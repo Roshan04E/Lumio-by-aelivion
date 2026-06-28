@@ -1,0 +1,2 @@
+ALTER TABLE "RenderJob" ADD COLUMN "manifest" JSONB;
+ALTER TABLE "RenderJob" ADD COLUMN "manifestVersion" INTEGER NOT NULL DEFAULT 1;

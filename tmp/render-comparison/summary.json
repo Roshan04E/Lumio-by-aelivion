@@ -1,0 +1,10 @@
+{
+  "width": 1080,
+  "height": 1920,
+  "frameSeconds": 0.45,
+  "threshold": 0.16,
+  "maxDiffRatio": 0.035,
+  "diffPixels": 4726,
+  "totalPixels": 2073600,
+  "diffRatio": 0.002279128086419753
+}

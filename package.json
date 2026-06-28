@@ -1,0 +1,21 @@
+{
+  "name": "reelforge-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-minded MVP for turning raw videos into modular reel-style edits.",
+  "packageManager": "pnpm@11.5.1",
+  "scripts": {
+    "dev": "pnpm --parallel --stream --filter @reelforge/api --filter @reelforge/web --filter @reelforge/worker dev",
+    "build": "pnpm -r build",
+    "caption:qa": "pnpm --filter @reelforge/worker caption:qa",
+    "lint": "pnpm -r lint",
+    "animation:test": "pnpm --filter @reelforge/worker animation:test",
+    "render:compare": "pnpm --filter @reelforge/worker render:compare",
+    "render:compare:pixels": "pnpm --filter @reelforge/worker render:compare:pixels",
+    "typecheck": "pnpm -r typecheck",
+    "models:fetch": "node scripts/fetch-local-models.mjs",
+    "db:generate": "pnpm --filter @reelforge/api prisma:generate",
+    "db:migrate": "pnpm --filter @reelforge/api prisma:migrate",
+    "db:seed": "pnpm --filter @reelforge/api db:seed"
+  }
+}

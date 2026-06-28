@@ -1,0 +1,39 @@
+{
+  "name": "@reelforge/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "vite preview --host 0.0.0.0",
+    "editor:test": "tsx src/editor/editor.test.ts",
+    "continuity:test": "tsx src/ai/planner/continuity.test.ts",
+    "memory:test": "tsx src/ai/memory.test.ts"
+  },
+  "dependencies": {
+    "@reelforge/shared": "workspace:*",
+    "@vitejs/plugin-react": "^5.0.1",
+    "lucide-react": "^0.542.0",
+    "mp4-muxer": "^5.1.5",
+    "mp4box": "^0.5.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.8.2",
+    "webm-muxer": "^5.0.3",
+    "wink-eng-lite-web-model": "^1.8.1",
+    "wink-nlp": "^2.4.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "tsx": "^4.20.4",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "vite-plugin-pwa": "^1.3.0",
+    "workbox-window": "^7.4.1"
+  }
+}

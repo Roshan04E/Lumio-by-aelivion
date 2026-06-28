@@ -1,0 +1,15 @@
+-- AlterTable
+ALTER TABLE "SourceAsset" ADD COLUMN     "aiJson" JSONB,
+ADD COLUMN     "cloudUrl" TEXT,
+ADD COLUMN     "externalJson" JSONB,
+ADD COLUMN     "folder" TEXT,
+ADD COLUMN     "fps" INTEGER,
+ADD COLUMN     "originalName" TEXT,
+ADD COLUMN     "previewUrl" TEXT,
+ADD COLUMN     "projectId" TEXT,
+ADD COLUMN     "proxyUrl" TEXT,
+ADD COLUMN     "sizeBytes" INTEGER,
+ADD COLUMN     "source" TEXT,
+ADD COLUMN     "tags" JSONB,
+ADD COLUMN     "thumbnailUrl" TEXT,
+ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;

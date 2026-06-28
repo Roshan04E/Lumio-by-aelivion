@@ -1,0 +1,42 @@
+{
+  "name": "@reelforge/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "animation:test": "tsx src/animation-evaluator-test.ts",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "caption:qa": "tsx src/caption-qa-test.ts",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "render:compare": "tsx src/render-comparison-test.ts",
+    "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
+    "color:compare": "tsx src/color-engine-compare.ts",
+    "render:manifest": "tsx src/render-manifest-cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.14.0",
+    "@reelforge/render-templates": "workspace:*",
+    "@reelforge/shared": "workspace:*",
+    "@remotion/bundler": "^4.0.479",
+    "@remotion/renderer": "^4.0.479",
+    "bullmq": "^5.58.0",
+    "dotenv": "^17.2.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "remotion": "^4.0.479"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.61.0",
+    "pngjs": "^7.0.0",
+    "tsx": "^4.20.4",
+    "typescript": "^5.9.2"
+  }
+}

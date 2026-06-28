@@ -1,0 +1,193 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String              @id @default(cuid())
+  name               String
+  email              String              @unique
+  passwordHash       String
+  walletCredits      Int                 @default(30)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  sourceAssets       SourceAsset[]
+  projects           Project[]
+  renderJobs         RenderJob[]
+  payments           Payment[]
+  walletTransactions WalletTransaction[]
+  memoryFacts        MemoryFact[]
+}
+
+/**
+ * Phase 11 — AI Memory OS. One reusable signal per row, tiered by `scope`
+ * (creator = the user long-term, project = one video, style = a reference
+ * fingerprint). Fact-based (not rigid columns) so new keys need no migration and
+ * the Memory Panel can list/forget per fact. Re-observing a fact bumps confidence.
+ */
+model MemoryFact {
+  id         String   @id @default(cuid())
+  userId     String
+  scope      String // "creator" | "project" | "style"
+  // "" for creator/style scope; the project id for project scope. Non-null so it
+  // can take part in the compound unique key (Prisma can't match NULL there).
+  projectId  String   @default("")
+  key        String // e.g. "captionStyle", "textColor", "language", "avoid"
+  value      Json
+  confidence Float    @default(0.5)
+  source     String   @default("inferred") // "inferred" | "explicit"
+  lastUsedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope, projectId, key])
+  @@index([userId, scope])
+}
+
+model Template {
+  id              String    @id @default(cuid())
+  name            String
+  slug            String    @unique
+  category        String
+  description     String
+  previewUrl      String
+  thumbnailUrl    String
+  durationSeconds Int
+  requiredModules Json
+  editableFields  Json
+  templateGraph   Json
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  projects        Project[]
+}
+
+model Tool {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String
+  moduleType  String
+  steps       Json
+  creditCost  Int
+  bestFor     String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model SourceAsset {
+  id              String         @id @default(cuid())
+  userId          String
+  fileName        String
+  fileType        String
+  fileUrl         String
+  durationSeconds Int
+  width           Int
+  height          Int
+  status          String         @default("uploaded")
+  createdAt       DateTime       @default(now())
+  // --- Media-library metadata (additive, all nullable) ---
+  source          String?
+  folder          String?
+  tags            Json?
+  originalName    String?
+  thumbnailUrl    String?
+  previewUrl      String?
+  proxyUrl        String?
+  cloudUrl        String?
+  fps             Int?
+  sizeBytes       Int?
+  projectId       String?
+  externalJson    Json?
+  aiJson          Json?
+  updatedAt       DateTime       @default(now()) @updatedAt
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  derivedAssets   DerivedAsset[]
+  projects        Project[]
+}
+
+model DerivedAsset {
+  id            String      @id @default(cuid())
+  sourceAssetId String
+  type          String
+  configHash    String
+  fileUrl       String?
+  jsonData      Json?
+  status        String      @default("queued")
+  createdAt     DateTime    @default(now())
+  sourceAsset   SourceAsset @relation(fields: [sourceAssetId], references: [id], onDelete: Cascade)
+
+  @@index([sourceAssetId])
+}
+
+model Project {
+  id              String      @id @default(cuid())
+  userId          String
+  templateId      String?
+  title           String
+  status          String      @default("draft")
+  sourceAssetId   String?
+  projectGraph    Json
+  previewUrl      String?
+  finalUrl        String?
+  durationSeconds Int         @default(12)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template        Template?   @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  sourceAsset     SourceAsset? @relation(fields: [sourceAssetId], references: [id], onDelete: SetNull)
+  renderJobs      RenderJob[]
+  payments        Payment[]
+}
+
+model RenderJob {
+  id           String    @id @default(cuid())
+  projectId    String
+  userId       String
+  type         String
+  status       String    @default("queued")
+  progress     Int       @default(0)
+  manifest     Json?
+  manifestVersion Int    @default(1)
+  errorMessage String?
+  outputUrl    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  completedAt  DateTime?
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([userId])
+}
+
+model Payment {
+  id                String    @id @default(cuid())
+  userId            String
+  projectId         String?
+  amount            Int
+  credits           Int
+  provider          String    @default("mock")
+  providerOrderId   String
+  providerPaymentId String?
+  status            String    @default("created")
+  createdAt         DateTime  @default(now())
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project           Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model WalletTransaction {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  credits   Int
+  reason    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}

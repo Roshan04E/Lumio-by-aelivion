@@ -1,0 +1,19 @@
+node_modules
+dist
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log
+# Self-hosted local ML model weights (lazy-fetched on tool interaction, browser-cached).
+# Kept out of git history — fetched into place by scripts/fetch-local-models, or via the
+# remote (HuggingFace) fallback on networks that can reach it. See apps/web/src/tools/local-sam.ts.
+apps/web/public/models/*
+apps/api/storage/uploads/*
+apps/api/storage/previews/*
+apps/api/storage/finals/*
+apps/api/storage/derived/*
+!apps/api/storage/uploads/.gitkeep
+!apps/api/storage/previews/.gitkeep
+!apps/api/storage/finals/.gitkeep
+!apps/api/storage/derived/.gitkeep
