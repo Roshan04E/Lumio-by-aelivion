@@ -240,6 +240,26 @@ async function stopProcess(child: ChildProcess) {
     return;
   }
 
+  // On Windows the vite server is spawned via `shell:true`, so `child` is the cmd wrapper — SIGTERM to it
+  // leaves the real vite node process (and its ChildProcess handle) alive, which keeps this process's event
+  // loop open after `main()` resolves (the teardown hang). `taskkill /T /F` kills the whole tree. Mirrors the
+  // sibling export gates (export-worker-scene.ts / export-scene-compare.ts).
+  if (process.platform === "win32" && child.pid) {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      const timeout = setTimeout(resolve, 5_000);
+      killer.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      killer.once("error", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    return;
+  }
+
   child.kill("SIGTERM");
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {
@@ -253,7 +273,12 @@ async function stopProcess(child: ChildProcess) {
   });
 }
 
-void main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Exit explicitly once the verdict is printed. The render + diff work is done by then, so a lingering handle
+// (e.g. a vite child that outlived teardown) must not keep the process alive — `stopProcess` already tore the
+// server down. Mirrors export-worker-scene.ts.
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
