@@ -14,6 +14,7 @@ export * from "./export-stress-fixture";
 export * from "./masks";
 export * from "./matte";
 export * from "./render-comparison-fixture";
+export * from "./scene";
 export * from "./schemas";
 export * from "./templates";
 export * from "./text-warp";

@@ -1,25 +1,24 @@
 /**
- * Local export — text & shape rasterization (Phase L2).
+ * Text & shape rasterization (Phase L2; promoted into @reelforge/shared in Method 3 Phase 6.1).
  *
- * Draws `text` (incl. rich runs + warp) and `shape` layers onto the 2D compositor canvas,
+ * Draws `text` (incl. rich runs + warp) and `shape` layers onto a 2D compositor canvas,
  * reusing the shared style helpers so sizes/colors/positions match the editor preview.
  * Text uses canvas fillText with the document's loaded fonts (the orchestrator preloads
- * them); warp text rasterizes the shared vector-outline SVG (font-independent).
+ * them); warp text rasterizes the shared vector-outline SVG (font-independent). Shared so the
+ * editor preview, local export, and the future Remotion SceneStage all rasterize identically.
  */
 
+import { buildWarpedTextPaths } from "../font-outlines";
 import {
-  buildWarpedTextPaths,
   compositionTextDefaults,
   getCompositionShapeStyle,
   getCompositionTextRunStyle,
   getCompositionTextStyle,
   getCompositionTransform,
   getVisibleTextRuns,
-  hasTextWarp,
-  type TextRun,
-  type TextWarp,
-  type TimelineLayer,
-} from "@reelforge/shared";
+} from "../composition-style";
+import { hasTextWarp } from "../text-warp";
+import type { TextRun, TextWarp, TimelineLayer } from "../types";
 
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
 type Ctx = (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) & { letterSpacing?: string };

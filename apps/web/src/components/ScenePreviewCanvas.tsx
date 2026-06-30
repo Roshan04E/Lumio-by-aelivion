@@ -22,15 +22,16 @@ import type { CSSProperties } from "react";
 import {
   SceneCompositor,
   MediaWebGLRenderer,
+  SceneMaskMatteCache,
+  SceneTextRasterizer,
+  buildSceneDraws,
   type SceneFrameSpec,
   type TimelineLayer,
+  type ScenePreviewTransition,
 } from "@reelforge/shared";
-import { SceneMaskMatteCache } from "./scene-mask-matte";
-import { SceneTextRasterizer } from "./scene-text-raster";
-import { buildSceneDraws, type ScenePreviewTransition } from "../scene/build-scene-draws";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 
-export type { ScenePreviewTransition } from "../scene/build-scene-draws";
+export type { ScenePreviewTransition } from "@reelforge/shared";
 
 // After any change (scrub/seek/mount) keep compositing for this long so async work — a clip's graded
 // frame, a text raster — lands on screen. While PLAYING we composite every frame regardless.

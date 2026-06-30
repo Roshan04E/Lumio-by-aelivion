@@ -9,15 +9,9 @@
  * path for both — Phase 5 folded export onto the SceneCompositor and retired the old canvas2D copy.
  */
 
-import {
-  isRenderableMask,
-  maskShapeToPathD,
-  resolveMaskAtTime,
-  type Mask,
-  type MaskMode,
-  type TimelineLayer,
-} from "@reelforge/shared";
-import { makeCanvas2D, type AnyCanvas2D, type Ctx2D } from "../scene/canvas-2d";
+import { isRenderableMask, maskShapeToPathD, resolveMaskAtTime } from "../clip-masks";
+import type { Mask, MaskMode, TimelineLayer } from "../types";
+import { makeCanvas2D, type AnyCanvas2D, type Ctx2D } from "./canvas-2d";
 
 const MASK_GCO: Record<MaskMode, GlobalCompositeOperation> = {
   add: "source-over",

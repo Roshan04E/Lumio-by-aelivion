@@ -38,12 +38,16 @@ import {
   getCompositionObjectFit,
   isSceneTextureSource,
   isTrackEnabled,
+  buildSceneDraws,
+  SceneMaskMatteCache,
+  SceneTextRasterizer,
   type ColorPipeline,
   type SceneCompositorDebugSnapshot,
   type SceneDraw,
   type SceneFrameSpec,
   type SceneLayerDraw,
   type SceneTextureSource,
+  type ScenePreviewTransition,
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
@@ -51,9 +55,6 @@ import {
 import { getExportSingleContext } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
 import { clipSourceKey, type FrameProvider } from "./source-decoder";
-import { buildSceneDraws, type ScenePreviewTransition } from "../scene/build-scene-draws";
-import { SceneMaskMatteCache } from "../components/scene-mask-matte";
-import { SceneTextRasterizer } from "../components/scene-text-raster";
 
 /** A `<canvas>` (main-thread fallback) or `OffscreenCanvas` (export Worker). */
 type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;

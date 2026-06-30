@@ -12,8 +12,10 @@
  * grade, and transition mix — is built here from shared instances the caller owns + pools across frames.
  */
 
+import { MediaWebGLRenderer } from "../color/media-renderer";
+import type { ColorPipeline } from "../color/types";
+import type { SceneDraw, SceneLayerDraw, SceneTextureSource } from "../color/scene-compositor";
 import {
-  MediaWebGLRenderer,
   getActiveTransition,
   getCompositionBlendMode,
   getCompositionColorPipeline,
@@ -21,15 +23,10 @@ import {
   getCompositionFilterEffects,
   getCompositionObjectFit,
   getCompositionTransform,
-  type ColorPipeline,
-  type SceneDraw,
-  type SceneLayerDraw,
-  type SceneTextureSource,
-  type TimelineLayer,
-  type TransitionSpec,
-} from "@reelforge/shared";
-import type { SceneMaskMatteCache } from "../components/scene-mask-matte";
-import type { SceneTextRasterizer } from "../components/scene-text-raster";
+} from "../composition-style";
+import type { TimelineLayer, TransitionSpec } from "../types";
+import type { SceneMaskMatteCache } from "./scene-mask-matte";
+import type { SceneTextRasterizer } from "./scene-text-raster";
 
 /** A `<canvas>` (main thread) or `OffscreenCanvas` (export Worker) — the pooled grade/transition surfaces. */
 type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
