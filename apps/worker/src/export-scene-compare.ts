@@ -84,7 +84,12 @@ const fixtureKeys: RenderComparisonFixtureKey[] = (() => {
 
 async function main() {
   fs.mkdirSync(artifactDir, { recursive: true });
-  console.log(`Export compositor parity: comparing exportCompositor=scene vs exportCompositor=frame`);
+  // Phase 2 Stage 2: with EXPORT_SINGLE_CONTEXT=1 the scene capture runs the single-context export path
+  // (media + overlay graded into shared-context RTTs) — so the SAME parity thresholds prove it's a drop-in.
+  const singleCtxOverride = process.env.EXPORT_SINGLE_CONTEXT;
+  const singleCtx = singleCtxOverride != null ? `&exportSingleContext=${encodeURIComponent(singleCtxOverride)}` : "";
+  const singleCtxLabel = singleCtxOverride == null ? "single-context default" : `exportSingleContext=${singleCtxOverride}`;
+  console.log(`Export compositor parity: comparing exportCompositor=scene (${singleCtxLabel}) vs exportCompositor=frame`);
   console.log(`Fixtures: ${fixtureKeys.join(", ")}`);
 
   const port = await getFreePort();
@@ -99,7 +104,7 @@ async function main() {
       const scenePath = path.join(artifactDir, `scene-${key}.png`);
       const diffPath = path.join(artifactDir, `diff-${key}.png`);
       await captureExportFrame(`${baseUrl}?${fixture}&exportCompositor=frame`, framePath);
-      await captureExportFrame(`${baseUrl}?${fixture}&exportCompositor=scene`, scenePath);
+      await captureExportFrame(`${baseUrl}?${fixture}&exportCompositor=scene${singleCtx}`, scenePath);
       const summary = comparePngs(framePath, scenePath, diffPath);
       const limit = fixtureMaxDiff[key] ?? maxDiffRatio;
       const pct = (summary.diffRatio * 100).toFixed(3);
@@ -128,8 +133,7 @@ function startWebServer(port: number) {
 }
 
 async function captureExportFrame(url: string, outputPath: string) {
-  const channel = process.env.PIXEL_BROWSER_CHANNEL;
-  const browser = await chromium.launch(channel ? { channel } : {});
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage({ deviceScaleFactor: 1, viewport: { width: 1200, height: 2100 } });
     page.on("console", (msg) => {
@@ -153,6 +157,17 @@ async function captureExportFrame(url: string, outputPath: string) {
     });
   } finally {
     await browser.close();
+  }
+}
+
+async function launchBrowser() {
+  const channel = process.env.PIXEL_BROWSER_CHANNEL;
+  try {
+    return await chromium.launch(channel ? { channel } : {});
+  } catch (error) {
+    const chromePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    if (channel === "chrome" && fs.existsSync(chromePath)) return chromium.launch({ executablePath: chromePath });
+    throw error;
   }
 }
 
@@ -199,6 +214,21 @@ async function waitForServer(url: string) {
 
 async function stopProcess(child: ChildProcess) {
   if (child.exitCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      const timeout = setTimeout(resolve, 5_000);
+      killer.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      killer.once("error", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    return;
+  }
   child.kill("SIGTERM");
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {

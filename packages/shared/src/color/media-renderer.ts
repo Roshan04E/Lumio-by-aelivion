@@ -17,7 +17,7 @@
  */
 
 import { bakeMatteLut3d, bakePipelineToLut3d } from "./lut3d";
-import { noteGlContextCreated, releaseContextIfDetached } from "./gl-context";
+import { noteGlContextCreated, releaseContextIfDetached, type RenderTarget } from "./gl-context";
 import { MEDIA_FRAGMENT_SHADER, MEDIA_VERTEX_SHADER, mediaLut3dToRgbaFloat } from "./media-shader";
 import type { ColorPipeline, MediaEffects } from "./types";
 
@@ -49,6 +49,12 @@ export interface MediaRendererDrawParams {
    * the shared `getCompositionTransition` so all three renderers mask identically.
    */
   transition?: MediaTransition | null;
+  /**
+   * Shared-context mode ONLY: the caller-owned `RenderTarget` to render the graded result into (instead of the
+   * renderer's own canvas). Required when the renderer was constructed with `{ sharedGl }`; the renderer resizes
+   * it to the source dimensions (same auto-size behavior as own-canvas mode). Ignored in own-canvas mode.
+   */
+  target?: RenderTarget | null;
 }
 
 export interface MediaTransition {
@@ -90,7 +96,19 @@ function make2dTexture(gl: WebGL2RenderingContext): WebGLTexture {
 }
 
 export class MediaWebGLRenderer {
-  readonly canvas: HTMLCanvasElement | OffscreenCanvas;
+  private readonly _canvas: HTMLCanvasElement | OffscreenCanvas | null;
+  /**
+   * Own-canvas mode: the canvas this renderer grades into (read by `SceneFrameCompositor` / `buildSceneDraws` /
+   * `FrameCompositor` as a `TexImageSource`). Public type is unchanged (non-null) so every existing own-canvas
+   * caller compiles untouched; it throws only if read in shared-context mode (where there is no canvas — sample
+   * the `RenderTarget` you pass to `draw()` instead).
+   */
+  get canvas(): HTMLCanvasElement | OffscreenCanvas {
+    if (!this._canvas) throw new Error("media-renderer: .canvas is unavailable in shared-context mode (use the RenderTarget output)");
+    return this._canvas;
+  }
+  /** True when constructed against an external (shared) WebGL2 context — renders into a caller `RenderTarget`. */
+  private readonly shared: boolean;
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
   private readonly vao: WebGLVertexArrayObject;
@@ -129,17 +147,30 @@ export class MediaWebGLRenderer {
   private lutSize = 0;
   private disposed = false;
 
-  constructor(canvas: HTMLCanvasElement | OffscreenCanvas) {
-    this.canvas = canvas;
-    // preserveDrawingBuffer keeps the last frame on the canvas between draws. Without it the browser
-    // discards the (alpha) buffer after each composite, so a single skipped/late draw — exactly at a
-    // clip swap or before the incoming clip's draw loop ticks — flashes transparent for one frame
-    // (the flicker). Each draw() still clears+redraws, so output is unchanged when we do draw.
-    const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: true, preserveDrawingBuffer: true }) as WebGL2RenderingContext | null;
-    if (!gl) throw new Error("media-renderer: WebGL2 unavailable");
-    // Count toward the live WebGL context budget — this is the one creation site that doesn't route through
-    // createGl(); `dispose()`'s `releaseContextIfDetached` decrements it. Keeps the export budget accurate.
-    noteGlContextCreated();
+  constructor(target: HTMLCanvasElement | OffscreenCanvas | { sharedGl: WebGL2RenderingContext }) {
+    let gl: WebGL2RenderingContext;
+    if ("sharedGl" in target) {
+      // Shared-context mode (additive, Phase 2 Stage 1): borrow an existing WebGL2 context (e.g. the
+      // SceneCompositor's) and render the grade into a caller-owned RenderTarget — NO own canvas, NO own
+      // context. This is what lets the whole export run on ONE context (Worker-portable). We create no
+      // context here, so we deliberately do NOT noteGlContextCreated() and dispose() does NOT lose it.
+      this._canvas = null;
+      this.shared = true;
+      gl = target.sharedGl;
+    } else {
+      this._canvas = target;
+      this.shared = false;
+      // preserveDrawingBuffer keeps the last frame on the canvas between draws. Without it the browser
+      // discards the (alpha) buffer after each composite, so a single skipped/late draw — exactly at a
+      // clip swap or before the incoming clip's draw loop ticks — flashes transparent for one frame
+      // (the flicker). Each draw() still clears+redraws, so output is unchanged when we do draw.
+      const ctx = target.getContext("webgl2", { premultipliedAlpha: false, alpha: true, preserveDrawingBuffer: true }) as WebGL2RenderingContext | null;
+      if (!ctx) throw new Error("media-renderer: WebGL2 unavailable");
+      // Count toward the live WebGL context budget — this is the one creation site that doesn't route through
+      // createGl(); `dispose()`'s `releaseContextIfDetached` decrements it. Keeps the export budget accurate.
+      noteGlContextCreated();
+      gl = ctx;
+    }
     this.gl = gl;
 
     const vs = compile(gl, gl.VERTEX_SHADER, MEDIA_VERTEX_SHADER);
@@ -253,9 +284,16 @@ export class MediaWebGLRenderer {
     if (w === 0 || h === 0) return;
 
     const gl = this.gl;
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
+    if (this.shared) {
+      // Shared-context mode: render into the caller's RenderTarget (auto-sized to the source, mirroring the
+      // own-canvas resize below). No canvas to touch.
+      const target = params.target;
+      if (!target) throw new Error("media-renderer: shared-context draw() requires params.target");
+      target.resize(w, h);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    } else if (this._canvas!.width !== w || this._canvas!.height !== h) {
+      this._canvas!.width = w;
+      this._canvas!.height = h;
     }
 
     // lutSize is the authoritative, non-stale record of whether a non-identity LUT is
@@ -335,6 +373,21 @@ export class MediaWebGLRenderer {
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
+    // Shared mode: restore the default framebuffer so the borrowed context isn't left bound to our target.
+    if (this.shared) gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  /**
+   * Read this renderer's last-rendered RGBA8 pixels (bottom-left origin, like `gl.readPixels`) into `out`.
+   * Own-canvas mode reads the canvas's default framebuffer; shared-context mode reads the provided `target`.
+   * Diagnostic/test helper (e.g. the shared-context parity probe) — not used on the render hot path.
+   */
+  readPixelsInto(out: Uint8Array, width: number, height: number, target?: RenderTarget | null): void {
+    if (this.disposed) return;
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    if (target) gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   dispose(): void {
@@ -346,6 +399,9 @@ export class MediaWebGLRenderer {
     gl.deleteTexture(this.lutTex);
     gl.deleteVertexArray(this.vao);
     gl.deleteProgram(this.program);
-    releaseContextIfDetached(gl);
+    // Own-canvas mode created the context → release it when its canvas is detached. Shared-context mode borrows
+    // the caller's context (shared with the SceneCompositor) → only our GL objects above are ours to delete;
+    // losing the context here would break the caller, so we don't.
+    if (!this.shared) releaseContextIfDetached(gl);
   }
 }

@@ -24,6 +24,7 @@ import {
   type ColorPipeline,
   type SceneDraw,
   type SceneLayerDraw,
+  type SceneTextureSource,
   type TimelineLayer,
   type TransitionSpec,
 } from "@reelforge/shared";
@@ -56,10 +57,19 @@ export interface BuildSceneDrawsInputs {
   transitions: ScenePreviewTransition[];
   rasterizer: SceneTextRasterizer | null;
   matteCache: SceneMaskMatteCache | null;
-  /** Per-text/shape-layer overlay-grade renderer pool (owned by the caller; pruned here). */
+  /** Per-text/shape-layer overlay-grade renderer pool (owned by the caller; pruned here). Used only by the
+   *  built-in own-canvas overlay grade — ignored when `gradeOverlay` below is injected. */
   gradeRenderers: Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>;
-  /** Each media layer's graded canvas (color/matte baked, opacity NOT baked), or null if not ready. */
-  getMediaGraded: (layerId: string) => AnyCanvas | null;
+  /** Each media layer's graded source — a canvas (own-canvas path) OR a same-context texture (single-context
+   *  export, Phase 2), or null if not ready. */
+  getMediaGraded: (layerId: string) => AnyCanvas | SceneTextureSource | null;
+  /**
+   * Optional injected text/shape overlay-grade (Phase 2 single-context export): grade the ungraded raster into a
+   * same-context `RenderTarget` and return it as a `SceneTextureSource`. When omitted (editor preview + legacy
+   * export) the built-in own-canvas grade runs unchanged. Either way the GRADE MATH is identical — only the
+   * output surface (own canvas vs shared RTT) differs.
+   */
+  gradeOverlay?: (layerId: string, srcCanvas: AnyCanvas, pipeline: ColorPipeline) => TexImageSource | SceneTextureSource | null;
   /** Canvas factory for the pooled grade/transition renderers (DOM `<canvas>` or `OffscreenCanvas`). */
   createCanvas: () => AnyCanvas;
 }
@@ -99,6 +109,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     matteCache,
     gradeRenderers,
     getMediaGraded,
+    gradeOverlay: injectedGradeOverlay,
     createCanvas,
   } = inputs;
 
@@ -114,7 +125,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // Grade a text/shape raster through the per-layer MediaWebGLRenderer (the same LUT engine media +
   // the export overlay path use). Returns the graded canvas, or null if a GL context can't be made
   // (then the caller composites the ungraded raster — a soft degrade, never a hard fail).
-  const gradeOverlay = (layerId: string, srcCanvas: AnyCanvas, pipeline: ColorPipeline): TexImageSource | null => {
+  const builtinGradeOverlay = (layerId: string, srcCanvas: AnyCanvas, pipeline: ColorPipeline): TexImageSource | null => {
     let entry = gradeRenderers.get(layerId);
     if (!entry) {
       try {
@@ -141,6 +152,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     });
     return entry.renderer.canvas;
   };
+  // Single-context export injects its own RTT-based overlay grade; otherwise use the built-in own-canvas one.
+  const gradeOverlay = injectedGradeOverlay ?? builtinGradeOverlay;
 
   // Build the FULL `SceneLayerDraw` for one layer (object-fit/content + grade + blur/glow + mask + transform
   // + 3D). Used for normal layers AND for each side of a transition — so a transition mixes fully-rendered
@@ -176,7 +189,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // pipeline changes it every frame, it must always re-upload (sourceVersion undefined) — unlike the
       // static ungraded raster, which skips re-upload via its version.
       const pipeline = getCompositionColorPipeline(layer, { currentTimeSeconds: t });
-      let source: TexImageSource = raster.canvas;
+      let source: TexImageSource | SceneTextureSource = raster.canvas;
       // Grading resizes the renderer canvas to the raster's dims, so these hold for graded + ungraded.
       const sourceW = raster.canvas.width;
       const sourceH = raster.canvas.height;
@@ -194,6 +207,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       const mask = matteCache ? matteCache.get(layer, Math.max(0, t - layer.startSeconds)) : null;
 
       return {
+        debugLayerId: layer.id,
         source,
         sourceWidth: sourceW,
         sourceHeight: sourceH,
@@ -220,8 +234,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
 
     // Media: graded canvas (color/matte baked, opacity NOT baked — `bakeOpacity=false`) + object-fit +
     // clip mask + transform.
-    const source = getMediaGraded(layer.id);
-    if (!source || source.width === 0 || source.height === 0) return null;
+    const mediaSource = getMediaGraded(layer.id);
+    if (!mediaSource || mediaSource.width === 0 || mediaSource.height === 0) return null;
     const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
     const mask = matteCache ? matteCache.get(layer, Math.max(0, t - layer.startSeconds)) : null;
     // Content transform (source-within-frame pan/zoom/crop). offsetX/Y (-1..1 frame fractions) → pan
@@ -229,9 +243,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     const ct = getCompositionContentTransform(layer);
     const hasContent = ct.scale !== 1 || ct.offsetX !== 0 || ct.offsetY !== 0 || ct.crop.top > 0 || ct.crop.right > 0 || ct.crop.bottom > 0 || ct.crop.left > 0;
     return {
-      source: source as TexImageSource,
-      sourceWidth: source.width,
-      sourceHeight: source.height,
+      debugLayerId: layer.id,
+      source: mediaSource,
+      sourceWidth: mediaSource.width,
+      sourceHeight: mediaSource.height,
       fit: getCompositionObjectFit(layer),
       blendMode: getCompositionBlendMode(layer),
       // Opacity is applied LIVE here (the quad's uOpacity), NOT baked into the grade — so it's reactive
@@ -273,7 +288,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         const from = buildLayerDraw(outgoing);
         const to = buildLayerDraw(incoming);
         if (from && to) {
-          draws.push({ kind: "transition", from, to, def: active.def, progress: active.progress, params: active.params });
+          draws.push({ kind: "transition", debugFromId: outgoing.id, debugToId: incoming.id, from, to, def: active.def, progress: active.progress, params: active.params });
           continue;
         }
       }

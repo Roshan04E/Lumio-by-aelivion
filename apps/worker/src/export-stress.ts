@@ -30,11 +30,16 @@ const SAFE_CONTEXT_THRESHOLD = Number(process.env.EXPORT_GL_THRESHOLD ?? 8);
 const CLIP_COUNT = Number(process.env.EXPORT_STRESS_CLIPS ?? 24);
 
 async function main() {
-  console.log(`Export WebGL budget stress: ${CLIP_COUNT} clips (bloom + blur + grade), threshold ${SAFE_CONTEXT_THRESHOLD} contexts`);
+  // Phase 2 Stage 2: EXPORT_SINGLE_CONTEXT=1 measures the single-context export's context peak (expected ~1,
+  // vs the multi-context pool's peak) over the same sweep.
+  const singleCtxOverride = process.env.EXPORT_SINGLE_CONTEXT;
+  const singleCtx = singleCtxOverride != null ? `&exportSingleContext=${encodeURIComponent(singleCtxOverride)}` : "";
+  const singleCtxLabel = singleCtxOverride == null ? "single-context default" : `exportSingleContext=${singleCtxOverride}`;
+  console.log(`Export WebGL budget stress: ${CLIP_COUNT} clips (bloom + blur + grade), threshold ${SAFE_CONTEXT_THRESHOLD} contexts [${singleCtxLabel}]`);
   const port = await getFreePort();
   const vite = startWebServer(port);
   try {
-    const url = `http://127.0.0.1:${port}/editor/__export-stress?clips=${CLIP_COUNT}`;
+    const url = `http://127.0.0.1:${port}/editor/__export-stress?clips=${CLIP_COUNT}${singleCtx}`;
     await waitForServer(`http://127.0.0.1:${port}/editor/__export-stress`);
     const result = await runStress(url);
 
@@ -157,6 +162,21 @@ async function waitForServer(url: string) {
 
 async function stopProcess(child: ChildProcess) {
   if (child.exitCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      const timeout = setTimeout(resolve, 5_000);
+      killer.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      killer.once("error", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    return;
+  }
   child.kill("SIGTERM");
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {

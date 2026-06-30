@@ -17,6 +17,7 @@ const PreviewFixturePage = lazy(() => import("./pages/PreviewFixturePage").then(
 const ExportFixturePage = lazy(() => import("./pages/ExportFixturePage").then((module) => ({ default: module.ExportFixturePage })));
 const ExportStressPage = lazy(() => import("./pages/ExportStressPage").then((module) => ({ default: module.ExportStressPage })));
 const ExportLiveStressPage = lazy(() => import("./pages/ExportLiveStressPage").then((module) => ({ default: module.ExportLiveStressPage })));
+const ExportWorkerScenePage = lazy(() => import("./pages/ExportWorkerScenePage").then((module) => ({ default: module.ExportWorkerScenePage })));
 const AuthPage = lazy(() => import("./pages/AuthPage").then((module) => ({ default: module.AuthPage })));
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="/editor/__export-fixture" element={<ExportFixturePage />} />
           <Route path="/editor/__export-stress" element={<ExportStressPage />} />
           <Route path="/editor/__export-live-stress" element={<ExportLiveStressPage />} />
+          <Route path="/editor/__export-worker-scene" element={<ExportWorkerScenePage />} />
           <Route path="/editor/:projectId" element={<EditorPage />} />
           <Route path="/checkout/:projectId" element={<CheckoutPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />

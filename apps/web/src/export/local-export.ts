@@ -18,7 +18,7 @@ import {
   type ExportCoreInput,
 } from "./export-core";
 import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
-import { getExportCompositor } from "../color/render-engine";
+import { getExportCompositor, getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
 import { beginPreviewSuspendForExport, endPreviewSuspendForExport } from "./export-preview-suspend";
 import { logExportGl } from "./export-gl-debug";
 import { getActiveGlContextCount } from "@reelforge/shared";
@@ -75,22 +75,52 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   const mixedBuffer = await mixTimelineAudio(audioLayers, composition.durationSeconds).catch(() => null);
   const audio = mixedBuffer ? extractAudioChannels(mixedBuffer) : null;
 
-  // Resolve the composite engine ONCE here (main thread) and thread it through — the Worker can't read the
-  // ?exportCompositor= flag (no window) and would otherwise always default to "scene".
+  // Resolve the composite engine + single-context flag ONCE here (main thread) and thread them through — the
+  // Worker can't read the ?exportCompositor= / ?exportSingleContext= flags (no window), so resolve once on
+  // the main thread and thread them through. Stage 4 defaults single-context ON.
   const mode = getExportCompositor();
-  const input: ExportCoreInput = { composition, urlMap, audio, format, fps, exportCompositor: mode };
+  const singleContext = getExportSingleContext();
+  const input: ExportCoreInput = { composition, urlMap, audio, format, fps, exportCompositor: mode, exportSingleContext: singleContext };
 
-  // The GPU scene compositor's multi-/cross-context WebGL is reliable on the MAIN thread (the editor preview
-  // uses the same SceneCompositor) but loses its context in the export Worker's isolated GPU process → black
-  // frames. So scene-mode exports run on the main thread (slightly sluggish UI, but correct + with bloom); the
-  // canvas2D "frame" path stays in the Worker (non-blocking). Worker hardening to return scene there is Phase 2.
-  if (canUseWorker() && mode !== "scene") {
+  // Phase 2 Stage 4: scene export defaults to the Worker when single-context is on. The one self-contained
+  // WebGL2 context survives the Worker's isolated GPU process, whereas the legacy multi-/cross-context path
+  // black-framed there (Stage 0). If Worker scene fails or the black-frame guard throws, fall back to the
+  // MAIN-THREAD scene path below (NOT directly to canvas2D).
+  const workerScene = mode === "scene" && singleContext && getExportWorkerScene();
+  let workerInput = input;
+  if (workerScene) {
+    const exportFps = Math.max(1, fps || composition.fps || 30);
+    const activeMediaTimes = composition.tracks
+      .flatMap((track) => track.layers)
+      .filter((layer) => (layer.type === "video" || layer.type === "image") && layer.assetId && layer.durationSeconds > 0)
+      .slice(0, 4)
+      .map((layer) => Math.min(composition.durationSeconds - 1 / exportFps, layer.startSeconds + Math.min(layer.durationSeconds * 0.5, 0.5)))
+      .filter((time) => Number.isFinite(time) && time >= 0);
+    workerInput = {
+      ...input,
+      workerSceneDiagnostics: {
+        sampleTimes: activeMediaTimes,
+        blackFrameGuard: true,
+      },
+    };
+  }
+
+  // Canvas2D frame export always runs in the Worker. Scene export also runs in the Worker by default via the
+  // single-context path; if that fails, the proven main-thread scene path below keeps export correct.
+  if (canUseWorker() && (mode !== "scene" || workerScene)) {
     try {
-      return await runInWorker(input, onProgress, signal);
+      if (workerScene) {
+        logExportGl(() => `worker scene export start: single-context=true, active contexts=${getActiveGlContextCount()}`);
+      }
+      return await runInWorker(workerInput, onProgress, signal);
     } catch (error) {
       if (error instanceof Aborted) throw error;
-      // Worker failed (e.g. a source WebCodecs can't demux) — fall through to the main thread,
-      // which has the <video>-seek fallback. Re-loading sources there is fine; this is rare.
+      // Worker failed (e.g. a source WebCodecs can't demux, or — for scene — the Worker GPU process choked).
+      // Fall through to the main thread, which has the <video>-seek fallback and the (proven) main-thread
+      // scene path. Re-loading sources there is fine; this is rare.
+      if (workerScene) {
+        logExportGl(() => `worker scene export failed, falling back to main-thread scene: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 

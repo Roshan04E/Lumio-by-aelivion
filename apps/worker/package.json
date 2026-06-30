@@ -17,6 +17,7 @@
     "export:compare:scene": "tsx src/export-scene-compare.ts",
     "export:stress": "tsx src/export-stress.ts",
     "export:live-stress": "tsx src/export-live-stress.ts",
+    "export:worker-scene": "tsx src/export-worker-scene.ts",
     "render:manifest": "tsx src/render-manifest-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/index.ts"

@@ -33,7 +33,7 @@ import {
   type TimelineLayer,
   type TransitionSpec,
 } from "@reelforge/shared";
-import type { FrameProvider } from "./source-decoder";
+import { clipSourceKey, type FrameProvider } from "./source-decoder";
 import { drawShapeLayer, drawTextLayer } from "./text-shape";
 import { Quad3DCompositor, type Quad3DTransform } from "./quad-3d";
 
@@ -195,7 +195,8 @@ export class FrameCompositor {
   ): Promise<{ canvas: HTMLCanvasElement | OffscreenCanvas; sw: number; sh: number } | null> {
     const { layer } = item;
     if (!layer.assetId) return null;
-    const source = this.getSource(layer.assetId);
+    const providerKey = layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
+    const source = this.getSource(providerKey);
     if (!source) return null;
 
     const sourceTime = layer.type === "video" ? (layer.sourceInSeconds ?? 0) + (timeSeconds - layer.startSeconds) : 0;

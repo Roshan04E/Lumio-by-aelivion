@@ -42,6 +42,29 @@ import type { BlendMode } from "../types";
 
 export type ObjectFit = "cover" | "contain" | "fill";
 
+/**
+ * A layer source that is ALREADY a GPU texture living in THIS compositor's WebGL2 context (Method 3, Phase 2)
+ * — e.g. a `MediaWebGLRenderer` shared-context `RenderTarget` output. The compositor samples it DIRECTLY (no
+ * `texImage2D` upload), which removes the cross-context canvas→texture upload that fails in the export Worker.
+ * Orientation matches the canvas-upload path: `uploadSource` flips canvases (top-origin) to framebuffer-native
+ * bottom-origin, which is exactly what a render-target texture already is — so it's a drop-in (validated by
+ * `export:compare:scene`).
+ */
+export interface SceneTextureSource {
+  /** A texture created on this `SceneCompositor`'s context (the caller owns its lifetime). */
+  texture: WebGLTexture;
+  /** Natural pixel size (used for object-fit, same as `sourceWidth`/`sourceHeight`). */
+  width: number;
+  height: number;
+  /** Diagnostic-only backing target metadata for single-context export probes. */
+  debugTarget?: { width: number; height: number; framebufferStatus?: string; framebufferComplete?: boolean } | undefined;
+}
+
+/** True when a layer source is a same-context GPU texture (sample directly) vs an uploadable `TexImageSource`. */
+export function isSceneTextureSource(s: TexImageSource | SceneTextureSource): s is SceneTextureSource {
+  return (s as SceneTextureSource).texture !== undefined && typeof (s as SceneTextureSource).width === "number";
+}
+
 export interface SceneLayerTransform {
   /** Layer center, percent of comp (0..100). */
   x: number;
@@ -54,8 +77,14 @@ export interface SceneLayerTransform {
 }
 
 export interface SceneLayerDraw {
-  /** Already-graded, straight-alpha source (a `MediaWebGLRenderer` canvas, transition mix, etc.). */
-  source: TexImageSource;
+  /** Diagnostic-only source layer id. Ignored by the renderer. */
+  debugLayerId?: string | undefined;
+  /**
+   * Already-graded, straight-alpha source: either a `TexImageSource` to upload (a `MediaWebGLRenderer` canvas,
+   * raster, etc.) OR a `SceneTextureSource` already on this compositor's context (sampled directly — Phase 2
+   * single-context export). Both behave identically per-pixel; the texture path just skips the upload.
+   */
+  source: TexImageSource | SceneTextureSource;
   /** Natural pixel size of `source`, for object-fit. (Comp-sized sources pass comp w/h + fit:"fill".) */
   sourceWidth: number;
   sourceHeight: number;
@@ -114,6 +143,9 @@ export interface SceneLayerDraw {
  */
 export interface SceneTransitionDraw {
   kind: "transition";
+  /** Diagnostic-only source layer ids. Ignored by the renderer. */
+  debugFromId?: string | undefined;
+  debugToId?: string | undefined;
   from: SceneLayerDraw;
   to: SceneLayerDraw;
   def: TransitionDefinition;
@@ -135,6 +167,22 @@ export interface SceneFrameSpec {
   backgroundColor: string;
   /** Visible draws, back-to-front (first drawn = bottom). A draw is a layer or a folded transition. */
   layers: SceneDraw[];
+}
+
+export interface SceneCompositorDebugSnapshot {
+  width: number;
+  height: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  contextLost: boolean;
+  viewport: number[];
+  scissorBox: number[];
+  scissorTest: boolean;
+  lastPresentViewport: number[] | null;
+  framebufferBinding: "null" | "bound";
+  texture2dBinding: "null" | "bound";
+  glError: number;
+  targets: Record<string, { width: number; height: number; framebufferStatus: string; framebufferComplete: boolean }>;
 }
 
 /** A compiled per-transition program + its uniform locations (mirrors TransitionCompositor's cache). */
@@ -418,6 +466,7 @@ export class SceneCompositor {
   private width = 0;
   private height = 0;
   private disposed = false;
+  private lastPresentViewport: number[] | null = null;
 
   // 6 vertices (2 triangles) × (ndcX, ndcY, projective w, u, v).
   private readonly quad = new Float32Array(6 * 5);
@@ -433,6 +482,69 @@ export class SceneCompositor {
   private readonly uFitScale: WebGLUniformLocation | null;
   private readonly uContentPan: WebGLUniformLocation | null;
   private readonly uCrop: WebGLUniformLocation | null;
+
+  /**
+   * This compositor's WebGL2 context — so the export driver (Phase 2 single-context) can construct shared-mode
+   * `MediaWebGLRenderer`s + `RenderTarget`s on the SAME context and feed their outputs back as
+   * {@link SceneTextureSource}s (no cross-context upload). Read-only; the compositor owns the context lifetime.
+   */
+  get sharedGl(): WebGL2RenderingContext {
+    return this.gl;
+  }
+
+  private framebufferStatusName(status: number): string {
+    const gl = this.gl;
+    if (status === gl.FRAMEBUFFER_COMPLETE) return "FRAMEBUFFER_COMPLETE";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_ATTACHMENT) return "FRAMEBUFFER_INCOMPLETE_ATTACHMENT";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT) return "FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_DIMENSIONS) return "FRAMEBUFFER_INCOMPLETE_DIMENSIONS";
+    if (status === gl.FRAMEBUFFER_UNSUPPORTED) return "FRAMEBUFFER_UNSUPPORTED";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE) return "FRAMEBUFFER_INCOMPLETE_MULTISAMPLE";
+    return `0x${status.toString(16)}`;
+  }
+
+  private debugTarget(target: RenderTarget): { width: number; height: number; framebufferStatus: string; framebufferComplete: boolean } {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    return {
+      width: target.width,
+      height: target.height,
+      framebufferStatus: this.framebufferStatusName(status),
+      framebufferComplete: status === gl.FRAMEBUFFER_COMPLETE,
+    };
+  }
+
+  debugSnapshot(): SceneCompositorDebugSnapshot {
+    const gl = this.gl;
+    const viewport = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array | number[]);
+    const scissorBox = Array.from(gl.getParameter(gl.SCISSOR_BOX) as Int32Array | number[]);
+    const targets: SceneCompositorDebugSnapshot["targets"] = {
+      accumA: this.debugTarget(this.accumA),
+      accumB: this.debugTarget(this.accumB),
+    };
+    if (this.plateRT) targets.plate = this.debugTarget(this.plateRT);
+    if (this.scratch1) targets.scratch1 = this.debugTarget(this.scratch1);
+    if (this.scratch2) targets.scratch2 = this.debugTarget(this.scratch2);
+    if (this.sideA) targets.sideA = this.debugTarget(this.sideA);
+    if (this.sideB) targets.sideB = this.debugTarget(this.sideB);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return {
+      width: this.width,
+      height: this.height,
+      canvasWidth: this.canvas.width,
+      canvasHeight: this.canvas.height,
+      contextLost: gl.isContextLost(),
+      viewport,
+      scissorBox,
+      scissorTest: gl.isEnabled(gl.SCISSOR_TEST),
+      lastPresentViewport: this.lastPresentViewport,
+      framebufferBinding: gl.getParameter(gl.FRAMEBUFFER_BINDING) ? "bound" : "null",
+      texture2dBinding: gl.getParameter(gl.TEXTURE_BINDING_2D) ? "bound" : "null",
+      glError: gl.getError(),
+      targets,
+    };
+  }
 
   constructor(canvas: AnyCanvas, width: number, height: number) {
     this.canvas = canvas;
@@ -891,8 +1003,12 @@ export class SceneCompositor {
       z: layer.z ?? 0,
     };
 
-    // Upload source (+ mask) via the per-source cache (texSubImage2D / skip-unchanged, no realloc).
-    const srcTex = this.uploadSource(layer.source, layer.sourceVersion);
+    // Source: a same-context texture is sampled DIRECTLY (no upload — the single-context export path); any
+    // other source uploads via the per-source cache (texSubImage2D / skip-unchanged, no realloc). The mask
+    // matte stays a 2D canvas (CPU raster) → always the upload path.
+    const srcTex = isSceneTextureSource(layer.source)
+      ? layer.source.texture
+      : this.uploadSource(layer.source, layer.sourceVersion);
     const maskTex = layer.mask ? this.uploadSource(layer.mask, layer.maskVersion) : null;
 
     // Content transform (media only): zoom folds into the object-fit (smaller sampled window), pan shifts
@@ -1065,6 +1181,7 @@ export class SceneCompositor {
     // default framebuffer is multisampled, and it was failing silently (transparent canvas).
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
+    this.lastPresentViewport = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array | number[]);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(this.presentProgram);

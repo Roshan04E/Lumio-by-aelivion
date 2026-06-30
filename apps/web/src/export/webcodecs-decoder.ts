@@ -11,6 +11,44 @@
 import { createFile, DataStream, type MP4File, type MP4Sample, type MP4VideoTrackInfo } from "mp4box";
 import type { FrameProvider } from "./source-decoder";
 
+const videoBufferCache = new Map<string, Promise<ArrayBuffer>>();
+
+function webcodecsDebugEnabled(): boolean {
+  try {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("exportDecodeDebug") === "1" || params.get("exportGlDebug") === "1") return true;
+      if (window.localStorage?.getItem("lumio.exportDecodeDebug") === "1" || window.localStorage?.getItem("lumio.exportGlDebug") === "1") {
+        return true;
+      }
+    }
+  } catch {
+    /* no window/localStorage */
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env;
+  return env?.VITE_EXPORT_DECODE_DEBUG === "1" || env?.VITE_EXPORT_DECODE_DEBUG === "true";
+}
+
+function fetchVideoBuffer(url: string): Promise<ArrayBuffer> {
+  let cached = videoBufferCache.get(url);
+  if (!cached) {
+    cached = (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      try {
+        return await (await fetch(url, { signal: controller.signal, cache: "no-store" })).arrayBuffer();
+      } finally {
+        clearTimeout(timer);
+      }
+    })().catch((error) => {
+      videoBufferCache.delete(url);
+      throw error;
+    });
+    videoBufferCache.set(url, cached);
+  }
+  return cached;
+}
+
 function getDescription(file: MP4File, trackId: number): Uint8Array | undefined {
   const entry = file.getTrackById(trackId)?.mdia?.minf?.stbl?.stsd?.entries?.[0];
   const box = entry?.avcC ?? entry?.hvcC ?? entry?.vpcC ?? entry?.av1C;
@@ -31,13 +69,7 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
   try {
     // Abort a stalled fetch so a never-settling network/blob read falls back to the <video> provider
     // (or fails cleanly) instead of hanging the export at "Loading media…".
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15_000);
-    try {
-      buffer = await (await fetch(url, { signal: controller.signal, cache: "no-store" })).arrayBuffer();
-    } finally {
-      clearTimeout(timer);
-    }
+    buffer = (await fetchVideoBuffer(url)).slice(0);
   } catch {
     return null;
   }
@@ -85,7 +117,9 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
   // → the reported black/slow-fallback. If NO sample is flagged sync, assume the first is a keyframe so the
   // decoder can start (the probe still falls back if that assumption is wrong for this file).
   const syncCount = samples.reduce((n, s) => n + (s.is_sync ? 1 : 0), 0);
-  console.log(`[export] webcodecs: ${samples.length} chunks, ${syncCount} sync, codec="${track.codec}", desc=${description ? `${description.length}B` : "none"}`);
+  if (webcodecsDebugEnabled()) {
+    console.log(`[export] webcodecs: ${samples.length} chunks, ${syncCount} sync, codec="${track.codec}", desc=${description ? `${description.length}B` : "none"}`);
+  }
   const chunks = samples.map(
     (sample, i) =>
       new EncodedVideoChunk({

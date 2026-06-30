@@ -17,6 +17,10 @@ export interface FrameProvider {
   dispose(): void;
 }
 
+export function clipSourceKey(layerId: string, assetId: string): string {
+  return `clip:${layerId}:${assetId}`;
+}
+
 /** Pick the fastest provider for a source; `<video>` is the universal fallback. */
 export async function createFrameProvider(url: string, kind: "video" | "image"): Promise<FrameProvider> {
   if (kind === "image") return createImageSource(url);

@@ -13,7 +13,7 @@ import { MediaEncoder, type ExportFormat } from "./video-encoder";
 import { FrameCompositor } from "./frame-compositor";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
 import { getExportCompositor } from "../color/render-engine";
-import { createFrameProvider, type FrameProvider } from "./source-decoder";
+import { clipSourceKey, createFrameProvider, type FrameProvider } from "./source-decoder";
 import { audioConfig, encodeMixedChannels, type MixedAudioChannels } from "./audio-mixer";
 
 /** The composite contract both export compositors satisfy (canvas2D `FrameCompositor` + GPU `SceneFrameCompositor`). */
@@ -21,6 +21,8 @@ interface ExportCompositorLike {
   renderFrame(timeSeconds: number): Promise<void>;
   dispose(): void;
 }
+
+type StageProbe = { stage: "decode" | "rtt" | "final" | "draws" | "gl"; timeSeconds: number; meanLuma?: number; layerId?: string; assetId?: string; detail?: string };
 
 /** A resolved visual source: `assetId` (or `matte:<layerId>`) → playable URL + kind. */
 export type SourceUrlMap = Record<string, { url: string; kind: "video" | "image" }>;
@@ -40,6 +42,22 @@ export interface ExportCoreInput {
    * caller resolves `getExportCompositor()` once and threads it here so both threads agree.
    */
   exportCompositor?: "scene" | "frame" | undefined;
+  /**
+   * Single-context scene export (Method 3, Phase 2) — RESOLVED on the main thread and passed in, same reason
+   * as `exportCompositor`: the Worker has no `window` so it can't read `?exportSingleContext=` itself. When
+   * true, `SceneFrameCompositor` grades media + overlays into RTTs on its ONE WebGL2 context — the
+   * Worker-portable path. Undefined → the compositor falls back to its own flag read (main-thread only).
+   */
+  exportSingleContext?: boolean | undefined;
+  /**
+   * Phase 2 Stage 3.x diagnostics/guard for the experimental Worker scene route only. The main-thread scene
+   * path leaves this unset, so default export behavior is unchanged.
+   */
+  workerSceneDiagnostics?: {
+    sampleTimes?: number[] | undefined;
+    blackFrameGuard?: boolean | undefined;
+    stageProbes?: boolean | undefined;
+  } | undefined;
 }
 
 /** Minimal abort surface — satisfied by both `AbortSignal` and the Worker's abort flag. */
@@ -67,6 +85,66 @@ export class Aborted extends Error {
  */
 const FRAME_TIMEOUT_MS = 30_000;
 const SOURCE_LOAD_TIMEOUT_MS = 25_000;
+const BLACK_LUMA_THRESHOLD = 3;
+const BLACK_GUARD_CONSECUTIVE_FRAMES = 2;
+
+function shouldSampleTime(timeSeconds: number, sampleTimes: number[] | undefined, fps: number): boolean {
+  if (!sampleTimes?.length) return false;
+  const windowSeconds = Math.max(1 / Math.max(1, fps) / 2, 1e-4);
+  return sampleTimes.some((sample) => Math.abs(sample - timeSeconds) <= windowSeconds);
+}
+
+function meanLumaFromRgba(data: Uint8ClampedArray | Uint8Array, pixels: number): number {
+  if (pixels <= 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < data.length; i += 4) sum += 0.2126 * data[i]! + 0.7152 * data[i + 1]! + 0.0722 * data[i + 2]!;
+  return sum / pixels;
+}
+
+function sampleCanvasLuma(source: CanvasImageSource, sourceWidth: number, sourceHeight: number): number {
+  const w = Math.max(1, Math.min(64, sourceWidth));
+  const h = Math.max(1, Math.round((w * sourceHeight) / Math.max(1, sourceWidth)));
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("export diagnostics: 2D sample context unavailable");
+  ctx.drawImage(source, 0, 0, w, h);
+  return meanLumaFromRgba(ctx.getImageData(0, 0, w, h).data, w * h);
+}
+
+function hasActiveMediaAt(composition: TimelineComposition, t: number): boolean {
+  return composition.tracks.some((track) =>
+    track.layers.some((layer) => {
+      if ((layer.type !== "video" && layer.type !== "image") || !layer.assetId) return false;
+      return t >= layer.startSeconds && t < layer.startSeconds + layer.durationSeconds;
+    })
+  );
+}
+
+function mediaSourceKey(layer: TimelineLayer): string | null {
+  if ((layer.type !== "video" && layer.type !== "image") || !layer.assetId) return null;
+  return layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
+}
+
+function buildProviderUrlMap(composition: TimelineComposition, urlMap: SourceUrlMap): SourceUrlMap {
+  const map: SourceUrlMap = {};
+  for (const [key, source] of Object.entries(urlMap)) {
+    if (key.startsWith("matte:") || source.kind === "image") map[key] = source;
+  }
+  for (const track of composition.tracks) {
+    for (const layer of track.layers) {
+      if ((layer.type === "video" || layer.type === "image") && layer.assetId) {
+        const source = urlMap[layer.assetId];
+        const key = mediaSourceKey(layer);
+        if (source && key) map[key] = { url: source.url, kind: layer.type };
+      }
+      if ((layer.type === "video" || layer.type === "image") && layer.matte?.uri) {
+        map[`matte:${layer.id}`] = { url: layer.matte.uri, kind: layer.type };
+      }
+    }
+  }
+  return map;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
@@ -89,6 +167,41 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   const fps = Math.max(1, input.fps || composition.fps || 30);
   const totalFrames = Math.max(1, Math.ceil(composition.durationSeconds * fps));
 
+  // H.264 (and cleanly VP9) require even dimensions - round down to even and render the compositor at that
+  // size so the VideoFrame always matches the encoder config (odd comps otherwise crash the encoder).
+  const width = Math.max(2, composition.width - (composition.width % 2));
+  const height = Math.max(2, composition.height - (composition.height % 2));
+  const renderComposition = expandEffectRegionMasks(
+    width === composition.width && height === composition.height ? composition : { ...composition, width, height }
+  );
+  const providerUrlMap = buildProviderUrlMap(renderComposition, urlMap);
+
+  const trackEndPostroll = (layer: TimelineLayer, track: { layers: TimelineLayer[] }): number => {
+    const end = layer.startSeconds + layer.durationSeconds;
+    let postroll = 0;
+    for (const other of track.layers) {
+      if (other.id !== layer.id && other.transitionIn && Math.abs(other.startSeconds - end) < 0.05) {
+        postroll = Math.max(postroll, other.transitionIn.durationSeconds);
+      }
+    }
+    return postroll;
+  };
+
+  const activeSourceKeysAt = (t: number): string[] => {
+    const keys = new Set<string>();
+    for (const track of renderComposition.tracks) {
+      for (const layer of track.layers) {
+        const key = mediaSourceKey(layer);
+        if (!key) continue;
+        const postroll = trackEndPostroll(layer, track);
+        if (t < layer.startSeconds || t >= layer.startSeconds + layer.durationSeconds + postroll) continue;
+        keys.add(key);
+        if (layer.matte?.uri) keys.add(`matte:${layer.id}`);
+      }
+    }
+    return [...keys];
+  };
+
   // Preload text fonts so canvas fillText matches the preview. Only possible where the DOM
   // FontFaceSet exists (main thread); the Worker uses the platform's installed fonts.
   const fonts = getCompositionFontsUsed(composition.tracks.flatMap((track) => track.layers));
@@ -97,31 +210,33 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     await document.fonts.ready;
   }
 
-  // Load every visual source in parallel (P4 — was sequential). A failed non-matte source is
-  // fatal (we can't render that clip); a failed matte just drops that clip's mask.
   onProgress?.(0, "Loading media…");
   const sources = new Map<string, FrameProvider>();
-  await Promise.all(
-    Object.entries(urlMap).map(async ([key, { url, kind }]) => {
+  const sourceLoads = new Map<string, Promise<void>>();
+  const loadSource = async (key: string): Promise<void> => {
+    if (sources.has(key)) return;
+    const pending = sourceLoads.get(key);
+    if (pending) return pending;
+    const sourceDef = providerUrlMap[key];
+    if (!sourceDef) return;
+    const load = (async () => {
       throwIfAborted();
       try {
-        // Bound the whole per-source load: an un-timed fetch / decode-init that never settles used to
-        // hang the export at "Loading media…" forever. On timeout this names the exact stalled asset.
-        sources.set(key, await withTimeout(createFrameProvider(url, kind), SOURCE_LOAD_TIMEOUT_MS, `loadSource ${key}`));
+        sources.set(
+          key,
+          await withTimeout(createFrameProvider(sourceDef.url, sourceDef.kind), SOURCE_LOAD_TIMEOUT_MS, `loadSource ${key}`)
+        );
       } catch (error) {
         if (!key.startsWith("matte:")) throw error;
       }
-    })
-  );
-
-  // H.264 (and cleanly VP9) require even dimensions — round down to even and render the compositor at that
-  // size so the VideoFrame always matches the encoder config (odd comps otherwise crash the encoder).
-  const width = Math.max(2, composition.width - (composition.width % 2));
-  const height = Math.max(2, composition.height - (composition.height % 2));
-  // Even dims for the encoder + expand color/glow region masks into base/duplicate layers so the canvas
-  // compositor renders them via its existing per-layer grade + clip-mask matte (region effects in export).
-  const renderComposition = expandEffectRegionMasks(
-    width === composition.width && height === composition.height ? composition : { ...composition, width, height }
+    })().finally(() => sourceLoads.delete(key));
+    sourceLoads.set(key, load);
+    return load;
+  };
+  await Promise.all(
+    Object.entries(providerUrlMap)
+      .filter(([, source]) => source.kind === "image")
+      .map(([key]) => loadSource(key))
   );
 
   // Method 3 Phase 5: flag-select the composite engine. "scene" (default) drives the SAME shared
@@ -134,11 +249,34 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   // Mode is resolved by the caller (main thread) and passed in — the Worker can't read the flag itself.
   // Fall back to getExportCompositor() only when not provided (e.g. a direct call without the field).
   let usingScene = (input.exportCompositor ?? getExportCompositor()) === "scene";
+  // Single-context resolved by the caller (main thread) — pass it explicitly so the Worker honors it (it can't
+  // read the flag). Undefined falls through to the compositor's own flag read (main-thread direct calls).
+  const diagnostics = input.workerSceneDiagnostics;
+  const emitProbe = (probe: StageProbe) => {
+    const luma = probe.meanLuma != null ? ` luma=${probe.meanLuma.toFixed(2)}` : "";
+    onProgress?.(
+      0.031,
+      `[worker-scene-stage] ${probe.stage} t=${probe.timeSeconds.toFixed(3)}${luma}${probe.layerId ? ` layer=${probe.layerId}` : ""}${probe.assetId ? ` asset=${probe.assetId}` : ""}${probe.detail ? ` ${probe.detail}` : ""}`
+    );
+  };
+  const sceneOptions = {
+    ...(input.exportSingleContext != null ? { singleContext: input.exportSingleContext } : {}),
+    ...(diagnostics?.stageProbes && diagnostics.sampleTimes?.length
+      ? {
+          stageProbe: {
+            sampleTimes: diagnostics.sampleTimes,
+            fps,
+            onProbe: emitProbe,
+          },
+        }
+      : {}),
+  };
   let activeCanvas = new OffscreenCanvas(width, height);
   let compositor: ExportCompositorLike;
+  let consecutiveBlackExpectedMediaFrames = 0;
   try {
     compositor = usingScene
-      ? new SceneFrameCompositor(renderComposition, activeCanvas, getSrc)
+      ? new SceneFrameCompositor(renderComposition, activeCanvas, getSrc, sceneOptions)
       : new FrameCompositor(renderComposition, activeCanvas, getSrc);
   } catch (constructError) {
     if (!usingScene) throw constructError;
@@ -155,21 +293,16 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   // gap (e.g. an audio clip longer than the video). Holding ~32 decoded frames across that empty tail
   // can exhaust GPU memory and stall the encoder — the reported "render stops at frame N" hang.
   const sourceLastNeeded = new Map<string, number>();
-  const trackEndPostroll = (layer: TimelineLayer, track: { layers: TimelineLayer[] }): number => {
-    const end = layer.startSeconds + layer.durationSeconds;
-    let postroll = 0;
-    for (const other of track.layers) {
-      if (other.id !== layer.id && other.transitionIn && Math.abs(other.startSeconds - end) < 0.05) {
-        postroll = Math.max(postroll, other.transitionIn.durationSeconds);
-      }
-    }
-    return postroll;
-  };
   for (const track of renderComposition.tracks) {
     for (const layer of track.layers) {
-      if ((layer.type === "video" || layer.type === "image") && layer.assetId) {
+      const key = mediaSourceKey(layer);
+      if (key) {
         const last = layer.startSeconds + layer.durationSeconds + trackEndPostroll(layer, track) + 0.15;
-        sourceLastNeeded.set(layer.assetId, Math.max(sourceLastNeeded.get(layer.assetId) ?? 0, last));
+        sourceLastNeeded.set(key, Math.max(sourceLastNeeded.get(key) ?? 0, last));
+        if (layer.matte?.uri) {
+          const matteKey = `matte:${layer.id}`;
+          sourceLastNeeded.set(matteKey, Math.max(sourceLastNeeded.get(matteKey) ?? 0, last));
+        }
       }
     }
   }
@@ -198,6 +331,7 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     for (let i = 0; i < totalFrames; i += 1) {
       throwIfAborted();
       const t = i / fps;
+      await Promise.all(activeSourceKeysAt(t).map((key) => loadSource(key)));
       try {
         await withTimeout(compositor.renderFrame(t), FRAME_TIMEOUT_MS, `renderFrame ${i + 1}/${totalFrames}`);
       } catch (renderError) {
@@ -217,6 +351,28 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
         activeCanvas = new OffscreenCanvas(width, height); // a WebGL canvas can't be re-acquired as 2D
         compositor = new FrameCompositor(renderComposition, activeCanvas, getSrc);
         await withTimeout(compositor.renderFrame(t), FRAME_TIMEOUT_MS, `renderFrame ${i + 1}/${totalFrames}`);
+      }
+      if (diagnostics?.stageProbes && diagnostics.sampleTimes?.length && shouldSampleTime(t, diagnostics.sampleTimes, fps)) {
+        const meanLuma = sampleCanvasLuma(activeCanvas, width, height);
+        emitProbe({ stage: "final", timeSeconds: t, meanLuma });
+      }
+      if (
+        diagnostics?.blackFrameGuard &&
+        usingScene &&
+        shouldSampleTime(t, diagnostics.sampleTimes, fps) &&
+        hasActiveMediaAt(renderComposition, t)
+      ) {
+        const meanLuma = sampleCanvasLuma(activeCanvas, width, height);
+        if (meanLuma < BLACK_LUMA_THRESHOLD) {
+          consecutiveBlackExpectedMediaFrames += 1;
+          if (consecutiveBlackExpectedMediaFrames >= BLACK_GUARD_CONSECUTIVE_FRAMES) {
+            throw new Error(
+              `WORKER_SCENE_BLACK_FRAME_GUARD: final compositor mean luma ${meanLuma.toFixed(2)} below ${BLACK_LUMA_THRESHOLD} for ${consecutiveBlackExpectedMediaFrames} consecutive expected-nonblack media frames at t=${t.toFixed(3)}s`
+            );
+          }
+        } else {
+          consecutiveBlackExpectedMediaFrames = 0;
+        }
       }
       await withTimeout(encoder.addVideoFrame(activeCanvas, i), FRAME_TIMEOUT_MS, `encodeFrame ${i + 1}/${totalFrames}`);
       releaseSpentSources(t); // free decoders whose clips are now fully behind the playhead

@@ -172,6 +172,63 @@ export function getExportCompositor(): ExportCompositor {
   return env ?? "scene";
 }
 
+/**
+ * Single-context export (Method 3, Phase 2) — when ON, `SceneFrameCompositor` grades media + text/shape
+ * overlays into render-targets on the `SceneCompositor`'s OWN WebGL2 context (no per-clip context, no
+ * cross-context canvas upload), so the whole export runs on ONE context. That single self-contained context
+ * is what lets scene export move back to the Worker (Phase 2 Stage 3); the cross-context multi-context path
+ * is what dies in the Worker's isolated GPU process today (the Stage 0 probe reproduced the black frames).
+ *
+ * ON by default (Phase 2 Stage 4). Query/localStorage/VITE env overrides remain so the legacy
+ * multi-context scene path can be forced for debugging or emergency rollback.
+ * Resolution order: `?exportSingleContext=0|1` → localStorage `lumio.exportSingleContext` → VITE env → true.
+ */
+export function getExportSingleContext(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("exportSingleContext")) {
+        return truthy(new URLSearchParams(window.location.search).get("exportSingleContext"));
+      }
+      const stored = window.localStorage?.getItem("lumio.exportSingleContext");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_EXPORT_SINGLE_CONTEXT;
+  return env == null ? true : truthy(env);
+}
+
+/**
+ * Worker scene export (Method 3, Phase 2 Stage 3) — when ON, scene-mode export runs in the export Worker
+ * instead of on the main thread. This is ONLY honored together with single-context export
+ * ({@link getExportSingleContext}): the single self-contained WebGL2 context is what survives the Worker's
+ * isolated GPU process, whereas the legacy multi-/cross-context path black-frames there (Stage 0 probe).
+ *
+ * ON by default (Phase 2 Stage 4): scene-mode export now runs in the Worker through the stable single-context
+ * path. If Worker scene export fails, `local-export.ts` falls back to the main-thread scene path (NOT directly
+ * to canvas2D).
+ *
+ * Resolution order: `?exportWorkerScene=0|1` → localStorage `lumio.exportWorkerScene` → VITE env → true.
+ */
+export function getExportWorkerScene(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("exportWorkerScene")) {
+        return truthy(new URLSearchParams(window.location.search).get("exportWorkerScene"));
+      }
+      const stored = window.localStorage?.getItem("lumio.exportWorkerScene");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_EXPORT_WORKER_SCENE;
+  return env == null ? true : truthy(env);
+}
+
 /** True when the unified WebGL media renderer should be used for video/image layers. */
 export function useWebglRenderer(supported: boolean): boolean {
   return supported && getRendererMode() === "webgl";

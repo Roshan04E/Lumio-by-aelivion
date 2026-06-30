@@ -5,12 +5,12 @@
  * preview (`ScenePreviewCanvas` + a handful of `MediaWebGLRenderer` graded-canvas sources, exactly what
  * `WebglMediaLayer` provides in the app — each a live WebGL context) AND runs the REAL `exportLocally`
  * pipeline over a 20–30 clip bloom/blur/grade timeline, REPEATED 2–3×. This is the actual contention the
- * fixes target: the export's contexts stack on top of the preview's, the preview must SUSPEND during export
- * (so it isn't mid-upload when the browser evicts), the media-renderer POOL must keep the export's count
- * bounded, and the preview must RESTORE (keep compositing, no DOM fallback) after each export.
+ * fixes target: the default Worker scene export must keep the preview alive without needing preview suspend;
+ * when Worker scene is forced off, the main-thread fallback must still SUSPEND the preview so it can RESTORE
+ * after export (keep compositing, no DOM fallback).
  *
- * Asserted (via data-attributes the worker reads): every export observed the preview suspended; the preview
- * never failed/fell back across all exports; no "lost WebGL context" error; all exports completed. Logged:
+ * Asserted (via data-attributes the worker reads): whether preview suspend was observed; the preview never
+ * failed/fell back across all exports; no "lost WebGL context" error; all exports completed. Logged:
  * peak live context count, per-export suspend state, and (via `?exportGlDebug=1`) the `[export-gl]` pool lines.
  *
  * Needs a real WebGL2 GPU + WebCodecs encode — run with `PIXEL_BROWSER_CHANNEL=chrome`.

@@ -27,6 +27,7 @@
 
 import {
   MediaWebGLRenderer,
+  RenderTarget,
   SceneCompositor,
   findTransitionPairs,
   getActiveGlContextCount,
@@ -35,20 +36,33 @@ import {
   getCompositionFilterEffects,
   getCompositionMediaEffects,
   getCompositionObjectFit,
+  isSceneTextureSource,
   isTrackEnabled,
+  type ColorPipeline,
+  type SceneCompositorDebugSnapshot,
+  type SceneDraw,
   type SceneFrameSpec,
+  type SceneLayerDraw,
+  type SceneTextureSource,
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
 } from "@reelforge/shared";
+import { getExportSingleContext } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
-import type { FrameProvider } from "./source-decoder";
+import { clipSourceKey, type FrameProvider } from "./source-decoder";
 import { buildSceneDraws, type ScenePreviewTransition } from "../scene/build-scene-draws";
 import { SceneMaskMatteCache } from "../components/scene-mask-matte";
 import { SceneTextRasterizer } from "../components/scene-text-raster";
 
 /** A `<canvas>` (main-thread fallback) or `OffscreenCanvas` (export Worker). */
 type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
+
+interface SceneFrameStageProbeOptions {
+  sampleTimes: number[];
+  fps: number;
+  onProbe: (probe: { stage: "decode" | "rtt" | "draws" | "gl"; timeSeconds: number; meanLuma?: number; layerId?: string; assetId?: string; detail?: string }) => void;
+}
 
 /**
  * WebGL context budget. Only ~1 media clip (2 during a transition) is active on any frame, so we reuse a
@@ -81,6 +95,16 @@ export class SceneFrameCompositor {
   private readonly freeMediaRenderers: MediaWebGLRenderer[] = [];
   private readonly mediaPipelineKeys = new Map<string, string>();
   private peakContextCount = 0;
+  // Phase 2 single-context export: when ON, media + overlay grading render into RenderTargets on the
+  // SceneCompositor's OWN WebGL2 context (no per-clip context, no cross-context canvas upload) — so the whole
+  // export is one self-contained context (Worker-portable). OFF (default) keeps the proven own-canvas path
+  // above byte-for-byte. The two pools below are used ONLY in single-context mode.
+  private readonly singleContext: boolean;
+  private readonly sharedGl: WebGL2RenderingContext | null;
+  private readonly stageProbe: SceneFrameStageProbeOptions | null;
+  private readonly mediaSharedRenderers = new Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget }>();
+  private readonly freeMediaShared: { renderer: MediaWebGLRenderer; target: RenderTarget }[] = [];
+  private readonly overlaySharedRenderers = new Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string }>();
   // Pools `buildSceneDraws` lazily fills + prunes: per-text/shape-layer overlay-grade renderers and
   // per-active-junction transition mix engines. We own them so they persist + get disposed with us.
   private readonly gradeRenderers = new Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>();
@@ -91,11 +115,17 @@ export class SceneFrameCompositor {
   constructor(
     private readonly composition: TimelineComposition,
     canvas: AnyCanvas,
-    private readonly getSource: (assetId: string) => FrameProvider | undefined
+    private readonly getSource: (assetId: string) => FrameProvider | undefined,
+    options?: { singleContext?: boolean; stageProbe?: SceneFrameStageProbeOptions }
   ) {
     this.width = composition.width;
     this.height = composition.height;
     this.compositor = new SceneCompositor(canvas, this.width, this.height);
+    // Resolve single-context mode (default OFF). Explicit option wins (export-core/fixture can thread it);
+    // otherwise read the flag (URL/localStorage/env) — which works on the main thread (Stage 2).
+    this.singleContext = options?.singleContext ?? getExportSingleContext();
+    this.sharedGl = this.singleContext ? this.compositor.sharedGl : null;
+    this.stageProbe = options?.stageProbe ?? null;
     this.matteCache = new SceneMaskMatteCache(this.width, this.height);
     // No `onReady` callback: the export AWAITS `rasterizer.ensure()` per frame, so there's no draw loop to
     // re-arm (unlike the editor's fire-and-forget `get()`).
@@ -119,6 +149,123 @@ export class SceneFrameCompositor {
     return typeof document !== "undefined"
       ? document.createElement("canvas")
       : new OffscreenCanvas(this.width, this.height);
+  }
+
+  private shouldProbe(t: number): boolean {
+    const probe = this.stageProbe;
+    if (!probe?.sampleTimes.length) return false;
+    const windowSeconds = Math.max(1 / Math.max(1, probe.fps) / 2, 1e-4);
+    return probe.sampleTimes.some((sample) => Math.abs(sample - t) <= windowSeconds);
+  }
+
+  private meanLumaFromRgba(data: Uint8ClampedArray | Uint8Array, pixels: number): number {
+    if (pixels <= 0) return 0;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += 0.2126 * data[i]! + 0.7152 * data[i + 1]! + 0.0722 * data[i + 2]!;
+    return sum / pixels;
+  }
+
+  private sampleSourceLuma(source: CanvasImageSource, sourceWidth: number, sourceHeight: number): number {
+    const w = Math.max(1, Math.min(64, sourceWidth));
+    const h = Math.max(1, Math.round((w * sourceHeight) / Math.max(1, sourceWidth)));
+    const canvas = this.makeCanvas();
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("scene-frame-compositor diagnostics: 2D sample context unavailable");
+    ctx.drawImage(source, 0, 0, w, h);
+    return this.meanLumaFromRgba(ctx.getImageData(0, 0, w, h).data, w * h);
+  }
+
+  private framebufferStatusName(status: number): string {
+    const gl = this.sharedGl;
+    if (!gl) return "no-shared-gl";
+    if (status === gl.FRAMEBUFFER_COMPLETE) return "FRAMEBUFFER_COMPLETE";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_ATTACHMENT) return "FRAMEBUFFER_INCOMPLETE_ATTACHMENT";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT) return "FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_DIMENSIONS) return "FRAMEBUFFER_INCOMPLETE_DIMENSIONS";
+    if (status === gl.FRAMEBUFFER_UNSUPPORTED) return "FRAMEBUFFER_UNSUPPORTED";
+    if (status === gl.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE) return "FRAMEBUFFER_INCOMPLETE_MULTISAMPLE";
+    return `0x${status.toString(16)}`;
+  }
+
+  private debugRenderTarget(target: RenderTarget): { width: number; height: number; framebufferStatus: string; framebufferComplete: boolean } {
+    const gl = this.sharedGl;
+    if (!gl) return { width: target.width, height: target.height, framebufferStatus: "no-shared-gl", framebufferComplete: false };
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return {
+      width: target.width,
+      height: target.height,
+      framebufferStatus: this.framebufferStatusName(status),
+      framebufferComplete: status === gl.FRAMEBUFFER_COMPLETE,
+    };
+  }
+
+  private sourceKind(source: SceneLayerDraw["source"]): string {
+    if (isSceneTextureSource(source)) return "RenderTarget";
+    if (typeof OffscreenCanvas !== "undefined" && source instanceof OffscreenCanvas) return "OffscreenCanvas";
+    if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) return "HTMLCanvas";
+    if (typeof ImageBitmap !== "undefined" && source instanceof ImageBitmap) return "ImageBitmap";
+    if (typeof HTMLVideoElement !== "undefined" && source instanceof HTMLVideoElement) return "HTMLVideo";
+    if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) return "HTMLImage";
+    return "TexImageSource";
+  }
+
+  private describeLayerDraw(draw: SceneLayerDraw, order: string): string {
+    const rt = isSceneTextureSource(draw.source) ? draw.source.debugTarget : null;
+    const hasEffects = Boolean((draw.blurPx ?? 0) > 0 || draw.glow || draw.content || (draw.rotateX ?? 0) !== 0 || (draw.rotateY ?? 0) !== 0);
+    return [
+      `${order}`,
+      `layer=${draw.debugLayerId ?? "unknown"}`,
+      `source=${this.sourceKind(draw.source)}`,
+      `draw=${draw.sourceWidth}x${draw.sourceHeight}`,
+      `opacity=${draw.transform.opacity}`,
+      `blend=${draw.blendMode}`,
+      `fit=${draw.fit}`,
+      `mask=${draw.mask ? "1" : "0"}`,
+      `effects=${hasEffects ? "1" : "0"}`,
+      `blur=${draw.blurPx ?? 0}`,
+      `glow=${draw.glow ? "1" : "0"}`,
+      `tex=${isSceneTextureSource(draw.source) && draw.source.texture ? "1" : isSceneTextureSource(draw.source) ? "0" : "n/a"}`,
+      `rt=${rt ? `${rt.width}x${rt.height}:${rt.framebufferStatus}` : "n/a"}`,
+    ].join(" ");
+  }
+
+  private describeDraws(draws: SceneDraw[]): string {
+    if (!draws.length) return "none";
+    const parts: string[] = [];
+    draws.forEach((draw, index) => {
+      if ((draw as { kind?: string }).kind === "transition") {
+        const transition = draw as Extract<SceneDraw, { kind: "transition" }>;
+        parts.push(
+          `#${index}:transition from=${transition.debugFromId ?? transition.from.debugLayerId ?? "unknown"} to=${transition.debugToId ?? transition.to.debugLayerId ?? "unknown"} ` +
+            `progress=${transition.progress.toFixed(3)} from{${this.describeLayerDraw(transition.from, "side=from")}} to{${this.describeLayerDraw(transition.to, "side=to")}}`
+        );
+      } else {
+        parts.push(this.describeLayerDraw(draw as SceneLayerDraw, `#${index}`));
+      }
+    });
+    return parts.join(" | ");
+  }
+
+  private describeGlSnapshot(snapshot: SceneCompositorDebugSnapshot): string {
+    const targets = Object.entries(snapshot.targets)
+      .map(([name, target]) => `${name}=${target.width}x${target.height}:${target.framebufferStatus}`)
+      .join(",");
+    return [
+      `canvas=${snapshot.canvasWidth}x${snapshot.canvasHeight}`,
+      `comp=${snapshot.width}x${snapshot.height}`,
+      `viewport=${snapshot.viewport.join("x")}`,
+      `scissor=${snapshot.scissorTest ? "on" : "off"}:${snapshot.scissorBox.join("x")}`,
+      `presentViewport=${snapshot.lastPresentViewport?.join("x") ?? "none"}`,
+      `fb=${snapshot.framebufferBinding}`,
+      `tex2d=${snapshot.texture2dBinding}`,
+      `glError=0x${snapshot.glError.toString(16)}`,
+      `contextLost=${snapshot.contextLost ? "1" : "0"}`,
+      `targets=${targets}`,
+    ].join(" ");
   }
 
   /**
@@ -181,6 +328,18 @@ export class SceneFrameCompositor {
    * — overflow is disposed immediately (rule 5) so a long timeline doesn't hoard one context per clip.
    */
   private pruneMediaRenderers(activeMediaIds: Set<string>): void {
+    if (this.singleContext) {
+      // Single-context: the renderer+RTT pairs live on the shared context (no per-clip context to bound), but
+      // we still pool them by liveness so concurrent grading (a transition = 2 active) gets distinct targets.
+      for (const [id, entry] of this.mediaSharedRenderers) {
+        if (activeMediaIds.has(id)) continue;
+        this.mediaSharedRenderers.delete(id);
+        this.mediaPipelineKeys.delete(id);
+        if (this.freeMediaShared.length < MAX_POOLED_MEDIA_RENDERERS) this.freeMediaShared.push(entry);
+        else { entry.renderer.dispose(); entry.target.dispose(); }
+      }
+      return;
+    }
     for (const [id, renderer] of this.mediaRenderers) {
       if (activeMediaIds.has(id)) continue;
       this.mediaRenderers.delete(id);
@@ -193,21 +352,110 @@ export class SceneFrameCompositor {
     }
   }
 
+  /** Single-context: get/create the {shared MediaWebGLRenderer, RenderTarget} pair grading layer `id`. */
+  private mediaSharedFor(id: string): { renderer: MediaWebGLRenderer; target: RenderTarget } {
+    let entry = this.mediaSharedRenderers.get(id);
+    if (!entry) {
+      entry = this.freeMediaShared.pop() ?? {
+        renderer: new MediaWebGLRenderer({ sharedGl: this.sharedGl! }),
+        target: new RenderTarget(this.sharedGl!, 1, 1),
+      };
+      this.mediaSharedRenderers.set(id, entry);
+    }
+    return entry;
+  }
+
+  /**
+   * Single-context overlay grade (injected into buildSceneDraws): grade a text/shape raster into a per-layer
+   * RenderTarget on the shared context and return it as a SceneTextureSource. Same LUT engine + math as the
+   * built-in own-canvas overlay grade — only the output surface differs (RTT vs canvas).
+   */
+  private gradeOverlaySingle = (layerId: string, srcCanvas: AnyCanvas, pipeline: ColorPipeline): SceneTextureSource | null => {
+    const gl = this.sharedGl;
+    if (!gl) return null;
+    let entry = this.overlaySharedRenderers.get(layerId);
+    if (!entry) {
+      entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "" };
+      this.overlaySharedRenderers.set(layerId, entry);
+    }
+    const key = JSON.stringify(pipeline);
+    if (entry.pipelineKey !== key) {
+      entry.renderer.setPipeline(pipeline);
+      entry.pipelineKey = key;
+    }
+    entry.renderer.draw({
+      source: srcCanvas as TexImageSource,
+      sourceWidth: srcCanvas.width,
+      sourceHeight: srcCanvas.height,
+      matte: null,
+      pipeline,
+      amount: 1,
+      opacity: 1,
+      mediaEffects: null,
+      target: entry.target,
+    });
+    return { texture: entry.target.tex, width: srcCanvas.width, height: srcCanvas.height, debugTarget: this.debugRenderTarget(entry.target) };
+  };
+
+  /** Single-context: dispose overlay grade renderers/targets whose text/shape layer isn't active this frame. */
+  private pruneOverlayRenderers(activeOverlayIds: Set<string>): void {
+    for (const [id, entry] of this.overlaySharedRenderers) {
+      if (activeOverlayIds.has(id)) continue;
+      this.overlaySharedRenderers.delete(id);
+      entry.renderer.dispose();
+      entry.target.dispose();
+    }
+  }
+
   /**
    * Decode, matte, and color-grade a media layer's frame at `t` into its `MediaWebGLRenderer`, returning the
    * graded canvas (color + matte + media-effects baked, **opacity NOT baked** — the composite quad applies
    * it live, matching the editor's `bakeOpacity={false}` scene-media path) or null if no frame yet. This is
    * the export's inline equivalent of the hidden `WebglMediaLayer` that fills the editor's `gradedRef`.
    */
-  private async gradeMediaLayer(item: FlatLayer, t: number): Promise<AnyCanvas | null> {
+  private async gradeMediaLayer(item: FlatLayer, t: number): Promise<AnyCanvas | SceneTextureSource | null> {
     const { layer } = item;
     if (!layer.assetId) return null;
-    const source = this.getSource(layer.assetId);
-    if (!source) return null;
-
+    const providerKey = layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
+    const source = this.getSource(providerKey);
     const sourceTime = layer.type === "video" ? (layer.sourceInSeconds ?? 0) + (t - layer.startSeconds) : 0;
+    if (!source) {
+      if (this.stageProbe && this.shouldProbe(t)) {
+        this.stageProbe.onProbe({
+          stage: "decode",
+          timeSeconds: t,
+          meanLuma: 0,
+          layerId: layer.id,
+          assetId: layer.assetId,
+          detail: `missing-source providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)}`,
+        });
+      }
+      return null;
+    }
     const frame = await source.getFrame(sourceTime);
-    if (!frame || source.width === 0 || source.height === 0) return null;
+    if (!frame || source.width === 0 || source.height === 0) {
+      if (this.stageProbe && this.shouldProbe(t)) {
+        this.stageProbe.onProbe({
+          stage: "decode",
+          timeSeconds: t,
+          meanLuma: 0,
+          layerId: layer.id,
+          assetId: layer.assetId,
+          detail: `no-frame providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)} provider=${source.width}x${source.height}`,
+        });
+      }
+      return null;
+    }
+    if (this.stageProbe && this.shouldProbe(t)) {
+      this.stageProbe.onProbe({
+        stage: "decode",
+        timeSeconds: t,
+        layerId: layer.id,
+        assetId: layer.assetId,
+        meanLuma: this.sampleSourceLuma(frame, source.width, source.height),
+        detail: `providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)} provider=${source.width}x${source.height}`,
+      });
+    }
 
     let matteFrame: CanvasImageSource | null = null;
     if (layer.matte?.uri) {
@@ -222,13 +470,7 @@ export class SceneFrameCompositor {
     const pipeline = getCompositionColorPipeline(merged, { currentTimeSeconds: t });
     const mediaEffects = getCompositionMediaEffects(merged, { currentTimeSeconds: t });
 
-    const renderer = this.mediaRendererFor(layer.id);
-    const pipelineKey = JSON.stringify(pipeline);
-    if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
-      renderer.setPipeline(pipeline);
-      this.mediaPipelineKeys.set(layer.id, pipelineKey);
-    }
-    renderer.draw({
+    const drawParams = {
       source: frame as TexImageSource,
       sourceWidth: source.width,
       sourceHeight: source.height,
@@ -240,7 +482,41 @@ export class SceneFrameCompositor {
       opacity: 1, // NOT baked — buildSceneDraws applies opacity via the quad (live, like the editor)
       mediaEffects,
       transition: null, // junction transitions are the unified engine's job (buildSceneDraws), not a reveal
-    });
+    } as const;
+
+    if (this.singleContext) {
+      // Single-context: grade into a shared-context RenderTarget and hand back the texture directly (no canvas).
+      const { renderer, target } = this.mediaSharedFor(layer.id);
+      const pipelineKey = JSON.stringify(pipeline);
+      if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
+        renderer.setPipeline(pipeline);
+        this.mediaPipelineKeys.set(layer.id, pipelineKey);
+      }
+      renderer.draw({ ...drawParams, target });
+      if (this.stageProbe && this.shouldProbe(t)) {
+        const w = Math.max(1, target.width);
+        const h = Math.max(1, target.height);
+        const pixels = new Uint8Array(w * h * 4);
+        renderer.readPixelsInto(pixels, w, h, target);
+        this.stageProbe.onProbe({
+          stage: "rtt",
+          timeSeconds: t,
+          layerId: layer.id,
+          assetId: layer.assetId,
+          meanLuma: this.meanLumaFromRgba(pixels, w * h),
+          detail: `providerKey=${providerKey} target=${w}x${h}:${this.debugRenderTarget(target).framebufferStatus}`,
+        });
+      }
+      return { texture: target.tex, width: source.width, height: source.height, debugTarget: this.debugRenderTarget(target) };
+    }
+
+    const renderer = this.mediaRendererFor(layer.id);
+    const pipelineKey = JSON.stringify(pipeline);
+    if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
+      renderer.setPipeline(pipeline);
+      this.mediaPipelineKeys.set(layer.id, pipelineKey);
+    }
+    renderer.draw(drawParams);
     return renderer.canvas as AnyCanvas;
   }
 
@@ -272,6 +548,12 @@ export class SceneFrameCompositor {
       activeItems.filter((it) => it.layer.type === "video" || it.layer.type === "image").map((it) => it.layer.id)
     );
     this.pruneMediaRenderers(activeMediaIds);
+    // Single-context: also release overlay (text/shape) grade renderers whose layer left the frame.
+    if (this.singleContext) {
+      this.pruneOverlayRenderers(
+        new Set(activeItems.filter((it) => it.layer.type === "text" || it.layer.type === "shape").map((it) => it.layer.id))
+      );
+    }
 
     // Adjustment-merged layer list in back-to-front (z) order — exactly what the editor passes as `sceneLayers`.
     const layers = activeItems.map((item) => this.mergedLayer(item, t));
@@ -302,13 +584,13 @@ export class SceneFrameCompositor {
     // (1) Grade EVERY active media layer (incl. both sides of an active transition — the mix reads both
     // graded canvases) into a map, awaiting all of them so the synchronous getMediaGraded inside
     // buildSceneDraws is always satisfied.
-    const gradedById = new Map<string, AnyCanvas>();
+    const gradedById = new Map<string, AnyCanvas | SceneTextureSource>();
     await Promise.all(
       activeItems
         .filter((item) => item.layer.type === "video" || item.layer.type === "image")
         .map(async (item) => {
-          const canvas = await this.gradeMediaLayer(item, t);
-          if (canvas && canvas.width > 0 && canvas.height > 0) gradedById.set(item.layer.id, canvas);
+          const graded = await this.gradeMediaLayer(item, t);
+          if (graded && graded.width > 0 && graded.height > 0) gradedById.set(item.layer.id, graded);
         })
     );
 
@@ -336,8 +618,27 @@ export class SceneFrameCompositor {
       matteCache: this.matteCache,
       gradeRenderers: this.gradeRenderers,
       getMediaGraded: (id) => gradedById.get(id) ?? null,
+      // Single-context: grade text/shape overlays into shared-context RTTs too (no cross-context canvas upload).
+      ...(this.singleContext ? { gradeOverlay: this.gradeOverlaySingle } : {}),
       createCanvas: () => this.makeCanvas(),
     });
+
+    if (this.stageProbe && this.shouldProbe(t)) {
+      const graded = [...gradedById.entries()]
+        .map(([id, source]) => `${id}:${this.sourceKind(source)}:${source.width}x${source.height}`)
+        .join(",");
+      this.stageProbe.onProbe({
+        stage: "draws",
+        timeSeconds: t,
+        detail: [
+          `active=[${layers.map((layer) => layer.id).join(",") || "none"}]`,
+          `activeMedia=[${[...activeMediaIds].join(",") || "none"}]`,
+          `graded=[${graded || "none"}]`,
+          `drawCount=${draws.length}`,
+          `draws=${this.describeDraws(draws)}`,
+        ].join(" "),
+      });
+    }
 
     const spec: SceneFrameSpec = {
       width: this.width,
@@ -346,6 +647,13 @@ export class SceneFrameCompositor {
       layers: draws,
     };
     this.compositor.renderFrame(spec);
+    if (this.stageProbe && this.shouldProbe(t)) {
+      this.stageProbe.onProbe({
+        stage: "gl",
+        timeSeconds: t,
+        detail: this.describeGlSnapshot(this.compositor.debugSnapshot()),
+      });
+    }
 
     // Budget telemetry (rule 8): track the live WebGL context peak and warn ONCE if we cross the safe
     // threshold — we're nearing the browser's cap and risk evicting the preview's context. We do NOT
@@ -369,6 +677,13 @@ export class SceneFrameCompositor {
         /* ignore */
       }
     };
+    // Single-context pools live ON the compositor's context — dispose them BEFORE the compositor loses it.
+    for (const e of this.mediaSharedRenderers.values()) { safe(() => e.renderer.dispose()); safe(() => e.target.dispose()); }
+    this.mediaSharedRenderers.clear();
+    for (const e of this.freeMediaShared) { safe(() => e.renderer.dispose()); safe(() => e.target.dispose()); }
+    this.freeMediaShared.length = 0;
+    for (const e of this.overlaySharedRenderers.values()) { safe(() => e.renderer.dispose()); safe(() => e.target.dispose()); }
+    this.overlaySharedRenderers.clear();
     safe(() => this.compositor.dispose());
     safe(() => this.matteCache.dispose());
     safe(() => this.rasterizer.dispose());

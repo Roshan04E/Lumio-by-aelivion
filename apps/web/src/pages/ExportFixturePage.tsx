@@ -20,9 +20,11 @@ import {
   renderComparisonFixtureKeys,
   renderComparisonFrameSeconds,
   type RenderComparisonFixtureKey,
+  type TimelineComposition,
+  type TimelineLayer,
 } from "@reelforge/shared";
-import { buildSourceUrlMap } from "../export/export-core";
-import { createFrameProvider, type FrameProvider } from "../export/source-decoder";
+import { buildSourceUrlMap, type SourceUrlMap } from "../export/export-core";
+import { clipSourceKey, createFrameProvider, type FrameProvider } from "../export/source-decoder";
 import { FrameCompositor } from "../export/frame-compositor";
 import { SceneFrameCompositor } from "../export/scene-frame-compositor";
 
@@ -42,6 +44,31 @@ function exportCompositorFromUrl(): "frame" | "scene" {
 interface ExportCompositorLike {
   renderFrame(timeSeconds: number): Promise<void>;
   dispose(): void;
+}
+
+function mediaSourceKey(layer: TimelineLayer): string | null {
+  if ((layer.type !== "video" && layer.type !== "image") || !layer.assetId) return null;
+  return layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
+}
+
+function buildProviderUrlMap(composition: TimelineComposition, urlMap: SourceUrlMap): SourceUrlMap {
+  const map: SourceUrlMap = {};
+  for (const [key, source] of Object.entries(urlMap)) {
+    if (key.startsWith("matte:") || source.kind === "image") map[key] = source;
+  }
+  for (const track of composition.tracks) {
+    for (const layer of track.layers) {
+      if ((layer.type === "video" || layer.type === "image") && layer.assetId) {
+        const source = urlMap[layer.assetId];
+        const key = mediaSourceKey(layer);
+        if (source && key) map[key] = { url: source.url, kind: layer.type };
+      }
+      if ((layer.type === "video" || layer.type === "image") && layer.matte?.uri) {
+        map[`matte:${layer.id}`] = { url: layer.matte.uri, kind: layer.type };
+      }
+    }
+  }
+  return map;
 }
 
 /**
@@ -97,8 +124,9 @@ export function ExportFixturePage() {
       // Resolve fixture assets → URLs, then build the same source providers the real export uses.
       const assetUrl = new Map(fixture.assets.map((asset) => [asset.id, asset.fileUrl]));
       const urlMap = buildSourceUrlMap(renderComposition, (id) => assetUrl.get(id));
+      const providerUrlMap = buildProviderUrlMap(renderComposition, urlMap);
       await Promise.all(
-        Object.entries(urlMap).map(async ([key, { url, kind }]) => {
+        Object.entries(providerUrlMap).map(async ([key, { url, kind }]) => {
           try {
             const decodable = kind === "image" ? await bitmapDecodableUrl(url) : url;
             sources.set(key, await createFrameProvider(decodable, kind));
