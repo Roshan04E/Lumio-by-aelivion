@@ -70,6 +70,18 @@ function browserExecutableOption(): { browserExecutable: string } | Record<strin
 }
 
 /**
+ * Surface select worker-process env vars into the Remotion bundle as `process.env.*` (read by Root.tsx).
+ * `RENDERER_MODE` picks the media render path; `REMOTION_COMPOSITOR=scene` enables the Method-3 SceneStage
+ * (default OFF → legacy per-clip DOM composite). Spread conditionally so we never set empty `envVariables`.
+ */
+function rendererEnvVariables(rendererMode?: "legacy" | "webgl"): { envVariables: Record<string, string> } | Record<string, never> {
+  const envVariables: Record<string, string> = {};
+  if (rendererMode) envVariables.RENDERER_MODE = rendererMode;
+  if (process.env.REMOTION_COMPOSITOR) envVariables.REMOTION_COMPOSITOR = process.env.REMOTION_COMPOSITOR;
+  return Object.keys(envVariables).length ? { envVariables } : {};
+}
+
+/**
  * Ensure a usable Chromium up front, inside the caller's awaited try/catch, so a download
  * failure becomes a clean "render failed" job error rather than a later mid-render crash.
  * Skipped when an installed browser was resolved (no download needed).
@@ -106,6 +118,7 @@ export async function renderManifestToMp4(input: {
     // layers, incl. HSL hue-curves/secondary that SVG can't express) runs headless.
     chromiumOptions: { gl: "angle" },
     ...browserExecutableOption(),
+    ...rendererEnvVariables(),
     ...cancel,
     outputLocation: input.outputLocation,
     onProgress: async ({ progress }) => {
@@ -139,8 +152,8 @@ export async function renderManifestStill(input: {
     // Match renderMedia: enable WebGL for the in-composition 3D-LUT color engine.
     chromiumOptions: { gl: "angle" },
     ...browserExecutableOption(),
-    // Surfaced to the browser bundle as process.env.RENDERER_MODE (read by Root.getRendererMode).
-    ...(input.rendererMode ? { envVariables: { RENDERER_MODE: input.rendererMode } } : {}),
+    // Surfaced to the browser bundle as process.env.* (RENDERER_MODE + REMOTION_COMPOSITOR), read by Root.tsx.
+    ...rendererEnvVariables(input.rendererMode),
     output: input.outputLocation
   });
 }

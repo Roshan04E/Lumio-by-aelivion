@@ -14,6 +14,7 @@ import {
 } from "remotion";
 import type { RenderManifest, RenderManifestLayer } from "@reelforge/render-templates";
 import { MaskedVideo } from "./MaskedVideo";
+import { SceneStage, getRemotionCompositor } from "./SceneStage";
 import { WebglMediaImageRemotion, WebglMediaVideoRemotion } from "./WebglMediaLayerRemotion";
 import {
   MediaWebGLRenderer,
@@ -104,6 +105,15 @@ export function RemotionRoot() {
 }
 
 function TimelineComposition({ manifest }: { manifest: RenderManifest }) {
+  // Method-3 Phase 6.2: when REMOTION_COMPOSITOR=scene, composite the whole frame through the shared
+  // SceneCompositor (preview IS export). Default OFF — the legacy per-clip DOM composite below is unchanged.
+  if (getRemotionCompositor() === "scene") {
+    return <SceneStage manifest={manifest} />;
+  }
+  return <LegacyTimelineComposition manifest={manifest} />;
+}
+
+function LegacyTimelineComposition({ manifest }: { manifest: RenderManifest }) {
   const layers = useMemo(() => [...manifest.layers].sort((a, b) => a.zIndex - b.zIndex), [manifest.layers]);
   const adjustmentLayers = useMemo(() => layers.filter((layer) => layer.type === "adjustment"), [layers]);
   const renderLayers = useMemo(() => layers.filter((layer) => layer.type !== "adjustment"), [layers]);
