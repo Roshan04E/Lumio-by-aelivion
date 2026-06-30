@@ -103,7 +103,9 @@ export async function mixTimelineAudio(
     if (cache.has(layer.assetId)) return cache.get(layer.assetId) ?? null;
     let buffer: AudioBuffer | null = null;
     try {
-      const bytes = await (await fetch(layer.url)).arrayBuffer();
+      // cache:"no-store" bypasses the HTTP cache — the dev server's /storage range responses otherwise
+      // trip Chromium's ERR_CACHE_OPERATION_NOT_SUPPORTED, which silently dropped the audio track.
+      const bytes = await (await fetch(layer.url, { cache: "no-store" })).arrayBuffer();
       buffer = await decodeCtx.decodeAudioData(bytes);
     } catch {
       buffer = null; // a source without an audio track (silent video) just contributes nothing

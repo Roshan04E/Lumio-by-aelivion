@@ -11,6 +11,7 @@
  */
 
 import { COLOR_FRAGMENT_SHADER, COLOR_VERTEX_SHADER, lut3dToRgbaFloat } from "./shader";
+import { releaseContextIfDetached } from "./gl-context";
 import type { Lut3d } from "./lut3d";
 
 export type ColorCanvas = HTMLCanvasElement | OffscreenCanvas;
@@ -164,5 +165,6 @@ export class WebglColorApplicator {
     gl.deleteTexture(this.lutTex);
     gl.deleteVertexArray(this.vao);
     gl.deleteProgram(this.program);
+    releaseContextIfDetached(gl);
   }
 }

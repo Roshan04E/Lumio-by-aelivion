@@ -137,7 +137,8 @@ import {
 import { Badge } from "../components/Badge";
 import { ColorWheels } from "../components/ColorWheels";
 import { CurveEditor } from "../components/CurveEditor";
-import { EffectSliderControl, effectSliderTone } from "../components/EffectSliderControl";
+import { EffectSliderControl } from "../components/EffectSliderControl";
+import { effectSliderTone } from "../components/effectSliderTone";
 import { HueSatCurves } from "../components/HueSatCurves";
 import { HslSecondary } from "../components/HslSecondary";
 import { LutFileImport } from "../components/LutFileImport";
@@ -150,6 +151,7 @@ import { EmptyState } from "../components/EmptyState";
 import { ResetButton } from "../components/ResetButton";
 import { TimelineStrip } from "../components/TimelineStrip";
 import { VideoPreview } from "../components/VideoPreview";
+import { getPlaybackClock, setPlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { averageTrackConfidence, type SavedTrack } from "../lib/trackLibrary";
 import {
   createAsset,
@@ -169,7 +171,7 @@ import {
   type ProjectRecord,
   type StockProvider
 } from "../lib/api";
-import { getVideoPoster } from "../lib/videoThumbnails";
+import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import {
   checkNow,
   ensureExportReady,
@@ -242,6 +244,16 @@ const defaultShapeStyle = {
   shadowOffsetY: 8
 };
 
+/**
+ * Transport time readout. Subscribes to the high-frequency playback clock directly so the number
+ * stays smooth during playback WITHOUT re-rendering `EditorPage` every tick (the whole point of the
+ * clock store). Falls back to the passed `currentTime` when paused/scrubbing.
+ */
+function PlayheadTimeReadout({ currentTime, isPlaying }: { currentTime: number; isPlaying: boolean }) {
+  const time = usePlaybackClock(currentTime, isPlaying);
+  return <span>{time.toFixed(2)}s</span>;
+}
+
 type LayerSelectMode = "replace" | "toggle" | "range" | "add-range";
 type LayerCollectionSelectMode = "replace" | "add" | "toggle";
 type EditorHistorySnapshot = {
@@ -292,6 +304,12 @@ export function EditorPage() {
   // Masking (Phase 2): active draw tool, the mask being edited in the preview, and overlay visibility.
   const [maskTool, setMaskTool] = useState<MaskTool>("select");
   const [activeMaskId, setActiveMaskId] = useState<string | null>(null);
+  // Picking a DRAW tool (rect/ellipse/polygon/pen) also turns the mask overlay on, so the tool always has a
+  // surface to draw into even if the overlay was toggled off — otherwise the viewer top-bar tools look dead.
+  const changeMaskTool = useCallback((tool: MaskTool) => {
+    setMaskTool(tool);
+    if (tool !== "select") setShowMasks(true);
+  }, []);
   // When set, the preview overlay edits this effect's region masks (Phase 3) instead of the clip masks.
   const [activeMaskEffectId, setActiveMaskEffectId] = useState<string | null>(null);
   const [showMasks, setShowMasks] = useState(true);
@@ -317,32 +335,22 @@ export function EditorPage() {
   const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("reelforge_editor_track_height", 44));
   const [timelineTool, setTimelineTool] = useState<TimelineToolMode>("select");
   const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("reelforge_timeline_snap", "on", ["on", "off"] as const) === "on");
-  const [viewerZoom, setViewerZoom] = useState(() => readStoredNumber("reelforge_viewer_zoom", 1));
-  const [viewerFitZoom, setViewerFitZoom] = useState({ width: 1, height: 1 });
-  const handleFitViewerHeight = useCallback((zoom: number) => {
-    setViewerFitZoom((current) => (current.height === zoom ? current : { ...current, height: zoom }));
-  }, []);
-  const handleFitViewerWidth = useCallback((zoom: number) => {
-    setViewerFitZoom((current) => (current.width === zoom ? current : { ...current, width: zoom }));
-  }, []);
-  // Which fit the viewer tracks. In a fit mode the preview re-fits whenever its container resizes
-  // (e.g. dragging the inspector), so the viewer shifts with the timeline instead of staying fixed.
-  const [viewerFitMode, setViewerFitMode] = useState<"fit" | "width" | "height" | "manual">(() =>
-    readStoredChoice("reelforge_viewer_fit_mode", "fit", ["fit", "width", "height", "manual"] as const)
+  // Viewer scaling (Premiere-style): "fit" auto-scales the comp to the viewer (re-fits on panel resize);
+  // "manual" uses `manualScale` (1:1 — 1.0 = 100% actual pixels). `fitScale` is reported up from the
+  // preview (measured from the stable viewer box, no feedback) purely so the toolbar can show the % in
+  // fit mode. Single scale end-to-end — no width/height fit modes, no zoom² coupling.
+  const [viewMode, setViewMode] = useState<"fit" | "manual">(() =>
+    readStoredChoice("reelforge_viewer_view_mode", "fit", ["fit", "manual"] as const)
   );
+  const [manualScale, setManualScale] = useState(() => readStoredNumber("reelforge_viewer_manual_scale", 1));
+  const [fitScale, setFitScale] = useState(1);
+  const zoomTo = useCallback((scale: number) => {
+    setManualScale(scale);
+    setViewMode("manual");
+  }, []);
   useEffect(() => {
-    localStorage.setItem("reelforge_viewer_fit_mode", viewerFitMode);
-  }, [viewerFitMode]);
-  useEffect(() => {
-    if (viewerFitMode === "manual") return;
-    const target =
-      viewerFitMode === "width"
-        ? viewerFitZoom.width
-        : viewerFitMode === "height"
-          ? viewerFitZoom.height
-          : Math.min(viewerFitZoom.width, viewerFitZoom.height);
-    setViewerZoom((current) => (Math.abs(current - target) < 0.001 ? current : target));
-  }, [viewerFitMode, viewerFitZoom]);
+    localStorage.setItem("reelforge_viewer_view_mode", viewMode);
+  }, [viewMode]);
   const [imagePalette, setImagePalette] = useState(defaultColorPalette);
   const [historyVersion, setHistoryVersion] = useState(0);
   const currentTimeRef = useRef(currentTime);
@@ -478,8 +486,12 @@ export function EditorPage() {
     if (composition && currentTime > composition.durationSeconds) {
       setCurrentTime(composition.durationSeconds);
     }
-    currentTimeRef.current = currentTime;
-  }, [composition, currentTime]);
+    // During playback the rAF loop owns `currentTimeRef` (updated every frame to the live clock);
+    // don't clobber it here with the throttled React value.
+    if (!isPlaying) {
+      currentTimeRef.current = currentTime;
+    }
+  }, [composition, currentTime, isPlaying]);
 
   useEffect(() => {
     if (!selectedLayerIds.length) {
@@ -487,13 +499,26 @@ export function EditorPage() {
     }
 
     const existingIds = new Set(layers.map((layer) => layer.id));
-    setSelectedLayerIds((current) => current.filter((layerId) => existingIds.has(layerId)));
+    setSelectedLayerIds((current) => {
+      const next = current.filter((layerId) => existingIds.has(layerId));
+      // Bail when nothing was removed — `filter` always returns a NEW array, so returning it unconditionally
+      // would schedule a no-op state update (and re-render) every time this effect runs. Same-ref → React skips.
+      return next.length === current.length ? current : next;
+    });
   }, [layers, selectedLayerIds.length]);
 
   const playbackCommitIntervalMs = previewQuality === "quality" ? 16 : previewQuality === "balanced" ? 40 : 90;
 
   useEffect(() => {
     if (!isPlaying || !composition) {
+      // Leaving playback: flush the precise live clock back into React state so the cold path
+      // (inspector, scopes, clip-under-playhead) lands exactly where playback stopped, not on the
+      // last throttled low-rate commit.
+      if (playbackStartRef.current) {
+        const stopped = getPlaybackClock();
+        currentTimeRef.current = stopped;
+        setCurrentTime(stopped);
+      }
       playbackStartRef.current = null;
       setPlaybackStart(null);
       return;
@@ -502,8 +527,17 @@ export function EditorPage() {
     const started = { clockMs: performance.now(), timeSeconds: currentTimeRef.current };
     playbackStartRef.current = started;
     setPlaybackStart(started);
+    setPlaybackClock(started.timeSeconds);
     let frame = 0;
-    let lastCommitMs = 0;
+    let lastClockCommitMs = 0;
+    let lastStateCommitMs = 0;
+    // The clock store drives the hot leaves (preview/transport/scopes) at the quality cadence — the
+    // same rate the preview re-rendered before. React `currentTime` re-renders the WHOLE ~6000-line
+    // EditorPage (timeline + every panel + the inline asset bin), so committing it ~7×/sec is the periodic
+    // playback freeze (full-tree reconcile + alloc → major GC). The hot path doesn't need it (it reads the
+    // clock store + self-animates), so commit it only ~2×/sec just to keep the COLD panels roughly synced;
+    // leaving playback flushes the exact frame below. INDEPENDENT of `playbackCommitIntervalMs` (the store).
+    const STATE_COMMIT_MS = 500;
 
     const tick = (clockMs: number) => {
       const started = playbackStartRef.current;
@@ -512,14 +546,20 @@ export function EditorPage() {
       }
 
       const nextTime = started.timeSeconds + (clockMs - started.clockMs) / 1000;
+      currentTimeRef.current = nextTime; // always live for handlers reading the ref
       if (nextTime >= composition.durationSeconds) {
+        setPlaybackClock(composition.durationSeconds);
         setCurrentTime(composition.durationSeconds);
         setIsPlaying(false);
         return;
       }
 
-      if (clockMs - lastCommitMs >= playbackCommitIntervalMs) {
-        lastCommitMs = clockMs;
+      if (clockMs - lastClockCommitMs >= playbackCommitIntervalMs) {
+        lastClockCommitMs = clockMs;
+        setPlaybackClock(nextTime);
+      }
+      if (clockMs - lastStateCommitMs >= STATE_COMMIT_MS) {
+        lastStateCommitMs = clockMs;
         setCurrentTime(nextTime);
       }
       frame = window.requestAnimationFrame(tick);
@@ -534,6 +574,10 @@ export function EditorPage() {
       return;
     }
 
+    // Signature of the render-progress fields the poll cares about, so we can detect "nothing changed".
+    const jobsSig = (jobs?: { id: string; status: string; progress: number; outputUrl?: string | undefined }[]) =>
+      (jobs ?? []).map((j) => `${j.id}:${j.status}:${j.progress}:${j.outputUrl ?? ""}`).join("|");
+
     const interval = window.setInterval(() => {
       getProject(projectId).then((fresh) =>
         // Adopt only render-progress fields. Replacing the whole project here would clobber
@@ -542,6 +586,19 @@ export function EditorPage() {
         // flicker while a render job is active.
         setProject((current) => {
           if (!current) return fresh;
+          // No-op when nothing render-related changed: returning the SAME reference makes React bail
+          // out of the re-render. Without this, a render job stuck in queued/processing (e.g. the dev
+          // worker never finishes it) re-rendered the entire editor every 1.5s, periodically stalling
+          // the main thread — the "playhead is smooth then freezes for ~300ms, repeating" lag that
+          // vanished on a fresh project (no active job → this poll never runs).
+          if (
+            current.status === fresh.status &&
+            current.previewUrl === fresh.previewUrl &&
+            current.finalUrl === fresh.finalUrl &&
+            jobsSig(current.renderJobs) === jobsSig(fresh.renderJobs)
+          ) {
+            return current;
+          }
           return {
             ...current,
             status: fresh.status,
@@ -646,6 +703,11 @@ export function EditorPage() {
       ) {
         return;
       }
+      // Modifier combos (e.g. ⌘/Ctrl+M = local export) are owned by their own handlers — never treat
+      // them as the bare tool/mask shortcuts below.
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
       if (event.key === "Escape" || event.key === "v" || event.key === "V") {
         setMaskTool("select");
         return;
@@ -666,6 +728,39 @@ export function EditorPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [composition, selectedLayer]);
+
+  // Export shortcuts: ⌘/Ctrl+M → local (on-device) export, ⌘/Ctrl+⇧+M → cloud export. Mirror the
+  // toolbar buttons exactly (same gating), so the keys never start a render the buttons wouldn't.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "m") {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.shiftKey) {
+        // Cloud export (same gate as the Export button).
+        if (busy === "export" || activeRenderJob) return;
+        void renderFinal();
+        return;
+      }
+      // Local export (same gate + setup as the on-device button: opens the fps/format dialog).
+      if (!localExportSupported || localExport || !composition) return;
+      setExportFps(null);
+      setExportFormat("mp4");
+      setExportDialogOpen(true);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [busy, activeRenderJob, localExportSupported, localExport, composition, project]);
 
   useEffect(() => {
     localStorage.setItem("reelforge_editor_left_width", String(leftPaneWidth));
@@ -694,8 +789,8 @@ export function EditorPage() {
   }, [selectedLayerId]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_viewer_zoom", String(viewerZoom));
-  }, [viewerZoom]);
+    localStorage.setItem("reelforge_viewer_manual_scale", String(manualScale));
+  }, [manualScale]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1068,8 +1163,10 @@ export function EditorPage() {
     const updater = (layer: TimelineLayer): TimelineLayer => ({
       ...layer,
       transform: {
+        // No upper cap on scale (Premiere-style: tiny → huge is the user's call). A small positive
+        // floor only, so the layer can't collapse to a zero-size, ungrabbable point.
         ...layer.transform,
-        scale: roundEditorNumber(clamp(scale, 0.2, 5))
+        scale: roundEditorNumber(Math.max(0.01, scale))
       }
     });
 
@@ -2452,6 +2549,7 @@ export function EditorPage() {
       playbackStartRef.current = started;
       setPlaybackStart(started);
     }
+    setPlaybackClock(timeSeconds);
     setCurrentTime(timeSeconds);
   }
 
@@ -2903,13 +3001,13 @@ export function EditorPage() {
               currentTime={currentTime}
               isPlaying={isPlaying}
               previewQuality={previewQuality}
-              viewerZoom={viewerZoom}
+              viewMode={viewMode}
+              manualScale={manualScale}
               assets={assets}
               selectedLayerId={selectedLayer?.id}
               frameRef={previewFrameRef}
-              onChangeViewerZoom={setViewerZoom}
-              onFitViewerHeight={handleFitViewerHeight}
-              onFitViewerWidth={handleFitViewerWidth}
+              onFitScale={setFitScale}
+              onZoomTo={zoomTo}
               onSaveFreezeFrame={() => void handleSaveFreezeFrame()}
               onMoveLayer={handlePreviewMoveLayer}
               onMovePositionKeyframe={handlePreviewMovePositionKeyframe}
@@ -2920,7 +3018,7 @@ export function EditorPage() {
               onSelectLayer={selectLayer}
               sourceAsset={project.sourceAsset}
               maskTool={maskTool}
-              onChangeMaskTool={setMaskTool}
+              onChangeMaskTool={changeMaskTool}
               activeMaskId={activeMaskId ?? undefined}
               onSelectMask={setActiveMaskId}
               showMasks={showMasks}
@@ -2970,49 +3068,44 @@ export function EditorPage() {
               <button type="button" title="End (End)" onClick={goToEnd}>
                 <SkipForward size={16} />
               </button>
-              <span>{currentTime.toFixed(2)}s</span>
-              <div className="preview-quality-control" aria-label="Preview quality">
-                {(["performance", "balanced", "quality"] as const).map((quality) => (
+              <PlayheadTimeReadout currentTime={currentTime} isPlaying={isPlaying} />
+              <div className="preview-quality-control" aria-label="Playback resolution">
+                {(["quality", "balanced", "performance"] as const).map((quality) => (
                   <button
                     className={previewQuality === quality ? "is-active" : ""}
                     key={quality}
                     type="button"
-                    title={`${previewQualityLabel(quality)} preview`}
+                    title={`${previewQualityLabel(quality)} playback resolution`}
                     onClick={() => setPreviewQuality(quality)}
                   >
-                    {quality === "performance" ? "P" : quality === "balanced" ? "B" : "Q"}
+                    {quality === "performance" ? "¼" : quality === "balanced" ? "½" : "1"}
                   </button>
                 ))}
               </div>
               <label className="viewer-zoom-control" title="Viewer zoom">
                 <input
                   type="range"
-                  min={0.5}
-                  max={4}
+                  min={0.1}
+                  max={8}
                   step={0.01}
-                  value={viewerZoom}
-                  onChange={(event) => { setViewerFitMode("manual"); setViewerZoom(Number(event.target.value)); }}
+                  value={viewMode === "fit" ? fitScale : manualScale}
+                  onChange={(event) => zoomTo(Number(event.target.value))}
                 />
-                <small>{Math.round(viewerZoom * 100)}%</small>
+                <small>{Math.round((viewMode === "fit" ? fitScale : manualScale) * 100)}%</small>
                 <span className="zoom-preset-buttons" aria-label="Viewer zoom presets">
-                  <button className={viewerFitMode === "fit" ? "is-active" : ""} type="button" title="Fit view (auto-tracks panel resizes)" onClick={() => setViewerFitMode("fit")}>
+                  <button className={viewMode === "fit" ? "is-active" : ""} type="button" title="Fit to viewer (auto-tracks panel resizes)" onClick={() => setViewMode("fit")}>
                     Fit
                   </button>
-                  <button className={viewerFitMode === "width" ? "is-active" : ""} type="button" title="Fit width (auto-tracks panel resizes)" onClick={() => setViewerFitMode("width")}>
-                    W
-                  </button>
-                  <button className={viewerFitMode === "height" ? "is-active" : ""} type="button" title="Fit height (auto-tracks panel resizes)" onClick={() => setViewerFitMode("height")}>
-                    H
-                  </button>
-                  {[0.5, 0.75, 1, 1.5, 2, 3, 4].map((zoom) => (
+                  {/* Percentages are actual pixels (100% = 1 comp px : 1 screen px), Premiere-style. */}
+                  {[0.25, 0.5, 0.75, 1, 1.5, 2, 4].map((scale) => (
                     <button
-                      className={viewerFitMode === "manual" && Math.abs(viewerZoom - zoom) < 0.005 ? "is-active" : ""}
-                      key={zoom}
-                      title={`${Math.round(zoom * 100)}%`}
+                      className={viewMode === "manual" && Math.abs(manualScale - scale) < 0.005 ? "is-active" : ""}
+                      key={scale}
+                      title={`${Math.round(scale * 100)}% (actual pixels)`}
                       type="button"
-                      onClick={() => { setViewerFitMode("manual"); setViewerZoom(zoom); }}
+                      onClick={() => zoomTo(scale)}
                     >
-                      {Math.round(zoom * 100)}
+                      {Math.round(scale * 100)}
                     </button>
                   ))}
                 </span>
@@ -3116,7 +3209,7 @@ export function EditorPage() {
                     setActiveMaskEffectId(effectId);
                     setActiveMaskId(maskId);
                   }}
-                  onChangeMaskTool={setMaskTool}
+                  onChangeMaskTool={changeMaskTool}
                 />
               </>
             ) : selectedLayerIds.length > 1 ? (
@@ -3925,18 +4018,39 @@ function readMediaMetadata(file: File) {
       const url = URL.createObjectURL(file);
       const video = document.createElement("video");
       video.preload = "metadata";
-      video.onloadedmetadata = () => {
+      const done = (duration: number) => {
         URL.revokeObjectURL(url);
         resolve({
-          durationSeconds: clamp(Number.isFinite(video.duration) ? video.duration : 12, 0.2, 7200),
+          // The REAL fractional duration — never rounded up. A too-long clip freezes on the last frame
+          // for the overshoot; a finite-but-default 12s on a short clip is the worst case (a long freeze).
+          durationSeconds: clamp(Number.isFinite(duration) && duration > 0 ? duration : 12, 0.2, 7200),
           width: Math.max(320, video.videoWidth || 1080),
           height: Math.max(320, video.videoHeight || 1920)
         });
       };
-      video.onerror = () => {
-        URL.revokeObjectURL(url);
-        resolve({ durationSeconds: 12, width: 1080, height: 1920 });
+      video.onloadedmetadata = () => {
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          done(video.duration);
+          return;
+        }
+        // Some MP4/WebM report duration=Infinity from metadata alone; seeking to the end forces the
+        // browser to compute the true duration (then `durationchange`/`timeupdate` fires with it).
+        const onDuration = () => {
+          if (Number.isFinite(video.duration) && video.duration > 0) {
+            video.removeEventListener("durationchange", onDuration);
+            video.removeEventListener("timeupdate", onDuration);
+            done(video.duration);
+          }
+        };
+        video.addEventListener("durationchange", onDuration);
+        video.addEventListener("timeupdate", onDuration);
+        try {
+          video.currentTime = 1e101; // overshoot → browser clamps to real end and reports duration
+        } catch {
+          done(12);
+        }
       };
+      video.onerror = () => done(12);
       video.src = url;
     });
   }
@@ -4387,6 +4501,7 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
           src={asset.thumbnailUrl ?? asset.fileUrl}
           alt=""
           loading="lazy"
+          decoding="async"
           onLoad={(event) => {
             if (measured.current) return;
             const el = event.currentTarget;
@@ -4401,42 +4516,50 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
   }
 
   const videoSrc = asset.proxyUrl ?? asset.previewUrl ?? asset.fileUrl;
+  // Show a STILL by default — never mount a <video> per card. A live <video preload="metadata"> on every
+  // card fired a metadata fetch + decoder for every video asset the moment the bin opened, flooding the
+  // browser's ~6 connections (starving playback AND the thumbnail extractor). The poster comes from the
+  // server thumbnail when present, else a ONE-shot, throttled+cached first-frame extraction (useVideoPoster,
+  // max 2 concurrent). A real <video> mounts only while hovered, for the live preview.
+  const extractedPoster = useVideoPoster(asset.thumbnailUrl ? undefined : videoSrc, 0);
+  const posterSrc = asset.thumbnailUrl ?? extractedPoster ?? undefined;
+  const [hovering, setHovering] = useState(false);
   return (
     <div
       className="asset-card-media"
       style={style}
       onMouseEnter={() => {
         if (prefersReducedMotion()) return;
-        void videoRef.current?.play().catch(() => {});
+        setHovering(true);
       }}
-      onMouseLeave={() => {
-        const video = videoRef.current;
-        if (!video) return;
-        video.pause();
-        try {
-          video.currentTime = 0;
-        } catch {
-          /* ignore seek errors before metadata is ready */
-        }
-      }}
+      onMouseLeave={() => setHovering(false)}
     >
-      <video
-        ref={videoRef}
-        src={videoSrc}
-        poster={asset.thumbnailUrl}
-        muted
-        loop
-        playsInline
-        preload="metadata"
-        onLoadedMetadata={(event) => {
-          if (measured.current) return;
-          const el = event.currentTarget;
-          if (el.videoWidth && el.videoHeight) {
-            measured.current = true;
-            setRatio(el.videoWidth / el.videoHeight);
-          }
-        }}
-      />
+      {hovering ? (
+        <video
+          ref={videoRef}
+          src={videoSrc}
+          poster={posterSrc}
+          muted
+          loop
+          autoPlay
+          playsInline
+          preload="auto"
+          onLoadedMetadata={(event) => {
+            if (measured.current) return;
+            const el = event.currentTarget;
+            if (el.videoWidth && el.videoHeight) {
+              measured.current = true;
+              setRatio(el.videoWidth / el.videoHeight);
+            }
+          }}
+        />
+      ) : posterSrc ? (
+        <img src={posterSrc} alt="" loading="lazy" decoding="async" />
+      ) : (
+        <div className="asset-card-media-video-fallback">
+          <Film size={20} />
+        </div>
+      )}
     </div>
   );
 }
@@ -5085,6 +5208,10 @@ function LayerInspector({
       />
 
       {layer.type === "video" || layer.type === "image" ? (
+        <InspectorHost layer={layer} onChange={onChange} panelIds={["content"]} currentTime={currentTime} onSeek={onSeek} />
+      ) : null}
+
+      {layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape" ? (
         <InspectorHost
           layer={layer}
           onChange={onChange}
@@ -5523,7 +5650,7 @@ function TimelineEffectControl({
           ))}
         </div>
       ) : null}
-      {(layer.type === "video" || layer.type === "image") &&
+      {(layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape") &&
       (normalizedEffect.type === "blur" || COLOR_EFFECT_TYPES.has(normalizedEffect.type)) &&
       composition &&
       onSelectEffectMask &&
@@ -5832,9 +5959,10 @@ function readStoredChoice<T extends string>(key: string, fallback: T, allowed: r
 }
 
 function previewQualityLabel(quality: "performance" | "balanced" | "quality") {
-  if (quality === "performance") return "Performance";
-  if (quality === "balanced") return "Balanced";
-  return "Quality";
+  // Premiere-style playback RESOLUTION (downscales the render surface while playing, Full when paused).
+  if (quality === "performance") return "Quarter";
+  if (quality === "balanced") return "Half";
+  return "Full";
 }
 
 function clamp(value: number, min: number, max: number) {

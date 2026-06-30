@@ -31,7 +31,8 @@ export function PreviewFixturePage() {
         previewQuality="quality"
         selectedLayerId={undefined}
         sourceAsset={null}
-        viewerZoom={1}
+        viewMode="fit"
+        manualScale={1}
       />
     </section>
   );

@@ -2,7 +2,7 @@ import { evaluateAnimatedValue, evaluateTimelineEffectParam, evaluateTimelineTra
 import { COLOR_EFFECT_TYPES, compileColorPipeline, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
-import type { BlendMode, Mask, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
+import type { BlendMode, LayerContentTransform, Mask, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
 
 export interface CompositionTransform {
   x: number;
@@ -408,6 +408,38 @@ export function getCompositionObjectFit(layer: Pick<CompositionLayerStyleInput, 
   return rawFit === "contain" || rawFit === "fill" || rawFit === "cover" ? rawFit : compositionMediaDefaults.fit;
 }
 
+/** Resolved content transform — source-within-frame pan/zoom + crop, normalized + clamped to safe ranges. */
+export interface ResolvedContentTransform {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  /** Edge insets as fractions of the frame (0..0.95). */
+  crop: { top: number; right: number; bottom: number; left: number };
+}
+
+/**
+ * Resolve a layer's {@link LayerContentTransform} (source-within-frame pan/zoom/crop) with defaults =
+ * identity. Shared by every renderer + the inspector so the preview, export, and controls agree. Media-only;
+ * text/shape callers get identity (they have no source to reframe).
+ */
+export function getCompositionContentTransform(
+  layer: { content?: LayerContentTransform | undefined } | undefined
+): ResolvedContentTransform {
+  const c = layer?.content;
+  const cropOf = (v: number | undefined) => Math.max(0, Math.min(0.95, numberOr(v, 0)));
+  return {
+    scale: Math.max(0.01, numberOr(c?.scale, 1)),
+    offsetX: numberOr(c?.offsetX, 0),
+    offsetY: numberOr(c?.offsetY, 0),
+    crop: {
+      top: cropOf(c?.crop?.top),
+      right: cropOf(c?.crop?.right),
+      bottom: cropOf(c?.crop?.bottom),
+      left: cropOf(c?.crop?.left)
+    }
+  };
+}
+
 export function getCompositionTextStyle(layer: CompositionLayerStyleInput | TimelineLayer, options: CompositionStyleOptions = {}) {
   const style = styleOf(layer);
   const transform = getCompositionTransform(layer, options);
@@ -707,6 +739,69 @@ function getEffectCss(effects: unknown[] | undefined, animations: TimelineKeyfra
     filter: filters.length ? filters.join(" ") : undefined,
     boxShadow: shadows.length ? shadows.join(", ") : undefined
   };
+}
+
+export interface CompositionFilterEffects {
+  /** Combined Gaussian blur radius in comp px (0 = none). */
+  blurPx: number;
+  /**
+   * Whole-clip glow — strongest enabled glow, or null. `mode` "edge" blooms the alpha silhouette
+   * (drop-shadow, for text/cutouts); "highlights" is a luminance bloom (bright areas glow outward, for
+   * footage). `threshold` (0..1) + `strength` are only used in highlights mode.
+   */
+  glow: { radiusPx: number; color: string; mode: "edge" | "highlights"; threshold: number; strength: number } | null;
+}
+
+/**
+ * Numeric sibling of `getEffectCss` for the single GPU compositor (Method 3, Phase 2). The DOM path
+ * applies blur/glow as CSS `filter` on the (now hidden) media canvas, which the scene path can't see;
+ * the scene path needs the same params as NUMBERS so it can run real GPU passes. This reads the exact
+ * same effect params, defaults, keyframes (`evaluateTimelineEffectParam`) and masked-skip rule as
+ * `getEffectCss` — keep the two in lockstep so DOM and GPU stay parity-aligned.
+ *
+ * Multiple blur effects compose in quadrature (`blur(a) blur(b)` ≈ Gaussian σ=√(a²+b²)); the single
+ * blur case is exact. Multiple glows collapse to the largest-radius one (rare).
+ */
+export function getCompositionFilterEffects(
+  layer: { effects?: unknown[] | undefined; animations?: TimelineKeyframeV2[] | undefined; startSeconds?: number | undefined },
+  options: CompositionStyleOptions = {}
+): CompositionFilterEffects {
+  const layerStartSeconds = layer.startSeconds ?? 0;
+  const currentTimeSeconds = options.currentTimeSeconds;
+  let blurSq = 0;
+  let glow: CompositionFilterEffects["glow"] = null;
+
+  for (const rawEffect of layer.effects ?? []) {
+    const effect = asRecord(rawEffect);
+    if (effect.enabled === false) continue;
+    // Same masked-skip as getEffectCss: a masked color/blur is handled by duplicate-layer expansion, so
+    // it never reaches here masked; glow is the exception (region glow deferred → masked glow is whole-clip).
+    if (effect.type !== "glow" && Array.isArray(effect.masks) && (effect.masks as Mask[]).some(isRenderableMask)) {
+      continue;
+    }
+    const params = asRecord(effect.params);
+    const effectId = stringOr(effect.id, "");
+    const layerTimeSeconds = typeof currentTimeSeconds === "number" ? Math.max(0, currentTimeSeconds - layerStartSeconds) : undefined;
+    const paramNumber = (key: string, fallback: number) =>
+      evaluateTimelineEffectParam({ animations: layer.animations, baseValue: numberOr(params[key], fallback), effectId, paramKey: key, timeSeconds: layerTimeSeconds });
+    const intensity = numberOr(effect.intensity, 50) / 100;
+
+    if (effect.type === "blur") {
+      const amount = paramNumber("amount", Math.round(18 * intensity));
+      if (amount > 0) blurSq += amount * amount;
+    } else if (effect.type === "glow") {
+      const radius = paramNumber("radius", Math.round(24 * intensity));
+      const color = stringOr(params.color, "#C9FF4A");
+      const mode = stringOr(params.mode, "edge") === "highlights" ? "highlights" : "edge";
+      // Threshold 0..100% → 0..1 luminance cutoff (highlights mode). Strength scales with the effect's
+      // intensity (the "Mix" slider): 50% → 1×, 100% → 2× additive gain.
+      const threshold = Math.max(0, Math.min(1, paramNumber("threshold", 55) / 100));
+      const strength = Math.max(0, intensity * 2);
+      if (radius > 0 && (!glow || radius > glow.radiusPx)) glow = { radiusPx: radius, color, mode, threshold, strength };
+    }
+  }
+
+  return { blurPx: blurSq > 0 ? Math.sqrt(blurSq) : 0, glow };
 }
 
 export interface MaskedEffectOverlay {

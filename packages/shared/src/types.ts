@@ -228,6 +228,23 @@ export interface TimelineTransform {
 }
 
 /**
+ * Content transform — positions the SOURCE MEDIA *within* the clip's frame box, independent of the
+ * comp-space {@link TimelineTransform} (which moves the whole frame). This is the "adjust the media inside
+ * the clip" model (CapCut/Canva): reframe a mismatched-aspect source (e.g. a 9:16 video in a 16:9 comp),
+ * pan/zoom the visible part, and crop the frame edges — all without pushing the layer off-canvas. All fields
+ * optional, defaults = identity, so existing projects are unchanged. Only meaningful for media (video/image).
+ */
+export interface LayerContentTransform {
+  /** Zoom the source within the frame. 1 = object-fit baseline; >1 zooms in (shows less of the source). */
+  scale?: number | undefined;
+  /** Pan the source within the frame, as a fraction of the frame (-1..1). 0 = centered, +1 = one frame over. */
+  offsetX?: number | undefined;
+  offsetY?: number | undefined;
+  /** Crop insets — fraction (0..1) trimmed off each edge of the frame (the trimmed area shows what's below). */
+  crop?: { top?: number; right?: number; bottom?: number; left?: number } | undefined;
+}
+
+/**
  * Unified vector-mask model (Premiere/AE-style), reused by clip-level masks, effect-level masks, and
  * later color/adjustment/AI masks. Masks are stored in the layer's *local comp-pixel space* (the
  * untransformed layer box == comp size), so applying the mask to the transformed layer element makes it
@@ -505,6 +522,8 @@ export interface TimelineLayer {
   textWarp?: TextWarp | undefined;
   color?: string | undefined;
   fit?: "cover" | "contain" | "fill" | undefined;
+  /** Source-within-frame pan/zoom/crop (media only) — see {@link LayerContentTransform}. */
+  content?: LayerContentTransform | undefined;
   widthPercent?: number | undefined;
   heightPercent?: number | undefined;
   borderRadius?: number | undefined;

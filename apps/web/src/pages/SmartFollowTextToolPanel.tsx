@@ -1369,7 +1369,8 @@ function FollowResultPreviewPlayer({ asset, composition }: { asset: SourceAsset;
         isPlaying={isPlaying}
         previewQuality="quality"
         sourceAsset={asset}
-        viewerZoom={1}
+        viewMode="fit"
+        manualScale={1}
         onSelectLayer={() => undefined}
       />
       <div className="viewer-controls follow-result-controls">

@@ -118,10 +118,15 @@ async function main() {
 }
 
 function startWebServer(port: number) {
+  // shell:true so Windows resolves `pnpm` → `pnpm.cmd`. Bare `spawn("pnpm")` is ENOENT, and spawning
+  // `pnpm.cmd` directly is EINVAL on modern Node/Windows (CVE-2024-27980 hardening) — a shell is
+  // required for `.cmd`. The args are static (no interpolation), so shell:true is safe here despite
+  // the DEP0190 notice.
   const child = spawn("pnpm", ["--dir", path.join(repoRoot, "apps/web"), "exec", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
     cwd: repoRoot,
     env: { ...process.env, BROWSER: "none" },
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: true
   });
 
   child.stdout.on("data", (data) => process.stdout.write(`[web] ${data}`));

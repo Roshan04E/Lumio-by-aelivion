@@ -407,6 +407,21 @@ export function getCompositionMaskCss(layer: { id: string; masks?: Mask[] | unde
   return getMaskCss(layer.id, layer.masks);
 }
 
+/**
+ * Comp-space mask WRAPPER style for a content-sized overlay (text/shape). Media masks directly on its
+ * comp-sized element, so the `userSpaceOnUse` (comp-px) mask aligns; text/shape are content-sized, so the
+ * clip mask must instead live on a comp-sized, transform-less wrapper for those coords to align — and to
+ * stay fixed in comp space, matching the GPU scene compositor (which samples the matte at `gl_FragCoord`,
+ * i.e. comp space, independent of the layer transform). The wrapper is `pointer-events:none` so it doesn't
+ * swallow clicks across the whole comp; the inner element re-enables pointer events. Returns `null` when the
+ * layer has no renderable masks (render the overlay directly — no wrapper, no behavior change).
+ */
+export function getOverlayMaskWrapperStyle(layer: { id: string; masks?: Mask[] | undefined }): Record<string, string> | null {
+  const maskCss = getCompositionMaskCss(layer);
+  if (!Object.keys(maskCss).length) return null;
+  return { position: "absolute", inset: "0", pointerEvents: "none", ...maskCss };
+}
+
 // --- Effect-region masks for color/glow: render-time duplicate-layer expansion -------------------
 //
 // Color/glow effects can't use the blur backdrop-filter trick (they run through the WebGL/SVG color
@@ -432,10 +447,15 @@ function effectHasRenderableMask(effect: TimelineEffect): boolean {
   return Array.isArray(effect.masks) && effect.masks.some(isRenderableMask);
 }
 
-/** True if a media layer has at least one color/blur effect limited to a region (so it needs expansion). */
+/**
+ * True if a visual layer has at least one color/blur effect limited to a region (so it needs expansion).
+ * Applies to media AND text/shape: the duplicate-layer cascade below works for any layer whose grade + clip
+ * mask render, which text/shape do (Phase 4.1c). Adjustment layers are excluded — they have no content to
+ * region-mask (a region adjustment would need to clip the whole stack below, not this layer).
+ */
 export function hasRegionColorEffect(layer: TimelineLayer): boolean {
   return (
-    (layer.type === "video" || layer.type === "image") &&
+    (layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape") &&
     layer.effects.some((effect) => isRegionEffectType(effect.type) && effectHasRenderableMask(effect))
   );
 }

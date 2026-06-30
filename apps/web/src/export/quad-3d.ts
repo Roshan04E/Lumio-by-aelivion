@@ -252,5 +252,11 @@ export class Quad3DCompositor {
     gl.deleteBuffer(this.vbo);
     gl.deleteVertexArray(this.vao);
     gl.deleteProgram(this.program);
+    // Release the GPU context (export quad-3d always renders to a throwaway Offscreen/detached canvas) so
+    // it doesn't linger against the browser's ~16-context cap. Guarded on isConnected like the shared
+    // renderers: only release a DETACHED canvas (a reused DOM canvas can't re-acquire a lost context).
+    if ((gl.canvas as { isConnected?: boolean }).isConnected !== true) {
+      try { gl.getExtension("WEBGL_lose_context")?.loseContext(); } catch { /* ignore */ }
+    }
   }
 }

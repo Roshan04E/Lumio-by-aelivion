@@ -73,6 +73,12 @@ export class MediaEncoder {
   private readonly videoEncoder: VideoEncoder;
   private audioEncoder: AudioEncoder | null = null;
   private readonly frameDurationUs: number;
+  // A WebCodecs encoder reports failures through its async `error` callback, NOT by rejecting any
+  // promise we await. If we just `throw` in that callback, the error vanishes into the event loop and
+  // the backpressure wait below spins forever — the export silently "stops". So we latch the error and
+  // surface it from the encode/finalize calls, turning a hang into a clean failure (which then lets the
+  // worker→main-thread fallback retry).
+  private encoderError: Error | null = null;
 
   constructor(opts: MediaEncoderOptions) {
     this.opts = opts;
@@ -106,7 +112,7 @@ export class MediaEncoder {
     this.videoEncoder = new VideoEncoder({
       output: (chunk, meta) => this.muxer.addVideoChunk(chunk, meta),
       error: (error) => {
-        throw error;
+        this.encoderError = error instanceof Error ? error : new Error(`Video encoder error: ${String(error)}`);
       },
     });
     this.videoEncoder.configure({
@@ -122,7 +128,7 @@ export class MediaEncoder {
       this.audioEncoder = new AudioEncoder({
         output: (chunk, meta) => this.muxer.addAudioChunk(chunk, meta),
         error: (error) => {
-          throw error;
+          this.encoderError = error instanceof Error ? error : new Error(`Audio encoder error: ${String(error)}`);
         },
       });
       this.audioEncoder.configure({
@@ -136,10 +142,22 @@ export class MediaEncoder {
 
   /** Encode one composited frame. `index` is the 0-based frame number. */
   async addVideoFrame(source: CanvasImageSource, index: number): Promise<void> {
-    // Backpressure: don't let the encoder queue grow unbounded on long exports.
+    // Backpressure: don't let the encoder queue grow unbounded on long exports. Bail out the instant the
+    // encoder errors or closes, so a failed encoder surfaces a clear error instead of an infinite wait.
+    // Watchdog: a healthy encoder drains the queue in milliseconds; if it stops draining entirely for
+    // STALL_MS (e.g. GPU-memory pressure with no error event), throw rather than spin forever — the
+    // export then surfaces an error / the worker falls back to the main thread instead of hanging.
+    const STALL_MS = 30_000;
+    const waitStart = Date.now();
     while (this.videoEncoder.encodeQueueSize > 8) {
+      if (this.encoderError) throw this.encoderError;
+      if (this.videoEncoder.state === "closed") throw new Error("Video encoder closed unexpectedly during export.");
+      if (Date.now() - waitStart > STALL_MS) {
+        throw new Error("Video encoder stalled during export (queue stopped draining). Try a lower export resolution.");
+      }
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
+    if (this.encoderError) throw this.encoderError;
     const frame = new VideoFrame(source, {
       timestamp: Math.round(index * this.frameDurationUs),
       duration: Math.round(this.frameDurationUs),
@@ -155,12 +173,14 @@ export class MediaEncoder {
   }
 
   async finalize(): Promise<Blob> {
+    if (this.encoderError) throw this.encoderError;
     await this.videoEncoder.flush();
     this.videoEncoder.close();
     if (this.audioEncoder) {
       await this.audioEncoder.flush();
       this.audioEncoder.close();
     }
+    if (this.encoderError) throw this.encoderError;
     this.muxer.finalize();
     const buffer = (this.target as { buffer: ArrayBuffer }).buffer;
     return new Blob([buffer], { type: this.opts.format === "mp4" ? "video/mp4" : "video/webm" });

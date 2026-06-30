@@ -134,7 +134,9 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "Lightweight primary correction: exposure, contrast, color, and tonal curve controls.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    // Colour grades apply to text/shape too — every renderer grades overlays (DOM SVG filter, Remotion,
+    // export overlay-grade, and the GPU scene pass), so they belong in the inspector for those layers.
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 50,
     previewSupport: "native",
     renderSupport: "native",
@@ -161,7 +163,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
   {
     type: "glow",
     name: "Glow",
-    description: "Adds soft luminous bloom around layer edges.",
+    description: "Edge glow around alpha edges (text/cutouts), or a highlight bloom that makes bright areas of footage glow outward.",
     category: "Stylize",
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
@@ -169,7 +171,21 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     previewSupport: "native",
     renderSupport: "native",
     params: [
-      { key: "radius", label: "Radius", type: "number", min: 0, max: 48, step: 1, defaultValue: 14, unit: "px", keyframeable: true },
+      // Edge = bloom the alpha silhouette (text/shapes/person cutouts). Highlights = luminance bloom: bright
+      // areas of the content glow outward (works on opaque footage, where an edge glow has no edges to bloom).
+      {
+        key: "mode",
+        label: "Mode",
+        type: "select",
+        defaultValue: "edge",
+        options: [
+          { label: "Edge", value: "edge" },
+          { label: "Highlights (bloom)", value: "highlights" }
+        ]
+      },
+      { key: "radius", label: "Radius", type: "number", min: 0, max: 160, step: 1, defaultValue: 14, unit: "px", keyframeable: true },
+      // Highlights mode only: the luminance above which pixels start to bloom (0 = everything, 100 = only the brightest).
+      { key: "threshold", label: "Threshold", type: "number", min: 0, max: 100, step: 1, defaultValue: 55, unit: "%", keyframeable: true },
       { key: "color", label: "Color", type: "color", defaultValue: "#C9FF4A" }
     ]
   },
@@ -222,7 +238,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "Pro RGB + master tone curves — drag points on the graph to reshape tone and color.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",
@@ -236,7 +252,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "3-way Lift/Gamma/Gain — balance color in shadows, midtones, and highlights on color wheels.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",
@@ -250,7 +266,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "Lumetri hue curves — shift hue, push saturation or luma per color, and shape sat vs luma/sat. WebGL engine.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",
@@ -264,7 +280,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "Isolate a color by hue/sat/luma (feathered key) and re-grade only that range. Mask preview. WebGL engine.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",
@@ -278,7 +294,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "One-click cinematic look preset — Teal & Orange, Faded Film, Noir and more — with intensity control.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",
@@ -299,7 +315,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description: "Import a .cube LUT file for creative grading — any 3-D LUT at up to 65³ resolution.",
     category: "Adjust",
     scope: ["clip", "adjustment"],
-    compatibleLayerTypes: ["video", "image", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",

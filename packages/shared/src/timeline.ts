@@ -88,6 +88,56 @@ export function flattenTimelineLayers(composition: TimelineComposition): Timelin
   return composition.tracks.flatMap((trackItem) => trackItem.layers);
 }
 
+/**
+ * Premiere-style work area: when in/out points are set on the timeline, clip the composition to that
+ * sub-range. Layers fully outside the range are dropped; layers straddling an edge are trimmed (with
+ * `sourceInSeconds` advanced by the trimmed head so the media stays in sync); everything is shifted so
+ * the in-point becomes t=0; and `durationSeconds` collapses to the range length. Returns the
+ * composition UNCHANGED (same reference) when no in/out point is set — so the full-project export path
+ * stays byte-identical. Mirrors the cloud render path (`buildRenderManifest`) so local export honors
+ * the work area the same way. The returned composition has its in/out points cleared (already applied).
+ */
+export function clipCompositionToWorkArea(composition: TimelineComposition): TimelineComposition {
+  const inRaw = composition.settings?.timeline.inPointSeconds;
+  const outRaw = composition.settings?.timeline.outPointSeconds;
+  if (inRaw === undefined && outRaw === undefined) return composition;
+
+  const clampRange = (value: number, lo: number, hi: number) => Math.min(Math.max(value, lo), hi);
+  const inPoint = clampRange(inRaw ?? 0, 0, composition.durationSeconds);
+  const outPoint = clampRange(outRaw ?? composition.durationSeconds, inPoint, composition.durationSeconds);
+  const rangeDurationSeconds = Math.max(1 / composition.fps, outPoint - inPoint);
+
+  const tracks: TimelineTrack[] = composition.tracks.map((trackItem) => ({
+    ...trackItem,
+    layers: trackItem.layers.flatMap((layer) => {
+      const layerStart = layer.startSeconds;
+      const layerEnd = layer.startSeconds + layer.durationSeconds;
+      if (layerEnd <= inPoint || layerStart >= outPoint) return [];
+      const clippedStart = Math.max(layerStart, inPoint);
+      const clippedEnd = Math.min(layerEnd, outPoint);
+      const trimmedFromHeadSeconds = clippedStart - layerStart;
+      const next: TimelineLayer = {
+        ...layer,
+        startSeconds: clippedStart - inPoint,
+        durationSeconds: clippedEnd - clippedStart
+      };
+      if (layer.sourceInSeconds !== undefined) {
+        next.sourceInSeconds = layer.sourceInSeconds + trimmedFromHeadSeconds;
+      }
+      return [next];
+    })
+  }));
+
+  return {
+    ...composition,
+    durationSeconds: rangeDurationSeconds,
+    tracks,
+    ...(composition.settings
+      ? { settings: { ...composition.settings, timeline: { ...composition.settings.timeline, inPointSeconds: undefined, outPointSeconds: undefined } } }
+      : {})
+  };
+}
+
 export function updateTimelineLayer(
   composition: TimelineComposition,
   layerId: string,

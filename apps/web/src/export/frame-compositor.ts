@@ -393,9 +393,14 @@ export class FrameCompositor {
     const graded = Boolean(pipeline && !pipeline.identity);
     const transform = getCompositionTransform(merged, { currentTimeSeconds: t });
     const tilted = has3DTilt(transform);
+    // Clip mask (comp-space matte). Text/shape rasterize with their transform baked into the comp-sized
+    // buffer, so we punch that buffer with the comp-space matte (destination-in) — a mask FIXED in comp
+    // space, matching the GPU scene compositor + the DOM/Remotion comp-sized mask wrapper. (Media instead
+    // masks pre-transform then transforms; overlays follow the scene path.)
+    const matte = this.buildMaskMatte(layer, Math.max(0, t - layer.startSeconds));
 
-    // Fast path: no grade, no tilt — draw with the full 2D transform straight onto the frame.
-    if (!graded && !tilted) {
+    // Fast path: no grade, no tilt, no mask — draw with the full 2D transform straight onto the frame.
+    if (!graded && !tilted && !matte) {
       if (layer.type === "text") {
         await drawTextLayer(this.ctx, layer, t, this.width, this.height);
       } else {
@@ -439,8 +444,20 @@ export class FrameCompositor {
 
     if (tilted) {
       // Pass the REAL element box — the CSS translate(-50%,-50%) term in the projection depends
-      // on it. quad-3d adds its own render-only padding for stroke/shadow coverage.
+      // on it. quad-3d adds its own render-only padding for stroke/shadow coverage. (A tilted + masked
+      // overlay is an uncommon combo; the comp-space mask isn't applied post-tilt here — minor gap.)
       if (box.boxW > 0 && box.boxH > 0) this.place3D(buffer, transform, box.boxW, box.boxH);
+    } else if (matte) {
+      // Punch the (transform-baked) overlay buffer with the comp-space matte, then composite. Copy into a
+      // scratch first so destination-in doesn't mutate the reused grade-renderer canvas.
+      const masked = this.scratchCtx("overlayMaskBuffer");
+      masked.clearRect(0, 0, this.width, this.height);
+      masked.drawImage(buffer, 0, 0);
+      masked.save();
+      masked.globalCompositeOperation = "destination-in";
+      masked.drawImage(matte.canvas, 0, 0);
+      masked.restore();
+      this.ctx.drawImage(masked.canvas, 0, 0);
     } else {
       this.ctx.drawImage(buffer, 0, 0);
     }

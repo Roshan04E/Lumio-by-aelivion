@@ -56,11 +56,25 @@ interface BaseProps {
    */
   hidden?: boolean | undefined;
   /**
+   * Scene-composited media: the GPU SceneCompositor draws this clip, so hide the DOM canvas via `opacity:0`
+   * (NOT `visibility:hidden`) so it stays pointer-INTERACTIVE — click-to-select on the preview still works,
+   * like text/shape. The shader keeps drawing the real frame (the scene path reads it as a texture). Ignored
+   * while `hidden` (pending/pre-roll) is set — that needs visibility:hidden (no early paint, no interaction).
+   */
+  interactiveHidden?: boolean | undefined;
+  /**
    * Called after each successful draw with the graded canvas, so a parent (the transition compositor) can
    * sample it as the `from`/`to` texture of a two-clip GPU mix. The canvas is sized to the SOURCE
    * resolution and carries the full grade (LUT + matte + opacity), straight-alpha sRGB.
    */
   onGradedFrame?: ((canvas: HTMLCanvasElement) => void) | undefined;
+  /**
+   * Whether to BAKE the layer opacity into the graded canvas (default true). The scene compositor sets
+   * this false for the media it composites: it applies opacity LIVE at composite time (like
+   * position/scale and like text/shape), so opacity is never stale on a seek/pause (a `currentTime`
+   * change doesn't re-grade, but it DOES recomposite). DOM display + transition sources keep baking.
+   */
+  bakeOpacity?: boolean | undefined;
 }
 
 interface ImageProps extends BaseProps {
@@ -91,7 +105,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
   function WebglMediaLayer(props, forwardedRef) {
     const {
       mediaType, src, matte, pipeline, mediaEffects = null, amount = 1, style, className,
-      dragHandlers, onWebglFailed, poster, hidden = false, transition = null, onGradedFrame,
+      dragHandlers, onWebglFailed, poster, hidden = false, interactiveHidden = false, transition = null, onGradedFrame,
+      bakeOpacity = true,
     } = props;
 
     // Latest onGradedFrame, read inside the draw loop (whose closure would otherwise be stale).
@@ -176,6 +191,20 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [mediaEffectsKey]);
 
+    // `opacity` (from `style`), effect `amount`, and the matte params are BAKED into the grade by
+    // drawVideoFrame/drawImage but — unlike pipeline/mediaEffects/transition above — had NO paused-repaint
+    // trigger. So editing them WHILE PAUSED re-rendered the component without repainting the canvas (it
+    // only refreshed once you played, where the per-frame loop re-grades every frame). Keying on their
+    // VALUES (not object identity, so no spurious redraws) repaints a paused frame on any change, making
+    // every baked draw input real-time. Covers the reported opacity bug + the same class for the others.
+    const bakedInputsKey = `${extractOpacity(style)}|${amount}|${matte?.invert ?? false}|${matte?.opacity ?? 1}`;
+    useEffect(() => {
+      if (failedRef.current) return;
+      if (mediaType === "image") drawImage();
+      else if (mediaType === "video" && !(props as VideoProps).isPlaying) drawVideoFrame();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [bakedInputsKey]);
+
     // ─── IMAGE PATH ──────────────────────────────────────────────────────────
 
     useEffect(() => {
@@ -203,7 +232,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           sourceHeight: img.naturalHeight,
           pipeline,
           amount,
-          opacity: extractOpacity(style),
+          opacity: bakeOpacity ? extractOpacity(style) : 1,
           mediaEffects: mediaEffectsRef.current,
           transition: transitionRef.current,
         });
@@ -336,7 +365,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           matteOpacity: matte?.opacity ?? 1,
           pipeline,
           amount,
-          opacity: extractOpacity(style),
+          opacity: bakeOpacity ? extractOpacity(style) : 1,
           mediaEffects: mediaEffectsRef.current,
           transition: transitionRef.current,
         });
@@ -362,7 +391,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const canvasStyle: CSSProperties = {
       ...style,
       pointerEvents: dragHandlers ? undefined : "none",
-      ...(hidden ? { visibility: "hidden" } : {}),
+      ...(hidden ? { visibility: "hidden" } : interactiveHidden ? { opacity: 0 } : {}),
     };
 
     return (

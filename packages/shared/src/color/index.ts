@@ -17,5 +17,8 @@ export * from "./media-shader";
 export * from "./media-renderer";
 export * from "./transitions/registry";
 export * from "./transition-compositor";
+export * from "./gl-context";
+export * from "./blend";
+export * from "./scene-compositor";
 export * from "./cube-parser";
 export * from "./looks";

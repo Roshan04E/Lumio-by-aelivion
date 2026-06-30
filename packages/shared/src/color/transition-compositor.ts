@@ -20,6 +20,7 @@ import {
   type TransitionDefinition,
   type TransitionParam
 } from "./transitions/registry";
+import { releaseContextIfDetached } from "./gl-context";
 
 const VERTEX_SHADER = `#version 300 es
 in vec2 a_position;
@@ -272,5 +273,6 @@ export class TransitionCompositor {
     gl.deleteTexture(this.texTo);
     gl.deleteBuffer(this.vbo);
     gl.deleteVertexArray(this.vao);
+    releaseContextIfDetached(gl);
   }
 }

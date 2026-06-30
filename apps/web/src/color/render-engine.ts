@@ -85,6 +85,93 @@ export function useWebglColorEngine(supported: boolean): boolean {
   return supported && getColorEngine() === "webgl";
 }
 
+export type CompositorMode = "dom" | "scene";
+
+function normalizeCompositor(value: string | null | undefined): CompositorMode | undefined {
+  return value === "scene" || value === "dom" ? value : undefined;
+}
+
+/**
+ * Single GPU compositor (Method 3) — now the DEFAULT ("scene"), like `getRendererMode`'s "webgl" backbone.
+ *
+ * "scene" routes the preview's media + text/shape layers through the shared `SceneCompositor`: one
+ * WebGL2 context composites every already-graded clip canvas + rasterized text/shape into ONE output
+ * canvas (object-fit + clip mask + 16 blend modes + blur/glow + 3D tilt + junction transitions in-shader).
+ * Only selection handles stay DOM overlays on top. "dom" is the original per-clip-canvas path — kept as the
+ * escape hatch (`?compositor=dom`).
+ *
+ * History: a first flip (2026-06-28) was reverted the SAME day for scene-only gaps the single-frame
+ * fixtures don't exercise — preloaded-clip handling + a black flash at cuts, a stale text-warp raster key,
+ * empty-gap background consistency (the GPU canvas mounting/unmounting as `sceneActive` toggled on
+ * `visualCount`), and per-frame perf. Those are now fixed: Phase 4.1 (self-sufficient text/shape: grade +
+ * mask + 3D, no DOM fallbacks), Phase 4.2 (transitions in the pass), the warp key, the always-mounted scene
+ * canvas (`sceneEnabled` — owns the background every frame, no toggle flash), and the event-driven redraw +
+ * per-source texture cache. Gates green (`scene:compare` incl. transition/graded/masked/tilted-text;
+ * `render:compare:pixels`). So the default flips to "scene" for good.
+ *
+ * Still WebGL2-gated (`useSceneCompositor`) + a runtime GL-failure fallback (`sceneFailed`), so even as the
+ * default it can never blank a comp; `?compositor=dom` / `localStorage["lumio.compositor"]` /
+ * `VITE_COMPOSITOR_MODE` force the DOM path.
+ *
+ * Resolution order: `?compositor=scene|dom` → localStorage → VITE_COMPOSITOR_MODE → default "scene".
+ */
+export function getCompositorMode(): CompositorMode {
+  if (typeof window !== "undefined") {
+    try {
+      const param = normalizeCompositor(new URLSearchParams(window.location.search).get("compositor"));
+      if (param) return param;
+      const stored = normalizeCompositor(window.localStorage?.getItem("lumio.compositor"));
+      if (stored) return stored;
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = normalizeCompositor((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_COMPOSITOR_MODE);
+  return env ?? "scene";
+}
+
+/** True when the single GPU SceneCompositor should drive the preview's media layers (and WebGL2 is supported). */
+export function useSceneCompositor(supported: boolean): boolean {
+  return supported && getCompositorMode() === "scene";
+}
+
+export type ExportCompositor = "frame" | "scene";
+
+function normalizeExportCompositor(value: string | null | undefined): ExportCompositor | undefined {
+  return value === "scene" || value === "frame" ? value : undefined;
+}
+
+/**
+ * Local-export compositor (Method 3, Phase 5) — which engine the browser export uses to composite frames.
+ *
+ * "scene" (default) is the `SceneFrameCompositor`, which drives the SAME shared `SceneCompositor` +
+ * `buildSceneDraws` the editor preview uses — so the on-screen preview LITERALLY becomes the export (the
+ * Method 3 goal), and blur/glow/highlight-bloom/content-transform finally render in export (the canvas2D
+ * `FrameCompositor` never drew those). "frame" is the proven canvas2D fallback. Both share the media grade
+ * engine + draw-list builder; the only difference is the final composite (WebGL vs canvas2D).
+ *
+ * Default flipped to "scene" (Phase 5 Step 5a-intermediate): `export-core` also auto-falls-back to "frame"
+ * if the scene path fails to construct or errors on frame 0, so the flip can't ship a broken export. The
+ * `?exportCompositor=frame` escape hatch forces canvas2D. `FrameCompositor` deletion (5b) waits on the gate
+ * (`export:compare:scene`) + a manual real-Worker export pass.
+ *
+ * Resolution order: `?exportCompositor=frame|scene` → localStorage → VITE_EXPORT_COMPOSITOR → default "scene".
+ */
+export function getExportCompositor(): ExportCompositor {
+  if (typeof window !== "undefined") {
+    try {
+      const param = normalizeExportCompositor(new URLSearchParams(window.location.search).get("exportCompositor"));
+      if (param) return param;
+      const stored = normalizeExportCompositor(window.localStorage?.getItem("lumio.exportCompositor"));
+      if (stored) return stored;
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = normalizeExportCompositor((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_EXPORT_COMPOSITOR);
+  return env ?? "scene";
+}
+
 /** True when the unified WebGL media renderer should be used for video/image layers. */
 export function useWebglRenderer(supported: boolean): boolean {
   return supported && getRendererMode() === "webgl";

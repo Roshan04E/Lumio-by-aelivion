@@ -6301,9 +6301,12 @@ input[type="checkbox"] {
 
 .editor-viewer .preview-viewport {
   /* Margin around the fitted frame so selection / mask / feather handles stay visible past the canvas
-     edge (Premiere-style) instead of being cropped by the viewport. The frame fit reads this padding
-     dynamically (updateFitZooms), so the frame just sits slightly smaller and the margin becomes handle room. */
+     edge (Premiere-style) instead of being cropped by the viewport. The fit computation subtracts this
+     padding so the frame leaves the margin free. */
   padding: 56px;
+  /* `safe`: a zoomed-in (overflowing) comp aligns to start and is fully scrollable to every edge, while
+     a comp that fits stays centered (avoids the centered-overflow clipping of plain `center`). */
+  place-items: safe center;
 }
 
 .preview-viewport.is-panning {
@@ -6312,18 +6315,21 @@ input[type="checkbox"] {
 
 .preview-canvas {
   width: fit-content;
-  min-width: calc(min(48vh, 390px, 100%) * var(--viewer-zoom, 1));
-  min-height: calc(min(85vh, 690px) * var(--viewer-zoom, 1));
+  min-width: min(48vh, 390px, 100%);
+  min-height: min(85vh, 690px);
   display: grid;
   place-items: center;
   padding: 10px;
 }
 
 .editor-viewer .preview-canvas {
+  /* Wrap the explicitly-sized frame so the viewport can center it (when it fits) or scroll it (zoomed
+     in). The frame's size is the single source of scale — no --viewer-zoom, no container queries. */
   padding: 0;
-  width: 100%;
-  height: 100%;
-  container-type: size;
+  width: fit-content;
+  height: fit-content;
+  min-width: 0;
+  min-height: 0;
 }
 
 .phone-frame {
@@ -6391,13 +6397,12 @@ input[type="checkbox"] {
 /* In the editor, the frame adopts the composition's aspect ratio (portrait, square,
    16:9, 21:9, …) and scales to the largest box that fits the viewer in BOTH axes. */
 .editor-viewer .phone-frame {
-  aspect-ratio: var(--comp-aspect, 0.5625);
-  width: min(100cqw, calc(100cqh * var(--comp-aspect, 0.5625)));
-  max-width: 100%;
-  max-height: 100%;
-  height: auto;
-  transform: scale(var(--viewer-zoom, 1));
-  transform-origin: center;
+  /* width/height are set inline by VideoPreview = composition × displayScale (the single scale). */
+  aspect-ratio: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  transform: none;
 }
 
 .phone-frame .preview-media {
@@ -7751,16 +7756,20 @@ input[type="checkbox"] {
 
 .track-controls {
   display: grid;
-  grid-template-columns: repeat(4, 24px);
-  gap: 5px;
+  /* Flexible columns so all four actions (lock / eye / solo / delete) always fit the header width —
+     fixed 24px columns + gaps needed 111px but the header is only ~100px, so delete overflowed. */
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
   margin-top: 5px;
 }
 
 .track-controls button {
-  width: 24px;
+  width: 100%;
+  min-width: 0;
   height: 22px;
   display: grid;
   place-items: center;
+  padding: 0;
   border-radius: 6px;
   color: var(--muted);
   border: 1px solid var(--editor-border);
@@ -9312,6 +9321,18 @@ input[type="checkbox"] {
   background: linear-gradient(135deg, rgba(77, 159, 255, 0.16), rgba(147, 102, 255, 0.16));
 }
 
+/* Transient placeholder for a video card whose poster (server thumbnail or throttled first-frame
+   extraction) hasn't resolved yet — replaces the old per-card live <video>, so opening the bin no
+   longer floods the connection pool. */
+.asset-card-media-video-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted, #6b7280);
+  background: linear-gradient(135deg, rgba(120, 130, 150, 0.14), rgba(90, 100, 120, 0.14));
+}
+
 /* ---- List / compact row mode ---- */
 .asset-bin-list .asset-tile {
   display: grid;
@@ -10057,9 +10078,16 @@ input[type="checkbox"] {
   align-items: center;
   gap: 4px;
   min-width: 0;
-  overflow: hidden;
   font-size: 0.7rem;
   font-weight: 750;
+  white-space: nowrap;
+}
+
+/* The text truncates (ellipsis) so a long label like "Threshold %" never pushes the keyframe diamond
+   (flex:0 0 auto) out of the column where it would clip. */
+.effect-slider-label-text {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

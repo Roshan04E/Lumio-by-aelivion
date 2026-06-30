@@ -4,6 +4,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -34,6 +35,7 @@ import {
   expandEffectRegionMasks,
   isWebgl2ColorSupported,
   getCompositionMediaStyle,
+  getOverlayMaskWrapperStyle,
   getCompositionShapeStyle,
   getCompositionTextRunStyle,
   getCompositionTextStyle,
@@ -61,7 +63,10 @@ import { WebglColorView } from "./WebglColorView";
 import { WebglVideoOverlay } from "./WebglVideoOverlay";
 import { WebglMediaLayer } from "./WebglMediaLayer";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
-import { useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
+import { useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
+import { usePlaybackClock } from "../playback/playback-clock";
+import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
+import { ScenePreviewCanvas } from "./ScenePreviewCanvas";
 
 /** Mask drawing/editing tools (mirrors the registry `MaskTool`). */
 type MaskTool = "select" | "rectangle" | "ellipse" | "pen" | "polygon";
@@ -306,16 +311,16 @@ function PreviewGuides({ mode, width, height, rotate = false }: { mode: GridMode
 export function VideoPreview({
   graph,
   composition,
-  currentTime,
+  currentTime: currentTimeProp,
   isPlaying,
   previewQuality,
-  viewerZoom,
+  viewMode,
+  manualScale,
   assets,
   selectedLayerId,
   frameRef,
-  onChangeViewerZoom,
-  onFitViewerHeight,
-  onFitViewerWidth,
+  onFitScale,
+  onZoomTo,
   onSaveFreezeFrame,
   onSelectLayer,
   onMoveLayer,
@@ -341,14 +346,19 @@ export function VideoPreview({
   currentTime: number;
   isPlaying: boolean;
   previewQuality: "performance" | "balanced" | "quality";
-  viewerZoom: number;
+  /** "fit" auto-scales the comp to the viewer (re-fits on resize); "manual" uses `manualScale` (1:1). */
+  viewMode: "fit" | "manual";
+  /** Manual zoom as a comp-px→screen-px scale (1 = 100% actual pixels). Used only in "manual" mode. */
+  manualScale: number;
   assets: SourceAsset[];
   selectedLayerId?: string | undefined;
   /** Optional ref forwarded to the phone-frame element so callers can sample its content (e.g. color scopes). */
   frameRef?: React.Ref<HTMLDivElement> | undefined;
-  onChangeViewerZoom?: ((zoom: number) => void) | undefined;
-  onFitViewerHeight?: ((zoom: number) => void) | undefined;
-  onFitViewerWidth?: ((zoom: number) => void) | undefined;
+  /** Reports the computed fit scale (comp→viewer) so the toolbar can show the % in fit mode. NO feedback
+   *  loop: fit is measured from the stable viewport box, never from the (zoom-scaled) comp. */
+  onFitScale?: ((scale: number) => void) | undefined;
+  /** Ctrl/⌘-wheel zoom → switch to manual at this absolute scale. */
+  onZoomTo?: ((scale: number) => void) | undefined;
   onSaveFreezeFrame?: (() => void) | undefined;
   onSelectLayer: (layerId?: string | undefined) => void;
   onMoveLayer?: ((layerId: string, position: { x: number; y: number }, commit: boolean) => void) | undefined;
@@ -378,6 +388,10 @@ export function VideoPreview({
   /** When set, the overlay edits this effect's region masks instead of the layer's clip masks (Phase 3). */
   maskEffectId?: string | null | undefined;
 }) {
+  // During playback the playhead time comes from the high-frequency clock store (so the preview
+  // animates smoothly without re-rendering the whole editor every tick — see playback-clock.ts);
+  // when paused/scrubbing it's the `currentTime` prop. Everything below reads this single `currentTime`.
+  const currentTime = usePlaybackClock(currentTimeProp, isPlaying);
   const phoneFrameRef = useRef<HTMLDivElement | null>(null);
   // Merge internal ref with optional external frameRef prop (for color scopes).
   const mergedPhoneFrameRef = useCallback(
@@ -436,14 +450,33 @@ export function VideoPreview({
     else void el.requestFullscreen().catch(() => undefined);
   }
   const panRef = useRef<{ pointerId: number; clientX: number; clientY: number; scrollLeft: number; scrollTop: number } | null>(null);
-  const viewerZoomRef = useRef(viewerZoom);
-  const onChangeViewerZoomRef = useRef(onChangeViewerZoom);
-  const [compositionScale, setCompositionScale] = useState(1);
+  // ONE display scale (comp px → screen px). In "fit" mode it tracks the computed fit; in "manual" it is
+  // `manualScale`. Replaces the old nested compositionScale × viewer-zoom (which scaled as zoom² and fed
+  // the fit loop). Fit is measured from the stable viewport box, so changing the scale never re-fits.
+  const [displayScale, setDisplayScale] = useState(1);
+  const displayScaleRef = useRef(displayScale);
+  displayScaleRef.current = displayScale;
+  const fitScaleRef = useRef(1);
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
+  const manualScaleRef = useRef(manualScale);
+  manualScaleRef.current = manualScale;
+  const onFitScaleRef = useRef(onFitScale);
+  onFitScaleRef.current = onFitScale;
+  const onZoomToRef = useRef(onZoomTo);
+  onZoomToRef.current = onZoomTo;
+  // Pending cursor-anchored zoom: captured on a ctrl/⌘-wheel, applied in a layout effect after the new
+  // scale lands so the comp point under the cursor stays under the cursor (Premiere/Photoshop feel).
+  const pendingZoomRef = useRef<{ ratio: number; cx: number; cy: number; scrollLeft: number; scrollTop: number } | null>(null);
   // Unclipped layer that editing overlays (selection box, motion path) portal into, so their handles show
   // past the canvas edge (the comp content is still cropped by .preview-comp-clip).
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const shouldRenderRichEffects = previewQuality !== "performance";
+  // Premiere-style playback resolution: downscale the scene render backing WHILE PLAYING (Full/Half/Quarter
+  // = 1/0.5/0.25 from the previewQuality profile), Full (1) when paused/scrubbing → crisp stills, fast
+  // playback. Only the scene compositor honors it (the DOM path is being retired by Method 3).
+  const playbackRenderScale = isPlaying ? getPreviewQualityProfile(previewQuality).resolutionScale : 1;
   const hasTracking = shouldRenderRichEffects && graph.effects.some((effect) => effect.type === "SMART_3D_FOLLOW_TEXT");
   const hasBehindText = shouldRenderRichEffects && graph.effects.some((effect) => effect.type === "TEXT_BEHIND_PERSON");
   const resolvedAssets = useMemo(() => {
@@ -456,6 +489,14 @@ export function VideoPreview({
   // Region color/glow masks expand into base + duplicate layers at render time (duplicate = the masked effect
   // applied globally, clipped to the region). Render-only; the editor state keeps the original single layer.
   const expandedTracks = useMemo(() => expandEffectRegionMasks(composition).tracks, [composition]);
+  // The REAL (un-expanded) layer ids. expandEffectRegionMasks adds render-only `__rfx_` clone layers for
+  // region color/blur masks; those clones must be pixels-only — NOT selectable/draggable — or clicking the
+  // clip in the preview selects a phantom id (deselecting the real clip) and the drag drives a render-only
+  // layer. Only ids in this set are interactive; clones fall through to the real base layer beneath.
+  const realLayerIds = useMemo(
+    () => new Set(composition.tracks.flatMap((track) => track.layers.map((layer) => layer.id))),
+    [composition]
+  );
   const activeVisualLayerEntries = useMemo(
     () =>
       expandedTracks
@@ -497,6 +538,9 @@ export function VideoPreview({
   // Mount the next video clip's <video> a moment before its cut so it has time
   // to seek to the right source frame in the background - avoids the visible
   // black/stale frame flash that a fresh seek-on-mount causes right at a cut.
+  // Built from the RAW composition (un-expanded), i.e. REAL clips only — region-mask `__rfx_` blur clones are
+  // NOT preloaded here because they no longer mount their own decoder (they share the base's graded canvas via
+  // `sceneSharedMediaClones`), so preloading the base seeks the clone's frame for free + saves a GL context.
   const pendingVideoLayerEntries = useMemo(
     () =>
       composition.tracks
@@ -543,14 +587,19 @@ export function VideoPreview({
     [composition, currentTime]
   );
 
-  // The selected media layer is the mask-editing target (clip masks apply to video/image in Phase 1). Read it
-  // from the ORIGINAL composition, not `renderedLayerEntries`: region effects expand into render-only clones
-  // (the base clone keeps this id but has the region effects stripped), so editing must use the un-expanded
-  // layer to still see `effect.masks` (region masks) — otherwise the region mask is invisible/uneditable.
+  // The selected visual layer is the mask-editing target. Clip + region masks apply to media AND text/shape
+  // (text/shape clip masks render via getOverlayMaskWrapperStyle in every path since Phase 4.1c). Read it from
+  // the ORIGINAL composition, not `renderedLayerEntries`: region effects expand into render-only clones (the
+  // base clone keeps this id but has the region effects stripped), so editing must use the un-expanded layer
+  // to still see `effect.masks` (region masks) — otherwise the region mask is invisible/uneditable.
   const maskActiveLayer = selectedLayerId
     ? composition.tracks
         .flatMap((track) => track.layers)
-        .find((layer) => layer.id === selectedLayerId && (layer.type === "video" || layer.type === "image"))
+        .find(
+          (layer) =>
+            layer.id === selectedLayerId &&
+            (layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape")
+        )
     : undefined;
   // The mask collection the overlay edits: a blur effect's region masks (Phase 3) or the clip masks.
   const maskEditMasks: Mask[] = maskActiveLayer
@@ -563,6 +612,10 @@ export function VideoPreview({
   // transition that is currently ACTIVE. The two clips keep rendering through their WebglMediaLayer (which
   // reports its graded canvas into gradedCanvasesRef); a TransitionOverlay mixes them in one GPU pass.
   const gradedCanvasesRef = useRef<Record<string, HTMLCanvasElement | null>>({});
+  // ScenePreviewCanvas hands us its `requestDraw` here so a media re-grade (e.g. an opacity/grade edit
+  // while PAUSED) re-arms a recomposite — otherwise the new graded frame only lands via the settle
+  // window and the paused viewer can show a stale frame after an edit.
+  const sceneRedrawRef = useRef<(() => void) | null>(null);
   const transitionPairs = useMemo(() => {
     const layers = renderedLayerEntries.map((entry) => entry.layer);
     const byId = new Map(layers.map((layer) => [layer.id, layer]));
@@ -623,6 +676,89 @@ export function VideoPreview({
   }, [transitionPairs, renderedLayerEntries]);
   const hasRealMedia = renderVisualLayerEntries.some(({ layer }) => Boolean(resolveLayerUrl(layer, resolvedAssets, sourceAsset)));
 
+  // Single GPU compositor (Method 3) — gated by the `compositor=scene` flag + WebGL2 support. Media + text/
+  // shape (incl. 3D tilt, clip masks, color grade, blur/glow) and junction transitions all composite into one
+  // GPU canvas (Phases 1–4.2); only editing handles stay DOM. The ONLY fallback to the shipped DOM path is a
+  // runtime GL failure (`sceneFailed`), so turning the flag on can never hard-regress a comp.
+  const [sceneFailed, setSceneFailed] = useState(false);
+  const sceneMediaIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const { layer } of renderedLayerEntries) {
+      if (layer.type === "video" || layer.type === "image") ids.add(layer.id);
+    }
+    return ids;
+  }, [renderedLayerEntries]);
+  // Text/shape layers the scene pass rasterizes (so their DOM visual is hidden; handles stay).
+  const sceneOverlayIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const { layer } of renderedLayerEntries) {
+      if (layer.type === "text" || layer.type === "shape") ids.add(layer.id);
+    }
+    return ids;
+  }, [renderedLayerEntries]);
+  // Region-blur clone id → base layer id. `expandEffectRegionMasks` clones a region-masked VIDEO/IMAGE into
+  // [base, clone]; when the clone adds ONLY blur over its base (the common "blur a region/face" case) its
+  // decoded+graded media source is IDENTICAL to the base's — blur is a GPU compositor PASS here, not baked
+  // into the grade — so in scene mode the clone need NOT mount its own <video> decoder + MediaWebGLRenderer
+  // GL context. It reads the base's graded canvas (mediaSourceAlias) and the compositor applies blur + the
+  // region mask on top. This halves media GL contexts for region blur (the "too many active WebGL contexts"
+  // eviction that was losing the scene compositor's OWN context → the lost-context spam + stale/weak blur)
+  // AND keeps the clone perfectly time-synced to the base (no second decoder to drift). A clone that adds a
+  // COLOR grade over its base genuinely needs a different graded canvas, so it is NOT aliased (keeps its decoder).
+  const sceneSharedMediaClones = useMemo(() => {
+    const map = new Map<string, string>();
+    const layerById = new Map(renderedLayerEntries.map((entry) => [entry.layer.id, entry.layer]));
+    for (const { layer } of renderedLayerEntries) {
+      const sep = layer.id.indexOf("__rfx_");
+      if (sep < 0 || (layer.type !== "video" && layer.type !== "image")) continue;
+      const base = layerById.get(layer.id.slice(0, sep));
+      if (!base) continue;
+      // The clone's effects = base globals + its cascade region effects; the "extra" (region) effects beyond
+      // the base are blur-only ⇒ the color pipeline is unchanged ⇒ the graded canvas matches the base.
+      const baseEffectIds = new Set(base.effects.map((effect) => effect.id));
+      const extra = layer.effects.filter((effect) => !baseEffectIds.has(effect.id));
+      if (extra.length > 0 && extra.every((effect) => effect.type === "blur")) map.set(layer.id, layer.id.slice(0, sep));
+    }
+    return map;
+  }, [renderedLayerEntries]);
+  // Scene mode is ENABLED whenever the flag is on, WebGL2 is supported, and the GPU path hasn't errored at
+  // runtime. We deliberately do NOT gate on "has a visual layer under the playhead": the ScenePreviewCanvas
+  // stays mounted even over an empty gap so it owns the background EVERY frame (clearing to
+  // composition.backgroundColor) — no mount/unmount toggle as clips enter/leave → no background flash at
+  // gaps / cuts / before the first clip (the prior `visualCount > 0` gate caused the "black just before a
+  // clip" flash). Per-layer fallbacks are gone (Phase 4.1c/d); only a runtime GL failure reverts to DOM.
+  const sceneEnabled = useMemo(
+    () => !sceneFailed && useSceneCompositor(webgl2Supported()),
+    [sceneFailed]
+  );
+  const sceneLayers = useMemo(
+    () =>
+      renderedLayerEntries
+        .filter(
+          ({ layer, pending }) =>
+            // Skip PRELOAD (pending) clips: a video mounted ~PRELOAD_LOOKAHEAD_SECONDS before its cut is
+            // seeked to its first frame but NOT active yet. In DOM mode it's CSS-hidden; the scene path
+            // must likewise not composite it (it reads the graded canvas directly), or the clip's still
+            // frame paints before the playhead reaches it. It still mounts + grades into gradedRef while
+            // pending, so when it goes active its canvas is ready → no black flash, just no early paint.
+            !pending &&
+            (sceneMediaIds.has(layer.id) || sceneOverlayIds.has(layer.id))
+            // Phase 4.2: the two clips of an active transition STAY in the list so ScenePreviewCanvas can
+            // place the mix at the incoming clip's z-slot (it skips the outgoing + emits the two-texture
+            // mix instead of the incoming's normal draw). The DOM TransitionOverlay is suppressed in scene
+            // mode (below), so there's no double-render.
+        )
+        .map(({ layer }) => layer),
+    [renderedLayerEntries, sceneMediaIds, sceneOverlayIds]
+  );
+  // The media layers ScenePreviewCanvas applies opacity LIVE for (so they skip baking opacity into the
+  // grade). Transition-active clips are EXCLUDED: their graded canvases feed the two-texture mix, which —
+  // like the DOM overlay / Remotion / export — consumes BAKED-opacity canvases, so they keep bakeOpacity.
+  const sceneLayerIds = useMemo(
+    () => new Set(sceneLayers.filter((layer) => !transitionSourceIds.has(layer.id)).map((layer) => layer.id)),
+    [sceneLayers, transitionSourceIds]
+  );
+
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm
   // when they mount (active or ~1.2s pending), and posters are cached per url@in-point.
@@ -640,79 +776,56 @@ export function VideoPreview({
     }
   }, [composition, resolvedAssets, sourceAsset]);
 
+  // Compute the single display scale. Fit is measured from the STABLE viewport box (border-box via
+  // getBoundingClientRect − padding, which does NOT change when the comp is scaled or a scrollbar
+  // toggles), and the scale is applied via a transform on the comp — so applying the scale never
+  // resizes anything the observer watches → no feedback loop (the old design measured the zoom-scaled
+  // frame, giving the zoom² 2-cycle / 10% runaway). We observe only the viewport + editor-viewer
+  // (their boxes change only on real panel resizes), never the scaled comp/frame.
   useEffect(() => {
-    viewerZoomRef.current = viewerZoom;
-    onChangeViewerZoomRef.current = onChangeViewerZoom;
-  }, [onChangeViewerZoom, viewerZoom]);
+    const viewport = viewportRef.current;
+    if (!viewport) return;
 
-  useEffect(() => {
-    const frame = phoneFrameRef.current;
-    if (!frame) {
-      return;
-    }
+    const recomputeFit = () => {
+      const rect = viewport.getBoundingClientRect();
+      const style = window.getComputedStyle(viewport);
+      const padX = Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+      const padY = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+      const availW = rect.width - padX;
+      const availH = rect.height - padY;
+      if (availW <= 0 || availH <= 0 || composition.width <= 0 || composition.height <= 0) return;
+      const fit = Math.min(availW / composition.width, availH / composition.height);
+      if (!Number.isFinite(fit) || fit <= 0) return;
+      fitScaleRef.current = fit;
+      onFitScaleRef.current?.(fit);
+      if (viewModeRef.current === "fit") setDisplayScale(fit);
+    };
 
-    function updateScale(width: number, height: number) {
-      const nextScale = Math.min(width / composition.width, height / composition.height);
-      setCompositionScale(Number.isFinite(nextScale) && nextScale > 0 ? nextScale : 1);
-      updateFitZooms();
-    }
-
-    function updateFitZooms() {
-      const viewport = viewportRef.current;
-      const currentFrame = phoneFrameRef.current;
-      if (!viewport || !currentFrame) {
-        return;
-      }
-
-      const viewportRect = viewport.getBoundingClientRect();
-      const viewportStyle = window.getComputedStyle(viewport);
-      // Always subtract the viewport padding (the editor viewport now has padding so handles show past
-      // the frame edge); the fitted frame must leave that margin free.
-      const horizontalPadding = Number.parseFloat(viewportStyle.paddingLeft) + Number.parseFloat(viewportStyle.paddingRight);
-      const verticalPadding = Number.parseFloat(viewportStyle.paddingTop) + Number.parseFloat(viewportStyle.paddingBottom);
-      const availableWidth = viewportRect.width - horizontalPadding;
-      const availableHeight = viewportRect.height - verticalPadding;
-      const fitWidth = availableWidth / currentFrame.offsetWidth;
-      const fitHeight = availableHeight / currentFrame.offsetHeight;
-      if (Number.isFinite(fitWidth) && fitWidth > 0) {
-        onFitViewerWidth?.(clamp(fitWidth, 0.1, 4));
-      }
-      if (Number.isFinite(fitHeight) && fitHeight > 0) {
-        onFitViewerHeight?.(clamp(fitHeight, 0.1, 4));
-      }
-    }
-
-    updateScale(frame.clientWidth, frame.clientHeight);
-
-    // This observer watches three different elements (frame, viewport, the
-    // .editor-viewer panel) so any of them resizing triggers a recompute - but
-    // updateScale() divides by composition.width/height, so it must always be
-    // called with the FRAME's own box size, never whichever element happened to
-    // produce entries[0]. Using the wrong entry (e.g. the much larger panel) was
-    // producing a stale/wrong compositionScale that no longer matched the
-    // frame's actual rendered size, leaving a visible gap between the frame box
-    // and its (now mis-scaled) inner video content after resizing the timeline
-    // panel. Re-reading the frame's current size directly from the ref sidesteps
-    // that ambiguity entirely.
-    const observer = new ResizeObserver(() => {
-      const currentFrame = phoneFrameRef.current;
-      if (!currentFrame) {
-        return;
-      }
-
-      updateScale(currentFrame.clientWidth, currentFrame.clientHeight);
-    });
-    observer.observe(frame);
-    if (viewportRef.current) {
-      observer.observe(viewportRef.current);
-    }
-    const editorViewer = viewportRef.current?.closest(".editor-viewer");
-    if (editorViewer) {
-      observer.observe(editorViewer);
-    }
-
+    recomputeFit();
+    const observer = new ResizeObserver(recomputeFit);
+    observer.observe(viewport);
+    const editorViewer = viewport.closest(".editor-viewer");
+    if (editorViewer) observer.observe(editorViewer);
     return () => observer.disconnect();
-  }, [composition.height, composition.width, onFitViewerHeight, onFitViewerWidth]);
+  }, [composition.width, composition.height]);
+
+  // Apply the chosen mode/scale (a fresh "fit" uses the latest measured fit).
+  useEffect(() => {
+    setDisplayScale(viewMode === "fit" ? fitScaleRef.current : manualScale);
+  }, [viewMode, manualScale]);
+
+  // Cursor-anchored zoom: after the new scale lands (frame resized), re-scroll so the comp point that
+  // was under the cursor stays under it. `newScroll = (oldScroll + cursorOffset) * ratio − cursorOffset`.
+  // Runs pre-paint (no flicker); only acts when a ctrl/⌘-wheel set `pendingZoomRef`.
+  useLayoutEffect(() => {
+    const anchor = pendingZoomRef.current;
+    if (!anchor) return;
+    pendingZoomRef.current = null;
+    const vp = viewportRef.current;
+    if (!vp) return;
+    vp.scrollLeft = (anchor.scrollLeft + anchor.cx) * anchor.ratio - anchor.cx;
+    vp.scrollTop = (anchor.scrollTop + anchor.cy) * anchor.ratio - anchor.cy;
+  }, [displayScale]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -726,8 +839,21 @@ export function VideoPreview({
       event.stopPropagation();
 
       if (event.ctrlKey || event.metaKey) {
-        const zoomDelta = event.deltaY < 0 ? 0.12 : -0.12;
-        onChangeViewerZoomRef.current?.(clamp(viewerZoomRef.current + zoomDelta, 0.55, 4));
+        const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+        const old = displayScaleRef.current;
+        const next = clamp(old * factor, 0.05, 8);
+        if (next === old) return;
+        // Capture the cursor anchor (relative to the viewport) + current scroll, so the layout effect
+        // can re-scroll to keep the point under the cursor fixed once the new scale renders.
+        const rect = viewportElement.getBoundingClientRect();
+        pendingZoomRef.current = {
+          ratio: next / old,
+          cx: event.clientX - rect.left,
+          cy: event.clientY - rect.top,
+          scrollLeft: viewportElement.scrollLeft,
+          scrollTop: viewportElement.scrollTop,
+        };
+        onZoomToRef.current?.(next);
         return;
       }
 
@@ -794,7 +920,14 @@ export function VideoPreview({
       return;
     }
 
-    if (target.closest(".preview-text-layer, .preview-shape-layer, .preview-media, .preview-missing-layer, .preview-selection-box")) {
+    // Mask-overlay clicks/drags (selecting a mask, dragging its outline/points) bubble a trailing `click`
+    // whose target is an SVG mask element — they must NOT deselect the clip (that would close the inspector
+    // mid-edit). The overlay's own pointerdown stops propagation, but the click is separate, so spare it here.
+    if (
+      target.closest(
+        ".preview-text-layer, .preview-shape-layer, .preview-media, .preview-missing-layer, .preview-selection-box, .preview-mask-overlay"
+      )
+    ) {
       return;
     }
 
@@ -990,11 +1123,18 @@ export function VideoPreview({
         onPointerUp={finishViewportPan}
         onClick={deselectFromEmptyPreviewClick}
       >
-        <div className="preview-canvas" style={{ "--viewer-zoom": viewerZoom } as CSSProperties}>
+        <div className="preview-canvas">
+          {/* The frame is sized EXPLICITLY to the displayed comp box (comp × displayScale). This is the
+              single source of scale — no CSS --viewer-zoom, no nested compositionScale. When the box
+              exceeds the viewport (zoomed in past fit) the viewport scrolls/pans. */}
           <div
             className={`phone-frame preview-bg-${previewBg}`}
             ref={mergedPhoneFrameRef}
-            style={{ "--comp-aspect": composition.width / composition.height } as CSSProperties}
+            style={{
+              "--comp-aspect": composition.width / composition.height,
+              width: Math.max(1, composition.width * displayScale),
+              height: Math.max(1, composition.height * displayScale),
+            } as CSSProperties}
           >
             <div
               className="preview-composition-space"
@@ -1002,7 +1142,7 @@ export function VideoPreview({
                 {
                   width: composition.width,
                   height: composition.height,
-                  transform: `translate3d(-50%, -50%, 0) scale(${compositionScale})`
+                  transform: `translate3d(-50%, -50%, 0) scale(${displayScale})`
                 } as CSSProperties
               }
             >
@@ -1020,8 +1160,29 @@ export function VideoPreview({
                 height={composition.height}
                 currentTime={currentTime}
               />
-              {renderVisualLayerEntries.length === 0 ? <div className="preview-empty-frame" aria-hidden="true" /> : null}
+              {/* DOM empty-frame only in DOM mode — in scene mode the always-mounted ScenePreviewCanvas
+                  owns the empty/gap background (clears to composition.backgroundColor), so no toggle/flash. */}
+              {!sceneEnabled && renderVisualLayerEntries.length === 0 ? <div className="preview-empty-frame" aria-hidden="true" /> : null}
+              {sceneEnabled ? (
+                <ScenePreviewCanvas
+                  layers={sceneLayers}
+                  width={composition.width}
+                  height={composition.height}
+                  backgroundColor={composition.backgroundColor || "#000000"}
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  gradedRef={gradedCanvasesRef}
+                  onFailure={() => setSceneFailed(true)}
+                  redrawRef={sceneRedrawRef}
+                  renderScale={playbackRenderScale}
+                  transitions={transitionPairs}
+                  mediaSourceAlias={sceneSharedMediaClones}
+                />
+              ) : null}
               {renderedLayerEntries.map(({ layer, pending }) => (
+                // A shared region-blur clone reads the base's graded canvas in scene mode — don't mount its
+                // own <video> decoder + GL context (kills the "too many WebGL contexts" eviction).
+                sceneEnabled && sceneSharedMediaClones.has(layer.id) ? null : (
                 <Fragment key={layer.id}>
                   <PreviewLayer
                     currentTime={currentTime}
@@ -1036,19 +1197,35 @@ export function VideoPreview({
                     onScaleLayer={onScaleLayer}
                     onSelectLayer={onSelectLayer}
                     selected={!pending && selectedLayerId === layer.id}
+                    interactive={realLayerIds.has(layer.id)}
                     assets={resolvedAssets}
                     sourceAsset={sourceAsset}
+                    // DOM-transition hide (visibility:hidden) is for the DOM path's incoming clip only;
+                    // scene-composited media is hidden via opacity:0 (sceneComposited) so it stays clickable.
                     hideForTransition={transitionHiddenIds.has(layer.id)}
+                    sceneComposited={sceneEnabled && sceneMediaIds.has(layer.id)}
+                    hideVisual={sceneEnabled && sceneOverlayIds.has(layer.id)}
+                    // Scene-composited media: don't bake opacity into the grade — ScenePreviewCanvas
+                    // applies it LIVE at composite (no stale opacity on seek/pause). DOM + transition-active
+                    // clips (drawn by the DOM overlay) still bake — hence `sceneLayerIds`, not sceneMediaIds.
+                    bakeOpacity={!sceneLayerIds.has(layer.id)}
                     bypassColor={compareBefore}
                     onGradedFrame={
-                      transitionSourceIds.has(layer.id)
+                      transitionSourceIds.has(layer.id) || (sceneEnabled && sceneMediaIds.has(layer.id))
                         ? (canvas) => {
                             gradedCanvasesRef.current[layer.id] = canvas;
+                            // A fresh graded frame landed — re-arm the scene recomposite so a paused edit
+                            // (opacity/grade/etc., re-graded by WebglMediaLayer) shows immediately, not just
+                            // via the settle window. Cheap (sets a timestamp ref); harmless while playing.
+                            sceneRedrawRef.current?.();
                           }
                         : undefined
                     }
                   />
-                  {(overlaysByAnchorId.get(layer.id) ?? []).map((pair) => (
+                  {/* DOM transition overlay — suppressed in scene mode (Phase 4.2): the scene pass mixes
+                      the junction in-canvas via ScenePreviewCanvas's TransitionCompositor, so a DOM overlay
+                      on top would double-render. The DOM path keeps using it. */}
+                  {(sceneEnabled ? [] : (overlaysByAnchorId.get(layer.id) ?? [])).map((pair) => (
                     <TransitionOverlay
                       key={`${pair.outgoingId}->${pair.incomingId}`}
                       spec={pair.spec}
@@ -1065,6 +1242,7 @@ export function VideoPreview({
                     />
                   ))}
                 </Fragment>
+              )
               ))}
               {hasBehindText ? <div className="behind-text">FORGE</div> : null}
               {hasTracking ? (
@@ -1084,14 +1262,14 @@ export function VideoPreview({
                 </div>
               ) : null}
               </div>
-              {showMasks && maskActiveLayer ? (
+              {showMasks && maskActiveLayer && isLayerActive(maskActiveLayer, currentTime) ? (
                 <MaskEditorOverlay
                   layer={maskActiveLayer}
                   masks={maskEditMasks}
                   currentTime={currentTime}
                   width={composition.width}
                   height={composition.height}
-                  scale={compositionScale}
+                  scale={displayScale}
                   tool={maskTool}
                   activeMaskId={activeMaskId}
                   onSelectMask={onSelectMask}
@@ -1117,6 +1295,7 @@ function PreviewLayer({
   isPlaying,
   layer,
   selected,
+  interactive = true,
   pending = false,
   assets,
   sourceAsset,
@@ -1128,19 +1307,31 @@ function PreviewLayer({
   onScaleLayer,
   onSelectLayer,
   hideForTransition = false,
+  hideVisual = false,
+  sceneComposited = false,
   bypassColor = false,
-  onGradedFrame
+  onGradedFrame,
+  bakeOpacity = true
 }: {
   currentTime: number;
   isPlaying: boolean;
   layer: TimelineLayer;
   selected: boolean;
+  /** False for render-only region-mask clones (`__rfx_` ids): pixels only, no select/drag, pointer-transparent
+   *  so clicks fall through to the real base layer. Defaults true for normal layers. */
+  interactive?: boolean;
   /** This clip is the incoming side of an active GPU transition — hide it; the overlay shows the mix. */
   hideForTransition?: boolean;
+  /** Scene compositor renders this text/shape layer in the GPU pass — hide its DOM visual, keep handles. */
+  hideVisual?: boolean;
+  /** Scene compositor draws this MEDIA clip — hide the DOM canvas via opacity:0 but keep it click-selectable. */
+  sceneComposited?: boolean;
   /** Before/after compare: skip the color grade so the original (ungraded) frame shows. */
   bypassColor?: boolean;
   /** Report the graded canvas so the transition overlay can sample it as a from/to texture. */
   onGradedFrame?: ((canvas: HTMLCanvasElement) => void) | undefined;
+  /** False for scene-composited media → opacity is applied LIVE at composite, not baked (no seek staleness). */
+  bakeOpacity?: boolean | undefined;
   // True while this layer is mounted ahead of its start time purely to let its
   // <video> seek to the right source frame in the background, so the cut to it
   // doesn't show a black/stale frame. Invisible and non-interactive until active.
@@ -1506,13 +1697,17 @@ function PreviewLayer({
     spatialHandleDragRef.current = null;
   }
 
-  const dragHandlers = {
-    onClick: handlePreviewClick,
-    onPointerCancel: finishPreviewDrag,
-    onPointerDown: startPreviewDrag,
-    onPointerMove: updatePreviewDrag,
-    onPointerUp: finishPreviewDrag
-  };
+  // Render-only region clones are pointer-transparent (no handlers + pointerEvents:none below) so clicks fall
+  // through to the real base layer; only real layers get the select/drag handlers.
+  const dragHandlers = interactive
+    ? {
+        onClick: handlePreviewClick,
+        onPointerCancel: finishPreviewDrag,
+        onPointerDown: startPreviewDrag,
+        onPointerMove: updatePreviewDrag,
+        onPointerUp: finishPreviewDrag
+      }
+    : undefined;
 
   function syncVideoTime(video: HTMLVideoElement) {
     // Source-aware: offset into the source media so trimmed/split clips play the correct source frame.
@@ -1560,30 +1755,53 @@ function PreviewLayer({
     // HTML runs stay for box sizing/selection but go invisible once the warp is ready;
     // while it loads (or if the font isn't hosted) the plain text shows instead.
     const warpReady = warpTextSvg != null;
+    // Clip mask (text): the comp-px mask must live on a comp-sized, transform-less wrapper (text is
+    // content-sized) so it aligns + stays comp-fixed like the GPU scene path. `null` when unmasked → no
+    // wrapper, byte-identical to before. The inner button re-enables pointer events (wrapper is none).
+    const textMaskWrapper = getOverlayMaskWrapperStyle(layer);
+    const textButton = (
+      <button
+        className={`preview-text-layer ${selected ? "is-selected" : ""}`}
+        type="button"
+        {...dragHandlers}
+        style={{
+          ...(style as CSSProperties),
+          ...(hideVisual ? { opacity: 0 } : null),
+          ...(textMaskWrapper ? { pointerEvents: "auto" } : null),
+          // Render-only clones stay pointer-transparent (overrides the mask-wrapper's auto) so clicks reach
+          // the real base layer beneath.
+          ...(interactive ? null : { pointerEvents: "none" })
+        }}
+      >
+        {visibleRuns.map((run, index) => (
+          <span
+            key={`${layer.id}_run_${index}`}
+            style={{ ...(getCompositionTextRunStyle(run, style) as CSSProperties), visibility: warpReady ? "hidden" : undefined }}
+          >
+            {run.text}
+          </span>
+        ))}
+        {warpReady ? (
+          // Force visibility so the warp shows even though the (sibling) runs are hidden — but when
+          // the layer is GPU-composited (`hideVisual`, scene path), the scene raster already draws the
+          // warp; keep this DOM overlay hidden too or it double-renders on top of the GPU warp.
+          <span
+            aria-hidden="true"
+            style={{ position: "absolute", inset: 0, visibility: hideVisual ? "hidden" : "visible" }}
+            dangerouslySetInnerHTML={{ __html: warpTextSvg }}
+          />
+        ) : null}
+      </button>
+    );
 
     return (
       <>
-        <button className={`preview-text-layer ${selected ? "is-selected" : ""}`} type="button" {...dragHandlers} style={style as CSSProperties}>
-          {visibleRuns.map((run, index) => (
-            <span
-              key={`${layer.id}_run_${index}`}
-              style={{ ...(getCompositionTextRunStyle(run, style) as CSSProperties), visibility: warpReady ? "hidden" : undefined }}
-            >
-              {run.text}
-            </span>
-          ))}
-          {warpReady ? (
-            <span
-              aria-hidden="true"
-              style={{ position: "absolute", inset: 0, visibility: "visible" }}
-              dangerouslySetInnerHTML={{ __html: warpTextSvg }}
-            />
-          ) : null}
-        </button>
+        {textMaskWrapper ? <div style={textMaskWrapper as CSSProperties}>{textButton}</div> : textButton}
         {selected ? (
           <PreviewSelectionOverlay
             layer={layer}
             style={style as CSSProperties}
+            currentTime={currentTime}
             text={layer.text}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
@@ -1615,19 +1833,33 @@ function PreviewLayer({
 
   if (layer.type === "shape") {
     const style = getCompositionShapeStyle(layer, { currentTimeSeconds: currentTime });
+    // Clip mask (shape): comp-space wrapper, same as text (see above). `null` when unmasked.
+    const shapeMaskWrapper = getOverlayMaskWrapperStyle(layer);
+    const shapeButton = (
+      <button
+        className={`preview-shape-layer ${selected ? "is-selected" : ""}`}
+        type="button"
+        {...dragHandlers}
+        // Scene mode: the GPU raster draws the shape, so hide the DOM visual — but with `opacity:0`,
+        // NOT `visibility:hidden`, so the element still receives pointer events (drag/select on canvas).
+        style={{
+          ...(style as CSSProperties),
+          ...(hideVisual ? { opacity: 0 } : null),
+          ...(shapeMaskWrapper ? { pointerEvents: "auto" } : null),
+          // Render-only clones stay pointer-transparent so clicks reach the real base layer beneath.
+          ...(interactive ? null : { pointerEvents: "none" })
+        }}
+      />
+    );
 
     return (
       <>
-        <button
-          className={`preview-shape-layer ${selected ? "is-selected" : ""}`}
-          type="button"
-          {...dragHandlers}
-          style={style as CSSProperties}
-        />
+        {shapeMaskWrapper ? <div style={shapeMaskWrapper as CSSProperties}>{shapeButton}</div> : shapeButton}
         {selected ? (
           <PreviewSelectionOverlay
             layer={layer}
             style={style as CSSProperties}
+            currentTime={currentTime}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -1658,8 +1890,13 @@ function PreviewLayer({
 
   if (isVideo && mediaUrl) {
     const baseStyle = getCompositionMediaStyle(layer, { currentTimeSeconds: currentTime }) as CSSProperties;
-    // Pre-rolled but not yet on-screen: keep it invisible and click-through until active.
-    const style: CSSProperties = pending ? { ...baseStyle, opacity: 0, pointerEvents: "none" } : baseStyle;
+    // Pre-rolled but not yet on-screen: keep it invisible and click-through until active. Render-only clones
+    // (!interactive) stay click-through too so the real base layer beneath gets the pointer.
+    const style: CSSProperties = pending
+      ? { ...baseStyle, opacity: 0, pointerEvents: "none" }
+      : interactive
+        ? baseStyle
+        : { ...baseStyle, pointerEvents: "none" };
     const effectiveDragHandlers = pending ? undefined : dragHandlers;
     const isSelectedVisible = selected && !pending;
     const videoColorPipeline = bypassColor ? null : getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
@@ -1698,9 +1935,11 @@ function PreviewLayer({
             dragHandlers={effectiveDragHandlers}
             onWebglFailed={() => setWebglMediaFailed(true)}
             poster={videoPoster ?? undefined}
-            hidden={pending || hideForTransition}
+            hidden={pending || (hideForTransition && !sceneComposited)}
+            interactiveHidden={sceneComposited && !pending}
             transition={onGradedFrame ? null : videoTransition}
             onGradedFrame={onGradedFrame}
+            bakeOpacity={bakeOpacity}
             ref={videoRef}
             style={webglLayerStyle}
           />
@@ -1709,6 +1948,7 @@ function PreviewLayer({
             <PreviewSelectionOverlay
               layer={layer}
               style={webglLayerStyle}
+              currentTime={currentTime}
               onResizePointerCancel={finishPreviewResize}
               onResizePointerDown={startPreviewResize}
               onResizePointerMove={updatePreviewResize}
@@ -1792,6 +2032,7 @@ function PreviewLayer({
           <PreviewSelectionOverlay
             layer={layer}
             style={style}
+            currentTime={currentTime}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -1836,6 +2077,7 @@ function PreviewLayer({
           <PreviewSelectionOverlay
             layer={layer}
             style={missingStyle}
+            currentTime={currentTime}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -1864,7 +2106,9 @@ function PreviewLayer({
     );
   }
 
-  const imageStyle = getCompositionMediaStyle(layer, { currentTimeSeconds: currentTime }) as CSSProperties;
+  const imageStyleBase = getCompositionMediaStyle(layer, { currentTimeSeconds: currentTime }) as CSSProperties;
+  // Render-only clones (!interactive) stay click-through so the real base layer beneath gets the pointer.
+  const imageStyle: CSSProperties = interactive ? imageStyleBase : { ...imageStyleBase, pointerEvents: "none" };
   const imageColorPipeline = bypassColor ? null : getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
   const imageMediaEffects = getCompositionMediaEffects(layer, { currentTimeSeconds: currentTime });
   const imageTransition = getCompositionTransition(layer, { currentTimeSeconds: currentTime });
@@ -1886,7 +2130,9 @@ function PreviewLayer({
           mediaEffects={imageMediaEffects}
           transition={onGradedFrame ? null : imageTransition}
           onGradedFrame={onGradedFrame}
-          hidden={hideForTransition}
+          bakeOpacity={bakeOpacity}
+          hidden={hideForTransition && !sceneComposited}
+          interactiveHidden={sceneComposited && !pending}
           dragHandlers={dragHandlers}
           onWebglFailed={() => setWebglMediaFailed(true)}
           style={webglImageStyle}
@@ -1896,6 +2142,7 @@ function PreviewLayer({
           <PreviewSelectionOverlay
             layer={layer}
             style={webglImageStyle}
+            currentTime={currentTime}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -1947,6 +2194,7 @@ function PreviewLayer({
         <PreviewSelectionOverlay
           layer={layer}
           style={imageStyle}
+          currentTime={currentTime}
           onResizePointerCancel={finishPreviewResize}
           onResizePointerDown={startPreviewResize}
           onResizePointerMove={updatePreviewResize}
@@ -2256,6 +2504,7 @@ function PreviewSelectionOverlay({
   layer,
   style,
   text,
+  currentTime,
   onResizePointerCancel,
   onResizePointerDown,
   onResizePointerMove,
@@ -2268,6 +2517,7 @@ function PreviewSelectionOverlay({
   layer: TimelineLayer;
   style: CSSProperties;
   text?: string | undefined;
+  currentTime: number;
   onResizePointerCancel: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onResizePointerDown: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onResizePointerMove: (event: ReactPointerEvent<HTMLSpanElement>) => void;
@@ -2277,9 +2527,14 @@ function PreviewSelectionOverlay({
   onRotatePointerMove: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onRotatePointerUp: (event: ReactPointerEvent<HTMLSpanElement>) => void;
 }) {
+  // Counter the box's scale so the handles stay a constant on-screen size. Use the KEYFRAME-EVALUATED
+  // scale (the exact value compositionTransformCss bakes into the box transform), not the raw base
+  // `layer.transform.scale` — otherwise a scale keyframe / entrance animation / scrubbed value makes the
+  // counter miss and the handles scale with the clip.
+  const evaluatedScale = getCompositionTransform(layer, { currentTimeSeconds: currentTime }).scale;
   const overlayStyle = {
     ...selectionOverlayStyle(style),
-    "--handle-inverse-scale": 1 / Math.max(0.1, layer.transform.scale)
+    "--handle-inverse-scale": 1 / Math.max(0.1, evaluatedScale)
   } as CSSProperties;
 
   const portalTarget = useContext(OverlayPortalContext);
@@ -2483,10 +2738,16 @@ function MaskEditorOverlay({
 
   const localTime = Math.max(0, currentTime - layer.startSeconds);
   const transform = getCompositionTransform(layer, { currentTimeSeconds: currentTime });
-  const cx = (transform.x / 100) * width;
-  const cy = (transform.y / 100) * height;
-  const s = transform.scale || 1;
-  const rad = ((transform.rotation || 0) * Math.PI) / 180;
+  // Text/shape clip masks are authored + rendered in COMP space (the scene matte, local export, and the DOM
+  // getOverlayMaskWrapperStyle wrapper all apply the mask comp-fixed, never the layer transform). Media masks
+  // ride the layer transform (the media element is comp-sized + transformed). So drop the layer transform here
+  // for overlay layers, or a scaled/positioned text would divide the drawn shape toward center (mask lands on
+  // the glyphs, not where drawn). For media local≈comp so this matches the existing behavior.
+  const overlayType = layer.type === "text" || layer.type === "shape";
+  const cx = overlayType ? width / 2 : (transform.x / 100) * width;
+  const cy = overlayType ? height / 2 : (transform.y / 100) * height;
+  const s = overlayType ? 1 : transform.scale || 1;
+  const rad = overlayType ? 0 : ((transform.rotation || 0) * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
 
@@ -2989,9 +3250,10 @@ function MaskEditorOverlay({
         });
         const d = maskShapeToPathD({ ...compMask, points: compPoints });
         const isActive = mask.id === activeMaskId;
-        // Select tool: the active mask is draggable by its whole interior (transparent fill hit area), not
-        // just the thin outline; inactive masks hit-test the stroke (click to select). While a draw tool is
-        // active, masks don't capture pointers so drawing over them still works.
+        // Select tool: the ACTIVE mask is draggable by its whole interior (transparent fill hit area) to move
+        // it; inactive masks hit-test the stroke (click to select). So when a mask is NOT being edited, clicks
+        // inside it fall through to the layer (drag the text/clip); selecting the mask makes its interior drag
+        // the mask. While a draw tool is active, masks don't capture pointers so drawing over them still works.
         const interactive = tool === "select";
         return (
           <g key={mask.id} className={isActive ? "mask-outline is-active" : "mask-outline"}>
@@ -3143,12 +3405,17 @@ function MaskEditorOverlay({
 }
 
 function selectionOverlayStyle(style: CSSProperties): CSSProperties {
+  // The overlay copies only the clip's GEOMETRY (position / size / transform). Strip every appearance
+  // property so the selection box + handles render as plain UI chrome — in particular `mixBlendMode`
+  // and `opacity`, or a clip's blend mode / fade would also blend/fade the handles.
   const {
     background: _background,
     backgroundColor: _backgroundColor,
     boxShadow: _boxShadow,
     color: _color,
     filter: _filter,
+    mixBlendMode: _mixBlendMode,
+    opacity: _opacity,
     textShadow: _textShadow,
     WebkitTextStroke: _webkitTextStroke,
     ...layoutStyle
@@ -3226,7 +3493,8 @@ function scaleFromResize(
   }
 ) {
   const nextDistance = distance(event.clientX, event.clientY, resize.centerClientX, resize.centerClientY);
-  return clamp(resize.startScale * (nextDistance / resize.startDistance), 0.2, 5);
+  // Floor only — no upper cap (Premiere-style free scaling); handlePreviewScaleLayer keeps the floor too.
+  return Math.max(0.01, resize.startScale * (nextDistance / resize.startDistance));
 }
 
 function shapeSizeFromResize(

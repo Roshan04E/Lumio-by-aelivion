@@ -8,7 +8,7 @@
  */
 
 import {
-  buildWarpedTextPathSvg,
+  buildWarpedTextPaths,
   compositionTextDefaults,
   getCompositionShapeStyle,
   getCompositionTextRunStyle,
@@ -159,27 +159,48 @@ function lineWidth(ctx: Ctx, line: Word[]): number {
  * "full" bakes the layer's rotation+scale into the raster (2D path). "flat" applies only
  * position + opacity, leaving rotation/scale/3D to the WebGL perspective quad (3D-tilt path).
  */
-export type OverlayTransformMode = "full" | "flat";
+// "full": bake position + rotation/scale + opacity (the 2D draw-straight-to-frame path).
+// "flat": bake position + opacity, NO rotation/scale (the 3D quad owns those).
+// "content": bake NOTHING — draw the element at the COMP CENTER, no rotation/scale/opacity — so the
+//   raster depends only on content+style+size and a transform animation reuses it (the scene path lets
+//   the composite quad apply position/scale/rotation/opacity). See scene-text-raster.ts.
+// "box": like "content" but draws into a TIGHT element-box canvas, centered, pre-scaled by `rasterScale`
+//   (so the raster is near the DISPLAYED resolution → crisp when the composite quad magnifies it). The
+//   caller sizes ctx.canvas to (box+margin)*rasterScale; this just centers + scales into it. Scene-only
+//   (resolution-aware raster); the composite quad's `box` half-extents = canvas/(2*rasterScale).
+export type OverlayTransformMode = "full" | "flat" | "content" | "box";
 
-/** The drawn element's content-box size in comp px — used to size the 3D perspective quad. */
+/** The drawn element's content-box size in comp px — used to size the 3D perspective quad / element box. */
 export interface OverlayBox {
   boxW: number;
   boxH: number;
 }
 
-export async function drawTextLayer(
-  ctx: Ctx,
-  layer: TimelineLayer,
-  t: number,
-  W: number,
-  H: number,
-  mode: OverlayTransformMode = "full"
-): Promise<OverlayBox> {
+/** Resolved text layout (word-wrap + box) — shared by the draw pass and the `measureOverlayBox` pass so
+ *  the box used to SIZE a "box"-mode canvas can never disagree with the box the draw fills. */
+interface TextLayout {
+  runs: TextRun[];
+  style: Record<string, unknown>;
+  fontSize: number;
+  lineHeightPx: number;
+  letterSpacing: string;
+  padX: number;
+  padY: number;
+  radius: number;
+  background: string;
+  textAlign: CanvasTextAlign;
+  lines: Word[][];
+  boxW: number;
+  boxH: number;
+}
+
+/** Run word-wrap + box math for a text layer (no drawing). `null` = no visible text. Needs the comp
+ *  width `W` because the wrap width is `maxWidthFraction*W − 2*padX`. */
+function measureTextLayout(ctx: Ctx, layer: TimelineLayer, t: number, W: number): TextLayout | null {
   // #4: slice visible chars via textRevealProgress (typewriter animation), matching preview/cloud.
   const runs = getVisibleTextRuns(layer, t);
-  if (!runs.some((r) => r.text)) return { boxW: 0, boxH: 0 };
+  if (!runs.some((r) => r.text)) return null;
   const style = getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
-  const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
 
   const fontSize = num(style.fontSize, 72);
   const lineHeight = num(style.lineHeight, 1.2);
@@ -198,8 +219,9 @@ export async function drawTextLayer(
   const maxWidthFraction = widthStr.endsWith("%") ? num(widthStr) / 100 : compositionTextDefaults.maxWidthPercent / 100;
   const maxWidthContent = maxWidthFraction * W - 2 * padX;
 
-  if (letterSpacing) ctx.letterSpacing = letterSpacing;
-
+  // measureText is letter-spacing sensitive — set it for the layout, then reset so a reused scratch ctx
+  // doesn't carry stale spacing into the next measure.
+  ctx.letterSpacing = letterSpacing;
   const baseStyle = { fontSize, fontWeight: style.fontWeight, color: style.color, fontFamily: style.fontFamily, fontStyle: style.fontStyle };
   const lines = layoutWords(ctx, runs, baseStyle, maxWidthContent > 0 ? maxWidthContent : 0);
 
@@ -207,16 +229,80 @@ export async function drawTextLayer(
   const contentWidth = fixedWidth > 0 ? fixedWidth : Math.max(0, ...lines.map((l) => lineWidth(ctx, l)));
   const boxW = contentWidth + 2 * padX;
   const boxH = lines.length * lineHeightPx + 2 * padY;
+  ctx.letterSpacing = "";
 
-  const centerX = (transform.x / 100) * W;
-  const centerY = (transform.y / 100) * H;
+  return { runs, style, fontSize, lineHeightPx, letterSpacing, padX, padY, radius, background, textAlign, lines, boxW, boxH };
+}
+
+/** Content-box size (comp px) of a text/shape layer, with no drawing — used to size a "box"-mode raster
+ *  canvas before the draw pass. Returns {0,0} for an empty layer (no visible text / zero-size shape). */
+export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: number, H: number): OverlayBox {
+  if (layer.type === "text") {
+    const layout = measureTextLayout(ctx, layer, t, W);
+    return layout ? { boxW: layout.boxW, boxH: layout.boxH } : { boxW: 0, boxH: 0 };
+  }
+  const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+  return { boxW: Math.max(0, (num(style.width) / 100) * W), boxH: Math.max(0, (num(style.height) / 100) * H) };
+}
+
+/** Extra comp-px padding a "box"-mode raster needs so text-shadow / stroke / shape border+shadow don't
+ *  clip against the tight element box (the comp-sized raster never clipped; a tight box would). Parsed
+ *  from the same resolved style the draw uses, so it tracks the actual overhang. */
+export function overlayOverhangMargin(layer: TimelineLayer, t: number): number {
+  let m = 2; // base anti-aliasing pad
+  const shadowExtent = (css: string): number => {
+    const sm = css.match(/(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px/);
+    return sm ? Math.abs(num(sm[1])) + Math.abs(num(sm[2])) + num(sm[3]) * 1.5 + 2 : 0;
+  };
+  if (layer.type === "text") {
+    const style = getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+    if (style.textShadow) m = Math.max(m, shadowExtent(String(style.textShadow)));
+    if (style.WebkitTextStroke) m = Math.max(m, num(String(style.WebkitTextStroke)) + 2);
+  } else if (layer.type === "shape") {
+    const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
+    if (style.boxShadow) m = Math.max(m, shadowExtent(String(style.boxShadow)));
+    if (style.border) m = Math.max(m, num(String(style.border)) / 2 + 2); // border straddles the edge
+  }
+  return m;
+}
+
+export async function drawTextLayer(
+  ctx: Ctx,
+  layer: TimelineLayer,
+  t: number,
+  W: number,
+  H: number,
+  mode: OverlayTransformMode = "full",
+  rasterScale = 1
+): Promise<OverlayBox> {
+  const layout = measureTextLayout(ctx, layer, t, W);
+  if (!layout) return { boxW: 0, boxH: 0 };
+  const { runs, style, fontSize, lineHeightPx, letterSpacing, padX, padY, radius, background, textAlign, lines, boxW, boxH } = layout;
+  const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
+
+  if (letterSpacing) ctx.letterSpacing = letterSpacing;
+
+  // "content"/"box" draw with no transform/opacity (the composite quad applies them); other modes bake
+  // the layer position (and "full" also rotation/scale/opacity). "box" centers in a tight pre-scaled
+  // canvas (resolution-aware raster); "content" centers in the comp.
+  const content = mode === "content";
+  const box = mode === "box";
 
   ctx.save();
-  ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity / 100));
-  ctx.translate(centerX, centerY);
-  if (mode === "full") {
-    ctx.rotate((transform.rotation * Math.PI) / 180);
-    ctx.scale(transform.scale, transform.scale);
+  ctx.globalAlpha = content || box ? 1 : Math.max(0, Math.min(1, transform.opacity / 100));
+  if (box) {
+    // Caller sized ctx.canvas to (box+margin)*rasterScale; center the content in it and pre-scale so the
+    // raster is at ~display resolution. The composite quad derives the box from canvas/(2*rasterScale).
+    ctx.translate(ctx.canvas.width / 2, ctx.canvas.height / 2);
+    ctx.scale(rasterScale, rasterScale);
+  } else {
+    const centerX = content ? W / 2 : (transform.x / 100) * W;
+    const centerY = content ? H / 2 : (transform.y / 100) * H;
+    ctx.translate(centerX, centerY);
+    if (mode === "full") {
+      ctx.rotate((transform.rotation * Math.PI) / 180);
+      ctx.scale(transform.scale, transform.scale);
+    }
   }
 
   // Background box.
@@ -226,11 +312,30 @@ export async function drawTextLayer(
     ctx.fill();
   }
 
-  // Warp: rasterize the shared vector-outline SVG over the text box (font-independent).
+  // Warp: draw the shared vector glyph outlines via Path2D (font-independent). Path2D works on both
+  // the main thread AND the export Worker's OffscreenCanvas — unlike createImageBitmap(svgBlob), which
+  // Chrome can't decode (it threw, so warp silently fell back to plain text in scene + local export).
   if (hasTextWarp(layer.textWarp as TextWarp | undefined)) {
-    const warpImg = await rasterizeWarp(layer.textWarp as TextWarp, runs, style, boxW, boxH).catch(() => null);
-    if (warpImg) {
-      ctx.drawImage(warpImg as CanvasImageSource, -boxW / 2, -boxH / 2, boxW, boxH);
+    const warp = await buildWarpedTextPaths(layer.textWarp as TextWarp, runs, style).catch(() => undefined);
+    if (warp && warp.paths.length) {
+      ctx.save();
+      // Map the warp's local box (width×height) onto the text box (boxW×boxH), centred at the origin —
+      // the same stretch the old SVG raster did (viewBox→box, preserveAspectRatio="none").
+      ctx.translate(-boxW / 2, -boxH / 2);
+      ctx.scale(boxW / warp.width, boxH / warp.height);
+      for (const p of warp.paths) {
+        const path2d = new Path2D(p.d);
+        if (p.stroke && p.stroke.width > 0) {
+          // paint-order: stroke is painted UNDER the fill (matches the SVG `paint-order="stroke"`).
+          ctx.lineWidth = p.stroke.width;
+          ctx.strokeStyle = p.stroke.color;
+          ctx.lineJoin = "round";
+          ctx.stroke(path2d);
+        }
+        ctx.fillStyle = p.fill;
+        ctx.fill(path2d);
+      }
+      ctx.restore();
       ctx.restore();
       ctx.letterSpacing = "";
       return { boxW, boxH };
@@ -305,45 +410,6 @@ export async function drawTextLayer(
   return { boxW, boxH };
 }
 
-// Cache rasterized warp bitmaps by markup+box so a held warp clip isn't re-rasterized every
-// frame (P4 micro-opt). buildWarpedTextPathSvg is itself content-memoized, so identical frames
-// produce an identical markup key and hit this cache.
-const warpRasterCache = new Map<string, ImageBitmap>();
-const WARP_RASTER_CACHE_CAP = 64;
-
-async function rasterizeWarp(
-  warp: TextWarp,
-  runs: TextRun[],
-  style: Record<string, unknown>,
-  boxW: number,
-  boxH: number
-): Promise<ImageBitmap | null> {
-  let markup = await buildWarpedTextPathSvg(warp, runs as never, style as never);
-  if (!markup) return null;
-  const w = Math.max(1, Math.round(boxW));
-  const h = Math.max(1, Math.round(boxH));
-  // Ensure the rasterized SVG has explicit pixel dimensions so it renders at box size.
-  if (/^<svg/i.test(markup) && !/\bwidth=/.test(markup.slice(0, 200))) {
-    markup = markup.replace(/^<svg/i, `<svg width="${w}" height="${h}"`);
-  }
-  const cacheKey = `${w}x${h}:${markup}`;
-  const cached = warpRasterCache.get(cacheKey);
-  if (cached) return cached;
-
-  // createImageBitmap rasterizes the SVG blob on both the main thread and inside a Worker.
-  const bitmap = await createImageBitmap(new Blob([markup], { type: "image/svg+xml" })).catch(() => null);
-  if (!bitmap) return null;
-
-  if (warpRasterCache.size >= WARP_RASTER_CACHE_CAP) {
-    const firstKey = warpRasterCache.keys().next().value;
-    if (firstKey !== undefined) {
-      warpRasterCache.get(firstKey)?.close();
-      warpRasterCache.delete(firstKey);
-    }
-  }
-  warpRasterCache.set(cacheKey, bitmap);
-  return bitmap;
-}
 
 export function drawShapeLayer(
   ctx: Ctx,
@@ -351,7 +417,8 @@ export function drawShapeLayer(
   t: number,
   W: number,
   H: number,
-  mode: OverlayTransformMode = "full"
+  mode: OverlayTransformMode = "full",
+  rasterScale = 1
 ): OverlayBox {
   const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
   const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
@@ -364,15 +431,22 @@ export function drawShapeLayer(
   const borderWidth = borderStr ? num(borderStr) : 0;
   const borderColor = borderStr ? borderStr.slice(String(num(borderStr)).length).replace(/^px\s+solid\s+/, "").trim() : "";
 
-  const centerX = (transform.x / 100) * W;
-  const centerY = (transform.y / 100) * H;
+  const content = mode === "content";
+  const box = mode === "box";
 
   ctx.save();
-  ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity / 100));
-  ctx.translate(centerX, centerY);
-  if (mode === "full") {
-    ctx.rotate((transform.rotation * Math.PI) / 180);
-    ctx.scale(transform.scale, transform.scale);
+  ctx.globalAlpha = content || box ? 1 : Math.max(0, Math.min(1, transform.opacity / 100));
+  if (box) {
+    ctx.translate(ctx.canvas.width / 2, ctx.canvas.height / 2);
+    ctx.scale(rasterScale, rasterScale);
+  } else {
+    const centerX = content ? W / 2 : (transform.x / 100) * W;
+    const centerY = content ? H / 2 : (transform.y / 100) * H;
+    ctx.translate(centerX, centerY);
+    if (mode === "full") {
+      ctx.rotate((transform.rotation * Math.PI) / 180);
+      ctx.scale(transform.scale, transform.scale);
+    }
   }
 
   const boxShadow = style.boxShadow ? String(style.boxShadow) : "";

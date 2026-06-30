@@ -1,6 +1,6 @@
 # ReelForge Architecture And Progress Tracker
 
-Last updated: 2026-06-23
+Last updated: 2026-06-29
 
 This file is the working architecture and product tracker. Keep it crisp:
 
@@ -117,9 +117,9 @@ During product build:
 
 [x] Timeline ruler/playhead sync is fixed, including XS row mode.
 
-[x] Timeline playhead is smooth and spans the track area correctly.
+[x] Timeline playhead is smooth and spans the track area correctly. **Playback no longer hitches** (2026-06-28): the render-status poll (`EditorPage.tsx`) was rebuilding the `project` object every 1.5s for a stuck render job → full editor re-render → periodic ~300ms freeze; it now returns the same reference when nothing render-related changed (no-op re-render).
 
-[x] Timeline playback follows the playhead with smooth horizontal viewport scrolling near the right edge.
+[x] Timeline playback follows the playhead with smooth horizontal viewport scrolling. **Rewritten 2026-06-28** (`TimelineStrip.tsx`): the per-frame auto-follow uses cached geometry (`followGeomRef`/`measureFollowGeom`, refreshed by a ResizeObserver on dock+lane) instead of two `getBoundingClientRect` calls per animation frame — no forced synchronous reflow. The old dead-zone "drift to 84% then ease back to 64%" sawtooth (jumpy/stop-motion) is replaced by **continuous pinned follow** (`PIN_FRAC = 0.88`): the playhead glides to ~88% of the viewport, then holds while the content scrolls in lockstep with its clock-driven motion.
 
 [x] Timeline toolbar stays fixed during horizontal scrolling; clip link/unlink actions live beside undo/redo.
 
@@ -148,6 +148,8 @@ During product build:
 [ ] Browser export renderer is not built.
 
 [ ] Local desktop renderer is not built.
+
+[~] **Method 3 — single GPU compositor (Phases 1/2/4.1/4.2 done; DEFAULT now "scene").** North-star: collapse the three renderers' divergent *composite* step (preview DOM siblings / export canvas2D / Remotion Chromium) into ONE GPU pass so preview IS the export. The per-clip grade was already unified (`MediaWebGLRenderer`); Method 3 adds the missing composite: `packages/shared/src/color/scene-compositor.ts` (`SceneCompositor` — one WebGL2 context, ping-pong RTT accumulator, object-fit + clip mask + 16 in-shader blend modes via `blend.ts` + element-box/3D transform), on shared plumbing `gl-context.ts`. Wired into `VideoPreview.tsx` via `getCompositorMode()`. **Phase 1** media composite; **Phase 2** GPU blur + glow (plate-RTT + separable premultiplied Gaussian + glow drop-shadow; one mechanism covers whole-clip AND region blur); **Phase 4 v1** text/shape rasterized INTO the pass (`scene-text-raster.ts`/`scene-mask-matte.ts`); **Phase 4.1** self-sufficient text/shape — resolution-aware box raster (4.1), transform-independent raster (4.1b), generalized element-box + 3D composite quad (4.1a), text/shape color-grade (per-layer `MediaWebGLRenderer`) + clip-mask + 3D in the pass (4.1c), all DOM fallbacks dropped (4.1d, only a runtime GL failure reverts); **Phase 4.2** junction transitions folded into the pass (per-junction `TransitionCompositor` mix fed as one scene layer; DOM `TransitionOverlay` suppressed in scene mode). Also: clip masks on text/shape now render in DOM preview + Remotion + local export too (comp-space mask wrapper — they never did before); colour/grade effects are now apply-able to text/shape in the inspector (`effects.ts` `compatibleLayerTypes`). **Default flipped dom→"scene" (2026-06-29)** after the prior same-day revert's causes were fixed: the empty-gap **background flash** is gone (the scene canvas is ALWAYS mounted — `sceneEnabled`, decoupled from `visualCount` — so it owns the background every frame; the DOM empty-frame is suppressed in scene mode), preload/cut handling + stale warp key fixed, media is click-selectable in the preview again (`opacity:0` interactive-hidden, not `visibility:hidden`), and perf is event-driven (idle = a timestamp check; per-source texture cache). Escape hatch: `?compositor=dom` / `localStorage` / `VITE_COMPOSITOR_MODE`; WebGL2-gated + `sceneFailed` runtime fallback. **Phase-1.5 export WebGL-context budget (stable, 2026-06-30):** scene-mode local export runs on the main thread, so its contexts stack on the live preview's and can cross the browser's ~16 cap → preview eviction + console spam. Fixed by: preview GPU suspended during export (`export-preview-suspend.ts` + `local-export.ts` begin/end wrap + `ScenePreviewCanvas` rAF guard), a media-renderer **free-list pool** in `scene-frame-compositor.ts` (`MAX_POOLED_MEDIA_RENDERERS=2`, `SAFE_CONTEXT_THRESHOLD=8`, peak counter — caps live media contexts at ~1–2 active reused across all clips, not one-per-clip), and `[export-gl]` telemetry (`export-gl-debug.ts`, gated by `?exportGlDebug=1`). **Gates green:** `blend:test`; `scene:compare` (DOM-vs-scene) incl. masked-blur 0.000%, transition 0.246%, graded/masked/tilted-text ~0.4–0.6%; `render:compare:pixels` (now scene↔Remotion); `export:stress` (isolated 24-clip compositor sweep — pool bounds contexts, returns to baseline); `export:live-stress` (real-world: live `ScenePreviewCanvas` + real `exportLocally` ×3 over a 24-clip bloom/blur/grade comp — peak 7 ≤ 14, suspend observed every export, preview never fell back, 0 lost-context, contexts released to baseline). **Remaining:** Phase 5 (browser export reads back the compositor via `gl.readPixels`→WebCodecs; retire `frame-compositor.ts` — builds the currently-unbuilt browser export renderer), Phase 6 (Remotion convergence). **Phase 2 (deferred):** single shared export GL context + move scene export back to the Worker (would lift the main-thread requirement Phase-1.5 works around). Plan: `~/.claude/plans/we-re-building-lumio-moonlit-beacon.md`.
 
 ### Effects
 
@@ -213,7 +215,7 @@ During product build:
 
 [x] Animation presets.
 
-[x] **Vector masks** (clip masks + effect-region/blur masks) — rectangle/ellipse/polygon/Bézier shapes with Add/Subtract/Intersect/Exclude modes, invert/feather/expansion/opacity, scalar + shape keyframes, reorder, drag-to-move. Alpha-matte SVG built once in `packages/shared/src/clip-masks.ts` and consumed identically by preview + Remotion. Full reference + test recipes: [MASKS.md](MASKS.md).
+[x] **Vector masks** (clip masks + effect-region/blur masks) — rectangle/ellipse/polygon/Bézier shapes with Add/Subtract/Intersect/Exclude modes, invert/feather/expansion/opacity, scalar + shape keyframes, reorder, drag-to-move. Alpha-matte SVG built once in `packages/shared/src/clip-masks.ts` and consumed identically by preview + Remotion. The mask-editing overlay in the viewer is gated to the clip's active time (2026-06-28) — it no longer renders before the selected clip's in-point. Full reference + test recipes: [MASKS.md](MASKS.md).
 
 [x] **Mask tracking** — attach a saved motion track to a mask so it follows a moving subject (`trackingPathToMaskTransformKeyframes` → `scope:"mask"` transform.x/y keyframes, renderer-agnostic). Clip masks also now composite in the **local browser export** (`apps/web/src/export/frame-compositor.ts`).
 

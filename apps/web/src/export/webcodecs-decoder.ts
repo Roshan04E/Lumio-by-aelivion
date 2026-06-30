@@ -29,7 +29,15 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
 
   let buffer: ArrayBuffer;
   try {
-    buffer = await (await fetch(url)).arrayBuffer();
+    // Abort a stalled fetch so a never-settling network/blob read falls back to the <video> provider
+    // (or fails cleanly) instead of hanging the export at "Loading media…".
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      buffer = await (await fetch(url, { signal: controller.signal, cache: "no-store" })).arrayBuffer();
+    } finally {
+      clearTimeout(timer);
+    }
   } catch {
     return null;
   }
@@ -72,10 +80,16 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
 
   const timescale = track.timescale || 1;
   const toMicros = (t: number) => Math.round((t / timescale) * 1_000_000);
+  // Some demuxes don't flag sync samples (no `stss` box → every `is_sync` is false). Feeding the decoder
+  // all-"delta" chunks means it silently waits forever for a keyframe and emits nothing (no frame, no error)
+  // → the reported black/slow-fallback. If NO sample is flagged sync, assume the first is a keyframe so the
+  // decoder can start (the probe still falls back if that assumption is wrong for this file).
+  const syncCount = samples.reduce((n, s) => n + (s.is_sync ? 1 : 0), 0);
+  console.log(`[export] webcodecs: ${samples.length} chunks, ${syncCount} sync, codec="${track.codec}", desc=${description ? `${description.length}B` : "none"}`);
   const chunks = samples.map(
-    (sample) =>
+    (sample, i) =>
       new EncodedVideoChunk({
-        type: sample.is_sync ? "key" : "delta",
+        type: sample.is_sync || (syncCount === 0 && i === 0) ? "key" : "delta",
         timestamp: toMicros(sample.cts),
         duration: toMicros(sample.duration),
         data: sample.data,
@@ -94,22 +108,39 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
 
   const queue: VideoFrame[] = [];
   let failed = false;
+  let outputCount = 0;
   const decoder = new VideoDecoder({
-    output: (frame) => queue.push(frame),
-    error: () => {
+    output: (frame) => {
+      outputCount += 1;
+      queue.push(frame);
+    },
+    error: (e) => {
       failed = true;
+      console.warn("[export] VideoDecoder error:", (e as Error)?.message ?? e);
     },
   });
-  const configure = () => {
+  const buildConfig = (): VideoDecoderConfig => {
     const config: VideoDecoderConfig = { codec: track.codec };
     if (trackW) config.codedWidth = trackW;
     if (trackH) config.codedHeight = trackH;
     if (description) config.description = description;
-    decoder.configure(config);
+    return config;
   };
+  const configure = () => decoder.configure(buildConfig());
+  // Fast-fail an unsupported config BEFORE the 5s probe-decode, and surface why (codec / avcC presence) so
+  // we can fix the fast path rather than silently always taking the slow <video> fallback.
   try {
+    const cfg = buildConfig();
+    const support = await VideoDecoder.isConfigSupported(cfg).catch(() => null);
+    if (!support?.supported) {
+      console.warn(
+        `[export] VideoDecoder config unsupported → <video> fallback. codec="${track.codec}" description=${description ? `${description.length}B` : "none"}`
+      );
+      return null;
+    }
     configure();
-  } catch {
+  } catch (e) {
+    console.warn(`[export] VideoDecoder.configure failed: codec="${track.codec}" description=${description ? `${description.length}B` : "none"}`, e);
     return null;
   }
 
@@ -161,25 +192,59 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
     }
     lastMicros = micros;
 
-    const MAX = 32;
+    // Look-ahead / pinned-frame budget. Export reads forward one frame at a time, so a small window is
+    // plenty — and each pinned VideoFrame is GPU memory (~6MB at 1080p). 32 frames (~190MB) alongside the
+    // scene compositor's RTTs was exhausting the export Worker's GPU process → "lost WebGL context" + black
+    // tail. 8 keeps decode fed without the pressure.
+    const MAX = 8;
     let guard = 0;
+    let stalledRounds = 0;
+    let lastProgress = -1;
     while (!failed && guard++ < 50000) {
       if (queue.length > 0 && queue[queue.length - 1]!.timestamp > micros) break; // decoded past target
       if (fed >= chunks.length) {
         try {
-          await decoder.flush();
+          // End of stream — flush to emit anything still buffered. Bounded so a stuck flush can't hang the
+          // whole export at one frame near a clip's tail.
+          await Promise.race([decoder.flush(), rejectAfter(5000)]);
         } catch {
           failed = true;
         }
         break;
       }
+      let fedThisRound = false;
       while (fed < chunks.length && decoder.decodeQueueSize < MAX && queue.length < MAX) {
         try {
           decoder.decode(chunks[fed++]!);
+          fedThisRound = true;
         } catch {
           failed = true;
           break;
         }
+      }
+      // Progress = any new output OR any new feed this round. A healthy decoder emits PROGRESSIVELY, so it
+      // keeps making progress and never trips the drain below — the bug before was force-flushing during
+      // warmup (saturated input, output not started yet), which corrupted/stalled a working decoder.
+      const progress = outputCount + fed;
+      if (progress !== lastProgress) {
+        stalledRounds = 0;
+        lastProgress = progress;
+      } else {
+        stalledRounds += 1;
+      }
+      // Genuinely stuck: input saturated, zero output, no progress for several rounds → the decoder is
+      // buffering and only emits on flush (some B-frame streams). Force ONE drain. Non-fatal: if it still
+      // produces nothing, give up to the <video> fallback rather than killing a decoder that just warmed
+      // up slowly.
+      if (!fedThisRound && queue.length === 0 && stalledRounds >= 8) {
+        const before = outputCount;
+        try {
+          await Promise.race([decoder.flush(), rejectAfter(5000)]);
+        } catch {
+          /* non-fatal — fall through to the bail check */
+        }
+        stalledRounds = 0;
+        if (outputCount === before) break; // flush yielded nothing → bail (probe → <video> fallback)
       }
       await yieldTask();
     }
@@ -191,6 +256,32 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
     if (!current && queue.length) current = queue.shift()!;
     return current;
   }
+
+  // Probe-decode the first frame BEFORE committing to this provider. configure() can succeed for a codec
+  // the decoder then can't actually decode in this context (e.g. a Worker without HW accel), which used to
+  // surface as a BLACK export (every getFrame returned null). If the probe yields no frame, bail to null so
+  // createFrameProvider falls back to the native <video> decoder (via WEBCODECS_REQUIRED_NO_DOM in a Worker).
+  const probe = await getFrame(0).catch(() => null);
+  if (failed || !probe) {
+    console.warn(
+      `[export] WebCodecs probe-decode produced no frame → <video> fallback. outputs=${outputCount} state=${decoder.state} failed=${failed} qsize=${decoder.decodeQueueSize} firstChunkType=${chunks[0]?.type}`
+    );
+    for (const frame of queue) frame.close();
+    queue.length = 0;
+    (current as VideoFrame | null)?.close();
+    current = null;
+    try {
+      decoder.close();
+    } catch {
+      /* already closed */
+    }
+    return null;
+  }
+  // Do NOT reset after the probe: `getFrame(0)` already decoded frame 0 and left the decoder positioned
+  // exactly where the export begins (`current` = frame 0, `lastMicros` = 0, read-ahead frames queued), so the
+  // first real getFrame reuses it and forward-decodes from there. A `decoder.reset()` here tears the decoder
+  // down to "unconfigured" mid-flight and corrupts the FIRST GOP — invisible on multi-keyframe clips (they
+  // recover at the next IDR) but fatal on a SINGLE-keyframe clip, which then renders black after a frame or two.
 
   return {
     get width() {

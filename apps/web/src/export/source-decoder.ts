@@ -38,6 +38,12 @@ export async function createVideoSource(url: string): Promise<FrameProvider> {
   video.src = url;
 
   await new Promise<void>((resolve, reject) => {
+    // A source that never fires loadeddata OR error (unsupported codec, stalled/dead URL) would hang
+    // the export at "Loading media…" forever — bound the wait so it fails cleanly instead.
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out loading video source for export"));
+    }, 20_000);
     const onReady = () => {
       cleanup();
       resolve();
@@ -47,6 +53,7 @@ export async function createVideoSource(url: string): Promise<FrameProvider> {
       reject(new Error("Failed to load video source for export"));
     };
     const cleanup = () => {
+      clearTimeout(timer);
       video.removeEventListener("loadeddata", onReady);
       video.removeEventListener("error", onError);
     };
@@ -92,8 +99,14 @@ export async function createImageSource(url: string): Promise<FrameProvider> {
   // decodes once up front, and returns a GPU-friendly CanvasImageSource/TexImageSource.
   let bitmap: ImageBitmap;
   try {
-    const blob = await (await fetch(url)).blob();
-    bitmap = await createImageBitmap(blob);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const blob = await (await fetch(url, { signal: controller.signal, cache: "no-store" })).blob();
+      bitmap = await createImageBitmap(blob);
+    } finally {
+      clearTimeout(timer);
+    }
   } catch {
     throw new Error("Failed to load image source for export");
   }

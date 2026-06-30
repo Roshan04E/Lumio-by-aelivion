@@ -1,5 +1,6 @@
 import type { ProjectGraph, SourceAsset, TimelineLayer } from "./types";
 import { applyCaptionTrackToComposition, captionStylePresets, createCaptionTrack, parseTranscriptInput } from "./captions";
+import { createBoxMask } from "./clip-masks";
 
 const fixtureImageSvg = encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
@@ -48,7 +49,20 @@ export type RenderComparisonFixtureKey =
   | "brightness-contrast"
   | "color-curves"
   | "object-fit-cover"
-  | "object-fit-contain";
+  | "object-fit-contain"
+  | "blur"
+  | "glow"
+  | "region-blur"
+  | "masked-blur"
+  | "clip-region-blur"
+  | "tilt-3d"
+  | "scaled-text"
+  | "media-opacity"
+  | "graded-text"
+  | "masked-text"
+  | "region-text"
+  | "tilted-text"
+  | "transition";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -56,7 +70,20 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "brightness-contrast",
   "color-curves",
   "object-fit-cover",
-  "object-fit-contain"
+  "object-fit-contain",
+  "blur",
+  "glow",
+  "region-blur",
+  "masked-blur",
+  "clip-region-blur",
+  "tilt-3d",
+  "scaled-text",
+  "media-opacity",
+  "graded-text",
+  "masked-text",
+  "region-text",
+  "tilted-text",
+  "transition"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -147,9 +174,83 @@ const colorCurvesEffects: TimelineLayer["effects"] = [
   }
 ];
 
+// Method 3 Phase 2: blur/glow exercise the GPU effect passes in the scene compositor (dropped CSS
+// filters in the DOM path). `region-blur` carries a mask on the blur effect so the duplicate-layer
+// expansion (`expandEffectRegionMasks`) turns it into a region blur the scene path must reproduce.
+const blurEffects: TimelineLayer["effects"] = [
+  { id: "fixture_blur", type: "blur", name: "Blur", enabled: true, intensity: 100, params: { amount: 16 } }
+];
+
+const glowEffects: TimelineLayer["effects"] = [
+  { id: "fixture_glow", type: "glow", name: "Glow", enabled: true, intensity: 100, params: { radius: 28, color: "#C9FF4A" } }
+];
+
+const regionBlurEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_region_blur",
+    type: "blur",
+    name: "Region Blur",
+    enabled: true,
+    intensity: 100,
+    params: { amount: 24 },
+    masks: [createBoxMask("rectangle", 300, 700, 780, 1200, 0)]
+  }
+];
+
+// masked-blur: a whole-clip blur UNDER an ellipse clip-mask — exercises the scene compositor's mask +
+// blur-edge handling (the comp corners outside the ellipse must stay background, no edge bleed).
+const maskedBlurEffects: TimelineLayer["effects"] = [
+  { id: "fixture_masked_blur", type: "blur", name: "Blur", enabled: true, intensity: 100, params: { amount: 18 } }
+];
+
+// Phase 4.1c: a color grade applied to the TEXT layer. The scene path now grades text through the SAME
+// LUT engine as media (vs the old DOM fallback), so this fixture trips if the scene draws text ungraded.
+const textGradeEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_text_grade",
+    type: "brightnessContrast",
+    name: "Text grade",
+    enabled: true,
+    intensity: 100,
+    params: { exposure: -8, contrast: 44, saturation: 70, temperature: 64, tint: -24 }
+  }
+];
+
+// region-text: the SAME text grade limited to a REGION (left comp half) via an effect mask. Exercises
+// expandLayerEffectRegions on a TEXT layer — only the masked region is graded; the rest stays the base look.
+// Trips if region expansion is still media-only (the whole text would grade, or not at all).
+const textRegionGradeEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_text_region_grade",
+    type: "brightnessContrast",
+    name: "Text region grade",
+    enabled: true,
+    intensity: 100,
+    params: { exposure: -8, contrast: 44, saturation: 70, temperature: 64, tint: -24 },
+    masks: [createBoxMask("rectangle", 0, 0, 540, 1920, 0)]
+  }
+];
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
+  masks?: TimelineLayer["masks"];
+  /** 3D tilt applied to the base media layer (exercises the composite quad vs CSS perspective). */
+  tilt?: { rotateX?: number; rotateY?: number; perspective?: number };
+  /** When set, the overlay track is a single TEXT layer at this scale (no captions/shape) — exercises the
+   *  resolution-aware BOX raster: scaled scene text must stay as crisp as the DOM/export text. */
+  textScale?: number;
+  /** Base media-layer opacity (0–100). Exercises scene composite-applied opacity vs DOM CSS opacity. */
+  mediaOpacity?: number;
+  /** Phase 4.1c: color grade on the TEXT layer (scene grades text via the LUT, like media). */
+  textEffects?: TimelineLayer["effects"];
+  /** Phase 4.1c: clip mask on the TEXT layer (scene clips text via the comp-space matte). */
+  textMasks?: TimelineLayer["masks"];
+  /** Phase 4.1c: 3D tilt on the TEXT layer (scene tilts text via the composite quad). */
+  textTilt?: { rotateX?: number; rotateY?: number; perspective?: number };
+  /** Phase 4.2: two same-track clips joined by a junction transition, sampled MID-transition — exercises
+   *  the scene pass mixing the junction in-canvas (vs the DOM overlay). */
+  transition?: boolean;
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -164,6 +265,39 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover" };
     case "object-fit-contain":
       return { effects: [], fit: "contain" };
+    case "blur":
+      return { effects: blurEffects, fit: "cover" };
+    case "glow":
+      return { effects: glowEffects, fit: "cover" };
+    case "region-blur":
+      return { effects: regionBlurEffects, fit: "cover" };
+    case "masked-blur":
+      return { effects: maskedBlurEffects, fit: "cover", masks: [createBoxMask("ellipse", 300, 560, 780, 1360, 0)] };
+    case "clip-region-blur":
+      // The user's exact repro: a CLIP mask on the layer AND a REGION blur on the effect = the `clip ∩ region`
+      // compound. The expansion must blur only inside (clipEllipse ∩ regionRect); the rest of the clip ellipse
+      // stays sharp, and outside the clip is background. Region blur alone works — this checks the compound.
+      return { effects: regionBlurEffects, fit: "cover", masks: [createBoxMask("ellipse", 220, 520, 860, 1400, 0)] };
+    case "tilt-3d":
+      return { effects: [], fit: "cover", tilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
+    case "scaled-text":
+      return { effects: [], fit: "cover", textScale: 5 };
+    case "media-opacity":
+      return { effects: [], fit: "cover", mediaOpacity: 50 };
+    case "graded-text":
+      return { effects: [], fit: "cover", textScale: 5, textEffects: textGradeEffects };
+    case "masked-text":
+      // A rectangle clip mask revealing only the LEFT comp half — a big, unambiguous clip of the
+      // scaled text (the right glyphs disappear). Ungraded/unmasked scene text trips the bar.
+      return { effects: [], fit: "cover", textScale: 5, textMasks: [createBoxMask("rectangle", 0, 0, 540, 1920, 0)] };
+    case "region-text":
+      // Text grade confined to the left comp half via an effect (region) mask — exercises region expansion
+      // on a TEXT layer (left half graded, right half base).
+      return { effects: [], fit: "cover", textScale: 5, textEffects: textRegionGradeEffects };
+    case "tilted-text":
+      return { effects: [], fit: "cover", textScale: 3, textTilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
+    case "transition":
+      return { effects: [], fit: "cover", transition: true };
     case "default":
     default:
       return { effects: fullColorEffects, fit: "cover" };
@@ -198,13 +332,21 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
       position: { x: 50, y: 50 },
       scale: 1,
       rotation: 0,
-      opacity: 100
+      opacity: variant.mediaOpacity ?? 100,
+      ...(variant.tilt
+        ? {
+            rotateX: variant.tilt.rotateX ?? 0,
+            rotateY: variant.tilt.rotateY ?? 0,
+            perspective: variant.tilt.perspective ?? 0
+          }
+        : {})
     },
     // Variant-driven (see RenderComparisonFixtureKey): the "default" fixture exercises the
     // full Phase-3 color pipeline (13C.1 graph Curves + 13C.3 HSL Secondary that ONLY the
     // WebGL float-3D-LUT engine can render); other variants isolate a single concern so a
     // parity regression points at one code path.
     effects: variant.effects,
+    ...(variant.masks ? { masks: variant.masks } : {}),
     keyframes: []
   };
 
@@ -226,6 +368,43 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     keyframes: []
   };
 
+  // Text-only fixtures: a single large text layer (no captions/shape) so the diff isolates ONE text
+  // concern — scaled-text (resolution-aware BOX raster), graded-text (LUT grade), masked-text (clip
+  // matte), tilted-text (3D quad). All four now composite text on the GPU (Phase 4.1c/d, no DOM fallback).
+  const useTextFixture = Boolean(variant.textScale || variant.textEffects || variant.textMasks || variant.textTilt);
+  const textFixtureLayer: TimelineLayer = {
+    id: "fixture_scaled_text",
+    trackId: "overlay_track",
+    type: "text",
+    name: "Text fixture",
+    text: "HI",
+    startSeconds: 0,
+    durationSeconds: 12,
+    fontFamily: "Arial",
+    fontSize: 110,
+    textWidthPercent: 86,
+    textAlign: "center",
+    color: "#ffffff",
+    strokeColor: "#050608",
+    strokeWidth: 4,
+    transform: {
+      position: { x: 50, y: 50 },
+      scale: variant.textScale ?? 1,
+      rotation: 0,
+      opacity: 100,
+      ...(variant.textTilt
+        ? {
+            rotateX: variant.textTilt.rotateX ?? 0,
+            rotateY: variant.textTilt.rotateY ?? 0,
+            perspective: variant.textTilt.perspective ?? 0
+          }
+        : {})
+    },
+    effects: variant.textEffects ?? [],
+    ...(variant.textMasks ? { masks: variant.textMasks } : {}),
+    keyframes: []
+  };
+
   const transcript = parseTranscriptInput(`WEBVTT
 
 00:00:00.000 --> 00:00:01.400
@@ -235,6 +414,37 @@ New Drop
 Save this style now`);
   const captionStyle = captionStylePresets[0]!;
   const captionTrack = createCaptionTrack(transcript, captionStyle.id, "new, drop, save");
+
+  // Transition fixture (Phase 4.2): two same-track image clips joined by a crossDissolve, sampled
+  // MID-transition (the comp frame renderComparisonFrameSeconds = 0.45s is inside the 0.4–0.8s window).
+  // The incoming clip carries a heavy grade so the two-texture mix is non-trivial (plain ⟷ graded).
+  const transitionOutgoing: TimelineLayer = {
+    id: "fixture_transition_out",
+    trackId: "video_track",
+    type: "image",
+    name: "Transition outgoing",
+    startSeconds: 0,
+    durationSeconds: 0.4,
+    assetId: imageAsset.id,
+    fit: "cover",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+  const transitionIncoming: TimelineLayer = {
+    id: "fixture_transition_in",
+    trackId: "video_track",
+    type: "image",
+    name: "Transition incoming",
+    startSeconds: 0.4,
+    durationSeconds: 11.6,
+    assetId: imageAsset.id,
+    fit: "cover",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: colorCurvesEffects,
+    transitionIn: { kind: "crossDissolve", durationSeconds: 0.4 },
+    keyframes: []
+  };
 
   const graph: ProjectGraph = {
     projectId: "project_render_pixel_fixture",
@@ -258,18 +468,22 @@ Save this style now`);
           id: "overlay_track",
           type: "overlay",
           name: "Overlay",
-          layers: [shapeLayer]
+          // Transition fixture keeps the overlay empty so the diff isolates the junction mix.
+          layers: useTextFixture ? [textFixtureLayer] : variant.transition ? [] : [shapeLayer]
         },
         {
           id: "video_track",
           type: "video",
           name: "Video",
-          layers: [imageLayer]
+          layers: variant.transition ? [transitionOutgoing, transitionIncoming] : [imageLayer]
         }
       ]
     }
   };
-  const compositionWithCaptions = applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
+  // Text-only + transition fixtures isolate their concern — skip captions so the diff is just that.
+  const compositionWithCaptions = useTextFixture || variant.transition
+    ? graph.composition!
+    : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
 
   return {
     graph: {

@@ -61,10 +61,12 @@ async function main() {
 }
 
 function startWebServer(port: number) {
+  // shell:true so Windows resolves `pnpm` → `pnpm.cmd` (bare spawn is ENOENT; spawning `.cmd`
+  // directly is EINVAL on modern Node/Windows). Args are static, so shell:true is safe here.
   const child = spawn(
     "pnpm",
     ["--dir", path.join(repoRoot, "apps/web"), "exec", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-    { cwd: repoRoot, env: { ...process.env, BROWSER: "none" }, stdio: ["ignore", "pipe", "pipe"] }
+    { cwd: repoRoot, env: { ...process.env, BROWSER: "none" }, stdio: ["ignore", "pipe", "pipe"], shell: true }
   );
   child.stdout.on("data", (data) => process.stdout.write(`[web] ${data}`));
   child.stderr.on("data", (data) => process.stderr.write(`[web] ${data}`));

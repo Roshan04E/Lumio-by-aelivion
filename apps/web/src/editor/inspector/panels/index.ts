@@ -24,6 +24,17 @@ export function registerBuiltinInspectorPanels(): void {
     load: () => import("./TransformPanel")
   });
 
+  // Content / Crop — reframe the SOURCE inside the clip (pan/zoom/crop), separate from the comp Transform.
+  // Media only (text/shape have no source to reframe). Sits just under Transform.
+  inspectorRegistry.register({
+    id: "content",
+    title: "Content / Crop",
+    tier: "basic",
+    appliesTo: ["video", "image"],
+    order: 20,
+    load: () => import("./ContentPanel")
+  });
+
   inspectorRegistry.register({
     id: "text.warp",
     title: "Warp",
@@ -33,12 +44,14 @@ export function registerBuiltinInspectorPanels(): void {
     load: () => import("./TextWarpPanel")
   });
 
-  // Vector masks (Phase 1) — clip-level masks on full-bleed media layers.
+  // Vector clip masks — crop a layer to a shape. Media masks on its comp-sized element; text/shape mask via
+  // a comp-space, transform-less wrapper (getOverlayMaskWrapperStyle), rendered in every path (DOM/scene/
+  // Remotion/export) since Phase 4.1c — so the section applies to all visual layer types.
   inspectorRegistry.register({
     id: "mask",
     title: "Masks",
     tier: "advanced",
-    appliesTo: ["video", "image"],
+    appliesTo: ["video", "image", "text", "shape"],
     order: 30,
     load: () => import("./MaskPanel")
   });

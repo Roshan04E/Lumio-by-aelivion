@@ -23,6 +23,7 @@ import {
   bakePipelineToLut3d,
   buildColorFilterDefs,
   buildMaskDefsSvg,
+  getCompositionMaskCss,
   buildWarpedTextPathSvg,
   compositionTransformCss,
   configureFontResolver,
@@ -571,8 +572,11 @@ function RenderLayer({ adjustmentLayers, layer }: { adjustmentLayers: RenderMani
   }
 
   if (renderLayer.type === "shape") {
+    // Clip mask: the AbsoluteFill is the comp-sized, transform-less wrapper the comp-px mask needs (the
+    // shape <div> inside is content-sized + transformed). Matches the DOM preview + GPU scene path.
     return (
-      <AbsoluteFill style={{ pointerEvents: "none" }}>
+      <AbsoluteFill style={{ pointerEvents: "none", ...getCompositionMaskCss(renderLayer) }}>
+        <MaskDefs layer={renderLayer} currentTimeSeconds={currentTimeSeconds} />
         <ColorFilterDefs layer={renderLayer} currentTimeSeconds={currentTimeSeconds} />
         <div style={shapeStyle(renderLayer, currentTimeSeconds)} />
       </AbsoluteFill>
@@ -689,8 +693,11 @@ function TextLayer({ renderLayer, currentTimeSeconds }: { renderLayer: RenderMan
   const warpSvg = useWarpedTextSvgRemotion(textWarp, visibleRuns, style);
   const warpReady = warpSvg != null;
 
+  // Clip mask: the AbsoluteFill is the comp-sized, transform-less wrapper the comp-px mask needs (the text
+  // <div> inside is content-sized + transformed). Matches the DOM preview + GPU scene path.
   return (
-    <AbsoluteFill style={{ pointerEvents: "none" }}>
+    <AbsoluteFill style={{ pointerEvents: "none", ...getCompositionMaskCss(renderLayer) }}>
+      <MaskDefs layer={renderLayer} currentTimeSeconds={currentTimeSeconds} />
       <ColorFilterDefs layer={renderLayer} currentTimeSeconds={currentTimeSeconds} />
       <div style={style}>
         {visibleRuns.map((run, index) => (

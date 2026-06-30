@@ -9,7 +9,7 @@
  * pipeline on the main thread (where the `<video>`-seek fallback exists).
  */
 
-import { type TimelineComposition } from "@reelforge/shared";
+import { clipCompositionToWorkArea, type TimelineComposition } from "@reelforge/shared";
 import { detectBrowserToolCapabilities } from "../tools/capabilities";
 import { type ExportFormat } from "./video-encoder";
 import {
@@ -18,6 +18,10 @@ import {
   type ExportCoreInput,
 } from "./export-core";
 import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
+import { getExportCompositor } from "../color/render-engine";
+import { beginPreviewSuspendForExport, endPreviewSuspendForExport } from "./export-preview-suspend";
+import { logExportGl } from "./export-gl-debug";
+import { getActiveGlContextCount } from "@reelforge/shared";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "./export-worker-protocol";
 
 export interface LocalExportRequest {
@@ -54,8 +58,14 @@ function canUseWorker(): boolean {
 }
 
 export async function exportLocally(request: LocalExportRequest): Promise<Blob> {
-  const { composition, urlForAsset, format = "mp4", fps, onProgress, signal } = request;
+  const { urlForAsset, format = "mp4", fps, onProgress, signal } = request;
   if (signal?.aborted) throw new Aborted();
+
+  // Honor Premiere-style in/out points (work area): clip the composition to the range and shift it so
+  // the in-point becomes t=0 — same as the cloud render path (buildRenderManifest). Applied BEFORE
+  // audio mixing + source resolution so audio, video, and durationSeconds all share the clipped timeline.
+  // Identity (same reference) when no in/out point is set, so a full-project export is unaffected.
+  const composition = clipCompositionToWorkArea(request.composition);
 
   // Resolve sources + mix audio on the main thread (both need Window-only APIs).
   const urlMap = buildSourceUrlMap(composition, urlForAsset);
@@ -65,10 +75,16 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   const mixedBuffer = await mixTimelineAudio(audioLayers, composition.durationSeconds).catch(() => null);
   const audio = mixedBuffer ? extractAudioChannels(mixedBuffer) : null;
 
-  const input: ExportCoreInput = { composition, urlMap, audio, format, fps };
+  // Resolve the composite engine ONCE here (main thread) and thread it through — the Worker can't read the
+  // ?exportCompositor= flag (no window) and would otherwise always default to "scene".
+  const mode = getExportCompositor();
+  const input: ExportCoreInput = { composition, urlMap, audio, format, fps, exportCompositor: mode };
 
-  // Preferred path: render in a Worker (keeps the UI responsive).
-  if (canUseWorker()) {
+  // The GPU scene compositor's multi-/cross-context WebGL is reliable on the MAIN thread (the editor preview
+  // uses the same SceneCompositor) but loses its context in the export Worker's isolated GPU process → black
+  // frames. So scene-mode exports run on the main thread (slightly sluggish UI, but correct + with bloom); the
+  // canvas2D "frame" path stays in the Worker (non-blocking). Worker hardening to return scene there is Phase 2.
+  if (canUseWorker() && mode !== "scene") {
     try {
       return await runInWorker(input, onProgress, signal);
     } catch (error) {
@@ -78,7 +94,18 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
     }
   }
 
-  return runExportCore(input, { onProgress, ...(signal ? { signal } : {}) });
+  // Main-thread export: the editor preview's GPU compositor must yield its WebGL context for the
+  // duration (its own SceneFrameCompositor + per-media contexts can evict the preview's context). Pausing
+  // the preview's compositing while we run here keeps it off its context during the eviction window, so it
+  // doesn't flood the console with "lost WebGL context" uploads, and it repaints once the export releases.
+  beginPreviewSuspendForExport();
+  logExportGl(() => `main-thread export start: preview suspended=true, mode=${mode}, active contexts=${getActiveGlContextCount()}`);
+  try {
+    return await runExportCore(input, { onProgress, ...(signal ? { signal } : {}) });
+  } finally {
+    endPreviewSuspendForExport();
+    logExportGl(() => `main-thread export end: preview suspended=false, active contexts=${getActiveGlContextCount()}`);
+  }
 }
 
 /** Drive the export Worker, relaying progress and cancellation. */

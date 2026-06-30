@@ -24,6 +24,30 @@ import {
   type TimelineKeyframeV2
 } from "@reelforge/shared";
 
+// ── Perspective control mapping ─────────────────────────────────────────────────────────────────────
+// All renderers store CSS `perspective(N px)`, where a SMALLER N = STRONGER 3D foreshortening (it's a camera
+// DISTANCE) and N=0 = flat (omitted). Correct, but counter-intuitive as a control: a raw 0→4000 px slider
+// feels inverted (more value = flatter) AND jumps flat→extreme the instant it leaves 0. So the inspector
+// exposes a monotonic "depth" 0..100 (0 = flat → 100 = strongest tilt) and converts to/from the stored px
+// here — the stored `transform.perspective` field, the three renderers, and keyframes are all unchanged.
+const PERSPECTIVE_DEPTH_MAX = 100;
+const PERSPECTIVE_PX_FLAT = 4000; // near-flat (camera far) — the depth just above 0
+const PERSPECTIVE_PX_STRONG = 350; // strongest tilt (camera close) — depth = max
+
+/** Stored CSS-perspective px → display depth 0..100 (0 = flat). Inverse of {@link perspectiveDepthToPx}. */
+function perspectivePxToDepth(px: number): number {
+  if (!(px > 0)) return 0;
+  const d = (PERSPECTIVE_DEPTH_MAX * (PERSPECTIVE_PX_FLAT - px)) / (PERSPECTIVE_PX_FLAT - PERSPECTIVE_PX_STRONG);
+  return Math.round(Math.max(0, Math.min(PERSPECTIVE_DEPTH_MAX, d)));
+}
+
+/** Display depth 0..100 → stored CSS-perspective px (0 = flat/omitted; monotonic: more depth = stronger). */
+function perspectiveDepthToPx(depth: number): number {
+  if (depth <= 0) return 0;
+  const d = Math.min(PERSPECTIVE_DEPTH_MAX, depth);
+  return Math.round(PERSPECTIVE_PX_FLAT - (d / PERSPECTIVE_DEPTH_MAX) * (PERSPECTIVE_PX_FLAT - PERSPECTIVE_PX_STRONG));
+}
+
 /**
  * Blend-mode options shown in the inspector, grouped the way creators expect
  * (Photoshop/Premiere ordering). Every entry below is fully implemented in all
@@ -780,8 +804,8 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
           keyframe={transformKeyframe("transform.scale")}
           label="Scale"
           value={animatedTransform.scale}
-          min={0.2}
-          max={3}
+          min={0.01}
+          max={100}
           step={0.05}
           onReset={() => changeTransformProperty("transform.scale", 1)}
           onChange={(value) => changeTransformProperty("transform.scale", value)}
@@ -863,12 +887,13 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
           icon={<Box size={14} />}
           keyframe={transformKeyframe("transform.perspective")}
           label="Perspective"
-          value={animatedTransform.perspective ?? 0}
+          // Monotonic depth 0..100 (0 = flat → 100 = strongest); stored as CSS-perspective px (see mapping above).
+          value={perspectivePxToDepth(animatedTransform.perspective ?? 0)}
           min={0}
-          max={4000}
-          step={20}
+          max={100}
+          step={1}
           onReset={() => changeTransformProperty("transform.perspective", 0)}
-          onChange={(value) => changeTransformProperty("transform.perspective", value)}
+          onChange={(value) => changeTransformProperty("transform.perspective", perspectiveDepthToPx(value))}
         />
       </div>
       </InspectorSection>

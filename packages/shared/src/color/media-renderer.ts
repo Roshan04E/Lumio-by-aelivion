@@ -17,6 +17,7 @@
  */
 
 import { bakeMatteLut3d, bakePipelineToLut3d } from "./lut3d";
+import { noteGlContextCreated, releaseContextIfDetached } from "./gl-context";
 import { MEDIA_FRAGMENT_SHADER, MEDIA_VERTEX_SHADER, mediaLut3dToRgbaFloat } from "./media-shader";
 import type { ColorPipeline, MediaEffects } from "./types";
 
@@ -136,6 +137,9 @@ export class MediaWebGLRenderer {
     // (the flicker). Each draw() still clears+redraws, so output is unchanged when we do draw.
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: true, preserveDrawingBuffer: true }) as WebGL2RenderingContext | null;
     if (!gl) throw new Error("media-renderer: WebGL2 unavailable");
+    // Count toward the live WebGL context budget — this is the one creation site that doesn't route through
+    // createGl(); `dispose()`'s `releaseContextIfDetached` decrements it. Keeps the export budget accurate.
+    noteGlContextCreated();
     this.gl = gl;
 
     const vs = compile(gl, gl.VERTEX_SHADER, MEDIA_VERTEX_SHADER);
@@ -342,5 +346,6 @@ export class MediaWebGLRenderer {
     gl.deleteTexture(this.lutTex);
     gl.deleteVertexArray(this.vao);
     gl.deleteProgram(this.program);
+    releaseContextIfDetached(gl);
   }
 }

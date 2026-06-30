@@ -10,6 +10,7 @@ export * from "./cloud-transcription";
 export * from "./composition-style";
 export * from "./dependencies";
 export * from "./effects";
+export * from "./export-stress-fixture";
 export * from "./masks";
 export * from "./matte";
 export * from "./render-comparison-fixture";

@@ -68,7 +68,7 @@ export const transformPropertyConfigs: Array<{
 }> = [
   { label: "X", property: "transform.position.x", min: 0, max: 100, step: 1 },
   { label: "Y", property: "transform.position.y", min: 0, max: 100, step: 1 },
-  { label: "Scale", property: "transform.scale", min: 0.2, max: 3, step: 0.05 },
+  { label: "Scale", property: "transform.scale", min: 0.01, max: 100, step: 0.05 },
   { label: "Rotate", property: "transform.rotation", min: -180, max: 180, step: 1 },
   { label: "Opacity", property: "transform.opacity", min: 0, max: 100, step: 1 },
   { label: "Tilt X", property: "transform.rotateX", min: -180, max: 180, step: 1 },
