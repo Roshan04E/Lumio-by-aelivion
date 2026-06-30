@@ -36,6 +36,7 @@ const supportedFixtures: RenderComparisonFixtureKey[] = [
   "color-curves",
   "object-fit-cover",
   "object-fit-contain",
+  "content-transform",
   "clip-region-blur",
   "media-opacity",
   "transition",
@@ -47,8 +48,7 @@ const supportedFixtures: RenderComparisonFixtureKey[] = [
 ];
 
 const unsupportedGaps = [
-  "person-extraction mattes",
-  "source-within-frame content transforms"
+  "person-extraction mattes"
 ];
 
 const diffThreshold = Number(process.env.PIXEL_DIFF_THRESHOLD ?? 0.16);

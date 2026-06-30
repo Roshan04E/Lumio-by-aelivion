@@ -43,8 +43,8 @@ import {
  * Phase 6.2 is deliberately MINIMAL: media (image + video) with object-fit + transform (incl. 3D tilt the
  * compositor already does) + opacity + blend + color grade + media effects + blur/glow + clip (vector) masks +
  * junction transitions, all from the shared builder. Text/shape layers, person-extraction mattes, and
- * source-within-frame content transforms are NOT wired here yet (see the gaps note at the bottom) — they fall
- * back to nothing in this path. The legacy Root.tsx path is untouched and remains the default.
+ * source-within-frame content transforms are carried through the shared draw-list builder. Person-extraction
+ * mattes are NOT wired here yet. The legacy Root.tsx path is untouched and remains the default.
  *
  * Audio/sequencing/mux are unchanged: audio layers still render as `<Audio>` inside `<Sequence>` exactly like
  * the legacy path, so the muxed output keeps its sound.

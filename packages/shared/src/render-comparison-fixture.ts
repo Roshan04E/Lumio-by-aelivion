@@ -50,6 +50,7 @@ export type RenderComparisonFixtureKey =
   | "color-curves"
   | "object-fit-cover"
   | "object-fit-contain"
+  | "content-transform"
   | "blur"
   | "glow"
   | "region-blur"
@@ -71,6 +72,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "color-curves",
   "object-fit-cover",
   "object-fit-contain",
+  // Kept out of the default legacy pixel sweep until the legacy DOM Remotion path supports content transforms.
   "blur",
   "glow",
   "region-blur",
@@ -242,6 +244,7 @@ interface FixtureVariant {
   textScale?: number;
   /** Base media-layer opacity (0–100). Exercises scene composite-applied opacity vs DOM CSS opacity. */
   mediaOpacity?: number;
+  content?: TimelineLayer["content"];
   /** Phase 4.1c: color grade on the TEXT layer (scene grades text via the LUT, like media). */
   textEffects?: TimelineLayer["effects"];
   /** Phase 4.1c: clip mask on the TEXT layer (scene clips text via the comp-space matte). */
@@ -265,6 +268,17 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover" };
     case "object-fit-contain":
       return { effects: [], fit: "contain" };
+    case "content-transform":
+      return {
+        effects: [],
+        fit: "cover",
+        content: {
+          scale: 1.8,
+          offsetX: 0.42,
+          offsetY: -0.24,
+          crop: { top: 0.08, right: 0.18, bottom: 0.12, left: 0.06 }
+        }
+      };
     case "blur":
       return { effects: blurEffects, fit: "cover" };
     case "glow":
@@ -346,6 +360,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     // WebGL float-3D-LUT engine can render); other variants isolate a single concern so a
     // parity regression points at one code path.
     effects: variant.effects,
+    ...(variant.content ? { content: variant.content } : {}),
     ...(variant.masks ? { masks: variant.masks } : {}),
     keyframes: []
   };

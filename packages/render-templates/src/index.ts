@@ -1,5 +1,5 @@
 import { expandEffectRegionMasks, isTrackEnabled } from "@reelforge/shared";
-import type { BlendMode, Mask, MatteRef, ProjectGraph, SourceAsset, TemplateDefinition, TextRun, TimelineComposition, TimelineKeyframeV2, TransitionSpec } from "@reelforge/shared";
+import type { BlendMode, LayerContentTransform, Mask, MatteRef, ProjectGraph, SourceAsset, TemplateDefinition, TextRun, TimelineComposition, TimelineKeyframeV2, TransitionSpec } from "@reelforge/shared";
 
 export interface RenderComposition {
   id: string;
@@ -111,6 +111,8 @@ export interface RenderManifestLayer {
   transitionIn?: TransitionSpec | undefined;
   /** Layer blend mode, carried verbatim; the renderer applies it as CSS mix-blend-mode. */
   blendMode?: BlendMode | undefined;
+  /** Source-within-frame media pan/zoom/crop, carried verbatim for scene-compositor paths. */
+  content?: LayerContentTransform | undefined;
   transform: Record<string, unknown>;
   style: Record<string, unknown>;
   effects: unknown[];
@@ -202,6 +204,7 @@ export function buildRenderManifest(input: {
           masks: layer.masks,
           transitionIn: layer.transitionIn,
           blendMode: layer.blendMode,
+          content: layer.content,
           transform: layer.transform as unknown as Record<string, unknown>,
           style: {
             color: layer.color,
