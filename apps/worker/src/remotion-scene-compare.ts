@@ -38,11 +38,15 @@ const supportedFixtures: RenderComparisonFixtureKey[] = [
   "object-fit-contain",
   "clip-region-blur",
   "media-opacity",
-  "transition"
+  "transition",
+  "graded-text",
+  "masked-text",
+  "region-text",
+  "tilted-text",
+  "scaled-text"
 ];
 
 const unsupportedGaps = [
-  "text/shape layers (SceneStage Phase 6.2 uses rasterizer:null)",
   "person-extraction mattes",
   "source-within-frame content transforms"
 ];

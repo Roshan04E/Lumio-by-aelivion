@@ -15,10 +15,12 @@ import {
   MediaWebGLRenderer,
   SceneCompositor,
   SceneMaskMatteCache,
+  SceneTextRasterizer,
   buildSceneDraws,
   findTransitionPairs,
   getActiveTransition,
   getCompositionColorPipeline,
+  getCompositionFilterEffects,
   getCompositionMediaEffects,
   getCompositionObjectFit,
   getCompositionVolume,
@@ -129,6 +131,7 @@ function isMedia(layer: RenderManifestLayer): boolean {
 class SceneController {
   private readonly compositor: SceneCompositor;
   private readonly matteCache: SceneMaskMatteCache;
+  private readonly rasterizer: SceneTextRasterizer;
   private readonly mediaRenderers = new Map<string, MediaWebGLRenderer>();
   private readonly mediaPipelineKeys = new Map<string, string>();
   private readonly gradeRenderers = new Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>();
@@ -141,6 +144,7 @@ class SceneController {
   ) {
     this.compositor = new SceneCompositor(canvas, width, height);
     this.matteCache = new SceneMaskMatteCache(width, height);
+    this.rasterizer = new SceneTextRasterizer();
   }
 
   private mediaRendererFor(id: string): MediaWebGLRenderer {
@@ -196,12 +200,12 @@ class SceneController {
    * decoded frame for each active media layer. Returns true when the frame was rendered, false when a media
    * frame is still missing (caller retries once it arrives).
    */
-  composite(
+  async composite(
     activeLayers: RenderManifestLayer[],
     rawById: Map<string, RawFrame>,
     transitions: ScenePreviewTransition[],
     t: number
-  ): boolean {
+  ): Promise<boolean> {
     const activeMediaIds = new Set(activeLayers.filter(isMedia).map((l) => l.id));
     this.pruneRenderers(activeMediaIds);
 
@@ -218,6 +222,16 @@ class SceneController {
       gradedById.set(layer.id, this.gradeMedia(layer, raw, t));
     }
 
+    await Promise.all(
+      activeLayers
+        .filter((layer) => layer.type === "text" || layer.type === "shape")
+        .map(async (layer) => {
+          const fx = getCompositionFilterEffects(layer as unknown as TimelineLayer, { currentTimeSeconds: t });
+          const boxMode = !(fx.blurPx > 0 || fx.glow);
+          await this.rasterizer.ensure(layer as unknown as TimelineLayer, t, this.width, this.height, boxMode);
+        })
+    );
+
     const draws = buildSceneDraws({
       layers: activeLayers as unknown as TimelineLayer[],
       width: this.width,
@@ -225,8 +239,8 @@ class SceneController {
       currentTime: t,
       renderScale: 1,
       transitions,
-      // Phase 6.2: text/shape are not rasterized here yet → the builder drops them (no raster).
-      rasterizer: null,
+      // Phase 6.3a: text/shape rasterize through the shared export rasterizer before the draw list is built.
+      rasterizer: this.rasterizer,
       matteCache: this.matteCache,
       gradeRenderers: this.gradeRenderers,
       getMediaGraded: (id) => gradedById.get(id) ?? null,
@@ -253,6 +267,7 @@ class SceneController {
     };
     safe(() => this.compositor.dispose());
     safe(() => this.matteCache.dispose());
+    safe(() => this.rasterizer.dispose());
     for (const renderer of this.mediaRenderers.values()) safe(() => renderer.dispose());
     this.mediaRenderers.clear();
     this.mediaPipelineKeys.clear();
@@ -361,9 +376,11 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   // Per-frame composite, gated by a delayRender held until every active media frame has arrived + composited.
   const pendingRef = useRef<{ frame: number; id: number } | null>(null);
   const continuedFrameRef = useRef<number>(-1);
+  const compositePassRef = useRef(0);
   useEffect(() => {
     const controller = controllerRef.current;
     if (!controller) return;
+    const pass = ++compositePassRef.current;
 
     // Acquire (or keep) this frame's render-block handle.
     if (continuedFrameRef.current !== frame && (!pendingRef.current || pendingRef.current.frame !== frame)) {
@@ -408,22 +425,25 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       });
     }
 
-    let complete = false;
-    try {
-      complete = controller.composite(merged, rawRef.current, transitions, t);
-    } catch (error) {
-      console.error("SceneStage: composite failed", error);
-      complete = true; // don't deadlock the render — ship whatever landed
-    }
-    if (complete && pendingRef.current && pendingRef.current.frame === frame) {
+    void (async () => {
+      let complete = false;
       try {
-        continueRender(pendingRef.current.id);
-      } catch {
-        /* ignore */
+        complete = await controller.composite(merged, rawRef.current, transitions, t);
+      } catch (error) {
+        console.error("SceneStage: composite failed", error);
+        complete = true;
       }
-      continuedFrameRef.current = frame;
-      pendingRef.current = null;
-    }
+      if (pass !== compositePassRef.current) return;
+      if (complete && pendingRef.current && pendingRef.current.frame === frame) {
+        try {
+          continueRender(pendingRef.current.id);
+        } catch {
+          /* ignore */
+        }
+        continuedFrameRef.current = frame;
+        pendingRef.current = null;
+      }
+    })();
     // `mediaTick` re-runs this when a media frame arrives; `t`/`frame` cover the timeline advancing.
   }, [frame, t, sorted, adjustments, mediaTick]);
 
