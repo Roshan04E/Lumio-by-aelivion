@@ -1,8 +1,8 @@
 /**
  * Unified GPU transition engine — the two-texture mix compositor.
  *
- * Sibling of `Quad3DCompositor` (apps/web/src/export/quad-3d.ts): a standalone WebGL2 program that
- * consumes two ALREADY-GRADED frames (each a `MediaWebGLRenderer` canvas, or any TexImageSource) and
+ * A standalone WebGL2 program that consumes two ALREADY-GRADED frames (each a `MediaWebGLRenderer` canvas,
+ * or any TexImageSource) and
  * runs a per-transition fragment shader to produce the blended result. One instance is reused across
  * windows/transitions; programs are compiled once per transition id and cached.
  *

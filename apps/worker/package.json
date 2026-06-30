@@ -14,7 +14,6 @@
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
     "color:compare": "tsx src/color-engine-compare.ts",
     "scene:compare": "tsx src/scene-compositor-compare.ts",
-    "export:compare:scene": "tsx src/export-scene-compare.ts",
     "export:stress": "tsx src/export-stress.ts",
     "export:live-stress": "tsx src/export-live-stress.ts",
     "export:worker-scene": "tsx src/export-worker-scene.ts",

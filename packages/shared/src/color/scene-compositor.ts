@@ -48,7 +48,7 @@ export type ObjectFit = "cover" | "contain" | "fill";
  * `texImage2D` upload), which removes the cross-context canvas→texture upload that fails in the export Worker.
  * Orientation matches the canvas-upload path: `uploadSource` flips canvases (top-origin) to framebuffer-native
  * bottom-origin, which is exactly what a render-target texture already is — so it's a drop-in (validated by
- * `export:compare:scene`).
+ * the `export:worker-scene` parity gate).
  */
 export interface SceneTextureSource {
   /** A texture created on this `SceneCompositor`'s context (the caller owns its lifetime). */
@@ -122,7 +122,7 @@ export interface SceneLayerDraw {
   /**
    * Element-box half-extents in comp px (unscaled). Media's element IS the comp, so omit it (defaults
    * to comp/2). Text/shape content rasters pass their tight box so the composite quad places + tilts the
-   * box about the layer center (the `quad-3d` translate(-50%,-50%) term needs the real box).
+   * box about the layer center (the 3D-tilt translate(-50%,-50%) term needs the real box).
    */
   box?: { halfW: number; halfH: number } | undefined;
   /** 3D tilt (Phase 4.1). Default 0 → the quad reduces to the 2D affine path, byte-identical. */
@@ -768,7 +768,7 @@ export class SceneCompositor {
   /**
    * Compute the 6 transformed quad vertices (NDC + projective w + uv) for a layer.
    *
-   * Ports the `quad-3d` projection: scale → rotateY → rotateX → rotateZ about the layer center, then
+   * The CSS-matched 3D-tilt projection: scale → rotateY → rotateX → rotateZ about the layer center, then
    * the CSS translate(-50%,-50%,z) term inside perspective() (using the ELEMENT-box half-extents), then
    * the homogeneous divide. With `rotateX=rotateY=0, perspective=0` and box = comp/2 this reduces
    * EXACTLY to the previous 2D affine quad (w=1, the translate term cancels) — the parity guard.

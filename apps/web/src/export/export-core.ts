@@ -10,17 +10,9 @@
 
 import { expandEffectRegionMasks, getCompositionFontsUsed, type TimelineComposition, type TimelineLayer } from "@reelforge/shared";
 import { MediaEncoder, type ExportFormat } from "./video-encoder";
-import { FrameCompositor } from "./frame-compositor";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
-import { getExportCompositor } from "../color/render-engine";
 import { clipSourceKey, createFrameProvider, type FrameProvider } from "./source-decoder";
 import { audioConfig, encodeMixedChannels, type MixedAudioChannels } from "./audio-mixer";
-
-/** The composite contract both export compositors satisfy (canvas2D `FrameCompositor` + GPU `SceneFrameCompositor`). */
-interface ExportCompositorLike {
-  renderFrame(timeSeconds: number): Promise<void>;
-  dispose(): void;
-}
 
 type StageProbe = { stage: "decode" | "rtt" | "final" | "draws" | "gl"; timeSeconds: number; meanLuma?: number; layerId?: string; assetId?: string; detail?: string };
 
@@ -37,11 +29,11 @@ export interface ExportCoreInput {
   /** Export frame rate. Defaults to the composition's fps; lets the user export at a different rate. */
   fps?: number | undefined;
   /**
-   * Which composite engine to use — RESOLVED on the main thread and passed in. The export Worker has no
-   * `window`, so it can't read the `?exportCompositor=` flag itself (it would always default to "scene"); the
-   * caller resolves `getExportCompositor()` once and threads it here so both threads agree.
+   * Vestigial scene-only marker (Method 3 Phase 5). The canvas2D "frame" compositor is retired — export ALWAYS
+   * uses `SceneFrameCompositor`. Retained as an accepted no-op so the Worker-scene gate page (and probes) that
+   * still pass `exportCompositor: "scene"` keep compiling; the pipeline ignores its value.
    */
-  exportCompositor?: "scene" | "frame" | undefined;
+  exportCompositor?: "scene" | undefined;
   /**
    * Single-context scene export (Method 3, Phase 2) — RESOLVED on the main thread and passed in, same reason
    * as `exportCompositor`: the Worker has no `window` so it can't read `?exportSingleContext=` itself. When
@@ -239,16 +231,11 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
       .map(([key]) => loadSource(key))
   );
 
-  // Method 3 Phase 5: flag-select the composite engine. "scene" (default) drives the SAME shared
+  // Method 3 Phase 5: SceneFrameCompositor is the ONLY local export compositor. It drives the SAME shared
   // SceneCompositor + buildSceneDraws as the editor preview (preview IS export — so blur/glow/highlight
-  // bloom/content-transform all render in export, which the canvas2D "frame" path never did). "frame" is
-  // the proven canvas2D fallback, still reachable via ?exportCompositor=frame. Both present into a canvas,
-  // so the encode loop is identical — `addVideoFrame(canvas)` reads a 2D or WebGL surface transparently.
-  // A WebGL canvas can't be re-acquired as 2D, so the fallback below allocates a fresh canvas.
+  // bloom/content-transform all render in export, which the retired canvas2D "frame" path never did). It
+  // presents into the OffscreenCanvas the encode loop reads via `addVideoFrame(canvas)`.
   const getSrc = (id: string) => sources.get(id);
-  // Mode is resolved by the caller (main thread) and passed in — the Worker can't read the flag itself.
-  // Fall back to getExportCompositor() only when not provided (e.g. a direct call without the field).
-  let usingScene = (input.exportCompositor ?? getExportCompositor()) === "scene";
   // Single-context resolved by the caller (main thread) — pass it explicitly so the Worker honors it (it can't
   // read the flag). Undefined falls through to the compositor's own flag read (main-thread direct calls).
   const diagnostics = input.workerSceneDiagnostics;
@@ -271,21 +258,12 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
         }
       : {}),
   };
-  let activeCanvas = new OffscreenCanvas(width, height);
-  let compositor: ExportCompositorLike;
+  const activeCanvas = new OffscreenCanvas(width, height);
   let consecutiveBlackExpectedMediaFrames = 0;
-  try {
-    compositor = usingScene
-      ? new SceneFrameCompositor(renderComposition, activeCanvas, getSrc, sceneOptions)
-      : new FrameCompositor(renderComposition, activeCanvas, getSrc);
-  } catch (constructError) {
-    if (!usingScene) throw constructError;
-    // Scene compositor failed to construct (e.g. WebGL2 unavailable in this Worker) — degrade to canvas2D.
-    console.warn("[export] scene compositor construction failed, using frame compositor:", constructError);
-    usingScene = false;
-    activeCanvas = new OffscreenCanvas(width, height);
-    compositor = new FrameCompositor(renderComposition, activeCanvas, getSrc);
-  }
+  // SceneFrameCompositor is the ONLY local export compositor (Phase 5). If it can't construct (e.g. no WebGL2
+  // in this Worker), the error propagates: a Worker failure routes local-export.ts to the MAIN-THREAD scene
+  // retry; there is no canvas2D fallback (the FrameCompositor path was retired).
+  const compositor = new SceneFrameCompositor(renderComposition, activeCanvas, getSrc, sceneOptions);
 
   // When each MEDIA source is last needed = the latest end (+ transition postroll) of any clip using it.
   // The export reads time monotonically, so once we pass that we can dispose the source — this is what
@@ -332,33 +310,17 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
       throwIfAborted();
       const t = i / fps;
       await Promise.all(activeSourceKeysAt(t).map((key) => loadSource(key)));
-      try {
-        await withTimeout(compositor.renderFrame(t), FRAME_TIMEOUT_MS, `renderFrame ${i + 1}/${totalFrames}`);
-      } catch (renderError) {
-        if (signal?.aborted) throw renderError;
-        // Scene export failed (e.g. the Worker's WebGL context was lost mid-render under GPU pressure — the
-        // scene compositor throws on isContextLost). Degrade to the canvas2D FrameCompositor for the REST of
-        // the export instead of shipping black frames. Fires at ANY frame: already-encoded scene frames keep
-        // their bloom; the tail switches to the (bloom-less but correct) frame path — never black.
-        if (!usingScene) throw renderError;
-        console.warn(`[export] scene compositor failed on frame ${i}, falling back to frame compositor:`, renderError);
-        try {
-          compositor.dispose();
-        } catch {
-          /* already disposed */
-        }
-        usingScene = false;
-        activeCanvas = new OffscreenCanvas(width, height); // a WebGL canvas can't be re-acquired as 2D
-        compositor = new FrameCompositor(renderComposition, activeCanvas, getSrc);
-        await withTimeout(compositor.renderFrame(t), FRAME_TIMEOUT_MS, `renderFrame ${i + 1}/${totalFrames}`);
-      }
+      // Phase 5: no canvas2D degrade. A scene render failure (e.g. the Worker's WebGL context lost mid-render
+      // under GPU pressure — SceneFrameCompositor throws on isContextLost) propagates out of the loop: in the
+      // Worker it routes local-export.ts to the main-thread scene retry; on the main thread it surfaces as a
+      // hard export error rather than shipping black or a bloom-less canvas2D fallback.
+      await withTimeout(compositor.renderFrame(t), FRAME_TIMEOUT_MS, `renderFrame ${i + 1}/${totalFrames}`);
       if (diagnostics?.stageProbes && diagnostics.sampleTimes?.length && shouldSampleTime(t, diagnostics.sampleTimes, fps)) {
         const meanLuma = sampleCanvasLuma(activeCanvas, width, height);
         emitProbe({ stage: "final", timeSeconds: t, meanLuma });
       }
       if (
         diagnostics?.blackFrameGuard &&
-        usingScene &&
         shouldSampleTime(t, diagnostics.sampleTimes, fps) &&
         hasActiveMediaAt(renderComposition, t)
       ) {

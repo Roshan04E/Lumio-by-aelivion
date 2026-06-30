@@ -3,8 +3,7 @@
  *
  * The scene text raster + clip-mask matte run on the MAIN THREAD in the editor (where `document` exists)
  * AND inside the export Web Worker (where it does not). This returns a real `<canvas>` on the main thread
- * and an `OffscreenCanvas` in the Worker — the same fallback `FrameCompositor.makeCanvas` already uses —
- * so the scene compositor can drive the local export headlessly.
+ * and an `OffscreenCanvas` in the Worker, so the scene compositor can drive the local export headlessly.
  */
 
 export type AnyCanvas2D = HTMLCanvasElement | OffscreenCanvas;

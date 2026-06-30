@@ -98,8 +98,8 @@ function make2dTexture(gl: WebGL2RenderingContext): WebGLTexture {
 export class MediaWebGLRenderer {
   private readonly _canvas: HTMLCanvasElement | OffscreenCanvas | null;
   /**
-   * Own-canvas mode: the canvas this renderer grades into (read by `SceneFrameCompositor` / `buildSceneDraws` /
-   * `FrameCompositor` as a `TexImageSource`). Public type is unchanged (non-null) so every existing own-canvas
+   * Own-canvas mode: the canvas this renderer grades into (read by `SceneFrameCompositor` / `buildSceneDraws`
+   * as a `TexImageSource`). Public type is unchanged (non-null) so every existing own-canvas
    * caller compiles untouched; it throws only if read in shared-context mode (where there is no canvas — sample
    * the `RenderTarget` you pass to `draw()` instead).
    */

@@ -1,15 +1,15 @@
 /**
  * Local export — scene-driven frame compositor (Method 3, Phase 5).
  *
- * A drop-in replacement for {@link FrameCompositor} that composites each export frame through the SAME
- * shared `SceneCompositor` + `buildSceneDraws` the EDITOR preview uses, instead of the canvas2D path. So
- * the on-screen preview literally becomes the exported MP4 — the Method 3 goal — collapsing the last of
- * the three separate composite implementations the gates kept in sync by hand.
+ * The SOLE local export compositor (Phase 5 retired the canvas2D path): it composites each export frame
+ * through the SAME shared `SceneCompositor` + `buildSceneDraws` the EDITOR preview uses. So the on-screen
+ * preview literally becomes the exported MP4 — the Method 3 goal — collapsing the last of the three
+ * separate composite implementations the gates kept in sync by hand.
  *
- * It shares the exact same interface as `FrameCompositor` — `constructor(composition, canvas, getSource)`,
- * `async renderFrame(t)`, `dispose()` — so `export-core` selects between them with one flag-gated branch and
- * the encode loop is untouched. The output canvas is a WebGL2 surface (the compositor presents to it via a
- * fullscreen quad), so `new VideoFrame(canvas)` in the encoder reads the GPU-composited frame directly.
+ * Interface: `constructor(composition, canvas, getSource, options?)`, `async renderFrame(t)`, `dispose()` —
+ * `export-core` constructs it unconditionally and the encode loop is untouched. The output canvas is a
+ * WebGL2 surface (the compositor presents to it via a fullscreen quad), so `new VideoFrame(canvas)` in the
+ * encoder reads the GPU-composited frame directly.
  *
  * The ONLY thing this does that the editor's `ScenePreviewCanvas` gets "for free":
  *   1. **Grade media inline** — the editor reads each media layer's graded canvas from a hidden
@@ -137,7 +137,7 @@ export class SceneFrameCompositor {
     });
     this.adjustments = flat.filter((f) => f.layer.type === "adjustment");
     // Back-to-front: track 0 is the TOP track → draw highest trackIndex first, ties by layerIndex asc.
-    // Identical to FrameCompositor + the editor's renderedLayerEntries, so z-order matches exactly.
+    // Identical to the editor's renderedLayerEntries, so z-order matches the preview exactly.
     this.flat = flat
       .slice()
       .sort((a, b) => (a.trackIndex !== b.trackIndex ? b.trackIndex - a.trackIndex : a.layerIndex - b.layerIndex));
@@ -270,7 +270,7 @@ export class SceneFrameCompositor {
 
   /**
    * Adjustment-clip effects that sit above `target` and are active at `t`, merged into the layer — mirrors
-   * FrameCompositor.mergedLayer + the editor's applyActiveAdjustmentEffects. An adjustment affects layers on
+   * the editor's applyActiveAdjustmentEffects. An adjustment affects layers on
    * lower-in-the-stack (higher-index) tracks: `adjustment.trackIndex < target.trackIndex`. Both media (whose
    * grade reads the merged pipeline) AND text/shape (whose grade/blur `buildSceneDraws` reads off effects)
    * must carry the merge, so we apply it to every layer handed to the builder.
@@ -290,7 +290,7 @@ export class SceneFrameCompositor {
 
   /**
    * How long this clip keeps rendering past its out-point: the duration of the next same-track clip's
-   * `transitionIn` (the window the outgoing clip is composited under). 0 if none. Matches FrameCompositor.
+   * `transitionIn` (the window the outgoing clip is composited under). 0 if none. Matches the editor preview.
    */
   private postrollSeconds(item: FlatLayer): number {
     const track = this.composition.tracks[item.trackIndex];
@@ -520,7 +520,7 @@ export class SceneFrameCompositor {
     return renderer.canvas as AnyCanvas;
   }
 
-  /** Render the composition at `timeSeconds` onto the WebGL output canvas (mirrors FrameCompositor.renderFrame). */
+  /** Render the composition at `timeSeconds` onto the WebGL output canvas (the export's per-frame entry point). */
   async renderFrame(timeSeconds: number): Promise<void> {
     const t = timeSeconds;
 
@@ -656,9 +656,9 @@ export class SceneFrameCompositor {
     }
 
     // Budget telemetry (rule 8): track the live WebGL context peak and warn ONCE if we cross the safe
-    // threshold — we're nearing the browser's cap and risk evicting the preview's context. We do NOT
-    // proactively fall back to canvas2D here (that would drop the bloom/blur the user wants in export); the
-    // pool keeps us under by design, and export-core's render-error → FrameCompositor path is the real net.
+    // threshold — we're nearing the browser's cap and risk evicting the preview's context. The pool keeps us
+    // under by design; if a render still fails (e.g. lost context), export-core propagates the error so the
+    // Worker run retries on the main-thread scene path rather than shipping a degraded frame.
     const live = getActiveGlContextCount();
     if (live > this.peakContextCount) this.peakContextCount = live;
     if (live > SAFE_CONTEXT_THRESHOLD) warnExportGlThresholdOnce(live, SAFE_CONTEXT_THRESHOLD);

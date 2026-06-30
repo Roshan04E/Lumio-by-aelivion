@@ -21,8 +21,8 @@
  *
  * Parity note: the reference is an uncompressed canvas render and the worker output is a lossy H.264 MP4, so
  * exact-pixel parity is impossible here — we use a luma diff with a per-pixel tolerance (H.264 noise) and a
- * small whole-frame diff budget. TRUE pixel parity of the single-context path itself is gate-locked separately
- * by `export:compare:scene` (single-context == frame within its thresholds); this gate's job is the Worker.
+ * small whole-frame diff budget. TRUE pixel parity of the scene compositor itself is gate-locked separately
+ * by `scene:compare` (scene preview == DOM), which transitively covers the export; this gate's job is the Worker.
  *
  * Needs real WebGL2 (main + worker) + WebCodecs encode/decode → run with `PIXEL_BROWSER_CHANNEL=chrome`.
  */

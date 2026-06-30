@@ -18,7 +18,7 @@ import {
   type ExportCoreInput,
 } from "./export-core";
 import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
-import { getExportCompositor, getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
+import { getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
 import { beginPreviewSuspendForExport, endPreviewSuspendForExport } from "./export-preview-suspend";
 import { logExportGl } from "./export-gl-debug";
 import { getActiveGlContextCount } from "@reelforge/shared";
@@ -75,18 +75,18 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   const mixedBuffer = await mixTimelineAudio(audioLayers, composition.durationSeconds).catch(() => null);
   const audio = mixedBuffer ? extractAudioChannels(mixedBuffer) : null;
 
-  // Resolve the composite engine + single-context flag ONCE here (main thread) and thread them through — the
-  // Worker can't read the ?exportCompositor= / ?exportSingleContext= flags (no window), so resolve once on
-  // the main thread and thread them through. Stage 4 defaults single-context ON.
-  const mode = getExportCompositor();
+  // Resolve the single-context flag ONCE here (main thread) and thread it through — the Worker can't read the
+  // ?exportSingleContext= flag (no window), so resolve once on the main thread and pass it down. Single-context
+  // defaults ON. Method 3 Phase 5: SceneFrameCompositor is the only export compositor, so there's no longer a
+  // frame/scene mode to resolve.
   const singleContext = getExportSingleContext();
-  const input: ExportCoreInput = { composition, urlMap, audio, format, fps, exportCompositor: mode, exportSingleContext: singleContext };
+  const input: ExportCoreInput = { composition, urlMap, audio, format, fps, exportSingleContext: singleContext };
 
   // Phase 2 Stage 4: scene export defaults to the Worker when single-context is on. The one self-contained
   // WebGL2 context survives the Worker's isolated GPU process, whereas the legacy multi-/cross-context path
   // black-framed there (Stage 0). If Worker scene fails or the black-frame guard throws, fall back to the
-  // MAIN-THREAD scene path below (NOT directly to canvas2D).
-  const workerScene = mode === "scene" && singleContext && getExportWorkerScene();
+  // MAIN-THREAD scene path below (NOT to canvas2D — that path was retired in Phase 5).
+  const workerScene = singleContext && getExportWorkerScene();
   let workerInput = input;
   if (workerScene) {
     const exportFps = Math.max(1, fps || composition.fps || 30);
@@ -105,9 +105,9 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
     };
   }
 
-  // Canvas2D frame export always runs in the Worker. Scene export also runs in the Worker by default via the
-  // single-context path; if that fails, the proven main-thread scene path below keeps export correct.
-  if (canUseWorker() && (mode !== "scene" || workerScene)) {
+  // Scene export runs in the Worker by default via the single-context path; if that fails, the proven
+  // main-thread scene path below keeps export correct (NOT canvas2D — retired in Phase 5).
+  if (canUseWorker() && workerScene) {
     try {
       if (workerScene) {
         logExportGl(() => `worker scene export start: single-context=true, active contexts=${getActiveGlContextCount()}`);
@@ -129,7 +129,7 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   // the preview's compositing while we run here keeps it off its context during the eviction window, so it
   // doesn't flood the console with "lost WebGL context" uploads, and it repaints once the export releases.
   beginPreviewSuspendForExport();
-  logExportGl(() => `main-thread export start: preview suspended=true, mode=${mode}, active contexts=${getActiveGlContextCount()}`);
+  logExportGl(() => `main-thread export start: preview suspended=true, mode=scene, active contexts=${getActiveGlContextCount()}`);
   try {
     return await runExportCore(input, { onProgress, ...(signal ? { signal } : {}) });
   } finally {

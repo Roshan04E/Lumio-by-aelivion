@@ -4,8 +4,8 @@
  * Opt-in (`?exportGlDebug=1` or `localStorage["lumio.exportGlDebug"] = "1"`), OFF by default so the normal
  * export console stays clean. When on, the export pipeline emits `[export-gl]` lines — preview-suspend state,
  * media renderers created/reused, live + peak WebGL context counts — so the context budget (the media-renderer
- * pool, the threshold warn, the stress gate) is observable. The flag check mirrors `getExportCompositor`'s
- * query → localStorage pattern in `../color/render-engine`.
+ * pool, the threshold warn, the stress gate) is observable. The flag check mirrors the query → localStorage
+ * pattern of the export toggles in `../color/render-engine` (e.g. `getExportWorkerScene`).
  *
  * The threshold WARN (`warnExportGlThresholdOnce`) is NOT gated — exceeding the safe context count is a real
  * "you're near eviction" signal worth surfacing even without the debug flag, but it fires at most once per

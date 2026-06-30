@@ -18,7 +18,10 @@
  *   - output luma-parity vs the main-thread single-context reference within the fallback diff budget.
  *
  * Parity is luma-tolerant because the reference is an uncompressed canvas render and the worker output is a
- * lossy H.264 MP4 — exact-pixel parity of the single-context path itself is gate-locked by `export:compare:scene`.
+ * lossy H.264 MP4 — exact-pixel parity of the scene compositor itself is gate-locked by `scene:compare`
+ * (scene preview vs DOM), which transitively covers the export since it shares the preview's draw-list +
+ * compositor. (This is the permanent export parity gate; the `export:compare:scene` frame↔scene migration
+ * scaffold was retired with the canvas2D FrameCompositor in Phase 5.)
  *
  * Changes NO default behavior (hidden route + its own Worker; `local-export.ts` default routing untouched).
  * Needs real WebGL2 (main + worker) + WebCodecs → run with `PIXEL_BROWSER_CHANNEL=chrome`.

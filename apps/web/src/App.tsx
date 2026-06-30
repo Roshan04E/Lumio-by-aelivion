@@ -14,7 +14,6 @@ const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) =
 const AdminTemplatesPage = lazy(() => import("./pages/AdminTemplatesPage").then((module) => ({ default: module.AdminTemplatesPage })));
 const AdminJobsPage = lazy(() => import("./pages/AdminJobsPage").then((module) => ({ default: module.AdminJobsPage })));
 const PreviewFixturePage = lazy(() => import("./pages/PreviewFixturePage").then((module) => ({ default: module.PreviewFixturePage })));
-const ExportFixturePage = lazy(() => import("./pages/ExportFixturePage").then((module) => ({ default: module.ExportFixturePage })));
 const ExportStressPage = lazy(() => import("./pages/ExportStressPage").then((module) => ({ default: module.ExportStressPage })));
 const ExportLiveStressPage = lazy(() => import("./pages/ExportLiveStressPage").then((module) => ({ default: module.ExportLiveStressPage })));
 const ExportWorkerScenePage = lazy(() => import("./pages/ExportWorkerScenePage").then((module) => ({ default: module.ExportWorkerScenePage })));
@@ -34,7 +33,6 @@ export default function App() {
           <Route path="/cookbook/:sectionId" element={<CookbookPage />} />
           <Route path="/create" element={<CreatePage />} />
           <Route path="/editor/__preview-fixture" element={<PreviewFixturePage />} />
-          <Route path="/editor/__export-fixture" element={<ExportFixturePage />} />
           <Route path="/editor/__export-stress" element={<ExportStressPage />} />
           <Route path="/editor/__export-live-stress" element={<ExportLiveStressPage />} />
           <Route path="/editor/__export-worker-scene" element={<ExportWorkerScenePage />} />

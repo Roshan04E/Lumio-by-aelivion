@@ -1,8 +1,8 @@
 /**
  * Shared WebGL2 plumbing for the single GPU compositor (Method 3, Phase 1).
  *
- * The existing GPU bricks (`MediaWebGLRenderer`, `TransitionCompositor`,
- * `apps/web/src/export/quad-3d.ts`) each re-implement the same boilerplate: context creation with
+ * The existing GPU bricks (`MediaWebGLRenderer`, `TransitionCompositor`) each re-implement the same
+ * boilerplate: context creation with
  * `premultipliedAlpha:false`, a shader `compile()` helper, a `make2dTexture()`, and a fullscreen
  * triangle. This module centralizes that, and adds the new piece Phase 1 needs that none of them
  * have: **render-to-texture targets** (`RenderTarget`) so the compositor can ping-pong an

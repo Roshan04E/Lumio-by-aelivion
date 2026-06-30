@@ -8,7 +8,7 @@
  * (plus baseline/final) via `data-` attributes + `[export-gl]` console lines, so the Playwright worker script
  * can assert the count stays bounded (pool reuse, not one-per-clip) with no "lost WebGL context" error.
  *
- * Like `ExportFixturePage` it needs a real WebGL2 GPU + the export decode path, so run the gate with
+ * Like the other export gates it needs a real WebGL2 GPU + the export decode path, so run the gate with
  * `PIXEL_BROWSER_CHANNEL=chrome` (bundled Chromium lacks WebGL2).
  */
 
@@ -25,7 +25,7 @@ function clipCountFromUrl(): number {
 }
 
 // The fixture image is an SVG data URL; `createImageBitmap(blob)` can't decode SVG in Chrome, so rasterize it
-// to a PNG data URL via <img>→canvas (same shim ExportFixturePage uses). Keeps the real decode path under test.
+// to a PNG data URL via <img>→canvas. Keeps the real decode path under test.
 async function bitmapDecodableUrl(url: string): Promise<string> {
   if (!url.startsWith("data:image/svg")) return url;
   const img = new Image();

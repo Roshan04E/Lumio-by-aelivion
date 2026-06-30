@@ -2,12 +2,11 @@
  * Comp-sized clip-mask alpha matte builder for the single GPU compositor (Method 3, Phase 1).
  *
  * The DOM preview applies clip masks via CSS `mask-image`; the SceneCompositor instead multiplies a
- * comp-sized alpha matte into the layer in-shader. This builds that matte on a 2D scratch canvas using
- * the SAME math the local export already uses (`apps/web/src/export/frame-compositor.ts`'s private
- * `renderMaskAlpha` / `buildMaskMatte`) — masks composite in panel order, each onto the running matte
- * by its mode (`MASK_GCO`), with per-mask feather/expansion/invert/transform/opacity. Kept standalone
- * so the scene path can reuse it without depending on the export class; the export keeps its own copy
- * (a small, deliberate duplication until the export is folded onto the SceneCompositor in Phase 5).
+ * comp-sized alpha matte into the layer in-shader. This builds that matte on a 2D scratch canvas: masks
+ * composite in panel order, each onto the running matte by its mode (`MASK_GCO`), with per-mask
+ * feather/expansion/invert/transform/opacity. Both the editor preview (`ScenePreviewCanvas`) and the local
+ * export (`SceneFrameCompositor`) go through the SceneCompositor, so this is the single clip-mask matte
+ * path for both — Phase 5 folded export onto the SceneCompositor and retired the old canvas2D copy.
  */
 
 import {

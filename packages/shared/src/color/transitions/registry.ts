@@ -10,7 +10,7 @@
  * Hard rule: bodies operate in the renderer's sRGB OUTPUT space (the space the per-clip canvases already
  * composite in). Do NOT add pow(2.2) linear round-trips, or preview and export diverge.
  *
- * UV convention matches `MediaWebGLRenderer` / `Quad3DCompositor`: uv (0,0) = bottom-left, (1,1) = top-left,
+ * UV convention matches `MediaWebGLRenderer`: uv (0,0) = bottom-left, (1,1) = top-left,
  * with sources uploaded UNPACK_FLIP_Y=true — so upstream gl-transition bodies port over verbatim.
  */
 

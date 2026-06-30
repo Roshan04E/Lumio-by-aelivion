@@ -135,42 +135,16 @@ export function useSceneCompositor(supported: boolean): boolean {
   return supported && getCompositorMode() === "scene";
 }
 
-export type ExportCompositor = "frame" | "scene";
-
-function normalizeExportCompositor(value: string | null | undefined): ExportCompositor | undefined {
-  return value === "scene" || value === "frame" ? value : undefined;
-}
-
 /**
- * Local-export compositor (Method 3, Phase 5) — which engine the browser export uses to composite frames.
- *
- * "scene" (default) is the `SceneFrameCompositor`, which drives the SAME shared `SceneCompositor` +
- * `buildSceneDraws` the editor preview uses — so the on-screen preview LITERALLY becomes the export (the
- * Method 3 goal), and blur/glow/highlight-bloom/content-transform finally render in export (the canvas2D
- * `FrameCompositor` never drew those). "frame" is the proven canvas2D fallback. Both share the media grade
- * engine + draw-list builder; the only difference is the final composite (WebGL vs canvas2D).
- *
- * Default flipped to "scene" (Phase 5 Step 5a-intermediate): `export-core` also auto-falls-back to "frame"
- * if the scene path fails to construct or errors on frame 0, so the flip can't ship a broken export. The
- * `?exportCompositor=frame` escape hatch forces canvas2D. `FrameCompositor` deletion (5b) waits on the gate
- * (`export:compare:scene`) + a manual real-Worker export pass.
- *
- * Resolution order: `?exportCompositor=frame|scene` → localStorage → VITE_EXPORT_COMPOSITOR → default "scene".
+ * Local-export compositor (Method 3) — `SceneFrameCompositor` is the ONLY browser-export compositor as of
+ * Phase 5. It drives the SAME shared `SceneCompositor` + `buildSceneDraws` the editor preview uses, so the
+ * on-screen preview LITERALLY becomes the export (the Method 3 goal): blur/glow/highlight-bloom/content-
+ * transform all render in export, which the retired canvas2D `FrameCompositor` never did. There is no longer
+ * an `exportCompositor` flag or a canvas2D fallback — `getExportSingleContext` / `getExportWorkerScene` below
+ * are the remaining export-path toggles. Export parity is held by `export:worker-scene` (Worker scene vs
+ * main-thread scene) and `scene:compare` (scene preview vs DOM), which transitively covers the export since
+ * it shares the preview's draw-list + compositor.
  */
-export function getExportCompositor(): ExportCompositor {
-  if (typeof window !== "undefined") {
-    try {
-      const param = normalizeExportCompositor(new URLSearchParams(window.location.search).get("exportCompositor"));
-      if (param) return param;
-      const stored = normalizeExportCompositor(window.localStorage?.getItem("lumio.exportCompositor"));
-      if (stored) return stored;
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  const env = normalizeExportCompositor((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_EXPORT_COMPOSITOR);
-  return env ?? "scene";
-}
 
 /**
  * Single-context export (Method 3, Phase 2) — when ON, `SceneFrameCompositor` grades media + text/shape

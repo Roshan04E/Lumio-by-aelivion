@@ -201,9 +201,10 @@ Notes on the planned phases:
   masks are appended with the first forced to `intersect`) so a region can't reveal anything outside the clip
   mask — exact for the common cases (single region, carved-hole / inverted clip masks); only a clip mask that
   *unions* several add-shapes combined with *multiple* region masks stays approximate (flat mask lists can't
-  express `A ∩ (r0 ∪ r1)`). Limitations: **region blur isn't applied in the local canvas export yet** (the
-  compositor doesn't do CSS blur — P7); **glow region is deferred** (its bloom must extend past the mask).
-- **P7**: the canvas exporter (`apps/web/src/export/frame-compositor.ts`) composites **clip** masks and (via
-  P6) color/glow region masks, but effect-region **blur** (backdrop-filter) masks and the 3D-tilt + mask combo
-  are still dropped on local export.
+  express `A ∩ (r0 ∪ r1)`).
+- **P7 (superseded by Method 3 Phase 5)**: the old canvas2D exporter (`frame-compositor.ts`) couldn't do CSS
+  blur, so it composited **clip** masks + (via P6) color/glow region masks but dropped effect-region **blur**
+  masks and the 3D-tilt + mask combo. That exporter is retired — local export now runs through
+  `apps/web/src/export/scene-frame-compositor.ts` → the shared `SceneCompositor`, the SAME GPU pass as the
+  editor preview, so region blur/glow and 3D-tilt + mask now render in local export.
 - **P8**: depends on the deferred SAM2 work (see `architecture.md` Person Extraction / Remove Person notes).

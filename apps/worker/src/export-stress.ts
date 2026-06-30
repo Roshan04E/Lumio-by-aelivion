@@ -12,7 +12,7 @@
  * Standalone assert-and-exit script (repo convention). Needs a real WebGL2 GPU + the export decode path, so
  * run with `PIXEL_BROWSER_CHANNEL=chrome` (bundled Chromium lacks WebGL2 and would render nothing).
  *
- * Reuses the same vite-spawn + free-port + Playwright harness shape as `export-scene-compare.ts`.
+ * Reuses the same vite-spawn + free-port + Playwright harness shape as `export-worker-scene.ts`.
  */
 
 import assert from "node:assert/strict";
