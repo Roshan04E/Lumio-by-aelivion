@@ -71,8 +71,8 @@ function browserExecutableOption(): { browserExecutable: string } | Record<strin
 
 /**
  * Surface select worker-process env vars into the Remotion bundle as `process.env.*` (read by Root.tsx).
- * `RENDERER_MODE` picks the media render path; `REMOTION_COMPOSITOR=scene` enables the Method-3 SceneStage
- * (default OFF → legacy per-clip DOM composite). Spread conditionally so we never set empty `envVariables`.
+ * `RENDERER_MODE` is retained for older harnesses; `REMOTION_COMPOSITOR=legacy` is a retired escape-hatch hint.
+ * SceneStage is the default cloud compositor. Spread conditionally so we never set empty `envVariables`.
  */
 function rendererEnvVariables(rendererMode?: "legacy" | "webgl"): { envVariables: Record<string, string> } | Record<string, never> {
   const envVariables: Record<string, string> = {};

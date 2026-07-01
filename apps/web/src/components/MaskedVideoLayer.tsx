@@ -3,10 +3,10 @@ import { compositeMatteToImageData, type MatteRef } from "@reelforge/shared";
 
 /**
  * Renders a video layer through its person-extraction matte. This is the web
- * half of the parity-critical compositor described in matte.ts - the Remotion
- * side (apps/worker/src/remotion/MaskedVideo.tsx) must call the exact same
- * compositeMatteToImageData() so the editor preview and the exported video show
- * the same cutout. Do not reimplement the alpha-multiply math here.
+ * half of the parity-critical compositor described in matte.ts. The Remotion
+ * side now applies mattes through SceneStage's shared MediaWebGLRenderer path so
+ * the editor preview and the exported video show the same cutout. Do not
+ * reimplement the alpha-multiply math here.
  *
  * Strategy: decode the source video and the matte video into two hidden <video>
  * elements, draw both to off-screen canvases each frame, composite, and blit the

@@ -82,7 +82,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "color-curves",
   "object-fit-cover",
   "object-fit-contain",
-  // Kept out of the default legacy pixel sweep until the legacy DOM Remotion path supports content transforms.
+  "content-transform",
   "blur",
   "glow",
   "region-blur",

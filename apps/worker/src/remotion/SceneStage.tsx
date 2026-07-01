@@ -32,27 +32,24 @@ import {
 } from "@reelforge/shared";
 
 /**
- * Method-3 Phase 6.2 — Remotion SceneStage (FLAGGED OFF by default; see `getRemotionCompositor`).
+ * Method-3 Phase 6.4 — Remotion SceneStage (default cloud compositor; see `getRemotionCompositor`).
  *
- * The legacy Remotion path (Root.tsx) lays every clip out as its OWN DOM/canvas sibling and lets Chrome
- * composite them — a different composite than the editor preview + local export, which both run the shared
- * `SceneCompositor` + `buildSceneDraws`. SceneStage closes that gap on the cloud/Remotion side: it composites
- * the WHOLE frame into ONE WebGL2 canvas through the SAME shared logic, so (once complete) "preview IS export"
- * holds for Remotion too.
+ * SceneStage composites the WHOLE frame into ONE WebGL2 canvas through the SAME shared `SceneCompositor` +
+ * `buildSceneDraws` logic used by the editor preview and local export, so "preview IS export" holds for
+ * Remotion too.
  *
- * Phase 6.2 is deliberately MINIMAL: media (image + video) with object-fit + transform (incl. 3D tilt the
- * compositor already does) + opacity + blend + color grade + media effects + blur/glow + clip (vector) masks +
- * junction transitions, text/shape rasterization, person-extraction mattes, and source-within-frame content
- * transforms, all from the shared builder. The legacy Root.tsx path is untouched and remains the default.
+ * Supported: media (image + video) with object-fit + transform (incl. 3D tilt) + opacity + blend + color grade
+ * + media effects + blur/glow + clip (vector) masks + junction transitions, text/shape rasterization,
+ * person-extraction mattes, and source-within-frame content transforms, all from the shared builder.
  *
  * Audio/sequencing/mux are unchanged: audio layers still render as `<Audio>` inside `<Sequence>` exactly like
  * the legacy path, so the muxed output keeps its sound.
  */
 
-/** Read the Remotion compositor flag. `scene` enables SceneStage; anything else keeps the legacy DOM composite. */
+/** Read the Remotion compositor flag. SceneStage is the default; `legacy` is retained only as a retired hint. */
 export function getRemotionCompositor(): "legacy" | "scene" {
   const value = typeof process !== "undefined" ? process.env?.REMOTION_COMPOSITOR : undefined;
-  return value === "scene" ? "scene" : "legacy";
+  return value === "legacy" ? "legacy" : "scene";
 }
 
 /** A `<canvas>`/`OffscreenCanvas` graded source plus its natural pixel size, as `buildSceneDraws` expects. */
@@ -332,7 +329,7 @@ function ImageGrabber({
 }
 
 /**
- * SceneStage — the flagged Remotion single-canvas composite. Renders one output `<canvas>` the shared
+ * SceneStage — the Remotion single-canvas composite. Renders one output `<canvas>` the shared
  * `SceneCompositor` composites into, plus hidden media decoders that feed it and the unchanged audio sequences.
  */
 export function SceneStage({ manifest }: { manifest: RenderManifest }) {

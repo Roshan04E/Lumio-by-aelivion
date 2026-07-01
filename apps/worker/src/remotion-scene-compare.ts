@@ -1,11 +1,11 @@
 /**
  * Method 3 Phase 6.3 gate: local SceneCompositor export vs Remotion SceneStage.
  *
- * This compares the browser local-export compositor (`SceneFrameCompositor`) against the flagged Remotion
- * whole-frame compositor (`REMOTION_COMPOSITOR=scene`) for the Phase 6.2 supported media-only fixture set.
+ * This compares the browser local-export compositor (`SceneFrameCompositor`) against the default Remotion
+ * whole-frame compositor (SceneStage).
  *
- * It deliberately does NOT flip the Remotion default. This script sets the flag only for its own Remotion
- * still renders, and leaves the legacy DOM composite as the application default.
+ * It deliberately keeps `REMOTION_COMPOSITOR=scene` set for its own renders so the gate remains explicit even
+ * though SceneStage is now the default.
  */
 
 import assert from "node:assert/strict";
