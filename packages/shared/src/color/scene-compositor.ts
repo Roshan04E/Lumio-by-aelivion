@@ -28,6 +28,7 @@ import {
   compileShader,
   createFullscreenVao,
   createGl,
+  getTexImageSourceProducerInfo,
   linkProgram,
   releaseContextIfDetached,
   type AnyCanvas,
@@ -167,6 +168,8 @@ export interface SceneFrameSpec {
   backgroundColor: string;
   /** Visible draws, back-to-front (first drawn = bottom). A draw is a layer or a folded transition. */
   layers: SceneDraw[];
+  /** Diagnostic-only preview/export time for upload tracing. */
+  debugFrameTime?: number | undefined;
 }
 
 export const SCENE_COMPOSITOR_CONTEXT_LOST = "SCENE_COMPOSITOR_CONTEXT_LOST";
@@ -397,6 +400,53 @@ function srcDims(s: TexImageSource): [number, number] {
   return [w, h];
 }
 
+type UploadRole = "source" | "mask" | "empty";
+
+interface UploadDebugMeta {
+  layerId?: string | undefined;
+  role: UploadRole;
+  frameTime?: number | undefined;
+}
+
+interface UploadDebugSnapshot extends UploadDebugMeta {
+  sourceKind: string;
+  width: number;
+  height: number;
+  textureState: "new" | "resize" | "existing";
+  op?: "texImage2D" | "texSubImage2D" | undefined;
+  contextLostBefore: boolean;
+  producer?: { label: string; disposed: boolean; contextLost: boolean; width: number; height: number } | undefined;
+  glErrorAfter?: number | undefined;
+  reason?: string | undefined;
+}
+
+function sceneGlDebugEnabled(): boolean {
+  try {
+    const global = globalThis as {
+      location?: { search?: string };
+      localStorage?: { getItem: (key: string) => string | null };
+    };
+    const params = new URLSearchParams(global.location?.search ?? "");
+    return params.get("debugGl") === "1" || global.localStorage?.getItem("reelforge_debug_gl") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function sourceKind(source: TexImageSource): string {
+  if (typeof HTMLVideoElement !== "undefined" && source instanceof HTMLVideoElement) return "HTMLVideoElement";
+  if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) return "HTMLImageElement";
+  if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) return "HTMLCanvasElement";
+  if (typeof OffscreenCanvas !== "undefined" && source instanceof OffscreenCanvas) return "OffscreenCanvas";
+  if (typeof ImageBitmap !== "undefined" && source instanceof ImageBitmap) return "ImageBitmap";
+  const s = source as { videoWidth?: number; naturalWidth?: number; displayWidth?: number; width?: number };
+  if (typeof s.videoWidth === "number") return "HTMLVideoElement";
+  if (typeof s.naturalWidth === "number") return "HTMLImageElement";
+  if (typeof s.displayWidth === "number") return "ImageBitmap";
+  if (typeof s.width === "number") return "canvas";
+  return "TexImageSource";
+}
+
 /** comp/draw scale per axis for object-fit (inverse of how much the media is scaled to fill the box). */
 function fitScale(sw: number, sh: number, cw: number, ch: number, fit: ObjectFit): [number, number] {
   if (fit === "fill" || sw <= 0 || sh <= 0) return [1, 1];
@@ -468,6 +518,11 @@ export class SceneCompositor {
   private width = 0;
   private height = 0;
   private disposed = false;
+  private contextLost = false;
+  private debugFrameTime: number | undefined;
+  /** `gl.MAX_TEXTURE_SIZE`, read once — sources larger than this can't be uploaded (would be an INVALID_VALUE). */
+  private readonly maxTextureSize: number;
+  private readonly uploadFallbackWarnings = new Set<string>();
   private lastPresentViewport: number[] | null = null;
 
   // 6 vertices (2 triangles) × (ndcX, ndcY, projective w, u, v).
@@ -495,7 +550,7 @@ export class SceneCompositor {
   }
 
   isContextLost(): boolean {
-    return this.gl.isContextLost();
+    return this.contextLost || this.gl.isContextLost();
   }
 
   private framebufferStatusName(status: number): string {
@@ -522,7 +577,64 @@ export class SceneCompositor {
   }
 
   private assertContextAlive(): void {
-    if (this.gl.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
+    if (this.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
+  }
+
+  private publishUploadDebug(snapshot: UploadDebugSnapshot): void {
+    if (!sceneGlDebugEnabled()) return;
+    try {
+      const global = globalThis as { __rfLastSceneUpload?: UploadDebugSnapshot; __rfLastSceneUploadFailure?: UploadDebugSnapshot };
+      global.__rfLastSceneUpload = snapshot;
+      if (snapshot.reason) global.__rfLastSceneUploadFailure = snapshot;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private warnUploadFallback(snapshot: UploadDebugSnapshot): void {
+    const key = `${snapshot.reason ?? "unknown"}:${snapshot.layerId ?? ""}:${snapshot.role}:${snapshot.sourceKind}:${snapshot.width}x${snapshot.height}`;
+    if (this.uploadFallbackWarnings.has(key)) return;
+    this.uploadFallbackWarnings.add(key);
+    this.publishUploadDebug(snapshot);
+    if (sceneGlDebugEnabled() || snapshot.reason === "exceeds-max-texture-size") {
+      console.warn(
+        `SceneCompositor: skipping texture upload reason=${snapshot.reason ?? "unknown"} layer=${snapshot.layerId ?? "unknown"} role=${snapshot.role} source=${snapshot.sourceKind} size=${snapshot.width}x${snapshot.height} producer=${snapshot.producer?.label ?? "none"}`,
+        snapshot,
+      );
+    }
+  }
+
+  private failUpload(snapshot: UploadDebugSnapshot, fallbackMessage: string): never {
+    this.publishUploadDebug(snapshot);
+    if (sceneGlDebugEnabled()) console.warn("SceneCompositor: texture upload failed", snapshot);
+    if (snapshot.reason === "context-lost" || snapshot.reason === "context-lost-after-upload" || snapshot.glErrorAfter === this.gl.CONTEXT_LOST_WEBGL || this.isContextLost()) {
+      this.contextLost = true;
+      throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
+    }
+    throw new Error(fallbackMessage);
+  }
+
+  private assertUploadSucceeded(snapshot: UploadDebugSnapshot, debug: boolean): void {
+    const gl = this.gl;
+    // Cheap, always-on: did the upload reveal/trigger context loss? (the lost-context upload case).
+    // gl.isContextLost() is a flag read (no GPU flush), unlike gl.getError().
+    if (this.isContextLost()) {
+      snapshot.reason = "context-lost-after-upload";
+      this.failUpload(snapshot, "scene-compositor: texture upload failed after context loss");
+    }
+    // gl.getError() forces a synchronous GPU flush, so on the per-frame upload hot path we only pay it
+    // when debug tracing is on — the isContextLost() check above already catches the real failure mode.
+    if (!debug) return;
+    const error = gl.getError();
+    snapshot.glErrorAfter = error;
+    this.publishUploadDebug(snapshot);
+    if (error === gl.NO_ERROR) return;
+    if (error === gl.CONTEXT_LOST_WEBGL || this.isContextLost()) {
+      snapshot.reason = "context-lost-after-upload";
+      this.failUpload(snapshot, "scene-compositor: texture upload failed after context loss");
+    }
+    snapshot.reason = error === gl.INVALID_OPERATION ? "invalid-operation-after-upload" : "gl-error-after-upload";
+    this.failUpload(snapshot, `scene-compositor: texture upload failed: 0x${error.toString(16)}`);
   }
 
   debugSnapshot(): SceneCompositorDebugSnapshot {
@@ -562,8 +674,9 @@ export class SceneCompositor {
     this.height = height;
     canvas.width = width;
     canvas.height = height;
-    const gl = createGl(canvas);
+    const gl = createGl(canvas, { kind: "scene-compositor", label: "scene-compositor" });
     this.gl = gl;
+    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
 
     const vs = compileShader(gl, gl.VERTEX_SHADER, COMPOSITE_VS);
     const fs = compileShader(gl, gl.FRAGMENT_SHADER, COMPOSITE_FS);
@@ -598,7 +711,20 @@ export class SceneCompositor {
 
     this.emptyTex = this.makeTex();
     gl.bindTexture(gl.TEXTURE_2D, this.emptyTex);
+    this.assertContextAlive();
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    this.assertUploadSucceeded(
+      {
+        role: "empty",
+        sourceKind: "Uint8Array",
+        width: 1,
+        height: 1,
+        textureState: "new",
+        op: "texImage2D",
+        contextLostBefore: false,
+      },
+      sceneGlDebugEnabled(),
+    );
     this.accumA = new RenderTarget(gl, width, height);
     this.accumB = new RenderTarget(gl, width, height);
 
@@ -848,31 +974,101 @@ export class SceneCompositor {
    * Reuses storage via `texSubImage2D` when the size is unchanged (no realloc → no driver churn), and
    * skips the upload entirely when `version` matches the last upload (static text/shape rasters).
    */
-  private uploadSource(source: TexImageSource, version: number | undefined): WebGLTexture {
+  private uploadSource(source: TexImageSource, version: number | undefined, meta: UploadDebugMeta): WebGLTexture {
     const gl = this.gl;
+    const debug = sceneGlDebugEnabled();
+    // Hard guard: a lost context is permanent — bail BEFORE touching it (no INVALID_OPERATION spam).
     this.assertContextAlive();
+
     const [sw, sh] = srcDims(source);
+    const kind = sourceKind(source);
+
+    // Guard: a source with no pixels (e.g. a <video> that hasn't decoded its first frame yet) would
+    // make texImage2D throw/INVALID_OPERATION. Skip safely — the layer draws transparent this frame and
+    // the settle window recomposites once the real frame lands.
+    if (sw <= 0 || sh <= 0) {
+      this.warnUploadFallback({ ...meta, sourceKind: kind, width: sw, height: sh, textureState: "new", contextLostBefore: false, reason: "zero-dimensions" });
+      return this.emptyTex;
+    }
+    // Guard: a source larger than the GPU's max texture size can't be uploaded (INVALID_VALUE). Skip
+    // safely with a controlled, deduped warning rather than letting the driver error every frame.
+    if (sw > this.maxTextureSize || sh > this.maxTextureSize) {
+      this.warnUploadFallback({ ...meta, sourceKind: kind, width: sw, height: sh, textureState: "new", contextLostBefore: false, reason: "exceeds-max-texture-size" });
+      return this.emptyTex;
+    }
+
     let entry = this.srcTextures.get(source);
+    const producer = getTexImageSourceProducerInfo(source);
+    if (producer?.disposed || producer?.contextLost) {
+      this.warnUploadFallback({
+        ...meta,
+        sourceKind: kind,
+        width: sw,
+        height: sh,
+        textureState: entry ? "existing" : "new",
+        contextLostBefore: false,
+        producer: {
+          label: producer.label,
+          disposed: producer.disposed,
+          contextLost: producer.contextLost,
+          width: producer.width,
+          height: producer.height,
+        },
+        reason: producer.contextLost ? "producer-context-lost" : "producer-disposed",
+      });
+      return entry?.tex ?? this.emptyTex;
+    }
     const needAlloc = !entry || entry.w !== sw || entry.h !== sh;
+    const textureState: UploadDebugSnapshot["textureState"] = !entry ? "new" : needAlloc ? "resize" : "existing";
     if (!entry) {
       entry = { tex: this.makeTex(), w: sw, h: sh, version: Number.NaN, lastFrame: this.frameCounter };
       this.srcTextures.set(source, entry);
     }
     entry.lastFrame = this.frameCounter;
     // Unchanged content (a versioned source whose version + size match the last upload) → reuse as-is.
-    if (version !== undefined && !needAlloc && entry.version === version) return entry.tex;
+    if (version !== undefined && !needAlloc && entry.version === version) {
+      if (debug) this.publishUploadDebug({ ...meta, sourceKind: kind, width: sw, height: sh, textureState: "existing", contextLostBefore: false, reason: "reused-unchanged" });
+      return entry.tex;
+    }
+
+    const snapshot: UploadDebugSnapshot = {
+      ...meta,
+      sourceKind: kind,
+      width: sw,
+      height: sh,
+      textureState,
+      op: needAlloc ? "texImage2D" : "texSubImage2D",
+      contextLostBefore: false,
+      producer: producer
+        ? {
+            label: producer.label,
+            disposed: producer.disposed,
+            contextLost: producer.contextLost,
+            width: producer.width,
+            height: producer.height,
+          }
+        : undefined,
+    };
+
     gl.bindTexture(gl.TEXTURE_2D, entry.tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    if (needAlloc) {
-      if (gl.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-      entry.w = sw;
-      entry.h = sh;
-    } else {
-      if (gl.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    try {
+      if (needAlloc) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        entry.w = sw;
+        entry.h = sh;
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      }
+    } catch (err) {
+      // texImage2D/texSubImage2D can THROW (e.g. a security error, or a lost-context upload in some
+      // engines). A lost-context throw becomes SCENE_COMPOSITOR_CONTEXT_LOST (caller falls back to DOM);
+      // anything else surfaces as a descriptive upload error.
+      snapshot.reason = this.isContextLost() || (err instanceof Error && /CONTEXT_LOST/i.test(err.message)) ? "context-lost" : "upload-threw";
+      this.failUpload(snapshot, `scene-compositor: texture upload threw: ${err instanceof Error ? err.message : String(err)}`);
     }
+    this.assertUploadSucceeded(snapshot, debug);
     entry.version = version ?? Number.NaN;
     return entry.tex;
   }
@@ -1021,8 +1217,10 @@ export class SceneCompositor {
     // matte stays a 2D canvas (CPU raster) → always the upload path.
     const srcTex = isSceneTextureSource(layer.source)
       ? layer.source.texture
-      : this.uploadSource(layer.source, layer.sourceVersion);
-    const maskTex = layer.mask ? this.uploadSource(layer.mask, layer.maskVersion) : null;
+      : this.uploadSource(layer.source, layer.sourceVersion, { layerId: layer.debugLayerId, role: "source", frameTime: this.debugFrameTime });
+    const maskTex = layer.mask
+      ? this.uploadSource(layer.mask, layer.maskVersion, { layerId: layer.debugLayerId, role: "mask", frameTime: this.debugFrameTime })
+      : null;
 
     // Content transform (media only): zoom folds into the object-fit (smaller sampled window), pan shifts
     // the window, crop trims the frame edges. Identity (no `content`) → unchanged object-fit.
@@ -1155,7 +1353,19 @@ export class SceneCompositor {
 
   /** Render the composition for one frame onto the output canvas. */
   renderFrame(spec: SceneFrameSpec): void {
+    try {
+      this.renderFrameUnchecked(spec);
+    } catch (error) {
+      if (error instanceof Error && error.message === SCENE_COMPOSITOR_CONTEXT_LOST) {
+        this.contextLost = true;
+      }
+      throw error;
+    }
+  }
+
+  private renderFrameUnchecked(spec: SceneFrameSpec): void {
     if (this.disposed) return;
+    this.debugFrameTime = spec.debugFrameTime;
     const gl = this.gl;
     // If the browser evicted this context ("Too many active WebGL contexts. Oldest context will be lost."),
     // every upload/draw below is a no-op that floods the console. A lost context is PERMANENT, so bail loudly

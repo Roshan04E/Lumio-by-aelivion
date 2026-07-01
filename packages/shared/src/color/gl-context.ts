@@ -30,17 +30,135 @@ export type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
  * `OffscreenCanvas` that IS freed via `loseContext`, so the export-time count is accurate.
  */
 let activeGlContexts = 0;
+let nextGlContextId = 1;
 
-export function noteGlContextCreated(): void {
-  activeGlContexts += 1;
+export interface GlContextOwnerInfo {
+  id: number;
+  label: string;
+  kind: "scene-compositor" | "media-renderer" | "transition-compositor" | "webgl-applicator" | "unknown";
+  createdAt: number;
+  disposedAt?: number;
+  canvasConnected?: boolean | undefined;
+  contextLost?: boolean | undefined;
 }
 
-export function noteGlContextDisposed(): void {
+export interface GlContextCreateOptions {
+  label?: string;
+  kind?: GlContextOwnerInfo["kind"];
+}
+
+export interface TexImageSourceProducerInfo {
+  label: string;
+  disposed: boolean;
+  contextLost: boolean;
+  width: number;
+  height: number;
+  updatedAt: number;
+}
+
+const glOwners = new WeakMap<WebGL2RenderingContext, GlContextOwnerInfo>();
+const glOwnerRecords = new Map<number, GlContextOwnerInfo>();
+const producerBySource = new WeakMap<TexImageSource, TexImageSourceProducerInfo>();
+
+function nowMs(): number {
+  try {
+    return typeof performance !== "undefined" ? performance.now() : Date.now();
+  } catch {
+    return Date.now();
+  }
+}
+
+function publishActiveGlContextCount(): void {
+  try {
+    const global = globalThis as { __rfActiveGlContexts?: number; __rfGlContextBudget?: unknown; __rfDumpGlDebug?: () => unknown; __rfLastSceneUpload?: unknown; __rfLastSceneUploadFailure?: unknown };
+    global.__rfActiveGlContexts = activeGlContexts;
+    global.__rfGlContextBudget = getGlContextBudgetSnapshot();
+    global.__rfDumpGlDebug = () => ({
+      activeGlContexts,
+      budget: getGlContextBudgetSnapshot(),
+      lastSceneUpload: global.__rfLastSceneUpload,
+      lastSceneUploadFailure: global.__rfLastSceneUploadFailure,
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+export function noteGlContextCreated(gl?: WebGL2RenderingContext, options: GlContextCreateOptions = {}): void {
+  if (gl) {
+    const existing = glOwners.get(gl);
+    if (existing && existing.disposedAt == null) {
+      existing.label = options.label ?? existing.label;
+      existing.kind = options.kind ?? existing.kind;
+      existing.canvasConnected = (gl.canvas as { isConnected?: boolean }).isConnected;
+      existing.contextLost = gl.isContextLost();
+      publishActiveGlContextCount();
+      return;
+    }
+  }
+  activeGlContexts += 1;
+  if (gl) {
+    const owner = {
+      id: nextGlContextId++,
+      label: options.label ?? options.kind ?? "unknown",
+      kind: options.kind ?? "unknown",
+      createdAt: nowMs(),
+      canvasConnected: (gl.canvas as { isConnected?: boolean }).isConnected,
+      contextLost: gl.isContextLost(),
+    };
+    glOwners.set(gl, owner);
+    glOwnerRecords.set(owner.id, owner);
+  }
+  publishActiveGlContextCount();
+}
+
+export function noteGlContextDisposed(gl?: WebGL2RenderingContext): void {
+  if (gl) {
+    const owner = glOwners.get(gl);
+    if (owner) {
+      if (owner.disposedAt != null) {
+        publishActiveGlContextCount();
+        return;
+      }
+      owner.disposedAt = nowMs();
+      owner.canvasConnected = (gl.canvas as { isConnected?: boolean }).isConnected;
+      owner.contextLost = gl.isContextLost();
+    }
+  }
   activeGlContexts = Math.max(0, activeGlContexts - 1);
+  publishActiveGlContextCount();
 }
 
 export function getActiveGlContextCount(): number {
   return activeGlContexts;
+}
+
+export function getGlContextOwnerInfo(gl: WebGL2RenderingContext): GlContextOwnerInfo | null {
+  const owner = glOwners.get(gl);
+  if (!owner) return null;
+  owner.canvasConnected = (gl.canvas as { isConnected?: boolean }).isConnected;
+  owner.contextLost = gl.isContextLost();
+  return { ...owner };
+}
+
+export function getGlContextBudgetSnapshot(): { active: number; target: number; hardCap: number; owners: GlContextOwnerInfo[] } {
+  return {
+    active: activeGlContexts,
+    target: 3,
+    hardCap: 4,
+    owners: Array.from(glOwnerRecords.values())
+      .filter((owner) => owner.disposedAt == null)
+      .map((owner) => ({ ...owner })),
+  };
+}
+
+export function markTexImageSourceProducer(source: TexImageSource, info: TexImageSourceProducerInfo): void {
+  producerBySource.set(source, { ...info, updatedAt: nowMs() });
+}
+
+export function getTexImageSourceProducerInfo(source: TexImageSource): TexImageSourceProducerInfo | null {
+  const info = producerBySource.get(source);
+  return info ? { ...info } : null;
 }
 
 /**
@@ -75,17 +193,21 @@ export const FULLSCREEN_TRI_VERTS = new Float32Array([-1, -1, 3, -1, -1, 3]);
  * `isConnected` and is always throwaway → release it too.
  */
 export function releaseContextIfDetached(gl: WebGL2RenderingContext): void {
+  if (gl.isContextLost()) {
+    noteGlContextDisposed(gl);
+    return;
+  }
   const connected = (gl.canvas as { isConnected?: boolean }).isConnected;
   if (connected === true) return; // still in the DOM → will be reused; a lost context can't be re-acquired
   try {
     gl.getExtension("WEBGL_lose_context")?.loseContext();
-    noteGlContextDisposed();
+    noteGlContextDisposed(gl);
   } catch {
     /* ignore */
   }
 }
 
-export function createGl(canvas: AnyCanvas): WebGL2RenderingContext {
+export function createGl(canvas: AnyCanvas, options: GlContextCreateOptions = {}): WebGL2RenderingContext {
   const gl = canvas.getContext("webgl2", {
     premultipliedAlpha: false,
     alpha: true,
@@ -96,7 +218,7 @@ export function createGl(canvas: AnyCanvas): WebGL2RenderingContext {
     antialias: false,
   }) as WebGL2RenderingContext | null;
   if (!gl) throw new Error("gl-context: WebGL2 unavailable");
-  noteGlContextCreated();
+  noteGlContextCreated(gl, options);
   return gl;
 }
 

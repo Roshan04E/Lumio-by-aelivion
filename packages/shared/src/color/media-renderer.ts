@@ -17,7 +17,13 @@
  */
 
 import { bakeMatteLut3d, bakePipelineToLut3d } from "./lut3d";
-import { noteGlContextCreated, releaseContextIfDetached, type RenderTarget } from "./gl-context";
+import {
+  markTexImageSourceProducer,
+  noteGlContextCreated,
+  releaseContextIfDetached,
+  type GlContextCreateOptions,
+  type RenderTarget,
+} from "./gl-context";
 import { MEDIA_FRAGMENT_SHADER, MEDIA_VERTEX_SHADER, mediaLut3dToRgbaFloat } from "./media-shader";
 import type { ColorPipeline, MediaEffects } from "./types";
 
@@ -56,6 +62,10 @@ export interface MediaRendererDrawParams {
    */
   target?: RenderTarget | null;
 }
+
+export const MEDIA_RENDERER_CONTEXT_LOST = "MEDIA_RENDERER_CONTEXT_LOST";
+
+export interface MediaWebGLRendererOptions extends GlContextCreateOptions {}
 
 export interface MediaTransition {
   kind: "wipe" | "iris" | "dip";
@@ -115,6 +125,8 @@ export class MediaWebGLRenderer {
   private readonly frameTex: WebGLTexture;
   private readonly matteTex: WebGLTexture;
   private readonly lutTex: WebGLTexture;
+  private readonly ownerLabel: string;
+  private readonly maxTextureSize: number;
 
   // Uniform locations
   private readonly uFrame: WebGLUniformLocation | null;
@@ -146,9 +158,11 @@ export class MediaWebGLRenderer {
 
   private lutSize = 0;
   private disposed = false;
+  private contextLost = false;
 
-  constructor(target: HTMLCanvasElement | OffscreenCanvas | { sharedGl: WebGL2RenderingContext }) {
+  constructor(target: HTMLCanvasElement | OffscreenCanvas | { sharedGl: WebGL2RenderingContext }, options: MediaWebGLRendererOptions = {}) {
     let gl: WebGL2RenderingContext;
+    this.ownerLabel = options.label ?? (("sharedGl" in target) ? "media-renderer:shared" : "media-renderer");
     if ("sharedGl" in target) {
       // Shared-context mode (additive, Phase 2 Stage 1): borrow an existing WebGL2 context (e.g. the
       // SceneCompositor's) and render the grade into a caller-owned RenderTarget — NO own canvas, NO own
@@ -168,10 +182,11 @@ export class MediaWebGLRenderer {
       if (!ctx) throw new Error("media-renderer: WebGL2 unavailable");
       // Count toward the live WebGL context budget — this is the one creation site that doesn't route through
       // createGl(); `dispose()`'s `releaseContextIfDetached` decrements it. Keeps the export budget accurate.
-      noteGlContextCreated();
+      noteGlContextCreated(ctx, { kind: options.kind ?? "media-renderer", label: this.ownerLabel });
       gl = ctx;
     }
     this.gl = gl;
+    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
 
     const vs = compile(gl, gl.VERTEX_SHADER, MEDIA_VERTEX_SHADER);
     const fs = compile(gl, gl.FRAGMENT_SHADER, MEDIA_FRAGMENT_SHADER);
@@ -232,6 +247,64 @@ export class MediaWebGLRenderer {
     this.frameTex = make2dTexture(gl);
     this.matteTex = make2dTexture(gl);
     this.lutTex = gl.createTexture()!;
+    this.publishProducerState();
+  }
+
+  isContextLost(): boolean {
+    return this.contextLost || this.gl.isContextLost();
+  }
+
+  private assertContextAlive(): void {
+    if (!this.isContextLost()) return;
+    this.contextLost = true;
+    this.publishProducerState();
+    throw new Error(MEDIA_RENDERER_CONTEXT_LOST);
+  }
+
+  private publishProducerState(): void {
+    if (this.shared || !this._canvas) return;
+    try {
+      markTexImageSourceProducer(this._canvas as TexImageSource, {
+        label: this.ownerLabel,
+        disposed: this.disposed,
+        contextLost: this.isContextLost(),
+        width: this._canvas.width,
+        height: this._canvas.height,
+        updatedAt: 0,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private canUpload(width: number, height: number): boolean {
+    if (this.disposed) return false;
+    this.assertContextAlive();
+    if (width <= 0 || height <= 0) return false;
+    if (width > this.maxTextureSize || height > this.maxTextureSize) return false;
+    return true;
+  }
+
+  private uploadTexImage(label: "source" | "matte", tex: WebGLTexture, source: TexImageSource): void {
+    const gl = this.gl;
+    this.assertContextAlive();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    try {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    } catch (error) {
+      if (this.isContextLost() || (error instanceof Error && /CONTEXT_LOST/i.test(error.message))) {
+        this.contextLost = true;
+        this.publishProducerState();
+        throw new Error(MEDIA_RENDERER_CONTEXT_LOST);
+      }
+      throw new Error(`media-renderer: ${label} upload failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (this.isContextLost()) {
+      this.contextLost = true;
+      this.publishProducerState();
+      throw new Error(MEDIA_RENDERER_CONTEXT_LOST);
+    }
   }
 
   /**
@@ -241,6 +314,7 @@ export class MediaWebGLRenderer {
    */
   setPipeline(pipeline: ColorPipeline | null, showMatte = false): void {
     if (this.disposed) return;
+    this.assertContextAlive();
     const gl = this.gl;
 
     if (!pipeline || pipeline.identity) {
@@ -281,12 +355,32 @@ export class MediaWebGLRenderer {
       matte, matteInvert = false, matteOpacity = 1,
       pipeline, amount = 1, opacity = 1, mediaEffects = null, transition = null
     } = params;
-    if (w === 0 || h === 0) return;
+    if (!this.canUpload(w, h)) return;
 
     const gl = this.gl;
+
+    // lutSize is the authoritative, non-stale record of whether a non-identity LUT is
+    // loaded (setPipeline sets it to 0 for identity/null). Do NOT also gate on the passed
+    // `pipeline`: during playback the draw loop closes over a stale pipeline from when play
+    // started, so the grade would never apply over an adjustment clip until paused.
+    const hasLut = this.lutSize > 0;
+
+    gl.activeTexture(gl.TEXTURE0);
+    this.uploadTexImage("source", this.frameTex, source);
+
+    let hasMatte = false;
+    if (matte) {
+      const matteSource = matte as { videoWidth?: number; naturalWidth?: number; width?: number; videoHeight?: number; naturalHeight?: number; height?: number };
+      const mw = params.matteWidth ?? matteSource.videoWidth ?? matteSource.naturalWidth ?? matteSource.width ?? 0;
+      const mh = params.matteHeight ?? matteSource.videoHeight ?? matteSource.naturalHeight ?? matteSource.height ?? 0;
+      if (this.canUpload(mw, mh)) {
+        gl.activeTexture(gl.TEXTURE2);
+        this.uploadTexImage("matte", this.matteTex, matte);
+        hasMatte = true;
+      }
+    }
+
     if (this.shared) {
-      // Shared-context mode: render into the caller's RenderTarget (auto-sized to the source, mirroring the
-      // own-canvas resize below). No canvas to touch.
       const target = params.target;
       if (!target) throw new Error("media-renderer: shared-context draw() requires params.target");
       target.resize(w, h);
@@ -294,13 +388,8 @@ export class MediaWebGLRenderer {
     } else if (this._canvas!.width !== w || this._canvas!.height !== h) {
       this._canvas!.width = w;
       this._canvas!.height = h;
+      this.publishProducerState();
     }
-
-    // lutSize is the authoritative, non-stale record of whether a non-identity LUT is
-    // loaded (setPipeline sets it to 0 for identity/null). Do NOT also gate on the passed
-    // `pipeline`: during playback the draw loop closes over a stale pipeline from when play
-    // started, so the grade would never apply over an adjustment clip until paused.
-    const hasLut = this.lutSize > 0;
 
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 0);
@@ -311,8 +400,6 @@ export class MediaWebGLRenderer {
     // Source frame → TEXTURE0
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.uniform1i(this.uFrame, 0);
 
     // 3D LUT → TEXTURE1
@@ -324,13 +411,8 @@ export class MediaWebGLRenderer {
     gl.uniform1i(this.uHasLut, hasLut ? 1 : 0);
 
     // Luma matte → TEXTURE2
-    const hasMatte = Boolean(matte);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.matteTex);
-    if (matte) {
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, matte);
-    }
     gl.uniform1i(this.uMatte, 2);
     gl.uniform1i(this.uHasMatte, hasMatte ? 1 : 0);
     gl.uniform1i(this.uMatteInvert, matteInvert ? 1 : 0);
@@ -372,9 +454,11 @@ export class MediaWebGLRenderer {
     gl.uniform3f(this.uTransitionColor, dipColor[0], dipColor[1], dipColor[2]);
 
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.assertContextAlive();
     gl.bindVertexArray(null);
     // Shared mode: restore the default framebuffer so the borrowed context isn't left bound to our target.
     if (this.shared) gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.publishProducerState();
   }
 
   /**
@@ -393,6 +477,7 @@ export class MediaWebGLRenderer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.publishProducerState();
     const gl = this.gl;
     gl.deleteTexture(this.frameTex);
     gl.deleteTexture(this.matteTex);

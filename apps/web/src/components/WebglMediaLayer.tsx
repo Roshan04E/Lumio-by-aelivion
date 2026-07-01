@@ -136,6 +136,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const imageRef = useRef<HTMLImageElement | null>(null);
     const rafRef = useRef<number | null>(null);
     const vfcRef = useRef<number | null>(null);
+    const disposeTimerRef = useRef<number | null>(null);
     const failedRef = useRef(false);
     // The playback loop closes over this ref so it always invokes the CURRENT drawVideoFrame — which
     // reads live opacity/transform from `style`. Without it the loop froze the opacity captured when it
@@ -149,17 +150,36 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     useEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return undefined;
+      const handleContextLost = (event: Event) => {
+        event.preventDefault();
+        failedRef.current = true;
+        stopLoop();
+        const renderer = rendererRef.current;
+        rendererRef.current = null;
+        try { renderer?.dispose(); } catch { /* ignore */ }
+        onWebglFailed?.();
+      };
+      canvas.addEventListener("webglcontextlost", handleContextLost);
+      if (disposeTimerRef.current !== null) {
+        window.clearTimeout(disposeTimerRef.current);
+        disposeTimerRef.current = null;
+      }
+      if (rendererRef.current) return () => {
+        canvas.removeEventListener("webglcontextlost", handleContextLost);
+        stopLoop();
+        scheduleRendererDispose();
+      };
       try {
-        rendererRef.current = new MediaWebGLRenderer(canvas);
+        rendererRef.current = new MediaWebGLRenderer(canvas, { kind: "media-renderer", label: `preview-media:${mediaType}:${src}` });
       } catch {
         rendererRef.current = null;
         failedRef.current = true;
         onWebglFailed?.();
       }
       return () => {
+        canvas.removeEventListener("webglcontextlost", handleContextLost);
         stopLoop();
-        try { rendererRef.current?.dispose(); } catch { /* ignore */ }
-        rendererRef.current = null;
+        scheduleRendererDispose();
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -346,6 +366,17 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
 
     function stopLoop() {
       if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    }
+
+    function scheduleRendererDispose() {
+      const renderer = rendererRef.current;
+      if (!renderer) return;
+      if (disposeTimerRef.current !== null) window.clearTimeout(disposeTimerRef.current);
+      disposeTimerRef.current = window.setTimeout(() => {
+        disposeTimerRef.current = null;
+        if (rendererRef.current === renderer) rendererRef.current = null;
+        try { renderer.dispose(); } catch { /* ignore */ }
+      }, 0);
     }
 
     function drawVideoFrame() {

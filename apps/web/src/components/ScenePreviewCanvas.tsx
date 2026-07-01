@@ -22,11 +22,16 @@ import type { CSSProperties } from "react";
 import {
   SceneCompositor,
   SCENE_COMPOSITOR_CONTEXT_LOST,
+  MEDIA_RENDERER_CONTEXT_LOST,
   MediaWebGLRenderer,
+  RenderTarget,
+  getTexImageSourceProducerInfo,
   SceneMaskMatteCache,
   SceneTextRasterizer,
   buildSceneDraws,
+  type ColorPipeline,
   type SceneFrameSpec,
+  type SceneTextureSource,
   type TimelineLayer,
   type ScenePreviewTransition,
 } from "@reelforge/shared";
@@ -99,6 +104,7 @@ export function ScenePreviewCanvas({
   const disposedRef = useRef(false);
   const contextLostRef = useRef(false);
   const [recoveryTick, setRecoveryTick] = useState(0);
+  const sharedGradeRenderersRef = useRef<Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string }>>(new Map());
   // Per-text/shape-layer color-grade renderers (Phase 4.1c). A graded overlay's UNGRADED raster stays
   // cached (transform/grade-independent — the 4.1b win); the grade is applied as a post-pass through the
   // SAME `MediaWebGLRenderer` the media path + export overlay-grade use, so the result becomes the scene
@@ -140,8 +146,21 @@ export function ScenePreviewCanvas({
       }
     }
     gradeRenderersRef.current.clear();
+    for (const { renderer, target } of sharedGradeRenderersRef.current.values()) {
+      try {
+        renderer.dispose();
+      } catch {
+        /* ignore */
+      }
+      try {
+        target.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    sharedGradeRenderersRef.current.clear();
   };
-  const isContextLostError = (error: unknown) => error instanceof Error && error.message === SCENE_COMPOSITOR_CONTEXT_LOST;
+  const isContextLostError = (error: unknown) => error instanceof Error && (error.message === SCENE_COMPOSITOR_CONTEXT_LOST || error.message === MEDIA_RENDERER_CONTEXT_LOST);
   const fail = (where: string, error: unknown) => {
     if (failedRef.current) return;
     failedRef.current = true;
@@ -242,9 +261,71 @@ export function ScenePreviewCanvas({
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
     const renderH = Math.max(1, Math.round(h * rScale));
+    const isLiveMediaCanvas = (canvas: HTMLCanvasElement | null | undefined): canvas is HTMLCanvasElement => {
+      if (!canvas) return false;
+      const producer = getTexImageSourceProducerInfo(canvas);
+      return !producer || (!producer.disposed && !producer.contextLost);
+    };
+    const getMediaGradedSource = (id: string): HTMLCanvasElement | null => {
+      let resolvedId = id;
+      const seen = new Set<string>();
+      while (alias?.has(resolvedId) && !seen.has(resolvedId)) {
+        seen.add(resolvedId);
+        resolvedId = alias.get(resolvedId)!;
+      }
+      const explicit = gradedRef.current[resolvedId];
+      if (isLiveMediaCanvas(explicit)) return explicit;
+
+      // User-duplicated region/media layers can carry `_copy_...` ids without an explicit render-effect alias.
+      // Prefer the nearest live base canvas over a stale duplicate canvas.
+      let copyIdx = id.lastIndexOf("_copy_");
+      while (copyIdx > 0) {
+        const baseId = id.slice(0, copyIdx);
+        const base = gradedRef.current[baseId];
+        if (isLiveMediaCanvas(base)) return base;
+        copyIdx = baseId.lastIndexOf("_copy_");
+      }
+      const own = gradedRef.current[id];
+      return isLiveMediaCanvas(own) ? own : null;
+    };
+    const gradeOverlay = (layerId: string, srcCanvas: HTMLCanvasElement | OffscreenCanvas, pipeline: ColorPipeline): SceneTextureSource | null => {
+      if (compositor.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
+      const gl = compositor.sharedGl;
+      const targetW = Math.max(1, srcCanvas.width);
+      const targetH = Math.max(1, srcCanvas.height);
+      let entry = sharedGradeRenderersRef.current.get(layerId);
+      if (!entry) {
+        entry = {
+          renderer: new MediaWebGLRenderer({ sharedGl: gl }),
+          target: new RenderTarget(gl, targetW, targetH),
+          pipelineKey: "",
+        };
+        sharedGradeRenderersRef.current.set(layerId, entry);
+      }
+      entry.target.resize(targetW, targetH);
+      const pipelineKey = JSON.stringify(pipeline);
+      if (entry.pipelineKey !== pipelineKey) {
+        entry.renderer.setPipeline(pipeline);
+        entry.pipelineKey = pipelineKey;
+      }
+      entry.renderer.draw({
+        source: srcCanvas,
+        sourceWidth: targetW,
+        sourceHeight: targetH,
+        matte: null,
+        pipeline,
+        amount: 1,
+        opacity: 1,
+        mediaEffects: null,
+        target: entry.target,
+      });
+      return { texture: entry.target.tex, width: targetW, height: targetH };
+    };
     // The draw-list build is shared with the local export (`SceneFrameCompositor`) — see build-scene-draws.
     // The only editor-specific input is the media graded canvas, read here from the hidden WebglMediaLayers.
-    const draws = buildSceneDraws({
+    let draws: SceneFrameSpec["layers"];
+    try {
+      draws = buildSceneDraws({
       layers: ls,
       width: w,
       height: h,
@@ -255,11 +336,24 @@ export function ScenePreviewCanvas({
       matteCache: matteCacheRef.current,
       gradeRenderers: gradeRenderersRef.current,
       // A region-blur clone reads its base layer's graded canvas (no own decoder/context) — see mediaSourceAlias.
-      getMediaGraded: (id) => gradedRef.current[id] ?? (alias ? gradedRef.current[alias.get(id) ?? ""] ?? null : null),
+        getMediaGraded: getMediaGradedSource,
+      gradeOverlay,
       createCanvas: () => document.createElement("canvas"),
-    });
+      });
+    } catch (error) {
+      fail("build draw list", error);
+      return;
+    }
 
-    const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws };
+    const liveLayerIds = new Set(ls.map((layer) => layer.id));
+    for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
+      if (liveLayerIds.has(id)) continue;
+      renderer.dispose();
+      target.dispose();
+      sharedGradeRenderersRef.current.delete(id);
+    }
+
+    const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t };
     try {
       compositor.renderFrame(spec);
     } catch (error) {
