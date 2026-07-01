@@ -17,10 +17,11 @@
  * (see `VideoPreview`); otherwise the shipped DOM path renders unchanged.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   SceneCompositor,
+  SCENE_COMPOSITOR_CONTEXT_LOST,
   MediaWebGLRenderer,
   SceneMaskMatteCache,
   SceneTextRasterizer,
@@ -94,6 +95,10 @@ export function ScenePreviewCanvas({
   const compositorRef = useRef<SceneCompositor | null>(null);
   const matteCacheRef = useRef<SceneMaskMatteCache | null>(null);
   const rasterizerRef = useRef<SceneTextRasterizer | null>(null);
+  const rafRef = useRef<number>(0);
+  const disposedRef = useRef(false);
+  const contextLostRef = useRef(false);
+  const [recoveryTick, setRecoveryTick] = useState(0);
   // Per-text/shape-layer color-grade renderers (Phase 4.1c). A graded overlay's UNGRADED raster stays
   // cached (transform/grade-independent — the 4.1b win); the grade is applied as a post-pass through the
   // SAME `MediaWebGLRenderer` the media path + export overlay-grade use, so the result becomes the scene
@@ -103,10 +108,51 @@ export function ScenePreviewCanvas({
   const failedRef = useRef(false);
   const onFailureRef = useRef(onFailure);
   onFailureRef.current = onFailure;
+  const stopLoop = () => {
+    if (!rafRef.current) return;
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = 0;
+  };
+  const disposeResources = () => {
+    try {
+      compositorRef.current?.dispose();
+    } catch {
+      /* ignore teardown after context loss */
+    }
+    compositorRef.current = null;
+    try {
+      matteCacheRef.current?.dispose();
+    } catch {
+      /* ignore */
+    }
+    matteCacheRef.current = null;
+    try {
+      rasterizerRef.current?.dispose();
+    } catch {
+      /* ignore */
+    }
+    rasterizerRef.current = null;
+    for (const { renderer } of gradeRenderersRef.current.values()) {
+      try {
+        renderer.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    gradeRenderersRef.current.clear();
+  };
+  const isContextLostError = (error: unknown) => error instanceof Error && error.message === SCENE_COMPOSITOR_CONTEXT_LOST;
   const fail = (where: string, error: unknown) => {
     if (failedRef.current) return;
     failedRef.current = true;
-    console.error(`ScenePreviewCanvas: GPU compositor ${where} failed — falling back to DOM path`, error);
+    stopLoop();
+    disposeResources();
+    if (isContextLostError(error)) {
+      contextLostRef.current = true;
+      console.warn("ScenePreviewCanvas: GPU compositor context lost; falling back to DOM path");
+    } else {
+      console.error(`ScenePreviewCanvas: GPU compositor ${where} failed - falling back to DOM path`, error);
+    }
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
@@ -124,11 +170,24 @@ export function ScenePreviewCanvas({
   if (redrawRef) redrawRef.current = requestDraw;
   useEffect(requestDraw, [layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions]);
 
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+      stopLoop();
+      disposeResources();
+      if (redrawRef?.current === requestDraw) redrawRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Create / dispose the compositor with the canvas.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
+      failedRef.current = false;
+      contextLostRef.current = false;
       compositorRef.current = new SceneCompositor(canvas, width, height);
       matteCacheRef.current = new SceneMaskMatteCache(width, height);
       // A late async raster (text/font) re-arms the settle window so it lands on screen even when idle.
@@ -138,24 +197,46 @@ export function ScenePreviewCanvas({
       fail("init", error);
     }
     return () => {
-      compositorRef.current?.dispose();
-      compositorRef.current = null;
-      matteCacheRef.current?.dispose();
-      matteCacheRef.current = null;
-      rasterizerRef.current?.dispose();
-      rasterizerRef.current = null;
-      for (const { renderer } of gradeRenderersRef.current.values()) renderer.dispose();
-      gradeRenderersRef.current.clear();
+      disposeResources();
     };
     // Re-create only when the comp dimensions change (the compositor sizes its FBOs to them).
-  }, [width, height]);
+  }, [width, height, recoveryTick]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const handleLost = (event: Event) => {
+      event.preventDefault();
+      if (contextLostRef.current) return;
+      contextLostRef.current = true;
+      failedRef.current = true;
+      stopLoop();
+      disposeResources();
+      console.warn("ScenePreviewCanvas: WebGL context lost; preview compositor stopped");
+      onFailureRef.current?.();
+    };
+    const handleRestored = () => {
+      if (disposedRef.current) return;
+      contextLostRef.current = false;
+      failedRef.current = false;
+      setRecoveryTick((tick) => tick + 1);
+      requestDraw();
+    };
+    canvas.addEventListener("webglcontextlost", handleLost);
+    canvas.addEventListener("webglcontextrestored", handleRestored);
+    return () => {
+      canvas.removeEventListener("webglcontextlost", handleLost);
+      canvas.removeEventListener("webglcontextrestored", handleRestored);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // The latest draw closure, kept in a ref so the persistent rAF loop always runs current logic
   // without re-subscribing. Reads live values from `inputsRef` / `gradedRef` (both stable refs).
   const drawRef = useRef<() => void>(() => {});
   drawRef.current = () => {
     const compositor = compositorRef.current;
-    if (!compositor || failedRef.current) return;
+    if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
     const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, renderScale: rScale, transitions: tPairs, mediaSourceAlias: alias } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
@@ -190,9 +271,19 @@ export function ScenePreviewCanvas({
   // arrival). When idle it's a single timestamp check + reschedule — no GPU work, no texture uploads —
   // so the scene compositor doesn't steal main-thread/GPU time from the timeline + viewer when paused.
   useEffect(() => {
-    let raf = 0;
+    let cancelled = false;
     let wasSuspended = false;
     const loop = () => {
+      const compositor = compositorRef.current;
+      if (cancelled || disposedRef.current || failedRef.current || contextLostRef.current || !compositor || compositor.isContextLost()) {
+        if (compositor?.isContextLost()) {
+          contextLostRef.current = true;
+          failedRef.current = true;
+          disposeResources();
+        }
+        rafRef.current = 0;
+        return;
+      }
       // During a main-thread export this compositor must NOT touch its WebGL context: the export's own
       // contexts can evict ours, and rendering through the dead context floods the console. Skip drawing
       // while suspended; on release re-arm a settle window so we repaint the current frame.
@@ -206,11 +297,25 @@ export function ScenePreviewCanvas({
         const now = typeof performance !== "undefined" ? performance.now() : Date.now();
         if (inputsRef.current.isPlaying || now < activeUntilRef.current) drawRef.current();
       }
-      raf = requestAnimationFrame(loop);
+      const nextCompositor = compositorRef.current;
+      if (cancelled || disposedRef.current || contextLostRef.current || failedRef.current || !nextCompositor || nextCompositor.isContextLost()) {
+        if (nextCompositor?.isContextLost()) {
+          contextLostRef.current = true;
+          failedRef.current = true;
+          disposeResources();
+        }
+        rafRef.current = 0;
+        return;
+      }
+      rafRef.current = requestAnimationFrame(loop);
     };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+    stopLoop();
+    rafRef.current = requestAnimationFrame(loop);
+    return () => {
+      cancelled = true;
+      stopLoop();
+    };
+  }, [recoveryTick]);
 
   // Non-interactive: selection boxes / motion-path handles are separate DOM overlays that must stay
   // clickable above this canvas.

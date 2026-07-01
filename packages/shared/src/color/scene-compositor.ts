@@ -169,6 +169,8 @@ export interface SceneFrameSpec {
   layers: SceneDraw[];
 }
 
+export const SCENE_COMPOSITOR_CONTEXT_LOST = "SCENE_COMPOSITOR_CONTEXT_LOST";
+
 export interface SceneCompositorDebugSnapshot {
   width: number;
   height: number;
@@ -492,6 +494,10 @@ export class SceneCompositor {
     return this.gl;
   }
 
+  isContextLost(): boolean {
+    return this.gl.isContextLost();
+  }
+
   private framebufferStatusName(status: number): string {
     const gl = this.gl;
     if (status === gl.FRAMEBUFFER_COMPLETE) return "FRAMEBUFFER_COMPLETE";
@@ -513,6 +519,10 @@ export class SceneCompositor {
       framebufferStatus: this.framebufferStatusName(status),
       framebufferComplete: status === gl.FRAMEBUFFER_COMPLETE,
     };
+  }
+
+  private assertContextAlive(): void {
+    if (this.gl.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
   }
 
   debugSnapshot(): SceneCompositorDebugSnapshot {
@@ -840,6 +850,7 @@ export class SceneCompositor {
    */
   private uploadSource(source: TexImageSource, version: number | undefined): WebGLTexture {
     const gl = this.gl;
+    this.assertContextAlive();
     const [sw, sh] = srcDims(source);
     let entry = this.srcTextures.get(source);
     const needAlloc = !entry || entry.w !== sw || entry.h !== sh;
@@ -854,10 +865,12 @@ export class SceneCompositor {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     if (needAlloc) {
+      if (gl.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       entry.w = sw;
       entry.h = sh;
     } else {
+      if (gl.isContextLost()) throw new Error(SCENE_COMPOSITOR_CONTEXT_LOST);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
     }
     entry.version = version ?? Number.NaN;
@@ -1147,7 +1160,7 @@ export class SceneCompositor {
     // If the browser evicted this context ("Too many active WebGL contexts. Oldest context will be lost."),
     // every upload/draw below is a no-op that floods the console. A lost context is PERMANENT, so bail loudly
     // ONCE — ScenePreviewCanvas catches this and falls back to the DOM path instead of spamming every frame.
-    if (gl.isContextLost()) throw new Error("scene-compositor: WebGL context lost (evicted)");
+    this.assertContextAlive();
     this.frameCounter += 1;
     this.ensureSize(spec.width, spec.height);
     const w = this.width;
