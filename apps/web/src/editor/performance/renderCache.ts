@@ -1,3 +1,5 @@
+import type { TimelineComposition } from "@reelforge/shared";
+
 /**
  * Frame render cache (Phase 3 interface + a small LRU impl; wired in Phase 5).
  * Memoizes rendered preview frames keyed by (composition signature, time,
@@ -49,6 +51,43 @@ export interface AdaptiveCachePlanOptions {
   minSpanSeconds?: number | undefined;
   maxSimpleSpanSeconds?: number | undefined;
   maxComplexSpanSeconds?: number | undefined;
+}
+
+export type CachedPreviewSpanStatus = "ready" | "pending" | "dirty" | "failed";
+
+export interface CachedPreviewSpan {
+  id: string;
+  signature: string;
+  startSeconds: number;
+  endSeconds: number;
+  reason: AdaptiveCacheSpanReason;
+  status: CachedPreviewSpanStatus;
+  priority: number;
+  layerIds: string[];
+  renderScale: number;
+  createdAt: number;
+  lastUsedAt: number;
+  byteSize: number;
+  url?: string | undefined;
+  error?: string | undefined;
+}
+
+export interface PreviewRenderCacheStore {
+  getReadySpan: (timeSeconds: number, signature: string, renderScale: number) => CachedPreviewSpan | undefined;
+  upsert: (span: CachedPreviewSpan) => void;
+  markDirty: (range: TimelineInterval) => number;
+  removeSignature: (signature: string) => number;
+  reconcile: (plan: readonly AdaptiveCacheSpan[], signature: string, renderScale: number, now?: number) => CachedPreviewSpan[];
+  nextPending: () => CachedPreviewSpan | undefined;
+  clear: () => void;
+  readonly entries: CachedPreviewSpan[];
+  readonly size: number;
+  readonly byteSize: number;
+}
+
+export interface PreviewRenderCacheStoreOptions {
+  maxEntries?: number | undefined;
+  maxBytes?: number | undefined;
 }
 
 function keyString(key: RenderCacheKey): string {
@@ -108,6 +147,10 @@ function isFinitePositive(value: number): boolean {
 
 function overlaps(a: TimelineInterval, b: TimelineInterval): boolean {
   return a.startSeconds < b.endSeconds && b.startSeconds < a.endSeconds;
+}
+
+function containsTime(span: TimelineInterval, timeSeconds: number): boolean {
+  return timeSeconds >= span.startSeconds && timeSeconds < span.endSeconds;
 }
 
 function layerInterval(layer: TimelineCacheLayerInput, durationSeconds: number): TimelineInterval | undefined {
@@ -286,4 +329,211 @@ export function planAdaptiveCacheSpans(options: AdaptiveCachePlanOptions): Adapt
   }
 
   return spans;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
+    .join(",")}}`;
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+export function compositionCacheLayers(composition: TimelineComposition): TimelineCacheLayerInput[] {
+  return composition.tracks.flatMap((track) =>
+    track.layers.map((layer) => ({
+      id: layer.id,
+      type: layer.type,
+      startSeconds: layer.startSeconds,
+      durationSeconds: layer.durationSeconds,
+      ...(layer.assetId !== undefined ? { assetId: layer.assetId } : {}),
+      ...(layer.transitionIn !== undefined ? { transitionIn: { durationSeconds: layer.transitionIn.durationSeconds } } : {}),
+      effects: layer.effects,
+      masks: layer.masks,
+      keyframes: layer.keyframes,
+      animations: layer.animations
+    }))
+  );
+}
+
+export function timelineCacheSignature(input: {
+  compositionId: string;
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  layers: readonly TimelineCacheLayerInput[];
+  renderScale: number;
+}): string {
+  const payload = {
+    compositionId: input.compositionId,
+    durationSeconds: Number(input.durationSeconds.toFixed(3)),
+    width: input.width,
+    height: input.height,
+    fps: input.fps,
+    renderScale: Number(input.renderScale.toFixed(3)),
+    layers: input.layers.map((layer) => ({
+      id: layer.id,
+      type: layer.type,
+      startSeconds: Number(layer.startSeconds.toFixed(3)),
+      durationSeconds: Number(layer.durationSeconds.toFixed(3)),
+      assetId: layer.assetId ?? "",
+      transitionSeconds: layer.transitionIn?.durationSeconds ?? 0,
+      effects: layer.effects ?? [],
+      masks: layer.masks ?? [],
+      keyframes: layer.keyframes ?? [],
+      animations: layer.animations ?? []
+    }))
+  };
+  return hashString(stableStringify(payload));
+}
+
+export function compositionCacheSignature(composition: TimelineComposition, renderScale: number): string {
+  return timelineCacheSignature({
+    compositionId: composition.id,
+    durationSeconds: composition.durationSeconds,
+    width: composition.width,
+    height: composition.height,
+    fps: composition.fps,
+    layers: compositionCacheLayers(composition),
+    renderScale
+  });
+}
+
+function cacheSpanKey(signature: string, renderScale: number, span: TimelineInterval): string {
+  return `${signature}:${renderScale.toFixed(3)}:${span.startSeconds.toFixed(3)}-${span.endSeconds.toFixed(3)}`;
+}
+
+function sortByPriority(a: CachedPreviewSpan, b: CachedPreviewSpan): number {
+  if (b.priority !== a.priority) {
+    return b.priority - a.priority;
+  }
+  return a.createdAt - b.createdAt;
+}
+
+export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOptions = {}): PreviewRenderCacheStore {
+  const maxEntries = Math.max(1, options.maxEntries ?? 120);
+  const maxBytes = Math.max(1, options.maxBytes ?? 256 * 1024 * 1024);
+  const entries = new Map<string, CachedPreviewSpan>();
+
+  const currentByteSize = (): number => [...entries.values()].reduce((total, span) => total + span.byteSize, 0);
+
+  const evictIfNeeded = (): void => {
+    while (entries.size > maxEntries || currentByteSize() > maxBytes) {
+      const evictable = [...entries.values()].sort((a, b) => {
+        if (a.status !== b.status) {
+          return a.status === "ready" ? 1 : -1;
+        }
+        return a.lastUsedAt - b.lastUsedAt;
+      })[0];
+      if (!evictable) {
+        break;
+      }
+      entries.delete(evictable.id);
+    }
+  };
+
+  return {
+    getReadySpan(timeSeconds, signature, renderScale) {
+      const match = [...entries.values()]
+        .filter((span) => span.signature === signature && span.renderScale === renderScale && span.status === "ready")
+        .find((span) => containsTime(span, timeSeconds));
+      if (match) {
+        match.lastUsedAt = Date.now();
+      }
+      return match;
+    },
+    upsert(span) {
+      entries.set(span.id, span);
+      evictIfNeeded();
+    },
+    markDirty(range) {
+      let count = 0;
+      for (const span of entries.values()) {
+        if (span.status !== "dirty" && overlaps(span, range)) {
+          span.status = "dirty";
+          count += 1;
+        }
+      }
+      return count;
+    },
+    removeSignature(signature) {
+      let count = 0;
+      for (const span of [...entries.values()]) {
+        if (span.signature === signature) {
+          entries.delete(span.id);
+          count += 1;
+        }
+      }
+      return count;
+    },
+    reconcile(plan, signature, renderScale, now = Date.now()) {
+      const wantedIds = new Set<string>();
+      const pending: CachedPreviewSpan[] = [];
+      for (const planned of plan) {
+        const id = cacheSpanKey(signature, renderScale, planned);
+        wantedIds.add(id);
+        const existing = entries.get(id);
+        if (existing && existing.status !== "dirty" && existing.status !== "failed") {
+          existing.priority = planned.priority;
+          existing.layerIds = planned.layerIds;
+          continue;
+        }
+        const span: CachedPreviewSpan = {
+          id,
+          signature,
+          startSeconds: planned.startSeconds,
+          endSeconds: planned.endSeconds,
+          reason: planned.reason,
+          status: "pending",
+          priority: planned.priority,
+          layerIds: planned.layerIds,
+          renderScale,
+          createdAt: now,
+          lastUsedAt: now,
+          byteSize: 0
+        };
+        entries.set(id, span);
+        pending.push(span);
+      }
+
+      for (const span of [...entries.values()]) {
+        if (span.signature === signature && span.renderScale === renderScale && !wantedIds.has(span.id)) {
+          span.status = "dirty";
+        }
+      }
+      evictIfNeeded();
+      return pending.sort(sortByPriority);
+    },
+    nextPending() {
+      return [...entries.values()].filter((span) => span.status === "pending").sort(sortByPriority)[0];
+    },
+    clear() {
+      entries.clear();
+    },
+    get entries() {
+      return [...entries.values()].sort((a, b) => a.startSeconds - b.startSeconds);
+    },
+    get size() {
+      return entries.size;
+    },
+    get byteSize() {
+      return currentByteSize();
+    }
+  };
 }

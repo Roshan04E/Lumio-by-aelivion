@@ -138,7 +138,7 @@ Hard boundaries:
 - [x] Build a deterministic dirty interval model.
 - [x] Split cache spans by real dependency boundaries, not fixed 10 second windows.
 - [ ] Add long-timeline proxy/render-cache mode to keep old timeline ranges as media assets, not live WebGL producers.
-- [ ] Choose cache span length adaptively from:
+- [x] Choose cache span length adaptively from:
   - source clip duration
   - effect density
   - overlay density
@@ -156,6 +156,8 @@ Hard boundaries:
   - invalidation version
 - [x] Use larger spans for simple continuous clips.
 - [x] Use smaller spans around dense edits, transitions, overlays, and effects.
+- [x] Add an in-memory preview cache manifest for span validity, priority, status, and budget.
+- [x] Add deterministic composition/cache signatures for span invalidation.
 - [ ] Store cached spans as browser-managed media assets:
   - OPFS or IndexedDB-backed blobs
   - LRU eviction by size and recency

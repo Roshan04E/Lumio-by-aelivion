@@ -10,7 +10,14 @@ import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
 import { inspectorRegistry } from "./registry/inspector";
 import { seedBuiltinRegistries } from "./registry/builtins";
-import { createFrameCache, planAdaptiveCacheSpans, type TimelineCacheLayerInput } from "./performance/renderCache";
+import {
+  compositionCacheLayers,
+  compositionCacheSignature,
+  createFrameCache,
+  createPreviewRenderCacheStore,
+  planAdaptiveCacheSpans,
+  type TimelineCacheLayerInput
+} from "./performance/renderCache";
 import { layersInRange, playheadRange } from "./performance/visibleRange";
 import { getPreviewQualityProfile } from "./performance/previewQuality";
 
@@ -132,6 +139,54 @@ function check(name: string, condition: boolean): void {
   const playheadSpan = densePlan.find((span) => span.startSeconds <= 118 && span.endSeconds > 118);
   const farSpan = densePlan.find((span) => span.startSeconds >= 240);
   check("adaptive cache prioritizes playhead area", !!playheadSpan && !!farSpan && playheadSpan.priority > farSpan.priority);
+}
+
+// --- Preview render cache manifest -------------------------------------------
+{
+  const composition = createDefaultComposition({ id: "cache", name: "Cache", durationSeconds: 60 });
+  const layers = compositionCacheLayers(composition);
+  const signature = compositionCacheSignature(composition, 0.5);
+  const fullSignature = compositionCacheSignature(composition, 1);
+  check("composition cache extracts layers", layers.length > 0);
+  check("composition cache signature includes render scale", signature !== fullSignature);
+
+  const plan = planAdaptiveCacheSpans({
+    durationSeconds: composition.durationSeconds,
+    layers,
+    playheadSeconds: 5,
+    maxSimpleSpanSeconds: 20
+  });
+  const store = createPreviewRenderCacheStore({ maxEntries: 3, maxBytes: 10_000 });
+  const pending = store.reconcile(plan, signature, 0.5, 1000);
+  check("preview cache manifest creates pending work", pending.length > 0);
+  check("preview cache manifest chooses next pending", store.nextPending()?.id === pending[0]?.id);
+
+  const first = pending[0]!;
+  store.upsert({ ...first, status: "ready", byteSize: 4000, url: "blob:first", lastUsedAt: 2000 });
+  check("preview cache hits ready span", store.getReadySpan(first.startSeconds + 0.1, signature, 0.5)?.url === "blob:first");
+  check("preview cache misses wrong signature", store.getReadySpan(first.startSeconds + 0.1, fullSignature, 0.5) === undefined);
+  check("preview cache dirty invalidates overlap", store.markDirty({ startSeconds: first.startSeconds, endSeconds: first.endSeconds }) === 1);
+  check("preview cache dirty span no longer hits", store.getReadySpan(first.startSeconds + 0.1, signature, 0.5) === undefined);
+
+  const synthetic = (index: number) => ({
+    id: `synthetic-${index}`,
+    signature,
+    startSeconds: index,
+    endSeconds: index + 1,
+    reason: "simple" as const,
+    status: "ready" as const,
+    priority: 1,
+    layerIds: [],
+    renderScale: 0.5,
+    createdAt: index,
+    lastUsedAt: index,
+    byteSize: 4000
+  });
+  store.upsert(synthetic(1));
+  store.upsert(synthetic(2));
+  store.upsert(synthetic(3));
+  store.upsert(synthetic(4));
+  check("preview cache enforces entry and byte budget", store.size <= 3 && store.byteSize <= 10_000);
 }
 
 if (failures > 0) {
