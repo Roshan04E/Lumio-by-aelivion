@@ -10,7 +10,7 @@ import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
 import { inspectorRegistry } from "./registry/inspector";
 import { seedBuiltinRegistries } from "./registry/builtins";
-import { createFrameCache } from "./performance/renderCache";
+import { createFrameCache, planAdaptiveCacheSpans, type TimelineCacheLayerInput } from "./performance/renderCache";
 import { layersInRange, playheadRange } from "./performance/visibleRange";
 import { getPreviewQualityProfile } from "./performance/previewQuality";
 
@@ -87,6 +87,51 @@ function check(name: string, condition: boolean): void {
   cache.set({ signature: "a", timeSeconds: 2 }, "f2"); // evicts oldest
   check("frame cache hit", cache.get({ signature: "a", timeSeconds: 2 }) === "f2");
   check("frame cache LRU eviction", cache.get({ signature: "a", timeSeconds: 0 }) === undefined);
+}
+
+// --- Adaptive preview cache spans --------------------------------------------
+{
+  const longClip: TimelineCacheLayerInput = {
+    id: "clip-1",
+    type: "video",
+    startSeconds: 0,
+    durationSeconds: 300
+  };
+  const longPlan = planAdaptiveCacheSpans({ durationSeconds: 300, layers: [longClip], playheadSeconds: 120 });
+  check("adaptive cache uses long spans for simple media", longPlan.length <= 8);
+  check("adaptive cache covers full duration", longPlan[0]?.startSeconds === 0 && longPlan.at(-1)?.endSeconds === 300);
+  check("adaptive cache spans are ordered", longPlan.every((span, index) => index === 0 || longPlan[index - 1]!.endSeconds <= span.startSeconds));
+
+  const denseLayers: TimelineCacheLayerInput[] = [
+    longClip,
+    {
+      id: "title",
+      type: "text",
+      startSeconds: 95,
+      durationSeconds: 25,
+      effects: [{ id: "glow" }]
+    },
+    {
+      id: "clip-2",
+      type: "video",
+      startSeconds: 120,
+      durationSeconds: 60,
+      transitionIn: { durationSeconds: 1.5 }
+    }
+  ];
+  const densePlan = planAdaptiveCacheSpans({
+    durationSeconds: 300,
+    layers: denseLayers,
+    playheadSeconds: 118,
+    dirtyLayerIds: ["title"]
+  });
+  check("adaptive cache isolates dirty spans", densePlan.some((span) => span.reason === "dirty" && span.layerIds.includes("title")));
+  check("adaptive cache isolates transition spans", densePlan.some((span) => span.reason === "transition" && span.startSeconds <= 120 && span.endSeconds > 120 && span.endSeconds <= 121.5));
+  check("adaptive cache keeps complex spans short", densePlan.filter((span) => span.reason !== "simple").every((span) => span.endSeconds - span.startSeconds <= 8.001));
+
+  const playheadSpan = densePlan.find((span) => span.startSeconds <= 118 && span.endSeconds > 118);
+  const farSpan = densePlan.find((span) => span.startSeconds >= 240);
+  check("adaptive cache prioritizes playhead area", !!playheadSpan && !!farSpan && playheadSpan.priority > farSpan.priority);
 }
 
 if (failures > 0) {

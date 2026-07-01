@@ -135,8 +135,8 @@ Hard boundaries:
 
 ## Phase 6 - Adaptive Preview Cache
 
-- [ ] Build a deterministic dirty interval model.
-- [ ] Split cache spans by real dependency boundaries, not fixed 10 second windows.
+- [x] Build a deterministic dirty interval model.
+- [x] Split cache spans by real dependency boundaries, not fixed 10 second windows.
 - [ ] Add long-timeline proxy/render-cache mode to keep old timeline ranges as media assets, not live WebGL producers.
 - [ ] Choose cache span length adaptively from:
   - source clip duration
@@ -154,8 +154,8 @@ Hard boundaries:
   - time range
   - render scale/quality
   - invalidation version
-- [ ] Use larger spans for simple continuous clips.
-- [ ] Use smaller spans around dense edits, transitions, overlays, and effects.
+- [x] Use larger spans for simple continuous clips.
+- [x] Use smaller spans around dense edits, transitions, overlays, and effects.
 - [ ] Store cached spans as browser-managed media assets:
   - OPFS or IndexedDB-backed blobs
   - LRU eviction by size and recency
