@@ -14,8 +14,10 @@ import {
   compositionCacheLayers,
   compositionCacheSignature,
   createFrameCache,
+  createPreviewCacheController,
   createPreviewRenderCacheStore,
   planAdaptiveCacheSpans,
+  previewCacheRulerSegments,
   type TimelineCacheLayerInput
 } from "./performance/renderCache";
 import { layersInRange, playheadRange } from "./performance/visibleRange";
@@ -187,6 +189,49 @@ function check(name: string, condition: boolean): void {
   store.upsert(synthetic(3));
   store.upsert(synthetic(4));
   check("preview cache enforces entry and byte budget", store.size <= 3 && store.byteSize <= 10_000);
+}
+
+// --- Preview cache controller -------------------------------------------------
+{
+  const composition = createDefaultComposition({ id: "controller", name: "Controller", durationSeconds: 90 });
+  const controller = createPreviewCacheController({ maxEntries: 20 });
+  const first = controller.update({
+    composition,
+    renderScale: 0.5,
+    playheadSeconds: 10,
+    maxSimpleSpanSeconds: 30,
+    now: 1000
+  });
+  const second = controller.update({
+    composition,
+    renderScale: 0.5,
+    playheadSeconds: 11,
+    maxSimpleSpanSeconds: 30,
+    now: 2000
+  });
+  check("preview cache controller plans from composition", first.plannedSpans.length > 0);
+  check("preview cache controller does not duplicate pending spans", first.pendingSpans.length > 0 && second.pendingSpans.length === 0);
+  check("preview cache controller exposes next work", !!second.nextPending);
+
+  const playheadPending = first.pendingSpans.find((span) => span.startSeconds <= 10 && span.endSeconds > 10)!;
+  controller.store.upsert({ ...playheadPending, status: "ready", byteSize: 2048, url: "blob:playhead", lastUsedAt: 3000 });
+  const afterReady = controller.update({
+    composition,
+    renderScale: 0.5,
+    playheadSeconds: 10,
+    maxSimpleSpanSeconds: 30,
+    now: 4000
+  });
+  check("preview cache controller returns ready playhead span", afterReady.readySpan?.url === "blob:playhead");
+  check("preview cache controller dirties by time range", controller.markDirty({ startSeconds: playheadPending.startSeconds, endSeconds: playheadPending.endSeconds }) === 1);
+
+  const rulerSegments = previewCacheRulerSegments({
+    entries: controller.store.entries,
+    durationSeconds: composition.durationSeconds,
+    visibleRange: { startSeconds: 0, endSeconds: 30 }
+  });
+  check("preview cache ruler exposes visible proxy segments", rulerSegments.length > 0);
+  check("preview cache ruler clips to visible range", rulerSegments.every((segment) => segment.startPercent >= 0 && segment.endPercent <= 100));
 }
 
 if (failures > 0) {

@@ -90,6 +90,45 @@ export interface PreviewRenderCacheStoreOptions {
   maxBytes?: number | undefined;
 }
 
+export interface PreviewCacheControllerUpdate {
+  composition: TimelineComposition;
+  renderScale: number;
+  playheadSeconds: number;
+  dirtyLayerIds?: readonly string[] | undefined;
+  minSpanSeconds?: number | undefined;
+  maxSimpleSpanSeconds?: number | undefined;
+  maxComplexSpanSeconds?: number | undefined;
+  now?: number | undefined;
+}
+
+export interface PreviewCacheControllerSnapshot {
+  signature: string;
+  renderScale: number;
+  playheadSeconds: number;
+  plannedSpans: AdaptiveCacheSpan[];
+  pendingSpans: CachedPreviewSpan[];
+  readySpan?: CachedPreviewSpan | undefined;
+  nextPending?: CachedPreviewSpan | undefined;
+  entries: CachedPreviewSpan[];
+  byteSize: number;
+}
+
+export interface PreviewCacheController {
+  update: (input: PreviewCacheControllerUpdate) => PreviewCacheControllerSnapshot;
+  markDirty: (range: TimelineInterval) => number;
+  clear: () => void;
+  readonly store: PreviewRenderCacheStore;
+}
+
+export interface PreviewCacheRulerSegment {
+  id: string;
+  startPercent: number;
+  endPercent: number;
+  status: CachedPreviewSpanStatus;
+  reason: AdaptiveCacheSpanReason;
+  priority: number;
+}
+
 function keyString(key: RenderCacheKey): string {
   return `${key.signature}@${key.timeSeconds.toFixed(3)}`;
 }
@@ -132,7 +171,7 @@ const DEFAULT_MIN_SPAN_SECONDS = 2;
 const DEFAULT_MAX_SIMPLE_SPAN_SECONDS = 45;
 const DEFAULT_MAX_COMPLEX_SPAN_SECONDS = 8;
 
-interface TimelineInterval {
+export interface TimelineInterval {
   startSeconds: number;
   endSeconds: number;
 }
@@ -536,4 +575,82 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       return currentByteSize();
     }
   };
+}
+
+export function createPreviewCacheController(options: PreviewRenderCacheStoreOptions = {}): PreviewCacheController {
+  const store = createPreviewRenderCacheStore(options);
+  return {
+    update(input) {
+      const layers = compositionCacheLayers(input.composition);
+      const signature = timelineCacheSignature({
+        compositionId: input.composition.id,
+        durationSeconds: input.composition.durationSeconds,
+        width: input.composition.width,
+        height: input.composition.height,
+        fps: input.composition.fps,
+        layers,
+        renderScale: input.renderScale
+      });
+      const plannedSpans = planAdaptiveCacheSpans({
+        durationSeconds: input.composition.durationSeconds,
+        layers,
+        playheadSeconds: input.playheadSeconds,
+        ...(input.dirtyLayerIds !== undefined ? { dirtyLayerIds: input.dirtyLayerIds } : {}),
+        ...(input.minSpanSeconds !== undefined ? { minSpanSeconds: input.minSpanSeconds } : {}),
+        ...(input.maxSimpleSpanSeconds !== undefined ? { maxSimpleSpanSeconds: input.maxSimpleSpanSeconds } : {}),
+        ...(input.maxComplexSpanSeconds !== undefined ? { maxComplexSpanSeconds: input.maxComplexSpanSeconds } : {})
+      });
+      const pendingSpans = store.reconcile(plannedSpans, signature, input.renderScale, input.now);
+      const readySpan = store.getReadySpan(input.playheadSeconds, signature, input.renderScale);
+      const nextPending = store.nextPending();
+      return {
+        signature,
+        renderScale: input.renderScale,
+        playheadSeconds: input.playheadSeconds,
+        plannedSpans,
+        pendingSpans,
+        ...(readySpan !== undefined ? { readySpan } : {}),
+        ...(nextPending !== undefined ? { nextPending } : {}),
+        entries: store.entries,
+        byteSize: store.byteSize
+      };
+    },
+    markDirty(range) {
+      return store.markDirty(range);
+    },
+    clear() {
+      store.clear();
+    },
+    get store() {
+      return store;
+    }
+  };
+}
+
+export function previewCacheRulerSegments(input: {
+  entries: readonly CachedPreviewSpan[];
+  durationSeconds: number;
+  visibleRange?: TimelineInterval | undefined;
+}): PreviewCacheRulerSegment[] {
+  const durationSeconds = Number.isFinite(input.durationSeconds) ? Math.max(0, input.durationSeconds) : 0;
+  if (durationSeconds <= 0) {
+    return [];
+  }
+  const visibleRange = input.visibleRange ?? { startSeconds: 0, endSeconds: durationSeconds };
+  return input.entries
+    .filter((span) => overlaps(span, visibleRange))
+    .map((span) => {
+      const startSeconds = clamp(Math.max(span.startSeconds, visibleRange.startSeconds), 0, durationSeconds);
+      const endSeconds = clamp(Math.min(span.endSeconds, visibleRange.endSeconds), 0, durationSeconds);
+      return {
+        id: span.id,
+        startPercent: (startSeconds / durationSeconds) * 100,
+        endPercent: (endSeconds / durationSeconds) * 100,
+        status: span.status,
+        reason: span.reason,
+        priority: span.priority
+      };
+    })
+    .filter((segment) => segment.endPercent > segment.startPercent)
+    .sort((a, b) => a.startPercent - b.startPercent);
 }

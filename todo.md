@@ -158,6 +158,9 @@ Hard boundaries:
 - [x] Use smaller spans around dense edits, transitions, overlays, and effects.
 - [x] Add an in-memory preview cache manifest for span validity, priority, status, and budget.
 - [x] Add deterministic composition/cache signatures for span invalidation.
+- [x] Add a preview cache controller that plans real composition spans from playhead and render scale.
+- [x] Add cache-ruler segment data for a thin Adobe-style proxy/rendered indicator.
+- [ ] Render a thin timeline/ruler indicator for ready, pending, dirty, and failed proxy spans.
 - [ ] Store cached spans as browser-managed media assets:
   - OPFS or IndexedDB-backed blobs
   - LRU eviction by size and recency
