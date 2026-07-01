@@ -35,6 +35,15 @@ const fixtureImageSvg = encodeURIComponent(`
     .join("")}
 </svg>`);
 
+const fixturePersonMatteSvg = encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <rect width="1080" height="1920" fill="#000000"/>
+  <ellipse cx="540" cy="880" rx="245" ry="320" fill="#ffffff"/>
+  <rect x="360" y="1130" width="360" height="520" rx="120" fill="#ffffff"/>
+  <circle cx="445" cy="740" r="54" fill="#ffffff"/>
+  <circle cx="635" cy="740" r="54" fill="#ffffff"/>
+</svg>`);
+
 export const renderComparisonFrameSeconds = 0.45;
 export const renderComparisonArtifactDir = "render-comparison";
 
@@ -51,6 +60,7 @@ export type RenderComparisonFixtureKey =
   | "object-fit-cover"
   | "object-fit-contain"
   | "content-transform"
+  | "person-matte"
   | "blur"
   | "glow"
   | "region-blur"
@@ -254,6 +264,8 @@ interface FixtureVariant {
   /** Phase 4.2: two same-track clips joined by a junction transition, sampled MID-transition — exercises
    *  the scene pass mixing the junction in-canvas (vs the DOM overlay). */
   transition?: boolean;
+  /** Phase 6.3c: luma person-extraction matte on a media layer. */
+  matte?: TimelineLayer["matte"];
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -277,6 +289,21 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
           offsetX: 0.42,
           offsetY: -0.24,
           crop: { top: 0.08, right: 0.18, bottom: 0.12, left: 0.06 }
+        }
+      };
+    case "person-matte":
+      return {
+        effects: [],
+        fit: "cover",
+        matte: {
+          artifactId: "fixture_person_matte",
+          uri: `data:image/svg+xml;charset=utf-8,${fixturePersonMatteSvg}`,
+          kind: "luma",
+          fps: 30,
+          feather: 0,
+          edgeMode: "clean",
+          invert: false,
+          opacity: 1
         }
       };
     case "blur":
@@ -361,6 +388,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     // parity regression points at one code path.
     effects: variant.effects,
     ...(variant.content ? { content: variant.content } : {}),
+    ...(variant.matte ? { matte: variant.matte } : {}),
     ...(variant.masks ? { masks: variant.masks } : {}),
     keyframes: []
   };

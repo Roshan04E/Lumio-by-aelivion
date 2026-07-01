@@ -37,6 +37,7 @@ const supportedFixtures: RenderComparisonFixtureKey[] = [
   "object-fit-cover",
   "object-fit-contain",
   "content-transform",
+  "person-matte",
   "clip-region-blur",
   "media-opacity",
   "transition",
@@ -47,9 +48,7 @@ const supportedFixtures: RenderComparisonFixtureKey[] = [
   "scaled-text"
 ];
 
-const unsupportedGaps = [
-  "person-extraction mattes"
-];
+const unsupportedGaps: string[] = [];
 
 const diffThreshold = Number(process.env.PIXEL_DIFF_THRESHOLD ?? 0.16);
 const maxDiffRatio = Number(process.env.CLOUD_SCENE_MAX_DIFF_RATIO ?? 0.02);
@@ -215,10 +214,19 @@ async function renderLocalSceneFrame(baseUrl: string, input: LocalRenderInput, o
       for (const track of composition.tracks) {
         for (const layer of track.layers) {
           const key = mediaSourceKey(layer);
-          if (!key || !layer.assetId) continue;
-          const source = payload.urlMap[layer.assetId];
-          if (!source || providers.has(key)) continue;
-          providers.set(key, source.kind === "image" ? await createImageElementProvider(source.url) : await createFrameProvider(source.url, source.kind));
+          if (key && layer.assetId) {
+            const source = payload.urlMap[layer.assetId];
+            if (source && !providers.has(key)) {
+              providers.set(key, source.kind === "image" ? await createImageElementProvider(source.url) : await createFrameProvider(source.url, source.kind));
+            }
+          }
+          if ((layer.type === "video" || layer.type === "image") && layer.matte?.uri) {
+            const matteKey = \`matte:\${layer.id}\`;
+            if (!providers.has(matteKey)) {
+              const kind = layer.type === "video" ? "video" : "image";
+              providers.set(matteKey, kind === "image" ? await createImageElementProvider(layer.matte.uri) : await createFrameProvider(layer.matte.uri, kind));
+            }
+          }
         }
       }
 

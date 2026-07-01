@@ -42,9 +42,8 @@ import {
  *
  * Phase 6.2 is deliberately MINIMAL: media (image + video) with object-fit + transform (incl. 3D tilt the
  * compositor already does) + opacity + blend + color grade + media effects + blur/glow + clip (vector) masks +
- * junction transitions, all from the shared builder. Text/shape layers, person-extraction mattes, and
- * source-within-frame content transforms are carried through the shared draw-list builder. Person-extraction
- * mattes are NOT wired here yet. The legacy Root.tsx path is untouched and remains the default.
+ * junction transitions, text/shape rasterization, person-extraction mattes, and source-within-frame content
+ * transforms, all from the shared builder. The legacy Root.tsx path is untouched and remains the default.
  *
  * Audio/sequencing/mux are unchanged: audio layers still render as `<Audio>` inside `<Sequence>` exactly like
  * the legacy path, so the muxed output keeps its sound.
@@ -158,7 +157,7 @@ class SceneController {
 
   /** Color/matte/media-effects grade a raw decoded frame into its renderer canvas (opacity NOT baked — the
    *  composite quad applies it live, matching the editor's `bakeOpacity={false}` scene-media path). */
-  private gradeMedia(layer: RenderManifestLayer, raw: RawFrame, t: number): AnyCanvas {
+  private gradeMedia(layer: RenderManifestLayer, raw: RawFrame, matte: RawFrame | null, t: number): AnyCanvas {
     const renderer = this.mediaRendererFor(layer.id);
     const pipeline = getCompositionColorPipeline(layer as unknown as TimelineLayer, { currentTimeSeconds: t });
     const mediaEffects = getCompositionMediaEffects(layer as unknown as TimelineLayer, { currentTimeSeconds: t });
@@ -171,7 +170,9 @@ class SceneController {
       source: raw.source as TexImageSource,
       sourceWidth: raw.width,
       sourceHeight: raw.height,
-      matte: null,
+      matte: matte ? (matte.source as TexImageSource) : null,
+      matteInvert: layer.matte?.invert ?? false,
+      matteOpacity: layer.matte?.opacity ?? 1,
       pipeline,
       amount: 1,
       opacity: 1,
@@ -203,6 +204,7 @@ class SceneController {
   async composite(
     activeLayers: RenderManifestLayer[],
     rawById: Map<string, RawFrame>,
+    matteById: Map<string, RawFrame>,
     transitions: ScenePreviewTransition[],
     t: number
   ): Promise<boolean> {
@@ -212,6 +214,7 @@ class SceneController {
     // Every active media layer must have its decoded frame before we can build a complete composite.
     for (const layer of activeLayers) {
       if (isMedia(layer) && !rawById.has(layer.id)) return false;
+      if (isMedia(layer) && layer.matte?.uri && !matteById.has(layer.id)) return false;
     }
 
     const gradedById = new Map<string, AnyCanvas>();
@@ -219,7 +222,8 @@ class SceneController {
       if (!isMedia(layer)) continue;
       const raw = rawById.get(layer.id);
       if (!raw || raw.width === 0 || raw.height === 0) return false;
-      gradedById.set(layer.id, this.gradeMedia(layer, raw, t));
+      const matte = layer.matte?.uri ? matteById.get(layer.id) ?? null : null;
+      gradedById.set(layer.id, this.gradeMedia(layer, raw, matte, t));
     }
 
     await Promise.all(
@@ -347,11 +351,19 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<SceneController | null>(null);
   const rawRef = useRef<Map<string, RawFrame>>(new Map());
+  const matteRef = useRef<Map<string, RawFrame>>(new Map());
   const [mediaTick, bumpMediaTick] = useState(0);
   const bump = useCallback(() => bumpMediaTick((v) => v + 1), []);
   const onFrame = useCallback(
     (id: string, raw: RawFrame) => {
       rawRef.current.set(id, raw);
+      bump();
+    },
+    [bump]
+  );
+  const onMatteFrame = useCallback(
+    (id: string, raw: RawFrame) => {
+      matteRef.current.set(id, raw);
       bump();
     },
     [bump]
@@ -428,7 +440,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     void (async () => {
       let complete = false;
       try {
-        complete = await controller.composite(merged, rawRef.current, transitions, t);
+        complete = await controller.composite(merged, rawRef.current, matteRef.current, transitions, t);
       } catch (error) {
         console.error("SceneStage: composite failed", error);
         complete = true;
@@ -472,9 +484,17 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
             1,
             Math.round((layer.durationSeconds + outgoingPostrollSeconds(layer, sorted)) * fps)
           );
+          const matteLayer = layer.matte?.uri ? { ...layer, assetUrl: layer.matte.uri } : null;
           return (
             <Sequence key={layer.id} from={from} durationInFrames={durationInFrames}>
               {layer.type === "video" ? <VideoGrabber layer={layer} onFrame={onFrame} /> : <ImageGrabber layer={layer} onFrame={onFrame} />}
+              {matteLayer ? (
+                layer.type === "video" ? (
+                  <VideoGrabber layer={matteLayer} onFrame={onMatteFrame} />
+                ) : (
+                  <ImageGrabber layer={matteLayer} onFrame={onMatteFrame} />
+                )
+              ) : null}
             </Sequence>
           );
         })}
