@@ -1,5 +1,5 @@
-import type { MaskSequenceArtifactData, SubjectBounds, TrackingPathArtifactData } from "@reelforge/shared";
-import { smoothTrackingPoints } from "@reelforge/shared";
+import type { MaskSequenceArtifactData, SubjectBounds, TrackingPathArtifactData } from "@lumio-by-aelivion/shared";
+import { smoothTrackingPoints } from "@lumio-by-aelivion/shared";
 import type { BrowserToolCapabilities } from "./capabilities";
 
 /**

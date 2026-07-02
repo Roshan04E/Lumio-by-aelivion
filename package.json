@@ -1,21 +1,21 @@
 {
-  "name": "reelforge-studio",
+  "name": "lumio-by-aelivion",
   "version": "0.1.0",
   "private": true,
   "description": "Production-minded MVP for turning raw videos into modular reel-style edits.",
   "packageManager": "pnpm@11.5.1",
   "scripts": {
-    "dev": "pnpm --parallel --stream --filter @reelforge/api --filter @reelforge/web --filter @reelforge/worker dev",
+    "dev": "pnpm --parallel --stream --filter @lumio-by-aelivion/api --filter @lumio-by-aelivion/web --filter @lumio-by-aelivion/worker dev",
     "build": "pnpm -r build",
-    "caption:qa": "pnpm --filter @reelforge/worker caption:qa",
+    "caption:qa": "pnpm --filter @lumio-by-aelivion/worker caption:qa",
     "lint": "pnpm -r lint",
-    "animation:test": "pnpm --filter @reelforge/worker animation:test",
-    "render:compare": "pnpm --filter @reelforge/worker render:compare",
-    "render:compare:pixels": "pnpm --filter @reelforge/worker render:compare:pixels",
+    "animation:test": "pnpm --filter @lumio-by-aelivion/worker animation:test",
+    "render:compare": "pnpm --filter @lumio-by-aelivion/worker render:compare",
+    "render:compare:pixels": "pnpm --filter @lumio-by-aelivion/worker render:compare:pixels",
     "typecheck": "pnpm -r typecheck",
     "models:fetch": "node scripts/fetch-local-models.mjs",
-    "db:generate": "pnpm --filter @reelforge/api prisma:generate",
-    "db:migrate": "pnpm --filter @reelforge/api prisma:migrate",
-    "db:seed": "pnpm --filter @reelforge/api db:seed"
+    "db:generate": "pnpm --filter @lumio-by-aelivion/api prisma:generate",
+    "db:migrate": "pnpm --filter @lumio-by-aelivion/api prisma:migrate",
+    "db:seed": "pnpm --filter @lumio-by-aelivion/api db:seed"
   }
 }

@@ -55,7 +55,7 @@ export function CookbookPage() {
     <div className="page cookbook-page">
       <section className="page-heading cookbook-hero">
         <Badge tone="lime">Cookbook</Badge>
-        <h1>How ReelForge works — all of it</h1>
+        <h1>How Lumio works — all of it</h1>
         <p>
           A guided, no-secrets tour of the product: what it is, who it's for, how a reel flows from raw clip to export, and
           exactly how each tool works behind the scenes.

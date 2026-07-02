@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { templateDefinitions, type TemplateDefinition } from "@reelforge/shared";
+import { templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { TemplateCard } from "../components/TemplateCard";
 import { createAsset, createProject, listTemplates } from "../lib/api";

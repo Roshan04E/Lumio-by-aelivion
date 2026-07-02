@@ -1,5 +1,20 @@
-import { expandEffectRegionMasks, isTrackEnabled } from "@reelforge/shared";
-import type { BlendMode, LayerContentTransform, Mask, MatteRef, ProjectGraph, SourceAsset, TemplateDefinition, TextRun, TimelineComposition, TimelineKeyframeV2, TransitionSpec } from "@reelforge/shared";
+import { expandEffectRegionMasks, isTrackEnabled } from "@lumio-by-aelivion/shared";
+import type {
+  BlendMode,
+  LayerContentTransform,
+  Mask,
+  MatteRef,
+  PluginEffectManifest,
+  PluginLookManifest,
+  PluginTransitionManifest,
+  ProjectGraph,
+  SourceAsset,
+  TemplateDefinition,
+  TextRun,
+  TimelineComposition,
+  TimelineKeyframeV2,
+  TransitionSpec
+} from "@lumio-by-aelivion/shared";
 
 export interface RenderComposition {
   id: string;
@@ -62,7 +77,7 @@ export function buildCompositionFromGraph(
 
 export function createPreviewOverlay(graph: ProjectGraph) {
   return {
-    watermark: "ReelForge Preview",
+    watermark: "Lumio Preview",
     effectBadges: graph.effects.map((effect) => effect.name),
     trackingDots: graph.effects.some((effect) => effect.type === "SMART_3D_FOLLOW_TEXT"),
     personCutoutLayer: graph.effects.some((effect) => effect.type === "TEXT_BEHIND_PERSON")
@@ -140,10 +155,15 @@ export interface RenderManifest {
     format: "mp4";
   };
   assets: RenderManifestAsset[];
+  plugins?: {
+    effects?: PluginEffectManifest[] | undefined;
+    looks?: PluginLookManifest[] | undefined;
+    transitions?: PluginTransitionManifest[] | undefined;
+  } | undefined;
   layers: RenderManifestLayer[];
   createdAt: string;
   renderer: {
-    engine: "reelforge-manifest";
+    engine: "lumio-manifest";
     version: 1;
     note: string;
   };
@@ -266,10 +286,11 @@ export function buildRenderManifest(input: {
       width: asset.width,
       height: asset.height
     })),
+    plugins: input.graph.plugins,
     layers,
     createdAt: input.createdAt ?? new Date().toISOString(),
     renderer: {
-      engine: "reelforge-manifest",
+      engine: "lumio-manifest",
       version: 1,
       note: "This manifest is the render contract. Remotion/FFmpeg encoding plugs into this boundary next."
     }

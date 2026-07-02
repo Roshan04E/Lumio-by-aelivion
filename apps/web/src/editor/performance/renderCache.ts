@@ -1,4 +1,4 @@
-import type { TimelineComposition } from "@reelforge/shared";
+import type { TimelineComposition } from "@lumio-by-aelivion/shared";
 
 /**
  * Frame render cache (Phase 3 interface + a small LRU impl; wired in Phase 5).
@@ -24,6 +24,7 @@ export interface TimelineCacheLayerInput {
   type: string;
   startSeconds: number;
   durationSeconds: number;
+  sourceInSeconds?: number | undefined;
   assetId?: string | undefined;
   transitionIn?: { durationSeconds: number } | undefined;
   effects?: readonly unknown[] | undefined;
@@ -41,12 +42,19 @@ export interface AdaptiveCacheSpan {
   reason: AdaptiveCacheSpanReason;
   priority: number;
   layerIds: string[];
+  /**
+   * Hash of ONLY the layers overlapping this span's time range (and their render-relevant props). Two
+   * plans agree on a span iff its time range AND content signature match — so an edit invalidates only the
+   * spans it actually overlaps, leaving distant ready proxies untouched.
+   */
+  contentSignature: string;
 }
 
 export interface AdaptiveCachePlanOptions {
   durationSeconds: number;
   layers: readonly TimelineCacheLayerInput[];
   playheadSeconds?: number | undefined;
+  targetRange?: TimelineInterval | undefined;
   dirtyLayerIds?: readonly string[] | undefined;
   minSpanSeconds?: number | undefined;
   maxSimpleSpanSeconds?: number | undefined;
@@ -54,10 +62,14 @@ export interface AdaptiveCachePlanOptions {
 }
 
 export type CachedPreviewSpanStatus = "ready" | "pending" | "dirty" | "failed";
+export type PreviewCacheRulerSegmentStatus = CachedPreviewSpanStatus | "live";
 
 export interface CachedPreviewSpan {
   id: string;
+  /** Base composition signature (comp id + resolution + fps + render scale) — NOT layer content. */
   signature: string;
+  /** Content signature of the layers overlapping this span; drives per-span invalidation. */
+  contentSignature: string;
   startSeconds: number;
   endSeconds: number;
   reason: AdaptiveCacheSpanReason;
@@ -68,6 +80,8 @@ export interface CachedPreviewSpan {
   createdAt: number;
   lastUsedAt: number;
   byteSize: number;
+  /** Ranges successfully rendered by live preview playback. Telemetry only, not playable media. */
+  liveRanges?: TimelineInterval[] | undefined;
   url?: string | undefined;
   error?: string | undefined;
 }
@@ -77,7 +91,13 @@ export interface PreviewRenderCacheStore {
   upsert: (span: CachedPreviewSpan) => void;
   markDirty: (range: TimelineInterval) => number;
   removeSignature: (signature: string) => number;
-  reconcile: (plan: readonly AdaptiveCacheSpan[], signature: string, renderScale: number, now?: number) => CachedPreviewSpan[];
+  reconcile: (plan: readonly AdaptiveCacheSpan[], signature: string, renderScale: number, now?: number, scope?: TimelineInterval | undefined) => CachedPreviewSpan[];
+  markFrameRendered: (input: { signature: string; renderScale: number; timeSeconds: number; frameDurationSeconds: number; now?: number | undefined }) => CachedPreviewSpan | undefined;
+  /** Seal a span with its finalized proxy media (from the background generator). */
+  markSpanReady: (input: { id: string; signature: string; contentSignature: string; url: string; byteSize: number; now?: number | undefined }) => CachedPreviewSpan | undefined;
+  /** Look up ready proxy media covering a time, for playback substitution. */
+  getReadySpanMedia: (timeSeconds: number, signature: string, renderScale: number) => { url: string; spanStartSeconds: number; spanId: string } | undefined;
+  markFailed: (id: string, error: string) => void;
   nextPending: () => CachedPreviewSpan | undefined;
   clear: () => void;
   readonly entries: CachedPreviewSpan[];
@@ -88,16 +108,23 @@ export interface PreviewRenderCacheStore {
 export interface PreviewRenderCacheStoreOptions {
   maxEntries?: number | undefined;
   maxBytes?: number | undefined;
+  /**
+   * Called when a span's backing proxy media should be released — on eviction, invalidation (dirty),
+   * signature change, or clear. Lets the owner delete the OPFS/blob without the pure store importing it.
+   */
+  onDisposeSpanMedia?: ((span: CachedPreviewSpan) => void) | undefined;
 }
 
 export interface PreviewCacheControllerUpdate {
   composition: TimelineComposition;
   renderScale: number;
   playheadSeconds: number;
+  targetRange?: TimelineInterval | undefined;
   dirtyLayerIds?: readonly string[] | undefined;
   minSpanSeconds?: number | undefined;
   maxSimpleSpanSeconds?: number | undefined;
   maxComplexSpanSeconds?: number | undefined;
+  pluginSignature?: string | undefined;
   now?: number | undefined;
 }
 
@@ -115,6 +142,7 @@ export interface PreviewCacheControllerSnapshot {
 
 export interface PreviewCacheController {
   update: (input: PreviewCacheControllerUpdate) => PreviewCacheControllerSnapshot;
+  markFrameRendered: (input: { signature: string; renderScale: number; timeSeconds: number; frameDurationSeconds: number; now?: number | undefined }) => CachedPreviewSpan | undefined;
   markDirty: (range: TimelineInterval) => number;
   clear: () => void;
   readonly store: PreviewRenderCacheStore;
@@ -124,9 +152,75 @@ export interface PreviewCacheRulerSegment {
   id: string;
   startPercent: number;
   endPercent: number;
-  status: CachedPreviewSpanStatus;
+  status: PreviewCacheRulerSegmentStatus;
   reason: AdaptiveCacheSpanReason;
   priority: number;
+}
+
+export interface ProxyCacheStatus {
+  ready: number;
+  pending: number;
+  dirty: number;
+  failed: number;
+  readyWithUrl: number;
+  live: number;
+  liveSeconds: number;
+  total: number;
+  byteSize: number;
+  /** 0..1 fraction of spans that are ready. */
+  readyRatio: number;
+  /** True while any span is still pending/dirty (i.e. generation in flight or outstanding). */
+  generating: boolean;
+}
+
+/** Aggregate span counts + storage size for the timeline proxy status indicator. */
+export function summarizePreviewCacheStatus(entries: readonly CachedPreviewSpan[]): ProxyCacheStatus {
+  let ready = 0;
+  let pending = 0;
+  let dirty = 0;
+  let failed = 0;
+  let readyWithUrl = 0;
+  let live = 0;
+  let liveSeconds = 0;
+  let byteSize = 0;
+  for (const span of entries) {
+    byteSize += span.byteSize;
+    if (span.liveRanges && span.liveRanges.length > 0) {
+      live += 1;
+      liveSeconds += span.liveRanges.reduce((total, range) => total + Math.max(0, range.endSeconds - range.startSeconds), 0);
+    }
+    switch (span.status) {
+      case "ready":
+        ready += 1;
+        if (span.url !== undefined) {
+          readyWithUrl += 1;
+        }
+        break;
+      case "pending":
+        pending += 1;
+        break;
+      case "dirty":
+        dirty += 1;
+        break;
+      case "failed":
+        failed += 1;
+        break;
+    }
+  }
+  const total = entries.length;
+  return {
+    ready,
+    pending,
+    dirty,
+    failed,
+    readyWithUrl,
+    live,
+    liveSeconds,
+    total,
+    byteSize,
+    readyRatio: total > 0 ? readyWithUrl / total : 0,
+    generating: pending + dirty > 0
+  };
 }
 
 function keyString(key: RenderCacheKey): string {
@@ -170,6 +264,7 @@ export function createFrameCache<T>(capacity = 60): FrameCache<T> {
 const DEFAULT_MIN_SPAN_SECONDS = 2;
 const DEFAULT_MAX_SIMPLE_SPAN_SECONDS = 45;
 const DEFAULT_MAX_COMPLEX_SPAN_SECONDS = 8;
+const PREVIEW_PROXY_RENDER_VERSION = 3;
 
 export interface TimelineInterval {
   startSeconds: number;
@@ -190,6 +285,23 @@ function overlaps(a: TimelineInterval, b: TimelineInterval): boolean {
 
 function containsTime(span: TimelineInterval, timeSeconds: number): boolean {
   return timeSeconds >= span.startSeconds && timeSeconds < span.endSeconds;
+}
+
+function mergeLiveRanges(ranges: readonly TimelineInterval[], next: TimelineInterval): TimelineInterval[] {
+  const mergeToleranceSeconds = 0.12;
+  const sorted = [...ranges, next]
+    .filter((range) => range.endSeconds > range.startSeconds)
+    .sort((a, b) => a.startSeconds - b.startSeconds);
+  const merged: TimelineInterval[] = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (!last || range.startSeconds > last.endSeconds + mergeToleranceSeconds) {
+      merged.push({ ...range });
+      continue;
+    }
+    last.endSeconds = Math.max(last.endSeconds, range.endSeconds);
+  }
+  return merged;
 }
 
 function layerInterval(layer: TimelineCacheLayerInput, durationSeconds: number): TimelineInterval | undefined {
@@ -266,25 +378,6 @@ function scoreSpan(span: TimelineInterval, reason: AdaptiveCacheSpanReason, play
   return base + Math.max(0, 40 - Math.round(distance));
 }
 
-function splitInterval(interval: TimelineInterval, maxLength: number, minLength: number): TimelineInterval[] {
-  const length = interval.endSeconds - interval.startSeconds;
-  if (length <= maxLength) {
-    return [interval];
-  }
-  const parts = Math.ceil(length / Math.max(maxLength, minLength));
-  const partLength = length / parts;
-  const spans: TimelineInterval[] = [];
-  for (let index = 0; index < parts; index += 1) {
-    const startSeconds = index === 0 ? interval.startSeconds : interval.startSeconds + partLength * index;
-    const endSeconds = index === parts - 1 ? interval.endSeconds : interval.startSeconds + partLength * (index + 1);
-    spans.push({
-      startSeconds: Number(startSeconds.toFixed(3)),
-      endSeconds: Number(endSeconds.toFixed(3))
-    });
-  }
-  return spans;
-}
-
 /**
  * Plans preview/proxy cache spans from timeline dependency boundaries.
  *
@@ -297,29 +390,53 @@ export function planAdaptiveCacheSpans(options: AdaptiveCachePlanOptions): Adapt
   if (durationSeconds <= 0) {
     return [];
   }
+  const targetStartSeconds = clamp(options.targetRange?.startSeconds ?? 0, 0, durationSeconds);
+  const targetEndSeconds = clamp(options.targetRange?.endSeconds ?? durationSeconds, 0, durationSeconds);
+  if (targetEndSeconds <= targetStartSeconds) {
+    return [];
+  }
 
   const minSpanSeconds = Math.max(0.25, options.minSpanSeconds ?? DEFAULT_MIN_SPAN_SECONDS);
   const maxSimpleSpanSeconds = Math.max(minSpanSeconds, options.maxSimpleSpanSeconds ?? DEFAULT_MAX_SIMPLE_SPAN_SECONDS);
   const maxComplexSpanSeconds = Math.max(minSpanSeconds, options.maxComplexSpanSeconds ?? DEFAULT_MAX_COMPLEX_SPAN_SECONDS);
   const dirtyLayerIds = new Set(options.dirtyLayerIds ?? []);
-  const boundaries = new Set<number>([0, Number(durationSeconds.toFixed(3))]);
+  const boundaries = new Set<number>([Number(targetStartSeconds.toFixed(3)), Number(targetEndSeconds.toFixed(3))]);
   const transitionIntervals: TimelineInterval[] = [];
+  const addTargetBoundary = (value: number): void => {
+    if (value > targetStartSeconds && value < targetEndSeconds) {
+      addBoundary(boundaries, value, durationSeconds);
+    }
+  };
 
   for (const layer of options.layers) {
     const interval = layerInterval(layer, durationSeconds);
-    if (!interval) {
+    const targetInterval = { startSeconds: targetStartSeconds, endSeconds: targetEndSeconds };
+    if (!interval || !overlaps(interval, targetInterval)) {
       continue;
     }
-    addBoundary(boundaries, interval.startSeconds, durationSeconds);
-    addBoundary(boundaries, interval.endSeconds, durationSeconds);
+    addTargetBoundary(interval.startSeconds);
+    addTargetBoundary(interval.endSeconds);
 
     const transition = transitionInterval(layer, durationSeconds);
-    if (transition) {
+    if (transition && overlaps(transition, targetInterval)) {
       transitionIntervals.push(transition);
-      addBoundary(boundaries, transition.startSeconds, durationSeconds);
-      addBoundary(boundaries, layer.startSeconds, durationSeconds);
-      addBoundary(boundaries, transition.endSeconds, durationSeconds);
+      addTargetBoundary(transition.startSeconds);
+      addTargetBoundary(layer.startSeconds);
+      addTargetBoundary(transition.endSeconds);
     }
+  }
+
+  // A STABLE, absolute-time grid is what keeps invalidation local. Because grid lines sit at fixed
+  // multiples of `gridStep` (measured from t=0), inserting a clip/overlay only re-cuts the one cell it
+  // lands in — every distant cell keeps the exact same [start,end] range (and therefore the same span id
+  // and cached proxy). Without this, subdividing each inter-boundary segment by equal parts would shift
+  // every downstream range on any edit, orphaning the whole timeline's proxies.
+  const hasComplexContent = options.layers.some(
+    (layer) => isOverlayLayer(layer) || isEffectLayer(layer) || (layer.transitionIn?.durationSeconds ?? 0) > 0
+  );
+  const gridStep = Math.max(minSpanSeconds, hasComplexContent ? maxComplexSpanSeconds : maxSimpleSpanSeconds);
+  for (let mark = Math.ceil(targetStartSeconds / gridStep) * gridStep; mark < targetEndSeconds; mark += gridStep) {
+    addTargetBoundary(Number(mark.toFixed(3)));
   }
 
   const sortedBoundaries = [...boundaries].sort((a, b) => a - b);
@@ -354,20 +471,45 @@ export function planAdaptiveCacheSpans(options: AdaptiveCachePlanOptions): Adapt
       }
     }
 
-    const maxLength = reason === "simple" ? maxSimpleSpanSeconds : maxComplexSpanSeconds;
-    for (const split of splitInterval(interval, maxLength, minSpanSeconds)) {
-      spans.push({
-        id: `${split.startSeconds.toFixed(3)}-${split.endSeconds.toFixed(3)}-${reason}`,
-        startSeconds: split.startSeconds,
-        endSeconds: split.endSeconds,
-        reason,
-        priority: scoreSpan(split, reason, options.playheadSeconds),
-        layerIds: activeLayers.map((layer) => layer.id)
-      });
-    }
+    const startRounded = Number(startSeconds.toFixed(3));
+    const endRounded = Number(endSeconds.toFixed(3));
+    spans.push({
+      // Grid-stable id: purely time+reason, no layer content — so an edit elsewhere can't change it.
+      id: `${startRounded.toFixed(3)}-${endRounded.toFixed(3)}-${reason}`,
+      startSeconds: startRounded,
+      endSeconds: endRounded,
+      reason,
+      priority: scoreSpan(interval, reason, options.playheadSeconds),
+      layerIds: activeLayers.map((layer) => layer.id),
+      contentSignature: spanContentSignature(activeLayers)
+    });
   }
 
   return spans;
+}
+
+/**
+ * Hash of the layers overlapping one span. Deterministic (layers sorted by id) and limited to the props
+ * that actually change the composited pixels, so re-ordering unrelated tracks or editing a distant layer
+ * does not perturb an unaffected span's signature.
+ */
+function spanContentSignature(layers: readonly TimelineCacheLayerInput[]): string {
+  const payload = [...layers]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((layer) => ({
+      id: layer.id,
+      type: layer.type,
+      startSeconds: Number(layer.startSeconds.toFixed(3)),
+      durationSeconds: Number(layer.durationSeconds.toFixed(3)),
+      sourceInSeconds: Number((layer.sourceInSeconds ?? 0).toFixed(3)),
+      assetId: layer.assetId ?? "",
+      transitionSeconds: layer.transitionIn?.durationSeconds ?? 0,
+      effects: layer.effects ?? [],
+      masks: layer.masks ?? [],
+      keyframes: layer.keyframes ?? [],
+      animations: layer.animations ?? []
+    }));
+  return hashString(stableStringify(payload));
 }
 
 function stableStringify(value: unknown): string {
@@ -400,6 +542,7 @@ export function compositionCacheLayers(composition: TimelineComposition): Timeli
       type: layer.type,
       startSeconds: layer.startSeconds,
       durationSeconds: layer.durationSeconds,
+      ...(layer.sourceInSeconds !== undefined ? { sourceInSeconds: layer.sourceInSeconds } : {}),
       ...(layer.assetId !== undefined ? { assetId: layer.assetId } : {}),
       ...(layer.transitionIn !== undefined ? { transitionIn: { durationSeconds: layer.transitionIn.durationSeconds } } : {}),
       effects: layer.effects,
@@ -454,6 +597,29 @@ export function compositionCacheSignature(composition: TimelineComposition, rend
   });
 }
 
+/**
+ * Base signature for a composition: identity + output format ONLY (no layer content, no duration). This
+ * scopes the cache to a project+resolution; per-span `contentSignature` handles layer-level invalidation.
+ * Changing quality (renderScale) or opening a different project flips this and prunes the whole store;
+ * ordinary timeline edits do NOT.
+ */
+export function baseCompositionSignature(composition: TimelineComposition, renderScale: number): string {
+  return hashString(
+    stableStringify({
+      compositionId: composition.id,
+      width: composition.width,
+      height: composition.height,
+      fps: composition.fps,
+      previewProxyRenderVersion: PREVIEW_PROXY_RENDER_VERSION,
+      renderScale: Number(renderScale.toFixed(3))
+    })
+  );
+}
+
+export function previewPluginSignature(value: unknown): string {
+  return hashString(stableStringify(value ?? null));
+}
+
 function cacheSpanKey(signature: string, renderScale: number, span: TimelineInterval): string {
   return `${signature}:${renderScale.toFixed(3)}:${span.startSeconds.toFixed(3)}-${span.endSeconds.toFixed(3)}`;
 }
@@ -472,6 +638,17 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
 
   const currentByteSize = (): number => [...entries.values()].reduce((total, span) => total + span.byteSize, 0);
 
+  // Release backing proxy media (OPFS/blob) for a span the owner no longer needs. Idempotent per call.
+  const disposeMedia = (span: CachedPreviewSpan): void => {
+    if (span.url !== undefined || span.byteSize > 0) {
+      options.onDisposeSpanMedia?.(span);
+    }
+  };
+  const deleteSpan = (span: CachedPreviewSpan): void => {
+    disposeMedia(span);
+    entries.delete(span.id);
+  };
+
   const evictIfNeeded = (): void => {
     while (entries.size > maxEntries || currentByteSize() > maxBytes) {
       const evictable = [...entries.values()].sort((a, b) => {
@@ -483,14 +660,14 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       if (!evictable) {
         break;
       }
-      entries.delete(evictable.id);
+      deleteSpan(evictable);
     }
   };
 
   return {
     getReadySpan(timeSeconds, signature, renderScale) {
       const match = [...entries.values()]
-        .filter((span) => span.signature === signature && span.renderScale === renderScale && span.status === "ready")
+        .filter((span) => span.signature === signature && span.renderScale === renderScale && span.status === "ready" && span.url !== undefined)
         .find((span) => containsTime(span, timeSeconds));
       if (match) {
         match.lastUsedAt = Date.now();
@@ -505,7 +682,13 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       let count = 0;
       for (const span of entries.values()) {
         if (span.status !== "dirty" && overlaps(span, range)) {
+          // Media captured for the old content is now invalid — drop the blob but keep the entry so the
+          // ruler still shows the range (as dirty) until it is re-rendered.
+          disposeMedia(span);
           span.status = "dirty";
+          span.url = undefined;
+          span.byteSize = 0;
+          delete span.liveRanges;
           count += 1;
         }
       }
@@ -515,27 +698,59 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       let count = 0;
       for (const span of [...entries.values()]) {
         if (span.signature === signature) {
-          entries.delete(span.id);
+          deleteSpan(span);
           count += 1;
         }
       }
       return count;
     },
-    reconcile(plan, signature, renderScale, now = Date.now()) {
+    reconcile(plan, signature, renderScale, now = Date.now(), scope) {
+      // Prune everything from a PREVIOUS composition/quality signature. Without this, changing resolution or
+      // opening a different project would leave stale spans in the store. Ordinary edits keep the same base
+      // signature (only per-span content signatures change), so this does NOT wipe the timeline on an edit.
+      for (const span of [...entries.values()]) {
+        if (span.signature !== signature || span.renderScale !== renderScale) {
+          deleteSpan(span);
+        }
+      }
+
       const wantedIds = new Set<string>();
       const pending: CachedPreviewSpan[] = [];
       for (const planned of plan) {
         const id = cacheSpanKey(signature, renderScale, planned);
         wantedIds.add(id);
         const existing = entries.get(id);
-        if (existing && existing.status !== "dirty" && existing.status !== "failed") {
+        if (existing) {
+          // Same time-range span already tracked. Keep its proxy iff the overlapping content is unchanged
+          // AND it is still valid (ready/pending). A dirty/failed span is rebuilt (e.g. forced regen).
+          if (
+            existing.contentSignature === planned.contentSignature &&
+            (existing.status === "ready" || existing.status === "pending")
+          ) {
+            existing.priority = planned.priority;
+            existing.layerIds = planned.layerIds;
+            continue;
+          }
+          // Content within THIS span changed (an edit overlapped it) — invalidate just this one.
+          disposeMedia(existing);
+          existing.contentSignature = planned.contentSignature;
+          existing.reason = planned.reason;
           existing.priority = planned.priority;
           existing.layerIds = planned.layerIds;
+          existing.status = "pending";
+          existing.url = undefined;
+          existing.byteSize = 0;
+          delete existing.liveRanges;
+          existing.createdAt = now;
+          existing.lastUsedAt = now;
+          delete existing.error;
+          pending.push(existing);
           continue;
         }
         const span: CachedPreviewSpan = {
           id,
           signature,
+          contentSignature: planned.contentSignature,
           startSeconds: planned.startSeconds,
           endSeconds: planned.endSeconds,
           reason: planned.reason,
@@ -552,17 +767,97 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       }
 
       for (const span of [...entries.values()]) {
-        if (span.signature === signature && span.renderScale === renderScale && !wantedIds.has(span.id)) {
-          span.status = "dirty";
+        if (wantedIds.has(span.id)) {
+          continue;
+        }
+        // Drop spans the current plan no longer wants so counts reflect the current timeline. But a SCOPED
+        // (In/Out) reconcile only planned spans inside `scope` — leave spans outside that window alone, or
+        // regenerating a range would nuke the rest of the timeline's proxies.
+        if (!scope || overlaps(span, scope)) {
+          deleteSpan(span);
         }
       }
       evictIfNeeded();
       return pending.sort(sortByPriority);
     },
+    markFrameRendered(input) {
+      const frameDurationSeconds = Math.max(1 / 120, input.frameDurationSeconds);
+      const frameRange = {
+        startSeconds: input.timeSeconds,
+        endSeconds: input.timeSeconds + frameDurationSeconds
+      };
+      const matches = [...entries.values()].filter(
+        (span) =>
+          span.signature === input.signature &&
+          span.renderScale === input.renderScale &&
+          span.status !== "ready" &&
+          overlaps(span, frameRange)
+      );
+      let updated: CachedPreviewSpan | undefined;
+      for (const span of matches) {
+        const range = {
+          startSeconds: clamp(Math.max(frameRange.startSeconds, span.startSeconds), span.startSeconds, span.endSeconds),
+          endSeconds: clamp(Math.min(frameRange.endSeconds, span.endSeconds), span.startSeconds, span.endSeconds)
+        };
+        if (range.endSeconds <= range.startSeconds) {
+          continue;
+        }
+        span.liveRanges = mergeLiveRanges(span.liveRanges ?? [], range);
+        span.lastUsedAt = input.now ?? Date.now();
+        updated = span;
+      }
+      return updated;
+    },
+    markSpanReady(input) {
+      const span = entries.get(input.id);
+      // Reject stale media: the span may have been pruned, or its content changed (an edit landed) while it
+      // was rendering in the Worker. Sealing here would show an out-of-date proxy — drop the blob instead.
+      if (!span || span.signature !== input.signature || span.contentSignature !== input.contentSignature) {
+        options.onDisposeSpanMedia?.({ ...(span ?? ({} as CachedPreviewSpan)), id: input.id, url: input.url, byteSize: input.byteSize } as CachedPreviewSpan);
+        return undefined;
+      }
+      span.url = input.url;
+      span.byteSize = Math.max(0, input.byteSize);
+      span.status = "ready";
+      span.lastUsedAt = input.now ?? Date.now();
+      delete span.liveRanges;
+      evictIfNeeded();
+      return span;
+    },
+    getReadySpanMedia(timeSeconds, signature, renderScale) {
+      const match = [...entries.values()].find(
+        (span) =>
+          span.signature === signature &&
+          span.renderScale === renderScale &&
+          span.status === "ready" &&
+          span.url !== undefined &&
+          containsTime(span, timeSeconds)
+      );
+      if (!match || match.url === undefined) {
+        return undefined;
+      }
+      match.lastUsedAt = Date.now();
+      return { url: match.url, spanStartSeconds: match.startSeconds, spanId: match.id };
+    },
+    markFailed(id, error) {
+      const span = entries.get(id);
+      if (!span) {
+        return;
+      }
+      disposeMedia(span);
+      span.status = "failed";
+      span.url = undefined;
+      span.byteSize = 0;
+      delete span.liveRanges;
+      span.error = error;
+    },
     nextPending() {
       return [...entries.values()].filter((span) => span.status === "pending").sort(sortByPriority)[0];
     },
     clear() {
+      for (const span of entries.values()) {
+        disposeMedia(span);
+      }
       entries.clear();
     },
     get entries() {
@@ -582,25 +877,21 @@ export function createPreviewCacheController(options: PreviewRenderCacheStoreOpt
   return {
     update(input) {
       const layers = compositionCacheLayers(input.composition);
-      const signature = timelineCacheSignature({
-        compositionId: input.composition.id,
-        durationSeconds: input.composition.durationSeconds,
-        width: input.composition.width,
-        height: input.composition.height,
-        fps: input.composition.fps,
-        layers,
-        renderScale: input.renderScale
-      });
+      // Base signature only — per-span content signatures (inside the plan) drive invalidation, so an
+      // ordinary edit re-renders just the overlapping spans instead of the whole store.
+      const baseSignature = baseCompositionSignature(input.composition, input.renderScale);
+      const signature = input.pluginSignature ? `${baseSignature}:${input.pluginSignature}` : baseSignature;
       const plannedSpans = planAdaptiveCacheSpans({
         durationSeconds: input.composition.durationSeconds,
         layers,
         playheadSeconds: input.playheadSeconds,
+        ...(input.targetRange !== undefined ? { targetRange: input.targetRange } : {}),
         ...(input.dirtyLayerIds !== undefined ? { dirtyLayerIds: input.dirtyLayerIds } : {}),
         ...(input.minSpanSeconds !== undefined ? { minSpanSeconds: input.minSpanSeconds } : {}),
         ...(input.maxSimpleSpanSeconds !== undefined ? { maxSimpleSpanSeconds: input.maxSimpleSpanSeconds } : {}),
         ...(input.maxComplexSpanSeconds !== undefined ? { maxComplexSpanSeconds: input.maxComplexSpanSeconds } : {})
       });
-      const pendingSpans = store.reconcile(plannedSpans, signature, input.renderScale, input.now);
+      const pendingSpans = store.reconcile(plannedSpans, signature, input.renderScale, input.now, input.targetRange);
       const readySpan = store.getReadySpan(input.playheadSeconds, signature, input.renderScale);
       const nextPending = store.nextPending();
       return {
@@ -614,6 +905,9 @@ export function createPreviewCacheController(options: PreviewRenderCacheStoreOpt
         entries: store.entries,
         byteSize: store.byteSize
       };
+    },
+    markFrameRendered(input) {
+      return store.markFrameRendered(input);
     },
     markDirty(range) {
       return store.markDirty(range);
@@ -637,20 +931,45 @@ export function previewCacheRulerSegments(input: {
     return [];
   }
   const visibleRange = input.visibleRange ?? { startSeconds: 0, endSeconds: durationSeconds };
-  return input.entries
-    .filter((span) => overlaps(span, visibleRange))
-    .map((span) => {
-      const startSeconds = clamp(Math.max(span.startSeconds, visibleRange.startSeconds), 0, durationSeconds);
-      const endSeconds = clamp(Math.min(span.endSeconds, visibleRange.endSeconds), 0, durationSeconds);
-      return {
+  const segments: PreviewCacheRulerSegment[] = [];
+  for (const span of input.entries.filter((entry) => overlaps(entry, visibleRange))) {
+    const startSeconds = clamp(Math.max(span.startSeconds, visibleRange.startSeconds), 0, durationSeconds);
+    const endSeconds = clamp(Math.min(span.endSeconds, visibleRange.endSeconds), 0, durationSeconds);
+    if (endSeconds > startSeconds) {
+      const status = span.status === "ready" && span.url === undefined ? "pending" : span.status;
+      segments.push({
         id: span.id,
         startPercent: (startSeconds / durationSeconds) * 100,
         endPercent: (endSeconds / durationSeconds) * 100,
-        status: span.status,
+        status,
         reason: span.reason,
         priority: span.priority
-      };
-    })
+      });
+      if (span.url === undefined) {
+        for (const [index, liveRange] of (span.liveRanges ?? []).entries()) {
+          const liveStartSeconds = clamp(Math.max(liveRange.startSeconds, visibleRange.startSeconds), 0, durationSeconds);
+          const liveEndSeconds = clamp(Math.min(liveRange.endSeconds, visibleRange.endSeconds), 0, durationSeconds);
+          if (liveEndSeconds > liveStartSeconds) {
+            segments.push({
+              id: `${span.id}:live:${index}`,
+              startPercent: (liveStartSeconds / durationSeconds) * 100,
+              endPercent: (liveEndSeconds / durationSeconds) * 100,
+              status: "live",
+              reason: span.reason,
+              priority: span.priority
+            });
+          }
+        }
+      }
+    }
+  }
+  return segments
     .filter((segment) => segment.endPercent > segment.startPercent)
-    .sort((a, b) => a.startPercent - b.startPercent);
+    .sort((a, b) => {
+      if (a.startPercent !== b.startPercent) {
+        return a.startPercent - b.startPercent;
+      }
+      const rank = (status: PreviewCacheRulerSegmentStatus): number => (status === "ready" ? 3 : status === "live" ? 2 : 1);
+      return rank(a.status) - rank(b.status);
+    });
 }

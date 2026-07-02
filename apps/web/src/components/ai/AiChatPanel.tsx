@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, Brain, Cpu, KeyRound, Plus, SendHorizontal, Settings2, Sparkles, Undo2, X } from "lucide-react";
-import { getActionAnalytics, logUnsupported, recordPlanReviewed } from "@reelforge/shared";
+import { getActionAnalytics, logUnsupported, recordPlanReviewed } from "@lumio-by-aelivion/shared";
 import { createPlanner } from "../../ai/planner/createPlanner";
 import { classifyContinuity, type ContinuityResult } from "../../ai/planner/intent-continuity";
 import { streamTalk } from "../../ai/talk";

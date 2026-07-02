@@ -53,11 +53,11 @@ export function AuthPage() {
   return (
     <main className="auth-page">
       <div className="auth-card">
-        <Link to="/" className="auth-brand" aria-label="ReelForge Studio">
+        <Link to="/" className="auth-brand" aria-label="Lumio">
           <span className="brand-mark">
             <Clapperboard size={20} />
           </span>
-          <span>ReelForge Studio</span>
+          <span>Lumio</span>
         </Link>
 
         <div className="auth-tabs" role="tablist" aria-label="Sign in or create account">

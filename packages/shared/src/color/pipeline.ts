@@ -261,7 +261,10 @@ export function compileColorPipeline(effects: ColorEffectInput[]): ColorPipeline
     // Imported .cube LUT: a single lut3d stage (WebGL/CPU only — SVG can't express 3D LUTs).
     if (effect.type === "importedLut") {
       if (effect.importedLut3d) {
-        stages.push({ matrix: null, curve: null, lut3d: effect.importedLut3d });
+        const amount = clamp01(num(effect.params, "intensity", effect.intensity ?? 100) / 100);
+        if (amount > 0) {
+          stages.push({ matrix: null, curve: null, lut3d: effect.importedLut3d, lutAmount: amount });
+        }
       }
       continue;
     }

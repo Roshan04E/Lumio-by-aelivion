@@ -2,7 +2,7 @@
  * Standalone assert script for the P10 intent-continuity classifier. Repo
  * convention: no test framework — exits non-zero on first failure.
  *
- *   pnpm --filter @reelforge/web continuity:test
+ *   pnpm --filter @lumio-by-aelivion/web continuity:test
  */
 import { classifyContinuity } from "./intent-continuity";
 

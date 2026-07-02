@@ -1,4 +1,4 @@
-import { walletPacks } from "@reelforge/shared";
+import { walletPacks } from "@lumio-by-aelivion/shared";
 import { HttpError } from "../lib/http";
 import { prisma } from "../lib/prisma";
 

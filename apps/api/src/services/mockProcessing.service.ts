@@ -1,5 +1,5 @@
-import { buildRenderManifest, type RenderManifest, type RenderQuality } from "@reelforge/render-templates";
-import { type ModuleType, type ProjectGraph, type SourceAsset } from "@reelforge/shared";
+import { buildRenderManifest, type RenderManifest, type RenderQuality } from "@lumio-by-aelivion/render-templates";
+import { type ModuleType, type ProjectGraph, type SourceAsset } from "@lumio-by-aelivion/shared";
 import { HttpError } from "../lib/http";
 import { asJson, fromJson } from "../lib/json";
 import { prisma } from "../lib/prisma";

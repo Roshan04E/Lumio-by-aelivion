@@ -22,7 +22,7 @@ import {
   createExportStressFixture,
   getActiveGlContextCount,
   type TimelineLayer,
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { ScenePreviewCanvas } from "../components/ScenePreviewCanvas";
 import { exportLocally, canExportLocally } from "../export/local-export";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";

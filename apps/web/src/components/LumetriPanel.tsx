@@ -17,14 +17,15 @@
 
 import { ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { createTimelineEffect, evaluateTimelineEffectParam, type TimelineEffect, type TimelineLayer } from "@reelforge/shared";
+import { createTimelineEffect, evaluateTimelineEffectParam, type TimelineEffect, type TimelineLayer } from "@lumio-by-aelivion/shared";
 import { CurveEditor } from "./CurveEditor";
 import { ColorWheels } from "./ColorWheels";
 import { HueSatCurves } from "./HueSatCurves";
 import { HslSecondary } from "./HslSecondary";
 import { LutFileImport } from "./LutFileImport";
-import { CREATIVE_LOOK_NAMES } from "@reelforge/shared";
-import { EffectSliderControl, effectSliderTone } from "./EffectSliderControl";
+import { CREATIVE_LOOK_NAMES } from "@lumio-by-aelivion/shared";
+import { EffectSliderControl } from "./EffectSliderControl";
+import { effectSliderTone } from "./effectSliderTone";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import {
   clamp,
@@ -102,7 +103,20 @@ interface SectionProps {
 function Section({ label, enabled, open, onToggleOpen, onReset, children }: SectionProps) {
   return (
     <div className={`lumetri-section${enabled ? " lumetri-section--active" : ""}`}>
-      <button className="lumetri-section-header" type="button" onClick={onToggleOpen}>
+      {/* Header is a role=button DIV, not a <button>, so the Reset <button> can nest inside it (a button
+          inside a button is invalid HTML → React hydration error). Enter/Space toggle for keyboard a11y. */}
+      <div
+        className="lumetri-section-header"
+        role="button"
+        tabIndex={0}
+        onClick={onToggleOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggleOpen();
+          }
+        }}
+      >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span className="lumetri-section-label">{label}</span>
         {enabled && <span className="lumetri-section-dot" title="Effect applied" />}
@@ -114,7 +128,7 @@ function Section({ label, enabled, open, onToggleOpen, onReset, children }: Sect
         >
           <RotateCcw size={11} />
         </button>
-      </button>
+      </div>
       {open && <div className="lumetri-section-body">{children}</div>}
     </div>
   );
@@ -135,6 +149,19 @@ export function LumetriPanel({ layer, currentTime, onChange }: Props) {
 
   function updateEffectParam(type: string, key: string, value: string | number | boolean) {
     onChange((l) => upsertEffect(l, type, (e) => setEffectParam(e, key, value)));
+  }
+
+  function updateImportedLut(value: string, name?: string) {
+    onChange((l) =>
+      upsertEffect(l, "importedLut", (e) => ({
+        ...e,
+        params: {
+          ...e.params,
+          lut: value,
+          ...(name !== undefined ? { lutName: name } : {})
+        }
+      }))
+    );
   }
 
   function resetSection(type: string) {
@@ -248,8 +275,16 @@ export function LumetriPanel({ layer, currentTime, onChange }: Props) {
                 <div className="lumetri-divider" />
                 <p className="lumetri-section-sub">LUT</p>
                 <LutFileImport
+                  label={
+                    typeof findEffect(layer, "importedLut")?.params?.lutName === "string" &&
+                    String(findEffect(layer, "importedLut")?.params?.lutName).trim()
+                      ? String(findEffect(layer, "importedLut")?.params?.lutName)
+                      : findEffect(layer, "importedLut")?.name !== "LUT"
+                        ? findEffect(layer, "importedLut")?.name
+                        : undefined
+                  }
                   value={ps("importedLut", "lut", "")}
-                  onChange={(v) => updateEffectParam("importedLut", "lut", v)}
+                  onChange={updateImportedLut}
                 />
                 {renderSlider("importedLut", "intensity", "LUT Intensity", 0, 100, 100)}
               </div>

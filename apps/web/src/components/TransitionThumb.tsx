@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Star } from "lucide-react";
-import type { TransitionKind } from "@reelforge/shared";
+import { Star, Trash2 } from "lucide-react";
+import type { TransitionKind } from "@lumio-by-aelivion/shared";
 import { transitionPreviewStyle, type TransitionPreviewParams } from "../editor/effects/transition-preview";
 
 /**
@@ -22,7 +22,8 @@ export function TransitionThumb({
   aSrc,
   bSrc,
   onApply,
-  onToggleStar
+  onToggleStar,
+  onRemove
 }: {
   kind: TransitionKind;
   params: TransitionPreviewParams;
@@ -33,6 +34,7 @@ export function TransitionThumb({
   bSrc?: string | undefined;
   onApply: () => void;
   onToggleStar: () => void;
+  onRemove?: (() => void) | undefined;
 }) {
   const aRef = useRef<HTMLDivElement | null>(null);
   const bRef = useRef<HTMLDivElement | null>(null);
@@ -111,6 +113,20 @@ export function TransitionThumb({
       >
         <Star size={12} fill={starred ? "currentColor" : "none"} />
       </button>
+      {onRemove ? (
+        <button
+          type="button"
+          className="transition-thumb-delete"
+          aria-label={`Remove uploaded transition ${label}`}
+          title="Remove uploaded transition"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+        >
+          <Trash2 size={12} />
+        </button>
+      ) : null}
       <span className="transition-thumb-label">{label}</span>
     </div>
   );

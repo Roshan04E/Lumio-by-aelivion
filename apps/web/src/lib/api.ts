@@ -10,6 +10,8 @@ import {
   type AssetExternalRef,
   type AssetSource,
   type ModuleType,
+  type PluginCatalogResponse,
+  type PluginPackageKind,
   type ProjectGraph,
   type RenderJob,
   type SourceAsset,
@@ -22,13 +24,27 @@ import {
   type TranscriptArtifactData,
   type TemplateDefinition,
   type ToolDefinition
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { getAssetBlobStore, requestPersistentAssetStorage } from "./asset-blob-store";
+// Runtime-only use (inside function bodies) — safe across the api⇄sync circular edge; no top-level call.
+import { candidateProjectIds, resolveProjectId } from "./sync";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4100/api";
-const tokenKey = "reelforge_token";
-const localProjectsKey = "reelforge_local_projects";
-const localAssetsKey = "reelforge_local_assets";
+
+/** Thrown when an EXISTING project id can't be loaded from server or local storage. Callers should retry or
+ *  surface an error — NEVER swap in a blank project, which the user can unknowingly edit (lost-work scare). */
+export class ProjectLoadError extends Error {
+  constructor(public readonly projectId: string) {
+    super(`Could not load project ${projectId}. Check your connection and try again.`);
+    this.name = "ProjectLoadError";
+  }
+}
+
+const LOCAL_PROJECT_ID_PREFIX = "project_local_";
+const tokenKey = "lumio_token";
+const localProjectsKey = "lumio_local_projects";
+const localAssetsKey = "lumio_local_assets";
+const pluginCatalogLatestKey = "lumio_plugin_catalog_latest";
 /** Marker stored as a local asset's fileUrl; the real bytes live in the on-device blob
  *  store (asset-blob-store.ts) and are resolved to a fresh object URL on load. */
 export const LOCAL_BLOB_PREFIX = "localblob:";
@@ -102,7 +118,7 @@ export function logout(): void {
   localStorage.removeItem(tokenKey);
 }
 
-const DEMO_CREDENTIALS = { name: "Demo Creator", email: "demo@reelforge.studio", password: "password123" };
+const DEMO_CREDENTIALS = { name: "Demo Creator", email: "demo@aelivion.studio", password: "password123" };
 
 export async function loginRequest(email: string, password: string): Promise<UserRecord> {
   const data = await apiRequest<{ token: string; user: UserRecord }>("/auth/login", {
@@ -169,8 +185,8 @@ export async function getMe(): Promise<UserRecord> {
     return {
       id: "local_demo",
       name: "Demo Creator",
-      email: "demo@reelforge.studio",
-      walletCredits: Number(localStorage.getItem("reelforge_wallet") ?? 120)
+      email: "demo@aelivion.studio",
+      walletCredits: Number(localStorage.getItem("lumio_wallet") ?? 120)
     };
   }
 }
@@ -223,6 +239,21 @@ export async function listTools(): Promise<ToolDefinition[]> {
   }
 }
 
+export async function listPluginPackages(kind: PluginPackageKind | "all" = "all"): Promise<PluginCatalogResponse> {
+  const params = new URLSearchParams();
+  if (kind !== "all") {
+    params.set("kind", kind);
+  }
+  const cacheNamespace = kind;
+  try {
+    const data = await apiRequest<PluginCatalogResponse>(`/plugin-packages${params.size ? `?${params.toString()}` : ""}`);
+    writePluginCatalogCache(cacheNamespace, data);
+    return data;
+  } catch {
+    return readPluginCatalogCache(cacheNamespace) ?? { packages: [], revision: "offline-empty" };
+  }
+}
+
 export interface CreateAssetInput {
   file?: File | undefined;
   fileName?: string | undefined;
@@ -246,12 +277,16 @@ export interface CreateAssetInput {
 export async function createAsset(input: CreateAssetInput) {
   await ensureDemoSession();
 
+  // SourceAsset.durationSeconds is a Postgres Int column, so the SERVER payload must be an int. But the
+  // rounded value must NOT come back to the timeline: rounding UP makes a clip ~1s LONGER than the video
+  // → the tail freezes on the last frame during playback. So we send the ceiled int to the server but
+  // keep the REAL fractional duration on the returned asset (clips read that) — for both the server and
+  // local-first paths.
+  const durationSeconds = Math.max(1, Math.ceil(input.durationSeconds ?? 12));
+  const realDuration = Math.max(0.2, Math.min(7200, input.durationSeconds ?? durationSeconds));
+  const withRealDuration = (asset: SourceAsset): SourceAsset => ({ ...asset, durationSeconds: realDuration });
+
   try {
-    // SourceAsset.durationSeconds is a Postgres Int column - a real clip's duration is
-    // essentially never a whole number, so this must be rounded before it's sent.
-    // Rounded UP, never down, so the stored value can never under-represent the
-    // actual clip length (which would risk the timeline cutting it short).
-    const durationSeconds = Math.max(1, Math.ceil(input.durationSeconds ?? 12));
     if (input.file) {
       const body = new FormData();
       body.append("file", input.file);
@@ -260,7 +295,7 @@ export async function createAsset(input: CreateAssetInput) {
       body.append("height", String(input.height ?? 1920));
       appendAssetMetadata(body, input);
       const data = await apiRequest<{ asset: SourceAsset }>("/assets", { method: "POST", body });
-      return data.asset;
+      return withRealDuration(data.asset);
     }
 
     const data = await apiRequest<{ asset: SourceAsset }>("/assets", {
@@ -283,7 +318,7 @@ export async function createAsset(input: CreateAssetInput) {
         ai: input.ai
       })
     });
-    return data.asset;
+    return withRealDuration(data.asset);
   } catch {
     const file = input.file;
     const isFileVideo = file?.type.startsWith("video/");
@@ -292,7 +327,7 @@ export async function createAsset(input: CreateAssetInput) {
     // Persist the actual bytes on-device so the asset survives refresh and large clips load
     // instantly. Only a stable marker is stored as the URL; the live object URL is resolved
     // now (for immediate use) and re-resolved by listAssets() / resolveLocalAssetUrls() later.
-    let liveUrl = "/assets/reelforge-studio-hero.png";
+    let liveUrl = "/assets/lumio-by-aelivion-hero.png";
     if (file) {
       try {
         const store = await getAssetBlobStore();
@@ -311,7 +346,7 @@ export async function createAsset(input: CreateAssetInput) {
       fileType: file?.type ?? input.fileType ?? "video/mp4",
       // Persist the MARKER, not the (session-only) object URL.
       fileUrl: file ? `${LOCAL_BLOB_PREFIX}${id}` : liveUrl,
-      durationSeconds: input.durationSeconds ?? 12,
+      durationSeconds: realDuration,
       width: input.width ?? 1080,
       height: input.height ?? 1920,
       status: isFileVideo || file?.type.startsWith("image/") ? "ready" : "uploaded",
@@ -547,17 +582,37 @@ export async function listProjects(): Promise<ProjectRecord[]> {
 export async function getProject(projectId: string): Promise<ProjectRecord> {
   await ensureDemoSession();
 
-  try {
-    const data = await apiRequest<{ project: ProjectRecord }>(`/projects/${projectId}`);
-    return data.project;
-  } catch {
-    const project = readLocal<ProjectRecord[]>(localProjectsKey, []).find((item) => item.id === projectId);
-    if (project) {
-      return project;
+  // Search local storage under EVERY id this project may be keyed by (self, mapped server id, mapped local
+  // id). A promoted draft's record can be keyed by its local id while the UI holds the server id — searching
+  // only one id is what caused the intermittent miss → blank "Untitled reel" fabrication.
+  const readLocalCandidate = (): ProjectRecord | undefined => {
+    const local = readLocal<ProjectRecord[]>(localProjectsKey, []);
+    for (const id of candidateProjectIds(projectId)) {
+      const found = local.find((item) => item.id === id);
+      if (found) return found;
     }
-    const fallback = createLocalProject({ title: "Untitled reel", templateId: templateDefinitions[0]?.id });
-    saveLocalProject(fallback);
-    return fallback;
+    return undefined;
+  };
+
+  // Local drafts live ONLY in the browser — a server fetch for them always 404s, and routing that guaranteed
+  // failure through the catch below is exactly what made a transient hiccup fabricate a blank project. Read
+  // local FIRST for local ids and skip the doomed round trip.
+  if (projectId.startsWith(LOCAL_PROJECT_ID_PREFIX)) {
+    const local = readLocalCandidate();
+    if (local) return local;
+  }
+
+  try {
+    const data = await apiRequest<{ project: ProjectRecord }>(`/projects/${resolveProjectId(projectId)}`);
+    return data.project;
+  } catch (error) {
+    const local = readLocalCandidate();
+    if (local) return local;
+    // No local copy. Preserve the AUTH distinction: a 401 (guest / expired session) is not a transient
+    // network blip — retrying can't help, the caller must prompt sign-in. Re-throw AuthRequiredError as-is;
+    // otherwise fail with ProjectLoadError. Either way we NEVER fabricate a blank project the user could edit.
+    if (error instanceof AuthRequiredError) throw error;
+    throw new ProjectLoadError(projectId);
   }
 }
 
@@ -661,8 +716,8 @@ export async function buyCredits(packId: "starter" | "creator" | "growth", proje
     return true;
   } catch {
     const pack = walletPacks.find((item) => item.id === packId);
-    const wallet = Number(localStorage.getItem("reelforge_wallet") ?? 120);
-    localStorage.setItem("reelforge_wallet", String(wallet + (pack?.credits ?? 0)));
+    const wallet = Number(localStorage.getItem("lumio_wallet") ?? 120);
+    localStorage.setItem("lumio_wallet", String(wallet + (pack?.credits ?? 0)));
     return true;
   }
 }
@@ -849,6 +904,18 @@ function saveLocalProject(project: ProjectRecord) {
   const projects = readLocal<ProjectRecord[]>(localProjectsKey, []);
   const withoutCurrent = projects.filter((item) => item.id !== project.id);
   writeLocal(localProjectsKey, [project, ...withoutCurrent]);
+}
+
+function readPluginCatalogCache(namespace: string): PluginCatalogResponse | undefined {
+  const latest = readLocal<Record<string, string>>(pluginCatalogLatestKey, {});
+  const revision = latest[namespace];
+  return revision ? readLocal<PluginCatalogResponse | undefined>(`lumio_plugin_catalog_${namespace}_${revision}`, undefined) : undefined;
+}
+
+function writePluginCatalogCache(namespace: string, value: PluginCatalogResponse) {
+  const latest = readLocal<Record<string, string>>(pluginCatalogLatestKey, {});
+  writeLocal(pluginCatalogLatestKey, { ...latest, [namespace]: value.revision });
+  writeLocal(`lumio_plugin_catalog_${namespace}_${value.revision}`, value);
 }
 
 function readLocal<T>(key: string, fallback: T): T {

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "9.9.9",
+  "kind": "effect",
+  "id": "bad.dangerous-effect",
+  "name": "Dangerous Test Effect",
+  "version": "1.0.0",
+  "description": "Intentionally malformed manifest for testing Lumio package safety rejection.",
+  "author": {
+    "name": "Aelivion Studio"
+  },
+  "tags": ["test", "malformed"],
+  "engine": "native",
+  "scope": ["clip"],
+  "compatibleLayerTypes": ["video"],
+  "thumbnail": "missing-thumb.png",
+  "unknownTopLevelField": "this should produce a warning",
+  "script": "alert('blocked')",
+  "effect": {
+    "type": "glow",
+    "intensity": 50,
+    "params": {
+      "radius": 20,
+      "unsafeUrl": "javascript:alert('blocked')",
+      "html": "<script>alert('blocked')</script>"
+    }
+  }
+}

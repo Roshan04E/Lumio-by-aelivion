@@ -8,7 +8,7 @@ import {
   type CapabilityIndex,
   type TimelineComposition,
   type TimelineLayer
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import type { AiPlan, PlanEventHandler, PlanStep, PlannerContext, PlannerProvider } from "../types";
 import { extractColor, extractPosition, extractSize, extractTextStyle, resolveShapeGeometry } from "./entities";
 import { analyze, hasLemma, type NluDoc } from "./nlu";

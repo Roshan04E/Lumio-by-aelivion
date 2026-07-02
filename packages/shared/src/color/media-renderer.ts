@@ -21,6 +21,8 @@ import {
   markTexImageSourceProducer,
   noteGlContextCreated,
   releaseContextIfDetached,
+  requestContextSlot,
+  touchContext,
   type GlContextCreateOptions,
   type RenderTarget,
 } from "./gl-context";
@@ -174,6 +176,11 @@ export class MediaWebGLRenderer {
     } else {
       this._canvas = target;
       this.shared = false;
+      // Reserve budget room BEFORE creating our own context: when the governor is enabled and we're at the
+      // hard cap, this evicts the least-recently-used idle preview context so a large, many-clip timeline
+      // never crosses the browser's ~16-context cap (a browser force-loss would drop the GPU scene to DOM).
+      // No-op when the governor is disabled. (Shared-context mode borrows a context → no reservation.)
+      requestContextSlot();
       // preserveDrawingBuffer keeps the last frame on the canvas between draws. Without it the browser
       // discards the (alpha) buffer after each composite, so a single skipped/late draw — exactly at a
       // clip swap or before the incoming clip's draw loop ticks — flashes transparent for one frame
@@ -347,9 +354,20 @@ export class MediaWebGLRenderer {
     );
   }
 
+  /**
+   * The OWN WebGL2 context this renderer created (null in shared-context mode, where it borrows another's).
+   * Exposed so the owner can register a governor eviction disposer against it (`registerContextDisposer`).
+   */
+  get governorContext(): WebGL2RenderingContext | null {
+    return this.shared ? null : this.gl;
+  }
+
   /** Render one frame. Does nothing if disposed or source has no dimensions. */
   draw(params: MediaRendererDrawParams): void {
     if (this.disposed) return;
+    // Mark this context as used THIS frame so the governor's least-recently-used eviction targets genuinely
+    // idle contexts (a clip scrolled out of the active window), never the one being composited right now.
+    touchContext(this.gl);
     const {
       source, sourceWidth: w, sourceHeight: h,
       matte, matteInvert = false, matteOpacity = 1,

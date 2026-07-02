@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type CSSProperties, type HTMLAttributes } from "react";
-import { compositeMatteToImageData, type MatteRef } from "@reelforge/shared";
+import { compositeMatteToImageData, type MatteRef } from "@lumio-by-aelivion/shared";
 
 /**
  * Renders a video layer through its person-extraction matte. This is the web

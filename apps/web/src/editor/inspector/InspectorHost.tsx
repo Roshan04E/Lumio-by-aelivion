@@ -1,5 +1,5 @@
 import { Suspense, lazy, useMemo, type ComponentType } from "react";
-import type { TimelineLayer } from "@reelforge/shared";
+import type { TimelineLayer } from "@lumio-by-aelivion/shared";
 import { inspectorRegistry, type InspectorPanelProps, type MaskTool } from "../registry/inspector";
 import type { SavedTrack } from "../../lib/trackLibrary";
 

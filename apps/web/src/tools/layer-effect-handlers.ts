@@ -9,7 +9,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TrackingPathArtifactData
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { createAsset } from "../lib/api";
 import { createToolArtifactStore } from "./artifact-store";
 import { detectBrowserToolCapabilities } from "./capabilities";

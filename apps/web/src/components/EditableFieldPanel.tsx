@@ -1,4 +1,4 @@
-import type { EditableFieldDefinition } from "@reelforge/shared";
+import type { EditableFieldDefinition } from "@lumio-by-aelivion/shared";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 
 export function EditableFieldPanel({

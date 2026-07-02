@@ -1,12 +1,22 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
-import { buildRenderManifest, type RenderManifest } from "@reelforge/render-templates";
-import { type ProjectGraph, type SourceAsset } from "@reelforge/shared";
+import { buildRenderManifest, type RenderManifest } from "@lumio-by-aelivion/render-templates";
+import { type ProjectGraph, type SourceAsset } from "@lumio-by-aelivion/shared";
 import { makeCancelSignal } from "@remotion/renderer";
 import { renderManifestToMp4 } from "./remotion-renderer";
 
-process.env.DATABASE_URL ??= "postgresql://reelforge:reelforge@localhost:5432/reelforge?schema=public";
+const workerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const workspaceRoot = path.resolve(workerRoot, "../..");
+
+dotenv.config({ path: path.join(workspaceRoot, ".env") });
+dotenv.config({ path: path.join(workspaceRoot, ".env.local"), override: true });
+dotenv.config({ path: path.join(workerRoot, ".env") });
+dotenv.config({ path: path.join(workerRoot, ".env.local"), override: true });
+
+process.env.DATABASE_URL ??= "postgresql://lumio:lumio@localhost:5432/lumio?schema=public";
 process.env.API_PUBLIC_URL ??= "http://localhost:4100";
 process.env.STORAGE_ROOT ??= "apps/api/storage";
 

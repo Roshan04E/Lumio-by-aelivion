@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createOrderSchema, verifyPaymentSchema, walletPacks } from "@reelforge/shared";
+import { createOrderSchema, verifyPaymentSchema, walletPacks } from "@lumio-by-aelivion/shared";
 import { asyncHandler, ok, validateBody } from "../lib/http";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { createMockOrder, verifyMockPayment } from "../services/payment.service";

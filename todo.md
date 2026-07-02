@@ -2,6 +2,30 @@
 
 Goal: stop preview WebGL context loss during normal playback, backward seek, and replay by replacing ad hoc context ownership with a small, explicit context budget system plus adaptive preview caching.
 
+## Status update — 2026-07-02 (governor + recovery + cache verification)
+
+Landed this pass (see also `GAPS.md` §1):
+- **Phase 2 context governor — BUILT, flag-gated default-off** (`?glGovernor=1` / `localStorage lumio.glGovernor` /
+  `VITE_GL_GOVERNOR`; `getGlGovernorEnabled` in `apps/web/src/color/render-engine.ts`). Enforcement lives in
+  `packages/shared/src/color/gl-context.ts`: `requestContextSlot()` evicts the least-recently-used **idle**
+  evictable context (never the root `scene-compositor`, never a context touched within `EVICT_IDLE_MS`) via a
+  registered disposer; `touchContext()` marks per-frame liveness; `registerContextDisposer()` lets an evictable
+  renderer be reclaimed. `MediaWebGLRenderer` reserves a slot before creating its context; `WebglMediaLayer`
+  registers a disposer and **lazily recreates** after eviction (no permanent legacy fallback). Telemetry is
+  unchanged/always-on. Gate: `pnpm --filter @lumio-by-aelivion/shared governor:test` (15 checks).
+- **GPU reset/recovery — BUILT.** `ScenePreviewCanvas` now does a **bounded auto-rebuild** of the compositor on
+  a fresh context (`MAX_SCENE_REBUILDS=3`, backoff) instead of latching permanently to the DOM path; a sustained
+  run of clean frames restores the retry budget; logging is de-spammed (once per loss). DOM is the last resort
+  only after retries exhaust — so a transient GPU eviction no longer costs exactness/quality.
+- **Persistent proxy cache — VERIFIED already-built + wired + active by default** (was tracked as unbuilt below).
+  OPFS blob store + background Worker generator + double-buffered proxy playback + LRU + per-span
+  content-signature invalidation all present and on by default (`proxyGenActive`). Playback proxies are
+  export-grade (full-res, `defaultBitrate` ~0.12bpp), so "no quality loss" already holds; the 1.5Mbps
+  `PROXY_BITRATE` only feeds the **unused** `ProxySpanEncoder` (future P1a live-capture scaffolding).
+  **Deferred:** OPFS rehydration on reload (regenerates each session — correct but re-warms; needs a persisted
+  per-span content signature to avoid stale proxies). **Not-yet:** flip the governor default on after a GPU
+  preview-contention stress gate.
+
 Current signal:
 - `window.__rfActiveGlContexts` is mostly bounded around 3-4 after the last patch.
 - Context loss still occurs during playback/replay, especially after seeking backward.
@@ -23,13 +47,13 @@ Hard boundaries:
 - [x] Active preview WebGL contexts stay under the configured budget.
 - [x] When a context is actually lost, all dependent preview renderers stop using it immediately.
 - [x] A lost producer canvas is never uploaded into `SceneCompositor`.
-- [ ] GPU preview recovers through a controlled reset path instead of console spam.
+- [x] GPU preview recovers through a controlled reset path instead of console spam. (bounded auto-rebuild, 2026-07-02)
 - [ ] Existing render comparison fixtures remain unchanged.
 
 ## Architecture Decision
 
-- [ ] Use a deterministic context governor as the source of truth for preview WebGL ownership.
-- [ ] Keep the governor local to preview/editor code first.
+- [x] Use a deterministic context governor as the source of truth for preview WebGL ownership. (flag-gated, 2026-07-02)
+- [x] Keep the governor local to preview/editor code first. (enforcement in shared gl-context.ts; flag in web)
 - [ ] Use AI only as an optional cache-priority advisor later, not as the correctness layer.
 - [ ] Do not use fixed 10 second cache windows as the core model.
 - [ ] Use adaptive cache spans based on timeline dependency intervals:
@@ -65,22 +89,22 @@ Hard boundaries:
   - last source/layer id
 - [x] Expose a debug snapshot at `window.__rfGlContextBudget`.
 
-## Phase 2 - Context Governor
+## Phase 2 - Context Governor  ✅ BUILT (flag-gated default-off, 2026-07-02)
 
-- [ ] Add a preview-only `GlContextGovernor`.
-- [ ] Configure a conservative preview budget:
-  - target active contexts: 2-3
-  - hard cap: 4
-- [ ] Make the governor responsible for:
-  - allocating preview contexts
-  - tracking ownership
-  - disposing inactive renderers
-  - refusing nonessential context creation over budget
-  - logging the oldest/least valuable context before eviction
-- [ ] Prefer shared-context renderers where possible.
-- [ ] Keep one root `SceneCompositor` context for final preview composition.
-- [ ] Avoid per-layer WebGL contexts for clips that are outside the active lookahead window.
-- [ ] Do not let backward seek create duplicate renderers for the same layer/time range.
+- [x] Add a preview-only governor. (in `gl-context.ts`: `requestContextSlot`/`touchContext`/`registerContextDisposer` + `setGlGovernorEnabled`)
+- [x] Configure a conservative preview budget:
+  - target active contexts: 3 (`PREVIEW_CONTEXT_TARGET`)
+  - hard cap: 4 (`PREVIEW_CONTEXT_HARD_CAP`)
+- [x] Make the governor responsible for:
+  - allocating preview contexts (`requestContextSlot` before `MediaWebGLRenderer` getContext)
+  - tracking ownership (owner records + `lastUsedAt`)
+  - disposing inactive renderers (LRU-idle eviction via registered disposer; `WebglMediaLayer` lazily recreates)
+  - refusing/reclaiming over budget (evicts idle LRU at hard cap; tolerates transient over-cap when all live)
+  - logging the least-valuable context before eviction (once per loss, de-spammed)
+- [x] Prefer shared-context renderers where possible. (scene shared-grade path already reuses the root context)
+- [x] Keep one root `SceneCompositor` context for final preview composition. (`scene-compositor` kind never evicted)
+- [x] Avoid per-layer WebGL contexts for clips outside the active lookahead window. (VideoPreview `isLayerActive` mount filter + React unmount + governor idle-reclaim)
+- [~] Do not let backward seek create duplicate renderers for the same layer/time range. (bounded by the mount filter + hard cap; explicit dedup not added)
 
 ## Phase 3 - Producer Canvas Safety
 
@@ -137,7 +161,7 @@ Hard boundaries:
 
 - [x] Build a deterministic dirty interval model.
 - [x] Split cache spans by real dependency boundaries, not fixed 10 second windows.
-- [ ] Add long-timeline proxy/render-cache mode to keep old timeline ranges as media assets, not live WebGL producers.
+- [x] Add long-timeline proxy/render-cache mode to keep old timeline ranges as media assets, not live WebGL producers. (proxyMediaStore + ProxyPlaybackLayer, active by default)
 - [x] Choose cache span length adaptively from:
   - source clip duration
   - effect density
@@ -145,10 +169,10 @@ Hard boundaries:
   - transition boundaries
   - recent seek/playback behavior
   - device performance and available storage
-- [ ] Use one active live-preview GPU window around the playhead and nearby edit range.
-- [ ] Keep distant clean ranges as decoded proxy video/image spans.
-- [ ] Never allocate one WebGL context per cached span.
-- [ ] Store proxy spans as files/blobs with metadata:
+- [x] Use one active live-preview GPU window around the playhead and nearby edit range. (proxy substitutes distant ranges; live GPU around playhead)
+- [x] Keep distant clean ranges as decoded proxy video/image spans. (ProxyPlaybackLayer plain-`<video>` substitution)
+- [x] Never allocate one WebGL context per cached span. (spans are webm blobs; playback via `<video>`, generation via one Worker context)
+- [x] Store proxy spans as files/blobs with metadata:
   - timeline fingerprint
   - source dependency ids
   - time range
@@ -160,21 +184,112 @@ Hard boundaries:
 - [x] Add deterministic composition/cache signatures for span invalidation.
 - [x] Add a preview cache controller that plans real composition spans from playhead and render scale.
 - [x] Add cache-ruler segment data for a thin Adobe-style proxy/rendered indicator.
-- [ ] Render a thin timeline/ruler indicator for ready, pending, dirty, and failed proxy spans.
-- [ ] Store cached spans as browser-managed media assets:
-  - OPFS or IndexedDB-backed blobs
-  - LRU eviction by size and recency
-  - metadata keyed by timeline fingerprint
-- [ ] Positive edits should invalidate only affected overlay/composite spans where possible.
-- [ ] Negative edits, trims, deletes, or time shifts should invalidate the affected base span and downstream dependency spans.
-- [ ] Preview playback should prefer:
-  - valid cached span
-  - live GPU render for active edit range
-  - DOM fallback only as last resort
-- [ ] Cache playback must not allocate one WebGL context per span.
-- [ ] Background cache renderer must obey the same context governor as preview.
-- [ ] Cache writer must pause when active preview contexts reach the target budget.
-- [ ] Cache writer may resume when preview is idle or under budget.
+- [x] Render a thin timeline/ruler indicator for ready, pending, dirty, and failed proxy spans.
+- [x] Add timeline controls to regenerate all proxy spans or only the current In/Out range.
+- [x] Add an info window explaining proxy regeneration and ruler colors.
+- [x] Use successful GPU playback frames as live proxy coverage for the ruler indicator.
+- [~] Store cached spans as browser-managed media assets:
+  - [x] OPFS-backed blobs (in-memory fallback) — `createProxyBlobStore`
+  - [x] LRU eviction by size and recency — `createPreviewRenderCacheStore` (`maxEntries`/`maxBytes`, `evictIfNeeded`)
+  - [x] metadata keyed by timeline fingerprint (base + per-span content signature)
+  - [ ] rehydrate the manifest from OPFS on reload (DEFERRED — needs a persisted per-span content signature to avoid stale proxies)
+- [x] Positive edits invalidate only affected overlay/composite spans. (per-span `contentSignature` in `reconcile`)
+- [x] Negative edits/trims/deletes/time shifts invalidate the affected + downstream spans. (`markDirty` range + content signature)
+- [x] Preview playback prefers: valid cached span → live GPU (active range) → DOM last resort. (`resolveProxyPlayback` + ProxyPlaybackLayer)
+- [x] Cache playback must not allocate one WebGL context per span. (plain-`<video>` playback)
+- [~] Background cache renderer obeys the governor. (Worker path uses its own context; main-thread fallback defers when governor over target)
+- [x] Cache writer pauses under budget / while playing. (generation loop runs only while paused; fallback gated on `isGlBudgetOverTarget`)
+- [x] Cache writer may resume when preview is idle or under budget. (re-kicked on idle)
+
+## Phase 6B - Proxy + Transition Faithfulness (GENERAL, plugin-ready)
+
+Guiding constraint: fixes must be effect/transition-AGNOSTIC. Effects + transitions will grow via a plugin
+system, so the proxy, transition, and region-expansion code must never switch on specific effect/transition
+type names — behaviour comes from registry METADATA. "Fix blur", "skip blur clones", "special-case iris" are
+all anti-patterns. Three principles:
+
+- P1 - The proxy IS the viewer. Generate proxies by capturing the SAME renderer the viewer uses
+  (`SceneCompositor` + the viewer's decoded/graded sources + `buildSceneDraws`), NOT a second pipeline
+  (`SceneFrameCompositor` + WebCodecs). Then ANY effect/transition the viewer renders — including future
+  plugins — is faithful by construction; no per-effect proxy patching. This is the endgame that RETIRES the
+  export-front-end patches below as the mechanism (they only made a second renderer match, which is fragile
+  and not plugin-safe).
+- P2 - A transition side is a clip GROUP, not one layer. `SceneTransitionDraw.from/.to` are single
+  `SceneLayerDraw`s, so a clip's region-expanded layers (blur clone, any region/plugin effect) are excluded
+  from the mix → effects vanish DURING transitions. Make each side composite the full set of layers belonging
+  to that clip (base + every `__rfx_`/expansion layer) into its side RTT, then mix. Generalises to all effects.
+- P3 - Registry-driven, no hardcoded types. Decode-sharing, region expansion, and transition grouping must be
+  driven by effect/transition metadata (e.g. "does this effect need its own decoded/graded source?",
+  "what layers does this clip expand into?"), declared in the registry, so a plugin slots in with no core edits.
+  (`buildRegionBlurCloneAliases` hardcoding `effect.type === "blur"` is the pattern to generalise under P3.)
+
+Interim patches shipped (keep as safety/interim; supersede per principle):
+- [x] M1a - `buildRegionBlurCloneAliases` shared by viewer + export so the export stops decoding blur clones
+  independently. INTERIM: generalise the blur-hardcode via P3, and mooted entirely by P1.
+- [x] M1b - Black-frame guard in proxy generation so a black composite FAILS the span (→ live render) instead
+  of sealing black. GENERAL (any black composite), keep as a safety net.
+- [x] Live-playback toggle (timeline proxy box, `Zap`): play the viewer, generate no proxies. Escape hatch.
+- [x] Transition clone-skip in `buildSceneDraws` REMOVED — replaced by P2a clip-group compositing.
+
+Build order:
+- [x] P2a - `SceneTransitionDraw.from/.to` → `SceneLayerDraw[]` (clip groups); `buildSceneDraws` groups each
+  transition clip's base + its `__rfx_` layers generically (no effect-type check).
+- [x] P2a-fix - NEST PRE-COMPOSE (NLE model). First attempt looped `renderLayerInto` into a shared side RTT,
+  but that path reads a TRANSPARENT backdrop (built for ONE isolated clip), so the 2nd layer OVERWRITES the
+  1st → "black except the blurred region". Fixed: `precomposeGroup()` renders each clip's nest through the
+  SAME multi-layer accumulator the main scene uses (temporarily retargeted to a per-side ping-pong pair,
+  NORMAL blend inside the nest), then the transition mixes the two finished clip images. Any effect (or future
+  plugin) on a clip now renders THROUGH the transition; the transition has zero knowledge of effect types.
+  Covers ALL THREE renderers by construction — viewer (`ScenePreviewCanvas`), local export
+  (`SceneFrameCompositor`), and cloud (Remotion `SceneStage`, default) all use this shared `SceneCompositor` +
+  `buildSceneDraws`. Research: AE precompose / Premiere nest / Resolve compound clip — a transition mixes two
+  fully-rendered clip images.
+- [~] P2b - Gate fixtures. Added `two-region-effects` (disjoint blur + colour-grade regions — locks region
+  independence / no leak) and `feather-region-blur` (feather 140 — locks the feather ramp). Both pass
+  scene:compare at ~0.25% under the 0.80% bar (21/21). STILL TODO: an effect-THROUGH-A-TRANSITION fixture
+  (region blur across a junction) to gate-lock the nest pre-compose too.
+- [ ] P3a - Move the decode-share decision to effect metadata (grade-neutral?) instead of `type === "blur"`.
+- [ ] P1a - Proxy generation captures the viewer's SceneCompositor (idle, abort-on-interaction); WebCodecs
+  export retained for final render only. Retires M1a/M1b as mechanisms.
+- [ ] P1b - Parity self-check: sample frames of a generated span vs a viewer render; over threshold → regen +
+  log. The safety net that makes divergence impossible to ship silently.
+- [ ] Perf - route `reason:"simple"` spans to a fast path; context-pool + yield during idle generation.
+
+## Region-effect model — ROOT of the mask leak/inherit bugs
+
+Root cause (architectural, not a one-off): `expandLayerEffectRegions` turns a layer with region effects into
+duplicate media LAYERS (`__rfx_` clones). A clone applies its WHOLE effect list to its ONE mask region — the
+model conflates "which effect" with "which region" (one mask per clone). To combine effects across regions it
+CASCADED upper effects onto lower clones MASK-STRIPPED, so any combined effect over-applied to the whole lower
+region → the leak/inherit ("creative look giving a blur", "blur intensity changes the look region", "look
+blurs where it touches the blur"). AABB overlap/containment guards were heuristic patches on this, not the fix.
+
+- [x] Interim ROOT fix: region effects are now INDEPENDENT — each `__rfx_` clone applies ONLY its own region
+  effect in ONLY its own region (+ shared globals); no cross-effect inheritance. Leak eliminated by
+  construction. Overlap → clones stack, top region effect wins its area (no bleed). Single-region-effect
+  fixtures unchanged. Shared → viewer + local export + cloud.
+- [ ] TRUE fix (the deep one) — REGION EFFECTS AS PER-EFFECT MASKED POST-COMPOSITE PASSES: model a layer as
+  base + an ordered stack of {effect, mask} passes, each applied to the layer's RUNNING composited image and
+  composited back masked to its own region (the After Effects model). Then overlaps COMBINE correctly for any
+  geometry (blur then look in the intersection), nesting works, and there are no clones to leak. Requires
+  `SceneLayerDraw` to carry an effect-pass stack and the compositor to loop it (blur/grade the current result,
+  composite masked) — retires `expandLayerEffectRegions`/`__rfx_` clones. Plugin-safe: passes are generic
+  {effect, mask}, no per-type logic.
+
+[x] Separate bug (not proxy): transition window ran PAST the clip. ROOT: the GPU-reveal path
+(`getActiveTransition`/`getCompositionTransition`) used `spec.durationSeconds` UNCLAMPED, while the
+keyframe path (`buildTransitionAnimations`) clamped to `Math.min(spec.durationSeconds,
+layer.durationSeconds)` — so wipe/iris/scene transitions kept progressing after the incoming clip ended.
+FIX: added shared `effectiveTransitionDuration(authored, clipDurationSeconds)` = `min(authored, clip)`;
+`getActiveTransition` now takes `clipDurationSeconds`, `getCompositionTransition` reads
+`layer.durationSeconds`. Threaded incoming duration through all 4 call sites (VideoPreview,
+build-scene-draws, scene-frame-compositor, SceneStage) + the DOM `TransitionOverlay`. Also clamped the
+outgoing-clip POSTROLL windows to match (VideoPreview `isOutgoingInPostroll`, export-core
+`trackEndPostroll`, scene-frame-compositor `postrollSeconds`, SceneStage `outgoingPostrollSeconds`).
+typecheck green (shared/web/worker); scene:compare 21/21.
+
+Feather "hard line" is likely the transition's own edge showing once the
+feathered region clone is skipped (P2 fixes the appearance); verify feather still soft after P2a.
 
 ## Phase 7 - Optional AI Cache Advisor
 
@@ -212,9 +327,9 @@ Start only after preview context ownership is stable.
 ## Phase 9 - Verification Gates
 
 - [x] `pnpm -r typecheck`
-- [x] `pnpm --filter @reelforge/web build`
-- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @reelforge/worker scene:compare`
-- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @reelforge/worker render:compare:pixels`
+- [x] `pnpm --filter @lumio-by-aelivion/web build`
+- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker scene:compare`
+- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker render:compare:pixels`
 
 ## Manual Verification
 
@@ -234,7 +349,7 @@ Start only after preview context ownership is stable.
 ## Build Order
 
 - [x] Phase 1: inventory and owner labels.
-- [ ] Phase 2: context governor skeleton and debug snapshot.
+- [x] Phase 2: context governor + debug snapshot (flag-gated default-off, 2026-07-02).
 - [x] Phase 3: producer canvas safety.
 - [x] Phase 4: renderer lifecycle fixes for seek/replay.
 - [x] Phase 5: upload failure semantics cleanup.

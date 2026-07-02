@@ -2,7 +2,7 @@
  * Favourited catalog items (Effects tab stars). Persisted in localStorage and shared by the Effects
  * panel (toggle + Favourites bin) and the timeline right-click menu (favourite transitions submenu).
  */
-const FAVOURITES_KEY = "reelforge.effectFavourites";
+const FAVOURITES_KEY = "lumio.effectFavourites";
 
 export function loadFavourites(): Set<string> {
   try {

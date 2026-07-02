@@ -6,7 +6,7 @@ import {
   buildPlannerUserContent,
   buildConsultantUserContent,
   extractPlanJson
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { asyncHandler, ok, validateBody } from "../lib/http";
 import { aiLog, promptHash, snippet } from "../lib/logger";
 import {

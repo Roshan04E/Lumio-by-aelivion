@@ -4,7 +4,7 @@ import {
   type CloudTranscriptionProgress,
   type CloudTranscriptionResult,
   type SourceAsset
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import {
   cancelAutoCaptionTranscriptionJob,
   getAutoCaptionTranscriptionJob,

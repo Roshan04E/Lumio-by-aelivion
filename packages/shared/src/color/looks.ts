@@ -86,9 +86,30 @@ export const CREATIVE_LOOKS: CreativeLook[] = [
 
 export const CREATIVE_LOOK_NAMES = CREATIVE_LOOKS.map((l) => l.name);
 
+const creativeLookRegistry = new Map<string, CreativeLook>();
+for (const look of CREATIVE_LOOKS) {
+  creativeLookRegistry.set(look.name, look);
+}
+
+export function registerCreativeLook(look: CreativeLook, options: { override?: boolean } = {}): boolean {
+  if (creativeLookRegistry.has(look.name) && !options.override) {
+    return false;
+  }
+  creativeLookRegistry.set(look.name, look);
+  return true;
+}
+
+export function getCreativeLook(name: string): CreativeLook | undefined {
+  return creativeLookRegistry.get(name);
+}
+
+export function listCreativeLooks(): CreativeLook[] {
+  return [...creativeLookRegistry.values()];
+}
+
 /** Resolve a look name to a `ColorEffectInput[]` (pre-scaled, ready for compileColorPipeline). */
 export function resolveLookEffects(lookName: string, intensity: number): ColorEffectInput[] {
-  const look = CREATIVE_LOOKS.find((l) => l.name === lookName);
+  const look = getCreativeLook(lookName);
   if (!look) return [];
 
   const k = Math.max(0, Math.min(100, intensity)) / 100;

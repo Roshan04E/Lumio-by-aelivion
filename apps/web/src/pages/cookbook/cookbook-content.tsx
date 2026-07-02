@@ -9,7 +9,7 @@ import {
   type EffectModule,
   type ModuleType,
   type ToolCapabilityDefinition
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import {
   BookOpen,
   Boxes,
@@ -147,7 +147,7 @@ function ToolCard({ tool }: { tool: ToolCapabilityDefinition }) {
 export const cookbookSections: CookbookSection[] = [
   {
     id: "overview",
-    title: "What ReelForge is",
+    title: "What Lumio is",
     blurb: "The pitch, the people it's built for, and the one belief everything else follows from.",
     icon: BookOpen,
     subsections: [
@@ -158,7 +158,7 @@ export const cookbookSections: CookbookSection[] = [
         render: () => (
           <>
             <p>
-              ReelForge turns a normal video into a short-form reel, entirely in your browser. Upload a clip, shape it on a
+              Lumio turns a normal video into a short-form reel, entirely in your browser. Upload a clip, shape it on a
               real timeline, preview it for free, and export only when you're happy. No install, no upload-and-pray —
               the editing happens on your machine, in the open.
             </p>
@@ -234,15 +234,15 @@ export const cookbookSections: CookbookSection[] = [
               <div>
                 <h4>Free prompt bridge</h4>
                 <Diagram>{`open a tool
-  → ReelForge writes a precise prompt
+  → Lumio writes a precise prompt
   → you paste it into your own chat AI
   → paste the result back
-  → ReelForge validates + applies it`}</Diagram>
+  → Lumio validates + applies it`}</Diagram>
                 <p className="cookbook-muted">For anyone who already has a free chat tool and doesn't want to pay for integrated AI.</p>
               </div>
               <div>
                 <h4>Integrated AI</h4>
-                <Diagram>{`ask ReelForge chat
+                <Diagram>{`ask Lumio chat
   → AI picks a tool
   → fills the params
   → you confirm

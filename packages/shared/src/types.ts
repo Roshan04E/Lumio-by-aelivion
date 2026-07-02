@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { PluginEffectManifest, PluginLookManifest, PluginTransitionManifest } from "./plugin-manifest";
 
 export const moduleTypes = [
   "PERSON_EXTRACTION",
@@ -176,6 +177,11 @@ export interface ProjectGraph {
   sourceAssetId?: string | undefined;
   effects: ProjectEffect[];
   editableFields: Record<string, unknown>;
+  plugins?: {
+    effects?: PluginEffectManifest[] | undefined;
+    looks?: PluginLookManifest[] | undefined;
+    transitions?: PluginTransitionManifest[] | undefined;
+  } | undefined;
   composition?: TimelineComposition | undefined;
   version: number;
 }
@@ -436,7 +442,7 @@ export interface TextWarp {
  * the shared media shader (`MediaWebGLRenderer`), driven by `TransitionSpec` + the time-derived
  * progress from `getCompositionTransition`.
  */
-export type TransitionKind =
+export type BuiltInTransitionKind =
   // Per-clip edge fades (keyframe-driven, no second clip to mix).
   | "fadeIn"
   | "fadeOut"
@@ -466,6 +472,8 @@ export type TransitionKind =
   | "pixelate"
   // Mask.
   | "maskReveal";
+
+export type TransitionKind = BuiltInTransitionKind | (string & {});
 
 export type TransitionDirection = "left" | "right" | "up" | "down";
 

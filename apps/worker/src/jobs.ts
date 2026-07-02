@@ -1,4 +1,4 @@
-import type { ModuleType } from "@reelforge/shared";
+import type { ModuleType } from "@lumio-by-aelivion/shared";
 
 export const workerJobTypes = [
   "PROCESS_PERSON_EXTRACTION",

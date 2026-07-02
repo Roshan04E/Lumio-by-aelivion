@@ -1,5 +1,5 @@
-import type { TrackingPathArtifactData, TrackingPoint } from "@reelforge/shared";
-import { smoothTrackingPoints } from "@reelforge/shared";
+import type { TrackingPathArtifactData, TrackingPoint } from "@lumio-by-aelivion/shared";
+import { smoothTrackingPoints } from "@lumio-by-aelivion/shared";
 import { detectInitialSubjectBox, loadVideoElement, sampleFrameTimes, seekVideo } from "./local-segmentation";
 import { downsampleGrayHalf, extractPatch, nccToConfidence, prepareTemplate, searchNcc, type GrayImage } from "./tracking-core";
 

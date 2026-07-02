@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Spline, Undo2 } from "lucide-react";
-import { sampleHueSatCurve, type CurvePoint } from "@reelforge/shared";
+import { sampleHueSatCurve, type CurvePoint } from "@lumio-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3, 13C.3) — Lumetri Hue/Sat curve editor.

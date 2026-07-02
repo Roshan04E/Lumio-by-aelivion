@@ -1,14 +1,14 @@
 import { PrismaClient } from "@prisma/client";
 
-process.env.DATABASE_URL ??= "postgresql://reelforge:reelforge@localhost:5432/reelforge?schema=public";
+process.env.DATABASE_URL ??= "postgresql://lumio:lumio@localhost:5432/lumio?schema=public";
 
 declare global {
   // eslint-disable-next-line no-var
-  var __reelforgePrisma: PrismaClient | undefined;
+  var __lumioPrisma: PrismaClient | undefined;
 }
 
-export const prisma = globalThis.__reelforgePrisma ?? new PrismaClient();
+export const prisma = globalThis.__lumioPrisma ?? new PrismaClient();
 
 if (process.env.NODE_ENV !== "production") {
-  globalThis.__reelforgePrisma = prisma;
+  globalThis.__lumioPrisma = prisma;
 }

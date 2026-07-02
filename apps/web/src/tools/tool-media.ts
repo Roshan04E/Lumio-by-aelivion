@@ -1,4 +1,4 @@
-import type { SourceAsset, ToolCapabilityDefinition } from "@reelforge/shared";
+import type { SourceAsset, ToolCapabilityDefinition } from "@lumio-by-aelivion/shared";
 
 export function isCompatibleToolAsset(tool: ToolCapabilityDefinition, asset: SourceAsset) {
   if (tool.accepts.includes("video") && asset.fileType.startsWith("video/")) {

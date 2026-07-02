@@ -1,6 +1,6 @@
 import multer from "multer";
 import { Router } from "express";
-import { createAssetSchema, moduleTypeSchema } from "@reelforge/shared";
+import { createAssetSchema, moduleTypeSchema } from "@lumio-by-aelivion/shared";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";

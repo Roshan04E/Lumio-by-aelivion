@@ -121,8 +121,8 @@ export function clipCompositionToWorkArea(composition: TimelineComposition): Tim
         startSeconds: clippedStart - inPoint,
         durationSeconds: clippedEnd - clippedStart
       };
-      if (layer.sourceInSeconds !== undefined) {
-        next.sourceInSeconds = layer.sourceInSeconds + trimmedFromHeadSeconds;
+      if (layer.type === "video" || layer.type === "audio" || layer.sourceInSeconds !== undefined) {
+        next.sourceInSeconds = (layer.sourceInSeconds ?? 0) + trimmedFromHeadSeconds;
       }
       return [next];
     })

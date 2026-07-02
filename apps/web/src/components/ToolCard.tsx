@@ -1,5 +1,5 @@
 import { ArrowRight, Wrench } from "lucide-react";
-import { stageLabel, type ToolCapabilityDefinition } from "@reelforge/shared";
+import { stageLabel, type ToolCapabilityDefinition } from "@lumio-by-aelivion/shared";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { CreditBadge } from "./CreditBadge";

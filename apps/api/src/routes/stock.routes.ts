@@ -5,7 +5,7 @@ import { prisma } from "../lib/prisma";
 import { serializeAsset } from "../lib/asset-serializer";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { saveBuffer } from "../services/storage.service";
-import type { StockOrientation } from "@reelforge/shared";
+import type { StockOrientation } from "@lumio-by-aelivion/shared";
 import {
   downloadStockMedia,
   isStockProvider,

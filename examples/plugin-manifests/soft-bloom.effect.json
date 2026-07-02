@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "effect",
+  "id": "aelivion.soft-bloom",
+  "name": "Soft Bloom",
+  "version": "1.0.0",
+  "description": "A creator-pack glow preset mapped onto Lumio's native Glow renderer.",
+  "author": {
+    "name": "Aelivion Studio"
+  },
+  "license": {
+    "type": "free",
+    "name": "Internal test manifest"
+  },
+  "tags": ["glow", "bloom", "creator"],
+  "engine": "native",
+  "scope": ["clip", "adjustment"],
+  "compatibleLayerTypes": ["video", "image", "text", "shape", "adjustment"],
+  "effect": {
+    "type": "glow",
+    "intensity": 72,
+    "params": {
+      "mode": "highlights",
+      "radius": 32,
+      "threshold": 48, 
+      "color": "#ffe4a8"
+    }
+  }
+}

@@ -6,7 +6,7 @@ import {
   type ProjectGraph,
   type SourceAsset,
   type ToolCapabilityDefinition
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";

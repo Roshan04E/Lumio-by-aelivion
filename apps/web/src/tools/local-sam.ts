@@ -1,4 +1,4 @@
-import type { MaskSequenceArtifactData, TrackingPathArtifactData } from "@reelforge/shared";
+import type { MaskSequenceArtifactData, TrackingPathArtifactData } from "@lumio-by-aelivion/shared";
 import type { BrowserToolCapabilities } from "./capabilities";
 import type { SegmentVideoResult } from "./local-segmentation";
 import { loadVideoElement, sampleFrameTimes, seekVideo } from "./local-segmentation";

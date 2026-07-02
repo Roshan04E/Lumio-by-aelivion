@@ -8,7 +8,7 @@
  * becomes the default. Runs in a real browser/GPU env (CI / local / Docker Playwright
  * image), NOT the restricted sandbox.
  *
- *   pnpm --filter @reelforge/worker color:compare
+ *   pnpm --filter @lumio-by-aelivion/worker color:compare
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";

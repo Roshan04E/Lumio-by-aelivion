@@ -16,7 +16,10 @@ const AdminJobsPage = lazy(() => import("./pages/AdminJobsPage").then((module) =
 const PreviewFixturePage = lazy(() => import("./pages/PreviewFixturePage").then((module) => ({ default: module.PreviewFixturePage })));
 const ExportStressPage = lazy(() => import("./pages/ExportStressPage").then((module) => ({ default: module.ExportStressPage })));
 const ExportLiveStressPage = lazy(() => import("./pages/ExportLiveStressPage").then((module) => ({ default: module.ExportLiveStressPage })));
+const LocalExportPage = lazy(() => import("./pages/LocalExportPage").then((module) => ({ default: module.LocalExportPage })));
+const ExportWorkerSceneProbePage = lazy(() => import("./pages/ExportWorkerSceneProbePage").then((module) => ({ default: module.ExportWorkerSceneProbePage })));
 const ExportWorkerScenePage = lazy(() => import("./pages/ExportWorkerScenePage").then((module) => ({ default: module.ExportWorkerScenePage })));
+const MediaSharedContextProbePage = lazy(() => import("./pages/MediaSharedContextProbePage").then((module) => ({ default: module.MediaSharedContextProbePage })));
 const AuthPage = lazy(() => import("./pages/AuthPage").then((module) => ({ default: module.AuthPage })));
 
 export default function App() {
@@ -35,7 +38,10 @@ export default function App() {
           <Route path="/editor/__preview-fixture" element={<PreviewFixturePage />} />
           <Route path="/editor/__export-stress" element={<ExportStressPage />} />
           <Route path="/editor/__export-live-stress" element={<ExportLiveStressPage />} />
+          <Route path="/editor/__local-export" element={<LocalExportPage />} />
+          <Route path="/editor/__export-worker-scene-probe" element={<ExportWorkerSceneProbePage />} />
           <Route path="/editor/__export-worker-scene" element={<ExportWorkerScenePage />} />
+          <Route path="/editor/__media-shared-context-probe" element={<MediaSharedContextProbePage />} />
           <Route path="/editor/:projectId" element={<EditorPage />} />
           <Route path="/checkout/:projectId" element={<CheckoutPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />

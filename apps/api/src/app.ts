@@ -10,6 +10,7 @@ import { stockRouter } from "./routes/stock.routes";
 import { projectsRouter } from "./routes/projects.routes";
 import { jobsRouter } from "./routes/jobs.routes";
 import { paymentsRouter } from "./routes/payments.routes";
+import { pluginPackagesRouter } from "./routes/plugin-packages.routes";
 import { aiRouter } from "./routes/ai.routes";
 import { memoryRouter } from "./routes/memory.routes";
 import { errorHandler, notFound } from "./middleware/error";
@@ -34,7 +35,7 @@ export function createApp() {
   app.use("/storage", express.static(storagePaths.root));
 
   app.get("/health", (_req, res) => {
-    res.json({ success: true, message: "ReelForge API is healthy", data: { uptime: process.uptime() } });
+    res.json({ success: true, message: "Lumio API is healthy", data: { uptime: process.uptime() } });
   });
 
   app.use("/api/auth", authRouter);
@@ -45,6 +46,7 @@ export function createApp() {
   app.use("/api/projects", projectsRouter);
   app.use("/api/jobs", jobsRouter);
   app.use("/api/payments", paymentsRouter);
+  app.use("/api/plugin-packages", pluginPackagesRouter);
   app.use("/api/ai", aiRouter);
   app.use("/api/memory", memoryRouter);
 

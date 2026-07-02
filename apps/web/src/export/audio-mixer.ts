@@ -6,7 +6,7 @@
  * mute (layer or track). The result is sliced into `AudioData` frames for the encoder.
  */
 
-import { getCompositionVolume, isTrackEnabled, type TimelineComposition, type TimelineLayer } from "@reelforge/shared";
+import { getCompositionVolume, isTrackEnabled, type TimelineComposition, type TimelineLayer } from "@lumio-by-aelivion/shared";
 import type { MediaEncoder } from "./video-encoder";
 
 const SAMPLE_RATE = 48_000;

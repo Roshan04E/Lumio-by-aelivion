@@ -8,7 +8,7 @@ import {
   PLANNER_SYSTEM_PROMPT,
   recordEffectDemand,
   recordToolDemand
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { loadByoKey } from "../byok";
 import { isOllamaLocalActive, loadOllamaConfig, streamOllamaChat } from "../ollama";
 import type { AiPlan, PlanEventHandler, PlanStep, PlannerContext, PlannerProvider } from "../types";

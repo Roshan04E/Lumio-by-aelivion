@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "look",
+  "id": "aelivion.warm-cinema-look",
+  "name": "Warm Cinema",
+  "version": "1.0.0",
+  "description": "A warm, slightly faded cinematic color style for the Lumio look plugin pipeline.",
+  "author": {
+    "name": "Aelivion Studio"
+  },
+  "license": {
+    "type": "free",
+    "name": "Internal test manifest"
+  },
+  "tags": ["cinematic", "warm", "creator"],
+  "engine": "color-pipeline",
+  "scope": ["clip", "adjustment"],
+  "look": {
+    "correction": {
+      "contrast": 14,
+      "highlights": -16,
+      "shadows": 8,
+      "blacks": 6,
+      "saturation": 108,
+      "vibrance": 12,
+      "temperature": 18,
+      "tint": 4
+    },
+    "wheels": {
+      "shadows": { "x": -0.05, "y": 0.04, "master": -2 },
+      "midtones": { "x": 0.02, "y": -0.01, "master": 0 },
+      "highlights": { "x": 0.08, "y": -0.05, "master": 3 }
+    }
+  }
+}

@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { createExportStressFixture, getActiveGlContextCount } from "@reelforge/shared";
+import { createExportStressFixture, getActiveGlContextCount } from "@lumio-by-aelivion/shared";
 import { buildSourceUrlMap } from "../export/export-core";
 import { createFrameProvider, type FrameProvider } from "../export/source-decoder";
 import { SceneFrameCompositor } from "../export/scene-frame-compositor";

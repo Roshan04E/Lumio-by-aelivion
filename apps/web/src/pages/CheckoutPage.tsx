@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { estimateCreditsForEffects, walletPacks } from "@reelforge/shared";
+import { estimateCreditsForEffects, walletPacks } from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";

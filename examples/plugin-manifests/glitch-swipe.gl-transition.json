@@ -1,0 +1,14 @@
+{
+  "name": "Glitch Swipe",
+  "description": "Example external GL transition JSON imported by Lumio.",
+  "author": "Aelivion Studio",
+  "license": "free",
+  "category": "glitch",
+  "tags": ["glitch", "external"],
+  "defaultDurationSeconds": 0.6,
+  "easing": "easeInOut",
+  "defaultParams": {
+    "strength": 0.08
+  },
+  "glsl": "vec4 transition(vec2 uv) {\n  float jitter = (fract(sin(dot(vec2(floor(uv.y * 18.0), progress), vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * strength * (1.0 - abs(progress - 0.5) * 2.0);\n  vec2 warped = uv + vec2(jitter, 0.0);\n  vec4 a = getFromColor(warped);\n  vec4 b = getToColor(uv - vec2(jitter, 0.0));\n  float m = smoothstep(progress - 0.18, progress + 0.18, uv.x + jitter);\n  return mix(a, b, m);\n}\n"
+}

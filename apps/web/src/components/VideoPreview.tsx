@@ -1,6 +1,7 @@
 import {
   Fragment,
   createContext,
+  memo,
   useCallback,
   useContext,
   useEffect,
@@ -33,6 +34,7 @@ import {
   getCompositionObjectFit,
   isTrackEnabled,
   expandEffectRegionMasks,
+  buildRegionBlurCloneAliases,
   isWebgl2ColorSupported,
   getCompositionMediaStyle,
   getOverlayMaskWrapperStyle,
@@ -48,6 +50,7 @@ import {
   getLayerAnimations,
   hasTextWarp,
   normalizeTextWarp,
+  setGlGovernorEnabled,
   type ProjectGraph,
   type SourceAsset,
   type TimelineComposition,
@@ -55,15 +58,21 @@ import {
   type TimelineLayer,
   type TimelineTrack,
   type TransitionSpec
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { MaskedVideoLayer } from "./MaskedVideoLayer";
 import { TransitionOverlay } from "./TransitionLayer";
 import { ColorEngineBoundary } from "./ColorEngineBoundary";
 import { WebglColorView } from "./WebglColorView";
 import { WebglVideoOverlay } from "./WebglVideoOverlay";
 import { WebglMediaLayer } from "./WebglMediaLayer";
+import { ProxyPlaybackLayer, type ProxyPlaybackHit } from "./ProxyPlaybackLayer";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
-import { useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
+import { getGlGovernorEnabled, useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
+
+// Apply the preview WebGL context-governor flag once per session (read from ?glGovernor / localStorage /
+// VITE_GL_GOVERNOR). Enforcement is default-off; telemetry is unaffected. Module scope so it's set before any
+// MediaWebGLRenderer allocation, matching how the other render-engine flags are read once per session.
+setGlGovernorEnabled(getGlGovernorEnabled());
 import { usePlaybackClock } from "../playback/playback-clock";
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
 import { ScenePreviewCanvas } from "./ScenePreviewCanvas";
@@ -83,6 +92,73 @@ let cachedWebgl2Support: boolean | null = null;
 function webgl2Supported(): boolean {
   if (cachedWebgl2Support === null) cachedWebgl2Support = isWebgl2ColorSupported();
   return cachedWebgl2Support;
+}
+
+// ── Playback-tick render stabilization (Playback Jank Patch 1) ────────────────────────────────────
+// During playback VideoPreview re-renders on every clock tick (usePlaybackClock). The active-set arrays
+// below only change at clip/transition boundaries, but rebuilding them yields a NEW array identity each
+// tick, which invalidated every downstream `useMemo` keyed on them AND re-rendered every layer subtree —
+// the allocation churn behind the periodic GC freeze. `useStableList` returns the PREVIOUS array instance
+// when the freshly-built one is structurally identical (same length + per-element `eq`), so identity stays
+// stable between real changes and the whole downstream memo cascade collapses. It never returns stale
+// data: any real content change flows through a new layer/composition object identity, which `eq` detects.
+function useStableList<T>(next: T[], eq: (a: T, b: T) => boolean): T[] {
+  const ref = useRef<T[]>(next);
+  const prev = ref.current;
+  if (prev !== next && prev.length === next.length && prev.every((item, index) => eq(item, next[index]!))) {
+    return prev;
+  }
+  ref.current = next;
+  return next;
+}
+
+type VisualLayerEntry = { layer: TimelineLayer; trackIndex: number; layerIndex: number };
+const eqVisualEntry = (a: VisualLayerEntry, b: VisualLayerEntry): boolean =>
+  a.layer === b.layer && a.trackIndex === b.trackIndex && a.layerIndex === b.layerIndex;
+
+type AudioLayerEntry = { layer: TimelineLayer; trackIndex: number; track: TimelineTrack };
+const eqAudioEntry = (a: AudioLayerEntry, b: AudioLayerEntry): boolean =>
+  a.layer === b.layer && a.track === b.track && a.trackIndex === b.trackIndex;
+
+type TransitionPairEntry = {
+  outgoingId: string;
+  incomingId: string;
+  spec: TransitionSpec;
+  startSeconds: number;
+  incomingDurationSeconds: number;
+  fromFit: "cover" | "contain" | "fill";
+  toFit: "cover" | "contain" | "fill";
+};
+const eqTransitionPair = (a: TransitionPairEntry, b: TransitionPairEntry): boolean =>
+  a.outgoingId === b.outgoingId &&
+  a.incomingId === b.incomingId &&
+  a.spec === b.spec &&
+  a.startSeconds === b.startSeconds &&
+  a.incomingDurationSeconds === b.incomingDurationSeconds &&
+  a.fromFit === b.fromFit &&
+  a.toFit === b.toFit;
+
+// Dev-only, opt-in render instrumentation for the playback-jank investigation. Enable with
+// `?debugRenders=1` or localStorage["lumio_debug_renders"]="1"; counts accumulate on
+// `window.__rfRenderCounts` (inspect in the console). Off by default and never logs → no prod noise.
+let renderDebugFlag: boolean | null = null;
+function renderDebugEnabled(): boolean {
+  if (renderDebugFlag === null) {
+    try {
+      renderDebugFlag =
+        new URLSearchParams(window.location.search).get("debugRenders") === "1" ||
+        window.localStorage?.getItem("lumio_debug_renders") === "1";
+    } catch {
+      renderDebugFlag = false;
+    }
+  }
+  return renderDebugFlag;
+}
+function bumpRenderCount(name: string): void {
+  if (!renderDebugEnabled()) return;
+  const w = window as unknown as { __rfRenderCounts?: Record<string, number> };
+  const counts = (w.__rfRenderCounts ??= {});
+  counts[name] = (counts[name] ?? 0) + 1;
 }
 
 // How far ahead of a clip's start we mount its <video> (hidden) so it can fetch/decode/seek to its
@@ -339,7 +415,9 @@ export function VideoPreview({
   onUpdateLayerMasks,
   onCommitMaskPoints,
   onPreviewMaskScalar,
-  maskEffectId
+  maskEffectId,
+  onPreviewFrameRendered,
+  resolveProxyPlayback
 }: {
   graph: ProjectGraph;
   composition: TimelineComposition;
@@ -387,10 +465,15 @@ export function VideoPreview({
   onPreviewMaskScalar?: ((layerId: string, maskId: string, patch: { feather?: number; opacity?: number }, commit: boolean) => void) | undefined;
   /** When set, the overlay edits this effect's region masks instead of the layer's clip masks (Phase 3). */
   maskEffectId?: string | null | undefined;
+  /** Called after the GPU scene preview successfully renders a playback frame. */
+  onPreviewFrameRendered?: ((timeSeconds: number, renderScale: number) => void) | undefined;
+  /** Resolve a ready flattened-proxy for a timeline time, for smooth native-video playback substitution. */
+  resolveProxyPlayback?: ((timeSeconds: number) => ProxyPlaybackHit | undefined) | undefined;
 }) {
   // During playback the playhead time comes from the high-frequency clock store (so the preview
   // animates smoothly without re-rendering the whole editor every tick — see playback-clock.ts);
   // when paused/scrubbing it's the `currentTime` prop. Everything below reads this single `currentTime`.
+  bumpRenderCount("VideoPreview");
   const currentTime = usePlaybackClock(currentTimeProp, isPlaying);
   const phoneFrameRef = useRef<HTMLDivElement | null>(null);
   // Merge internal ref with optional external frameRef prop (for color scopes).
@@ -415,7 +498,7 @@ export function VideoPreview({
   // Collapse the floating tool bar to a single chevron to free up viewer room.
   const [toolsCollapsed, setToolsCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("reelforge_preview_tools_collapsed") === "1";
+      return localStorage.getItem("lumio_preview_tools_collapsed") === "1";
     } catch {
       return false;
     }
@@ -497,7 +580,7 @@ export function VideoPreview({
     () => new Set(composition.tracks.flatMap((track) => track.layers.map((layer) => layer.id))),
     [composition]
   );
-  const activeVisualLayerEntries = useMemo(
+  const activeVisualLayerEntriesRaw = useMemo(
     () =>
       expandedTracks
         .flatMap((track, trackIndex) =>
@@ -525,6 +608,10 @@ export function VideoPreview({
         }),
     [expandedTracks, composition, currentTime]
   );
+  // Stabilize identity between clip boundaries so the downstream memo cascade + layer subtrees don't
+  // rebuild every playback tick. renderVisualLayerEntries/renderedLayerEntries/sceneLayers/etc. are all
+  // memoized on this, so stabilizing the source collapses the whole cascade (Playback Jank Patch 1).
+  const activeVisualLayerEntries = useStableList(activeVisualLayerEntriesRaw, eqVisualEntry);
   const renderVisualLayerEntries = useMemo(
     () =>
       activeVisualLayerEntries
@@ -541,7 +628,7 @@ export function VideoPreview({
   // Built from the RAW composition (un-expanded), i.e. REAL clips only — region-mask `__rfx_` blur clones are
   // NOT preloaded here because they no longer mount their own decoder (they share the base's graded canvas via
   // `sceneSharedMediaClones`), so preloading the base seeks the clone's frame for free + saves a GL context.
-  const pendingVideoLayerEntries = useMemo(
+  const pendingVideoLayerEntriesRaw = useMemo(
     () =>
       composition.tracks
         .flatMap((track, trackIndex) => track.layers.map((layer, layerIndex) => ({ layer, trackIndex, layerIndex })))
@@ -554,6 +641,7 @@ export function VideoPreview({
         }),
     [composition, currentTime]
   );
+  const pendingVideoLayerEntries = useStableList(pendingVideoLayerEntriesRaw, eqVisualEntry);
   // ONE render list: active visual layers + the pre-rolled next video clips, deduped by id and sorted
   // by the same stable z-order. Rendering both from a single keyed array means a clip that crosses its
   // start (pending → active) keeps the SAME React element + DOM <video> — already decoded and seeked —
@@ -579,13 +667,14 @@ export function VideoPreview({
     }
     return combined.sort((a, b) => (a.trackIndex !== b.trackIndex ? b.trackIndex - a.trackIndex : a.layerIndex - b.layerIndex));
   }, [renderVisualLayerEntries, pendingVideoLayerEntries, activeVisualLayerEntries]);
-  const activeAudioLayerEntries = useMemo(
+  const activeAudioLayerEntriesRaw = useMemo(
     () =>
       composition.tracks
         .flatMap((track, trackIndex) => track.layers.map((layer) => ({ layer, trackIndex, track })))
         .filter(({ layer, track }) => isTrackEnabled(track, composition.tracks) && !layer.muted && layer.type === "audio" && isLayerActive(layer, currentTime)),
     [composition, currentTime]
   );
+  const activeAudioLayerEntries = useStableList(activeAudioLayerEntriesRaw, eqAudioEntry);
 
   // The selected visual layer is the mask-editing target. Clip + region masks apply to media AND text/shape
   // (text/shape clip masks render via getOverlayMaskWrapperStyle in every path since Phase 4.1c). Read it from
@@ -616,7 +705,7 @@ export function VideoPreview({
   // while PAUSED) re-arms a recomposite — otherwise the new graded frame only lands via the settle
   // window and the paused viewer can show a stale frame after an edit.
   const sceneRedrawRef = useRef<(() => void) | null>(null);
-  const transitionPairs = useMemo(() => {
+  const transitionPairsRaw = useMemo(() => {
     const layers = renderedLayerEntries.map((entry) => entry.layer);
     const byId = new Map(layers.map((layer) => [layer.id, layer]));
     const out: {
@@ -624,6 +713,7 @@ export function VideoPreview({
       incomingId: string;
       spec: TransitionSpec;
       startSeconds: number;
+      incomingDurationSeconds: number;
       fromFit: "cover" | "contain" | "fill";
       toFit: "cover" | "contain" | "fill";
     }[] = [];
@@ -631,19 +721,21 @@ export function VideoPreview({
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;
-      const active = getActiveTransition(pair.spec, { currentTimeSeconds: currentTime, startSeconds: incoming.startSeconds });
+      const active = getActiveTransition(pair.spec, { currentTimeSeconds: currentTime, startSeconds: incoming.startSeconds, clipDurationSeconds: incoming.durationSeconds });
       if (!active) continue;
       out.push({
         outgoingId: pair.outgoingId,
         incomingId: pair.incomingId,
         spec: pair.spec,
         startSeconds: incoming.startSeconds,
+        incomingDurationSeconds: incoming.durationSeconds,
         fromFit: getCompositionObjectFit(outgoing) as "cover" | "contain" | "fill",
         toFit: getCompositionObjectFit(incoming) as "cover" | "contain" | "fill",
       });
     }
     return out;
   }, [renderedLayerEntries, currentTime]);
+  const transitionPairs = useStableList(transitionPairsRaw, eqTransitionPair);
   // Source clips (report graded frames) and the incoming clip (hidden — the overlay shows the mix on top;
   // the outgoing stays visible as a fallback until both graded canvases are ready).
   const transitionSourceIds = useMemo(() => {
@@ -705,22 +797,13 @@ export function VideoPreview({
   // eviction that was losing the scene compositor's OWN context → the lost-context spam + stale/weak blur)
   // AND keeps the clone perfectly time-synced to the base (no second decoder to drift). A clone that adds a
   // COLOR grade over its base genuinely needs a different graded canvas, so it is NOT aliased (keeps its decoder).
-  const sceneSharedMediaClones = useMemo(() => {
-    const map = new Map<string, string>();
-    const layerById = new Map(renderedLayerEntries.map((entry) => [entry.layer.id, entry.layer]));
-    for (const { layer } of renderedLayerEntries) {
-      const sep = layer.id.indexOf("__rfx_");
-      if (sep < 0 || (layer.type !== "video" && layer.type !== "image")) continue;
-      const base = layerById.get(layer.id.slice(0, sep));
-      if (!base) continue;
-      // The clone's effects = base globals + its cascade region effects; the "extra" (region) effects beyond
-      // the base are blur-only ⇒ the color pipeline is unchanged ⇒ the graded canvas matches the base.
-      const baseEffectIds = new Set(base.effects.map((effect) => effect.id));
-      const extra = layer.effects.filter((effect) => !baseEffectIds.has(effect.id));
-      if (extra.length > 0 && extra.every((effect) => effect.type === "blur")) map.set(layer.id, layer.id.slice(0, sep));
-    }
-    return map;
-  }, [renderedLayerEntries]);
+  // Blur-only region clones share the base's graded canvas (no second decoder/context). SHARED with the local
+  // export (buildRegionBlurCloneAliases) so the proxy the export renders matches this preview exactly — the
+  // export aliasing the same clones is what keeps the masked blur in the generated proxy.
+  const sceneSharedMediaClones = useMemo(
+    () => buildRegionBlurCloneAliases(renderedLayerEntries.map((entry) => entry.layer)),
+    [renderedLayerEntries]
+  );
   // Scene mode is ENABLED whenever the flag is on, WebGL2 is supported, and the GPU path hasn't errored at
   // runtime. We deliberately do NOT gate on "has a visual layer under the playhead": the ScenePreviewCanvas
   // stays mounted even over an empty gap so it owns the background EVERY frame (clearing to
@@ -947,7 +1030,7 @@ export function VideoPreview({
             setToolsCollapsed((v) => {
               const next = !v;
               try {
-                localStorage.setItem("reelforge_preview_tools_collapsed", next ? "1" : "0");
+                localStorage.setItem("lumio_preview_tools_collapsed", next ? "1" : "0");
               } catch {
                 /* ignore storage failures */
               }
@@ -1176,8 +1259,12 @@ export function VideoPreview({
                   redrawRef={sceneRedrawRef}
                   renderScale={playbackRenderScale}
                   transitions={transitionPairs}
+                  onFrameRendered={(timeSeconds) => onPreviewFrameRendered?.(timeSeconds, playbackRenderScale)}
                   mediaSourceAlias={sceneSharedMediaClones}
                 />
+              ) : null}
+              {resolveProxyPlayback ? (
+                <ProxyPlaybackLayer currentTime={currentTime} isPlaying={isPlaying} resolveProxyPlayback={resolveProxyPlayback} />
               ) : null}
               {renderedLayerEntries.map(({ layer, pending }) => (
                 // A shared region-blur clone reads the base's graded canvas in scene mode — don't mount its
@@ -1230,6 +1317,7 @@ export function VideoPreview({
                       key={`${pair.outgoingId}->${pair.incomingId}`}
                       spec={pair.spec}
                       startSeconds={pair.startSeconds}
+                      clipDurationSeconds={pair.incomingDurationSeconds}
                       currentTime={currentTime}
                       isPlaying={isPlaying}
                       width={composition.width}
@@ -1290,29 +1378,7 @@ export function VideoPreview({
   );
 }
 
-function PreviewLayer({
-  currentTime,
-  isPlaying,
-  layer,
-  selected,
-  interactive = true,
-  pending = false,
-  assets,
-  sourceAsset,
-  onMoveLayer,
-  onMovePositionKeyframe,
-  onMoveSpatialHandle,
-  onResizeShapeLayer,
-  onRotateLayer,
-  onScaleLayer,
-  onSelectLayer,
-  hideForTransition = false,
-  hideVisual = false,
-  sceneComposited = false,
-  bypassColor = false,
-  onGradedFrame,
-  bakeOpacity = true
-}: {
+type PreviewLayerProps = {
   currentTime: number;
   isPlaying: boolean;
   layer: TimelineLayer;
@@ -1347,7 +1413,58 @@ function PreviewLayer({
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
   onSelectLayer: (layerId: string) => void;
-}) {
+};
+
+/**
+ * Skip re-rendering a layer subtree on a pure playback tick when its pixels come from the imperative
+ * scene draw loop, NOT its DOM (Playback Jank Patch 1). Only a scene-rasterized text/shape overlay
+ * (`hideVisual`) qualifies: its visible output is the GPU scene raster (evaluated at LIVE time inside
+ * buildSceneDraws), its DOM is opacity:0, and — because we require `!selected` — no selection handles
+ * need to track it. Media is deliberately NOT skipped: a keyframed color grade flows through its
+ * `pipeline` prop, so it must re-render each tick. Paused scrubbing, DOM-mode animation, and selected
+ * layers all fall through to a full compare → byte-identical behavior to before.
+ */
+function arePreviewLayerPropsEqual(prev: PreviewLayerProps, next: PreviewLayerProps): boolean {
+  const keys = Object.keys(next) as (keyof PreviewLayerProps)[];
+  if (keys.length !== Object.keys(prev).length) return false;
+  const canIgnoreTime = next.isPlaying && !next.selected && Boolean(next.hideVisual);
+  for (const key of keys) {
+    // onGradedFrame is a fresh closure each render but captures only stable refs + layer.id, so its
+    // identity is not meaningful — compare by presence (guards a future text-layer onGradedFrame too).
+    if (key === "onGradedFrame") {
+      if (Boolean(prev.onGradedFrame) !== Boolean(next.onGradedFrame)) return false;
+      continue;
+    }
+    if (key === "currentTime" && canIgnoreTime) continue;
+    if (!Object.is(prev[key], next[key])) return false;
+  }
+  return true;
+}
+
+const PreviewLayer = memo(function PreviewLayer({
+  currentTime,
+  isPlaying,
+  layer,
+  selected,
+  interactive = true,
+  pending = false,
+  assets,
+  sourceAsset,
+  onMoveLayer,
+  onMovePositionKeyframe,
+  onMoveSpatialHandle,
+  onResizeShapeLayer,
+  onRotateLayer,
+  onScaleLayer,
+  onSelectLayer,
+  hideForTransition = false,
+  hideVisual = false,
+  sceneComposited = false,
+  bypassColor = false,
+  onGradedFrame,
+  bakeOpacity = true
+}: PreviewLayerProps) {
+  bumpRenderCount("PreviewLayer");
   const warpTextSvg = useWarpedTextSvg(layer, currentTime);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   // Unified WebGL render path (rendererMode=webgl). If the shared MediaWebGLRenderer
@@ -2221,7 +2338,7 @@ function PreviewLayer({
       ) : null}
     </>
   );
-}
+}, arePreviewLayerPropsEqual);
 
 /**
  * One shared AudioContext for all preview audio layers. Created lazily (and resumed on the play
@@ -2240,7 +2357,11 @@ function getPreviewAudioContext(): AudioContext | undefined {
   return sharedPreviewAudioContext;
 }
 
-function AudioPreviewLayer({
+// Memoized (default shallow compare) so a VideoPreview re-render that DIDN'T change this layer's props
+// skips the audio subtree. `currentTime` changes every tick and drives per-tick volume/fade automation
+// (the gain effect below), so the shallow compare intentionally still re-renders during playback —
+// reconciling one <audio> element is cheap, and moving volume off the render path is out of scope here.
+const AudioPreviewLayer = memo(function AudioPreviewLayer({
   assets,
   currentTime,
   isPlaying,
@@ -2332,7 +2453,7 @@ function AudioPreviewLayer({
   }
 
   return <audio aria-hidden="true" crossOrigin="anonymous" preload="auto" ref={audioRef} src={mediaUrl} />;
-}
+});
 
 function applyActiveAdjustmentEffects(
   layer: TimelineLayer,
@@ -3553,7 +3674,9 @@ function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack, curren
     if (other.id === layer.id || !other.transitionIn) {
       continue;
     }
-    if (Math.abs(other.startSeconds - end) < 0.05 && currentTime <= end + other.transitionIn.durationSeconds) {
+    // Post-roll matches the clamped transition window (never past the incoming clip it reveals).
+    const window = Math.min(other.transitionIn.durationSeconds, other.durationSeconds);
+    if (Math.abs(other.startSeconds - end) < 0.05 && currentTime <= end + window) {
       return true;
     }
   }

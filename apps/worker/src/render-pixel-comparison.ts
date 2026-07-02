@@ -4,14 +4,14 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRenderManifest } from "@reelforge/render-templates";
+import { buildRenderManifest } from "@lumio-by-aelivion/render-templates";
 import {
   createRenderComparisonFixture,
   renderComparisonArtifactDir,
   renderComparisonFixtureKeys,
   renderComparisonFrameSeconds,
   type RenderComparisonFixtureKey
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import pixelmatch from "pixelmatch";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";

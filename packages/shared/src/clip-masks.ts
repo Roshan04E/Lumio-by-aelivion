@@ -492,8 +492,14 @@ export function expandLayerEffectRegions(layer: TimelineLayer): TimelineLayer[] 
     return {
       ...layer,
       id: `${layer.id}__rfx_${effect.id}`,
-      // Cascade: globals + every region effect from the bottom up to this one (applied globally on the copy).
-      effects: [...globals, ...regionEffects.slice(0, index + 1).map(strip)],
+      // Each region effect is INDEPENDENT: this clone applies ONLY its own region effect, in ONLY its own
+      // region (+ the whole-clip globals every clone shares). Region effects do NOT inherit each other — that
+      // cross-effect merge was the ROOT of the leak (a blur "region" whose mask was stripped and re-applied
+      // across another effect's whole region). Where two regions overlap, the clones simply stack in panel
+      // order, so the top region effect wins its area — no bleed. (Correctly COMBINING two effects in an
+      // overlap for any geometry needs per-effect masked post-composite passes — see the region-effect
+      // pass model in todo.md — which this flat one-mask-per-clone model can't express.)
+      effects: [...globals, strip(effect)],
       masks
     };
   });
@@ -509,6 +515,39 @@ export function expandEffectRegionMasks(composition: TimelineComposition): Timel
     return { ...track, layers: track.layers.flatMap(expandLayerEffectRegions) };
   });
   return changed ? { ...composition, tracks } : composition;
+}
+
+/**
+ * Region-blur clones ({@link expandLayerEffectRegions} produces `${baseId}__rfx_${effectId}`) whose ONLY
+ * effects beyond their base are `blur` render pixel-identical MEDIA to the base — blur is a GPU compositor
+ * pass here, NOT baked into the color grade — so the clone can reuse the base's already-graded frame instead
+ * of decoding + grading a second copy of the same source. Both the editor preview and the local export MUST
+ * alias these clones the same way, or the two diverge: the viewer (which aliases) shows the masked blur while
+ * the export/proxy (which decoded the clone independently) can drop it whenever that second decoder fails or
+ * isn't ready — the reported "no blur in the proxy" bug. Aliasing also removes a decoder + GL context per
+ * clone (the context-budget win) and keeps the clone frame-synced to the base (no second decoder to drift).
+ *
+ * A clone that adds a region COLOR grade over its base genuinely needs its own graded frame, so it is NOT
+ * aliased. `layers` MUST be the EXPANDED + adjustment-merged layer list both renderers build (the base and
+ * clone carry the same merged adjustment effects, so those cancel and only the region effects remain "extra").
+ * Returns a map of clone layer id → base layer id.
+ */
+export function buildRegionBlurCloneAliases(layers: readonly TimelineLayer[]): Map<string, string> {
+  const map = new Map<string, string>();
+  const byId = new Map(layers.map((layer) => [layer.id, layer]));
+  for (const layer of layers) {
+    const sep = layer.id.indexOf("__rfx_");
+    if (sep < 0 || (layer.type !== "video" && layer.type !== "image")) continue;
+    const baseId = layer.id.slice(0, sep);
+    const base = byId.get(baseId);
+    if (!base) continue;
+    const baseEffectIds = new Set(base.effects.map((effect) => effect.id));
+    const extra = layer.effects.filter((effect) => !baseEffectIds.has(effect.id));
+    if (extra.length > 0 && extra.every((effect) => effect.type === "blur")) {
+      map.set(layer.id, baseId);
+    }
+  }
+  return map;
 }
 
 // --- Factories used by the preview drawing tools -------------------------------------------------

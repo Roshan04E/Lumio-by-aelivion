@@ -39,6 +39,7 @@ import {
   isSceneTextureSource,
   isTrackEnabled,
   buildSceneDraws,
+  buildRegionBlurCloneAliases,
   SceneMaskMatteCache,
   SceneTextRasterizer,
   type ColorPipeline,
@@ -51,7 +52,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { getExportSingleContext } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
 import { clipSourceKey, type FrameProvider } from "./source-decoder";
@@ -240,9 +241,11 @@ export class SceneFrameCompositor {
     draws.forEach((draw, index) => {
       if ((draw as { kind?: string }).kind === "transition") {
         const transition = draw as Extract<SceneDraw, { kind: "transition" }>;
+        const describeGroup = (group: SceneLayerDraw[], side: string): string =>
+          group.map((layer, i) => this.describeLayerDraw(layer, `${side}[${i}]`)).join(" ");
         parts.push(
-          `#${index}:transition from=${transition.debugFromId ?? transition.from.debugLayerId ?? "unknown"} to=${transition.debugToId ?? transition.to.debugLayerId ?? "unknown"} ` +
-            `progress=${transition.progress.toFixed(3)} from{${this.describeLayerDraw(transition.from, "side=from")}} to{${this.describeLayerDraw(transition.to, "side=to")}}`
+          `#${index}:transition from=${transition.debugFromId ?? transition.from[0]?.debugLayerId ?? "unknown"} to=${transition.debugToId ?? transition.to[0]?.debugLayerId ?? "unknown"} ` +
+            `progress=${transition.progress.toFixed(3)} from{${describeGroup(transition.from, "from")}} to{${describeGroup(transition.to, "to")}}`
         );
       } else {
         parts.push(this.describeLayerDraw(draw as SceneLayerDraw, `#${index}`));
@@ -300,7 +303,8 @@ export class SceneFrameCompositor {
     let best = 0;
     for (const other of track.layers) {
       if (other.id === item.layer.id || !other.transitionIn) continue;
-      if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, other.transitionIn.durationSeconds);
+      // Clamp to the incoming clip's length — matches the clamped transition window (getActiveTransition).
+      if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds));
     }
     return best;
   }
@@ -559,6 +563,12 @@ export class SceneFrameCompositor {
     // Adjustment-merged layer list in back-to-front (z) order — exactly what the editor passes as `sceneLayers`.
     const layers = activeItems.map((item) => this.mergedLayer(item, t));
 
+    // Blur-only region clones reuse their base's graded frame (SHARED with the editor preview via
+    // buildRegionBlurCloneAliases) — grading the clone through its OWN decoder is what dropped the masked blur
+    // from the proxy when that second decoder wasn't ready, and it burned an extra GL context. Alias here so
+    // the export renders the clone identically to the viewer: base graded once, clone reads it.
+    const cloneAlias = buildRegionBlurCloneAliases(layers);
+
     // Active junction transitions ONLY (an inactive pair would make buildSceneDraws wrongly skip the outgoing
     // clip, which it unconditionally treats as folded-into-the-mix). Mirrors VideoPreview.transitionPairs.
     const byId = new Map(layers.map((layer) => [layer.id, layer]));
@@ -570,6 +580,7 @@ export class SceneFrameCompositor {
       const active = getActiveTransition(pair.spec as TransitionSpec, {
         currentTimeSeconds: t,
         startSeconds: incoming.startSeconds,
+        clipDurationSeconds: incoming.durationSeconds,
       });
       if (!active) continue;
       transitions.push({
@@ -588,7 +599,9 @@ export class SceneFrameCompositor {
     const gradedById = new Map<string, AnyCanvas | SceneTextureSource>();
     await Promise.all(
       activeItems
-        .filter((item) => item.layer.type === "video" || item.layer.type === "image")
+        // Skip aliased blur-only clones — they read the base's graded frame below, so grading them (a second
+        // decoder + context) is both wasteful and the source of the proxy/preview divergence.
+        .filter((item) => (item.layer.type === "video" || item.layer.type === "image") && !cloneAlias.has(item.layer.id))
         .map(async (item) => {
           const graded = await this.gradeMediaLayer(item, t);
           if (graded && graded.width > 0 && graded.height > 0) gradedById.set(item.layer.id, graded);
@@ -618,7 +631,8 @@ export class SceneFrameCompositor {
       rasterizer: this.rasterizer,
       matteCache: this.matteCache,
       gradeRenderers: this.gradeRenderers,
-      getMediaGraded: (id) => gradedById.get(id) ?? null,
+      // Resolve a blur-only clone to its base's graded frame (the alias mirrors the editor's mediaSourceAlias).
+      getMediaGraded: (id) => gradedById.get(cloneAlias.get(id) ?? id) ?? null,
       // Single-context: grade text/shape overlays into shared-context RTTs too (no cross-context canvas upload).
       ...(this.singleContext ? { gradeOverlay: this.gradeOverlaySingle } : {}),
       createCanvas: () => this.makeCanvas(),
@@ -648,6 +662,10 @@ export class SceneFrameCompositor {
       layers: draws,
     };
     this.compositor.renderFrame(spec);
+    // Force GPU completion before the caller snapshots this canvas into a VideoFrame. WebGL draws are async;
+    // without this, the export encoder can capture an unfinished (black) buffer — the "first frame OK, rest
+    // black" bug, which only vanished when the diagnostic luma readback happened to force the same sync.
+    this.compositor.finish();
     if (this.stageProbe && this.shouldProbe(t)) {
       this.stageProbe.onProbe({
         stage: "gl",

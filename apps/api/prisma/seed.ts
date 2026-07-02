@@ -1,5 +1,7 @@
 import bcrypt from "bcryptjs";
-import { templateDefinitions, toolDefinitions } from "@reelforge/shared";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { parsePluginManifest, templateDefinitions, toolDefinitions } from "@lumio-by-aelivion/shared";
 import { prisma } from "../src/lib/prisma";
 import { asJson } from "../src/lib/json";
 
@@ -7,14 +9,14 @@ async function main() {
   const passwordHash = await bcrypt.hash("password123", 12);
 
   const demoUser = await prisma.user.upsert({
-    where: { email: "demo@reelforge.studio" },
+    where: { email: "demo@aelivion.studio" },
     update: {
       name: "Demo Creator",
       walletCredits: 120
     },
     create: {
       name: "Demo Creator",
-      email: "demo@reelforge.studio",
+      email: "demo@aelivion.studio",
       passwordHash,
       walletCredits: 120
     }
@@ -90,7 +92,56 @@ async function main() {
     });
   }
 
-  console.log("Seed complete: 1 demo user, 8 templates, 5 tools");
+  const pluginManifestDirCandidates = [
+    path.resolve(process.cwd(), "examples/plugin-manifests"),
+    path.resolve(process.cwd(), "../../examples/plugin-manifests")
+  ];
+  const pluginManifestDir = pluginManifestDirCandidates.find((candidate) => existsSync(candidate)) ?? pluginManifestDirCandidates[0]!;
+  for (const fileName of ["soft-bloom.effect.json", "warm-cinema.look.json"]) {
+    const manifest = parsePluginManifest(JSON.parse(readFileSync(path.join(pluginManifestDir, fileName), "utf8")));
+    await prisma.pluginPackage.upsert({
+      where: { manifestId: manifest.id },
+      update: {
+        kind: manifest.kind,
+        schemaVersion: manifest.schemaVersion,
+        name: manifest.name,
+        version: manifest.version,
+        description: manifest.description ?? null,
+        authorName: manifest.author?.name ?? null,
+        licenseType: manifest.license?.type ?? null,
+        tags: asJson(manifest.tags),
+        category: manifest.category ?? null,
+        thumbnail: manifest.thumbnail ?? null,
+        preview: manifest.preview ?? null,
+        manifest: asJson(manifest),
+        compatibility: asJson(manifest.compatibility),
+        active: true,
+        published: true,
+        createdById: demoUser.id
+      },
+      create: {
+        manifestId: manifest.id,
+        kind: manifest.kind,
+        schemaVersion: manifest.schemaVersion,
+        name: manifest.name,
+        version: manifest.version,
+        description: manifest.description ?? null,
+        authorName: manifest.author?.name ?? null,
+        licenseType: manifest.license?.type ?? null,
+        tags: asJson(manifest.tags),
+        category: manifest.category ?? null,
+        thumbnail: manifest.thumbnail ?? null,
+        preview: manifest.preview ?? null,
+        manifest: asJson(manifest),
+        compatibility: asJson(manifest.compatibility),
+        active: true,
+        published: true,
+        createdById: demoUser.id
+      }
+    });
+  }
+
+  console.log("Seed complete: 1 demo user, 8 templates, 5 tools, 2 plugin packages");
 }
 
 main()

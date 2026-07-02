@@ -1,5 +1,5 @@
 import { MoveHorizontal, MoveVertical, Spline } from "lucide-react";
-import { defaultTextWarp, type TextWarp, type TextWarpStyle } from "@reelforge/shared";
+import { defaultTextWarp, type TextWarp, type TextWarpStyle } from "@lumio-by-aelivion/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { NumberControl } from "../controls/NumberControl";
 import { ThemedSelect } from "../controls/ThemedSelect";

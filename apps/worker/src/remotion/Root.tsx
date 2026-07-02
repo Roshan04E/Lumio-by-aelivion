@@ -1,14 +1,14 @@
 import React from "react";
 import { Composition, staticFile } from "remotion";
-import type { RenderManifest } from "@reelforge/render-templates";
-import { configureFontResolver, warpFontFile } from "@reelforge/shared";
+import type { RenderManifest } from "@lumio-by-aelivion/render-templates";
+import { configureFontResolver, warpFontFile } from "@lumio-by-aelivion/shared";
 import { SceneStage, getRemotionCompositor } from "./SceneStage";
 
 // Text-warp outline engine: resolve warp font families to the binaries served from the
 // Remotion public/ dir, so the exported warp matches the editor preview exactly.
 configureFontResolver((family) => staticFile(warpFontFile(family)));
 
-export const compositionId = "ReelForgeTimeline";
+export const compositionId = "LumioTimeline";
 
 const fallbackManifest: RenderManifest = {
   id: "fallback",
@@ -28,7 +28,7 @@ const fallbackManifest: RenderManifest = {
   layers: [],
   createdAt: new Date(0).toISOString(),
   renderer: {
-    engine: "reelforge-manifest",
+    engine: "lumio-manifest",
     version: 1,
     note: "Fallback manifest"
   }

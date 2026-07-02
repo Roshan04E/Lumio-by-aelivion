@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { ActionAnalyticsSnapshot } from "@reelforge/shared";
+import type { ActionAnalyticsSnapshot } from "@lumio-by-aelivion/shared";
 import { readAnalytics } from "../../ai/analytics-store";
 
 /**

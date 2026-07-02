@@ -9,7 +9,7 @@
  * pipeline on the main thread (where the `<video>`-seek fallback exists).
  */
 
-import { clipCompositionToWorkArea, type TimelineComposition } from "@reelforge/shared";
+import { clipCompositionToWorkArea, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@lumio-by-aelivion/shared";
 import { detectBrowserToolCapabilities } from "../tools/capabilities";
 import { type ExportFormat } from "./video-encoder";
 import {
@@ -21,7 +21,7 @@ import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./au
 import { getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
 import { beginPreviewSuspendForExport, endPreviewSuspendForExport } from "./export-preview-suspend";
 import { logExportGl } from "./export-gl-debug";
-import { getActiveGlContextCount } from "@reelforge/shared";
+import { getActiveGlContextCount } from "@lumio-by-aelivion/shared";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "./export-worker-protocol";
 
 export interface LocalExportRequest {
@@ -31,6 +31,9 @@ export interface LocalExportRequest {
   format?: ExportFormat;
   /** Export frame rate (defaults to the composition's fps). */
   fps?: number | undefined;
+  transitionManifests?: PluginTransitionManifest[] | undefined;
+  lookManifests?: PluginLookManifest[] | undefined;
+  preferWorker?: boolean | undefined;
   onProgress?: (fraction: number, label: string) => void;
   signal?: AbortSignal;
 }
@@ -57,6 +60,13 @@ function canUseWorker(): boolean {
   return typeof Worker !== "undefined" && typeof OffscreenCanvas !== "undefined";
 }
 
+function yieldToBrowser(): Promise<void> {
+  if (typeof requestAnimationFrame !== "undefined") {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+  return Promise.resolve();
+}
+
 export async function exportLocally(request: LocalExportRequest): Promise<Blob> {
   const { urlForAsset, format = "mp4", fps, onProgress, signal } = request;
   if (signal?.aborted) throw new Aborted();
@@ -65,14 +75,22 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   // the in-point becomes t=0 — same as the cloud render path (buildRenderManifest). Applied BEFORE
   // audio mixing + source resolution so audio, video, and durationSeconds all share the clipped timeline.
   // Identity (same reference) when no in/out point is set, so a full-project export is unaffected.
+  onProgress?.(0.005, "Clipping work area...");
+  await yieldToBrowser();
   const composition = clipCompositionToWorkArea(request.composition);
 
   // Resolve sources + mix audio on the main thread (both need Window-only APIs).
+  onProgress?.(0.01, "Resolving sources...");
+  await yieldToBrowser();
   const urlMap = buildSourceUrlMap(composition, urlForAsset);
 
   onProgress?.(0.02, "Mixing audio…");
+  await yieldToBrowser();
   const audioLayers = collectAudioLayers(composition, urlForAsset);
-  const mixedBuffer = await mixTimelineAudio(audioLayers, composition.durationSeconds).catch(() => null);
+  const mixedBuffer = await Promise.race([
+    mixTimelineAudio(audioLayers, composition.durationSeconds),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 20_000))
+  ]).catch(() => null);
   const audio = mixedBuffer ? extractAudioChannels(mixedBuffer) : null;
 
   // Resolve the single-context flag ONCE here (main thread) and thread it through — the Worker can't read the
@@ -80,7 +98,16 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   // defaults ON. Method 3 Phase 5: SceneFrameCompositor is the only export compositor, so there's no longer a
   // frame/scene mode to resolve.
   const singleContext = getExportSingleContext();
-  const input: ExportCoreInput = { composition, urlMap, audio, format, fps, exportSingleContext: singleContext };
+  const input: ExportCoreInput = {
+    composition,
+    urlMap,
+    audio,
+    format,
+    fps,
+    exportSingleContext: singleContext,
+    transitionManifests: request.transitionManifests,
+    lookManifests: request.lookManifests
+  };
 
   // Phase 2 Stage 4: scene export defaults to the Worker when single-context is on. The one self-contained
   // WebGL2 context survives the Worker's isolated GPU process, whereas the legacy multi-/cross-context path
@@ -107,7 +134,7 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
 
   // Scene export runs in the Worker by default via the single-context path; if that fails, the proven
   // main-thread scene path below keeps export correct (NOT canvas2D — retired in Phase 5).
-  if (canUseWorker() && workerScene) {
+  if (request.preferWorker !== false && canUseWorker() && workerScene) {
     try {
       if (workerScene) {
         logExportGl(() => `worker scene export start: single-context=true, active contexts=${getActiveGlContextCount()}`);

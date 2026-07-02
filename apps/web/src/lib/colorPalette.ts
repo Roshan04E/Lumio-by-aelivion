@@ -1,4 +1,4 @@
-import type { SourceAsset } from "@reelforge/shared";
+import type { SourceAsset } from "@lumio-by-aelivion/shared";
 
 export type EyeDropperConstructor = new () => {
   open: () => Promise<{ sRGBHex: string }>;

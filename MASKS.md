@@ -83,7 +83,7 @@ drag, Polygon/Pen click points), draw it in the preview, then drag it. Nothing i
 8. **Move.** With the **Select** tool, drag **inside** an active mask to move the whole shape; drag a point to
    reshape; **Alt-drag** a point to pull out Bézier handles.
 9. **Export parity.** The exported MP4 shows the identical cutout (everything bakes into the same SVG stencil).
-   Spot-check with `pnpm --filter @reelforge/worker render:compare:pixels`.
+   Spot-check with `pnpm --filter @lumio-by-aelivion/worker render:compare:pixels`.
 
 ---
 

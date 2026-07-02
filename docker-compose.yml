@@ -1,25 +1,25 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: reelforge-postgres
+    container_name: lumio-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: reelforge
-      POSTGRES_PASSWORD: reelforge
-      POSTGRES_DB: reelforge
+      POSTGRES_USER: lumio
+      POSTGRES_PASSWORD: lumio
+      POSTGRES_DB: lumio
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U reelforge -d reelforge"]
+      test: ["CMD-SHELL", "pg_isready -U lumio -d lumio"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   redis:
     image: redis:7-alpine
-    container_name: reelforge-redis
+    container_name: lumio-redis
     restart: unless-stopped
     ports:
       - "6379:6379"

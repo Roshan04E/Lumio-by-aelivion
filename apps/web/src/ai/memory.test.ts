@@ -3,7 +3,7 @@
  * retriever). Pure logic — no DB, no localStorage. Repo convention: exits
  * non-zero on first failure.
  *
- *   pnpm --filter @reelforge/web memory:test
+ *   pnpm --filter @lumio-by-aelivion/web memory:test
  */
 import { extractFacts } from "./memory-extractor";
 import { selectMemorySlice } from "./memory-retriever";

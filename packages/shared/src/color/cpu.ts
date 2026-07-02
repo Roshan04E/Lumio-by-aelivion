@@ -46,6 +46,11 @@ function applyCurve(curve: ToneCurve, [r, g, b]: Rgb): Rgb {
   return [sampleLut(curve.r, r), sampleLut(curve.g, g), sampleLut(curve.b, b)];
 }
 
+function mixRgb(a: Rgb, b: Rgb, amount: number): Rgb {
+  const k = clamp01(amount);
+  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+}
+
 /** Apply the full pipeline to one RGB triplet (0..1). */
 export function applyPipelineToRgb(pipeline: ColorPipeline, rgb: Rgb): Rgb {
   let out: Rgb = [clamp01(rgb[0]), clamp01(rgb[1]), clamp01(rgb[2])];
@@ -60,7 +65,7 @@ export function applyPipelineToRgb(pipeline: ColorPipeline, rgb: Rgb): Rgb {
       out = isSecondary(stage.hsl) ? applySecondary(stage.hsl, out) : applyHueSatCurves(stage.hsl, out);
     }
     if (stage.lut3d) {
-      out = sampleLut3d(stage.lut3d, out);
+      out = mixRgb(out, sampleLut3d(stage.lut3d, out), stage.lutAmount ?? 1);
     }
   }
   return out;

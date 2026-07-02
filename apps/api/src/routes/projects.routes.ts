@@ -12,7 +12,7 @@ import {
   resolveModuleInsertions,
   templateDefinitions,
   type ProjectGraph
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { asJson, fromJson } from "../lib/json";
 import { prisma } from "../lib/prisma";

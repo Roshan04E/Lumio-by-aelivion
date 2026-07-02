@@ -1,4 +1,4 @@
-import { buildConsultantUserContent, CONSULTANT_SYSTEM_PROMPT } from "@reelforge/shared";
+import { buildConsultantUserContent, CONSULTANT_SYSTEM_PROMPT } from "@lumio-by-aelivion/shared";
 import { loadByoKey } from "./byok";
 import { isOllamaLocalActive, loadOllamaConfig, streamOllamaChat } from "./ollama";
 import type { PlannerContext } from "./types";

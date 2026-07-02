@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { templateDefinitions, type TemplateDefinition } from "@reelforge/shared";
+import { templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { Card } from "../components/Card";
 import { listTemplates } from "../lib/api";

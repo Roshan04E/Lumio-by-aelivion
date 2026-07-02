@@ -9,7 +9,7 @@
  */
 
 import { Crop } from "lucide-react";
-import type { LayerContentTransform, TimelineLayer } from "@reelforge/shared";
+import type { LayerContentTransform, TimelineLayer } from "@lumio-by-aelivion/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { InspectorSection } from "../InspectorSection";
 import { EffectSliderControl } from "../../../components/EffectSliderControl";

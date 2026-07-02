@@ -168,12 +168,31 @@ export interface CompositionTransitionReveal {
  * renderers compute it identically. Returns null once fully revealed (progress ≥ 1) so the rest of
  * the clip draws plainly.
  */
+/**
+ * The transition's EFFECTIVE window duration: the authored `spec.durationSeconds` clamped to the
+ * incoming clip's own length so a start-aligned transition never runs PAST the clip it reveals. This
+ * mirrors the keyframe path (`buildTransitionAnimations`, `Math.min(spec.durationSeconds,
+ * layer.durationSeconds)`) so the GPU reveal and the keyframed kinds finish at the same instant. When
+ * the clip duration is unknown (undefined), the authored duration is used unchanged.
+ */
+export function effectiveTransitionDuration(
+  authoredSeconds: number,
+  clipDurationSeconds?: number | undefined
+): number {
+  const authored = Math.max(1e-4, authoredSeconds);
+  if (typeof clipDurationSeconds === "number" && clipDurationSeconds > 0) {
+    return Math.min(authored, clipDurationSeconds);
+  }
+  return authored;
+}
+
 export function getCompositionTransition(
-  layer: { startSeconds?: number | undefined; transitionIn?: TransitionSpec | undefined } | undefined,
+  layer: { startSeconds?: number | undefined; durationSeconds?: number | undefined; transitionIn?: TransitionSpec | undefined } | undefined,
   options: CompositionStyleOptions = {}
 ): CompositionTransitionReveal | null {
   const spec = layer?.transitionIn;
-  if (!spec || (spec.kind !== "wipe" && spec.kind !== "iris" && spec.kind !== "dip")) {
+  const kind = spec?.kind;
+  if (!spec || (kind !== "wipe" && kind !== "iris" && kind !== "dip")) {
     return null;
   }
   const t = options.currentTimeSeconds;
@@ -181,18 +200,18 @@ export function getCompositionTransition(
     return null;
   }
   const start = layer?.startSeconds ?? 0;
-  const duration = Math.max(1e-4, spec.durationSeconds);
+  const duration = effectiveTransitionDuration(spec.durationSeconds, layer?.durationSeconds);
   const progress = (t - start) / duration;
   if (progress >= 1) {
     return null;
   }
   return {
-    kind: spec.kind,
+    kind: kind as "dip" | "wipe" | "iris",
     progress: Math.max(0, Math.min(1, progress)),
     direction: spec.direction ?? "right",
     mode: spec.mode ?? "in",
     softness: Math.max(0, Math.min(1, spec.softness ?? 0.12)),
-    color: spec.kind === "dip" ? hexToRgb01(spec.color ?? "#000000") : undefined
+    color: kind === "dip" ? hexToRgb01(spec.color ?? "#000000") : undefined
   };
 }
 
@@ -272,7 +291,12 @@ function transitionOverrides(def: TransitionDefinition, spec: TransitionSpec): R
  */
 export function getActiveTransition(
   spec: TransitionSpec | undefined,
-  options: { currentTimeSeconds?: number | undefined; startSeconds?: number | undefined }
+  options: {
+    currentTimeSeconds?: number | undefined;
+    startSeconds?: number | undefined;
+    /** Incoming clip length — clamps the window so the transition never runs past the clip it reveals. */
+    clipDurationSeconds?: number | undefined;
+  }
 ): ActiveTransition | null {
   if (!spec) return null;
   const def = getTransition(spec.kind);
@@ -280,7 +304,7 @@ export function getActiveTransition(
   const t = options.currentTimeSeconds;
   if (typeof t !== "number") return null;
   const start = options.startSeconds ?? 0;
-  const duration = Math.max(1e-4, spec.durationSeconds);
+  const duration = effectiveTransitionDuration(spec.durationSeconds, options.clipDurationSeconds);
   const linear = (t - start) / duration;
   if (linear < 0 || linear >= 1) return null;
   const eased = applyTransitionEasing(linear, def.easing);
@@ -953,7 +977,9 @@ export function getCompositionColorPipeline(
       if (lutBase64) {
         const importedLut3d = parseLutBase64(lutBase64);
         if (importedLut3d) {
-          const intensity = typeof params.intensity === "number" ? params.intensity : numberOr(effect.intensity, 100);
+          const paramIntensity = typeof params.intensity === "number" ? params.intensity : 100;
+          const mixIntensity = numberOr(effect.intensity, 100);
+          const intensity = Math.max(0, Math.min(100, (paramIntensity * mixIntensity) / 100));
           inputs.push({ type, params: { intensity }, intensity: 100, importedLut3d });
         }
       }

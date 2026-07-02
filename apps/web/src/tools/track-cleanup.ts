@@ -1,5 +1,5 @@
-import type { SubjectBounds, TrackingPathArtifactData, TrackingPoint } from "@reelforge/shared";
-import { cleanTrackingPoints, fuseTrackMeasurements, type FrameMeasurement } from "@reelforge/shared";
+import type { SubjectBounds, TrackingPathArtifactData, TrackingPoint } from "@lumio-by-aelivion/shared";
+import { cleanTrackingPoints, fuseTrackMeasurements, type FrameMeasurement } from "@lumio-by-aelivion/shared";
 import { detectInitialSubjectBox, loadVideoElement, seekVideo } from "./local-segmentation";
 import { extractPatch, prepareTemplate, searchNcc, type GrayImage } from "./tracking-core";
 

@@ -1,14 +1,31 @@
-import { ChevronDown, ChevronRight, Plus, Search, Sparkles, Star, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Layers, Plus, Search, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   type ProjectEffect,
+  cubeLutToEffectManifest,
+  glTransitionToManifest,
+  inspectPluginManifestSafety,
+  pluginSafetyReportToMessage,
+  pluginSafetyWarnings,
+  type PluginEffectManifest,
+  type PluginManifest,
+  type PluginLookManifest,
+  type PluginTransitionManifest,
   type TimelineEffectType,
   type TimelineLayerType,
   type TransitionDirection,
   type TransitionKind
-} from "@reelforge/shared";
-import { buildEffectCatalog, effectPanelCategories, transitionGalleryCategories, type CatalogItem, type TransitionGroup } from "../editor/effects/catalog";
+} from "@lumio-by-aelivion/shared";
+import {
+  buildEffectCatalog,
+  effectPanelCategories,
+  lookGalleryCategories,
+  transitionGalleryCategories,
+  type CatalogItem,
+  type LookGroup,
+  type TransitionGroup
+} from "../editor/effects/catalog";
 import { loadFavourites, saveFavourites } from "../editor/effects/favourites";
 import { useVideoPoster } from "../lib/videoThumbnails";
 import { Badge } from "./Badge";
@@ -17,6 +34,7 @@ import { TransitionThumb } from "./TransitionThumb";
 
 /** How many transition tiles the inline strip shows before the "Show more" full gallery. */
 const TRANSITION_STRIP_CAP = 7;
+const LOOK_STRIP_CAP = 7;
 
 /** The transition spec the panel hands to the editor (duration is filled in there). */
 export interface TransitionApplySpec {
@@ -25,10 +43,11 @@ export interface TransitionApplySpec {
   mode?: "in" | "out" | undefined;
   color?: string | undefined;
   params?: Record<string, number | number[] | boolean> | undefined;
+  manifest?: PluginTransitionManifest | undefined;
 }
 
 // ── Folder open/closed state (persisted; folders start closed) ─────────────────────────────
-const FOLDERS_KEY = "reelforge.effectFoldersCollapsed";
+const FOLDERS_KEY = "lumio.effectFoldersCollapsed";
 const ALL_FOLDER_IDS = ["favourites", ...effectPanelCategories.map((entry) => entry.id)];
 
 function loadCollapsed(): Set<string> {
@@ -55,6 +74,22 @@ function saveCollapsed(set: Set<string>): void {
   }
 }
 
+function formatManifestImportError(kind: "Effect" | "Look" | "Transition" | "Plugin", error: unknown): string {
+  const issues = (error as { issues?: Array<{ path?: Array<string | number>; message?: string }> } | undefined)?.issues;
+  if (Array.isArray(issues) && issues.length) {
+    const detail = issues
+      .slice(0, 4)
+      .map((issue) => `${issue.path?.length ? issue.path.join(".") : "manifest"}: ${issue.message ?? "Invalid value"}`)
+      .join("; ");
+    const more = issues.length > 4 ? `; +${issues.length - 4} more` : "";
+    return `${kind} upload rejected - ${detail}${more}`;
+  }
+  if (error instanceof SyntaxError) {
+    return `${kind} upload rejected - the file is not valid JSON.`;
+  }
+  return `${kind} upload rejected - ${error instanceof Error ? error.message : "unknown error"}`;
+}
+
 /**
  * Effects tab — an Adobe Premiere-style searchable folder tree over the lightweight catalog. Each
  * category (Video / Text / Audio / Transition / AI) is a collapsible bin; a live search filters every
@@ -67,9 +102,20 @@ export function EffectGraphPanel({
   effects,
   selectedLayerType,
   sampleFrames,
+  importedEffects,
+  importedLooks,
+  importedTransitions,
   onAddTimelineEffect,
+  onApplyEffectManifest,
+  onImportEffectManifest,
+  onRemoveEffectManifest,
+  onImportLookManifest,
+  onRemoveLookManifest,
+  onImportTransitionManifest,
+  onRemoveTransitionManifest,
   onApplyToolEffect,
   onApplyPreset,
+  onApplyLook,
   onAddTransition,
   onAddAudioEffect,
   onRemove
@@ -78,23 +124,46 @@ export function EffectGraphPanel({
   selectedLayerType?: TimelineLayerType | undefined;
   /** Up to two real timeline frames (A, B) used as the transition preview footage. */
   sampleFrames?: Array<{ url: string; kind: "video" | "image" }> | undefined;
+  importedEffects: PluginEffectManifest[];
+  importedLooks: PluginLookManifest[];
+  importedTransitions: PluginTransitionManifest[];
   onAddTimelineEffect: (type: TimelineEffectType) => void;
+  onApplyEffectManifest: (manifest: PluginEffectManifest) => void;
+  onImportEffectManifest: (manifest: PluginEffectManifest) => Promise<string>;
+  onRemoveEffectManifest: (manifestId: string) => Promise<string> | string;
+  onImportLookManifest: (manifest: PluginLookManifest) => Promise<string>;
+  onRemoveLookManifest: (manifestId: string) => Promise<string> | string;
+  onImportTransitionManifest: (manifest: PluginTransitionManifest) => Promise<string>;
+  onRemoveTransitionManifest: (manifestId: string) => Promise<string> | string;
   onApplyToolEffect: (toolSlug: string) => void;
   onApplyPreset: (presetId: string) => void;
+  onApplyLook: (lookName: string, mode: "clip" | "adjustment", manifest?: PluginLookManifest | undefined) => void;
   onAddTransition: (spec: TransitionApplySpec) => void;
   onAddAudioEffect: (fade?: "in" | "out" | undefined) => void;
   onRemove: (id: string) => void;
 }) {
-  const catalog = useMemo(() => buildEffectCatalog(selectedLayerType), [selectedLayerType]);
   const [query, setQuery] = useState("");
   const [favourites, setFavourites] = useState<Set<string>>(() => loadFavourites());
+  const [importStatus, setImportStatus] = useState<string | null>(null);
   // Folder ids the user has collapsed (persisted; folders start closed).
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   // Full-screen transition gallery ("Show more" portal).
   const [galleryOpen, setGalleryOpen] = useState(false);
   // Active filter chip in the "Show more" gallery. "all" shows every category as a labeled section.
   const [galleryCategory, setGalleryCategory] = useState<TransitionGroup | "all">("all");
+  const [lookGalleryOpen, setLookGalleryOpen] = useState(false);
+  const [lookGalleryCategory, setLookGalleryCategory] = useState<LookGroup | "all">("all");
   const searchRef = useRef<HTMLInputElement>(null);
+  const universalImportInputRef = useRef<HTMLInputElement>(null);
+  const catalog = useMemo(
+    () =>
+      buildEffectCatalog(selectedLayerType, {
+        effectManifests: importedEffects,
+        lookManifests: importedLooks,
+        transitionManifests: importedTransitions
+      }),
+    [selectedLayerType, importedEffects, importedLooks, importedTransitions]
+  );
 
   // Resolve the two sample frames to image sources: an image clip is its own url; a video clip needs a
   // captured poster frame. Same A/B pair feeds every preview tile so transitions are comparable.
@@ -113,7 +182,7 @@ export function EffectGraphPanel({
   // AI favourites live in their own strip rows (transitions float to the top of the Transitions row).
   const itemsById = useMemo(() => {
     const map = new Map<string, CatalogItem>();
-    for (const id of ["video", "text", "audio"] as const) {
+    for (const id of ["uploaded", "video", "text", "audio"] as const) {
       for (const item of catalog[id]) map.set(item.id, item);
     }
     return map;
@@ -150,14 +219,20 @@ export function EffectGraphPanel({
       case "effect":
         onAddTimelineEffect(item.effectType);
         break;
+      case "effectManifest":
+        onApplyEffectManifest(item.manifest);
+        break;
       case "audio":
         onAddAudioEffect(item.fade);
         break;
       case "preset":
         onApplyPreset(item.presetId);
         break;
+      case "look":
+        onApplyLook(item.lookName, "clip", item.manifest);
+        break;
       case "transition":
-        onAddTransition({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params });
+        onAddTransition({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params, manifest: item.manifest });
         break;
       case "ai":
         onApplyToolEffect(item.toolSlug);
@@ -165,8 +240,82 @@ export function EffectGraphPanel({
     }
   }
 
+  async function importUniversalPlugin(file: File | undefined) {
+    if (!file) return;
+    setImportStatus(`Uploading ${file.name}...`);
+    try {
+      if (file.name.toLowerCase().endsWith(".cube")) {
+        const result = cubeLutToEffectManifest({ fileName: file.name, text: await file.text() });
+        const message = await onImportEffectManifest(result.manifest);
+        setImportStatus(result.warnings.length ? `${message} ${result.warnings.join(" ")}` : message);
+        openImportedFolder("uploaded");
+        return;
+      }
+      if (/\.(glsl|frag)$/i.test(file.name)) {
+        const result = glTransitionToManifest({ fileName: file.name, text: await file.text() });
+        const message = await onImportTransitionManifest(result.manifest);
+        setImportStatus(result.warnings.length ? `${message} ${result.warnings.join(" ")}` : message);
+        setGalleryCategory("uploaded");
+        openImportedFolder("transition");
+        return;
+      }
+      const manifest = await parseSafeAnyManifestFile(file);
+      if (manifest.kind === "effect") {
+        setImportStatus(await onImportEffectManifest(manifest));
+        openImportedFolder("uploaded");
+      } else if (manifest.kind === "look") {
+        setImportStatus(await onImportLookManifest(manifest));
+        setLookGalleryCategory("uploaded");
+        openImportedFolder("look");
+      } else if (manifest.kind === "transition") {
+        setImportStatus(await onImportTransitionManifest(manifest));
+        setGalleryCategory("uploaded");
+        openImportedFolder("transition");
+      } else {
+        throw new Error(`"${manifest.kind}" packages are valid, but this panel can import effects, looks, transitions, and .cube LUTs.`);
+      }
+    } catch (error) {
+      setImportStatus(formatManifestImportError("Plugin", error));
+    } finally {
+      if (universalImportInputRef.current) universalImportInputRef.current.value = "";
+    }
+  }
+
+  async function parseSafeAnyManifestFile(file: File): Promise<PluginManifest> {
+    const text = await file.text();
+    const parsedJson = JSON.parse(text) as unknown;
+    const report = inspectPluginManifestSafety(parsedJson, { byteSize: file.size });
+    if (!report.ok && isExternalGlTransitionJson(parsedJson)) {
+      return glTransitionToManifest({ fileName: file.name, text, json: parsedJson }).manifest;
+    }
+    if (!report.ok || !report.manifest) {
+      throw new Error(pluginSafetyReportToMessage(report));
+    }
+    const warnings = pluginSafetyWarnings(report);
+    if (warnings.length) {
+      console.warn("[plugins] safety warnings", warnings);
+    }
+    return report.manifest;
+  }
+
+  function isExternalGlTransitionJson(value: unknown): boolean {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+    return ["glsl", "fragment", "shader", "transition"].some((key) => typeof record[key] === "string") && record.kind !== "transition";
+  }
+
+  function openImportedFolder(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      saveCollapsed(next);
+      return next;
+    });
+  }
+
   function renderRow(item: CatalogItem) {
     const starred = favourites.has(item.id);
+    const removable = item.kind === "effectManifest";
     // Junction transitions can be dragged onto a cut between two clips; effects drag onto a clip.
     const draggableEffect = item.kind === "effect";
     const draggableTransition = item.kind === "transition" && Boolean(item.junction);
@@ -180,13 +329,13 @@ export function EffectGraphPanel({
           onDragStart={(event) => {
             if (draggableEffect) {
               event.dataTransfer.effectAllowed = "copy";
-              event.dataTransfer.setData("application/x-reelforge-timeline-effect", item.effectType);
+              event.dataTransfer.setData("application/x-lumio-timeline-effect", item.effectType);
               event.dataTransfer.setData("text/plain", item.label);
             } else if (draggableTransition && item.kind === "transition") {
               event.dataTransfer.effectAllowed = "copy";
               event.dataTransfer.setData(
-                "application/x-reelforge-transition",
-                JSON.stringify({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params })
+                "application/x-lumio-transition",
+                JSON.stringify({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params, manifest: item.manifest })
               );
               event.dataTransfer.setData("text/plain", item.label);
             }
@@ -204,6 +353,26 @@ export function EffectGraphPanel({
         >
           <Star size={14} fill={starred ? "currentColor" : "none"} />
         </button>
+        {removable ? (
+          <button
+            type="button"
+            className="effect-tree-delete"
+            aria-label={`Remove uploaded effect ${item.label}`}
+            title="Remove uploaded effect"
+            onClick={async () => {
+              setImportStatus(await onRemoveEffectManifest(item.manifest.id));
+              setFavourites((prev) => {
+                if (!prev.has(item.id)) return prev;
+                const next = new Set(prev);
+                next.delete(item.id);
+                saveFavourites(next);
+                return next;
+              });
+            }}
+          >
+            <Trash2 size={13} />
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -225,9 +394,15 @@ export function EffectGraphPanel({
   }
 
   // The top tree holds only effect categories; Transitions + AI live in the bottom strip.
-  const treeCategoryIds = new Set(["video", "text", "audio"]);
+  const treeCategoryIds = new Set(["uploaded", "video", "text", "audio"]);
   function renderTransitionTile(item: CatalogItem) {
     if (item.kind !== "transition") return null;
+    const removeTransition = item.manifest
+      ? async () => {
+          setImportStatus(await onRemoveTransitionManifest(item.manifest!.id));
+          setFavourites((prev) => removeFavourite(prev, item.id));
+        }
+      : undefined;
     return (
       <TransitionThumb
         key={item.id}
@@ -239,8 +414,78 @@ export function EffectGraphPanel({
         bSrc={bSrc}
         onApply={() => addItem(item)}
         onToggleStar={() => toggleFavourite(item.id)}
+        onRemove={removeTransition}
       />
     );
+  }
+
+  function renderLookTile(item: CatalogItem) {
+    if (item.kind !== "look") return null;
+    const starred = favourites.has(item.id);
+    const sampleSrc = aSrc ?? bSrc;
+    return (
+      <div className="look-thumb-wrap" key={item.id} title={item.description}>
+        <button type="button" className="look-thumb" onClick={() => onApplyLook(item.lookName, "clip", item.manifest)}>
+          <span
+            className={`look-thumb-preview look-thumb-preview--${item.group}`}
+            style={{
+              backgroundImage: sampleSrc ? `url("${sampleSrc}")` : undefined,
+              filter: item.previewStyle.filter
+            }}
+          />
+          <span
+            className="look-thumb-grade"
+            style={{
+              background: item.previewStyle.overlay,
+              opacity: item.previewStyle.opacity
+            }}
+          />
+          <span className="look-thumb-vignette" />
+          <span className="look-thumb-name">{item.label}</span>
+        </button>
+        <button
+          type="button"
+          className={`transition-thumb-star ${starred ? "is-on" : ""}`}
+          aria-label={starred ? "Remove from favourites" : "Add to favourites"}
+          aria-pressed={starred}
+          onClick={() => toggleFavourite(item.id)}
+        >
+          <Star size={12} fill={starred ? "currentColor" : "none"} />
+        </button>
+        <button
+          type="button"
+          className="look-thumb-adjustment"
+          title="Apply as adjustment layer"
+          aria-label={`Apply ${item.label} as adjustment layer`}
+          onClick={() => onApplyLook(item.lookName, "adjustment", item.manifest)}
+        >
+          <Layers size={12} />
+        </button>
+        {item.manifest ? (
+          <button
+            type="button"
+            className="look-thumb-delete"
+            title="Remove uploaded look"
+            aria-label={`Remove uploaded look ${item.label}`}
+            onClick={async () => {
+              setImportStatus(await onRemoveLookManifest(item.manifest!.id));
+              setFavourites((prev) => removeFavourite(prev, item.id));
+            }}
+          >
+            <Trash2 size={12} />
+          </button>
+        ) : null}
+        <span className="transition-thumb-label">{item.label}</span>
+      </div>
+    );
+  }
+
+  function removeFavourite(prev: Set<string>, id: string) {
+    if (!prev.has(id)) return prev;
+    const next = new Set(prev);
+    next.delete(id);
+    saveFavourites(next);
+    return next;
   }
 
   const visibleByCategory = effectPanelCategories
@@ -254,6 +499,10 @@ export function EffectGraphPanel({
     .filter(matchesQuery)
     .slice()
     .sort((a, b) => Number(favourites.has(b.id)) - Number(favourites.has(a.id)));
+  const lookTiles = catalog.look
+    .filter(matchesQuery)
+    .slice()
+    .sort((a, b) => Number(favourites.has(b.id)) - Number(favourites.has(a.id)));
   const aiTiles = catalog.ai.filter(matchesQuery);
 
   return (
@@ -261,7 +510,24 @@ export function EffectGraphPanel({
       <div className="panel-heading">
         <h2>Effects</h2>
         <Badge tone="muted">{selectedLayerType ? selectedLayerType : "select layer"}</Badge>
+        <button
+          type="button"
+          className="effect-header-import"
+          title="Import plugin manifest or .cube LUT"
+          onClick={() => universalImportInputRef.current?.click()}
+        >
+          <Upload size={13} />
+          <span>Upload</span>
+        </button>
+        <input
+          ref={universalImportInputRef}
+          type="file"
+          accept="application/json,.json,.cube,.glsl,.frag"
+          className="effect-import-input"
+          onChange={(event) => void importUniversalPlugin(event.currentTarget.files?.[0])}
+        />
       </div>
+      {importStatus ? <small className="effect-import-status">{importStatus}</small> : null}
 
       <div className="effect-search-bar">
         <Search size={14} aria-hidden="true" />
@@ -294,6 +560,24 @@ export function EffectGraphPanel({
 
       {/* Bottom strip — browsable square tiles. Transitions preview on hover; AI tools run on click. */}
       <div className="effect-strip-panel">
+        {lookTiles.length ? (
+          <div className="effect-strip-row">
+            <div className="effect-strip-head">
+              <span>Looks</span>
+              <Badge tone="muted">{lookTiles.length}</Badge>
+            </div>
+            <div className="effect-strip-track">
+              {lookTiles.slice(0, LOOK_STRIP_CAP).map(renderLookTile)}
+              {lookTiles.length > LOOK_STRIP_CAP ? (
+                <button type="button" className="transition-show-more" onClick={() => { setLookGalleryCategory("all"); setLookGalleryOpen(true); }}>
+                  <span className="transition-show-more-plus">+{lookTiles.length - LOOK_STRIP_CAP}</span>
+                  <span>Show more</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         {transitionTiles.length ? (
           <div className="effect-strip-row">
             <div className="effect-strip-head">
@@ -364,6 +648,78 @@ export function EffectGraphPanel({
       {/* Full transitions gallery ("Show more") — portalled to <body> so it overlays the whole editor,
           not just the effects panel (whose transform/overflow would otherwise trap a fixed child).
           Grouped by industry-standard category with filter chips + labeled sections. */}
+      {lookGalleryOpen && typeof document !== "undefined"
+        ? createPortal(
+            (() => {
+              const matching = catalog.look.filter(matchesQuery);
+              const itemsFor = (id: LookGroup) => matching.filter((item) => item.kind === "look" && item.group === id);
+              const nonEmpty = lookGalleryCategories.filter((cat) => itemsFor(cat.id).length > 0);
+              const shownSections = lookGalleryCategory === "all" ? nonEmpty : nonEmpty.filter((cat) => cat.id === lookGalleryCategory);
+              return (
+                <div className="transition-gallery-portal" onClick={() => setLookGalleryOpen(false)}>
+                  <div className="transition-gallery" onClick={(event) => event.stopPropagation()}>
+                    <div className="transition-gallery-head">
+                      <h3>Looks</h3>
+                      <Badge tone="muted">{matching.length}</Badge>
+                      <button
+                        type="button"
+                        className="transition-gallery-import"
+                        title="Import look manifest"
+                        aria-label="Import look manifest"
+                        onClick={() => universalImportInputRef.current?.click()}
+                      >
+                        <Upload size={15} />
+                        <span>Upload</span>
+                      </button>
+                      <button type="button" className="transition-gallery-close" aria-label="Close" onClick={() => setLookGalleryOpen(false)}>
+                        <X size={16} />
+                      </button>
+                    </div>
+                    <div className="transition-gallery-chips">
+                      <button
+                        type="button"
+                        className={`transition-gallery-chip ${lookGalleryCategory === "all" ? "is-active" : ""}`}
+                        onClick={() => setLookGalleryCategory("all")}
+                      >
+                        All
+                      </button>
+                      {nonEmpty.map((cat) => (
+                        <button
+                          key={cat.id}
+                          type="button"
+                          className={`transition-gallery-chip ${lookGalleryCategory === cat.id ? "is-active" : ""}`}
+                          onClick={() => setLookGalleryCategory(cat.id)}
+                        >
+                          {cat.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="transition-gallery-body">
+                      {shownSections.length === 0 ? (
+                        <small className="effect-panel-hint">{`No looks match “${query.trim()}”.`}</small>
+                      ) : (
+                        shownSections.map((cat) => {
+                          const items = itemsFor(cat.id);
+                          return (
+                            <section className="transition-gallery-section" key={cat.id}>
+                              <div className="transition-gallery-section-head">
+                                <span>{cat.label}</span>
+                                <Badge tone="muted">{items.length}</Badge>
+                              </div>
+                              <div className="transition-gallery-grid">{items.map(renderLookTile)}</div>
+                            </section>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })(),
+            document.body
+          )
+        : null}
+
       {galleryOpen && typeof document !== "undefined"
         ? createPortal(
             (() => {
@@ -375,8 +731,21 @@ export function EffectGraphPanel({
                 <div className="transition-gallery-portal" onClick={() => setGalleryOpen(false)}>
                   <div className="transition-gallery" onClick={(event) => event.stopPropagation()}>
                     <div className="transition-gallery-head">
-                      <h3>Transitions</h3>
+                      <div className="transition-gallery-title">
+                        <h3>Transitions</h3>
+                        <small>Applies to the selected clip's right cut first, then left cut.</small>
+                      </div>
                       <Badge tone="muted">{matching.length}</Badge>
+                      <button
+                        type="button"
+                        className="transition-gallery-import"
+                        title="Import transition manifest"
+                        aria-label="Import transition manifest"
+                        onClick={() => universalImportInputRef.current?.click()}
+                      >
+                        <Upload size={15} />
+                        <span>Upload</span>
+                      </button>
                       <button type="button" className="transition-gallery-close" aria-label="Close" onClick={() => setGalleryOpen(false)}>
                         <X size={16} />
                       </button>

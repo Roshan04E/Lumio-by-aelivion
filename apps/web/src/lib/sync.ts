@@ -21,7 +21,7 @@
  * asset-blob-store.ts. No DB/shared type changes.
  */
 
-import type { ProjectGraph, SourceAsset } from "@reelforge/shared";
+import type { ProjectGraph, SourceAsset } from "@lumio-by-aelivion/shared";
 import {
   apiRequest,
   AuthRequiredError,
@@ -36,7 +36,7 @@ import {
 } from "./api";
 import { getAssetBlobStore } from "./asset-blob-store";
 
-const SYNC_KEY = "reelforge_sync_state";
+const SYNC_KEY = "lumio_sync_state";
 const LOCAL_PROJECT_PREFIX = "project_local_";
 const LOCAL_ASSET_PREFIX = "asset_local_";
 const SAVE_DEBOUNCE_MS = 800;
@@ -219,6 +219,27 @@ export function stopMonitor(): void {
 /** Map an id the UI holds (possibly a promoted local id) to the live server id. */
 export function resolveProjectId(id: string): string {
   return readState().projects[id]?.serverId ?? id;
+}
+
+/**
+ * Every id a project may be stored under, given ANY id the UI holds — the id itself, its mapped server id
+ * (if this is a promoted local draft), and its local id (if this is a server id whose local record is keyed
+ * differently). A local lookup must try all of these: after promotion the localStorage record can be keyed
+ * by the local id while the UI/route holds the server id (or vice-versa), and searching only one id is what
+ * makes `getProject` miss and fabricate a blank project on a transient server failure.
+ */
+export function candidateProjectIds(id: string): string[] {
+  const ids = new Set<string>([id]);
+  const state = readState();
+  const serverId = state.projects[id]?.serverId;
+  if (serverId) ids.add(serverId);
+  for (const record of Object.values(state.projects)) {
+    if (record.serverId === id || record.localId === id) {
+      ids.add(record.localId);
+      if (record.serverId) ids.add(record.serverId);
+    }
+  }
+  return [...ids];
 }
 
 /** Record a project that was created directly on the server (online) as already synced. */

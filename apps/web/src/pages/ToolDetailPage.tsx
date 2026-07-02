@@ -64,7 +64,7 @@ import {
   type ToolAdapterType,
   type ToolRun,
   type TranscriptSegment,
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { AiRotoToolPanel } from "./AiRotoToolPanel";
 import { RemovePersonToolPanel } from "./RemovePersonToolPanel";
 import { SmartFollowTextToolPanel } from "./SmartFollowTextToolPanel";
@@ -732,7 +732,7 @@ export function ToolDetailPage() {
       setHighlightedWords(artifact.style.highlightedWords.join(", "));
       setCaptionStyleOverrides(artifact.style.segmentStyleOverrides ?? {});
       setLastLocalTranscript(artifact.transcript);
-      setLocalTranscriptionStatus("Imported ReelForge caption artifact.");
+      setLocalTranscriptionStatus("Imported Lumio caption artifact.");
       return;
     }
 
@@ -757,7 +757,7 @@ export function ToolDetailPage() {
         : format === "srt"
           ? exportTranscriptToSrt(transcript)
           : exportTranscriptToVtt(transcript);
-    const extension = format === "json" ? "reelforge-captions.json" : format;
+    const extension = format === "json" ? "lumio-captions.json" : format;
     downloadTextFile(`auto-captions.${extension}`, body, format === "json" ? "application/json" : "text/plain");
   }
 
@@ -2444,7 +2444,7 @@ function AutoCaptionsPanel({
           ) : null}
 
           <div className="caption-interchange-panel">
-            <p>Move captions between ReelForge, editors, chat agents, and subtitle tools.</p>
+            <p>Move captions between Lumio, editors, chat agents, and subtitle tools.</p>
             <div className="caption-interchange-actions">
               <button type="button" onClick={() => onExportCaptionData("json")}>
                 <FileJson size={13} />

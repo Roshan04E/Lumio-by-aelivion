@@ -1,4 +1,4 @@
-import type { StockOrientation, StockResult, StockVariant } from "@reelforge/shared";
+import type { StockOrientation, StockResult, StockVariant } from "@lumio-by-aelivion/shared";
 import { env } from "../config/env";
 import { HttpError } from "../lib/http";
 
@@ -280,12 +280,43 @@ export async function searchStock(
     : searchPixabay(query, type, page, orientation);
 }
 
-/** Download a stock media URL into a Buffer + filename, ready for saveBuffer(). */
+/**
+ * Download a stock media URL into a Buffer + filename, ready for saveBuffer().
+ *
+ * Resilient to the CDN closing the connection mid-stream (large 4K videos), which surfaced as an
+ * uncaught undici `TypeError: terminated` (`UND_ERR_SOCKET: other side closed`). Adds a per-attempt
+ * timeout (so a stalled transfer can't hang the request), one retry on a network drop, and a clean
+ * `HttpError` on final failure so the client gets a useful message instead of a raw 500.
+ */
 export async function downloadStockMedia(downloadUrl: string, externalId: string, type: StockMediaType) {
   if (!downloadUrl) throw new HttpError(400, "Missing download URL");
-  const res = await fetch(downloadUrl);
-  if (!res.ok) throw new HttpError(502, `Failed to download stock media (${res.status})`);
-  const arrayBuffer = await res.arrayBuffer();
   const ext = type === "video" ? "mp4" : "jpg";
-  return { buffer: Buffer.from(arrayBuffer), fileName: `stock-${externalId}.${ext}` };
+  const maxAttempts = 2;
+  const timeoutMs = 120_000; // large videos can be slow; abort a stalled download rather than hang
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(downloadUrl, { signal: controller.signal });
+      if (!res.ok) {
+        // A definitive HTTP failure (404/403/…) — surface immediately, no retry.
+        throw new HttpError(502, `Failed to download stock media (${res.status})`);
+      }
+      const arrayBuffer = await res.arrayBuffer();
+      return { buffer: Buffer.from(arrayBuffer), fileName: `stock-${externalId}.${ext}` };
+    } catch (error) {
+      if (error instanceof HttpError) throw error; // status error → don't retry
+      lastError = error; // network drop / timeout / "terminated" → retry once
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : "connection closed";
+  throw new HttpError(
+    502,
+    `Stock download was interrupted (${reason}). Please retry, or pick a lower-resolution variant.`
+  );
 }

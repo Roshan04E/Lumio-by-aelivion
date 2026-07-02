@@ -8,7 +8,16 @@
  * hands this pipeline plain, transferable data.
  */
 
-import { expandEffectRegionMasks, getCompositionFontsUsed, type TimelineComposition, type TimelineLayer } from "@reelforge/shared";
+import {
+  expandEffectRegionMasks,
+  getCompositionFontsUsed,
+  registerLookManifests,
+  registerTransitionManifests,
+  type PluginLookManifest,
+  type PluginTransitionManifest,
+  type TimelineComposition,
+  type TimelineLayer
+} from "@lumio-by-aelivion/shared";
 import { MediaEncoder, type ExportFormat } from "./video-encoder";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
 import { clipSourceKey, createFrameProvider, type FrameProvider } from "./source-decoder";
@@ -26,6 +35,10 @@ export interface ExportCoreInput {
   /** Pre-mixed audio PCM (null when the timeline is silent). */
   audio: MixedAudioChannels | null;
   format: ExportFormat;
+  /** Imported transition definitions needed for custom transition ids stored in transitionIn.kind. */
+  transitionManifests?: PluginTransitionManifest[] | undefined;
+  /** Imported creative looks needed for creativeLook effect names stored on clips/adjustment layers. */
+  lookManifests?: PluginLookManifest[] | undefined;
   /** Export frame rate. Defaults to the composition's fps; lets the user export at a different rate. */
   fps?: number | undefined;
   /**
@@ -147,6 +160,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 /** Render `input` to an MP4/WebM Blob. Safe to run on the main thread or in a Worker. */
 export async function runExportCore(input: ExportCoreInput, handlers: ExportCoreHandlers = {}): Promise<Blob> {
+  if (input.lookManifests?.length) {
+    registerLookManifests(input.lookManifests, { override: true });
+  }
+  if (input.transitionManifests?.length) {
+    registerTransitionManifests(input.transitionManifests, { override: true });
+  }
   const { composition, urlMap, audio, format } = input;
   const { onProgress, signal } = handlers;
   const throwIfAborted = () => {
@@ -173,7 +192,8 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     let postroll = 0;
     for (const other of track.layers) {
       if (other.id !== layer.id && other.transitionIn && Math.abs(other.startSeconds - end) < 0.05) {
-        postroll = Math.max(postroll, other.transitionIn.durationSeconds);
+        // Clamp to the incoming clip's length — matches the clamped transition window (getActiveTransition).
+        postroll = Math.max(postroll, Math.min(other.transitionIn.durationSeconds, other.durationSeconds));
       }
     }
     return postroll;
@@ -216,7 +236,11 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
       try {
         sources.set(
           key,
-          await withTimeout(createFrameProvider(sourceDef.url, sourceDef.kind), SOURCE_LOAD_TIMEOUT_MS, `loadSource ${key}`)
+          await withTimeout(
+            createFrameProvider(sourceDef.url, sourceDef.kind),
+            SOURCE_LOAD_TIMEOUT_MS,
+            `loadSource ${key}`
+          )
         );
       } catch (error) {
         if (!key.startsWith("matte:")) throw error;

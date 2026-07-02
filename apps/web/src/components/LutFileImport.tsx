@@ -12,14 +12,15 @@
 
 import { useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
-import { lut3dToBase64, parseCubeFile } from "@reelforge/shared";
+import { lut3dToBase64, parseCubeFile } from "@lumio-by-aelivion/shared";
 
 interface Props {
   value: string;
-  onChange: (value: string) => void;
+  label?: string | undefined;
+  onChange: (value: string, name?: string) => void;
 }
 
-export function LutFileImport({ value, onChange }: Props) {
+export function LutFileImport({ value, label, onChange }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [filename, setFilename] = useState<string | null>(null);
@@ -42,7 +43,7 @@ export function LutFileImport({ value, onChange }: Props) {
         return;
       }
       setError(null);
-      onChange(lut3dToBase64(result.lut));
+      onChange(lut3dToBase64(result.lut), file.name);
     };
     reader.readAsText(file);
   }
@@ -57,7 +58,7 @@ export function LutFileImport({ value, onChange }: Props) {
   function handleClear() {
     setFilename(null);
     setError(null);
-    onChange("");
+    onChange("", "");
   }
 
   function handleDrop(evt: React.DragEvent) {
@@ -82,8 +83,8 @@ export function LutFileImport({ value, onChange }: Props) {
 
       {hasLut ? (
         <div className="lut-import-loaded">
-          <span className="lut-import-name" title={filename ?? "LUT loaded"}>
-            {filename ?? "LUT loaded"}
+          <span className="lut-import-name" title={filename ?? label ?? "LUT loaded"}>
+            {filename ?? label ?? "LUT loaded"}
           </span>
           <button
             className="lut-import-btn lut-import-btn--swap"

@@ -21,6 +21,7 @@ model User {
   payments           Payment[]
   walletTransactions WalletTransaction[]
   memoryFacts        MemoryFact[]
+  pluginPackages     PluginPackage[]
 }
 
 /**
@@ -79,6 +80,35 @@ model Tool {
   active      Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+model PluginPackage {
+  id            String   @id @default(cuid())
+  manifestId    String   @unique
+  kind          String
+  schemaVersion String
+  name          String
+  version       String
+  description   String?
+  authorName    String?
+  licenseType   String?
+  tags          Json
+  category      String?
+  thumbnail     String?
+  preview       String?
+  packageUrl    String?
+  manifest      Json
+  packageJson   Json?
+  compatibility Json?
+  active        Boolean  @default(true)
+  published     Boolean  @default(true)
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdBy     User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([kind, active, published])
+  @@index([updatedAt])
 }
 
 model SourceAsset {

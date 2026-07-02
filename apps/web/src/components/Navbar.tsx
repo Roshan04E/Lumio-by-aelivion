@@ -13,11 +13,11 @@ const navItems = [
 export function Navbar() {
   return (
     <header className="navbar">
-      <Link to="/" className="brand" aria-label="ReelForge Studio">
+      <Link to="/" className="brand" aria-label="Lumio">
         <span className="brand-mark">
           <Clapperboard size={20} />
         </span>
-        <span>ReelForge Studio</span>
+        <span>Lumio</span>
       </Link>
 
       <nav className="nav-links" aria-label="Main navigation">

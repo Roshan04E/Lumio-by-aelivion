@@ -66,6 +66,8 @@ export type RenderComparisonFixtureKey =
   | "region-blur"
   | "masked-blur"
   | "clip-region-blur"
+  | "two-region-effects"
+  | "feather-region-blur"
   | "tilt-3d"
   | "scaled-text"
   | "media-opacity"
@@ -88,6 +90,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "region-blur",
   "masked-blur",
   "clip-region-blur",
+  "two-region-effects",
+  "feather-region-blur",
   "tilt-3d",
   "scaled-text",
   "media-opacity",
@@ -243,6 +247,47 @@ const textRegionGradeEffects: TimelineLayer["effects"] = [
   }
 ];
 
+// two-region-effects: a blur region on the LEFT and a colour grade region on the RIGHT — DISJOINT. Locks the
+// region-effect independence root fix: neither effect may bleed into the other's region (the blur must not
+// appear in the graded region, and vice versa). Scene and DOM both run the shared `expandLayerEffectRegions`,
+// so they must agree; a regression that re-introduces cross-effect inheritance trips this.
+const twoRegionEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_two_region_blur",
+    type: "blur",
+    name: "Region Blur (left)",
+    enabled: true,
+    intensity: 100,
+    params: { amount: 24 },
+    masks: [createBoxMask("rectangle", 100, 500, 500, 1400, 0)]
+  },
+  {
+    id: "fixture_two_region_grade",
+    type: "brightnessContrast",
+    name: "Region Grade (right)",
+    enabled: true,
+    intensity: 100,
+    params: { exposure: -8, contrast: 44, saturation: 70, temperature: 64, tint: -24 },
+    masks: [createBoxMask("rectangle", 600, 500, 1000, 1400, 0)]
+  }
+];
+
+// feather-region-blur: a region blur whose mask carries a non-zero FEATHER. Locks the mask-feather class
+// (dim / hollow-ring / hard-edge regressions all change the feathered alpha ramp). Feather is a soft band, so
+// the scene (matte blur) and DOM (CSS mask feather) differ somewhat at the edge — a looser per-fixture bar
+// still trips a gross regression (a ring, a fully-dim matte, or a hard cut).
+const featherRegionBlurEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_feather_region_blur",
+    type: "blur",
+    name: "Feather Region Blur",
+    enabled: true,
+    intensity: 100,
+    params: { amount: 24 },
+    masks: [{ ...createBoxMask("ellipse", 300, 560, 780, 1360, 0), feather: 140 }]
+  }
+];
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -319,6 +364,10 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       // compound. The expansion must blur only inside (clipEllipse ∩ regionRect); the rest of the clip ellipse
       // stays sharp, and outside the clip is background. Region blur alone works — this checks the compound.
       return { effects: regionBlurEffects, fit: "cover", masks: [createBoxMask("ellipse", 220, 520, 860, 1400, 0)] };
+    case "two-region-effects":
+      return { effects: twoRegionEffects, fit: "cover" };
+    case "feather-region-blur":
+      return { effects: featherRegionBlurEffects, fit: "cover" };
     case "tilt-3d":
       return { effects: [], fit: "cover", tilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
     case "scaled-text":

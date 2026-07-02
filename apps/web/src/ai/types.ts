@@ -1,4 +1,4 @@
-import type { CostEstimate, TimelineComposition } from "@reelforge/shared";
+import type { CostEstimate, TimelineComposition } from "@lumio-by-aelivion/shared";
 import type { IntentScope } from "./planner/intent-continuity";
 
 export type { IntentScope } from "./planner/intent-continuity";

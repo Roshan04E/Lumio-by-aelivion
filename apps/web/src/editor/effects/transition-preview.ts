@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import type { TransitionDirection, TransitionKind } from "@reelforge/shared";
+import type { TransitionDirection, TransitionKind } from "@lumio-by-aelivion/shared";
 
 /**
  * Pure recipe that maps a transition (kind + params) and a 0..1 progress to CSS for a small gallery

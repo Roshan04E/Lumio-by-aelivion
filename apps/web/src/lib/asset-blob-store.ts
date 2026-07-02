@@ -24,8 +24,8 @@ export interface AssetBlobStore {
   remove: (id: string) => Promise<void>;
 }
 
-const OPFS_DIR = "reelforge-assets";
-const IDB_NAME = "reelforge-assets";
+const OPFS_DIR = "lumio-assets";
+const IDB_NAME = "lumio-assets";
 const IDB_STORE = "blobs";
 
 // Per-session cache so repeated resolves return one stable object URL (and we can revoke).

@@ -22,9 +22,13 @@ export function clipSourceKey(layerId: string, assetId: string): string {
 }
 
 /** Pick the fastest provider for a source; `<video>` is the universal fallback. */
-export async function createFrameProvider(url: string, kind: "video" | "image"): Promise<FrameProvider> {
+export async function createFrameProvider(
+  url: string,
+  kind: "video" | "image",
+  opts: { preferSoftware?: boolean } = {}
+): Promise<FrameProvider> {
   if (kind === "image") return createImageSource(url);
-  const webcodecs = await createWebCodecsVideoSource(url).catch(() => null);
+  const webcodecs = await createWebCodecsVideoSource(url, opts).catch(() => null);
   if (webcodecs) return webcodecs;
   // The <video> fallback needs the DOM; inside the export Worker there is none, so signal the
   // caller (worker → main thread) to retry this export on the main thread where <video> works.
@@ -68,14 +72,31 @@ export async function createVideoSource(url: string): Promise<FrameProvider> {
   let lastSeekedTo = -1;
   async function seek(sourceTimeSeconds: number) {
     const target = Math.max(0, Math.min(sourceTimeSeconds, Math.max(0, (video.duration || 0) - 1e-3)));
-    if (Math.abs(target - lastSeekedTo) < 1e-4 && video.readyState >= 2) return;
-    await new Promise<void>((resolve) => {
-      const onSeeked = () => {
+    if ((Math.abs(target - lastSeekedTo) < 1e-4 || Math.abs(video.currentTime - target) < 1e-4) && video.readyState >= 2) {
+      lastSeekedTo = target;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
         video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        reject(new Error(`Timed out seeking video source for export to ${target.toFixed(3)}s`));
+      }, 10_000);
+      const onSeeked = () => {
+        clearTimeout(timer);
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
         lastSeekedTo = target;
         resolve();
       };
+      const onError = () => {
+        clearTimeout(timer);
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        reject(new Error(`Failed seeking video source for export to ${target.toFixed(3)}s`));
+      };
       video.addEventListener("seeked", onSeeked);
+      video.addEventListener("error", onError);
       video.currentTime = target;
     });
   }

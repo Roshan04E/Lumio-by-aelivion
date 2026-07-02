@@ -145,7 +145,7 @@ remote stock URL or a browser blob URL in a clip that needs to export on the ser
   (worker/API) holds the query engine. Stop dev, then `pnpm db:generate`.
 - **Migrations need DATABASE_URL**: the API reads a default from `apps/api/src/config/env.ts`,
   but the Prisma CLI does not. Run migrations with
-  `DATABASE_URL="postgresql://reelforge:reelforge@localhost:5432/reelforge?schema=public"` set,
+  `DATABASE_URL="postgresql://lumio:lumio@localhost:5432/lumio?schema=public"` set,
   e.g. `npx prisma migrate dev --schema prisma/schema.prisma --name <name> --skip-generate`.
 - **exactOptionalPropertyTypes**: Prisma Json columns reject an explicit `undefined`; set those
   keys conditionally (spread `...(x ? {col:x} : {})`).

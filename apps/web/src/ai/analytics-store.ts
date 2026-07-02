@@ -3,7 +3,7 @@ import {
   hydrateActionAnalytics,
   subscribeActionAnalytics,
   type ActionAnalyticsSnapshot
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 
 /**
  * Host-side persistence for the shared analytics counters (P7). The shared

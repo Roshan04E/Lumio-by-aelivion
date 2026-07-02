@@ -62,7 +62,10 @@ function rejectAfter(ms: number): Promise<never> {
   return new Promise((_, reject) => setTimeout(() => reject(new Error("mp4box timeout")), ms));
 }
 
-export async function createWebCodecsVideoSource(url: string): Promise<FrameProvider | null> {
+export async function createWebCodecsVideoSource(
+  url: string,
+  opts: { preferSoftware?: boolean } = {}
+): Promise<FrameProvider | null> {
   if (typeof VideoDecoder === "undefined" || typeof EncodedVideoChunk === "undefined") return null;
 
   let buffer: ArrayBuffer;
@@ -158,6 +161,11 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
     if (trackW) config.codedWidth = trackW;
     if (trackH) config.codedHeight = trackH;
     if (description) config.description = description;
+    // Prefer SOFTWARE decode for export when asked. On an MP4 (H.264) export the hardware H.264 ENCODER and
+    // hardware H.264 decode of an expensive source (high level / sparse keyframes) contend for the GPU's one
+    // H.264 block; the decoder silently starves and the clip exports black. SW decode is LOSSLESS (identical
+    // pixels) so quality is untouched, and it frees the HW block for the full-quality hardware encoder.
+    if (opts.preferSoftware) config.hardwareAcceleration = "prefer-software";
     return config;
   };
   const configure = () => decoder.configure(buildConfig());
@@ -181,6 +189,11 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
   let fed = 0;
   let current: VideoFrame | null = null;
   let lastMicros = -1;
+  // WebCodecs invariant: after configure()/reset()/flush(), the next decode() MUST be a keyframe. All the
+  // seek paths (first call, backward jump, resetTo) already point `fed` at a keyframe, but the mid-stream
+  // drain/EOS flushes below do not — feeding the next delta after a flush throws DataError and (via the
+  // catch) poisons the whole provider → the clip goes black. This flag makes flush-then-continue legal.
+  let needKey = false;
 
   const keyAtOrBefore = (chunkIndex: number) => {
     let k = keyIndices[0]!;
@@ -216,6 +229,16 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
     fed = keyAtOrBefore(chunkIndex);
   }
 
+  function consumeDecodedUpTo(micros: number): boolean {
+    let consumed = false;
+    while (queue.length && queue[0]!.timestamp <= micros) {
+      if (current) current.close();
+      current = queue.shift()!;
+      consumed = true;
+    }
+    return consumed;
+  }
+
   async function getFrame(sourceTimeSeconds: number): Promise<CanvasImageSource | null> {
     if (failed) return null;
     const micros = Math.max(0, Math.round(sourceTimeSeconds * 1_000_000));
@@ -226,21 +249,28 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
     }
     lastMicros = micros;
 
-    // Look-ahead / pinned-frame budget. Export reads forward one frame at a time, so a small window is
-    // plenty — and each pinned VideoFrame is GPU memory (~6MB at 1080p). 32 frames (~190MB) alongside the
-    // scene compositor's RTTs was exhausting the export Worker's GPU process → "lost WebGL context" + black
-    // tail. 8 keeps decode fed without the pressure.
-    const MAX = 8;
+    // Feed window. ONCE the decoder is emitting, keep it TIGHT: each pinned VideoFrame is ~6MB GPU memory,
+    // and 32+ frames alongside the scene compositor's RTTs exhausted the export Worker's GPU process → "lost
+    // WebGL context" + black tail. But BEFORE the first output the decoder is filling its reorder buffer
+    // (B-frames / sparse keyframes) and needs MORE than 8 chunks queued to emit frame 1 — capping at 8 during
+    // warmup looks like a false stall and used to trip the corrupting drain-flush below (the DataError black
+    // clip). So allow a generous window until the first frame appears, then clamp.
+    const OUTPUT_MAX = 8;
+    const WARMUP_MAX = 64;
+    let keyRetryDone = false;
     let guard = 0;
     let stalledRounds = 0;
     let lastProgress = -1;
     while (!failed && guard++ < 50000) {
+      consumeDecodedUpTo(micros);
       if (queue.length > 0 && queue[queue.length - 1]!.timestamp > micros) break; // decoded past target
+      const MAX = outputCount === 0 ? WARMUP_MAX : OUTPUT_MAX;
       if (fed >= chunks.length) {
         try {
           // End of stream — flush to emit anything still buffered. Bounded so a stuck flush can't hang the
           // whole export at one frame near a clip's tail.
           await Promise.race([decoder.flush(), rejectAfter(5000)]);
+          needKey = true; // post-flush: a later getFrame must resume from a keyframe
         } catch {
           failed = true;
         }
@@ -248,11 +278,36 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
       }
       let fedThisRound = false;
       while (fed < chunks.length && decoder.decodeQueueSize < MAX && queue.length < MAX) {
+        // Post-flush/configure the decoder demands a keyframe first — rewind to the keyframe at/before the
+        // target so we never feed a delta into a decoder that's waiting for an IDR (the DataError black-clip bug).
+        if (needKey && chunks[fed]!.type !== "key") fed = keyAtOrBefore(fed);
+        const chunk = chunks[fed]!;
         try {
-          decoder.decode(chunks[fed++]!);
+          decoder.decode(chunk);
+          if (chunk.type === "key") needKey = false;
+          fed += 1;
           fedThisRound = true;
-        } catch {
+        } catch (e) {
+          // "A key frame is required after configure()/flush()" — the decoder is waiting for an IDR but we fed
+          // a delta (a stray flush left it needing a key). RECOVER instead of permanently failing: rewind to
+          // the keyframe at/before here and retry once, so a single bad feed can't black out the whole clip.
+          const keyRequired = /key frame is required/i.test((e as Error)?.message ?? "");
+          if (keyRequired && !keyRetryDone) {
+            keyRetryDone = true;
+            needKey = true;
+            fed = keyAtOrBefore(fed);
+            if (webcodecsDebugEnabled()) {
+              console.warn(`[export] decode() key-required → recovering: rewind fed=${fed} outputs=${outputCount}`);
+            }
+            break; // leave the feed loop; outer loop re-enters and decodes the keyframe first
+          }
           failed = true;
+          if (webcodecsDebugEnabled()) {
+            console.warn(
+              `[export] decoder.decode() threw → failed. state=${decoder.state} qsize=${decoder.decodeQueueSize} fed=${fed}/${chunks.length} outputs=${outputCount}`,
+              e
+            );
+          }
           break;
         }
       }
@@ -266,14 +321,27 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
       } else {
         stalledRounds += 1;
       }
-      // Genuinely stuck: input saturated, zero output, no progress for several rounds → the decoder is
-      // buffering and only emits on flush (some B-frame streams). Force ONE drain. Non-fatal: if it still
-      // produces nothing, give up to the <video> fallback rather than killing a decoder that just warmed
-      // up slowly.
+      // Warmup (no output yet): the decoder is filling its reorder buffer, NOT stuck. The window already grew
+      // to WARMUP_MAX above; do NOT flush it (flushing a warming decoder then feeding a delta is exactly the
+      // "key frame is required" DataError that black-outed clips). If it's saturated with zero output for a
+      // long stretch, it genuinely can't decode here → bail to the <video> fallback rather than corrupt it.
+      if (outputCount === 0) {
+        if (!fedThisRound && stalledRounds >= 24) {
+          if (webcodecsDebugEnabled()) {
+            console.warn(`[export] warmup produced no output (qsize=${decoder.decodeQueueSize} fed=${fed}/${chunks.length}) → bail to <video>`);
+          }
+          break; // getFrame returns null → probe/caller falls back to the <video> decoder
+        }
+        await yieldTask();
+        continue;
+      }
+      // Emitting but momentarily stuck: input saturated, zero NEW output, no progress for several rounds →
+      // some B-frame streams only release the tail on flush. Force ONE drain (safe now that output started).
       if (!fedThisRound && queue.length === 0 && stalledRounds >= 8) {
         const before = outputCount;
         try {
           await Promise.race([decoder.flush(), rejectAfter(5000)]);
+          needKey = true; // post-flush: the next fed chunk must be a keyframe (see feed loop above)
         } catch {
           /* non-fatal — fall through to the bail check */
         }
@@ -283,11 +351,13 @@ export async function createWebCodecsVideoSource(url: string): Promise<FrameProv
       await yieldTask();
     }
 
-    while (queue.length && queue[0]!.timestamp <= micros) {
-      if (current) current.close();
-      current = queue.shift()!;
-    }
+    consumeDecodedUpTo(micros);
     if (!current && queue.length) current = queue.shift()!;
+    if (!current && webcodecsDebugEnabled()) {
+      console.warn(
+        `[export] getFrame → null. failed=${failed} state=${decoder.state} qsize=${decoder.decodeQueueSize} queue=${queue.length} fed=${fed}/${chunks.length} outputs=${outputCount} micros=${micros} guard=${guard}`
+      );
+    }
     return current;
   }
 

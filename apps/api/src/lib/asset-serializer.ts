@@ -1,4 +1,4 @@
-import type { AssetAiRef, AssetExternalRef, AssetSource, SourceAsset } from "@reelforge/shared";
+import type { AssetAiRef, AssetExternalRef, AssetSource, SourceAsset } from "@lumio-by-aelivion/shared";
 
 /** The Prisma `SourceAsset` row shape (subset we read). */
 interface SourceAssetRow {

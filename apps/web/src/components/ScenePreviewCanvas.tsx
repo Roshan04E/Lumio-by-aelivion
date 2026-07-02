@@ -34,14 +34,26 @@ import {
   type SceneTextureSource,
   type TimelineLayer,
   type ScenePreviewTransition,
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 
-export type { ScenePreviewTransition } from "@reelforge/shared";
+export type { ScenePreviewTransition } from "@lumio-by-aelivion/shared";
 
 // After any change (scrub/seek/mount) keep compositing for this long so async work — a clip's graded
 // frame, a text raster — lands on screen. While PLAYING we composite every frame regardless.
 const SCENE_SETTLE_MS = 600;
+
+// Bounded GPU recovery. On a WebGL context loss the preview used to latch PERMANENTLY to the DOM path — which
+// is NOT pixel-identical to the scene compositor, so a transient GPU eviction meant a lasting fidelity + quality
+// regression. Instead we rebuild the compositor on a fresh context up to MAX_SCENE_REBUILDS times (backoff
+// below), keeping the EXACT GPU scene; only after the budget is exhausted do we degrade to DOM, once, quietly.
+// The context governor (getGlGovernorEnabled) keeps large timelines under the browser cap so a loss is rare in
+// the first place; this is the safety net for when one still happens.
+const MAX_SCENE_REBUILDS = 3;
+const RECOVERY_BACKOFF_MS = [150, 300, 600];
+// A sustained run of clean frames after a rebuild resets the attempt budget, so a later unrelated loss gets a
+// fresh set of retries instead of immediately falling to DOM.
+const HEALTHY_FRAMES_TO_RESET = 120;
 
 export interface ScenePreviewCanvasProps {
   /** ALL scene-eligible visual layers (media + text/shape) in back-to-front (z) order. Includes the two
@@ -72,6 +84,8 @@ export interface ScenePreviewCanvasProps {
   renderScale?: number;
   /** Active junction transitions at `currentTime` — the scene pass mixes them in (Phase 4.2). */
   transitions?: ScenePreviewTransition[];
+  /** Called after the scene compositor successfully renders a frame. Used by live preview proxy coverage. */
+  onFrameRendered?: ((timeSeconds: number) => void) | undefined;
   /**
    * Region-blur clone → base layer id. A region-mask blur expands a media layer into [base, blurred-region
    * clone]; the clone's decoded+graded media source is IDENTICAL to its base (blur is a GPU pass here, not
@@ -94,6 +108,7 @@ export function ScenePreviewCanvas({
   redrawRef,
   renderScale = 1,
   transitions = [],
+  onFrameRendered,
   mediaSourceAlias,
 }: ScenePreviewCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -112,6 +127,10 @@ export function ScenePreviewCanvas({
   // leaves the draw set so we don't leak WebGL contexts.
   const gradeRenderersRef = useRef<Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>>(new Map());
   const failedRef = useRef(false);
+  // Bounded-recovery bookkeeping (see MAX_SCENE_REBUILDS above).
+  const rebuildAttemptsRef = useRef(0);
+  const goodFramesRef = useRef(0);
+  const recoveryTimerRef = useRef<number | null>(null);
   const onFailureRef = useRef(onFailure);
   onFailureRef.current = onFailure;
   const stopLoop = () => {
@@ -161,6 +180,31 @@ export function ScenePreviewCanvas({
     sharedGradeRenderersRef.current.clear();
   };
   const isContextLostError = (error: unknown) => error instanceof Error && (error.message === SCENE_COMPOSITOR_CONTEXT_LOST || error.message === MEDIA_RENDERER_CONTEXT_LOST);
+  /**
+   * A recoverable GPU context loss happened. Schedule a bounded rebuild of the compositor on a fresh context
+   * (backoff) rather than degrading to the DOM path. Only once the retry budget is exhausted do we hand off to
+   * DOM — once, quietly. Idempotent while a rebuild is already pending; logs once per loss, not per frame.
+   */
+  const scheduleSceneRecovery = () => {
+    if (disposedRef.current || recoveryTimerRef.current != null) return;
+    if (rebuildAttemptsRef.current >= MAX_SCENE_REBUILDS) {
+      console.warn("ScenePreviewCanvas: GPU compositor context lost after retries; falling back to DOM path");
+      onFailureRef.current?.();
+      return;
+    }
+    const attempt = rebuildAttemptsRef.current;
+    rebuildAttemptsRef.current = attempt + 1;
+    goodFramesRef.current = 0;
+    const delay = RECOVERY_BACKOFF_MS[Math.min(attempt, RECOVERY_BACKOFF_MS.length - 1)] ?? 600;
+    console.warn(`ScenePreviewCanvas: GPU compositor context lost; controlled rebuild ${attempt + 1}/${MAX_SCENE_REBUILDS} in ${delay}ms`);
+    recoveryTimerRef.current = window.setTimeout(() => {
+      recoveryTimerRef.current = null;
+      if (disposedRef.current) return;
+      // Bumping recoveryTick re-runs the create effect (which clears failed/contextLost flags and rebuilds the
+      // compositor on a fresh context) and the rAF-loop effect.
+      setRecoveryTick((tick) => tick + 1);
+    }, delay);
+  };
   const fail = (where: string, error: unknown) => {
     if (failedRef.current) return;
     failedRef.current = true;
@@ -168,15 +212,16 @@ export function ScenePreviewCanvas({
     disposeResources();
     if (isContextLostError(error)) {
       contextLostRef.current = true;
-      console.warn("ScenePreviewCanvas: GPU compositor context lost; falling back to DOM path");
-    } else {
-      console.error(`ScenePreviewCanvas: GPU compositor ${where} failed - falling back to DOM path`, error);
+      // Recoverable — rebuild the exact GPU scene instead of latching to the DOM path.
+      scheduleSceneRecovery();
+      return;
     }
+    console.error(`ScenePreviewCanvas: GPU compositor ${where} failed - falling back to DOM path`, error);
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
-  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, mediaSourceAlias });
-  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, mediaSourceAlias };
+  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias });
+  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias };
   // Event-driven redraw: composite while playing, or for a settle window after any input change /
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
@@ -195,6 +240,10 @@ export function ScenePreviewCanvas({
       disposedRef.current = true;
       stopLoop();
       disposeResources();
+      if (recoveryTimerRef.current != null) {
+        window.clearTimeout(recoveryTimerRef.current);
+        recoveryTimerRef.current = null;
+      }
       if (redrawRef?.current === requestDraw) redrawRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -211,6 +260,9 @@ export function ScenePreviewCanvas({
       matteCacheRef.current = new SceneMaskMatteCache(width, height);
       // A late async raster (text/font) re-arms the settle window so it lands on screen even when idle.
       rasterizerRef.current = new SceneTextRasterizer(requestDraw);
+      // Repaint the current frame after a (re)build — including a recovery rebuild (recoveryTick), so a paused
+      // preview immediately shows the restored GPU scene instead of a blank canvas until the next input change.
+      requestDraw();
     } catch (error) {
       compositorRef.current = null;
       fail("init", error);
@@ -231,11 +283,14 @@ export function ScenePreviewCanvas({
       failedRef.current = true;
       stopLoop();
       disposeResources();
-      console.warn("ScenePreviewCanvas: WebGL context lost; preview compositor stopped");
-      onFailureRef.current?.();
+      // Rebuild the GPU compositor (bounded) instead of a permanent DOM fallback — keeps the exact scene.
+      scheduleSceneRecovery();
     };
     const handleRestored = () => {
       if (disposedRef.current) return;
+      // The browser restored the context on its own — a clean recovery, so give it a fresh retry budget.
+      rebuildAttemptsRef.current = 0;
+      goodFramesRef.current = 0;
       contextLostRef.current = false;
       failedRef.current = false;
       setRecoveryTick((tick) => tick + 1);
@@ -256,7 +311,7 @@ export function ScenePreviewCanvas({
   drawRef.current = () => {
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
-    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, renderScale: rScale, transitions: tPairs, mediaSourceAlias: alias } = inputsRef.current;
+    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
@@ -356,6 +411,9 @@ export function ScenePreviewCanvas({
     const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t };
     try {
       compositor.renderFrame(spec);
+      if (playing) {
+        frameRendered?.(t);
+      }
     } catch (error) {
       fail("render", error);
     }
@@ -370,10 +428,11 @@ export function ScenePreviewCanvas({
     const loop = () => {
       const compositor = compositorRef.current;
       if (cancelled || disposedRef.current || failedRef.current || contextLostRef.current || !compositor || compositor.isContextLost()) {
-        if (compositor?.isContextLost()) {
+        if (compositor?.isContextLost() && !failedRef.current) {
           contextLostRef.current = true;
           failedRef.current = true;
           disposeResources();
+          scheduleSceneRecovery();
         }
         rafRef.current = 0;
         return;
@@ -389,14 +448,25 @@ export function ScenePreviewCanvas({
           requestDraw();
         }
         const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-        if (inputsRef.current.isPlaying || now < activeUntilRef.current) drawRef.current();
+        if (inputsRef.current.isPlaying || now < activeUntilRef.current) {
+          drawRef.current();
+          // A sustained run of clean frames after a rebuild restores the full retry budget.
+          if (rebuildAttemptsRef.current > 0 && !failedRef.current && !contextLostRef.current) {
+            goodFramesRef.current += 1;
+            if (goodFramesRef.current >= HEALTHY_FRAMES_TO_RESET) {
+              rebuildAttemptsRef.current = 0;
+              goodFramesRef.current = 0;
+            }
+          }
+        }
       }
       const nextCompositor = compositorRef.current;
       if (cancelled || disposedRef.current || contextLostRef.current || failedRef.current || !nextCompositor || nextCompositor.isContextLost()) {
-        if (nextCompositor?.isContextLost()) {
+        if (nextCompositor?.isContextLost() && !failedRef.current) {
           contextLostRef.current = true;
           failedRef.current = true;
           disposeResources();
+          scheduleSceneRecovery();
         }
         rafRef.current = 0;
         return;

@@ -32,11 +32,55 @@ export type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
 let activeGlContexts = 0;
 let nextGlContextId = 1;
 
+/**
+ * Preview WebGL context budget (todo.md Phase 2). `target` is the count we try to stay at or below; `hardCap`
+ * is the ceiling above which the governor evicts the least-valuable idle context before allowing another
+ * allocation. Kept well under the browser's ~16 cap so preview never triggers a browser-side force-loss of the
+ * OLDEST context (which is how large timelines silently drop the GPU scene to the DOM path today).
+ */
+const PREVIEW_CONTEXT_TARGET = 3;
+const PREVIEW_CONTEXT_HARD_CAP = 4;
+/** Kinds the governor may evict — never the persistent root `scene-compositor`. */
+const EVICTABLE_KINDS: ReadonlySet<GlContextOwnerInfo["kind"]> = new Set(["media-renderer", "transition-compositor", "webgl-applicator"]);
+/**
+ * A context is only evictable once it has gone IDLE this long (no `touchContext` = not drawn). This is the
+ * safety that keeps a legitimately multi-track composition intact: every currently-VISIBLE layer is touched
+ * each frame, so only genuinely abandoned contexts (a clip scrolled out of the active window, a stale preload)
+ * are reclaimed. If everything on screen is active we simply run transiently over the cap — still far under
+ * the browser's ~16 — rather than evict a live layer and flash it black.
+ */
+const EVICT_IDLE_MS = 200;
+
+/**
+ * ENFORCEMENT gate. Telemetry (owner labels, `__rfGlContextBudget`, the active count) is ALWAYS live; the
+ * governor only *acts* (evicts on `requestContextSlot`) when this is on. The web app sets it once at startup
+ * from `getGlGovernorEnabled()` so this shared, framework-free module never reads a query param / localStorage.
+ */
+let governorEnabled = false;
+/** Disposers registered by evictable renderers so the governor can actually free an evicted context. */
+const glDisposers = new Map<number, () => void>();
+
+/** Enable/disable governor ENFORCEMENT (allocation eviction). Default off; telemetry is unaffected. */
+export function setGlGovernorEnabled(enabled: boolean): void {
+  governorEnabled = enabled;
+}
+
+export function isGlGovernorEnabled(): boolean {
+  return governorEnabled;
+}
+
+/** True when the live context count is at/over the soft target — used to pause background cache generation. */
+export function isGlBudgetOverTarget(): boolean {
+  return activeGlContexts >= PREVIEW_CONTEXT_TARGET;
+}
+
 export interface GlContextOwnerInfo {
   id: number;
   label: string;
   kind: "scene-compositor" | "media-renderer" | "transition-compositor" | "webgl-applicator" | "unknown";
   createdAt: number;
+  /** Last frame this context was drawn with (`touchContext`); drives least-recently-used eviction. */
+  lastUsedAt: number;
   disposedAt?: number;
   canvasConnected?: boolean | undefined;
   contextLost?: boolean | undefined;
@@ -98,11 +142,13 @@ export function noteGlContextCreated(gl?: WebGL2RenderingContext, options: GlCon
   }
   activeGlContexts += 1;
   if (gl) {
+    const created = nowMs();
     const owner = {
       id: nextGlContextId++,
       label: options.label ?? options.kind ?? "unknown",
       kind: options.kind ?? "unknown",
-      createdAt: nowMs(),
+      createdAt: created,
+      lastUsedAt: created,
       canvasConnected: (gl.canvas as { isConnected?: boolean }).isConnected,
       contextLost: gl.isContextLost(),
     };
@@ -110,6 +156,64 @@ export function noteGlContextCreated(gl?: WebGL2RenderingContext, options: GlCon
     glOwnerRecords.set(owner.id, owner);
   }
   publishActiveGlContextCount();
+}
+
+/**
+ * Mark a context as used THIS frame so least-recently-used eviction targets genuinely idle contexts (e.g. a
+ * clip that scrolled out of the active window and stopped drawing) rather than the one being composited now.
+ * Cheap (a timestamp write); renderers call it per draw. No-op for an unknown/disposed context.
+ */
+export function touchContext(gl: WebGL2RenderingContext): void {
+  const owner = glOwners.get(gl);
+  if (owner && owner.disposedAt == null) {
+    owner.lastUsedAt = nowMs();
+  }
+}
+
+/**
+ * Register the disposer an evictable renderer runs when the governor reclaims its context. The disposer MUST
+ * fully tear the renderer down (its own `dispose()` → `releaseContextIfDetached` → `noteGlContextDisposed`),
+ * and leave the owner able to lazily re-create later. Keyed by the context's owner id; cleared on disposal.
+ */
+export function registerContextDisposer(gl: WebGL2RenderingContext, dispose: () => void): void {
+  const owner = glOwners.get(gl);
+  if (owner) {
+    glDisposers.set(owner.id, dispose);
+  }
+}
+
+/**
+ * Reserve room for ONE new preview context. When the governor is enabled and we're at the hard cap, evict the
+ * least-recently-used EVICTABLE context (never the root `scene-compositor`) via its registered disposer,
+ * repeating until under the cap or nothing evictable remains. No-op when the governor is disabled — telemetry
+ * stays accurate either way. Call this immediately BEFORE creating a per-layer context.
+ */
+export function requestContextSlot(): void {
+  if (!governorEnabled) return;
+  let guard = 0;
+  while (activeGlContexts >= PREVIEW_CONTEXT_HARD_CAP && guard < 16) {
+    guard += 1;
+    const idleBefore = nowMs() - EVICT_IDLE_MS;
+    const victim = [...glOwnerRecords.values()]
+      .filter(
+        (owner) =>
+          owner.disposedAt == null &&
+          EVICTABLE_KINDS.has(owner.kind) &&
+          glDisposers.has(owner.id) &&
+          owner.lastUsedAt <= idleBefore
+      )
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+    // Nothing IDLE enough to reclaim → everything live is genuinely on screen. Allow the allocation and run
+    // briefly over the cap (still far under the browser's ceiling) rather than evict a visible layer.
+    if (!victim) break;
+    const dispose = glDisposers.get(victim.id);
+    glDisposers.delete(victim.id);
+    try {
+      dispose?.();
+    } catch {
+      /* a failed disposer must not block allocation */
+    }
+  }
 }
 
 export function noteGlContextDisposed(gl?: WebGL2RenderingContext): void {
@@ -123,6 +227,7 @@ export function noteGlContextDisposed(gl?: WebGL2RenderingContext): void {
       owner.disposedAt = nowMs();
       owner.canvasConnected = (gl.canvas as { isConnected?: boolean }).isConnected;
       owner.contextLost = gl.isContextLost();
+      glDisposers.delete(owner.id);
     }
   }
   activeGlContexts = Math.max(0, activeGlContexts - 1);
@@ -144,8 +249,8 @@ export function getGlContextOwnerInfo(gl: WebGL2RenderingContext): GlContextOwne
 export function getGlContextBudgetSnapshot(): { active: number; target: number; hardCap: number; owners: GlContextOwnerInfo[] } {
   return {
     active: activeGlContexts,
-    target: 3,
-    hardCap: 4,
+    target: PREVIEW_CONTEXT_TARGET,
+    hardCap: PREVIEW_CONTEXT_HARD_CAP,
     owners: Array.from(glOwnerRecords.values())
       .filter((owner) => owner.disposedAt == null)
       .map((owner) => ({ ...owner })),

@@ -147,8 +147,11 @@ export interface SceneTransitionDraw {
   /** Diagnostic-only source layer ids. Ignored by the renderer. */
   debugFromId?: string | undefined;
   debugToId?: string | undefined;
-  from: SceneLayerDraw;
-  to: SceneLayerDraw;
+  /** Outgoing/incoming clip GROUPS: each is the clip's base + its region-expansion (`__rfx_`) layers in
+   *  back-to-front order. The compositor composites each group into its side RTT (so every per-clip effect —
+   *  region blur/colour, future plugin region effects — renders THROUGH the transition), then mixes the two. */
+  from: SceneLayerDraw[];
+  to: SceneLayerDraw[];
   def: TransitionDefinition;
   /** EASED progress 0..1 (caller applies the definition's easing). */
   progress: number;
@@ -427,7 +430,7 @@ function sceneGlDebugEnabled(): boolean {
       localStorage?: { getItem: (key: string) => string | null };
     };
     const params = new URLSearchParams(global.location?.search ?? "");
-    return params.get("debugGl") === "1" || global.localStorage?.getItem("reelforge_debug_gl") === "1";
+    return params.get("debugGl") === "1" || global.localStorage?.getItem("lumio_debug_gl") === "1";
   } catch {
     return false;
   }
@@ -470,6 +473,8 @@ export class SceneCompositor {
   // 1×1 placeholder bound to the mask sampler when a layer has no mask (the shader won't sample it,
   // but a valid texture must stay bound to the unit).
   private readonly emptyTex: WebGLTexture;
+  // Reused 1px scratch for finish()'s materialization readback (export capture sync) — avoids per-frame alloc.
+  private readonly captureSyncPixel = new Uint8Array(4);
   // Present pass: a textured fullscreen triangle that copies the final accumulator to the canvas.
   private readonly presentProgram: WebGLProgram;
   private readonly presentVao: WebGLVertexArrayObject;
@@ -506,10 +511,18 @@ export class SceneCompositor {
   private plateRT: RenderTarget | null = null;
   private scratch1: RenderTarget | null = null;
   private scratch2: RenderTarget | null = null;
-  // Per-transition-side RTTs (each side rendered fully — effects + transform — over transparent, then
-  // mixed). Lazily allocated; comps with no transition pay zero VRAM.
+  // Per-transition-side RTT PAIRS. Each side is a clip NEST (base + its region-expansion layers) pre-composed
+  // to a finished image, then the two are mixed — the NLE pre-compose/nest model. Each side needs its own
+  // ping-pong pair (target + scratch) because the nest is built with the SAME multi-layer accumulator the main
+  // scene uses (which reads its previous contents as backdrop). Lazily allocated; comps with no transition pay
+  // zero VRAM.
   private sideA: RenderTarget | null = null;
+  private sideAScratch: RenderTarget | null = null;
   private sideB: RenderTarget | null = null;
+  private sideBScratch: RenderTarget | null = null;
+  // While pre-composing a nest, layers composite with NORMAL blend (the clip's own blend mode applies when the
+  // MIXED result lands on the main scene, not between the clip's own layers). Set only inside precomposeGroup.
+  private nestMode = false;
   // Per-transition-def compiled program cache (the SAME shaders TransitionCompositor uses, compiled in
   // THIS context so the mix runs without a second GL context).
   private readonly transitionPrograms = new Map<string, CompiledTransition>();
@@ -798,7 +811,9 @@ export class SceneCompositor {
     this.scratch1?.resize(width, height);
     this.scratch2?.resize(width, height);
     this.sideA?.resize(width, height);
+    this.sideAScratch?.resize(width, height);
     this.sideB?.resize(width, height);
+    this.sideBScratch?.resize(width, height);
   }
 
   /** Lazily allocate the comp-sized RTTs the blur/glow passes need (pooled across layers/frames). */
@@ -810,12 +825,14 @@ export class SceneCompositor {
     return { plate: this.plateRT, s1: this.scratch1, s2: this.scratch2 };
   }
 
-  /** Lazily allocate the two per-side RTTs a folded transition renders its full sides into. */
-  private transitionTargets(): { sideA: RenderTarget; sideB: RenderTarget } {
+  /** Lazily allocate the two per-side ping-pong PAIRS a folded transition pre-composes each clip nest into. */
+  private transitionTargets(): { sideA: RenderTarget; sideAScratch: RenderTarget; sideB: RenderTarget; sideBScratch: RenderTarget } {
     const gl = this.gl;
+    this.sideAScratch ??= new RenderTarget(gl, this.width, this.height);
+    this.sideBScratch ??= new RenderTarget(gl, this.width, this.height);
     this.sideA ??= new RenderTarget(gl, this.width, this.height);
     this.sideB ??= new RenderTarget(gl, this.width, this.height);
-    return { sideA: this.sideA, sideB: this.sideB };
+    return { sideA: this.sideA, sideAScratch: this.sideAScratch, sideB: this.sideB, sideBScratch: this.sideBScratch };
   }
 
   /** Compile + cache the program for a transition definition (the same shaders TransitionCompositor uses). */
@@ -1199,9 +1216,10 @@ export class SceneCompositor {
     const blurPx = layer.blurPx ?? 0;
     const glow = layer.glow ?? null;
     const opacity = layer.transform.opacity / 100;
-    // A transition side is rendered in isolation over transparent → force normal blend (its blend-with-below
-    // applies when the MIX lands on the accumulator); the normal path keeps the layer's blend mode.
-    const blend: BlendMode = dest ? "normal" : layer.blendMode;
+    // Within a pre-composed nest (or the isolated `dest` path), layers composite NORMAL — the clip's own blend
+    // mode applies when the MIXED transition result lands on the main scene, not between the clip's own layers.
+    // The ordinary main-scene path keeps the layer's blend mode.
+    const blend: BlendMode = dest || this.nestMode ? "normal" : layer.blendMode;
     // Composite geometry: element box (default = comp) + 3D tilt (default = none → 2D affine quad).
     const geom = {
       halfW: layer.box ? layer.box.halfW : w / 2,
@@ -1314,31 +1332,55 @@ export class SceneCompositor {
   }
 
   /**
-   * Render a folded transition: render each side as a FULL layer (all effects) into its own RTT, mix the two
-   * with the transition shader, then composite the mix into the main accumulator at the incoming z-slot.
+   * Pre-compose a clip's NEST — its group of layers (base + region-expansion layers, which is how a region
+   * effect like a masked blur is represented) — into `target`, using the SAME multi-layer accumulator the main
+   * scene uses. The isolated single-clip path can only hold ONE layer (it reads a transparent backdrop, so a
+   * second layer OVERWRITES the first — the "black except the blurred region" bug); the accumulator reads its
+   * previous contents as backdrop, so N layers composite correctly. We temporarily retarget the accumulator to
+   * this side's (target, scratch) pair so the main scene's in-progress accumulation is untouched, force NORMAL
+   * blend inside the nest, and return whichever RTT the per-layer ping-pong ended on. This is the NLE
+   * "pre-compose / nest": the transition then mixes two finished clip images, so any effect (or future plugin)
+   * on a clip renders THROUGH the transition with no transition-side knowledge of what the effect is.
+   */
+  private precomposeGroup(group: SceneLayerDraw[], target: RenderTarget, scratch: RenderTarget): RenderTarget {
+    const gl = this.gl;
+    const savedA = this.accumA;
+    const savedB = this.accumB;
+    const savedNest = this.nestMode;
+    this.accumA = target;
+    this.accumB = scratch;
+    this.nestMode = true;
+    for (const rt of [target, scratch]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    for (const draw of group) this.renderLayerInto(draw, null);
+    const result = this.accumA; // the accumulator leaves the latest result in accumA after each layer's swap
+    this.accumA = savedA;
+    this.accumB = savedB;
+    this.nestMode = savedNest;
+    return result;
+  }
+
+  /**
+   * Render a folded transition: pre-compose each side's clip nest to a finished image, then mix the two with
+   * the transition shader and composite the mix into the main accumulator at the incoming z-slot.
    */
   private renderTransition(draw: SceneTransitionDraw): void {
-    const gl = this.gl;
     const w = this.width;
     const h = this.height;
-    const { sideA, sideB } = this.transitionTargets();
+    const { sideA, sideAScratch, sideB, sideBScratch } = this.transitionTargets();
+    // Each side is its own ping-pong pair, so the two finished nests live in distinct textures the mix reads
+    // simultaneously.
+    const fromTex = this.precomposeGroup(draw.from, sideA, sideAScratch).tex;
+    const toTex = this.precomposeGroup(draw.to, sideB, sideBScratch).tex;
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, sideA.fbo);
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    this.renderLayerInto(draw.from, sideA);
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, sideB.fbo);
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    this.renderLayerInto(draw.to, sideB);
-
-    // Mix into the plate RTT (free now that both sides are rendered), then composite that into the accumulator
-    // as a comp-filling, identity-transform layer (the same z-slot the incoming clip would occupy).
+    // Mix into the plate RTT, then composite that into the accumulator as a comp-filling, identity-transform
+    // layer (the same z-slot the incoming clip would occupy).
     const { plate } = this.effectTargets();
-    this.drawTransition(draw.def, sideA.tex, sideB.tex, draw.progress, draw.params, plate);
+    this.drawTransition(draw.def, fromTex, toTex, draw.progress, draw.params, plate);
     this.compositeTexture(
       plate.tex,
       null,
@@ -1416,6 +1458,28 @@ export class SceneCompositor {
     gl.bindVertexArray(null);
   }
 
+  /**
+   * Force the output canvas to be fully materialized before the caller snapshots it. Export ONLY: a one-shot
+   * export does `new VideoFrame(canvas)` right after `renderFrame`, but WebGL draws are asynchronous. On some
+   * drivers `gl.finish()` alone is NOT enough — `VideoFrame(offscreenCanvas)` can still capture an unfinished
+   * (black) buffer, intermittently, on later frames under load (the "last clip sometimes black" bug). A tiny
+   * `readPixels` from the default framebuffer forces the driver to resolve the presented image (this is what
+   * the diagnostic luma readback did — which is why probing always "fixed" it). We keep `finish()` too as the
+   * command-completion barrier, then the 1px read as the materialization barrier. The editor preview never
+   * captures its canvas, so it never calls this; the render loop stays sync-free.
+   */
+  finish(): void {
+    if (this.disposed) return;
+    const gl = this.gl;
+    gl.finish();
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.captureSyncPixel);
+    } catch {
+      /* readback is a best-effort materialization barrier; finish() above is the hard sync */
+    }
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -1429,7 +1493,9 @@ export class SceneCompositor {
     this.scratch1?.dispose();
     this.scratch2?.dispose();
     this.sideA?.dispose();
+    this.sideAScratch?.dispose();
     this.sideB?.dispose();
+    this.sideBScratch?.dispose();
     for (const compiled of this.transitionPrograms.values()) gl.deleteProgram(compiled.program);
     this.transitionPrograms.clear();
     gl.deleteBuffer(this.vbo);

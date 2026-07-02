@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { googleAuthSchema, loginSchema, signupSchema } from "@reelforge/shared";
+import { googleAuthSchema, loginSchema, signupSchema } from "@lumio-by-aelivion/shared";
 import { asyncHandler, ok, validateBody } from "../lib/http";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { googleLogin, login, signup } from "../services/auth.service";

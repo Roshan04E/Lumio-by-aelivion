@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
 } from "react";
-import { MediaWebGLRenderer, type ColorPipeline, type MatteRef, type MediaEffects, type MediaTransition } from "@reelforge/shared";
+import { MediaWebGLRenderer, registerContextDisposer, type ColorPipeline, type MatteRef, type MediaEffects, type MediaTransition } from "@lumio-by-aelivion/shared";
 
 /**
  * Unified WebGL media layer for the editor preview (flag-gated, rendererMode=webgl).
@@ -146,6 +146,46 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // Expose the source video element so VideoPreview's play/pause/seek effects keep working.
     useImperativeHandle(forwardedRef, () => sourceVideoRef.current as HTMLVideoElement, []);
 
+    /**
+     * Get the renderer, lazily (re)creating it when absent. Absent means either first mount OR the context
+     * governor evicted this layer's context under budget pressure — in which case we transparently recreate
+     * it here the next time the clip is actually drawn (it's back in the active window). A freshly created
+     * context has no baked LUT, so we re-apply the current grade immediately. Returns null once `failedRef`
+     * (a real WebGL failure → legacy fallback) or when there's no canvas yet.
+     */
+    function ensureRenderer(): MediaWebGLRenderer | null {
+      if (failedRef.current) return null;
+      const existing = rendererRef.current;
+      if (existing) return existing;
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      let renderer: MediaWebGLRenderer;
+      try {
+        renderer = new MediaWebGLRenderer(canvas, { kind: "media-renderer", label: `preview-media:${mediaType}:${src}` });
+      } catch {
+        rendererRef.current = null;
+        failedRef.current = true;
+        onWebglFailed?.();
+        return null;
+      }
+      rendererRef.current = renderer;
+      // The pipeline effect only fires on pipelineKey CHANGES, so after a governor recreate the grade would
+      // otherwise be missing until the next edit — re-bake it now.
+      try { renderer.setPipeline(pipeline); } catch { /* a bad pipeline must not kill the layer */ }
+      // Let the governor reclaim THIS renderer's context under budget pressure. Unlike a real context loss
+      // (which latches `failedRef` → legacy fallback), an eviction merely drops the renderer so `ensureRenderer`
+      // lazily recreates it on the next draw once the clip is active again — the LRU dance that bounds contexts.
+      const gl = renderer.governorContext;
+      if (gl) {
+        registerContextDisposer(gl, () => {
+          stopLoop();
+          if (rendererRef.current === renderer) rendererRef.current = null;
+          try { renderer.dispose(); } catch { /* ignore */ }
+        });
+      }
+      return renderer;
+    }
+
     // Create / destroy the renderer with the canvas.
     useEffect(() => {
       const canvas = canvasRef.current;
@@ -164,18 +204,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         window.clearTimeout(disposeTimerRef.current);
         disposeTimerRef.current = null;
       }
-      if (rendererRef.current) return () => {
-        canvas.removeEventListener("webglcontextlost", handleContextLost);
-        stopLoop();
-        scheduleRendererDispose();
-      };
-      try {
-        rendererRef.current = new MediaWebGLRenderer(canvas, { kind: "media-renderer", label: `preview-media:${mediaType}:${src}` });
-      } catch {
-        rendererRef.current = null;
-        failedRef.current = true;
-        onWebglFailed?.();
-      }
+      ensureRenderer();
       return () => {
         canvas.removeEventListener("webglcontextlost", handleContextLost);
         stopLoop();
@@ -242,7 +271,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
 
     function drawImage() {
       if (failedRef.current) return;
-      const renderer = rendererRef.current;
+      const renderer = ensureRenderer();
       const img = imageRef.current;
       if (!renderer || !img || img.naturalWidth === 0) return;
       try {
@@ -381,7 +410,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
 
     function drawVideoFrame() {
       if (failedRef.current || mediaType !== "video") return;
-      const renderer = rendererRef.current;
+      const renderer = ensureRenderer();
       const video = sourceVideoRef.current;
       if (!renderer || !video || video.readyState < 2 || video.videoWidth === 0) return;
       const matteVideo = matteVideoRef.current;

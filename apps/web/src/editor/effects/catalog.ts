@@ -1,29 +1,39 @@
 /**
  * Effects-tab catalog: the single, lightweight source that powers the categorized
  * (Video / Text / Audio / Transition / AI) dropdown. It only assembles *descriptors* from the
- * existing registries — timeline effects + AI tools ([@reelforge/shared]) and animation presets —
+ * existing registries — timeline effects + AI tools ([@lumio-by-aelivion/shared]) and animation presets —
  * so importing it pulls no effect-control UI, no ML handlers, and no renderer code. The actual
  * implementations load lazily when an item is added/run (see EditorPage handlers + lazy modals).
  */
 import {
-  getTimelineEffectsForLayer,
-  timelineEffectRegistry,
+  createManifestTransitionProvider,
+  listEffectLibrary,
+  listLookLibrary,
+  listTransitionLibrary,
   toolCapabilityDefinitions,
+  resolveEffectManifest,
+  resolveLookManifest,
+  type PluginLookManifest,
+  type PluginEffectManifest,
+  type PluginTransitionManifest,
+  type TimelineEffectDefinition,
   type TimelineEffectType,
   type TimelineLayerType,
   type ToolInputType,
   type TransitionDirection,
   type TransitionKind
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { animationPresets } from "../inspector/keyframeUtils";
 import { READY_TOOL_SLUGS } from "../../tools/ready-tool-slugs";
 
-export type EffectPanelCategory = "video" | "text" | "audio" | "transition" | "ai";
+export type EffectPanelCategory = "uploaded" | "video" | "text" | "audio" | "look" | "transition" | "ai";
 
 export const effectPanelCategories: { id: EffectPanelCategory; label: string }[] = [
+  { id: "uploaded", label: "Uploaded Effects" },
   { id: "video", label: "Video" },
   { id: "text", label: "Text" },
   { id: "audio", label: "Audio" },
+  { id: "look", label: "Looks" },
   { id: "transition", label: "Transition" },
   { id: "ai", label: "AI" }
 ];
@@ -34,6 +44,7 @@ export const effectPanelCategories: { id: EffectPanelCategory; label: string }[]
  * Zoom, a Whip, a Reveal, a Glitch, …) rather than implementation buckets.
  */
 export type TransitionGroup =
+  | "uploaded"
   | "essentials"
   | "slide-push"
   | "zoom-spin"
@@ -44,6 +55,7 @@ export type TransitionGroup =
   | "impact";
 
 export const transitionGalleryCategories: { id: TransitionGroup; label: string }[] = [
+  { id: "uploaded", label: "Uploaded" },
   { id: "essentials", label: "Essentials" },
   { id: "slide-push", label: "Slide & Push" },
   { id: "zoom-spin", label: "Zoom & Spin" },
@@ -54,11 +66,54 @@ export const transitionGalleryCategories: { id: TransitionGroup; label: string }
   { id: "impact", label: "Impact" }
 ];
 
+export interface BuildEffectCatalogOptions {
+  effectManifests?: PluginEffectManifest[] | undefined;
+  lookManifests?: PluginLookManifest[] | undefined;
+  transitionManifests?: PluginTransitionManifest[] | undefined;
+}
+
+export type LookGroup = "uploaded" | "cinematic" | "film" | "clean" | "vintage" | "creator";
+
+export interface LookPreviewStyle {
+  filter: string;
+  overlay: string;
+  opacity: number;
+}
+
+export const lookGalleryCategories: { id: LookGroup; label: string }[] = [
+  { id: "uploaded", label: "Uploaded Looks" },
+  { id: "cinematic", label: "Cinematic" },
+  { id: "film", label: "Film" },
+  { id: "clean", label: "Clean" },
+  { id: "vintage", label: "Vintage" },
+  { id: "creator", label: "Creator Packs" }
+];
+
 /** A single addable catalog entry; `kind` selects which EditorPage handler runs on add. */
 export type CatalogItem =
   | { kind: "effect"; id: string; label: string; description: string; effectType: TimelineEffectType; draggable: true }
+  | {
+      kind: "effectManifest";
+      id: string;
+      label: string;
+      description: string;
+      manifest: PluginEffectManifest;
+      effectType: TimelineEffectType;
+      draggable: false;
+    }
   | { kind: "audio"; id: string; label: string; description: string; effectType: "volume"; fade?: "in" | "out" | undefined }
   | { kind: "preset"; id: string; label: string; description: string; presetId: string }
+  | {
+      kind: "look";
+      id: string;
+      label: string;
+      description: string;
+      lookName: string;
+      group: LookGroup;
+      sourceId: string;
+      manifest?: PluginLookManifest | undefined;
+      previewStyle: LookPreviewStyle;
+    }
   | {
       kind: "transition";
       id: string;
@@ -72,6 +127,7 @@ export type CatalogItem =
       color?: string;
       /** Registry param overrides for this preset (e.g. strength, motionBlur, flashColor). */
       params?: Record<string, number | number[] | boolean>;
+      manifest?: PluginTransitionManifest | undefined;
       /** Grouping bucket in the transition gallery (see `transitionGalleryCategories`). */
       group?: TransitionGroup;
     }
@@ -179,6 +235,59 @@ function aiItem(slug: string, name: string, description: string): CatalogItem {
   return { kind: "ai", id: `ai-${slug}`, label: name, description, toolSlug: slug };
 }
 
+function isTimelineEffectDefinition(value: unknown): value is TimelineEffectDefinition {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "type" in value &&
+      "compatibleLayerTypes" in value &&
+      Array.isArray((value as { compatibleLayerTypes?: unknown }).compatibleLayerTypes)
+  );
+}
+
+function lookGroupForName(name: string): LookGroup {
+  const key = name.toLowerCase();
+  if (key.includes("film") || key.includes("burn") || key.includes("bleach")) return "film";
+  if (key.includes("noir") || key.includes("faded") || key.includes("process")) return "vintage";
+  if (key.includes("cold") || key.includes("clean")) return "clean";
+  if (key.includes("cinematic") || key.includes("teal") || key.includes("sunset")) return "cinematic";
+  return "creator";
+}
+
+function lookPreviewStyleForName(name: string): LookPreviewStyle {
+  const key = name.toLowerCase();
+  if (key.includes("teal")) {
+    return { filter: "contrast(1.16) saturate(1.16) sepia(0.08) hue-rotate(-8deg)", overlay: "linear-gradient(45deg, rgba(0, 128, 150, 0.28), rgba(255, 129, 58, 0.26))", opacity: 0.7 };
+  }
+  if (key.includes("faded")) {
+    return { filter: "contrast(0.86) saturate(0.74) brightness(1.06) sepia(0.18)", overlay: "linear-gradient(45deg, rgba(60, 47, 37, 0.22), rgba(231, 205, 156, 0.24))", opacity: 0.68 };
+  }
+  if (key.includes("noir")) {
+    return { filter: "grayscale(0.9) contrast(1.35) brightness(0.86)", overlay: "linear-gradient(45deg, rgba(0, 0, 0, 0.3), rgba(255, 255, 255, 0.08))", opacity: 0.75 };
+  }
+  if (key.includes("sunset")) {
+    return { filter: "contrast(1.08) saturate(1.22) sepia(0.2) hue-rotate(-12deg) brightness(1.04)", overlay: "linear-gradient(45deg, rgba(255, 130, 42, 0.34), rgba(255, 214, 116, 0.18))", opacity: 0.72 };
+  }
+  if (key.includes("cold")) {
+    return { filter: "contrast(1.08) saturate(0.82) hue-rotate(8deg) brightness(1.03)", overlay: "linear-gradient(45deg, rgba(55, 132, 180, 0.34), rgba(220, 245, 255, 0.16))", opacity: 0.74 };
+  }
+  if (key.includes("bleach")) {
+    return { filter: "contrast(1.38) saturate(0.58) brightness(1.04)", overlay: "linear-gradient(45deg, rgba(245, 220, 155, 0.22), rgba(0, 0, 0, 0.2))", opacity: 0.72 };
+  }
+  if (key.includes("process")) {
+    return { filter: "contrast(1.18) saturate(1.32) hue-rotate(14deg)", overlay: "linear-gradient(45deg, rgba(37, 172, 136, 0.24), rgba(222, 60, 172, 0.22))", opacity: 0.7 };
+  }
+  return { filter: "contrast(1.14) saturate(1.05) brightness(0.98)", overlay: "linear-gradient(45deg, rgba(34, 92, 130, 0.18), rgba(224, 139, 62, 0.2))", opacity: 0.66 };
+}
+
+function transitionGroupForCategory(category: string): TransitionGroup {
+  if (category === "basic") return "essentials";
+  if (category === "cinematic") return "cinematic";
+  if (category === "glitch") return "glitch";
+  if (category === "mask") return "reveals";
+  return "impact";
+}
+
 /**
  * Build the catalog grouped by panel category for the selected layer type. Timeline effects are
  * bucketed by their `compatibleLayerTypes` (video/image→Video, text→Text, audio/video→Audio, minus
@@ -186,16 +295,40 @@ function aiItem(slug: string, name: string, description: string): CatalogItem {
  * aware (`textOnly` → Text). AI tools are gated by the ready-slug list and their accepted inputs.
  * Items are layer-filtered when a layer is selected, else everything shows (discovery).
  */
-export function buildEffectCatalog(selectedLayerType?: TimelineLayerType | undefined): Record<EffectPanelCategory, CatalogItem[]> {
-  const effects = selectedLayerType ? getTimelineEffectsForLayer(selectedLayerType) : timelineEffectRegistry;
+export function buildEffectCatalog(
+  selectedLayerType?: TimelineLayerType | undefined,
+  options: BuildEffectCatalogOptions = {}
+): Record<EffectPanelCategory, CatalogItem[]> {
+  const effectDefinitions = listEffectLibrary()
+    .map((item) => item.definition)
+    .filter(isTimelineEffectDefinition);
+  const effects = selectedLayerType
+    ? effectDefinitions.filter((effect) => effect.compatibleLayerTypes.includes(selectedLayerType))
+    : effectDefinitions;
 
   const video: CatalogItem[] = [];
   const text: CatalogItem[] = [];
+  const uploaded: CatalogItem[] = [];
   for (const effect of effects) {
     if (effect.type === "volume") continue; // curated under Audio
     const item = effectItem(effect.type, effect.name, effect.description);
     if (effect.compatibleLayerTypes.includes("video") || effect.compatibleLayerTypes.includes("image")) video.push(item);
     if (effect.compatibleLayerTypes.includes("text")) text.push(item);
+  }
+
+  const importedEffects = (options.effectManifests ?? [])
+    .map((manifest) => resolveEffectManifest(manifest))
+    .filter((resolved) => !selectedLayerType || resolved.compatibleLayerTypes.includes(selectedLayerType));
+  for (const resolved of importedEffects) {
+    uploaded.push({
+      kind: "effectManifest",
+      id: `fx-imported-${resolved.id}`,
+      label: resolved.name,
+      description: resolved.description ?? `Imported ${resolved.effectType} preset.`,
+      manifest: resolved.manifest,
+      effectType: resolved.effectType,
+      draggable: false
+    });
   }
 
   // Animation presets: general presets under Video; text-only (Typewriter) under Text. When a
@@ -214,7 +347,52 @@ export function buildEffectCatalog(selectedLayerType?: TimelineLayerType | undef
     !selectedLayerType || selectedLayerType === "audio" || selectedLayerType === "video" ? [...AUDIO_ITEMS] : [];
 
   // Opacity transitions are visual — audio layers fade via the Audio items instead.
-  const transition: CatalogItem[] = !selectedLayerType || selectedLayerType !== "audio" ? [...TRANSITION_ITEMS] : [];
+  const importedTransitionProvider = options.transitionManifests?.length
+    ? createManifestTransitionProvider("lumio.imported.transitions", "Imported Transitions", options.transitionManifests)
+    : null;
+  const importedTransitions: CatalogItem[] =
+    importedTransitionProvider && (!selectedLayerType || selectedLayerType !== "audio")
+      ? listTransitionLibrary([importedTransitionProvider]).map((item) => ({
+          kind: "transition" as const,
+          id: `tr-imported-${item.id}`,
+          label: item.name,
+          description: item.description ?? "Imported transition manifest.",
+          transition: item.definition.id,
+          junction: true,
+          manifest: item.manifest,
+          group: "uploaded"
+        }))
+      : [];
+  const transition: CatalogItem[] = !selectedLayerType || selectedLayerType !== "audio" ? [...TRANSITION_ITEMS, ...importedTransitions] : [];
+  const look: CatalogItem[] =
+    !selectedLayerType || selectedLayerType !== "audio"
+      ? [
+          ...(options.lookManifests ?? []).map((manifest) => {
+            const resolved = resolveLookManifest(manifest);
+            return {
+              kind: "look" as const,
+              id: `look-imported-${manifest.id}`,
+              label: resolved.name,
+              description: resolved.description ?? "Imported color look.",
+              lookName: resolved.look.name,
+              group: "uploaded" as const,
+              sourceId: manifest.id,
+              manifest,
+              previewStyle: lookPreviewStyleForName(resolved.look.name)
+            };
+          }),
+          ...listLookLibrary().map((item) => ({
+            kind: "look" as const,
+            id: item.id,
+            label: item.name,
+            description: item.description ?? "Apply this color look.",
+            lookName: item.name,
+            group: lookGroupForName(item.name),
+            sourceId: item.source.id,
+            previewStyle: lookPreviewStyleForName(item.name)
+          }))
+        ]
+      : [];
 
   const ai: CatalogItem[] = toolCapabilityDefinitions
     .filter(
@@ -224,5 +402,5 @@ export function buildEffectCatalog(selectedLayerType?: TimelineLayerType | undef
     )
     .map((tool) => aiItem(tool.slug, tool.name, tool.shortDescription));
 
-  return { video, text, audio, transition, ai };
+  return { uploaded, video, text, audio, look, transition, ai };
 }

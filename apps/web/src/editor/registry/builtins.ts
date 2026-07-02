@@ -1,4 +1,4 @@
-import { timelineEffectRegistry, toolCapabilityDefinitions } from "@reelforge/shared";
+import { timelineEffectRegistry, toolCapabilityDefinitions } from "@lumio-by-aelivion/shared";
 import { registerBuiltinInspectorPanels } from "../inspector/panels";
 import { commandRegistry } from "./commands";
 import { moduleRegistry } from "./modules";

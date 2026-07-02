@@ -1,4 +1,4 @@
-import type { TrackingPathArtifactData } from "@reelforge/shared";
+import type { TrackingPathArtifactData } from "@lumio-by-aelivion/shared";
 
 /**
  * A single named, saved tracking result that can be attached to any timeline layer

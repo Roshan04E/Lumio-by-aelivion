@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { toolCapabilityDefinitions } from "@reelforge/shared";
+import { toolCapabilityDefinitions } from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { ToolCard } from "../components/ToolCard";
 

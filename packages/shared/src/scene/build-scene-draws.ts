@@ -23,6 +23,7 @@ import {
   getCompositionFilterEffects,
   getCompositionObjectFit,
   getCompositionTransform,
+  type ActiveTransition,
 } from "../composition-style";
 import type { TimelineLayer, TransitionSpec } from "../types";
 import type { SceneMaskMatteCache } from "./scene-mask-matte";
@@ -113,10 +114,53 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // Layer lookup so a transition can build each side as a FULL layer draw (effects included).
   const layerById = new Map(ls.map((layer) => [layer.id, layer]));
 
-  // Active junction transitions: the outgoing clip is folded into the mix (skipped) and the incoming
-  // clip's z-slot emits a SceneTransitionDraw (two full side draws + the transition) instead of its normal draw.
+  // Junction transitions fold TWO clip GROUPS into one mix draw. A "clip" is not one layer: a region-mask
+  // effect expands it into a base + render-only `${baseId}__rfx_${effectId}` layers (region blur today, region
+  // colour, or any future plugin region effect). A transition side must therefore composite the clip's WHOLE
+  // group — base + every `__rfx_` layer — not a single layer, or those effect layers vanish DURING the
+  // transition (or leak over the other clip). This is generic over effect type: nothing here knows what the
+  // region effect IS, only that `__rfx_` layers belong to their base clip. The editor + export share this, so
+  // the on-screen preview and the generated proxy stay aligned by construction.
   const transitionOutgoingIds = new Set(tPairs.map((pair) => pair.outgoingId));
   const transitionByIncomingId = new Map(tPairs.map((pair) => [pair.incomingId, pair]));
+  const regionCloneBaseId = (layerId: string): string | null => {
+    const marker = layerId.indexOf("__rfx_");
+    return marker > 0 ? layerId.slice(0, marker) : null;
+  };
+  // Transitions ACTIVE at `t`, keyed by incoming id, plus every layer folded into one: the outgoing clip's
+  // whole group and the incoming clip's `__rfx_` layers (the incoming BASE stays — it emits the mix at its
+  // z-slot). A layer in `foldedIds` is drawn inside a side group, never independently.
+  const activeByIncomingId = new Map<string, ActiveTransition>();
+  const foldedIds = new Set<string>();
+  for (const pair of tPairs) {
+    const active = getActiveTransition(pair.spec, {
+      currentTimeSeconds: t,
+      startSeconds: pair.startSeconds,
+      clipDurationSeconds: layerById.get(pair.incomingId)?.durationSeconds,
+    });
+    if (!active || !layerById.has(pair.outgoingId) || !layerById.has(pair.incomingId)) {
+      continue;
+    }
+    activeByIncomingId.set(pair.incomingId, active);
+    for (const layer of ls) {
+      const base = regionCloneBaseId(layer.id);
+      if (layer.id === pair.outgoingId || base === pair.outgoingId || base === pair.incomingId) {
+        foldedIds.add(layer.id);
+      }
+    }
+  }
+  // A clip's group as ordered (back-to-front) layer draws: base + its region-expansion layers, dropping any
+  // whose source/raster isn't ready. The compositor renders these into the side RTT in order, then mixes.
+  const buildClipGroup = (baseId: string): SceneLayerDraw[] => {
+    const group: SceneLayerDraw[] = [];
+    for (const layer of ls) {
+      if (layer.id === baseId || regionCloneBaseId(layer.id) === baseId) {
+        const draw = buildLayerDraw(layer);
+        if (draw) group.push(draw);
+      }
+    }
+    return group;
+  };
   const draws: SceneDraw[] = [];
 
   // Grade a text/shape raster through the per-layer MediaWebGLRenderer (the same LUT engine media +
@@ -270,24 +314,21 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   };
 
   for (const layer of ls) {
-    // Skip the outgoing clip of an active transition (it's folded into the incoming clip's mix draw).
+    // Outgoing base + everything folded into an active transition's side groups is drawn INSIDE the mix, not
+    // independently. The incoming BASE is not folded — it reaches the emit below.
     if (transitionOutgoingIds.has(layer.id)) continue;
-    const incomingPair = transitionByIncomingId.get(layer.id);
-    if (incomingPair) {
-      // Emit a folded transition: BOTH sides built as full layer draws (effects included) + the active
-      // transition. The compositor renders each side fully, then mixes — so blur/glow/bloom/content/3D/mask
-      // are all present THROUGHOUT the transition. If it's not active yet or a side isn't ready, fall through
-      // to drawing the incoming clip normally.
-      const active = getActiveTransition(incomingPair.spec, { currentTimeSeconds: t, startSeconds: incomingPair.startSeconds });
-      const outgoing = layerById.get(incomingPair.outgoingId);
-      const incoming = layerById.get(incomingPair.incomingId);
-      if (active && outgoing && incoming) {
-        const from = buildLayerDraw(outgoing);
-        const to = buildLayerDraw(incoming);
-        if (from && to) {
-          draws.push({ kind: "transition", debugFromId: outgoing.id, debugToId: incoming.id, from, to, def: active.def, progress: active.progress, params: active.params });
-          continue;
-        }
+    if (foldedIds.has(layer.id)) continue;
+    const active = activeByIncomingId.get(layer.id);
+    if (active) {
+      // Emit a folded transition: each side is the clip's WHOLE group (base + region-expansion layers), so
+      // every per-clip effect renders THROUGH the transition. If a side has no ready draw, fall through to
+      // drawing the incoming clip normally.
+      const pair = transitionByIncomingId.get(layer.id)!;
+      const from = buildClipGroup(pair.outgoingId);
+      const to = buildClipGroup(pair.incomingId);
+      if (from.length > 0 && to.length > 0) {
+        draws.push({ kind: "transition", debugFromId: pair.outgoingId, debugToId: pair.incomingId, from, to, def: active.def, progress: active.progress, params: active.params });
+        continue;
       }
     }
     const d = buildLayerDraw(layer);

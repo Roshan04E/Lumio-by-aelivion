@@ -19,7 +19,7 @@ const envSchema = z.object({
   DATABASE_URL: z
     .string()
     .min(1)
-    .default("postgresql://reelforge:reelforge@localhost:5432/reelforge?schema=public"),
+    .default("postgresql://lumio:lumio@localhost:5432/lumio?schema=public"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
   JWT_SECRET: z.string().min(16).default("local-dev-secret-change-me"),
   STORAGE_ROOT: z.string().default("apps/api/storage"),

@@ -1,5 +1,5 @@
 {
-  "name": "@reelforge/web",
+  "name": "@lumio-by-aelivion/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "memory:test": "tsx src/ai/memory.test.ts"
   },
   "dependencies": {
-    "@reelforge/shared": "workspace:*",
+    "@lumio-by-aelivion/shared": "workspace:*",
     "@vitejs/plugin-react": "^5.0.1",
     "lucide-react": "^0.542.0",
     "mp4-muxer": "^5.1.5",

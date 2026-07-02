@@ -1,4 +1,4 @@
-import type { InpaintedClipArtifactData } from "@reelforge/shared";
+import type { InpaintedClipArtifactData } from "@lumio-by-aelivion/shared";
 import type { MockInpaintResult } from "./mock-inpaint";
 import type { ToolArtifactStore } from "./artifact-store";
 

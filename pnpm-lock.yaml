@@ -16,10 +16,10 @@ importers:
       '@prisma/client':
         specifier: ^6.14.0
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
-      '@reelforge/render-templates':
+      '@lumio-by-aelivion/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
-      '@reelforge/shared':
+      '@lumio-by-aelivion/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       bcryptjs:
@@ -74,7 +74,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@reelforge/shared':
+      '@lumio-by-aelivion/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@vitejs/plugin-react':
@@ -138,10 +138,10 @@ importers:
       '@prisma/client':
         specifier: ^6.14.0
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
-      '@reelforge/render-templates':
+      '@lumio-by-aelivion/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
-      '@reelforge/shared':
+      '@lumio-by-aelivion/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@remotion/bundler':
@@ -196,7 +196,7 @@ importers:
 
   packages/render-templates:
     dependencies:
-      '@reelforge/shared':
+      '@lumio-by-aelivion/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:

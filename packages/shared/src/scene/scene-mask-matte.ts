@@ -59,8 +59,9 @@ function renderMaskAlpha(
     ctx.scale(t.scaleX, t.scaleY);
     ctx.translate(-c.x, -c.y);
   }
-  ctx.filter = mask.feather > 0 ? `blur(${mask.feather / 2}px)` : "none";
   const path = new Path2D(d);
+  // Build the CRISP shape first (fill + expansion, NO blur). Feather is applied afterwards as an
+  // edge-preserving pass — see below.
   ctx.fillStyle = "#fff";
   ctx.fill(path);
   if (mask.expansion > 0) {
@@ -75,7 +76,26 @@ function renderMaskAlpha(
     ctx.strokeStyle = "#fff";
     ctx.stroke(path);
   }
-  ctx.restore();
+  // Feather = a SYMMETRIC soft alpha ramp across the mask edge (the professional/AE behavior): blur the CRISP
+  // (already fill+expansion) shape and REPLACE the matte with it. Applying the blur to the rasterized expanded
+  // shape (not to each draw op, and not by eroding the base path) means expansion is respected and no hollow
+  // ring can form. Note this is inherently a trade-off, not a bug: a Gaussian of a BOUNDED region loses peak
+  // alpha once the radius nears the shape size, so a feather that is LARGE relative to the shape turns most of
+  // it into a gradient (softer / more translucent) — exactly as in every NLE. A solid interior AND a soft
+  // symmetric edge cannot coexist when feather ≳ shape size; use a smaller feather for a crisp core.
+  if (mask.feather > 0) {
+    const r = mask.feather / 2;
+    ctx.restore(); // pop the transform; ctx now holds the crisp shape rasterized in device space
+    invertCtx.clearRect(0, 0, w, h);
+    invertCtx.save();
+    invertCtx.filter = `blur(${r}px)`;
+    invertCtx.drawImage(ctx.canvas, 0, 0);
+    invertCtx.restore();
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(invertCtx.canvas, 0, 0); // symmetric feathered edge
+  } else {
+    ctx.restore();
+  }
 
   if (!mask.inverted) return ctx;
   invertCtx.clearRect(0, 0, w, h);

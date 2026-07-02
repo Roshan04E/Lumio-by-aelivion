@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChevronDown, Sparkles } from "lucide-react";
-import { templateDefinitions, type TemplateDefinition } from "@reelforge/shared";
+import { templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -13,7 +13,7 @@ export function CreatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [templates, setTemplates] = useState<TemplateDefinition[]>(templateDefinitions);
   const [templateId, setTemplateId] = useState(templateDefinitions[0]?.id ?? "");
-  const [title, setTitle] = useState("My ReelForge edit");
+  const [title, setTitle] = useState("My Lumio edit");
   const [prompt, setPrompt] = useState("Make this like a fast product promo with bold price text.");
   const [busy, setBusy] = useState(false);
 

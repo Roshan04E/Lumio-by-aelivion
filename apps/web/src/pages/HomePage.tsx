@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Clapperboard, Film, Layers3, Scissors, Sparkles, WandSparkles } from "lucide-react";
-import { mvpLimits, templateDefinitions, type TemplateDefinition } from "@reelforge/shared";
+import { mvpLimits, templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -61,7 +61,7 @@ export function HomePage() {
         </div>
 
         <Card className="quick-forge">
-          <img src="/assets/reelforge-studio-hero.png" alt="" />
+          <img src="/assets/lumio-by-aelivion-hero.png" alt="" />
           <div className="quick-forge-panel">
             <UploadDropzone file={file} onFile={setFile} />
             <label className="prompt-box">

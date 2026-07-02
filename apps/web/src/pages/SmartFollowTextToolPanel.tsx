@@ -10,7 +10,7 @@ import {
   type TimelineComposition,
   type ToolCapabilityDefinition,
   type TrackingPathArtifactData
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { AiActivityIndicator } from "../components/AiActivityIndicator";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";

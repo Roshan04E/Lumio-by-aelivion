@@ -1,10 +1,10 @@
 /**
  * Compatibility shim (Method 3, Phase 6.1).
  *
- * The text/shape rasterizer moved into `@reelforge/shared` (packages/shared/src/scene/scene-text-raster.ts)
+ * The text/shape rasterizer moved into `@lumio-by-aelivion/shared` (packages/shared/src/scene/scene-text-raster.ts)
  * so the editor preview, local export, and the future Remotion SceneStage share one rasterizer. This file
  * is intentionally kept at its original path because the raster diagnostic probes load it by URL
  * (`/src/components/scene-text-raster.ts`); it just re-exports the canonical shared implementation.
  */
 
-export { SceneTextRasterizer, type SceneRaster } from "@reelforge/shared";
+export { SceneTextRasterizer, type SceneRaster } from "@lumio-by-aelivion/shared";

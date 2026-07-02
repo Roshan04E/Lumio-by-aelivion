@@ -1,5 +1,5 @@
 import { useEffect, useRef, type CSSProperties } from "react";
-import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, type ColorPipeline } from "@reelforge/shared";
+import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, type ColorPipeline } from "@lumio-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3) — WebGL color OVERLAY for images (flag-gated).

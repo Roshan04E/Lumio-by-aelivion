@@ -21,7 +21,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderComparisonFixtureKeys, type RenderComparisonFixtureKey } from "@reelforge/shared";
+import { renderComparisonFixtureKeys, type RenderComparisonFixtureKey } from "@lumio-by-aelivion/shared";
 import pixelmatch from "pixelmatch";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";
@@ -77,7 +77,11 @@ const fixtureMaxDiff: Partial<Record<RenderComparisonFixtureKey, number>> = {
 
 const fixtureKeys: RenderComparisonFixtureKey[] = (() => {
   const raw = process.env.PIXEL_FIXTURES;
-  if (!raw) return renderComparisonFixtureKeys;
+  if (!raw) {
+    // `content-transform` is a scene/Remotion capability whose legacy DOM preview comparison is not
+    // meaningful; it is covered by render:compare:pixels and remotion:scene-compare.
+    return renderComparisonFixtureKeys.filter((key) => key !== "content-transform");
+  }
   const requested = raw.split(",").map((v) => v.trim()).filter(Boolean);
   const valid = requested.filter((v): v is RenderComparisonFixtureKey =>
     renderComparisonFixtureKeys.includes(v as RenderComparisonFixtureKey)
@@ -216,6 +220,22 @@ async function waitForServer(url: string) {
 
 async function stopProcess(child: ChildProcess) {
   if (child.exitCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      const timeout = setTimeout(resolve, 5_000);
+      killer.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      killer.once("error", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    return;
+  }
+
   child.kill("SIGTERM");
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {

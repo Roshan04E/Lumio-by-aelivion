@@ -22,7 +22,7 @@ import {
   type BlendMode,
   type KeyframeInterpolation,
   type TimelineKeyframeV2
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 
 // ── Perspective control mapping ─────────────────────────────────────────────────────────────────────
 // All renderers store CSS `perspective(N px)`, where a SMALLER N = STRONGER 3D foreshortening (it's a camera
@@ -52,7 +52,7 @@ function perspectiveDepthToPx(depth: number): number {
  * Blend-mode options shown in the inspector, grouped the way creators expect
  * (Photoshop/Premiere ordering). Every entry below is fully implemented in all
  * three renderers (preview CSS, browser-export canvas, Remotion) — see
- * BLEND_CSS / BLEND_CANVAS in `@reelforge/shared`. To expose a new mode later,
+ * BLEND_CSS / BLEND_CANVAS in `@lumio-by-aelivion/shared`. To expose a new mode later,
  * add it to the BlendMode union + those maps, then list it here.
  */
 const BLEND_MODE_GROUPS: { label: string; options: { value: BlendMode; label: string }[] }[] = [

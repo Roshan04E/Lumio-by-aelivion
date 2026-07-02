@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Diamond, Trash2 } from "lucide-react";
-import type { KeyframeInterpolation } from "@reelforge/shared";
+import type { KeyframeInterpolation } from "@lumio-by-aelivion/shared";
 import { ResetButton } from "../../../components/ResetButton";
 
 /**

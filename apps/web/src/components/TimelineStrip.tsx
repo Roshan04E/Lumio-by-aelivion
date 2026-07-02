@@ -1,7 +1,7 @@
-import { Aperture, ChevronLeft, ChevronRight, ChevronsRight, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, Hand, Image, Keyboard, Link2, Lock, Magnet, Maximize2, MousePointer2, MoveHorizontal, Music, Redo2, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Trash2, Type, Undo2, Unlink2, Unlock, Volume2, VolumeX, X } from "lucide-react";
+import { Aperture, ChevronLeft, ChevronRight, ChevronsRight, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Maximize2, MousePointer2, MoveHorizontal, Music, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Trash2, Type, Undo2, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { computeSnapTargets, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, snapValue, TRANSITION_MARKER, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@reelforge/shared";
+import { computeSnapTargets, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, snapValue, TRANSITION_MARKER, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@lumio-by-aelivion/shared";
 import { useAudioPeaksSlice } from "../lib/audioPeaks";
 import {
   VOLUME_HANDLE_IN_DX,
@@ -22,6 +22,7 @@ import { useVideoThumbnails } from "../lib/videoThumbnails";
 import { useWheelScrollPerformance } from "../lib/useWheelScrollPerformance";
 import { favouriteTransitionSpecs } from "../editor/effects/catalog";
 import { loadFavourites } from "../editor/effects/favourites";
+import type { PreviewCacheRulerSegment, ProxyCacheStatus } from "../editor/performance/renderCache";
 
 type LayerSelectMode = "replace" | "toggle" | "range" | "add-range";
 type LayerCollectionSelectMode = "replace" | "add" | "toggle";
@@ -134,7 +135,7 @@ function transitionGlyph(kind: TransitionKind) {
  */
 function contextTransitions(): Array<{ label: string; spec: Omit<TransitionSpec, "durationSeconds"> }> {
   return [
-    { label: "Default transition", spec: { kind: "crossDissolve" } },
+    { label: "Default cross dissolve", spec: { kind: "crossDissolve" } },
     ...favouriteTransitionSpecs(loadFavourites())
   ];
 }
@@ -196,6 +197,8 @@ const shortcutCheatSheet: Array<{ keys: string; label: string }> = [
   { keys: "\\", label: "Fit timeline to view" },
   { keys: "⌘Z", label: "Undo" },
   { keys: "⌘⇧Z", label: "Redo" },
+  { keys: "⌘M", label: "Export on this device (local)" },
+  { keys: "⌘⇧M", label: "Export to cloud" },
   { keys: "Space", label: "Play / pause" },
   { keys: "Home", label: "Jump to start" },
   { keys: "End", label: "Jump to end" },
@@ -261,6 +264,11 @@ export function TimelineStrip({
   onClearInPoint,
   onClearOutPoint,
   onClearInOutPoints,
+  proxyCacheSegments = [],
+  proxyCacheStatus,
+  onRegenerateProxyCache,
+  livePlaybackMode = false,
+  onToggleLivePlayback,
   onReplaceLayerAsset,
   onSlipLayer,
   onPreviewVolume
@@ -321,6 +329,11 @@ export function TimelineStrip({
   onClearInPoint?: (() => void) | undefined;
   onClearOutPoint?: (() => void) | undefined;
   onClearInOutPoints?: (() => void) | undefined;
+  proxyCacheSegments?: PreviewCacheRulerSegment[] | undefined;
+  proxyCacheStatus?: ProxyCacheStatus | undefined;
+  onRegenerateProxyCache?: ((target: "all" | "inOut") => void) | undefined;
+  livePlaybackMode?: boolean | undefined;
+  onToggleLivePlayback?: ((next: boolean) => void) | undefined;
   onReplaceLayerAsset?: ((layerId: string) => void) | undefined;
   onSlipLayer?: ((layerId: string, sourceInSeconds: number) => void) | undefined;
   /** Transient/commit layer edit for the audio volume envelope (drag = transient, release = commit). */
@@ -360,6 +373,11 @@ export function TimelineStrip({
   }
   const editorRef = useRef<HTMLDivElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
+  const liveProxyBarRef = useRef<HTMLElement | null>(null);
+  // Cached timeline geometry for the playback auto-follow, so the per-frame follow does NOT call
+  // getBoundingClientRect (a forced synchronous layout). Refreshed on playback start + on resize/zoom
+  // (ResizeObserver below), not every animation frame. `laneOffset` = lane origin in dock-content coords.
+  const followGeomRef = useRef<{ laneOffset: number; laneWidth: number; clientWidth: number; maxScroll: number } | null>(null);
   const [drag, setDragState] = useState<DragState>(null);
   const dragRef = useRef<DragState>(null);
   const setDrag = useCallback((value: DragState | ((current: DragState) => DragState)) => {
@@ -421,6 +439,7 @@ export function TimelineStrip({
   const [effectDropTargetLayerId, setEffectDropTargetLayerId] = useState<string | null>(null);
   const [toolbarViewportWidth, setToolbarViewportWidth] = useState(0);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showProxyInfo, setShowProxyInfo] = useState(false);
   const [trackContextMenu, setTrackContextMenu] = useState<{ x: number; y: number; timeSeconds: number } | null>(null);
   const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean } | null>(null);
   // The menu is measured after mount and clamped inside the viewport so it never spills off the
@@ -485,11 +504,38 @@ export function TimelineStrip({
     }
 
     const updateToolbarWidth = () => setToolbarViewportWidth(Math.max(360, timelineDock.clientWidth - 66));
-    updateToolbarWidth();
-    const observer = new ResizeObserver(updateToolbarWidth);
+    const update = () => {
+      updateToolbarWidth();
+      measureFollowGeom();
+    };
+    update();
+    const observer = new ResizeObserver(update);
     observer.observe(timelineDock);
+    const lane = timelineEditor.querySelector(".timeline-lane");
+    if (lane instanceof HTMLElement) observer.observe(lane); // lane width changes on zoom; re-measure
     return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- measureFollowGeom reads live DOM via refs
   }, []);
+
+  // Snapshot the dock/lane geometry the playback auto-follow needs, with ONE getBoundingClientRect pass
+  // (vs two per animation frame). Called on resize/zoom (observer above) and at playback start.
+  function measureFollowGeom() {
+    const timelineEditor = editorRef.current;
+    const timelineDock = timelineEditor?.closest(".editor-timeline-dock");
+    const lane = timelineEditor?.querySelector(".timeline-lane");
+    if (!timelineEditor || !(timelineDock instanceof HTMLElement) || !(lane instanceof HTMLElement)) {
+      followGeomRef.current = null;
+      return;
+    }
+    const dockRect = timelineDock.getBoundingClientRect();
+    const laneRect = lane.getBoundingClientRect();
+    followGeomRef.current = {
+      laneOffset: laneRect.left - dockRect.left + timelineDock.scrollLeft,
+      laneWidth: laneRect.width,
+      clientWidth: timelineDock.clientWidth,
+      maxScroll: Math.max(0, timelineDock.scrollWidth - timelineDock.clientWidth),
+    };
+  }
 
   useEffect(() => {
     const timelineEditor = editorRef.current;
@@ -567,29 +613,42 @@ export function TimelineStrip({
     }
 
     playhead.style.setProperty("--playhead-percent", playheadOffsetPercent(currentTime, timelineDurationSeconds));
+    const liveProxyBar = liveProxyBarRef.current;
+    if (liveProxyBar) {
+      liveProxyBar.style.display = "none";
+      liveProxyBar.style.setProperty("--proxy-start-percent", "0%");
+      liveProxyBar.style.setProperty("--proxy-width-percent", "0%");
+    }
   }, [currentTime, isPlaying, playbackStart, scrub, timelineDurationSeconds]);
 
-  function followPlaybackPlayhead(timeSeconds: number) {
+  // Per-frame auto-follow scroll, using the CACHED geometry (no getBoundingClientRect, no forced
+  // reflow). `scrollLeft` is read once by the caller before any writes (reads-before-writes), so this
+  // never dirties layout mid-frame.
+  //
+  // CONTINUOUS PINNED FOLLOW (smooth, no stop-motion): the playhead drifts freely across the viewport
+  // and only when it reaches PIN_FRAC (near the right edge) does the content start scrolling; from
+  // there it stays pinned and the content scrolls in lockstep with the playhead, which moves smoothly
+  // from the playback clock, so the scroll velocity == the playhead velocity (no catch-up bursts). The
+  // previous version had a dead-zone (drift to 84%, ease back to 64%), which made the playhead oscillate
+  // and the content lurch, creating the jumpy/stop-motion feel. Forward-only: while the playhead is left of the
+  // pin, `desiredScroll <= scrollLeft`, so the view is left alone; at the timeline end the scroll clamps
+  // to maxScroll and the playhead glides on to the right edge.
+  const PIN_FRAC = 0.88;
+  function followPlaybackPlayhead(timeSeconds: number, scrollLeft: number) {
     const timelineEditor = editorRef.current;
     const timelineDock = timelineEditor?.closest(".editor-timeline-dock");
-    const lane = timelineEditor?.querySelector<HTMLElement>(".timeline-lane");
-    if (!timelineEditor || !(timelineDock instanceof HTMLElement) || !lane) {
+    const geom = followGeomRef.current;
+    if (!geom || !(timelineDock instanceof HTMLElement)) {
       return;
     }
 
-    const dockRect = timelineDock.getBoundingClientRect();
-    const laneRect = lane.getBoundingClientRect();
-    const playheadX = laneRect.left + (clamp(timeSeconds, 0, timelineDurationSeconds) / Math.max(0.001, timelineDurationSeconds)) * laneRect.width;
-    const followThresholdX = dockRect.left + dockRect.width * 0.84;
-    if (playheadX <= followThresholdX) {
-      return;
+    const frac = clamp(timeSeconds, 0, timelineDurationSeconds) / Math.max(0.001, timelineDurationSeconds);
+    const playheadContentX = geom.laneOffset + frac * geom.laneWidth;
+    const desiredScroll = clamp(playheadContentX - geom.clientWidth * PIN_FRAC, 0, geom.maxScroll);
+    if (desiredScroll <= scrollLeft) {
+      return; // playhead still left of the pin (or can't scroll further right), so don't move the view
     }
-
-    const targetPlayheadX = dockRect.left + dockRect.width * 0.64;
-    const maxScrollLeft = Math.max(0, timelineDock.scrollWidth - timelineDock.clientWidth);
-    const targetScrollLeft = clamp(timelineDock.scrollLeft + playheadX - targetPlayheadX, 0, maxScrollLeft);
-    const distance = targetScrollLeft - timelineDock.scrollLeft;
-    timelineDock.scrollLeft += Math.abs(distance) < 0.75 ? distance : distance * 0.2;
+    timelineDock.scrollLeft = desiredScroll;
   }
 
   useEffect(() => {
@@ -597,21 +656,50 @@ export function TimelineStrip({
     if (!playhead || !isPlaying || !playbackStart || scrub) {
       return;
     }
+    const timelineDock = editorRef.current?.closest(".editor-timeline-dock");
+    const dock = timelineDock instanceof HTMLElement ? timelineDock : null;
+    const liveProxyBar = liveProxyBarRef.current;
+
+    measureFollowGeom(); // fresh snapshot for this playback run (zoom/resize during play re-measures via observer)
+    const updateLiveProxyBar = (timeSeconds: number) => {
+      if (!liveProxyBar) {
+        return;
+      }
+      const start = clamp(playbackStart.timeSeconds, 0, timelineDurationSeconds);
+      const end = clamp(timeSeconds, 0, timelineDurationSeconds);
+      if (end <= start) {
+        liveProxyBar.style.display = "none";
+        return;
+      }
+      liveProxyBar.style.display = "block";
+      liveProxyBar.style.setProperty("--proxy-start-percent", playheadOffsetPercent(start, timelineDurationSeconds));
+      liveProxyBar.style.setProperty("--proxy-width-percent", `${((end - start) / Math.max(0.001, timelineDurationSeconds)) * 100}%`);
+    };
 
     let frame = 0;
     const animate = (clockMs: number) => {
+      // Reads BEFORE writes: read scrollLeft while layout is clean (last frame already painted), then
+      // do all writes (scrollLeft via follow, then the playhead CSS var). No forced reflow per frame.
+      const scrollLeft = dock?.scrollLeft ?? 0;
       const nextTime = clamp(playbackStart.timeSeconds + (clockMs - playbackStart.clockMs) / 1000, 0, composition.durationSeconds);
+      if (dock) followPlaybackPlayhead(nextTime, scrollLeft);
       playhead.style.setProperty("--playhead-percent", playheadOffsetPercent(nextTime, timelineDurationSeconds));
-      followPlaybackPlayhead(nextTime);
+      updateLiveProxyBar(nextTime);
       if (nextTime < composition.durationSeconds) {
         frame = window.requestAnimationFrame(animate);
       }
     };
 
+    if (dock) followPlaybackPlayhead(playbackStart.timeSeconds, dock.scrollLeft);
     playhead.style.setProperty("--playhead-percent", playheadOffsetPercent(playbackStart.timeSeconds, timelineDurationSeconds));
-    followPlaybackPlayhead(playbackStart.timeSeconds);
+    updateLiveProxyBar(playbackStart.timeSeconds);
     frame = window.requestAnimationFrame(animate);
-    return () => window.cancelAnimationFrame(frame);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (liveProxyBar) {
+        liveProxyBar.style.display = "none";
+      }
+    };
   }, [composition.durationSeconds, isPlaying, playbackStart, scrub, timelineDurationSeconds]);
 
   // Drag/resize handlers below are wrapped in useCallback and read live state
@@ -1414,6 +1502,72 @@ export function TimelineStrip({
         <div className="timeline-timebar" ref={timebarRef} style={toolbarViewportWidth ? { width: `${toolbarViewportWidth}px` } : undefined}>
           <span>{currentTime.toFixed(2)}s</span>
           <div className="timeline-toolbar" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+            <div className="timeline-tool-group" role="group" aria-label="Preview proxies">
+              <button
+                type="button"
+                className={livePlaybackMode ? "is-active" : ""}
+                aria-pressed={livePlaybackMode}
+                title={
+                  livePlaybackMode
+                    ? "Live playback ON — playing the live compositor, not preview proxies (no proxies are generated). Click to use proxies again."
+                    : "Play live instead of preview proxies (stops proxy generation)"
+                }
+                onClick={() => onToggleLivePlayback?.(!livePlaybackMode)}
+              >
+                <Zap size={13} />
+              </button>
+              <button
+                type="button"
+                title="Regenerate all preview proxies"
+                disabled={livePlaybackMode}
+                onClick={() => onRegenerateProxyCache?.("all")}
+              >
+                <RefreshCw size={13} />
+              </button>
+              <button
+                type="button"
+                className="timeline-proxy-range-button"
+                disabled={livePlaybackMode || inPointSeconds == null || outPointSeconds == null || inPointSeconds >= outPointSeconds}
+                title={
+                  livePlaybackMode
+                    ? "Disabled while live playback is on"
+                    : inPointSeconds != null && outPointSeconds != null && inPointSeconds < outPointSeconds
+                      ? "Regenerate preview proxies for the In/Out range"
+                      : "Set both In and Out points to regenerate only that range"
+                }
+                onClick={() => onRegenerateProxyCache?.("inOut")}
+              >
+                I/O
+              </button>
+              <button type="button" className={showProxyInfo ? "is-active" : ""} title="How preview proxies work" onClick={() => setShowProxyInfo(true)}>
+                <Info size={13} />
+              </button>
+              {proxyCacheStatus && proxyCacheStatus.total > 0 ? (
+                <span
+                  className={`timeline-proxy-status${proxyCacheStatus.generating ? " is-generating" : ""}`}
+                  title={
+                    `Preview proxies: ${proxyCacheStatus.readyWithUrl}/${proxyCacheStatus.total} ready with media` +
+                    (proxyCacheStatus.ready !== proxyCacheStatus.readyWithUrl ? ` | ${proxyCacheStatus.ready} marked ready` : "") +
+                    (proxyCacheStatus.live > 0 ? ` | ${proxyCacheStatus.live} live-rendered` : "") +
+                    (proxyCacheStatus.pending > 0 ? ` | ${proxyCacheStatus.pending} rendering` : "") +
+                    (proxyCacheStatus.dirty > 0 ? ` | ${proxyCacheStatus.dirty} stale` : "") +
+                    (proxyCacheStatus.failed > 0 ? ` | ${proxyCacheStatus.failed} failed` : "") +
+                    ` | ${formatProxyBytes(proxyCacheStatus.byteSize)}`
+                  }
+                >
+                  <span
+                    className="timeline-proxy-status-bar"
+                    style={{ "--proxy-ready-percent": `${Math.round(proxyCacheStatus.readyRatio * 100)}%` } as CSSProperties & Record<"--proxy-ready-percent", string>}
+                  />
+                  <span className="timeline-proxy-status-label">
+                    {proxyCacheStatus.readyWithUrl}/{proxyCacheStatus.total}
+                  </span>
+                </span>
+              ) : null}
+            </div>
+
+            <span className="timeline-toolbar-divider" />
+
             <div className="timeline-tool-group" role="group" aria-label="Tools">
               <button type="button" className={toolMode === "select" ? "is-active" : ""} title="Select tool (V)" onClick={() => onChangeToolMode?.("select")}>
                 <MousePointer2 size={13} />
@@ -1555,6 +1709,24 @@ export function TimelineStrip({
             onToggleMarkerAtPlayhead?.();
           }}
         >
+          {proxyCacheSegments.length > 0 || isPlaying ? (
+            <div className="timeline-proxy-cache-bar" aria-hidden="true">
+              {proxyCacheSegments.map((segment) => (
+                <i
+                  className={`timeline-proxy-cache-segment is-${segment.status}`}
+                  key={segment.id}
+                  style={
+                    {
+                      "--proxy-start-percent": `${segment.startPercent}%`,
+                      "--proxy-width-percent": `${segment.endPercent - segment.startPercent}%`
+                    } as CSSProperties & Record<"--proxy-start-percent" | "--proxy-width-percent", string>
+                  }
+                  title={`Preview proxy ${segment.status} (${segment.reason})`}
+                />
+              ))}
+              <i className="timeline-proxy-cache-live-range" ref={liveProxyBarRef} />
+            </div>
+          ) : null}
           {rulerMarks.map((mark) => (
             <span
               key={mark}
@@ -1706,13 +1878,13 @@ export function TimelineStrip({
                 data-track-id={track.id}
                 style={{ "--timeline-ruler-step-percent": `${(rulerStepSeconds / Math.max(0.001, timelineDurationSeconds)) * 100}%` } as CSSProperties & Record<"--timeline-ruler-step-percent", string>}
                 onDragOver={(event) => {
-                  if (!track.locked && event.dataTransfer.types.includes("application/x-reelforge-asset")) {
+                  if (!track.locked && event.dataTransfer.types.includes("application/x-lumio-asset")) {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
                   }
                 }}
                 onDrop={(event) => {
-                  const assetId = event.dataTransfer.getData("application/x-reelforge-asset");
+                  const assetId = event.dataTransfer.getData("application/x-lumio-asset");
                   if (!assetId || track.locked) {
                     return;
                   }
@@ -1836,6 +2008,33 @@ export function TimelineStrip({
                 </li>
               ))}
             </ul>
+          </div>
+        </div>
+      ) : null}
+      {showProxyInfo ? (
+        <div className="timeline-shortcuts-backdrop" onClick={() => setShowProxyInfo(false)}>
+          <div className="timeline-shortcuts-panel timeline-proxy-info-panel" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <h3>Preview proxies</h3>
+              <button type="button" title="Close" onClick={() => setShowProxyInfo(false)}>
+                <X size={14} />
+              </button>
+            </header>
+            <div className="timeline-proxy-info-body">
+              <p>
+                Preview proxies are cached timeline sections used to keep long edits smooth without keeping many WebGL renderers alive.
+              </p>
+              <p>
+                Use the refresh button to rebuild the whole timeline cache when playback looks stale. Set both In and Out points, then use I/O to rebuild only that range.
+              </p>
+              <ul>
+                <li><span className="proxy-dot is-ready" /> Ready sections can play from proxy media.</li>
+                <li><span className="proxy-dot is-live" /> Live sections were rendered during playback and still need proxy media.</li>
+                <li><span className="proxy-dot is-pending" /> Pending sections are queued for regeneration.</li>
+                <li><span className="proxy-dot is-dirty" /> Dirty sections changed and need a new proxy.</li>
+                <li><span className="proxy-dot is-failed" /> Failed sections fall back to live preview until rebuilt.</li>
+              </ul>
+            </div>
           </div>
         </div>
       ) : null}
@@ -1970,7 +2169,7 @@ export function TimelineStrip({
             {clipContextMenu.crossPair ? (
               <>
                 <span className="timeline-context-menu-divider" />
-                <span className="timeline-context-menu-label">{clipContextMenu.hasTransition ? "Change transition" : "Add transition"}</span>
+                <span className="timeline-context-menu-label">{clipContextMenu.hasTransition ? "Change cut transition" : "Add transition at cut"}</span>
                 {contextTransitions().map((entry) => (
                   <button
                     key={entry.label}
@@ -2352,16 +2551,64 @@ const AudioVolumeEnvelope = memo(function AudioVolumeEnvelope({
   );
 });
 
-// Real video-frame filmstrip: tiles evenly-spaced captured frames across the clip. Shows a
-// subtle placeholder while frames extract (or if the asset can't be read).
+// Real video-frame filmstrip: tiles captured frames across the clip at a FIXED on-screen size.
+// The cache holds a fixed number of evenly-spaced frames per asset; the strip picks the tile COUNT
+// from the clip's measured width so every tile is roughly one frame wide (height * frame aspect) regardless
+// of clip duration. A short and a long clip then show the same-sized frames: a uniform filmstrip,
+// not 10 frames squished/stretched to fit (the old `flex:1`-per-fixed-10 layout). Shows a subtle
+// placeholder while frames extract (or if the asset can't be read). The host span is stable across
+// loading/ready so the ResizeObserver stays attached.
+const FILMSTRIP_DEFAULT_ASPECT = 16 / 9;
+
 const Filmstrip = memo(function Filmstrip({ url }: { url?: string | undefined }) {
   const thumbs = useVideoThumbnails(url);
-  if (!thumbs || thumbs.length === 0) {
-    return <span className="clip-filmstrip is-loading" aria-hidden="true" />;
-  }
+  const hostRef = useRef<HTMLSpanElement | null>(null);
+  const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [aspect, setAspect] = useState(FILMSTRIP_DEFAULT_ASPECT);
+
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      setBox((prev) =>
+        Math.abs(prev.width - rect.width) > 0.5 || Math.abs(prev.height - rect.height) > 0.5
+          ? { width: rect.width, height: rect.height }
+          : prev
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Real frame aspect from the first cached thumbnail, so each fixed tile shows a full (uncropped)
+  // frame at the clip's height. Cheap one-shot decode of a tiny cached data URL.
+  const firstThumb = thumbs?.[0];
+  useEffect(() => {
+    if (!firstThumb) return;
+    const img = document.createElement("img");
+    img.onload = () => {
+      if (img.naturalHeight > 0) setAspect(img.naturalWidth / img.naturalHeight);
+    };
+    img.src = firstThumb;
+  }, [firstThumb]);
+
+  const ready = Boolean(thumbs && thumbs.length > 0);
+  const tilePx = Math.max(28, Math.round((box.height || 44) * aspect));
+  const tileCount = ready ? (box.width > 0 ? Math.max(1, Math.round(box.width / tilePx)) : thumbs!.length) : 0;
+  const tiles = ready
+    ? Array.from({ length: tileCount }, (_, i) => {
+        const frac = tileCount <= 1 ? 0 : i / (tileCount - 1);
+        const index = Math.min(thumbs!.length - 1, Math.round(frac * (thumbs!.length - 1)));
+        return thumbs![index];
+      })
+    : [];
+
   return (
-    <span className="clip-filmstrip" aria-hidden="true">
-      {thumbs.map((src, index) => (
+    <span ref={hostRef} className={`clip-filmstrip ${ready ? "" : "is-loading"}`} aria-hidden="true">
+      {tiles.map((src, index) => (
         <i key={index} style={{ backgroundImage: `url(${src})` }} />
       ))}
     </span>
@@ -2369,7 +2616,7 @@ const Filmstrip = memo(function Filmstrip({ url }: { url?: string | undefined })
 });
 
 function getDraggedTimelineEffect(event: DragEvent<HTMLElement>): TimelineEffectType | undefined {
-  const type = event.dataTransfer.getData("application/x-reelforge-timeline-effect");
+  const type = event.dataTransfer.getData("application/x-lumio-timeline-effect");
   return getTimelineEffectDefinition(type as TimelineEffectType) ? (type as TimelineEffectType) : undefined;
 }
 
@@ -2524,13 +2771,13 @@ const TimelineClip = memo(function TimelineClip({
         }
       }}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes("application/x-reelforge-asset")) {
+        if (event.dataTransfer.types.includes("application/x-lumio-asset")) {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
           return;
         }
 
-        if (event.dataTransfer.types.includes("application/x-reelforge-timeline-effect")) {
+        if (event.dataTransfer.types.includes("application/x-lumio-timeline-effect")) {
           const effectType = getDraggedTimelineEffect(event);
           if (effectType && canDropTimelineEffect(effectType, layer)) {
             event.preventDefault();
@@ -2549,7 +2796,7 @@ const TimelineClip = memo(function TimelineClip({
       }}
       onDrop={(event) => {
         onSetEffectDropTarget(null);
-        const assetId = event.dataTransfer.getData("application/x-reelforge-asset");
+        const assetId = event.dataTransfer.getData("application/x-lumio-asset");
         if (assetId) {
           event.preventDefault();
           event.stopPropagation();
@@ -2862,6 +3109,20 @@ function getRulerMarks(durationSeconds: number, stepSeconds: number) {
     marks.push(durationSeconds);
   }
   return marks;
+}
+
+function formatProxyBytes(byteSize: number): string {
+  if (!Number.isFinite(byteSize) || byteSize <= 0) {
+    return "0 MB";
+  }
+  const mb = byteSize / (1024 * 1024);
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`;
+  }
+  if (mb >= 10) {
+    return `${Math.round(mb)} MB`;
+  }
+  return `${mb.toFixed(1)} MB`;
 }
 
 function formatRulerTime(timeSeconds: number) {

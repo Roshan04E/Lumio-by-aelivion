@@ -1,4 +1,4 @@
-# ReelForge Studio
+# Lumio
 
 Production-minded MVP for turning normal videos into modular reel-style edits.
 
@@ -34,7 +34,7 @@ API: `http://localhost:4100`
 Demo login used by the frontend:
 
 ```text
-demo@reelforge.studio
+demo@aelivion.studio
 password123
 ```
 

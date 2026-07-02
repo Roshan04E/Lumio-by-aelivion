@@ -1,5 +1,5 @@
 import { useEffect, useRef, type CSSProperties, type RefObject } from "react";
-import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, type ColorPipeline } from "@reelforge/shared";
+import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, type ColorPipeline } from "@lumio-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3) — WebGL video grading overlay (flag-gated).

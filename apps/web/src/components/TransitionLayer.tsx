@@ -4,7 +4,7 @@ import {
   getTransition,
   TransitionCompositor,
   type TransitionSpec,
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 
 /**
  * Editor-preview overlay for the unified GPU transition engine.
@@ -21,6 +21,8 @@ interface TransitionOverlayProps {
   spec: TransitionSpec;
   /** Incoming clip start = the cut. The transition window is [startSeconds, startSeconds+duration]. */
   startSeconds: number;
+  /** Incoming clip length — clamps the window so the reveal never runs past the clip. */
+  clipDurationSeconds: number;
   currentTime: number;
   isPlaying: boolean;
   /** Composition pixel size (the compositor renders at this resolution). */
@@ -38,6 +40,7 @@ interface TransitionOverlayProps {
 export function TransitionOverlay({
   spec,
   startSeconds,
+  clipDurationSeconds,
   currentTime,
   isPlaying,
   width,
@@ -80,7 +83,7 @@ export function TransitionOverlay({
   function drawMix() {
     const compositor = compositorRef.current;
     if (!compositor || !def) return;
-    const active = getActiveTransition(spec, { currentTimeSeconds: timeRef.current, startSeconds });
+    const active = getActiveTransition(spec, { currentTimeSeconds: timeRef.current, startSeconds, clipDurationSeconds });
     if (!active) return;
     const from = gradedRef.current[fromId];
     const to = gradedRef.current[toId];

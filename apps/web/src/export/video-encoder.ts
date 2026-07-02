@@ -121,6 +121,9 @@ export class MediaEncoder {
       height: opts.height,
       bitrate: videoBitrate,
       framerate: opts.fps,
+      // Keep HARDWARE encode (default) for full quality: SW H.264 encode in the browser is Baseline-profile
+      // only, which would downgrade the output. The H.264 decode↔encode contention is resolved on the DECODER
+      // side instead (software source decode is lossless — identical pixels — so quality is untouched).
       ...(opts.format === "mp4" ? { avc: { format: "avc" as const } } : {}),
     });
 
@@ -170,6 +173,24 @@ export class MediaEncoder {
   encodeAudio(data: AudioData): void {
     this.audioEncoder?.encode(data);
     data.close();
+  }
+
+  /** Tear down the encoders WITHOUT muxing a file — used to abandon a partial/aborted encode. */
+  dispose(): void {
+    try {
+      if (this.videoEncoder.state !== "closed") {
+        this.videoEncoder.close();
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (this.audioEncoder && this.audioEncoder.state !== "closed") {
+        this.audioEncoder.close();
+      }
+    } catch {
+      // ignore
+    }
   }
 
   async finalize(): Promise<Blob> {

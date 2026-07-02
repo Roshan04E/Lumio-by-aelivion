@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NEUTRAL_SECONDARY, type HslSecondary as Secondary } from "@reelforge/shared";
+import { NEUTRAL_SECONDARY, type HslSecondary as Secondary } from "@lumio-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3, 13C.3) — HSL Secondary keyer + correction.

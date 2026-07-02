@@ -10,7 +10,7 @@ import {
   useVideoConfig,
   type OnVideoFrame
 } from "remotion";
-import type { RenderManifest, RenderManifestLayer } from "@reelforge/render-templates";
+import type { RenderManifest, RenderManifestLayer } from "@lumio-by-aelivion/render-templates";
 import {
   MediaWebGLRenderer,
   SceneCompositor,
@@ -24,12 +24,14 @@ import {
   getCompositionMediaEffects,
   getCompositionObjectFit,
   getCompositionVolume,
+  registerLookManifests,
+  registerTransitionManifests,
   type ColorPipeline,
   type SceneFrameSpec,
   type ScenePreviewTransition,
   type TimelineLayer,
   type TransitionSpec
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 
 /**
  * Method-3 Phase 6.4 — Remotion SceneStage (default cloud compositor; see `getRemotionCompositor`).
@@ -95,7 +97,11 @@ function outgoingPostrollSeconds(layer: RenderManifestLayer, layers: RenderManif
   let best = 0;
   for (const other of layers) {
     if (other.id === layer.id || other.trackId !== layer.trackId || !other.transitionIn) continue;
-    if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, other.transitionIn.durationSeconds);
+    // Clamp to the incoming clip's length: the transition window is start-aligned and never runs past the
+    // clip it reveals (getActiveTransition), so the outgoing clip only needs to sit under it for that long.
+    if (Math.abs(other.startSeconds - end) < 0.05) {
+      best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds));
+    }
   }
   return best;
 }
@@ -336,6 +342,14 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
   const t = frame / fps;
+  useMemo(() => {
+    if (manifest.plugins?.looks?.length) {
+      registerLookManifests(manifest.plugins.looks, { override: true });
+    }
+    if (manifest.plugins?.transitions?.length) {
+      registerTransitionManifests(manifest.plugins.transitions, { override: true });
+    }
+  }, [manifest.plugins?.looks, manifest.plugins?.transitions]);
 
   // Back-to-front (z ascending = drawn first/bottom). Matches the legacy DOM order + the editor's z-order.
   const sorted = useMemo(() => [...manifest.layers].sort((a, b) => a.zIndex - b.zIndex), [manifest.layers]);
@@ -421,7 +435,8 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       if (!incoming || !outgoing) continue;
       const activeTransition = getActiveTransition(pair.spec as TransitionSpec, {
         currentTimeSeconds: t,
-        startSeconds: incoming.startSeconds
+        startSeconds: incoming.startSeconds,
+        clipDurationSeconds: incoming.durationSeconds
       });
       if (!activeTransition) continue;
       transitions.push({

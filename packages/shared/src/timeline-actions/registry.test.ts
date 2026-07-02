@@ -2,7 +2,7 @@
  * Standalone assert script for the Timeline Action Registry (repo convention:
  * no test framework — exits non-zero on first failure).
  *
- *   pnpm --filter @reelforge/shared actions:test
+ *   pnpm --filter @lumio-by-aelivion/shared actions:test
  */
 import { createDefaultComposition } from "../timeline";
 import type { TimelineComposition } from "../types";

@@ -50,6 +50,8 @@ export interface ColorStage {
    * SVG can't express 3D LUTs — this stage is WebGL/CPU only.
    */
   lut3d?: import("./lut3d").Lut3d | null;
+  /** 0..1 blend amount for `lut3d`; default 1. */
+  lutAmount?: number | undefined;
 }
 
 export interface ColorPipeline {

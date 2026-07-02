@@ -1,5 +1,5 @@
 {
-  "name": "@reelforge/shared",
+  "name": "@lumio-by-aelivion/shared",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,8 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "actions:test": "tsx src/timeline-actions/registry.test.ts",
-    "color:test": "tsx src/color/color.test.ts"
+    "color:test": "tsx src/color/color.test.ts",
+    "governor:test": "tsx src/color/gl-context.test.ts"
   },
   "dependencies": {
     "immer": "^11.1.8",

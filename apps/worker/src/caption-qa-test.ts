@@ -12,7 +12,7 @@ import {
   parseTranscriptInput,
   validateTranscriptArtifact,
   type SourceAsset
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 
 const transcript = parseTranscriptInput(`WEBVTT
 

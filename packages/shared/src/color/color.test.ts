@@ -2,7 +2,7 @@
  * Standalone assert script for the Professional Color System engine (13C.0).
  * Repo convention: no test framework — exits non-zero on first failure.
  *
- *   pnpm --filter @reelforge/shared color:test
+ *   pnpm --filter @lumio-by-aelivion/shared color:test
  *
  * The CPU applier is the ground truth that the SVG primitives mirror, so we test
  * the compiler + CPU path; the SVG emitter is checked structurally.

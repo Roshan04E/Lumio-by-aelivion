@@ -52,7 +52,7 @@ export function createMockRunner(jobs: WorkerJobPayload[] = []): JobRunner {
 export function createBullMqRunner(redisUrl: string): JobRunner {
   const connection = parseRedisUrl(redisUrl);
   const worker = new Worker<WorkerJobPayload>(
-    "reelforge-jobs",
+    "lumio-jobs",
     async (job) => {
       console.log(`[bullmq-worker] processing ${job.data.type}`, job.data);
       return {
@@ -65,7 +65,7 @@ export function createBullMqRunner(redisUrl: string): JobRunner {
 
   return {
     async start() {
-      console.log("Worker running with BullMQ queue: reelforge-jobs");
+      console.log("Worker running with BullMQ queue: lumio-jobs");
     },
     async stop() {
       await worker.close();

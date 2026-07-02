@@ -57,15 +57,22 @@ import {
   StepForward,
   Trash2,
   Type,
+  Upload,
   X
 } from "lucide-react";
 import {
+  applyTimelineTemplatePackage,
+  buildTimelineTemplatePackage,
   buildTemplateGraphFromProject,
   buildTransitionKeyframes,
   COLOR_EFFECT_TYPES,
   getTransition,
   TRANSITION_MARKER,
+  canApplyEffectManifestToLayer,
   createTimelineEffect,
+  createTimelineEffectFromManifest,
+  resolveEffectManifest,
+  resolveLookManifest,
   defaultTextWarp,
   ensureComposition,
   evaluateTimelineEffectParam,
@@ -84,12 +91,17 @@ import {
   getToolCapability,
   hasClipboardLayer,
   pasteLayerFromClipboard,
+  parseTimelineTemplatePackage,
   trackingPathToPositionKeyframes,
+  timelineTemplatePackageToJson,
   updateTimelineLayer,
   createDefaultMask,
   type AssetSource,
   type Mask,
   type ProjectGraph,
+  type PluginEffectManifest,
+  type PluginLookManifest,
+  type PluginTransitionManifest,
   type RenderJob,
   type SourceAsset,
   type StockOrientation,
@@ -111,7 +123,7 @@ import {
   type TrackingPathArtifactData,
   type TransitionKind,
   type TransitionSpec
-} from "@reelforge/shared";
+} from "@lumio-by-aelivion/shared";
 import { AiActivityIndicator } from "../components/AiActivityIndicator";
 import { AiChatPanel } from "../components/ai/AiChatPanel";
 import type { ToolStepResult } from "../ai/executor/PlanExecutor";
@@ -124,6 +136,21 @@ import { recordMaskPoints } from "../editor/inspector/maskKeyframeUtils";
 import { EffectMaskControls } from "../editor/inspector/EffectMaskControls";
 import { InspectorSection } from "../editor/inspector/InspectorSection";
 import { seedBuiltinRegistries } from "../editor";
+import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
+import {
+  createPreviewCacheController,
+  previewPluginSignature,
+  previewCacheRulerSegments,
+  summarizePreviewCacheStatus,
+  type CachedPreviewSpan,
+  type PreviewCacheController,
+  type PreviewCacheRulerSegment,
+  type ProxyCacheStatus,
+  type TimelineInterval
+} from "../editor/performance/renderCache";
+import { createProxyBlobStore, isProxyMediaSupported, type ProxyBlobStore } from "../editor/performance/proxyMediaStore";
+import { generateSpanProxy, ProxyGenerationAborted, type ProxyGenerationDiagnostic } from "../editor/performance/proxyWorkerClient";
+import type { ProxyPlaybackHit } from "../components/ProxyPlaybackLayer";
 import {
   applyAnimationPreset,
   getActiveEffectParamKeyframe,
@@ -165,6 +192,7 @@ import {
   getStockStatus,
   importStock,
   listAssets,
+  listPluginPackages,
   searchStock,
   STOCK_PAGE_SIZE,
   AuthRequiredError,
@@ -193,6 +221,42 @@ import { AssetViewerModal, type AssetViewerTarget } from "../components/AssetVie
 import { buildBackgroundColor, parseBackgroundColor } from "../lib/colorBackground";
 import { defaultColorPalette, extractPaletteFromAsset } from "../lib/colorPalette";
 import { useWheelScrollPerformance } from "../lib/useWheelScrollPerformance";
+import {
+  EMPTY_IMPORTED_PLUGIN_LIBRARY,
+  hydrateLookManifests,
+  hydrateTransitionManifests,
+  loadHiddenEffectManifestIds,
+  loadHiddenLookManifestIds,
+  loadHiddenTransitionManifestIds,
+  loadImportedPluginLibrary,
+  mergeLookManifest,
+  mergeEffectManifest,
+  mergeTransitionManifest,
+  removeEffectManifest,
+  removeLookManifest,
+  removeTransitionManifest,
+  normalizeImportedPluginLibrary,
+  pluginPackagesToImportedLibrary,
+  saveHiddenEffectManifestIds,
+  saveHiddenLookManifestIds,
+  saveHiddenTransitionManifestIds,
+  saveImportedPluginLibrary,
+  type ImportedPluginLibrary
+} from "../editor/effects/pluginManifestStore";
+
+function proxyDebugEnabled(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return (
+      params.get("debugGl") === "1" ||
+      params.get("debugProxy") === "1" ||
+      window.localStorage?.getItem("lumio_debug_gl") === "1" ||
+      window.localStorage?.getItem("lumio_debug_proxy") === "1"
+    );
+  } catch {
+    return false;
+  }
+}
 
 // Lazy-loaded so the editor's initial chunk stays light: the Effects panel + its catalog load when
 // the Effects tab opens, and the tool-runner modals (which pull the heavy ML handler graph) load
@@ -252,6 +316,26 @@ const defaultShapeStyle = {
 function PlayheadTimeReadout({ currentTime, isPlaying }: { currentTime: number; isPlaying: boolean }) {
   const time = usePlaybackClock(currentTime, isPlaying);
   return <span>{time.toFixed(2)}s</span>;
+}
+
+function downloadJsonFile(contents: string, fileName: string) {
+  const blob = new Blob([contents], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function safeFileStem(value: string) {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "lumio-template"
+  );
 }
 
 type LayerSelectMode = "replace" | "toggle" | "range" | "add-range";
@@ -320,6 +404,11 @@ export function EditorPage() {
   // clicks swap the clip's asset instead of adding a new layer.
   const [assetPickerForLayerId, setAssetPickerForLayerId] = useState<string | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const templatePackageInputRef = useRef<HTMLInputElement | null>(null);
+  const [backendPluginLibrary, setBackendPluginLibrary] = useState<ImportedPluginLibrary>(EMPTY_IMPORTED_PLUGIN_LIBRARY);
+  const [hiddenEffectManifestIds, setHiddenEffectManifestIds] = useState<Set<string>>(() => loadHiddenEffectManifestIds());
+  const [hiddenLookManifestIds, setHiddenLookManifestIds] = useState<Set<string>>(() => loadHiddenLookManifestIds());
+  const [hiddenTransitionManifestIds, setHiddenTransitionManifestIds] = useState<Set<string>>(() => loadHiddenTransitionManifestIds());
   const [activeLayerToolEffect, setActiveLayerToolEffect] = useState<
     { tool: ToolCapabilityDefinition; layer: TimelineLayer; asset: SourceAsset } | undefined
   >(undefined);
@@ -327,29 +416,56 @@ export function EditorPage() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackStart, setPlaybackStart] = useState<{ clockMs: number; timeSeconds: number } | null>(null);
   const [previewQuality, setPreviewQuality] = useState<"performance" | "balanced" | "quality">(() =>
-    readStoredChoice("reelforge_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
+    readStoredChoice("lumio_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
   );
-  const [leftPaneWidth, setLeftPaneWidth] = useState(() => readStoredNumber("reelforge_editor_left_width", 420));
-  const [rightPaneWidth, setRightPaneWidth] = useState(() => readStoredNumber("reelforge_editor_right_width", 340));
-  const [timelineHeight, setTimelineHeight] = useState(() => readStoredNumber("reelforge_editor_timeline_height", 270));
-  const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("reelforge_editor_track_height", 44));
+  const previewCacheControllerRef = useRef<PreviewCacheController | null>(null);
+  const previewCacheRenderStateRef = useRef<{ signature: string; renderScale: number; fps: number; durationSeconds: number } | null>(null);
+  const [proxyCacheSegments, setProxyCacheSegments] = useState<PreviewCacheRulerSegment[]>([]);
+  const [proxyCacheStatus, setProxyCacheStatus] = useState<ProxyCacheStatus | null>(null);
+  // Background proxy generation (worker-driven, playhead-independent). Refs let the async loop read the
+  // live isPlaying/asset state without stale closures.
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const proxyBlobStoreRef = useRef<ProxyBlobStore | null>(null);
+  const proxyGenAbortRef = useRef<AbortController | null>(null);
+  const proxyGenRunningRef = useRef(false);
+  const proxyGenLastReadyRef = useRef<{ id: string; ms: number; bytes: number } | null>(null);
+  const proxyGenLastErrorRef = useRef<string | null>(null);
+  const proxyGenEventsRef = useRef<Array<ProxyGenerationDiagnostic & { id: string; reason: string; layerIds: string[]; at: number }>>([]);
+  const proxyGenFailuresRef = useRef<Array<{ id: string; startSeconds: number; endSeconds: number; reason: string; layerIds: string[]; message: string; at: number }>>([]);
+  const resolvedAssetsRef = useRef<SourceAsset[]>([]);
+  const [proxyGenSupported] = useState(() => canExportLocally() && isProxyMediaSupported());
+  // User escape hatch: play the LIVE compositor instead of preview proxies. When on, no proxies are
+  // generated and playback never substitutes one — the viewer is always authoritative (useful while proxy
+  // faithfulness is being fixed, or on a machine where generation is costly). Persisted across sessions.
+  const [livePlaybackMode, setLivePlaybackMode] = useState(
+    () => readStoredChoice("lumio_live_playback", "off", ["on", "off"] as const) === "on"
+  );
+  const proxyGenActive = proxyGenSupported && !livePlaybackMode;
+  // Bumped to (re)kick background generation when nothing else in the dep list changed — e.g. after a
+  // manual In/Out regenerate, which marks spans dirty without altering the composition reference.
+  const [proxyGenNonce, setProxyGenNonce] = useState(0);
+  const [leftPaneWidth, setLeftPaneWidth] = useState(() => readStoredNumber("lumio_editor_left_width", 420));
+  const [rightPaneWidth, setRightPaneWidth] = useState(() => readStoredNumber("lumio_editor_right_width", 340));
+  const [timelineHeight, setTimelineHeight] = useState(() => readStoredNumber("lumio_editor_timeline_height", 270));
+  const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("lumio_editor_track_height", 44));
   const [timelineTool, setTimelineTool] = useState<TimelineToolMode>("select");
-  const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("reelforge_timeline_snap", "on", ["on", "off"] as const) === "on");
+  const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("lumio_timeline_snap", "on", ["on", "off"] as const) === "on");
   // Viewer scaling (Premiere-style): "fit" auto-scales the comp to the viewer (re-fits on panel resize);
   // "manual" uses `manualScale` (1:1 — 1.0 = 100% actual pixels). `fitScale` is reported up from the
   // preview (measured from the stable viewer box, no feedback) purely so the toolbar can show the % in
   // fit mode. Single scale end-to-end — no width/height fit modes, no zoom² coupling.
   const [viewMode, setViewMode] = useState<"fit" | "manual">(() =>
-    readStoredChoice("reelforge_viewer_view_mode", "fit", ["fit", "manual"] as const)
+    readStoredChoice("lumio_viewer_view_mode", "fit", ["fit", "manual"] as const)
   );
-  const [manualScale, setManualScale] = useState(() => readStoredNumber("reelforge_viewer_manual_scale", 1));
+  const [manualScale, setManualScale] = useState(() => readStoredNumber("lumio_viewer_manual_scale", 1));
   const [fitScale, setFitScale] = useState(1);
   const zoomTo = useCallback((scale: number) => {
     setManualScale(scale);
     setViewMode("manual");
   }, []);
   useEffect(() => {
-    localStorage.setItem("reelforge_viewer_view_mode", viewMode);
+    localStorage.setItem("lumio_viewer_view_mode", viewMode);
   }, [viewMode]);
   const [imagePalette, setImagePalette] = useState(defaultColorPalette);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -389,23 +505,68 @@ export function EditorPage() {
 
   useEffect(() => {
     if (!projectId) {
-      return;
+      return undefined;
     }
+    let cancelled = false;
     // A previously-promoted local draft redirects to its server project.
     const resolvedId = resolveProjectId(projectId);
-    getProject(resolvedId).then((loaded) => {
-      setProject(loaded);
-      if (!loaded.id.startsWith("project_local_")) {
-        markServerProjectSynced(loaded.id);
+    // Load with a bounded retry: getProject now THROWS on a transient miss instead of fabricating a blank
+    // "Untitled reel" (which the user could unknowingly edit). A short retry rides out a network blip; only
+    // after that do we surface an error — we never replace the user's project with an empty one.
+    const loadProject = async (attempt: number): Promise<void> => {
+      try {
+        const loaded = await getProject(resolvedId);
+        if (cancelled) return;
+        setProject(loaded);
+        if (!loaded.id.startsWith("project_local_")) {
+          markServerProjectSynced(loaded.id);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        // Auth failure (guest / expired session) on a server-only project: retrying without a token can't
+        // succeed and there's no local copy to fall back to. Send the user to sign in, remembering where to
+        // return — after login the project loads normally. NOT a transient error, so no retry.
+        if (error instanceof AuthRequiredError) {
+          const from = `${window.location.pathname}${window.location.search}`;
+          navigate(`/login?from=${encodeURIComponent(from)}`, { replace: true });
+          return;
+        }
+        if (attempt < 2) {
+          window.setTimeout(() => void loadProject(attempt + 1), 600 * (attempt + 1));
+          return;
+        }
+        setNotice(error instanceof Error ? error.message : "Could not load this project. Check your connection and try again.");
       }
-    });
+    };
+    void loadProject(0);
     listAssets().then(setAssets);
     // Kick connectivity: promotes any pending local draft (incl. this one) when online.
     void checkNow();
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion((value) => value + 1);
+    return () => {
+      cancelled = true;
+    };
   }, [projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listPluginPackages()
+      .then((catalog) => {
+        if (!cancelled) {
+          setBackendPluginLibrary(pluginPackagesToImportedLibrary(catalog.packages));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBackendPluginLibrary(EMPTY_IMPORTED_PLUGIN_LIBRARY);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Adopt the server id if the project gets promoted in the background (reconnect monitor).
   useEffect(() => {
@@ -416,20 +577,49 @@ export function EditorPage() {
     return subscribeSync(() => {
       const serverId = resolveProjectId(currentId);
       if (serverId !== currentId) {
-        getProject(serverId).then((promoted) => {
-          setProject(promoted);
-          try {
-            const newPath = window.location.pathname.replace(currentId, serverId);
-            window.history.replaceState(window.history.state, "", newPath);
-          } catch {
-            /* route swap is best-effort */
-          }
-        });
+        getProject(serverId)
+          .then((promoted) => {
+            setProject(promoted);
+            try {
+              const newPath = window.location.pathname.replace(currentId, serverId);
+              window.history.replaceState(window.history.state, "", newPath);
+            } catch {
+              /* route swap is best-effort */
+            }
+          })
+          .catch(() => {
+            /* Best-effort background adopt: keep the current (working) project if the promoted fetch fails. */
+          });
       }
     });
   }, [project?.id]);
 
   const graph = project?.projectGraph;
+  const importedPluginLibrary = useMemo(
+    () => {
+      const merged = mergeImportedPluginLibraries(
+        backendPluginLibrary,
+        mergeImportedPluginLibraries(loadImportedPluginLibrary(), normalizeImportedPluginLibrary(graph?.plugins))
+      );
+      return {
+        ...merged,
+        effects: merged.effects.filter((item) => !hiddenEffectManifestIds.has(item.id)),
+        looks: merged.looks.filter((item) => !hiddenLookManifestIds.has(item.id)),
+        transitions: merged.transitions.filter((item) => !hiddenTransitionManifestIds.has(item.id))
+      };
+    },
+    [backendPluginLibrary, graph?.plugins, hiddenEffectManifestIds, hiddenLookManifestIds, hiddenTransitionManifestIds]
+  );
+  const importedPluginSignature = useMemo(() => previewPluginSignature(importedPluginLibrary), [importedPluginLibrary]);
+  useEffect(() => {
+    const warnings = [
+      ...hydrateLookManifests(importedPluginLibrary.looks),
+      ...hydrateTransitionManifests(importedPluginLibrary.transitions)
+    ];
+    if (warnings.length) {
+      console.warn("[plugins] import warnings", warnings);
+    }
+  }, [importedPluginLibrary.looks, importedPluginLibrary.transitions]);
   const composition = useMemo(
     () => (project && graph ? ensureComposition(graph, { name: project.title, durationSeconds: project.durationSeconds }) : undefined),
     [graph, project]
@@ -441,6 +631,9 @@ export function EditorPage() {
 
     return [project.sourceAsset, ...assets];
   }, [assets, project?.sourceAsset]);
+  useEffect(() => {
+    resolvedAssetsRef.current = resolvedAssets;
+  }, [resolvedAssets]);
   const layers = useMemo(() => (composition ? flattenTimelineLayers(composition) : []), [composition]);
   const layerMaxDurations = useMemo(
     () => (composition ? buildLayerMaxDurations(composition, resolvedAssets) : {}),
@@ -530,14 +723,9 @@ export function EditorPage() {
     setPlaybackClock(started.timeSeconds);
     let frame = 0;
     let lastClockCommitMs = 0;
-    let lastStateCommitMs = 0;
-    // The clock store drives the hot leaves (preview/transport/scopes) at the quality cadence — the
-    // same rate the preview re-rendered before. React `currentTime` re-renders the WHOLE ~6000-line
-    // EditorPage (timeline + every panel + the inline asset bin), so committing it ~7×/sec is the periodic
-    // playback freeze (full-tree reconcile + alloc → major GC). The hot path doesn't need it (it reads the
-    // clock store + self-animates), so commit it only ~2×/sec just to keep the COLD panels roughly synced;
-    // leaving playback flushes the exact frame below. INDEPENDENT of `playbackCommitIntervalMs` (the store).
-    const STATE_COMMIT_MS = 500;
+    // The clock store drives the hot leaves (preview/transport/scopes) at the quality cadence.
+    // React `currentTime` re-renders the whole editor, so the playback loop does not mirror it
+    // while playing; stop/seek/end paths flush the exact time back into React state.
 
     const tick = (clockMs: number) => {
       const started = playbackStartRef.current;
@@ -545,6 +733,11 @@ export function EditorPage() {
         return;
       }
 
+      // Wall-clock playhead. Playback smoothness for the PICTURE comes from native media playback (the live
+      // <video> frame loop and — over ready spans — the proxy <video> substitution overlay), both of which
+      // present off the main thread and stay in sync with real time. Keeping this clock real-time is what
+      // holds the proxy <video> aligned with the playhead; clamping it would make a native proxy race ahead
+      // and re-seek. (The overlay/playhead may momentarily lag the picture during a main-thread stall.)
       const nextTime = started.timeSeconds + (clockMs - started.clockMs) / 1000;
       currentTimeRef.current = nextTime; // always live for handlers reading the ref
       if (nextTime >= composition.durationSeconds) {
@@ -557,10 +750,6 @@ export function EditorPage() {
       if (clockMs - lastClockCommitMs >= playbackCommitIntervalMs) {
         lastClockCommitMs = clockMs;
         setPlaybackClock(nextTime);
-      }
-      if (clockMs - lastStateCommitMs >= STATE_COMMIT_MS) {
-        lastStateCommitMs = clockMs;
-        setCurrentTime(nextTime);
       }
       frame = window.requestAnimationFrame(tick);
     };
@@ -613,8 +802,327 @@ export function EditorPage() {
   }, [activeRenderJob, projectId]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_preview_quality", previewQuality);
+    localStorage.setItem("lumio_preview_quality", previewQuality);
   }, [previewQuality]);
+
+  useEffect(() => {
+    previewCacheControllerRef.current?.clear();
+    setProxyCacheSegments([]);
+    setProxyCacheStatus(null);
+  }, [composition?.id]);
+
+  const getPreviewCacheController = useCallback((): PreviewCacheController => {
+    previewCacheControllerRef.current ??= createPreviewCacheController({
+      // When a span is evicted/invalidated/pruned, delete its backing proxy blob so storage tracks reality.
+      onDisposeSpanMedia: (span) => {
+        void proxyBlobStoreRef.current?.remove(span.id);
+      }
+    });
+    return previewCacheControllerRef.current;
+  }, []);
+
+  // Repaint the ruler segments + status chip from the current cache entries. Both derive from the same
+  // entry snapshot so the thin ruler and the "N/M ready" chip never disagree.
+  const paintProxyCacheState = useCallback((entries: readonly CachedPreviewSpan[], durationSeconds: number) => {
+    const status = summarizePreviewCacheStatus(entries);
+    setProxyCacheSegments(previewCacheRulerSegments({ entries, durationSeconds }));
+    setProxyCacheStatus(status);
+    if (typeof window !== "undefined") {
+      (window as Window & { __rfProxyDebug?: unknown }).__rfProxyDebug = {
+        supported: proxyGenSupported,
+        blobStoreKind: proxyBlobStoreRef.current?.kind ?? null,
+        counts: {
+          pending: status.pending,
+          ready: status.ready,
+          readyWithUrl: status.readyWithUrl,
+          dirty: status.dirty,
+          failed: status.failed,
+          live: status.live,
+          total: status.total
+        },
+        liveSeconds: status.liveSeconds,
+        byteSize: status.byteSize,
+        running: proxyGenRunningRef.current,
+        lastReady: proxyGenLastReadyRef.current,
+        lastError: proxyGenLastErrorRef.current,
+        events: proxyGenEventsRef.current,
+        failures: proxyGenFailuresRef.current,
+        // Per-span snapshot for divergence triage: after editing an effect, watch the span covering the
+        // playhead. If its `contentSignature` does NOT change on the edit, the signature isn't capturing that
+        // field (fix in spanContentSignature). If it changes + regenerates but the proxy still looks wrong,
+        // it's a clip-time render issue in the span composition.
+        spans: entries.map((span) => ({
+          id: span.id,
+          status: span.status,
+          reason: span.reason,
+          contentSignature: span.contentSignature,
+          startSeconds: span.startSeconds,
+          endSeconds: span.endSeconds,
+          hasUrl: span.url !== undefined,
+          layerIds: span.layerIds
+        }))
+      };
+    }
+  }, [proxyGenSupported]);
+
+  const updateProxyCacheRuler = useCallback(
+    (targetRange?: TimelineInterval | undefined) => {
+      if (!composition) {
+        setProxyCacheSegments([]);
+        setProxyCacheStatus(null);
+        return;
+      }
+      const controller = getPreviewCacheController();
+      const renderScale = getPreviewQualityProfile(previewQuality).resolutionScale;
+      const snapshot = controller.update({
+        composition,
+        renderScale,
+        playheadSeconds: currentTimeRef.current,
+        pluginSignature: importedPluginSignature,
+        ...(targetRange !== undefined ? { targetRange } : {}),
+        now: Date.now()
+      });
+      previewCacheRenderStateRef.current = {
+        signature: snapshot.signature,
+        renderScale,
+        fps: composition.fps,
+        durationSeconds: composition.durationSeconds
+      };
+      paintProxyCacheState(snapshot.entries, composition.durationSeconds);
+    },
+    [composition, getPreviewCacheController, importedPluginSignature, previewQuality, paintProxyCacheState]
+  );
+
+  useEffect(() => {
+    updateProxyCacheRuler();
+  }, [composition, isPlaying, previewQuality, updateProxyCacheRuler]);
+
+  const handlePreviewFrameRendered = useCallback(
+    (timeSeconds: number, renderScale: number) => {
+      if (!composition) {
+        return;
+      }
+      const controller = previewCacheControllerRef.current;
+      const state = previewCacheRenderStateRef.current;
+      if (!controller || !state || state.renderScale !== renderScale) {
+        return;
+      }
+      const span = controller.markFrameRendered({
+        signature: state.signature,
+        renderScale,
+        timeSeconds,
+        frameDurationSeconds: 1 / Math.max(1, composition.fps),
+        now: Date.now()
+      });
+      if (span && typeof window !== "undefined") {
+        const debug = (window as Window & { __rfProxyDebug?: Record<string, unknown> }).__rfProxyDebug;
+        if (debug && typeof debug === "object") {
+          debug.lastLive = { spanId: span.id, timeSeconds };
+        }
+      }
+    },
+    [composition]
+  );
+
+  const handleRegenerateProxyCache = useCallback(
+    (target: "all" | "inOut") => {
+      if (!composition) {
+        return;
+      }
+      const controller = getPreviewCacheController();
+      let targetRange: TimelineInterval | undefined;
+      if (target === "inOut") {
+        const startSeconds = composition.settings?.timeline.inPointSeconds;
+        const endSeconds = composition.settings?.timeline.outPointSeconds;
+        if (startSeconds == null || endSeconds == null || startSeconds >= endSeconds) {
+          setNotice("Set both In and Out points to regenerate that proxy range");
+          return;
+        }
+        targetRange = { startSeconds, endSeconds };
+        controller.markDirty(targetRange);
+      } else {
+        controller.clear();
+      }
+
+      updateProxyCacheRuler(targetRange);
+      setProxyGenNonce((value) => value + 1); // kick the background generator for the freshly-queued spans
+      const rangeLabel = targetRange ? `${targetRange.startSeconds.toFixed(2)}s-${targetRange.endSeconds.toFixed(2)}s` : "whole timeline";
+      setNotice(`Preview proxy regeneration queued for ${rangeLabel}`);
+    },
+    [composition, getPreviewCacheController, updateProxyCacheRuler]
+  );
+
+  // Playback substitution lookup: is there a ready flattened-proxy covering this time? The preview plays it
+  // as a native <video> (smooth through main-thread stalls) instead of live-compositing. Returns the object
+  // URL + span start so the overlay can seek to span-local time. undefined → live compositor renders.
+  const resolveProxyPlayback = useCallback(
+    (timeSeconds: number): ProxyPlaybackHit | undefined => {
+      if (!proxyGenActive) {
+        return undefined;
+      }
+      const controller = previewCacheControllerRef.current;
+      const state = previewCacheRenderStateRef.current;
+      if (!controller || !state) {
+        return undefined;
+      }
+      const media = controller.store.getReadySpanMedia(timeSeconds, state.signature, state.renderScale);
+      if (!media) {
+        return undefined;
+      }
+      return { url: media.url, spanStartSeconds: media.spanStartSeconds, spanId: media.spanId };
+    },
+    [proxyGenActive]
+  );
+
+  // Background proxy generation loop. Runs ONLY while paused/idle (so it never competes with playback),
+  // renders pending spans off the main thread in the export Worker (no new preview WebGL context), stores
+  // the resulting webm, and seals the span. Fully playhead-independent: it processes whatever is pending,
+  // regardless of where the playhead is. Aborts the instant playback starts or the timeline changes.
+  const runProxyGeneration = useCallback(async () => {
+    if (proxyGenRunningRef.current || !proxyGenActive) {
+      return;
+    }
+    if (!composition || isPlayingRef.current) {
+      return;
+    }
+    const controller = previewCacheControllerRef.current;
+    const state = previewCacheRenderStateRef.current;
+    if (!controller || !state) {
+      return;
+    }
+    proxyGenRunningRef.current = true;
+    const debugProxy = proxyDebugEnabled();
+    if (debugProxy) {
+      console.debug("preview proxy generation start");
+    }
+    try {
+      proxyBlobStoreRef.current ??= await createProxyBlobStore();
+      const store = proxyBlobStoreRef.current;
+      // Snapshot the composition for this run; an edit changes the ref and the trigger effect re-kicks.
+      const runComposition = composition;
+      while (!isPlayingRef.current) {
+        const activeState = previewCacheRenderStateRef.current;
+        if (!activeState || activeState.signature !== state.signature) {
+          break; // signature changed (resolution/project) — a fresh run will take over
+        }
+        const span = controller.store.nextPending();
+        if (!span) {
+          if (debugProxy) {
+            console.debug("preview proxy generation drained");
+          }
+          break;
+        }
+        const abort = new AbortController();
+        proxyGenAbortRef.current = abort;
+        try {
+          const startedMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+          const recordProxyEvent = (event: ProxyGenerationDiagnostic) => {
+            const entry = { ...event, id: span.id, reason: span.reason, layerIds: span.layerIds, at: Date.now() };
+            proxyGenEventsRef.current = [...proxyGenEventsRef.current.slice(-39), entry];
+            if (debugProxy) {
+              console.debug("preview proxy event", entry);
+            }
+          };
+          if (debugProxy) {
+            console.debug(`preview proxy start ${span.id}`);
+          }
+          const blob = await generateSpanProxy({
+            composition: runComposition,
+            spanStartSeconds: span.startSeconds,
+            spanEndSeconds: span.endSeconds,
+            fps: runComposition.fps,
+            urlForAsset: (id) => resolvedAssetsRef.current.find((asset) => asset.id === id)?.fileUrl,
+            transitionManifests: importedPluginLibrary.transitions,
+            lookManifests: importedPluginLibrary.looks,
+            signal: abort.signal,
+            onDiagnostic: recordProxyEvent
+          });
+          await store.put(span.id, blob);
+          const url = await store.getObjectUrl(span.id);
+          if (url) {
+            controller.store.markSpanReady({
+              id: span.id,
+              signature: activeState.signature,
+              contentSignature: span.contentSignature,
+              url,
+              byteSize: blob.size
+            });
+            const elapsedMs = Math.round((typeof performance !== "undefined" ? performance.now() : Date.now()) - startedMs);
+            proxyGenLastReadyRef.current = { id: span.id, ms: elapsedMs, bytes: blob.size };
+            proxyGenLastErrorRef.current = null;
+            if (debugProxy) {
+              console.debug(`preview proxy ready ${span.id} ${blob.size} bytes in ${elapsedMs}ms`);
+            }
+          } else {
+            const message = "proxy blob store returned no url";
+            proxyGenLastErrorRef.current = message;
+            proxyGenFailuresRef.current = [
+              ...proxyGenFailuresRef.current.slice(-19),
+              { id: span.id, startSeconds: span.startSeconds, endSeconds: span.endSeconds, reason: span.reason, layerIds: span.layerIds, message, at: Date.now() }
+            ];
+            controller.store.markFailed(span.id, message);
+            if (debugProxy) {
+              console.debug(`preview proxy failed ${span.id}: ${message}`);
+            }
+          }
+        } catch (error) {
+          if (error instanceof ProxyGenerationAborted) {
+            if (debugProxy) {
+              console.debug("preview proxy generation aborted");
+            }
+            break;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          proxyGenLastErrorRef.current = message;
+          proxyGenFailuresRef.current = [
+            ...proxyGenFailuresRef.current.slice(-19),
+            { id: span.id, startSeconds: span.startSeconds, endSeconds: span.endSeconds, reason: span.reason, layerIds: span.layerIds, message, at: Date.now() }
+          ];
+          controller.store.markFailed(span.id, message);
+          if (debugProxy) {
+            console.debug(`preview proxy failed ${span.id}: ${message}`);
+          }
+        } finally {
+          proxyGenAbortRef.current = null;
+        }
+        paintProxyCacheState(controller.store.entries, activeState.durationSeconds);
+      }
+    } finally {
+      proxyGenRunningRef.current = false;
+      paintProxyCacheState(controller.store.entries, state.durationSeconds);
+      if (debugProxy) {
+        console.debug("preview proxy generation exit");
+      }
+    }
+  }, [composition, importedPluginLibrary.looks, importedPluginLibrary.transitions, paintProxyCacheState, proxyGenActive]);
+
+  // Kick generation when idle; abort it the moment playback starts, live-playback is toggled on, or the
+  // timeline/quality changes.
+  useEffect(() => {
+    if (isPlaying || !composition || !proxyGenActive) {
+      proxyGenAbortRef.current?.abort();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void runProxyGeneration();
+    }, 600);
+    return () => {
+      window.clearTimeout(timer);
+      proxyGenAbortRef.current?.abort();
+    };
+  }, [isPlaying, composition, previewQuality, proxyGenNonce, proxyGenActive, runProxyGeneration]);
+
+  useEffect(() => {
+    localStorage.setItem("lumio_live_playback", livePlaybackMode ? "on" : "off");
+  }, [livePlaybackMode]);
+
+  // Release proxy storage when switching projects.
+  useEffect(() => {
+    return () => {
+      proxyGenAbortRef.current?.abort();
+      void proxyBlobStoreRef.current?.clear();
+    };
+  }, [composition?.id]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -643,7 +1151,7 @@ export function EditorPage() {
       // Playback transport (matches the viewer buttons): Space play/pause, Home/End jump, ← → step one frame.
       if (event.code === "Space") {
         event.preventDefault();
-        setIsPlaying((value) => !value);
+        togglePlayback();
         return;
       }
       if (event.key === "Home") {
@@ -670,7 +1178,7 @@ export function EditorPage() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [project]);
+  }, [composition, isPlaying, project]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -763,23 +1271,23 @@ export function EditorPage() {
   }, [busy, activeRenderJob, localExportSupported, localExport, composition, project]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_editor_left_width", String(leftPaneWidth));
+    localStorage.setItem("lumio_editor_left_width", String(leftPaneWidth));
   }, [leftPaneWidth]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_editor_right_width", String(rightPaneWidth));
+    localStorage.setItem("lumio_editor_right_width", String(rightPaneWidth));
   }, [rightPaneWidth]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_editor_timeline_height", String(timelineHeight));
+    localStorage.setItem("lumio_editor_timeline_height", String(timelineHeight));
   }, [timelineHeight]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_timeline_snap", snapEnabled ? "on" : "off");
+    localStorage.setItem("lumio_timeline_snap", snapEnabled ? "on" : "off");
   }, [snapEnabled]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_editor_track_height", String(timelineTrackHeight));
+    localStorage.setItem("lumio_editor_track_height", String(timelineTrackHeight));
   }, [timelineTrackHeight]);
 
   useEffect(() => {
@@ -789,7 +1297,7 @@ export function EditorPage() {
   }, [selectedLayerId]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_viewer_manual_scale", String(manualScale));
+    localStorage.setItem("lumio_viewer_manual_scale", String(manualScale));
   }, [manualScale]);
 
   useEffect(() => {
@@ -876,7 +1384,7 @@ export function EditorPage() {
     setNotice("Redo complete");
   }
 
-  async function updateComposition(nextComposition: TimelineComposition) {
+  async function updateComposition(nextComposition: TimelineComposition, options: { plugins?: ImportedPluginLibrary | undefined } = {}) {
     if (!graph) {
       return;
     }
@@ -885,6 +1393,7 @@ export function EditorPage() {
     await updateGraph({
       ...graph,
       composition: normalizedComposition,
+      ...(options.plugins ? { plugins: options.plugins } : {}),
       version: graph.version + 1
     }, normalizedComposition.durationSeconds);
   }
@@ -953,6 +1462,122 @@ export function EditorPage() {
     await updateGraph({ ...graph, editableFields: updater(graph.editableFields), version: graph.version + 1 }, undefined, {
       recordHistory: false
     });
+  }
+
+  async function updateImportedPluginLibrary(library: ImportedPluginLibrary) {
+    saveImportedPluginLibrary(library);
+    if (!graph) {
+      return;
+    }
+    await updateGraph({ ...graph, plugins: library, version: graph.version + 1 }, undefined, {
+      recordHistory: false
+    });
+  }
+
+  function projectPluginLibraryWithEffectManifest(manifest: PluginEffectManifest): ImportedPluginLibrary {
+    return mergeEffectManifest(normalizeImportedPluginLibrary(graph?.plugins), manifest);
+  }
+
+  function projectPluginLibraryWithLookManifest(manifest: PluginLookManifest): ImportedPluginLibrary {
+    return mergeLookManifest(normalizeImportedPluginLibrary(graph?.plugins), manifest);
+  }
+
+  function projectPluginLibraryWithTransitionManifest(manifest: PluginTransitionManifest): ImportedPluginLibrary {
+    return mergeTransitionManifest(normalizeImportedPluginLibrary(graph?.plugins), manifest);
+  }
+
+  async function handleImportEffectManifest(manifest: PluginEffectManifest): Promise<string> {
+    const existed = importedPluginLibrary.effects.some((item) => item.id === manifest.id);
+    const resolved = resolveEffectManifest(manifest);
+    const next = mergeEffectManifest(importedPluginLibrary, manifest);
+    setHiddenEffectManifestIds((prev) => {
+      if (!prev.has(manifest.id)) return prev;
+      const unhidden = new Set(prev);
+      unhidden.delete(manifest.id);
+      saveHiddenEffectManifestIds(unhidden);
+      return unhidden;
+    });
+    await updateImportedPluginLibrary(next);
+    const base = `${existed ? "Updated" : "Imported"} effect ${manifest.name}`;
+    const warnings = resolved.warnings.length ? ` ${resolved.warnings.join(" ")}` : "";
+    if (selectedLayer && !resolved.compatibleLayerTypes.includes(selectedLayer.type)) {
+      return `${base}. It is saved, but hidden for the selected ${selectedLayer.type} layer. Select a compatible visual layer to apply it.${warnings}`;
+    }
+    return `${base}.${warnings}`;
+  }
+
+  async function handleRemoveEffectManifest(manifestId: string): Promise<string> {
+    const existing = importedPluginLibrary.effects.find((item) => item.id === manifestId);
+    const next = removeEffectManifest(importedPluginLibrary, manifestId);
+    setHiddenEffectManifestIds((prev) => {
+      const hidden = new Set(prev);
+      hidden.add(manifestId);
+      saveHiddenEffectManifestIds(hidden);
+      return hidden;
+    });
+    await updateImportedPluginLibrary(next);
+    return existing ? `Removed effect ${existing.name}.` : "Removed uploaded effect.";
+  }
+
+  async function handleImportLookManifest(manifest: PluginLookManifest): Promise<string> {
+    const existed = importedPluginLibrary.looks.some((item) => item.id === manifest.id);
+    const resolved = resolveLookManifest(manifest);
+    const next = mergeLookManifest(importedPluginLibrary, manifest);
+    setHiddenLookManifestIds((prev) => {
+      if (!prev.has(manifest.id)) return prev;
+      const unhidden = new Set(prev);
+      unhidden.delete(manifest.id);
+      saveHiddenLookManifestIds(unhidden);
+      return unhidden;
+    });
+    const warnings = hydrateLookManifests([manifest]);
+    await updateImportedPluginLibrary(next);
+    return warnings.length
+      ? `${existed ? "Updated" : "Imported"} look ${resolved.look.name}: ${warnings.join(" ")}`
+      : `${existed ? "Updated" : "Imported"} look ${resolved.look.name}.`;
+  }
+
+  async function handleImportTransitionManifest(manifest: PluginTransitionManifest): Promise<string> {
+    const existed = importedPluginLibrary.transitions.some((item) => item.id === manifest.id);
+    const next = mergeTransitionManifest(importedPluginLibrary, manifest);
+    setHiddenTransitionManifestIds((prev) => {
+      if (!prev.has(manifest.id)) return prev;
+      const unhidden = new Set(prev);
+      unhidden.delete(manifest.id);
+      saveHiddenTransitionManifestIds(unhidden);
+      return unhidden;
+    });
+    const warnings = hydrateTransitionManifests([manifest]);
+    await updateImportedPluginLibrary(next);
+    return warnings.length
+      ? `${existed ? "Updated" : "Imported"} transition ${manifest.name}: ${warnings.join(" ")}`
+      : `${existed ? "Updated" : "Imported"} transition ${manifest.name}`;
+  }
+
+  async function handleRemoveLookManifest(manifestId: string): Promise<string> {
+    const existing = importedPluginLibrary.looks.find((item) => item.id === manifestId);
+    const next = removeLookManifest(importedPluginLibrary, manifestId);
+    setHiddenLookManifestIds((prev) => {
+      const hidden = new Set(prev);
+      hidden.add(manifestId);
+      saveHiddenLookManifestIds(hidden);
+      return hidden;
+    });
+    await updateImportedPluginLibrary(next);
+    return existing ? `Removed look ${existing.name}.` : "Removed uploaded look.";
+  }
+
+  async function handleRemoveTransitionManifest(manifestId: string): Promise<string> {
+    const existing = importedPluginLibrary.transitions.find((item) => item.id === manifestId);
+    const next = removeTransitionManifest(importedPluginLibrary, manifestId);
+    setHiddenTransitionManifestIds((prev) => {
+      const hidden = new Set(prev);
+      hidden.add(manifestId);
+      saveHiddenTransitionManifestIds(hidden);
+      return hidden;
+    });
+    await updateImportedPluginLibrary(next);
+    return existing ? `Removed transition ${existing.name}.` : "Removed uploaded transition.";
   }
 
   const trackLibrary: SavedTrack[] = useMemo(() => {
@@ -1728,6 +2353,58 @@ export function EditorPage() {
     }
   }
 
+  function exportTimelineTemplatePackage() {
+    if (!project || !graph || !composition) {
+      setNotice("Open a timeline before exporting a template package");
+      return;
+    }
+    try {
+      const pkg = buildTimelineTemplatePackage({
+        projectId: project.id,
+        title: `${project.title} Template`,
+        description: `Lumio template package exported from ${project.title}.`,
+        graph,
+        composition,
+        assets: resolvedAssets
+      });
+      downloadJsonFile(timelineTemplatePackageToJson(pkg), `${safeFileStem(project.title)}.lumio-template.json`);
+      const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
+      setNotice(`Template package exported${warningText}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Template package export failed");
+    }
+  }
+
+  async function importTimelineTemplatePackage(file: File | undefined) {
+    if (!file || !project) {
+      return;
+    }
+
+    setBusy("template-package");
+    try {
+      const raw = JSON.parse(await file.text()) as unknown;
+      const pkg = parseTimelineTemplatePackage(raw);
+      const applied = applyTimelineTemplatePackage({
+        package: pkg,
+        projectId: project.id,
+        projectTitle: project.title,
+        sourceAssetId: project.sourceAssetId ?? project.sourceAsset?.id ?? undefined,
+        availableAssetIds: resolvedAssets.map((asset) => asset.id)
+      });
+      await updateGraph(applied.graph, applied.composition?.durationSeconds ?? project.durationSeconds);
+      setSelectedLayerIds([]);
+      setEditorCurrentTime(0);
+      if (applied.warnings.length) {
+        console.warn("[templates] import warnings", applied.warnings);
+      }
+      setNotice(applied.warnings[0] ? `Imported "${pkg.manifest.name}" · ${applied.warnings[0]}` : `Imported "${pkg.manifest.name}"`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Template package import failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function handlePickReplacement(asset: SourceAsset) {
     const layerId = assetPickerForLayerId;
     if (!composition || !layerId) {
@@ -2156,7 +2833,98 @@ export function EditorPage() {
     setNotice("Effect added");
   }
 
+  function handleApplyEffectManifest(manifest: PluginEffectManifest) {
+    if (!selectedLayer || !composition) {
+      setNotice("Select a timeline element first");
+      focusInspector();
+      return;
+    }
+    if (!canApplyEffectManifestToLayer(manifest, selectedLayer.type)) {
+      setNotice("Effect is not compatible with this layer");
+      return;
+    }
+
+    const effect = createTimelineEffectFromManifest(manifest);
+    const nextComposition = updateTimelineLayer(composition, selectedLayer.id, (layer) => ({
+      ...layer,
+      effects: [...layer.effects, effect]
+    }));
+    void updateComposition(nextComposition, { plugins: projectPluginLibraryWithEffectManifest(manifest) });
+    focusInspector();
+    setNotice(`${effect.name} added`);
+  }
+
   /** Apply an animation preset (Pop In, Typewriter, …) from the Effects catalog. */
+  function lookEffect(lookName: string): TimelineEffect {
+    return {
+      ...createTimelineEffect("creativeLook"),
+      params: { look: lookName, intensity: 100 }
+    };
+  }
+
+  function applyLookToLayer(layer: TimelineLayer, lookName: string): TimelineLayer {
+    const existing = layer.effects.find((effect) => effect.type === "creativeLook");
+    if (!existing) {
+      return { ...layer, effects: [...layer.effects, lookEffect(lookName)] };
+    }
+    return {
+      ...layer,
+      effects: layer.effects.map((effect) =>
+        effect.id === existing.id
+          ? {
+              ...effect,
+              enabled: true,
+              intensity: 100,
+              params: { ...(effect.params ?? {}), look: lookName, intensity: 100 }
+            }
+          : effect
+      )
+    };
+  }
+
+  function handleApplyLook(lookName: string, mode: "clip" | "adjustment", manifest?: PluginLookManifest | undefined) {
+    if (mode === "clip") {
+      if (!selectedLayer || !composition) {
+        setNotice("Select a timeline element first");
+        focusInspector();
+        return;
+      }
+      if (selectedLayer.type === "audio") {
+        setNotice("Looks need a visual layer");
+        return;
+      }
+      const nextComposition = updateTimelineLayer(composition, selectedLayer.id, (layer) => applyLookToLayer(layer, lookName));
+      void updateComposition(nextComposition, manifest ? { plugins: projectPluginLibraryWithLookManifest(manifest) } : {});
+      focusInspector();
+      setNotice("Look applied");
+      return;
+    }
+
+    if (!composition) {
+      return;
+    }
+    const selectedTrack = selectedLayer ? composition.tracks.find((item) => item.id === selectedLayer.trackId) : undefined;
+    const track =
+      selectedTrack && selectedTrack.type !== "audio"
+        ? selectedTrack
+        : composition.tracks.find((item) => item.type !== "audio");
+    if (!track) {
+      setNotice("Add a visual track first");
+      return;
+    }
+    const layer = applyLookToLayer(createEditorLayer("adjustment", track, composition, layers.length + 1, currentTime), lookName);
+    setSelectedLayerIds([layer.id]);
+    void updateComposition(
+      {
+        ...composition,
+        tracks: composition.tracks.map((item) => (item.id === track.id ? { ...item, layers: [...item.layers, layer] } : item))
+      },
+      manifest ? { plugins: projectPluginLibraryWithLookManifest(manifest) } : {}
+    );
+    focusInspector();
+    setNotice("Adjustment look added");
+  }
+
   function handleApplyPreset(presetId: string) {
     if (!selectedLayer) {
       setNotice("Select a timeline element first");
@@ -2185,6 +2953,7 @@ export function EditorPage() {
   /**
    * Add a transition from the Effects catalog/gallery. Target resolution: the selected clip if one is
    * selected; otherwise the clip under the playhead; if several clips are under the playhead, ask which.
+   * Junction transitions apply to a cut: selected clip's right edge first, else its left edge.
    */
   function handleAddTransition(spec: TransitionApplySpec) {
     if (selectedLayer) {
@@ -2206,21 +2975,25 @@ export function EditorPage() {
 
   /**
    * Apply a transition to a specific clip. Per-clip edge fades (fadeIn/fadeOut) write opacity keyframes
-   * on the clip; every junction kind (cross dissolve / dip / slide / push / zoom / wipe / iris) applies
-   * at the cut between this clip and the clip immediately before it on the same track.
+   * on the clip; every junction kind applies at a cut. If both sides are possible, prefer this clip's
+   * right edge (between this clip and the next clip), matching the timeline right-click menu.
    */
   function applyTransitionToClip(clipId: string, spec: TransitionApplySpec) {
-    if (spec.kind === "fadeIn" || spec.kind === "fadeOut") {
-      void updateLayer(clipId, (layer) => ({ ...layer, animations: buildTransitionKeyframes(layer, spec.kind as "fadeIn" | "fadeOut") }));
-      setNotice("Transition added");
-      return;
-    }
     if (!composition) {
       return;
     }
-    const left = findLeftNeighbor(composition, clipId);
-    if (!left) {
-      setNotice("Place this clip right after another clip, then add the transition");
+    if (spec.kind === "fadeIn" || spec.kind === "fadeOut") {
+      const nextComposition = updateTimelineLayer(composition, clipId, (layer) => ({
+        ...layer,
+        animations: buildTransitionKeyframes(layer, spec.kind as "fadeIn" | "fadeOut")
+      }));
+      void updateComposition(nextComposition, spec.manifest ? { plugins: projectPluginLibraryWithTransitionManifest(spec.manifest) } : {});
+      setNotice("Transition added");
+      return;
+    }
+    const target = findTransitionCutForClip(composition, clipId);
+    if (!target) {
+      setNotice("Transitions need a cut between two touching clips");
       return;
     }
     const fullSpec: TransitionSpec = {
@@ -2231,8 +3004,11 @@ export function EditorPage() {
       color: spec.color,
       params: spec.params
     };
-    void updateComposition(applyJunctionTransition(composition, left.id, clipId, fullSpec));
-    setNotice("Transition added");
+    void updateComposition(
+      applyJunctionTransition(composition, target.left.id, target.right.id, fullSpec),
+      spec.manifest ? { plugins: projectPluginLibraryWithTransitionManifest(spec.manifest) } : {}
+    );
+    setNotice(target.side === "right" ? "Transition added to right cut" : "Transition added to left cut");
   }
 
   /** Resize a fade band on the timeline — rewrites just that direction's transition keyframes. */
@@ -2240,7 +3016,10 @@ export function EditorPage() {
     if (kind !== "fadeIn" && kind !== "fadeOut" && kind !== "crossDissolve") {
       return;
     }
-    void updateLayer(layerId, (layer) => ({ ...layer, animations: buildTransitionKeyframes(layer, kind, durationSeconds) }));
+    void updateLayer(layerId, (layer) => ({
+      ...layer,
+      animations: buildTransitionKeyframes(layer, kind as "fadeIn" | "fadeOut" | "crossDissolve", durationSeconds)
+    }));
   }
 
   /** Remove one fade direction (double-click a band) by stripping its `_transition_` keyframes. */
@@ -2487,11 +3266,13 @@ export function EditorPage() {
         urlForAsset: (id) => resolvedAssets.find((asset) => asset.id === id)?.fileUrl,
         format,
         fps,
+        transitionManifests: importedPluginLibrary.transitions,
+        lookManifests: importedPluginLibrary.looks,
         signal: controller.signal,
         onProgress: (progress, label) => setLocalExport({ progress, label })
       });
       const ext = format === "webm" ? "webm" : "mp4";
-      await saveExportedFile(blob, `${project.title || "reelforge"}.${ext}`);
+      await saveExportedFile(blob, `${project.title || "lumio"}.${ext}`);
       setNotice("Exported on this device");
     } catch (error) {
       if (!(error instanceof Error && error.name === "Aborted")) {
@@ -2501,6 +3282,41 @@ export function EditorPage() {
       setLocalExport(null);
       localExportAbortRef.current = null;
     }
+  }
+
+  function openIsolatedDeviceExport(fps: number, format: ExportFormat) {
+    if (!project) {
+      return;
+    }
+    setExportDialogOpen(false);
+    const handoffKey = `lumio.localExportHandoff.${project.id}.${Date.now()}`;
+    let handoffWritten = false;
+    try {
+      localStorage.setItem(handoffKey, JSON.stringify({ project, assets: resolvedAssets, createdAt: Date.now() }));
+      handoffWritten = true;
+    } catch {
+      /* fallback route can still load from local/API project stores */
+    }
+    const params = new URLSearchParams({
+      projectId: project.id,
+      fps: String(fps),
+      format
+    });
+    if (handoffWritten) {
+      params.set("handoff", handoffKey);
+    }
+    const url = `/editor/__local-export?${params.toString()}`;
+    const opened = window.open(url, "_blank");
+    if (!opened) {
+      setNotice("Popup blocked. Allow popups for Lumio, then export again.");
+      return;
+    }
+    try {
+      opened.opener = null;
+    } catch {
+      /* best-effort */
+    }
+    setNotice("Export opened in a separate tab");
   }
 
   async function downloadRenderManifest() {
@@ -2535,6 +3351,36 @@ export function EditorPage() {
     if (!composition) return;
     setEditorCurrentTime(composition.durationSeconds);
     setIsPlaying(false);
+  }
+
+  function getLivePlaybackTime() {
+    if (!composition) return currentTimeRef.current;
+    const started = playbackStartRef.current;
+    if (!started) {
+      return Math.max(0, Math.min(composition.durationSeconds, currentTimeRef.current));
+    }
+    return Math.max(
+      0,
+      Math.min(composition.durationSeconds, started.timeSeconds + (performance.now() - started.clockMs) / 1000)
+    );
+  }
+
+  function pausePlaybackAtLiveClock() {
+    const stopped = getLivePlaybackTime();
+    currentTimeRef.current = stopped;
+    playbackStartRef.current = null;
+    setPlaybackClock(stopped);
+    setCurrentTime(stopped);
+    setPlaybackStart(null);
+    setIsPlaying(false);
+  }
+
+  function togglePlayback() {
+    if (isPlayingRef.current) {
+      pausePlaybackAtLiveClock();
+      return;
+    }
+    setIsPlaying(true);
   }
 
   function stepFrame(direction: -1 | 1) {
@@ -2735,7 +3581,7 @@ export function EditorPage() {
       <div className="editor-topbar">
         <div className="editor-titlebar">
           <Link to="/" className="editor-brand">
-            ReelForge
+            Lumio
           </Link>
           <Badge tone="lime">{project.status}</Badge>
           <h1>{project.title}</h1>
@@ -2756,6 +3602,17 @@ export function EditorPage() {
           </Button>
           <span className="editor-actions-divider" aria-hidden="true" />
           {/* Document actions — icon-only with tooltips to keep the bar compact. */}
+          <input
+            ref={templatePackageInputRef}
+            type="file"
+            accept="application/json,.json,.lumio-template"
+            className="effect-import-input"
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              void importTimelineTemplatePackage(file);
+              event.currentTarget.value = "";
+            }}
+          />
           <Button
             className="icon-only"
             variant="secondary"
@@ -2764,6 +3621,24 @@ export function EditorPage() {
             onClick={() => setTemplateModalOpen(true)}
             aria-label="Save as template"
             title="Save as template"
+          />
+          <Button
+            className="icon-only"
+            variant="secondary"
+            icon={<Download size={16} />}
+            disabled={busy === "template-package" || !composition}
+            onClick={exportTimelineTemplatePackage}
+            aria-label="Export template package"
+            title="Export template package"
+          />
+          <Button
+            className="icon-only"
+            variant="secondary"
+            icon={<Upload size={16} />}
+            disabled={busy === "template-package"}
+            onClick={() => templatePackageInputRef.current?.click()}
+            aria-label="Import template package"
+            title="Import template package"
           />
           <Button
             className="icon-only"
@@ -2832,7 +3707,7 @@ export function EditorPage() {
         <div className="transition-choice-backdrop" onClick={() => setTransitionChoice(null)}>
           <div className="transition-choice-modal" onClick={(event) => event.stopPropagation()}>
             <h3>Apply transition to…</h3>
-            <p>Several clips are under the playhead. Pick the clip that should get the transition.</p>
+            <p>Transitions are applied to a cut between two touching clips. Pick which cut to use.</p>
             <div className="transition-choice-list">
               {transitionChoice.candidates.map((candidate) => (
                 <button
@@ -2845,7 +3720,7 @@ export function EditorPage() {
                   }}
                 >
                   <strong>{candidate.name}</strong>
-                  <span>{candidate.type}</span>
+                  <span>{describeTransitionCutForClip(composition, candidate.id)}</span>
                 </button>
               ))}
             </div>
@@ -2940,9 +3815,20 @@ export function EditorPage() {
                       effects={graph.effects}
                       selectedLayerType={selectedLayer?.type}
                       sampleFrames={transitionSampleFrames}
+                      importedEffects={importedPluginLibrary.effects}
+                      importedLooks={importedPluginLibrary.looks}
+                      importedTransitions={importedPluginLibrary.transitions}
                       onAddTimelineEffect={handleAddTimelineEffect}
+                      onApplyEffectManifest={handleApplyEffectManifest}
+                      onImportEffectManifest={handleImportEffectManifest}
+                      onRemoveEffectManifest={handleRemoveEffectManifest}
+                      onImportLookManifest={handleImportLookManifest}
+                      onRemoveLookManifest={handleRemoveLookManifest}
+                      onImportTransitionManifest={handleImportTransitionManifest}
+                      onRemoveTransitionManifest={handleRemoveTransitionManifest}
                       onApplyToolEffect={handleApplyLayerToolEffect}
                       onApplyPreset={handleApplyPreset}
+                      onApplyLook={handleApplyLook}
                       onAddTransition={handleAddTransition}
                       onAddAudioEffect={handleAddAudioEffect}
                       onRemove={handleRemoveEffect}
@@ -3015,6 +3901,8 @@ export function EditorPage() {
               onResizeShapeLayer={handlePreviewResizeShapeLayer}
               onRotateLayer={handlePreviewRotateLayer}
               onScaleLayer={handlePreviewScaleLayer}
+              resolveProxyPlayback={resolveProxyPlayback}
+              onPreviewFrameRendered={handlePreviewFrameRendered}
               onSelectLayer={selectLayer}
               sourceAsset={project.sourceAsset}
               maskTool={maskTool}
@@ -3059,7 +3947,7 @@ export function EditorPage() {
               <button type="button" title="Previous frame (←)" onClick={() => stepFrame(-1)}>
                 <StepBack size={16} />
               </button>
-              <button type="button" title={isPlaying ? "Pause (Space)" : "Play (Space)"} onClick={() => setIsPlaying((value) => !value)}>
+              <button type="button" title={isPlaying ? "Pause (Space)" : "Play (Space)"} onClick={togglePlayback}>
                 {isPlaying ? <Pause size={17} /> : <Play size={17} />}
               </button>
               <button type="button" title="Next frame (→)" onClick={() => stepFrame(1)}>
@@ -3316,6 +4204,11 @@ export function EditorPage() {
             onClearInPoint={handleClearInPoint}
             onClearOutPoint={handleClearOutPoint}
             onClearInOutPoints={handleClearInOutPoints}
+            proxyCacheSegments={proxyCacheSegments}
+            proxyCacheStatus={proxyCacheStatus ?? undefined}
+            onRegenerateProxyCache={handleRegenerateProxyCache}
+            livePlaybackMode={livePlaybackMode}
+            onToggleLivePlayback={setLivePlaybackMode}
             onReplaceLayerAsset={handleReplaceLayerAsset}
             onSlipLayer={handleSlipLayer}
             onPreviewVolume={handlePreviewLayer}
@@ -3424,12 +4317,15 @@ export function EditorPage() {
                     <span>Format</span>
                     <ThemedSelect ariaLabel="Export format" value={exportFormat} groups={formatGroups} onChange={setExportFormat} />
                   </label>
-                  <p className="local-export-hint">Rendered on your device — nothing is uploaded.</p>
+                  <p className="local-export-hint">Renders on this device (in a background worker). Nothing is uploaded.</p>
                   <div className="export-settings-actions">
                     <Button variant="secondary" onClick={() => setExportDialogOpen(false)}>
                       Cancel
                     </Button>
-                    <Button icon={<MonitorDown size={16} />} onClick={() => void exportOnDevice(exportFps ?? projFps, exportFormat)}>
+                    <Button variant="secondary" onClick={() => openIsolatedDeviceExport(exportFps ?? projFps, exportFormat)}>
+                      Separate tab
+                    </Button>
+                    <Button icon={<MonitorDown size={16} />} onClick={() => exportOnDevice(exportFps ?? projFps, exportFormat)}>
                       Export
                     </Button>
                   </div>
@@ -3445,7 +4341,7 @@ export function EditorPage() {
               <span style={{ width: `${Math.round(localExport.progress * 100)}%` }} />
             </div>
             <p className="local-export-label">{localExport.label}</p>
-            <p className="local-export-hint">Rendered on your device — nothing is uploaded.</p>
+            <p className="local-export-hint">Rendering on this device in a background worker. Keep this tab open.</p>
             <Button variant="secondary" onClick={() => localExportAbortRef.current?.abort()}>
               Cancel
             </Button>
@@ -3632,6 +4528,18 @@ function findLatestRenderJob(jobs: RenderJob[], type: RenderJob["type"]) {
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
 }
 
+function mergeImportedPluginLibraries(a: ImportedPluginLibrary, b: ImportedPluginLibrary): ImportedPluginLibrary {
+  const effects = new Map(a.effects.map((item) => [item.id, item]));
+  const looks = new Map(a.looks.map((item) => [item.id, item]));
+  const transitions = new Map(a.transitions.map((item) => [item.id, item]));
+  for (const item of b.effects) effects.set(item.id, item);
+  for (const item of b.looks) looks.set(item.id, item);
+  for (const item of b.transitions) transitions.set(item.id, item);
+  return effects.size || looks.size || transitions.size
+    ? { effects: [...effects.values()], looks: [...looks.values()], transitions: [...transitions.values()] }
+    : EMPTY_IMPORTED_PLUGIN_LIBRARY;
+}
+
 function getRenderNotice(activeJob: RenderJob | undefined, latestFinalJob: RenderJob | undefined, fallback: string) {
   if (activeJob?.type === "final") {
     if (activeJob.status === "queued") {
@@ -3800,6 +4708,61 @@ function findLeftNeighbor(composition: TimelineComposition, rightId: string): Ti
     }
   }
   return best;
+}
+
+/** The clip immediately after `leftId` on the same track that touches/overlaps its end, or null. */
+function findRightNeighbor(composition: TimelineComposition, leftId: string): TimelineLayer | null {
+  const track = composition.tracks.find((item) => item.layers.some((layer) => layer.id === leftId));
+  const left = track?.layers.find((layer) => layer.id === leftId);
+  if (!track || !left) {
+    return null;
+  }
+  const epsilon = 1 / (Math.round(composition.fps) || 30) + 1e-3;
+  const cut = left.startSeconds + left.durationSeconds;
+  let best: TimelineLayer | null = null;
+  for (const layer of track.layers) {
+    if (layer.id === leftId || layer.startSeconds <= left.startSeconds) {
+      continue;
+    }
+    if (layer.startSeconds <= cut + epsilon) {
+      if (!best || layer.startSeconds < best.startSeconds) {
+        best = layer;
+      }
+    }
+  }
+  return best;
+}
+
+function findTransitionCutForClip(
+  composition: TimelineComposition,
+  clipId: string
+): { left: TimelineLayer; right: TimelineLayer; side: "left" | "right" } | null {
+  const clip = flattenTimelineLayers(composition).find((layer) => layer.id === clipId);
+  if (!clip || clip.type === "audio") {
+    return null;
+  }
+  const right = findRightNeighbor(composition, clipId);
+  if (right) {
+    return { left: clip, right, side: "right" };
+  }
+  const left = findLeftNeighbor(composition, clipId);
+  if (left) {
+    return { left, right: clip, side: "left" };
+  }
+  return null;
+}
+
+function describeTransitionCutForClip(composition: TimelineComposition | null | undefined, clipId: string): string {
+  if (!composition) {
+    return "No cut available";
+  }
+  const target = findTransitionCutForClip(composition, clipId);
+  if (!target) {
+    return "No touching clip";
+  }
+  return target.side === "right"
+    ? `Right cut: ${target.left.name} -> ${target.right.name}`
+    : `Left cut: ${target.left.name} -> ${target.right.name}`;
 }
 
 /**
@@ -4643,14 +5606,14 @@ function AssetBin({
   };
   const [query, setQuery] = useState("");
   const [sourceTab, setSourceTab] = useState<AssetSourceTab>(() =>
-    readStoredChoice("reelforge_asset_tab", "local", ["local", "ai", "stock", "brand", "used"] as const)
+    readStoredChoice("lumio_asset_tab", "local", ["local", "ai", "stock", "brand", "used"] as const)
   );
   const [filter, setFilter] = useState<AssetTypeFilter>(() =>
-    readStoredChoice("reelforge_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
+    readStoredChoice("lumio_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
   );
-  const [view, setView] = useState<"tiles" | "list">(() => readStoredChoice("reelforge_asset_view", "tiles", ["tiles", "list"] as const));
+  const [view, setView] = useState<"tiles" | "list">(() => readStoredChoice("lumio_asset_view", "tiles", ["tiles", "list"] as const));
   const [size, setSize] = useState<"small" | "medium" | "large">(() =>
-    readStoredChoice("reelforge_asset_size", "medium", ["small", "medium", "large"] as const)
+    readStoredChoice("lumio_asset_size", "medium", ["small", "medium", "large"] as const)
   );
   const [menuAssetId, setMenuAssetId] = useState<string | null>(null);
 
@@ -4658,10 +5621,10 @@ function AssetBin({
   const [stockProvider, setStockProvider] = useState<StockProvider>("pexels");
   const [stockType, setStockType] = useState<"image" | "video">("image");
   const [stockOrientation, setStockOrientation] = useState<StockOrientation>(() =>
-    readStoredChoice("reelforge_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
+    readStoredChoice("lumio_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
   );
   const [stockQuality, setStockQuality] = useState<StockQuality>(() =>
-    readStoredChoice("reelforge_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
+    readStoredChoice("lumio_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
   );
   const [stockStatus, setStockStatus] = useState<Record<StockProvider, boolean> | null>(null);
   const [stockResults, setStockResults] = useState<StockResult[]>([]);
@@ -4681,27 +5644,27 @@ function AssetBin({
   );
 
   useEffect(() => {
-    localStorage.setItem("reelforge_asset_tab", sourceTab);
+    localStorage.setItem("lumio_asset_tab", sourceTab);
   }, [sourceTab]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_asset_filter", filter);
+    localStorage.setItem("lumio_asset_filter", filter);
   }, [filter]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_asset_view", view);
+    localStorage.setItem("lumio_asset_view", view);
   }, [view]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_asset_size", size);
+    localStorage.setItem("lumio_asset_size", size);
   }, [size]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_stock_orientation", stockOrientation);
+    localStorage.setItem("lumio_stock_orientation", stockOrientation);
   }, [stockOrientation]);
 
   useEffect(() => {
-    localStorage.setItem("reelforge_stock_quality", stockQuality);
+    localStorage.setItem("lumio_stock_quality", stockQuality);
   }, [stockQuality]);
 
   // Close the per-card "More" menu when clicking elsewhere or pressing Escape.
@@ -5008,7 +5971,7 @@ function AssetBin({
                   onClick={() => handleTileActivate(asset)}
                   onDoubleClick={() => (replaceActive ? onPickReplacement?.(asset) : setViewerTarget({ kind: "asset", asset }))}
                   onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-reelforge-asset", asset.id);
+                    event.dataTransfer.setData("application/x-lumio-asset", asset.id);
                     event.dataTransfer.effectAllowed = "copy";
                   }}
                   onKeyDown={(event) => {
@@ -5596,12 +6559,17 @@ function TimelineEffectControl({
     onUpdate({ ...fresh, id: normalizedEffect.id });
   };
 
-  const updateParam = (param: TimelineEffectParamDefinition, value: string | number | boolean) => {
+  const updateParam = (
+    param: TimelineEffectParamDefinition,
+    value: string | number | boolean,
+    extraParams?: Record<string, string | number | boolean>
+  ) => {
     onUpdate({
       ...normalizedEffect,
       params: {
         ...(normalizedEffect.params ?? {}),
-        [param.key]: value
+        [param.key]: value,
+        ...(extraParams ?? {})
       }
     });
   };
@@ -5645,7 +6613,7 @@ function TimelineEffectControl({
               palette={palette}
               param={param}
               onChangeLayer={onChangeLayer}
-              onChange={(value) => updateParam(param, value)}
+              onChange={(value, extraParams) => updateParam(param, value, extraParams)}
             />
           ))}
         </div>
@@ -5688,7 +6656,7 @@ function EffectParamControl({
   param: TimelineEffectParamDefinition;
   palette: string[];
   onChangeLayer: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
-  onChange: (value: string | number | boolean) => void;
+  onChange: (value: string | number | boolean, extraParams?: Record<string, string | number | boolean>) => void;
 }) {
   const value = effect.params?.[param.key] ?? param.defaultValue;
 
@@ -5796,11 +6764,18 @@ function EffectParamControl({
   }
 
   if (param.type === "lut") {
+    const lutLabel =
+      typeof effect.params?.lutName === "string" && effect.params.lutName.trim()
+        ? effect.params.lutName
+        : effect.name !== "LUT"
+          ? effect.name
+          : undefined;
     return (
       <div className="effect-lut-control">
         <LutFileImport
+          label={lutLabel}
           value={typeof value === "string" ? value : param.defaultValue}
-          onChange={(next) => onChange(next)}
+          onChange={(next, name) => onChange(next, name !== undefined ? { lutName: name } : undefined)}
         />
       </div>
     );
@@ -5981,4 +6956,3 @@ function normalizeRotation(value: number) {
   const normalized = ((value + 180) % 360) - 180;
   return normalized < -180 ? normalized + 360 : normalized;
 }
-

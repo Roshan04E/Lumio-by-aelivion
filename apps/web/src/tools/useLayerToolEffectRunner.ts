@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import type { SourceAsset, TimelineComposition, TimelineLayer, ToolCapabilityDefinition } from "@reelforge/shared";
+import type { SourceAsset, TimelineComposition, TimelineLayer, ToolCapabilityDefinition } from "@lumio-by-aelivion/shared";
 import { getLayerToolEffectHandler, type LayerToolEffectOptionField } from "./layer-effect-handlers";
 
 /**

@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { registerSW } from "virtual:pwa-register";
-import { configureFontResolver, warpFontFile } from "@reelforge/shared";
+import { configureFontResolver, warpFontFile } from "@lumio-by-aelivion/shared";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";

@@ -61,7 +61,7 @@ export function getColorEngine(): ColorEngine {
  * Default is "webgl": the unified path is the backbone (it's the only path that can apply
  * the pro in-shader stylize effects — vignette/grain/chroma — that effects.ts now marks
  * `native`). The worker mirrors this default (Root.getRendererMode → process.env
- * RENDERER_MODE). The formal pixel sweep (`pnpm --filter @reelforge/worker render:compare:pixels`
+ * RENDERER_MODE). The formal pixel sweep (`pnpm --filter @lumio-by-aelivion/worker render:compare:pixels`
  * in a GPU env) should still be run to confirm; force the old path with `?rendererMode=legacy`
  * / localStorage if a regression appears. See COLOR_SYSTEM_PLAN.md.
  */
@@ -206,4 +206,35 @@ export function getExportWorkerScene(): boolean {
 /** True when the unified WebGL media renderer should be used for video/image layers. */
 export function useWebglRenderer(supported: boolean): boolean {
   return supported && getRendererMode() === "webgl";
+}
+
+/**
+ * Preview WebGL context governor (todo.md Phase 2) — bounds the number of LIVE preview WebGL2 contexts so a
+ * large, many-clip timeline never crosses the browser's ~16-context cap (which force-loses the OLDEST context
+ * → `texImage2D` spam + a permanent fall to the non-pixel-identical DOM path). When ON, `gl-context.ts`
+ * enforces its budget: per-layer `MediaWebGLRenderer` allocation routes through `requestContextSlot` (evicting
+ * the least-valuable idle context when over the hard cap) and preview media layers release their renderer
+ * after a grace period once their clip leaves the active window.
+ *
+ * DEFAULT OFF — built behind the flag and proven via a preview-contention stress gate before the default is
+ * flipped (the Method-3 convention, mirroring `getExportSingleContext`). Telemetry (`__rfGlContextBudget`) is
+ * always on regardless of this flag; only ENFORCEMENT is gated.
+ *
+ * Resolution order: `?glGovernor=0|1` → localStorage `lumio.glGovernor` → `VITE_GL_GOVERNOR` → false.
+ */
+export function getGlGovernorEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("glGovernor")) {
+        return truthy(new URLSearchParams(window.location.search).get("glGovernor"));
+      }
+      const stored = window.localStorage?.getItem("lumio.glGovernor");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_GL_GOVERNOR;
+  return env == null ? false : truthy(env);
 }

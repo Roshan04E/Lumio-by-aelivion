@@ -135,8 +135,13 @@ void main(){ fragColor = transition(v_uv); }
 
 const registry = new Map<string, TransitionDefinition>();
 
-export function registerTransition(def: TransitionDefinition): void {
+export function registerTransition(def: TransitionDefinition, options: { override?: boolean } = {}): boolean {
+  if (registry.has(def.id) && !options.override) {
+    return false;
+  }
+  shaderCache.delete(def.id);
   registry.set(def.id, def);
+  return true;
 }
 
 export function getTransition(id: string): TransitionDefinition | undefined {

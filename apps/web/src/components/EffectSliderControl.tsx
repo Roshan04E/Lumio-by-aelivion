@@ -7,26 +7,11 @@
 
 import { Diamond, RotateCcw } from "lucide-react";
 import type { CSSProperties } from "react";
-import type { KeyframeInterpolation } from "@reelforge/shared";
+import type { KeyframeInterpolation } from "@lumio-by-aelivion/shared";
 import { clamp } from "../editor/inspector/keyframeUtils";
+import { formatEffectValue, type SliderTone } from "./effectSliderTone";
 
-export type SliderTone = "neutral" | "warmth" | "tint" | "saturation" | "light" | "shadow" | "highlight";
-
-/** Map a param key to its tonal track color so sliders read like a pro color panel. */
-export function effectSliderTone(key: string): SliderTone {
-  if (key === "temperature") return "warmth";
-  if (key === "tint") return "tint";
-  if (key === "saturation" || key === "vibrance") return "saturation";
-  if (key === "blackPoint" || key === "blacks" || key === "shadows" || key === "curveShadows") return "shadow";
-  if (key === "whitePoint" || key === "whites" || key === "highlights" || key === "curveHighlights") return "highlight";
-  if (key === "midtones" || key === "curveMidtones" || key === "exposure") return "light";
-  if (key === "brightness" || key === "contrast" || key === "amount") return "light";
-  return "neutral";
-}
-
-export function formatEffectValue(value: number, step: number) {
-  return step < 1 ? value.toFixed(1) : String(Math.round(value));
-}
+export type { SliderTone };
 
 export function EffectSliderControl({
   keyframe,
@@ -72,7 +57,7 @@ export function EffectSliderControl({
       title={label}
     >
       <span className="effect-slider-label">
-        {label}
+        <span className="effect-slider-label-text">{label}</span>
         {keyframe ? (
           <button
             className={`effect-keyframe-button ${keyframe.active ? "is-active" : ""}`}
