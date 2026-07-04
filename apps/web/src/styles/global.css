@@ -343,6 +343,11 @@ main {
   transform: translateY(-1px);
 }
 
+.button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .button:disabled {
   cursor: wait;
   opacity: 0.62;
@@ -4403,6 +4408,17 @@ input[type="checkbox"] {
   color: var(--editor-accent);
 }
 
+/* Consistent keyboard-focus ring for the editor's icon/tab-style buttons — these are plain
+   <button>s with no border by default, so without this, Tab-ing through the UI is invisible. */
+.tabbar button:focus-visible,
+.asset-bin-tabs button:focus-visible,
+.track-controls button:focus-visible,
+.timeline-toolbar button:focus-visible,
+.preview-tools > button:focus-visible {
+  outline: 2px solid var(--editor-accent);
+  outline-offset: 1px;
+}
+
 .tabbar .tabbar-icon-button {
   display: grid;
   place-items: center;
@@ -4783,8 +4799,8 @@ input[type="checkbox"] {
 
 .pane-resizer:hover::before,
 .pane-resizer:active::before {
-  background: var(--primary);
-  box-shadow: 0 0 16px rgba(77, 159, 255, 0.35);
+  background: var(--nle-accent);
+  box-shadow: 0 0 16px rgba(79, 156, 255, 0.35);
 }
 
 .pane-resizer-vertical {
