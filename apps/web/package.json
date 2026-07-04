@@ -14,6 +14,8 @@
     "memory:test": "tsx src/ai/memory.test.ts"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@lumio-by-aelivion/shared": "workspace:*",
     "@vitejs/plugin-react": "^5.0.1",
     "lucide-react": "^0.542.0",

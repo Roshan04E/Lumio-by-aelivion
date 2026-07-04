@@ -6,6 +6,13 @@ import { configureFontResolver, warpFontFile } from "@lumio-by-aelivion/shared";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/600.css";
 import "./styles/global.css";
 
 // Durable chunk cache: the service worker runtime-caches hashed JS/wasm/fonts (CacheFirst) so a

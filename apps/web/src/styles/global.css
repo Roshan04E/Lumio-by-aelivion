@@ -19,31 +19,64 @@
   --panel-pad: 8px;
   --section-gap: 6px;
 
+  /* NLE design tokens (2026-07-05): professional cinematic-dark palette for the editor
+     workstation. This is the canonical source — the --editor-* alias layer below (consumed
+     by editor/timeline/inspector/asset-bin CSS) reads from these, not the marketing --bg/
+     --surface/--primary tokens, so the polish pass stays scoped to the editor UI. */
+  --nle-bg: #0b0d10;
+  --nle-bg-2: #101318;
+  --nle-panel: #151922;
+  --nle-panel-2: #1a1f29;
+  --nle-panel-3: #202633;
+  --nle-border: #2a3140;
+  --nle-border-soft: #202633;
+  --nle-text: #d7dce5;
+  --nle-text-muted: #8e96a6;
+  --nle-text-dim: #626b7a;
+  --nle-accent: #4f9cff;
+  --nle-accent-soft: rgba(79, 156, 255, 0.16);
+  --nle-accent-border: rgba(79, 156, 255, 0.4);
+  --nle-green: #39d98a;
+  --nle-yellow: #f6c85f;
+  --nle-red: #ff5f6d;
+  --nle-radius-xs: 3px;
+  --nle-radius-sm: 5px;
+  --nle-radius-md: 8px;
+  --nle-topbar-h: 42px;
+  --nle-panel-header-h: 34px;
+  --nle-toolbar-h: 34px;
+  --nle-track-h: 42px;
+  --nle-font-ui:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --nle-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
   /* Editor surface system — shared by the Color tab, the right Inspector, and
-     studio panels so they read as one product. Intentionally aliased to the
-     existing palette (the accent stays --primary #4d9fff, matching the Color
-     tab — not a separate blue) so nothing here introduces a competing shade. */
-  --editor-bg: var(--bg);
-  --editor-surface: var(--surface);
-  --editor-panel: rgba(255, 255, 255, 0.03);
-  --editor-panel-soft: rgba(255, 255, 255, 0.055);
-  --editor-card: rgba(255, 255, 255, 0.022);
-  --editor-card-head: rgba(255, 255, 255, 0.03);
-  --editor-border: var(--border);
-  --editor-border-strong: rgba(255, 255, 255, 0.14);
-  --editor-text: #f4f4f5;
-  --editor-text-muted: var(--muted);
-  --editor-text-dim: rgba(255, 255, 255, 0.42);
-  --editor-accent: var(--primary);
-  --editor-accent-border: rgba(77, 159, 255, 0.28);
-  --editor-accent-soft: rgba(77, 159, 255, 0.18);
-  --editor-accent-bg: rgba(77, 159, 255, 0.12);
-  --editor-input-bg: rgba(255, 255, 255, 0.06);
-  --editor-green: var(--success);
-  --editor-danger: var(--danger);
-  --editor-radius-sm: 6px;
-  --editor-radius-md: 8px;
-  --editor-radius-lg: 10px;
+     studio panels so they read as one product. Aliased to the --nle-* tokens above so the
+     editor reskins independently of the marketing/dashboard palette. */
+  --editor-bg: var(--nle-bg);
+  --editor-surface: var(--nle-panel);
+  --editor-panel: var(--nle-panel-2);
+  --editor-panel-soft: rgba(255, 255, 255, 0.05);
+  --editor-card: var(--nle-panel-2);
+  --editor-card-head: var(--nle-panel-3);
+  /* Hairline pass (2026-07-05): reinstates subtle resting borders (--nle-border-soft) — the
+     prior de-box choice (transparent) is superseded by the professional-NLE hairline-panel
+     direction. Accent borders (active/selected states) remain separate tokens. */
+  --editor-border: var(--nle-border-soft);
+  --editor-border-strong: var(--nle-border);
+  --editor-text: var(--nle-text);
+  --editor-text-muted: var(--nle-text-muted);
+  --editor-text-dim: var(--nle-text-dim);
+  --editor-accent: var(--nle-accent);
+  --editor-accent-border: var(--nle-accent-border);
+  --editor-accent-soft: var(--nle-accent-soft);
+  --editor-accent-bg: var(--nle-accent-soft);
+  --editor-input-bg: var(--nle-bg-2);
+  --editor-green: var(--nle-green);
+  --editor-danger: var(--nle-red);
+  --editor-radius-sm: var(--nle-radius-xs);
+  --editor-radius-md: var(--nle-radius-sm);
+  --editor-radius-lg: var(--nle-radius-md);
 }
 
 * {
@@ -3263,12 +3296,12 @@ input[type="checkbox"] {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 48px;
+  min-height: var(--nle-topbar-h);
   margin-bottom: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: rgba(10, 12, 17, 0.92);
+  padding: 0 10px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--nle-bg);
   backdrop-filter: blur(18px);
 }
 
@@ -3278,7 +3311,9 @@ input[type="checkbox"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.95rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--editor-text);
 }
 
 .editor-titlebar {
@@ -3290,25 +3325,36 @@ input[type="checkbox"] {
 
 .editor-brand {
   flex: 0 0 auto;
-  color: #fff;
-  font-weight: 1000;
+  color: var(--editor-text);
+  font-weight: 800;
   letter-spacing: 0;
 }
 
 .editor-actions {
   flex: 0 0 auto;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: nowrap;
 }
 
 .editor-topbar .button {
-  min-height: 34px;
-  padding: 0 12px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: var(--editor-radius-sm);
+  font-weight: 600;
 }
 
 .editor-topbar .credit-badge,
 .editor-topbar .badge {
-  min-height: 30px;
+  min-height: 26px;
+}
+
+/* Export is the only strong (solid-fill) primary action in the bar. The AI toggle reuses
+   Button's "primary" variant for its pressed state, so it needs a quieter look here — an
+   accent outline/tint rather than a solid fill — to keep Export visually singular. */
+.editor-ai-topbar-button.button-primary {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent);
 }
 
 .editor-output-link {
@@ -3329,21 +3375,21 @@ input[type="checkbox"] {
 .editor-status {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
+  min-height: 26px;
 }
 
 /* Visual separators between header action groups. */
 .editor-actions-divider {
   width: 1px;
   align-self: stretch;
-  margin: 4px 2px;
-  background: var(--border);
+  margin: 6px 0;
+  background: var(--editor-border-strong);
 }
 
 /* Icon-only header buttons: square, no label, tooltip-driven. */
 .editor-topbar .button.icon-only {
-  width: 34px;
-  min-width: 34px;
+  width: 30px;
+  min-width: 30px;
   padding: 0;
   justify-content: center;
 }
@@ -4043,8 +4089,10 @@ input[type="checkbox"] {
   align-content: start;
   gap: var(--section-gap);
   padding: var(--panel-pad);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  /* Hairline pass: panels read as sharp docked slabs — a subtle border plus the surface shade
+     against the page bg (and the 8px grid gaps between panels) does the separating. */
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
   /* Solid (not translucent) so adjacent panels never show the viewer bleeding through them. */
   background: var(--editor-surface);
 }
@@ -4069,8 +4117,9 @@ input[type="checkbox"] {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: var(--nle-panel-header-h);
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--editor-border-strong);
 }
 
 .inspector-head h2 {
@@ -7444,6 +7493,7 @@ input[type="checkbox"] {
 
 .timeline-timebar > span:first-child {
   color: var(--primary);
+  font-family: var(--nle-font-mono);
   font-weight: 900;
 }
 
@@ -7502,6 +7552,7 @@ input[type="checkbox"] {
 .timeline-toolbar .timeline-zoom-readout {
   width: 38px;
   color: rgba(255, 255, 255, 0.84);
+  font-family: var(--nle-font-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -7596,6 +7647,7 @@ input[type="checkbox"] {
   margin-left: var(--timeline-lane-offset);
   height: 20px;
   color: var(--muted);
+  font-family: var(--nle-font-mono);
   font-size: 0.68rem;
 }
 
@@ -10697,6 +10749,7 @@ input[type="checkbox"] {
   border-radius: 5px;
   background: transparent;
   color: #71b7ff;
+  font-family: var(--nle-font-mono);
   font-size: 0.74rem;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
