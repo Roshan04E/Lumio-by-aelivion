@@ -4868,8 +4868,8 @@ input[type="checkbox"] {
   gap: 6px;
   height: 32px;
   padding: 0 9px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
   background: rgba(255, 255, 255, 0.022);
   color: var(--muted);
 }
@@ -4911,14 +4911,14 @@ input[type="checkbox"] {
 
 /* A category bin — visually identical to a Color-tab section card. */
 .effect-tree-folder {
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
   background: rgba(255, 255, 255, 0.022);
   overflow: hidden;
 }
 
 .effect-tree-folder.is-pinned {
-  border-color: var(--border);
+  border-color: var(--editor-border);
 }
 
 .effect-tree-folder-head {
@@ -4961,14 +4961,14 @@ input[type="checkbox"] {
   display: grid;
   gap: 1px;
   padding: 4px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--editor-border);
 }
 
 .effect-tree-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  border-radius: 6px;
+  border-radius: var(--editor-radius-sm);
 }
 
 .effect-tree-row:hover {
@@ -9861,8 +9861,8 @@ input[type="checkbox"] {
   width: 100%;
   margin: 0 0 8px;
   break-inside: avoid;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
   background: rgba(255, 255, 255, 0.04);
   color: #fff;
   cursor: pointer;
@@ -9870,8 +9870,8 @@ input[type="checkbox"] {
 }
 
 .asset-tile.is-selected {
-  border-color: rgba(77, 159, 255, 0.85);
-  box-shadow: 0 0 0 2px rgba(77, 159, 255, 0.14);
+  border-color: var(--nle-accent);
+  box-shadow: 0 0 0 2px var(--nle-accent-soft);
 }
 
 /* The media layer fills the card; --asset-ar carries the asset's real width/height. */
@@ -9981,7 +9981,7 @@ input[type="checkbox"] {
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--editor-border);
-  border-radius: var(--editor-radius-md);
+  border-radius: var(--editor-radius-sm);
   background: var(--editor-panel);
 }
 
