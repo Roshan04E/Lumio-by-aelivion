@@ -2,6 +2,7 @@ import {
   pluginEffectManifestSchema,
   pluginLookManifestSchema,
   pluginTransitionManifestSchema,
+  registerEffectManifest,
   registerLookManifest,
   registerTransitionManifest,
   type PluginEffectManifest,
@@ -180,6 +181,20 @@ export function hydrateTransitionManifests(manifests: PluginTransitionManifest[]
       warnings.push(...result.warnings);
     } catch (error) {
       warnings.push(error instanceof Error ? error.message : `Could not register transition ${manifest.id}.`);
+    }
+  }
+  return warnings;
+}
+
+/** Registers webgl-fragment effect manifests' GLSL as fragment-effect defs; no-op for other engines. */
+export function hydrateEffectManifests(manifests: PluginEffectManifest[]): string[] {
+  const warnings: string[] = [];
+  for (const manifest of manifests) {
+    try {
+      const result = registerEffectManifest(manifest, { override: true });
+      warnings.push(...result.warnings);
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : `Could not register effect ${manifest.id}.`);
     }
   }
   return warnings;

@@ -39,6 +39,12 @@ import {
   type TransitionDefinition,
   type TransitionParam,
 } from "./transitions/registry";
+import {
+  buildFragmentEffectShader,
+  resolveFragmentEffectParams,
+  type FragmentEffectDefinition,
+  type FragmentEffectParam,
+} from "./fragment-effects/registry";
 import type { BlendMode } from "../types";
 import type { ColorPipeline } from "./types";
 import { MediaWebGLRenderer } from "./media-renderer";
@@ -163,6 +169,31 @@ export interface SceneLayerDraw {
    * finished nest composites once with the layer's blend/opacity. Replaces stacked `__rfx_` clone draws.
    */
   regionPasses?: SceneRegionPass[] | undefined;
+  /**
+   * Ordered plugin fragment-shader passes (real user GLSL "Custom Shader" effects, Task 1.3). Each
+   * applies to the layer's RUNNING nest image, same precompose model as `regionPasses` — run inside
+   * the SAME nest, after any region passes, in `layer.effects` index order (the caller is responsible
+   * for ordering). A pass with no `mask` covers the whole layer.
+   */
+  fragmentPasses?: SceneFragmentPass[] | undefined;
+}
+
+/**
+ * One plugin fragment-shader pass — a real user GLSL `vec4 effect(vec2 uv)` body applied to the
+ * layer's running nest image (see `fragment-effects/registry.ts`). Mirrors `SceneRegionPass`'s
+ * precompose model: `intensity` mixes the effect against the running image (baked into the shader's
+ * own `main()`), `mask` (optional) limits it to a region — omitted = whole layer.
+ */
+export interface SceneFragmentPass {
+  /** Stable id for the pass (drives the compiled-program cache — this is the fragment def's id). */
+  effectKey: string;
+  def: FragmentEffectDefinition;
+  params: Record<string, number | number[] | boolean>;
+  /** 0..1 mix of the effect against the running image. */
+  intensity: number;
+  timeSeconds: number;
+  mask?: TexImageSource | null | undefined;
+  maskVersion?: number | undefined;
 }
 
 /**
@@ -269,6 +300,17 @@ interface CompiledTransition {
   uFromFit: WebGLUniformLocation | null;
   uToFit: WebGLUniformLocation | null;
   params: { param: TransitionParam; location: WebGLUniformLocation | null }[];
+}
+
+/** A compiled per-fragment-effect program + its uniform locations (mirrors CompiledTransition). */
+interface CompiledFragmentEffect {
+  program: WebGLProgram;
+  uSrc: WebGLUniformLocation | null;
+  uResolution: WebGLUniformLocation | null;
+  uIntensity: WebGLUniformLocation | null;
+  uTime: WebGLUniformLocation | null;
+  params: { param: FragmentEffectParam; location: WebGLUniformLocation | null }[];
+  lastFrame: number;
 }
 
 const COMPOSITE_VS = `#version 300 es
@@ -632,6 +674,11 @@ export class SceneCompositor {
   // Per-transition-def compiled program cache (the SAME shaders TransitionCompositor uses, compiled in
   // THIS context so the mix runs without a second GL context).
   private readonly transitionPrograms = new Map<string, CompiledTransition>();
+  // Per-fragment-effect-def compiled program cache (Task 1.3 render seam) — same "compile once, cache by
+  // id" pattern as transitionPrograms. A program that fails to compile is never retried (warned once);
+  // the layer keeps its base image instead of going black.
+  private readonly fragmentPrograms = new Map<string, CompiledFragmentEffect>();
+  private readonly fragmentCompileFailureWarnings = new Set<string>();
   private accumA: RenderTarget;
   private accumB: RenderTarget;
   private width = 0;
@@ -1013,6 +1060,79 @@ export class SceneCompositor {
     return compiled;
   }
 
+  /** Compile + cache the program for a fragment-effect definition. Throws on GLSL compile/link failure. */
+  private prepareFragmentEffect(def: FragmentEffectDefinition): CompiledFragmentEffect {
+    const existing = this.fragmentPrograms.get(def.id);
+    if (existing) {
+      existing.lastFrame = this.frameCounter;
+      return existing;
+    }
+    const gl = this.gl;
+    const program = linkProgram(gl, FULLSCREEN_TRI_VS, buildFragmentEffectShader(def));
+    const compiled: CompiledFragmentEffect = {
+      program,
+      uSrc: gl.getUniformLocation(program, "uSrc"),
+      uResolution: gl.getUniformLocation(program, "uResolution"),
+      uIntensity: gl.getUniformLocation(program, "uIntensity"),
+      uTime: gl.getUniformLocation(program, "uTime"),
+      params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
+      lastFrame: this.frameCounter,
+    };
+    this.fragmentPrograms.set(def.id, compiled);
+    return compiled;
+  }
+
+  /**
+   * Run one fragment-effect pass: `srcTex` (the layer's running nest image) → `dstRT` (comp-sized).
+   * Returns false (no-op, base image preserved) if the def fails to compile — never black-frames.
+   */
+  private runFragmentPass(srcTex: WebGLTexture, pass: SceneFragmentPass, dstRT: RenderTarget): boolean {
+    const gl = this.gl;
+    let compiled: CompiledFragmentEffect;
+    try {
+      compiled = this.prepareFragmentEffect(pass.def);
+    } catch (error) {
+      if (!this.fragmentCompileFailureWarnings.has(pass.def.id)) {
+        this.fragmentCompileFailureWarnings.add(pass.def.id);
+        console.warn(`SceneCompositor: fragment effect "${pass.def.id}" failed to compile; skipping pass.`, error);
+      }
+      return false;
+    }
+    const resolved = resolveFragmentEffectParams(pass.def, pass.params);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstRT.fbo);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(compiled.program);
+    gl.bindVertexArray(this.presentVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1i(compiled.uSrc, 0);
+    gl.uniform2f(compiled.uResolution, this.width, this.height);
+    gl.uniform1f(compiled.uIntensity, Math.max(0, Math.min(1, pass.intensity)));
+    gl.uniform1f(compiled.uTime, pass.timeSeconds);
+    for (const { param, location } of compiled.params) {
+      if (!location) continue;
+      const value = resolved[param.name];
+      if (param.type === "float") gl.uniform1f(location, typeof value === "number" ? value : 0);
+      else if (param.type === "bool") gl.uniform1i(location, value ? 1 : 0);
+      else if (param.type === "vec2" && Array.isArray(value)) gl.uniform2f(location, value[0] ?? 0, value[1] ?? 0);
+      else if (param.type === "vec3" && Array.isArray(value)) gl.uniform3f(location, value[0] ?? 0, value[1] ?? 0, value[2] ?? 0);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return true;
+  }
+
+  /** Drop fragment-effect programs whose def hasn't drawn recently (mirrors pruneRegionGradeRenderers). */
+  private pruneFragmentPrograms(): void {
+    if (this.fragmentPrograms.size === 0) return;
+    const gl = this.gl;
+    for (const [key, entry] of this.fragmentPrograms) {
+      if (this.frameCounter - entry.lastFrame > 300) {
+        gl.deleteProgram(entry.program);
+        this.fragmentPrograms.delete(key);
+      }
+    }
+  }
+
   /**
    * Mix two already-rendered side textures (`fromTex`/`toTex`, comp-sized, each a full clip incl. effects)
    * with the transition shader into `target`. The sides are comp-pre-fitted, so uFromFit/uToFit = (1,1).
@@ -1360,7 +1480,7 @@ export class SceneCompositor {
    * normal blend) — used to build a transition side so every per-clip effect is present during the transition.
    */
   private renderLayerInto(layer: SceneLayerDraw, dest: RenderTarget | null): void {
-    if (layer.regionPasses && layer.regionPasses.length > 0) {
+    if ((layer.regionPasses && layer.regionPasses.length > 0) || (layer.fragmentPasses && layer.fragmentPasses.length > 0)) {
       this.renderLayerWithRegionPasses(layer, dest);
       return;
     }
@@ -1502,6 +1622,7 @@ export class SceneCompositor {
   private renderLayerWithRegionPasses(layer: SceneLayerDraw, dest: RenderTarget | null): void {
     const gl = this.gl;
     const passes = layer.regionPasses ?? [];
+    const fragmentPasses = layer.fragmentPasses ?? [];
     this.layerNestA ??= new RenderTarget(gl, this.width, this.height);
     this.layerNestB ??= new RenderTarget(gl, this.width, this.height);
     const savedA = this.accumA;
@@ -1518,7 +1639,10 @@ export class SceneCompositor {
     }
     // Base image: the layer without its passes. Opacity/blend are deferred to the final nest composite —
     // inside the nest everything is NORMAL at full opacity (nestMode), the precompose model.
-    this.renderLayerInto({ ...layer, regionPasses: undefined, transform: { ...layer.transform, opacity: 100 } }, null);
+    this.renderLayerInto(
+      { ...layer, regionPasses: undefined, fragmentPasses: undefined, transform: { ...layer.transform, opacity: 100 } },
+      null,
+    );
     for (const pass of passes) {
       // Each pass builds its effected frame (blurred / graded RUNNING nest image) into a comp-sized RTT,
       // then composites it back masked — the masked mix IS the ordinary compositeTexture, ping-ponging the
@@ -1562,6 +1686,31 @@ export class SceneCompositor {
         maskTex,
         [1, 1],
         true,
+        1,
+        "normal",
+        { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+        { halfW: this.width / 2, halfH: this.height / 2, rotateX: 0, rotateY: 0, perspective: 0, z: 0 },
+      );
+    }
+    // Plugin fragment-shader passes run AFTER region passes, inside the SAME nest (risk #1: never a
+    // second nest, or the layer's opacity/blend gets applied twice). A compile failure just skips the
+    // pass (runFragmentPass returns false) — the running nest image is left untouched.
+    for (const pass of fragmentPasses) {
+      const { s2 } = this.effectTargets();
+      const ok = this.runFragmentPass(this.accumA.tex, pass, s2);
+      if (!ok) continue;
+      const maskTex = pass.mask
+        ? this.uploadSource(pass.mask, pass.maskVersion, {
+            layerId: layer.debugLayerId,
+            role: "mask",
+            frameTime: this.debugFrameTime,
+          })
+        : null;
+      this.compositeTexture(
+        s2.tex,
+        maskTex,
+        [1, 1],
+        Boolean(maskTex),
         1,
         "normal",
         { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
@@ -1780,6 +1929,7 @@ export class SceneCompositor {
 
     this.pruneTextures();
     this.pruneRegionGradeRenderers();
+    this.pruneFragmentPrograms();
     gl.bindVertexArray(null);
     return true;
   }
@@ -2055,6 +2205,8 @@ export class SceneCompositor {
     this.regionGradeRenderers.clear();
     for (const compiled of this.transitionPrograms.values()) gl.deleteProgram(compiled.program);
     this.transitionPrograms.clear();
+    for (const compiled of this.fragmentPrograms.values()) gl.deleteProgram(compiled.program);
+    this.fragmentPrograms.clear();
     gl.deleteBuffer(this.vbo);
     gl.deleteVertexArray(this.vao);
     gl.deleteVertexArray(this.presentVao);

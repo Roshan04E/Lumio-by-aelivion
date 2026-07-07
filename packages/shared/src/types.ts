@@ -333,7 +333,8 @@ export const timelineEffectTypes = [
   "audioEq",
   "audioCompressor",
   "audioGate",
-  "audioLimiter"
+  "audioLimiter",
+  "pluginShader"
 ] as const;
 
 export type TimelineEffectType = (typeof timelineEffectTypes)[number];

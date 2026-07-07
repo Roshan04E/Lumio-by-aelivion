@@ -15,7 +15,8 @@
 import { getTexImageSourceProducerInfo } from "../color/gl-context";
 import { MediaWebGLRenderer } from "../color/media-renderer";
 import type { ColorPipeline } from "../color/types";
-import type { SceneDraw, SceneGroupDraw, SceneLayerDraw, SceneRegionPass, SceneTextureSource } from "../color/scene-compositor";
+import { getFragmentEffect } from "../color/fragment-effects/registry";
+import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass, SceneTextureSource } from "../color/scene-compositor";
 import {
   getActiveTransition,
   getCompositionBlendMode,
@@ -26,9 +27,11 @@ import {
   getCompositionTransform,
   type ActiveTransition,
 } from "../composition-style";
+import { evaluateTimelineEffectParam } from "../animation";
 import { expandLayerEffectRegions, hasRegionColorEffect } from "../clip-masks";
 import { NEST_ID_SEPARATOR, type NestedGroupSpec } from "../nesting";
-import type { TimelineLayer, TransitionSpec } from "../types";
+import { fragmentEffectParamsFromStorage, SHADER_MANIFEST_ID_PARAM_KEY } from "../plugin-effect-adapter";
+import type { TimelineEffectParamValue, TimelineLayer, TransitionSpec } from "../types";
 // VALUE import (not type-only): nested-comp masks need their OWN matte-cache instance, sized to the
 // nested composition, distinct from the parent's — lazily constructed here and pooled in the caller-
 // owned `nestMatteCaches` map (mirrors how `builtinGradeOverlay` below lazily constructs
@@ -447,13 +450,67 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     return passes;
   };
 
-  /** `buildLayerDraw`, plus the layer's folded region passes when the pass model is on. `dims` threads
-   *  through to both (see `buildLayerDraw`'s doc) — nested children (Task 2) pass their nest's size/matte. */
+  /**
+   * Fold a layer's enabled `pluginShader` effects (real user GLSL "Custom Shader", Task 1.4) into ordered
+   * `SceneFragmentPass`es, independent of the region-pass-model clone system (fragment effects don't need
+   * `expandLayerEffectRegions` cascading — each is its own self-contained pass). A per-effect `masks` list,
+   * when present, builds its own matte via the same `SceneMaskMatteCache` region blur/color passes use,
+   * keyed by the effect's own id (never collides with the layer's or a region-clone's pool key). A missing
+   * fragment definition (manifest never registered this session) skips the pass — never throws — and
+   * records `window.__rfFragmentEffects` telemetry in dev.
+   */
+  const buildFragmentPasses = (layer: TimelineLayer, mc: SceneMaskMatteCache | null = matteCache): SceneFragmentPass[] => {
+    const passes: SceneFragmentPass[] = [];
+    const layerTimeSeconds = Math.max(0, t - layer.startSeconds);
+    for (const effect of layer.effects) {
+      if (effect.type !== "pluginShader" || effect.enabled === false) continue;
+      const manifestId = effect.params?.[SHADER_MANIFEST_ID_PARAM_KEY];
+      const def = typeof manifestId === "string" ? getFragmentEffect(manifestId) : undefined;
+      if (!def) {
+        if (typeof window !== "undefined") {
+          const dbg = ((window as { __rfFragmentEffects?: Record<string, unknown> }).__rfFragmentEffects ??= {});
+          dbg[effect.id] = { manifestId, missing: true };
+        }
+        continue;
+      }
+      const rawParams = effect.params ?? {};
+      const keyframeResolved: Record<string, TimelineEffectParamValue> = {};
+      for (const [key, value] of Object.entries(rawParams)) {
+        keyframeResolved[key] =
+          typeof value === "number"
+            ? evaluateTimelineEffectParam({ animations: layer.animations, baseValue: value, effectId: effect.id, paramKey: key, timeSeconds: layerTimeSeconds })
+            : value;
+      }
+      const params = fragmentEffectParamsFromStorage(def, keyframeResolved);
+      const hasMasks = Array.isArray(effect.masks) && effect.masks.length > 0;
+      const mask = hasMasks && mc ? mc.get({ id: effect.id, masks: effect.masks, animations: layer.animations } as TimelineLayer, layerTimeSeconds) : null;
+      passes.push({
+        effectKey: effect.id,
+        def,
+        params,
+        intensity: Math.max(0, Math.min(1, (effect.intensity ?? 100) / 100)),
+        timeSeconds: t,
+        mask: mask ?? undefined,
+        maskVersion: mask && mc ? mc.versionOf(effect.id) : undefined,
+      });
+    }
+    return passes;
+  };
+
+  /** `buildLayerDraw`, plus the layer's folded region + fragment passes. `dims` threads through to both
+   *  (see `buildLayerDraw`'s doc) — nested children (Task 2) pass their nest's size/matte. */
   function buildLayerDrawWithPasses(
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
   ): SceneLayerDraw | null {
-    if (!regionPassModel || regionCloneBaseId(layer.id)) return buildLayerDraw(layer, dims);
+    if (!regionPassModel || regionCloneBaseId(layer.id)) {
+      const draw = buildLayerDraw(layer, dims);
+      if (draw) {
+        const fragmentPasses = buildFragmentPasses(layer, dims.matteCache);
+        if (fragmentPasses.length > 0) draw.fragmentPasses = fragmentPasses;
+      }
+      return draw;
+    }
     let baseLayer = layer;
     let clones = clonesByBase.get(layer.id) ?? [];
     if (clones.length === 0 && hasRegionColorEffect(layer)) {
@@ -467,6 +524,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     if (!draw) return draw;
     const passes = buildRegionPasses(baseLayer, clones, dims.matteCache);
     if (passes.length > 0) draw.regionPasses = passes;
+    const fragmentPasses = buildFragmentPasses(baseLayer, dims.matteCache);
+    if (fragmentPasses.length > 0) draw.fragmentPasses = fragmentPasses;
     // Debug telemetry (window.__rf* convention): what the pass folding decided for this layer this frame.
     if (typeof window !== "undefined") {
       const dbg = ((window as { __rfRegionPasses?: Record<string, unknown> }).__rfRegionPasses ??= {});

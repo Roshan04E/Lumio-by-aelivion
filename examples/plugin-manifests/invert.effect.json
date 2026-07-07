@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "effect",
+  "id": "com.lumio.examples.invert",
+  "name": "Invert",
+  "version": "1.0.0",
+  "description": "A minimal real GLSL fragment-shader effect (webgl-fragment engine) that inverts the layer's RGB, mixed by intensity.",
+  "author": {
+    "name": "Aelivion Studio"
+  },
+  "license": {
+    "type": "free",
+    "name": "Internal test manifest"
+  },
+  "tags": ["stylize", "shader", "example"],
+  "category": "Stylize",
+  "engine": "webgl-fragment",
+  "scope": ["clip"],
+  "compatibleLayerTypes": ["video", "image", "text", "shape"],
+  "effect": {
+    "glsl": "vec4 effect(vec2 uv){ vec4 s = getSrcColor(uv); return vec4(1.0 - s.rgb, s.a); }",
+    "params": []
+  }
+}

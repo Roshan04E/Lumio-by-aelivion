@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @lumio-by-aelivion/web editor:test
  */
-import { applyLayerAttributes, buildSceneDraws, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, layerSourceTimeSeconds, nestParentClipId, parseExternalTimelineFile, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer } from "@lumio-by-aelivion/shared";
+import { applyLayerAttributes, buildLumioPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isLumioPackageZipBytes, layerSourceTimeSeconds, nestParentClipId, parseExternalTimelineFile, parseLumioPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer } from "@lumio-by-aelivion/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -1113,6 +1113,64 @@ function check(name: string, condition: boolean): void {
     "buildSceneDraws: nest-in-nest folds hierarchically (outer group's child is itself a group)",
     outerGroup.children.length === 1 && outerGroup.children[0]?.kind === "group"
   );
+}
+
+// --- .lumio ZIP package round-trip (Task 1.6: embedded-media packages) --------
+{
+  const layer: TimelineLayer = {
+    id: "v1",
+    trackId: "t1",
+    type: "video",
+    name: "v1",
+    startSeconds: 0,
+    durationSeconds: 4,
+    assetId: "asset_test",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+  const composition = {
+    id: "zipTest",
+    name: "zipTest",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 4,
+    backgroundColor: "#000",
+    tracks: [{ id: "t1", type: "video" as const, name: "V1", layers: [layer] }]
+  };
+  const graph = {
+    projectId: "proj_zip_test",
+    effects: [],
+    editableFields: {},
+    composition,
+    version: 1
+  };
+  const asset = {
+    id: "asset_test",
+    userId: "user_test",
+    fileName: "clip.mp4",
+    fileType: "video/mp4",
+    fileUrl: "blob:asset_test",
+    durationSeconds: 4,
+    width: 1080,
+    height: 1920,
+    status: "ready" as const,
+    createdAt: new Date().toISOString()
+  };
+  const pkg = buildTimelineTemplatePackage({ projectId: graph.projectId, title: "Zip Test", graph, composition, assets: [asset] });
+  const assetBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+  const zip = buildLumioPackageZip({ pkg, assets: [{ id: "asset_test", fileName: "clip.mp4", bytes: assetBytes }] });
+  check("lumio zip: produces ZIP magic bytes", isLumioPackageZipBytes(zip));
+  const parsed = parseLumioPackageZip(zip);
+  check("lumio zip: timeline layer count survives", parsed.pkg.graph.composition?.tracks[0]?.layers.length === 1);
+  check("lumio zip: manifest name survives", parsed.pkg.manifest.name === "Zip Test");
+  const roundTrippedBytes = parsed.assetBytes.get("asset_test");
+  check(
+    "lumio zip: asset bytes survive byte-for-byte",
+    Boolean(roundTrippedBytes) && roundTrippedBytes!.length === assetBytes.length && roundTrippedBytes!.every((b, i) => b === assetBytes[i])
+  );
+  check("lumio zip: bare JSON bytes are NOT sniffed as ZIP", !isLumioPackageZipBytes(new TextEncoder().encode(JSON.stringify(pkg))));
 }
 
 if (failures > 0) {

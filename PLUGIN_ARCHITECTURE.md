@@ -12,20 +12,19 @@ This tracker turns effects, looks, transitions, and full timeline templates into
 
 ## Package Shape
 
-Lumio packages should use a zipped folder format, eventually named `.tcut` or `.lumio`.
+Lumio packages use a zipped folder format, named `.lumio`.
 
 ```txt
-example.tcut
+example.lumio
   manifest.json
   timeline.json
   assets/
-  effects/
-  transitions/
-  looks/
   previews/
 ```
 
 The root `manifest.json` identifies the package kind, version, author, compatibility, entry files, assets, and warnings. The individual entries are validated against shared schemas before registration.
+
+Status: Complete - `packages/shared/src/plugin-package-zip.ts` (fflate) builds/parses real `.lumio` ZIPs with embedded media: `manifest.json` + `timeline.json` (the full bare `LumioTimelineTemplatePackage`) + `assets/<assetId>.<ext>` + an optional `previews/` image. `isLumioPackageZipBytes` sniffs the ZIP magic so bare `.lumio-template.json` (no media) keeps working unchanged. The editor's export button (Shift+click) builds the ZIP with every referenced asset's real bytes (local blob store first, `fetch(fileUrl)` fallback) and downloads `.lumio`; import detects the ZIP (by extension or magic), creates a real local `SourceAsset` per embedded file via the normal upload path, and remaps `layer.assetId` (root + auxiliary compositions) from the package's ids to the newly created ones - no relink-by-warning. `examples/plugin-manifests/sample-template.lumio` is a worked example. `effects/`/`transitions/`/`looks/` subfolders from the original sketch above are not used - manifests are embedded in `timeline.json`'s `graph.plugins`, not as separate zip entries.
 
 ## Task 1 - Shared Manifest Contract
 
@@ -70,9 +69,9 @@ Implementation:
 - Add clear unsupported-engine warnings.
 - Keep built-in effect IDs backwards compatible.
 
-Status: Complete for safe V1 - `packages/shared/src/plugin-effect-adapter.ts` resolves imported effect manifests into existing renderable Lumio timeline effects, applies creator-defined params/intensity/name, checks layer compatibility, and reports unsupported-engine warnings. The Effects panel can import a JSON effect manifest and add it to the selected clip. Arbitrary `webgl-fragment`, `css-filter`, and `composite` render execution remains deferred until renderer sandboxes are implemented.
+Status: Complete for safe V1, and `webgl-fragment` is now REAL (flagship gap closed) - `packages/shared/src/plugin-effect-adapter.ts` resolves imported effect manifests into existing renderable Lumio timeline effects, applies creator-defined params/intensity/name, checks layer compatibility, and reports unsupported-engine warnings. A `webgl-fragment` manifest's GLSL registers as a `FragmentEffectDefinition` (`packages/shared/src/color/fragment-effects/registry.ts`, the same registry+harness pattern as the transition engine) and produces a `pluginShader` `TimelineEffect`; `SceneCompositor` runs it as a real fragment-shader pass (`packages/shared/src/color/scene-compositor.ts` `renderLayerWithRegionPasses`/`runFragmentPass`) in preview, local export, AND Remotion (`apps/worker/src/remotion/SceneStage.tsx` now calls `registerEffectManifests`), so a user's own GLSL renders identically everywhere - verified by `render:compare:pixels` at 0.000% for the `plugin-shader` fixture. `css-filter` and `composite` remain deferred.
 
-TODO: Manually import one JSON effect manifest and verify it appears in the Effects tab without adding a hardcoded entry.
+TODO: Manually import one JSON effect manifest and verify it appears in the Effects tab without adding a hardcoded entry. For a `webgl-fragment` manifest (e.g. `examples/plugin-manifests/invert.effect.json`), verify the shader renders live in preview, scrubs with intensity/params, and matches in a local export.
 
 ## Task 4 - Dynamic Transition Definitions
 

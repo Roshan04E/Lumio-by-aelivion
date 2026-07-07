@@ -367,7 +367,12 @@ function collectDangerousContentIssues(value: unknown, issues: PluginSafetyIssue
 }
 
 function supportedEffectEngine(manifest: PluginEffectManifest): boolean {
-  return manifest.engine === "native" || manifest.engine === "color-pipeline" || manifest.engine === "lut3d";
+  return (
+    manifest.engine === "native" ||
+    manifest.engine === "color-pipeline" ||
+    manifest.engine === "lut3d" ||
+    manifest.engine === "webgl-fragment"
+  );
 }
 
 function supportedLookEngine(manifest: PluginLookManifest): boolean {

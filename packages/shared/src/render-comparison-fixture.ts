@@ -1,6 +1,8 @@
 import type { ProjectGraph, SourceAsset, TimelineLayer } from "./types";
 import { applyCaptionTrackToComposition, captionStylePresets, createCaptionTrack, parseTranscriptInput } from "./captions";
 import { createBoxMask } from "./clip-masks";
+import { registerFragmentEffect } from "./color/fragment-effects/registry";
+import { SHADER_MANIFEST_ID_PARAM_KEY } from "./plugin-effect-adapter";
 
 const fixtureImageSvg = encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
@@ -76,7 +78,8 @@ export type RenderComparisonFixtureKey =
   | "masked-text"
   | "region-text"
   | "tilted-text"
-  | "transition";
+  | "transition"
+  | "plugin-shader";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -101,7 +104,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "masked-text",
   "region-text",
   "tilted-text",
-  "transition"
+  "transition",
+  "plugin-shader"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -201,6 +205,34 @@ const blurEffects: TimelineLayer["effects"] = [
 
 const glowEffects: TimelineLayer["effects"] = [
   { id: "fixture_glow", type: "glow", name: "Glow", enabled: true, intensity: 100, params: { radius: 28, color: "#C9FF4A" } }
+];
+
+// Task 1.5 pixel gate: a real user GLSL "Custom Shader" (webgl-fragment) effect. Registered here so the
+// fixture is self-contained for every renderer (web preview, browser export, Remotion) without needing a
+// manifest-import step first; `examples/plugin-manifests/invert.effect.json` carries the SAME GLSL for the
+// user-facing import flow. Deterministic (pure invert, no randomness) so preview/export/Remotion should
+// match at ~0.000% at a strict pixel-gate tolerance.
+export const EXAMPLE_INVERT_FRAGMENT_EFFECT_ID = "com.lumio.examples.invert";
+registerFragmentEffect(
+  {
+    id: EXAMPLE_INVERT_FRAGMENT_EFFECT_ID,
+    name: "Invert",
+    category: "Stylize",
+    params: [],
+    glsl: `vec4 effect(vec2 uv){ vec4 s = getSrcColor(uv); return vec4(1.0 - s.rgb, s.a); }`
+  },
+  { override: true }
+);
+
+const pluginShaderEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_plugin_shader",
+    type: "pluginShader",
+    name: "Custom Shader",
+    enabled: true,
+    intensity: 100,
+    params: { [SHADER_MANIFEST_ID_PARAM_KEY]: EXAMPLE_INVERT_FRAGMENT_EFFECT_ID }
+  }
 ];
 
 const regionBlurEffects: TimelineLayer["effects"] = [
@@ -420,6 +452,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", textScale: 3, textTilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
     case "transition":
       return { effects: [], fit: "cover", transition: true };
+    case "plugin-shader":
+      return { effects: pluginShaderEffects, fit: "cover" };
     case "default":
     default:
       return { effects: fullColorEffects, fit: "cover" };

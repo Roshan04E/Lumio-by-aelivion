@@ -81,9 +81,11 @@ const fixtureMaxDiff: Partial<Record<RenderComparisonFixtureKey, number>> = {
 const fixtureKeys: RenderComparisonFixtureKey[] = (() => {
   const raw = process.env.PIXEL_FIXTURES;
   if (!raw) {
-    // `content-transform` is a scene/Remotion capability whose legacy DOM preview comparison is not
-    // meaningful; it is covered by render:compare:pixels and remotion:scene-compare.
-    return renderComparisonFixtureKeys.filter((key) => key !== "content-transform");
+    // `content-transform` and `plugin-shader` are scene/Remotion-only capabilities with no legacy DOM
+    // preview equivalent (the DOM renderer has no fragment-shader pass at all, so a scene-vs-DOM diff
+    // would just measure "inverted vs not-inverted" — not a meaningful parity check). Both are covered by
+    // render:compare:pixels (preview vs Remotion) instead.
+    return renderComparisonFixtureKeys.filter((key) => key !== "content-transform" && key !== "plugin-shader");
   }
   const requested = raw.split(",").map((v) => v.trim()).filter(Boolean);
   const valid = requested.filter((v): v is RenderComparisonFixtureKey =>

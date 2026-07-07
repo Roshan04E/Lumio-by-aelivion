@@ -68,8 +68,11 @@ import {
 } from "lucide-react";
 import {
   applyTimelineTemplatePackage,
+  buildLumioPackageZip,
   buildTimelineTemplatePackage,
   buildTemplateGraphFromProject,
+  isLumioPackageZipBytes,
+  parseLumioPackageZip,
   buildTransitionKeyframes,
   COLOR_EFFECT_TYPES,
   getTransition,
@@ -85,9 +88,11 @@ import {
   evaluateTimelineTransform,
   estimateCreditsForEffects,
   flattenTimelineLayers,
+  getFragmentEffect,
   getLayerAnimations,
   getTimelineEffectDefinition,
   getTimelineEffectsForLayer,
+  SHADER_MANIFEST_ID_PARAM_KEY,
   isExternalTimelineFile,
   normalizeTimelineEffect,
   normalizeTimelineMarkers,
@@ -264,6 +269,7 @@ import {
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { ASSET_LABEL_COLORS, assetLabelOf, defaultAssetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
 import { assetHasAudioStream } from "../lib/assetAudio";
+import { getAssetBlobStore } from "../lib/asset-blob-store";
 import { useRenderCost } from "../lib/perfDiagnostics";
 import { useStableHandler, useStableHandlers } from "../lib/useStableHandler";
 import { NoticeToast, getNotice, setNotice } from "../lib/noticeStore";
@@ -292,6 +298,7 @@ import { defaultColorPalette, extractPaletteFromAsset } from "../lib/colorPalett
 import { useWheelScrollPerformance } from "../lib/useWheelScrollPerformance";
 import {
   EMPTY_IMPORTED_PLUGIN_LIBRARY,
+  hydrateEffectManifests,
   hydrateLookManifests,
   hydrateTransitionManifests,
   loadHiddenEffectManifestIds,
@@ -438,6 +445,15 @@ function PlayheadTimeReadout({ fallback }: { fallback: number }) {
 
 function downloadJsonFile(contents: string, fileName: string) {
   const blob = new Blob([contents], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlobFile(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -917,7 +933,8 @@ export function EditorPage() {
   useEffect(() => {
     const warnings = [
       ...hydrateLookManifests(importedPluginLibrary.looks),
-      ...hydrateTransitionManifests(importedPluginLibrary.transitions)
+      ...hydrateTransitionManifests(importedPluginLibrary.transitions),
+      ...hydrateEffectManifests(importedPluginLibrary.effects)
     ];
     if (warnings.length) {
       console.warn("[plugins] import warnings", warnings);
@@ -2339,6 +2356,7 @@ export function EditorPage() {
 
   async function handleImportEffectManifest(manifest: PluginEffectManifest): Promise<string> {
     const existed = importedPluginLibrary.effects.some((item) => item.id === manifest.id);
+    hydrateEffectManifests([manifest]);
     const resolved = resolveEffectManifest(manifest);
     const next = mergeEffectManifest(importedPluginLibrary, manifest);
     setHiddenEffectManifestIds((prev) => {
@@ -3510,9 +3528,15 @@ export function EditorPage() {
     }
   }
 
-  function exportTimelineTemplatePackage() {
+  function exportTimelineTemplatePackage(event?: { shiftKey?: boolean }) {
     if (!project || !graph || !composition) {
       setNotice("Open a timeline before exporting a template package");
+      return;
+    }
+    // Shift+click = ".lumio" ZIP with embedded media (no relink warnings on import); plain click keeps
+    // the bare ".lumio-template.json" (no media) path, unchanged.
+    if (event?.shiftKey) {
+      void exportTimelineTemplatePackageZip();
       return;
     }
     try {
@@ -3532,8 +3556,76 @@ export function EditorPage() {
     }
   }
 
+  /** Reads an asset's bytes for ZIP embedding: local blob store (OPFS/IDB/memory) first, else fetch fileUrl. */
+  async function readAssetBytesForPackage(asset: SourceAsset): Promise<Uint8Array | null> {
+    try {
+      const store = await getAssetBlobStore();
+      const blob = await store.getBlob(asset.id);
+      if (blob) return new Uint8Array(await blob.arrayBuffer());
+    } catch {
+      /* fall through to a remote fetch */
+    }
+    if (asset.fileUrl) {
+      try {
+        const response = await fetch(asset.fileUrl);
+        if (response.ok) return new Uint8Array(await response.arrayBuffer());
+      } catch {
+        /* asset stays unembedded; the ZIP still carries its metadata, so import still relinks by name */
+      }
+    }
+    return null;
+  }
+
+  async function exportTimelineTemplatePackageZip() {
+    if (!project || !graph || !composition) {
+      setNotice("Open a timeline before exporting a template package");
+      return;
+    }
+    setBusy("template-package");
+    try {
+      const pkg = buildTimelineTemplatePackage({
+        projectId: project.id,
+        title: `${project.title} Template`,
+        description: `Lumio template package exported from ${project.title}.`,
+        graph,
+        composition,
+        assets: resolvedAssets
+      });
+      const assetBytesById = await Promise.all(
+        pkg.assets.map(async (assetRef) => {
+          const sourceAsset = resolvedAssets.find((a) => a.id === assetRef.id);
+          const bytes = sourceAsset ? await readAssetBytesForPackage(sourceAsset) : null;
+          return bytes ? { id: assetRef.id, fileName: assetRef.fileName, bytes } : null;
+        })
+      );
+      const embeddedAssets = assetBytesById.filter((a): a is { id: string; fileName: string; bytes: Uint8Array } => a !== null);
+      const zip = buildLumioPackageZip({ pkg, assets: embeddedAssets });
+      downloadBlobFile(new Blob([zip.slice()], { type: "application/zip" }), `${safeFileStem(project.title)}.lumio`);
+      const skipped = pkg.assets.length - embeddedAssets.length;
+      const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
+      const skippedText = skipped > 0 ? ` · ${skipped} asset${skipped === 1 ? "" : "s"} could not be embedded and stay relink-by-name` : "";
+      setNotice(`Template package exported with ${embeddedAssets.length} embedded asset${embeddedAssets.length === 1 ? "" : "s"}${skippedText}${warningText}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Template package export failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function importTimelineOrTemplateFile(file: File | undefined) {
     if (!file || !project) {
+      return;
+    }
+
+    if (file.name.toLowerCase().endsWith(".lumio")) {
+      await importLumioPackageZip(file);
+      return;
+    }
+    // Non-".lumio"-named files still get sniffed for the ZIP magic (a renamed/downloaded package),
+    // matching how the JSON branch below already sniffs content rather than trusting the extension.
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    if (isLumioPackageZipBytes(head)) {
+      await importLumioPackageZip(file);
       return;
     }
 
@@ -3570,6 +3662,84 @@ export function EditorPage() {
       setNotice(applied.warnings[0] ? `Imported "${pkg.manifest.name}" · ${applied.warnings[0]}` : `Imported "${pkg.manifest.name}"`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Template package import failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Import a ".lumio" ZIP package: unzip, create a real local `SourceAsset` per embedded asset (via the
+   * normal `createAsset` — local OPFS-first with an opt-in server fallback, same as any drag-drop upload),
+   * then remap `layer.assetId` from the package's original ids to the freshly created ones so the applied
+   * composition points at real, present media instead of relink-by-name placeholders.
+   */
+  async function importLumioPackageZip(file: File) {
+    if (!project) return;
+    setBusy("template-package");
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const { pkg, assetBytes } = parseLumioPackageZip(bytes);
+      const idMap = new Map<string, string>();
+      const assetWarnings: string[] = [];
+      for (const assetRef of pkg.assets) {
+        const embedded = assetBytes.get(assetRef.id);
+        if (!embedded) {
+          assetWarnings.push(`"${assetRef.fileName}" was not embedded; relink it manually.`);
+          continue;
+        }
+        try {
+          const blobFile = new File([embedded.slice()], assetRef.fileName, { type: assetRef.fileType || "application/octet-stream" });
+          const metadata = blobFile.type.startsWith("video/") || blobFile.type.startsWith("image/")
+            ? await readMediaMetadata(blobFile)
+            : undefined;
+          const kind = blobFile.type.startsWith("image/") ? "image" : blobFile.type.startsWith("audio/") ? "audio" : "video";
+          const created = await createAsset({
+            file: blobFile,
+            durationSeconds: metadata?.durationSeconds ?? assetRef.durationSeconds,
+            width: metadata?.width ?? assetRef.width,
+            height: metadata?.height ?? assetRef.height,
+            hasAudio: metadata?.hasAudio,
+            source: assetRef.source ?? "local",
+            folder: `local/${kind}`,
+            originalName: assetRef.fileName,
+            sizeBytes: embedded.byteLength
+          });
+          idMap.set(assetRef.id, created.id);
+          registerAsset(created);
+        } catch {
+          assetWarnings.push(`Could not import embedded asset "${assetRef.fileName}".`);
+        }
+      }
+      const applied = applyTimelineTemplatePackage({
+        package: pkg,
+        projectId: project.id,
+        projectTitle: project.title,
+        sourceAssetId: project.sourceAssetId ?? project.sourceAsset?.id ?? undefined,
+        availableAssetIds: [...resolvedAssets.map((asset) => asset.id), ...idMap.values()]
+      });
+      const remappedComposition = applied.composition ? remapCompositionAssetIds(applied.composition, idMap) : applied.composition;
+      const remappedAuxCompositions = applied.graph.compositions
+        ? Object.fromEntries(
+            Object.entries(applied.graph.compositions).map(([id, comp]) => [id, remapCompositionAssetIds(comp, idMap)])
+          )
+        : applied.graph.compositions;
+      await updateGraph(
+        { ...applied.graph, composition: remappedComposition, compositions: remappedAuxCompositions },
+        remappedComposition?.durationSeconds ?? project.durationSeconds
+      );
+      setSelectedLayerIds([]);
+      setEditorCurrentTime(0);
+      const warnings = [...applied.warnings, ...assetWarnings];
+      if (warnings.length) {
+        console.warn("[templates] .lumio import warnings", warnings);
+      }
+      setNotice(
+        warnings[0]
+          ? `Imported "${pkg.manifest.name}" · ${idMap.size} embedded asset(s) · ${warnings[0]}`
+          : `Imported "${pkg.manifest.name}" with ${idMap.size} embedded asset(s)`
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : ".lumio package import failed");
     } finally {
       setBusy(null);
     }
@@ -5352,7 +5522,7 @@ export function EditorPage() {
           <input
             ref={templatePackageInputRef}
             type="file"
-            accept="application/json,.json,.lumio-template,.edl,.fcpxml,.xml,.prproj"
+            accept="application/json,.json,.lumio-template,.lumio,.edl,.fcpxml,.xml,.prproj"
             className="effect-import-input"
             onChange={(event) => {
               const file = event.currentTarget.files?.[0];
@@ -5396,9 +5566,9 @@ export function EditorPage() {
             variant="secondary"
             icon={<Upload size={16} />}
             disabled={busy === "template-package" || !composition}
-            onClick={exportTimelineTemplatePackage}
+            onClick={(event) => exportTimelineTemplatePackage(event)}
             aria-label="Export template package"
-            title="Export template package"
+            title="Export template package (Shift+click: .lumio package with embedded media)"
           />
           <Button
             className="icon-only"
@@ -7299,6 +7469,17 @@ function getAssetUseCounts(layers: TimelineLayer[]) {
 
 type AssetAddMode = "auto" | "video" | "audio" | "both";
 type MediaMetadata = { durationSeconds: number; width: number; height: number; hasAudio?: boolean | undefined; color?: SourceColorMetadata | undefined };
+
+/** Rewrites `layer.assetId` through a package→created-asset id map (this composition's own tracks only). */
+function remapCompositionAssetIds(composition: TimelineComposition, idMap: Map<string, string>): TimelineComposition {
+  if (idMap.size === 0) return composition;
+  const remapLayer = (layer: TimelineLayer): TimelineLayer =>
+    layer.assetId && idMap.has(layer.assetId) ? { ...layer, assetId: idMap.get(layer.assetId) } : layer;
+  return {
+    ...composition,
+    tracks: composition.tracks.map((track) => ({ ...track, layers: track.layers.map(remapLayer) }))
+  };
+}
 
 function findCompatibleTrackId(composition: TimelineComposition, asset: SourceAsset, mode: AssetAddMode = "auto") {
   const wantsAudio = mode === "audio" || (mode === "auto" && asset.fileType.startsWith("audio/"));
@@ -10039,6 +10220,47 @@ function BackgroundControls({
   );
 }
 
+/** rgb 0..1 -> "#rrggbb", matching the shared `plugin-effect-adapter.ts` storage convention. */
+function rgbToHexDisplay(rgb: number[]): string {
+  const toHex = (c: number) =>
+    Math.round(Math.min(1, Math.max(0, c)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(rgb[0] ?? 0)}${toHex(rgb[1] ?? 0)}${toHex(rgb[2] ?? 0)}`;
+}
+
+/**
+ * Builds the inspector's per-manifest param list for a `pluginShader` effect from its registered
+ * fragment definition — reuses the existing number/color(vec3)/boolean control branches (no new
+ * control types). `vec2` params have no matching control yet and are skipped.
+ */
+function buildPluginShaderParamDefinitions(effect: TimelineEffect): TimelineEffectParamDefinition[] {
+  const manifestId = effect.params?.[SHADER_MANIFEST_ID_PARAM_KEY];
+  const def = typeof manifestId === "string" ? getFragmentEffect(manifestId) : undefined;
+  if (!def) return [];
+  const out: TimelineEffectParamDefinition[] = [];
+  for (const p of def.params) {
+    if (p.type === "bool") {
+      out.push({ key: p.name, label: p.label ?? p.name, type: "boolean", defaultValue: Boolean(p.default) });
+    } else if (p.type === "vec3") {
+      const rgb = Array.isArray(p.default) ? (p.default as number[]) : [0, 0, 0];
+      out.push({ key: p.name, label: p.label ?? p.name, type: "color", defaultValue: rgbToHexDisplay(rgb) });
+    } else if (p.type === "float") {
+      out.push({
+        key: p.name,
+        label: p.label ?? p.name,
+        type: "number",
+        min: p.min ?? 0,
+        max: p.max ?? 1,
+        step: p.step ?? 0.01,
+        defaultValue: typeof p.default === "number" ? p.default : 0,
+        keyframeable: true
+      });
+    }
+  }
+  return out;
+}
+
 function TimelineEffectControl({
   effect,
   layer,
@@ -10070,6 +10292,11 @@ function TimelineEffectControl({
 }) {
   const normalizedEffect = normalizeTimelineEffect(effect);
   const definition = getTimelineEffectDefinition(normalizedEffect.type);
+  // "Custom Shader" (pluginShader) params are dynamic per-manifest — the static registry entry declares
+  // params: [], so build the inspector's param list from the fragment def the effect points at.
+  const pluginShaderParams: TimelineEffectParamDefinition[] =
+    normalizedEffect.type === "pluginShader" ? buildPluginShaderParamDefinitions(normalizedEffect) : [];
+  const inspectorParams = normalizedEffect.type === "pluginShader" ? pluginShaderParams : definition?.params ?? [];
   const resetEffect = () => {
     const fresh = createTimelineEffect(normalizedEffect.type);
     onUpdate({ ...fresh, id: normalizedEffect.id });
@@ -10120,7 +10347,7 @@ function TimelineEffectControl({
       />
       {normalizedEffect.params && Object.keys(normalizedEffect.params).length ? (
         <div className="effect-param-grid">
-          {definition?.params.map((param) => (
+          {inspectorParams.map((param) => (
             <EffectParamControl
               effect={normalizedEffect}
               key={param.key}

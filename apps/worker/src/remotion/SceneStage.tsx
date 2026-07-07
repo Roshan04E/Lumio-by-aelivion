@@ -26,6 +26,7 @@ import {
   getCompositionVolume,
   getTrackAudioGainAt,
   layerSourceTimeSeconds,
+  registerEffectManifests,
   registerLookManifests,
   registerTransitionManifests,
   type ColorPipeline,
@@ -412,7 +413,10 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     if (manifest.plugins?.transitions?.length) {
       registerTransitionManifests(manifest.plugins.transitions, { override: true });
     }
-  }, [manifest.plugins?.looks, manifest.plugins?.transitions]);
+    if (manifest.plugins?.effects?.length) {
+      registerEffectManifests(manifest.plugins.effects, { override: true });
+    }
+  }, [manifest.plugins?.looks, manifest.plugins?.transitions, manifest.plugins?.effects]);
 
   // Back-to-front (z ascending = drawn first/bottom). Matches the legacy DOM order + the editor's z-order.
   const sorted = useMemo(() => [...manifest.layers].sort((a, b) => a.zIndex - b.zIndex), [manifest.layers]);

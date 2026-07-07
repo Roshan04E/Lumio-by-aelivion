@@ -324,6 +324,20 @@
       "diffPixels": 0,
       "totalPixels": 2073600,
       "diffRatio": 0
+    },
+    {
+      "fixture": "plugin-shader",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-plugin-shader.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-plugin-shader.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-plugin-shader.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
     }
   ]
 }

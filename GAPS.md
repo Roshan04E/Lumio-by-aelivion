@@ -75,7 +75,7 @@ runner registration for modals that open but can't run (e.g. Remove Background).
 - **EDITOR_REFACTOR Phase 4-6**: EditorPage (~5.2k LOC) & ToolDetailPage (~2.8k LOC) not yet migrated to Zustand store / inspector registry. [EDITOR_REFACTOR_PLAN.md:136](EDITOR_REFACTOR_PLAN.md#L136)
 - **Save/load effect presets** — not built. [architecture.md:176](architecture.md#L176)
 - **Transition transform limitation**: per-clip scale/position/rotation keyframes not applied during transition windows. [architecture.md:178](architecture.md#L178)
-- **Plugin system**: real `webgl-fragment`/`css-filter`/`composite` execution deferred pending renderer sandboxes; creator-tools authoring pending. [PLUGIN_ARCHITECTURE.md:73](PLUGIN_ARCHITECTURE.md#L73)
+- **Plugin system**: `webgl-fragment` is now real (fragment-shader effect engine shipped, pixel-gated at 0.000%); `css-filter`/`composite` execution still deferred pending renderer sandboxes; creator-tools authoring pending. [PLUGIN_ARCHITECTURE.md:73](PLUGIN_ARCHITECTURE.md#L73)
 - **Color parity gates never run in a real GPU env** — structurally green only; `render:compare:pixels` / `color:compare` / `scene:compare` need a GPU env pass.
 - **Doc drift**: architecture.md still flags Grain/Vignette/Chroma as needing render impl, but COLOR_SYSTEM_PLAN E1 shipped them as native shaders — reconcile.
 

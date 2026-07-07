@@ -23,6 +23,7 @@ export * from "./plugin-library";
 export * from "./plugin-effect-adapter";
 export * from "./plugin-look-adapter";
 export * from "./plugin-manifest";
+export * from "./plugin-package-zip";
 export * from "./plugin-template-package";
 export * from "./plugin-safety";
 export * from "./plugin-transition-adapter";

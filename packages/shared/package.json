@@ -17,6 +17,7 @@
     "governor:test": "tsx src/color/gl-context.test.ts"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "immer": "^11.1.8",
     "opentype.js": "^2.0.0",
     "zod": "^3.25.76"

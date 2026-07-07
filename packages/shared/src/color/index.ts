@@ -18,6 +18,7 @@ export * from "./media-shader";
 export * from "./media-renderer";
 export * from "./transitions/registry";
 export * from "./transition-compositor";
+export * from "./fragment-effects/registry";
 export * from "./gl-context";
 export * from "./blend";
 export * from "./scene-compositor";

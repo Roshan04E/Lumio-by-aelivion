@@ -414,6 +414,21 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
       { key: "ceilingDb", label: "Ceiling", type: "number", min: -12, max: 0, step: 0.5, defaultValue: -1, unit: "dB" },
       { key: "releaseMs", label: "Release", type: "number", min: 5, max: 500, step: 5, defaultValue: 50, unit: "ms" }
     ]
+  },
+  {
+    // Plugin-authored real GLSL fragment effect. Params are dynamic per-manifest — the inspector
+    // reads them from the fragment definition (`getFragmentEffect(effect.params.__shaderManifestId)`)
+    // rather than from this static `params: []`.
+    type: "pluginShader",
+    name: "Custom Shader",
+    description: "A user-authored GLSL fragment effect, rendered natively in preview, export, and Remotion.",
+    category: "Stylize",
+    scope: ["clip"],
+    compatibleLayerTypes: ["video", "image", "text", "shape"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: []
   }
 ];
 
