@@ -45,7 +45,45 @@ const LOCAL_PROJECT_ID_PREFIX = "project_local_";
 const tokenKey = "lumio_token";
 const localProjectsKey = "lumio_local_projects";
 const localAssetsKey = "lumio_local_assets";
+// Mirrors the server ProjectAsset join for the offline/local-first path: projectId -> linked assetIds.
+// Keep the filtering logic here in lockstep with the server GET /assets scope in apps/api.
+const localProjectLinksKey = "lumio_project_asset_links";
 const pluginCatalogLatestKey = "lumio_plugin_catalog_latest";
+
+type LocalProjectLinks = Record<string, string[]>;
+
+function readLocalProjectLinks(): LocalProjectLinks {
+  return readLocal<LocalProjectLinks>(localProjectLinksKey, {});
+}
+function writeLocalProjectLinks(links: LocalProjectLinks): void {
+  writeLocal(localProjectLinksKey, links);
+}
+function addLocalProjectLink(projectId: string, assetId: string): void {
+  const links = readLocalProjectLinks();
+  const set = new Set(links[projectId] ?? []);
+  set.add(assetId);
+  links[projectId] = [...set];
+  writeLocalProjectLinks(links);
+}
+function removeLocalProjectLink(projectId: string, assetId: string): void {
+  const links = readLocalProjectLinks();
+  if (!links[projectId]) return;
+  links[projectId] = links[projectId].filter((id) => id !== assetId);
+  writeLocalProjectLinks(links);
+}
+/** Local-first mirror of the server's `scope` filter (project = owned uploads + linked; library = no owner). */
+function filterLocalAssetsByScope(
+  assets: SourceAsset[],
+  projectId: string | undefined,
+  scope: "project" | "library" | "all"
+): SourceAsset[] {
+  if (scope === "library") return assets.filter((a) => !a.ownerProjectId);
+  if (scope === "project" && projectId) {
+    const linked = new Set(readLocalProjectLinks()[projectId] ?? []);
+    return assets.filter((a) => a.ownerProjectId === projectId || linked.has(a.id));
+  }
+  return assets;
+}
 /** Marker stored as a local asset's fileUrl; the real bytes live in the on-device blob
  *  store (asset-blob-store.ts) and are resolved to a fresh object URL on load. */
 export const LOCAL_BLOB_PREFIX = "localblob:";
@@ -365,12 +403,16 @@ export async function createAsset(input: CreateAssetInput) {
       sizeBytes: input.sizeBytes ?? file?.size,
       tags,
       projectId: input.projectId,
+      // A local upload is owned by the project it was added to (null = user-level library asset).
+      ownerProjectId: input.projectId,
       external: input.external,
       ai: input.ai,
       ...(input.color ? { color: input.color } : {})
     };
     const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
     writeLocal(localAssetsKey, [asset, ...assets]);
+    // Mirror the server's auto-link so the project's scoped bin shows this upload offline too.
+    if (input.projectId) addLocalProjectLink(input.projectId, id);
     return { ...asset, fileUrl: liveUrl };
   }
 }
@@ -399,14 +441,49 @@ function withAssetAudioTag(tags: string[] | undefined, hasAudio: boolean | undef
   return [...clean, hasAudio ? ASSET_AUDIO_TRUE_TAG : ASSET_AUDIO_FALSE_TAG];
 }
 
-export async function listAssets(): Promise<SourceAsset[]> {
+/**
+ * List assets scoped to a project (its owned uploads + linked library assets), the reusable library pool, or
+ * everything. The local-first fallback mirrors the server's scope filter via `filterLocalAssetsByScope`.
+ */
+export async function listAssets(
+  projectId?: string,
+  scope: "project" | "library" | "all" = "all"
+): Promise<SourceAsset[]> {
   await ensureDemoSession();
 
+  const params = new URLSearchParams();
+  if (projectId) params.set("projectId", projectId);
+  if (scope !== "all") params.set("scope", scope);
+  const query = params.toString();
+
   try {
-    const data = await apiRequest<{ assets: SourceAsset[] }>("/assets");
+    const data = await apiRequest<{ assets: SourceAsset[] }>(`/assets${query ? `?${query}` : ""}`);
     return data.assets;
   } catch {
-    return resolveLocalAssetUrls(readLocal<SourceAsset[]>(localAssetsKey, []));
+    const local = filterLocalAssetsByScope(readLocal<SourceAsset[]>(localAssetsKey, []), projectId, scope);
+    return resolveLocalAssetUrls(local);
+  }
+}
+
+/** Link a reusable library asset (brand/ai/stock) into a project's bin. Server + local-first mirror. */
+export async function linkAssetToProject(assetId: string, projectId: string): Promise<void> {
+  await ensureDemoSession();
+  addLocalProjectLink(projectId, assetId);
+  try {
+    await apiRequest(`/assets/${assetId}/link`, { method: "POST", body: JSON.stringify({ projectId }) });
+  } catch {
+    /* local link already recorded; server will reconcile on next online create/link */
+  }
+}
+
+/** Remove a library asset from a project's bin (does not delete the asset). Server + local-first mirror. */
+export async function unlinkAssetFromProject(assetId: string, projectId: string): Promise<void> {
+  await ensureDemoSession();
+  removeLocalProjectLink(projectId, assetId);
+  try {
+    await apiRequest(`/assets/${assetId}/link?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" });
+  } catch {
+    /* local unlink already recorded */
   }
 }
 

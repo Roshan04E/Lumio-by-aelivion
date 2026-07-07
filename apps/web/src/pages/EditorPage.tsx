@@ -258,6 +258,7 @@ import {
   getRenderManifest,
   getStockStatus,
   importStock,
+  linkAssetToProject,
   listAssets,
   listPluginPackages,
   searchStock,
@@ -4108,6 +4109,12 @@ export function EditorPage() {
       return;
     }
 
+    // Record project membership for a reusable library asset (brand/ai/stock) pulled into this project, so it
+    // persists in the project-scoped bin. Owned uploads are already linked at create time. Best-effort.
+    if (project?.id && asset.ownerProjectId !== project.id) {
+      void linkAssetToProject(asset.id, project.id);
+    }
+
     await handleDropAsset(asset.id, trackId, currentTimeRef.current, undefined, mode);
   }
 
@@ -5831,6 +5838,7 @@ export function EditorPage() {
               <div className={`panel-tab-content${panelTab === "assets" ? "" : " panel-tab-hidden"}`}>
                 <AssetBin
                   assets={assets}
+                  currentProjectId={project?.id}
                   selectedAssetId={selectedLayer?.assetId}
                   usedCounts={assetUseCounts}
                   replaceActive={assetPickerForLayerId !== null}
@@ -8330,7 +8338,8 @@ function StockCardMedia({ result }: { result: StockResult }) {
 const AssetBin = memo(AssetBinImpl);
 
 function AssetBinImpl({
-  assets,
+  assets: rawAssets,
+  currentProjectId,
   selectedAssetId,
   usedCounts = {},
   replaceActive = false,
@@ -8350,6 +8359,9 @@ function AssetBinImpl({
   onOpenSourceMonitor
 }: {
   assets: SourceAsset[];
+  /** Scopes the Local bin to this project: assets owned by a DIFFERENT project are hidden; user-level library
+   *  assets (no owner) and this project's own uploads stay. Omit to show everything (legacy behavior). */
+  currentProjectId?: string | undefined;
   selectedAssetId?: string | undefined;
   usedCounts?: Record<string, number>;
   replaceActive?: boolean;
@@ -8373,6 +8385,15 @@ function AssetBinImpl({
   onOpenSourceMonitor?: ((asset: SourceAsset) => void) | undefined;
 }) {
   useRenderCost("AssetBin");
+  // Project-scoped bin: drop uploads owned by another project (the "pile" fix). Library assets (ownerProjectId
+  // null — brand/ai/stock) and this project's own uploads pass through. Mirrors GET /assets scope=project.
+  const assets = useMemo(
+    () =>
+      currentProjectId
+        ? rawAssets.filter((a) => !a.ownerProjectId || a.ownerProjectId === currentProjectId)
+        : rawAssets,
+    [rawAssets, currentProjectId]
+  );
   const handleTileActivate = (asset: SourceAsset) => {
     if (replaceActive) {
       onPickReplacement?.(asset);

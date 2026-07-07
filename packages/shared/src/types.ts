@@ -131,6 +131,9 @@ export interface SourceAsset {
   sizeBytes?: number | undefined;
   /** Optional project binding for project-specific generated assets. */
   projectId?: string | undefined;
+  /** Owner project for uploaded (local) media. null/absent = user-level library asset (brand/ai/stock),
+   *  reusable across projects. A project's bin = its owned uploads + assets linked to it (ProjectAsset). */
+  ownerProjectId?: string | null | undefined;
   updatedAt?: string | undefined;
   external?: AssetExternalRef | undefined;
   ai?: AssetAiRef | undefined;

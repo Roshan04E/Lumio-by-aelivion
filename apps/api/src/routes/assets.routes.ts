@@ -1,5 +1,6 @@
 import multer from "multer";
 import { Router } from "express";
+import type { Prisma } from "@prisma/client";
 import { createAssetSchema, moduleTypeSchema, normalizeSourceColorMetadata } from "@lumio-by-aelivion/shared";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
@@ -24,8 +25,28 @@ assetsRouter.get(
   "/",
   requireAuth,
   asyncHandler<AuthRequest>(async (req, res) => {
+    // Scope the bin: `project` = this project's owned uploads + assets linked into it; `library` = the
+    // user-level reusable pool (no owner project); `all` (default) = everything the user has. This filter is
+    // mirrored by the web local-first fallback in apps/web/src/lib/api.ts — keep the two in sync.
+    const query = z
+      .object({
+        projectId: z.string().trim().min(1).optional(),
+        scope: z.enum(["project", "library", "all"]).default("all")
+      })
+      .parse({ projectId: req.query.projectId, scope: req.query.scope });
+
+    let where: Prisma.SourceAssetWhereInput = { userId: req.user.id };
+    if (query.scope === "library") {
+      where = { userId: req.user.id, ownerProjectId: null };
+    } else if (query.projectId && query.scope === "project") {
+      where = {
+        userId: req.user.id,
+        OR: [{ ownerProjectId: query.projectId }, { projectLinks: { some: { projectId: query.projectId } } }]
+      };
+    }
+
     const assets = await prisma.sourceAsset.findMany({
-      where: { userId: req.user.id },
+      where,
       orderBy: { createdAt: "desc" }
     });
 
@@ -47,6 +68,7 @@ assetsRouter.post(
     const fileType = input.fileType ?? "video/mp4";
     const fileUrl = await saveUpload(req.file, fileName);
 
+    const ownerProjectId = input.projectId ?? null;
     const asset = await prisma.sourceAsset.create({
       data: {
         userId: req.user.id,
@@ -68,7 +90,10 @@ assetsRouter.post(
         thumbnailUrl: input.thumbnailUrl ?? null,
         fps: input.fps ?? null,
         sizeBytes: input.sizeBytes ?? (req.file ? req.file.size : null),
-        projectId: input.projectId ?? null,
+        // An uploaded file is owned by the project it was added to (null = user-level library asset). When
+        // owned, also create the ProjectAsset link so the bin's "project" query is uniform.
+        ownerProjectId,
+        ...(ownerProjectId ? { projectLinks: { create: { projectId: ownerProjectId } } } : {}),
         // Json columns: only set when present (explicit `undefined` is rejected under
         // exactOptionalPropertyTypes).
         ...(input.tags ? { tags: input.tags } : {}),
@@ -131,6 +156,46 @@ assetsRouter.patch(
     });
 
     return ok(res, "Asset updated", { asset: serializeAsset(updated) });
+  })
+);
+
+// Link a reusable library asset (brand/ai/stock) into a project's bin without duplicating bytes. Idempotent.
+assetsRouter.post(
+  "/:id/link",
+  requireAuth,
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const id = getParam(req, "id");
+    const { projectId } = z.object({ projectId: z.string().trim().min(1) }).parse(req.body);
+    const asset = await prisma.sourceAsset.findFirst({ where: { id, userId: req.user.id } });
+    if (!asset) throw new HttpError(404, "Asset not found");
+    const project = await prisma.project.findFirst({ where: { id: projectId, userId: req.user.id } });
+    if (!project) throw new HttpError(404, "Project not found");
+
+    await prisma.projectAsset.upsert({
+      where: { projectId_sourceAssetId: { projectId, sourceAssetId: id } },
+      create: { projectId, sourceAssetId: id },
+      update: {}
+    });
+
+    return ok(res, "Asset linked", { asset: serializeAsset(asset) });
+  })
+);
+
+// Remove a library asset from a project's bin (does not delete the asset). No-op if not linked.
+assetsRouter.delete(
+  "/:id/link",
+  requireAuth,
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const id = getParam(req, "id");
+    const { projectId } = z
+      .object({ projectId: z.string().trim().min(1) })
+      .parse({ projectId: req.query.projectId });
+    const asset = await prisma.sourceAsset.findFirst({ where: { id, userId: req.user.id } });
+    if (!asset) throw new HttpError(404, "Asset not found");
+
+    await prisma.projectAsset.deleteMany({ where: { projectId, sourceAssetId: id } });
+
+    return ok(res, "Asset unlinked", { id });
   })
 );
 

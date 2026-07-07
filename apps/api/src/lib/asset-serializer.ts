@@ -22,7 +22,8 @@ interface SourceAssetRow {
   cloudUrl?: string | null;
   fps?: number | null;
   sizeBytes?: number | null;
-  projectId?: string | null;
+  // Prisma field is `ownerProjectId` (mapped onto the legacy `projectId` column).
+  ownerProjectId?: string | null;
   externalJson?: unknown;
   aiJson?: unknown;
   colorJson?: unknown;
@@ -69,7 +70,9 @@ export function serializeAsset(row: SourceAssetRow): SourceAsset {
     cloudUrl: row.cloudUrl ?? undefined,
     fps: row.fps ?? undefined,
     sizeBytes: row.sizeBytes ?? undefined,
-    projectId: row.projectId ?? undefined,
+    ownerProjectId: row.ownerProjectId ?? undefined,
+    // Back-compat: legacy `projectId` consumers mirror the owner (same column, same meaning).
+    projectId: row.ownerProjectId ?? undefined,
     external: (row.externalJson as AssetExternalRef | null) ?? undefined,
     ai: (row.aiJson as AssetAiRef | null) ?? undefined,
     color: row.colorJson != null ? normalizeSourceColorMetadata(row.colorJson) : undefined,

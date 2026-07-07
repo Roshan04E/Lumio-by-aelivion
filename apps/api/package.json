@@ -11,7 +11,8 @@
     "start": "tsx src/server.ts",
     "prisma:generate": "prisma generate --schema prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema prisma/schema.prisma",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "assets:backfill": "tsx src/scripts/backfill-project-assets.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.69.0",

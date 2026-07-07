@@ -316,7 +316,9 @@ export async function processGenerationJob(jobId: string): Promise<void> {
         source: "ai",
         folder: `ai/${job.taskKind}`,
         originalName: typeof params.prompt === "string" ? String(params.prompt).slice(0, 120) : job.taskKind,
-        projectId: job.projectId,
+        // AI assets are user-level & reusable (ownerProjectId stays null); link to the generating project so
+        // they show in its bin without being bound to it.
+        ...(job.projectId ? { projectLinks: { create: { projectId: job.projectId } } } : {}),
         sizeBytes: buffer.byteLength,
         aiJson: {
           model: model.id,
