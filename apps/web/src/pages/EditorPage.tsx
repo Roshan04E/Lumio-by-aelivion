@@ -3538,9 +3538,9 @@ export function EditorPage() {
       setNotice("Open a timeline before exporting a template package");
       return;
     }
-    // Shift+click = ".lumio" ZIP with embedded media (no relink warnings on import); plain click keeps
-    // the bare ".lumio-template.json" (no media) path, unchanged.
-    if (event?.shiftKey) {
+    // Default = ".lumio" ZIP with embedded media (self-contained, no relink warnings on import).
+    // Shift+click = the lightweight bare ".lumio-template.json" (no media, git-friendly).
+    if (!event?.shiftKey) {
       void exportTimelineTemplatePackageZip();
       return;
     }
@@ -5607,7 +5607,7 @@ export function EditorPage() {
             disabled={busy === "template-package" || !composition}
             onClick={(event) => exportTimelineTemplatePackage(event)}
             aria-label="Export template package"
-            title="Export template package (Shift+click: .lumio package with embedded media)"
+            title="Export .lumio package with embedded media (Shift+click: lightweight .lumio-template.json)"
           />
           <Button
             className="icon-only"
