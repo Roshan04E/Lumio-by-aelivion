@@ -14,6 +14,42 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-07 — Claude: Phase 1 — project-scoped media (foundation for the media/library plan)
+
+Executes Phase 1 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phases 2–5 (AI folders, unified
+provider-agnostic Search + Graphics, curated/user-saved Templates, docs) are still PENDING and being handed to
+another agent — read that plan file before continuing.
+
+- **Model:** uploads bind to a project via `SourceAsset.ownerProjectId` (`@map("projectId")` — reuses the legacy
+  column, no data dropped). Brand/AI stay user-level & reusable; `ProjectAsset` join links a library asset into
+  a project's bin without copying bytes. Named the pre-existing Project↔SourceAsset relation
+  (`ProjectPrimarySource`) to disambiguate from the new `ProjectUploads`. Migration `project_scoped_media`.
+- **API:** `GET /assets?projectId&scope=project|library|all`; create sets owner + auto-links; `POST`/`DELETE`
+  `/assets/:id/link`; serializer emits `ownerProjectId` (mirrors to legacy `projectId` for back-compat). AI
+  generations stay user-level and link to the generating project.
+- **Backfill:** `pnpm --filter @lumio-by-aelivion/api assets:backfill` (ran: 77 projects, 75 links, 27 sole-owner
+  uploads) so existing projects keep their bin media. Idempotent.
+- **Web:** `listAssets(projectId?, scope?)` + local-first links mirror (`lumio_project_asset_links`) +
+  `linkAssetToProject`/`unlinkAssetFromProject`. `AssetBin` takes `currentProjectId` and hides uploads owned by
+  OTHER projects (the "pile" fix) while keeping library tabs global; link-on-add for library assets.
+- **Known gap (deferred):** the inspector's replacement-picker AssetBin isn't project-scoped yet (no projectId in
+  scope there) — defaults to legacy show-all.
+- Gates green: `pnpm -r typecheck` (5/5), `editor:test`. Commit `c6163da`.
+- NOTE: API+worker dev processes were stopped to run prisma migrate (Windows DLL lock) — restart `pnpm dev`.
+
+### 2026-07-07 — Claude: DIAGNOSIS (not fixed) — local export produces 90°-rotated clips for phone videos
+
+Root cause found, fix deferred. Nothing in web/worker reads the container's **rotation/display matrix** (tkhd).
+Preview is correct because proxies are built by drawing an `HTMLVideoElement` to a canvas
+(`proxyMediaStore.ts`, `sourceProxyEngine.ts`, `sourceProxy.worker.ts`, `viewerProxyCapture.ts`) and a `<video>`
+element auto-applies rotation; ingest also reads `video.videoWidth/Height` (post-rotation dims). But **export
+reads ORIGINAL bytes via WebCodecs `VideoDecoder`** (per the "exports read original bytes never proxyUrl" rule),
+which emits **coded frames with rotation NOT applied** → a portrait phone clip decodes landscape and is drawn
+into a portrait layer box → rotated export. Only clips carrying a rotation flag are affected ("some clips").
+**Fix direction:** parse track rotation (mp4box exposes tkhd `matrix`) during demux, thread a `rotationDeg` onto
+the decoded source, and rotate the `VideoFrame` 90/180/270 in the export scene compositor before compositing
+(or bake rotation during a normalization transcode) — must land shared so preview/export stay pixel-aligned.
+
 ### 2026-07-07 — Claude: `.lumio` export/import hardening (default `.lumio`, async zip, trust-split caps)
 
 - **Default export is now `.lumio`** (self-contained ZIP with embedded media), not the bare `.lumio-template.json` — plain click = `.lumio`, Shift+click = the lightweight bare JSON (`EditorPage.tsx` export button + tooltip).
