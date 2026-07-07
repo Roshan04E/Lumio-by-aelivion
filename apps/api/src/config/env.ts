@@ -27,10 +27,9 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_TRANSCRIPTION_MODEL: z.string().default("gemini-2.5-flash"),
-  // Stock media providers (optional). The Stock tab shows an "add API key" state when a
-  // provider's key is absent; imports always download the file into our own storage.
+  // Stock media provider (optional). Search shows an unconfigured/empty state when absent;
+  // imports always download the file into our own storage. Provider identity is never shown in the UI.
   PEXELS_API_KEY: z.string().optional(),
-  PIXABAY_API_KEY: z.string().optional(),
   // AI asset generation — fal.ai aggregator (image + video). Held server-side; the Studio's
   // cloud models are only offered when this is present. Generated media is downloaded into our
   // own storage as a SourceAsset(source="ai"). Cost is metadata only (no gating).

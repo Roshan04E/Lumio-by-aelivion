@@ -266,9 +266,11 @@ import {
   updateAssetFolder,
   updateAssetTags,
   AuthRequiredError,
-  type ProjectRecord,
-  type StockProvider
+  type ProjectRecord
 } from "../lib/api";
+import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
+import { rasterizeSvgToFile } from "../lib/rasterize-svg";
+import { listBundledGraphics, searchBundledGraphics, type BundledGraphic } from "@lumio-by-aelivion/shared";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { ASSET_LABEL_COLORS, assetLabelOf, defaultAssetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
 import { assetHasAudioStream } from "../lib/assetAudio";
@@ -7951,7 +7953,7 @@ function SettingsNumberField({
   );
 }
 
-type AssetSourceTab = "local" | "ai" | "stock" | "brand" | "used";
+type AssetSourceTab = "local" | "ai" | "search" | "brand" | "used";
 type AssetTypeFilter = "all" | "video" | "image" | "audio" | "graphics";
 type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand" | "ai">;
 type AssetBinFolder = {
@@ -7985,9 +7987,9 @@ function assetSourceOf(asset: SourceAsset): AssetSource {
 const ASSET_SOURCE_BADGE: Record<AssetSource, string> = {
   local: "Local",
   ai: "AI",
-  pexels: "Pexels",
-  pixabay: "Pixabay",
+  pexels: "Stock",
   unsplash: "Unsplash",
+  graphic: "Graphic",
   "timeline-generated": "Generated",
   brand: "Brand"
 };
@@ -8001,8 +8003,10 @@ function matchesAssetTab(asset: SourceAsset, tab: AssetSourceTab, used: boolean)
       return source === "ai" || source === "timeline-generated";
     case "brand":
       return source === "brand";
-    case "stock":
-      return source === "pexels" || source === "pixabay" || source === "unsplash";
+    case "search":
+      // Search itself is query-driven (ephemeral results, not filtered via this function); this case only
+      // matters for previously-imported stock/graphic assets encountered elsewhere (e.g. "Used" lookups).
+      return source === "pexels" || source === "unsplash" || source === "graphic";
     case "used":
       return used;
     default:
@@ -8080,9 +8084,9 @@ function formatAssetMeta(asset: SourceAsset): string {
 }
 
 const ASSET_TABS: { id: AssetSourceTab; label: string; icon: ReactNode }[] = [
+  { id: "search", label: "Search", icon: <Search size={13} /> },
   { id: "local", label: "Local", icon: <FolderClosedIcon /> },
   { id: "ai", label: "AI", icon: <Sparkles size={13} /> },
-  { id: "stock", label: "Stock", icon: <Globe size={13} /> },
   { id: "brand", label: "Brand", icon: <Palette size={13} /> },
   { id: "used", label: "Used", icon: <Layers size={13} /> }
 ];
@@ -8137,10 +8141,6 @@ function prefersReducedMotion(): boolean {
 }
 
 type StockQuality = "highest" | "4k" | "1080p" | "720p" | "sd";
-
-const STOCK_TYPE_GROUPS: ThemedSelectGroup<"image" | "video">[] = [
-  { label: "Type", options: [{ value: "image", label: "Photos" }, { value: "video", label: "Videos" }] }
-];
 
 const STOCK_ORIENTATION_GROUPS: ThemedSelectGroup<StockOrientation>[] = [
   {
@@ -8408,7 +8408,7 @@ function AssetBinImpl({
   };
   const [query, setQuery] = useState("");
   const [sourceTab, setSourceTab] = useState<AssetSourceTab>(() =>
-    readStoredChoice("lumio_asset_tab", "local", ["local", "ai", "stock", "brand", "used"] as const)
+    readStoredChoice("lumio_asset_tab", "local", ["local", "ai", "search", "brand", "used"] as const)
   );
   const [filter, setFilter] = useState<AssetTypeFilter>(() =>
     readStoredChoice("lumio_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
@@ -8427,24 +8427,28 @@ function AssetBinImpl({
   const [dropActive, setDropActive] = useState(false);
   const dragDepthRef = useRef(0);
 
-  // --- Stock state ---
-  const [stockProvider, setStockProvider] = useState<StockProvider>("pexels");
-  const [stockType, setStockType] = useState<"image" | "video">("image");
+  // --- Unified Search state (Stock: photos/videos; Graphics: bundled + Iconify) ---
+  // No provider identity in the UI — `stockType` doubles as the type chip (photos/videos/graphics).
+  const [stockType, setStockType] = useState<"image" | "video" | "graphics">("image");
   const [stockOrientation, setStockOrientation] = useState<StockOrientation>(() =>
     readStoredChoice("lumio_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
   );
   const [stockQuality, setStockQuality] = useState<StockQuality>(() =>
     readStoredChoice("lumio_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
   );
-  const [stockStatus, setStockStatus] = useState<Record<StockProvider, boolean> | null>(null);
+  const [stockStatus, setStockStatus] = useState<{ configured: boolean } | null>(null);
   const [stockResults, setStockResults] = useState<StockResult[]>([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockPage, setStockPage] = useState(1);
   const [stockHasMore, setStockHasMore] = useState(false);
   const [stockLoadingMore, setStockLoadingMore] = useState(false);
   const [importingId, setImportingId] = useState<string | null>(null);
-  // Stock import failures (CDN 502s etc.) used to vanish into the console — show them in-panel.
+  // Stock/graphics import failures (CDN 502s etc.) used to vanish into the console — show them in-panel.
   const [stockImportError, setStockImportError] = useState<string | null>(null);
+  // Graphics: bundled pack is instant/offline (filtered client-side); Iconify results are fetched.
+  const graphicsBundled = useMemo(() => searchBundledGraphics(query), [query]);
+  const [graphicsIconify, setGraphicsIconify] = useState<IconifyGraphicResult[]>([]);
+  const [graphicsLoading, setGraphicsLoading] = useState(false);
   // Asset viewer modal — opened by double-clicking a library asset or a stock result.
   const [viewerTarget, setViewerTarget] = useState<AssetViewerTarget | null>(null);
 
@@ -8455,8 +8459,7 @@ function AssetBinImpl({
   const currentFolderLabel = folderTab ? (activeFolder === folderRoot ? `${folderTabLabel} project` : assetFolderLabel(activeFolder)) : "";
   const folderCrumbs = useMemo(() => {
     if (!folderTab) return [];
-    const rootLabel = sourceTab === "brand" ? "Brand" : "Local";
-    const rootCrumb = { path: folderRoot, label: rootLabel };
+    const rootCrumb = { path: folderRoot, label: folderTabLabel };
     const parts = activeFolder.slice(folderRoot.length).split("/").filter(Boolean);
     let path = folderRoot;
     return [
@@ -8699,15 +8702,15 @@ function AssetBinImpl({
     };
   }, [menuAssetId]);
 
-  // Probe which stock providers have keys configured (once the Stock tab is opened).
+  // Probe whether stock search is configured (once the Search tab is opened).
   useEffect(() => {
-    if (sourceTab !== "stock" || stockStatus) return;
+    if (sourceTab !== "search" || stockStatus) return;
     void getStockStatus().then(setStockStatus);
   }, [sourceTab, stockStatus]);
 
-  // Debounced stock search (page 1) against the active provider / type / orientation.
+  // Debounced stock search (page 1) against the active type / orientation. Graphics has its own effect below.
   useEffect(() => {
-    if (sourceTab !== "stock") return;
+    if (sourceTab !== "search" || stockType === "graphics") return;
     const trimmed = query.trim();
     if (!trimmed) {
       setStockResults([]);
@@ -8718,7 +8721,7 @@ function AssetBinImpl({
     }
     setStockLoading(true);
     const handle = window.setTimeout(() => {
-      void searchStock(stockProvider, trimmed, stockType, 1, stockOrientation)
+      void searchStock(trimmed, stockType, 1, stockOrientation)
         .then((data) => {
           setStockResults(data.results);
           setStockHasMore(data.results.length >= STOCK_PAGE_SIZE);
@@ -8731,15 +8734,35 @@ function AssetBinImpl({
         .finally(() => setStockLoading(false));
     }, 350);
     return () => window.clearTimeout(handle);
-  }, [sourceTab, query, stockProvider, stockType, stockOrientation]);
+  }, [sourceTab, query, stockType, stockOrientation]);
+
+  // Debounced Iconify search (Graphics chip). The bundled pack (graphicsBundled) is filtered client-side
+  // and needs no fetch; this only covers the searchable icon set, and fails soft to [] (see graphics-search.ts).
+  useEffect(() => {
+    if (sourceTab !== "search" || stockType !== "graphics") return;
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setGraphicsIconify([]);
+      setGraphicsLoading(false);
+      return;
+    }
+    setGraphicsLoading(true);
+    const handle = window.setTimeout(() => {
+      void searchIconifyGraphics(trimmed)
+        .then(setGraphicsIconify)
+        .finally(() => setGraphicsLoading(false));
+    }, 350);
+    return () => window.clearTimeout(handle);
+  }, [sourceTab, stockType, query]);
 
   async function handleLoadMoreStock() {
+    if (stockType === "graphics") return;
     const trimmed = query.trim();
     if (!trimmed || stockLoadingMore) return;
     const nextPage = stockPage + 1;
     setStockLoadingMore(true);
     try {
-      const data = await searchStock(stockProvider, trimmed, stockType, nextPage, stockOrientation);
+      const data = await searchStock(trimmed, stockType, nextPage, stockOrientation);
       setStockResults((prev) => {
         const seen = new Set(prev.map((item) => `${item.provider}_${item.externalId}`));
         const fresh = data.results.filter((item) => !seen.has(`${item.provider}_${item.externalId}`));
@@ -8758,7 +8781,7 @@ function AssetBinImpl({
     setImportingId(result.externalId);
     setStockImportError(null);
     try {
-      const asset = await importStock(result, variant ?? pickStockVariant(result, stockQuality));
+      const asset = await importStock(result, variant ?? pickStockVariant(result, stockQuality), currentProjectId);
       onImportedAsset?.(asset);
       // If the viewer was importing this result, close it once it lands in the library.
       setViewerTarget((current) => (current?.kind === "stock" && current.result.externalId === result.externalId ? null : current));
@@ -8769,7 +8792,31 @@ function AssetBinImpl({
     }
   }
 
-  const stockConfigured = stockStatus ? stockStatus[stockProvider] : true;
+  /** Import a Graphics-chip pick (bundled shape or Iconify icon) as a real, project-scoped image asset. */
+  async function handleImportGraphic(id: string, name: string, svg: string) {
+    setImportingId(id);
+    setStockImportError(null);
+    try {
+      const file = await rasterizeSvgToFile(svg, `${name.toLowerCase().replace(/\s+/g, "-")}.png`);
+      const asset = await createAsset({
+        file,
+        source: "graphic",
+        folder: "graphic",
+        width: 512,
+        height: 512,
+        durationSeconds: 5,
+        originalName: name,
+        projectId: currentProjectId
+      });
+      onImportedAsset?.(asset);
+    } catch (error) {
+      setStockImportError(error instanceof Error ? error.message : "Graphic import failed — please try again.");
+    } finally {
+      setImportingId(null);
+    }
+  }
+
+  const stockConfigured = stockStatus ? stockStatus.configured : true;
   const uploadSource: AssetUploadOptions | undefined = folderTab ? { source: folderTab, folder: activeFolder || folderRoot } : undefined;
   const showUpload = sourceTab === "local" || sourceTab === "brand";
   const canDropFiles = showUpload;
@@ -8910,7 +8957,7 @@ function AssetBinImpl({
   // Project-panel style). Search flattens to plain results; non-folder tabs have no bins.
   type AssetListNode = { kind: "bin"; folder: AssetBinFolder; depth: number } | { kind: "asset"; asset: SourceAsset; depth: number };
   const listNodes: AssetListNode[] = [];
-  if (view === "list" && sourceTab !== "stock") {
+  if (view === "list" && sourceTab !== "search") {
     if (folderTab && !queryText) {
       const assetsOf = (folderPath: string) =>
         assets
@@ -8958,7 +9005,7 @@ function AssetBinImpl({
     </div>
   );
   const assetPanelFooter =
-    sourceTab === "stock" ? (
+    sourceTab === "search" ? (
       <div className="asset-control-strip" aria-label="Asset panel controls">
         <div className="asset-control-left">{viewControls}</div>
       </div>
@@ -9048,36 +9095,35 @@ function AssetBinImpl({
           </button>
         </div>
       ) : null}
-      {sourceTab === "stock" ? (
+      {sourceTab === "search" ? (
         <div className="asset-stock-controls">
-          <div className="asset-subtabs" role="tablist" aria-label="Stock provider">
-            {(["pexels", "pixabay"] as const).map((provider) => (
-              <button
-                key={provider}
-                type="button"
-                className={stockProvider === provider ? "is-active" : ""}
-                onClick={() => setStockProvider(provider)}
-              >
-                {provider === "pexels" ? "Pexels" : "Pixabay"}
+          {/* Type chips — no provider identity shown anywhere; Photos/Videos hit stock search, Graphics
+              merges the offline bundled pack with searchable Iconify icons. */}
+          <div className="asset-subtabs" role="tablist" aria-label="Search type">
+            {(["image", "video", "graphics"] as const).map((kind) => (
+              <button key={kind} type="button" className={stockType === kind ? "is-active" : ""} onClick={() => setStockType(kind)}>
+                {kind === "image" ? "Photos" : kind === "video" ? "Videos" : "Graphics"}
               </button>
             ))}
           </div>
-          {/* Photos/Videos dropdown sits to the left of the search, Pexels-style. */}
-          <div className="asset-search asset-search-with-type">
-            <div className="asset-search-type">
-              <ThemedSelect ariaLabel="Stock media type" value={stockType} groups={STOCK_TYPE_GROUPS} onChange={setStockType} />
-            </div>
+          <div className="asset-search">
             <Search size={13} />
-            <input placeholder={`Search ${stockProvider}…`} value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input
+              placeholder={stockType === "graphics" ? "Search graphics…" : "Search stock…"}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
           </div>
-          <div className="asset-stock-filters">
-            <div className="asset-stock-filter">
-              <ThemedSelect ariaLabel="Orientation" value={stockOrientation} groups={STOCK_ORIENTATION_GROUPS} onChange={setStockOrientation} />
+          {stockType !== "graphics" ? (
+            <div className="asset-stock-filters">
+              <div className="asset-stock-filter">
+                <ThemedSelect ariaLabel="Orientation" value={stockOrientation} groups={STOCK_ORIENTATION_GROUPS} onChange={setStockOrientation} />
+              </div>
+              <div className="asset-stock-filter">
+                <ThemedSelect ariaLabel="Import quality" value={stockQuality} groups={STOCK_QUALITY_GROUPS} onChange={setStockQuality} />
+              </div>
             </div>
-            <div className="asset-stock-filter">
-              <ThemedSelect ariaLabel="Import quality" value={stockQuality} groups={STOCK_QUALITY_GROUPS} onChange={setStockQuality} />
-            </div>
-          </div>
+          ) : null}
         </div>
       ) : (
         <div className="asset-bin-controls">
@@ -9115,7 +9161,7 @@ function AssetBinImpl({
         </div>
       )}
       <div className="asset-content-scroll">
-        {sourceTab === "stock" && stockImportError ? (
+        {sourceTab === "search" && stockImportError ? (
           <div className="stock-import-error" role="alert">
             {stockImportError}
             <button type="button" title="Dismiss" onClick={() => setStockImportError(null)}>
@@ -9123,25 +9169,83 @@ function AssetBinImpl({
             </button>
           </div>
         ) : null}
-        {sourceTab === "stock" && !stockConfigured ? (
+        {sourceTab === "search" && stockType === "graphics" ? (
+          <div className="asset-grid">
+            {graphicsLoading ? <div className="empty-mini">Searching graphics…</div> : null}
+            {graphicsBundled.map((graphic) => (
+              <div
+                className="asset-tile asset-stock-tile"
+                key={`bundled_${graphic.id}`}
+                title={graphic.name}
+                role="button"
+                tabIndex={0}
+              >
+                <div className="asset-graphic-preview" dangerouslySetInnerHTML={{ __html: graphic.svg }} />
+                <div className="asset-card-hover">
+                  <div className="asset-card-info">
+                    <strong>{graphic.name}</strong>
+                  </div>
+                  <div className="asset-card-actions">
+                    <button
+                      type="button"
+                      className="asset-more-button"
+                      aria-busy={importingId === `bundled_${graphic.id}`}
+                      disabled={importingId === `bundled_${graphic.id}`}
+                      title="Import to library"
+                      onClick={() => void handleImportGraphic(`bundled_${graphic.id}`, graphic.name, graphic.svg)}
+                    >
+                      <Download size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {graphicsIconify.map((icon) => (
+              <div className="asset-tile asset-stock-tile" key={`iconify_${icon.iconId}`} title={icon.name} role="button" tabIndex={0}>
+                <img className="asset-graphic-preview" src={`https://api.iconify.design/${icon.iconId}.svg`} alt={icon.name} loading="lazy" />
+                <div className="asset-card-hover">
+                  <div className="asset-card-info">
+                    <strong>{icon.name}</strong>
+                  </div>
+                  <div className="asset-card-actions">
+                    <button
+                      type="button"
+                      className="asset-more-button"
+                      aria-busy={importingId === `iconify_${icon.iconId}`}
+                      disabled={importingId === `iconify_${icon.iconId}`}
+                      title="Import to library"
+                      onClick={() =>
+                        void fetchIconifySvg(icon.iconId).then((svg) => {
+                          if (svg) void handleImportGraphic(`iconify_${icon.iconId}`, icon.name, svg);
+                        })
+                      }
+                    >
+                      <Download size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {!graphicsLoading && !graphicsBundled.length && !graphicsIconify.length ? (
+              <div className="empty-mini">No graphics found</div>
+            ) : null}
+          </div>
+        ) : sourceTab === "search" && !stockConfigured ? (
           <div className="asset-empty-state">
             <Globe size={18} />
-            <strong>{stockProvider === "pexels" ? "Pexels" : "Pixabay"} not connected</strong>
-            <span>
-              Add {stockProvider === "pexels" ? "PEXELS_API_KEY" : "PIXABAY_API_KEY"} to your .env to search and import
-              stock {stockType === "image" ? "photos" : "videos"}.
-            </span>
+            <strong>Stock search not connected</strong>
+            <span>Add PEXELS_API_KEY to your .env to search and import stock {stockType === "image" ? "photos" : "videos"}.</span>
           </div>
-        ) : sourceTab === "stock" && query.trim() ? (
+        ) : sourceTab === "search" && query.trim() ? (
           <div className="asset-grid">
           {stockLoading ? (
-            <div className="empty-mini">Searching {stockProvider}…</div>
+            <div className="empty-mini">Searching…</div>
           ) : stockResults.length ? (
             stockResults.map((result) => (
               <div
                 className="asset-tile asset-stock-tile"
                 key={`${result.provider}_${result.externalId}`}
-                title={result.author ? `By ${result.author}` : result.provider}
+                title={result.author ?? "Stock"}
                 role="button"
                 tabIndex={0}
                 onDoubleClick={() => setViewerTarget({ kind: "stock", result })}
@@ -9150,15 +9254,12 @@ function AssetBinImpl({
                 <span className="asset-type-chip" title={result.type}>
                   {result.type === "video" ? <Film size={11} /> : <Image size={11} />}
                 </span>
-                <span className={`asset-badge asset-badge-source asset-badge-${result.provider}`} title={result.provider}>
-                  {result.provider === "pexels" ? "Pexels" : "Pixabay"}
-                </span>
                 {result.width && result.height ? (
                   <span className="asset-chip asset-chip-duration">{result.width}×{result.height}</span>
                 ) : null}
                 <div className="asset-card-hover">
                   <div className="asset-card-info">
-                    <strong>{result.author ?? result.provider}</strong>
+                    <strong>{result.author ?? "Stock"}</strong>
                     {result.width && result.height ? <small>{result.width}×{result.height}</small> : null}
                   </div>
                   <div className="asset-card-actions">

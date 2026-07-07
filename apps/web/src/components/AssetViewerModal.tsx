@@ -37,9 +37,9 @@ function formatBytes(bytes?: number): string | null {
 const SOURCE_LABEL: Record<string, string> = {
   local: "Local",
   ai: "AI",
-  pexels: "Pexels",
-  pixabay: "Pixabay",
+  pexels: "Stock",
   unsplash: "Unsplash",
+  graphic: "Graphic",
   "timeline-generated": "Generated",
   brand: "Brand"
 };
@@ -91,7 +91,7 @@ export function AssetViewerModal({
   const isStock = target.kind === "stock";
   const kind: ViewerKind = isStock ? (target.result.type === "video" ? "video" : "image") : assetViewerKind(target.asset.fileType);
 
-  const title = isStock ? target.result.author ?? (target.result.provider === "pexels" ? "Pexels" : "Pixabay") : target.asset.originalName ?? target.asset.fileName;
+  const title = isStock ? target.result.author ?? "Stock" : target.asset.originalName ?? target.asset.fileName;
   const source = isStock ? target.result.provider : target.asset.source ?? "local";
   const width = isStock ? target.result.width : target.asset.width;
   const height = isStock ? target.result.height : target.asset.height;

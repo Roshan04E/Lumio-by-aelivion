@@ -12169,6 +12169,26 @@ input.scrub-number:focus {
   transform: scale(1.04);
 }
 
+.asset-graphic-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: inherit;
+  background: #131316;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.asset-graphic-preview svg,
+.asset-graphic-preview.asset-graphic-preview img,
+img.asset-graphic-preview {
+  width: 60%;
+  height: 60%;
+  object-fit: contain;
+}
+
 /* Audio has no frame: a short, fixed card with a centered glyph. */
 .asset-card-media-audio {
   aspect-ratio: 5 / 2;
@@ -12458,8 +12478,8 @@ input.scrub-number:focus {
 .asset-tile .asset-badge-pexels {
   background: rgba(5, 160, 120, 0.9);
 }
-.asset-tile .asset-badge-pixabay {
-  background: rgba(0, 168, 132, 0.9);
+.asset-tile .asset-badge-graphic {
+  background: rgba(56, 189, 248, 0.9);
 }
 .asset-tile .asset-badge-brand {
   background: rgba(245, 158, 11, 0.9);

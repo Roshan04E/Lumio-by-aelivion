@@ -1,49 +1,31 @@
 import { Router } from "express";
 import { z } from "zod";
-import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
+import { asyncHandler, HttpError, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { serializeAsset } from "../lib/asset-serializer";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { saveBuffer } from "../services/storage.service";
 import type { StockOrientation } from "@lumio-by-aelivion/shared";
-import {
-  downloadStockMedia,
-  isStockProvider,
-  searchStock,
-  STOCK_PER_PAGE,
-  stockProviderConfigured,
-  type StockMediaType
-} from "../services/stock.service";
+import { downloadStockMedia, searchStock, STOCK_PER_PAGE, stockProviderConfigured, type StockMediaType } from "../services/stock.service";
 
 export const stockRouter = Router();
 
-function resolveProvider(req: AuthRequest) {
-  const provider = getParam(req, "provider");
-  if (!isStockProvider(provider)) {
-    throw new HttpError(404, `Unknown stock provider: ${provider}`);
-  }
-  return provider;
-}
+// Provider-less routes: the UI is one unified Search surface, so no provider name is ever exposed here
+// (today this fans out to Pexels only; adding a source later stays additive in stock.service.ts).
 
-/** Which providers have keys configured — lets the UI show an "add key" state cleanly. */
+/** Whether stock search is configured at all — lets the UI show an "unconfigured" empty state cleanly. */
 stockRouter.get(
   "/status",
   requireAuth,
-  asyncHandler<AuthRequest>(async (_req, res) =>
-    ok(res, "Stock status", {
-      pexels: stockProviderConfigured("pexels"),
-      pixabay: stockProviderConfigured("pixabay")
-    })
-  )
+  asyncHandler<AuthRequest>(async (_req, res) => ok(res, "Stock status", { configured: stockProviderConfigured("pexels") }))
 );
 
 stockRouter.get(
-  "/:provider/search",
+  "/search",
   requireAuth,
   asyncHandler<AuthRequest>(async (req, res) => {
-    const provider = resolveProvider(req);
-    if (!stockProviderConfigured(provider)) {
-      return ok(res, "Stock provider not configured", { configured: false, results: [] });
+    if (!stockProviderConfigured("pexels")) {
+      return ok(res, "Stock search not configured", { configured: false, results: [] });
     }
     const query = typeof req.query.q === "string" ? req.query.q : "";
     const type: StockMediaType = req.query.type === "video" ? "video" : "image";
@@ -51,7 +33,7 @@ stockRouter.get(
     const orientationRaw = typeof req.query.orientation === "string" ? req.query.orientation : "all";
     const orientation: StockOrientation =
       orientationRaw === "horizontal" || orientationRaw === "vertical" || orientationRaw === "square" ? orientationRaw : "all";
-    const results = await searchStock(provider, query, type, page, orientation);
+    const results = await searchStock("pexels", query, type, page, orientation);
     return ok(res, "Stock results", { configured: true, results, page, perPage: STOCK_PER_PAGE });
   })
 );
@@ -65,16 +47,17 @@ const importSchema = z.object({
   durationSeconds: z.coerce.number().min(0).optional(),
   fileType: z.string().default("image/jpeg"),
   author: z.string().optional(),
-  sourceUrl: z.string().optional()
+  sourceUrl: z.string().optional(),
+  // Project-scoped import (Phase 1 rule): imported stock lands in the requesting project's bin.
+  projectId: z.string().trim().min(1).optional()
 });
 
 stockRouter.post(
-  "/:provider/import",
+  "/import",
   requireAuth,
   asyncHandler<AuthRequest>(async (req, res) => {
-    const provider = resolveProvider(req);
-    if (!stockProviderConfigured(provider)) {
-      throw new HttpError(501, `${provider} is not configured`);
+    if (!stockProviderConfigured("pexels")) {
+      throw new HttpError(501, "Stock search is not configured");
     }
     const input = validateBody(importSchema, req.body);
     const { buffer, fileName } = await downloadStockMedia(input.downloadUrl, input.externalId, input.type);
@@ -91,16 +74,19 @@ stockRouter.post(
         width: input.width ?? 1080,
         height: input.height ?? 1920,
         status: "ready",
-        source: provider,
-        folder: `stock/${provider}/${input.type}`,
-        originalName: `${provider} ${input.externalId}`,
+        source: "pexels",
+        folder: `stock/pexels/${input.type}`,
+        originalName: `pexels ${input.externalId}`,
         sizeBytes: buffer.byteLength,
+        // Stock is a reusable library asset (ownerProjectId stays null); link it into the requesting
+        // project so it shows in that project's bin without being bound to it.
+        ...(input.projectId ? { projectLinks: { create: { projectId: input.projectId } } } : {}),
         externalJson: {
-          provider,
+          provider: "pexels",
           externalId: input.externalId,
           author: input.author,
           sourceUrl: input.sourceUrl,
-          license: provider === "pexels" ? "Pexels License" : "Pixabay License"
+          license: "Pexels License"
         }
       }
     });

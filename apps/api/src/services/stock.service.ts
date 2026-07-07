@@ -2,27 +2,27 @@ import type { StockOrientation, StockResult, StockVariant } from "@lumio-by-aeli
 import { env } from "../config/env";
 import { HttpError } from "../lib/http";
 
-export type StockProvider = "pexels" | "pixabay";
+// Provider identity is INTERNAL ONLY — never surfaced in API responses or the UI (one unified Search
+// surface). `StockProvider` stays a single-member union today; the registry pattern here is what makes
+// adding a second source (e.g. Unsplash) additive later rather than a rewrite.
+export type StockProvider = "pexels";
 export type StockMediaType = "image" | "video";
 
 /** Results per page — shared with the search response so the UI knows when to show "Load more". */
 export const STOCK_PER_PAGE = 24;
 
 export function isStockProvider(value: string): value is StockProvider {
-  return value === "pexels" || value === "pixabay";
+  return value === "pexels";
 }
 
 export function stockProviderConfigured(provider: StockProvider): boolean {
-  return provider === "pexels" ? Boolean(env.PEXELS_API_KEY) : Boolean(env.PIXABAY_API_KEY);
+  return provider === "pexels" && Boolean(env.PEXELS_API_KEY);
 }
 
 function requireKey(provider: StockProvider): string {
-  const key = provider === "pexels" ? env.PEXELS_API_KEY : env.PIXABAY_API_KEY;
+  const key = provider === "pexels" ? env.PEXELS_API_KEY : undefined;
   if (!key) {
-    throw new HttpError(
-      501,
-      `${provider} is not configured. Add ${provider === "pexels" ? "PEXELS_API_KEY" : "PIXABAY_API_KEY"} to enable stock import.`
-    );
+    throw new HttpError(501, "Stock search is not configured. Add PEXELS_API_KEY to enable it.");
   }
   return key;
 }
@@ -36,16 +36,6 @@ function resolutionLabel(width?: number | null, height?: number | null): string 
   if (longEdge >= 1280) return "720p";
   if (longEdge >= 640) return "540p";
   return "SD";
-}
-
-function orientationOf(width?: number | null, height?: number | null): StockOrientation {
-  const w = width ?? 0;
-  const h = height ?? 0;
-  if (!w || !h) return "all";
-  const ratio = w / h;
-  if (ratio > 1.15) return "horizontal";
-  if (ratio < 0.87) return "vertical";
-  return "square";
 }
 
 /** Keep one variant per quality label (best-first list already sorted), so the picker stays short. */
@@ -169,104 +159,6 @@ async function searchPexels(query: string, type: StockMediaType, page: number, o
   }));
 }
 
-// --- Pixabay --------------------------------------------------------------------
-
-interface PixabayImage {
-  id: number;
-  webformatURL: string;
-  largeImageURL: string;
-  previewURL: string;
-  imageWidth: number;
-  imageHeight: number;
-  user: string;
-  pageURL: string;
-}
-
-interface PixabayVideoVariant {
-  url: string;
-  width: number;
-  height: number;
-}
-
-interface PixabayVideo {
-  id: number;
-  duration: number;
-  pageURL: string;
-  user: string;
-  videos: { large?: PixabayVideoVariant; medium?: PixabayVideoVariant; small?: PixabayVideoVariant };
-}
-
-async function searchPixabay(query: string, type: StockMediaType, page: number, orientation: StockOrientation): Promise<StockResult[]> {
-  const key = requireKey("pixabay");
-  if (type === "video") {
-    const res = await fetch(
-      `https://pixabay.com/api/videos/?key=${key}&q=${encodeURIComponent(query)}&per_page=${STOCK_PER_PAGE}&page=${page}`
-    );
-    if (!res.ok) throw new HttpError(502, `Pixabay error (${res.status})`);
-    const data = (await res.json()) as { hits: PixabayVideo[] };
-    const results = data.hits.map((hit) => {
-      const ordered = [hit.videos.large, hit.videos.medium, hit.videos.small].filter(
-        (variant): variant is PixabayVideoVariant => Boolean(variant?.url)
-      );
-      const variants = dedupeVariants(
-        ordered.map((variant) => ({
-          label: resolutionLabel(variant.width, variant.height),
-          downloadUrl: variant.url,
-          fileType: "video/mp4",
-          width: variant.width,
-          height: variant.height
-        }))
-      );
-      const best = ordered[0];
-      const smallest = ordered[ordered.length - 1];
-      return {
-        provider: "pixabay",
-        externalId: String(hit.id),
-        type: "video",
-        thumbnailUrl: `https://i.vimeocdn.com/video/${hit.id}_295x166.jpg`,
-        previewUrl: smallest?.url ?? best?.url,
-        downloadUrl: best?.url ?? "",
-        width: best?.width ?? 1920,
-        height: best?.height ?? 1080,
-        durationSeconds: hit.duration,
-        author: hit.user,
-        sourceUrl: hit.pageURL,
-        fileType: "video/mp4",
-        variants
-      } satisfies StockResult;
-    });
-    // Pixabay has no orientation filter — narrow by aspect ratio of the best variant.
-    return filterByOrientation(results, orientation);
-  }
-  const res = await fetch(
-    `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(query)}&image_type=photo&per_page=${STOCK_PER_PAGE}&page=${page}`
-  );
-  if (!res.ok) throw new HttpError(502, `Pixabay error (${res.status})`);
-  const data = (await res.json()) as { hits: PixabayImage[] };
-  const results = data.hits.map((hit) => ({
-    provider: "pixabay" as const,
-    externalId: String(hit.id),
-    type: "image" as const,
-    thumbnailUrl: hit.webformatURL ?? hit.previewURL,
-    downloadUrl: hit.largeImageURL ?? hit.webformatURL,
-    width: hit.imageWidth,
-    height: hit.imageHeight,
-    author: hit.user,
-    sourceUrl: hit.pageURL,
-    fileType: "image/jpeg",
-    variants: [
-      { label: "Large", downloadUrl: hit.largeImageURL ?? hit.webformatURL, fileType: "image/jpeg", width: hit.imageWidth, height: hit.imageHeight },
-      { label: "Web", downloadUrl: hit.webformatURL, fileType: "image/jpeg" }
-    ]
-  }));
-  return filterByOrientation(results, orientation);
-}
-
-function filterByOrientation(results: StockResult[], orientation: StockOrientation): StockResult[] {
-  if (orientation === "all") return results;
-  return results.filter((result) => orientationOf(result.width, result.height) === orientation);
-}
-
 export async function searchStock(
   provider: StockProvider,
   query: string,
@@ -275,9 +167,7 @@ export async function searchStock(
   orientation: StockOrientation = "all"
 ): Promise<StockResult[]> {
   if (!query.trim()) return [];
-  return provider === "pexels"
-    ? searchPexels(query, type, page, orientation)
-    : searchPixabay(query, type, page, orientation);
+  return searchPexels(query, type, page, orientation);
 }
 
 /**

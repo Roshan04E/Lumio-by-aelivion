@@ -40,8 +40,8 @@ const ASSET_SOURCES: AssetSource[] = [
   "local",
   "ai",
   "pexels",
-  "pixabay",
   "unsplash",
+  "graphic",
   "timeline-generated",
   "brand"
 ];

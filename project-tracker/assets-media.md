@@ -71,3 +71,23 @@ printed and inspected; migration SQL inspected for no destructive `DROP COLUMN`.
 **Known gap:** the inspector's replacement-picker `AssetBin` instance isn't project-scoped yet (no
 project id threaded into that component) — defaults to legacy show-all; low risk, it's a picker not
 the primary bin surface.
+
+## v7 — Pixabay removed; unified provider-agnostic Search + Graphics (2026-07-07)
+**Problem:** The Stock tab exposed provider identity (Pexels vs Pixabay buttons) in the UI, contrary to
+the product decision to keep external-provider branding invisible behind one unified Search surface.
+Pixabay itself was to be dropped entirely. There was also no way to browse/import royalty-free
+graphics/icons (stickers, shapes, arrows) — only photo/video stock.
+**Fix:** `StockProvider` collapsed to a single-member `"pexels"` union server-side (registry pattern kept
+so adding a source later is additive); all Pixabay fetch/parse code, `PIXABAY_API_KEY`, and the
+`"pixabay"` `AssetSource`/schema enum values deleted repo-wide. `POST /stock/import` now links the
+imported asset into the requesting project (`ProjectAsset`) instead of leaving it unlinked. Added a new
+`"graphic"` asset source backed by two content paths: an offline bundled inline-SVG shape pack
+(`packages/shared/src/graphics/catalog.ts`) and searchable Iconify icons (`apps/web/src/lib/
+graphics-search.ts`, no API key, fails soft on network/CSP failure). Both rasterize to a real PNG via
+`apps/web/src/lib/rasterize-svg.ts` so an imported graphic is ordinary editable image media. The editor's
+"Stock" tab is renamed "Search" with Photos/Videos/Graphics type chips replacing the provider picker; no
+provider name is shown anywhere in badges/titles/empty-states.
+**Verify:** `pnpm -r typecheck` (5/5, including after the breaking `AssetSource` enum change) and
+`editor:test`, both green.
+**Known gap:** Iconify sticker/emoji sets beyond line icons are not covered (icons only); a paid sticker
+provider was explicitly deferred per the original plan.

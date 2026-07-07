@@ -4,6 +4,7 @@ export * from "./animation";
 export * from "./audio-fx";
 export * from "./color";
 export * from "./auto-caption-assistant";
+export * from "./graphics/catalog";
 export * from "./capability-index";
 export * from "./captions";
 export * from "./clip-masks";

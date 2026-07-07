@@ -43,14 +43,14 @@ export type AssetSource =
   | "local"
   | "ai"
   | "pexels"
-  | "pixabay"
   | "unsplash"
+  | "graphic"
   | "timeline-generated"
   | "brand";
 
-/** Provenance for a stock-imported asset (we save a local copy; this records the origin). */
+/** Provenance for a stock/graphic-imported asset (we save a local copy; this records the origin). */
 export interface AssetExternalRef {
-  provider: "pexels" | "pixabay" | "unsplash";
+  provider: "pexels" | "unsplash" | "iconify";
   externalId: string;
   author?: string | undefined;
   sourceUrl?: string | undefined;
@@ -70,7 +70,8 @@ export interface StockVariant {
 }
 
 export interface StockResult {
-  provider: "pexels" | "pixabay";
+  /** Internal only — never shown in the UI (unified, provider-agnostic Search surface). */
+  provider: "pexels";
   externalId: string;
   type: "image" | "video";
   /** Small preview/thumbnail URL for the result grid. */

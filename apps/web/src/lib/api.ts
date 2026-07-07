@@ -568,18 +568,17 @@ export async function updateAssetTags(assetId: string, tags: string[]): Promise<
   }
 }
 
-// --- Stock media (Pexels / Pixabay) ---------------------------------------------
-// Stock requires the server (search hits provider APIs; import downloads the file into
-// our own storage so the export worker can fetch it). No local-only fallback.
+// --- Stock media ------------------------------------------------------------------
+// One unified, provider-agnostic Search surface — no provider name is ever shown in the UI. Stock
+// requires the server (search hits the provider API; import downloads the file into our own storage so
+// the export worker can fetch it). No local-only fallback.
 
-export type StockProvider = "pexels" | "pixabay";
-
-export async function getStockStatus(): Promise<Record<StockProvider, boolean>> {
+export async function getStockStatus(): Promise<{ configured: boolean }> {
   await ensureDemoSession();
   try {
-    return await apiRequest<Record<StockProvider, boolean>>("/stock/status");
+    return await apiRequest<{ configured: boolean }>("/stock/status");
   } catch {
-    return { pexels: false, pixabay: false };
+    return { configured: false };
   }
 }
 
@@ -587,7 +586,6 @@ export async function getStockStatus(): Promise<Record<StockProvider, boolean>> 
 export const STOCK_PAGE_SIZE = 24;
 
 export async function searchStock(
-  provider: StockProvider,
   query: string,
   type: "image" | "video",
   page = 1,
@@ -595,12 +593,12 @@ export async function searchStock(
 ): Promise<{ configured: boolean; results: StockResult[] }> {
   await ensureDemoSession();
   const params = new URLSearchParams({ q: query, type, page: String(page), orientation });
-  return apiRequest<{ configured: boolean; results: StockResult[] }>(`/stock/${provider}/search?${params.toString()}`);
+  return apiRequest<{ configured: boolean; results: StockResult[] }>(`/stock/search?${params.toString()}`);
 }
 
-export async function importStock(result: StockResult, variant?: StockVariant): Promise<SourceAsset> {
+export async function importStock(result: StockResult, variant?: StockVariant, projectId?: string): Promise<SourceAsset> {
   await ensureDemoSession();
-  const data = await apiRequest<{ asset: SourceAsset }>(`/stock/${result.provider}/import`, {
+  const data = await apiRequest<{ asset: SourceAsset }>("/stock/import", {
     method: "POST",
     body: JSON.stringify({
       externalId: result.externalId,
@@ -611,7 +609,8 @@ export async function importStock(result: StockResult, variant?: StockVariant): 
       durationSeconds: result.durationSeconds,
       fileType: variant?.fileType ?? result.fileType,
       author: result.author,
-      sourceUrl: result.sourceUrl
+      sourceUrl: result.sourceUrl,
+      ...(projectId ? { projectId } : {})
     })
   });
   return data.asset;

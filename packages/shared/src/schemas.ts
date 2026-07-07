@@ -22,8 +22,8 @@ export const assetSourceSchema = z.enum([
   "local",
   "ai",
   "pexels",
-  "pixabay",
   "unsplash",
+  "graphic",
   "timeline-generated",
   "brand"
 ]);
@@ -56,7 +56,7 @@ export const createAssetSchema = z.object({
   tags: jsonField(z.array(z.string())),
   external: jsonField(
     z.object({
-      provider: z.enum(["pexels", "pixabay", "unsplash"]),
+      provider: z.enum(["pexels", "unsplash", "iconify"]),
       externalId: z.string(),
       author: z.string().optional(),
       sourceUrl: z.string().optional(),

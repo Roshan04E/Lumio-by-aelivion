@@ -14,6 +14,41 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-07 — Claude: Phase 3 — unified Search (drop Pixabay, Pexels provider-agnostic) + Graphics (media/library plan)
+
+Executes Phase 3 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phase 4 (curated/user-saved
+Templates) and Phase 5 (docs) still PENDING.
+
+- **Stock provider-agnostic + Pixabay removed entirely.** `apps/api/src/services/stock.service.ts`:
+  `StockProvider` is now a single-member union (`"pexels"`), deleted all Pixabay fetch/parse code plus
+  `PIXABAY_API_KEY` (`env.ts`); `stock.routes.ts` routes are provider-less (`/status`, `/search`, `/import`
+  — no provider in the URL or response, matching the "one unified Search surface" decision). `POST
+  /stock/import` now accepts an optional `projectId` and LINKS the imported asset into that project
+  (`ProjectAsset`) rather than leaving it a dangling user-level asset — stock stays a reusable library
+  asset like Brand/AI, consistent with Phase 1's model.
+- Shared: `AssetSource`/`assetSourceSchema`/`AssetExternalRef.provider` drop `"pixabay"`, add `"graphic"`
+  (imported bundled shape or Iconify icon) and `"iconify"` provider. This is a breaking union change —
+  grepped and fixed every reference (`asset-serializer.ts`, `EditorPage.tsx`, `AssetViewerModal.tsx`,
+  `api.ts`, `.env.example`, `global.css`'s now-dead `.asset-badge-pixabay` rule).
+- **Graphics, bundled pack:** new `packages/shared/src/graphics/catalog.ts` — ~28 inline-SVG shapes/
+  arrows/badges/lines/bubbles, zero network, `listBundledGraphics()`/`searchBundledGraphics(query)`.
+- **Graphics, searchable icons:** new `apps/web/src/lib/graphics-search.ts` — Iconify's public search API
+  (no key), fails soft to `[]` on any network/CSP failure (bundled pack still renders). New
+  `apps/web/src/lib/rasterize-svg.ts` rasterizes either source's SVG to a real PNG `File` so an imported
+  graphic is ordinary editable image media, not a special-cased vector layer type. Iconify SVGs are
+  rendered via `<img src=".../icon.svg">` (never `dangerouslySetInnerHTML`, since that content is
+  third-party) — only our own hardcoded bundled-pack strings use `dangerouslySetInnerHTML`.
+- **Unified Search bin tab** (`EditorPage.tsx`): `AssetSourceTab`'s `"stock"` renamed to `"search"`
+  (mechanical rename across ~12 call sites); the old Pexels/Pixabay provider-picker buttons replaced with
+  Photos/Videos/Graphics type chips; no provider name shown anywhere in the UI (badges/titles/empty-states
+  all genericized to "Stock"/"Graphic"). Graphics imports are project-scoped directly (`ownerProjectId`),
+  same as a local upload, since each is freshly rasterized rather than a reusable pre-existing object.
+  Also fixed a Phase-2 gap found while in this code: `folderCrumbs`' root-label ternary didn't cover the
+  AI tab (only checked brand/local) — now uses the shared `folderTabLabel`.
+- Gates green: `pnpm -r typecheck` (5/5, including after the breaking enum removal), `editor:test`.
+- NOTE: an unrelated concurrent session still has uncommitted changes to `apps/web/src/tools/*` and
+  `packages/shared/src/skills/*` — left untouched, not staged in this commit.
+
 ### 2026-07-07 — Claude: Phase 2 — AI folder structure (media/library plan)
 
 Executes Phase 2 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phases 3–5 (unified
