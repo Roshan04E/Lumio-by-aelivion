@@ -14,6 +14,15 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-07 — Claude: `.lumio` export/import hardening (default `.lumio`, async zip, trust-split caps)
+
+- **Default export is now `.lumio`** (self-contained ZIP with embedded media), not the bare `.lumio-template.json` — plain click = `.lumio`, Shift+click = the lightweight bare JSON (`EditorPage.tsx` export button + tooltip).
+- **Export no longer freezes the UI:** `buildLumioPackageZip` ran `zipSync(level 6)` on the main thread, re-DEFLATEing already-compressed media. Now media is STORED (`level 0`) and there's a new `buildLumioPackageZipAsync` (fflate worker threads) that the editor uses, with a "Building…" notice. Sync builder kept for tests.
+- **`.lumio` has NO size limits by default** (it's the user's own project; export was uncapped, so import must be too). Old 512 MB / 256 MB-per-asset / 64-asset caps removed from the default path. `parseLumioPackageZipAsync` (new, off-thread) is what the editor imports with; sync `parseLumioPackageZip` kept for tests. Untrusted callers can still pass `maxPackageBytes`/`maxAssetBytes`/`maxAssetCount` explicitly ("others").
+- **Zip-bomb guard retained (crash-prevention, not a product limit):** only the DEFLATE'd metadata (`manifest.json`/`timeline.json`) is capped at 512 MB decompressed via fflate's pre-decompress `filter`; embedded media under `assets/` is STORED so it can't amplify and stays unlimited. Manifest content-safety scan (`javascript:`/`importScripts` deny-list) is unchanged — `.lumio` is declarative data, no arbitrary-code execution.
+- **Gates green:** `pnpm -r typecheck` (5/5), `editor:test` (`.lumio` round-trip incl. byte-for-byte asset survival).
+- Files: `packages/shared/src/plugin-package-zip.ts`, `apps/web/src/pages/EditorPage.tsx`.
+
 ### 2026-07-07 — Claude: Day 2 — NLE import fidelity (titles/transitions/multi-sequence) + FCPXML export
 
 - **Shared transition-name table:** `mapExternalTransition(name)` in `external-timeline-adapter.ts` replaces the old per-format "dissolve or nothing" checks — every importer (FCPXML, `.prproj`) and the new exporter route through the SAME table (Cross/Film Dissolve, Dip to Black/White, Wipe, Push, Slide, Cross Zoom, Iris; unknown → Cross Dissolve, never dropped).

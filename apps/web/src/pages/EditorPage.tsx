@@ -74,7 +74,7 @@ import {
   buildTemplateGraphFromProject,
   exportCompositionToFcpxml,
   isLumioPackageZipBytes,
-  parseLumioPackageZip,
+  parseLumioPackageZipAsync,
   buildTransitionKeyframes,
   COLOR_EFFECT_TYPES,
   getTransition,
@@ -3685,7 +3685,7 @@ export function EditorPage() {
     setBusy("template-package");
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const { pkg, assetBytes } = parseLumioPackageZip(bytes);
+      const { pkg, assetBytes } = await parseLumioPackageZipAsync(bytes);
       const idMap = new Map<string, string>();
       const assetWarnings: string[] = [];
       for (const assetRef of pkg.assets) {

@@ -1,4 +1,4 @@
-import { unzipSync, zipSync, zip, strToU8, strFromU8, type Zippable, type AsyncZippable } from "fflate";
+import { unzip, unzipSync, zipSync, zip, strToU8, strFromU8, type Zippable, type AsyncZippable, type UnzipFileInfo } from "fflate";
 import { assertPluginPackageSafe } from "./plugin-safety";
 import { parseTimelineTemplatePackage, type LumioTimelineTemplatePackage } from "./plugin-template-package";
 
@@ -102,38 +102,61 @@ export function buildLumioPackageZipAsync(input: BuildLumioPackageZipInput): Pro
   });
 }
 
+export interface ParseLumioPackageZipOptions {
+  /**
+   * Optional caps for UNTRUSTED callers (a marketplace/download path). Omitted = UNLIMITED, which is the
+   * default for a user importing their own `.lumio`: it's their project, and export applies no size cap, so
+   * import must not reject packages Lumio itself produced. These do NOT disable the zip-bomb guard below.
+   */
+  maxPackageBytes?: number;
+  maxAssetBytes?: number;
+  maxAssetCount?: number;
+}
+
 /**
- * Parse a `.lumio` ZIP back into its `LumioTimelineTemplatePackage` + embedded asset bytes. Runs the same
- * `assertPluginPackageSafe` gate the bare-JSON path uses plus a per-asset count/size cap so a pathological
- * archive can't exhaust memory before the caller even looks at it.
- *
- * The defaults are sized for REAL video projects, not marketplace plugins: a user re-importing a `.lumio`
- * they exported themselves is a trusted, local, user-picked file, and export applies NO size cap — so a low
- * import cap would reject packages Lumio itself produced. The ceiling only exists to avoid OOMing the tab
- * (`unzipSync` materializes every entry in memory). Untrusted callers can pass tighter limits explicitly.
+ * Zip-bomb guard on the COMPRESSIBLE metadata only. `manifest.json`/`timeline.json` are DEFLATE'd, so a
+ * crafted entry could expand from kilobytes to gigabytes and OOM the tab. Embedded media under `assets/` is
+ * STORED (level 0) — no decompression amplification — so it stays UNLIMITED. No real timeline JSON comes
+ * close to this ceiling; it exists purely to refuse a hostile file, not to limit legitimate content.
+ * (fflate reports each entry's declared uncompressed size via the filter before decompressing it.)
  */
-export function parseLumioPackageZip(
-  bytes: Uint8Array,
-  options: { maxPackageBytes?: number; maxAssetBytes?: number; maxAssetCount?: number } = {}
+const LUMIO_METADATA_DECOMPRESSED_CAP = 512 * 1024 * 1024;
+
+/** Build the fflate unzip `filter`: media = decompress unconditionally; metadata = only if within the bomb cap
+ *  (and flags a bomb out-of-band); everything else (e.g. `previews/`) = skipped, we never read it on import. */
+function lumioUnzipFilter(onBomb: (name: string) => void): (file: UnzipFileInfo) => boolean {
+  const assetPrefix = `${lumioPackageZipAssetsDir}/`;
+  return (file) => {
+    if (file.name.startsWith(assetPrefix)) return true; // media: unlimited
+    const isMetadata = file.name === lumioPackageZipManifestEntry || file.name === lumioPackageZipTimelineEntry;
+    if (!isMetadata) return false;
+    if (file.originalSize > LUMIO_METADATA_DECOMPRESSED_CAP) {
+      onBomb(file.name);
+      return false; // refuse to expand it
+    }
+    return true;
+  };
+}
+
+/** Turn decompressed entries into the parsed package, applying the (untrusted-only) caps and safety gate. */
+function decodeLumioEntries(
+  entries: Record<string, Uint8Array>,
+  bombEntry: string | null,
+  options: ParseLumioPackageZipOptions
 ): ParsedLumioPackageZip {
-  const GB = 1024 * 1024 * 1024;
-  const maxPackageBytes = options.maxPackageBytes ?? 4 * GB; // whole-archive ceiling (tab-memory guard, not a product limit)
-  const maxAssetBytes = options.maxAssetBytes ?? 2 * GB; // per embedded asset (a 4K/long clip alone can exceed the old 256 MB)
-  const maxAssetCount = options.maxAssetCount ?? 256;
-
-  if (bytes.byteLength > maxPackageBytes) {
-    throw new Error(`.lumio package is ${(bytes.byteLength / (1024 * 1024)).toFixed(1)} MB, above the ${(maxPackageBytes / (1024 * 1024)).toFixed(0)} MB limit.`);
+  if (bombEntry) {
+    throw new Error(`.lumio metadata entry "${bombEntry}" decompresses far larger than any real project — refusing to expand it (possible zip bomb).`);
   }
-
-  const entries = unzipSync(bytes);
   const timelineRaw = entries[lumioPackageZipTimelineEntry];
   if (!timelineRaw) {
     throw new Error(`.lumio package is missing ${lumioPackageZipTimelineEntry}.`);
   }
   const timelineJson = JSON.parse(strFromU8(timelineRaw)) as unknown;
+  // Keep the manifest content-safety scan (blocks javascript:/importScripts/etc.); only the SIZE veto is
+  // relaxed — Infinity unless an untrusted caller passed a real limit.
   assertPluginPackageSafe(
     { manifest: (timelineJson as { manifest?: unknown }).manifest ?? {} },
-    { maxPackageBytes }
+    { maxPackageBytes: options.maxPackageBytes ?? Number.POSITIVE_INFINITY }
   );
   const pkg = parseTimelineTemplatePackage(timelineJson);
 
@@ -143,11 +166,11 @@ export function parseLumioPackageZip(
   for (const [name, data] of Object.entries(entries)) {
     if (!name.startsWith(assetPrefix)) continue;
     assetCount += 1;
-    if (assetCount > maxAssetCount) {
-      throw new Error(`.lumio package declares more than ${maxAssetCount} embedded assets.`);
+    if (options.maxAssetCount !== undefined && assetCount > options.maxAssetCount) {
+      throw new Error(`.lumio package declares more than ${options.maxAssetCount} embedded assets.`);
     }
-    if (data.byteLength > maxAssetBytes) {
-      throw new Error(`.lumio package asset "${name}" is above the ${(maxAssetBytes / (1024 * 1024)).toFixed(0)} MB per-asset limit.`);
+    if (options.maxAssetBytes !== undefined && data.byteLength > options.maxAssetBytes) {
+      throw new Error(`.lumio package asset "${name}" is above the ${(options.maxAssetBytes / (1024 * 1024)).toFixed(0)} MB per-asset limit.`);
     }
     const rest = name.slice(assetPrefix.length);
     const dot = rest.lastIndexOf(".");
@@ -156,4 +179,43 @@ export function parseLumioPackageZip(
   }
 
   return { pkg, assetBytes };
+}
+
+/**
+ * Parse a `.lumio` ZIP (SYNCHRONOUS — blocks the calling thread; fine for tests/Node, but UI callers should
+ * use `parseLumioPackageZipAsync` so a large or hostile file can't freeze the tab). By default there are NO
+ * size limits on a `.lumio` — it's the user's own project/content — beyond the metadata zip-bomb guard.
+ * Untrusted callers (marketplace/download flows) can pass `maxPackageBytes`/`maxAssetBytes`/`maxAssetCount`.
+ */
+export function parseLumioPackageZip(
+  bytes: Uint8Array,
+  options: ParseLumioPackageZipOptions = {}
+): ParsedLumioPackageZip {
+  let bombEntry: string | null = null;
+  const entries = unzipSync(bytes, { filter: lumioUnzipFilter((name) => { bombEntry = name; }) });
+  return decodeLumioEntries(entries, bombEntry, options);
+}
+
+/**
+ * Async `.lumio` parse — same result as `parseLumioPackageZip`, but fflate runs the inflate/copy on worker
+ * threads so the UI thread stays responsive. This is the correct entry point for the editor import.
+ */
+export function parseLumioPackageZipAsync(
+  bytes: Uint8Array,
+  options: ParseLumioPackageZipOptions = {}
+): Promise<ParsedLumioPackageZip> {
+  return new Promise((resolve, reject) => {
+    let bombEntry: string | null = null;
+    unzip(bytes, { filter: lumioUnzipFilter((name) => { bombEntry = name; }) }, (err, entries) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      try {
+        resolve(decodeLumioEntries(entries, bombEntry, options));
+      } catch (decodeError) {
+        reject(decodeError);
+      }
+    });
+  });
 }
