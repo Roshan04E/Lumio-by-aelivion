@@ -5,11 +5,12 @@
  * (warmth/tint/saturation/shadow/highlight/light/neutral) defined in global.css.
  */
 
-import { Diamond, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import type { CSSProperties } from "react";
-import type { KeyframeInterpolation } from "@lumio-by-aelivion/shared";
 import { clamp } from "../editor/inspector/keyframeUtils";
+import { KeyframeButtons, type KeyframeButtonsProps } from "../editor/inspector/controls/KeyframeButtons";
 import { formatEffectValue, type SliderTone } from "./effectSliderTone";
+import { ScrubNumberInput } from "./ScrubNumberInput";
 
 export type { SliderTone };
 
@@ -24,14 +25,7 @@ export function EffectSliderControl({
   onReset,
   onChange
 }: {
-  keyframe?:
-    | {
-        active: boolean;
-        interpolation?: KeyframeInterpolation | undefined;
-        onChangeInterpolation: (interpolation: KeyframeInterpolation) => void;
-        onToggle: () => void;
-      }
-    | undefined;
+  keyframe?: Omit<KeyframeButtonsProps, "label"> | undefined;
   label: string;
   value: number;
   min: number;
@@ -59,30 +53,29 @@ export function EffectSliderControl({
       <span className="effect-slider-label">
         <span className="effect-slider-label-text">{label}</span>
         {keyframe ? (
-          <button
-            className={`effect-keyframe-button ${keyframe.active ? "is-active" : ""}`}
-            type="button"
-            title={keyframe.active ? "Remove keyframe" : "Add keyframe"}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              keyframe.onToggle();
-            }}
-          >
-            <Diamond size={9} />
-          </button>
+          <KeyframeButtons
+            active={keyframe.active}
+            hasAny={keyframe.hasAny}
+            hasNext={keyframe.hasNext}
+            hasPrevious={keyframe.hasPrevious}
+            label={label}
+            onClearAll={keyframe.onClearAll}
+            onNext={keyframe.onNext}
+            onPrevious={keyframe.onPrevious}
+            onToggle={keyframe.onToggle}
+          />
         ) : null}
       </span>
       <input min={min} max={max} step={step} type="range" value={safeValue} onChange={(event) => commitValue(Number(event.target.value))} />
-      <input
+      <ScrubNumberInput
         aria-label={`${label} value`}
         className="effect-slider-number"
         inputMode="decimal"
         max={max}
         min={min}
         step={step}
-        type="number"
         value={formatEffectValue(value, step)}
+        onScrubChange={commitValue}
         onChange={(event) => commitValue(Number(event.target.value))}
         onClick={(event) => event.stopPropagation()}
       />

@@ -15,6 +15,7 @@ import {
   type ProjectGraph,
   type RenderJob,
   type SourceAsset,
+  type SourceColorMetadata,
   type StockOrientation,
   type StockResult,
   type StockVariant,
@@ -261,6 +262,7 @@ export interface CreateAssetInput {
   durationSeconds?: number | undefined;
   width?: number | undefined;
   height?: number | undefined;
+  hasAudio?: boolean | undefined;
   // --- Media-library metadata ---
   source?: AssetSource | undefined;
   folder?: string | undefined;
@@ -272,6 +274,8 @@ export interface CreateAssetInput {
   projectId?: string | undefined;
   external?: AssetExternalRef | undefined;
   ai?: AssetAiRef | undefined;
+  /** Detected source color metadata (Rec.709 SDR contract); absent → assume Rec.709. */
+  color?: SourceColorMetadata | undefined;
 }
 
 export async function createAsset(input: CreateAssetInput) {
@@ -284,6 +288,7 @@ export async function createAsset(input: CreateAssetInput) {
   // local-first paths.
   const durationSeconds = Math.max(1, Math.ceil(input.durationSeconds ?? 12));
   const realDuration = Math.max(0.2, Math.min(7200, input.durationSeconds ?? durationSeconds));
+  const tags = withAssetAudioTag(input.tags, input.hasAudio);
   const withRealDuration = (asset: SourceAsset): SourceAsset => ({ ...asset, durationSeconds: realDuration });
 
   try {
@@ -293,7 +298,7 @@ export async function createAsset(input: CreateAssetInput) {
       body.append("durationSeconds", String(durationSeconds));
       body.append("width", String(input.width ?? 1080));
       body.append("height", String(input.height ?? 1920));
-      appendAssetMetadata(body, input);
+      appendAssetMetadata(body, { ...input, tags });
       const data = await apiRequest<{ asset: SourceAsset }>("/assets", { method: "POST", body });
       return withRealDuration(data.asset);
     }
@@ -313,9 +318,10 @@ export async function createAsset(input: CreateAssetInput) {
         fps: input.fps,
         sizeBytes: input.sizeBytes,
         projectId: input.projectId,
-        tags: input.tags,
+        tags,
         external: input.external,
-        ai: input.ai
+        ai: input.ai,
+        color: input.color
       })
     });
     return withRealDuration(data.asset);
@@ -357,10 +363,11 @@ export async function createAsset(input: CreateAssetInput) {
       thumbnailUrl: input.thumbnailUrl,
       fps: input.fps,
       sizeBytes: input.sizeBytes ?? file?.size,
-      tags: input.tags,
+      tags,
       projectId: input.projectId,
       external: input.external,
-      ai: input.ai
+      ai: input.ai,
+      ...(input.color ? { color: input.color } : {})
     };
     const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
     writeLocal(localAssetsKey, [asset, ...assets]);
@@ -380,6 +387,16 @@ function appendAssetMetadata(body: FormData, input: CreateAssetInput) {
   if (input.tags?.length) body.append("tags", JSON.stringify(input.tags));
   if (input.external) body.append("external", JSON.stringify(input.external));
   if (input.ai) body.append("ai", JSON.stringify(input.ai));
+  if (input.color) body.append("color", JSON.stringify(input.color));
+}
+
+const ASSET_AUDIO_TRUE_TAG = "lumio:audio=true";
+const ASSET_AUDIO_FALSE_TAG = "lumio:audio=false";
+
+function withAssetAudioTag(tags: string[] | undefined, hasAudio: boolean | undefined): string[] | undefined {
+  const clean = (tags ?? []).filter((tag) => tag !== ASSET_AUDIO_TRUE_TAG && tag !== ASSET_AUDIO_FALSE_TAG);
+  if (hasAudio === undefined) return clean.length ? clean : undefined;
+  return [...clean, hasAudio ? ASSET_AUDIO_TRUE_TAG : ASSET_AUDIO_FALSE_TAG];
 }
 
 export async function listAssets(): Promise<SourceAsset[]> {
@@ -410,6 +427,67 @@ export async function deleteAsset(assetId: string) {
     } catch {
       /* best-effort cleanup */
     }
+  }
+}
+
+// The local fallback below is a READ-MODIFY-WRITE of one localStorage key. Concurrent calls (the
+// bin's batch label/move actions fire one per selected asset) all read the pre-batch array and the
+// LAST write clobbered every other change — "only the latest selected gets the label"
+// (2026-07-04). All local asset mutations therefore serialize through this chain.
+let localAssetsWriteChain: Promise<unknown> = Promise.resolve();
+function withLocalAssetsWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = localAssetsWriteChain.then(task, task);
+  localAssetsWriteChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+export async function updateAssetFolder(assetId: string, folder: string | null): Promise<SourceAsset> {
+  await ensureDemoSession();
+
+  try {
+    const data = await apiRequest<{ asset: SourceAsset }>(`/assets/${assetId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ folder })
+    });
+    return data.asset;
+  } catch {
+    return withLocalAssetsWriteLock(async () => {
+      const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
+      const nextAssets = assets.map((asset) => (asset.id === assetId ? { ...asset, folder: folder ?? undefined } : asset));
+      writeLocal(localAssetsKey, nextAssets);
+      const updated = nextAssets.find((asset) => asset.id === assetId);
+      if (!updated) {
+        throw new Error("Asset not found");
+      }
+      return (await resolveLocalAssetUrls([updated]))[0] ?? updated;
+    });
+  }
+}
+
+/** Replace an asset's tag list (carries the editor's color label as a "label:<color>" tag). */
+export async function updateAssetTags(assetId: string, tags: string[]): Promise<SourceAsset> {
+  await ensureDemoSession();
+
+  try {
+    const data = await apiRequest<{ asset: SourceAsset }>(`/assets/${assetId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ tags })
+    });
+    return data.asset;
+  } catch {
+    return withLocalAssetsWriteLock(async () => {
+      const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
+      const nextAssets = assets.map((asset) => (asset.id === assetId ? { ...asset, tags } : asset));
+      writeLocal(localAssetsKey, nextAssets);
+      const updated = nextAssets.find((asset) => asset.id === assetId);
+      if (!updated) {
+        throw new Error("Asset not found");
+      }
+      return (await resolveLocalAssetUrls([updated]))[0] ?? updated;
+    });
   }
 }
 
@@ -552,6 +630,7 @@ export async function createProject(input: {
   templateId?: string | undefined;
   sourceAssetId?: string | undefined;
   prompt?: string | undefined;
+  orientation?: "portrait" | "landscape" | undefined;
 }): Promise<ProjectRecord> {
   await ensureDemoSession();
 
@@ -629,6 +708,39 @@ export async function patchProject(projectId: string, patch: Partial<ProjectReco
     saveLocalProject(updated);
     return updated;
   }
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  try {
+    await apiRequest(`/projects/${resolveProjectId(projectId)}`, { method: "DELETE" });
+  } catch {
+    // Local draft or backend offline — the local removal below is the source of truth for those.
+  }
+  removeLocalProjectRecord(projectId);
+}
+
+/** Clone a project into a fresh local draft (new ids, "copy" suffix, reset to draft with no renders). */
+export async function duplicateProject(projectId: string): Promise<ProjectRecord> {
+  const source = await getProject(projectId);
+  const id = `${LOCAL_PROJECT_ID_PREFIX}${Date.now()}`;
+  const graph: ProjectGraph = { ...source.projectGraph, projectId: id };
+  if (graph.composition) {
+    graph.composition = { ...graph.composition, id: `composition_${id}` };
+  }
+  const now = new Date().toISOString();
+  const copy: ProjectRecord = {
+    ...source,
+    id,
+    title: `${source.title} copy`,
+    status: "draft",
+    previewUrl: undefined,
+    finalUrl: undefined,
+    projectGraph: graph,
+    createdAt: now,
+    updatedAt: now
+  };
+  saveLocalProject(copy);
+  return copy;
 }
 
 export async function addEffect(projectId: string, type: ModuleType, config: Record<string, unknown> = {}) {
@@ -817,7 +929,67 @@ export function writeLocalAssetRecords(assets: SourceAsset[]): void {
   writeLocal(localAssetsKey, assets);
 }
 
+// ── Backend-offline state (2026-07-03) ─────────────────────────────────────
+// A refused connection used to surface as N unhandled fetch errors (one per mounted data hook)
+// with nothing user-visible. Now: the FIRST network failure flips a shared offline flag (the app
+// shows a banner via useApiOffline), every request while offline fails fast with ApiOfflineError
+// (callers' local-fallback paths catch it like any error — no thundering retry herd), and ONE
+// /health poller with backoff flips the flag back when the backend returns.
+// Note: the browser itself still logs net::ERR_CONNECTION_REFUSED lines for real attempts — that
+// console noise is Chrome's, not an unhandled error; this keeps attempts to the single poller.
+
+export class ApiOfflineError extends Error {
+  constructor() {
+    super("Backend offline — the API at " + API_URL + " is not reachable. Working locally; retrying in the background.");
+    this.name = "ApiOfflineError";
+  }
+}
+
+let apiOffline = false;
+let offlinePollTimer: number | undefined;
+const offlineListeners = new Set<(offline: boolean) => void>();
+
+export function isApiOffline(): boolean {
+  return apiOffline;
+}
+
+export function subscribeApiOffline(listener: (offline: boolean) => void): () => void {
+  offlineListeners.add(listener);
+  return () => offlineListeners.delete(listener);
+}
+
+function setApiOffline(next: boolean): void {
+  if (apiOffline === next) return;
+  apiOffline = next;
+  for (const listener of offlineListeners) listener(next);
+  if (next) {
+    scheduleOfflinePoll(2000);
+  } else if (offlinePollTimer !== undefined) {
+    clearTimeout(offlinePollTimer);
+    offlinePollTimer = undefined;
+  }
+}
+
+function scheduleOfflinePoll(delayMs: number): void {
+  if (typeof window === "undefined") return;
+  if (offlinePollTimer !== undefined) clearTimeout(offlinePollTimer);
+  offlinePollTimer = window.setTimeout(() => {
+    offlinePollTimer = undefined;
+    void pingHealth().then((ok) => {
+      if (ok) {
+        setApiOffline(false);
+      } else if (apiOffline) {
+        scheduleOfflinePoll(Math.min(15_000, delayMs * 1.6)); // backoff 2s → 15s cap
+      }
+    });
+  }, delayMs);
+}
+
 async function apiRequestWithAuthRetry<T>(path: string, init: RequestInit = {}, _canRetryAuth: boolean): Promise<T> {
+  // Fail fast while offline: one poller owns reconnection; data callers drop to their local paths.
+  if (apiOffline) {
+    throw new ApiOfflineError();
+  }
   const headers = new Headers(init.headers);
   const bodyIsForm = init.body instanceof FormData;
   if (!bodyIsForm && !headers.has("Content-Type")) {
@@ -828,7 +1000,18 @@ async function apiRequestWithAuthRetry<T>(path: string, init: RequestInit = {}, 
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  } catch (error) {
+    // fetch rejects with TypeError ONLY for network-level failures (refused/DNS/CORS) — the
+    // backend is unreachable, not returning errors.
+    if (error instanceof TypeError) {
+      setApiOffline(true);
+      throw new ApiOfflineError();
+    }
+    throw error;
+  }
   const json = (await response.json()) as ApiEnvelope<T>;
 
   // A 401 on a non-auth route means the session is missing/expired. Drop the stale token
@@ -851,10 +1034,16 @@ function createLocalProject(input: {
   templateId?: string | undefined;
   sourceAssetId?: string | undefined;
   prompt?: string | undefined;
+  orientation?: "portrait" | "landscape" | undefined;
 }): ProjectRecord {
   const template = templateDefinitions.find((item) => item.id === input.templateId || item.slug === input.templateId) ?? templateDefinitions[0]!;
   const sourceAsset = input.sourceAssetId ? readLocal<SourceAsset[]>(localAssetsKey, []).find((asset) => asset.id === input.sourceAssetId) : undefined;
   const id = `project_local_${Date.now()}`;
+  // "Continue without a template": no templateId AND no prompt → a genuinely blank project.
+  // Mirrors the server, which only instantiates a template's authored composition when one was
+  // actually selected. Without this the local fallback silently seeded templateDefinitions[0]'s
+  // modules onto the timeline ("unwanted stuff").
+  const isBlank = !input.templateId && !input.prompt;
   const graph: ProjectGraph = input.prompt
     ? {
         projectId: id,
@@ -863,23 +1052,27 @@ function createLocalProject(input: {
         editableFields: { hookText: input.prompt, captionStyle: "bold_yellow" },
         version: 1
       }
-    : {
-        ...template.templateGraph,
-        projectId: id,
-        sourceAssetId: input.sourceAssetId,
-        version: 1
-      };
+    : isBlank
+      ? { projectId: id, sourceAssetId: input.sourceAssetId, effects: [], editableFields: {}, version: 1 }
+      : {
+          ...template.templateGraph,
+          projectId: id,
+          sourceAssetId: input.sourceAssetId,
+          version: 1
+        };
 
-  // A composition-based (save-as-template) template carries an authored
-  // composition - instantiate it; otherwise build the default timeline.
-  const templateComposition = !input.prompt ? template.templateGraph.composition : undefined;
+  // A composition-based (save-as-template) template carries an authored composition - instantiate
+  // it. Prompt drafts and blank projects both get the clean default timeline instead.
+  const templateComposition = !input.prompt && !isBlank ? template.templateGraph.composition : undefined;
   graph.composition = templateComposition
     ? instantiateTemplateComposition(templateComposition, id, { sourceAssetId: input.sourceAssetId, name: input.title })
     : createDefaultComposition({
         id,
         name: input.title,
         durationSeconds: sourceAsset?.durationSeconds ?? template.durationSeconds,
-        assetId: input.sourceAssetId
+        assetId: input.sourceAssetId,
+        orientation: input.orientation,
+        blank: isBlank
       });
   const projectDurationSeconds = graph.composition.durationSeconds;
 
@@ -928,7 +1121,13 @@ function readLocal<T>(key: string, fallback: T): T {
 }
 
 function writeLocal<T>(key: string, value: T) {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    // Quota overflow (large graphs) or restricted storage must not break the caller —
+    // every writeLocal consumer is a best-effort local cache/registry.
+    console.warn(`[lumio] localStorage write failed for "${key}"`, error);
+  }
 }
 
 function createLocalRenderUrl(type: "preview" | "final", project: ProjectRecord) {

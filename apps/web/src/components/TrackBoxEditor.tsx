@@ -300,7 +300,7 @@ export function TrackBoxEditor({
     ctx.moveTo(MAGNIFIER_SIZE / 2 - 7, MAGNIFIER_SIZE / 2);
     ctx.lineTo(MAGNIFIER_SIZE / 2 + 7, MAGNIFIER_SIZE / 2);
     ctx.stroke();
-    ctx.strokeStyle = "rgba(77, 159, 255, 0.95)";
+    ctx.strokeStyle = getComputedStyle(ctx.canvas).getPropertyValue("--nle-accent").trim() || "rgba(77, 159, 255, 0.95)";
     ctx.beginPath();
     ctx.arc(MAGNIFIER_SIZE / 2, MAGNIFIER_SIZE / 2, 3, 0, Math.PI * 2);
     ctx.stroke();

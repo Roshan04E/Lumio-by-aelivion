@@ -10,7 +10,9 @@
 import { compileColorPipeline, extractControls } from "./pipeline";
 import { applyPipelineToRgb, type Rgb } from "./cpu";
 import { pipelineToSvgFilter } from "./svg";
-import { LUMA_WEIGHTS, TONE_LUT_SIZE, type ColorEffectInput } from "./types";
+import { LUMA_WEIGHTS, TONE_LUT_SIZE, NEUTRAL_CONTROLS, type ColorEffectInput } from "./types";
+import { rec709CodeToLinear, rec709LinearToCode, DEFAULT_PROJECT_COLOR_SETTINGS } from "./color-management";
+import { applyControlsLinear } from "./managed";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {
@@ -55,12 +57,14 @@ function fx(type: string, params: Record<string, number>, intensity = 100): Colo
 }
 
 // 4. Saturation 0 → grayscale at correct Rec.709 luma; channels equal.
+//    Managed path: saturation is luma-preserving in LINEAR light, so a pure-red pixel maps to
+//    the DISPLAY encoding of its linear luma (≈0.499), not the gamma-space luma weight (0.2126).
 {
   const pipeline = compileColorPipeline([fx("brightnessContrast", { saturation: 0 })]);
-  const out = applyPipelineToRgb(pipeline, [1, 0, 0]); // pure red
-  const luma = LUMA_WEIGHTS[0];
+  const out = applyPipelineToRgb(pipeline, [1, 0, 0]); // pure red (already linear at the extremes)
+  const grayDisplay = rec709LinearToCode(LUMA_WEIGHTS[0]);
   check("saturation 0 → channels equal (grayscale)", approx(out[0], out[1]) && approx(out[1], out[2]));
-  check("saturation 0 → red maps to its luma weight", approx(out[0], luma));
+  check("saturation 0 → red maps to display-encoded linear luma", approx(out[0], grayDisplay, 1e-3));
 }
 
 // 5. Saturation > 100 increases channel spread vs original.
@@ -345,6 +349,76 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   const green = hslToRgb(0.33, 0.8, 0.5);
   const blue = hslToRgb(2 / 3, 0.8, 0.5);
   check("matte LUT is bright on keyed, dark off-key", sampleLut3d(matte, green)[0] > 0.7 && sampleLut3d(matte, blue)[0] < 0.2);
+}
+
+// ------------------------------------------------ Managed Rec.709-linear working space
+// The default project color settings put the pipeline in the managed `rec709-linear` working
+// space: Basic-Correction controls are graded in linear light, unclamped, then encoded to
+// Rec.709 SDR display at output.
+
+// 32. Rec.709 transfer round-trips (code → linear → code ≈ identity) across the range.
+{
+  let worst = 0;
+  for (let i = 0; i <= 20; i += 1) {
+    const c = i / 20;
+    worst = Math.max(worst, Math.abs(rec709LinearToCode(rec709CodeToLinear(c)) - c));
+  }
+  check("Rec.709 code→linear→code round-trips", worst < 1e-6);
+  check("default working space is rec709-linear", DEFAULT_PROJECT_COLOR_SETTINGS.workingSpace === "rec709-linear");
+}
+
+// 33. Neutral controls are an exact identity in linear (no drift from the managed path).
+{
+  const lin = rec709CodeToLinear(0.4);
+  const out = applyControlsLinear(NEUTRAL_CONTROLS, [lin, lin, lin]);
+  check("neutral controls → linear identity", approx(out[0], lin, 1e-9) && approx(out[1], lin, 1e-9) && approx(out[2], lin, 1e-9));
+}
+
+// 34. Exposure maps to real photographic stops: +50 exposure ≈ +1 stop (2× linear).
+{
+  const lin = rec709CodeToLinear(0.3);
+  const out = applyControlsLinear({ ...NEUTRAL_CONTROLS, exposure: 50 }, [lin, lin, lin]);
+  check("+50 exposure ≈ one stop (2× linear)", approx(out[0], lin * 2, 1e-6));
+  const out2 = applyControlsLinear({ ...NEUTRAL_CONTROLS, exposure: 100 }, [lin, lin, lin]);
+  check("+100 exposure ≈ two stops (4× linear)", approx(out2[0], lin * 4, 1e-6));
+}
+
+// 35. Contrast leaves the linear middle-grey pivot fixed and steepens around it.
+{
+  const pivot = rec709CodeToLinear(0.5);
+  const atPivot = applyControlsLinear({ ...NEUTRAL_CONTROLS, contrast: 80 }, [pivot, pivot, pivot]);
+  check("contrast fixes the mid-grey pivot", approx(atPivot[0], pivot, 1e-6));
+  const lowIn = rec709CodeToLinear(0.3);
+  const low = applyControlsLinear({ ...NEUTRAL_CONTROLS, contrast: 80 }, [lowIn, lowIn, lowIn]);
+  check("contrast pushes sub-pivot values down", low[0] < lowIn);
+}
+
+// 36. No intermediate clamp: a bright exposure lift that a later stage pulls back keeps detail
+//     that the old per-stage clamp would have crushed to pure white.
+{
+  const bright = compileColorPipeline([
+    fx("brightnessContrast", { exposure: 80 }), // lifts a light pixel well past display white in linear
+    fx("brightnessContrast", { exposure: -80 }) // and pulls it back
+  ]);
+  const start: Rgb = [0.8, 0.8, 0.8];
+  const out = applyPipelineToRgb(bright, start);
+  // Two adjacent managed stages grade in ONE linear segment → near round-trip, NOT clipped to 1.
+  check("adjacent managed stages don't clip super-white", approx(out[0], start[0], 2e-2) && out[0] < 0.999);
+}
+
+// 37. Determinism: the managed path is a pure function.
+{
+  const pipeline = compileColorPipeline([fx("brightnessContrast", { exposure: 35, contrast: 20, temperature: 15, saturation: 120 })]);
+  const a = applyPipelineToRgb(pipeline, [0.42, 0.55, 0.61]);
+  const b = applyPipelineToRgb(pipeline, [0.42, 0.55, 0.61]);
+  check("managed grade is deterministic", a[0] === b[0] && a[1] === b[1] && a[2] === b[2]);
+}
+
+// 38. Temperature adaptation is luma-directional in linear (warm raises R, lowers B) and the
+//     grade stays finite/bounded after the display encode.
+{
+  const out = applyPipelineToRgb(compileColorPipeline([fx("brightnessContrast", { temperature: 60, tint: -20 })]), GRAY);
+  check("warm WB: R above B, all channels in display range", out[0] > out[2] && out[0] <= 1 && out[2] >= 0);
 }
 
 if (failures > 0) {

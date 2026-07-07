@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, Layers, Plus, Search, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   type ProjectEffect,
@@ -155,15 +155,33 @@ export function EffectGraphPanel({
   const [lookGalleryCategory, setLookGalleryCategory] = useState<LookGroup | "all">("all");
   const searchRef = useRef<HTMLInputElement>(null);
   const universalImportInputRef = useRef<HTMLInputElement>(null);
+  // FULL catalog always (2026-07-03 UX change): selecting a clip no longer FILTERS the panel down
+  // to that type's items — every category stays browsable so users can grab, say, a video effect
+  // while an audio clip is selected and drag it onto any compatible clip. The selection instead
+  // AUTO-EXPANDS the matching category below.
   const catalog = useMemo(
     () =>
-      buildEffectCatalog(selectedLayerType, {
+      buildEffectCatalog(undefined, {
         effectManifests: importedEffects,
         lookManifests: importedLooks,
         transitionManifests: importedTransitions
       }),
-    [selectedLayerType, importedEffects, importedLooks, importedTransitions]
+    [importedEffects, importedLooks, importedTransitions]
   );
+
+  // Selecting a clip opens its category bin (audio clip → Audio, text → Text, video/image →
+  // Video) without collapsing anything the user opened themselves.
+  useEffect(() => {
+    if (!selectedLayerType) return;
+    const folder = selectedLayerType === "audio" ? "audio" : selectedLayerType === "text" ? "text" : "video";
+    setCollapsed((current) => {
+      if (!current.has(folder)) return current;
+      const next = new Set(current);
+      next.delete(folder);
+      saveCollapsed(next);
+      return next;
+    });
+  }, [selectedLayerType]);
 
   // Resolve the two sample frames to image sources: an image clip is its own url; a video clip needs a
   // captured poster frame. Same A/B pair feeds every preview tile so transitions are comparable.

@@ -39,7 +39,20 @@ export class ProxyGenerationAborted extends Error {
 }
 
 export interface ProxyGenerationDiagnostic {
-  stage: "worker-start" | "worker-ready" | "worker-failed" | "fallback-start" | "fallback-ready" | "fallback-failed";
+  stage:
+    | "viewer-start"
+    | "viewer-ready"
+    | "viewer-failed"
+    | "worker-start"
+    | "worker-ready"
+    | "worker-failed"
+    | "fallback-start"
+    | "fallback-ready"
+    | "fallback-failed"
+    | "parity-ok"
+    | "parity-failed"
+    | "verify-ok"
+    | "verify-failed";
   spanStartSeconds: number;
   spanEndSeconds: number;
   message?: string | undefined;

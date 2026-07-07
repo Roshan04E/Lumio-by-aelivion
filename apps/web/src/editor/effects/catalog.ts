@@ -308,10 +308,17 @@ export function buildEffectCatalog(
 
   const video: CatalogItem[] = [];
   const text: CatalogItem[] = [];
+  const audioFx: CatalogItem[] = [];
   const uploaded: CatalogItem[] = [];
   for (const effect of effects) {
     if (effect.type === "volume") continue; // curated under Audio
     const item = effectItem(effect.type, effect.name, effect.description);
+    // Audio-category clip FX (EQ/compressor/gate/limiter) live under the Audio bin, after the
+    // curated volume/fade items — they'd otherwise be dropped by the video/text bucketing below.
+    if (effect.category === "Audio") {
+      audioFx.push(item);
+      continue;
+    }
     if (effect.compatibleLayerTypes.includes("video") || effect.compatibleLayerTypes.includes("image")) video.push(item);
     if (effect.compatibleLayerTypes.includes("text")) text.push(item);
   }
@@ -344,7 +351,9 @@ export function buildEffectCatalog(
   }
 
   const audio: CatalogItem[] =
-    !selectedLayerType || selectedLayerType === "audio" || selectedLayerType === "video" ? [...AUDIO_ITEMS] : [];
+    !selectedLayerType || selectedLayerType === "audio" || selectedLayerType === "video"
+      ? [...AUDIO_ITEMS, ...audioFx]
+      : [];
 
   // Opacity transitions are visual — audio layers fade via the Audio items instead.
   const importedTransitionProvider = options.transitionManifests?.length

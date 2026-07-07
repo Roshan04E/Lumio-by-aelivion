@@ -18,7 +18,7 @@ import {
   getVisibleTextRuns,
 } from "../composition-style";
 import { hasTextWarp } from "../text-warp";
-import type { TextRun, TextWarp, TimelineLayer } from "../types";
+import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
 
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
 type Ctx = (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) & { letterSpacing?: string };
@@ -425,6 +425,8 @@ export function drawShapeLayer(
   const h = (num(style.height) / 100) * H;
   if (w <= 0 || h <= 0) return { boxW: 0, boxH: 0 };
   const radius = num(style.borderRadius);
+  const shapeKind = String(style.shapeKind ?? layer.shapeKind ?? "rounded-rectangle");
+  const shapePath = Array.isArray(style.shapePath) ? (style.shapePath as MaskPoint[]) : layer.shapePath;
   const background = String(style.background ?? "#fff");
   const borderStr = style.border ? String(style.border) : "";
   const borderWidth = borderStr ? num(borderStr) : 0;
@@ -452,7 +454,7 @@ export function drawShapeLayer(
   if (boxShadow) applyShadow(ctx, boxShadow);
 
   ctx.fillStyle = background;
-  roundRect(ctx, -w / 2, -h / 2, w, h, radius);
+  buildShapePath(ctx, shapeKind, -w / 2, -h / 2, w, h, radius, shapePath);
   ctx.fill();
   ctx.shadowColor = "transparent";
   ctx.shadowBlur = 0;
@@ -460,11 +462,95 @@ export function drawShapeLayer(
   if (borderWidth > 0) {
     ctx.lineWidth = borderWidth;
     ctx.strokeStyle = borderColor || "#fff";
-    roundRect(ctx, -w / 2, -h / 2, w, h, radius);
+    buildShapePath(ctx, shapeKind, -w / 2, -h / 2, w, h, radius, shapePath);
     ctx.stroke();
   }
   ctx.restore();
   return { boxW: w, boxH: h };
+}
+
+function buildShapePath(ctx: Ctx, kind: string, x: number, y: number, w: number, h: number, radius: number, shapePath?: MaskPoint[] | undefined): void {
+  switch (kind) {
+    case "pen":
+      customShapePath(ctx, shapePath, x, y, w, h);
+      return;
+    case "ellipse":
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, y + h / 2, Math.max(0, w / 2), Math.max(0, h / 2), 0, 0, Math.PI * 2);
+      return;
+    case "line":
+      roundRect(ctx, x, y + h * 0.375, w, h * 0.25, Math.min(radius, h / 8));
+      return;
+    case "triangle":
+      regularPolygon(ctx, x, y, w, h, 3, -Math.PI / 2);
+      return;
+    case "diamond":
+      regularPolygon(ctx, x, y, w, h, 4, -Math.PI / 2);
+      return;
+    case "pentagon":
+      regularPolygon(ctx, x, y, w, h, 5, -Math.PI / 2);
+      return;
+    case "rectangle":
+      roundRect(ctx, x, y, w, h, 0);
+      return;
+    case "rounded-rectangle":
+    default:
+      roundRect(ctx, x, y, w, h, radius);
+      return;
+  }
+}
+
+function customShapePath(ctx: Ctx, points: MaskPoint[] | undefined, x: number, y: number, w: number, h: number): void {
+  const pts = points && points.length >= 2 ? points : defaultPenShapePath();
+  const toX = (value: number) => x + (value / 100) * w;
+  const toY = (value: number) => y + (value / 100) * h;
+  const toDx = (value: number) => (value / 100) * w;
+  const toDy = (value: number) => (value / 100) * h;
+  ctx.beginPath();
+  ctx.moveTo(toX(pts[0]!.x), toY(pts[0]!.y));
+  const hasTangents = pts.some((point) => point.inTangent || point.outTangent);
+  for (let i = 0; i < pts.length; i += 1) {
+    const cur = pts[i]!;
+    const next = pts[(i + 1) % pts.length]!;
+    if (hasTangents) {
+      ctx.bezierCurveTo(
+        toX(cur.x) + toDx(cur.outTangent?.x ?? 0),
+        toY(cur.y) + toDy(cur.outTangent?.y ?? 0),
+        toX(next.x) + toDx(next.inTangent?.x ?? 0),
+        toY(next.y) + toDy(next.inTangent?.y ?? 0),
+        toX(next.x),
+        toY(next.y)
+      );
+    } else {
+      ctx.lineTo(toX(next.x), toY(next.y));
+    }
+  }
+  ctx.closePath();
+}
+
+function defaultPenShapePath(): MaskPoint[] {
+  return [
+    { id: "pen_top", x: 50, y: 4, inTangent: { x: -30.36, y: 0 }, outTangent: { x: 30.36, y: 0 }, lockedTangents: true },
+    { id: "pen_right", x: 96, y: 50, inTangent: { x: 0, y: -30.36 }, outTangent: { x: 0, y: 30.36 }, lockedTangents: true },
+    { id: "pen_bottom", x: 50, y: 96, inTangent: { x: 30.36, y: 0 }, outTangent: { x: -30.36, y: 0 }, lockedTangents: true },
+    { id: "pen_left", x: 4, y: 50, inTangent: { x: 0, y: 30.36 }, outTangent: { x: 0, y: -30.36 }, lockedTangents: true }
+  ];
+}
+
+function regularPolygon(ctx: Ctx, x: number, y: number, w: number, h: number, sides: number, startAngle: number): void {
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const rx = Math.max(0, w / 2);
+  const ry = Math.max(0, h / 2);
+  ctx.beginPath();
+  for (let i = 0; i < sides; i += 1) {
+    const angle = startAngle + (i / sides) * Math.PI * 2;
+    const px = cx + Math.cos(angle) * rx;
+    const py = cy + Math.sin(angle) * ry;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
 }
 
 function roundRect(ctx: Ctx, x: number, y: number, w: number, h: number, r: number): void {

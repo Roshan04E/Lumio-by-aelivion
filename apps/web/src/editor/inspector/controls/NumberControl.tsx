@@ -1,13 +1,16 @@
-import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Diamond, Trash2 } from "lucide-react";
+import { useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { RotateCcw } from "lucide-react";
 import type { KeyframeInterpolation } from "@lumio-by-aelivion/shared";
-import { ResetButton } from "../../../components/ResetButton";
+import { ScrubNumberInput } from "../../../components/ScrubNumberInput";
+import { KeyframeButtons } from "./KeyframeButtons";
 
 /**
- * Shared inspector number control (relocated from EditorPage in Phase 4 of the
- * editor refactor). Presentational: a labelled numeric input with optional reset
- * and keyframe scrubbing buttons. Reused by every inspector panel, so it lives
- * outside the monolith as a reusable primitive.
+ * Shared inspector number control — a DaVinci/Premiere-style full-width row that
+ * reuses the `.effect-slider-*` visual language from the color panel so every
+ * inspector number reads the same: label | slider (or drag-scrub pad) | blue
+ * scrub value | reset. Sliders only appear where a bounded range is natural
+ * (0..100, -100..100, -180..180 — or an explicit `slider` prop); everything
+ * else scrubs in realtime on the pad or the value itself, Premiere hot-text style.
  */
 export interface NumberControlKeyframeProps {
   active: boolean;
@@ -30,74 +33,135 @@ export interface NumberControlProps {
   min: number;
   max: number;
   step: number;
+  /** Force the slider on/off; defaults to auto (natural bounded ranges only). */
+  slider?: boolean | undefined;
   onReset?: (() => void) | undefined;
   onChange: (value: number) => void;
 }
 
-export function NumberControl({ icon, keyframe, label, value, min, max, step, onReset, onChange }: NumberControlProps) {
+/** Ranges where a slider reads naturally; anything else gets scrub-only (no fake slider). */
+function isNaturalSliderRange(min: number, max: number) {
+  return (min === 0 && max === 100) || (min === -100 && max === 100) || (min === -180 && max === 180);
+}
+
+/** Decimal places implied by the step, so displayed/scrubbed values stay clean. */
+function stepDecimals(step: number): number {
+  if (Number.isInteger(step)) return 0;
+  const text = String(step);
+  const dot = text.indexOf(".");
+  return dot === -1 ? 0 : Math.min(6, text.length - dot - 1);
+}
+
+const SCRUB_FINE_FACTOR = 0.1;
+
+export function NumberControl({ icon, keyframe, label, value, min, max, step, slider, onReset, onChange }: NumberControlProps) {
+  const showSlider = slider ?? isNaturalSliderRange(min, max);
+  const decimals = stepDecimals(step);
+  const clamped = Math.min(max, Math.max(min, value));
+  const percent = ((clamped - min) / Math.max(0.0001, max - min)) * 100;
+
+  const padDragRef = useRef<{ pointerId: number; startX: number; startValue: number } | null>(null);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+
+  const commitValue = (next: number) => {
+    if (!Number.isFinite(next)) return;
+    onChange(Math.min(max, Math.max(min, next)));
+  };
+
+  const handlePadPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    padDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startValue: value };
+    setIsScrubbing(true);
+  };
+
+  const handlePadPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = padDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const raw = drag.startValue + dx * step * (event.shiftKey ? SCRUB_FINE_FACTOR : 1);
+    const stepped = Math.round(raw / step) * step;
+    commitValue(Number(stepped.toFixed(decimals)));
+  };
+
+  const handlePadPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = padDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    padDragRef.current = null;
+    setIsScrubbing(false);
+  };
+
   return (
-    <label className={`number-control ${keyframe ? "is-keyframable" : ""}`} title={label}>
-      <span>
-        <span className="number-control-label">
-          <span className="control-icon">{icon ?? label}</span>
-          <small>{label}</small>
-        </span>
-        {onReset ? <ResetButton onReset={onReset} /> : null}
+    <label
+      className="effect-slider-control effect-slider-neutral number-row"
+      style={{ "--slider-percent": `${percent}%` } as CSSProperties}
+      title={label}
+    >
+      <span className="effect-slider-label">
+        {icon ? <span className="control-icon">{icon}</span> : null}
+        <span className="effect-slider-label-text">{label}</span>
         {keyframe ? (
-          <span className="keyframe-buttons" aria-label={`${label} keyframes`}>
-            <button
-              type="button"
-              title="Previous keyframe"
-              disabled={!keyframe.hasPrevious}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                keyframe.onPrevious();
-              }}
-            >
-              <ChevronLeft size={11} />
-            </button>
-            <button
-              className={keyframe.active ? "is-active" : ""}
-              type="button"
-              title={keyframe.active ? "Remove keyframe" : "Add keyframe"}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                keyframe.onToggle();
-              }}
-            >
-              <Diamond size={10} />
-            </button>
-            <button
-              type="button"
-              title="Next keyframe"
-              disabled={!keyframe.hasNext}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                keyframe.onNext();
-              }}
-            >
-              <ChevronRight size={11} />
-            </button>
-            {keyframe.hasAny ? (
-              <button
-                type="button"
-                title="Clear all keyframes for this property"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  keyframe.onClearAll();
-                }}
-              >
-                <Trash2 size={11} />
-              </button>
-            ) : null}
-          </span>
+          <KeyframeButtons
+            active={keyframe.active}
+            hasAny={keyframe.hasAny}
+            hasNext={keyframe.hasNext}
+            hasPrevious={keyframe.hasPrevious}
+            label={label}
+            onClearAll={keyframe.onClearAll}
+            onNext={keyframe.onNext}
+            onPrevious={keyframe.onPrevious}
+            onToggle={keyframe.onToggle}
+          />
         ) : null}
       </span>
-      <input min={min} max={max} step={step} type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      {showSlider ? (
+        <input
+          min={min}
+          max={max}
+          step={step}
+          type="range"
+          value={clamped}
+          onChange={(event) => commitValue(Number(event.target.value))}
+        />
+      ) : (
+        <div
+          className={`number-row-scrubpad${isScrubbing ? " is-scrubbing" : ""}`}
+          title={`Drag to adjust ${label}`}
+          onPointerDown={handlePadPointerDown}
+          onPointerMove={handlePadPointerMove}
+          onPointerUp={handlePadPointerUp}
+          onPointerCancel={handlePadPointerUp}
+        />
+      )}
+      <ScrubNumberInput
+        aria-label={`${label} value`}
+        className="effect-slider-number"
+        inputMode="decimal"
+        max={max}
+        min={min}
+        step={step}
+        value={clamped.toFixed(decimals)}
+        onScrubChange={commitValue}
+        onChange={(event) => commitValue(Number(event.target.value))}
+        onClick={(event) => event.stopPropagation()}
+      />
+      {onReset ? (
+        <button
+          className="effect-slider-reset"
+          type="button"
+          title="Reset"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onReset();
+          }}
+        >
+          <RotateCcw size={12} />
+        </button>
+      ) : (
+        <span />
+      )}
     </label>
   );
 }

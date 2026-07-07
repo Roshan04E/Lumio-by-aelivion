@@ -35,11 +35,17 @@ import {
   type ProjectRecord,
 } from "./api";
 import { getAssetBlobStore } from "./asset-blob-store";
+import { scheduleRecoveryCheckpoint } from "./crash-recovery";
 
 const SYNC_KEY = "lumio_sync_state";
 const LOCAL_PROJECT_PREFIX = "project_local_";
 const LOCAL_ASSET_PREFIX = "asset_local_";
 const SAVE_DEBOUNCE_MS = 800;
+// Local draft persistence used to run synchronously on EVERY edit — a full JSON
+// stringify of every local project's graph into localStorage, per drag frame on
+// a big timeline. A short trailing debounce (+ pagehide/tab-hide flush) keeps the
+// crash-loss window tiny while removing the per-edit main-thread serialize.
+const LOCAL_PERSIST_DEBOUNCE_MS = 250;
 const POLL_INTERVAL_MS = 20000;
 
 export type AssetSyncStatus = "local" | "uploading" | "synced" | "missing" | "failed";
@@ -328,8 +334,11 @@ const pendingSaves = new Map<string, PendingSave>();
  * immediately and debounces a background server sync. Never throws.
  */
 export function scheduleGraphSave(projectId: string, graph: ProjectGraph, durationSeconds: number): void {
-  // Persist to the local draft record now (so a refresh keeps the edit while offline).
-  persistLocalGraph(projectId, graph, durationSeconds);
+  // Persist to the local draft record shortly (debounced; flushed on pagehide) so a
+  // refresh keeps the edit while offline — without a full-graph serialize per edit.
+  scheduleLocalPersist(projectId, graph, durationSeconds);
+  // OPFS crash checkpoint covers server projects too (localStorage drafts don't).
+  scheduleRecoveryCheckpoint(projectId, graph, durationSeconds);
   if (projectId.startsWith(LOCAL_PROJECT_PREFIX)) {
     upsertProject(projectId, { pendingGraph: true });
   } else {
@@ -344,16 +353,59 @@ export function scheduleGraphSave(projectId: string, graph: ProjectGraph, durati
   ensureMonitor();
 }
 
+interface PendingLocalPersist {
+  graph: ProjectGraph;
+  durationSeconds: number;
+  timer: number;
+}
+const pendingLocalPersists = new Map<string, PendingLocalPersist>();
+let persistFlushRegistered = false;
+
+function scheduleLocalPersist(projectId: string, graph: ProjectGraph, durationSeconds: number): void {
+  if (!persistFlushRegistered && typeof window !== "undefined") {
+    persistFlushRegistered = true;
+    window.addEventListener("pagehide", flushAllLocalPersists);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushAllLocalPersists();
+    });
+  }
+  const existing = pendingLocalPersists.get(projectId);
+  if (existing) clearTimeout(existing.timer);
+  const timer = window.setTimeout(() => flushLocalPersist(projectId), LOCAL_PERSIST_DEBOUNCE_MS);
+  pendingLocalPersists.set(projectId, { graph, durationSeconds, timer });
+}
+
+function flushLocalPersist(projectId: string): void {
+  const entry = pendingLocalPersists.get(projectId);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  pendingLocalPersists.delete(projectId);
+  persistLocalGraph(projectId, entry.graph, entry.durationSeconds);
+}
+
+function flushAllLocalPersists(): void {
+  for (const projectId of [...pendingLocalPersists.keys()]) {
+    flushLocalPersist(projectId);
+  }
+}
+
 function persistLocalGraph(projectId: string, graph: ProjectGraph, durationSeconds: number): void {
-  const record = readLocalProject(projectId);
-  if (!record) return; // server-only project — server is the store
-  record.projectGraph = graph;
-  record.durationSeconds = durationSeconds;
-  record.updatedAt = new Date().toISOString();
-  writeLocalProjectRecord(record);
+  try {
+    const record = readLocalProject(projectId);
+    if (!record) return; // server-only project — server is the store
+    record.projectGraph = graph;
+    record.durationSeconds = durationSeconds;
+    record.updatedAt = new Date().toISOString();
+    writeLocalProjectRecord(record);
+  } catch {
+    // localStorage quota/serialization failure must never break editing — the OPFS
+    // crash checkpoint (no 5MB quota) still holds the newest graph for recovery.
+  }
 }
 
 async function flushGraphSave(projectId: string): Promise<void> {
+  // Commit any debounced local persist first so the draft record matches what syncs.
+  flushLocalPersist(projectId);
   const pending = pendingSaves.get(projectId);
   if (pending) {
     clearTimeout(pending.timer);
@@ -408,6 +460,9 @@ async function doSyncProject(
   overrideGraph?: ProjectGraph,
   overrideDuration?: number
 ): Promise<PromoteResult> {
+  // Promotion paths (reconnect monitor) may run without an override graph — make sure
+  // the local record they fall back to includes any still-debounced edit.
+  flushLocalPersist(projectId);
   const localRecord = readLocalProject(projectId);
   const state = readState();
   const projRec = state.projects[projectId];

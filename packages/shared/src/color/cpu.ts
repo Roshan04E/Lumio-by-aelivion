@@ -1,14 +1,23 @@
 /**
  * Professional Color System (Phase 3) — CPU reference applier.
- * Replays a `ColorPipeline` on a single RGB triplet (0..1, in the pipeline's space).
- * This is the ground truth for `color:test` and the fallback for any non-DOM render
- * path (e.g. a Remotion env without GL once the WebGL phases land). It MUST mirror the
- * SVG emitter's math: matrix first (clamped), then per-channel tone-curve lookup.
+ * Replays a `ColorPipeline` on a single RGB triplet (0..1 Rec.709 SDR code values).
+ * This is the ground truth for `color:test` AND the baker input for the WebGL 3D LUT
+ * (`bakePipelineToLut3d`), so whatever this function computes, the GPU applies identically.
+ *
+ * Two working modes, chosen by `pipeline.colorSettings.workingSpace`:
+ *  - **`rec709-linear` (managed, default)** — Basic-Correction `stage.controls` are decoded to
+ *    Rec.709 **linear light** and graded there without intermediate clamps (`applyControlsLinear`),
+ *    encoding back to display only for the next display-referred stage (or the final output).
+ *    Authored curves / wheels / HSL / .cube LUTs remain **display-referred** (they are authored on
+ *    0..1 display graphs / code-value domains — running them through linear would distort them).
+ *  - **legacy** — no `controls` on a stage → the old display-referred `matrix` then `curve` path.
  */
 
-import type { ColorPipeline, ToneCurve } from "./types";
+import type { ColorPipeline, ColorStage, ToneCurve } from "./types";
 import { applyHueSatCurves, applySecondary, type HslSecondary, type HueSatCurves } from "./hsl";
 import { sampleLut3d } from "./lut3d";
+import { applyControlsLinear, type LinRgb } from "./managed";
+import { rgbCodeToLinear, rgbLinearToCode } from "./color-management";
 
 export type Rgb = [number, number, number];
 
@@ -51,22 +60,52 @@ function mixRgb(a: Rgb, b: Rgb, amount: number): Rgb {
   return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
 }
 
-/** Apply the full pipeline to one RGB triplet (0..1). */
+/** A stage is display-referred (curve/hsl/lut3d, or a legacy matrix without controls). */
+function hasDisplayStage(stage: ColorStage): boolean {
+  return Boolean(stage.matrix || stage.curve || stage.hsl || stage.lut3d);
+}
+
+/** Apply the display-referred (authored) part of a stage in Rec.709 SDR code-value space. */
+function applyDisplayStage(stage: ColorStage, rgb: Rgb): Rgb {
+  let out = rgb;
+  if (stage.matrix) out = applyMatrix(stage.matrix, out);
+  if (stage.curve) out = applyCurve(stage.curve, out);
+  if (stage.hsl) out = isSecondary(stage.hsl) ? applySecondary(stage.hsl, out) : applyHueSatCurves(stage.hsl, out);
+  if (stage.lut3d) out = mixRgb(out, sampleLut3d(stage.lut3d, out), stage.lutAmount ?? 1);
+  return out;
+}
+
+/**
+ * Apply the full pipeline to one Rec.709 SDR code-value triplet (0..1). In the managed
+ * `rec709-linear` path, consecutive Basic-Correction `controls` stages are graded in a single
+ * linear segment (decode once, encode once) so no super-white/black detail is clipped between
+ * them; a display-referred stage forces an encode back to display and re-decode after.
+ */
 export function applyPipelineToRgb(pipeline: ColorPipeline, rgb: Rgb): Rgb {
+  const managed = pipeline.colorSettings?.workingSpace === "rec709-linear";
   let out: Rgb = [clamp01(rgb[0]), clamp01(rgb[1]), clamp01(rgb[2])];
+  // Non-null while we're carrying an unclamped linear value across adjacent managed stages.
+  let lin: LinRgb | null = null;
+
+  const flushLinear = (): void => {
+    if (lin) {
+      out = rgbLinearToCode(lin) as Rgb; // encode (clamps to display 0..1)
+      lin = null;
+    }
+  };
+
   for (const stage of pipeline.stages) {
-    if (stage.matrix) {
-      out = applyMatrix(stage.matrix, out);
+    if (managed && stage.controls) {
+      // Enter/continue the linear segment; grade in linear without clamping.
+      if (!lin) lin = rgbCodeToLinear(out) as LinRgb;
+      lin = applyControlsLinear(stage.controls, lin);
+      continue; // matrix/curve on this stage are the SVG approximation of the same op — skip
     }
-    if (stage.curve) {
-      out = applyCurve(stage.curve, out);
-    }
-    if (stage.hsl) {
-      out = isSecondary(stage.hsl) ? applySecondary(stage.hsl, out) : applyHueSatCurves(stage.hsl, out);
-    }
-    if (stage.lut3d) {
-      out = mixRgb(out, sampleLut3d(stage.lut3d, out), stage.lutAmount ?? 1);
+    if (hasDisplayStage(stage)) {
+      flushLinear();
+      out = applyDisplayStage(stage, out);
     }
   }
+  flushLinear();
   return out;
 }

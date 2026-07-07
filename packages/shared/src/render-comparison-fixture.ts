@@ -67,6 +67,7 @@ export type RenderComparisonFixtureKey =
   | "masked-blur"
   | "clip-region-blur"
   | "two-region-effects"
+  | "overlap-region-effects"
   | "feather-region-blur"
   | "tilt-3d"
   | "scaled-text"
@@ -91,6 +92,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "masked-blur",
   "clip-region-blur",
   "two-region-effects",
+  "overlap-region-effects",
   "feather-region-blur",
   "tilt-3d",
   "scaled-text",
@@ -272,6 +274,34 @@ const twoRegionEffects: TimelineLayer["effects"] = [
   }
 ];
 
+// overlap-region-effects: a colour grade and a blur on the SAME region (identical masks; blur later in
+// panel order). This is the fixture where the two region models INTENTIONALLY diverge: the clone-stack
+// model draws the blur clone on top, so the region shows blur(ungraded base) — "top region effect wins";
+// the pass model blurs the RUNNING image, so the region shows blur(graded base) — effects COMBINE (the AE
+// model, todo.md TRUE fix). Flag OFF it gates scene-vs-DOM parity like any fixture; with REGION_PASSES=1
+// the gate instead asserts scene(on) vs scene(off) DIFFER (combine engaged) — a DOM comparison would be
+// asserting against the model this fixture exists to replace.
+const overlapRegionEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_overlap_grade",
+    type: "brightnessContrast",
+    name: "Overlap Region Grade",
+    enabled: true,
+    intensity: 100,
+    params: { exposure: -8, contrast: 44, saturation: 70, temperature: 64, tint: -24 },
+    masks: [createBoxMask("rectangle", 200, 500, 880, 1400, 0)]
+  },
+  {
+    id: "fixture_overlap_blur",
+    type: "blur",
+    name: "Overlap Region Blur",
+    enabled: true,
+    intensity: 100,
+    params: { amount: 24 },
+    masks: [createBoxMask("rectangle", 200, 500, 880, 1400, 0)]
+  }
+];
+
 // feather-region-blur: a region blur whose mask carries a non-zero FEATHER. Locks the mask-feather class
 // (dim / hollow-ring / hard-edge regressions all change the feathered alpha ramp). Feather is a soft band, so
 // the scene (matte blur) and DOM (CSS mask feather) differ somewhat at the edge — a looser per-fixture bar
@@ -366,6 +396,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: regionBlurEffects, fit: "cover", masks: [createBoxMask("ellipse", 220, 520, 860, 1400, 0)] };
     case "two-region-effects":
       return { effects: twoRegionEffects, fit: "cover" };
+    case "overlap-region-effects":
+      return { effects: overlapRegionEffects, fit: "cover" };
     case "feather-region-blur":
       return { effects: featherRegionBlurEffects, fit: "cover" };
     case "tilt-3d":

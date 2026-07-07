@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, type ComponentType } from "react";
+import { Suspense, lazy, memo, useMemo, type ComponentType } from "react";
 import type { TimelineLayer } from "@lumio-by-aelivion/shared";
 import { inspectorRegistry, type InspectorPanelProps, type MaskTool } from "../registry/inspector";
 import type { SavedTrack } from "../../lib/trackLibrary";
@@ -47,9 +47,18 @@ export interface InspectorHostProps {
   onChangeMaskTool?: ((tool: MaskTool) => void) | undefined;
   /** Saved motion tracks, forwarded to the Mask panel for mask tracking. */
   trackLibrary?: SavedTrack[] | undefined;
+  /** Auto-keyframe mode, forwarded to panels so value edits drop keyframes at the playhead. */
+  autoKeyframe?: boolean | undefined;
 }
 
-export function InspectorHost({ layer, onChange, panelIds, currentTime, onSeek, composition, activeMaskId, onSelectMask, onChangeMaskTool, trackLibrary }: InspectorHostProps) {
+/**
+ * memo(): hosts sit inside per-cold-commit parents (LayerInspector under <ColdTime>). While paused
+ * the playhead prop is stable, so with identity-stable callbacks (EditorPage's inspectorHandlers
+ * block) and module-constant panelIds, unrelated parent renders skip the lazy panel subtrees.
+ */
+export const InspectorHost = memo(InspectorHostImpl);
+
+function InspectorHostImpl({ layer, onChange, panelIds, currentTime, onSeek, composition, activeMaskId, onSelectMask, onChangeMaskTool, trackLibrary, autoKeyframe }: InspectorHostProps) {
   const panels = useMemo(() => {
     const all = inspectorRegistry.panelsFor(layer.type);
     return panelIds ? all.filter((panel) => panelIds.includes(panel.id)) : all;
@@ -71,6 +80,7 @@ export function InspectorHost({ layer, onChange, panelIds, currentTime, onSeek, 
               onSelectMask={onSelectMask}
               onChangeMaskTool={onChangeMaskTool}
               trackLibrary={trackLibrary}
+              autoKeyframe={autoKeyframe}
             />
           </Suspense>
         );

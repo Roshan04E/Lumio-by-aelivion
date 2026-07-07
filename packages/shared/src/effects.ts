@@ -1,7 +1,7 @@
 import type { TimelineEffect, TimelineEffectParamValue, TimelineEffectType, TimelineLayerType } from "./types";
 import { CREATIVE_LOOK_NAMES } from "./color/looks";
 
-export type TimelineEffectCategory = "Adjust" | "Stylize" | "Blur" | "Keying" | "Motion" | "Texture";
+export type TimelineEffectCategory = "Adjust" | "Stylize" | "Blur" | "Keying" | "Motion" | "Texture" | "Audio";
 export type TimelineEffectScope = "clip" | "track" | "adjustment" | "transition";
 
 export type TimelineEffectParamDefinition =
@@ -335,6 +335,85 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     previewSupport: "native",
     renderSupport: "native",
     params: [{ key: "gain", label: "Gain", type: "number", min: 0, max: 200, step: 1, defaultValue: 100, unit: "%", keyframeable: true }]
+  },
+  // ── Clip audio FX ─────────────────────────────────────────────────────────
+  // Real DSP in all three renderers via ONE shared implementation (audio-fx.ts): preview runs it
+  // in an AudioWorklet, local export processes decoded PCM, the cloud worker post-mix runs it in
+  // Node. Params are static per clip in v1 (not keyframeable) and `intensity` is ignored — a
+  // wet/dry blend on dynamics stops behaving like dynamics.
+  {
+    type: "audioEq",
+    name: "EQ",
+    description: "Three-band equalizer with low-cut and high-cut filters (RBJ biquads, matching Web Audio's filters exactly).",
+    category: "Audio",
+    scope: ["clip"],
+    compatibleLayerTypes: ["audio"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "lowCutHz", label: "Low Cut", type: "number", min: 0, max: 400, step: 5, defaultValue: 0, unit: "Hz" },
+      { key: "lowShelfDb", label: "Low Gain", type: "number", min: -12, max: 12, step: 0.5, defaultValue: 0, unit: "dB" },
+      { key: "lowShelfHz", label: "Low Freq", type: "number", min: 60, max: 500, step: 5, defaultValue: 120, unit: "Hz" },
+      { key: "midDb", label: "Mid Gain", type: "number", min: -12, max: 12, step: 0.5, defaultValue: 0, unit: "dB" },
+      { key: "midHz", label: "Mid Freq", type: "number", min: 200, max: 8000, step: 50, defaultValue: 1000, unit: "Hz" },
+      { key: "midQ", label: "Mid Q", type: "number", min: 0.3, max: 4, step: 0.1, defaultValue: 1 },
+      { key: "highShelfDb", label: "High Gain", type: "number", min: -12, max: 12, step: 0.5, defaultValue: 0, unit: "dB" },
+      { key: "highShelfHz", label: "High Freq", type: "number", min: 2000, max: 16000, step: 100, defaultValue: 8000, unit: "Hz" },
+      { key: "highCutHz", label: "High Cut", type: "number", min: 0, max: 20000, step: 100, defaultValue: 0, unit: "Hz" }
+    ]
+  },
+  {
+    type: "audioCompressor",
+    name: "Compressor",
+    description: "Soft-knee dynamics compressor (stereo-linked) with makeup gain — even out dialog or tighten a music bed.",
+    category: "Audio",
+    scope: ["clip"],
+    compatibleLayerTypes: ["audio"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "thresholdDb", label: "Threshold", type: "number", min: -60, max: 0, step: 1, defaultValue: -24, unit: "dB" },
+      { key: "ratio", label: "Ratio", type: "number", min: 1, max: 20, step: 0.5, defaultValue: 3, unit: ":1" },
+      { key: "kneeDb", label: "Knee", type: "number", min: 0, max: 24, step: 1, defaultValue: 6, unit: "dB" },
+      { key: "attackMs", label: "Attack", type: "number", min: 0.1, max: 100, step: 0.1, defaultValue: 10, unit: "ms" },
+      { key: "releaseMs", label: "Release", type: "number", min: 10, max: 1000, step: 10, defaultValue: 150, unit: "ms" },
+      { key: "makeupDb", label: "Makeup", type: "number", min: 0, max: 24, step: 0.5, defaultValue: 0, unit: "dB" }
+    ]
+  },
+  {
+    type: "audioGate",
+    name: "Noise Gate",
+    description: "Mutes the clip below a threshold — removes room tone and bleed between phrases.",
+    category: "Audio",
+    scope: ["clip"],
+    compatibleLayerTypes: ["audio"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "thresholdDb", label: "Threshold", type: "number", min: -80, max: 0, step: 1, defaultValue: -50, unit: "dB" },
+      { key: "reduceDb", label: "Reduction", type: "number", min: 0, max: 80, step: 1, defaultValue: 80, unit: "dB" },
+      { key: "attackMs", label: "Attack", type: "number", min: 0.1, max: 50, step: 0.1, defaultValue: 2, unit: "ms" },
+      { key: "holdMs", label: "Hold", type: "number", min: 0, max: 500, step: 10, defaultValue: 50, unit: "ms" },
+      { key: "releaseMs", label: "Release", type: "number", min: 10, max: 1000, step: 10, defaultValue: 120, unit: "ms" }
+    ]
+  },
+  {
+    type: "audioLimiter",
+    name: "Limiter",
+    description: "Hard ceiling on the clip's level — stops peaks from clipping without squashing the body of the sound.",
+    category: "Audio",
+    scope: ["clip"],
+    compatibleLayerTypes: ["audio"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "ceilingDb", label: "Ceiling", type: "number", min: -12, max: 0, step: 0.5, defaultValue: -1, unit: "dB" },
+      { key: "releaseMs", label: "Release", type: "number", min: 5, max: 500, step: 5, defaultValue: 50, unit: "ms" }
+    ]
   }
 ];
 

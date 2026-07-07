@@ -9,12 +9,13 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
 import { createPortal } from "react-dom";
-import { Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
+import { Activity, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
 import {
   buildColorFilterDefs,
   buildMaskDefsSvg,
@@ -34,6 +35,7 @@ import {
   getCompositionObjectFit,
   isTrackEnabled,
   expandEffectRegionMasks,
+  expandNestedCompositions,
   buildRegionBlurCloneAliases,
   isWebgl2ColorSupported,
   getCompositionMediaStyle,
@@ -43,6 +45,13 @@ import {
   getCompositionTextStyle,
   getCompositionTransition,
   getCompositionVolume,
+  getLayerSpeed,
+  getLayerSpeedAt,
+  getTrackAudioGainAt,
+  hasSpeedRamp,
+  layerSourceTimeSeconds,
+  resolveAudioFxChain,
+  getTrackPanAt,
   getVisibleTextRuns,
   evaluateTimelineTransform,
   findTransitionPairs,
@@ -50,7 +59,11 @@ import {
   getLayerAnimations,
   hasTextWarp,
   normalizeTextWarp,
+  setGlContextBudget,
   setGlGovernorEnabled,
+  COLOR_EFFECT_TYPES,
+  colorWarningsLabel,
+  type NestedGroupSpec,
   type ProjectGraph,
   type SourceAsset,
   type TimelineComposition,
@@ -64,18 +77,34 @@ import { TransitionOverlay } from "./TransitionLayer";
 import { ColorEngineBoundary } from "./ColorEngineBoundary";
 import { WebglColorView } from "./WebglColorView";
 import { WebglVideoOverlay } from "./WebglVideoOverlay";
-import { WebglMediaLayer } from "./WebglMediaLayer";
+import { WebglMediaLayer, requestLiveReprime } from "./WebglMediaLayer";
 import { ProxyPlaybackLayer, type ProxyPlaybackHit } from "./ProxyPlaybackLayer";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
-import { getGlGovernorEnabled, useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
+import { getGlGovernorEnabled, getRegionPassesEnabled, getSingleCtxPreviewEnabled, useSceneCompositor, useWebglColorEngine, useWebglRenderer } from "../color/render-engine";
+import type { SceneMediaSink, ScenePreviewMediaSource } from "./scene-media-source";
 
 // Apply the preview WebGL context-governor flag once per session (read from ?glGovernor / localStorage /
 // VITE_GL_GOVERNOR). Enforcement is default-off; telemetry is unaffected. Module scope so it's set before any
 // MediaWebGLRenderer allocation, matching how the other render-engine flags are read once per session.
 setGlGovernorEnabled(getGlGovernorEnabled());
-import { usePlaybackClock } from "../playback/playback-clock";
+// Realistic preview budget (the shared default 3/4 exists for the unit test's pinned scenarios):
+// a real multi-track timeline holds 8–11 live per-layer grade contexts, and the 2026-07-03 soak hit
+// GL ctx 15 — one clip from Chromium's ~16 force-loss (which kills the OLDEST context, possibly the
+// scene compositor → whole GPU preview drops to DOM). Target 8 pauses background cache generation
+// early; hard cap 12 lets the governor (when enabled) reclaim IDLE contexts (stale preloads,
+// scrolled-past clips) with real headroom before the browser acts. Live layers are never evicted —
+// they're touched every frame.
+setGlContextBudget(8, 12);
+import { getLivePlaybackTime, getPlaybackClock, usePlaybackClock } from "../playback/playback-clock";
+import { useRenderCost } from "../lib/perfDiagnostics";
+import { AUDIO_MASTER_GATE_S, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";
+import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
+import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../playback/audio-fx-worklet";
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
-import { ScenePreviewCanvas } from "./ScenePreviewCanvas";
+import { notePlaybackActive, noteRenderScale } from "../editor/performance/frame-stats";
+import { ensureAdaptiveQualityStarted, getAdaptiveScaleCap, subscribeAdaptiveScaleCap } from "../editor/performance/adaptive-quality";
+import { PreviewStatsOverlay } from "./PreviewStatsOverlay";
+import { ScenePreviewCanvas, type SceneViewerCaptureHandle } from "./ScenePreviewCanvas";
 
 /** Mask drawing/editing tools (mirrors the registry `MaskTool`). */
 type MaskTool = "select" | "rectangle" | "ellipse" | "pen" | "polygon";
@@ -384,14 +413,17 @@ function PreviewGuides({ mode, width, height, rotate = false }: { mode: GridMode
   );
 }
 
-export function VideoPreview({
+function VideoPreviewImpl({
   graph,
   composition,
   currentTime: currentTimeProp,
   isPlaying,
+  clockDriven = false,
   previewQuality,
   viewMode,
   manualScale,
+  viewerPanMode = false,
+  rotationSnapEnabled = false,
   assets,
   selectedLayerId,
   frameRef,
@@ -417,17 +449,29 @@ export function VideoPreview({
   onPreviewMaskScalar,
   maskEffectId,
   onPreviewFrameRendered,
-  resolveProxyPlayback
+  resolveProxyPlayback,
+  proxyCaptureRef
 }: {
   graph: ProjectGraph;
   composition: TimelineComposition;
   currentTime: number;
   isPlaying: boolean;
+  /**
+   * When true, the playhead time ALWAYS comes from the clock store — paused seeks/scrubs included —
+   * so the host page never has to re-render to feed a new `currentTime` prop (EditorPage pushes
+   * every seek into the clock). Leave false for hosts that pass a fixed/local time and never push
+   * the clock (PreviewFixturePage, SmartFollowTextToolPanel).
+   */
+  clockDriven?: boolean | undefined;
   previewQuality: "performance" | "balanced" | "quality";
   /** "fit" auto-scales the comp to the viewer (re-fits on resize); "manual" uses `manualScale` (1:1). */
   viewMode: "fit" | "manual";
   /** Manual zoom as a comp-px→screen-px scale (1 = 100% actual pixels). Used only in "manual" mode. */
   manualScale: number;
+  /** When true, primary touch/drag gestures pan/zoom the viewer canvas instead of editing selected layers. */
+  viewerPanMode?: boolean | undefined;
+  /** When true, rotate gestures snap to common production angles. */
+  rotationSnapEnabled?: boolean | undefined;
   assets: SourceAsset[];
   selectedLayerId?: string | undefined;
   /** Optional ref forwarded to the phone-frame element so callers can sample its content (e.g. color scopes). */
@@ -469,12 +513,15 @@ export function VideoPreview({
   onPreviewFrameRendered?: ((timeSeconds: number, renderScale: number) => void) | undefined;
   /** Resolve a ready flattened-proxy for a timeline time, for smooth native-video playback substitution. */
   resolveProxyPlayback?: ((timeSeconds: number) => ProxyPlaybackHit | undefined) | undefined;
+  /** Viewer-capture handle for background proxy generation (forwarded to ScenePreviewCanvas). */
+  proxyCaptureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
 }) {
   // During playback the playhead time comes from the high-frequency clock store (so the preview
   // animates smoothly without re-rendering the whole editor every tick — see playback-clock.ts);
   // when paused/scrubbing it's the `currentTime` prop. Everything below reads this single `currentTime`.
   bumpRenderCount("VideoPreview");
-  const currentTime = usePlaybackClock(currentTimeProp, isPlaying);
+  useRenderCost("VideoPreview");
+  const currentTime = usePlaybackClock(currentTimeProp, clockDriven || isPlaying);
   const phoneFrameRef = useRef<HTMLDivElement | null>(null);
   // Merge internal ref with optional external frameRef prop (for color scopes).
   const mergedPhoneFrameRef = useCallback(
@@ -492,9 +539,12 @@ export function VideoPreview({
   const stageRef = useRef<HTMLDivElement | null>(null);
   // Preview creator tools (local toggles).
   const [showSafeArea, setShowSafeArea] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const [gridMode, setGridMode] = useState<GridMode>("off");
   const [gridMenuOpen, setGridMenuOpen] = useState(false);
   const gridMenuRef = useRef<HTMLDivElement | null>(null);
+  const gridMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [gridMenuRect, setGridMenuRect] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
   // Collapse the floating tool bar to a single chevron to free up viewer room.
   const [toolsCollapsed, setToolsCollapsed] = useState<boolean>(() => {
     try {
@@ -505,24 +555,54 @@ export function VideoPreview({
   });
   const [spiralRotate, setSpiralRotate] = useState(false);
 
+  const repositionGridMenu = useCallback(() => {
+    const trigger = gridMenuButtonRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const viewportPadding = 8;
+    const width = Math.min(212, Math.max(176, window.innerWidth - viewportPadding * 2));
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
+    const spaceAbove = rect.top - viewportPadding;
+    const openAbove = spaceBelow < 260 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(180, Math.min(360, (openAbove ? spaceAbove : spaceBelow) - 6));
+    const left = Math.max(viewportPadding, Math.min(rect.right - width, window.innerWidth - width - viewportPadding));
+    const top = openAbove ? Math.max(viewportPadding, rect.top - maxHeight - 6) : Math.min(window.innerHeight - viewportPadding, rect.bottom + 6);
+    setGridMenuRect({ top, left, width, maxHeight });
+  }, []);
+
   // Close the composition-guides popover on outside click / Escape.
+  useLayoutEffect(() => {
+    if (gridMenuOpen) repositionGridMenu();
+  }, [gridMenuOpen, repositionGridMenu]);
+
   useEffect(() => {
     if (!gridMenuOpen) return;
     function handlePointerDown(event: PointerEvent) {
-      if (gridMenuRef.current && !gridMenuRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (gridMenuRef.current?.contains(target) || gridMenuButtonRef.current?.contains(target)) {
+        return;
+      }
+      {
         setGridMenuOpen(false);
       }
     }
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") setGridMenuOpen(false);
     }
+    function handleReflow() {
+      repositionGridMenu();
+    }
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKey);
+    window.addEventListener("scroll", handleReflow, true);
+    window.addEventListener("resize", handleReflow);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKey);
+      window.removeEventListener("scroll", handleReflow, true);
+      window.removeEventListener("resize", handleReflow);
     };
-  }, [gridMenuOpen]);
+  }, [gridMenuOpen, repositionGridMenu]);
   const [previewBg, setPreviewBg] = useState<"default" | "dark" | "light" | "checker">("default");
   const [compareBefore, setCompareBefore] = useState(false);
   const isPortrait = composition.height >= composition.width;
@@ -533,6 +613,8 @@ export function VideoPreview({
     else void el.requestFullscreen().catch(() => undefined);
   }
   const panRef = useRef<{ pointerId: number; clientX: number; clientY: number; scrollLeft: number; scrollTop: number } | null>(null);
+  const viewportPointersRef = useRef(new Map<number, { clientX: number; clientY: number }>());
+  const pinchRef = useRef<{ startDistance: number; startScale: number } | null>(null);
   // ONE display scale (comp px → screen px). In "fit" mode it tracks the computed fit; in "manual" it is
   // `manualScale`. Replaces the old nested compositionScale × viewer-zoom (which scaled as zoom² and fed
   // the fit loop). Fit is measured from the stable viewport box, so changing the scale never re-fits.
@@ -559,7 +641,22 @@ export function VideoPreview({
   // Premiere-style playback resolution: downscale the scene render backing WHILE PLAYING (Full/Half/Quarter
   // = 1/0.5/0.25 from the previewQuality profile), Full (1) when paused/scrubbing → crisp stills, fast
   // playback. Only the scene compositor honors it (the DOM path is being retired by Method 3).
-  const playbackRenderScale = isPlaying ? getPreviewQualityProfile(previewQuality).resolutionScale : 1;
+  // The ADAPTIVE cap (adaptive-quality.ts) can lower — never raise — the profile scale while playback is
+  // dropping frames, stepping through the same tested ladder (1/0.5/0.25). Kill switch: ?adaptiveQuality=0.
+  const adaptiveScaleCap = useSyncExternalStore(subscribeAdaptiveScaleCap, getAdaptiveScaleCap, getAdaptiveScaleCap);
+  const playbackRenderScale = isPlaying ? Math.min(getPreviewQualityProfile(previewQuality).resolutionScale, adaptiveScaleCap) : 1;
+  // Frame-stats bookkeeping (measurement only): start the adaptive controller once, mark play/pause
+  // boundaries (resets the sample window), and report the scale actually applied for the Stats HUD.
+  useEffect(() => {
+    ensureAdaptiveQualityStarted();
+  }, []);
+  useEffect(() => {
+    notePlaybackActive(isPlaying);
+    return () => notePlaybackActive(false);
+  }, [isPlaying]);
+  useEffect(() => {
+    noteRenderScale(playbackRenderScale);
+  }, [playbackRenderScale]);
   const hasTracking = shouldRenderRichEffects && graph.effects.some((effect) => effect.type === "SMART_3D_FOLLOW_TEXT");
   const hasBehindText = shouldRenderRichEffects && graph.effects.some((effect) => effect.type === "TEXT_BEHIND_PERSON");
   const resolvedAssets = useMemo(() => {
@@ -569,9 +666,17 @@ export function VideoPreview({
 
     return [sourceAsset, ...assets];
   }, [assets, sourceAsset]);
+  // Nested sequences (NESTING.md Phase C — imported prproj nests today, native compounds later) expand
+  // FIRST: each `nestedCompositionId` clip becomes derived child layers in parent coordinates (namespaced
+  // `__nest_` ids), with the compound clip itself REMOVED from its track — region-mask expansion then runs
+  // on those children like any other layer. Order matters and must match export/manifest exactly (Tasks
+  // 4/5) or preview and export would composite different layer sets. Returns the SAME `composition`
+  // reference when there's nothing to expand, so `expandedTracks`'s memo below is unaffected for the
+  // (overwhelmingly common) non-nested case.
+  const nestExpansion = useMemo(() => expandNestedCompositions(composition, graph.compositions), [composition, graph.compositions]);
   // Region color/glow masks expand into base + duplicate layers at render time (duplicate = the masked effect
   // applied globally, clipped to the region). Render-only; the editor state keeps the original single layer.
-  const expandedTracks = useMemo(() => expandEffectRegionMasks(composition).tracks, [composition]);
+  const expandedTracks = useMemo(() => expandEffectRegionMasks(nestExpansion.composition).tracks, [nestExpansion]);
   // The REAL (un-expanded) layer ids. expandEffectRegionMasks adds render-only `__rfx_` clone layers for
   // region color/blur masks; those clones must be pixels-only — NOT selectable/draggable — or clicking the
   // clip in the preview selects a phantom id (deselecting the real clip) and the drag drives a render-only
@@ -676,6 +781,23 @@ export function VideoPreview({
   );
   const activeAudioLayerEntries = useStableList(activeAudioLayerEntriesRaw, eqAudioEntry);
 
+  // Every shader-transition kind the composition uses (deduped + sorted for referential stability
+  // via the join key). ScenePreviewCanvas pre-warms these programs during idle so the first frame
+  // of a cut never pays a shader-compile stall. Non-shader kinds resolve to nothing downstream.
+  const prewarmTransitionKey = useMemo(
+    () =>
+      [...new Set(
+        composition.tracks.flatMap((track) => track.layers.flatMap((layer) => (layer.transitionIn?.kind ? [layer.transitionIn.kind] : [])))
+      )]
+        .sort()
+        .join(","),
+    [composition]
+  );
+  const prewarmTransitionIds = useMemo(
+    () => (prewarmTransitionKey ? prewarmTransitionKey.split(",") : []),
+    [prewarmTransitionKey]
+  );
+
   // The selected visual layer is the mask-editing target. Clip + region masks apply to media AND text/shape
   // (text/shape clip masks render via getOverlayMaskWrapperStyle in every path since Phase 4.1c). Read it from
   // the ORIGINAL composition, not `renderedLayerEntries`: region effects expand into render-only clones (the
@@ -705,6 +827,28 @@ export function VideoPreview({
   // while PAUSED) re-arms a recomposite — otherwise the new graded frame only lands via the settle
   // window and the paused viewer can show a stale frame after an edit.
   const sceneRedrawRef = useRef<(() => void) | null>(null);
+  // Single-context GPU-first preview (Phase 5, `lumio.singleCtxPreview`): media layers publish a raw
+  // frame-source descriptor here (keyed by layer id) instead of grading into `gradedCanvasesRef`;
+  // ScenePreviewCanvas grades them in-context. The per-layer sinks are cached (stable identity) so
+  // toggling other props never re-registers a descriptor. Flag read once (doesn't change mid-session).
+  const singleCtxPreview = useMemo(() => getSingleCtxPreviewEnabled(), []);
+  const sceneMediaSourcesRef = useRef<Record<string, ScenePreviewMediaSource | null>>({});
+  const sceneMediaSinksRef = useRef(new Map<string, SceneMediaSink>());
+  const getSceneMediaSink = useCallback((layerId: string): SceneMediaSink => {
+    let sink = sceneMediaSinksRef.current.get(layerId);
+    if (!sink) {
+      sink = {
+        register: (source) => {
+          if (source) sceneMediaSourcesRef.current[layerId] = source;
+          else delete sceneMediaSourcesRef.current[layerId];
+        },
+        // A new raw frame landed — re-arm the scene recomposite (the analog of onGradedFrame → sceneRedrawRef).
+        onFrame: () => sceneRedrawRef.current?.(),
+      };
+      sceneMediaSinksRef.current.set(layerId, sink);
+    }
+    return sink;
+  }, []);
   const transitionPairsRaw = useMemo(() => {
     const layers = renderedLayerEntries.map((entry) => entry.layer);
     const byId = new Map(layers.map((layer) => [layer.id, layer]));
@@ -804,6 +948,11 @@ export function VideoPreview({
     () => buildRegionBlurCloneAliases(renderedLayerEntries.map((entry) => entry.layer)),
     [renderedLayerEntries]
   );
+  // Region-effect PASS model (R2): the scene path reads NO clone canvas at all — blur passes gaussian the
+  // layer's running nest image and color passes grade it in-compositor — so in scene mode no `__rfx_` clone
+  // (blur OR color) needs its own <video> decoder / MediaWebGLRenderer context. That extends the blur-alias
+  // decoder saving to region COLOR effects. Query/localStorage flags don't change mid-session → read once.
+  const regionPassesOn = useMemo(() => getRegionPassesEnabled(), []);
   // Scene mode is ENABLED whenever the flag is on, WebGL2 is supported, and the GPU path hasn't errored at
   // runtime. We deliberately do NOT gate on "has a visual layer under the playhead": the ScenePreviewCanvas
   // stays mounted even over an empty gap so it owns the background EVERY frame (clearing to
@@ -834,6 +983,21 @@ export function VideoPreview({
         .map(({ layer }) => layer),
     [renderedLayerEntries, sceneMediaIds, sceneOverlayIds]
   );
+  // Honest degradation signal: a color grade is EXACT when it renders through WebGL (the scene
+  // compositor, the unified media renderer, or the legacy WebGL color engine). If none of those is
+  // active, the DOM/SVG filter path applies only an sRGB approximation of the managed Rec.709-linear
+  // grade (and drops HSL/LUT stages entirely) → badge the preview so the user knows it isn't exact.
+  const colorGradeExact =
+    sceneEnabled || useWebglRenderer(webgl2Supported()) || useWebglColorEngine(webgl2Supported());
+  const hasActiveColorGrade = useMemo(
+    () =>
+      renderedLayerEntries.some(({ layer }) => {
+        const effects = (layer as { effects?: Array<{ type?: unknown; enabled?: unknown }> }).effects;
+        return Array.isArray(effects) && effects.some((e) => e && e.enabled !== false && COLOR_EFFECT_TYPES.has(String(e.type)));
+      }),
+    [renderedLayerEntries]
+  );
+  const colorPreviewDegraded = hasActiveColorGrade && !colorGradeExact;
   // The media layers ScenePreviewCanvas applies opacity LIVE for (so they skip baking opacity into the
   // grade). Transition-active clips are EXCLUDED: their graded canvases feed the two-texture mix, which —
   // like the DOM overlay / Remotion / export — consumes BAKED-opacity canvases, so they keep bakeOpacity.
@@ -954,7 +1118,9 @@ export function VideoPreview({
   }, []);
 
   function startViewportPan(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 1) {
+    const primaryViewerPan = viewerPanMode && event.button === 0;
+    const middleMousePan = !viewerPanMode && event.button === 1;
+    if (!primaryViewerPan && !middleMousePan) {
       return;
     }
 
@@ -964,7 +1130,23 @@ export function VideoPreview({
     }
 
     event.preventDefault();
+    event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    if (viewerPanMode) {
+      viewportPointersRef.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+      const points = [...viewportPointersRef.current.values()];
+      if (points.length >= 2) {
+        const a = points[0]!;
+        const b = points[1]!;
+        panRef.current = null;
+        pinchRef.current = {
+          startDistance: Math.max(1, distance(a.clientX, a.clientY, b.clientX, b.clientY)),
+          startScale: displayScaleRef.current
+        };
+        setIsPanning(true);
+        return;
+      }
+    }
     panRef.current = {
       pointerId: event.pointerId,
       clientX: event.clientX,
@@ -976,6 +1158,32 @@ export function VideoPreview({
   }
 
   function updateViewportPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (viewerPanMode && viewportPointersRef.current.has(event.pointerId)) {
+      viewportPointersRef.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+      const points = [...viewportPointersRef.current.values()];
+      const pinch = pinchRef.current;
+      const viewport = viewportRef.current;
+      if (pinch && points.length >= 2 && viewport) {
+        const a = points[0]!;
+        const b = points[1]!;
+        const nextDistance = Math.max(1, distance(a.clientX, a.clientY, b.clientX, b.clientY));
+        const nextScale = clamp(pinch.startScale * (nextDistance / pinch.startDistance), 0.05, 8);
+        const oldScale = Math.max(0.001, displayScaleRef.current);
+        const rect = viewport.getBoundingClientRect();
+        pendingZoomRef.current = {
+          ratio: nextScale / oldScale,
+          cx: (a.clientX + b.clientX) / 2 - rect.left,
+          cy: (a.clientY + b.clientY) / 2 - rect.top,
+          scrollLeft: viewport.scrollLeft,
+          scrollTop: viewport.scrollTop
+        };
+        event.preventDefault();
+        event.stopPropagation();
+        onZoomToRef.current?.(nextScale);
+        return;
+      }
+    }
+
     const pan = panRef.current;
     const viewport = viewportRef.current;
     if (!pan || !viewport || event.pointerId !== pan.pointerId) {
@@ -983,13 +1191,36 @@ export function VideoPreview({
     }
 
     event.preventDefault();
+    event.stopPropagation();
     viewport.scrollLeft = pan.scrollLeft - (event.clientX - pan.clientX);
     viewport.scrollTop = pan.scrollTop - (event.clientY - pan.clientY);
   }
 
   function finishViewportPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (viewerPanMode) {
+      viewportPointersRef.current.delete(event.pointerId);
+      pinchRef.current = null;
+      const viewport = viewportRef.current;
+      const remaining = [...viewportPointersRef.current.entries()][0];
+      if (remaining && viewport) {
+        const [pointerId, point] = remaining;
+        panRef.current = {
+          pointerId,
+          clientX: point.clientX,
+          clientY: point.clientY,
+          scrollLeft: viewport.scrollLeft,
+          scrollTop: viewport.scrollTop
+        };
+        return;
+      }
+    }
+
     const pan = panRef.current;
     if (!pan || event.pointerId !== pan.pointerId) {
+      if (viewerPanMode) {
+        panRef.current = null;
+        setIsPanning(false);
+      }
       return;
     }
 
@@ -998,6 +1229,12 @@ export function VideoPreview({
   }
 
   function deselectFromEmptyPreviewClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (viewerPanMode) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
       return;
@@ -1018,7 +1255,13 @@ export function VideoPreview({
   }
 
   return (
-    <div className={`preview-stage preview-quality-${previewQuality}`} ref={stageRef}>
+    <div className={`preview-stage preview-quality-${previewQuality} ${viewerPanMode ? "is-viewer-pan-mode" : ""}`} ref={stageRef}>
+      {showStats ? <PreviewStatsOverlay /> : null}
+      {colorPreviewDegraded ? (
+        <div className="preview-color-degraded" role="status">
+          {colorWarningsLabel([{ code: "advanced-stage-fallback", severity: "warning", message: "" }])}
+        </div>
+      ) : null}
       <div className={`preview-tools ${toolsCollapsed ? "is-collapsed" : ""}`} aria-label="Preview tools">
         <button
           type="button"
@@ -1046,22 +1289,25 @@ export function VideoPreview({
         <button type="button" className={showSafeArea ? "is-active" : ""} title="Safe areas (title + caption zone)" onClick={() => setShowSafeArea((v) => !v)}>
           <Ratio size={15} />
         </button>
-        <div className="preview-tool-menu" ref={gridMenuRef}>
+        <div className="preview-tool-menu">
           <button
+            ref={gridMenuButtonRef}
             type="button"
             className={gridMode !== "off" ? "is-active" : ""}
             title="Composition guides"
             aria-haspopup="menu"
             aria-expanded={gridMenuOpen}
             onClick={() => setGridMenuOpen((v) => !v)}
-            onBlur={(event) => {
-              if (!event.currentTarget.parentElement?.contains(event.relatedTarget as Node)) setGridMenuOpen(false);
-            }}
           >
             <Grid3x3 size={15} />
           </button>
-          {gridMenuOpen ? (
-            <div className="preview-tool-popover" role="menu">
+          {gridMenuOpen && gridMenuRect ? createPortal(
+            <div
+              className="preview-tool-popover"
+              role="menu"
+              ref={gridMenuRef}
+              style={{ top: gridMenuRect.top, left: gridMenuRect.left, width: gridMenuRect.width, maxHeight: gridMenuRect.maxHeight }}
+            >
               {GRID_OPTIONS.map((option) => {
                 const active =
                   option.value === "golden-spiral"
@@ -1117,7 +1363,8 @@ export function VideoPreview({
                   </div>
                 </>
               ) : null}
-            </div>
+            </div>,
+            document.body
           ) : null}
         </div>
         <button type="button" className={previewBg !== "default" ? "is-active" : ""} title={`Background: ${previewBg}`} onClick={() => setPreviewBg((v) => (v === "default" ? "dark" : v === "dark" ? "light" : v === "light" ? "checker" : "default"))}>
@@ -1133,6 +1380,9 @@ export function VideoPreview({
         ) : null}
         <button type="button" title="Fullscreen" onClick={toggleFullscreen}>
           <Maximize size={15} />
+        </button>
+        <button type="button" className={showStats ? "is-active" : ""} title="Playback stats (FPS / dropped frames / render scale)" onClick={() => setShowStats((v) => !v)}>
+          <Activity size={15} />
         </button>
         <span className="preview-tools-divider" aria-hidden="true" />
         <button
@@ -1187,7 +1437,7 @@ export function VideoPreview({
         )}
       </div>
       {compareBefore ? <div className="preview-compare-badge">Before</div> : null}
-      {activeAudioLayerEntries.map(({ layer }) => (
+      {activeAudioLayerEntries.map(({ layer, track }) => (
         <AudioPreviewLayer
           assets={resolvedAssets}
           currentTime={currentTime}
@@ -1195,10 +1445,12 @@ export function VideoPreview({
           key={layer.id}
           layer={layer}
           sourceAsset={sourceAsset}
+          trackGain={getTrackAudioGainAt(track, currentTime)}
+          trackPan={getTrackPanAt(track, currentTime)}
         />
       ))}
       <div
-        className={`preview-viewport ${isPanning ? "is-panning" : ""}`}
+        className={`preview-viewport ${isPanning ? "is-panning" : ""} ${viewerPanMode ? "is-viewer-pan-mode" : ""}`}
         ref={viewportRef}
         onPointerCancel={finishViewportPan}
         onPointerDown={startViewportPan}
@@ -1261,15 +1513,31 @@ export function VideoPreview({
                   transitions={transitionPairs}
                   onFrameRendered={(timeSeconds) => onPreviewFrameRendered?.(timeSeconds, playbackRenderScale)}
                   mediaSourceAlias={sceneSharedMediaClones}
+                  nestedGroups={nestExpansion.groups}
+                  captureRef={proxyCaptureRef}
+                  prewarmTransitionIds={prewarmTransitionIds}
+                  singleCtxMedia={sceneEnabled && singleCtxPreview}
+                  mediaSourcesRef={sceneMediaSourcesRef}
                 />
               ) : null}
               {resolveProxyPlayback ? (
-                <ProxyPlaybackLayer currentTime={currentTime} isPlaying={isPlaying} resolveProxyPlayback={resolveProxyPlayback} />
+                <ProxyPlaybackLayer
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  resolveProxyPlayback={resolveProxyPlayback}
+                  // Coverage exiting into a live region: the layers under the overlay decoded
+                  // unobserved and may have silently wedged — re-prime them before/at the reveal so
+                  // the uncovered picture is live, not frozen (2026-07-06 build freeze).
+                  onCoverageEnding={requestLiveReprime}
+                  onCoverageEnd={requestLiveReprime}
+                />
               ) : null}
               {renderedLayerEntries.map(({ layer, pending }) => (
                 // A shared region-blur clone reads the base's graded canvas in scene mode — don't mount its
-                // own <video> decoder + GL context (kills the "too many WebGL contexts" eviction).
-                sceneEnabled && sceneSharedMediaClones.has(layer.id) ? null : (
+                // own <video> decoder + GL context (kills the "too many WebGL contexts" eviction). With the
+                // pass model on, NO clone needs a mount (blur/color passes work off the running nest image);
+                // a runtime scene failure flips sceneEnabled → clones mount again for the DOM path.
+                sceneEnabled && (sceneSharedMediaClones.has(layer.id) || (regionPassesOn && layer.id.includes("__rfx_"))) ? null : (
                 <Fragment key={layer.id}>
                   <PreviewLayer
                     currentTime={currentTime}
@@ -1283,8 +1551,9 @@ export function VideoPreview({
                     onRotateLayer={onRotateLayer}
                     onScaleLayer={onScaleLayer}
                     onSelectLayer={onSelectLayer}
-                    selected={!pending && selectedLayerId === layer.id}
-                    interactive={realLayerIds.has(layer.id)}
+                    rotationSnapEnabled={rotationSnapEnabled}
+                    selected={!viewerPanMode && !pending && selectedLayerId === layer.id}
+                    interactive={!viewerPanMode && realLayerIds.has(layer.id)}
                     assets={resolvedAssets}
                     sourceAsset={sourceAsset}
                     // DOM-transition hide (visibility:hidden) is for the DOM path's incoming clip only;
@@ -1297,8 +1566,11 @@ export function VideoPreview({
                     // clips (drawn by the DOM overlay) still bake — hence `sceneLayerIds`, not sceneMediaIds.
                     bakeOpacity={!sceneLayerIds.has(layer.id)}
                     bypassColor={compareBefore}
+                    // Single-ctx preview: media publishes a raw frame to the sink instead of grading into a
+                    // canvas — so onGradedFrame is suppressed for those layers (the sink drives recomposite).
                     onGradedFrame={
-                      transitionSourceIds.has(layer.id) || (sceneEnabled && sceneMediaIds.has(layer.id))
+                      !(sceneEnabled && singleCtxPreview && sceneMediaIds.has(layer.id)) &&
+                      (transitionSourceIds.has(layer.id) || (sceneEnabled && sceneMediaIds.has(layer.id)))
                         ? (canvas) => {
                             gradedCanvasesRef.current[layer.id] = canvas;
                             // A fresh graded frame landed — re-arm the scene recomposite so a paused edit
@@ -1306,6 +1578,11 @@ export function VideoPreview({
                             // via the settle window. Cheap (sets a timestamp ref); harmless while playing.
                             sceneRedrawRef.current?.();
                           }
+                        : undefined
+                    }
+                    sceneMediaSink={
+                      sceneEnabled && singleCtxPreview && sceneMediaIds.has(layer.id)
+                        ? getSceneMediaSink(layer.id)
                         : undefined
                     }
                   />
@@ -1350,7 +1627,7 @@ export function VideoPreview({
                 </div>
               ) : null}
               </div>
-              {showMasks && maskActiveLayer && isLayerActive(maskActiveLayer, currentTime) ? (
+              {!viewerPanMode && showMasks && maskActiveLayer && isLayerActive(maskActiveLayer, currentTime) ? (
                 <MaskEditorOverlay
                   layer={maskActiveLayer}
                   masks={maskEditMasks}
@@ -1378,6 +1655,33 @@ export function VideoPreview({
   );
 }
 
+type VideoPreviewProps = Parameters<typeof VideoPreviewImpl>[0];
+
+/**
+ * VideoPreview is CLOCK-DRIVEN in the editor (`clockDriven`): its playhead time comes from the
+ * playback-clock store via `usePlaybackClock`, which EditorPage pushes on EVERY seek/scrub tick
+ * synchronously. So the `currentTime` PROP is redundant there — the store already keeps the preview
+ * live. This comparator skips a re-render when only `currentTime` changed (the 120ms cold-commit
+ * mirror), killing the single biggest per-seek render (~220ms: the whole preview + every PreviewLayer
+ * re-rendering for a time value it already has). Every OTHER prop still forces a re-render via
+ * Object.is — real edits, selection, assets, masks all flow through untouched. When NOT clockDriven
+ * (PreviewFixturePage / SmartFollowTextToolPanel pass a fixed prop time) currentTime is compared
+ * normally, so those hosts keep prop-driven behavior. All function props are identity-stabilized at
+ * the EditorPage call site (useStableHandler), so they don't spuriously break this.
+ */
+function areVideoPreviewPropsEqual(prev: VideoPreviewProps, next: VideoPreviewProps): boolean {
+  const prevKeys = Object.keys(prev) as (keyof VideoPreviewProps)[];
+  const nextKeys = Object.keys(next) as (keyof VideoPreviewProps)[];
+  if (prevKeys.length !== nextKeys.length) return false;
+  for (const key of nextKeys) {
+    if (key === "currentTime" && next.clockDriven) continue;
+    if (!Object.is(prev[key], next[key])) return false;
+  }
+  return true;
+}
+
+export const VideoPreview = memo(VideoPreviewImpl, areVideoPreviewPropsEqual);
+
 type PreviewLayerProps = {
   currentTime: number;
   isPlaying: boolean;
@@ -1396,6 +1700,9 @@ type PreviewLayerProps = {
   bypassColor?: boolean;
   /** Report the graded canvas so the transition overlay can sample it as a from/to texture. */
   onGradedFrame?: ((canvas: HTMLCanvasElement) => void) | undefined;
+  /** Single-ctx preview (Phase 5): publish this media layer's raw frame source to the scene compositor
+   *  (no own GL context); set only for scene-composited media when `lumio.singleCtxPreview` is on. */
+  sceneMediaSink?: SceneMediaSink | undefined;
   /** False for scene-composited media → opacity is applied LIVE at composite, not baked (no seek staleness). */
   bakeOpacity?: boolean | undefined;
   // True while this layer is mounted ahead of its start time purely to let its
@@ -1413,6 +1720,14 @@ type PreviewLayerProps = {
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
   onSelectLayer: (layerId: string) => void;
+  rotationSnapEnabled?: boolean | undefined;
+};
+
+type PreviewTransformHud = {
+  mode: "rotate" | "scale" | "size";
+  primary: string;
+  secondary?: string | undefined;
+  snapped?: boolean | undefined;
 };
 
 /**
@@ -1433,6 +1748,12 @@ function arePreviewLayerPropsEqual(prev: PreviewLayerProps, next: PreviewLayerPr
     // identity is not meaningful — compare by presence (guards a future text-layer onGradedFrame too).
     if (key === "onGradedFrame") {
       if (Boolean(prev.onGradedFrame) !== Boolean(next.onGradedFrame)) return false;
+      continue;
+    }
+    // sceneMediaSink is a per-layer cached (stable) object — but guard by presence anyway so toggling
+    // single-ctx mode on/off flips the render path (compare identity is meaningless here).
+    if (key === "sceneMediaSink") {
+      if (Boolean(prev.sceneMediaSink) !== Boolean(next.sceneMediaSink)) return false;
       continue;
     }
     if (key === "currentTime" && canIgnoreTime) continue;
@@ -1457,11 +1778,13 @@ const PreviewLayer = memo(function PreviewLayer({
   onRotateLayer,
   onScaleLayer,
   onSelectLayer,
+  rotationSnapEnabled = false,
   hideForTransition = false,
   hideVisual = false,
   sceneComposited = false,
   bypassColor = false,
   onGradedFrame,
+  sceneMediaSink,
   bakeOpacity = true
 }: PreviewLayerProps) {
   bumpRenderCount("PreviewLayer");
@@ -1527,6 +1850,30 @@ const PreviewLayer = memo(function PreviewLayer({
   const videoPoster = useVideoPoster(isVideo ? mediaUrl : undefined, layer.sourceInSeconds ?? 0);
   // A pending layer is only mounted to pre-seek; it must never actually play.
   const effectivePlaying = isPlaying && !pending;
+  const [transformHud, setTransformHud] = useState<PreviewTransformHud | null>(null);
+  const transformHudTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (transformHudTimerRef.current !== null) {
+        window.clearTimeout(transformHudTimerRef.current);
+      }
+    };
+  }, []);
+
+  function showTransformHud(nextHud: PreviewTransformHud, hold = false) {
+    if (transformHudTimerRef.current !== null) {
+      window.clearTimeout(transformHudTimerRef.current);
+      transformHudTimerRef.current = null;
+    }
+    setTransformHud(nextHud);
+    if (hold) {
+      transformHudTimerRef.current = window.setTimeout(() => {
+        transformHudTimerRef.current = null;
+        setTransformHud(null);
+      }, 900);
+    }
+  }
 
   function startPreviewDrag(event: ReactPointerEvent<HTMLElement>) {
     if (!onMoveLayer || event.button !== 0 || layer.locked) {
@@ -1554,6 +1901,11 @@ const PreviewLayer = memo(function PreviewLayer({
       surfaceHeight: bounds.height,
       moved: false
     };
+    if (layer.type === "shape") {
+      showTransformHud(sizeHud(layer.widthPercent ?? 44, layer.heightPercent ?? 18));
+    } else {
+      showTransformHud(scaleHud(layer.transform.scale));
+    }
   }
 
   function updatePreviewDrag(event: ReactPointerEvent<HTMLElement>) {
@@ -1635,6 +1987,7 @@ const PreviewLayer = memo(function PreviewLayer({
     if (layer.type === "shape" && onResizeShapeLayer) {
       const nextSize = shapeSizeFromResize(event, resize);
       resize.moved = resize.moved || Math.abs(nextSize.widthPercent - resize.startWidthPercent) > 0.2 || Math.abs(nextSize.heightPercent - resize.startHeightPercent) > 0.2;
+      showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent));
       onResizeShapeLayer(resize.layerId, nextSize, false);
       return;
     }
@@ -1642,6 +1995,7 @@ const PreviewLayer = memo(function PreviewLayer({
     if (onScaleLayer) {
       const nextScale = scaleFromResize(event, resize);
       resize.moved = resize.moved || Math.abs(nextScale - resize.startScale) > 0.01;
+      showTransformHud(scaleHud(nextScale));
       onScaleLayer(resize.layerId, nextScale, false);
     }
   }
@@ -1656,12 +2010,16 @@ const PreviewLayer = memo(function PreviewLayer({
     event.stopPropagation();
     resizeRef.current = null;
     if (layer.type === "shape" && onResizeShapeLayer) {
-      onResizeShapeLayer(resize.layerId, shapeSizeFromResize(event, resize), true);
+      const nextSize = shapeSizeFromResize(event, resize);
+      showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent), true);
+      onResizeShapeLayer(resize.layerId, nextSize, true);
       return;
     }
 
     if (onScaleLayer) {
-      onScaleLayer(resize.layerId, scaleFromResize(event, resize), true);
+      const nextScale = scaleFromResize(event, resize);
+      showTransformHud(scaleHud(nextScale), true);
+      onScaleLayer(resize.layerId, nextScale, true);
     }
   }
 
@@ -1691,6 +2049,7 @@ const PreviewLayer = memo(function PreviewLayer({
       startRotation: layer.transform.rotation,
       moved: false
     };
+    showTransformHud(rotationHud(layer.transform.rotation, false));
   }
 
   function updatePreviewRotate(event: ReactPointerEvent<HTMLSpanElement>) {
@@ -1701,9 +2060,10 @@ const PreviewLayer = memo(function PreviewLayer({
 
     event.preventDefault();
     event.stopPropagation();
-    const nextRotation = rotationFromPointer(event, rotate);
-    rotate.moved = rotate.moved || Math.abs(nextRotation - rotate.startRotation) > 1;
-    onRotateLayer(rotate.layerId, nextRotation, false);
+    const nextRotation = rotationFromPointerWithSnap(event, rotate, rotationSnapEnabled);
+    rotate.moved = rotate.moved || Math.abs(nextRotation.value - rotate.startRotation) > 1;
+    showTransformHud(rotationHud(nextRotation.value, nextRotation.snapped));
+    onRotateLayer(rotate.layerId, nextRotation.value, false);
   }
 
   function finishPreviewRotate(event: ReactPointerEvent<HTMLSpanElement>) {
@@ -1714,9 +2074,10 @@ const PreviewLayer = memo(function PreviewLayer({
 
     event.preventDefault();
     event.stopPropagation();
-    const nextRotation = rotationFromPointer(event, rotate);
+    const nextRotation = rotationFromPointerWithSnap(event, rotate, rotationSnapEnabled);
     rotateRef.current = null;
-    onRotateLayer(rotate.layerId, nextRotation, true);
+    showTransformHud(rotationHud(nextRotation.value, nextRotation.snapped), true);
+    onRotateLayer(rotate.layerId, nextRotation.value, true);
   }
 
   function startMotionPathPointDrag(event: ReactPointerEvent<SVGCircleElement>, timeSeconds: number) {
@@ -1826,16 +2187,30 @@ const PreviewLayer = memo(function PreviewLayer({
       }
     : undefined;
 
+  // Speed-ramp "tangent": the matte/WC sync paths map time LINEARLY (sourceIn + local × speed).
+  // For ramped clips pass per-tick effective values so that linear map equals the exact integral
+  // AT the current time — those components' contract stays unchanged, and their 0.08s resync
+  // threshold absorbs the within-tick curvature. Null for constant-speed clips (path untouched).
+  const rampTangent = (() => {
+    if (!hasSpeedRamp(layer)) return null;
+    const local = Math.max(0, currentTime - layer.startSeconds);
+    const speed = getLayerSpeedAt(layer, local);
+    return { speed, sourceIn: layerSourceTimeSeconds(layer, local) - local * speed };
+  })();
+
   function syncVideoTime(video: HTMLVideoElement) {
     // Source-aware: offset into the source media so trimmed/split clips play the correct source frame.
     // The clamp is the asset's available media (not just the clip's visible span) so that during a
     // transition post-roll the outgoing clip can play a little past its out-point into its tail handle
     // (held at the last real frame when there's no spare media) — exactly like a pro editor's handles.
+    // Speed-aware (rate stretch + ramps): timeline→source through the shared mapper — for ramped
+    // clips the exact closed-form integral, for constant speed the same product as before.
+    const speed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
     const sourceIn = layer.sourceInSeconds ?? 0;
-    const maxLocal = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : layer.durationSeconds;
-    const localTime = Math.max(0, Math.min(maxLocal, currentTime - layer.startSeconds));
-    const nextTime = sourceIn + localTime;
-    if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > 0.08) {
+    const rawSource = layerSourceTimeSeconds(layer, Math.max(0, currentTime - layer.startSeconds)) - sourceIn;
+    const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
+    const nextTime = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
+    if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > 0.08 * Math.max(1, speed)) {
       video.currentTime = nextTime;
     }
   }
@@ -1846,6 +2221,12 @@ const PreviewLayer = memo(function PreviewLayer({
       return;
     }
 
+    // Rate stretch: the element free-runs at the clip speed while playing. preservesPitch=false
+    // (varispeed) matches the export mixer's AudioBufferSourceNode behavior.
+    video.playbackRate = getLayerSpeed(layer);
+    if ("preservesPitch" in video) {
+      (video as HTMLVideoElement & { preservesPitch: boolean }).preservesPitch = false;
+    }
     if (effectivePlaying) {
       syncVideoTime(video);
       void video.play().catch(() => undefined);
@@ -1854,7 +2235,20 @@ const PreviewLayer = memo(function PreviewLayer({
 
     video.pause();
     syncVideoTime(video);
-  }, [effectivePlaying, isVideo, layer.id, mediaUrl]);
+  }, [effectivePlaying, isVideo, layer.id, layer.speed, mediaUrl]);
+
+  // Speed ramp: the element can't free-run a VARYING rate — follow the ramp per tick (instantaneous
+  // rate + the integral resync in syncVideoTime keeps it frame-honest within the 0.08s threshold).
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isVideo || !hasSpeedRamp(layer)) {
+      return;
+    }
+    video.playbackRate = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
+    if (effectivePlaying) {
+      syncVideoTime(video);
+    }
+  }, [currentTime, effectivePlaying, isVideo, layer, mediaUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1864,6 +2258,53 @@ const PreviewLayer = memo(function PreviewLayer({
 
     syncVideoTime(video);
   }, [currentTime, effectivePlaying, isVideo, layer.startSeconds, mediaUrl]);
+
+  // MID-PLAY JUMP resync. While playing, nothing seeked the element on a ruler jump — the 500ms
+  // drift corrector below eventually snapped it, so after a backward jump the picture kept playing
+  // from the PRE-jump position for up to half a second ("catching up", 2026-07-04 soak). Seek
+  // immediately on JUMP-scale drift only (>1s): ordinary decode drift stays with the gentle
+  // 0.15s/500ms corrector, so this can never seek-storm during normal playback.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isVideo || !effectivePlaying) {
+      return;
+    }
+    const speed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
+    const sourceIn = layer.sourceInSeconds ?? 0;
+    const rawSource = layerSourceTimeSeconds(layer, Math.max(0, currentTime - layer.startSeconds)) - sourceIn;
+    const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
+    const expected = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
+    if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 1 * Math.max(1, speed)) {
+      video.currentTime = expected;
+    }
+  }, [currentTime, effectivePlaying, isVideo, layer, mediaUrl, asset?.durationSeconds]);
+
+  // Playback drift correction for the VIDEO element — the exact mirror of the audio corrector
+  // below (see "NON-master playback drift correction"): while playing, a play()-start latency or a
+  // decode hiccup left the element permanently offset from the clock because NOTHING re-synced it
+  // until pause (the paused-only sync above) — so pausing visibly "jumped" the frame to the true
+  // time (2026-07-03 report: boat positions differ between live playback and the paused frame at
+  // the same ruler position). Coarse threshold + infrequent tick = no seek storms; ramped clips
+  // are excluded (their per-tick effect above already resyncs through the exact integral).
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isVideo || !effectivePlaying || hasSpeedRamp(layer)) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      if (video.paused || video.seeking || video.readyState < 2) return;
+      const local = Math.max(0, Math.min(layer.durationSeconds, getPlaybackClock() - layer.startSeconds));
+      const speed = getLayerSpeedAt(layer, local);
+      const sourceIn = layer.sourceInSeconds ?? 0;
+      const rawSource = layerSourceTimeSeconds(layer, local) - sourceIn;
+      const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
+      const expected = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
+      if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 0.15 * Math.max(1, speed)) {
+        video.currentTime = expected;
+      }
+    }, 500);
+    return () => window.clearInterval(interval);
+  }, [effectivePlaying, isVideo, layer, mediaUrl, asset?.durationSeconds]);
 
   if (layer.type === "text") {
     const style = getCompositionTextStyle(layer, { currentTimeSeconds: currentTime });
@@ -1919,6 +2360,7 @@ const PreviewLayer = memo(function PreviewLayer({
             layer={layer}
             style={style as CSSProperties}
             currentTime={currentTime}
+            transformHud={transformHud}
             text={layer.text}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
@@ -1977,6 +2419,7 @@ const PreviewLayer = memo(function PreviewLayer({
             layer={layer}
             style={style as CSSProperties}
             currentTime={currentTime}
+            transformHud={transformHud}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -2041,31 +2484,45 @@ const PreviewLayer = memo(function PreviewLayer({
             className={`preview-media ${isSelectedVisible ? "is-selected" : ""}`}
             key={mediaUrl}
             src={mediaUrl}
+            // Full-res settle frame on pause: the ORIGINAL bytes, same preference order as the
+            // freeze-frame invariant (fileUrl ?? previewUrl — never proxyUrl). When proxy playback is
+            // off (fixed full quality) mediaUrl already IS this URL and the layer no-ops it.
+            fullResSrc={asset?.fileUrl ?? asset?.previewUrl}
+            // ORIGINAL bytes (no ingest proxy yet, or fixed full quality) must use the native
+            // element decoder: the WC preview pool is for keyframe-dense proxies — a sparse-GOP
+            // camera original freezes it (2026-07-06). Flips to WC automatically when the proxy
+            // lands (mediaUrl becomes proxyUrl → new key/src remounts the layer).
+            preferNativeDecode={mediaUrl !== (asset as (typeof asset & { proxyUrl?: string }) | undefined)?.proxyUrl}
             matte={layer.matte}
             pipeline={videoColorPipeline}
             mediaEffects={videoMediaEffects}
             currentTime={currentTime}
             isPlaying={effectivePlaying}
             layerStartSeconds={layer.startSeconds}
-            sourceInSeconds={layer.sourceInSeconds}
+            sourceInSeconds={rampTangent ? rampTangent.sourceIn : layer.sourceInSeconds}
+            speedFactor={rampTangent ? rampTangent.speed : getLayerSpeed(layer)}
             onLoadedMetadata={(event) => syncVideoTime(event.currentTarget)}
             dragHandlers={effectiveDragHandlers}
             onWebglFailed={() => setWebglMediaFailed(true)}
             poster={videoPoster ?? undefined}
             hidden={pending || (hideForTransition && !sceneComposited)}
             interactiveHidden={sceneComposited && !pending}
-            transition={onGradedFrame ? null : videoTransition}
+            // Scene-composited media carries no per-clip reveal (junctions fold in-compositor) — null it for
+            // both the own-canvas onGradedFrame path AND the single-ctx sink path.
+            transition={onGradedFrame || sceneMediaSink ? null : videoTransition}
             onGradedFrame={onGradedFrame}
+            sceneMediaSink={sceneMediaSink}
             bakeOpacity={bakeOpacity}
             ref={videoRef}
             style={webglLayerStyle}
           />
-          <EffectMaskOverlays layer={layer} currentTime={currentTime} style={webglLayerStyle} />
+          {pending || sceneComposited ? null : <EffectMaskOverlays layer={layer} currentTime={currentTime} style={webglLayerStyle} />}
           {isSelectedVisible ? (
             <PreviewSelectionOverlay
               layer={layer}
               style={webglLayerStyle}
               currentTime={currentTime}
+              transformHud={transformHud}
               onResizePointerCancel={finishPreviewResize}
               onResizePointerDown={startPreviewResize}
               onResizePointerMove={updatePreviewResize}
@@ -2109,7 +2566,8 @@ const PreviewLayer = memo(function PreviewLayer({
             isPlaying={effectivePlaying}
             key={mediaUrl}
             layerStartSeconds={layer.startSeconds}
-            sourceInSeconds={layer.sourceInSeconds}
+            sourceInSeconds={rampTangent ? rampTangent.sourceIn : layer.sourceInSeconds}
+            speedFactor={rampTangent ? rampTangent.speed : getLayerSpeed(layer)}
             matte={layer.matte}
             mediaUrl={mediaUrl}
             onLoadedMetadata={(event) => syncVideoTime(event.currentTarget)}
@@ -2144,12 +2602,13 @@ const PreviewLayer = memo(function PreviewLayer({
             />
           </ColorEngineBoundary>
         ) : null}
-        <EffectMaskOverlays layer={layer} currentTime={currentTime} style={style} />
+        {pending || sceneComposited ? null : <EffectMaskOverlays layer={layer} currentTime={currentTime} style={style} />}
         {isSelectedVisible ? (
           <PreviewSelectionOverlay
             layer={layer}
             style={style}
             currentTime={currentTime}
+            transformHud={transformHud}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -2195,6 +2654,7 @@ const PreviewLayer = memo(function PreviewLayer({
             layer={layer}
             style={missingStyle}
             currentTime={currentTime}
+            transformHud={transformHud}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -2243,10 +2703,14 @@ const PreviewLayer = memo(function PreviewLayer({
           mediaType="image"
           className={`preview-media ${selected ? "is-selected" : ""}`}
           src={mediaUrl}
+          // Still-proxy size tier (P2): static transform/content zoom only — animated scale
+          // spikes are rare on stills and degrade to softness, never breakage.
+          stillZoomFactor={Math.max(layer.transform?.scale ?? 1, layer.content?.scale ?? 1)}
           pipeline={imageColorPipeline}
           mediaEffects={imageMediaEffects}
-          transition={onGradedFrame ? null : imageTransition}
+          transition={onGradedFrame || sceneMediaSink ? null : imageTransition}
           onGradedFrame={onGradedFrame}
+          sceneMediaSink={sceneMediaSink}
           bakeOpacity={bakeOpacity}
           hidden={hideForTransition && !sceneComposited}
           interactiveHidden={sceneComposited && !pending}
@@ -2254,12 +2718,13 @@ const PreviewLayer = memo(function PreviewLayer({
           onWebglFailed={() => setWebglMediaFailed(true)}
           style={webglImageStyle}
         />
-        <EffectMaskOverlays layer={layer} currentTime={currentTime} style={webglImageStyle} />
+        {pending || sceneComposited ? null : <EffectMaskOverlays layer={layer} currentTime={currentTime} style={webglImageStyle} />}
         {selected ? (
           <PreviewSelectionOverlay
             layer={layer}
             style={webglImageStyle}
             currentTime={currentTime}
+            transformHud={transformHud}
             onResizePointerCancel={finishPreviewResize}
             onResizePointerDown={startPreviewResize}
             onResizePointerMove={updatePreviewResize}
@@ -2306,12 +2771,13 @@ const PreviewLayer = memo(function PreviewLayer({
           <WebglColorView src={mediaUrl ?? ""} pipeline={imageColorPipeline} style={imageStyle} />
         </ColorEngineBoundary>
       ) : null}
-      <EffectMaskOverlays layer={layer} currentTime={currentTime} style={imageStyle} />
+      {pending || sceneComposited ? null : <EffectMaskOverlays layer={layer} currentTime={currentTime} style={imageStyle} />}
       {selected ? (
         <PreviewSelectionOverlay
           layer={layer}
           style={imageStyle}
           currentTime={currentTime}
+          transformHud={transformHud}
           onResizePointerCancel={finishPreviewResize}
           onResizePointerDown={startPreviewResize}
           onResizePointerMove={updatePreviewResize}
@@ -2340,23 +2806,6 @@ const PreviewLayer = memo(function PreviewLayer({
   );
 }, arePreviewLayerPropsEqual);
 
-/**
- * One shared AudioContext for all preview audio layers. Created lazily (and resumed on the play
- * gesture) so it satisfies the autoplay policy. Returns undefined where Web Audio is unavailable.
- */
-let sharedPreviewAudioContext: AudioContext | undefined;
-function getPreviewAudioContext(): AudioContext | undefined {
-  if (typeof window === "undefined") {
-    return undefined;
-  }
-  const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-  if (!Ctor) {
-    return undefined;
-  }
-  sharedPreviewAudioContext ??= new Ctor();
-  return sharedPreviewAudioContext;
-}
-
 // Memoized (default shallow compare) so a VideoPreview re-render that DIDN'T change this layer's props
 // skips the audio subtree. `currentTime` changes every tick and drives per-tick volume/fade automation
 // (the gain effect below), so the shallow compare intentionally still re-renders during playback —
@@ -2366,25 +2815,47 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
   currentTime,
   isPlaying,
   layer,
-  sourceAsset
+  sourceAsset,
+  trackGain = 1,
+  trackPan = 0
 }: {
   assets: SourceAsset[];
   currentTime: number;
   isPlaying: boolean;
   layer: TimelineLayer;
   sourceAsset?: SourceAsset | null | undefined;
+  /** Track mixer fader gain (0..2, 1 = unity) — multiplies the clip's own volume. */
+  trackGain?: number | undefined;
+  /** Track stereo pan (−1..1, 0 = center). */
+  trackPan?: number | undefined;
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   // Route the element through a Web Audio GainNode so the gain matches the export exactly — the raw
   // element.volume is clamped to 0..1, but the mixer/Remotion (and this graph) can boost past 100%.
   const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const panNodeRef = useRef<StereoPannerNode | null>(null);
+  const fxNodeRef = useRef<AudioWorkletNode | null>(null);
   const asset = resolveLayerAsset(layer, assets, sourceAsset);
   const mediaUrl = resolvePlaybackUrl(asset);
 
+  // Clip audio FX chain (EQ/compressor/gate/limiter) — same resolver the exports use. Keyed by
+  // value so the wiring effect below only reacts to REAL param/order changes, not layer identity.
+  const fxChain = resolveAudioFxChain(layer);
+  const fxChainKey = fxChain.length ? JSON.stringify(fxChain) : "";
+
+  // Source-aware + speed-aware: local timeline time maps to source time via
+  // sourceIn + local * speed (the same contract as video / the export mixer).
+  // (sourceInSeconds was previously ignored here — trimmed audio clips played
+  // from 0 in preview but from the trim point in export. Fixed 2026-07-03.)
+  const speed = getLayerSpeed(layer);
+  const sourceIn = layer.sourceInSeconds ?? 0;
+
   function syncAudioTime(audio: HTMLAudioElement) {
-    const nextTime = Math.max(0, Math.min(layer.durationSeconds, currentTime - layer.startSeconds));
-    if (Number.isFinite(nextTime) && Math.abs(audio.currentTime - nextTime) > 0.08) {
+    const local = Math.max(0, Math.min(layer.durationSeconds, currentTime - layer.startSeconds));
+    // Ramp-aware: the shared mapper is the exact integral for ramped clips, sourceIn + local×speed otherwise.
+    const nextTime = layerSourceTimeSeconds(layer, local);
+    if (Number.isFinite(nextTime) && Math.abs(audio.currentTime - nextTime) > 0.08 * Math.max(1, getLayerSpeedAt(layer, local))) {
       audio.currentTime = nextTime;
     }
   }
@@ -2401,13 +2872,66 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     try {
       const source = ctx.createMediaElementSource(audio);
       const gain = ctx.createGain();
-      source.connect(gain).connect(ctx.destination);
+      // Through the unity master bus (preview-audio-bus.ts) instead of destination directly —
+      // audibly identical, and gives the timeline audio meters one mix point to observe.
+      // A StereoPannerNode between gain and the bus carries the TRACK pan (unity/center by
+      // default — byte-identical to the old graph when the mixer is untouched).
+      const pan = typeof ctx.createStereoPanner === "function" ? ctx.createStereoPanner() : null;
+      if (pan) {
+        source.connect(gain).connect(pan).connect(getPreviewMasterBusInput(ctx));
+      } else {
+        source.connect(gain).connect(getPreviewMasterBusInput(ctx));
+      }
       sourceNodeRef.current = source;
       gainNodeRef.current = gain;
+      panNodeRef.current = pan;
     } catch {
       // Already connected or unsupported — element.volume path covers it.
     }
   }, [mediaUrl]);
+
+  // Track mixer pan follows the composition live.
+  useEffect(() => {
+    if (panNodeRef.current) {
+      panNodeRef.current.pan.value = Math.min(1, Math.max(-1, trackPan));
+    }
+  }, [trackPan]);
+
+  // Clip audio FX: lazily insert an AudioWorkletNode running the SHARED export DSP between the
+  // media source and the gain node (pre-fader insert — the same chain position both exports use).
+  // Clips without FX never create the node (zero cost); once created it stays and follows edits
+  // via postMessage (an empty chain is a passthrough). Worklet unavailable → preview skips FX,
+  // exports still apply them (documented fallback, same shape as the element.volume fallback).
+  useEffect(() => {
+    const ctx = getPreviewAudioContext();
+    if (!ctx) return;
+    if (fxNodeRef.current) {
+      updateAudioFxNode(fxNodeRef.current, fxChain);
+      return;
+    }
+    if (!fxChainKey) return;
+    let cancelled = false;
+    void ensureAudioFxWorklet(ctx).then((ok) => {
+      // The graph may not be wired yet (the media-source effect runs async of this one) or the
+      // layer may have unmounted/changed — bail; the next chain change retries.
+      const source = sourceNodeRef.current;
+      const gain = gainNodeRef.current;
+      if (!ok || cancelled || !source || !gain || fxNodeRef.current) return;
+      try {
+        const node = createAudioFxNode(ctx, resolveAudioFxChain(layer));
+        source.disconnect();
+        source.connect(node);
+        node.connect(gain);
+        fxNodeRef.current = node;
+      } catch {
+        // Insert failed mid-flight — leave the direct source → gain wiring untouched.
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fxChainKey IS the chain's value identity
+  }, [fxChainKey, mediaUrl]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -2415,6 +2939,13 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
       return;
     }
 
+    // Rate stretch: element playbackRate follows the clip speed. preservesPitch stays
+    // false for parity with the export mixer (AudioBufferSourceNode.playbackRate is
+    // varispeed — pitch shifts with speed), like Premiere with "Maintain Audio Pitch" off.
+    audio.playbackRate = speed;
+    if ("preservesPitch" in audio) {
+      (audio as HTMLAudioElement & { preservesPitch: boolean }).preservesPitch = false;
+    }
     if (isPlaying) {
       void getPreviewAudioContext()?.resume();
       syncAudioTime(audio);
@@ -2424,7 +2955,7 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
 
     audio.pause();
     syncAudioTime(audio);
-  }, [isPlaying, layer.id, mediaUrl]);
+  }, [isPlaying, layer.id, mediaUrl, speed]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -2434,10 +2965,90 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     syncAudioTime(audio);
   }, [currentTime, isPlaying, layer.startSeconds, mediaUrl]);
 
+  // Speed ramp: follow the varying rate per tick (elements can't free-run a curve); syncAudioTime's
+  // integral resync bounds the drift.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !mediaUrl || !hasSpeedRamp(layer)) {
+      return;
+    }
+    audio.playbackRate = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
+    if (isPlaying) {
+      syncAudioTime(audio);
+    }
+  }, [currentTime, isPlaying, layer, mediaUrl]);
+
+  // ── Audio-master clock (audio-clock.ts) ─────────────────────────────────
+  // While playing, this element is a candidate MASTER for the playback clock: its currentTime maps back
+  // to timeline time (same mapping syncAudioTime uses, inverted). read() returns null whenever the
+  // element isn't authoritative — paused/seeking/ended/underbuffered — so a stalling clip can never
+  // drag the clock; the registry then falls back to another audible clip or pure wall time.
+  useEffect(() => {
+    const audio = audioRef.current;
+    // Ramped clips never take the master-clock role: read() must invert time→source, and the
+    // ramp's inverse integral isn't worth the cost — another audible clip or wall time drives.
+    if (!audio || !mediaUrl || !isPlaying || !getAudioClockEnabled() || hasSpeedRamp(layer)) {
+      return;
+    }
+    // ADVANCEMENT gate state: a master must have actually MOVED since this registration. During
+    // play() startup latency the element reports paused=false while its currentTime sits frozen at
+    // the seek position — that's WITHIN the distance gate right after play starts, so it got
+    // elected reporting its (stale) start position and the hard resync yanked the playhead back by
+    // the startup latency ("playhead runs ~0.5–1s then jumps back to the start", user report
+    // 2026-07-03, second occurrence — the distance gate alone only stopped LATE elections).
+    // `lastMovedAtMs === 0` = never advanced since registration → never authoritative. Once moving,
+    // brief flat reads are tolerated (audio currentTime advances in coarse browser-dependent steps).
+    let lastSeenCt = audio.currentTime;
+    let lastMovedAtMs = 0;
+    return registerAudioClockSource({
+      layerId: layer.id,
+      startSeconds: layer.startSeconds,
+      read: () => {
+        if (audio.paused || audio.seeking || audio.ended || audio.readyState < 2) return null;
+        const now = performance.now();
+        if (audio.currentTime !== lastSeenCt) {
+          lastSeenCt = audio.currentTime;
+          lastMovedAtMs = now;
+        }
+        if (lastMovedAtMs === 0 || now - lastMovedAtMs > 350) return null; // cold-starting or stalled
+        // Inverse of syncAudioTime: source time back to timeline time (speed/sourceIn-aware).
+        const mapped = layer.startSeconds + (audio.currentTime - sourceIn) / speed;
+        // Cold-start/stall authority gate (AUDIO_MASTER_GATE_S): a just-started element lags the
+        // clock by its play() latency — reporting that as master time yanked playback backward.
+        // Not authoritative yet → the non-master corrector below seeks it onto the clock instead.
+        // Compared against the LIVE playhead (the committed store clock trails it by up to one
+        // commit interval right after play starts, which weakened this gate).
+        if (Math.abs(mapped - getLivePlaybackTime()) > AUDIO_MASTER_GATE_S) return null;
+        return mapped;
+      },
+    });
+  }, [isPlaying, layer.id, layer.startSeconds, mediaUrl, sourceIn, speed]);
+
+  // NON-master playback drift correction. Before the audio clock, audio elements free-ran with NO
+  // correction during playback (the paused-only sync above), so a start-latency offset persisted for
+  // the whole clip. The master is never corrected — it DEFINES time; every other audible element is
+  // nudged back onto the clock when it strays past 0.15s (coarse + infrequent, so no seek storms).
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !mediaUrl || !isPlaying || !getAudioClockEnabled()) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      if (isAudioClockMaster(layer.id) || audio.paused || audio.seeking || audio.readyState < 2) return;
+      const local = Math.max(0, Math.min(layer.durationSeconds, getPlaybackClock() - layer.startSeconds));
+      const expected = layerSourceTimeSeconds(layer, local);
+      if (Number.isFinite(expected) && Math.abs(audio.currentTime - expected) > 0.15 * Math.max(1, getLayerSpeedAt(layer, local))) {
+        audio.currentTime = expected;
+      }
+    }, 500);
+    return () => window.clearInterval(interval);
+  }, [isPlaying, layer.durationSeconds, layer.id, layer.startSeconds, mediaUrl, sourceIn, speed]);
+
   // Volume / fade tracked against currentTime so it updates during scrub + playback. The GainNode
   // takes the full 0..2 range (exact parity); the element.volume fallback clamps to 0..1.
   useEffect(() => {
-    const gain = Math.max(0, getCompositionVolume(layer, { currentTimeSeconds: currentTime }));
+    // Clip volume (keyframable) × track mixer fader — same product the export mixer applies.
+    const gain = Math.max(0, getCompositionVolume(layer, { currentTimeSeconds: currentTime })) * Math.max(0, trackGain);
     if (gainNodeRef.current) {
       gainNodeRef.current.gain.value = gain;
       return;
@@ -2446,7 +3057,7 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     if (audio) {
       audio.volume = Math.min(1, gain);
     }
-  }, [currentTime, layer]);
+  }, [currentTime, layer, trackGain]);
 
   if (!mediaUrl) {
     return null;
@@ -2455,7 +3066,8 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
   return <audio aria-hidden="true" crossOrigin="anonymous" preload="auto" ref={audioRef} src={mediaUrl} />;
 });
 
-function applyActiveAdjustmentEffects(
+/** Exported for the viewer-capture proxy generator (same adjustment-merge as the live viewer). */
+export function applyActiveAdjustmentEffects(
   layer: TimelineLayer,
   trackIndex: number,
   activeLayerEntries: Array<{ layer: TimelineLayer; trackIndex: number; layerIndex: number }>
@@ -2626,6 +3238,7 @@ function PreviewSelectionOverlay({
   style,
   text,
   currentTime,
+  transformHud,
   onResizePointerCancel,
   onResizePointerDown,
   onResizePointerMove,
@@ -2639,6 +3252,7 @@ function PreviewSelectionOverlay({
   style: CSSProperties;
   text?: string | undefined;
   currentTime: number;
+  transformHud?: PreviewTransformHud | null | undefined;
   onResizePointerCancel: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onResizePointerDown: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onResizePointerMove: (event: ReactPointerEvent<HTMLSpanElement>) => void;
@@ -2662,6 +3276,12 @@ function PreviewSelectionOverlay({
   const node = (
     <div className={`preview-selection-box preview-selection-box-${layer.type}`} style={overlayStyle}>
       {text ? <span className="preview-selection-measure">{text}</span> : null}
+      {transformHud ? (
+        <span className={`preview-transform-hud preview-transform-hud-${transformHud.mode} ${transformHud.snapped ? "is-snapped" : ""}`}>
+          <strong>{transformHud.primary}</strong>
+          {transformHud.secondary ? <small>{transformHud.secondary}</small> : null}
+        </span>
+      ) : null}
       <span className="preview-resize-handles" aria-hidden="true">
       <span
         className="preview-rotate-handle"
@@ -2670,10 +3290,13 @@ function PreviewSelectionOverlay({
         onPointerMove={onRotatePointerMove}
         onPointerUp={onRotatePointerUp}
       />
-      {(["nw", "ne", "sw", "se"] as const).map((corner) => (
+      {/* Corners + edge midpoints. The resize model is a uniform scale-from-center, so every handle
+          drives the same scale gesture — the 8-handle set is the modern pro affordance (all identical
+          style via the shared handle tokens). */}
+      {(["nw", "ne", "sw", "se", "n", "e", "s", "w"] as const).map((handle) => (
         <span
-          className={`preview-resize-handle preview-resize-handle-${corner}`}
-          key={corner}
+          className={`preview-resize-handle preview-resize-handle-${handle}`}
+          key={handle}
           onPointerCancel={onResizePointerCancel}
           onPointerDown={onResizePointerDown}
           onPointerMove={onResizePointerMove}
@@ -2711,6 +3334,13 @@ function ColorFilterDefs({ layers, currentTime }: { layers: TimelineLayer[]; cur
  * clipped to its mask, blurring only that region of the clip behind it (single-copy, no media duplication).
  * The overlay mirrors the media element's box (left/top/width/height/transform) so it sits exactly on top.
  * Mirrors `MaskedEffectOverlays` in the Remotion renderer for export parity.
+ *
+ * MUST NOT render for `pending` (preloaded) or scene-composited layers. Active layers are EXPANDED
+ * (region effects live on `__rfx_` clones / scene passes, so this returns [] for them), but pending
+ * preload entries come from the RAW composition with `effect.masks` intact — and a backdrop-filter
+ * blurs whatever is BENEATH the overlay in the DOM, i.e. the preview showing the PREVIOUS clip. That
+ * was the "region effect applies ~1.2s (the preload lookahead) before its clip" leak. Callers gate on
+ * `pending || sceneComposited`.
  */
 function EffectMaskOverlays({ layer, currentTime, style }: { layer: TimelineLayer; currentTime: number; style: CSSProperties }) {
   const overlays = getMaskedEffectOverlays(layer, { currentTimeSeconds: currentTime });
@@ -3618,6 +4248,41 @@ function scaleFromResize(
   return Math.max(0.01, resize.startScale * (nextDistance / resize.startDistance));
 }
 
+function formatPercent(value: number) {
+  return `${Math.round(value)}%`;
+}
+
+function scaleHud(scale: number): PreviewTransformHud {
+  return {
+    mode: "scale",
+    primary: `Scale ${formatPercent(scale * 100)}`
+  };
+}
+
+function sizeHud(widthPercent: number, heightPercent: number): PreviewTransformHud {
+  return {
+    mode: "size",
+    primary: `Size ${formatPercent(widthPercent)}`,
+    secondary: `H ${formatPercent(heightPercent)}`
+  };
+}
+
+function normalizeDegrees(value: number) {
+  let next = value % 360;
+  if (next <= -180) next += 360;
+  if (next > 180) next -= 360;
+  return next;
+}
+
+function rotationHud(rotation: number, snapped: boolean): PreviewTransformHud {
+  return {
+    mode: "rotate",
+    primary: `Rotate ${Math.round(normalizeDegrees(rotation))}°`,
+    secondary: snapped ? "Snap" : undefined,
+    snapped
+  };
+}
+
 function shapeSizeFromResize(
   event: ReactPointerEvent<HTMLElement>,
   resize: {
@@ -3651,7 +4316,39 @@ function rotationFromPointer(
   return rotate.startRotation + angleDegrees(event.clientX, event.clientY, rotate.centerClientX, rotate.centerClientY) - rotate.startAngle;
 }
 
-function isLayerActive(layer: TimelineLayer, currentTime: number) {
+const ROTATION_SNAP_ANGLES = [-180, -135, -120, -90, -60, -45, 0, 45, 60, 90, 120, 135, 180] as const;
+const ROTATION_SNAP_TOLERANCE_DEGREES = 4;
+
+function snapRotation(rotation: number) {
+  const normalized = normalizeDegrees(rotation);
+  let best = normalized;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const angle of ROTATION_SNAP_ANGLES) {
+    const delta = Math.abs(normalizeDegrees(normalized - angle));
+    if (delta < bestDelta) {
+      best = angle;
+      bestDelta = delta;
+    }
+  }
+  return bestDelta <= ROTATION_SNAP_TOLERANCE_DEGREES ? { value: best, snapped: true } : { value: rotation, snapped: false };
+}
+
+function rotationFromPointerWithSnap(
+  event: ReactPointerEvent<HTMLElement>,
+  rotate: {
+    centerClientX: number;
+    centerClientY: number;
+    startAngle: number;
+    startRotation: number;
+  },
+  snapEnabled: boolean
+) {
+  const raw = rotationFromPointer(event, rotate);
+  return snapEnabled ? snapRotation(raw) : { value: raw, snapped: false };
+}
+
+/** Exported for the viewer-capture proxy generator, which must mirror the viewer's activity rules exactly. */
+export function isLayerActive(layer: TimelineLayer, currentTime: number) {
   return currentTime >= layer.startSeconds && currentTime <= layer.startSeconds + layer.durationSeconds;
 }
 
@@ -3662,7 +4359,7 @@ function isLayerActive(layer: TimelineLayer, currentTime: number) {
  * the "repeated frames" a pro editor shows when a clip has no spare handle) under the incoming reveal,
  * without its timeline length ever changing.
  */
-function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack, currentTime: number): boolean {
+export function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack, currentTime: number): boolean {
   if (layer.type === "audio") {
     return false;
   }
@@ -3717,12 +4414,25 @@ function resolveLayerAsset(layer: TimelineLayer | undefined, assets: SourceAsset
   return undefined;
 }
 
+// FULL-QUALITY PLAYBACK (pro toggle, 2026-07-05): the transport's "1" resolution preset also
+// bypasses the ingest proxies — playing AND paused frames come from the ORIGINAL media. ½/¼/Auto
+// keep the proxy substitution (the low-end smoothness path). Module-level flag set by EditorPage
+// from the quality control; the accompanying setState re-renders the tree so every layer
+// re-resolves its src when it flips.
+let ingestProxyPlaybackEnabled = true;
+export function setIngestProxyPlaybackEnabled(enabled: boolean): void {
+  ingestProxyPlaybackEnabled = enabled;
+}
+
 function resolvePlaybackUrl(asset: SourceAsset | undefined) {
   if (!asset) {
     return undefined;
   }
 
   const previewAsset = asset as SourceAsset & { proxyUrl?: string | undefined; previewUrl?: string | undefined };
+  if (!ingestProxyPlaybackEnabled) {
+    return asset.fileUrl ?? previewAsset.previewUrl ?? previewAsset.proxyUrl;
+  }
   return previewAsset.proxyUrl ?? previewAsset.previewUrl ?? asset.fileUrl;
 }
 
@@ -3747,6 +4457,7 @@ function useWarpedTextSvg(layer: TimelineLayer, currentTime: number): string | n
         runs.map((run) => [run.text, run.color ?? "", run.fontSizeMultiplier ?? 1]),
         style?.fontSize,
         style?.fontFamily,
+        style?.fontWeight,
         style?.color,
         style?.textAlign,
         style?.WebkitTextStroke

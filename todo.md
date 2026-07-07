@@ -89,7 +89,15 @@ Hard boundaries:
   - last source/layer id
 - [x] Expose a debug snapshot at `window.__rfGlContextBudget`.
 
-## Phase 2 - Context Governor  ✅ BUILT (flag-gated default-off, 2026-07-02)
+## Phase 2 - Context Governor  ✅ BUILT + DEFAULT ON (2026-07-02, flipped same day after the contention gate)
+
+Default flipped ON after `governor:stress` (the GPU preview-contention stress gate this flip was gated on)
+passed in real Chrome: fixture `/editor/__governor-stress` (`GovernorStressPage.tsx`) reproduces the
+historical leak shape (renderer waves that idle without unmounting + a backward-seek revisit) against the
+real `ScenePreviewCanvas`. Enforced run: peak 7 (bounded = root + active wave + not-yet-idle previous wave),
+12 LRU evictions, 0 recreate failures, preview alive, settled to the hard cap 4. Control run (`glGovernor=0`):
+unbounded peak 13, 0 evictions — proves genuine contention so the gate can't rot into a tautology.
+Run: `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker governor:stress`. Escape hatch: `?glGovernor=0`.
 
 - [x] Add a preview-only governor. (in `gl-context.ts`: `requestContextSlot`/`touchContext`/`registerContextDisposer` + `setGlGovernorEnabled`)
 - [x] Configure a conservative preview budget:
@@ -192,7 +200,9 @@ Hard boundaries:
   - [x] OPFS-backed blobs (in-memory fallback) — `createProxyBlobStore`
   - [x] LRU eviction by size and recency — `createPreviewRenderCacheStore` (`maxEntries`/`maxBytes`, `evictIfNeeded`)
   - [x] metadata keyed by timeline fingerprint (base + per-span content signature)
-  - [ ] rehydrate the manifest from OPFS on reload (DEFERRED — needs a persisted per-span content signature to avoid stale proxies)
+  - [x] rehydrate the manifest from OPFS on reload (2026-07-02 — persisted per-span index with content
+    signatures in `proxy-span-index.json`; restore validated through `markSpanReady`'s staleness check,
+    blobs kept across unmount, foreign-signature records aged out after 24h)
 - [x] Positive edits invalidate only affected overlay/composite spans. (per-span `contentSignature` in `reconcile`)
 - [x] Negative edits/trims/deletes/time shifts invalidate the affected + downstream spans. (`markDirty` range + content signature)
 - [x] Preview playback prefers: valid cached span → live GPU (active range) → DOM last resort. (`resolveProxyPlayback` + ProxyPlaybackLayer)
@@ -249,10 +259,24 @@ Build order:
   scene:compare at ~0.25% under the 0.80% bar (21/21). STILL TODO: an effect-THROUGH-A-TRANSITION fixture
   (region blur across a junction) to gate-lock the nest pre-compose too.
 - [ ] P3a - Move the decode-share decision to effect metadata (grade-neutral?) instead of `type === "blur"`.
-- [ ] P1a - Proxy generation captures the viewer's SceneCompositor (idle, abort-on-interaction); WebCodecs
-  export retained for final render only. Retires M1a/M1b as mechanisms.
-- [ ] P1b - Parity self-check: sample frames of a generated span vs a viewer render; over threshold → regen +
-  log. The safety net that makes divergence impossible to ship silently.
+- [x] P1a - DEFAULT ON (flipped 2026-07-03; escape hatch `?proxyViewerCapture=0`): real-video soak on a
+  user project passed — span sealed viewer-first, `parity-ok` worst 0.00%, zero worker fallbacks. M1a/M1b
+  stay for now: they harden the export-Worker pipeline, which remains the live FALLBACK path when capture
+  fails (retire only if the worker pipeline itself is retired). Original ship notes:
+  SHIPPED flag-gated (2026-07-02, `?proxyViewerCapture=1`): proxy spans render
+  through the LIVE preview's own SceneCompositor — `SceneCompositor.renderFrameOffscreen` (render without
+  present + RGBA readback; the on-screen canvas never flashes), `SceneViewerCaptureHandle` on
+  ScenePreviewCanvas (viewer's compositor/rasterizer/matteCache/flags), and
+  `editor/performance/viewerProxyCapture.ts` (pooled `<video>` decode — sources WebCodecs can't decode
+  finally proxy; shared-context grade renderers — ZERO new GL contexts; viewer's exact
+  activity/z/adjustment/transition rules via exported VideoPreview helpers; MediaEncoder webm).
+  EditorPage tries capture first, falls back to the export-Worker pipeline on any failure. Verified live
+  (Playwright, real Chrome): span sealed viewer-first (0 worker fallbacks) on an image+look+region-blur
+  comp, `scene:compare` 22/22 after the render/present split.
+- [~] P1b - SHIPPED behind the same flag: `verifySpanProxyAgainstViewer` decodes sample frames from the
+  sealed webm (EITHER pipeline) and pixel-compares vs a fresh offscreen viewer render (fail >8% of pixels
+  off by >24/channel → span markFailed, stays live; check errors never block sealing). Telemetry stages
+  `parity-ok`/`parity-failed` in `__rfProxyDebug.events`. Verified live (parity-ok on first sealed span).
 - [ ] Perf - route `reason:"simple"` spans to a fast path; context-pool + yield during idle generation.
 
 ## Region-effect model — ROOT of the mask leak/inherit bugs
@@ -268,13 +292,50 @@ blurs where it touches the blur"). AABB overlap/containment guards were heuristi
   effect in ONLY its own region (+ shared globals); no cross-effect inheritance. Leak eliminated by
   construction. Overlap → clones stack, top region effect wins its area (no bleed). Single-region-effect
   fixtures unchanged. Shared → viewer + local export + cloud.
-- [ ] TRUE fix (the deep one) — REGION EFFECTS AS PER-EFFECT MASKED POST-COMPOSITE PASSES: model a layer as
+- [~] TRUE fix (the deep one) — REGION EFFECTS AS PER-EFFECT MASKED POST-COMPOSITE PASSES: model a layer as
   base + an ordered stack of {effect, mask} passes, each applied to the layer's RUNNING composited image and
   composited back masked to its own region (the After Effects model). Then overlaps COMBINE correctly for any
-  geometry (blur then look in the intersection), nesting works, and there are no clones to leak. Requires
-  `SceneLayerDraw` to carry an effect-pass stack and the compositor to loop it (blur/grade the current result,
-  composite masked) — retires `expandLayerEffectRegions`/`__rfx_` clones. Plugin-safe: passes are generic
-  {effect, mask}, no per-type logic.
+  geometry (blur then look in the intersection), nesting works, and there are no clones to leak.
+  - [x] **Stage R1 shipped (2026-07-02, flag `regionPasses`, default OFF):** `SceneLayerDraw.regionPasses`
+    (`SceneRegionPass[]`) + `SceneCompositor.renderLayerWithRegionPasses` — the layer pre-composes into a
+    DEDICATED nest pair (base draw first, NORMAL/full-opacity inside), then each pass lands masked on the
+    RUNNING nest image: a BLUR pass gaussians the nest itself (so region blur now combines with the base grade
+    and earlier passes — inexpressible in the clone-stack model), a COLOR pass composites its clone-graded
+    source (global blur/glow riding along); the finished nest composites ONCE with the layer's opacity/blend.
+    `buildSceneDraws` folds `__rfx_` clones into passes on the base draw (`regionPassModel` input); transition
+    clip groups collapse to the single base draw. Upstream expansion + per-clone grading are UNCHANGED in R1 —
+    the flag toggles only the composite (clean A/B). Gate: `scene:compare` 21/21 in real Chrome BOTH ways —
+    flag off (byte-level no-change) and `REGION_PASSES=1` (pass model vs the same DOM oracle; region fixtures
+    0.005–0.743%, all within limits).
+  - [x] **Stage R2a–c shipped (2026-07-02, same flag, still default OFF):** color passes now carry the ONE
+    region effect's `ColorPipeline` and grade the RUNNING nest image IN-COMPOSITOR — `MediaWebGLRenderer`
+    accepts a same-context `sourceTexture` (bottom-origin, drop-in with the flip-Y upload path) and the
+    compositor keeps a per-effectKey shared-context renderer pool (own baked LUT each, pruned after ~300
+    frames idle; ZERO extra GL contexts). So region color combines with the base grade/earlier passes exactly
+    like region blur — the full AE model. `buildSceneDraws` derives passes from ls clones OR (when handed
+    UNEXPANDED layers) synthesizes the region structure itself via `expandLayerEffectRegions` — the scene
+    path no longer depends on upstream expansion at all. Preview (`VideoPreview`): with the flag on, NO
+    `__rfx_` clone mounts a `<video>` decoder / renderer context (extends the blur-alias saving to region
+    COLOR); a runtime scene failure re-mounts them for the DOM path. Gates (real Chrome): `scene:compare`
+    21/21 flag OFF (byte-stable) + 21/21 `REGION_PASSES=1` with clone mounts skipped (region fixtures
+    unchanged margins — regions render with zero clone decoders).
+  - [x] **Stage R2d shipped — DEFAULT ON (2026-07-02).** One shared flip point: `REGION_PASS_MODEL_DEFAULT`
+    (build-scene-draws) feeds the web flag helper's env fallback, `buildRenderManifest` (NEW
+    `RenderManifest.regionPassModel` → `SceneStage` controller), and the gates — all three renderers flip
+    together by construction, and empirically: a STRICT-threshold `render:compare:pixels` run on the overlap
+    fixture measured 1.186% Remotion-vs-preview (a clone-model Remotion would show ~25%). Export front-end
+    now skips clone decode entirely (`export-core.activeSourceKeysAt` never loads `__rfx_` providers;
+    `scene-frame-compositor` never grades clones) — one WebCodecs decoder saved per region effect at export
+    too. NEW `overlap-region-effects` fixture (grade + blur on the SAME region): `scene:compare` runs it as a
+    3-way check immune to the shipped default — clone-parity (scene flag-off vs DOM, 0.249%) + combine-delta
+    (scene on-vs-off at STRICT pixelmatch 0.02 — the standard perceptual threshold absorbs a moderate grade
+    shift — 24.77% ≥ 2% floor, so a silently-dropped pass can never ship). Full ladder re-run post-flip in
+    real Chrome: `scene:compare` 22/22 (default + `REGION_PASSES=1`), `render:compare:pixels` 7/7 on all
+    region fixtures + transition, 4-package typecheck, `editor:test`, web build. Escape hatch `?regionPasses=0`.
+  - [ ] Cleanup (after soak): retire `expandEffectRegionMasks` call sites + `buildRegionBlurCloneAliases`
+    from the SCENE path callers (VideoPreview still expands for the DOM fallback — expansion stays until the
+    DOM path itself is retired); drop the R1-era clone-folding branch in `buildSceneDraws` once no caller
+    passes expanded layers.
 
 [x] Separate bug (not proxy): transition window ran PAST the clip. ROOT: the GPU-reveal path
 (`getActiveTransition`/`getCompositionTransition`) used `spec.durationSeconds` UNCLAMPED, while the

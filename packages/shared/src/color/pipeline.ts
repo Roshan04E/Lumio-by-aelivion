@@ -21,6 +21,7 @@ import { channelCurvesAreIdentity, channelCurvesToToneCurve } from "./curve";
 import { colorWheelsToToneCurve, wheelsAreIdentity } from "./wheels";
 import { hueSatCurvesAreIdentity, secondaryIsIdentity, type HslSecondary } from "./hsl";
 import { resolveLookEffects } from "./looks";
+import { DEFAULT_PROJECT_COLOR_SETTINGS, type ProjectColorSettings } from "./color-management";
 
 const IDENTITY_MATRIX_3x4: readonly number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
 
@@ -174,6 +175,11 @@ function sampleCurve(fn: (x: number) => number): number[] {
   return samples;
 }
 
+/**
+ * Compile a normalized control set into a `ColorStage`. Attaches the raw `controls` for the
+ * exact managed linear path (`applyControlsLinear` in `cpu.ts`/the baked LUT), AND emits a
+ * display-referred `matrix` + `curve` as the SVG/no-GL **approximation** of the same grade.
+ */
 function controlsToStage(c: ColorControls): ColorStage {
   const hasMatrix = c.saturation !== 100 || c.vibrance !== 0 || c.temperature !== 0 || c.tint !== 0;
   const hasCurve = c.exposure !== 0 || c.contrast !== 0 || c.highlights !== 0 || c.shadows !== 0 || c.whites !== 0 || c.blacks !== 0;
@@ -189,15 +195,23 @@ function controlsToStage(c: ColorControls): ColorStage {
     curve = { r: master, g: [...master], b: [...master] };
   }
 
-  return { matrix, curve };
+  return { controls: c, matrix, curve };
 }
 
 /**
  * Compile color effects (params pre-resolved) into a single `ColorPipeline`.
  * Non-color and disabled effects should be filtered out by the caller; unknown
  * types are ignored. Stages preserve effect order.
+ *
+ * `colorSettings` carries the project's managed color contract (working/output space + range).
+ * It defaults to `DEFAULT_PROJECT_COLOR_SETTINGS` (Rec.709 linear working, Rec.709 SDR limited
+ * output) so existing callers stay managed; thread the composition's `settings.color` here when
+ * the project overrides it.
  */
-export function compileColorPipeline(effects: ColorEffectInput[]): ColorPipeline {
+export function compileColorPipeline(
+  effects: ColorEffectInput[],
+  colorSettings: ProjectColorSettings = DEFAULT_PROJECT_COLOR_SETTINGS
+): ColorPipeline {
   const stages: ColorStage[] = [];
   let previewMatte: HslSecondary | null = null;
   for (const effect of effects) {
@@ -251,7 +265,7 @@ export function compileColorPipeline(effects: ColorEffectInput[]): ColorPipeline
             const controls = extractControls(le);
             if (!controlsAreNeutral(controls)) {
               const stage = controlsToStage(controls);
-              if (stage.matrix || stage.curve) stages.push(stage);
+              if (stage.matrix || stage.curve || stage.controls) stages.push(stage);
             }
           }
         }
@@ -273,11 +287,20 @@ export function compileColorPipeline(effects: ColorEffectInput[]): ColorPipeline
       continue;
     }
     const stage = controlsToStage(controls);
-    if (stage.matrix || stage.curve) {
+    if (stage.matrix || stage.curve || stage.controls) {
       stages.push(stage);
     }
   }
-  return { stages, space: "sRGB", identity: stages.length === 0 && !previewMatte, previewMatte };
+  // `space` pins the SVG `color-interpolation-filters` for the no-GL approximation (kept sRGB so the
+  // fallback curve/matrix primitives read like standard NLE sliders). The managed linear working space
+  // is carried on `colorSettings.workingSpace` and applied by the CPU/WebGL backbone, not by SVG.
+  return {
+    stages,
+    space: "sRGB",
+    colorSettings,
+    identity: stages.length === 0 && !previewMatte,
+    previewMatte
+  };
 }
 
 export const COLOR_IDENTITY_MATRIX_3x4 = IDENTITY_MATRIX_3x4;

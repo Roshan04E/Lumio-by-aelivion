@@ -1,0 +1,151 @@
+{
+  "maxDiffRatio": 0.02,
+  "threshold": 0.16,
+  "unsupportedGaps": [],
+  "worst": {
+    "fixture": "plain-image",
+    "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-plain-image.png",
+    "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-plain-image.png",
+    "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-plain-image.png",
+    "diffPixels": 0,
+    "totalPixels": 2073600,
+    "diffRatio": 0
+  },
+  "results": [
+    {
+      "fixture": "plain-image",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-plain-image.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-plain-image.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-plain-image.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "brightness-contrast",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-brightness-contrast.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-brightness-contrast.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-brightness-contrast.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "color-curves",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-color-curves.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-color-curves.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-color-curves.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "object-fit-cover",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-object-fit-cover.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-object-fit-cover.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-object-fit-cover.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "object-fit-contain",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-object-fit-contain.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-object-fit-contain.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-object-fit-contain.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "content-transform",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-content-transform.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-content-transform.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-content-transform.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "person-matte",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-person-matte.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-person-matte.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-person-matte.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "clip-region-blur",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-clip-region-blur.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-clip-region-blur.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-clip-region-blur.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "media-opacity",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-media-opacity.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-media-opacity.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-media-opacity.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "transition",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-transition.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-transition.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-transition.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "graded-text",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-graded-text.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-graded-text.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-graded-text.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "masked-text",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-masked-text.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-masked-text.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-masked-text.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "region-text",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-region-text.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-region-text.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-region-text.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "tilted-text",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-tilted-text.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-tilted-text.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-tilted-text.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "scaled-text",
+      "localFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\local-scene-scaled-text.png",
+      "remotionFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\remotion-scene-scaled-text.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\remotion-scene-compare\\diff-scaled-text.png",
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    }
+  ]
+}

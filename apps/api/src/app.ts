@@ -12,6 +12,7 @@ import { jobsRouter } from "./routes/jobs.routes";
 import { paymentsRouter } from "./routes/payments.routes";
 import { pluginPackagesRouter } from "./routes/plugin-packages.routes";
 import { aiRouter } from "./routes/ai.routes";
+import { generateRouter } from "./routes/generate.routes";
 import { memoryRouter } from "./routes/memory.routes";
 import { errorHandler, notFound } from "./middleware/error";
 
@@ -21,7 +22,7 @@ export function createApp() {
   app.use(
     cors({
       origin(origin, callback) {
-        if (!origin || origin === env.WEB_ORIGIN || /^http:\/\/(localhost|127\.0\.0\.1):517\d$/.test(origin)) {
+        if (!origin || origin === env.WEB_ORIGIN || /^http:\/\/(localhost|127\.0\.0\.1):(517\d|4173)$/.test(origin)) {
           callback(null, true);
           return;
         }
@@ -48,6 +49,7 @@ export function createApp() {
   app.use("/api/payments", paymentsRouter);
   app.use("/api/plugin-packages", pluginPackagesRouter);
   app.use("/api/ai", aiRouter);
+  app.use("/api/generate", generateRouter);
   app.use("/api/memory", memoryRouter);
 
   app.use(notFound);

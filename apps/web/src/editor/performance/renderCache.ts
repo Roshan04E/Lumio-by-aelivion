@@ -1,4 +1,4 @@
-import type { TimelineComposition } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
 
 /**
  * Frame render cache (Phase 3 interface + a small LRU impl; wired in Phase 5).
@@ -25,12 +25,29 @@ export interface TimelineCacheLayerInput {
   startSeconds: number;
   durationSeconds: number;
   sourceInSeconds?: number | undefined;
+  /** Constant playback rate (rate stretch) — changes composited pixels, so it's in the signature. */
+  speed?: number | undefined;
+  /** Speed ramp points — also pixel-changing, so also in the signature. */
+  speedKeyframes?: readonly unknown[] | undefined;
   assetId?: string | undefined;
-  transitionIn?: { durationSeconds: number } | undefined;
+  transitionIn?: unknown | undefined;
   effects?: readonly unknown[] | undefined;
   masks?: readonly unknown[] | undefined;
   keyframes?: readonly unknown[] | undefined;
   animations?: readonly unknown[] | undefined;
+  /**
+   * Z-order + track enable state + the FULL render-relevant layer object (2026-07-04). The named
+   * fields above fed the signature alone, which was PROVABLY INCOMPLETE — transform/scale edits and
+   * TRACK REORDERS kept serving stale proxy spans (soak repros: 4 rescaled clips played at their old
+   * scale; a reordered text track replayed the old stacking). Hand-picked field lists always rot the
+   * same way the hand-bumped version constant did, so the signature now hashes the whole layer minus
+   * render-irrelevant fields (see `cacheRenderPropsOf`). Optional so pinned test literals (and the
+   * planner, which only reads the named fields) keep working.
+   */
+  trackIndex?: number | undefined;
+  trackMuted?: boolean | undefined;
+  trackSolo?: boolean | undefined;
+  renderProps?: unknown | undefined;
 }
 
 export type AdaptiveCacheSpanReason = "simple" | "overlay" | "effect" | "transition" | "dirty";
@@ -93,8 +110,23 @@ export interface PreviewRenderCacheStore {
   removeSignature: (signature: string) => number;
   reconcile: (plan: readonly AdaptiveCacheSpan[], signature: string, renderScale: number, now?: number, scope?: TimelineInterval | undefined) => CachedPreviewSpan[];
   markFrameRendered: (input: { signature: string; renderScale: number; timeSeconds: number; frameDurationSeconds: number; now?: number | undefined }) => CachedPreviewSpan | undefined;
-  /** Seal a span with its finalized proxy media (from the background generator). */
-  markSpanReady: (input: { id: string; signature: string; contentSignature: string; url: string; byteSize: number; now?: number | undefined }) => CachedPreviewSpan | undefined;
+  /**
+   * Seal a span with its finalized proxy media (from the background generator or rehydration).
+   * `renderScale` stamps the scale the media was ACTUALLY produced at (never sharper than planned);
+   * with `startSeconds`/`endSeconds` it also lets a SHARPER persisted record seal a range-equal span
+   * planned at a softer scale (quality downgrade between sessions).
+   */
+  markSpanReady: (input: {
+    id: string;
+    signature: string;
+    contentSignature: string;
+    url: string;
+    byteSize: number;
+    renderScale?: number | undefined;
+    startSeconds?: number | undefined;
+    endSeconds?: number | undefined;
+    now?: number | undefined;
+  }) => CachedPreviewSpan | undefined;
   /** Look up ready proxy media covering a time, for playback substitution. */
   getReadySpanMedia: (timeSeconds: number, signature: string, renderScale: number) => { url: string; spanStartSeconds: number; spanId: string } | undefined;
   markFailed: (id: string, error: string) => void;
@@ -264,7 +296,18 @@ export function createFrameCache<T>(capacity = 60): FrameCache<T> {
 const DEFAULT_MIN_SPAN_SECONDS = 2;
 const DEFAULT_MAX_SIMPLE_SPAN_SECONDS = 45;
 const DEFAULT_MAX_COMPLEX_SPAN_SECONDS = 8;
-const PREVIEW_PROXY_RENDER_VERSION = 3;
+/**
+ * Bump whenever ANYTHING that affects proxy-span pixel output changes — compositor math, effects,
+ * AND the WebCodecs decode pipeline. v5 (2026-07-03): invalidate every span generated before the
+ * hardware-decoder warmup-wedge fix (WARMUP_MAX 64→12 in webcodecs-decoder.ts) — pre-fix spans
+ * could contain FROZEN video baked into the proxy file (user repro: both videos under a text clip
+ * frozen for exactly the span's duration, recovering at the span boundary — the live pipeline was
+ * fine; playback was faithfully replaying a broken cached proxy).
+ *
+ * v6 (2026-07-04): managed Rec.709-linear color pipeline — Basic-Correction now grades in linear
+ * light (no intermediate clamp), so any graded span's pixels changed. Invalidate all pre-managed spans.
+ */
+const PREVIEW_PROXY_RENDER_VERSION = 6;
 
 export interface TimelineInterval {
   startSeconds: number;
@@ -334,8 +377,16 @@ function isEffectLayer(layer: TimelineCacheLayerInput): boolean {
   return hasItems(layer.effects) || hasItems(layer.masks) || hasItems(layer.keyframes) || hasItems(layer.animations);
 }
 
+function readTransitionDuration(value: unknown): number {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return 0;
+  }
+  const duration = (value as { durationSeconds?: unknown }).durationSeconds;
+  return typeof duration === "number" && Number.isFinite(duration) ? duration : 0;
+}
+
 function transitionInterval(layer: TimelineCacheLayerInput, durationSeconds: number): TimelineInterval | undefined {
-  const transitionDuration = layer.transitionIn?.durationSeconds ?? 0;
+  const transitionDuration = readTransitionDuration(layer.transitionIn);
   if (!isFinitePositive(transitionDuration)) {
     return undefined;
   }
@@ -432,7 +483,7 @@ export function planAdaptiveCacheSpans(options: AdaptiveCachePlanOptions): Adapt
   // and cached proxy). Without this, subdividing each inter-boundary segment by equal parts would shift
   // every downstream range on any edit, orphaning the whole timeline's proxies.
   const hasComplexContent = options.layers.some(
-    (layer) => isOverlayLayer(layer) || isEffectLayer(layer) || (layer.transitionIn?.durationSeconds ?? 0) > 0
+    (layer) => isOverlayLayer(layer) || isEffectLayer(layer) || readTransitionDuration(layer.transitionIn) > 0
   );
   const gridStep = Math.max(minSpanSeconds, hasComplexContent ? maxComplexSpanSeconds : maxSimpleSpanSeconds);
   for (let mark = Math.ceil(targetStartSeconds / gridStep) * gridStep; mark < targetEndSeconds; mark += gridStep) {
@@ -494,6 +545,8 @@ export function planAdaptiveCacheSpans(options: AdaptiveCachePlanOptions): Adapt
  * does not perturb an unaffected span's signature.
  */
 function spanContentSignature(layers: readonly TimelineCacheLayerInput[]): string {
+  // Sorted by id ONLY for hash stability across plan runs — the actual z-order is inside the
+  // payload (`trackIndex`), so a track reorder changes the hash even though the sort doesn't.
   const payload = [...layers]
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((layer) => ({
@@ -502,14 +555,35 @@ function spanContentSignature(layers: readonly TimelineCacheLayerInput[]): strin
       startSeconds: Number(layer.startSeconds.toFixed(3)),
       durationSeconds: Number(layer.durationSeconds.toFixed(3)),
       sourceInSeconds: Number((layer.sourceInSeconds ?? 0).toFixed(3)),
+      speed: Number((layer.speed ?? 1).toFixed(3)),
+      speedKeyframes: layer.speedKeyframes ?? [],
       assetId: layer.assetId ?? "",
-      transitionSeconds: layer.transitionIn?.durationSeconds ?? 0,
+      transitionIn: layer.transitionIn ?? null,
       effects: layer.effects ?? [],
       masks: layer.masks ?? [],
       keyframes: layer.keyframes ?? [],
-      animations: layer.animations ?? []
+      animations: layer.animations ?? [],
+      // Completeness fields (see TimelineCacheLayerInput doc): z-order, track enable state, and the
+      // full render-relevant layer object — transform, content pan/zoom, blend, fit, text/shape
+      // styling, matte, mute… anything that changes pixels changes this hash.
+      trackIndex: layer.trackIndex ?? 0,
+      trackMuted: layer.trackMuted ?? false,
+      trackSolo: layer.trackSolo ?? false,
+      renderProps: layer.renderProps ?? null
     }));
   return hashString(stableStringify(payload));
+}
+
+/**
+ * The layer minus fields that can NEVER change rendered pixels. Everything else — known today or
+ * added tomorrow — participates in the span signature automatically, the same "automatic beats
+ * hand-maintained" rule as the P1 render fingerprint. Over-invalidation (e.g. a future editor-only
+ * field regenerating a span) costs background work; under-invalidation serves wrong frames.
+ */
+function cacheRenderPropsOf(layer: TimelineLayer): Record<string, unknown> {
+  // `label` is the Premiere-style clip color label — timeline UI cosmetics, never rendered pixels.
+  const { name: _name, locked: _locked, slot: _slot, linkedGroupId: _linked, label: _label, ...render } = layer as unknown as Record<string, unknown>;
+  return render;
 }
 
 function stableStringify(value: unknown): string {
@@ -536,19 +610,29 @@ function hashString(value: string): string {
 }
 
 export function compositionCacheLayers(composition: TimelineComposition): TimelineCacheLayerInput[] {
-  return composition.tracks.flatMap((track) =>
+  return composition.tracks.flatMap((track, trackIndex) =>
     track.layers.map((layer) => ({
       id: layer.id,
       type: layer.type,
       startSeconds: layer.startSeconds,
       durationSeconds: layer.durationSeconds,
       ...(layer.sourceInSeconds !== undefined ? { sourceInSeconds: layer.sourceInSeconds } : {}),
+      ...(layer.speed !== undefined ? { speed: layer.speed } : {}),
+      ...(layer.speedKeyframes !== undefined ? { speedKeyframes: layer.speedKeyframes } : {}),
       ...(layer.assetId !== undefined ? { assetId: layer.assetId } : {}),
-      ...(layer.transitionIn !== undefined ? { transitionIn: { durationSeconds: layer.transitionIn.durationSeconds } } : {}),
+      ...(layer.transitionIn !== undefined ? { transitionIn: layer.transitionIn } : {}),
       effects: layer.effects,
       masks: layer.masks,
       keyframes: layer.keyframes,
-      animations: layer.animations
+      animations: layer.animations,
+      // Signature-completeness fields (2026-07-04): z-order + track enable state + the whole
+      // render-relevant layer — see TimelineCacheLayerInput. Track volume/pan are deliberately
+      // EXCLUDED: span proxies are picture-only (audio always plays live), so audio edits must not
+      // regenerate video spans.
+      trackIndex,
+      trackMuted: track.muted ?? false,
+      trackSolo: track.solo ?? false,
+      renderProps: cacheRenderPropsOf(layer)
     }))
   );
 }
@@ -575,7 +659,7 @@ export function timelineCacheSignature(input: {
       startSeconds: Number(layer.startSeconds.toFixed(3)),
       durationSeconds: Number(layer.durationSeconds.toFixed(3)),
       assetId: layer.assetId ?? "",
-      transitionSeconds: layer.transitionIn?.durationSeconds ?? 0,
+      transitionIn: layer.transitionIn ?? null,
       effects: layer.effects ?? [],
       masks: layer.masks ?? [],
       keyframes: layer.keyframes ?? [],
@@ -600,10 +684,14 @@ export function compositionCacheSignature(composition: TimelineComposition, rend
 /**
  * Base signature for a composition: identity + output format ONLY (no layer content, no duration). This
  * scopes the cache to a project+resolution; per-span `contentSignature` handles layer-level invalidation.
- * Changing quality (renderScale) or opening a different project flips this and prunes the whole store;
- * ordinary timeline edits do NOT.
+ * Opening a different project flips this and prunes the whole store; ordinary timeline edits do NOT.
+ *
+ * Render scale is deliberately NOT part of this signature: it lives as a comparable per-span field
+ * instead, so a proxy captured at a SHARPER scale keeps serving softer previews (downscaling is free).
+ * When it was hashed in here, every quality switch (1 → ½ → ¼, or an adaptive drop) flipped the
+ * signature and regenerated the entire store from scratch (2026-07-04 user report).
  */
-export function baseCompositionSignature(composition: TimelineComposition, renderScale: number): string {
+export function baseCompositionSignature(composition: TimelineComposition): string {
   return hashString(
     stableStringify({
       compositionId: composition.id,
@@ -611,9 +699,31 @@ export function baseCompositionSignature(composition: TimelineComposition, rende
       height: composition.height,
       fps: composition.fps,
       previewProxyRenderVersion: PREVIEW_PROXY_RENDER_VERSION,
-      renderScale: Number(renderScale.toFixed(3))
+      // Managed color contract (working/output space + range). A runtime change to the project's
+      // color settings alters graded pixels but is NOT a code change, so the build fingerprint below
+      // won't catch it — hash it here so switching color settings regenerates the proxy store.
+      colorSettings: composition.settings?.color ?? null,
+      // AUTOMATIC invalidation root (PREVIEW_PIPELINE.md P1): build-time hash of the
+      // render-critical sources (vite.config.ts). Any decoder/compositor/effects code change flips
+      // it → whole store regenerates — the 2026-07-03 frozen-stale-span incident cannot recur from
+      // a forgotten manual bump. The constant above remains for coarse manual invalidation and as
+      // the only key in non-vite consumers (tsx tests), where the fingerprint is undefined.
+      renderFingerprint: typeof __LUMIO_RENDER_FINGERPRINT__ === "string" ? __LUMIO_RENDER_FINGERPRINT__ : "test"
     })
   );
+}
+
+/** Scales are stored `toFixed(3)`-rounded; treat anything within this as the same scale. */
+const SCALE_EPS = 0.0005;
+
+/** A span at `spanScale` can serve a preview at `neededScale` iff it is at least as sharp. */
+function scaleSuffices(spanScale: number, neededScale: number): boolean {
+  return spanScale >= neededScale - SCALE_EPS;
+}
+
+/** Same planned time range (plan boundaries derive from clip edges, never from scale). */
+function rangeEquals(a: TimelineInterval, b: TimelineInterval): boolean {
+  return Math.abs(a.startSeconds - b.startSeconds) < 0.002 && Math.abs(a.endSeconds - b.endSeconds) < 0.002;
 }
 
 export function previewPluginSignature(value: unknown): string {
@@ -666,9 +776,18 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
 
   return {
     getReadySpan(timeSeconds, signature, renderScale) {
+      // Any span at LEAST as sharp as the preview serves it; prefer the smallest sufficient scale
+      // (the exact match when present) to keep proxy decode as cheap as possible.
       const match = [...entries.values()]
-        .filter((span) => span.signature === signature && span.renderScale === renderScale && span.status === "ready" && span.url !== undefined)
-        .find((span) => containsTime(span, timeSeconds));
+        .filter(
+          (span) =>
+            span.signature === signature &&
+            scaleSuffices(span.renderScale, renderScale) &&
+            span.status === "ready" &&
+            span.url !== undefined &&
+            containsTime(span, timeSeconds)
+        )
+        .sort((a, b) => a.renderScale - b.renderScale)[0];
       if (match) {
         match.lastUsedAt = Date.now();
       }
@@ -705,11 +824,13 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       return count;
     },
     reconcile(plan, signature, renderScale, now = Date.now(), scope) {
-      // Prune everything from a PREVIOUS composition/quality signature. Without this, changing resolution or
-      // opening a different project would leave stale spans in the store. Ordinary edits keep the same base
-      // signature (only per-span content signatures change), so this does NOT wipe the timeline on an edit.
+      // Prune spans from a PREVIOUS composition signature, and spans SOFTER than the current preview
+      // (they can never serve it). Spans at a sharper scale STAY — downscaling is free, so a quality
+      // DOWNGRADE (1 → ½ → ¼, or an adaptive drop) reuses the whole cache instead of regenerating it;
+      // only an UPGRADE queues real work. Ordinary edits keep the same base signature (per-span
+      // content signatures change), so this does NOT wipe the timeline on an edit.
       for (const span of [...entries.values()]) {
-        if (span.signature !== signature || span.renderScale !== renderScale) {
+        if (span.signature !== signature || !scaleSuffices(span.renderScale, renderScale)) {
           deleteSpan(span);
         }
       }
@@ -719,6 +840,30 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       for (const planned of plan) {
         const id = cacheSpanKey(signature, renderScale, planned);
         wantedIds.add(id);
+        // A range-equal span at a SHARPER scale already covers this plan (sealed or in flight) with
+        // the same content — adopt it rather than queueing duplicate work at the softer scale.
+        const sharper = [...entries.values()].find(
+          (entry) =>
+            entry.id !== id &&
+            entry.signature === signature &&
+            entry.renderScale > renderScale + SCALE_EPS &&
+            rangeEquals(entry, planned) &&
+            entry.contentSignature === planned.contentSignature &&
+            (entry.status === "ready" || entry.status === "pending")
+        );
+        if (sharper) {
+          sharper.priority = planned.priority;
+          sharper.layerIds = planned.layerIds;
+          wantedIds.add(sharper.id);
+          const softerDuplicate = entries.get(id);
+          if (softerDuplicate) {
+            deleteSpan(softerDuplicate); // pointless next to the sharper equivalent
+          }
+          if (sharper.status === "pending") {
+            pending.push(sharper);
+          }
+          continue;
+        }
         const existing = entries.get(id);
         if (existing) {
           // Same time-range span already tracked. Keep its proxy iff the overlapping content is unchanged
@@ -789,7 +934,9 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       const matches = [...entries.values()].filter(
         (span) =>
           span.signature === input.signature &&
-          span.renderScale === input.renderScale &&
+          // No scale gate: live coverage is visibility telemetry, never playable media — a live frame
+          // at ANY scale counts (an adopted sharper pending span must not go permanently un-marked
+          // just because the viewer currently renders softer).
           span.status !== "ready" &&
           overlaps(span, frameRange)
       );
@@ -809,30 +956,64 @@ export function createPreviewRenderCacheStore(options: PreviewRenderCacheStoreOp
       return updated;
     },
     markSpanReady(input) {
-      const span = entries.get(input.id);
+      let span = entries.get(input.id);
+      if (!span && input.renderScale !== undefined && input.startSeconds !== undefined && input.endSeconds !== undefined) {
+        // No exact-id entry (the id embeds the scale it was planned at), but the media may still be
+        // valid for a range-equal span planned at a SOFTER scale — the rehydration path after a
+        // quality downgrade: a persisted 1× blob sealing the ¼ session's plan. Adopt the planned
+        // entry under the record's id/scale; content signature is still verified below.
+        const range = { startSeconds: input.startSeconds, endSeconds: input.endSeconds };
+        const candidate = [...entries.values()].find(
+          (entry) =>
+            entry.signature === input.signature &&
+            entry.status !== "ready" &&
+            rangeEquals(entry, range) &&
+            entry.contentSignature === input.contentSignature &&
+            scaleSuffices(input.renderScale as number, entry.renderScale)
+        );
+        if (candidate) {
+          entries.delete(candidate.id);
+          span = { ...candidate, id: input.id, renderScale: input.renderScale };
+          entries.set(span.id, span);
+        }
+      }
       // Reject stale media: the span may have been pruned, or its content changed (an edit landed) while it
       // was rendering in the Worker. Sealing here would show an out-of-date proxy — drop the blob instead.
       if (!span || span.signature !== input.signature || span.contentSignature !== input.contentSignature) {
         options.onDisposeSpanMedia?.({ ...(span ?? ({} as CachedPreviewSpan)), id: input.id, url: input.url, byteSize: input.byteSize } as CachedPreviewSpan);
         return undefined;
       }
+      if (input.renderScale !== undefined) {
+        // Stamp the scale the media was ACTUALLY produced at — never sharper than claimed. A span
+        // planned at 1× but captured after a drop to ¼ must not advertise 1× pixels.
+        span.renderScale = Math.min(span.renderScale, input.renderScale);
+      }
       span.url = input.url;
       span.byteSize = Math.max(0, input.byteSize);
       span.status = "ready";
       span.lastUsedAt = input.now ?? Date.now();
       delete span.liveRanges;
+      // A sealed span makes any range-equal SOFTER leftovers pointless — sweep them.
+      for (const other of [...entries.values()]) {
+        if (other.id !== span.id && other.signature === span.signature && rangeEquals(other, span) && other.renderScale < span.renderScale - SCALE_EPS) {
+          deleteSpan(other);
+        }
+      }
       evictIfNeeded();
       return span;
     },
     getReadySpanMedia(timeSeconds, signature, renderScale) {
-      const match = [...entries.values()].find(
-        (span) =>
-          span.signature === signature &&
-          span.renderScale === renderScale &&
-          span.status === "ready" &&
-          span.url !== undefined &&
-          containsTime(span, timeSeconds)
-      );
+      // Same sufficiency rule as getReadySpan: sharper-or-equal serves, smallest sufficient wins.
+      const match = [...entries.values()]
+        .filter(
+          (span) =>
+            span.signature === signature &&
+            scaleSuffices(span.renderScale, renderScale) &&
+            span.status === "ready" &&
+            span.url !== undefined &&
+            containsTime(span, timeSeconds)
+        )
+        .sort((a, b) => a.renderScale - b.renderScale)[0];
       if (!match || match.url === undefined) {
         return undefined;
       }
@@ -879,7 +1060,7 @@ export function createPreviewCacheController(options: PreviewRenderCacheStoreOpt
       const layers = compositionCacheLayers(input.composition);
       // Base signature only — per-span content signatures (inside the plan) drive invalidation, so an
       // ordinary edit re-renders just the overlapping spans instead of the whole store.
-      const baseSignature = baseCompositionSignature(input.composition, input.renderScale);
+      const baseSignature = baseCompositionSignature(input.composition);
       const signature = input.pluginSignature ? `${baseSignature}:${input.pluginSignature}` : baseSignature;
       const plannedSpans = planAdaptiveCacheSpans({
         durationSeconds: input.composition.durationSeconds,

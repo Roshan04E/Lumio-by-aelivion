@@ -42,7 +42,9 @@ import {
   buildRegionBlurCloneAliases,
   SceneMaskMatteCache,
   SceneTextRasterizer,
+  layerSourceTimeSeconds,
   type ColorPipeline,
+  type NestedGroupSpec,
   type SceneCompositorDebugSnapshot,
   type SceneDraw,
   type SceneFrameSpec,
@@ -53,7 +55,7 @@ import {
   type TimelineLayer,
   type TransitionSpec,
 } from "@lumio-by-aelivion/shared";
-import { getExportSingleContext } from "../color/render-engine";
+import { getExportSingleContext, getRegionPassesEnabled } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
 import { clipSourceKey, type FrameProvider } from "./source-decoder";
 
@@ -110,6 +112,13 @@ export class SceneFrameCompositor {
   // Pools `buildSceneDraws` lazily fills + prunes: per-text/shape-layer overlay-grade renderers and
   // per-active-junction transition mix engines. We own them so they persist + get disposed with us.
   private readonly gradeRenderers = new Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>();
+  // Compound-clip group specs (NESTING.md Phase C) — `composition`'s tracks already carry nested children
+  // as ordinary layers (export-core nest-expands before constructing this), so this is ONLY consulted by
+  // buildSceneDraws to fold those children back into a group + build the compound clip's shell.
+  private readonly nestedGroups: ReadonlyMap<string, NestedGroupSpec> | undefined;
+  // Per-nested-composition matte caches — mirrors `this.matteCache` but sized per nest, not the export
+  // frame. See `nestMatteCaches` doc on `BuildSceneDrawsInputs`.
+  private readonly nestMatteCaches = new Map<string, SceneMaskMatteCache>();
   private readonly flat: FlatLayer[];
   private readonly adjustments: FlatLayer[];
   private readonly flatById = new Map<string, FlatLayer>();
@@ -118,7 +127,11 @@ export class SceneFrameCompositor {
     private readonly composition: TimelineComposition,
     canvas: AnyCanvas,
     private readonly getSource: (assetId: string) => FrameProvider | undefined,
-    options?: { singleContext?: boolean; stageProbe?: SceneFrameStageProbeOptions }
+    options?: {
+      singleContext?: boolean;
+      stageProbe?: SceneFrameStageProbeOptions;
+      nestedGroups?: ReadonlyMap<string, NestedGroupSpec>;
+    }
   ) {
     this.width = composition.width;
     this.height = composition.height;
@@ -132,6 +145,7 @@ export class SceneFrameCompositor {
     // No `onReady` callback: the export AWAITS `rasterizer.ensure()` per frame, so there's no draw loop to
     // re-arm (unlike the editor's fire-and-forget `get()`).
     this.rasterizer = new SceneTextRasterizer();
+    this.nestedGroups = options?.nestedGroups;
 
     const flat: FlatLayer[] = [];
     this.composition.tracks.forEach((track, trackIndex) => {
@@ -423,7 +437,8 @@ export class SceneFrameCompositor {
     if (!layer.assetId) return null;
     const providerKey = layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
     const source = this.getSource(providerKey);
-    const sourceTime = layer.type === "video" ? (layer.sourceInSeconds ?? 0) + (t - layer.startSeconds) : 0;
+    // Speed-aware (rate stretch + ramps): the shared mapper — exact integral for ramped clips.
+    const sourceTime = layer.type === "video" ? layerSourceTimeSeconds(layer, t - layer.startSeconds) : 0;
     if (!source) {
       if (this.stageProbe && this.shouldProbe(t)) {
         this.stageProbe.onProbe({
@@ -597,11 +612,19 @@ export class SceneFrameCompositor {
     // graded canvases) into a map, awaiting all of them so the synchronous getMediaGraded inside
     // buildSceneDraws is always satisfied.
     const gradedById = new Map<string, AnyCanvas | SceneTextureSource>();
+    const regionPasses = getRegionPassesEnabled();
     await Promise.all(
       activeItems
         // Skip aliased blur-only clones — they read the base's graded frame below, so grading them (a second
-        // decoder + context) is both wasteful and the source of the proxy/preview divergence.
-        .filter((item) => (item.layer.type === "video" || item.layer.type === "image") && !cloneAlias.has(item.layer.id))
+        // decoder + context) is both wasteful and the source of the proxy/preview divergence. With the pass
+        // model on, NO clone is graded (blur/color passes work off the layer's running nest image, and
+        // export-core doesn't even load their providers).
+        .filter(
+          (item) =>
+            (item.layer.type === "video" || item.layer.type === "image") &&
+            !cloneAlias.has(item.layer.id) &&
+            !(regionPasses && item.layer.id.includes("__rfx_"))
+        )
         .map(async (item) => {
           const graded = await this.gradeMediaLayer(item, t);
           if (graded && graded.width > 0 && graded.height > 0) gradedById.set(item.layer.id, graded);
@@ -636,6 +659,11 @@ export class SceneFrameCompositor {
       // Single-context: grade text/shape overlays into shared-context RTTs too (no cross-context canvas upload).
       ...(this.singleContext ? { gradeOverlay: this.gradeOverlaySingle } : {}),
       createCanvas: () => this.makeCanvas(),
+      // Same flag as the preview (query/localStorage on the main thread, VITE env in the export Worker) so
+      // "preview IS export" holds. Default OFF in every renderer until the region gates pass with it on.
+      regionPassModel: getRegionPassesEnabled(),
+      nestedGroups: this.nestedGroups,
+      nestMatteCaches: this.nestMatteCaches,
     });
 
     if (this.stageProbe && this.shouldProbe(t)) {
@@ -705,6 +733,8 @@ export class SceneFrameCompositor {
     this.overlaySharedRenderers.clear();
     safe(() => this.compositor.dispose());
     safe(() => this.matteCache.dispose());
+    for (const cache of this.nestMatteCaches.values()) safe(() => cache.dispose());
+    this.nestMatteCaches.clear();
     safe(() => this.rasterizer.dispose());
     for (const renderer of this.mediaRenderers.values()) safe(() => renderer.dispose());
     this.mediaRenderers.clear();

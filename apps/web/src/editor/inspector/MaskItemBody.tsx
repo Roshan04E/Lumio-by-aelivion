@@ -14,10 +14,13 @@ import { EffectSliderControl } from "../../components/EffectSliderControl";
 import { averageTrackConfidence, type SavedTrack } from "../../lib/trackLibrary";
 import {
   attachTrackToMask,
+  clearMaskScalarKeyframes,
   detachTrackFromMask,
   findMaskPathKeyframeTime,
+  findMaskScalarKeyframeTime,
   getActiveMaskScalarKeyframe,
   getMaskPathKeyframes,
+  getMaskScalarKeyframes,
   hasMaskPathKeyframeAt,
   maskScalarKeyframeCount,
   setMaskScalarInterpolation,
@@ -106,11 +109,23 @@ export function MaskItemBody({
 
   function scalarKeyframe(property: MaskScalarProperty, resolvedValue: number) {
     const active = getActiveMaskScalarKeyframe(layer, mask.id, property, layerTime);
+    const nextTime = findMaskScalarKeyframeTime(layer, mask.id, property, layerTime, 1);
+    const previousTime = findMaskScalarKeyframeTime(layer, mask.id, property, layerTime, -1);
     return {
       active: Boolean(active),
+      hasAny: getMaskScalarKeyframes(layer, mask.id, property).length > 0,
+      hasNext: nextTime !== undefined,
+      hasPrevious: previousTime !== undefined,
       interpolation: active?.interpolation,
       onChangeInterpolation: (interpolation: Parameters<typeof setMaskScalarInterpolation>[4]) =>
         onChange((item) => setMaskScalarInterpolation(item, mask.id, property, layerTime, interpolation)),
+      onClearAll: () => onChange((item) => clearMaskScalarKeyframes(item, mask.id, property)),
+      onNext: () => {
+        if (nextTime !== undefined) seek(nextTime);
+      },
+      onPrevious: () => {
+        if (previousTime !== undefined) seek(previousTime);
+      },
       onToggle: () => onChange((item) => toggleMaskScalarKeyframe(item, mask.id, property, layerTime, resolvedValue))
     };
   }

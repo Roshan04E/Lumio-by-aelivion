@@ -1,18 +1,23 @@
-import { expandEffectRegionMasks, isTrackEnabled } from "@lumio-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes } from "@lumio-by-aelivion/shared";
 import type {
   BlendMode,
   LayerContentTransform,
   Mask,
   MatteRef,
+  NestedGroupSpec,
   PluginEffectManifest,
   PluginLookManifest,
   PluginTransitionManifest,
+  ProjectColorSettings,
   ProjectGraph,
   SourceAsset,
+  SourceColorMetadata,
+  SpeedKeyframe,
   TemplateDefinition,
   TextRun,
   TimelineComposition,
   TimelineKeyframeV2,
+  TrackAudioKeyframe,
   TransitionSpec
 } from "@lumio-by-aelivion/shared";
 
@@ -94,6 +99,8 @@ export interface RenderManifestAsset {
   durationSeconds: number;
   width: number;
   height: number;
+  /** Detected/assumed source color metadata (Rec.709 SDR contract). Absent → assume Rec.709. */
+  color?: SourceColorMetadata | undefined;
 }
 
 export interface RenderManifestLayer {
@@ -112,6 +119,22 @@ export interface RenderManifestLayer {
   textRuns?: TextRun[] | undefined;
   /** Source media in-point (seconds), carried verbatim from the timeline layer for source-aware trimming. */
   sourceInSeconds?: number | undefined;
+  /** Constant playback rate (rate stretch), carried verbatim. 1/absent = normal. */
+  speed?: number | undefined;
+  /**
+   * Speed ramp (layer-local seconds → rate, linear segments), carried verbatim. Overrides `speed`.
+   * Video: Remotion remaps per frame (dynamic trimBefore). Audio: presence routes the render
+   * through the worker's audio post-mix (Remotion `<Audio>` can't ramp).
+   */
+  speedKeyframes?: SpeedKeyframe[] | undefined;
+  /** Track mixer fader gain (0..2, 1 = unity), resolved at manifest build. */
+  trackGain?: number | undefined;
+  /** Track stereo pan (−1..1). Remotion itself can't pan; non-zero pan routes the render through the worker's audio post-mix. */
+  trackPan?: number | undefined;
+  /** Track fader automation (absolute comp seconds, linear), denormalized per layer. */
+  trackVolumeKeyframes?: TrackAudioKeyframe[] | undefined;
+  /** Track pan automation — presence routes the render through the worker's audio post-mix. */
+  trackPanKeyframes?: TrackAudioKeyframe[] | undefined;
   /**
    * Person-extraction matte, carried through verbatim from the timeline layer.
    * `matte.uri` must resolve to an http(s) URL the worker can fetch - an OPFS
@@ -153,6 +176,12 @@ export interface RenderManifest {
     durationSeconds: number;
     durationInFrames: number;
     format: "mp4";
+    /**
+     * Managed color contract for the render (working/output space + range). Both the local export and the
+     * cloud/Remotion renderer tag output from this, so all render paths agree on Rec.709 SDR. `buildRenderManifest`
+     * always sets it; optional so older serialized manifests / literals stay valid (consumers default to Rec.709).
+     */
+    color?: ProjectColorSettings | undefined;
   };
   assets: RenderManifestAsset[];
   plugins?: {
@@ -161,6 +190,19 @@ export interface RenderManifest {
     transitions?: PluginTransitionManifest[] | undefined;
   } | undefined;
   layers: RenderManifestLayer[];
+  /**
+   * Region-effect PASS model (see shared `REGION_PASS_MODEL_DEFAULT`): recorded at manifest build time so
+   * the cloud renderer composites regions the same way the preview/local export that produced this manifest
+   * did — all three renderers flip together through the one shared constant, never independently.
+   */
+  regionPassModel?: boolean | undefined;
+  /**
+   * Compound-clip group specs from `expandNestedCompositions` (NESTING.md Phase C), serialized as a plain
+   * Record (Maps aren't JSON-safe) — `layers` above already carries nested children flattened in as
+   * ordinary entries; this is consulted only to fold them back into a group + build the compound clip's
+   * shell, exactly like the web preview/local export. Absent/empty = no nesting in this manifest.
+   */
+  nestedGroups?: Record<string, NestedGroupSpec> | undefined;
   createdAt: string;
   renderer: {
     engine: "lumio-manifest";
@@ -176,9 +218,16 @@ export function buildRenderManifest(input: {
   quality: RenderQuality;
   createdAt?: string | undefined;
 }): RenderManifest {
+  // Nested sequences (NESTING.md Phase C) expand FIRST — same order as the web preview (VideoPreview.tsx)
+  // and local export (export-core.ts): nest-expand, THEN region-mask expand. `expandNestedCompositions`
+  // returns the SAME composition reference when there's nothing to expand, so a non-nested manifest is
+  // unaffected. Nested children flatten into `layers` below like any other layer (generic over `layer.id`/
+  // `layer.type`); `nestExpansion.groups` is carried separately (see `nestedGroups` on `RenderManifest`) so
+  // SceneStage can fold them back into a group + build the compound clip's shell.
+  const nestExpansion = expandNestedCompositions(input.graph.composition ?? fallbackComposition(input.projectId), input.graph.compositions);
   // Expand color/glow region masks into base + duplicate layers so the Remotion renderer gets them via the
   // normal clip-mask path (duplicate's higher layerIndex → higher zIndex → drawn above its base).
-  const composition = expandEffectRegionMasks(input.graph.composition ?? fallbackComposition(input.projectId));
+  const composition = expandEffectRegionMasks(nestExpansion.composition);
   const assetMap = new Map(input.assets.map((asset) => [asset.id, asset]));
   const visualTracks = composition.tracks.filter((track) => track.type !== "audio");
 
@@ -189,6 +238,45 @@ export function buildRenderManifest(input: {
   const inPointSeconds = clampRange(composition.settings?.timeline.inPointSeconds ?? 0, 0, composition.durationSeconds);
   const outPointSeconds = clampRange(composition.settings?.timeline.outPointSeconds ?? composition.durationSeconds, inPointSeconds, composition.durationSeconds);
   const rangeDurationSeconds = Math.max(1 / composition.fps, outPointSeconds - inPointSeconds);
+  const preserveTimingLayerIds = new Set<string>();
+  const visualEndSecondsByLayerId = new Map<string, number>();
+  const overlapsRange = (startSeconds: number, endSeconds: number) => startSeconds < outPointSeconds && inPointSeconds < endSeconds;
+  const regionCloneBaseId = (layerId: string): string | null => {
+    const marker = layerId.indexOf("__rfx_");
+    return marker > 0 ? layerId.slice(0, marker) : null;
+  };
+
+  for (const track of composition.tracks) {
+    for (const incoming of track.layers) {
+      const transition = incoming.transitionIn;
+      if (!transition || incoming.type === "audio") continue;
+      const incomingStart = incoming.startSeconds;
+      const transitionDuration = Math.max(0, Math.min(transition.durationSeconds, incoming.durationSeconds));
+      const transitionEnd = incomingStart + transitionDuration;
+      if (!overlapsRange(incomingStart, transitionEnd)) continue;
+      preserveTimingLayerIds.add(incoming.id);
+      const outgoing = track.layers.find((layer) => {
+        if (layer.id === incoming.id || layer.type === "audio") return false;
+        return Math.abs(layer.startSeconds + layer.durationSeconds - incomingStart) < 0.05;
+      });
+      if (outgoing) {
+        preserveTimingLayerIds.add(outgoing.id);
+        visualEndSecondsByLayerId.set(outgoing.id, Math.max(visualEndSecondsByLayerId.get(outgoing.id) ?? 0, transitionEnd));
+      }
+    }
+  }
+  for (const track of composition.tracks) {
+    for (const layer of track.layers) {
+      const baseId = regionCloneBaseId(layer.id);
+      if (baseId && preserveTimingLayerIds.has(baseId)) {
+        preserveTimingLayerIds.add(layer.id);
+        const baseVisualEnd = visualEndSecondsByLayerId.get(baseId);
+        if (baseVisualEnd !== undefined) {
+          visualEndSecondsByLayerId.set(layer.id, baseVisualEnd);
+        }
+      }
+    }
+  }
 
   const layers = composition.tracks.flatMap((track, trackIndex) =>
     track.layers
@@ -196,8 +284,73 @@ export function buildRenderManifest(input: {
       .flatMap((layer, layerIndex) => {
         const layerStartSeconds = layer.startSeconds;
         const layerEndSeconds = layer.startSeconds + layer.durationSeconds;
-        if (layerEndSeconds <= inPointSeconds || layerStartSeconds >= outPointSeconds) {
+        const visualEndSeconds = Math.max(layerEndSeconds, visualEndSecondsByLayerId.get(layer.id) ?? layerEndSeconds);
+        if (visualEndSeconds <= inPointSeconds || layerStartSeconds >= outPointSeconds) {
           return [];
+        }
+        const preserveTiming = preserveTimingLayerIds.has(layer.id) && layerStartSeconds < inPointSeconds;
+        if (preserveTiming) {
+          const asset = layer.assetId ? assetMap.get(layer.assetId) : undefined;
+          const visualZIndex = track.type === "audio" ? -1 : visualTracks.length - trackIndex;
+          return [{
+            id: layer.id,
+            trackId: track.id,
+            trackName: track.name,
+            trackType: track.type,
+            zIndex: visualZIndex * 1000 + layerIndex,
+            type: layer.type,
+            name: layer.name,
+            startSeconds: layerStartSeconds - inPointSeconds,
+            durationSeconds: layer.durationSeconds,
+            assetId: layer.assetId,
+            assetUrl: asset?.fileUrl,
+            text: layer.text,
+            textRuns: layer.textRuns,
+            sourceInSeconds: layer.sourceInSeconds,
+            speed: layer.speed,
+            speedKeyframes: layer.speedKeyframes,
+            trackGain: getTrackAudioGain(track),
+            trackPan: getTrackPan(track),
+            trackVolumeKeyframes: track.volumeKeyframes,
+            trackPanKeyframes: track.panKeyframes,
+            matte: layer.matte,
+            masks: layer.masks,
+            transitionIn: layer.transitionIn,
+            blendMode: layer.blendMode,
+            content: layer.content,
+            transform: layer.transform as unknown as Record<string, unknown>,
+            style: {
+              color: layer.color,
+              fontFamily: layer.fontFamily,
+              fontSize: layer.fontSize,
+              fontWeight: layer.fontWeight,
+              italic: layer.italic,
+              letterSpacing: layer.letterSpacing,
+              lineHeight: layer.lineHeight,
+              textWidthPercent: layer.textWidthPercent,
+              textAlign: layer.textAlign,
+              textWarp: layer.textWarp,
+              fit: layer.fit,
+              widthPercent: layer.widthPercent,
+              heightPercent: layer.heightPercent,
+              borderRadius: layer.borderRadius,
+              strokeColor: layer.strokeColor,
+              strokeWidth: layer.strokeWidth,
+              backgroundColor: layer.backgroundColor,
+              backgroundPaddingEm: layer.backgroundPaddingEm,
+              backgroundRadiusEm: layer.backgroundRadiusEm,
+              shadowColor: layer.shadowColor,
+              shadowBlur: layer.shadowBlur,
+              shadowOffsetX: layer.shadowOffsetX,
+              shadowOffsetY: layer.shadowOffsetY
+            },
+            effects: layer.effects,
+            keyframes: layer.keyframes,
+            animations: layer.animations ?? [],
+            animatedProperties: [...new Set([...(layer.keyframes ?? []).map((keyframe) => keyframe.property), ...(layer.animations ?? []).map((animation) => animation.target.property)])],
+            textRevealProgress: layer.textRevealProgress,
+            muted: layer.muted
+          } satisfies RenderManifestLayer];
         }
         const clippedStartSeconds = Math.max(layerStartSeconds, inPointSeconds);
         const clippedEndSeconds = Math.min(layerEndSeconds, outPointSeconds);
@@ -219,7 +372,17 @@ export function buildRenderManifest(input: {
           assetUrl: asset?.fileUrl,
           text: layer.text,
           textRuns: layer.textRuns,
-          sourceInSeconds: layer.sourceInSeconds !== undefined ? layer.sourceInSeconds + trimmedFromHeadSeconds : layer.sourceInSeconds,
+          // Head trim consumes source media at the clip's playback rate (rate stretch / ramp integral).
+          sourceInSeconds:
+            layer.sourceInSeconds !== undefined
+              ? layerSourceTimeSeconds(layer, trimmedFromHeadSeconds)
+              : layer.sourceInSeconds,
+          speed: layer.speed,
+          speedKeyframes: shiftSpeedKeyframes(layer, trimmedFromHeadSeconds),
+          trackGain: getTrackAudioGain(track),
+          trackPan: getTrackPan(track),
+          trackVolumeKeyframes: track.volumeKeyframes,
+          trackPanKeyframes: track.panKeyframes,
           matte: layer.matte,
           masks: layer.masks,
           transitionIn: layer.transitionIn,
@@ -275,7 +438,8 @@ export function buildRenderManifest(input: {
       fps: outputFps,
       durationSeconds: rangeDurationSeconds,
       durationInFrames: Math.round(rangeDurationSeconds * outputFps),
-      format: "mp4"
+      format: "mp4",
+      color: normalizeProjectColorSettings(composition.settings?.color)
     },
     assets: input.assets.map((asset) => ({
       id: asset.id,
@@ -284,10 +448,24 @@ export function buildRenderManifest(input: {
       fileUrl: asset.fileUrl,
       durationSeconds: asset.durationSeconds,
       width: asset.width,
-      height: asset.height
+      height: asset.height,
+      ...(asset.color ? { color: asset.color } : {})
     })),
     plugins: input.graph.plugins,
     layers,
+    regionPassModel: REGION_PASS_MODEL_DEFAULT,
+    // NEST-REVIEW: `nestExpansion.groups` is computed from the composition BEFORE the work-area (in/out
+    // point) clipping above, so a compound clip's SHELL (spec.clip.startSeconds/durationSeconds) is NOT
+    // corrected the way its CHILDREN are (children are ordinary flattened layers and go through the
+    // `clippedStartSeconds`/`trimmedFromHeadSeconds` logic in the `layers` loop like any clip). Only
+    // matters when a compound clip straddles the work-area boundary — the fully-inside case (by far the
+    // common one) is unaffected. `local-export.ts` avoids this by running `clipCompositionToWorkArea`
+    // (a whole-composition clip) BEFORE nest-expansion; this function's work-area logic is instead inline
+    // per-flattened-layer (with transition-preservation nuance `clipCompositionToWorkArea` doesn't have),
+    // so reordering isn't a safe drop-in — a real fix means either giving the shell clip the same
+    // start/duration correction here, or switching this function to the whole-composition clip utility.
+    // Deferred as a narrow, documented gap rather than a rushed fix to shared work-area logic.
+    ...(nestExpansion.groups.size > 0 ? { nestedGroups: Object.fromEntries(nestExpansion.groups) } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
     renderer: {
       engine: "lumio-manifest",

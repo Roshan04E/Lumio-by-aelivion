@@ -29,7 +29,10 @@ import { effectSliderTone } from "./effectSliderTone";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import {
   clamp,
+  clearEffectParamKeyframes,
+  findEffectParamKeyframeTime,
   getActiveEffectParamKeyframe,
+  getEffectParamKeyframes,
   setEffectParamInterpolation,
   toggleEffectParamKeyframe,
   updateEffectParamAtTime
@@ -57,6 +60,7 @@ interface Props {
   layer: TimelineLayer;
   currentTime: number;
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+  onSeek: (seconds: number) => void;
 }
 
 function findEffect(layer: TimelineLayer, type: string): TimelineEffect | undefined {
@@ -134,7 +138,7 @@ function Section({ label, enabled, open, onToggleOpen, onReset, children }: Sect
   );
 }
 
-export function LumetriPanel({ layer, currentTime, onChange }: Props) {
+export function LumetriPanel({ layer, currentTime, onChange, onSeek }: Props) {
   const [openSections, setOpenSections] = useState<Set<SectionId>>(new Set(["basic"]));
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
 
@@ -194,6 +198,9 @@ export function LumetriPanel({ layer, currentTime, onChange }: Props) {
       ? evaluateTimelineEffectParam({ animations: layer.animations, baseValue, effectId: eff.id, paramKey, timeSeconds: layerTime })
       : baseValue;
     const activeKeyframe = eff ? getActiveEffectParamKeyframe(layer, eff.id, paramKey, layerTime) : undefined;
+    const hasAny = eff ? getEffectParamKeyframes(layer, eff.id, paramKey).length > 0 : false;
+    const nextTime = eff ? findEffectParamKeyframeTime(layer, eff.id, paramKey, layerTime, 1) : undefined;
+    const previousTime = eff ? findEffectParamKeyframeTime(layer, eff.id, paramKey, layerTime, -1) : undefined;
     const applyAtTime = (value: number) =>
       onChange((l) => {
         const next = ensureEffect(l, effectType);
@@ -210,12 +217,26 @@ export function LumetriPanel({ layer, currentTime, onChange }: Props) {
         value={animatedValue}
         keyframe={{
           active: Boolean(activeKeyframe),
+          hasAny,
+          hasNext: nextTime !== undefined,
+          hasPrevious: previousTime !== undefined,
           interpolation: activeKeyframe?.interpolation,
           onChangeInterpolation: (interp) =>
             onChange((l) => {
               const next = ensureEffect(l, effectType);
               return setEffectParamInterpolation(next, effectIdOf(next, effectType)!, paramKey, layerTime, interp);
             }),
+          onClearAll: () =>
+            onChange((l) => {
+              const id = effectIdOf(l, effectType);
+              return id ? clearEffectParamKeyframes(l, id, paramKey) : l;
+            }),
+          onNext: () => {
+            if (nextTime !== undefined) onSeek(layer.startSeconds + nextTime);
+          },
+          onPrevious: () => {
+            if (previousTime !== undefined) onSeek(layer.startSeconds + previousTime);
+          },
           onToggle: () =>
             onChange((l) => {
               const next = ensureEffect(l, effectType);

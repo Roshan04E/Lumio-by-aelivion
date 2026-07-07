@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { whenBackgroundIdle } from "../editor/performance/backgroundScheduler";
 
 /**
  * Real audio-waveform peaks for timeline clips. Decodes an audio (or video) asset once via
@@ -13,19 +14,66 @@ const PEAK_BUCKETS = 220;
 // gain detail as the clip gets wider (zoom / horizontal resize) without re-decoding.
 const HIRES_BUCKETS = 2000;
 
+// Bounded LRU (Phase 2): hi-res peak arrays are ~16KB each and the old Map never evicted — a long
+// session accumulated one per asset URL forever. `durations` is evicted in lockstep.
+const MAX_CACHED_PEAKS = 100;
 const cache = new Map<string, number[]>();
 const inflight = new Map<string, Promise<number[] | null>>();
 // Decoded asset duration (seconds), captured alongside the peaks. The hi-res peak array maps linearly onto
 // [0, duration], so this lets a trimmed clip render only the slice of peaks under it.
 const durations = new Map<string, number>();
 
+/** Memory-pressure relief (degradation controller): drop cached peaks — they re-decode lazily. */
+export function clearAudioPeakCaches(): void {
+  cache.clear();
+  durations.clear();
+}
+
+function cacheGet(url: string): number[] | undefined {
+  const value = cache.get(url);
+  if (value !== undefined) {
+    cache.delete(url);
+    cache.set(url, value);
+  }
+  return value;
+}
+function cacheSet(url: string, peaks: number[], duration: number): void {
+  cache.delete(url);
+  cache.set(url, peaks);
+  durations.set(url, duration);
+  while (cache.size > MAX_CACHED_PEAKS) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+    durations.delete(oldest);
+  }
+}
+
+// Shared decode context, CLOSED after an idle window (Phase 2): the old context lived (and held its
+// audio thread) for the whole session even though it's only needed for the seconds a decode runs.
+const CONTEXT_IDLE_CLOSE_MS = 30_000;
 let sharedContext: AudioContext | null = null;
+let contextCloseTimer: ReturnType<typeof setTimeout> | null = null;
 function getContext(): AudioContext | null {
   if (typeof window === "undefined") return null;
+  if (contextCloseTimer !== null) {
+    clearTimeout(contextCloseTimer);
+    contextCloseTimer = null;
+  }
   const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!Ctor) return null;
-  if (!sharedContext) sharedContext = new Ctor();
+  if (!sharedContext || sharedContext.state === "closed") sharedContext = new Ctor();
   return sharedContext;
+}
+function scheduleContextClose(): void {
+  if (contextCloseTimer !== null) clearTimeout(contextCloseTimer);
+  contextCloseTimer = setTimeout(() => {
+    contextCloseTimer = null;
+    if (inflight.size === 0 && sharedContext && sharedContext.state !== "closed") {
+      void sharedContext.close().catch(() => undefined);
+      sharedContext = null;
+    }
+  }, CONTEXT_IDLE_CLOSE_MS);
 }
 
 /** Downsample a decoded buffer to `buckets` peaks, taking the max abs sample per bucket. */
@@ -70,26 +118,31 @@ function resamplePeaks(hires: number[], buckets: number): number[] {
 /** Decode an asset once into a cached hi-res peak array (cheap to resample afterwards). */
 export async function getAudioPeaks(url: string): Promise<number[] | null> {
   if (!url) return null;
-  const cached = cache.get(url);
+  const cached = cacheGet(url);
   if (cached) return cached;
   const pending = inflight.get(url);
   if (pending) return pending;
 
   const task = (async () => {
     try {
+      // Background-gate first (Phase 2): a whole-file fetch + decodeAudioData + the synchronous
+      // bucket loop must never land during playback / a gesture / an export.
+      await whenBackgroundIdle();
       const ctx = getContext();
       if (!ctx) return null;
-      const res = await fetch(url);
+      // no-store: Chromium can't range-cache the dev server's /storage media responses and
+      // throws ERR_CACHE_OPERATION_NOT_SUPPORTED when asked to (same fix as the export decoders).
+      const res = await fetch(url, { cache: "no-store" });
       const data = await res.arrayBuffer();
       const buffer = await ctx.decodeAudioData(data);
       const peaks = bufferToPeaks(buffer, HIRES_BUCKETS);
-      cache.set(url, peaks);
-      durations.set(url, buffer.duration);
+      cacheSet(url, peaks, buffer.duration);
       return peaks;
     } catch {
       return null; // CORS / decode failure → caller falls back to a placeholder
     } finally {
       inflight.delete(url);
+      if (inflight.size === 0) scheduleContextClose();
     }
   })();
   inflight.set(url, task);
@@ -103,13 +156,13 @@ export async function getAudioPeaks(url: string): Promise<number[] | null> {
  * ask for more bars and gain detail instantly.
  */
 export function useAudioPeaks(url: string | undefined, buckets = PEAK_BUCKETS): number[] | null {
-  const [hires, setHires] = useState<number[] | null>(() => (url ? cache.get(url) ?? null : null));
+  const [hires, setHires] = useState<number[] | null>(() => (url ? cacheGet(url) ?? null : null));
   useEffect(() => {
     if (!url) {
       setHires(null);
       return;
     }
-    const cached = cache.get(url);
+    const cached = cacheGet(url);
     if (cached) {
       setHires(cached);
       return;
@@ -149,13 +202,13 @@ export function useAudioPeaksSlice(
   durationSeconds: number,
   buckets = PEAK_BUCKETS
 ): number[] | null {
-  const [hires, setHires] = useState<number[] | null>(() => (url ? cache.get(url) ?? null : null));
+  const [hires, setHires] = useState<number[] | null>(() => (url ? cacheGet(url) ?? null : null));
   useEffect(() => {
     if (!url) {
       setHires(null);
       return;
     }
-    const cached = cache.get(url);
+    const cached = cacheGet(url);
     if (cached) {
       setHires(cached);
       return;

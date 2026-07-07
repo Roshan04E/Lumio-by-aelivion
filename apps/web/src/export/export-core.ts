@@ -10,7 +10,9 @@
 
 import {
   expandEffectRegionMasks,
+  expandNestedCompositions,
   getCompositionFontsUsed,
+  normalizeProjectColorSettings,
   registerLookManifests,
   registerTransitionManifests,
   type PluginLookManifest,
@@ -18,7 +20,8 @@ import {
   type TimelineComposition,
   type TimelineLayer
 } from "@lumio-by-aelivion/shared";
-import { MediaEncoder, type ExportFormat } from "./video-encoder";
+import { EncoderStallRecoveredError, MediaEncoder, REC709_SDR_LIMITED, type ExportFormat } from "./video-encoder";
+import { getRegionPassesEnabled } from "../color/render-engine";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
 import { clipSourceKey, createFrameProvider, type FrameProvider } from "./source-decoder";
 import { audioConfig, encodeMixedChannels, type MixedAudioChannels } from "./audio-mixer";
@@ -30,6 +33,14 @@ export type SourceUrlMap = Record<string, { url: string; kind: "video" | "image"
 
 export interface ExportCoreInput {
   composition: TimelineComposition;
+  /**
+   * Auxiliary compositions (`ProjectGraph.compositions`) — nested sequences referenced by
+   * `TimelineLayer.nestedCompositionId` clips (NESTING.md Phase C, imported prproj nests today). Undefined
+   * = no nesting support for this export (any `nestedCompositionId` clip renders as an empty media layer,
+   * same as a missing/cyclic reference — see `expandNestedCompositions`). Plain JSON — safe across the
+   * Worker postMessage boundary.
+   */
+  compositions?: Record<string, TimelineComposition> | undefined;
   /** Every visual source the timeline references, pre-resolved to fetchable URLs. */
   urlMap: SourceUrlMap;
   /** Pre-mixed audio PCM (null when the timeline is silent). */
@@ -182,8 +193,16 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   // size so the VideoFrame always matches the encoder config (odd comps otherwise crash the encoder).
   const width = Math.max(2, composition.width - (composition.width % 2));
   const height = Math.max(2, composition.height - (composition.height % 2));
+  // Nested sequences (NESTING.md Phase C) expand FIRST — same order as the web preview (VideoPreview.tsx)
+  // and the render manifest (timeline.ts): nest-expand, THEN region-mask expand. Getting this order (or the
+  // even-dimension adjustment's placement) wrong would make export composite a DIFFERENT layer set than the
+  // preview — the repo's #1 parity bug class. `expandNestedCompositions` returns the SAME `composition`
+  // reference when there's nothing to expand, so a non-nested export is byte-identical to before.
+  const nestExpansion = expandNestedCompositions(composition, input.compositions);
   const renderComposition = expandEffectRegionMasks(
-    width === composition.width && height === composition.height ? composition : { ...composition, width, height }
+    width === nestExpansion.composition.width && height === nestExpansion.composition.height
+      ? nestExpansion.composition
+      : { ...nestExpansion.composition, width, height }
   );
   const providerUrlMap = buildProviderUrlMap(renderComposition, urlMap);
 
@@ -199,10 +218,17 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     return postroll;
   };
 
+  // Region-effect pass model: `__rfx_` clone layers are pure structure for the scene draw builder
+  // (mask + effect params) — their media is never decoded/graded (blur passes gaussian the layer's
+  // running image, color passes grade it in-compositor). Loading their providers would burn a full
+  // WebCodecs decoder per region effect for frames nothing reads.
+  const regionPasses = getRegionPassesEnabled();
+
   const activeSourceKeysAt = (t: number): string[] => {
     const keys = new Set<string>();
     for (const track of renderComposition.tracks) {
       for (const layer of track.layers) {
+        if (regionPasses && layer.id.includes("__rfx_")) continue;
         const key = mediaSourceKey(layer);
         if (!key) continue;
         const postroll = trackEndPostroll(layer, track);
@@ -218,8 +244,16 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   // FontFaceSet exists (main thread); the Worker uses the platform's installed fonts.
   const fonts = getCompositionFontsUsed(composition.tracks.flatMap((track) => track.layers));
   if (typeof document !== "undefined" && document.fonts) {
-    await Promise.all(fonts.map((family) => document.fonts.load(`900 64px ${family}`).catch(() => undefined)));
-    await document.fonts.ready;
+    // Timeout-raced: a stuck webfont must never hang the export (the raster falls back to the
+    // platform font, same as the live preview's non-blocking font path).
+    const fontTimeout = new Promise<void>((resolve) => setTimeout(resolve, 3000));
+    await Promise.race([
+      (async () => {
+        await Promise.all(fonts.map((family) => document.fonts.load(`900 64px ${family}`).catch(() => undefined)));
+        await document.fonts.ready;
+      })(),
+      fontTimeout,
+    ]);
   }
 
   onProgress?.(0, "Loading media…");
@@ -281,6 +315,7 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
           },
         }
       : {}),
+    ...(nestExpansion.groups.size > 0 ? { nestedGroups: nestExpansion.groups } : {}),
   };
   const activeCanvas = new OffscreenCanvas(width, height);
   let consecutiveBlackExpectedMediaFrames = 0;
@@ -318,11 +353,16 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     }
   };
 
+  // Managed color contract for this project → container color tag. Working space is always
+  // Rec.709 SDR in v1; only the output RANGE (limited/full) is user-visible, so map it here.
+  const projectColor = normalizeProjectColorSettings(renderComposition.settings?.color);
+  const outputColorSpace = { ...REC709_SDR_LIMITED, fullRange: projectColor.range === "full" };
   const encoder = new MediaEncoder({
     width,
     height,
     fps,
     format,
+    outputColorSpace,
     audio: audio ? { sampleRate: audioConfig.sampleRate, channels: audio.channels.length } : undefined,
   });
 
@@ -360,7 +400,20 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
           consecutiveBlackExpectedMediaFrames = 0;
         }
       }
-      await withTimeout(encoder.addVideoFrame(activeCanvas, i), FRAME_TIMEOUT_MS, `encodeFrame ${i + 1}/${totalFrames}`);
+      try {
+        await withTimeout(encoder.addVideoFrame(activeCanvas, i), FRAME_TIMEOUT_MS, `encodeFrame ${i + 1}/${totalFrames}`);
+      } catch (error) {
+        if (error instanceof EncoderStallRecoveredError) {
+          // The wedged encoder was reset; frames after resumeFrameIndex were queued but never muxed.
+          // Rewind and RE-RENDER them (the compositor is deterministic — identical pixels), so the
+          // recovery leaves no held frame / motion jump in the output. loadSource() recreates any
+          // decoder releaseSpentSources() already freed for this span.
+          onProgress?.(0.04 + (error.resumeFrameIndex / totalFrames) * 0.88, `Encoder recovered — re-rendering frame ${error.resumeFrameIndex + 1}…`);
+          i = error.resumeFrameIndex - 1; // loop increment lands exactly on resumeFrameIndex
+          continue;
+        }
+        throw error;
+      }
       releaseSpentSources(t); // free decoders whose clips are now fully behind the playhead
       // Reserve the last ~8% for audio + mux finalize.
       onProgress?.(0.04 + ((i + 1) / totalFrames) * 0.88, `Rendering frame ${i + 1} / ${totalFrames}`);
@@ -374,6 +427,13 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
 
     onProgress?.(0.96, "Finalizing…");
     const blob = await encoder.finalize();
+    const appliedColor = encoder.getAppliedColorSpace();
+    if (appliedColor) {
+      onProgress?.(0.999, `[color] tagged ${appliedColor.primaries}/${appliedColor.transfer}/${appliedColor.matrix} ${appliedColor.fullRange ? "full" : "limited"} range`);
+    } else {
+      // The encoder emitted no decoderConfig to attach color to → the container color tag isn't guaranteed.
+      onProgress?.(0.999, "[color] export-metadata-fallback: container color tag not guaranteed by this encoder");
+    }
     onProgress?.(1, "Done");
     return blob;
   } finally {

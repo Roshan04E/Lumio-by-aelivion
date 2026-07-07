@@ -22,6 +22,8 @@
  * can't express a 3D LUT), which is why webgl is the default rather than an opt-in.
  */
 
+import { REGION_PASS_MODEL_DEFAULT } from "@lumio-by-aelivion/shared";
+
 export type ColorEngine = "dom" | "webgl";
 export type RendererMode = "legacy" | "webgl";
 
@@ -209,6 +211,102 @@ export function useWebglRenderer(supported: boolean): boolean {
 }
 
 /**
+ * Region-effect PASS model (todo.md "Region-effect model" TRUE fix): region effects render as per-effect
+ * masked post-composite passes inside a per-layer nest in the SceneCompositor, replacing stacked `__rfx_`
+ * clone DRAWS in the composite. Upstream expansion (`expandEffectRegionMasks`) and per-clone grading are
+ * unchanged in this stage — only the composite differs, so the flag is a clean A/B. Default OFF until the
+ * scene:compare region fixtures pass with it on (then flip, the governor playbook).
+ *
+ * Resolution order: `?regionPasses=0|1` → localStorage `lumio.regionPasses` → `VITE_REGION_PASSES` →
+ * `REGION_PASS_MODEL_DEFAULT` (the shared single flip point — the render-manifest builder derives the cloud
+ * renderer's value from the same constant, so all three renderers flip together).
+ */
+export function getRegionPassesEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("regionPasses")) {
+        return truthy(new URLSearchParams(window.location.search).get("regionPasses"));
+      }
+      const stored = window.localStorage?.getItem("lumio.regionPasses");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_REGION_PASSES;
+  return env == null ? REGION_PASS_MODEL_DEFAULT : truthy(env);
+}
+
+/**
+ * Viewer-capture proxy generation (todo.md Phase 6B P1a — "the proxy IS the viewer"): background spans are
+ * rendered through the VISIBLE preview's own SceneCompositor (offscreen, no present) with pooled `<video>`
+ * decode + shared-context grading, instead of the second WebCodecs pipeline in the export Worker. Faithful
+ * to the viewer by construction (same compositor instance, caches, draw builder — plugins included). The
+ * Worker pipeline remains the fallback when capture fails.
+ *
+ * DEFAULT ON (flipped 2026-07-03) — soaked on a real user project: span sealed viewer-first with
+ * `parity-ok` worst-diff 0.00% and zero worker fallbacks, on top of the Playwright live gate
+ * (viewer-ready + parity-ok, fallback chain verified). Escape hatch `?proxyViewerCapture=0`.
+ *
+ * Resolution order: `?proxyViewerCapture=0|1` → localStorage `lumio.proxyViewerCapture` →
+ * `VITE_PROXY_VIEWER_CAPTURE` → true.
+ */
+export function getProxyViewerCaptureEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("proxyViewerCapture")) {
+        return truthy(new URLSearchParams(window.location.search).get("proxyViewerCapture"));
+      }
+      const stored = window.localStorage?.getItem("lumio.proxyViewerCapture");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_PROXY_VIEWER_CAPTURE;
+  return env == null ? true : truthy(env);
+}
+
+/**
+ * Single-context GPU-first preview (Phase 5 — the preview sibling of {@link getExportSingleContext}).
+ * When ON, scene-mode media layers do NOT create their own `MediaWebGLRenderer` context/canvas: each
+ * `WebglMediaLayer` exposes its RAW frame source (the `<video>` element / held WebCodecs `VideoFrame` /
+ * decoded still) plus its `ColorPipeline`, and `ScenePreviewCanvas` grades it through a shared-context
+ * `MediaWebGLRenderer` + `RenderTarget` ON the SceneCompositor's own WebGL2 context (the exact
+ * architecture the single-context EXPORT ships with). One upload per layer per frame instead of 2–3,
+ * zero per-clip GL contexts (no governor churn / context-loss storms), less VRAM.
+ *
+ * ON by default (flipped 2026-07-07) after the full flip ladder: `scene:compare`
+ * (PIXEL_BROWSER_CHANNEL=chrome) 22/22 in BOTH flag states at ZERO threshold changes with
+ * media-fixture diffs byte-identical, `render:compare:pixels` 23/23 at 0.000%, the engagement probe
+ * (`__rfSingleCtxPreview.grades>0` on / untouched off), and a user soak on the :4173 production
+ * build (one found-and-fixed bug: the ruler-click flicker → hold-last-graded-frame, tracker
+ * playback-preview v9). The per-clip-context path stays fully intact behind the escape hatch —
+ * `?singleCtxPreview=0` / localStorage `"0"` — and remains what DOM-compositor mode uses.
+ *
+ * Resolution order: `?singleCtxPreview=0|1` → localStorage `lumio.singleCtxPreview` →
+ * `VITE_SINGLE_CTX_PREVIEW` → true.
+ */
+export function getSingleCtxPreviewEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("singleCtxPreview")) {
+        return truthy(new URLSearchParams(window.location.search).get("singleCtxPreview"));
+      }
+      const stored = window.localStorage?.getItem("lumio.singleCtxPreview");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_SINGLE_CTX_PREVIEW;
+  return env == null ? true : truthy(env);
+}
+
+/**
  * Preview WebGL context governor (todo.md Phase 2) — bounds the number of LIVE preview WebGL2 contexts so a
  * large, many-clip timeline never crosses the browser's ~16-context cap (which force-loses the OLDEST context
  * → `texImage2D` spam + a permanent fall to the non-pixel-identical DOM path). When ON, `gl-context.ts`
@@ -216,11 +314,14 @@ export function useWebglRenderer(supported: boolean): boolean {
  * the least-valuable idle context when over the hard cap) and preview media layers release their renderer
  * after a grace period once their clip leaves the active window.
  *
- * DEFAULT OFF — built behind the flag and proven via a preview-contention stress gate before the default is
- * flipped (the Method-3 convention, mirroring `getExportSingleContext`). Telemetry (`__rfGlContextBudget`) is
- * always on regardless of this flag; only ENFORCEMENT is gated.
+ * DEFAULT ON (flipped 2026-07-02) — proven via the GPU preview-contention stress gate
+ * (`pnpm --filter @lumio-by-aelivion/worker governor:stress`, real Chrome): enforced run bounded peak at 7
+ * live contexts with 12 LRU evictions + clean lazy recreation + the root scene preview alive (settling to
+ * the hard cap 4), while the control run (governor off) climbed unbounded to 13 on the same fixture.
+ * Telemetry (`__rfGlContextBudget`) is always on regardless of this flag; only ENFORCEMENT is gated.
+ * Escape hatch: `?glGovernor=0`.
  *
- * Resolution order: `?glGovernor=0|1` → localStorage `lumio.glGovernor` → `VITE_GL_GOVERNOR` → false.
+ * Resolution order: `?glGovernor=0|1` → localStorage `lumio.glGovernor` → `VITE_GL_GOVERNOR` → true.
  */
 export function getGlGovernorEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
@@ -236,5 +337,5 @@ export function getGlGovernorEnabled(): boolean {
     }
   }
   const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_GL_GOVERNOR;
-  return env == null ? false : truthy(env);
+  return env == null ? true : truthy(env);
 }

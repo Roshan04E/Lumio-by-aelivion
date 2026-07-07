@@ -100,6 +100,7 @@ const updateText: TimelineActionDefinition<z.infer<typeof updateTextSchema>> = {
 
 const addShapeSchema = z.object({
   color: colorSchema.optional(),
+  shapeKind: z.enum(["rectangle", "rounded-rectangle", "ellipse", "line", "triangle", "diamond", "pentagon", "pen"]).optional(),
   x: z.number().min(0).max(100).optional(),
   y: z.number().min(0).max(100).optional(),
   widthPercent: z.number().min(1).max(100).optional(),

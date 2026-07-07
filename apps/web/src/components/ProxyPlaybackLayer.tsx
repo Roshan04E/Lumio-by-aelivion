@@ -32,14 +32,32 @@ export interface ProxyPlaybackHit {
 
 type BufferKey = "A" | "B";
 
+/** Soak telemetry (__rf* convention): how often a coverage exit triggered a live re-prime. */
+function bumpSpanExitReprimes(): void {
+  if (typeof window === "undefined") return;
+  const w = window as { __rfSpanExitReprimes?: number };
+  w.__rfSpanExitReprimes = (w.__rfSpanExitReprimes ?? 0) + 1;
+}
+
 export function ProxyPlaybackLayer({
   currentTime,
   isPlaying,
-  resolveProxyPlayback
+  resolveProxyPlayback,
+  onCoverageEnding,
+  onCoverageEnd
 }: {
   currentTime: number;
   isPlaying: boolean;
   resolveProxyPlayback: (timeSeconds: number) => ProxyPlaybackHit | undefined;
+  /**
+   * The current span ends into a live region within LOOKAHEAD_SECONDS (no next proxy ready). Fired
+   * once per span so the live layers underneath can re-prime BEFORE the overlay reveals them — while
+   * covered they decode unobserved and can silently wedge (the "plays then freezes at span exit"
+   * class, 2026-07-06).
+   */
+  onCoverageEnding?: (() => void) | undefined;
+  /** Coverage actually ended while playing (overlay was presenting last tick). Fired once per exit. */
+  onCoverageEnd?: (() => void) | undefined;
 }) {
   const videoARef = useRef<HTMLVideoElement | null>(null);
   const videoBRef = useRef<HTMLVideoElement | null>(null);
@@ -51,8 +69,14 @@ export function ProxyPlaybackLayer({
   // we release to the live compositor rather than freeze forever (e.g. the incoming proxy failed to load).
   const holdUntilRef = useRef(0);
   // Live inputs so the media event handlers below can re-run reconciliation between clock ticks.
-  const inputsRef = useRef({ currentTime, isPlaying, resolveProxyPlayback });
-  inputsRef.current = { currentTime, isPlaying, resolveProxyPlayback };
+  const inputsRef = useRef({ currentTime, isPlaying, resolveProxyPlayback, onCoverageEnding, onCoverageEnd });
+  inputsRef.current = { currentTime, isPlaying, resolveProxyPlayback, onCoverageEnding, onCoverageEnd };
+  // Was the overlay actually presenting a frame last tick? Distinguishes a coverage EXIT (live layers
+  // were hidden and may have wedged — fire onCoverageEnd + hold briefly) from ordinary uncovered play.
+  const presentingRef = useRef(false);
+  // One onCoverageEnd per exit / one onCoverageEnding per span.
+  const coverageEndFiredRef = useRef(false);
+  const coverageEndingSpanRef = useRef<string | null>(null);
 
   // Drift past which we hard-seek a proxy back onto the playhead (span switch, scrub, or a long stall).
   // Below it we let the element free-run so ordinary playback never stutters from re-seeks.
@@ -96,14 +120,57 @@ export function ProxyPlaybackLayer({
     const backKey = other(frontKey);
     const back = el(backKey);
 
+    // Keep the outgoing front (frozen on its last frame) visible across a boundary/exit so the picture
+    // doesn't flash black while the incoming proxy decodes (or the live layers re-prime) — but only for
+    // a short window, then release to live. Returns whether the front is still being shown.
+    const holdFrontOrRelease = (): boolean => {
+      if (srcRef.current[frontKey] && decoded(front)) {
+        if (!holdUntilRef.current) {
+          holdUntilRef.current = now + MAX_HOLD_MS;
+        }
+        if (now < holdUntilRef.current) {
+          if (!front.paused) {
+            front.pause(); // freeze on the last frame of the finished span; don't run past its range
+          }
+          setOpacity(front, "1");
+          return true;
+        }
+      }
+      setOpacity(front, "0");
+      return false;
+    };
+
     const hit = playing ? resolve(t) : undefined;
     if (!hit) {
+      if (playing && presentingRef.current) {
+        // COVERAGE EXIT while playing: the live compositor underneath decoded unobserved the whole
+        // time we covered it and can silently wedge — the instant, unconditional reveal here was
+        // what exposed the "plays ~4s then freezes" class (2026-07-06). Fire the re-prime hook once
+        // and hold the front's last frame briefly so the live layers get a beat to produce a real
+        // frame before they're on screen.
+        if (!coverageEndFiredRef.current) {
+          coverageEndFiredRef.current = true;
+          bumpSpanExitReprimes();
+          inputsRef.current.onCoverageEnd?.();
+        }
+        hide(back);
+        if (holdFrontOrRelease()) {
+          return;
+        }
+        presentingRef.current = false;
+        holdUntilRef.current = 0;
+        return;
+      }
       // Paused or no ready proxy here — hand the picture back to the live compositor.
       hide(A);
       hide(B);
       holdUntilRef.current = 0;
+      presentingRef.current = false;
+      coverageEndFiredRef.current = false;
+      coverageEndingSpanRef.current = null;
       return;
     }
+    coverageEndFiredRef.current = false;
 
     const localTime = Math.max(0, t - hit.spanStartSeconds);
 
@@ -153,28 +220,12 @@ export function ProxyPlaybackLayer({
       setOpacity(video, "0");
     };
 
-    // Keep the outgoing front (frozen on its last frame) visible across the boundary so the picture doesn't
-    // flash black while the incoming proxy decodes — but only for a short window, then release to live.
-    const holdFrontOrRelease = () => {
-      if (srcRef.current[frontKey] && decoded(front)) {
-        if (!holdUntilRef.current) {
-          holdUntilRef.current = now + MAX_HOLD_MS;
-        }
-        if (now < holdUntilRef.current) {
-          if (!front.paused) {
-            front.pause(); // freeze on the last frame of the finished span; don't run past its range
-          }
-          setOpacity(front, "1");
-          return;
-        }
-      }
-      setOpacity(front, "0");
-    };
-
     // Case 1: the front element already holds this span — the steady state during playback.
     if (srcRef.current[frontKey] === hit.url) {
       prepare(frontKey, hit.url);
-      setOpacity(front, decoded(front) ? "1" : "0");
+      const showing = decoded(front);
+      setOpacity(front, showing ? "1" : "0");
+      presentingRef.current = showing;
       // Warm the next span into the back element as the boundary approaches so its swap is seamless. If the
       // upcoming range has no ready proxy (or is the same span), leave the back idle.
       const ahead = resolve(t + LOOKAHEAD_SECONDS);
@@ -182,6 +233,12 @@ export function ProxyPlaybackLayer({
         warm(backKey, ahead.url);
       } else {
         hide(back); // abandon any half-prepared next span; we're staying on this one
+        if (!ahead && showing && coverageEndingSpanRef.current !== hit.spanId) {
+          // This span ends into a LIVE region within the lookahead — give the hidden live layers a
+          // head start on re-priming BEFORE the reveal (once per span).
+          coverageEndingSpanRef.current = hit.spanId;
+          inputsRef.current.onCoverageEnding?.();
+        }
       }
       holdUntilRef.current = 0;
       return;
@@ -195,16 +252,17 @@ export function ProxyPlaybackLayer({
         hide(front);
         frontRef.current = backKey;
         holdUntilRef.current = 0;
+        presentingRef.current = true;
         return;
       }
-      holdFrontOrRelease();
+      presentingRef.current = holdFrontOrRelease();
       return;
     }
 
     // Case 3: neither element holds this span (a fresh boundary) — assign it to the back and pre-roll it
     // while the front keeps showing its last frame.
     prepare(backKey, hit.url);
-    holdFrontOrRelease();
+    presentingRef.current = holdFrontOrRelease();
   };
 
   // Reconcile every clock tick (currentTime changes each frame while playing) and whenever play state or
@@ -267,6 +325,9 @@ export function ProxyPlaybackLayer({
       return;
     }
     holdUntilRef.current = 0;
+    presentingRef.current = false;
+    coverageEndFiredRef.current = false;
+    coverageEndingSpanRef.current = null;
     for (const video of [videoARef.current, videoBRef.current]) {
       if (video) {
         if (!video.paused) {

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "animation:test": "tsx src/animation-evaluator-test.ts",
+    "skills:test": "tsx src/skills-resolver-test.ts",
     "blend:test": "tsx src/blend-parity-test.ts",
     "build": "tsc -p tsconfig.json --noEmit",
     "caption:qa": "tsx src/caption-qa-test.ts",
@@ -15,9 +16,12 @@
     "remotion:scene-compare": "tsx src/remotion-scene-compare.ts",
     "color:compare": "tsx src/color-engine-compare.ts",
     "scene:compare": "tsx src/scene-compositor-compare.ts",
+    "audio:postmix:test": "tsx src/audio-post-mix-test.ts",
     "export:finish-guard": "tsx src/export-finish-guard.ts",
     "export:stress": "tsx src/export-stress.ts",
     "export:live-stress": "tsx src/export-live-stress.ts",
+    "wc:gate": "tsx src/wc-decoder-gate.ts",
+    "governor:stress": "tsx src/governor-stress.ts",
     "export:worker-scene-probe": "tsx src/export-worker-scene-probe.ts",
     "export:worker-scene": "tsx src/export-worker-scene.ts",
     "media:shared-probe": "tsx src/media-shared-context-probe.ts",
@@ -26,13 +30,14 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "@prisma/client": "^6.14.0",
     "@lumio-by-aelivion/render-templates": "workspace:*",
     "@lumio-by-aelivion/shared": "workspace:*",
+    "@prisma/client": "^6.14.0",
     "@remotion/bundler": "^4.0.479",
     "@remotion/renderer": "^4.0.479",
     "bullmq": "^5.58.0",
     "dotenv": "^17.2.1",
+    "ffmpeg-static": "^5.3.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "remotion": "^4.0.479"

@@ -9,7 +9,7 @@
  * pipeline on the main thread (where the `<video>`-seek fallback exists).
  */
 
-import { clipCompositionToWorkArea, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@lumio-by-aelivion/shared";
+import { clipCompositionToWorkArea, expandNestedCompositions, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@lumio-by-aelivion/shared";
 import { detectBrowserToolCapabilities } from "../tools/capabilities";
 import { type ExportFormat } from "./video-encoder";
 import {
@@ -26,6 +26,9 @@ import type { ExportWorkerRequest, ExportWorkerResponse } from "./export-worker-
 
 export interface LocalExportRequest {
   composition: TimelineComposition;
+  /** Auxiliary compositions (`ProjectGraph.compositions`) — nested sequences (NESTING.md Phase C).
+   *  Undefined = no nesting support for this export. */
+  compositions?: Record<string, TimelineComposition> | undefined;
   /** Resolve a timeline asset id to a playable URL (object URL / OPFS-resolved). */
   urlForAsset: (assetId: string) => string | undefined;
   format?: ExportFormat;
@@ -82,11 +85,19 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   // Resolve sources + mix audio on the main thread (both need Window-only APIs).
   onProgress?.(0.01, "Resolving sources...");
   await yieldToBrowser();
-  const urlMap = buildSourceUrlMap(composition, urlForAsset);
+  // NESTED children (NESTING.md Phase C) must be visible to BOTH URL resolution and audio collection below
+  // — neither `buildSourceUrlMap` nor `collectAudioLayers` recurses into `nestedCompositionId` clips on its
+  // own, so an asset/audio-clip used ONLY inside a nested sequence would otherwise silently drop out of the
+  // export. export-core.ts repeats this same expansion internally for the actual video render (it's also
+  // called directly by fixtures/tests, so it can't rely on this call site having already done it) —
+  // expandNestedCompositions is cheap/pure, so doing it twice per export is an acceptable cost for keeping
+  // buildSourceUrlMap/collectAudioLayers's own signatures untouched.
+  const expandedForSourceResolution = expandNestedCompositions(composition, request.compositions).composition;
+  const urlMap = buildSourceUrlMap(expandedForSourceResolution, urlForAsset);
 
   onProgress?.(0.02, "Mixing audio…");
   await yieldToBrowser();
-  const audioLayers = collectAudioLayers(composition, urlForAsset);
+  const audioLayers = collectAudioLayers(expandedForSourceResolution, urlForAsset);
   const mixedBuffer = await Promise.race([
     mixTimelineAudio(audioLayers, composition.durationSeconds),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 20_000))
@@ -100,6 +111,7 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   const singleContext = getExportSingleContext();
   const input: ExportCoreInput = {
     composition,
+    compositions: request.compositions,
     urlMap,
     audio,
     format,

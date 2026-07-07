@@ -36,22 +36,49 @@ interface OpentypeModule {
  */
 export const DEFAULT_WARP_FONT_FILE = "fonts/Roboto-Regular.ttf";
 
-const warpFontCatalog: Record<string, string> = {
-  // e.g. "Impact": "fonts/Anton-Regular.ttf", "Georgia": "fonts/LiberationSerif-Regular.ttf"
+/** One catalog family: the regular binary plus an optional bold cut (weight >= 600 picks bold). */
+export interface WarpFontEntry {
+  regular: string;
+  bold?: string;
+}
+
+// Metric-compatible open fonts for every renderSafeFonts family (2026-07-03 — the catalog was
+// EMPTY, so with warp active every family rendered as the Roboto fallback and "changing the font
+// did nothing", user report). Bold cuts matter: the editor's default text weight is 900, so a
+// regular-only outline makes warping look like a font SWAP (heavy Arial → thin Arimo). Anton is a
+// single-style display face (no bold cut exists). Files are hosted in BOTH apps/web/public/fonts
+// and apps/worker/public/fonts — keep them in sync when adding entries.
+const warpFontCatalog: Record<string, WarpFontEntry> = {
+  Arial: { regular: "fonts/Arimo-Regular.ttf", bold: "fonts/Arimo-Bold.ttf" }, // Arimo = metric-compatible Arial (OFL)
+  Helvetica: { regular: "fonts/Arimo-Regular.ttf", bold: "fonts/Arimo-Bold.ttf" },
+  "system-ui": { regular: "fonts/Arimo-Regular.ttf", bold: "fonts/Arimo-Bold.ttf" },
+  Impact: { regular: "fonts/Anton-Regular.ttf" }, // Anton = classic Impact-style display (OFL)
+  Haettenschweiler: { regular: "fonts/Anton-Regular.ttf" },
+  Georgia: { regular: "fonts/Tinos-Regular.ttf", bold: "fonts/Tinos-Bold.ttf" }, // Tinos = metric-compatible Times (closest hosted serif)
+  "Times New Roman": { regular: "fonts/Tinos-Regular.ttf", bold: "fonts/Tinos-Bold.ttf" },
+  "Courier New": { regular: "fonts/Cousine-Regular.ttf", bold: "fonts/Cousine-Bold.ttf" }, // Cousine = metric-compatible Courier (OFL)
+  Courier: { regular: "fonts/Cousine-Regular.ttf", bold: "fonts/Cousine-Bold.ttf" },
 };
 
 /** Registers/overrides catalog entries (for the future font-library integration). */
-export function registerWarpFonts(entries: Record<string, string>): void {
+export function registerWarpFonts(entries: Record<string, WarpFontEntry>): void {
   Object.assign(warpFontCatalog, entries);
 }
 
-/** Resolves a font family to its served binary path (relative to the app font root). */
-export function warpFontFile(family: string): string {
-  return warpFontCatalog[primaryFontFamily(family)] ?? DEFAULT_WARP_FONT_FILE;
+/** CSS-style cutoff: weights 600+ use the bold cut when the family has one. */
+function wantsBold(weight: number | undefined): boolean {
+  return typeof weight === "number" && Number.isFinite(weight) && weight >= 600;
 }
 
-/** Resolves a primary font family (e.g. "Courier New") to a font-binary URL. */
-export type FontBinaryResolver = (family: string) => string | undefined;
+/** Resolves a font family (+ weight) to its served binary path (relative to the app font root). */
+export function warpFontFile(family: string, weight?: number): string {
+  const entry = warpFontCatalog[primaryFontFamily(family)];
+  if (!entry) return DEFAULT_WARP_FONT_FILE;
+  return (wantsBold(weight) ? entry.bold : undefined) ?? entry.regular;
+}
+
+/** Resolves a primary font family (e.g. "Courier New") + weight to a font-binary URL. */
+export type FontBinaryResolver = (family: string, weight?: number) => string | undefined;
 
 let fontResolver: FontBinaryResolver | undefined;
 
@@ -77,13 +104,14 @@ async function getOpentype(): Promise<OpentypeModule> {
 
 const fontCache = new Map<string, Promise<OpentypeFont | undefined>>();
 
-/** Loads + parses the font binary for a family, cached so each font is fetched once. */
-export function loadWarpFont(family: string): Promise<OpentypeFont | undefined> {
-  const key = primaryFontFamily(family) || "__default__";
+/** Loads + parses the font binary for a family (+ weight), cached so each font is fetched once. */
+export function loadWarpFont(family: string, weight?: number): Promise<OpentypeFont | undefined> {
+  const primary = primaryFontFamily(family) || "__default__";
+  const key = `${primary}|${wantsBold(weight) ? "bold" : "regular"}`;
   const existing = fontCache.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const url = fontResolver?.(key);
+    const url = fontResolver?.(primary, weight);
     if (!url) return undefined;
     try {
       const response = await fetch(url);
@@ -103,6 +131,7 @@ export function loadWarpFont(family: string): Promise<OpentypeFont | undefined> 
 export interface WarpTextStyleInput {
   fontSize?: number | string | undefined;
   fontFamily?: string | undefined;
+  fontWeight?: number | string | undefined;
   color?: string | undefined;
   textAlign?: string | undefined;
   padding?: string | number | undefined;
@@ -173,12 +202,14 @@ export async function buildWarpedTextPaths(
 
   const family = primaryFontFamily(style.fontFamily);
   const fontSize = num(style.fontSize, 48);
+  const fontWeight = num(style.fontWeight, 400);
   const normalized = normalizeTextWarp(warp);
   const stroke = parseTextStroke(style.WebkitTextStroke);
   const baseColor = style.color ?? "#ffffff";
 
   const cacheKey = JSON.stringify([
     family,
+    fontWeight,
     Math.round(fontSize),
     normalized,
     baseColor,
@@ -188,7 +219,7 @@ export async function buildWarpedTextPaths(
   const cached = pathsCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  const font = await loadWarpFont(family);
+  const font = await loadWarpFont(family, fontWeight);
   if (!font) return undefined;
 
   const scale = fontSize / font.unitsPerEm;

@@ -1,17 +1,21 @@
 import multer from "multer";
 import { Router } from "express";
-import { createAssetSchema, moduleTypeSchema } from "@lumio-by-aelivion/shared";
+import { createAssetSchema, moduleTypeSchema, normalizeSourceColorMetadata } from "@lumio-by-aelivion/shared";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { serializeAsset } from "../lib/asset-serializer";
+import { asJson } from "../lib/json";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { processSourceAsset } from "../services/mockProcessing.service";
 import { deleteAsset, saveUpload } from "../services/storage.service";
 
+// 1 GiB: real camera/phone footage regularly exceeds the old 250MB cap (LIMIT_FILE_SIZE in the
+// 2026-07-05 soak). Kept on memoryStorage for now, so this is also the per-request RAM bound —
+// going higher than this needs disk/stream storage first, not a bigger number here.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 250 * 1024 * 1024 }
+  limits: { fileSize: 1024 * 1024 * 1024 }
 });
 
 export const assetsRouter = Router();
@@ -69,7 +73,9 @@ assetsRouter.post(
         // exactOptionalPropertyTypes).
         ...(input.tags ? { tags: input.tags } : {}),
         ...(input.external ? { externalJson: input.external } : {}),
-        ...(input.ai ? { aiJson: input.ai } : {})
+        ...(input.ai ? { aiJson: input.ai } : {}),
+        // Re-normalize the client-detected color to the canonical SourceColorMetadata shape before storing.
+        ...(input.color ? { colorJson: asJson(normalizeSourceColorMetadata(input.color)) } : {})
       }
     });
 
@@ -92,6 +98,39 @@ assetsRouter.get(
     }
 
     return ok(res, "Asset", { asset: serializeAsset(asset), derivedAssets: asset.derivedAssets });
+  })
+);
+
+assetsRouter.patch(
+  "/:id",
+  requireAuth,
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const id = getParam(req, "id");
+    const input = validateBody(
+      z.object({
+        folder: z.string().trim().max(120).nullable().optional(),
+        // Free-form metadata tags; the editor also stores its color label here as "label:<color>".
+        tags: z.array(z.string().trim().min(1).max(60)).max(50).optional()
+      }),
+      req.body
+    );
+    const asset = await prisma.sourceAsset.findFirst({
+      where: { id, userId: req.user.id }
+    });
+
+    if (!asset) {
+      throw new HttpError(404, "Asset not found");
+    }
+
+    const data: { folder?: string | null; tags?: string[] } = {};
+    if (input.folder !== undefined) data.folder = input.folder || null;
+    if (input.tags !== undefined) data.tags = input.tags;
+    const updated = await prisma.sourceAsset.update({
+      where: { id: asset.id },
+      data
+    });
+
+    return ok(res, "Asset updated", { asset: serializeAsset(updated) });
   })
 );
 

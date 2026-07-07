@@ -17,13 +17,45 @@ cache manifest + ruler UI (P6 partial). **Mostly landed 2026-07-02:**
   invalidation, double-buffered `<video>` playback, background Worker generator). Playback proxies are export-grade.
 - ✅ **Phase 8 export black clips** — fixed (guard + probes). No longer a gap.
 
-**Remaining:** flip the governor default on after a GPU preview-contention stress gate; OPFS rehydration on reload
-(needs a persisted per-span content signature); explicit backward-seek renderer dedup. [todo.md:68-83](todo.md#L68)
+- ✅ **Governor default ON (2026-07-02)** — the required GPU preview-contention stress gate is built and green:
+  `governor:stress` (`GovernorStressPage.tsx` + `apps/worker/src/governor-stress.ts`; enforced peak 7 bounded,
+  12 evictions, clean recreation, preview alive, settles to hard cap 4; control run unbounded 13). Escape hatch `?glGovernor=0`.
 
-## 2. Region-effect architecture (known-fragile; real fix deferred)
-- **TRUE fix**: region effects as per-effect masked post-composite passes (the AE model) — retires `__rfx_` clones. [todo.md:249](todo.md#L249)
-- **P1a/P1b**: proxy should capture the viewer's `SceneCompositor` + parity self-check (today a fragile second pipeline). [todo.md:230](todo.md#L230)
+- ✅ **OPFS rehydration on reload (2026-07-02)** — persisted per-span index (`proxy-span-index.json`, id + base
+  signature + content signature + bytes) in the proxy OPFS dir; on open, `rehydratePersistedProxies`
+  (EditorPage) seals matching spans through `markSpanReady`'s own staleness validation (stale → blob deleted).
+  Blobs are no longer wiped on unmount (URL release only); foreign-signature records age out after 24h.
+
+**Remaining:** explicit backward-seek renderer dedup. [todo.md:68-83](todo.md#L68)
+
+## 2. Region-effect architecture — TRUE fix SHIPPED, default ON (2026-07-02)
+- Region effects are per-effect masked post-composite passes (the AE model) **by default in all three
+  renderers** (`REGION_PASS_MODEL_DEFAULT`, threaded to Remotion via `RenderManifest.regionPassModel`;
+  escape hatch `?regionPasses=0`). Effects COMBINE in overlaps; no clone decoders in preview OR export.
+  Gate ladder: `scene:compare` 22/22 both states incl. the 3-way `overlap-region-effects` fixture;
+  `render:compare:pixels` region fixtures 7/7 + a strict-threshold cross-renderer overlap check (1.186%
+  vs ~25% if a renderer had stayed on the clone model). **Remaining cleanup (after soak)**: retire
+  `expandEffectRegionMasks` scene-path call sites + `buildRegionBlurCloneAliases` (DOM fallback still
+  expands). [todo.md](todo.md)
+- **P3a** (registry-metadata decode-share) is largely mooted by the pass model — revisit after cleanup.
+- **P1a/P1b DEFAULT ON (flipped 2026-07-03)**: proxy spans render through the LIVE viewer compositor
+  (offscreen, no present; pooled `<video>` decode; zero new GL contexts) with a parity self-check before
+  sealing (either pipeline). Real-project soak: viewer-first seal, parity-ok 0.00%, zero worker fallbacks.
+  Escape hatch `?proxyViewerCapture=0`. M1a/M1b kept — they harden the still-live worker FALLBACK path.
+  [todo.md](todo.md)
 - **P3a**: registry-metadata-driven decode-share instead of `type === "blur"` hardcode. [todo.md:229](todo.md#L229)
+
+## 2b. Preview↔export color parity — FIXED (2026-07-03)
+- **Cloud (Remotion) export color blowout FIXED**: `renderMedia` ran without `colorSpace` → ffmpeg wrote
+  full-range/untagged YUV that players decoded as limited BT.709 (measured ±19/255 on grays, "punchy"
+  saturated look vs preview). Fix: `colorSpace: "bt709"` **plus** `disallowParallelEncoding: true` in
+  `apps/worker/src/remotion-renderer.ts` — Remotion's parallel pre-encode converts with BT.601 while
+  tagging BT.709 (measured ±39/255 on saturated colors); the ffmpeg stitch path's `zscale=matrix=709`
+  converts correctly. Verified: patch-grid manifest → real Remotion render → Chrome decode = ±1/255.
+- **Local WebCodecs export measured clean** (±1/255 roundtrip, canvas + WebGL + Worker OffscreenCanvas;
+  encoder meta tags bt709 and mp4/webm muxers write it). Known edge: `new VideoFrame(canvas)` premultiplies
+  straight-alpha pixels — any composited output pixel with alpha<255 darkens in export (α=0.9 → RGB×0.9).
+  Compositor initializes the accumulator opaque, so this only matters if a future path emits alpha<1.
 
 ## 3. Export paths not built
 - **Browser export renderer** & **local desktop renderer**. [architecture.md:148-150](architecture.md#L148)

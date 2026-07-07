@@ -22,6 +22,7 @@ model User {
   walletTransactions WalletTransaction[]
   memoryFacts        MemoryFact[]
   pluginPackages     PluginPackage[]
+  generationJobs     GenerationJob[]
 }
 
 /**
@@ -136,6 +137,8 @@ model SourceAsset {
   projectId       String?
   externalJson    Json?
   aiJson          Json?
+  // Detected/assumed source color metadata (primaries/transfer/matrix/range); absent → assume Rec.709.
+  colorJson       Json?
   updatedAt       DateTime       @default(now()) @updatedAt
   user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   derivedAssets   DerivedAsset[]
@@ -195,6 +198,33 @@ model RenderJob {
 
   @@index([projectId])
   @@index([userId])
+}
+
+/**
+ * AI asset generation job. One row per generate request (image or video). Image jobs
+ * usually complete quickly; video jobs run async against the provider queue and are
+ * polled via GET /api/generate/:id. `resultAssetId` points at the ingested
+ * SourceAsset(source="ai") once done. Pricing is metadata only (no gating).
+ */
+model GenerationJob {
+  id            String    @id @default(cuid())
+  userId        String
+  projectId     String?
+  skillId       String
+  taskKind      String
+  provider      String
+  modelId       String
+  params        Json
+  status        String    @default("queued")
+  progress      Int       @default(0)
+  resultAssetId String?
+  errorMessage  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
 }
 
 model Payment {

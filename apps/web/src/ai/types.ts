@@ -8,9 +8,10 @@ export type { IntentScope } from "./planner/intent-continuity";
  * reviews before anything is applied. Steps are one of:
  *  - `timelineAction` — invoke a registered Timeline Action (free, local).
  *  - `tool` — open an existing tool window (e.g. tracker); may pause for input.
+ *  - `skill` — run a Skill (e.g. AI asset generation); may hand off to a studio.
  *  - `clarify` — ask the user a question before continuing.
  */
-export type PlanStepKind = "timelineAction" | "tool" | "clarify";
+export type PlanStepKind = "timelineAction" | "tool" | "skill" | "clarify";
 
 export interface PlanStep {
   id: string;
@@ -24,6 +25,9 @@ export interface PlanStep {
   toolSlug?: string;
   /** For `tool` — the user must confirm/tweak in the tool window before resuming. */
   requiresInput?: boolean;
+  /** For `skill` — which skill + task kind to run (params carries the task params). */
+  skillId?: string;
+  taskKind?: string;
   /** For `clarify`. */
   question?: string;
   cost: CostEstimate;

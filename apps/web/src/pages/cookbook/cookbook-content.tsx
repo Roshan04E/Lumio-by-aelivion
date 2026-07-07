@@ -15,9 +15,11 @@ import {
   Boxes,
   GitBranch,
   Layers,
+  Palette,
   Route,
   Sparkles,
   Wrench,
+  Zap,
   type LucideIcon
 } from "lucide-react";
 
@@ -301,6 +303,35 @@ export const cookbookSections: CookbookSection[] = [
             </UnderTheHood>
           </>
         )
+      },
+      {
+        id: "export",
+        title: "Export happens on your machine",
+        descriptor: "WebCodecs encoding — MP4 or WebM, no upload.",
+        render: () => (
+          <>
+            <p>
+              When you export, the encode runs <strong>locally in your browser</strong> using WebCodecs — your footage never
+              leaves your device and there's no render queue to wait in. The scene compositor draws each frame from the same
+              manifest the preview uses, then hands it to a hardware-accelerated video encoder.
+            </p>
+            <ul className="cookbook-people">
+              <li>
+                <strong>MP4 (H.264 + AAC)</strong> — the universally-playable default, ready to post anywhere.
+              </li>
+              <li>
+                <strong>WebM (VP9 + Opus)</strong> — the smaller, modern option when file size matters more than reach.
+              </li>
+            </ul>
+            <UnderTheHood>
+              <p>
+                The encoder writes a color descriptor into the container (the MP4 <code>colr</code> / WebM <code>Colour</code>
+                box), tagged Rec.709, so players interpret your colors the same way the editor did. Audio is mixed down through
+                a shared mixer that respects each track's fader and pan, so what you hear in preview is what the file carries.
+              </p>
+            </UnderTheHood>
+          </>
+        )
       }
     ]
   },
@@ -413,6 +444,126 @@ export const cookbookSections: CookbookSection[] = [
               control. Just like the renderers, animation is evaluated by a single shared evaluator — the editor and the
               exporter interpolate keyframes with identical math, so motion never drifts between what you tune and what you ship.
             </p>
+            <p className="cookbook-muted">
+              Auto-keyframe is available too: with it on, changing a value at the playhead writes a keyframe there instead of
+              editing the whole clip — the same rule the inspector and the effect rows share.
+            </p>
+          </>
+        )
+      },
+      {
+        id: "transitions",
+        title: "Transitions are real shaders",
+        descriptor: "One two-texture GPU engine, never a CSS fade.",
+        render: () => (
+          <>
+            <p>
+              Every effect and transition in Lumio is a genuine GPU shader or algorithm — never a CSS overlay faking the look.
+              A dissolve actually blends two clips on the GPU; a glitch is a real fragment shader. That's the bar: pro-grade,
+              but light enough to run smoothly in a browser.
+            </p>
+            <UnderTheHood>
+              <p>
+                All transitions run through <em>one</em> unified two-texture engine: the outgoing and incoming clips are both
+                bound as textures and a shader mixes them by a single <code>0..1</code> progress value. Adding a new transition
+                is adding a shader recipe — the timing, direction mapping, and manifest wiring are shared, so a transition
+                behaves identically in the small preview gallery, the editor, and the export.
+              </p>
+            </UnderTheHood>
+          </>
+        )
+      }
+    ]
+  },
+  {
+    id: "color",
+    title: "Color & scopes",
+    blurb: "A managed color pipeline and broadcast-style scopes you can actually trust.",
+    icon: Palette,
+    subsections: [
+      {
+        id: "managed-color",
+        title: "Managed color, not guesswork",
+        descriptor: "A Rec.709 pipeline where the grade is real.",
+        render: () => (
+          <>
+            <p>
+              Lumio grades in a managed color pipeline rather than nudging raw pixels and hoping. Exposure, temperature, tint,
+              contrast, saturation, and the curves all operate in a consistent Rec.709 SDR space, so a move you make reads the
+              same on your screen and in the exported file — the same "preview equals export" contract the rest of the pipeline
+              lives by, applied to color.
+            </p>
+            <UnderTheHood>
+              <p>
+                The grade is computed once and shared: the editor preview and the exporter run the same color math, and the
+                export tags the container Rec.709 so downstream players don't reinterpret your look. No hidden auto-grade is
+                applied to your clip — what you dial in is the whole story.
+              </p>
+            </UnderTheHood>
+          </>
+        )
+      },
+      {
+        id: "scopes",
+        title: "Scopes that tell the truth",
+        descriptor: "Waveform, RGB parade, vectorscope, histogram.",
+        render: () => (
+          <>
+            <p>
+              Grading by eye lies to you — monitors vary, rooms vary. So Lumio ships real scopes to measure what you're doing:
+            </p>
+            <ul className="cookbook-people">
+              <li><strong>Waveform</strong> — luma (Rec.709 Y) per column, with legal-range guides so you can see clipping.</li>
+              <li><strong>RGB parade</strong> — red, green, and blue waveforms side by side for spotting color casts.</li>
+              <li><strong>Vectorscope</strong> — a Cb/Cr dot plot with the skin-tone line at ~123° to keep faces natural.</li>
+              <li><strong>Histogram</strong> — tonal distribution across the frame at a glance.</li>
+            </ul>
+            <p className="cookbook-muted">
+              Scopes update in detail while paused (for careful grading) and stay lighter during playback, all in Rec.709 SDR.
+            </p>
+          </>
+        )
+      }
+    ]
+  },
+  {
+    id: "speed",
+    title: "Speed on real hardware",
+    blurb: "How Lumio stays smooth on a modest laptop without lying about quality.",
+    icon: Zap,
+    subsections: [
+      {
+        id: "proxies",
+        title: "Proxies & adaptive quality",
+        descriptor: "Smooth while you work, full quality when it counts.",
+        render: () => (
+          <>
+            <p>
+              Editing 4K in a browser could crawl, so Lumio quietly builds lighter <strong>proxy</strong> versions of your
+              sources to scrub and play against. You get a responsive timeline on ordinary hardware; the originals are always
+              kept for export, so nothing about the final quality is compromised.
+            </p>
+            <ul className="cookbook-people">
+              <li>
+                <strong>Adaptive resolution</strong> — while playing, the preview can drop resolution when frames start to
+                slip and recover when things are smooth. You can also pin a fixed ¼ / ½ / full quality.
+              </li>
+              <li>
+                <strong>Full-quality playback</strong> — at fixed full quality (with adaptive off), playback bypasses the
+                proxies entirely and shows original pixels, paused frame included.
+              </li>
+              <li>
+                <strong>Decode budget</strong> — a smart budget prioritizes the frames you're actually looking at, so decoding
+                work isn't wasted on frames off-screen.
+              </li>
+            </ul>
+            <UnderTheHood>
+              <p>
+                Proxies are generated per source on ingest and cached on-device; while you play at full quality, proxy
+                generation parks itself so it isn't taxing the decode budget nobody is consuming. It's all effect-agnostic and
+                registry-driven — the speed system doesn't care which effects or transitions a clip uses.
+              </p>
+            </UnderTheHood>
           </>
         )
       }
@@ -494,6 +645,14 @@ export const cookbookSections: CookbookSection[] = [
             <dd>A reusable output a tool produces — a transcript, a mask sequence, a tracking path — that other tools can consume.</dd>
             <dt>OPFS</dt>
             <dd>Origin Private File System — private browser storage where generated artifacts are cached on your machine.</dd>
+            <dt>Proxy</dt>
+            <dd>A lighter stand-in version of a source clip, used for smooth scrubbing and playback. The original is always kept for export.</dd>
+            <dt>WebCodecs</dt>
+            <dd>The browser API Lumio uses to encode your export locally — the reason your footage never has to be uploaded.</dd>
+            <dt>Scopes</dt>
+            <dd>Measurement displays (waveform, RGB parade, vectorscope, histogram) that show what your grade is actually doing, beyond what the eye can judge.</dd>
+            <dt>Rec.709</dt>
+            <dd>The standard HD color space Lumio grades and exports in, tagged into the file so players show your colors correctly.</dd>
           </dl>
         )
       }

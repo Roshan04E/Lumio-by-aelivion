@@ -6,7 +6,7 @@ import { SceneStage, getRemotionCompositor } from "./SceneStage";
 
 // Text-warp outline engine: resolve warp font families to the binaries served from the
 // Remotion public/ dir, so the exported warp matches the editor preview exactly.
-configureFontResolver((family) => staticFile(warpFontFile(family)));
+configureFontResolver((family, weight) => staticFile(warpFontFile(family, weight)));
 
 export const compositionId = "LumioTimeline";
 

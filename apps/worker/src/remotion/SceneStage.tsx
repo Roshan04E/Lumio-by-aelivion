@@ -24,9 +24,12 @@ import {
   getCompositionMediaEffects,
   getCompositionObjectFit,
   getCompositionVolume,
+  getTrackAudioGainAt,
+  layerSourceTimeSeconds,
   registerLookManifests,
   registerTransitionManifests,
   type ColorPipeline,
+  type NestedGroupSpec,
   type SceneFrameSpec,
   type ScenePreviewTransition,
   type TimelineLayer,
@@ -137,12 +140,20 @@ class SceneController {
   private readonly mediaRenderers = new Map<string, MediaWebGLRenderer>();
   private readonly mediaPipelineKeys = new Map<string, string>();
   private readonly gradeRenderers = new Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>();
+  // Per-nested-composition matte caches (NESTING.md Phase C) — mirrors `this.matteCache` but sized per
+  // nest. See `nestMatteCaches` doc on `BuildSceneDrawsInputs`.
+  private readonly nestMatteCaches = new Map<string, SceneMaskMatteCache>();
 
   constructor(
     canvas: HTMLCanvasElement,
     private readonly width: number,
     private readonly height: number,
-    private readonly backgroundColor: string
+    private readonly backgroundColor: string,
+    private readonly regionPassModel: boolean,
+    // Compound-clip group specs (from `manifest.nestedGroups`, rebuilt into a Map by the caller). `layers`
+    // passed into `composite()` already carries nested children flattened in as ordinary entries; this is
+    // consulted only to fold them back into a group + build the compound clip's shell.
+    private readonly nestedGroups?: ReadonlyMap<string, NestedGroupSpec>
   ) {
     this.compositor = new SceneCompositor(canvas, width, height);
     this.matteCache = new SceneMaskMatteCache(width, height);
@@ -251,7 +262,13 @@ class SceneController {
       matteCache: this.matteCache,
       gradeRenderers: this.gradeRenderers,
       getMediaGraded: (id) => gradedById.get(id) ?? null,
-      createCanvas: () => document.createElement("canvas")
+      createCanvas: () => document.createElement("canvas"),
+      // Region-effect pass model: recorded in the manifest at build time from the ONE shared
+      // REGION_PASS_MODEL_DEFAULT, so the cloud render composites regions exactly like the
+      // preview/local export that produced the manifest. Never hardcode a different value here.
+      regionPassModel: this.regionPassModel,
+      nestedGroups: this.nestedGroups,
+      nestMatteCaches: this.nestMatteCaches
     });
 
     const spec: SceneFrameSpec = {
@@ -274,6 +291,8 @@ class SceneController {
     };
     safe(() => this.compositor.dispose());
     safe(() => this.matteCache.dispose());
+    for (const cache of this.nestMatteCaches.values()) safe(() => cache.dispose());
+    this.nestMatteCaches.clear();
     safe(() => this.rasterizer.dispose());
     for (const renderer of this.mediaRenderers.values()) safe(() => renderer.dispose());
     this.mediaRenderers.clear();
@@ -292,7 +311,13 @@ function VideoGrabber({
   onFrame: (id: string, raw: RawFrame) => void;
 }) {
   const { fps } = useVideoConfig();
-  const trimBeforeFrames = Math.max(0, Math.round((layer.sourceInSeconds ?? 0) * fps)) || undefined;
+  const frame = useCurrentFrame();
+  // Rate stretch: playbackRate scales Remotion's media-time mapping (mediaTime =
+  // (trimBefore + frame*playbackRate)/fps), so trimBefore stays the raw source in-point.
+  // The hidden pre-roll lead is in TIMELINE seconds, so it consumes lead*speed of source.
+  const speed = layerSpeed(layer);
+  const hiddenLeadSeconds = Math.max(0, -layer.startSeconds);
+  const trimBeforeFrames = Math.max(0, Math.round(((layer.sourceInSeconds ?? 0) + hiddenLeadSeconds * speed) * fps)) || undefined;
   const onVideoFrame: OnVideoFrame = useCallback(
     (frame) => {
       const w = frameSourceWidth(frame);
@@ -302,9 +327,47 @@ function VideoGrabber({
     [layer.id, onFrame]
   );
   if (!layer.assetUrl) return null;
+  // Speed RAMP: OffthreadVideo's playbackRate is constant-only, so time-remap per frame with the
+  // documented Remotion pattern — re-anchor a Sequence at the CURRENT frame and point trimBefore
+  // at the exact source frame from the shared closed-form ramp integral (identical to preview +
+  // local export). Render-only path; each output frame is its own render pass, so the per-frame
+  // Sequence is free.
+  if (layer.speedKeyframes?.length) {
+    const localSeconds = hiddenLeadSeconds + frame / fps;
+    const sourceSeconds = layerSourceTimeSeconds(
+      { speed: layer.speed, sourceInSeconds: layer.sourceInSeconds, speedKeyframes: layer.speedKeyframes },
+      localSeconds
+    );
+    return (
+      <Sequence from={frame}>
+        <OffthreadVideo
+          muted
+          src={layer.assetUrl}
+          trimBefore={Math.max(0, Math.round(sourceSeconds * fps))}
+          playbackRate={1}
+          style={{ display: "none" }}
+          onVideoFrame={onVideoFrame}
+        />
+      </Sequence>
+    );
+  }
   return (
-    <OffthreadVideo muted src={layer.assetUrl} trimBefore={trimBeforeFrames} style={{ display: "none" }} onVideoFrame={onVideoFrame} />
+    <OffthreadVideo
+      muted
+      src={layer.assetUrl}
+      trimBefore={trimBeforeFrames}
+      playbackRate={speed}
+      style={{ display: "none" }}
+      onVideoFrame={onVideoFrame}
+    />
   );
+}
+
+/** Manifest-side equivalent of shared getLayerSpeed (RenderManifestLayer carries `speed` verbatim). */
+function layerSpeed(layer: Pick<RenderManifestLayer, "speed">): number {
+  const raw = layer.speed;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 1;
+  return Math.min(16, Math.max(0.05, raw));
 }
 
 /** Hidden image decoder: blocks the frame (delayRender) until the image is decoded, then hands it to `onFrame`. */
@@ -359,6 +422,11 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   // an outgoing clip keeps decoding under the next clip's transition reveal.
   const mediaLayers = useMemo(() => sorted.filter(isMedia), [sorted]);
 
+  // Rebuild the Map once per manifest (Maps aren't JSON-safe, so the manifest carries a plain Record).
+  const nestedGroups = useMemo(
+    () => (manifest.nestedGroups ? new Map(Object.entries(manifest.nestedGroups)) : undefined),
+    [manifest.nestedGroups]
+  );
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<SceneController | null>(null);
   const rawRef = useRef<Map<string, RawFrame>>(new Map());
@@ -385,7 +453,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     try {
-      controllerRef.current = new SceneController(canvas, width, height, "#000000");
+      controllerRef.current = new SceneController(canvas, width, height, "#000000", manifest.regionPassModel ?? false, nestedGroups);
     } catch (error) {
       console.error("SceneStage: SceneCompositor init failed", error);
       controllerRef.current = null;
@@ -394,7 +462,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       controllerRef.current?.dispose();
       controllerRef.current = null;
     };
-  }, [width, height]);
+  }, [width, height, manifest.regionPassModel, nestedGroups]);
 
   // Per-frame composite, gated by a delayRender held until every active media frame has arrived + composited.
   const pendingRef = useRef<{ frame: number; id: number } | null>(null);
@@ -517,9 +585,23 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
         const durationInFrames = Math.max(1, Math.round(layer.durationSeconds * fps));
         return (
           <Sequence key={layer.id} from={from} durationInFrames={durationInFrames}>
+            {/* trimBefore honors the clip's source in-point (was silently ignored before 2026-07-03);
+                playbackRate = rate stretch, varispeed like the local mixer / preview. */}
             <Audio
               src={layer.assetUrl!}
-              volume={(f) => getCompositionVolume(layer as unknown as TimelineLayer, { currentTimeSeconds: layer.startSeconds + f / fps })}
+              {...(Math.round((layer.sourceInSeconds ?? 0) * fps) > 0
+                ? { trimBefore: Math.round((layer.sourceInSeconds ?? 0) * fps) }
+                : {})}
+              playbackRate={layerSpeed(layer)}
+              volume={(f) => {
+                const t = layer.startSeconds + f / fps;
+                // Clip volume × track fader (incl. fader automation) through the SHARED evaluators.
+                return Math.max(
+                  0,
+                  getCompositionVolume(layer as unknown as TimelineLayer, { currentTimeSeconds: t }) *
+                    getTrackAudioGainAt({ volume: layer.trackGain, volumeKeyframes: layer.trackVolumeKeyframes }, t)
+                );
+              }}
             />
           </Sequence>
         );

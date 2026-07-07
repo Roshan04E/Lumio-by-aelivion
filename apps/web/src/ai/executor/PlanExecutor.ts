@@ -15,6 +15,12 @@ export interface ExecutorDeps {
   commitComposition: (after: TimelineComposition, summary: string) => Promise<void> | void;
   /** Open an existing tool window; resolves when the user applies or cancels. */
   openTool?: (step: PlanStep) => Promise<ToolStepResult>;
+  /**
+   * Run a Skill step (e.g. AI asset generation). Image tasks generate and land an asset
+   * inline; video tasks hand off to the Generate Studio. Resolves like a tool step:
+   * `applied` true when something was done/queued, with an optional new composition.
+   */
+  runSkillStep?: (step: PlanStep) => Promise<ToolStepResult>;
   /** Ask the user a question; resolves with their answer or null if dismissed. */
   askClarify?: (question: string) => Promise<string | null>;
   /** Progress callback for the UI. */
@@ -94,6 +100,24 @@ export async function executePlan(plan: AiPlan, deps: ExecutorDeps): Promise<Exe
         } else {
           working = deps.getContext();
         }
+        report.applied += 1;
+        deps.onProgress({ stepId: step.id, status: "done", detail: result.detail });
+      } else {
+        report.skipped += 1;
+        deps.onProgress({ stepId: step.id, status: "skipped", detail: result.detail ?? "Cancelled" });
+      }
+      continue;
+    }
+
+    if (step.kind === "skill") {
+      if (!deps.runSkillStep) {
+        report.skipped += 1;
+        deps.onProgress({ stepId: step.id, status: "skipped", detail: "Generation not available here" });
+        continue;
+      }
+      const result = await deps.runSkillStep(step);
+      if (result.applied) {
+        working = result.composition ? { ...deps.getContext(), composition: result.composition } : deps.getContext();
         report.applied += 1;
         deps.onProgress({ stepId: step.id, status: "done", detail: result.detail });
       } else {

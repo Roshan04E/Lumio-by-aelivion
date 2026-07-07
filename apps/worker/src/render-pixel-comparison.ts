@@ -161,6 +161,13 @@ async function capturePreviewFrame(url: string, outputPath: string) {
       );
     });
 
+    // Give the scene compositor's rAF a couple frames to paint its first result (same settle its
+    // sibling gate scene-compositor-compare.ts always had). Without it the screenshot races the first
+    // GPU present and randomly captures a BLACK canvas (~88% diff on arbitrary fixtures per run —
+    // verified 2026-07-07: failing web captures meanLuma≈0 vs remotion≈110, differing fixture sets
+    // across identical-code runs). Capture-sync only; thresholds and rendering are untouched.
+    await page.waitForTimeout(250);
+
     await page.locator(".preview-composition-space").screenshot({
       animations: "disabled",
       caret: "hide",

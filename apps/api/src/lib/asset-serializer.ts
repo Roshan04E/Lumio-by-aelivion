@@ -1,4 +1,4 @@
-import type { AssetAiRef, AssetExternalRef, AssetSource, SourceAsset } from "@lumio-by-aelivion/shared";
+import { normalizeSourceColorMetadata, type AssetAiRef, type AssetExternalRef, type AssetSource, type SourceAsset } from "@lumio-by-aelivion/shared";
 
 /** The Prisma `SourceAsset` row shape (subset we read). */
 interface SourceAssetRow {
@@ -25,6 +25,7 @@ interface SourceAssetRow {
   projectId?: string | null;
   externalJson?: unknown;
   aiJson?: unknown;
+  colorJson?: unknown;
   updatedAt?: Date | null;
 }
 
@@ -71,6 +72,7 @@ export function serializeAsset(row: SourceAssetRow): SourceAsset {
     projectId: row.projectId ?? undefined,
     external: (row.externalJson as AssetExternalRef | null) ?? undefined,
     ai: (row.aiJson as AssetAiRef | null) ?? undefined,
+    color: row.colorJson != null ? normalizeSourceColorMetadata(row.colorJson) : undefined,
     updatedAt: row.updatedAt ? row.updatedAt.toISOString() : undefined
   };
 }

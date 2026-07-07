@@ -1,0 +1,9 @@
+TITLE: Lumio EDL Import Smoke Test
+FCM: NON-DROP FRAME
+
+001 AX       V     C        00:00:00:00 00:00:04:00 00:00:00:00 00:00:04:00
+* FROM CLIP NAME: city-wide.mov
+002 AX       V     D  015   00:00:01:00 00:00:05:00 00:00:04:00 00:00:08:00
+* FROM CLIP NAME: bus-closeup.mov
+003 AX       V     C        00:00:00:00 00:00:03:00 00:00:08:00 00:00:11:00
+* FROM CLIP NAME: canal-rider.mov

@@ -70,6 +70,19 @@ export const createAssetSchema = z.object({
       seed: z.string().optional(),
       referenceAssetIds: z.array(z.string()).optional()
     })
+  ),
+  // Detected source color metadata (Rec.709 SDR contract). Loose object — the server re-normalizes it
+  // via `normalizeSourceColorMetadata` before use, so we only need to accept the JSON shape here.
+  color: jsonField(
+    z.object({
+      primaries: z.string().optional(),
+      transfer: z.string().optional(),
+      matrix: z.string().optional(),
+      fullRange: z.boolean().optional(),
+      bitDepth: z.number().optional(),
+      detectedFrom: z.string().optional(),
+      confidence: z.string().optional()
+    }).passthrough()
   )
 });
 
@@ -77,7 +90,8 @@ export const createProjectSchema = z.object({
   title: z.string().min(1).max(120).default("Untitled reel"),
   templateId: z.string().optional(),
   sourceAssetId: z.string().optional(),
-  prompt: z.string().max(600).optional()
+  prompt: z.string().max(600).optional(),
+  orientation: z.enum(["portrait", "landscape"]).optional()
 });
 
 export const patchProjectSchema = z.object({

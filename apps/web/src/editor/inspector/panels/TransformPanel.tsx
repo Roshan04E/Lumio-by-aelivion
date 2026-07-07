@@ -23,6 +23,7 @@ import {
   type KeyframeInterpolation,
   type TimelineKeyframeV2
 } from "@lumio-by-aelivion/shared";
+import { ScrubNumberInput } from "../../../components/ScrubNumberInput";
 
 // ── Perspective control mapping ─────────────────────────────────────────────────────────────────────
 // All renderers store CSS `perspective(N px)`, where a SMALLER N = STRONGER 3D foreshortening (it's a camera
@@ -106,6 +107,7 @@ import { ThemedSelect } from "../controls/ThemedSelect";
 import {
   animationPresets,
   applyAnimationPreset,
+  applyTransformValueAtTime,
   buildEffectGraphTargets,
   clamp,
   clearTransformKeyframes,
@@ -129,7 +131,6 @@ import {
   transformPropertyConfigs,
   updateGraphTargetHandle,
   updateGraphTargetKeyframe,
-  updateTransformPropertyAtTime,
   type AnimationPresetId,
   type GraphTarget,
   type TransformAnimationProperty
@@ -623,23 +624,23 @@ function TransformGraphEditor({
         <div className="graph-editor-exact">
           <label>
             <span>Time</span>
-            <input
+            <ScrubNumberInput
               min={0}
               max={displayLayer.durationSeconds}
               step={0.05}
-              type="number"
               value={activeKeyframe.timeSeconds}
+              onScrubChange={(next) => updateSelectedKeyframe({ timeSeconds: next })}
               onChange={(event) => updateSelectedKeyframe({ timeSeconds: Number(event.target.value) })}
             />
           </label>
           <label>
             <span>Value</span>
-            <input
+            <ScrubNumberInput
               min={config.min}
               max={config.max}
               step={config.step}
-              type="number"
               value={Number(activeKeyframe.value)}
+              onScrubChange={(next) => updateSelectedKeyframe({ value: next })}
               onChange={(event) => updateSelectedKeyframe({ value: Number(event.target.value) })}
             />
           </label>
@@ -721,7 +722,7 @@ function defaultOpacity(type: InspectorPanelProps["layer"]["type"]) {
   return type === "shape" ? 82 : 100;
 }
 
-export default function TransformPanel({ layer, onChange, currentTime = 0, onSeek }: InspectorPanelProps) {
+export default function TransformPanel({ layer, onChange, currentTime = 0, onSeek, autoKeyframe }: InspectorPanelProps) {
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
   const animatedTransform = evaluateTimelineTransform({
     transform: layer.transform,
@@ -760,7 +761,7 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
   }
 
   function changeTransformProperty(property: TransformAnimationProperty, value: number) {
-    onChange((item) => updateTransformPropertyAtTime(item, property, layerTime, value));
+    onChange((item) => applyTransformValueAtTime(item, property, layerTime, value, { autoKeyframe }));
   }
 
   // 3D tilt is static (not keyframed) for now — set the base transform field directly. Both the
@@ -832,8 +833,10 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
           onReset={() => changeTransformProperty("transform.opacity", defaultOpacity(layer.type))}
           onChange={(value) => changeTransformProperty("transform.opacity", value)}
         />
-        <div className="number-control">
-          <span>Blend</span>
+        <div className="number-row-select">
+          <span className="effect-slider-label">
+            <span className="effect-slider-label-text">Blend</span>
+          </span>
           <ThemedSelect
             ariaLabel="Blend mode"
             value={layer.blendMode ?? "normal"}
@@ -842,8 +845,10 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
           />
         </div>
         {layer.type === "video" || layer.type === "image" ? (
-          <div className="number-control">
-            <span>Fit</span>
+          <div className="number-row-select">
+            <span className="effect-slider-label">
+              <span className="effect-slider-label-text">Fit</span>
+            </span>
             <ThemedSelect
               ariaLabel="Fit"
               value={layer.fit ?? "cover"}

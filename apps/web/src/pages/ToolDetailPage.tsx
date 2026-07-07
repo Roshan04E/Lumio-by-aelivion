@@ -24,7 +24,14 @@ import {
   Sparkles,
   Square,
   Upload,
-  WandSparkles
+  WandSparkles,
+  Captions,
+  Eraser,
+  Layers,
+  Move3d,
+  Scissors,
+  Wrench,
+  type LucideIcon
 } from "lucide-react";
 import {
   applyCaptionTrackToComposition,
@@ -50,6 +57,7 @@ import {
   renderSafeFonts,
   stageLabel,
   type TranscriptArtifactData,
+  type ToolIconKey,
   toolCapabilityDefinitions,
   validateTranscriptArtifact,
   type CaptionStylePreset,
@@ -91,6 +99,15 @@ import { transcribeAssetLocally } from "../tools/local-transcription";
 import { storeMatteArtifact } from "../tools/matte-store";
 import { createToolRuntimeState, runToolAdapter, type ToolRunController, type ToolRuntimeState } from "../tools/tool-runner";
 import { isCompatibleToolAsset, resolveToolMediaUrl } from "../tools/tool-media";
+
+const TOOL_ICONS: Record<ToolIconKey, LucideIcon> = {
+  captions: Captions,
+  "text-behind": Layers,
+  "background-removal": Eraser,
+  "follow-text": Move3d,
+  "person-extraction": Scissors,
+  generic: Wrench
+};
 
 export function ToolDetailPage() {
   const { slug } = useParams();
@@ -1079,18 +1096,27 @@ export function ToolDetailPage() {
 
   return (
     <div className={`page tool-detail-page ${isTabbedTool ? "tool-detail-page-captions" : ""}`}>
-      <section className="tool-detail-header">
-        <Link to="/tools">
-          <ArrowLeft size={15} />
-          Tools
+      <header className="mkt-tdh">
+        <Link to="/tools" className="mkt-tdh-back">
+          <ArrowLeft size={13} /> All tools
         </Link>
-        <div>
-          <Badge tone="lime">{tool.category}</Badge>
-          <h1>{tool.name}</h1>
-          <p>{tool.userDescription}</p>
+        <div className="mkt-tdh-body">
+          <span className="mkt-ic mkt-tdh-ic">{(() => { const Icon = TOOL_ICONS[tool.icon ?? "generic"] ?? Wrench; return <Icon size={22} />; })()}</span>
+          <div className="mkt-tdh-text">
+            <span className="mkt-eyebrow">{tool.category} · {tool.browserMode}</span>
+            <h1>{tool.name}</h1>
+            <p>{tool.userDescription}</p>
+            <div className="mkt-tdh-stages">
+              {tool.stages.map((stage) => (
+                <span key={stage}>{stageLabel(stage)}</span>
+              ))}
+            </div>
+          </div>
+          <span className={`mkt-tdh-credits ${(tool.estimatedCredits ?? 0) === 0 ? "free" : ""}`}>
+            {(tool.estimatedCredits ?? 0) === 0 ? "Free" : `${tool.estimatedCredits} credits`}
+          </span>
         </div>
-        <CreditBadge value={tool.estimatedCredits ?? 0} />
-      </section>
+      </header>
 
       <section className={`tool-shell ${isTabbedTool ? "tool-shell-captions" : ""}`}>
         {!isTabbedTool ? (

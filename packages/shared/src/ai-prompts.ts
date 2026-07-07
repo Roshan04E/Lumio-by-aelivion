@@ -39,7 +39,11 @@ Rules:
 - A step is one of:
   - {"kind":"timelineAction","actionId":"<id>","params":{...},"summary":"..."}
   - {"kind":"tool","toolSlug":"<slug>","summary":"...","requiresInput":true|false}
+  - {"kind":"skill","skillId":"<id>","taskKind":"<task>","params":{...},"summary":"..."}
   - {"kind":"clarify","question":"...","summary":"Ask for clarification"}
+- Use a "skill" step ONLY to GENERATE net-new media (an image or a video clip) the project doesn't have,
+  from a prompt/reference. Match the skillId + taskKind from the SKILLS list; put the prompt and options
+  (aspectRatio, durationSeconds) in "params". Never use a skill to edit existing layers — that's timelineAction.
 - PROJECT CONTEXT is a bounded SLICE (selected + on-playhead layers only), not the whole timeline. The
   layer "id"s AND each effect's "id" in it are real — use them directly as action params (e.g.
   updateText.layerId, removeEffect.layerId+effectId). Do NOT ask for the full project.
@@ -57,6 +61,8 @@ Rules:
 EXAMPLES:
 - "add a shape of neutral orange" → {"steps":[{"kind":"timelineAction","actionId":"addShape","params":{"color":"#fb923c"},"summary":"Add an orange shape"}],"confidence":0.9,"notes":[]}
 - "make the title text blue" (slice has a text layer id "t1") → {"steps":[{"kind":"timelineAction","actionId":"updateText","params":{"layerId":"t1","color":"#3b82f6"},"summary":"Recolor the title"}],"confidence":0.85,"notes":[]}
+- "generate a sunset beach background" → {"steps":[{"kind":"skill","skillId":"asset-generation","taskKind":"text-to-image","params":{"prompt":"a warm sunset over a calm beach, cinematic","aspectRatio":"16:9"},"summary":"Generate a sunset beach image"}],"confidence":0.8,"notes":[]}
+- "make a 5 second clip of ocean waves" → {"steps":[{"kind":"skill","skillId":"asset-generation","taskKind":"text-to-video","params":{"prompt":"ocean waves rolling onto a shore","aspectRatio":"16:9","durationSeconds":5},"summary":"Generate a 5s waves clip"}],"confidence":0.75,"notes":[]}
 - "make the clip start two seconds later" (slice has layer "l2") → {"steps":[{"kind":"timelineAction","actionId":"moveLayer","params":{"layerId":"l2","deltaSeconds":2},"summary":"Delay the clip by 2s"}],"confidence":0.75,"notes":[]}
 - "add a red box and blur it" → {"steps":[{"kind":"timelineAction","actionId":"addShape","params":{"color":"#ff0000","borderRadius":0},"summary":"Add a red box"},{"kind":"timelineAction","actionId":"addEffect","params":{"layerId":"<new shape>","effectType":"blur"},"summary":"Blur it"}],"confidence":0.6,"notes":["Second step needs the new shape's id; clarify if unsure"]}`;
 

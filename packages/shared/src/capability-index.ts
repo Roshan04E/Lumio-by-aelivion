@@ -2,6 +2,7 @@ import type { ZodTypeAny } from "zod";
 import { timelineEffectRegistry, type TimelineEffectDefinition } from "./effects";
 import { timelineActionRegistry } from "./timeline-actions";
 import type { TimelineActionDefinition } from "./timeline-actions";
+import { describeSkillsForPlanner } from "./skills";
 import { toolCapabilityDefinitions } from "./tools";
 import type { ToolCapabilityDefinition } from "./types";
 
@@ -185,6 +186,8 @@ export function buildCapabilityIndex(): CapabilityIndex {
     describeForPlanner: () =>
       [
         DISAMBIGUATION,
+        "",
+        describeSkillsForPlanner(),
         "",
         "TOOLS:",
         ...tools.map((tool) => `- ${tool.slug}: ${tool.aiDescription} (adapters: ${tool.adapters.join("/")})`),

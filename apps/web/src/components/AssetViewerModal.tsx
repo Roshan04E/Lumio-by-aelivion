@@ -135,7 +135,10 @@ export function AssetViewerModal({
     return (
       <video
         className="asset-viewer-media"
-        src={asset.proxyUrl ?? asset.previewUrl ?? asset.fileUrl}
+        // ORIGINAL bytes, never the ingest proxy: the viewer is where the user judges SOURCE
+        // quality (Premiere model — proxies are a timeline-playback substitution only, invisible
+        // in the bin). Serving the 854px proxy here read as "upload quality got reduced".
+        src={asset.fileUrl ?? asset.previewUrl}
         poster={asset.thumbnailUrl}
         controls
         loop

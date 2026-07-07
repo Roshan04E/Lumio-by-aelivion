@@ -31,6 +31,11 @@ const envSchema = z.object({
   // provider's key is absent; imports always download the file into our own storage.
   PEXELS_API_KEY: z.string().optional(),
   PIXABAY_API_KEY: z.string().optional(),
+  // AI asset generation — fal.ai aggregator (image + video). Held server-side; the Studio's
+  // cloud models are only offered when this is present. Generated media is downloaded into our
+  // own storage as a SourceAsset(source="ai"). Cost is metadata only (no gating).
+  FAL_KEY: z.string().optional(),
+  FAL_QUEUE_BASE_URL: z.string().url().default("https://queue.fal.run"),
   // Lumio AI — multi-provider planner gateway (GP1). Each provider is enabled only when its key
   // is present; the gateway fails over in priority order. Model IDs are env-overridable because
   // free tiers drift. All endpoints are OpenAI-compatible (/v1/chat/completions).

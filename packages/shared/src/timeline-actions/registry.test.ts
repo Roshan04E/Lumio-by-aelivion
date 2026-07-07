@@ -89,6 +89,24 @@ const registry = createTimelineActionRegistry();
   }
 }
 
+// --- Shape primitive params -------------------------------------------------
+{
+  const base = fixture();
+  const outcome = registry.execute("addShape", { shapeKind: "triangle", widthPercent: 24, heightPercent: 24, borderRadius: 0 }, ctxFor(base));
+  check("addShape accepts basic shape kind", outcome.ok);
+  if (outcome.ok) {
+    const added = outcome.result.after.tracks.flatMap((track) => track.layers).find((layer) => layer.type === "shape");
+    check("addShape stores triangle primitive", added?.shapeKind === "triangle");
+    check("addShape stores triangle proportions", added?.widthPercent === 24 && added?.heightPercent === 24);
+  }
+  const penOutcome = registry.execute("addShape", { shapeKind: "pen" }, ctxFor(base));
+  check("addShape accepts pen primitive", penOutcome.ok);
+  if (penOutcome.ok) {
+    const added = penOutcome.result.after.tracks.flatMap((track) => track.layers).find((layer) => layer.type === "shape");
+    check("addShape stores pen path points", added?.shapeKind === "pen" && (added.shapePath?.length ?? 0) >= 4);
+  }
+}
+
 // --- Rejection paths --------------------------------------------------------
 {
   const base = fixture();

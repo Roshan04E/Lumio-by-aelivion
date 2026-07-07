@@ -1,0 +1,418 @@
+[
+  {
+    "name": "wide-1920x1080",
+    "width": 1920,
+    "height": 1080,
+    "mode": "wide",
+    "density": "comfortable",
+    "bodyOverflowX": 0,
+    "bodyOverflowY": 2,
+    "topbar": {
+      "x": 10,
+      "y": 8,
+      "w": 1900,
+      "h": 48,
+      "display": "flex",
+      "position": "sticky"
+    },
+    "layout": {
+      "x": 10,
+      "y": 64,
+      "w": 1900,
+      "h": 1008,
+      "display": "grid",
+      "position": "relative"
+    },
+    "studio": {
+      "x": 10,
+      "y": 64,
+      "w": 420,
+      "h": 730,
+      "display": "grid",
+      "position": "static"
+    },
+    "viewer": {
+      "x": 438,
+      "y": 64,
+      "w": 1124,
+      "h": 730,
+      "display": "grid",
+      "position": "relative"
+    },
+    "inspector": {
+      "x": 1570,
+      "y": 64,
+      "w": 340,
+      "h": 730,
+      "display": "grid",
+      "position": "static"
+    },
+    "timeline": {
+      "x": 10,
+      "y": 802,
+      "w": 1900,
+      "h": 270,
+      "display": "flex",
+      "position": "static"
+    },
+    "mixer": {
+      "x": 1830,
+      "y": 802,
+      "w": 26,
+      "h": 270,
+      "display": "grid",
+      "position": "static"
+    },
+    "meters": {
+      "x": 1864,
+      "y": 802,
+      "w": 46,
+      "h": 270,
+      "display": "block",
+      "position": "static"
+    },
+    "mobileRail": null
+  },
+  {
+    "name": "laptop-1440x900",
+    "width": 1440,
+    "height": 900,
+    "mode": "wide",
+    "density": "comfortable",
+    "bodyOverflowX": 0,
+    "bodyOverflowY": 2,
+    "topbar": {
+      "x": 10,
+      "y": 8,
+      "w": 1420,
+      "h": 48,
+      "display": "flex",
+      "position": "sticky"
+    },
+    "layout": {
+      "x": 10,
+      "y": 64,
+      "w": 1420,
+      "h": 828,
+      "display": "grid",
+      "position": "relative"
+    },
+    "studio": {
+      "x": 10,
+      "y": 64,
+      "w": 420,
+      "h": 550,
+      "display": "grid",
+      "position": "static"
+    },
+    "viewer": {
+      "x": 438,
+      "y": 64,
+      "w": 644,
+      "h": 550,
+      "display": "grid",
+      "position": "relative"
+    },
+    "inspector": {
+      "x": 1090,
+      "y": 64,
+      "w": 340,
+      "h": 550,
+      "display": "grid",
+      "position": "static"
+    },
+    "timeline": {
+      "x": 10,
+      "y": 622,
+      "w": 1420,
+      "h": 270,
+      "display": "flex",
+      "position": "static"
+    },
+    "mixer": {
+      "x": 1350,
+      "y": 622,
+      "w": 26,
+      "h": 270,
+      "display": "grid",
+      "position": "static"
+    },
+    "meters": {
+      "x": 1384,
+      "y": 622,
+      "w": 46,
+      "h": 270,
+      "display": "block",
+      "position": "static"
+    },
+    "mobileRail": null
+  },
+  {
+    "name": "laptop-1280x800",
+    "width": 1280,
+    "height": 800,
+    "mode": "laptop",
+    "density": "compact",
+    "bodyOverflowX": 0,
+    "bodyOverflowY": 2,
+    "topbar": {
+      "x": 10,
+      "y": 8,
+      "w": 1260,
+      "h": 48,
+      "display": "flex",
+      "position": "sticky"
+    },
+    "layout": {
+      "x": 10,
+      "y": 64,
+      "w": 1260,
+      "h": 728,
+      "display": "grid",
+      "position": "relative"
+    },
+    "studio": {
+      "x": 10,
+      "y": 64,
+      "w": 420,
+      "h": 450,
+      "display": "grid",
+      "position": "static"
+    },
+    "viewer": {
+      "x": 438,
+      "y": 64,
+      "w": 484,
+      "h": 450,
+      "display": "grid",
+      "position": "relative"
+    },
+    "inspector": {
+      "x": 930,
+      "y": 64,
+      "w": 340,
+      "h": 450,
+      "display": "grid",
+      "position": "static"
+    },
+    "timeline": {
+      "x": 10,
+      "y": 522,
+      "w": 1260,
+      "h": 270,
+      "display": "flex",
+      "position": "static"
+    },
+    "mixer": null,
+    "meters": {
+      "x": 1224,
+      "y": 522,
+      "w": 46,
+      "h": 270,
+      "display": "block",
+      "position": "static"
+    },
+    "mobileRail": null
+  },
+  {
+    "name": "tablet-768x1024",
+    "width": 768,
+    "height": 1024,
+    "mode": "tablet",
+    "density": "tight",
+    "bodyOverflowX": 0,
+    "bodyOverflowY": 0,
+    "topbar": {
+      "x": 10,
+      "y": 8,
+      "w": 748,
+      "h": 48,
+      "display": "flex",
+      "position": "sticky"
+    },
+    "layout": {
+      "x": 10,
+      "y": 64,
+      "w": 748,
+      "h": 902,
+      "display": "grid",
+      "position": "relative"
+    },
+    "studio": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none",
+      "position": "fixed"
+    },
+    "viewer": {
+      "x": 10,
+      "y": 64,
+      "w": 748,
+      "h": 632,
+      "display": "grid",
+      "position": "relative"
+    },
+    "inspector": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none",
+      "position": "fixed"
+    },
+    "timeline": {
+      "x": 10,
+      "y": 696,
+      "w": 748,
+      "h": 270,
+      "display": "flex",
+      "position": "static"
+    },
+    "mixer": null,
+    "meters": null,
+    "mobileRail": {
+      "x": 8,
+      "y": 961,
+      "w": 752,
+      "h": 55,
+      "display": "grid",
+      "position": "fixed"
+    }
+  },
+  {
+    "name": "phone-390x844",
+    "width": 390,
+    "height": 844,
+    "mode": "phone",
+    "density": "tight",
+    "bodyOverflowX": 0,
+    "bodyOverflowY": 22,
+    "topbar": {
+      "x": 6,
+      "y": 6,
+      "w": 378,
+      "h": 62,
+      "display": "flex",
+      "position": "sticky"
+    },
+    "layout": {
+      "x": 6,
+      "y": 76,
+      "w": 378,
+      "h": 722,
+      "display": "grid",
+      "position": "relative"
+    },
+    "studio": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none",
+      "position": "fixed"
+    },
+    "viewer": {
+      "x": 6,
+      "y": 76,
+      "w": 378,
+      "h": 371,
+      "display": "grid",
+      "position": "relative"
+    },
+    "inspector": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none",
+      "position": "fixed"
+    },
+    "timeline": {
+      "x": 6,
+      "y": 447,
+      "w": 378,
+      "h": 351,
+      "display": "flex",
+      "position": "static"
+    },
+    "mixer": null,
+    "meters": null,
+    "mobileRail": {
+      "x": 8,
+      "y": 781,
+      "w": 374,
+      "h": 55,
+      "display": "grid",
+      "position": "fixed"
+    }
+  },
+  {
+    "name": "phone-430x932",
+    "width": 430,
+    "height": 932,
+    "mode": "phone",
+    "density": "tight",
+    "bodyOverflowX": 0,
+    "bodyOverflowY": 6,
+    "topbar": {
+      "x": 6,
+      "y": 6,
+      "w": 418,
+      "h": 46,
+      "display": "flex",
+      "position": "sticky"
+    },
+    "layout": {
+      "x": 6,
+      "y": 60,
+      "w": 418,
+      "h": 810,
+      "display": "grid",
+      "position": "relative"
+    },
+    "studio": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none",
+      "position": "fixed"
+    },
+    "viewer": {
+      "x": 6,
+      "y": 60,
+      "w": 418,
+      "h": 410,
+      "display": "grid",
+      "position": "relative"
+    },
+    "inspector": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "display": "none",
+      "position": "fixed"
+    },
+    "timeline": {
+      "x": 6,
+      "y": 470,
+      "w": 418,
+      "h": 400,
+      "display": "flex",
+      "position": "static"
+    },
+    "mixer": null,
+    "meters": null,
+    "mobileRail": {
+      "x": 8,
+      "y": 869,
+      "w": 414,
+      "h": 55,
+      "display": "grid",
+      "position": "fixed"
+    }
+  }
+]

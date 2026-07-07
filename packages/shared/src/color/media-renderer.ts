@@ -30,8 +30,15 @@ import { MEDIA_FRAGMENT_SHADER, MEDIA_VERTEX_SHADER, mediaLut3dToRgbaFloat } fro
 import type { ColorPipeline, MediaEffects } from "./types";
 
 export interface MediaRendererDrawParams {
-  /** Decoded video frame, image element, or ImageBitmap — the graded source. */
-  source: TexImageSource;
+  /** Decoded video frame, image element, or ImageBitmap — the graded source. Omit when `sourceTexture` is set. */
+  source?: TexImageSource | undefined;
+  /**
+   * Shared-context mode ONLY: grade an EXISTING texture on the shared context (bottom-origin,
+   * e.g. a `SceneCompositor` render-target — the region-pass "grade the running image" path)
+   * instead of uploading a `TexImageSource`. Orientation matches the upload path (uploads are
+   * flip-Y'd to bottom-origin), so the two are drop-in equivalents.
+   */
+  sourceTexture?: WebGLTexture | null | undefined;
   sourceWidth: number;
   sourceHeight: number;
   /** Optional grayscale luma-matte frame (same natural dimensions as source). */
@@ -85,12 +92,17 @@ const TRANSITION_KIND_INDEX: Record<MediaTransition["kind"], number> = { wipe: 1
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
-  if (!shader) throw new Error("media-renderer: failed to create shader");
+  if (!shader) {
+    throw new Error(gl.isContextLost() ? MEDIA_RENDERER_CONTEXT_LOST : "media-renderer: failed to create shader");
+  }
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
     const log = gl.getShaderInfoLog(shader);
     gl.deleteShader(shader);
+    // Compile on a LOST context fails with an empty log — surface it as context loss so callers'
+    // recovery ladders keep retrying instead of latching a permanent "shader broken" fallback.
+    if (gl.isContextLost()) throw new Error(MEDIA_RENDERER_CONTEXT_LOST);
     throw new Error(`media-renderer: shader compile failed: ${log ?? "unknown"}`);
   }
   return shader;
@@ -129,6 +141,8 @@ export class MediaWebGLRenderer {
   private readonly lutTex: WebGLTexture;
   private readonly ownerLabel: string;
   private readonly maxTextureSize: number;
+  /** Last-allocated size per texture, so same-size per-frame uploads can use texSubImage2D. */
+  private readonly uploadedTexSizes = new Map<WebGLTexture, { width: number; height: number }>();
 
   // Uniform locations
   private readonly uFrame: WebGLUniformLocation | null;
@@ -292,14 +306,42 @@ export class MediaWebGLRenderer {
     return true;
   }
 
+  /** Intrinsic pixel dimensions of a TexImageSource (0×0 when not yet known, e.g. a loading video). */
+  private static texSourceDims(source: TexImageSource): { width: number; height: number } {
+    const s = source as {
+      videoWidth?: number; videoHeight?: number;
+      naturalWidth?: number; naturalHeight?: number;
+      displayWidth?: number; displayHeight?: number;
+      width?: number; height?: number;
+    };
+    return {
+      width: s.videoWidth ?? s.naturalWidth ?? s.displayWidth ?? s.width ?? 0,
+      height: s.videoHeight ?? s.naturalHeight ?? s.displayHeight ?? s.height ?? 0
+    };
+  }
+
   private uploadTexImage(label: "source" | "matte", tex: WebGLTexture, source: TexImageSource): void {
     const gl = this.gl;
     this.assertContextAlive();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    // texImage2D reallocates GPU storage every call; per-frame video uploads only need the pixels
+    // replaced. When the source's intrinsic size matches the texture's last allocation, upload
+    // in-place with texSubImage2D (same trick the scene-compositor uses). Any size change — or an
+    // unknown size — falls back to a full (re)allocation.
+    const { width, height } = MediaWebGLRenderer.texSourceDims(source);
+    const last = this.uploadedTexSizes.get(tex);
+    const canSubUpload = width > 0 && height > 0 && last !== undefined && last.width === width && last.height === height;
     try {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      if (canSubUpload) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        if (width > 0 && height > 0) this.uploadedTexSizes.set(tex, { width, height });
+        else this.uploadedTexSizes.delete(tex);
+      }
     } catch (error) {
+      this.uploadedTexSizes.delete(tex);
       if (this.isContextLost() || (error instanceof Error && /CONTEXT_LOST/i.test(error.message))) {
         this.contextLost = true;
         this.publishProducerState();
@@ -383,8 +425,12 @@ export class MediaWebGLRenderer {
     // started, so the grade would never apply over an adjustment clip until paused.
     const hasLut = this.lutSize > 0;
 
-    gl.activeTexture(gl.TEXTURE0);
-    this.uploadTexImage("source", this.frameTex, source);
+    const sourceTexture = this.shared ? (params.sourceTexture ?? null) : null;
+    if (!sourceTexture) {
+      if (!source) return; // nothing to grade
+      gl.activeTexture(gl.TEXTURE0);
+      this.uploadTexImage("source", this.frameTex, source);
+    }
 
     let hasMatte = false;
     if (matte) {
@@ -415,9 +461,9 @@ export class MediaWebGLRenderer {
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
 
-    // Source frame → TEXTURE0
+    // Source frame → TEXTURE0 (an existing shared-context texture, or the uploaded frame).
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture ?? this.frameTex);
     gl.uniform1i(this.uFrame, 0);
 
     // 3D LUT → TEXTURE1

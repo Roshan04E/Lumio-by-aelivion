@@ -301,8 +301,13 @@ export async function downloadStockMedia(downloadUrl: string, externalId: string
     try {
       const res = await fetch(downloadUrl, { signal: controller.signal });
       if (!res.ok) {
-        // A definitive HTTP failure (404/403/…) — surface immediately, no retry.
-        throw new HttpError(502, `Failed to download stock media (${res.status})`);
+        // CDN 5xx (Pexels' edge throws transient 502/503s on large videos) → retry once like a
+        // network drop. 4xx (404/403) is definitive — surface immediately.
+        if (res.status >= 500 && attempt < maxAttempts) {
+          lastError = new Error(`upstream ${res.status}`);
+          continue;
+        }
+        throw new HttpError(502, `The stock provider's CDN refused the download (${res.status}). Try again, or pick a lower-resolution variant.`);
       }
       const arrayBuffer = await res.arrayBuffer();
       return { buffer: Buffer.from(arrayBuffer), fileName: `stock-${externalId}.${ext}` };

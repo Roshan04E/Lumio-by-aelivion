@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Brain, Cpu, KeyRound, Plus, SendHorizontal, Settings2, Sparkles, Undo2, X } from "lucide-react";
-import { getActionAnalytics, logUnsupported, recordPlanReviewed } from "@lumio-by-aelivion/shared";
+import { BarChart3, Brain, Cpu, ImagePlus, KeyRound, Plus, SendHorizontal, Settings2, Sparkles, Undo2, X } from "lucide-react";
+import { getActionAnalytics, getSkill, getSkillTaskKind, logUnsupported, recordPlanReviewed, type SourceAsset } from "@lumio-by-aelivion/shared";
 import { createPlanner } from "../../ai/planner/createPlanner";
+import { runGeneration } from "../../generate/generateClient";
+import type { GenerateStudioPrefill } from "../generate/GenerateStudio";
 import { classifyContinuity, type ContinuityResult } from "../../ai/planner/intent-continuity";
 import { streamTalk } from "../../ai/talk";
 import { loadOllamaConfig, pingOllama, saveOllamaConfig, type OllamaConfig } from "../../ai/ollama";
@@ -47,6 +49,10 @@ export interface AiChatPanelProps {
   onUndo?: () => Promise<void> | void;
   /** Closes the whole AI dock (rendered as the ✕ in the panel header). */
   onClose?: () => void;
+  /** Open the Generate Studio (optionally pre-filled) — used by the composer button and video handoff. */
+  onOpenGenerate?: (prefill?: GenerateStudioPrefill) => void;
+  /** Place a freshly generated asset onto the timeline (image skill steps land inline). */
+  onAddAssetToTimeline?: (asset: SourceAsset) => void;
   /** P11 — the current project, so memory facts can be project-scoped + synced. */
   projectId?: string | undefined;
 }
@@ -107,7 +113,7 @@ const STARTER_PROMPTS = [
  * (P5: follow-ups), respects remembered preferences (P6), runs under a permission
  * mode (P4: Quick auto-applies safe edits), and surfaces demand analytics (P7).
  */
-export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, projectId }: AiChatPanelProps) {
+export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId }: AiChatPanelProps) {
   const planner = useMemo(() => createPlanner(), []);
   const initialMemory = useMemo(() => loadMemory(), []);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -227,6 +233,50 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
     [getContext, messages, projectId, attachedImage]
   );
 
+  /**
+   * Execute a Skill step from a plan. Video generation hands off to the Generate Studio
+   * (iterative + async — a new tab would lose editor state); image generation runs inline
+   * and lands the asset on the timeline.
+   */
+  const runSkillStep = useCallback<(step: PlanStep) => Promise<ToolStepResult>>(
+    async (step) => {
+      const skill = step.skillId ? getSkill(step.skillId) : undefined;
+      const task = skill && step.taskKind ? getSkillTaskKind(skill, step.taskKind) : undefined;
+      if (!skill || !task) {
+        return { applied: false, detail: "Unknown skill" };
+      }
+      const params = (step.params ?? {}) as Record<string, unknown>;
+
+      if (task.modality === "video") {
+        if (!onOpenGenerate) {
+          return { applied: false, detail: "Open the Generate Studio to create video" };
+        }
+        onOpenGenerate({
+          taskKind: task.id,
+          prompt: typeof params.prompt === "string" ? params.prompt : undefined,
+          aspectRatio: typeof params.aspectRatio === "string" ? params.aspectRatio : undefined,
+          durationSeconds: typeof params.durationSeconds === "number" ? params.durationSeconds : undefined,
+          referenceImage: typeof params.referenceImage === "string" ? params.referenceImage : undefined
+        });
+        return { applied: true, detail: "Opened the Generate Studio to finish your clip" };
+      }
+
+      try {
+        const outcome = await runGeneration({
+          skillId: skill.id,
+          taskKind: task.id,
+          params,
+          ...(projectId ? { projectId } : {})
+        });
+        onAddAssetToTimeline?.(outcome.asset);
+        return { applied: true, detail: `Generated with ${outcome.modelId}` };
+      } catch (error) {
+        return { applied: false, detail: error instanceof Error ? error.message : "Generation failed" };
+      }
+    },
+    [onOpenGenerate, onAddAssetToTimeline, projectId]
+  );
+
   const runPlan = useCallback(
     async (activePlan: AiPlan, promptForMemory: string) => {
       setPhase("executing");
@@ -250,6 +300,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
         commitComposition: countingCommit,
         askClarify,
         ...(openTool ? { openTool } : {}),
+        runSkillStep,
         onProgress: (update) => setProgress((current) => ({ ...current, [update.stepId]: update }))
       });
       setPhase("idle");
@@ -281,7 +332,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
       );
       setPlan(null);
     },
-    [askClarify, commitComposition, getContext, openTool, pushMessage, projectId, bestQuality, mode]
+    [askClarify, commitComposition, getContext, openTool, runSkillStep, pushMessage, projectId, bestQuality, mode]
   );
 
   const localActive = Boolean(ollama?.enabled && ollama.model);
@@ -770,6 +821,17 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
                 aria-label="Local model settings"
               >
                 <Settings2 size={13} />
+              </button>
+            ) : null}
+            {onOpenGenerate ? (
+              <button
+                type="button"
+                className="ai-local-toggle"
+                onClick={() => onOpenGenerate()}
+                aria-label="Generate images or video"
+                title="Generate — create AI images or video assets"
+              >
+                <ImagePlus size={14} />
               </button>
             ) : null}
           </div>

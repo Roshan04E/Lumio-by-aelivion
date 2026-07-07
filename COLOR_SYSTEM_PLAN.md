@@ -218,6 +218,48 @@ path only after pixel-parity is proven. The safe path (do NOT skip):
 - **13C.8 — ✅ done (Color tab slider parity + keyframes).** Extracted the Controls-tab slider into a shared `components/EffectSliderControl.tsx` (`EffectSliderControl` + `effectSliderTone` + `formatEffectValue`); EditorPage now imports it instead of defining its own. The Lumetri panel's sliders were rebuilt on top of it, so the Color tab now has **identical tonal track colors** (warmth/tint/saturation/shadow/highlight/light) **and per-param keyframes** (diamond toggle + interpolation), matching the Basic Color Grade effect exactly. The backing effect is created lazily (`ensureEffect`) on first edit/keyframe so browsing a section never mutates the project. HSL Secondary's internal sliders were restyled to the same custom track/thumb (dropping the bare native `accent-color`). `pnpm --filter @lumio-by-aelivion/web typecheck` clean.
   - _Related (non-color) timeline polish landed in the same passes:_ solid per-type clip colors; clip name in a bottom accent bar (video clips show filmstrip only, no name); audio name as a hover-only top-overlay (soft green scrim, no layout shift); thin rounded pixel-space waveform bars whose density scales with zoom (hi-res decode cached + resampled in `audioPeaks.ts`); playhead raised above selected clips; and an out-of-order save guard (`saveSeqRef`) in `updateGraph` that stops stale `patchProject` echoes from reverting newer optimistic state.
 
+- **Managed color Phase 1 — ✅ done (Rec.709-linear working space + trustworthy scopes).** The pipeline was
+  sRGB-code-value with clamps between every stage; now **Basic Correction grades in Rec.709 linear light,
+  unclamped** (`color/managed.ts applyControlsLinear`), encoding to Rec.709 SDR only at output. Applied at the
+  single CPU chokepoint (`cpu.ts applyPipelineToRgb`) so the baked 3D LUT — and therefore **both the WebGL
+  preview and the Remotion export** — inherit it with no shader change (`render:compare:pixels` **23/23 @
+  0.000%**). Real ±2-stop exposure, display-mid-pivoted contrast, luma-weighted highlight/shadow/white/black
+  masks, linear white-balance, luma-preserving saturation/vibrance. Authored curves/wheels/HSL/.cube LUTs stay
+  **display-referred** (SVG-expressible / authored on 0..1 graphs). `ColorStage.controls` populated + consumed;
+  `matrix`/`curve` are the SVG/no-GL approximation, flagged degraded via `svgFallbackWarnings` +
+  `.preview-color-degraded` badge. `compileColorPipeline(effects, colorSettings)` + `composition.settings.color`
+  carry the managed contract; `renderCache` hashes it (+ `PREVIEW_PROXY_RENDER_VERSION` 5→6).
+  **Scopes** now sample the scene compositor's retained composite (`SceneCompositor.readCompositeThumbnail`,
+  linear-blit downsample, no re-render) instead of `querySelector("canvas")`; vectorscope is **Rec.709** (was
+  601), with legal-range (16/235) guides, clip/crush markers, "Rec.709 SDR" label, and paused/playing
+  resolution. `color:test` 60/60, `scene:compare` 22/22, `render:compare:pixels` 23/23, `-r typecheck` clean.
+  - _Deferred (Phase 2/3):_ export `VideoColorSpace`/muxer BT.709 tagging + manifest color handoff; real source
+    color detection (mp4box `colr` / `VideoFrame.colorSpace`) + Prisma `SourceAsset` persistence.
+- **Managed color Phase 2 — ✅ done (export color tagging + manifest handoff).** Local export
+  (`export/video-encoder.ts`) writes the MP4 `colr` / WebM `Colour` box by merging a Rec.709 SDR descriptor into
+  the encoded-chunk `decoderConfig.colorSpace` the muxers read — **encoder-reported fields win** (they match the
+  real RGB→YUV matrix/range) and only gaps are filled, so we never mis-tag. `export-core.ts` derives range from
+  `composition.settings.color` and emits `[color]` diagnostics. Render manifest now carries `output.color`
+  (`ProjectColorSettings`) + per-asset `color` (`SourceColorMetadata`); the Remotion `colorSpace` is
+  manifest-driven (`manifestOutputColorSpace`, v1 → bt709). Verified: `ffprobe` of a real Remotion export shows
+  `color_space=bt709`, `color_range=tv`; `-r typecheck` clean. _Dialog color-warning banner deferred to Phase 3_
+  (local export is always exact via the WebGL scene compositor; source-HDR is the only real "not exact" signal;
+  landed below once Phase 3 gave a real per-source signal).
+- **Managed color Phase 3 — ✅ done (real source color detection + Prisma persistence).** `export/source-color.ts`
+  parses the MP4 `colr` box (mp4box) at ingest, mapping ISO 23091-2 codes to `SourceColorMetadata` — `nclx`/`nclc`
+  detected with high confidence; ICC-profile `colr` variants correctly fall back to "assumed Rec.709" rather than
+  guessing. Persisted via a new Prisma `SourceAsset.colorJson` column (migration
+  `20260704170156_add_source_asset_color_metadata`, applied) through `assets.routes.ts`/`asset-serializer.ts`; the
+  editor's Color tab surfaces `sourceColorWarnings` per selected clip. Verified against real encoded files (both
+  the detected `nclx` path and the null-fallback `prof` path), not just typechecked. Source color is
+  deliberately NOT hashed into the render-cache span signature yet — it drives warnings/export tags only in v1,
+  not different pixel math.
+- **Export dialog color warning — ✅ done.** The "Export on this device" dialog (`EditorPage.tsx`) now computes
+  `sourceColorWarnings` across every video/image asset actually used in the composition and shows an amber
+  `.export-color-warning` banner ("… treated as Rec.709 SDR. Export proceeds as Rec.709 SDR.") when any of them
+  is HDR/wide-gamut/log. Non-blocking, matches the original Phase 2 plan item; closes the last deferred piece.
+  - **All three phases of the Rec.709 SDR managed color milestone are now complete.**
+
 ## Risks / decisions
 
 - **Re-baseline expectation:** 13C.0 changes the *absolute* look (more correct color), so the

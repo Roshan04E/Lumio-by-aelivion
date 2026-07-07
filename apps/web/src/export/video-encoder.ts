@@ -12,6 +12,27 @@ import { ArrayBufferTarget as WebmTarget, Muxer as WebmMuxer } from "webm-muxer"
 
 export type ExportFormat = "mp4" | "webm";
 
+/**
+ * Container color descriptor written into the MP4 `colr` / WebM `Colour` box. Defaults to Rec.709
+ * SDR limited-range. We PREFER the encoder's own reported `colorSpace` (it truthfully matches the
+ * RGB→YUV matrix/range the encoder actually used — overriding it would reintroduce the BT.601-vs-BT.709
+ * mismatch the Remotion path had to disable parallel-encoding to avoid) and only fill fields the encoder
+ * left unspecified with these defaults.
+ */
+export interface OutputColorSpace {
+  primaries: VideoColorPrimaries;
+  transfer: VideoTransferCharacteristics;
+  matrix: VideoMatrixCoefficients;
+  fullRange: boolean;
+}
+
+export const REC709_SDR_LIMITED: OutputColorSpace = {
+  primaries: "bt709",
+  transfer: "bt709",
+  matrix: "bt709",
+  fullRange: false
+};
+
 export interface MediaEncoderOptions {
   width: number;
   height: number;
@@ -19,6 +40,14 @@ export interface MediaEncoderOptions {
   format: ExportFormat;
   /** Video bitrate in bits/s. Defaults to a quality-scaled value from the resolution. */
   videoBitrate?: number;
+  /** Fallback color descriptor for the container tag (default {@link REC709_SDR_LIMITED}). */
+  outputColorSpace?: OutputColorSpace | undefined;
+  /**
+   * Keyframe cadence in seconds (default 2 — the export setting). The source-proxy transcoder
+   * passes 1 to make ingest proxies keyframe-DENSE, so a playhead drop lands within ~15 delta
+   * frames of a sync point instead of a multi-second decode catch-up on sparse-GOP camera files.
+   */
+  keyFrameIntervalSeconds?: number;
   /** Present when the timeline has audio. */
   audio?: { sampleRate: number; channels: number } | undefined;
 }
@@ -66,6 +95,19 @@ function avcCodec(width: number, height: number, fps: number): string {
   return `avc1.6400${level}`; // High profile
 }
 
+/**
+ * Thrown by {@link MediaEncoder.addVideoFrame} after a wedged encoder was successfully reset:
+ * frames past `resumeFrameIndex` were queued but never muxed. The caller re-renders and re-submits
+ * from `resumeFrameIndex` (deterministic compositor → identical pixels), making the recovery
+ * gapless — no held frame, no motion jump, no timestamp gap in the output file.
+ */
+export class EncoderStallRecoveredError extends Error {
+  constructor(public readonly resumeFrameIndex: number) {
+    super(`Video encoder wedged and was reset — re-render from frame ${resumeFrameIndex}`);
+    this.name = "EncoderStallRecoveredError";
+  }
+}
+
 export class MediaEncoder {
   private readonly opts: MediaEncoderOptions;
   private readonly muxer: CommonMuxer;
@@ -79,10 +121,23 @@ export class MediaEncoder {
   // surface it from the encode/finalize calls, turning a hang into a clean failure (which then lets the
   // worker→main-thread fallback retry).
   private encoderError: Error | null = null;
+  // Saved video config so a wedged encoder can be reset + reconfigured mid-export (see addVideoFrame).
+  private readonly videoConfig: VideoEncoderConfig;
+  private encoderStallRecoveries = 0;
+  private forceKeyFrame = false;
+  // Video chunks actually MUXED — after a stall recovery this is the exact frame index the caller
+  // must re-render from, so the recovery is GAPLESS (no held frame, no motion jump) in the output.
+  private muxedVideoChunks = 0;
+  // Fallback color descriptor merged into the encoded-chunk metadata so the muxer writes a color box.
+  private readonly outputColorSpace: OutputColorSpace;
+  // The color descriptor actually written (encoder-reported values preserved, gaps filled) — surfaced
+  // for export diagnostics. Null until the first chunk carrying a decoderConfig has been muxed.
+  private colorSpaceApplied: VideoColorSpaceInit | null = null;
 
   constructor(opts: MediaEncoderOptions) {
     this.opts = opts;
     this.frameDurationUs = 1_000_000 / opts.fps;
+    this.outputColorSpace = opts.outputColorSpace ?? REC709_SDR_LIMITED;
 
     const videoBitrate = opts.videoBitrate ?? defaultBitrate(opts.width, opts.height, opts.fps);
 
@@ -110,12 +165,15 @@ export class MediaEncoder {
     }
 
     this.videoEncoder = new VideoEncoder({
-      output: (chunk, meta) => this.muxer.addVideoChunk(chunk, meta),
+      output: (chunk, meta) => {
+        this.muxedVideoChunks += 1;
+        this.muxer.addVideoChunk(chunk, this.tagColorMetadata(meta));
+      },
       error: (error) => {
         this.encoderError = error instanceof Error ? error : new Error(`Video encoder error: ${String(error)}`);
       },
     });
-    this.videoEncoder.configure({
+    this.videoConfig = {
       codec: opts.format === "mp4" ? avcCodec(opts.width, opts.height, opts.fps) : "vp09.00.40.08",
       width: opts.width,
       height: opts.height,
@@ -125,7 +183,8 @@ export class MediaEncoder {
       // only, which would downgrade the output. The H.264 decode↔encode contention is resolved on the DECODER
       // side instead (software source decode is lossless — identical pixels — so quality is untouched).
       ...(opts.format === "mp4" ? { avc: { format: "avc" as const } } : {}),
-    });
+    };
+    this.videoEncoder.configure(this.videoConfig);
 
     if (opts.audio) {
       this.audioEncoder = new AudioEncoder({
@@ -143,6 +202,34 @@ export class MediaEncoder {
     }
   }
 
+  /**
+   * Ensure the muxer receives a `decoderConfig.colorSpace` so it writes the container color box
+   * (MP4 `colr` / WebM `Colour`). Encoder-reported fields are AUTHORITATIVE (they match the pixels
+   * the encoder produced) and preserved; only unspecified fields are filled from `outputColorSpace`.
+   * When the encoder emits no `decoderConfig` (no color info to attach), the metadata passes through
+   * untouched and `colorSpaceApplied` stays null → the export surfaces an `export-metadata-fallback`.
+   */
+  private tagColorMetadata(meta?: EncodedVideoChunkMetadata): EncodedVideoChunkMetadata | undefined {
+    if (!meta?.decoderConfig) return meta;
+    const reported = meta.decoderConfig.colorSpace;
+    const merged: VideoColorSpaceInit = {
+      primaries: reported?.primaries ?? this.outputColorSpace.primaries,
+      transfer: reported?.transfer ?? this.outputColorSpace.transfer,
+      matrix: reported?.matrix ?? this.outputColorSpace.matrix,
+      fullRange: reported?.fullRange ?? this.outputColorSpace.fullRange
+    };
+    this.colorSpaceApplied = merged;
+    return { ...meta, decoderConfig: { ...meta.decoderConfig, colorSpace: merged } };
+  }
+
+  /**
+   * The color descriptor written into the container, or null if the encoder never emitted a
+   * `decoderConfig` to attach one to (caller should warn: container color tag not guaranteed).
+   */
+  getAppliedColorSpace(): VideoColorSpaceInit | null {
+    return this.colorSpaceApplied;
+  }
+
   /** Encode one composited frame. `index` is the 0-based frame number. */
   async addVideoFrame(source: CanvasImageSource, index: number): Promise<void> {
     // Backpressure: don't let the encoder queue grow unbounded on long exports. Bail out the instant the
@@ -156,6 +243,28 @@ export class MediaEncoder {
       if (this.encoderError) throw this.encoderError;
       if (this.videoEncoder.state === "closed") throw new Error("Video encoder closed unexpectedly during export.");
       if (Date.now() - waitStart > STALL_MS) {
+        // RECOVERY before giving up (2026-07-05 soak: "Export stalled: encodeFrame 9063/16690" killed a
+        // 5-minute export at 54%): a long-export hardware encoder can wedge without ever firing its error
+        // callback (GPU pressure, background-tab session loss). reset() discards the ≤9 wedged in-queue
+        // frames, reconfigure gives us a fresh session, and the thrown EncoderStallRecoveredError tells
+        // the caller the exact frame the mux actually reached — the export loop re-renders from there
+        // (the compositor is deterministic), so the recovery is GAPLESS in the output. The next encoded
+        // frame is a forced IDR so the resumed stream stays decodable. Bounded: a repeatedly wedging
+        // encoder still surfaces the hard error.
+        if (this.encoderStallRecoveries < 2 && this.videoEncoder.state === "configured") {
+          this.encoderStallRecoveries += 1;
+          try {
+            this.videoEncoder.reset();
+            this.videoEncoder.configure(this.videoConfig);
+            this.forceKeyFrame = true;
+          } catch (error) {
+            throw new Error(`Video encoder stalled and could not be recovered: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          console.warn(
+            `[export] video encoder wedged at frame ${index + 1} → reset (recovery ${this.encoderStallRecoveries}/2), resuming render at frame ${this.muxedVideoChunks + 1}`
+          );
+          throw new EncoderStallRecoveredError(this.muxedVideoChunks);
+        }
         throw new Error("Video encoder stalled during export (queue stopped draining). Try a lower export resolution.");
       }
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -165,7 +274,10 @@ export class MediaEncoder {
       timestamp: Math.round(index * this.frameDurationUs),
       duration: Math.round(this.frameDurationUs),
     });
-    this.videoEncoder.encode(frame, { keyFrame: index % Math.max(1, Math.round(this.opts.fps * 2)) === 0 });
+    const keyFrame =
+      this.forceKeyFrame || index % Math.max(1, Math.round(this.opts.fps * (this.opts.keyFrameIntervalSeconds ?? 2))) === 0;
+    this.forceKeyFrame = false;
+    this.videoEncoder.encode(frame, { keyFrame });
     frame.close();
   }
 

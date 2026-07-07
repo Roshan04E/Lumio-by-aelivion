@@ -13,7 +13,7 @@ import { Aborted, runExportCore } from "./export-core";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "./export-worker-protocol";
 
 // Mirror the main thread's warp-font resolver so vector text-warp still rasterizes in here.
-configureFontResolver((family) => `/${warpFontFile(family)}`);
+configureFontResolver((family, weight) => `/${warpFontFile(family, weight)}`);
 
 interface WorkerScope {
   postMessage(message: ExportWorkerResponse, transfer?: Transferable[]): void;

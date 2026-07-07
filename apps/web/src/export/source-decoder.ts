@@ -14,6 +14,20 @@ export interface FrameProvider {
   readonly height: number;
   /** Frame to draw at `sourceTimeSeconds`. Provider-owned; valid until the next call/dispose. */
   getFrame(sourceTimeSeconds: number): Promise<CanvasImageSource | null>;
+  /**
+   * How far BEHIND the last `getFrame` request the returned frame was, in seconds (0 = at/past
+   * the target). Only meaningful for time-sliced preview providers (`frameBudgetMs`): during a
+   * rewind catch-up on a sparse-keyframe source they serve progressively advancing stale frames —
+   * the presenter uses this to HOLD the last drawn frame instead of playing the gap fast-forward
+   * (user report 2026-07-03). Export providers block until decoded, so this stays 0 there.
+   */
+  readonly lastFrameLagSeconds?: number;
+  /**
+   * Nominal source frame rate estimated from the container's sample table (WebCodecs provider
+   * only; undefined on the <video>/image fallbacks). Resampling consumers (the ingest-proxy
+   * transcode) sample at this cadence so 24fps content isn't forced onto a 30fps grid (judder).
+   */
+  readonly nominalFps?: number | undefined;
   dispose(): void;
 }
 
@@ -25,7 +39,7 @@ export function clipSourceKey(layerId: string, assetId: string): string {
 export async function createFrameProvider(
   url: string,
   kind: "video" | "image",
-  opts: { preferSoftware?: boolean } = {}
+  opts: { preferSoftware?: boolean; frameBudgetMs?: number } = {}
 ): Promise<FrameProvider> {
   if (kind === "image") return createImageSource(url);
   const webcodecs = await createWebCodecsVideoSource(url, opts).catch(() => null);
@@ -122,13 +136,18 @@ export async function createVideoSource(url: string): Promise<FrameProvider> {
 export async function createImageSource(url: string): Promise<FrameProvider> {
   // createImageBitmap works on both the main thread and inside a Worker (unlike `new Image()`),
   // decodes once up front, and returns a GPU-friendly CanvasImageSource/TexImageSource.
+  // imageOrientation "flipY": texImage2D IGNORES UNPACK_FLIP_Y_WEBGL for ImageBitmap sources, but
+  // the media-renderer's upload convention assumes flipped uploads (true for the preview's
+  // HTMLImageElement stills) — an unflipped bitmap exported every photo UPSIDE DOWN
+  // (2026-07-03 report). Baking the flip into the bitmap restores preview↔export parity; the
+  // preview's own bitmap path (WebglMediaLayer) applies the same option.
   let bitmap: ImageBitmap;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
     try {
       const blob = await (await fetch(url, { signal: controller.signal, cache: "no-store" })).blob();
-      bitmap = await createImageBitmap(blob);
+      bitmap = await createImageBitmap(blob, { imageOrientation: "flipY" }).catch(() => createImageBitmap(blob));
     } finally {
       clearTimeout(timer);
     }

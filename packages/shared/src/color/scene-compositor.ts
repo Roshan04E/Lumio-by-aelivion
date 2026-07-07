@@ -40,6 +40,8 @@ import {
   type TransitionParam,
 } from "./transitions/registry";
 import type { BlendMode } from "../types";
+import type { ColorPipeline } from "./types";
+import { MediaWebGLRenderer } from "./media-renderer";
 
 export type ObjectFit = "cover" | "contain" | "fill";
 
@@ -75,6 +77,28 @@ export interface SceneLayerTransform {
   rotation: number;
   /** 0..100. */
   opacity: number;
+}
+
+/**
+ * One region-effect pass (the After Effects model — see todo.md "Region-effect model"): applied to the
+ * layer's RUNNING composited image inside a per-layer nest, masked to its own region. Exactly one of:
+ *   - `blurPx`: gaussian-blur the running nest image, composite it back masked — a region blur combines
+ *     with whatever is already on the layer (base grade, earlier passes).
+ *   - `pipeline`: grade the running nest image with this ONE effect's color pipeline (in-compositor,
+ *     shared-context MediaWebGLRenderer) and composite it back masked — region color combines the same way.
+ * `mask` is the comp-space alpha matte of `clip ∩ region`. Passes are generic {effect params, mask} — no
+ * per-effect-type logic beyond "blur is a kernel, color is a pipeline" (todo.md P3).
+ */
+export interface SceneRegionPass {
+  /** Stable id for the pass (drives the per-effect grade renderer/LUT cache). */
+  effectKey: string;
+  /** Comp-sized alpha matte (comp space, pre-transform); `.a` is coverage of the pass region. */
+  mask: TexImageSource;
+  maskVersion?: number | undefined;
+  /** Gaussian blur radius (σ, backing px) applied to the RUNNING nest image. */
+  blurPx?: number | undefined;
+  /** Color pipeline of the ONE region effect, applied to the RUNNING nest image. */
+  pipeline?: ColorPipeline | null | undefined;
 }
 
 export interface SceneLayerDraw {
@@ -133,6 +157,12 @@ export interface SceneLayerDraw {
   perspective?: number | undefined;
   /** translateZ px. */
   z?: number | undefined;
+  /**
+   * Ordered region-effect passes (flag-gated pass model). When present, the layer renders into its own
+   * nest: base draw first, then each pass applied to the running nest image masked to its region, and the
+   * finished nest composites once with the layer's blend/opacity. Replaces stacked `__rfx_` clone draws.
+   */
+  regionPasses?: SceneRegionPass[] | undefined;
 }
 
 /**
@@ -158,11 +188,46 @@ export interface SceneTransitionDraw {
   params?: Record<string, number | number[] | boolean> | undefined;
 }
 
-/** A compositor draw entry: a normal layer, or a folded transition between two full layer draws. */
-export type SceneDraw = SceneLayerDraw | SceneTransitionDraw;
+/**
+ * A compound-clip (nested sequence) GROUP draw (NESTING.md Phase C). `children` are the nest's own
+ * layers (back-to-front, ALREADY mapped/built against the NESTED comp's coordinate space by
+ * `build-scene-draws.ts` — see `buildLayerDraw`'s `{w,h}` override), pre-composed into an RTT the size
+ * of the nested comp, then that RTT becomes the source of a normal layer draw carrying the compound
+ * clip's own transform/effects/masks/blend (`shell`) — the same "pre-compose / nest" pattern
+ * `precomposeGroup` already uses for transition sides and region-effect passes.
+ */
+export interface SceneGroupDraw {
+  kind: "group";
+  /** Diagnostic-only source group id. Ignored by the renderer (matches debugLayerId/debugFromId/
+   *  debugToId convention) — NOT used as a cache key; see `renderGroupInto`'s depth-indexed pool. */
+  debugGroupId?: string | undefined;
+  /** Children back-to-front. Their draws were built against the NESTED comp's logical size. A child
+   *  may itself be a `SceneGroupDraw` (nests-in-nests). */
+  children: SceneDraw[];
+  /**
+   * Nested comp size IN BACKING PIXELS (i.e. already `logicalNestSize × renderScale` — the caller,
+   * `build-scene-draws.ts`, bakes renderScale in exactly like it does for `SceneLayerDraw.box`/
+   * `blurPx`/`perspective`/`z`, since renderScale never crosses into this file otherwise). The RTT
+   * `children` render into is exactly this size, cleared TRANSPARENT (NESTING.md §5 — alpha survives
+   * to the parent composite; the nested comp's own backgroundColor is never drawn here).
+   */
+  nestWidth: number;
+  nestHeight: number;
+  /** The compound clip's own presentation, applied to the composited RTT as if it were a media source:
+   *  everything a SceneLayerDraw has EXCEPT source/sourceWidth/sourceHeight/sourceVersion. */
+  shell: Omit<SceneLayerDraw, "source" | "sourceWidth" | "sourceHeight" | "sourceVersion">;
+}
+
+/** A compositor draw entry: a normal layer, a folded transition between two full layer draws, or a
+ *  compound-clip group (nested sequence pre-composed as one unit). */
+export type SceneDraw = SceneLayerDraw | SceneTransitionDraw | SceneGroupDraw;
 
 function isTransitionDraw(d: SceneDraw): d is SceneTransitionDraw {
   return (d as SceneTransitionDraw).kind === "transition";
+}
+
+function isGroupDraw(d: SceneDraw): d is SceneGroupDraw {
+  return (d as SceneGroupDraw).kind === "group";
 }
 
 export interface SceneFrameSpec {
@@ -511,6 +576,20 @@ export class SceneCompositor {
   private plateRT: RenderTarget | null = null;
   private scratch1: RenderTarget | null = null;
   private scratch2: RenderTarget | null = null;
+  // Small pooled target for `readCompositeThumbnail` — the color scopes downsample the RETAINED
+  // composite (accumA) into this via a linear blit, so scope sampling never re-composites the frame
+  // and never depends on the on-screen canvas (which has no preserveDrawingBuffer). Lazily allocated.
+  private scopeThumb: RenderTarget | null = null;
+  // Async (PBO + fence) scope readback state (`readCompositeThumbnailAsync`) — the synchronous
+  // `gl.readPixels` in `readCompositeThumbnail` stalls the CPU until the GPU drains; the async path reads
+  // into a PIXEL_PACK_BUFFER (returns immediately), fences it, and harvests it a frame later with a
+  // NON-blocking `clientWaitSync(0)` → `getBufferSubData`. One-slot pipeline (scopes run ≤10Hz), so the
+  // returned frame is the previous completed read (a frame of latency the scopes tolerate). Lazily allocated.
+  private scopePbo: WebGLBuffer | null = null;
+  private scopeFence: WebGLSync | null = null;
+  private scopePboBytes = 0;
+  private scopePendingWH: { w: number; h: number } | null = null;
+  private scopeReady: { pixels: Uint8Array; w: number; h: number } | null = null;
   // Per-transition-side RTT PAIRS. Each side is a clip NEST (base + its region-expansion layers) pre-composed
   // to a finished image, then the two are mixed — the NLE pre-compose/nest model. Each side needs its own
   // ping-pong pair (target + scratch) because the nest is built with the SAME multi-layer accumulator the main
@@ -520,6 +599,33 @@ export class SceneCompositor {
   private sideAScratch: RenderTarget | null = null;
   private sideB: RenderTarget | null = null;
   private sideBScratch: RenderTarget | null = null;
+  // Per-LAYER nest ping-pong pair for region-effect passes (dedicated: a regioned layer can render INSIDE a
+  // transition side, whose pair is busy). Lazily allocated; comps with no region passes pay zero VRAM.
+  private layerNestA: RenderTarget | null = null;
+  private layerNestB: RenderTarget | null = null;
+  // NEST-REVIEW: plan asked to "pool group RTTs per debugGroupId"; implemented DEPTH-indexed instead —
+  // debug*-prefixed fields are documented elsewhere in this file as diagnostic-only / "ignored by the
+  // renderer" (debugLayerId, debugFromId/debugToId), so keying a correctness-load-bearing cache off
+  // debugGroupId would break that convention. Depth-indexing gives the same no-data-race guarantee
+  // (see comment below) without relying on an optional debug field. Flagging for confirmation.
+  //
+  // Per-NESTING-DEPTH ping-pong pairs for compound-clip GROUP draws (NESTING.md Phase C), indexed by
+  // recursion depth (0 = outermost group in the frame). DEPTH-indexed rather than per-group-id: while an
+  // outer group's children render, `accumA/accumB` are temporarily the outer group's own pair (see
+  // `renderGroupInto`) — an inner group (nest-in-nest) child needs a DIFFERENT physical pair to pre-compose
+  // into before its finished texture can be composited back into the still-in-progress outer accumulator,
+  // exactly the reason `layerNestA/B` is dedicated apart from the transition-side pair. Groups at the SAME
+  // depth never render concurrently (fully sequential, one clip finishes and its texture is consumed before
+  // the next starts), so reuse across siblings at one depth is safe — this mirrors `sideA/sideB` being a
+  // single reusable pair rather than a map. Bounded by `NEST_MAX_DEPTH` (8), so at most 8 pairs ever exist.
+  private readonly groupTargets: { target: RenderTarget; scratch: RenderTarget }[] = [];
+  // Per-region-effect grade renderers ON THIS shared context (zero extra GL contexts) — each caches its own
+  // baked LUT, keyed by the pass's effectKey so two alternating passes never rebake per frame. Pruned when a
+  // pass hasn't drawn for a while (grade toggled off / clip left the window).
+  private readonly regionGradeRenderers = new Map<
+    string,
+    { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; lastFrame: number }
+  >();
   // While pre-composing a nest, layers composite with NORMAL blend (the clip's own blend mode applies when the
   // MIXED result lands on the main scene, not between the clip's own layers). Set only inside precomposeGroup.
   private nestMode = false;
@@ -814,6 +920,8 @@ export class SceneCompositor {
     this.sideAScratch?.resize(width, height);
     this.sideB?.resize(width, height);
     this.sideBScratch?.resize(width, height);
+    this.layerNestA?.resize(width, height);
+    this.layerNestB?.resize(width, height);
   }
 
   /** Lazily allocate the comp-sized RTTs the blur/glow passes need (pooled across layers/frames). */
@@ -825,6 +933,38 @@ export class SceneCompositor {
     return { plate: this.plateRT, s1: this.scratch1, s2: this.scratch2 };
   }
 
+  /** Per-effect region-grade renderer + output RTT on THIS context (lazy; LUT cached via pipelineKey). */
+  private regionGradeEntry(effectKey: string): {
+    renderer: MediaWebGLRenderer;
+    target: RenderTarget;
+    pipelineKey: string;
+    lastFrame: number;
+  } {
+    let entry = this.regionGradeRenderers.get(effectKey);
+    if (!entry) {
+      entry = {
+        renderer: new MediaWebGLRenderer({ sharedGl: this.gl }, { label: `scene-region-grade:${effectKey}` }),
+        target: new RenderTarget(this.gl, Math.max(1, this.width), Math.max(1, this.height)),
+        pipelineKey: "",
+        lastFrame: this.frameCounter,
+      };
+      this.regionGradeRenderers.set(effectKey, entry);
+    }
+    return entry;
+  }
+
+  /** Drop grade renderers whose pass hasn't drawn recently (grade removed / clip left the window). */
+  private pruneRegionGradeRenderers(): void {
+    if (this.regionGradeRenderers.size === 0) return;
+    for (const [key, entry] of this.regionGradeRenderers) {
+      if (this.frameCounter - entry.lastFrame > 300) {
+        entry.renderer.dispose();
+        entry.target.dispose();
+        this.regionGradeRenderers.delete(key);
+      }
+    }
+  }
+
   /** Lazily allocate the two per-side ping-pong PAIRS a folded transition pre-composes each clip nest into. */
   private transitionTargets(): { sideA: RenderTarget; sideAScratch: RenderTarget; sideB: RenderTarget; sideBScratch: RenderTarget } {
     const gl = this.gl;
@@ -833,6 +973,21 @@ export class SceneCompositor {
     this.sideA ??= new RenderTarget(gl, this.width, this.height);
     this.sideB ??= new RenderTarget(gl, this.width, this.height);
     return { sideA: this.sideA, sideAScratch: this.sideAScratch, sideB: this.sideB, sideBScratch: this.sideBScratch };
+  }
+
+  /**
+   * Pre-warm (compile + cache) transition programs ahead of playback so the first frame of a cut
+   * doesn't pay a 10–50ms shader-compile stall on the main thread. Idempotent; safe to call from
+   * requestIdleCallback with every transition kind the composition uses.
+   */
+  prewarmTransitions(defs: readonly TransitionDefinition[]): void {
+    for (const def of defs) {
+      try {
+        this.prepareTransition(def);
+      } catch {
+        // A single bad definition (e.g. plugin shader) must not break pre-warm for the rest.
+      }
+    }
   }
 
   /** Compile + cache the program for a transition definition (the same shaders TransitionCompositor uses). */
@@ -1205,6 +1360,10 @@ export class SceneCompositor {
    * normal blend) — used to build a transition side so every per-clip effect is present during the transition.
    */
   private renderLayerInto(layer: SceneLayerDraw, dest: RenderTarget | null): void {
+    if (layer.regionPasses && layer.regionPasses.length > 0) {
+      this.renderLayerWithRegionPasses(layer, dest);
+      return;
+    }
     const gl = this.gl;
     const w = this.width;
     const h = this.height;
@@ -1332,6 +1491,105 @@ export class SceneCompositor {
   }
 
   /**
+   * Render a layer whose region effects are PASSES (the AE model, flag-gated): pre-compose the layer into its
+   * own nest — base draw first (full transform + clip mask, NORMAL blend at full opacity), then each pass
+   * applied to the RUNNING nest image masked to its region — and composite the finished nest ONCE with the
+   * layer's opacity/blend. A blur pass blurs the running image (so it combines with the base grade and earlier
+   * passes — the fix the flat `__rfx_` clone-stack model could never express); a source pass composites its
+   * region-graded image masked (today's clone draw, isolated to this layer's nest). The nest uses a DEDICATED
+   * ping-pong pair because a regioned layer can render inside a transition side, whose pair is busy.
+   */
+  private renderLayerWithRegionPasses(layer: SceneLayerDraw, dest: RenderTarget | null): void {
+    const gl = this.gl;
+    const passes = layer.regionPasses ?? [];
+    this.layerNestA ??= new RenderTarget(gl, this.width, this.height);
+    this.layerNestB ??= new RenderTarget(gl, this.width, this.height);
+    const savedA = this.accumA;
+    const savedB = this.accumB;
+    const savedNest = this.nestMode;
+    this.accumA = this.layerNestA;
+    this.accumB = this.layerNestB;
+    this.nestMode = true;
+    for (const rt of [this.layerNestA, this.layerNestB]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    // Base image: the layer without its passes. Opacity/blend are deferred to the final nest composite —
+    // inside the nest everything is NORMAL at full opacity (nestMode), the precompose model.
+    this.renderLayerInto({ ...layer, regionPasses: undefined, transform: { ...layer.transform, opacity: 100 } }, null);
+    for (const pass of passes) {
+      // Each pass builds its effected frame (blurred / graded RUNNING nest image) into a comp-sized RTT,
+      // then composites it back masked — the masked mix IS the ordinary compositeTexture, ping-ponging the
+      // nest accumulator.
+      let fxTex: WebGLTexture | null = null;
+      if (pass.pipeline && !pass.pipeline.identity) {
+        // Region color: grade the running nest image with this ONE effect's pipeline, in this same context.
+        const entry = this.regionGradeEntry(pass.effectKey);
+        const key = JSON.stringify(pass.pipeline);
+        if (entry.pipelineKey !== key) {
+          entry.renderer.setPipeline(pass.pipeline);
+          entry.pipelineKey = key;
+        }
+        entry.lastFrame = this.frameCounter;
+        entry.renderer.draw({
+          sourceTexture: this.accumA.tex,
+          sourceWidth: this.width,
+          sourceHeight: this.height,
+          matte: null,
+          pipeline: pass.pipeline,
+          amount: 1,
+          opacity: 1,
+          mediaEffects: null,
+          target: entry.target,
+        });
+        fxTex = entry.target.tex;
+      } else if ((pass.blurPx ?? 0) > 0) {
+        // Region blur: gaussian the running nest image.
+        const { s1, s2 } = this.effectTargets();
+        this.gaussianBlur(this.accumA, s2, s1, pass.blurPx!);
+        fxTex = s2.tex;
+      }
+      if (!fxTex) continue;
+      const maskTex = this.uploadSource(pass.mask, pass.maskVersion, {
+        layerId: layer.debugLayerId,
+        role: "mask",
+        frameTime: this.debugFrameTime,
+      });
+      this.compositeTexture(
+        fxTex,
+        maskTex,
+        [1, 1],
+        true,
+        1,
+        "normal",
+        { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+        { halfW: this.width / 2, halfH: this.height / 2, rotateX: 0, rotateY: 0, perspective: 0, z: 0 },
+      );
+    }
+    const nestResult = this.accumA;
+    this.accumA = savedA;
+    this.accumB = savedB;
+    this.nestMode = savedNest;
+    // Composite the finished nest once, at the layer's opacity/blend (forced NORMAL inside an outer nest —
+    // same rule as every draw).
+    this.compositeTexture(
+      nestResult.tex,
+      null,
+      [1, 1],
+      false,
+      Math.max(0, Math.min(1, layer.transform.opacity / 100)),
+      dest || this.nestMode ? "normal" : layer.blendMode,
+      { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+      { halfW: this.width / 2, halfH: this.height / 2, rotateX: 0, rotateY: 0, perspective: 0, z: 0 },
+      [0, 0],
+      [0, 0, 0, 0],
+      dest,
+    );
+  }
+
+  /**
    * Pre-compose a clip's NEST — its group of layers (base + region-expansion layers, which is how a region
    * effect like a masked blur is represented) — into `target`, using the SAME multi-layer accumulator the main
    * scene uses. The isolated single-clip path can only hold ONE layer (it reads a transparent backdrop, so a
@@ -1362,6 +1620,80 @@ export class SceneCompositor {
     this.accumB = savedB;
     this.nestMode = savedNest;
     return result;
+  }
+
+  /** Lazily allocate (and resize-to-fit) the dedicated RTT pair for compound-group nesting depth `depth`. */
+  private groupTargetsForDepth(depth: number, width: number, height: number): { target: RenderTarget; scratch: RenderTarget } {
+    const gl = this.gl;
+    while (this.groupTargets.length <= depth) {
+      this.groupTargets.push({
+        target: new RenderTarget(gl, Math.max(1, width), Math.max(1, height)),
+        scratch: new RenderTarget(gl, Math.max(1, width), Math.max(1, height)),
+      });
+    }
+    const pair = this.groupTargets[depth]!;
+    pair.target.resize(width, height);
+    pair.scratch.resize(width, height);
+    return pair;
+  }
+
+  /**
+   * Render a compound-clip GROUP draw (NESTING.md Phase C): pre-compose `children` (back-to-front, the
+   * same "own nest, NORMAL blend, transparent backdrop" pattern as `precomposeGroup`/region passes) into
+   * an RTT sized to `nestWidth × nestHeight` (already backing px — see `SceneGroupDraw` doc), then
+   * composite that RTT through the ORDINARY layer-draw path using `shell` — so a compound clip's own
+   * mask/blur/glow/blend/regionPasses work completely unmodified (they're just another `renderLayerInto`
+   * call reading a `SceneTextureSource`).
+   *
+   * The compositor's AMBIENT `width`/`height` (read by `writeQuad`/`compositeTexture`/`gaussianBlur`/
+   * `uResolution` — everywhere geometry and blur radii are computed) are swapped to the NEST's size for
+   * the duration of the children render, because a child's `transform.x/y` (0..100%) is a percentage OF
+   * THE NEST, not the parent comp — build-scene-draws.ts built these children against the nested comp's
+   * `w/h` (Task 2), so the compositor's coordinate space must match. Restored before compositing the
+   * shell (which is built in PARENT coordinates).
+   */
+  private renderGroupInto(draw: SceneGroupDraw, dest: RenderTarget | null, depth: number): void {
+    const gl = this.gl;
+    const nestW = Math.max(1, Math.round(draw.nestWidth));
+    const nestH = Math.max(1, Math.round(draw.nestHeight));
+    const { target, scratch } = this.groupTargetsForDepth(depth, nestW, nestH);
+
+    const savedWidth = this.width;
+    const savedHeight = this.height;
+    const savedA = this.accumA;
+    const savedB = this.accumB;
+    const savedNest = this.nestMode;
+    this.width = nestW;
+    this.height = nestH;
+    this.accumA = target;
+    this.accumB = scratch;
+    this.nestMode = true;
+    for (const rt of [target, scratch]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+      gl.viewport(0, 0, nestW, nestH);
+      gl.clearColor(0, 0, 0, 0); // TRANSPARENT clear — alpha preserved (NESTING.md §5), no background bake
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    for (const child of draw.children) {
+      if (isTransitionDraw(child)) this.renderTransition(child);
+      else if (isGroupDraw(child)) this.renderGroupInto(child, null, depth + 1);
+      else this.renderLayerInto(child, null);
+    }
+    const resultTex = this.accumA.tex; // ping-pong leaves the latest result in accumA after each child's swap
+
+    this.width = savedWidth;
+    this.height = savedHeight;
+    this.accumA = savedA;
+    this.accumB = savedB;
+    this.nestMode = savedNest;
+
+    // Composite the finished nest through the NORMAL layer-draw path: the shell carries the compound
+    // clip's fit/transform/mask/blur/glow/blend/regionPasses in PARENT coordinates (this.width/height are
+    // already restored above), and the nest RTT is just its source texture — no new composite logic.
+    this.renderLayerInto(
+      { ...draw.shell, source: { texture: resultTex, width: nestW, height: nestH }, sourceWidth: nestW, sourceHeight: nestH },
+      dest,
+    );
   }
 
   /**
@@ -1406,7 +1738,13 @@ export class SceneCompositor {
   }
 
   private renderFrameUnchecked(spec: SceneFrameSpec): void {
-    if (this.disposed) return;
+    if (!this.renderFrameCore(spec)) return;
+    this.presentFrame();
+  }
+
+  /** Composite the frame into the accumulator (everything except the present). False = nothing to draw. */
+  private renderFrameCore(spec: SceneFrameSpec): boolean {
+    if (this.disposed) return false;
     this.debugFrameTime = spec.debugFrameTime;
     const gl = this.gl;
     // If the browser evicted this context ("Too many active WebGL contexts. Oldest context will be lost."),
@@ -1417,7 +1755,7 @@ export class SceneCompositor {
     this.ensureSize(spec.width, spec.height);
     const w = this.width;
     const h = this.height;
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) return false;
 
     // Initialize accumulator A with the (opaque) background.
     const [br, bg, bb] = parseColor(spec.backgroundColor || "#000000");
@@ -1433,17 +1771,28 @@ export class SceneCompositor {
     for (const draw of spec.layers) {
       if (isTransitionDraw(draw)) {
         this.renderTransition(draw);
+      } else if (isGroupDraw(draw)) {
+        this.renderGroupInto(draw, null, 0);
       } else {
         this.renderLayerInto(draw, null);
       }
     }
 
     this.pruneTextures();
+    this.pruneRegionGradeRenderers();
     gl.bindVertexArray(null);
+    return true;
+  }
 
-    // Present: draw the final accumulator A onto the output canvas (default framebuffer) with a
-    // textured fullscreen triangle. NOT blitFramebuffer-to-default — that is an illegal blit when the
-    // default framebuffer is multisampled, and it was failing silently (transparent canvas).
+  /**
+   * Present: draw the final accumulator A onto the output canvas (default framebuffer) with a
+   * textured fullscreen triangle. NOT blitFramebuffer-to-default — that is an illegal blit when the
+   * default framebuffer is multisampled, and it was failing silently (transparent canvas).
+   */
+  private presentFrame(): void {
+    const gl = this.gl;
+    const w = this.width;
+    const h = this.height;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
     this.lastPresentViewport = Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array | number[]);
@@ -1456,6 +1805,191 @@ export class SceneCompositor {
     gl.uniform1i(this.uPresentTex, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
+  }
+
+  /**
+   * Render one frame WITHOUT presenting, and read the composited RGBA pixels back (top-origin rows,
+   * opaque background baked in). The on-screen canvas keeps its last presented image untouched — this is
+   * the viewer-capture primitive for background proxy generation (todo.md Phase 6B P1a: "the proxy IS the
+   * viewer") and the P1b parity self-check: the EXACT compositor instance, texture caches, and draw-list
+   * builder the visible preview uses, minus the present. Returns null when there is nothing to draw or the
+   * context is lost. Pass `buffer` (≥ w*h*4 bytes) to avoid a fresh allocation per frame.
+   */
+  renderFrameOffscreen(spec: SceneFrameSpec, buffer?: Uint8Array): { pixels: Uint8Array; width: number; height: number } | null {
+    let drawn = false;
+    try {
+      drawn = this.renderFrameCore(spec);
+    } catch (error) {
+      if (error instanceof Error && error.message === SCENE_COMPOSITOR_CONTEXT_LOST) {
+        this.contextLost = true;
+      }
+      throw error;
+    }
+    if (!drawn) return null;
+    const gl = this.gl;
+    const w = this.width;
+    const h = this.height;
+    const size = w * h * 4;
+    const pixels = buffer && buffer.byteLength >= size ? buffer : new Uint8Array(size);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.accumA.fbo);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // FBO rows are bottom-origin; flip in place to top-origin for VideoFrame/ImageData consumers.
+    const rowBytes = w * 4;
+    const tmp = new Uint8Array(rowBytes);
+    for (let y = 0; y < h >> 1; y++) {
+      const top = y * rowBytes;
+      const bottom = (h - 1 - y) * rowBytes;
+      tmp.set(pixels.subarray(top, top + rowBytes));
+      pixels.copyWithin(top, bottom, bottom + rowBytes);
+      pixels.set(tmp, bottom);
+    }
+    return { pixels, width: w, height: h };
+  }
+
+  /**
+   * Downsample the RETAINED composite (the last frame left in `accumA` by `renderFrame`) into a small
+   * top-origin RGBA thumbnail — the trustworthy source for the color scopes. This does NOT re-composite
+   * (cheap: one linear blit + a tiny readback) and does NOT touch the on-screen canvas, so it is exact
+   * regardless of `preserveDrawingBuffer`. Returns null if nothing has been composited yet or the context
+   * is lost. `targetW`×`targetH` is the thumbnail size (e.g. 320×180); `buffer` (≥ w*h*4) avoids a per-call
+   * allocation.
+   */
+  readCompositeThumbnail(
+    targetW: number,
+    targetH: number,
+    buffer?: Uint8Array
+  ): { pixels: Uint8Array; width: number; height: number } | null {
+    if (this.disposed || this.isContextLost() || this.width === 0 || this.height === 0) return null;
+    const w = Math.max(1, Math.min(targetW | 0, this.width));
+    const h = Math.max(1, Math.min(targetH | 0, this.height));
+    const gl = this.gl;
+    if (!this.scopeThumb) this.scopeThumb = new RenderTarget(gl, w, h);
+    else this.scopeThumb.resize(w, h);
+    try {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.accumA.fbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.scopeThumb.fbo);
+      gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      const size = w * h * 4;
+      const pixels = buffer && buffer.byteLength >= size ? buffer : new Uint8Array(size);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeThumb.fbo);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      // FBO rows are bottom-origin; flip to top-origin for ImageData/scope consumers.
+      const rowBytes = w * 4;
+      const tmp = new Uint8Array(rowBytes);
+      for (let y = 0; y < h >> 1; y++) {
+        const top = y * rowBytes;
+        const bottom = (h - 1 - y) * rowBytes;
+        tmp.set(pixels.subarray(top, top + rowBytes));
+        pixels.copyWithin(top, bottom, bottom + rowBytes);
+        pixels.set(tmp, bottom);
+      }
+      return { pixels, width: w, height: h };
+    } catch {
+      return null;
+    } finally {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+  }
+
+  /**
+   * Async sibling of {@link readCompositeThumbnail} (Phase 5) — the scopes' non-stalling readback path.
+   *
+   * Same source (the RETAINED composite in `accumA`, linear-blit down to `targetW×targetH`), but instead of
+   * a synchronous `gl.readPixels` (which blocks the CPU on a GPU drain — the 30Hz stall this replaces), it:
+   *   1. harvests any PRIOR in-flight read whose fence is signaled — `clientWaitSync(…, 0)` is non-blocking,
+   *      and the following `getBufferSubData` from the PIXEL_PACK_BUFFER no longer stalls (the GPU is done);
+   *   2. kicks a NEW read into the PBO (returns immediately) + inserts a fence;
+   *   3. returns the most-recent COMPLETED pixels (top-origin), or null until the first read lands.
+   *
+   * Result is one scope-tick stale — imperceptible for waveform/vectorscope at ≤10Hz. Falls back to null
+   * (caller uses the sync path / DOM sample) on any error or before the first fence completes.
+   */
+  readCompositeThumbnailAsync(
+    targetW: number,
+    targetH: number,
+    buffer?: Uint8Array
+  ): { pixels: Uint8Array; width: number; height: number } | null {
+    if (this.disposed || this.isContextLost() || this.width === 0 || this.height === 0) return null;
+    const w = Math.max(1, Math.min(targetW | 0, this.width));
+    const h = Math.max(1, Math.min(targetH | 0, this.height));
+    const gl = this.gl;
+    const flipTopOrigin = (pixels: Uint8Array, pw: number, ph: number): void => {
+      const rowBytes = pw * 4;
+      const tmp = new Uint8Array(rowBytes);
+      for (let y = 0; y < ph >> 1; y++) {
+        const top = y * rowBytes;
+        const bottom = (ph - 1 - y) * rowBytes;
+        tmp.set(pixels.subarray(top, top + rowBytes));
+        pixels.copyWithin(top, bottom, bottom + rowBytes);
+        pixels.set(tmp, bottom);
+      }
+    };
+    try {
+      // (1) Harvest a completed prior read (non-blocking).
+      if (this.scopeFence && this.scopePendingWH) {
+        const status = gl.clientWaitSync(this.scopeFence, 0, 0);
+        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) {
+          const { w: pw, h: ph } = this.scopePendingWH;
+          const out = new Uint8Array(pw * ph * 4);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.scopePbo);
+          gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+          flipTopOrigin(out, pw, ph); // FBO rows are bottom-origin → flip for ImageData/scope consumers
+          this.scopeReady = { pixels: out, w: pw, h: ph };
+          gl.deleteSync(this.scopeFence);
+          this.scopeFence = null;
+          this.scopePendingWH = null;
+        } else if (status === gl.WAIT_FAILED) {
+          gl.deleteSync(this.scopeFence);
+          this.scopeFence = null;
+          this.scopePendingWH = null;
+        }
+        // TIMEOUT_EXPIRED → still in flight; leave it and skip kicking a new read.
+      }
+      // (2) Kick a new read only when the slot is free (single in-flight read).
+      if (!this.scopeFence) {
+        if (!this.scopeThumb) this.scopeThumb = new RenderTarget(gl, w, h);
+        else this.scopeThumb.resize(w, h);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.accumA.fbo);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.scopeThumb.fbo);
+        gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+        const size = w * h * 4;
+        if (!this.scopePbo) this.scopePbo = gl.createBuffer();
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.scopePbo);
+        if (this.scopePboBytes !== size) {
+          gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ);
+          this.scopePboBytes = size;
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeThumb.fbo);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0); // async → into the bound PBO at offset 0
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        this.scopeFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        this.scopePendingWH = { w, h };
+        gl.flush(); // make sure the fence + read are actually in the GPU command stream
+      }
+      // (3) Return the latest completed read (from this or a prior call).
+      const ready = this.scopeReady;
+      if (!ready) return null;
+      const bytes = ready.pixels.byteLength;
+      if (buffer && buffer.byteLength >= bytes) {
+        buffer.set(ready.pixels.subarray(0, bytes));
+        return { pixels: buffer, width: ready.w, height: ready.h };
+      }
+      return { pixels: ready.pixels, width: ready.w, height: ready.h };
+    } catch {
+      return null;
+    } finally {
+      // A bound PIXEL_PACK_BUFFER redirects EVERY later `readPixels(…, ArrayBufferView)` on this shared
+      // context into the PBO (INVALID_OPERATION) — renderFrameOffscreen / the sync scope read / finish()
+      // would all break. Unbind unconditionally so an exception mid-arm can never leak the binding.
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
   }
 
   /**
@@ -1492,10 +2026,33 @@ export class SceneCompositor {
     this.plateRT?.dispose();
     this.scratch1?.dispose();
     this.scratch2?.dispose();
+    this.scopeThumb?.dispose();
+    if (this.scopeFence) {
+      gl.deleteSync(this.scopeFence);
+      this.scopeFence = null;
+    }
+    if (this.scopePbo) {
+      gl.deleteBuffer(this.scopePbo);
+      this.scopePbo = null;
+    }
+    this.scopePendingWH = null;
+    this.scopeReady = null;
     this.sideA?.dispose();
     this.sideAScratch?.dispose();
     this.sideB?.dispose();
     this.sideBScratch?.dispose();
+    this.layerNestA?.dispose();
+    this.layerNestB?.dispose();
+    for (const pair of this.groupTargets) {
+      pair.target.dispose();
+      pair.scratch.dispose();
+    }
+    this.groupTargets.length = 0;
+    for (const entry of this.regionGradeRenderers.values()) {
+      entry.renderer.dispose();
+      entry.target.dispose();
+    }
+    this.regionGradeRenderers.clear();
     for (const compiled of this.transitionPrograms.values()) gl.deleteProgram(compiled.program);
     this.transitionPrograms.clear();
     gl.deleteBuffer(this.vbo);

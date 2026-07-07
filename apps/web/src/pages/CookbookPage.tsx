@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, NavLink, useParams } from "react-router-dom";
-import { Badge } from "../components/Badge";
 import {
   cookbookSections,
   defaultCookbookSectionId,
@@ -52,79 +51,70 @@ export function CookbookPage() {
   const SectionIcon = section.icon;
 
   return (
-    <div className="page cookbook-page">
-      <section className="page-heading cookbook-hero">
-        <Badge tone="lime">Cookbook</Badge>
-        <h1>How Lumio works — all of it</h1>
-        <p>
-          A guided, no-secrets tour of the product: what it is, who it's for, how a reel flows from raw clip to export, and
-          exactly how each tool works behind the scenes.
-        </p>
+    <div className="mkt-page">
+      <section className="mkt-hero" style={{ padding: "48px 0 8px" }}>
+        <div className="mkt-wrap mkt-hero-inner">
+          <span className="mkt-eyebrow">Cookbook</span>
+          <h1 style={{ fontSize: "clamp(28px, 3.6vw, 42px)" }}>
+            How Lumio works — <span className="mkt-grad">all of it.</span>
+          </h1>
+          <p className="mkt-sub">
+            A no-secrets tour: what the product is, how a reel flows from raw clip to export, and exactly
+            how each tool works behind the scenes.
+          </p>
+        </div>
       </section>
 
-      <div className="cookbook-shell">
-        <nav className="cookbook-rail cookbook-rail-left" aria-label="Cookbook sections">
-          <span className="cookbook-rail-title">Sections</span>
-          {cookbookSections.map((item) => {
-            const ItemIcon = item.icon;
-            return (
-              <NavLink
-                key={item.id}
-                to={`/cookbook/${item.id}`}
-                className={({ isActive }) => (isActive ? "is-active" : "")}
-              >
-                <span className="cookbook-rail-label">
-                  <ItemIcon size={15} />
-                  {item.title}
-                </span>
-                <small>{item.blurb}</small>
-              </NavLink>
-            );
-          })}
-        </nav>
+      <div className="mkt-wrap">
+        <div className="mkt-doc-shell">
+          <nav className="mkt-doc-rail mkt-doc-rail-left mkt-doc-nav" aria-label="Cookbook sections">
+            <span className="mkt-doc-rail-title">Sections</span>
+            {cookbookSections.map((item) => {
+              const ItemIcon = item.icon;
+              return (
+                <NavLink key={item.id} to={`/cookbook/${item.id}`} className={({ isActive }) => (isActive ? "is-active" : "")}>
+                  <span className="lbl">
+                    <ItemIcon size={15} />
+                    {item.title}
+                  </span>
+                  <small>{item.blurb}</small>
+                </NavLink>
+              );
+            })}
+          </nav>
 
-        <article className="cookbook-article" ref={articleRef}>
-          <header className="cookbook-article-head">
-            <span className="cookbook-article-icon">
-              <SectionIcon size={20} />
-            </span>
-            <div>
-              <h2>{section.title}</h2>
-              <p>{section.blurb}</p>
-            </div>
-          </header>
+          <article className="mkt-doc-article" ref={articleRef}>
+            <header className="mkt-doc-head">
+              <span className="mkt-ic"><SectionIcon size={18} /></span>
+              <div>
+                <h2>{section.title}</h2>
+                <p>{section.blurb}</p>
+              </div>
+            </header>
 
-          {section.subsections.map((sub) => (
-            <section
-              key={sub.id}
-              id={`section-${sub.id}`}
-              data-sub-id={sub.id}
-              className="cookbook-subsection"
-            >
-              <h3>{sub.title}</h3>
-              <div className="cookbook-prose">{sub.render()}</div>
-            </section>
-          ))}
+            {section.subsections.map((sub) => (
+              <section key={sub.id} id={`section-${sub.id}`} data-sub-id={sub.id} className="mkt-doc-sub">
+                <h3>{sub.title}</h3>
+                <div className="mkt-doc-prose">{sub.render()}</div>
+              </section>
+            ))}
 
-          <footer className="cookbook-article-foot">
-            <Link to="/tools">Browse the tools →</Link>
-            <Link to="/create">Start a project →</Link>
-          </footer>
-        </article>
+            <footer className="mkt-doc-foot">
+              <Link to="/tools">Browse the tools →</Link>
+              <Link to="/create">Start a project →</Link>
+            </footer>
+          </article>
 
-        <aside className="cookbook-rail cookbook-rail-right" aria-label="On this page">
-          <span className="cookbook-rail-title">On this page</span>
-          {section.subsections.map((sub) => (
-            <a
-              key={sub.id}
-              href={`#section-${sub.id}`}
-              className={activeSubId === sub.id ? "is-active" : ""}
-            >
-              <span className="cookbook-rail-label">{sub.title}</span>
-              <small>{sub.descriptor}</small>
-            </a>
-          ))}
-        </aside>
+          <aside className="mkt-doc-rail mkt-doc-rail-right mkt-doc-toc" aria-label="On this page">
+            <span className="mkt-doc-rail-title">On this page</span>
+            {section.subsections.map((sub) => (
+              <a key={sub.id} href={`#section-${sub.id}`} className={activeSubId === sub.id ? "is-active" : ""}>
+                {sub.title}
+                <small>{sub.descriptor}</small>
+              </a>
+            ))}
+          </aside>
+        </div>
       </div>
     </div>
   );

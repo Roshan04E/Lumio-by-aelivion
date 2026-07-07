@@ -4,6 +4,8 @@ import {
   buildPlannerUserContent,
   classifyToolCost,
   extractPlanJson,
+  getSkill,
+  getSkillTaskKind,
   logUnsupported,
   PLANNER_SYSTEM_PROMPT,
   recordEffectDemand,
@@ -366,6 +368,31 @@ function validateSteps(
           cost: classifyToolCost(tool.slug)
         });
       }
+      continue;
+    }
+
+    if (candidate.kind === "skill" && typeof candidate.skillId === "string" && typeof candidate.taskKind === "string") {
+      const skill = getSkill(candidate.skillId);
+      const task = skill ? getSkillTaskKind(skill, candidate.taskKind) : undefined;
+      if (!skill || !task) {
+        dropped.push(`${candidate.skillId}/${candidate.taskKind}: unknown skill/task`);
+        continue;
+      }
+      const parsed = task.inputSchema.safeParse(candidate.params ?? {});
+      if (!parsed.success) {
+        dropped.push(`${skill.id}/${task.id}: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`);
+        continue;
+      }
+      steps.push({
+        id: stepId(),
+        kind: "skill",
+        skillId: skill.id,
+        taskKind: task.id,
+        params: parsed.data,
+        summary: summary || `${skill.name}: ${task.label}`,
+        // Metadata cost only (no gating): video runs cloud, image resolves local-first at run time.
+        cost: { tier: task.modality === "video" ? "cloud" : "browser", credits: 0 }
+      });
       continue;
     }
 

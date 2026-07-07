@@ -31,6 +31,14 @@ Web: `http://localhost:5173`
 
 API: `http://localhost:4100`
 
+> **Dev vs production-preview origins:** `pnpm --filter @lumio-by-aelivion/web build && pnpm --filter @lumio-by-aelivion/web preview`
+> serves the production bundle on `http://localhost:4173` — a **separate browser-storage universe**
+> from `:5173` (its own localStorage, OPFS, IndexedDB, service worker). Ingest proxies, feature
+> flags, and local media built on one origin do not exist on the other; the first session on `:4173`
+> rebuilds proxies in the background (expected, not a bug). Before trusting any "the fix didn't
+> work" repro on `:4173`, compare the console's `index-*.js` hash against the latest build output —
+> a stale service worker has served pre-fix bundles before (see `project-tracker/infrastructure.md`).
+
 Demo login used by the frontend:
 
 ```text

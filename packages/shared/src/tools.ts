@@ -5,6 +5,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_auto_captions",
     name: "Auto Captions",
     slug: "auto-captions",
+    icon: "captions",
     shortDescription: "Generate punchy captions with highlighted words and zoom emphasis.",
     userDescription:
       "Turn speech into editable creator captions. Import or generate a transcript, style the captions, preview timing, and apply the result as normal timeline text layers.",
@@ -30,6 +31,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_extract_person",
     name: "Extract Person",
     slug: "extract-person",
+    icon: "person-extraction",
     shortDescription: "Create person masks, cutouts, and tracking metadata for reuse in templates.",
     userDescription:
       "Find the primary person in a clip, inspect the mask, and save reusable cutout/tracking artifacts for templates such as text-behind-person and follow text.",
@@ -55,6 +57,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_ai_roto",
     name: "AI Roto",
     slug: "ai-roto",
+    icon: "person-extraction",
     shortDescription: "Point at a subject — and anything it's holding — to auto-mask it across the clip.",
     userDescription:
       "Click the person and any object they hold (bike, notebook, cup) to build a precise subject matte that follows the clip. Add or subtract clicks to refine, then apply it as an editable matte.",
@@ -80,6 +83,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_remove_background",
     name: "Remove Background",
     slug: "remove-background",
+    icon: "background-removal",
     shortDescription: "Generate a transparent or green-screen-ready clip from a portrait video.",
     userDescription:
       "Use a person mask to separate subject from background, preview the matte, tune edges, and apply a transparent or green-screen-ready result.",
@@ -105,6 +109,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_remove_person",
     name: "Remove Person",
     slug: "remove-person",
+    icon: "background-removal",
     shortDescription: "Select a person or object, track it, and remove it with a clean inpainted background.",
     userDescription:
       "Tap or brush the person/object you want gone, preview the cleaned clip, and apply a single inpainted video layer to the timeline. Re-edit the selection any time.",
@@ -131,6 +136,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_smart_3d_follow_text",
     name: "Smart 3D Follow Text",
     slug: "smart-3d-follow-text",
+    icon: "follow-text",
     shortDescription: "Track one or more targets and lock text or stabilize the subject to them in 3D.",
     userDescription:
       "Auto-detect a subject or draw your own track box(es) on the real video frame, choose fast or quality tracking, then either attach editable text that follows the tracked surface (position, scale, rotation, perspective tilt) or stabilize the subject itself. Multi-target tracking runs several boxes in one local pass.",
@@ -157,6 +163,7 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
     id: "tool_text_behind_person",
     name: "Text Behind Person",
     slug: "text-behind-person",
+    icon: "text-behind",
     shortDescription: "Layer bold typography behind a subject with a cinematic 9:16 preview.",
     userDescription:
       "Create a layered composite where the background stays behind text and the cutout subject renders on top. Edit the text, style, mask, and layer stack afterward.",

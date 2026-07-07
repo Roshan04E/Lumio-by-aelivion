@@ -1,9 +1,10 @@
-import type { ProjectGraph, TimelineComposition, TimelineLayer, TimelineTrack } from "./types";
+import type { ProjectGraph, SpeedKeyframe, TimelineComposition, TimelineLayer, TimelineTrack, TrackAudioKeyframe } from "./types";
 
-const portrait = {
-  width: 1080,
-  height: 1920,
-  fps: 30
+export type CompositionOrientation = "portrait" | "landscape";
+
+const orientationPresets = {
+  portrait: { width: 1080, height: 1920, fps: 30, preset: "vertical_1080x1920" as const },
+  landscape: { width: 1920, height: 1080, fps: 30, preset: "landscape_1920x1080" as const }
 };
 
 export function createDefaultComposition(input: {
@@ -11,47 +12,52 @@ export function createDefaultComposition(input: {
   name: string;
   durationSeconds: number;
   assetId?: string | undefined;
+  orientation?: CompositionOrientation | undefined;
+  /** "Continue without a template": start with an empty timeline. Only the uploaded footage (if any)
+   *  lands on the video track — no placeholder "Main clip" and no empty "Music bed" audio layer. */
+  blank?: boolean | undefined;
 }): TimelineComposition {
   const duration = clamp(input.durationSeconds, 6, 7200);
+  const frame = orientationPresets[input.orientation ?? "portrait"];
   // Deliberately raw: the main clip carries no auto color-grade/grain and no fade-in
   // (see layer() below) - what the user uploaded is exactly what renders, frame 0
   // onward, full opacity, unaltered. No placeholder "Hook caption"/"CTA caption" text
   // is auto-inserted either; the text track starts empty for the user (or a tool's
   // Apply step) to fill in deliberately, not have copy appear they never asked for.
-  const mediaLayer = layer({
-    id: `${input.id}_media_1`,
-    trackId: `${input.id}_track_video`,
-    type: "video",
-    name: "Main clip",
-    startSeconds: 0,
-    durationSeconds: duration,
-    assetId: input.assetId,
-    fit: "cover"
-  });
-  const audioLayer = layer({
-    id: `${input.id}_audio_bed`,
-    trackId: `${input.id}_track_audio`,
-    type: "audio",
-    name: "Music bed",
-    startSeconds: 0,
-    durationSeconds: duration,
-    muted: false
-  });
+  //
+  // Blank projects seed NO placeholder layers: a video layer only when real footage is attached.
+  const includeMedia = !input.blank || Boolean(input.assetId);
+  const mediaLayer = includeMedia
+    ? layer({
+        id: `${input.id}_media_1`,
+        trackId: `${input.id}_track_video`,
+        type: "video",
+        name: "Main clip",
+        startSeconds: 0,
+        durationSeconds: duration,
+        assetId: input.assetId,
+        fit: "cover"
+      })
+    : undefined;
+  // No auto "Music bed": it carried no asset, so it always surfaced as a FALSE empty audio clip
+  // (worse when the source video has no audio at all). The audio track starts empty; the user or a
+  // tool drops real audio onto it deliberately. The video layer still carries its own embedded audio.
+  const audioLayer: TimelineLayer | undefined = undefined;
 
   return {
     id: `composition_${input.id}`,
     name: input.name,
-    width: portrait.width,
-    height: portrait.height,
-    fps: portrait.fps,
+    width: frame.width,
+    height: frame.height,
+    fps: frame.fps,
     durationSeconds: duration,
     backgroundColor: "#07080C",
     settings: {
       viewport: {
-        preset: "vertical_1080x1920",
-        width: portrait.width,
-        height: portrait.height,
-        fps: portrait.fps,
+        preset: frame.preset,
+        width: frame.width,
+        height: frame.height,
+        fps: frame.fps,
         backgroundColor: "#07080C",
         resizeBehavior: "keep-layout"
       },
@@ -65,15 +71,15 @@ export function createDefaultComposition(input: {
     },
     tracks: [
       track(`${input.id}_track_text`, "video", "Video 2", []),
-      track(`${input.id}_track_video`, "video", "Video 1", [mediaLayer]),
-      track(`${input.id}_track_audio`, "audio", "Audio 1", [audioLayer])
+      track(`${input.id}_track_video`, "video", "Video 1", mediaLayer ? [mediaLayer] : []),
+      track(`${input.id}_track_audio`, "audio", "Audio 1", audioLayer ? [audioLayer] : [])
     ]
   };
 }
 
 export function ensureComposition(graph: ProjectGraph, input: { name: string; durationSeconds: number }): TimelineComposition {
   if (graph.composition) {
-    return graph.composition;
+    return dedupeLayerIds(graph.composition);
   }
 
   return createDefaultComposition({
@@ -84,8 +90,225 @@ export function ensureComposition(graph: ProjectGraph, input: { name: string; du
   });
 }
 
+/**
+ * Healing pass: layer ids MUST be unique (React keys, selection, per-id ops all assume it) — but
+ * uniqueness is NEVER worth silently deleting user content. The original healer DROPPED later
+ * occurrences, which turned any id collision into a delayed time bomb: the collision was created
+ * silently (e.g. two layers minted in the same millisecond by the Date.now()-based id generator),
+ * both clips rendered normally, and then the user's NEXT ordinary edit re-derived the composition
+ * through this pass and one clip vanished — experienced as "I trimmed a clip and it got deleted"
+ * (2026-07-04 report). Later occurrences are now RE-IDENTIFIED: content preserved, uniqueness
+ * restored, incident loudly reported (console + globalThis.__rfHealedLayerIds) so collisions get
+ * fixed at their source. Returns the same reference when nothing is wrong.
+ */
+function dedupeLayerIds(composition: TimelineComposition): TimelineComposition {
+  const seen = new Set<string>();
+  let healed = 0;
+  const tracks = composition.tracks.map((track) => {
+    let changed = false;
+    const layers = track.layers.map((layer) => {
+      if (!seen.has(layer.id)) {
+        seen.add(layer.id);
+        return layer;
+      }
+      healed += 1;
+      let candidate = `${layer.id}__healed_${healed}`;
+      while (seen.has(candidate)) {
+        candidate = `${candidate}x`;
+      }
+      seen.add(candidate);
+      changed = true;
+      console.warn(`[timeline] duplicate layer id healed by re-id (content preserved): "${layer.id}" → "${candidate}" (${layer.type} "${layer.name}")`);
+      const g = globalThis as { __rfHealedLayerIds?: Array<{ from: string; to: string; type: string; name: string }> };
+      (g.__rfHealedLayerIds ??= []).push({ from: layer.id, to: candidate, type: layer.type, name: layer.name });
+      return { ...layer, id: candidate };
+    });
+    return changed ? { ...track, layers } : track;
+  });
+  return healed > 0 ? { ...composition, tracks } : composition;
+}
+
 export function flattenTimelineLayers(composition: TimelineComposition): TimelineLayer[] {
   return composition.tracks.flatMap((trackItem) => trackItem.layers);
+}
+
+/** Track mixer fader gain: 0..2 linear, 1 = unity. Normalizes absent/garbage values. */
+export function getTrackAudioGain(track: Pick<TimelineTrack, "volume">): number {
+  const raw = track.volume;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return 1;
+  return Math.min(2, raw);
+}
+
+/** Track stereo pan: −1 (left) .. 1 (right), 0 = center. Normalizes absent/garbage values. */
+export function getTrackPan(track: Pick<TimelineTrack, "pan">): number {
+  const raw = track.pan;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+  return Math.min(1, Math.max(-1, raw));
+}
+
+/** Linear interpolation over track audio keyframes (absolute comp seconds); flat outside the range. */
+function evaluateTrackAudioKeyframes(keyframes: readonly TrackAudioKeyframe[], timeSeconds: number): number {
+  const sorted = [...keyframes].filter((k) => Number.isFinite(k.timeSeconds) && Number.isFinite(k.value)).sort((a, b) => a.timeSeconds - b.timeSeconds);
+  if (!sorted.length) return Number.NaN;
+  if (timeSeconds <= sorted[0]!.timeSeconds) return sorted[0]!.value;
+  const last = sorted[sorted.length - 1]!;
+  if (timeSeconds >= last.timeSeconds) return last.value;
+  for (let i = 1; i < sorted.length; i += 1) {
+    const b = sorted[i]!;
+    if (timeSeconds <= b.timeSeconds) {
+      const a = sorted[i - 1]!;
+      const span = b.timeSeconds - a.timeSeconds;
+      const f = span <= 0 ? 1 : (timeSeconds - a.timeSeconds) / span;
+      return a.value + (b.value - a.value) * f;
+    }
+  }
+  return last.value;
+}
+
+/** Fader gain at `timeSeconds`: automation when present (linear v1), else the static fader. */
+export function getTrackAudioGainAt(track: Pick<TimelineTrack, "volume" | "volumeKeyframes">, timeSeconds: number): number {
+  if (track.volumeKeyframes?.length) {
+    const value = evaluateTrackAudioKeyframes(track.volumeKeyframes, timeSeconds);
+    if (Number.isFinite(value)) return Math.min(2, Math.max(0, value));
+  }
+  return getTrackAudioGain(track);
+}
+
+/** Stereo pan at `timeSeconds`: automation when present (linear v1), else the static pan. */
+export function getTrackPanAt(track: Pick<TimelineTrack, "pan" | "panKeyframes">, timeSeconds: number): number {
+  if (track.panKeyframes?.length) {
+    const value = evaluateTrackAudioKeyframes(track.panKeyframes, timeSeconds);
+    if (Number.isFinite(value)) return Math.min(1, Math.max(-1, value));
+  }
+  return getTrackPan(track);
+}
+
+/** True when the track's fader or pan is keyframed (drives export envelope sampling + cloud post-mix). */
+export function trackHasAudioAutomation(track: Pick<TimelineTrack, "volumeKeyframes" | "panKeyframes">): boolean {
+  return Boolean(track.volumeKeyframes?.length || track.panKeyframes?.length);
+}
+
+/** Sane clamp for rate stretch — matches Premiere's practical speed range. */
+export const MIN_LAYER_SPEED = 0.05;
+export const MAX_LAYER_SPEED = 16;
+
+/**
+ * The clip's constant playback rate (rate stretch). 1 = normal. ALWAYS read speed through this —
+ * it normalizes absent/zero/garbage values so `sourceTime = sourceIn + local * speed` stays finite.
+ */
+export function getLayerSpeed(layer: Pick<TimelineLayer, "speed">): number {
+  const raw = layer.speed;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 1;
+  return Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, raw));
+}
+
+// ── Speed ramps / time remap ─────────────────────────────────────────────────
+// `speedKeyframes` (layer-local seconds → rate, LINEAR segments) override constant `speed`.
+// Linear segments integrate in closed form (trapezoid), so the timeline→source mapping is exact
+// and identical in preview, local export, and the cloud worker — no numerical stepping.
+
+const clampSpeed = (v: number) =>
+  typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, v)) : 1;
+
+/** Sanitized, time-sorted ramp points, or null when the layer has no usable ramp. */
+export function getSpeedRamp(layer: Pick<TimelineLayer, "speedKeyframes">): SpeedKeyframe[] | null {
+  const raw = layer.speedKeyframes;
+  if (!raw?.length) return null;
+  const points = raw
+    .filter((kf) => typeof kf?.timeSeconds === "number" && Number.isFinite(kf.timeSeconds))
+    .map((kf) => ({ timeSeconds: Math.max(0, kf.timeSeconds), value: clampSpeed(kf.value) }))
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+  return points.length ? points : null;
+}
+
+/** True when the clip's rate varies over time (≥2 ramp points at different values or times). */
+export function hasSpeedRamp(layer: Pick<TimelineLayer, "speedKeyframes">): boolean {
+  return (getSpeedRamp(layer)?.length ?? 0) > 0;
+}
+
+/**
+ * Instantaneous playback rate at `localSeconds` (time since clip start). Ramp overrides constant
+ * speed; before the first / after the last point the edge value holds (Premiere semantics).
+ */
+export function getLayerSpeedAt(layer: Pick<TimelineLayer, "speed" | "speedKeyframes">, localSeconds: number): number {
+  const ramp = getSpeedRamp(layer);
+  if (!ramp) return getLayerSpeed(layer);
+  const t = Math.max(0, localSeconds);
+  if (t <= ramp[0]!.timeSeconds) return ramp[0]!.value;
+  for (let i = 1; i < ramp.length; i += 1) {
+    const prev = ramp[i - 1]!;
+    const next = ramp[i]!;
+    if (t <= next.timeSeconds) {
+      const span = next.timeSeconds - prev.timeSeconds;
+      if (span <= 0) return next.value;
+      const f = (t - prev.timeSeconds) / span;
+      return prev.value + (next.value - prev.value) * f;
+    }
+  }
+  return ramp[ramp.length - 1]!.value;
+}
+
+/** Exact ∫₀ᵗ speed(τ)dτ over the ramp (closed-form trapezoids; edge values hold outside the points). */
+function integrateRamp(ramp: SpeedKeyframe[], localSeconds: number): number {
+  const t = Math.max(0, localSeconds);
+  let integral = 0;
+  // Before the first point: constant at the first value.
+  const first = ramp[0]!;
+  integral += Math.min(t, first.timeSeconds) * first.value;
+  if (t <= first.timeSeconds) return integral;
+  for (let i = 1; i < ramp.length; i += 1) {
+    const a = ramp[i - 1]!;
+    const b = ramp[i]!;
+    const span = b.timeSeconds - a.timeSeconds;
+    if (span <= 0) continue;
+    if (t >= b.timeSeconds) {
+      integral += (span * (a.value + b.value)) / 2;
+    } else {
+      const dt = t - a.timeSeconds;
+      const vEnd = a.value + ((b.value - a.value) * dt) / span;
+      integral += (dt * (a.value + vEnd)) / 2;
+      return integral;
+    }
+  }
+  // After the last point: constant at the last value.
+  const last = ramp[ramp.length - 1]!;
+  integral += (t - last.timeSeconds) * last.value;
+  return integral;
+}
+
+/**
+ * Timeline seconds → source-media seconds for a clip (speed- AND ramp-aware). `localSeconds` is
+ * time since clip start. THE mapping every renderer must use for ramped clips.
+ */
+export function layerSourceTimeSeconds(
+  layer: Pick<TimelineLayer, "speed" | "sourceInSeconds" | "speedKeyframes">,
+  localSeconds: number
+): number {
+  const ramp = getSpeedRamp(layer);
+  if (!ramp) return (layer.sourceInSeconds ?? 0) + Math.max(0, localSeconds) * getLayerSpeed(layer);
+  return (layer.sourceInSeconds ?? 0) + integrateRamp(ramp, localSeconds);
+}
+
+/**
+ * Rebase a ramp after cutting `headSeconds` off the clip's head (split right half, head trim,
+ * work-area clip): points shift left; the segment value AT the cut becomes a new first point so
+ * the remaining clip plays identically. Returns undefined when the layer has no ramp.
+ */
+export function shiftSpeedKeyframes(
+  layer: Pick<TimelineLayer, "speed" | "speedKeyframes">,
+  headSeconds: number
+): SpeedKeyframe[] | undefined {
+  const ramp = getSpeedRamp(layer);
+  if (!ramp) return undefined;
+  if (headSeconds === 0) return ramp;
+  if (headSeconds < 0) {
+    // Head EXTENSION: points shift right; the edge-hold before the first point plays the new
+    // material at the first value — matching the sourceIn math in adjustLayerHead.
+    return ramp.map((kf) => ({ timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
+  }
+  const atCut = getLayerSpeedAt(layer, headSeconds);
+  const kept = ramp.filter((kf) => kf.timeSeconds > headSeconds).map((kf) => ({ timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
+  return [{ timeSeconds: 0, value: atCut }, ...kept];
 }
 
 /**
@@ -106,13 +329,41 @@ export function clipCompositionToWorkArea(composition: TimelineComposition): Tim
   const inPoint = clampRange(inRaw ?? 0, 0, composition.durationSeconds);
   const outPoint = clampRange(outRaw ?? composition.durationSeconds, inPoint, composition.durationSeconds);
   const rangeDurationSeconds = Math.max(1 / composition.fps, outPoint - inPoint);
+  const preserveTimingLayerIds = new Set<string>();
+  const visualEndSecondsByLayerId = new Map<string, number>();
+
+  const overlapsRange = (startSeconds: number, endSeconds: number) => startSeconds < outPoint && inPoint < endSeconds;
+  for (const trackItem of composition.tracks) {
+    for (const incoming of trackItem.layers) {
+      const transition = incoming.transitionIn;
+      if (!transition || incoming.type === "audio") continue;
+      const incomingStart = incoming.startSeconds;
+      const transitionDuration = Math.max(0, Math.min(transition.durationSeconds, incoming.durationSeconds));
+      const transitionEnd = incomingStart + transitionDuration;
+      if (!overlapsRange(incomingStart, transitionEnd)) continue;
+      preserveTimingLayerIds.add(incoming.id);
+      const outgoing = trackItem.layers.find((layer) => {
+        if (layer.id === incoming.id || layer.type === "audio") return false;
+        const layerEnd = layer.startSeconds + layer.durationSeconds;
+        return Math.abs(layerEnd - incomingStart) < 0.05;
+      });
+      if (outgoing) {
+        preserveTimingLayerIds.add(outgoing.id);
+        visualEndSecondsByLayerId.set(outgoing.id, Math.max(visualEndSecondsByLayerId.get(outgoing.id) ?? 0, transitionEnd));
+      }
+    }
+  }
 
   const tracks: TimelineTrack[] = composition.tracks.map((trackItem) => ({
     ...trackItem,
     layers: trackItem.layers.flatMap((layer) => {
       const layerStart = layer.startSeconds;
       const layerEnd = layer.startSeconds + layer.durationSeconds;
-      if (layerEnd <= inPoint || layerStart >= outPoint) return [];
+      const visualEnd = Math.max(layerEnd, visualEndSecondsByLayerId.get(layer.id) ?? layerEnd);
+      if (visualEnd <= inPoint || layerStart >= outPoint) return [];
+      if (preserveTimingLayerIds.has(layer.id) && layerStart < inPoint) {
+        return [{ ...layer, startSeconds: layerStart - inPoint }];
+      }
       const clippedStart = Math.max(layerStart, inPoint);
       const clippedEnd = Math.min(layerEnd, outPoint);
       const trimmedFromHeadSeconds = clippedStart - layerStart;
@@ -122,7 +373,10 @@ export function clipCompositionToWorkArea(composition: TimelineComposition): Tim
         durationSeconds: clippedEnd - clippedStart
       };
       if (layer.type === "video" || layer.type === "audio" || layer.sourceInSeconds !== undefined) {
-        next.sourceInSeconds = (layer.sourceInSeconds ?? 0) + trimmedFromHeadSeconds;
+        // Head trim consumes source media at the clip's playback rate (rate stretch / ramp integral).
+        next.sourceInSeconds = layerSourceTimeSeconds(layer, trimmedFromHeadSeconds);
+        const shiftedRamp = shiftSpeedKeyframes(layer, trimmedFromHeadSeconds);
+        if (shiftedRamp) next.speedKeyframes = shiftedRamp;
       }
       return [next];
     })

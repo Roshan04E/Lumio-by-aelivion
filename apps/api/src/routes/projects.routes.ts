@@ -84,7 +84,11 @@ projectsRouter.post(
         id: projectId,
         name: input.title ?? "Untitled reel",
         durationSeconds: timelineDurationSeconds,
-        assetId: input.sourceAssetId
+        assetId: input.sourceAssetId,
+        orientation: input.orientation,
+        // No template AND no prompt = "Continue without a template" → an empty timeline
+        // (no placeholder media layer when there's no real footage).
+        blank: !template && !promptPlan
       });
     }
 
@@ -162,6 +166,22 @@ projectsRouter.patch(
     });
 
     return ok(res, "Project updated", { project: updated });
+  })
+);
+
+projectsRouter.delete(
+  "/:id",
+  requireAuth,
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const id = getParam(req, "id");
+    const project = await prisma.project.findFirst({ where: { id, userId: req.user.id } });
+
+    if (!project) {
+      throw new HttpError(404, "Project not found");
+    }
+
+    await prisma.project.delete({ where: { id: project.id } });
+    return ok(res, "Project deleted", { id: project.id });
   })
 );
 

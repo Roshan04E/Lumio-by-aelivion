@@ -39,6 +39,26 @@ const PROXY_BITRATE = 1_500_000;
 // Blob store (OPFS with in-memory fallback) — keyed by span id.
 // ---------------------------------------------------------------------------
 
+/**
+ * Persisted per-span metadata enabling OPFS cache REHYDRATION across reloads (GAPS.md §1's last
+ * deferred item). A record carries exactly what `markSpanReady` validates — base signature + per-span
+ * content signature — so on the next session a restored span is either provably current (sealed
+ * ready with zero regeneration) or rejected by the store's own staleness check (blob then deleted).
+ */
+export interface PersistedProxySpanRecord {
+  id: string;
+  signature: string;
+  contentSignature: string;
+  byteSize: number;
+  savedAt: number;
+  /** Scale the media was produced at + its time range — lets a SHARPER record rehydrate into a
+   *  session running at a softer preview quality (records saved before these fields existed fall
+   *  back to exact-id sealing and regenerate on scale mismatch, as before). */
+  renderScale?: number | undefined;
+  startSeconds?: number | undefined;
+  endSeconds?: number | undefined;
+}
+
 export interface ProxyBlobStore {
   kind: "opfs" | "memory";
   put: (id: string, blob: Blob) => Promise<void>;
@@ -47,9 +67,19 @@ export interface ProxyBlobStore {
   release: (id: string) => void;
   remove: (id: string) => Promise<void>;
   clear: () => Promise<void>;
+  /** Persisted span index (empty for the memory store — nothing survives the session anyway). */
+  readIndex: () => Promise<PersistedProxySpanRecord[]>;
+  /** Record a sealed span so the next session can rehydrate it. Debounce-flushed; best-effort. */
+  saveRecord: (record: PersistedProxySpanRecord) => void;
+  removeRecord: (id: string) => void;
+  /** Revoke all live object URLs WITHOUT deleting the stored blobs — the unmount path (the blobs
+   *  are the whole point of rehydration; deleting them here was why the cache never survived). */
+  releaseAllUrls: () => void;
 }
 
 const PROXY_DIR = "lumio-preview-proxies";
+const PROXY_INDEX_FILE = "proxy-span-index.json";
+const INDEX_FLUSH_DELAY_MS = 400;
 
 export async function createProxyBlobStore(): Promise<ProxyBlobStore> {
   const storage = navigator.storage as
@@ -113,6 +143,17 @@ function createMemoryBlobStore(): ProxyBlobStore {
         revoke(id);
       }
       blobs.clear();
+    },
+    // In-memory blobs die with the page — there is nothing to rehydrate next session.
+    async readIndex() {
+      return [];
+    },
+    saveRecord() {},
+    removeRecord() {},
+    releaseAllUrls() {
+      for (const id of [...urls.keys()]) {
+        revoke(id);
+      }
     }
   };
 }
@@ -127,6 +168,60 @@ function createOpfsBlobStore(directory: FileSystemDirectoryHandle): ProxyBlobSto
       urls.delete(id);
     }
   };
+
+  // Persisted span index: an in-memory map mirrored to one JSON file in the proxy directory,
+  // loaded lazily once and flushed debounced. Best-effort — a lost/corrupt index only means the
+  // affected spans regenerate (the pre-rehydration behaviour), never a stale proxy.
+  let indexMap: Map<string, PersistedProxySpanRecord> | null = null;
+  let indexLoad: Promise<Map<string, PersistedProxySpanRecord>> | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const loadIndex = (): Promise<Map<string, PersistedProxySpanRecord>> => {
+    if (indexMap) return Promise.resolve(indexMap);
+    indexLoad ??= (async () => {
+      const map = new Map<string, PersistedProxySpanRecord>();
+      try {
+        const handle = await directory.getFileHandle(PROXY_INDEX_FILE);
+        const text = await (await handle.getFile()).text();
+        const parsed: unknown = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          for (const raw of parsed) {
+            const rec = raw as PersistedProxySpanRecord;
+            if (rec && typeof rec.id === "string" && typeof rec.signature === "string" && typeof rec.contentSignature === "string") {
+              map.set(rec.id, { ...rec, byteSize: Number(rec.byteSize) || 0, savedAt: Number(rec.savedAt) || 0 });
+            }
+          }
+        }
+      } catch {
+        /* absent/corrupt index → start empty */
+      }
+      indexMap = map;
+      return map;
+    })();
+    return indexLoad;
+  };
+  const scheduleFlush = (): void => {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      void (async () => {
+        const map = await loadIndex();
+        try {
+          const handle = await directory.getFileHandle(PROXY_INDEX_FILE, { create: true });
+          const writable = await handle.createWritable();
+          await writable.write(JSON.stringify([...map.values()]));
+          await writable.close();
+        } catch {
+          /* flush is best-effort */
+        }
+      })();
+    }, INDEX_FLUSH_DELAY_MS);
+  };
+  const dropRecord = (id: string): void => {
+    void loadIndex().then((map) => {
+      if (map.delete(id)) scheduleFlush();
+    });
+  };
+
   return {
     kind: "opfs",
     async put(id, blob) {
@@ -159,16 +254,39 @@ function createOpfsBlobStore(directory: FileSystemDirectoryHandle): ProxyBlobSto
     async remove(id) {
       revoke(id);
       known.delete(id);
+      dropRecord(id);
       await directory.removeEntry(fileName(id)).catch(() => undefined);
     },
     async clear() {
       for (const id of [...urls.keys()]) {
         revoke(id);
       }
-      for (const id of [...known]) {
+      const map = await loadIndex();
+      // Delete every INDEXED span file (covers blobs persisted by previous sessions, which `known`
+      // — a this-session set — does not), plus anything written this session.
+      for (const id of new Set([...known, ...map.keys()])) {
         await directory.removeEntry(fileName(id)).catch(() => undefined);
       }
       known.clear();
+      map.clear();
+      scheduleFlush();
+    },
+    async readIndex() {
+      return [...(await loadIndex()).values()];
+    },
+    saveRecord(record) {
+      void loadIndex().then((map) => {
+        map.set(record.id, record);
+        scheduleFlush();
+      });
+    },
+    removeRecord(id) {
+      dropRecord(id);
+    },
+    releaseAllUrls() {
+      for (const id of [...urls.keys()]) {
+        revoke(id);
+      }
     }
   };
 }

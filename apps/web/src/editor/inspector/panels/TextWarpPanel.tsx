@@ -31,14 +31,12 @@ export default function TextWarpPanel({ layer, onChange }: InspectorPanelProps) 
 
   return (
     <div className="graphic-controls">
-      <label className="number-control">
-        <span>
-          <span className="number-control-label">
-            <span className="control-icon">
-              <Spline size={14} />
-            </span>
-            <small>Style</small>
+      <label className="number-row-select">
+        <span className="effect-slider-label">
+          <span className="control-icon">
+            <Spline size={14} />
           </span>
+          <span className="effect-slider-label-text">Style</span>
         </span>
         <ThemedSelect
           ariaLabel="Warp style"

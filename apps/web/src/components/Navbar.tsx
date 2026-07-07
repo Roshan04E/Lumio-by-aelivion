@@ -1,42 +1,36 @@
 import { Link, NavLink } from "react-router-dom";
-import { Clapperboard, LayoutDashboard, WandSparkles } from "lucide-react";
-import { AccountMenu } from "./AccountMenu";
+import { BrandMark } from "./BrandMark";
 
 const navItems = [
-  { to: "/templates", label: "Templates" },
   { to: "/tools", label: "Tools" },
+  { to: "/templates", label: "Templates" },
   { to: "/cookbook", label: "Cookbook" },
-  { to: "/create", label: "Create" },
   { to: "/dashboard", label: "Dashboard" }
 ];
 
 export function Navbar() {
   return (
-    <header className="navbar">
-      <Link to="/" className="brand" aria-label="Lumio">
-        <span className="brand-mark">
-          <Clapperboard size={20} />
-        </span>
-        <span>Lumio</span>
-      </Link>
+    <header className="mkt-nav">
+      <div className="mkt-nav-inner">
+        <Link to="/" aria-label="Lumio home">
+          <BrandMark />
+        </Link>
 
-      <nav className="nav-links" aria-label="Main navigation">
-        {navItems.map((item) => (
-          <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? "active" : "")}>
-            {item.label}
-          </NavLink>
-        ))}
-      </nav>
+        <nav className="mkt-nav-links" aria-label="Main navigation">
+          {navItems.map((item) => (
+            <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? "active" : "")}>
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
 
-      <div className="nav-actions">
-        <NavLink to="/admin/jobs" className="icon-link" title="Jobs">
-          <LayoutDashboard size={18} />
+        <span className="mkt-nav-spacer" />
+        <NavLink to="/login" className="mkt-nav-ghost">
+          Sign in
         </NavLink>
-        <NavLink to="/create" className="nav-cta">
-          <WandSparkles size={16} />
-          Forge
-        </NavLink>
-        <AccountMenu />
+        <Link to="/create" className="mkt-btn mkt-btn-primary">
+          Start editing free
+        </Link>
       </div>
     </header>
   );

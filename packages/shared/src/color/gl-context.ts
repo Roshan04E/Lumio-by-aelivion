@@ -38,8 +38,23 @@ let nextGlContextId = 1;
  * allocation. Kept well under the browser's ~16 cap so preview never triggers a browser-side force-loss of the
  * OLDEST context (which is how large timelines silently drop the GPU scene to the DOM path today).
  */
-const PREVIEW_CONTEXT_TARGET = 3;
-const PREVIEW_CONTEXT_HARD_CAP = 4;
+const DEFAULT_PREVIEW_CONTEXT_TARGET = 3;
+const DEFAULT_PREVIEW_CONTEXT_HARD_CAP = 4;
+/**
+ * Live budget. The conservative defaults are kept for the unit test's pinned scenarios; the WEB APP
+ * sets a realistic budget at startup (VideoPreview module scope, next to the governor flag): a real
+ * multi-track timeline legitimately holds 8–11 live per-layer grade contexts (2026-07-03 soak hit
+ * GL ctx 15 — ONE clip from Chromium's ~16 force-loss, which kills the OLDEST context, possibly the
+ * scene compositor). The budget must sit safely under 16 while not evicting genuinely live layers.
+ */
+let previewContextTarget = DEFAULT_PREVIEW_CONTEXT_TARGET;
+let previewContextHardCap = DEFAULT_PREVIEW_CONTEXT_HARD_CAP;
+
+/** Set the preview context budget (target ≤ hardCap enforced; hardCap clamped under the browser's ~16). */
+export function setGlContextBudget(target: number, hardCap: number): void {
+  previewContextHardCap = Math.max(2, Math.min(14, Math.floor(hardCap)));
+  previewContextTarget = Math.max(1, Math.min(previewContextHardCap, Math.floor(target)));
+}
 /** Kinds the governor may evict — never the persistent root `scene-compositor`. */
 const EVICTABLE_KINDS: ReadonlySet<GlContextOwnerInfo["kind"]> = new Set(["media-renderer", "transition-compositor", "webgl-applicator"]);
 /**
@@ -71,7 +86,7 @@ export function isGlGovernorEnabled(): boolean {
 
 /** True when the live context count is at/over the soft target — used to pause background cache generation. */
 export function isGlBudgetOverTarget(): boolean {
-  return activeGlContexts >= PREVIEW_CONTEXT_TARGET;
+  return activeGlContexts >= previewContextTarget;
 }
 
 export interface GlContextOwnerInfo {
@@ -191,7 +206,7 @@ export function registerContextDisposer(gl: WebGL2RenderingContext, dispose: () 
 export function requestContextSlot(): void {
   if (!governorEnabled) return;
   let guard = 0;
-  while (activeGlContexts >= PREVIEW_CONTEXT_HARD_CAP && guard < 16) {
+  while (activeGlContexts >= previewContextHardCap && guard < 16) {
     guard += 1;
     const idleBefore = nowMs() - EVICT_IDLE_MS;
     const victim = [...glOwnerRecords.values()]
@@ -249,8 +264,8 @@ export function getGlContextOwnerInfo(gl: WebGL2RenderingContext): GlContextOwne
 export function getGlContextBudgetSnapshot(): { active: number; target: number; hardCap: number; owners: GlContextOwnerInfo[] } {
   return {
     active: activeGlContexts,
-    target: PREVIEW_CONTEXT_TARGET,
-    hardCap: PREVIEW_CONTEXT_HARD_CAP,
+    target: previewContextTarget,
+    hardCap: previewContextHardCap,
     owners: Array.from(glOwnerRecords.values())
       .filter((owner) => owner.disposedAt == null)
       .map((owner) => ({ ...owner })),
@@ -327,14 +342,26 @@ export function createGl(canvas: AnyCanvas, options: GlContextCreateOptions = {}
   return gl;
 }
 
+/**
+ * Sentinel for "this GL failure is really a lost context". Compile/link on a lost context fails
+ * with an EMPTY info log ("unknown"), which callers used to misread as a real shader error and
+ * latch into permanent fallbacks — a rebuild-on-fresh-context would have succeeded (2026-07-06:
+ * ScenePreviewCanvas printed "controlled rebuild 1/3", then the rebuild's compile-on-still-lost-
+ * context hard-failed to the DOM path instead of continuing the retry ladder).
+ */
+export const GL_CONTEXT_LOST = "gl-context: context lost";
+
 export function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
-  if (!shader) throw new Error("gl-context: createShader failed");
+  if (!shader) {
+    throw new Error(gl.isContextLost() ? GL_CONTEXT_LOST : "gl-context: createShader failed");
+  }
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
     const log = gl.getShaderInfoLog(shader);
     gl.deleteShader(shader);
+    if (gl.isContextLost()) throw new Error(GL_CONTEXT_LOST);
     throw new Error(`gl-context: shader compile failed: ${log ?? "unknown"}`);
   }
   return shader;
@@ -345,7 +372,9 @@ export function linkProgram(gl: WebGL2RenderingContext, vsSource: string, fsSour
   const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
   const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
   const program = gl.createProgram();
-  if (!program) throw new Error("gl-context: createProgram failed");
+  if (!program) {
+    throw new Error(gl.isContextLost() ? GL_CONTEXT_LOST : "gl-context: createProgram failed");
+  }
   gl.attachShader(program, vs);
   gl.attachShader(program, fs);
   gl.bindAttribLocation(program, 0, "a_position");
@@ -353,6 +382,7 @@ export function linkProgram(gl: WebGL2RenderingContext, vsSource: string, fsSour
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     const log = gl.getProgramInfoLog(program);
     gl.deleteProgram(program);
+    if (gl.isContextLost()) throw new Error(GL_CONTEXT_LOST);
     throw new Error(`gl-context: link failed: ${log ?? "unknown"}`);
   }
   gl.deleteShader(vs);

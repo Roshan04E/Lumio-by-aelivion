@@ -5,6 +5,7 @@ import { bundle } from "@remotion/bundler";
 import { ensureBrowser, renderMedia, renderStill, selectComposition, type CancelSignal } from "@remotion/renderer";
 import type { RenderManifest } from "@lumio-by-aelivion/render-templates";
 import { compositionId } from "./remotion/Root";
+import { manifestNeedsAudioPostMix, postMixManifestAudio } from "./audio-post-mix";
 
 let bundleLocationPromise: Promise<string> | undefined;
 
@@ -91,6 +92,18 @@ async function ensureBrowserReady(): Promise<void> {
   await ensureBrowser();
 }
 
+/**
+ * Map the manifest's managed output color space to a Remotion `colorSpace`. v1 masters only Rec.709
+ * SDR → "bt709"; an unknown/future output space falls back to BT.709 with a warning (no HDR pipeline yet).
+ */
+function manifestOutputColorSpace(manifest: RenderManifest): "bt709" {
+  const out: string | undefined = manifest.output.color?.output;
+  if (out && out !== "rec709-sdr") {
+    console.warn(`[render] unsupported manifest output color "${out}" → tagging BT.709`);
+  }
+  return "bt709";
+}
+
 export async function renderManifestToMp4(input: {
   manifest: RenderManifest;
   outputLocation: string;
@@ -109,22 +122,49 @@ export async function renderManifestToMp4(input: {
     ...cancel
   });
 
+  // Track-pan parity: Remotion has no <Audio> pan, so when the mixer's pan is in play we render
+  // the video MUTED and rebuild the audio ourselves (shared-evaluator JS mix + ffmpeg mux — see
+  // audio-post-mix.ts). Pan-free compositions keep the untouched Remotion audio path.
+  const audioPostMix = manifestNeedsAudioPostMix(input.manifest);
+  const videoLocation = audioPostMix ? `${input.outputLocation}.video.mp4` : input.outputLocation;
+
   await renderMedia({
     codec: "h264",
     composition,
     serveUrl,
     inputProps,
+    ...(audioPostMix ? { muted: true } : {}),
+    // Without this, ffmpeg encodes the sRGB page pixels without converting/tagging for BT.709
+    // limited range, and players decode the full-range data as limited → contrast/saturation
+    // blowout vs the editor preview (measured up to ±19/255 on grays; see architecture.md
+    // 2026-07-02 cloud-export color parity entry). "bt709" converts AND tags: measured roundtrip
+    // in Chrome is then ±1 — pixel-parity with the web preview and the local WebCodecs export.
+    // Driven by the manifest's managed output color space (v1 always Rec.709 SDR → bt709), so the
+    // local export and this cloud render agree by construction, and future output spaces are a data change.
+    colorSpace: manifestOutputColorSpace(input.manifest),
+    // Remotion's parallel (pre-encoded) path converts RGB→YUV with BT.601 coefficients while the
+    // container still gets tagged BT.709 — saturated colors shift hard (measured ±39/255 on pure
+    // green/magenta). Disallowing it routes through the ffmpeg stitch step whose
+    // `zscale=matrix=709` filter does the conversion the tag promises. Slower (frames buffered to
+    // disk before encode) but color-correct; drop when Remotion fixes the pre-encode matrix.
+    disallowParallelEncoding: true,
     // ANGLE backend so the in-composition WebGL2 color engine (3D-LUT grade for image
     // layers, incl. HSL hue-curves/secondary that SVG can't express) runs headless.
     chromiumOptions: { gl: "angle" },
     ...browserExecutableOption(),
     ...rendererEnvVariables(),
     ...cancel,
-    outputLocation: input.outputLocation,
+    outputLocation: videoLocation,
     onProgress: async ({ progress }) => {
-      await input.onProgress?.(progress);
+      // Reserve the last 5% for the audio post-mix step when it runs.
+      await input.onProgress?.(audioPostMix ? progress * 0.95 : progress);
     }
   });
+
+  if (audioPostMix) {
+    await postMixManifestAudio(input.manifest, videoLocation, input.outputLocation);
+    await input.onProgress?.(1);
+  }
 }
 
 export async function renderManifestStill(input: {

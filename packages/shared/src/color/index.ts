@@ -4,6 +4,7 @@
  * filter primitives for the DOM renderers, replayable on the CPU for tests/fallback.
  */
 export * from "./types";
+export * from "./color-management";
 export * from "./curve";
 export * from "./wheels";
 export * from "./hsl";

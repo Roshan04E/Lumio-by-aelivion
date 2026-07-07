@@ -225,6 +225,31 @@ export function findTransformKeyframeTime(
   return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
 }
 
+/** Effect-param counterpart of findTransformKeyframeTime — same prev/next lookup, keyed by effect+param instead of a transform property. */
+export function findEffectParamKeyframeTime(
+  layer: TimelineLayer,
+  effectId: string,
+  paramKey: string,
+  layerTime: number,
+  direction: -1 | 1
+) {
+  const keyframes = getEffectParamKeyframes(layer, effectId, paramKey);
+  if (direction < 0) {
+    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
+  }
+  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+}
+
+/** Effect-param counterpart of clearTransformKeyframes. */
+export function clearEffectParamKeyframes(layer: TimelineLayer, effectId: string, paramKey: string): TimelineLayer {
+  return {
+    ...layer,
+    animations: (layer.animations ?? []).filter(
+      (kf) => !(kf.target.scope === "effect" && kf.target.effectId === effectId && kf.target.property === paramKey)
+    )
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Transform property mutations
 // ---------------------------------------------------------------------------
@@ -609,6 +634,188 @@ export function setEffectParamInterpolation(
         : kf
     )
   };
+}
+
+// ---------------------------------------------------------------------------
+// Auto-keyframe write semantics (the single "where does an edit land" rule)
+// ---------------------------------------------------------------------------
+
+export interface AutoKeyframeOptions {
+  /** When true, editing a not-yet-animated property drops its first keyframe at the playhead. */
+  autoKeyframe?: boolean | undefined;
+}
+
+/**
+ * Route a transform value edit to the correct place, matching After Effects / Premiere:
+ *  - keyframe at the playhead        → update it in place
+ *  - property already animated       → INSERT a keyframe at the playhead
+ *    (fixes the old bug where such edits wrote to the ignored base field and did nothing)
+ *  - auto-keyframe mode ON           → INSERT the property's first keyframe at the playhead
+ *  - otherwise                       → set the static base value
+ */
+export function applyTransformValueAtTime(
+  layer: TimelineLayer,
+  property: TransformAnimationProperty,
+  layerTime: number,
+  value: number,
+  options: AutoKeyframeOptions = {}
+): TimelineLayer {
+  const hasKeyframeAtPlayhead = hasTransformKeyframeAt(layer, property, layerTime);
+  const isAnimated = getTransformKeyframes(layer, property).length > 0;
+  if (!hasKeyframeAtPlayhead && (isAnimated || options.autoKeyframe)) {
+    return toggleTransformKeyframe(layer, property, layerTime, value);
+  }
+  return updateTransformPropertyAtTime(layer, property, layerTime, value);
+}
+
+/** Effect-param counterpart of {@link applyTransformValueAtTime} — same four-way rule. */
+export function applyEffectParamValueAtTime(
+  layer: TimelineLayer,
+  effectId: string,
+  paramKey: string,
+  layerTime: number,
+  value: number,
+  options: AutoKeyframeOptions = {}
+): TimelineLayer {
+  const hasKeyframeAtPlayhead = Boolean(getActiveEffectParamKeyframe(layer, effectId, paramKey, layerTime));
+  const isAnimated = getEffectParamKeyframes(layer, effectId, paramKey).length > 0;
+  if (!hasKeyframeAtPlayhead && (isAnimated || options.autoKeyframe)) {
+    return toggleEffectParamKeyframe(layer, effectId, paramKey, layerTime, value);
+  }
+  return updateEffectParamAtTime(layer, effectId, paramKey, layerTime, value);
+}
+
+// ---------------------------------------------------------------------------
+// Content transform (source-within-frame pan/zoom/crop) keyframes — layer-scope V2 only
+// (no legacy equivalent). Base values live on `layer.content`; the shared evaluator reads
+// `content.*` keyframes in getCompositionContentTransform so all three renderers stay aligned.
+// ---------------------------------------------------------------------------
+
+export type ContentAnimationProperty =
+  | "content.scale"
+  | "content.offsetX"
+  | "content.offsetY"
+  | "content.crop.top"
+  | "content.crop.right"
+  | "content.crop.bottom"
+  | "content.crop.left";
+
+export function getContentBaseValue(layer: TimelineLayer, property: ContentAnimationProperty): number {
+  const c = layer.content ?? {};
+  switch (property) {
+    case "content.scale":
+      return c.scale ?? 1;
+    case "content.offsetX":
+      return c.offsetX ?? 0;
+    case "content.offsetY":
+      return c.offsetY ?? 0;
+    case "content.crop.top":
+      return c.crop?.top ?? 0;
+    case "content.crop.right":
+      return c.crop?.right ?? 0;
+    case "content.crop.bottom":
+      return c.crop?.bottom ?? 0;
+    case "content.crop.left":
+      return c.crop?.left ?? 0;
+    default:
+      return 0;
+  }
+}
+
+function setContentBaseValue(layer: TimelineLayer, property: ContentAnimationProperty, value: number): TimelineLayer {
+  const c = layer.content ?? {};
+  if (property.startsWith("content.crop.")) {
+    const edge = property.slice("content.crop.".length) as "top" | "right" | "bottom" | "left";
+    return { ...layer, content: { ...c, crop: { ...(c.crop ?? {}), [edge]: value } } };
+  }
+  const field = property.slice("content.".length) as "scale" | "offsetX" | "offsetY";
+  return { ...layer, content: { ...c, [field]: value } };
+}
+
+export function getContentKeyframes(layer: TimelineLayer, property: ContentAnimationProperty) {
+  return (layer.animations ?? [])
+    .filter((kf) => kf.target.scope === "layer" && kf.target.property === property)
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+}
+
+export function getActiveContentKeyframe(layer: TimelineLayer, property: ContentAnimationProperty, layerTime: number) {
+  return getContentKeyframes(layer, property).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
+}
+
+export function findContentKeyframeTime(
+  layer: TimelineLayer,
+  property: ContentAnimationProperty,
+  layerTime: number,
+  direction: -1 | 1
+) {
+  const keyframes = getContentKeyframes(layer, property);
+  if (direction < 0) {
+    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
+  }
+  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+}
+
+export function clearContentKeyframes(layer: TimelineLayer, property: ContentAnimationProperty): TimelineLayer {
+  return {
+    ...layer,
+    animations: (layer.animations ?? []).filter(
+      (kf) => !(kf.target.scope === "layer" && kf.target.property === property)
+    )
+  };
+}
+
+export function toggleContentKeyframe(
+  layer: TimelineLayer,
+  property: ContentAnimationProperty,
+  layerTime: number,
+  value: number
+): TimelineLayer {
+  if (getActiveContentKeyframe(layer, property, layerTime)) {
+    return {
+      ...layer,
+      animations: (layer.animations ?? []).filter(
+        (kf) => !(kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime))
+      )
+    };
+  }
+  const keyframe: TimelineKeyframeV2 = {
+    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    target: { scope: "layer", property },
+    timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
+    value,
+    interpolation: "linear",
+    temporal: {}
+  };
+  return {
+    ...layer,
+    animations: [...(layer.animations ?? []), keyframe].sort((a, b) => a.timeSeconds - b.timeSeconds)
+  };
+}
+
+/** Four-way content write — same auto-keyframe rule as {@link applyTransformValueAtTime}. */
+export function applyContentValueAtTime(
+  layer: TimelineLayer,
+  property: ContentAnimationProperty,
+  layerTime: number,
+  value: number,
+  options: AutoKeyframeOptions = {}
+): TimelineLayer {
+  const hasKeyframeAtPlayhead = Boolean(getActiveContentKeyframe(layer, property, layerTime));
+  const isAnimated = getContentKeyframes(layer, property).length > 0;
+  if (!hasKeyframeAtPlayhead && (isAnimated || options.autoKeyframe)) {
+    return toggleContentKeyframe(layer, property, layerTime, value);
+  }
+  if (hasKeyframeAtPlayhead) {
+    return {
+      ...layer,
+      animations: (layer.animations ?? []).map((kf) =>
+        kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime)
+          ? { ...kf, value }
+          : kf
+      )
+    };
+  }
+  return setContentBaseValue(layer, property, value);
 }
 
 // ---------------------------------------------------------------------------

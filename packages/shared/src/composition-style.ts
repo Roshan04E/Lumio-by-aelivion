@@ -1,8 +1,8 @@
 import { evaluateAnimatedValue, evaluateTimelineEffectParam, evaluateTimelineTransform } from "./animation";
-import { COLOR_EFFECT_TYPES, compileColorPipeline, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type SvgColorFilter } from "./color";
+import { COLOR_EFFECT_TYPES, compileColorPipeline, DEFAULT_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
-import type { BlendMode, LayerContentTransform, Mask, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
+import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
 
 export interface CompositionTransform {
   x: number;
@@ -37,6 +37,8 @@ export interface CompositionLayerStyleInput {
   blendMode?: BlendMode | undefined;
   widthPercent?: number | undefined;
   heightPercent?: number | undefined;
+  shapeKind?: ShapeKind | undefined;
+  shapePath?: MaskPoint[] | undefined;
   borderRadius?: number | undefined;
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
@@ -59,6 +61,12 @@ export interface CompositionStyleOptions {
    * is the sole grading path and the underlying element is a clean source (no double-grade).
    */
   skipColorFilter?: boolean | undefined;
+  /**
+   * The composition's managed color settings (`composition.settings.color`). Defaults to
+   * {@link DEFAULT_PROJECT_COLOR_SETTINGS} (Rec.709 linear working / Rec.709 SDR output) so
+   * callers that don't thread it stay managed. Drives the pipeline's working space.
+   */
+  colorSettings?: ProjectColorSettings | undefined;
 }
 
 export const compositionTextDefaults = {
@@ -71,7 +79,9 @@ export const compositionTextDefaults = {
   paddingEmY: 0.08,
   paddingEmX: 0.16,
   borderRadiusEm: 0.1,
-  backgroundColor: "rgba(8, 9, 13, 0.14)",
+  // No background box by default — new text must be a clean overlay (user report 2026-07-03:
+  // the old 14%-alpha tint read as an unwanted grey box behind every caption).
+  backgroundColor: "transparent",
   shadowColor: "rgba(0,0,0,0.62)",
   shadowBlur: 19,
   shadowOffsetX: 0,
@@ -79,6 +89,7 @@ export const compositionTextDefaults = {
 } as const;
 
 export const compositionShapeDefaults = {
+  shapeKind: "rounded-rectangle" as ShapeKind,
   widthPercent: 44,
   heightPercent: 18,
   borderRadiusPx: 22,
@@ -445,21 +456,44 @@ export interface ResolvedContentTransform {
  * Resolve a layer's {@link LayerContentTransform} (source-within-frame pan/zoom/crop) with defaults =
  * identity. Shared by every renderer + the inspector so the preview, export, and controls agree. Media-only;
  * text/shape callers get identity (they have no source to reframe).
+ *
+ * Time-aware: when `options.currentTimeSeconds` is supplied and the layer carries `content.*` keyframes
+ * (`content.scale`, `content.offsetX`, `content.offsetY`, `content.crop.{top,right,bottom,left}`), each field
+ * is evaluated at the playhead via the shared {@link evaluateAnimatedValue} — the same primitive the transform
+ * evaluator uses, so all three renderers stay pixel-aligned. With no time and no keyframes the result is
+ * byte-identical to the static resolve (existing projects unchanged).
  */
 export function getCompositionContentTransform(
-  layer: { content?: LayerContentTransform | undefined } | undefined
+  layer:
+    | (Pick<CompositionLayerStyleInput, "startSeconds" | "animations"> & { content?: LayerContentTransform | undefined })
+    | { content?: LayerContentTransform | undefined }
+    | undefined,
+  options: CompositionStyleOptions = {}
 ): ResolvedContentTransform {
   const c = layer?.content;
-  const cropOf = (v: number | undefined) => Math.max(0, Math.min(0.95, numberOr(v, 0)));
+  const cropOf = (v: number) => Math.max(0, Math.min(0.95, v));
+
+  const animations = (("animations" in (layer ?? {}) ? (layer as { animations?: unknown }).animations : undefined) ??
+    []) as TimelineKeyframeV2[];
+  const startSeconds = numberOr(("startSeconds" in (layer ?? {}) ? (layer as { startSeconds?: unknown }).startSeconds : 0) as number | undefined, 0);
+  const layerTime =
+    typeof options.currentTimeSeconds === "number" ? Math.max(0, options.currentTimeSeconds - startSeconds) : undefined;
+  const anim = (property: string, base: number): number => {
+    if (layerTime === undefined) return base;
+    const keyframes = animations.filter((kf) => kf.target.scope === "layer" && kf.target.property === property);
+    if (!keyframes.length) return base;
+    return evaluateAnimatedValue({ baseValue: base, keyframes, property, scope: "layer", timeSeconds: layerTime }) as number;
+  };
+
   return {
-    scale: Math.max(0.01, numberOr(c?.scale, 1)),
-    offsetX: numberOr(c?.offsetX, 0),
-    offsetY: numberOr(c?.offsetY, 0),
+    scale: Math.max(0.01, anim("content.scale", numberOr(c?.scale, 1))),
+    offsetX: anim("content.offsetX", numberOr(c?.offsetX, 0)),
+    offsetY: anim("content.offsetY", numberOr(c?.offsetY, 0)),
     crop: {
-      top: cropOf(c?.crop?.top),
-      right: cropOf(c?.crop?.right),
-      bottom: cropOf(c?.crop?.bottom),
-      left: cropOf(c?.crop?.left)
+      top: cropOf(anim("content.crop.top", numberOr(c?.crop?.top, 0))),
+      right: cropOf(anim("content.crop.right", numberOr(c?.crop?.right, 0))),
+      bottom: cropOf(anim("content.crop.bottom", numberOr(c?.crop?.bottom, 0))),
+      left: cropOf(anim("content.crop.left", numberOr(c?.crop?.left, 0)))
     }
   };
 }
@@ -594,6 +628,8 @@ export function getCompositionShapeStyle(layer: CompositionLayerStyleInput | Tim
     top: `${transform.y}%`,
     width: `${numberOr(layer.widthPercent ?? style.widthPercent, compositionShapeDefaults.widthPercent)}%`,
     height: `${numberOr(layer.heightPercent ?? style.heightPercent, compositionShapeDefaults.heightPercent)}%`,
+    shapeKind: (layer.shapeKind ?? style.shapeKind ?? compositionShapeDefaults.shapeKind) as ShapeKind,
+    shapePath: layer.shapePath ?? (style.shapePath as MaskPoint[] | undefined),
     borderRadius: numberOr(layer.borderRadius ?? style.borderRadius, compositionShapeDefaults.borderRadiusPx),
     border: getStrokeCss(layer, style),
     boxShadow: getShapeShadowCss(layer, style),
@@ -999,7 +1035,7 @@ export function getCompositionColorPipeline(
   if (inputs.length === 0) {
     return null;
   }
-  const pipeline = compileColorPipeline(inputs);
+  const pipeline = compileColorPipeline(inputs, options.colorSettings ?? DEFAULT_PROJECT_COLOR_SETTINGS);
   return pipeline.identity ? null : pipeline;
 }
 

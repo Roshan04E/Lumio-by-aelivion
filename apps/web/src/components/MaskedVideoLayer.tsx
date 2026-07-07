@@ -25,12 +25,14 @@ export const MaskedVideoLayer = forwardRef<HTMLVideoElement, {
   isPlaying: boolean;
   layerStartSeconds: number;
   sourceInSeconds?: number | undefined;
+  /** Clip playback rate (rate stretch). Default 1. */
+  speedFactor?: number | undefined;
   className?: string | undefined;
   style: CSSProperties;
   onLoadedMetadata?: ((event: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
   dragHandlers?: HTMLAttributes<HTMLCanvasElement> | undefined;
 }>(function MaskedVideoLayer(
-  { mediaUrl, matte, currentTime, isPlaying, layerStartSeconds, sourceInSeconds = 0, className, style, onLoadedMetadata, dragHandlers },
+  { mediaUrl, matte, currentTime, isPlaying, layerStartSeconds, sourceInSeconds = 0, speedFactor = 1, className, style, onLoadedMetadata, dragHandlers },
   forwardedRef
 ) {
   const sourceVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -49,11 +51,12 @@ export const MaskedVideoLayer = forwardRef<HTMLVideoElement, {
     }
     // The matte video is sampled across the source media, so it must use the
     // same source-aware offset as the source video itself.
-    const nextTime = sourceInSeconds + Math.max(0, currentTime - layerStartSeconds);
-    if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08) {
+    matteVideo.playbackRate = speedFactor;
+    const nextTime = sourceInSeconds + Math.max(0, currentTime - layerStartSeconds) * speedFactor;
+    if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08 * Math.max(1, speedFactor)) {
       matteVideo.currentTime = nextTime;
     }
-  }, [currentTime, layerStartSeconds, sourceInSeconds]);
+  }, [currentTime, layerStartSeconds, sourceInSeconds, speedFactor]);
 
   useEffect(() => {
     const matteVideo = matteVideoRef.current;

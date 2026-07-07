@@ -7,6 +7,7 @@
  */
 
 import type { ColorPipeline, ColorStage } from "./types";
+import type { ColorRenderWarning } from "./color-management";
 
 export type SvgColorPrimitive =
   | { kind: "colorMatrix"; values: string }
@@ -64,6 +65,29 @@ export function pipelineToSvgFilter(pipeline: ColorPipeline, id: string): SvgCol
     return null;
   }
   return { id, colorInterpolationFilters: pipeline.space, primitives };
+}
+
+/**
+ * Warnings for rendering `pipeline` through the DOM/SVG (no-GL) path. SVG can only apply the
+ * display-referred `matrix`/`curve` primitives, so it (a) omits `hsl`/`lut3d` stages entirely and
+ * (b) approximates managed `controls` in sRGB instead of the exact Rec.709-linear grade. The WebGL
+ * backbone is exact — this returns `[]` for it. The UI surfaces these via `colorWarningsLabel`.
+ */
+export function svgFallbackWarnings(pipeline: ColorPipeline): ColorRenderWarning[] {
+  if (pipeline.identity) return [];
+  const managed = pipeline.colorSettings.workingSpace === "rec709-linear";
+  const hasAdvanced = pipeline.stages.some((s) => s.hsl || s.lut3d);
+  const hasManagedControls = managed && pipeline.stages.some((s) => s.controls);
+  if (hasAdvanced || hasManagedControls) {
+    return [
+      {
+        code: "advanced-stage-fallback",
+        severity: "warning",
+        message: "Color preview degraded: LUT/HSL/managed color not exact."
+      }
+    ];
+  }
+  return [];
 }
 
 function primitiveToMarkup(primitive: SvgColorPrimitive): string {

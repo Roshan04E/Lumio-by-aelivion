@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PremiereData Version="3">
+  <Project ObjectID="1" Name="Simple Premiere Project" />
+  <Sequence ObjectID="seq_1" Name="Simple Premiere Sequence" Timebase="30" Width="1920" Height="1080">
+    <VideoTrack Index="0">
+      <ClipItem ObjectID="v1" Name="A001_C001.mov" Start="0" End="90" In="30" MediaPath="file:///A001_C001.mov">
+        <Transition Name="Cross Dissolve" Duration="15" />
+      </ClipItem>
+      <ClipItem ObjectID="v2" Name="A001_C002.mov" Start="90" End="150" In="0" MediaPath="file:///A001_C002.mov" />
+    </VideoTrack>
+    <AudioTrack Index="0">
+      <ClipItem ObjectID="a1" Name="A001_C001.wav" Type="audio" Start="0" End="150" In="30" MediaPath="file:///A001_C001.wav" />
+    </AudioTrack>
+    <Effect Name="Lumetri Color" />
+  </Sequence>
+</PremiereData>

@@ -6,6 +6,8 @@
  *  - and replayable on the CPU (`applyPipelineToRgb`) for deterministic tests / fallback.
  */
 
+import type { ProjectColorSettings } from "./color-management";
+
 /**
  * The color-interpolation space the pipeline operates in. SVG's
  * `color-interpolation-filters` defaults to linearRGB; 13C.0 pins **sRGB** so the
@@ -28,15 +30,28 @@ export interface ToneCurve {
 }
 
 /**
- * One color operation: an optional 3×4 (row-major, RGB + offset column) matrix
- * applied first, then an optional per-channel tone curve. A pipeline is an ordered
- * list of stages (one per source color effect) applied in sequence — this composes
- * correctly without folding, and maps 1:1 onto sequential SVG primitives.
+ * One color operation. **Per-stage working-space contract** (see `cpu.ts`):
+ *  - `controls` — managed Basic Correction. In the `rec709-linear` working space the CPU/WebGL
+ *    backbone decodes to Rec.709 **linear light** and grades there **unclamped**
+ *    (`applyControlsLinear`); `matrix`/`curve` below are the display-referred **SVG/no-GL
+ *    approximation** of the SAME grade (applied only when the exact `controls` path isn't).
+ *  - `matrix` then `curve` — display-referred (Rec.709 SDR code values). Authored 1D curves,
+ *    wheels (baked as curves), and the correction approximation live here; SVG expresses them
+ *    exactly via `feColorMatrix` + `feComponentTransfer`.
+ *  - `hsl`, `lut3d` — display-referred, cross-channel; SVG cannot express them (omitted → the
+ *    SVG path is degraded, see `svgFallbackWarnings`).
+ * A pipeline is an ordered list of stages (one per source color effect) applied in sequence.
  */
 export interface ColorStage {
-  /** 12 entries (3 rows × 4 cols); `null` = identity. */
+  /**
+   * Managed Rec.709 SDR correction controls, graded in Rec.709-linear by the CPU/WebGL backbone.
+   * When present in the managed working space the exact path applies THIS and skips `matrix`/`curve`
+   * (which are the no-GL SVG approximation of the same grade).
+   */
+  controls?: ColorControls | null | undefined;
+  /** 12 entries (3 rows × 4 cols); `null` = identity. Display-referred (SVG approximation). */
   matrix: number[] | null;
-  /** `null` = identity (passthrough). */
+  /** `null` = identity (passthrough). Display-referred (SVG approximation). */
   curve: ToneCurve | null;
   /**
    * Optional HSL-domain op (Lumetri hue/sat curves OR an HSL-secondary key+correct).
@@ -57,6 +72,7 @@ export interface ColorStage {
 export interface ColorPipeline {
   stages: ColorStage[];
   space: ColorInterpolation;
+  colorSettings: ProjectColorSettings;
   /** True when the pipeline is a no-op, so renderers can skip the filter entirely. */
   identity: boolean;
   /**

@@ -69,6 +69,11 @@ export function CurveEditor({ value, onChange }: { value: string; onChange: (jso
   const [channels, setChannels] = useState<Channels>(() => parseChannels(value));
   const [active, setActive] = useState<ChannelKey>("master");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  // Mirrors for pointer handlers that fire before React re-renders (add-then-drag): the drag
+  // index and the latest channels (state lags one frame behind the add-commit).
+  const dragIndexRef = useRef<number | null>(null);
+  const channelsRef = useRef<Channels>(channels);
+  channelsRef.current = channels;
   const [smooth, setSmooth] = useState(false);
   // Per-edit history (each point add/move/remove is one step) so the undo button
   // steps back through individual curve changes rather than wiping the whole curve.
@@ -137,31 +142,42 @@ export function CurveEditor({ value, onChange }: { value: string; onChange: (jso
 
   const setActivePoints = (pts: CurvePoint[]): Channels => ({ ...channels, [active]: pts });
 
-  const handlePointDown = (index: number) => (event: ReactPointerEvent<SVGCircleElement>) => {
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pushHistory(); // one undo step per drag
+  const startDrag = (index: number, pointerId: number) => {
+    // Capture on the SVG (not the circle) so add-then-drag works before the circle exists,
+    // and drags keep tracking outside the graph.
+    svgRef.current?.setPointerCapture(pointerId);
     draggingRef.current = true;
+    dragIndexRef.current = index;
     setDragIndex(index);
   };
 
-  const handlePointMove = (index: number) => (event: ReactPointerEvent<SVGCircleElement>) => {
-    if (dragIndex !== index) return;
+  const handlePointDown = (index: number) => (event: ReactPointerEvent<SVGCircleElement>) => {
+    event.stopPropagation();
+    pushHistory(); // one undo step per drag
+    startDrag(index, event.pointerId);
+  };
+
+  // Drag moves are handled at the SVG level (single handler, works with add-then-drag).
+  const handleSvgMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const index = dragIndexRef.current;
+    if (!draggingRef.current || index === null) return;
+    const livePoints = channelsRef.current[active];
     const p = pointFromEvent(event);
-    const last = points.length - 1;
-    const next = points.map((pt) => ({ ...pt }));
+    const last = livePoints.length - 1;
+    const next = livePoints.map((pt) => ({ ...pt }));
     // Target the cursor; endpoints keep their x, interior points stay between neighbors.
     let targetX: number;
     if (index === 0) targetX = 0;
     else if (index === last) targetX = 1;
-    else targetX = clamp01(Math.min(Math.max(p.x, points[index - 1]!.x + 0.001), points[index + 1]!.x - 0.001));
+    else targetX = clamp01(Math.min(Math.max(p.x, livePoints[index - 1]!.x + 0.001), livePoints[index + 1]!.x - 0.001));
     const targetY = p.y;
     // Smooth mode eases the point toward the cursor (gentle response) instead of snapping.
     const f = smooth ? SMOOTH_FACTOR : 1;
-    const current = points[index]!;
+    const current = livePoints[index];
+    if (!current) return;
     next[index]!.x = current.x + (targetX - current.x) * f;
     next[index]!.y = current.y + (targetY - current.y) * f;
-    const nextChannels = setActivePoints(next);
+    const nextChannels: Channels = { ...channelsRef.current, [active]: next };
     setChannels(nextChannels);
     // Emit live so the preview updates in real time as the point moves. The value→state
     // resync is skipped while dragging (draggingRef), so local state stays authoritative.
@@ -171,8 +187,9 @@ export function CurveEditor({ value, onChange }: { value: string; onChange: (jso
   const handlePointUp = () => {
     if (!draggingRef.current) return;
     draggingRef.current = false;
+    dragIndexRef.current = null;
     setDragIndex(null);
-    onChange(serialize(channels)); // final commit (history step was taken on pointer-down)
+    onChange(serialize(channelsRef.current)); // final commit (history step was taken on pointer-down)
   };
 
   const handlePointDoubleClick = (index: number) => (event: ReactPointerEvent<SVGCircleElement>) => {
@@ -186,8 +203,14 @@ export function CurveEditor({ value, onChange }: { value: string; onChange: (jso
     const p = pointFromEvent(event);
     // Ignore clicks that land on an existing point (those start a drag instead).
     if (points.some((pt) => Math.abs(pt.x - p.x) < HIT_RADIUS && Math.abs(pt.y - p.y) < HIT_RADIUS)) return;
-    const next = [...points, p].sort((a, b) => a.x - b.x);
+    // Insert ON the curve (y = the curve's current value at x), NOT at the raw cursor — adding a
+    // point must never deform the existing curve (Resolve/Photoshop behavior; user report). The
+    // drag that follows is what moves it.
+    const added: CurvePoint = { x: p.x, y: clamp01(evaluateCurve(points, p.x)) };
+    const next = [...points, added].sort((a, b) => a.x - b.x);
     commit(setActivePoints(next));
+    // Add-then-drag in one gesture: the new point immediately follows the pointer.
+    startDrag(next.findIndex((pt) => pt === added), event.pointerId);
   };
 
   return (
@@ -237,6 +260,9 @@ export function CurveEditor({ value, onChange }: { value: string; onChange: (jso
           viewBox={`0 0 ${VIEW} ${VIEW}`}
           preserveAspectRatio="xMidYMid meet"
           onPointerDown={handleBackgroundClick}
+          onPointerMove={handleSvgMove}
+          onPointerUp={handlePointUp}
+          onPointerCancel={handlePointUp}
         >
           <rect className="graph-editor-plot" x={0} y={0} width={VIEW} height={VIEW} />
           {[0.25, 0.5, 0.75].map((g) => (
@@ -256,9 +282,6 @@ export function CurveEditor({ value, onChange }: { value: string; onChange: (jso
               r={dragIndex === index ? 24 : 18}
               style={{ stroke: accent, ...(dragIndex === index ? { fill: accent } : {}) }}
               onPointerDown={handlePointDown(index)}
-              onPointerMove={handlePointMove(index)}
-              onPointerUp={handlePointUp}
-              onPointerCancel={handlePointUp}
               onDoubleClick={handlePointDoubleClick(index)}
             />
           ))}

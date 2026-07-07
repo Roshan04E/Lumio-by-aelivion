@@ -22,6 +22,10 @@ export interface InspectorPanelProps {
   currentTime?: number | undefined;
   /** Seek the playhead to an absolute composition time. Used by graph-editor navigation. */
   onSeek?: ((seconds: number) => void) | undefined;
+  /** Auto-keyframe mode: when true, editing any keyframeable value drops a keyframe at the playhead
+   *  (After Effects / Premiere stopwatch semantics). Panels route numeric writes through the
+   *  `apply*ValueAtTime` helpers in keyframeUtils with this flag. */
+  autoKeyframe?: boolean | undefined;
   /** Composition pixel dimensions — panels that author comp-space geometry (e.g. masks) need these. */
   composition?: { width: number; height: number } | undefined;
   /** The mask currently being edited in the preview (so the panel can highlight it). */

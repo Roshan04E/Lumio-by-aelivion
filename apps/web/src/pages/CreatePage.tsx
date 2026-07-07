@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronDown, Sparkles } from "lucide-react";
+import { ArrowRight, ChevronDown, FilePlus2, LayoutTemplate, Sparkles } from "lucide-react";
 import { templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
-import { Badge } from "../components/Badge";
-import { Button } from "../components/Button";
-import { Card } from "../components/Card";
 import { UploadDropzone } from "../components/UploadDropzone";
 import { createAsset, createProject, listTemplates } from "../lib/api";
 
@@ -15,6 +12,7 @@ export function CreatePage() {
   const [templateId, setTemplateId] = useState(templateDefinitions[0]?.id ?? "");
   const [title, setTitle] = useState("My Lumio edit");
   const [prompt, setPrompt] = useState("Make this like a fast product promo with bold price text.");
+  const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -24,60 +22,127 @@ export function CreatePage() {
     });
   }, []);
 
-  async function create(mode: "template" | "prompt") {
+  async function create(mode: "template" | "prompt" | "blank") {
     setBusy(true);
+    // Only mint an asset when the user actually uploaded a file. Fabricating a placeholder
+    // "creator-upload.mp4" asset for an empty create was exactly what seeded a black clip on
+    // "Open empty editor": createDefaultComposition saw a truthy assetId and added a media layer
+    // whose asset has no bytes → an empty black video.
     const metadata = file ? await readMediaMetadata(file) : undefined;
-    const asset = await createAsset({
-      file: file ?? undefined,
-      fileName: file?.name ?? "creator-upload.mp4",
-      durationSeconds: metadata?.durationSeconds,
-      width: metadata?.width,
-      height: metadata?.height
-    });
+    const asset = file
+      ? await createAsset({
+          file,
+          fileName: file.name,
+          durationSeconds: metadata?.durationSeconds,
+          width: metadata?.width,
+          height: metadata?.height
+        })
+      : undefined;
     const project = await createProject({
       title,
       templateId: mode === "template" ? templateId : undefined,
       prompt: mode === "prompt" ? prompt : undefined,
-      sourceAssetId: asset.id
+      sourceAssetId: asset?.id,
+      orientation
     });
     navigate(`/editor/${project.id}`);
   }
 
   return (
-    <div className="page create-page">
-      <section className="page-heading">
-        <Badge tone="lime">Create</Badge>
-        <h1>Start from a video</h1>
-        <p>Template projects and prompt-planned projects both become editable graphs.</p>
+    <div className="mkt-page">
+      <section className="mkt-hero" style={{ padding: "64px 0 12px" }}>
+        <div className="mkt-wrap mkt-hero-inner">
+          <span className="mkt-eyebrow">Create</span>
+          <h1 style={{ fontSize: "clamp(32px, 4.4vw, 52px)" }}>
+            Start from a video. <span className="mkt-grad">Shape it your way.</span>
+          </h1>
+          <p className="mkt-sub">
+            Bring a clip, then pick a template, describe it, or open a blank timeline. Every path lands in
+            the same fully editable editor — nothing is baked in.
+          </p>
+        </div>
       </section>
 
-      <div className="create-grid">
-        <Card className="create-card">
+      <div className="mkt-wrap mkt-narrow">
+        <div className="mkt-flow-step">
+          <span className="mkt-flow-label">Step 1</span>
+          <h2>Bring your footage</h2>
+          <p className="sub">Drop a video, image, or audio file. It stays on your machine until you export.</p>
           <UploadDropzone file={file} onFile={setFile} />
-          <label className="field-control">
-            <span>Project title</span>
-            <input value={title} onChange={(event) => setTitle(event.target.value)} />
-          </label>
-        </Card>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 28, marginTop: 18, alignItems: "flex-end" }}>
+            <label className="mkt-field" style={{ flex: "1 1 260px", maxWidth: 420 }}>
+              <span>Project title</span>
+              <input className="mkt-input" value={title} onChange={(event) => setTitle(event.target.value)} />
+            </label>
+            <div className="mkt-field">
+              <span>Canvas</span>
+              <div className="mkt-seg" role="group" aria-label="Canvas orientation">
+                <button type="button" aria-pressed={orientation === "portrait"} onClick={() => setOrientation("portrait")}>
+                  <span className="glyph portrait" /> Portrait <span style={{ color: "var(--mkt-text-dim)", fontFamily: "var(--mkt-mono)", fontSize: 11 }}>9:16</span>
+                </button>
+                <button type="button" aria-pressed={orientation === "landscape"} onClick={() => setOrientation("landscape")}>
+                  <span className="glyph landscape" /> Landscape <span style={{ color: "var(--mkt-text-dim)", fontFamily: "var(--mkt-mono)", fontSize: 11 }}>16:9</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
 
-        <Card className="create-card">
-          <h2>Template</h2>
-          <TemplatePicker templates={templates} value={templateId} onChange={setTemplateId} />
-          <Button disabled={busy} onClick={() => create("template")}>
-            Use Template
-          </Button>
-        </Card>
+        <div className="mkt-flow-step" style={{ paddingBottom: 100 }}>
+          <span className="mkt-flow-label">Step 2</span>
+          <h2>Choose how to start</h2>
+          <p className="sub">Pick one — you can add, remove, and re-edit everything once the editor opens.</p>
 
-        <Card className="create-card">
-          <h2>Prompt Planner</h2>
-          <label className="prompt-box">
-            <span>Prompt</span>
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={6} />
-          </label>
-          <Button icon={<Sparkles size={16} />} disabled={busy} onClick={() => create("prompt")}>
-            Plan Graph
-          </Button>
-        </Card>
+          <div className="mkt-start-row">
+            <div className="mkt-start-info">
+              <span className="mkt-ic"><LayoutTemplate size={18} /></span>
+              <div>
+                <h3>Start from a template</h3>
+                <p>Reusable module stacks — captions, follow-text, background removal, and more.</p>
+              </div>
+            </div>
+            <div className="mkt-start-action">
+              <TemplatePicker templates={templates} value={templateId} onChange={setTemplateId} />
+              <button type="button" className="mkt-linkbtn" disabled={busy} onClick={() => create("template")}>
+                {busy ? "Creating…" : "Use template"} <ArrowRight size={15} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mkt-start-row mkt-start-featured">
+            <div className="mkt-start-info">
+              <span className="mkt-ic"><Sparkles size={18} /></span>
+              <div>
+                <h3>Describe it with a prompt</h3>
+                <p>Lumio plans a starting graph from your words — you edit everything after.</p>
+              </div>
+            </div>
+            <div className="mkt-start-action">
+              <label className="mkt-field">
+                <span>Prompt</span>
+                <textarea className="mkt-textarea" value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={3} />
+              </label>
+              <button type="button" className="mkt-linkbtn" disabled={busy} onClick={() => create("prompt")}>
+                {busy ? "Planning…" : "Plan graph"} <ArrowRight size={15} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mkt-start-row">
+            <div className="mkt-start-info">
+              <span className="mkt-ic"><FilePlus2 size={18} /></span>
+              <div>
+                <h3>Continue without a template</h3>
+                <p>Open a blank timeline with just your footage and build from scratch.</p>
+              </div>
+            </div>
+            <div className="mkt-start-action">
+              <button type="button" className="mkt-linkbtn" disabled={busy} onClick={() => create("blank")}>
+                {busy ? "Opening…" : "Open empty editor"} <ArrowRight size={15} />
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -179,19 +244,21 @@ function TemplatePicker({
   }, []);
 
   return (
-    <div className="field-control template-picker" ref={rootRef}>
-      <span>Reel stack</span>
+    <div className="mkt-select" ref={rootRef}>
+      <span style={{ fontFamily: "var(--mkt-mono)", fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--mkt-text-dim)" }}>
+        Reel stack
+      </span>
       <button
         aria-expanded={open}
-        className="template-picker-trigger"
+        className="mkt-select-trigger"
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen((prev) => !prev)}
       >
         <span>{selected?.name ?? "Choose template"}</span>
         <ChevronDown size={16} />
       </button>
       {open ? (
-        <div className="template-picker-menu" role="listbox">
+        <div className="mkt-select-menu" role="listbox">
           {templates.map((template) => (
             <button
               aria-selected={template.id === value}

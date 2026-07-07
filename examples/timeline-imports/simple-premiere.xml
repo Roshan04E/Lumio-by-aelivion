@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xmeml version="5">
+  <sequence id="sequence-1">
+    <name>Simple Premiere XML Import</name>
+    <rate>
+      <timebase>30</timebase>
+      <ntsc>FALSE</ntsc>
+    </rate>
+    <media>
+      <video>
+        <samplecharacteristics>
+          <width>1920</width>
+          <height>1080</height>
+        </samplecharacteristics>
+        <track>
+          <clipitem id="clipitem-1">
+            <name>City Wide</name>
+            <start>0</start>
+            <end>120</end>
+            <in>0</in>
+            <out>120</out>
+            <file id="file-1">
+              <name>city-wide.mov</name>
+            </file>
+          </clipitem>
+          <transitionitem>
+            <start>105</start>
+            <end>135</end>
+          </transitionitem>
+          <clipitem id="clipitem-2">
+            <name>Bus Closeup</name>
+            <start>120</start>
+            <end>240</end>
+            <in>30</in>
+            <out>150</out>
+            <file id="file-2">
+              <name>bus-closeup.mov</name>
+            </file>
+          </clipitem>
+        </track>
+      </video>
+    </media>
+  </sequence>
+</xmeml>

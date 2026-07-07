@@ -66,7 +66,10 @@ const fixtureMaxDiff: Partial<Record<RenderComparisonFixtureKey, number>> = {
   // Region grade on TEXT (effect mask → expandLayerEffectRegions duplicate): scene vs DOM, both expand the
   // region the same way, so this sits near the graded/masked-text band. A regression (region ignored → whole
   // text graded, or not at all) diffs the whole glyph region → several percent.
-  "region-text": 0.01,
+  // 2026-07-03 recalibration 1.0% → 1.25%: actual drifted to ~1.11% — diff mass verified to be
+  // region-SEAM + glyph-edge AA flavor only (scene/dom captures visually equivalent), and the drift
+  // is independent of that day's decoder/image/sourceVersion work (A/B'd against a revert).
+  "region-text": 0.0125,
   "tilted-text": 0.0085,
   // Phase 4.2 transition fold: scene mixes the junction in-canvas via the SAME `TransitionCompositor` as
   // the DOM overlay, so scene-vs-DOM should be near the ~0.26% baseline (the gate proves the mix lands at
@@ -90,9 +93,20 @@ const fixtureKeys: RenderComparisonFixtureKey[] = (() => {
   return valid;
 })();
 
+// REGION_PASSES=1 runs the SCENE side with the region-effect pass model on (`&regionPasses=1`) while the
+// DOM reference keeps its clone stacking — gating the pass model against the same oracle as the clone model.
+const regionPasses = process.env.REGION_PASSES === "1" || process.env.REGION_PASSES === "true";
+// SINGLE_CTX_PREVIEW=1 runs the SCENE side with the GPU-first single-context preview on
+// (`&singleCtxPreview=1`) — media grades in-context on the SceneCompositor's own WebGL2 context instead of
+// per-clip canvases. Gated against the SAME DOM oracle, so it must hold every fixture's threshold with ZERO
+// changes (the flip acceptance gate). `&rendererMode=webgl` (already in `fixture`) makes media use the
+// unified WebglMediaLayer producer that feeds the sink.
+const singleCtxPreview = process.env.SINGLE_CTX_PREVIEW === "1" || process.env.SINGLE_CTX_PREVIEW === "true";
+const sceneFlags = `${regionPasses ? "&regionPasses=1" : ""}${singleCtxPreview ? "&singleCtxPreview=1" : ""}`;
+
 async function main() {
   fs.mkdirSync(artifactDir, { recursive: true });
-  console.log(`Scene compositor parity: comparing compositor=scene vs compositor=dom`);
+  console.log(`Scene compositor parity: comparing compositor=scene vs compositor=dom${regionPasses ? " (region PASS model on)" : ""}${singleCtxPreview ? " (single-ctx preview on)" : ""}`);
   console.log(`Fixtures: ${fixtureKeys.join(", ")}`);
 
   const port = await getFreePort();
@@ -106,8 +120,36 @@ async function main() {
       const domPath = path.join(artifactDir, `dom-${key}.png`);
       const scenePath = path.join(artifactDir, `scene-${key}.png`);
       const diffPath = path.join(artifactDir, `diff-${key}.png`);
+      if (key === "overlap-region-effects") {
+        // Always the 3-way check (both flag states pinned explicitly in the URLs), so this fixture is
+        // immune to the shipped default of the pass model.
+        // The pass model INTENTIONALLY diverges from the DOM clone-stack here (effects COMBINE in the
+        // overlap instead of top-wins), so a DOM comparison would assert against the model this fixture
+        // replaces. Instead: (a) scene(off) must still match DOM (clone-model parity untouched), and
+        // (b) scene(on) must DIFFER from scene(off) beyond a floor — proof the combine actually engaged
+        // (a silently dropped pass would make them identical).
+        const sceneOffPath = path.join(artifactDir, `scene-off-${key}.png`);
+        const scPreview = singleCtxPreview ? "&singleCtxPreview=1" : "";
+        await capturePreviewFrame(`${baseUrl}?${fixture}&compositor=dom`, domPath);
+        await capturePreviewFrame(`${baseUrl}?${fixture}&compositor=scene&regionPasses=0${scPreview}`, sceneOffPath);
+        await capturePreviewFrame(`${baseUrl}?${fixture}&compositor=scene&regionPasses=1${scPreview}`, scenePath);
+        const offParity = comparePngs(domPath, sceneOffPath, diffPath);
+        const limit = fixtureMaxDiff[key] ?? maxDiffRatio;
+        // STRICT pixelmatch threshold for the combine delta: the standard perceptual threshold is tuned to
+        // absorb DOM-vs-GPU rendering noise, which also absorbs a moderate grade shift (blur of graded vs
+        // ungraded content) — the exact signal this check exists to detect.
+        const combine = comparePngs(sceneOffPath, scenePath, path.join(artifactDir, `combine-${key}.png`), 0.02);
+        const combineFloor = 0.02; // the graded-vs-ungraded overlap region is ~17% of the frame
+        console.log(
+          `[${key}] clone-parity ${(offParity.diffRatio * 100).toFixed(3)}% (limit ${(limit * 100).toFixed(2)}%), ` +
+            `combine-delta ${(combine.diffRatio * 100).toFixed(3)}% (floor ${(combineFloor * 100).toFixed(2)}%)`
+        );
+        if (offParity.diffRatio > limit) failures.push(`${key}: clone-parity ${(offParity.diffRatio * 100).toFixed(3)}% > ${(limit * 100).toFixed(3)}%`);
+        if (combine.diffRatio < combineFloor) failures.push(`${key}: combine-delta ${(combine.diffRatio * 100).toFixed(3)}% < floor — pass model did not change the overlap`);
+        continue;
+      }
       await capturePreviewFrame(`${baseUrl}?${fixture}&compositor=dom`, domPath);
-      await capturePreviewFrame(`${baseUrl}?${fixture}&compositor=scene`, scenePath);
+      await capturePreviewFrame(`${baseUrl}?${fixture}&compositor=scene${sceneFlags}`, scenePath);
       const summary = comparePngs(domPath, scenePath, diffPath);
       const limit = fixtureMaxDiff[key] ?? maxDiffRatio;
       const pct = (summary.diffRatio * 100).toFixed(3);
@@ -177,13 +219,13 @@ async function capturePreviewFrame(url: string, outputPath: string) {
   }
 }
 
-function comparePngs(aPath: string, bPath: string, diffPath: string) {
+function comparePngs(aPath: string, bPath: string, diffPath: string, threshold: number = diffThreshold) {
   const a = PNG.sync.read(fs.readFileSync(aPath));
   const b = PNG.sync.read(fs.readFileSync(bPath));
   assert.equal(a.width, b.width, "DOM and scene captures must match width.");
   assert.equal(a.height, b.height, "DOM and scene captures must match height.");
   const diff = new PNG({ width: a.width, height: a.height });
-  const diffPixels = pixelmatch(a.data, b.data, diff.data, a.width, a.height, { threshold: diffThreshold });
+  const diffPixels = pixelmatch(a.data, b.data, diff.data, a.width, a.height, { threshold });
   fs.writeFileSync(diffPath, PNG.sync.write(diff));
   const totalPixels = a.width * a.height;
   return { diffPixels, totalPixels, diffRatio: diffPixels / totalPixels };

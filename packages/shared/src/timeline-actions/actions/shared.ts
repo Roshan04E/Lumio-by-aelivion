@@ -3,6 +3,8 @@ import type {
   TimelineKeyframeV2,
   TimelineLayer,
   TimelineLayerType,
+  MaskPoint,
+  ShapeKind,
   TimelineTrack,
   TimelineTransform,
   TimelineVector2
@@ -133,6 +135,27 @@ function clampToSafeArea(x: number | undefined, y: number | undefined): Timeline
   };
 }
 
+function defaultShapePathPoints(idPrefix: string): MaskPoint[] {
+  const points = [
+    { id: freshId(`${idPrefix}_pt`), x: 50, y: 4 },
+    { id: freshId(`${idPrefix}_pt`), x: 96, y: 50 },
+    { id: freshId(`${idPrefix}_pt`), x: 50, y: 96 },
+    { id: freshId(`${idPrefix}_pt`), x: 4, y: 50 }
+  ];
+  return points.map((point, index) => {
+    const prev = points[(index - 1 + points.length) % points.length]!;
+    const next = points[(index + 1) % points.length]!;
+    const dx = (next.x - prev.x) * 0.33;
+    const dy = (next.y - prev.y) * 0.33;
+    return {
+      ...point,
+      inTangent: { x: -dx, y: -dy },
+      outTangent: { x: dx, y: dy },
+      lockedTangents: true
+    };
+  });
+}
+
 export function createShapeLayer(
   track: TimelineTrack,
   composition: TimelineComposition,
@@ -143,12 +166,15 @@ export function createShapeLayer(
     y?: number | undefined;
     widthPercent?: number | undefined;
     heightPercent?: number | undefined;
+    shapeKind?: ShapeKind | undefined;
+    shapePath?: MaskPoint[] | undefined;
     borderRadius?: number | undefined;
     startSeconds?: number | undefined;
     durationSeconds?: number | undefined;
   }
 ): TimelineLayer {
   const timing = resolveTiming(composition, nowSeconds, params, 2);
+  const shapeKind = params.shapeKind ?? "rounded-rectangle";
   return {
     id: freshId("layer_shape"),
     trackId: track.id,
@@ -161,6 +187,8 @@ export function createShapeLayer(
     color: params.color ?? "#C9FF4A",
     widthPercent: params.widthPercent ?? 40,
     heightPercent: params.heightPercent ?? 24,
+    shapeKind,
+    ...(shapeKind === "pen" ? { shapePath: params.shapePath ?? defaultShapePathPoints("shape") } : {}),
     borderRadius: params.borderRadius ?? 12,
     transform: defaultTransform({ position: clampToSafeArea(params.x, params.y ?? 50), opacity: 82 }),
     effects: [],

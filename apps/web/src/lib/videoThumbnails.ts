@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { waitWhileBackgroundBlocked, whenBackgroundIdle } from "../editor/performance/backgroundScheduler";
 
 /**
  * Real video-frame thumbnails for timeline clips (the filmstrip look). Loads a video once
@@ -19,6 +20,9 @@ const MAX_CONCURRENT_EXTRACTIONS = 2;
 let activeExtractions = 0;
 const extractionWaiters: Array<() => void> = [];
 async function withExtractionSlot<T>(task: () => Promise<T>): Promise<T> {
+  // Background-gate first (Phase 2): extraction spins up a <video> decode — never start one while
+  // the user is playing / dragging / exporting. Consumers show a placeholder until the idle window.
+  await whenBackgroundIdle();
   if (activeExtractions >= MAX_CONCURRENT_EXTRACTIONS) {
     await new Promise<void>((resolve) => extractionWaiters.push(resolve));
   }
@@ -31,8 +35,37 @@ async function withExtractionSlot<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
+// Bounded LRU (Phase 2): the old unbounded Maps held every data-URL strip/poster ever extracted for
+// the session — a long editing session's heap never plateaued. Map insertion order + re-insert on
+// touch gives LRU semantics for free.
+const MAX_CACHED_STRIPS = 200;
+const MAX_CACHED_POSTERS = 200;
+function lruGet<V>(map: Map<string, V>, key: string): V | undefined {
+  const value = map.get(key);
+  if (value !== undefined) {
+    map.delete(key);
+    map.set(key, value);
+  }
+  return value;
+}
+function lruSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > cap) {
+    const oldest = map.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
 const cache = new Map<string, string[]>();
 const inflight = new Map<string, Promise<string[] | null>>();
+
+/** Memory-pressure relief (degradation controller): drop cached strips/posters — they regenerate lazily. */
+export function clearThumbnailCaches(): void {
+  cache.clear();
+  posterCache.clear();
+}
 
 function waitFor(el: HTMLVideoElement, event: string, timeoutMs = 8000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -105,7 +138,7 @@ function warnExtract(kind: string, url: string, reason: unknown): void {
 
 export async function getVideoThumbnails(url: string, count = FRAME_COUNT): Promise<string[] | null> {
   if (!url) return null;
-  const cached = cache.get(url);
+  const cached = lruGet(cache, url);
   if (cached) return cached;
   const pending = inflight.get(url);
   if (pending) return pending;
@@ -138,6 +171,8 @@ export async function getVideoThumbnails(url: string, count = FRAME_COUNT): Prom
 
       const thumbs: string[] = [];
       for (let i = 0; i < count; i += 1) {
+        // Park mid-strip if playback/a gesture/an export starts — the remaining frames resume after.
+        await waitWhileBackgroundBlocked();
         const t = ((i + 0.5) / count) * duration;
         await seek(video, Math.min(t, Math.max(0, duration - 0.05)));
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -145,7 +180,7 @@ export async function getVideoThumbnails(url: string, count = FRAME_COUNT): Prom
         // by warnExtract below so a cross-origin asset failure is diagnosable, not a silent blank strip.
         thumbs.push(canvas.toDataURL("image/jpeg", 0.6));
       }
-      cache.set(url, thumbs);
+      lruSet(cache, url, thumbs, MAX_CACHED_STRIPS);
       return thumbs;
     } catch (err) {
       warnExtract("thumbnails", url, err);
@@ -177,7 +212,7 @@ function posterKey(url: string, atSeconds: number): string {
 export async function getVideoPoster(url: string, atSeconds = 0): Promise<string | null> {
   if (!url) return null;
   const key = posterKey(url, atSeconds);
-  const cached = posterCache.get(key);
+  const cached = lruGet(posterCache, key);
   if (cached) return cached;
   const pending = posterInflight.get(key);
   if (pending) return pending;
@@ -211,7 +246,7 @@ export async function getVideoPoster(url: string, atSeconds = 0): Promise<string
       await seek(video, Math.min(Math.max(0, atSeconds), Math.max(0, duration - 0.05)));
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const poster = canvas.toDataURL("image/jpeg", 0.72);
-      posterCache.set(key, poster);
+      lruSet(posterCache, key, poster, MAX_CACHED_POSTERS);
       return poster;
     } catch (err) {
       warnExtract("poster", url, err);
@@ -230,13 +265,13 @@ export async function getVideoPoster(url: string, atSeconds = 0): Promise<string
 
 /** React hook: returns a first-frame poster (at `atSeconds`) for the url once captured, else `null`. */
 export function useVideoPoster(url: string | undefined, atSeconds = 0): string | null {
-  const [poster, setPoster] = useState<string | null>(() => (url ? posterCache.get(posterKey(url, atSeconds)) ?? null : null));
+  const [poster, setPoster] = useState<string | null>(() => (url ? lruGet(posterCache, posterKey(url, atSeconds)) ?? null : null));
   useEffect(() => {
     if (!url) {
       setPoster(null);
       return;
     }
-    const cached = posterCache.get(posterKey(url, atSeconds));
+    const cached = lruGet(posterCache, posterKey(url, atSeconds));
     if (cached) {
       setPoster(cached);
       return;
@@ -254,13 +289,13 @@ export function useVideoPoster(url: string | undefined, atSeconds = 0): string |
 
 /** React hook: returns the asset's frame thumbnails once extracted, or `null` meanwhile. */
 export function useVideoThumbnails(url: string | undefined, count = FRAME_COUNT): string[] | null {
-  const [thumbs, setThumbs] = useState<string[] | null>(() => (url ? cache.get(url) ?? null : null));
+  const [thumbs, setThumbs] = useState<string[] | null>(() => (url ? lruGet(cache, url) ?? null : null));
   useEffect(() => {
     if (!url) {
       setThumbs(null);
       return;
     }
-    const cached = cache.get(url);
+    const cached = lruGet(cache, url);
     if (cached) {
       setThumbs(cached);
       return;

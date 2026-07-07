@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type { PluginEffectManifest, PluginLookManifest, PluginTransitionManifest } from "./plugin-manifest";
+import type { ProjectColorSettings, SourceColorMetadata } from "./color/color-management";
 
 export const moduleTypes = [
   "PERSON_EXTRACTION",
@@ -133,6 +134,12 @@ export interface SourceAsset {
   updatedAt?: string | undefined;
   external?: AssetExternalRef | undefined;
   ai?: AssetAiRef | undefined;
+  /**
+   * Detected/assumed source color metadata (primaries/transfer/matrix/range). Absent → assume Rec.709
+   * SDR. Detected at ingest/decode (Phase 3); persisted in `SourceAsset.colorJson` and carried into the
+   * render manifest so both export paths know each source's color space.
+   */
+  color?: SourceColorMetadata | undefined;
 }
 
 export interface DerivedAsset {
@@ -183,11 +190,14 @@ export interface ProjectGraph {
     transitions?: PluginTransitionManifest[] | undefined;
   } | undefined;
   composition?: TimelineComposition | undefined;
+  /** Auxiliary compositions, used by imported nested timelines/templates. `composition` remains the active/root timeline. */
+  compositions?: Record<string, TimelineComposition> | undefined;
   version: number;
 }
 
 export type TimelineLayerType = "video" | "image" | "text" | "audio" | "shape" | "adjustment";
 export type TimelineTrackType = "video" | "text" | "audio" | "overlay";
+export type ShapeKind = "rectangle" | "rounded-rectangle" | "ellipse" | "line" | "triangle" | "diamond" | "pentagon" | "pen";
 
 export interface TimelineVector2 {
   x: number;
@@ -319,7 +329,11 @@ export const timelineEffectTypes = [
   "zoom",
   "motionBlur",
   "chromaKey",
-  "volume"
+  "volume",
+  "audioEq",
+  "audioCompressor",
+  "audioGate",
+  "audioLimiter"
 ] as const;
 
 export type TimelineEffectType = (typeof timelineEffectTypes)[number];
@@ -517,6 +531,14 @@ export interface TimelineLayer {
    */
   sourceInSeconds?: number | undefined;
   assetId?: string | undefined;
+  /**
+   * Editor-only color label (Premiere-style), e.g. "violet". Purely cosmetic: colors the clip in
+   * the timeline UI. Set per clip via the clip context menu; when absent the clip inherits the
+   * label of its source asset. Renderers and the preview proxy cache must ignore it.
+   */
+  label?: string | undefined;
+  /** References a composition stored in `ProjectGraph.compositions`; used for imported nested timelines. */
+  nestedCompositionId?: string | undefined;
   text?: string | undefined;
   textRuns?: TextRun[] | undefined;
   fontFamily?: string | undefined;
@@ -534,6 +556,10 @@ export interface TimelineLayer {
   content?: LayerContentTransform | undefined;
   widthPercent?: number | undefined;
   heightPercent?: number | undefined;
+  /** Basic graphic primitive for shape layers. Defaults to rounded rectangle for older projects. */
+  shapeKind?: ShapeKind | undefined;
+  /** Shape-local path points for Pen/custom graphic shapes. Coordinates are 0..100 inside the shape box. */
+  shapePath?: MaskPoint[] | undefined;
   borderRadius?: number | undefined;
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
@@ -561,6 +587,20 @@ export interface TimelineLayer {
    */
   textRevealProgress?: number | undefined;
   transform: TimelineTransform;
+  /**
+   * Constant playback speed (rate stretch). 1 (or absent) = normal. Source time consumed per
+   * timeline second = `speed`, so `sourceTime = sourceInSeconds + (t - startSeconds) * speed`.
+   * Every consumer must map through `getLayerSpeed` (timeline.ts) — never read this raw.
+   */
+  speed?: number | undefined;
+  /**
+   * Speed ramp / time remap (2026-07-03). Layer-LOCAL times (seconds since clip start), values are
+   * playback rates, LINEAR interpolation between points (deliberate: linear segments integrate in
+   * closed form, so `sourceTime = sourceIn + ∫speed` is EXACT and bit-identical in every renderer —
+   * no numerical stepping to keep in sync). When present (≥1 point) it OVERRIDES `speed`.
+   * Every consumer must map through `getLayerSpeedAt` / `layerSourceTimeSeconds` — never raw.
+   */
+  speedKeyframes?: SpeedKeyframe[] | undefined;
   /** How this layer composites over the layers below it. Default `normal`. */
   blendMode?: BlendMode | undefined;
   /** Vector masks that hide/reveal parts of this clip (Phase 1). Empty/absent = no masking. */
@@ -597,6 +637,45 @@ export interface TimelineTrack {
   muted?: boolean | undefined;
   /** Solo: when ANY track is soloed, only soloed tracks render/are audible. */
   solo?: boolean | undefined;
+  /**
+   * Track mixer fader gain (audio tracks). 0..2 linear, 1/absent = unity. Multiplies every
+   * clip's own volume. Read through `getTrackAudioGain` — never raw.
+   */
+  volume?: number | undefined;
+  /**
+   * Track fader automation (absolute composition seconds, linear interpolation, v1).
+   * When present it OVERRIDES the static `volume` during playback/export — evaluate via
+   * `getTrackAudioGainAt`. Same convention for `panKeyframes`/`getTrackPanAt`.
+   */
+  volumeKeyframes?: TrackAudioKeyframe[] | undefined;
+  panKeyframes?: TrackAudioKeyframe[] | undefined;
+  /**
+   * Track stereo pan (audio tracks). −1 (full left) .. 1 (full right), 0/absent = center.
+   * Read through `getTrackPan`. Applied in preview + local export (StereoPanner) and in cloud
+   * export via the worker's audio post-mix (Remotion renders video muted; the worker mixes audio
+   * with the same shared evaluators + ffmpeg mux — see apps/worker/src/audio-post-mix.ts).
+   */
+  pan?: number | undefined;
+}
+
+/** One speed-ramp point: layer-local seconds → playback rate (linear segments; see TimelineLayer.speedKeyframes). */
+export interface SpeedKeyframe {
+  timeSeconds: number;
+  value: number;
+}
+
+/** One point of track-level audio automation (mixer fader/pan), in absolute composition seconds. */
+export interface TrackAudioKeyframe {
+  timeSeconds: number;
+  value: number;
+}
+
+/** Named/colored timeline bookmark (Premiere-style marker). Editor-only — no render effect. */
+export interface TimelineMarker {
+  timeSeconds: number;
+  name?: string | undefined;
+  /** One of TIMELINE_MARKER_COLORS (timeline-ops) or any CSS color. Absent = default accent. */
+  color?: string | undefined;
 }
 
 export type TimelineViewportPreset = "vertical_1080x1920" | "landscape_1920x1080" | "square_1080" | "youtube_4k" | "custom";
@@ -604,6 +683,12 @@ export type TimelineResizeBehavior = "keep-layout" | "scale-visuals";
 export type TimelineTimeDisplay = "seconds" | "timecode" | "frames";
 
 export interface TimelineCompositionSettings {
+  /**
+   * Managed color contract for this composition (working/output space + range). Absent on legacy
+   * projects → treat as {@link DEFAULT_PROJECT_COLOR_SETTINGS} (Rec.709 linear working, Rec.709 SDR
+   * limited output). Persisted in the `ProjectGraph` JSON blob; no schema migration needed.
+   */
+  color?: ProjectColorSettings | undefined;
   viewport: {
     preset: TimelineViewportPreset;
     width: number;
@@ -618,7 +703,12 @@ export interface TimelineCompositionSettings {
     tailPaddingSeconds: number;
     snapSeconds: number;
     timeDisplay: TimelineTimeDisplay;
-    markers?: number[] | undefined;
+    /**
+     * Timeline bookmarks. Legacy entries are bare numbers (seconds); new entries are
+     * {@link TimelineMarker} objects with optional name/color. Always read through
+     * `normalizeTimelineMarkers` — never assume one shape.
+     */
+    markers?: (number | TimelineMarker)[] | undefined;
     /** Premiere-style work area: export is clipped to [inPointSeconds, outPointSeconds] when set. Editor playback/preview always shows the full timeline. */
     inPointSeconds?: number | undefined;
     outPointSeconds?: number | undefined;
@@ -699,6 +789,8 @@ export type ToolArtifactType =
   | "subjectDepth"
   | "timelinePatch"
   | "renderManifest"
+  | "generatedImage"
+  | "generatedVideo"
   | "thumbnail"
   | "diagnostics";
 
@@ -727,7 +819,19 @@ export interface ToolCapabilityDefinition {
   estimatedCredits?: number | undefined;
   bestFor: string;
   limitations: string[];
+  /** Renderer-agnostic icon key. UIs map this to their own glyph set (e.g. a lucide icon in web).
+   *  Keeps `shared` free of any icon library; new tools declare their glyph here, not in the page. */
+  icon?: ToolIconKey | undefined;
 }
+
+/** Stable icon identifiers a tool can request. Extend as new tool families arrive. */
+export type ToolIconKey =
+  | "captions"
+  | "text-behind"
+  | "background-removal"
+  | "follow-text"
+  | "person-extraction"
+  | "generic";
 
 export interface ToolDiagnostic {
   level: "info" | "warning" | "error";
