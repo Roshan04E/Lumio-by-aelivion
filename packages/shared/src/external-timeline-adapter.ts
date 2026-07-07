@@ -1,4 +1,4 @@
-import type { ProjectGraph, TimelineComposition, TimelineLayer, TimelineTrack, TransitionSpec } from "./types";
+import type { BuiltInTransitionKind, ProjectGraph, TimelineComposition, TimelineKeyframeV2, TimelineLayer, TimelineTrack, TransitionSpec } from "./types";
 
 export type ExternalTimelineFormat = "edl" | "fcpxml" | "xmeml" | "prproj";
 export type TimelineImportReportSection = "imported" | "mapped" | "skipped" | "unsupported";
@@ -32,6 +32,8 @@ export interface TimelineImportReport {
   mapped: TimelineImportReportItem[];
   skipped: TimelineImportReportItem[];
   unsupported: TimelineImportReportItem[];
+  /** Present when the source is a multi-sequence project (Task 2.3); lets a report modal offer a picker. */
+  availableSequences?: TimelineImportSequenceOption[] | undefined;
 }
 
 export interface ImportedExternalTimeline {
@@ -45,6 +47,16 @@ export interface ParseExternalTimelineInput {
   contents: string;
   projectId: string;
   projectTitle?: string | undefined;
+  /** Force a specific `.prproj` sequence (from `report.availableSequences[].id`) instead of the "most clips" heuristic. */
+  sequenceId?: string | undefined;
+}
+
+/** One candidate sequence in a multi-sequence project (Task 2.3) — lets a report modal offer a picker. */
+export interface TimelineImportSequenceOption {
+  id: string;
+  name: string;
+  clipCount: number;
+  selected: boolean;
 }
 
 interface ParsedTimelineClip {
@@ -59,6 +71,19 @@ interface ParsedTimelineClip {
   text?: string | undefined;
   nestedTimelineId?: string | undefined;
   transitionIn?: TransitionSpec | undefined;
+  /** Title-layer style overrides (FCPXML `<title>`/`<text-style-def>`) — absent = the existing hardcoded defaults. */
+  textStyle?:
+    | {
+        fontFamily?: string | undefined;
+        fontSize?: number | undefined;
+        fontWeight?: number | undefined;
+        italic?: boolean | undefined;
+        color?: string | undefined;
+        textAlign?: "left" | "center" | "right" | undefined;
+      }
+    | undefined;
+  /** Motion/opacity keyframes lifted from `<adjust-transform>`/`<adjust-opacity>` (layer-local seconds). */
+  keyframes?: TimelineKeyframeV2[] | undefined;
 }
 
 interface ParsedTimeline {
@@ -71,6 +96,8 @@ interface ParsedTimeline {
   clips: ParsedTimelineClip[];
   reportItems: TimelineImportReportItem[];
   nestedTimelines?: ParsedTimeline[] | undefined;
+  /** Every candidate sequence found in a multi-sequence project (Task 2.3), for a report-modal picker. */
+  availableSequences?: TimelineImportSequenceOption[] | undefined;
 }
 
 type XmlElement = Element | SimpleXmlElement;
@@ -88,7 +115,7 @@ export function isExternalTimelineFile(fileName: string): boolean {
 }
 
 export function parseExternalTimelineFile(input: ParseExternalTimelineInput): ImportedExternalTimeline {
-  const parsed = parseExternalTimeline(input.fileName, input.contents);
+  const parsed = parseExternalTimeline(input.fileName, input.contents, { sequenceId: input.sequenceId });
   const composition = buildCompositionFromParsedTimeline({
     parsed,
     projectId: input.projectId,
@@ -111,7 +138,7 @@ export function parseExternalTimelineFile(input: ParseExternalTimelineInput): Im
   return { graph, composition, report };
 }
 
-export function parseExternalTimeline(fileName: string, contents: string): ParsedTimeline {
+export function parseExternalTimeline(fileName: string, contents: string, options: { sequenceId?: string | undefined } = {}): ParsedTimeline {
   const lower = fileName.toLowerCase();
   const trimmed = contents.trim();
   if (lower.endsWith(".edl") || looksLikeEdl(trimmed)) {
@@ -121,7 +148,7 @@ export function parseExternalTimeline(fileName: string, contents: string): Parse
     return parseFcpxml(trimmed, fileName);
   }
   if (lower.endsWith(".prproj") || /<premieredata[\s>]/i.test(trimmed)) {
-    return parsePrproj(trimmed, fileName);
+    return parsePrproj(trimmed, fileName, options.sequenceId);
   }
   if (lower.endsWith(".xml") || /<(xmeml|sequence)[\s>]/i.test(trimmed)) {
     return parseXmeml(trimmed, fileName);
@@ -234,16 +261,24 @@ function parseFcpxml(contents: string, fileName: string): ParsedTimeline {
   const height = readPositiveNumber(attr(format, "height")) ?? DEFAULT_HEIGHT;
   const title = attr(sequence, "name") || attr(elementsByTag(document, "project")[0], "name") || stripExtension(fileName);
   const transitionCount = elementsByTag(document, "transition").length;
-  if (transitionCount > 0) {
-    reportItems.push(
-      reportItem("unsupported", "fcpxml.transitionitem", `${transitionCount} FCPXML transition element(s) were detected. V1 imports clips and reports transitions for manual remapping.`)
-    );
-  }
 
   const clips: ParsedTimelineClip[] = [];
   const spine = elementsByTag(document, "spine")[0] ?? sequence;
   if (spine) {
     collectFcpxmlClips(spine, { assets, clips, fps, reportItems, cursorSeconds: 0, fallbackTrack: 0 });
+  }
+
+  // Any transition elements NOT consumed by `collectFcpxmlClips` (e.g. a trailing transition with no
+  // following clip) still get reported rather than silently dropped.
+  const mappedTransitionCount = reportItems.filter((item) => item.code === "fcpxml.transition").length;
+  if (transitionCount > mappedTransitionCount) {
+    reportItems.push(
+      reportItem(
+        "unsupported",
+        "fcpxml.transitionitem",
+        `${transitionCount - mappedTransitionCount} FCPXML transition element(s) could not be mapped to a following clip.`
+      )
+    );
   }
 
   return { format: "fcpxml", title, width, height, fps, clips, reportItems };
@@ -275,7 +310,7 @@ function parseXmeml(contents: string, fileName: string): ParsedTimeline {
   return { format: "xmeml", title, width, height, fps, clips, reportItems };
 }
 
-function parsePrproj(contents: string, fileName: string): ParsedTimeline {
+function parsePrproj(contents: string, fileName: string, sequenceId?: string): ParsedTimeline {
   const document = parseXml(contents);
   if (!document) {
     throw new Error("Could not parse Premiere project. The .prproj XML appears malformed.");
@@ -328,11 +363,24 @@ function parsePrproj(contents: string, fileName: string): ParsedTimeline {
     const fps = readPrprojFps(sequence) ?? DEFAULT_FPS;
     const candidateReportItems: TimelineImportReportItem[] = [];
     const clips = collectPrprojSequenceClips(sequence, fps, candidateReportItems, objectIndex);
-    return { sequence, fps, clips, reportItems: candidateReportItems };
+    return { sequence, id: readPrprojId(sequence), fps, clips, reportItems: candidateReportItems };
   });
-  const selected = candidates
-    .slice()
-    .sort((a, b) => b.clips.length - a.clips.length || sequences.indexOf(a.sequence) - sequences.indexOf(b.sequence))[0]!;
+  // Task 2.3 multi-sequence: an explicit `sequenceId` (from a report-modal picker re-parse) wins over the
+  // "most readable clips" heuristic, so a user can select ANY sequence, not just the auto-picked one.
+  const requested = sequenceId ? candidates.find((c) => c.id === sequenceId) : undefined;
+  const selected =
+    requested ??
+    candidates.slice().sort((a, b) => b.clips.length - a.clips.length || sequences.indexOf(a.sequence) - sequences.indexOf(b.sequence))[0]!;
+
+  const availableSequences: TimelineImportSequenceOption[] | undefined =
+    sequences.length > 1
+      ? candidates.map((c, index) => ({
+          id: c.id || `sequence_${index}`,
+          name: readPrprojName(c.sequence) || `Sequence ${index + 1}`,
+          clipCount: c.clips.length,
+          selected: c === selected
+        }))
+      : undefined;
 
   if (sequences.length > 1) {
     const selectedName = readPrprojName(selected.sequence) || `sequence ${sequences.indexOf(selected.sequence) + 1}`;
@@ -340,7 +388,9 @@ function parsePrproj(contents: string, fileName: string): ParsedTimeline {
       reportItem(
         "mapped",
         "prproj.multiple_sequences",
-        `${sequences.length} sequences were detected. V1 imported "${selectedName}" because it has the most readable clips.`
+        requested
+          ? `${sequences.length} sequences were detected. Imported "${selectedName}" (selected).`
+          : `${sequences.length} sequences were detected. V1 imported "${selectedName}" because it has the most readable clips.`
       )
     );
   }
@@ -423,7 +473,7 @@ function parsePrproj(contents: string, fileName: string): ParsedTimeline {
     reportItems.push(reportItem("unsupported", "prproj.nested_sequence", `${nestedCount} nested sequence reference(s) were detected and skipped.`));
   }
 
-  return { format: "prproj", title, width, height, fps, clips, reportItems };
+  return { format: "prproj", title, width, height, fps, clips, reportItems, availableSequences };
 }
 
 function buildNestedCompositionsFromParsedTimeline(input: {
@@ -541,17 +591,19 @@ function createImportedLayer(clip: ParsedTimelineClip, trackId: string, width: n
         }),
     effects: [],
     keyframes: [],
+    ...(clip.keyframes?.length ? { animations: clip.keyframes } : {}),
     widthPercent: 100,
     heightPercent: 100,
     ...(clip.transitionIn ? { transitionIn: clip.transitionIn } : {})
   };
   if (clip.type === "text") {
     layer.text = clip.text || clip.name || "Text";
-    layer.fontFamily = "Inter, Arial, sans-serif";
-    layer.fontSize = 64;
-    layer.fontWeight = 700;
-    layer.textAlign = "center";
-    layer.color = "#FFFFFF";
+    layer.fontFamily = clip.textStyle?.fontFamily || "Inter, Arial, sans-serif";
+    layer.fontSize = clip.textStyle?.fontSize ?? 64;
+    layer.fontWeight = clip.textStyle?.fontWeight ?? 700;
+    layer.italic = clip.textStyle?.italic;
+    layer.textAlign = clip.textStyle?.textAlign ?? "center";
+    layer.color = clip.textStyle?.color || "#FFFFFF";
     layer.widthPercent = 80;
     layer.heightPercent = undefined;
     layer.backgroundColor = "transparent";
@@ -610,8 +662,38 @@ function buildTimelineImportReport(fileName: string, parsed: ParsedTimeline, com
     imported,
     mapped: [...parsed.reportItems.filter((item) => item.section === "mapped"), ...mapped],
     skipped,
-    unsupported
+    unsupported,
+    ...(parsed.availableSequences?.length ? { availableSequences: parsed.availableSequences } : {})
   };
+}
+
+export interface ExternalTransitionMapping {
+  kind: BuiltInTransitionKind;
+  params?: Record<string, number | number[] | boolean> | undefined;
+}
+
+/**
+ * Maps a Premiere/FCPXML/Resolve transition NAME to a registry transition kind (Task 2.1). Every NLE
+ * importer funnels through this ONE table so the same transition name maps identically regardless of
+ * source format — replaces the old per-format "dissolve or nothing" mapping. Unknown names still map
+ * (to `crossDissolve`, the least-surprising fallback) rather than being silently dropped; the CALLER is
+ * responsible for reporting the original name as "mapped" (not "unsupported") so a review modal shows
+ * what was approximated.
+ */
+export function mapExternalTransition(name: string | undefined): ExternalTransitionMapping {
+  const n = (name ?? "").toLowerCase().trim();
+  if (n.includes("dip to black")) return { kind: "dip", params: { dipColor: [0, 0, 0] } };
+  if (n.includes("dip to white")) return { kind: "dip", params: { dipColor: [1, 1, 1] } };
+  if (n.includes("dip")) return { kind: "dip" };
+  if (n.includes("iris")) return { kind: "iris" };
+  if (n.includes("cross zoom") || (n.includes("zoom") && !n.includes("push"))) return { kind: "zoom" };
+  if (n.includes("push")) return { kind: "push" };
+  if (n.includes("slide")) return { kind: "slide" };
+  if (n.startsWith("wipe") || n.includes(" wipe") || n.endsWith("wipe")) return { kind: "wipe" };
+  // Cross Dissolve, Film Dissolve, Additive Dissolve, Constant Power/Gain (audio-only names that still
+  // appear on video tracks in some exports), and anything unrecognized all fall back to Cross Dissolve —
+  // the standard "safe" junction transition every NLE treats as its default.
+  return { kind: "crossDissolve" };
 }
 
 function readEdlTransition(
@@ -643,6 +725,10 @@ function collectFcpxmlClips(
   }
 ): number {
   let cursor = context.cursorSeconds;
+  // A `<transition>` spine element sits BETWEEN the two clips it joins; FCPXML gives it its own
+  // offset/duration rather than nesting inside either clip. Stash it here and attach it as
+  // `transitionIn` to the NEXT clip pushed at this spine level (the incoming clip).
+  let pendingTransition: { name: string; durationSeconds: number } | undefined;
   for (const child of Array.from(root.children as unknown as ArrayLike<XmlElement>)) {
     const tag = child.localName.toLowerCase();
     if (tag === "asset-clip" || tag === "video" || tag === "audio" || tag === "clip") {
@@ -654,15 +740,27 @@ function collectFcpxmlClips(
       const lane = Number.parseInt(attr(child, "lane") || "", 10);
       const type = tag === "audio" ? "audio" : "video";
       const clipName = attr(child, "name") || asset?.name || ref || "Imported clip";
+      const clipId = attr(child, "id") || `${tag}_${context.clips.length + 1}`;
+      let transitionIn: TransitionSpec | undefined;
+      if (pendingTransition) {
+        const mapping = mapExternalTransition(pendingTransition.name);
+        transitionIn = { kind: mapping.kind, durationSeconds: pendingTransition.durationSeconds, ...(mapping.params ? { params: mapping.params } : {}) };
+        context.reportItems.push(
+          reportItem("mapped", "fcpxml.transition", `Mapped FCPXML transition "${pendingTransition.name || "unknown"}" before "${clipName}" to ${mapping.kind}.`, clipId)
+        );
+        pendingTransition = undefined;
+      }
       context.clips.push({
-        id: attr(child, "id") || `${tag}_${context.clips.length + 1}`,
+        id: clipId,
         name: clipName,
         sourceName: asset?.name ?? decodeFileName(asset?.src) ?? clipName,
         type,
         trackIndex: Number.isFinite(lane) ? Math.max(0, lane) : context.fallbackTrack,
         startSeconds: offsetSeconds,
         durationSeconds: Math.max(1 / context.fps, durationSeconds),
-        sourceInSeconds
+        sourceInSeconds,
+        ...(transitionIn ? { transitionIn } : {}),
+        keyframes: readFcpxmlOpacityKeyframes(child, context.fps)
       });
       cursor = Math.max(cursor, offsetSeconds + durationSeconds);
       collectFcpxmlClips(child, { ...context, cursorSeconds: offsetSeconds, fallbackTrack: context.fallbackTrack + 1 });
@@ -673,13 +771,83 @@ function collectFcpxmlClips(
       cursor += durationSeconds;
       continue;
     }
+    if (tag === "transition") {
+      pendingTransition = {
+        name: attr(child, "name") || "Cross Dissolve",
+        durationSeconds: Math.max(1 / context.fps, parseTimelineTime(attr(child, "duration"), context.fps) ?? 0.5)
+      };
+      continue;
+    }
     if (tag === "title") {
-      context.reportItems.push(reportItem("unsupported", "fcpxml.title", `Skipped title "${attr(child, "name") || "Untitled"}"; title import is not mapped in V1.`));
+      const offsetSeconds = parseTimelineTime(attr(child, "offset"), context.fps) ?? cursor;
+      const durationSeconds = Math.max(1 / context.fps, parseTimelineTime(attr(child, "duration"), context.fps) ?? 2);
+      const clipId = attr(child, "id") || `title_${context.clips.length + 1}`;
+      const textElement = firstChildByTag(child, "text");
+      const text = textOf(textElement) || attr(child, "name") || "Title";
+      const styleDef = firstChildByTag(textElement, "text-style-def") ?? firstChildByTag(child, "text-style-def");
+      const style = firstChildByTag(styleDef, "text-style") ?? firstChildByTag(textElement, "text-style");
+      const textStyle = style
+        ? {
+            fontFamily: attr(style, "font") || undefined,
+            fontSize: readPositiveNumber(attr(style, "fontSize")),
+            fontWeight: attr(style, "bold") === "1" ? 700 : undefined,
+            italic: attr(style, "italic") === "1" ? true : undefined,
+            color: fcpxmlColorToHex(attr(style, "fontColor")),
+            textAlign: fcpxmlAlignment(attr(style, "alignment"))
+          }
+        : undefined;
+      context.clips.push({
+        id: clipId,
+        name: attr(child, "name") || "Title",
+        type: "text",
+        text,
+        trackIndex: context.fallbackTrack,
+        startSeconds: offsetSeconds,
+        durationSeconds,
+        textStyle
+      });
+      context.reportItems.push(reportItem("mapped", "fcpxml.title", `Mapped FCPXML title "${attr(child, "name") || "Untitled"}" to an editable text layer.`, clipId));
+      cursor = Math.max(cursor, offsetSeconds + durationSeconds);
       continue;
     }
     cursor = collectFcpxmlClips(child, { ...context, cursorSeconds: cursor });
   }
   return cursor;
+}
+
+/** `<adjust-opacity>` `<keyframe time="…" value="0..1">` children -> layer-local opacity keyframes (0..100). */
+function readFcpxmlOpacityKeyframes(clipElement: XmlElement, fps: number): TimelineKeyframeV2[] | undefined {
+  const adjustOpacity = firstChildByTag(clipElement, "adjust-opacity");
+  const keyframeElements = childElementsByTag(firstChildByTag(adjustOpacity, "keyframeAnimation") ?? adjustOpacity, "keyframe");
+  if (!keyframeElements.length) return undefined;
+  const keyframes: TimelineKeyframeV2[] = keyframeElements.map((kf, index) => {
+    const timeSeconds = parseTimelineTime(attr(kf, "time"), fps) ?? 0;
+    const rawValue = Number.parseFloat(attr(kf, "value"));
+    const value = Number.isFinite(rawValue) ? Math.max(0, Math.min(100, rawValue * 100)) : 100;
+    return {
+      id: `import_opacity_kf_${index}`,
+      target: { scope: "layer" as const, property: "opacity" },
+      timeSeconds,
+      value,
+      interpolation: "linear" as const,
+      temporal: {}
+    };
+  });
+  return keyframes;
+}
+
+function fcpxmlColorToHex(value: string): string | undefined {
+  // FCPXML fontColor is "r g b a" floats 0..1.
+  const parts = value.trim().split(/\s+/).map((part) => Number.parseFloat(part));
+  if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return undefined;
+  const toHex = (n: number) => Math.round(Math.min(1, Math.max(0, n)) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(parts[0]!)}${toHex(parts[1]!)}${toHex(parts[2]!)}`;
+}
+
+function fcpxmlAlignment(value: string): "left" | "center" | "right" | undefined {
+  const n = value.trim().toLowerCase();
+  if (n === "left" || n === "center" || n === "right") return n;
+  return undefined;
 }
 
 function collectXmemlTrackClips(
@@ -1255,13 +1423,17 @@ function readPrprojClipTransition(
     return undefined;
   }
   const name = readPrprojName(transition).toLowerCase();
-  const durationSeconds = readPrprojTimeValue(transition, ["duration", "durationSeconds", "durationTicks", "durationFrames"], fps) ?? 0.5;
-  if (name.includes("dissolve") || name.includes("cross")) {
-    reportItems.push(reportItem("mapped", "prproj.dissolve", `Mapped Premiere dissolve on clip ${clipId} to Cross Dissolve.`, clipId));
-    return { kind: "crossDissolve", durationSeconds: Math.max(1 / fps, durationSeconds) };
-  }
-  reportItems.push(reportItem("unsupported", "prproj.transition", `Premiere transition "${name || "unknown"}" on clip ${clipId} is not mapped yet.`, clipId));
-  return undefined;
+  const durationSeconds = Math.max(1 / fps, readPrprojTimeValue(transition, ["duration", "durationSeconds", "durationTicks", "durationFrames"], fps) ?? 0.5);
+  const mapping = mapExternalTransition(name);
+  reportItems.push(
+    reportItem(
+      "mapped",
+      "prproj.transition",
+      `Mapped Premiere transition "${name || "unknown"}" on clip ${clipId} to ${mapping.kind}.`,
+      clipId
+    )
+  );
+  return { kind: mapping.kind, durationSeconds, ...(mapping.params ? { params: mapping.params } : {}) };
 }
 
 function readPrprojTrackKind(track: XmlElement): "video" | "audio" | undefined {

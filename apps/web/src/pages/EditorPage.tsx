@@ -10,6 +10,7 @@ import {
   CloudUpload,
   Diamond,
   Droplet,
+  FileCode,
   Film,
   Folder,
   FolderOpen,
@@ -71,6 +72,7 @@ import {
   buildLumioPackageZip,
   buildTimelineTemplatePackage,
   buildTemplateGraphFromProject,
+  exportCompositionToFcpxml,
   isLumioPackageZipBytes,
   parseLumioPackageZip,
   buildTransitionKeyframes,
@@ -552,6 +554,9 @@ export function EditorPage() {
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [pendingExternalTimelineImport, setPendingExternalTimelineImport] = useState<ImportedExternalTimeline | null>(null);
   const [externalTimelineImportMode, setExternalTimelineImportMode] = useState<ExternalTimelineImportMode>("append");
+  // Raw source kept alongside the parsed report so the multi-sequence picker (Task 2.3) can re-parse
+  // with a different `sequenceId` without re-prompting the user for the file.
+  const [pendingExternalTimelineSource, setPendingExternalTimelineSource] = useState<{ fileName: string; contents: string } | null>(null);
   const templatePackageInputRef = useRef<HTMLInputElement | null>(null);
   const [backendPluginLibrary, setBackendPluginLibrary] = useState<ImportedPluginLibrary>(EMPTY_IMPORTED_PLUGIN_LIBRARY);
   const [hiddenEffectManifestIds, setHiddenEffectManifestIds] = useState<Set<string>>(() => loadHiddenEffectManifestIds());
@@ -3641,6 +3646,7 @@ export function EditorPage() {
         });
         setExternalTimelineImportMode("append");
         setPendingExternalTimelineImport(imported);
+        setPendingExternalTimelineSource({ fileName: file.name, contents });
         setNotice(`Review timeline import report for "${imported.report.title}"`);
         return;
       }
@@ -3743,6 +3749,19 @@ export function EditorPage() {
     } finally {
       setBusy(null);
     }
+  }
+
+  /** Re-parse the pending import against a different `.prproj` sequence (Task 2.3 multi-sequence picker). */
+  function reparseExternalTimelineWithSequence(sequenceId: string) {
+    if (!project || !pendingExternalTimelineSource) return;
+    const imported = parseExternalTimelineFile({
+      fileName: pendingExternalTimelineSource.fileName,
+      contents: pendingExternalTimelineSource.contents,
+      projectId: project.id,
+      projectTitle: project.title,
+      sequenceId
+    });
+    setPendingExternalTimelineImport(imported);
   }
 
   async function applyPendingExternalTimelineImport(mode: ExternalTimelineImportMode) {
@@ -4874,6 +4893,26 @@ export function EditorPage() {
     }
   }
 
+  function exportFcpxml() {
+    if (!project || !composition) {
+      setNotice("Open a timeline before exporting FCPXML");
+      return;
+    }
+    try {
+      const { xml, report } = exportCompositionToFcpxml(composition, resolvedAssets);
+      downloadBlobFile(new Blob([xml], { type: "application/xml" }), `${safeFileStem(project.title)}.fcpxml`);
+      const unsupportedText = report.unsupported.length
+        ? ` · ${report.unsupported.length} item${report.unsupported.length === 1 ? "" : "s"} lossy (see console)`
+        : "";
+      if (report.unsupported.length) {
+        console.warn("[fcpxml export] unsupported constructs", report.unsupported);
+      }
+      setNotice(`FCPXML exported${unsupportedText}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "FCPXML export failed");
+    }
+  }
+
   function goToStart() {
     setEditorCurrentTime(0);
     setIsPlaying(false);
@@ -5578,6 +5617,15 @@ export function EditorPage() {
             onClick={downloadRenderManifest}
             aria-label="Download render manifest"
             title="Download render manifest"
+          />
+          <Button
+            className="icon-only"
+            variant="secondary"
+            icon={<FileCode size={16} />}
+            disabled={!composition}
+            onClick={exportFcpxml}
+            aria-label="Export FCPXML"
+            title="Export FCPXML (for Premiere/Resolve/Final Cut)"
           />
           <Button
             className="icon-only"
@@ -6475,7 +6523,11 @@ export function EditorPage() {
         applying={busy === "timeline-import"}
         onModeChange={setExternalTimelineImportMode}
         onApply={() => void applyPendingExternalTimelineImport(externalTimelineImportMode)}
-        onClose={() => setPendingExternalTimelineImport(null)}
+        onSelectSequence={reparseExternalTimelineWithSequence}
+        onClose={() => {
+          setPendingExternalTimelineImport(null);
+          setPendingExternalTimelineSource(null);
+        }}
       />
       <RelinkMediaModal
         open={relinkNeeds !== null}
@@ -6589,6 +6641,7 @@ function ExternalTimelineImportModal({
   applying,
   onModeChange,
   onApply,
+  onSelectSequence,
   onClose
 }: {
   imported: ImportedExternalTimeline | null;
@@ -6596,6 +6649,7 @@ function ExternalTimelineImportModal({
   applying: boolean;
   onModeChange: (mode: ExternalTimelineImportMode) => void;
   onApply: () => void;
+  onSelectSequence?: ((sequenceId: string) => void) | undefined;
   onClose: () => void;
 }) {
   if (!imported) {
@@ -6639,6 +6693,22 @@ function ExternalTimelineImportModal({
           <strong>{report.counts.placeholders} placeholder{report.counts.placeholders === 1 ? "" : "s"}</strong>
         </div>
       </div>
+      {report.availableSequences?.length ? (
+        <label className="timeline-import-sequence-picker">
+          <span>Sequence ({report.availableSequences.length} found)</span>
+          <select
+            value={report.availableSequences.find((s) => s.selected)?.id ?? ""}
+            disabled={applying || !onSelectSequence}
+            onChange={(event) => onSelectSequence?.(event.target.value)}
+          >
+            {report.availableSequences.map((seq) => (
+              <option key={seq.id} value={seq.id}>
+                {seq.name} ({seq.clipCount} clip{seq.clipCount === 1 ? "" : "s"})
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       <div className="timeline-import-mode" role="group" aria-label="Timeline import mode">
         <button type="button" className={mode === "append" ? "is-active" : ""} aria-pressed={mode === "append"} onClick={() => onModeChange("append")} disabled={applying}>
           Append to current

@@ -14,6 +14,7 @@ export * from "./effects";
 export * from "./external-cube-adapter";
 export * from "./external-gl-transition-adapter";
 export * from "./external-timeline-adapter";
+export * from "./external-timeline-exporter";
 export * from "./export-stress-fixture";
 export * from "./masks";
 export * from "./nesting";

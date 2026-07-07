@@ -28,6 +28,7 @@ it stops us re-walking them.
 | [background-tasks.md](background-tasks.md) | Background scheduling, transcodes, span generation, caches |
 | [export.md](export.md) | Local/worker export, encoders, muxing |
 | [infrastructure.md](infrastructure.md) | Build, service worker, dev/preview origins, tooling |
+| [nle-import-export.md](nle-import-export.md) | EDL/FCPXML/prproj import fidelity, transition/keyframe mapping, FCPXML export |
 
 Related (don't duplicate): `AGENTS.md` = live agent handoff log; `architecture.md` = product/feature
 tracker. This folder is the PROBLEM history.

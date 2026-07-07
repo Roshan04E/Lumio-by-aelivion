@@ -10,9 +10,17 @@
       <project name="Simple FCPXML Import">
         <sequence format="r1" duration="10s">
           <spine>
-            <asset-clip name="City Wide" ref="r2" offset="0s" start="0s" duration="5s"/>
+            <asset-clip name="City Wide" ref="r2" offset="0s" start="0s" duration="5s">
+              <adjust-opacity>
+                <keyframe time="0s" value="0"/>
+                <keyframe time="1s" value="1"/>
+              </adjust-opacity>
+            </asset-clip>
+            <transition name="Cross Dissolve" offset="4s" duration="1s"/>
             <asset-clip name="Bus Closeup" ref="r3" offset="5s" start="1s" duration="5s"/>
-            <title name="Skipped Title" offset="8s" duration="2s"/>
+            <title name="Intro Title" offset="10s" duration="2s">
+              <text>Hello Lumio</text>
+            </title>
           </spine>
         </sequence>
       </project>

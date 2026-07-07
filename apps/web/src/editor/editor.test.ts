@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @lumio-by-aelivion/web editor:test
  */
-import { applyLayerAttributes, buildLumioPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isLumioPackageZipBytes, layerSourceTimeSeconds, nestParentClipId, parseExternalTimelineFile, parseLumioPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer } from "@lumio-by-aelivion/shared";
+import { applyLayerAttributes, buildLumioPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isLumioPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestParentClipId, parseExternalTimelineFile, parseLumioPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer, type SourceAsset } from "@lumio-by-aelivion/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -149,6 +149,43 @@ function check(name: string, condition: boolean): void {
   check("prproj import maps sequence selection", prproj.report.mapped.some((item) => item.code === "prproj.multiple_sequences"));
   check("prproj import reports unsupported project features", prproj.report.unsupported.some((item) => item.code === "prproj.effects"));
 
+  // Multi-sequence picker (Task 2.3): every sequence is surfaced, and re-parsing with a chosen
+  // sequenceId selects it instead of the "most clips" heuristic.
+  check(
+    "prproj import lists every sequence for the picker",
+    prproj.report.availableSequences?.length === 2 &&
+      prproj.report.availableSequences.some((s) => s.name === "Main Sequence" && s.selected) &&
+      prproj.report.availableSequences.some((s) => s.name === "B Roll" && !s.selected)
+  );
+  const bRollSequenceId = prproj.report.availableSequences?.find((s) => s.name === "B Roll")?.id;
+  const prprojReparsed = bRollSequenceId
+    ? parseExternalTimelineFile({
+        fileName: "simple-premiere.prproj",
+        projectId: "prproj_test",
+        projectTitle: "PRPROJ Test",
+        sequenceId: bRollSequenceId,
+        contents: `<?xml version="1.0" encoding="UTF-8"?>
+<PremiereData Version="3">
+  <Project ObjectID="1" Name="Premiere Demo" />
+  <Sequence ObjectID="seq_1" Name="Main Sequence" Timebase="30" Width="1920" Height="1080">
+    <VideoTrack Index="0">
+      <ClipItem ObjectID="v1" Name="A001_C001.mov" Start="0" End="90" In="30" MediaPath="file:///A001_C001.mov">
+        <Transition Name="Cross Dissolve" Duration="15" />
+      </ClipItem>
+    </VideoTrack>
+    <AudioTrack Index="0">
+      <ClipItem ObjectID="a1" Name="A001_C001.wav" Type="audio" Start="0" End="90" In="30" MediaPath="file:///A001_C001.wav" />
+    </AudioTrack>
+    <Effect Name="Lumetri Color" />
+  </Sequence>
+  <Sequence ObjectID="seq_2" Name="B Roll">
+    <VideoTrack><ClipItem ObjectID="v2" Name="B.mov" Start="0" End="30" /></VideoTrack>
+  </Sequence>
+</PremiereData>`
+      })
+    : undefined;
+  check("prproj re-parse with sequenceId selects that sequence", prprojReparsed?.report.title === "B Roll");
+
   const graphPrproj = parseExternalTimelineFile({
     fileName: "object-graph.prproj",
     projectId: "prproj_graph",
@@ -258,6 +295,52 @@ function check(name: string, condition: boolean): void {
   check("prproj fallback reports object-reference parsing", fallbackPrproj.report.mapped.some((item) => item.code === "prproj.text_object_graph"));
   check("prproj fallback preserves nested sequence clips", Boolean(nestedLayer?.nestedCompositionId && fallbackPrproj.report.mapped.some((item) => item.code === "prproj.nested_sequences")));
   check("prproj fallback maps nested graphics to text layers", nestedComposition?.name === "NestedTitle" && nestedTextLayer?.text === "Text");
+
+  // FCPXML fidelity (Task 2.2): title -> text layer, transition mapping, opacity keyframe.
+  const fcpxml = parseExternalTimelineFile({
+    fileName: "titled-transition.fcpxml",
+    projectId: "fcpxml_fidelity",
+    projectTitle: "FCPXML Fidelity Test",
+    contents: `<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s" width="1920" height="1080"/>
+    <asset id="r2" name="city-wide.mov" src="file:///Volumes/Media/city-wide.mov" duration="8s"/>
+    <asset id="r3" name="bus-closeup.mov" src="file:///Volumes/Media/bus-closeup.mov" duration="6s"/>
+  </resources>
+  <library>
+    <event name="Lumio Import Tests">
+      <project name="Titled Transition FCPXML">
+        <sequence format="r1" duration="12s">
+          <spine>
+            <asset-clip name="City Wide" ref="r2" offset="0s" start="0s" duration="5s">
+              <adjust-opacity>
+                <keyframe time="0s" value="0"/>
+                <keyframe time="1s" value="1"/>
+              </adjust-opacity>
+            </asset-clip>
+            <transition name="Cross Dissolve" offset="4s" duration="1s"/>
+            <asset-clip name="Bus Closeup" ref="r3" offset="5s" start="1s" duration="5s"/>
+            <title name="Intro Title" offset="10s" duration="2s">
+              <text>Hello Lumio</text>
+            </title>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>`
+  });
+  const fcpxmlClips = fcpxml.composition.tracks.flatMap((track) => track.layers);
+  const titleLayer = fcpxmlClips.find((layer) => layer.type === "text");
+  const busLayer = fcpxmlClips.find((layer) => layer.name === "Bus Closeup");
+  const cityLayer = fcpxmlClips.find((layer) => layer.name === "City Wide");
+  check("fcpxml import detects format", fcpxml.report.format === "fcpxml");
+  check("fcpxml title maps to an editable text layer", titleLayer?.text === "Hello Lumio");
+  check("fcpxml reports the title mapping", fcpxml.report.mapped.some((item) => item.code === "fcpxml.title"));
+  check("fcpxml transition maps to crossDissolve on the incoming clip", busLayer?.transitionIn?.kind === "crossDissolve");
+  check("fcpxml reports the transition mapping", fcpxml.report.mapped.some((item) => item.code === "fcpxml.transition"));
+  check("fcpxml opacity keyframes land on the outgoing clip's animations", (cityLayer?.animations?.length ?? 0) >= 2);
 }
 
 // --- Adaptive preview cache spans --------------------------------------------
@@ -1171,6 +1254,125 @@ function check(name: string, condition: boolean): void {
     Boolean(roundTrippedBytes) && roundTrippedBytes!.length === assetBytes.length && roundTrippedBytes!.every((b, i) => b === assetBytes[i])
   );
   check("lumio zip: bare JSON bytes are NOT sniffed as ZIP", !isLumioPackageZipBytes(new TextEncoder().encode(JSON.stringify(pkg))));
+}
+
+// --- Shared transition-name mapping table (Task 2.1) --------------------------
+{
+  check("mapExternalTransition: Cross Dissolve -> crossDissolve", mapExternalTransition("Cross Dissolve").kind === "crossDissolve");
+  check("mapExternalTransition: Film Dissolve -> crossDissolve", mapExternalTransition("Film Dissolve").kind === "crossDissolve");
+  check("mapExternalTransition: Dip to Black -> dip with black param", (() => {
+    const m = mapExternalTransition("Dip to Black");
+    const color = m.params?.dipColor;
+    return m.kind === "dip" && Array.isArray(color) && color[0] === 0 && color[1] === 0 && color[2] === 0;
+  })());
+  check("mapExternalTransition: Dip to White -> dip with white param", (() => {
+    const m = mapExternalTransition("Dip to White");
+    const color = m.params?.dipColor;
+    return m.kind === "dip" && Array.isArray(color) && color[0] === 1 && color[1] === 1 && color[2] === 1;
+  })());
+  check("mapExternalTransition: Wipe Left -> wipe", mapExternalTransition("Wipe Left").kind === "wipe");
+  check("mapExternalTransition: Push -> push", mapExternalTransition("Push").kind === "push");
+  check("mapExternalTransition: Slide -> slide", mapExternalTransition("Slide").kind === "slide");
+  check("mapExternalTransition: Cross Zoom -> zoom", mapExternalTransition("Cross Zoom").kind === "zoom");
+  check("mapExternalTransition: Iris Round -> iris", mapExternalTransition("Iris Round").kind === "iris");
+  check("mapExternalTransition: unknown name falls back to crossDissolve", mapExternalTransition("Whatever").kind === "crossDissolve");
+}
+
+// --- FCPXML export round-trip (Task 2.4) --------------------------------------
+{
+  const clipA: TimelineLayer = {
+    id: "clipA",
+    trackId: "t1",
+    type: "video",
+    name: "Clip A",
+    startSeconds: 0,
+    durationSeconds: 4,
+    assetId: "asset1",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+  const clipB: TimelineLayer = {
+    id: "clipB",
+    trackId: "t1",
+    type: "video",
+    name: "Clip B",
+    startSeconds: 4,
+    durationSeconds: 4,
+    assetId: "asset2",
+    transitionIn: { kind: "crossDissolve", durationSeconds: 1 },
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+  const titleClip: TimelineLayer = {
+    id: "titleClip",
+    trackId: "t1",
+    type: "text",
+    name: "Title Clip",
+    text: "Round Trip Title",
+    startSeconds: 8,
+    durationSeconds: 2,
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+  const exportComposition = {
+    id: "exportFixture",
+    name: "Export Fixture",
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 10,
+    backgroundColor: "#000",
+    tracks: [{ id: "t1", type: "video" as const, name: "V1", layers: [clipA, clipB, titleClip] }]
+  };
+  const exportAssets: SourceAsset[] = [
+    {
+      id: "asset1",
+      userId: "user_test",
+      fileName: "clip-a.mp4",
+      fileType: "video/mp4",
+      fileUrl: "https://example.test/clip-a.mp4",
+      durationSeconds: 4,
+      width: 1920,
+      height: 1080,
+      status: "ready",
+      createdAt: new Date().toISOString()
+    },
+    {
+      id: "asset2",
+      userId: "user_test",
+      fileName: "clip-b.mp4",
+      fileType: "video/mp4",
+      fileUrl: "https://example.test/clip-b.mp4",
+      durationSeconds: 4,
+      width: 1920,
+      height: 1080,
+      status: "ready",
+      createdAt: new Date().toISOString()
+    }
+  ];
+  const exported = exportCompositionToFcpxml(exportComposition, exportAssets);
+  check("fcpxml export reports the transition mapping", exported.report.mapped.some((item) => item.code === "fcpxml.export.transition"));
+  check("fcpxml export reports the title mapping", exported.report.mapped.some((item) => item.code === "fcpxml.export.title"));
+
+  const reimported = parseExternalTimelineFile({
+    fileName: "roundtrip.fcpxml",
+    contents: exported.xml,
+    projectId: "fcpxml_export_roundtrip",
+    projectTitle: "Roundtrip"
+  });
+  const reimportedClips = reimported.composition.tracks.flatMap((track) => track.layers);
+  check("fcpxml export round-trip: clip count survives", reimportedClips.length === 3);
+  const reimportedClipB = reimportedClips.find((layer) => layer.name === "Clip B");
+  const reimportedTitle = reimportedClips.find((layer) => layer.type === "text");
+  check(
+    "fcpxml export round-trip: timing survives",
+    Math.abs((reimportedClipB?.startSeconds ?? -1) - 4) < 0.01 && Math.abs((reimportedClipB?.durationSeconds ?? -1) - 4) < 0.01
+  );
+  check("fcpxml export round-trip: title text survives", reimportedTitle?.text === "Round Trip Title");
+  check("fcpxml export round-trip: transition kind survives", reimportedClipB?.transitionIn?.kind === "crossDissolve");
 }
 
 if (failures > 0) {
