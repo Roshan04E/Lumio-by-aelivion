@@ -104,17 +104,22 @@ export function buildLumioPackageZipAsync(input: BuildLumioPackageZipInput): Pro
 
 /**
  * Parse a `.lumio` ZIP back into its `LumioTimelineTemplatePackage` + embedded asset bytes. Runs the same
- * `assertPluginPackageSafe` gate the bare-JSON path uses (byte caps raised here for embedded media — the
- * package as a whole still has a hard ceiling) plus a per-asset count/size cap so a malicious archive
- * can't exhaust memory before the caller even looks at it.
+ * `assertPluginPackageSafe` gate the bare-JSON path uses plus a per-asset count/size cap so a pathological
+ * archive can't exhaust memory before the caller even looks at it.
+ *
+ * The defaults are sized for REAL video projects, not marketplace plugins: a user re-importing a `.lumio`
+ * they exported themselves is a trusted, local, user-picked file, and export applies NO size cap — so a low
+ * import cap would reject packages Lumio itself produced. The ceiling only exists to avoid OOMing the tab
+ * (`unzipSync` materializes every entry in memory). Untrusted callers can pass tighter limits explicitly.
  */
 export function parseLumioPackageZip(
   bytes: Uint8Array,
   options: { maxPackageBytes?: number; maxAssetBytes?: number; maxAssetCount?: number } = {}
 ): ParsedLumioPackageZip {
-  const maxPackageBytes = options.maxPackageBytes ?? 512 * 1024 * 1024; // 512 MB ceiling for embedded media
-  const maxAssetBytes = options.maxAssetBytes ?? 256 * 1024 * 1024; // 256 MB per asset
-  const maxAssetCount = options.maxAssetCount ?? 64;
+  const GB = 1024 * 1024 * 1024;
+  const maxPackageBytes = options.maxPackageBytes ?? 4 * GB; // whole-archive ceiling (tab-memory guard, not a product limit)
+  const maxAssetBytes = options.maxAssetBytes ?? 2 * GB; // per embedded asset (a 4K/long clip alone can exceed the old 256 MB)
+  const maxAssetCount = options.maxAssetCount ?? 256;
 
   if (bytes.byteLength > maxPackageBytes) {
     throw new Error(`.lumio package is ${(bytes.byteLength / (1024 * 1024)).toFixed(1)} MB, above the ${(maxPackageBytes / (1024 * 1024)).toFixed(0)} MB limit.`);
