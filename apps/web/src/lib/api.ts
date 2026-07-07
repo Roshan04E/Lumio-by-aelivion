@@ -239,6 +239,21 @@ export async function listTemplates(): Promise<TemplateDefinition[]> {
   }
 }
 
+/** Curated (userId null) + the current user's own saved templates — the in-editor Templates gallery. */
+export async function listMyTemplates(): Promise<TemplateDefinition[]> {
+  try {
+    const data = await apiRequest<{ templates: TemplateDefinition[] }>("/templates/mine");
+    return data.templates;
+  } catch {
+    return templateDefinitions;
+  }
+}
+
+/** Delete one of the current user's own saved templates (curated templates can't be deleted this way). */
+export async function deleteTemplate(id: string): Promise<void> {
+  await apiRequest(`/templates/${id}`, { method: "DELETE" });
+}
+
 export async function createTemplate(input: {
   name: string;
   category: string;

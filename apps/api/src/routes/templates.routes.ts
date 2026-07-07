@@ -4,7 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { asJson } from "../lib/json";
 import { prisma } from "../lib/prisma";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthRequest } from "../middleware/auth";
 
 export const templatesRouter = Router();
 
@@ -19,6 +19,34 @@ templatesRouter.get(
     return ok(res, "Templates", {
       templates: templates.length ? templates : templateDefinitions
     });
+  })
+);
+
+// In-editor Templates gallery: curated (userId null) + the current user's own saved templates. Placed
+// BEFORE "/:id" so Express doesn't match "mine" as an id param.
+templatesRouter.get(
+  "/mine",
+  requireAuth,
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const templates = await prisma.template.findMany({
+      where: { active: true, OR: [{ userId: null }, { userId: req.user.id }] },
+      orderBy: [{ category: "asc" }, { name: "asc" }]
+    });
+    return ok(res, "Templates", { templates });
+  })
+);
+
+templatesRouter.delete(
+  "/:id",
+  requireAuth,
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const id = getParam(req, "id");
+    const existing = await prisma.template.findFirst({ where: { id, userId: req.user.id } });
+    if (!existing) {
+      throw new HttpError(404, "Template not found (or you don't own it)");
+    }
+    await prisma.template.delete({ where: { id: existing.id } });
+    return ok(res, "Template deleted", { id });
   })
 );
 
@@ -42,10 +70,13 @@ templatesRouter.get(
 templatesRouter.post(
   "/",
   requireAuth,
-  asyncHandler(async (req, res) => {
+  asyncHandler<AuthRequest>(async (req, res) => {
     const input = validateBody(createTemplateSchema, req.body);
     const template = await prisma.template.create({
       data: {
+        // "Save as template" from the editor always attributes to the saving user, so it shows in
+        // that user's own Templates gallery (curated templates stay userId=null, seeded separately).
+        userId: req.user.id,
         name: input.name,
         slug: input.slug,
         category: input.category,

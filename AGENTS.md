@@ -14,6 +14,41 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-08 — Claude: Phase 4 — in-editor Templates gallery (curated + user-saved) + asset-bin hover-autoplay removed
+
+Executes Phase 4 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phase 5 (docs) next.
+
+- **Discovered most of the hard part already shipped:** `buildTemplateGraphFromProject`/
+  `instantiateTemplateComposition`/`ensureTemplateSlots` (`packages/shared/src/timeline.ts`) already solve
+  the cross-project asset problem — saving a template strips `assetId` from media layers into empty
+  "slots"; applying fills them from the target project (or leaves them empty for the user to assign).
+  `handleSaveAsTemplate`/`SaveTemplateModal`/the topbar "Save as template" button were already fully wired.
+  Left all of that untouched — Phase 4 only ADDS the missing pieces around it.
+- **User-scoping:** `Template.userId String?` (nullable migration `user_templates`, existing rows stay
+  `null` = curated). `POST /templates` now stamps `userId: req.user.id` (every save-as-template
+  attributes to its saver). New `GET /templates/mine` (curated + own) and `DELETE /templates/:id` (own
+  only) — the existing public `GET /templates` (used by the standalone marketing `TemplatesPage`) is
+  UNCHANGED, still lists everyone's active templates for that separate "start a new project" flow.
+- **In-editor Templates tab** (`EditorPage.tsx`): new `AssetSourceTab` entry, its own data path (fetches
+  `TemplateDefinition[]`, not `SourceAsset[]`) rendered in a dedicated grid branch, filtered client-side by
+  the same search box. Hidden from the inspector's replace-picker (`clickAssigns`) since dropping a whole
+  composition doesn't make sense there.
+- **Apply is always append** (a deliberate simplification vs. the plan's "ask before replacing"): appending
+  is non-destructive by construction (`appendTimelineComposition`, already used by the FCPXML importer), so
+  there's no case where it needs a confirmation prompt. A template applied into an EMPTY project instead
+  goes through `instantiateTemplateComposition` for clean id remapping. After apply, the notice reports how
+  many empty media slots still need an asset — honest, not silent.
+- **Own templates are deletable** from the gallery tile (curated ones aren't — the option only renders
+  when `template.userId === currentUserId`).
+- **Unrelated fix bundled in, per user report:** asset-bin thumbnails were autoplaying video on hover
+  (`AssetCardMedia`'s `autoPlay` + `StockCardMedia`'s hover `.play()`). Both removed — `AssetCardMedia`
+  keeps its hover-scrub-by-pointer-move feature (video mounts on hover but starts paused, only advances
+  when the pointer moves across it); `StockCardMedia` now just shows the poster still, no video-element
+  autoplay and no more hover-triggered network fetch (`preload="none"` was already there).
+- Gates green: `pnpm -r typecheck` (5/5), `editor:test`.
+- NOTE: an unrelated concurrent session still has uncommitted changes to `apps/web/src/tools/*` and
+  `packages/shared/src/skills/*` (now also `clip-reference.ts`) — left untouched, not staged.
+
 ### 2026-07-07 — Claude: Phase 3 — unified Search (drop Pixabay, Pexels provider-agnostic) + Graphics (media/library plan)
 
 Executes Phase 3 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phase 4 (curated/user-saved

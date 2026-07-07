@@ -91,3 +91,18 @@ provider name is shown anywhere in badges/titles/empty-states.
 `editor:test`, both green.
 **Known gap:** Iconify sticker/emoji sets beyond line icons are not covered (icons only); a paid sticker
 provider was explicitly deferred per the original plan.
+
+## v8 — In-editor Templates gallery (curated + user-saved) + hover-autoplay removed (2026-07-08)
+**Problem:** No way to drop a pre-designed timeline into the CURRENTLY OPEN project from inside the
+editor — only a separate marketing page that starts a brand-new project. Separately, asset-bin video
+thumbnails autoplayed on hover (both the general library grid and stock search results), which was noisy
+and unwanted.
+**Fix:** Found the hard part (cross-project asset safety for templates) already solved by existing
+`buildTemplateGraphFromProject`/`instantiateTemplateComposition`/`ensureTemplateSlots` — templates store
+media layers as empty "slots," never someone else's concrete asset id. Added: `Template.userId` (nullable,
+existing rows stay curated/null), `GET /templates/mine` + `DELETE /templates/:id`, and a new in-editor
+Templates tab that applies a template via `appendTimelineComposition` (always append — non-destructive,
+no confirmation needed) and reports empty media slots honestly in the notice. Removed `autoPlay`/hover
+`.play()` calls from both asset-tile media components; the general library grid keeps hover-scrub (paused
+until the pointer moves), stock results just show a still.
+**Verify:** `pnpm -r typecheck` (5/5), `editor:test`, both green.

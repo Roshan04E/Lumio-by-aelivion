@@ -122,6 +122,7 @@ import {
   hasClipboardLayer,
   pasteLayerFromClipboard,
   parseTimelineTemplatePackage,
+  resolveTargetLayer,
   trackingPathToPositionKeyframes,
   timelineTemplatePackageToJson,
   updateTimelineLayer,
@@ -252,6 +253,7 @@ import {
   cancelJob,
   createTemplate,
   deleteAsset,
+  deleteTemplate,
   exportFinal,
   generatePreview,
   getProject,
@@ -260,6 +262,7 @@ import {
   importStock,
   linkAssetToProject,
   listAssets,
+  listMyTemplates,
   listPluginPackages,
   searchStock,
   STOCK_PAGE_SIZE,
@@ -270,7 +273,13 @@ import {
 } from "../lib/api";
 import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
 import { rasterizeSvgToFile } from "../lib/rasterize-svg";
-import { listBundledGraphics, searchBundledGraphics, type BundledGraphic } from "@lumio-by-aelivion/shared";
+import {
+  listBundledGraphics,
+  searchBundledGraphics,
+  instantiateTemplateComposition,
+  type BundledGraphic,
+  type TemplateDefinition
+} from "@lumio-by-aelivion/shared";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { ASSET_LABEL_COLORS, assetLabelOf, defaultAssetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
 import { assetHasAudioStream } from "../lib/assetAudio";
@@ -981,6 +990,7 @@ export function EditorPage() {
   const stableFocusAssetUse = useStableHandler((assetId: string) => focusAssetUse(assetId, layers));
   const stableUploadAsset = useStableHandler(handleUploadAsset);
   const stableImportFile = useStableHandler(importTimelineOrTemplateFile);
+  const stableApplyTemplate = useStableHandler(handleApplyTemplate);
   const stableRegisterAsset = useStableHandler(registerAsset);
   const stableMoveAssetFolder = useStableHandler(handleMoveAssetFolder);
   const stableSetAssetLabel = useStableHandler(handleSetAssetLabel);
@@ -3536,6 +3546,39 @@ export function EditorPage() {
     }
   }
 
+  /**
+   * Apply a Templates-gallery pick into the CURRENTLY OPEN project. Always append (never replaces the
+   * existing timeline) — safe by default, mirrors how a stock/asset pick is added to the timeline, and
+   * needs no "append vs replace" confirmation prompt. Media slots on the incoming layers ship with no
+   * assetId (see `buildTemplateGraphFromProject`); they land as empty clips the user fills via the normal
+   * replace-asset flow, so a template never silently drags in another project's media.
+   */
+  async function handleApplyTemplate(template: TemplateDefinition) {
+    if (!project || !graph || !composition) return;
+    const templateComposition = template.templateGraph?.composition;
+    if (!templateComposition) {
+      setNotice("This template has no timeline content to apply");
+      return;
+    }
+    setBusy("template-apply");
+    try {
+      const isEmpty = flattenTimelineLayers(composition).length === 0;
+      const { composition: nextComposition, offsetSeconds } = isEmpty
+        ? { composition: instantiateTemplateComposition(templateComposition, project.id), offsetSeconds: 0 }
+        : appendTimelineComposition(composition, templateComposition, project.id);
+      const nextGraph: ProjectGraph = { ...graph, composition: nextComposition, version: graph.version + 1 };
+      await updateGraph(nextGraph, nextComposition.durationSeconds);
+      setSelectedLayerIds([]);
+      setEditorCurrentTime(offsetSeconds);
+      const emptySlots = flattenTimelineLayers(nextComposition).filter((item) => item.slot?.kind === "media" && !item.assetId).length;
+      setNotice(`Added "${template.name}"${emptySlots ? ` · ${emptySlots} empty media slot${emptySlots === 1 ? "" : "s"} need an asset` : ""}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not apply template");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function exportTimelineTemplatePackage(event?: { shiftKey?: boolean }) {
     if (!project || !graph || !composition) {
       setNotice("Open a timeline before exporting a template package");
@@ -4702,13 +4745,24 @@ export function EditorPage() {
     if (!tool || !composition) {
       return Promise.resolve({ applied: false, detail: "Tool unavailable here" });
     }
-    const candidate =
-      selectedLayer?.assetId
-        ? selectedLayer
-        : layers.find((layer) => layer.assetId && (layer.type === "video" || layer.type === "image"));
+    // Resolve which clip this edits: an explicit layerId the planner set ("clip 4"), else the
+    // selected clip, else the clip under the playhead. Ambiguous/none → ask, never guess wrong.
+    const explicitLayerId = (step.params as { layerId?: string } | undefined)?.layerId;
+    const resolved = resolveTargetLayer(composition, {
+      selection: selectedLayerIds,
+      nowSeconds: currentTimeRef.current,
+      explicitLayerId
+    });
+    if (!resolved.layerId || resolved.reason === "ambiguous" || resolved.reason === "none") {
+      return Promise.resolve({
+        applied: false,
+        detail: "Which clip? Click a clip or move the playhead over it, then retry."
+      });
+    }
+    const candidate = layers.find((layer) => layer.id === resolved.layerId);
     const asset = candidate?.assetId ? resolvedAssets.find((item) => item.id === candidate.assetId) : undefined;
     if (!candidate || !asset) {
-      return Promise.resolve({ applied: false, detail: "Select a clip with media for this tool, then retry." });
+      return Promise.resolve({ applied: false, detail: "That clip has no media for this tool. Select a video or image clip, then retry." });
     }
     setSelectedLayerIds([candidate.id]);
     return new Promise<ToolStepResult>((resolve) => {
@@ -5841,6 +5895,8 @@ export function EditorPage() {
                 <AssetBin
                   assets={assets}
                   currentProjectId={project?.id}
+                  currentUserId={project?.userId}
+                  onApplyTemplate={stableApplyTemplate}
                   selectedAssetId={selectedLayer?.assetId}
                   usedCounts={assetUseCounts}
                   replaceActive={assetPickerForLayerId !== null}
@@ -7953,7 +8009,7 @@ function SettingsNumberField({
   );
 }
 
-type AssetSourceTab = "local" | "ai" | "search" | "brand" | "used";
+type AssetSourceTab = "local" | "ai" | "search" | "brand" | "templates" | "used";
 type AssetTypeFilter = "all" | "video" | "image" | "audio" | "graphics";
 type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand" | "ai">;
 type AssetBinFolder = {
@@ -8009,6 +8065,10 @@ function matchesAssetTab(asset: SourceAsset, tab: AssetSourceTab, used: boolean)
       return source === "pexels" || source === "unsplash" || source === "graphic";
     case "used":
       return used;
+    case "templates":
+      // Templates are a distinct data type (TemplateDefinition, not SourceAsset) rendered in its own
+      // dedicated branch below — never matched here.
+      return false;
     default:
       return true;
   }
@@ -8088,6 +8148,7 @@ const ASSET_TABS: { id: AssetSourceTab; label: string; icon: ReactNode }[] = [
   { id: "local", label: "Local", icon: <FolderClosedIcon /> },
   { id: "ai", label: "AI", icon: <Sparkles size={13} /> },
   { id: "brand", label: "Brand", icon: <Palette size={13} /> },
+  { id: "templates", label: "Templates", icon: <LayoutTemplate size={13} /> },
   { id: "used", label: "Used", icon: <Layers size={13} /> }
 ];
 
@@ -8229,7 +8290,8 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
   const posterSrc = asset.thumbnailUrl ?? extractedPoster ?? undefined;
   const [hovering, setHovering] = useState(false);
   // Premiere-style hover scrub: pointer X maps to source time (still only ONE <video>, mounted on
-  // hover). Autoplay covers touch/no-move hovers; the first pointer move takes over and scrubs.
+  // hover). No autoplay — the video stays paused on its poster frame until the pointer moves and
+  // scrubs it; hovering without moving just shows the still.
   const [scrubFrac, setScrubFrac] = useState<number | null>(null);
   return (
     <div
@@ -8262,7 +8324,6 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
           poster={posterSrc}
           muted
           loop
-          autoPlay
           playsInline
           preload="auto"
           onLoadedMetadata={(event) => {
@@ -8289,35 +8350,18 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
 }
 
 /**
- * Stock result thumbnail. Videos hover-play a lightweight preview variant (preload="none" so we
- * only fetch bytes on hover), letting the user see the footage before importing.
+ * Stock result thumbnail. Shows a still (poster) — no hover-autoplay; `preload="none"` so hovering
+ * never triggers a network fetch either. The video element stays mounted (unplayed) only so playback
+ * works once the user actually opens the asset viewer.
  */
 function StockCardMedia({ result }: { result: StockResult }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
   const ratio = result.width && result.height ? result.width / result.height : result.type === "video" ? 16 / 9 : 1;
   const style = { "--asset-ar": ratio } as CSSProperties;
 
   if (result.type === "video" && result.previewUrl) {
     return (
-      <div
-        className="asset-card-media"
-        style={style}
-        onMouseEnter={() => {
-          if (prefersReducedMotion()) return;
-          void videoRef.current?.play().catch(() => {});
-        }}
-        onMouseLeave={() => {
-          const video = videoRef.current;
-          if (!video) return;
-          video.pause();
-          try {
-            video.currentTime = 0;
-          } catch {
-            /* ignore seek errors before load */
-          }
-        }}
-      >
-        <video ref={videoRef} src={result.previewUrl} poster={result.thumbnailUrl} muted loop playsInline preload="none" />
+      <div className="asset-card-media" style={style}>
+        <video src={result.previewUrl} poster={result.thumbnailUrl} muted loop playsInline preload="none" />
       </div>
     );
   }
@@ -8340,6 +8384,8 @@ const AssetBin = memo(AssetBinImpl);
 function AssetBinImpl({
   assets: rawAssets,
   currentProjectId,
+  currentUserId,
+  onApplyTemplate,
   selectedAssetId,
   usedCounts = {},
   replaceActive = false,
@@ -8362,6 +8408,10 @@ function AssetBinImpl({
   /** Scopes the Local bin to this project: assets owned by a DIFFERENT project are hidden; user-level library
    *  assets (no owner) and this project's own uploads stay. Omit to show everything (legacy behavior). */
   currentProjectId?: string | undefined;
+  /** Owner of the open project — distinguishes "my saved templates" (deletable here) from curated ones. */
+  currentUserId?: string | undefined;
+  /** Applies a template's composition into the currently open project (append). Templates tab only. */
+  onApplyTemplate?: (template: TemplateDefinition) => void;
   selectedAssetId?: string | undefined;
   usedCounts?: Record<string, number>;
   replaceActive?: boolean;
@@ -8451,6 +8501,11 @@ function AssetBinImpl({
   const [graphicsLoading, setGraphicsLoading] = useState(false);
   // Asset viewer modal — opened by double-clicking a library asset or a stock result.
   const [viewerTarget, setViewerTarget] = useState<AssetViewerTarget | null>(null);
+
+  // --- Templates gallery (curated + own) ---
+  const [templatesList, setTemplatesList] = useState<TemplateDefinition[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [applyingTemplateId, setApplyingTemplateId] = useState<string | null>(null);
 
   const folderTab = isFolderAssetTab(sourceTab) ? sourceTab : null;
   const folderRoot = folderTab ? defaultAssetFolder(folderTab) : "";
@@ -8708,6 +8763,15 @@ function AssetBinImpl({
     void getStockStatus().then(setStockStatus);
   }, [sourceTab, stockStatus]);
 
+  // Fetch curated + own templates once the Templates tab is opened.
+  useEffect(() => {
+    if (sourceTab !== "templates" || templatesList.length) return;
+    setTemplatesLoading(true);
+    void listMyTemplates()
+      .then(setTemplatesList)
+      .finally(() => setTemplatesLoading(false));
+  }, [sourceTab, templatesList.length]);
+
   // Debounced stock search (page 1) against the active type / orientation. Graphics has its own effect below.
   useEffect(() => {
     if (sourceTab !== "search" || stockType === "graphics") return;
@@ -8813,6 +8877,28 @@ function AssetBinImpl({
       setStockImportError(error instanceof Error ? error.message : "Graphic import failed — please try again.");
     } finally {
       setImportingId(null);
+    }
+  }
+
+  /** Apply a template into the currently open project. Always additive (append) — never destroys
+   *  existing timeline content, so no confirmation prompt is needed regardless of template kind. */
+  async function handleApplyTemplateClick(template: TemplateDefinition) {
+    if (!onApplyTemplate) return;
+    setApplyingTemplateId(template.id);
+    try {
+      onApplyTemplate(template);
+    } finally {
+      setApplyingTemplateId(null);
+    }
+  }
+
+  async function handleDeleteTemplateClick(template: TemplateDefinition) {
+    if (!window.confirm(`Delete template "${template.name}"? This can't be undone.`)) return;
+    try {
+      await deleteTemplate(template.id);
+      setTemplatesList((current) => current.filter((item) => item.id !== template.id));
+    } catch (error) {
+      setStockImportError(error instanceof Error ? error.message : "Could not delete template.");
     }
   }
 
@@ -9005,7 +9091,7 @@ function AssetBinImpl({
     </div>
   );
   const assetPanelFooter =
-    sourceTab === "search" ? (
+    sourceTab === "search" || sourceTab === "templates" ? (
       <div className="asset-control-strip" aria-label="Asset panel controls">
         <div className="asset-control-left">{viewControls}</div>
       </div>
@@ -9070,7 +9156,7 @@ function AssetBinImpl({
       onDrop={handleAssetBinDrop}
     >
       <div className="asset-bin-tabs" role="tablist" aria-label="Asset library">
-        {ASSET_TABS.map((tab) => (
+        {ASSET_TABS.filter((tab) => !(clickAssigns && tab.id === "templates")).map((tab) => (
           <button
             key={tab.id}
             type="button"
@@ -9149,7 +9235,11 @@ function AssetBinImpl({
           <div className="asset-bin-controls-top">
             <div className="asset-search">
               <Search size={13} />
-              <input placeholder={folderTab ? `Search ${currentFolderLabel}` : "Search assets"} value={query} onChange={(event) => setQuery(event.target.value)} />
+              <input
+                placeholder={folderTab ? `Search ${currentFolderLabel}` : sourceTab === "templates" ? "Search templates" : "Search assets"}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
             </div>
           </div>
           {showDropPrompt ? (
@@ -9287,6 +9377,47 @@ function AssetBinImpl({
               </button>
             </div>
           ) : null}
+          </div>
+        ) : sourceTab === "templates" ? (
+          <div className="asset-grid">
+            {templatesLoading ? <div className="empty-mini">Loading templates…</div> : null}
+            {templatesList
+              .filter((template) => !queryText || template.name.toLowerCase().includes(queryText) || template.category.toLowerCase().includes(queryText))
+              .map((template) => {
+                const isMine = Boolean(currentUserId && template.userId === currentUserId);
+                return (
+                  <div className="asset-tile asset-stock-tile" key={template.id} title={template.description} role="button" tabIndex={0}>
+                    <div className="asset-card-media">
+                      <img src={template.thumbnailUrl} alt={template.name} loading="lazy" />
+                    </div>
+                    <span className="asset-chip asset-chip-duration">{template.category}</span>
+                    <div className="asset-card-hover">
+                      <div className="asset-card-info">
+                        <strong>{template.name}</strong>
+                        <small>{isMine ? "My template" : "Curated"}</small>
+                      </div>
+                      <div className="asset-card-actions">
+                        {isMine ? (
+                          <button type="button" className="asset-more-button" title="Delete template" onClick={() => void handleDeleteTemplateClick(template)}>
+                            <Trash2 size={14} />
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="asset-more-button"
+                          aria-busy={applyingTemplateId === template.id}
+                          disabled={applyingTemplateId === template.id}
+                          title="Add to timeline"
+                          onClick={() => void handleApplyTemplateClick(template)}
+                        >
+                          <Download size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            {!templatesLoading && !templatesList.length ? <div className="empty-mini">No templates yet — save one from the topbar</div> : null}
           </div>
         ) : view === "list" ? (
           // Premiere-style Project-panel LIST view (2026-07-04): real columns with sortable headers,

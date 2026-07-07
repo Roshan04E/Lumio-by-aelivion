@@ -23,6 +23,7 @@ model User {
   memoryFacts        MemoryFact[]
   pluginPackages     PluginPackage[]
   generationJobs     GenerationJob[]
+  templates          Template[]
 }
 
 /**
@@ -53,6 +54,11 @@ model MemoryFact {
 
 model Template {
   id              String    @id @default(cuid())
+  // null = curated/shared (seeded or saved before user-scoping existed); set = this user's own
+  // save-as-template, shown in the in-editor Templates gallery alongside curated ones (never other
+  // users' own templates). The public /templates browse route is unaffected — it still lists everyone's
+  // active templates, unchanged shipped behavior.
+  userId          String?
   name            String
   slug            String    @unique
   category        String
@@ -66,7 +72,10 @@ model Template {
   active          Boolean   @default(true)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+  user            User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
   projects        Project[]
+
+  @@index([userId])
 }
 
 model Tool {

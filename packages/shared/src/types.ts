@@ -742,6 +742,8 @@ export interface EditableFieldDefinition {
 
 export interface TemplateDefinition {
   id: string;
+  /** null/absent = curated (shared with everyone); set = one user's own save-as-template. */
+  userId?: string | null | undefined;
   name: string;
   slug: string;
   category: string;
