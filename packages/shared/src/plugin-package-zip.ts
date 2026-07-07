@@ -1,4 +1,4 @@
-import { unzipSync, zipSync, strToU8, strFromU8, type Zippable } from "fflate";
+import { unzipSync, zipSync, zip, strToU8, strFromU8, type Zippable, type AsyncZippable } from "fflate";
 import { assertPluginPackageSafe } from "./plugin-safety";
 import { parseTimelineTemplatePackage, type LumioTimelineTemplatePackage } from "./plugin-template-package";
 
@@ -57,22 +57,49 @@ function assetEntryName(asset: LumioPackageZipAssetInput): string {
 }
 
 /**
+ * Assemble the fflate file map. Media assets (and preview images) are STORED, not DEFLATEd (`level: 0`):
+ * mp4/jpg/png/webm are already compressed, so re-DEFLATE burns CPU for ~0 size gain — the exact cost that
+ * froze the UI when this ran synchronously at level 6. Only the JSON entries (small, highly compressible)
+ * are deflated.
+ */
+function buildLumioPackageZippable(input: BuildLumioPackageZipInput): Zippable {
+  const files: Zippable = {
+    [lumioPackageZipManifestEntry]: [strToU8(JSON.stringify(input.pkg.manifest, null, 2)), { level: 6 }],
+    [lumioPackageZipTimelineEntry]: [strToU8(JSON.stringify(input.pkg, null, 2)), { level: 6 }]
+  };
+  for (const asset of input.assets) {
+    files[assetEntryName(asset)] = [asset.bytes, { level: 0 }];
+  }
+  if (input.preview) {
+    files[`${lumioPackageZipPreviewsDir}/${input.preview.fileName}`] = [input.preview.bytes, { level: 0 }];
+  }
+  return files;
+}
+
+/**
  * Build a `.lumio` ZIP: `manifest.json` + `timeline.json` (the full bare package) + `assets/<id>.<ext>`
  * for each embedded asset + an optional `previews/` image. The caller supplies asset bytes already read
  * from OPFS/blob storage (`asset-blob-store.ts` for local assets, or a `fetch(fileUrl)` for cloud ones).
+ *
+ * SYNCHRONOUS — blocks the calling thread for the whole archive. Fine for tests and small packages, but UI
+ * callers embedding real media MUST use `buildLumioPackageZipAsync` instead so the zip runs off the main
+ * thread (fflate spins up worker threads); a synchronous zip over video-sized input freezes the tab.
  */
 export function buildLumioPackageZip(input: BuildLumioPackageZipInput): Uint8Array {
-  const files: Zippable = {
-    [lumioPackageZipManifestEntry]: strToU8(JSON.stringify(input.pkg.manifest, null, 2)),
-    [lumioPackageZipTimelineEntry]: strToU8(JSON.stringify(input.pkg, null, 2))
-  };
-  for (const asset of input.assets) {
-    files[assetEntryName(asset)] = asset.bytes;
-  }
-  if (input.preview) {
-    files[`${lumioPackageZipPreviewsDir}/${input.preview.fileName}`] = input.preview.bytes;
-  }
-  return zipSync(files, { level: 6 });
+  return zipSync(buildLumioPackageZippable(input));
+}
+
+/**
+ * Async `.lumio` build — same output as `buildLumioPackageZip`, but fflate runs the deflate/store on its own
+ * worker threads so the UI thread stays responsive. This is the correct entry point for the editor export.
+ */
+export function buildLumioPackageZipAsync(input: BuildLumioPackageZipInput): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    zip(buildLumioPackageZippable(input) as AsyncZippable, (err, data) => {
+      if (err) reject(err);
+      else resolve(data);
+    });
+  });
 }
 
 /**

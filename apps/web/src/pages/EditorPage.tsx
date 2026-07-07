@@ -69,7 +69,7 @@ import {
 } from "lucide-react";
 import {
   applyTimelineTemplatePackage,
-  buildLumioPackageZip,
+  buildLumioPackageZipAsync,
   buildTimelineTemplatePackage,
   buildTemplateGraphFromProject,
   exportCompositionToFcpxml,
@@ -3587,6 +3587,7 @@ export function EditorPage() {
       return;
     }
     setBusy("template-package");
+    setNotice("Building .lumio package (embedding media)…");
     try {
       const pkg = buildTimelineTemplatePackage({
         projectId: project.id,
@@ -3604,7 +3605,7 @@ export function EditorPage() {
         })
       );
       const embeddedAssets = assetBytesById.filter((a): a is { id: string; fileName: string; bytes: Uint8Array } => a !== null);
-      const zip = buildLumioPackageZip({ pkg, assets: embeddedAssets });
+      const zip = await buildLumioPackageZipAsync({ pkg, assets: embeddedAssets });
       downloadBlobFile(new Blob([zip.slice()], { type: "application/zip" }), `${safeFileStem(project.title)}.lumio`);
       const skipped = pkg.assets.length - embeddedAssets.length;
       const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
