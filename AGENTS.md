@@ -14,6 +14,21 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-08 — Claude: Phase 5 — docs + final verification (media/library plan COMPLETE)
+
+Executes Phase 5, the last phase of `~/.claude/plans/project-scoped-media-and-libraries.md`. All 5
+phases are now done: project-scoped media, AI folders, unified Search + Graphics, Templates gallery, docs.
+
+- `MEDIA_LIBRARY.md` rewritten to match reality: project scoping (`ownerProjectId`/`ProjectAsset`/
+  backfill/local-first mirror), the Search tab (Stock provider-agnostic + Graphics bundled/Iconify),
+  the Templates gallery, updated tab membership, hover-scrub (not hover-autoplay), and a trimmed Deferred
+  list (moved "per-project asset silos" out of Deferred — it's done — and reflected the rest accurately).
+  Per-phase detail already lives in this changelog (Phases 1–4 above) and `project-tracker/
+  assets-media.md` (v6–v8) — not duplicated here.
+- Final full gate: `pnpm -r typecheck` (5/5) + `editor:test` — both green.
+- Nothing pushed to remote across any phase; all five phases are separate, gated commits
+  (`c6163da`, `d292c4b`, `0ef003c`, `e8a1529`, and this one) so any phase can be reviewed/reverted alone.
+
 ### 2026-07-08 — Claude: Phase 4 — in-editor Templates gallery (curated + user-saved) + asset-bin hover-autoplay removed
 
 Executes Phase 4 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phase 5 (docs) next.
