@@ -14,6 +14,25 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-07 — Claude: Phase 2 — AI folder structure (media/library plan)
+
+Executes Phase 2 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phases 3–5 (unified
+provider-agnostic Search + Graphics, curated/user-saved Templates, docs) still PENDING.
+
+- `EditorPage.tsx`: `FolderAssetTab` widened to `"local" | "brand" | "ai"`; `isFolderAssetTab` updated.
+  AI tab now gets the same folder rail as Local/Brand (create/rename/move bins, per-tab active-folder
+  state persisted to `localStorage["lumio_asset_folder_ai"]`).
+  Fixed two spots that indexed `activeAssetFolders` / labeled the folder tab without an `"ai"` case
+  (would have been `undefined` at runtime): the `activeAssetFolders` initial state and
+  `currentFolderLabel`'s tab-name ternary (now a `folderTabLabel` lookup covering all three tabs).
+  Upload dropzone (`showUpload`) intentionally stays Local/Brand only — AI assets arrive via
+  generation, not drag-drop upload; folder organization/navigation works regardless.
+- AI asset creation (`apps/web/src/generate/generateClient.ts`) already wrote `folder: ai/<taskId>` — no
+  change needed there; confirmed it's the only client-side AI creation site.
+- Gates green: `pnpm --filter @lumio-by-aelivion/web typecheck`, `editor:test`.
+- NOTE: an unrelated concurrent session has uncommitted changes to `apps/web/src/tools/*` and
+  `packages/shared/src/skills/*` (executor/skills work) — left untouched, not staged in this commit.
+
 ### 2026-07-07 — Claude: Phase 1 — project-scoped media (foundation for the media/library plan)
 
 Executes Phase 1 of `~/.claude/plans/project-scoped-media-and-libraries.md`. Phases 2–5 (AI folders, unified

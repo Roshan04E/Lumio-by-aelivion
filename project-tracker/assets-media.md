@@ -48,3 +48,26 @@ the background-work gate (see background-tasks.md v1), AudioContext closed after
 1751411826; v4's was `"hint"`). Fallback chain engaged as designed, no freeze/regression — occurs
 identically with `lumio.singleCtxPreview` on or off (decode pipeline, unrelated to Phase 5).
 No action; v4's "HEVC clip — optimizing takes longer" badge remains the future nicety.
+
+## v6 — Global asset pile across projects; AI folder structure (2026-07-07)
+**Problem:** Every `SourceAsset` was user-level with no project scoping — uploading a clip in Project 1
+made it appear in the Local tab of every other project too, so power users with 10+ projects saw one
+giant undifferentiated pile instead of per-project media.
+**Fix (Phase 1 — project-scoped media):** `SourceAsset.ownerProjectId` (mapped onto the legacy
+`projectId` column, no data dropped) binds an upload to the project it was added to. Brand/AI assets
+stay user-level & reusable; a new `ProjectAsset` join links a reusable asset into a project's bin
+without duplicating bytes. `GET /assets?projectId&scope=project|library|all` scopes server-side; the
+web local-first fallback mirrors the same filter via a `lumio_project_asset_links` localStorage map.
+A one-shot backfill (`assets:backfill`) walked every existing project's `projectGraph` to link/assign
+already-referenced assets so old projects didn't lose their bin media on migration (ran clean: 77
+projects, 75 links, 27 sole-owner uploads assigned). Editor's `AssetBin` takes a `currentProjectId` and
+hides uploads owned by a DIFFERENT project.
+**Fix (Phase 2 — AI folders):** Widened `FolderAssetTab` to include `"ai"` so the AI tab gets the same
+folder rail (create/rename/move bins) as Local/Brand. Two spots that assumed only local/brand existed
+(the `activeAssetFolders` initial state and the folder-tab display label) were missing an `"ai"` case —
+fixed before they could hit `undefined` at runtime.
+**Verify:** `pnpm -r typecheck` (Phase 1: 5/5 packages) and `editor:test`, both green; backfill counts
+printed and inspected; migration SQL inspected for no destructive `DROP COLUMN`.
+**Known gap:** the inspector's replacement-picker `AssetBin` instance isn't project-scoped yet (no
+project id threaded into that component) — defaults to legacy show-all; low risk, it's a picker not
+the primary bin surface.

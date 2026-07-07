@@ -7953,7 +7953,7 @@ function SettingsNumberField({
 
 type AssetSourceTab = "local" | "ai" | "stock" | "brand" | "used";
 type AssetTypeFilter = "all" | "video" | "image" | "audio" | "graphics";
-type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand">;
+type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand" | "ai">;
 type AssetBinFolder = {
   path: string;
   label: string;
@@ -8018,7 +8018,7 @@ function matchesTypeFilter(asset: SourceAsset, typeFilter: AssetTypeFilter): boo
 }
 
 function isFolderAssetTab(tab: AssetSourceTab): tab is FolderAssetTab {
-  return tab === "local" || tab === "brand";
+  return tab === "local" || tab === "brand" || tab === "ai";
 }
 
 function defaultAssetFolder(tab: FolderAssetTab): string {
@@ -8419,7 +8419,8 @@ function AssetBinImpl({
   );
   const [activeAssetFolders, setActiveAssetFolders] = useState<Record<FolderAssetTab, string>>(() => ({
     local: localStorage.getItem("lumio_asset_folder_local") || defaultAssetFolder("local"),
-    brand: localStorage.getItem("lumio_asset_folder_brand") || defaultAssetFolder("brand")
+    brand: localStorage.getItem("lumio_asset_folder_brand") || defaultAssetFolder("brand"),
+    ai: localStorage.getItem("lumio_asset_folder_ai") || defaultAssetFolder("ai")
   }));
   const [customAssetFolders, setCustomAssetFolders] = useState<string[]>(readStoredAssetFolders);
   const [menuAssetId, setMenuAssetId] = useState<string | null>(null);
@@ -8450,7 +8451,8 @@ function AssetBinImpl({
   const folderTab = isFolderAssetTab(sourceTab) ? sourceTab : null;
   const folderRoot = folderTab ? defaultAssetFolder(folderTab) : "";
   const activeFolder = folderTab ? activeAssetFolders[folderTab] || folderRoot : "";
-  const currentFolderLabel = folderTab ? (activeFolder === folderRoot ? `${sourceTab === "brand" ? "Brand" : "Local"} project` : assetFolderLabel(activeFolder)) : "";
+  const folderTabLabel = sourceTab === "brand" ? "Brand" : sourceTab === "ai" ? "AI" : "Local";
+  const currentFolderLabel = folderTab ? (activeFolder === folderRoot ? `${folderTabLabel} project` : assetFolderLabel(activeFolder)) : "";
   const folderCrumbs = useMemo(() => {
     if (!folderTab) return [];
     const rootLabel = sourceTab === "brand" ? "Brand" : "Local";
@@ -8651,6 +8653,7 @@ function AssetBinImpl({
   useEffect(() => {
     localStorage.setItem("lumio_asset_folder_local", activeAssetFolders.local);
     localStorage.setItem("lumio_asset_folder_brand", activeAssetFolders.brand);
+    localStorage.setItem("lumio_asset_folder_ai", activeAssetFolders.ai);
   }, [activeAssetFolders]);
 
   useEffect(() => {
