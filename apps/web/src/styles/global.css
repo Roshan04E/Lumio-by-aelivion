@@ -12424,6 +12424,80 @@ input.scrub-number:focus {
   cursor: default;
 }
 
+/* Canva-style "magic recommendations" strip shown after a graphic is added to the timeline. Spans all
+   columns of the graphics grid and offers on-theme icons to keep building. */
+.asset-recommend {
+  column-span: all;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--editor-border);
+}
+
+.asset-recommend-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--editor-accent);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.asset-recommend-head span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-recommend-head button {
+  border: none;
+  background: transparent;
+  color: var(--editor-text-dim);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.asset-recommend-head button:hover {
+  color: #fff;
+}
+
+.asset-recommend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+  gap: 6px;
+}
+
+.asset-recommend-tile {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10%;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.asset-recommend-tile:hover:not(:disabled) {
+  border-color: var(--editor-accent-border);
+}
+
+.asset-recommend-tile:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.asset-recommend-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
 .asset-card-actions button:disabled {
   opacity: 0.55;
   cursor: default;

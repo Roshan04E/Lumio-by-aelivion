@@ -273,6 +273,18 @@ import {
 } from "../lib/api";
 import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
 import { rasterizeSvgToFile } from "../lib/rasterize-svg";
+
+/** How many Iconify results the Graphics chip requests per "Show more" step (the API has no offset paging,
+ *  so each step re-fetches at a higher limit). Also the recommendation-strip size. */
+const GRAPHICS_PAGE_SIZE = 40;
+
+/** Derive a search keyword for magic recommendations from a graphic's display name — the first meaningful
+ *  word (skipping generic filler), lowercased. Returns "" when nothing usable remains. */
+function graphicRecommendKeyword(name: string): string {
+  const stop = new Set(["the", "a", "an", "icon", "outline", "solid", "fill", "filled", "line"]);
+  const words = name.toLowerCase().replace(/[-_]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !stop.has(w));
+  return words[0] ?? "";
+}
 import {
   listBundledGraphics,
   searchBundledGraphics,
@@ -8503,6 +8515,11 @@ function AssetBinImpl({
   const graphicsBundled = useMemo(() => searchBundledGraphics(query), [query]);
   const [graphicsIconify, setGraphicsIconify] = useState<IconifyGraphicResult[]>([]);
   const [graphicsLoading, setGraphicsLoading] = useState(false);
+  // "Show more" for the Iconify grid: each click raises the fetch limit (the API has no offset paging).
+  const [graphicsLimit, setGraphicsLimit] = useState(GRAPHICS_PAGE_SIZE);
+  const [graphicsHasMore, setGraphicsHasMore] = useState(false);
+  // Canva-style "magic recommendations": after a graphic is added, surface related icons below the grid.
+  const [graphicsRecommend, setGraphicsRecommend] = useState<{ keyword: string; results: IconifyGraphicResult[] } | null>(null);
   // Asset viewer modal — opened by double-clicking a library asset or a stock result.
   const [viewerTarget, setViewerTarget] = useState<AssetViewerTarget | null>(null);
 
@@ -8812,16 +8829,26 @@ function AssetBinImpl({
     if (!trimmed) {
       setGraphicsIconify([]);
       setGraphicsLoading(false);
+      setGraphicsHasMore(false);
       return;
     }
     setGraphicsLoading(true);
     const handle = window.setTimeout(() => {
-      void searchIconifyGraphics(trimmed)
-        .then(setGraphicsIconify)
+      void searchIconifyGraphics(trimmed, graphicsLimit)
+        .then((results) => {
+          setGraphicsIconify(results);
+          // Iconify caps a query's total hits; if we got a full page back there is likely more to fetch.
+          setGraphicsHasMore(results.length >= graphicsLimit);
+        })
         .finally(() => setGraphicsLoading(false));
     }, 350);
     return () => window.clearTimeout(handle);
-  }, [sourceTab, stockType, query]);
+  }, [sourceTab, stockType, query, graphicsLimit]);
+
+  // Reset the Graphics "Show more" limit whenever the query changes, so a new search starts at page one.
+  useEffect(() => {
+    setGraphicsLimit(GRAPHICS_PAGE_SIZE);
+  }, [query]);
 
   async function handleLoadMoreStock() {
     if (stockType === "graphics") return;
@@ -8880,6 +8907,14 @@ function AssetBinImpl({
       // Canva-style: picking a graphic places it, no extra step. Both are best-effort no-ops if absent.
       onImportedAsset?.(asset);
       onAddAssetToTimeline?.(asset);
+      // Canva-style "magic recommendations": pull related icons keyed off the graphic's name so the strip
+      // below the grid fills with on-theme alternatives to keep building. Fails soft (offline/CSP → []).
+      const keyword = graphicRecommendKeyword(name);
+      if (keyword) {
+        void searchIconifyGraphics(keyword, GRAPHICS_PAGE_SIZE).then((results) => {
+          setGraphicsRecommend({ keyword, results: results.filter((r) => r.iconId !== id.replace(/^iconify_/, "")) });
+        });
+      }
     } catch (error) {
       setStockImportError(error instanceof Error ? error.message : "Graphic import failed — please try again.");
     } finally {
@@ -9327,6 +9362,43 @@ function AssetBinImpl({
             ))}
             {!graphicsLoading && !graphicsBundled.length && !graphicsIconify.length ? (
               <div className="empty-mini">No graphics found</div>
+            ) : null}
+            {graphicsHasMore && !graphicsLoading ? (
+              <div className="asset-load-more">
+                <button type="button" onClick={() => setGraphicsLimit((limit) => limit + GRAPHICS_PAGE_SIZE)}>
+                  Show more
+                </button>
+              </div>
+            ) : null}
+            {graphicsRecommend && graphicsRecommend.results.length ? (
+              <div className="asset-recommend">
+                <div className="asset-recommend-head">
+                  <Sparkles size={13} />
+                  <span>More like “{graphicsRecommend.keyword}”</span>
+                  <button type="button" title="Dismiss recommendations" onClick={() => setGraphicsRecommend(null)}>
+                    ×
+                  </button>
+                </div>
+                <div className="asset-recommend-grid">
+                  {graphicsRecommend.results.slice(0, 12).map((icon) => (
+                    <button
+                      type="button"
+                      className="asset-recommend-tile"
+                      key={`rec_${icon.iconId}`}
+                      title={`Add ${icon.name}`}
+                      aria-busy={importingId === `iconify_${icon.iconId}`}
+                      disabled={importingId === `iconify_${icon.iconId}`}
+                      onClick={() =>
+                        void fetchIconifySvg(icon.iconId).then((svg) => {
+                          if (svg) void handleImportGraphic(`iconify_${icon.iconId}`, icon.name, svg);
+                        })
+                      }
+                    >
+                      <img src={`https://api.iconify.design/${icon.iconId}.svg`} alt={icon.name} loading="lazy" />
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : null}
           </div>
         ) : sourceTab === "search" && !stockConfigured ? (
