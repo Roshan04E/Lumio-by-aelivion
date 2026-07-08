@@ -1870,9 +1870,26 @@ const PreviewLayer = memo(function PreviewLayer({
   const asset = resolveLayerAsset(layer, assets, sourceAsset);
   const mediaUrl = resolvePlaybackUrl(asset);
   // Adaptive selection box: a `contain` media layer paints its source at natural aspect (letterboxed inside
-  // the frame), so the selection box + handles should hug that rect — not the whole canvas. undefined for
-  // cover/fill/text/shape (box stays full-frame, unchanged).
-  const sourceAspect = asset && asset.width && asset.height ? asset.width / asset.height : undefined;
+  // the frame), so the selection box + handles should hug that rect — not the whole canvas. We measure the
+  // source's TRUE intrinsic aspect from the decoded image (asset.width/height metadata is often wrong or
+  // missing for generated graphics), falling back to the stored dims. undefined for cover/fill/text/shape.
+  const [measuredAspect, setMeasuredAspect] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    setMeasuredAspect(undefined);
+    if (!mediaUrl || layer.type !== "image") return;
+    let alive = true;
+    const img = new Image();
+    img.onload = () => {
+      if (alive && img.naturalWidth > 0 && img.naturalHeight > 0) setMeasuredAspect(img.naturalWidth / img.naturalHeight);
+    };
+    img.src = mediaUrl;
+    return () => {
+      alive = false;
+      img.onload = null;
+    };
+  }, [mediaUrl, layer.type]);
+  const metadataAspect = asset && asset.width && asset.height ? asset.width / asset.height : undefined;
+  const sourceAspect = measuredAspect ?? metadataAspect;
   const contentBoxOverride = contentBoxSizeOverride(layer, sourceAspect, frameAspect);
   const isVideo = layer.type === "video" && Boolean(mediaUrl) && (asset?.fileType.startsWith("video/") ?? true);
   // First-frame still at the clip's in-point — held over the canvas/video until the real frame
