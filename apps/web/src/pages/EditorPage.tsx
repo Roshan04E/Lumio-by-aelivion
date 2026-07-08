@@ -2125,6 +2125,59 @@ export function EditorPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // Panel shortcuts (Alt-based so they never collide with the bare tool keys or ⌘/Ctrl combos):
+  //   Alt+1/2/3 → left panel Assets/Effects/Color · Alt+[ / Alt+] → left panel / inspector full⇄half.
+  // Uses event.code so it's layout-independent (Alt+[ is a dead key on some layouts).
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      switch (event.code) {
+        case "Digit1":
+          event.preventDefault();
+          toggleLeftPanelTab("assets");
+          break;
+        case "Digit2":
+          event.preventDefault();
+          toggleLeftPanelTab("effects");
+          break;
+        case "Digit3":
+          event.preventDefault();
+          toggleLeftPanelTab("color");
+          break;
+        case "Digit4":
+          event.preventDefault();
+          toggleInspectorFromTopbar();
+          break;
+        // Left-hand-only height toggles (R/T are under the left index finger while the left thumb
+        // holds Alt) — keeps the whole panel scheme one-handed for power users. R = left panel, T =
+        // inspector (ordered left→right to match the panel positions).
+        case "KeyR":
+          event.preventDefault();
+          setPanelExpanded((value) => !value);
+          break;
+        case "KeyT":
+          event.preventDefault();
+          setInspectorExpanded((value) => !value);
+          break;
+        default:
+          break;
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [toggleLeftPanelTab, toggleInspectorFromTopbar]);
+
   useEffect(() => {
     localStorage.setItem("lumio_editor_left_width", String(leftPaneWidth));
   }, [leftPaneWidth]);
@@ -5664,7 +5717,8 @@ export function EditorPage() {
               className={`topbar-toggle${isLeftPanelTabActive("assets") ? " is-active" : ""}`}
               aria-pressed={isLeftPanelTabActive("assets")}
               onClick={() => toggleLeftPanelTab("assets")}
-              title="Media Pool"
+              title={`Media Pool (${altKeyLabel}+1)`}
+              aria-keyshortcuts={`${altKeyLabel}+1`}
             >
               <FolderOpen size={14} />
               <span>Media</span>
@@ -5674,7 +5728,8 @@ export function EditorPage() {
               className={`topbar-toggle${isLeftPanelTabActive("effects") ? " is-active" : ""}`}
               aria-pressed={isLeftPanelTabActive("effects")}
               onClick={() => toggleLeftPanelTab("effects")}
-              title="Effects"
+              title={`Effects (${altKeyLabel}+2)`}
+              aria-keyshortcuts={`${altKeyLabel}+2`}
             >
               <SlidersHorizontal size={14} />
               <span>Effects</span>
@@ -5684,7 +5739,8 @@ export function EditorPage() {
               className={`topbar-toggle${isLeftPanelTabActive("color") ? " is-active" : ""}`}
               aria-pressed={isLeftPanelTabActive("color")}
               onClick={() => toggleLeftPanelTab("color")}
-              title="Color"
+              title={`Color (${altKeyLabel}+3)`}
+              aria-keyshortcuts={`${altKeyLabel}+3`}
             >
               <Palette size={14} />
               <span>Color</span>
@@ -5884,7 +5940,8 @@ export function EditorPage() {
             className={`topbar-toggle${isInspectorOpenFromTopbar ? " is-active" : ""}`}
             aria-pressed={isInspectorOpenFromTopbar}
             onClick={toggleInspectorFromTopbar}
-            title="Inspector"
+            title={`Inspector (${altKeyLabel}+4)`}
+            aria-keyshortcuts={`${altKeyLabel}+4`}
           >
             {isInspectorOpenFromTopbar ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
             <span>Inspector</span>
@@ -5983,8 +6040,9 @@ export function EditorPage() {
                     <button
                       className={`tabbar-icon-button${panelExpanded ? " is-active" : ""}`}
                       type="button"
-                      title={panelExpanded ? "Restore left panel height" : "Expand left panel — full height, timeline under the viewer"}
+                      title={`${panelExpanded ? "Restore left panel height" : "Expand left panel — full height, timeline under the viewer"} (${altKeyLabel}+R)`}
                       aria-label={panelExpanded ? "Restore left panel height" : "Expand left panel to full height"}
+                      aria-keyshortcuts={`${altKeyLabel}+R`}
                       aria-pressed={panelExpanded}
                       onClick={() => setPanelExpanded((value) => !value)}
                     >
@@ -6390,8 +6448,9 @@ export function EditorPage() {
                 <button
                   type="button"
                   className={responsiveLayout.usesPhoneShell ? (isResponsiveOverlayExpanded("inspector") ? "is-active" : "") : inspectorExpanded ? "is-active" : ""}
-                  title={inspectorExpanded ? "Restore inspector height" : "Expand inspector — full height"}
+                  title={`${inspectorExpanded ? "Restore inspector height" : "Expand inspector — full height"} (${altKeyLabel}+T)`}
                   aria-label={inspectorExpanded ? "Restore inspector height" : "Expand inspector to full height"}
+                  aria-keyshortcuts={`${altKeyLabel}+T`}
                   aria-pressed={responsiveLayout.usesPhoneShell ? isResponsiveOverlayExpanded("inspector") : inspectorExpanded}
                   onClick={() => {
                     if (responsiveLayout.usesPhoneShell) toggleResponsiveOverlayExpansion("inspector");
@@ -8259,7 +8318,6 @@ const ASSET_TABS: { id: AssetSourceTab; label: string; icon: ReactNode }[] = [
   { id: "local", label: "Local", icon: <FolderClosedIcon /> },
   { id: "ai", label: "AI", icon: <Sparkles size={13} /> },
   { id: "brand", label: "Brand", icon: <Palette size={13} /> },
-  { id: "templates", label: "Templates", icon: <LayoutTemplate size={13} /> },
   { id: "used", label: "Used", icon: <Layers size={13} /> }
 ];
 
@@ -8592,7 +8650,7 @@ function AssetBinImpl({
 
   // --- Unified Search state (Stock: photos/videos; Graphics: bundled + Iconify) ---
   // No provider identity in the UI — `stockType` doubles as the type chip (photos/videos/graphics).
-  const [stockType, setStockType] = useState<"image" | "video" | "graphics">("image");
+  const [stockType, setStockType] = useState<"image" | "video" | "graphics" | "templates">("image");
   const [stockOrientation, setStockOrientation] = useState<StockOrientation>(() =>
     readStoredChoice("lumio_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
   );
@@ -8881,18 +8939,18 @@ function AssetBinImpl({
     void getStockStatus().then(setStockStatus);
   }, [sourceTab, stockStatus]);
 
-  // Fetch curated + own templates once the Templates tab is opened.
+  // Fetch curated + own templates once the Search → Templates chip is opened.
   useEffect(() => {
-    if (sourceTab !== "templates" || templatesList.length) return;
+    if (!(sourceTab === "search" && stockType === "templates") || templatesList.length) return;
     setTemplatesLoading(true);
     void listMyTemplates()
       .then(setTemplatesList)
       .finally(() => setTemplatesLoading(false));
-  }, [sourceTab, templatesList.length]);
+  }, [sourceTab, stockType, templatesList.length]);
 
   // Debounced stock search (page 1) against the active type / orientation. Graphics has its own effect below.
   useEffect(() => {
-    if (sourceTab !== "search" || stockType === "graphics") return;
+    if (sourceTab !== "search" || (stockType !== "image" && stockType !== "video")) return;
     const trimmed = query.trim();
     if (!trimmed) {
       setStockResults([]);
@@ -8948,7 +9006,7 @@ function AssetBinImpl({
   }, [query]);
 
   async function handleLoadMoreStock() {
-    if (stockType === "graphics") return;
+    if (stockType !== "image" && stockType !== "video") return;
     const trimmed = query.trim();
     if (!trimmed || stockLoadingMore) return;
     const nextPage = stockPage + 1;
@@ -9216,7 +9274,7 @@ function AssetBinImpl({
     </div>
   );
   const assetPanelFooter =
-    sourceTab === "search" || sourceTab === "templates" ? (
+    sourceTab === "search" ? (
       <div className="asset-control-strip" aria-label="Asset panel controls">
         <div className="asset-control-left">{viewControls}</div>
       </div>
@@ -9311,9 +9369,9 @@ function AssetBinImpl({
           {/* Type chips — no provider identity shown anywhere; Photos/Videos hit stock search, Graphics
               merges the offline bundled pack with searchable Iconify icons. */}
           <div className="asset-subtabs" role="tablist" aria-label="Search type">
-            {(["image", "video", "graphics"] as const).map((kind) => (
+            {(["image", "video", "graphics", "templates"] as const).map((kind) => (
               <button key={kind} type="button" className={stockType === kind ? "is-active" : ""} onClick={() => setStockType(kind)}>
-                {kind === "image" ? "Photos" : kind === "video" ? "Videos" : "Graphics"}
+                {kind === "image" ? "Photos" : kind === "video" ? "Videos" : kind === "graphics" ? "Graphics" : "Templates"}
               </button>
             ))}
           </div>
@@ -9361,7 +9419,7 @@ function AssetBinImpl({
             <div className="asset-search">
               <Search size={13} />
               <input
-                placeholder={folderTab ? `Search ${currentFolderLabel}` : sourceTab === "templates" ? "Search templates" : "Search assets"}
+                placeholder={folderTab ? `Search ${currentFolderLabel}` : "Search assets"}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
@@ -9484,13 +9542,13 @@ function AssetBinImpl({
               </div>
             ) : null}
           </div>
-        ) : sourceTab === "search" && !stockConfigured ? (
+        ) : sourceTab === "search" && stockType !== "templates" && !stockConfigured ? (
           <div className="asset-empty-state">
             <Globe size={18} />
             <strong>Stock search not connected</strong>
             <span>Add PEXELS_API_KEY to your .env to search and import stock {stockType === "image" ? "photos" : "videos"}.</span>
           </div>
-        ) : sourceTab === "search" && query.trim() ? (
+        ) : sourceTab === "search" && stockType !== "templates" && query.trim() ? (
           <div className="asset-grid">
           {stockLoading ? (
             <div className="empty-mini">Searching…</div>
@@ -9542,7 +9600,7 @@ function AssetBinImpl({
             </div>
           ) : null}
           </div>
-        ) : sourceTab === "templates" ? (
+        ) : sourceTab === "search" && stockType === "templates" ? (
           <div className="asset-grid">
             {templatesLoading ? <div className="empty-mini">Loading templates…</div> : null}
             {templatesList
