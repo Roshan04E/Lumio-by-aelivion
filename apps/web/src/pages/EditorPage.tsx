@@ -206,6 +206,7 @@ import type { SceneViewerCaptureHandle } from "../components/ScenePreviewCanvas"
 import type { ProxyPlaybackHit } from "../components/ProxyPlaybackLayer";
 import {
   applyAnimationPreset,
+  applyContentValueAtTime,
   applyEffectParamValueAtTime,
   applyTransformValueAtTime,
   clearEffectParamKeyframes,
@@ -277,6 +278,13 @@ import { rasterizeSvgToFile } from "../lib/rasterize-svg";
 /** How many Iconify results the Graphics chip requests per "Show more" step (the API has no offset paging,
  *  so each step re-fetches at a higher limit). Also the recommendation-strip size. */
 const GRAPHICS_PAGE_SIZE = 40;
+
+/** Default object-fit for a freshly dropped media layer. Images/graphics land at their natural aspect
+ *  (`contain`, Canva-style — a circle stays a circle, nothing is silently cropped); video fills the frame
+ *  (`cover`) as before. Users can still switch fit per clip in the inspector. */
+function defaultMediaFit(type: TimelineLayerType): "cover" | "contain" {
+  return type === "image" ? "contain" : "cover";
+}
 
 /** Derive a search keyword for magic recommendations from a graphic's display name — the first meaningful
  *  word (skipping generic filler), lowercased. Returns "" when nothing usable remains. */
@@ -2719,6 +2727,41 @@ export function EditorPage() {
     });
   }
 
+  // Edge-handle crop (N/E/S/W). Each drag trims one edge, written as a `content.crop.<edge>` fraction so it
+  // flows through the same content-transform pipeline the preview, WebGL compositor, and Remotion all honor.
+  // Auto-keyframe / already-animated routing matches every other spatial edit.
+  function handlePreviewCropLayer(layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) {
+    const nextValue = roundEditorNumber(clamp(value, 0, 0.95));
+    const updater = (layer: TimelineLayer): TimelineLayer =>
+      applyContentValueAtTime(
+        layer,
+        `content.crop.${edge}`,
+        clamp(currentTimeRef.current - layer.startSeconds, 0, layer.durationSeconds),
+        nextValue,
+        { autoKeyframe }
+      );
+
+    if (commit) {
+      void updateLayer(layerId, updater);
+      return;
+    }
+
+    setNotice("Unsaved");
+    setProject((current) => {
+      const currentGraph = current?.projectGraph;
+      if (!current || !currentGraph?.composition) {
+        return current;
+      }
+      return {
+        ...current,
+        projectGraph: {
+          ...currentGraph,
+          composition: updateTimelineLayer(currentGraph.composition, layerId, updater)
+        }
+      };
+    });
+  }
+
   function handlePreviewResizeShapeLayer(layerId: string, size: { widthPercent: number; heightPercent: number }, commit: boolean) {
     const updater = (layer: TimelineLayer): TimelineLayer => ({
       ...layer,
@@ -4235,7 +4278,7 @@ export function EditorPage() {
                 // A swapped-in asset must not inherit the previous clip's source in-point —
                 // reset to play from its start, unless a source-monitor drag marked a range.
                 sourceInSeconds: dragSourceIn,
-                fit: assetLayerType === "image" || assetLayerType === "video" ? (layer.fit ?? "cover") : undefined
+                fit: assetLayerType === "image" || assetLayerType === "video" ? (layer.fit ?? defaultMediaFit(assetLayerType)) : undefined
               }
             : layer
         )
@@ -4256,7 +4299,7 @@ export function EditorPage() {
           ? 3
           : dragDuration ?? Math.max(0.2, asset.durationSeconds),
       sourceInSeconds: dragSourceIn,
-      fit: assetLayerType === "image" || assetLayerType === "video" ? "cover" : undefined
+      fit: assetLayerType === "image" || assetLayerType === "video" ? defaultMediaFit(assetLayerType) : undefined
     };
 
     const compositionWithLayer = {
@@ -4332,7 +4375,7 @@ export function EditorPage() {
       startSeconds,
       durationSeconds: duration,
       sourceInSeconds: srcIn > 0.001 ? Number(srcIn.toFixed(3)) : undefined,
-      fit: assetLayerType === "image" || assetLayerType === "video" ? "cover" : undefined,
+      fit: assetLayerType === "image" || assetLayerType === "video" ? defaultMediaFit(assetLayerType) : undefined,
       linkedGroupId
     };
 
@@ -5387,6 +5430,7 @@ export function EditorPage() {
   const stablePreviewResizeShapeLayer = useStableHandler(handlePreviewResizeShapeLayer);
   const stablePreviewRotateLayer = useStableHandler(handlePreviewRotateLayer);
   const stablePreviewScaleLayer = useStableHandler(handlePreviewScaleLayer);
+  const stablePreviewCropLayer = useStableHandler(handlePreviewCropLayer);
   const stablePreviewToggleShowMasks = useStableHandler(() => setShowMasks((value) => !value));
   const stablePreviewMaskScalar = useStableHandler(handlePreviewMaskScalar);
   const stablePreviewUpdateLayerMasks = useStableHandler((layerId: string, updater: (masks: Mask[]) => Mask[]) =>
@@ -6132,6 +6176,7 @@ export function EditorPage() {
               onResizeShapeLayer={stablePreviewResizeShapeLayer}
               onRotateLayer={stablePreviewRotateLayer}
               onScaleLayer={stablePreviewScaleLayer}
+              onCropLayer={stablePreviewCropLayer}
               resolveProxyPlayback={resolveProxyPlayback}
               proxyCaptureRef={proxyCaptureRef}
               onPreviewFrameRendered={handlePreviewFrameRendered}
@@ -7055,7 +7100,7 @@ function createEditorLayer(
     name: `${labelForLayer(type)} ${index}`,
     startSeconds,
     durationSeconds,
-    fit: type === "image" || type === "video" ? "cover" : undefined,
+    fit: type === "image" || type === "video" ? defaultMediaFit(type) : undefined,
     transform: {
       position: { x: 50, y: type === "text" ? 62 : 50 },
       scale: 1,

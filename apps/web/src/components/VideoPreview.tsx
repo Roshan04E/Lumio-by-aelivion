@@ -23,6 +23,7 @@ import {
   createBoxMask,
   createMask,
   getCompositionTransform,
+  getCompositionContentTransform,
   maskShapeToPathD,
   resolveMaskAtTime,
   withAutoTangents,
@@ -437,6 +438,7 @@ function VideoPreviewImpl({
   onResizeShapeLayer,
   onRotateLayer,
   onScaleLayer,
+  onCropLayer,
   sourceAsset,
   maskTool = "select",
   onChangeMaskTool,
@@ -491,6 +493,7 @@ function VideoPreviewImpl({
   onResizeShapeLayer?: ((layerId: string, size: { widthPercent: number; heightPercent: number }, commit: boolean) => void) | undefined;
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
+  onCropLayer?: ((layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) => void) | undefined;
   sourceAsset?: SourceAsset | null | undefined;
   /** Active mask draw/edit tool. */
   maskTool?: MaskTool | undefined;
@@ -1550,7 +1553,9 @@ function VideoPreviewImpl({
                     onResizeShapeLayer={onResizeShapeLayer}
                     onRotateLayer={onRotateLayer}
                     onScaleLayer={onScaleLayer}
+                    onCropLayer={onCropLayer}
                     onSelectLayer={onSelectLayer}
+                    frameAspect={composition.width / composition.height}
                     rotationSnapEnabled={rotationSnapEnabled}
                     selected={!viewerPanMode && !pending && selectedLayerId === layer.id}
                     interactive={!viewerPanMode && realLayerIds.has(layer.id)}
@@ -1719,6 +1724,10 @@ type PreviewLayerProps = {
   onResizeShapeLayer?: ((layerId: string, size: { widthPercent: number; heightPercent: number }, commit: boolean) => void) | undefined;
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
+  onCropLayer?: ((layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) => void) | undefined;
+  /** Composition frame aspect (w/h) — lets a `contain` media layer's selection box hug the source's natural
+   *  rect (adaptive handles) instead of framing the whole canvas. */
+  frameAspect?: number | undefined;
   onSelectLayer: (layerId: string) => void;
   rotationSnapEnabled?: boolean | undefined;
 };
@@ -1777,7 +1786,9 @@ const PreviewLayer = memo(function PreviewLayer({
   onResizeShapeLayer,
   onRotateLayer,
   onScaleLayer,
+  onCropLayer,
   onSelectLayer,
+  frameAspect,
   rotationSnapEnabled = false,
   hideForTransition = false,
   hideVisual = false,
@@ -1818,6 +1829,20 @@ const PreviewLayer = memo(function PreviewLayer({
     surfaceHeight: number;
     moved: boolean;
   } | null>(null);
+  // Edge-handle crop drag. Frame px extents (bounds × evaluated scale) let a pixel drag become a
+  // content.crop fraction; startRotationRad de-rotates the pointer delta into the clip's own axes.
+  const cropRef = useRef<{
+    layerId: string;
+    pointerId: number;
+    edge: "top" | "right" | "bottom" | "left";
+    startClientX: number;
+    startClientY: number;
+    startValue: number;
+    frameWpx: number;
+    frameHpx: number;
+    startRotationRad: number;
+    moved: boolean;
+  } | null>(null);
   const rotateRef = useRef<{
     layerId: string;
     pointerId: number;
@@ -1844,6 +1869,11 @@ const PreviewLayer = memo(function PreviewLayer({
   } | null>(null);
   const asset = resolveLayerAsset(layer, assets, sourceAsset);
   const mediaUrl = resolvePlaybackUrl(asset);
+  // Adaptive selection box: a `contain` media layer paints its source at natural aspect (letterboxed inside
+  // the frame), so the selection box + handles should hug that rect — not the whole canvas. undefined for
+  // cover/fill/text/shape (box stays full-frame, unchanged).
+  const sourceAspect = asset && asset.width && asset.height ? asset.width / asset.height : undefined;
+  const contentBoxOverride = contentBoxSizeOverride(layer, sourceAspect, frameAspect);
   const isVideo = layer.type === "video" && Boolean(mediaUrl) && (asset?.fileType.startsWith("video/") ?? true);
   // First-frame still at the clip's in-point — held over the canvas/video until the real frame
   // decodes so the viewer never shows black (start, cut, or seek). Captured once, cached.
@@ -1945,6 +1975,13 @@ const PreviewLayer = memo(function PreviewLayer({
   }
 
   function startPreviewResize(event: ReactPointerEvent<HTMLSpanElement>) {
+    // Edge handles (N/E/S/W) crop media; corner handles (NW/NE/SW/SE) scale. Shapes/text have no source to
+    // crop, so all of their handles keep scaling/resizing. The edge is encoded in the handle's className.
+    const cropEdge = mediaCropEdgeFromHandle(event.currentTarget);
+    if (cropEdge && onCropLayer && (layer.type === "video" || layer.type === "image")) {
+      startPreviewCrop(event, cropEdge);
+      return;
+    }
     if ((!onScaleLayer && !onResizeShapeLayer) || event.button !== 0 || layer.locked) {
       return;
     }
@@ -1977,6 +2014,10 @@ const PreviewLayer = memo(function PreviewLayer({
   }
 
   function updatePreviewResize(event: ReactPointerEvent<HTMLSpanElement>) {
+    if (cropRef.current) {
+      updatePreviewCrop(event);
+      return;
+    }
     const resize = resizeRef.current;
     if (!resize || event.pointerId !== resize.pointerId) {
       return;
@@ -2001,6 +2042,10 @@ const PreviewLayer = memo(function PreviewLayer({
   }
 
   function finishPreviewResize(event: ReactPointerEvent<HTMLSpanElement>) {
+    if (cropRef.current) {
+      finishPreviewCrop(event);
+      return;
+    }
     const resize = resizeRef.current;
     if (!resize || event.pointerId !== resize.pointerId) {
       return;
@@ -2021,6 +2066,78 @@ const PreviewLayer = memo(function PreviewLayer({
       showTransformHud(scaleHud(nextScale), true);
       onScaleLayer(resize.layerId, nextScale, true);
     }
+  }
+
+  function startPreviewCrop(event: ReactPointerEvent<HTMLSpanElement>, edge: "top" | "right" | "bottom" | "left") {
+    if (!onCropLayer || event.button !== 0 || layer.locked) {
+      return;
+    }
+    const surface = event.currentTarget.closest(".preview-composition-space");
+    if (!(surface instanceof HTMLElement)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onSelectLayer(layer.id);
+    const bounds = surface.getBoundingClientRect();
+    const evaluated = getCompositionTransform(layer, { currentTimeSeconds: currentTime });
+    const crop = getCompositionContentTransform(layer, { currentTimeSeconds: currentTime }).crop;
+    cropRef.current = {
+      layerId: layer.id,
+      pointerId: event.pointerId,
+      edge,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startValue: crop[edge],
+      frameWpx: Math.max(1, bounds.width * evaluated.scale),
+      frameHpx: Math.max(1, bounds.height * evaluated.scale),
+      startRotationRad: (evaluated.rotation * Math.PI) / 180,
+      moved: false
+    };
+  }
+
+  function cropValueFromDrag(event: ReactPointerEvent<HTMLSpanElement>, crop: NonNullable<typeof cropRef.current>): number {
+    // De-rotate the screen-space pointer delta into the clip's local axes, then convert to a frame fraction.
+    const dxScreen = event.clientX - crop.startClientX;
+    const dyScreen = event.clientY - crop.startClientY;
+    const cos = Math.cos(-crop.startRotationRad);
+    const sin = Math.sin(-crop.startRotationRad);
+    const dxLocal = dxScreen * cos - dyScreen * sin;
+    const dyLocal = dxScreen * sin + dyScreen * cos;
+    // Dragging an edge toward the clip center adds crop on that edge (trims it).
+    const delta =
+      crop.edge === "left" ? dxLocal / crop.frameWpx
+      : crop.edge === "right" ? -dxLocal / crop.frameWpx
+      : crop.edge === "top" ? dyLocal / crop.frameHpx
+      : -dyLocal / crop.frameHpx;
+    return Math.max(0, Math.min(0.95, crop.startValue + delta));
+  }
+
+  function updatePreviewCrop(event: ReactPointerEvent<HTMLSpanElement>) {
+    const crop = cropRef.current;
+    if (!crop || !onCropLayer || event.pointerId !== crop.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const nextValue = cropValueFromDrag(event, crop);
+    crop.moved = crop.moved || Math.abs(nextValue - crop.startValue) > 0.002;
+    showTransformHud(cropHud(crop.edge, nextValue));
+    onCropLayer(crop.layerId, crop.edge, nextValue, false);
+  }
+
+  function finishPreviewCrop(event: ReactPointerEvent<HTMLSpanElement>) {
+    const crop = cropRef.current;
+    if (!crop || !onCropLayer || event.pointerId !== crop.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    cropRef.current = null;
+    const nextValue = cropValueFromDrag(event, crop);
+    showTransformHud(cropHud(crop.edge, nextValue), true);
+    onCropLayer(crop.layerId, crop.edge, nextValue, true);
   }
 
   function startPreviewRotate(event: ReactPointerEvent<HTMLSpanElement>) {
@@ -2370,6 +2487,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerDown={startPreviewRotate}
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
+            boxOverride={contentBoxOverride}
           />
         ) : null}
         {selected ? (
@@ -2428,6 +2546,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerDown={startPreviewRotate}
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
+            boxOverride={contentBoxOverride}
           />
         ) : null}
         {selected ? (
@@ -2531,6 +2650,7 @@ const PreviewLayer = memo(function PreviewLayer({
               onRotatePointerDown={startPreviewRotate}
               onRotatePointerMove={updatePreviewRotate}
               onRotatePointerUp={finishPreviewRotate}
+              boxOverride={contentBoxOverride}
             />
           ) : null}
           {isSelectedVisible ? (
@@ -2617,6 +2737,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerDown={startPreviewRotate}
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
+            boxOverride={contentBoxOverride}
           />
         ) : null}
         {isSelectedVisible ? (
@@ -2663,6 +2784,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerDown={startPreviewRotate}
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
+            boxOverride={contentBoxOverride}
           />
         ) : null}
         {selected ? (
@@ -2733,6 +2855,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerDown={startPreviewRotate}
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
+            boxOverride={contentBoxOverride}
           />
         ) : null}
         {selected ? (
@@ -2786,6 +2909,7 @@ const PreviewLayer = memo(function PreviewLayer({
           onRotatePointerDown={startPreviewRotate}
           onRotatePointerMove={updatePreviewRotate}
           onRotatePointerUp={finishPreviewRotate}
+          boxOverride={contentBoxOverride}
         />
       ) : null}
       {selected ? (
@@ -3246,7 +3370,8 @@ function PreviewSelectionOverlay({
   onRotatePointerCancel,
   onRotatePointerDown,
   onRotatePointerMove,
-  onRotatePointerUp
+  onRotatePointerUp,
+  boxOverride
 }: {
   layer: TimelineLayer;
   style: CSSProperties;
@@ -3261,6 +3386,8 @@ function PreviewSelectionOverlay({
   onRotatePointerDown: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onRotatePointerMove: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onRotatePointerUp: (event: ReactPointerEvent<HTMLSpanElement>) => void;
+  /** Shrinks the box to a `contain` media layer's natural rect so handles hug the source (adaptive). */
+  boxOverride?: { width: string; height: string } | undefined;
 }) {
   // Counter the box's scale so the handles stay a constant on-screen size. Use the KEYFRAME-EVALUATED
   // scale (the exact value compositionTransformCss bakes into the box transform), not the raw base
@@ -3269,6 +3396,9 @@ function PreviewSelectionOverlay({
   const evaluatedScale = getCompositionTransform(layer, { currentTimeSeconds: currentTime }).scale;
   const overlayStyle = {
     ...selectionOverlayStyle(style),
+    // Adaptive box: override the full-frame width/height with the contain source rect (centered by the same
+    // translate(-50%,-50%) the media uses), so the selection box hugs the visible image.
+    ...(boxOverride ?? {}),
     "--handle-inverse-scale": 1 / Math.max(0.1, evaluatedScale)
   } as CSSProperties;
 
@@ -3290,9 +3420,9 @@ function PreviewSelectionOverlay({
         onPointerMove={onRotatePointerMove}
         onPointerUp={onRotatePointerUp}
       />
-      {/* Corners + edge midpoints. The resize model is a uniform scale-from-center, so every handle
-          drives the same scale gesture — the 8-handle set is the modern pro affordance (all identical
-          style via the shared handle tokens). */}
+      {/* Corners + edge midpoints. Corner handles (nw/ne/sw/se) scale uniformly from center; edge handles
+          (n/e/s/w) crop the media (trim that edge via content.crop) — see startPreviewResize's routing.
+          Text/shape have no source to crop, so their edges resize like the corners. */}
       {(["nw", "ne", "sw", "se", "n", "e", "s", "w"] as const).map((handle) => (
         <span
           className={`preview-resize-handle preview-resize-handle-${handle}`}
@@ -4264,6 +4394,46 @@ function sizeHud(widthPercent: number, heightPercent: number): PreviewTransformH
     mode: "size",
     primary: `Size ${formatPercent(widthPercent)}`,
     secondary: `H ${formatPercent(heightPercent)}`
+  };
+}
+
+/** Selection-box size override (as CSS width/height %) for a `contain` media layer, so its handles hug the
+ *  source's natural rect inside the frame. Returns undefined when the box should stay full-frame (cover/fill,
+ *  non-media, unknown aspect, or the source already fills the frame). */
+function contentBoxSizeOverride(
+  layer: TimelineLayer,
+  sourceAspect: number | undefined,
+  frameAspect: number | undefined
+): { width: string; height: string } | undefined {
+  if (layer.type !== "image" && layer.type !== "video") return undefined;
+  if (getCompositionObjectFit(layer) !== "contain") return undefined;
+  if (!sourceAspect || !frameAspect || sourceAspect <= 0 || frameAspect <= 0) return undefined;
+  let w = 1;
+  let h = 1;
+  if (sourceAspect > frameAspect) {
+    h = frameAspect / sourceAspect; // source wider than frame → full width, letterboxed height
+  } else {
+    w = sourceAspect / frameAspect; // source taller/narrower → full height, pillarboxed width
+  }
+  if (w >= 0.999 && h >= 0.999) return undefined;
+  return { width: `${(w * 100).toFixed(4)}%`, height: `${(h * 100).toFixed(4)}%` };
+}
+
+/** Map an edge resize handle (by its `preview-resize-handle-<n|e|s|w>` class) to the crop edge it trims.
+ *  Corner handles (nw/ne/sw/se) return null so they keep driving scale. */
+function mediaCropEdgeFromHandle(el: Element): "top" | "right" | "bottom" | "left" | null {
+  if (el.classList.contains("preview-resize-handle-n")) return "top";
+  if (el.classList.contains("preview-resize-handle-s")) return "bottom";
+  if (el.classList.contains("preview-resize-handle-e")) return "right";
+  if (el.classList.contains("preview-resize-handle-w")) return "left";
+  return null;
+}
+
+function cropHud(edge: "top" | "right" | "bottom" | "left", value: number): PreviewTransformHud {
+  return {
+    mode: "size",
+    primary: `Crop ${edge[0]!.toUpperCase()}${edge.slice(1)}`,
+    secondary: formatPercent(value * 100)
   };
 }
 
