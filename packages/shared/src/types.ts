@@ -265,6 +265,19 @@ export interface LayerContentTransform {
 }
 
 /**
+ * Editable vector graphic carried directly on a layer (Search → Graphics pick). The SVG is stored normalized
+ * so every recolorable fill/stroke reads `currentColor`; `fill` is the current solid color the renderer bakes
+ * in (via `graphicToDataUrl`). Vector, so it stays crisp at any scale and recolorable forever — no rasterized
+ * asset, no file dependency. `naturalWidth`/`naturalHeight` retain the source viewBox aspect for framing.
+ */
+export interface LayerGraphic {
+  svg: string;
+  fill: string;
+  naturalWidth?: number | undefined;
+  naturalHeight?: number | undefined;
+}
+
+/**
  * Unified vector-mask model (Premiere/AE-style), reused by clip-level masks, effect-level masks, and
  * later color/adjustment/AI masks. Masks are stored in the layer's *local comp-pixel space* (the
  * untransformed layer box == comp size), so applying the mask to the transformed layer element makes it
@@ -561,6 +574,10 @@ export interface TimelineLayer {
   content?: LayerContentTransform | undefined;
   widthPercent?: number | undefined;
   heightPercent?: number | undefined;
+  /** Editable vector graphic (Search → Graphics). Present on `image` layers whose pixel source is a recolored
+   *  SVG rather than a file asset — the layer is self-contained (no SourceAsset needed) and stays recolorable.
+   *  See {@link LayerGraphic} and `graphicToDataUrl`. */
+  graphic?: LayerGraphic | undefined;
   /** Basic graphic primitive for shape layers. Defaults to rounded rectangle for older projects. */
   shapeKind?: ShapeKind | undefined;
   /** Shape-local path points for Pen/custom graphic shapes. Coordinates are 0..100 inside the shape box. */

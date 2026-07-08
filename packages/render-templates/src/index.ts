@@ -1,4 +1,4 @@
-import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes } from "@lumio-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes } from "@lumio-by-aelivion/shared";
 import type {
   BlendMode,
   LayerContentTransform,
@@ -303,7 +303,7 @@ export function buildRenderManifest(input: {
             startSeconds: layerStartSeconds - inPointSeconds,
             durationSeconds: layer.durationSeconds,
             assetId: layer.assetId,
-            assetUrl: asset?.fileUrl,
+            assetUrl: layer.graphic ? graphicToDataUrl(layer.graphic) : asset?.fileUrl,
             text: layer.text,
             textRuns: layer.textRuns,
             sourceInSeconds: layer.sourceInSeconds,

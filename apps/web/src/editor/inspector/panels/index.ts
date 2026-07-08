@@ -35,6 +35,17 @@ export function registerBuiltinInspectorPanels(): void {
     load: () => import("./ContentPanel")
   });
 
+  // Editable vector graphic — fill color (and future stroke/opacity). Renders only for image layers that
+  // carry `layer.graphic` (a Search → Graphics pick); a no-op for photo/file image layers.
+  inspectorRegistry.register({
+    id: "graphic",
+    title: "Graphic",
+    tier: "basic",
+    appliesTo: ["image"],
+    order: 15,
+    load: () => import("./GraphicPanel")
+  });
+
   inspectorRegistry.register({
     id: "text.warp",
     title: "Warp",

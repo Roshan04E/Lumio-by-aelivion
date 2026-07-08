@@ -273,7 +273,6 @@ import {
   type ProjectRecord
 } from "../lib/api";
 import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
-import { rasterizeSvgToFile } from "../lib/rasterize-svg";
 
 /** How many Iconify results the Graphics chip requests per "Show more" step (the API has no offset paging,
  *  so each step re-fetches at a higher limit). Also the recommendation-strip size. */
@@ -297,7 +296,10 @@ import {
   listBundledGraphics,
   searchBundledGraphics,
   instantiateTemplateComposition,
+  normalizeGraphicSvg,
+  DEFAULT_GRAPHIC_FILL,
   type BundledGraphic,
+  type LayerGraphic,
   type TemplateDefinition
 } from "@lumio-by-aelivion/shared";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
@@ -513,6 +515,11 @@ type EditorHistorySnapshot = {
   durationSeconds: number;
   projectGraph: ProjectGraph;
 };
+
+/** Platform-correct modifier labels for shortcut hints (⌘/⌥ on macOS, Ctrl/Alt elsewhere). */
+const isMacPlatform = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+const shortcutModifierLabel = isMacPlatform ? "⌘" : "Ctrl";
+const altKeyLabel = isMacPlatform ? "⌥" : "Alt";
 
 export function EditorPage() {
   // Render-cost probe (window.__rfRenderCost.EditorPage = whole tree per commit).
@@ -1004,6 +1011,7 @@ export function EditorPage() {
   // The named handlers are hoisted function declarations, so referencing them here is safe.
   const stableAssignAsset = useStableHandler(handleAssignAsset);
   const stableAddAssetToTimeline = useStableHandler(handleAddAssetToTimeline);
+  const stableAddGraphic = useStableHandler(handleAddGraphic);
   const stablePickReplacement = useStableHandler(handlePickReplacement);
   const stableCancelReplace = useStableHandler(() => setAssetPickerForLayerId(null));
   const stableDeleteAsset = useStableHandler(handleDeleteAsset);
@@ -2102,6 +2110,20 @@ export function EditorPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [busy, activeRenderJob, localExportSupported, localExport, composition, project]);
+
+  // ⌘/Ctrl+/ → toggle the AI chat panel. Works even while its composer is focused (so the same
+  // combo closes it), which is why we don't bail on input targets here.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.key !== "/") {
+        return;
+      }
+      event.preventDefault();
+      setAiPanelOpen((open) => !open);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem("lumio_editor_left_width", String(leftPaneWidth));
@@ -3983,6 +4005,31 @@ export function EditorPage() {
     await updateComposition(nextComposition);
   }
 
+  // Add a Search → Graphics pick as a self-contained editable VECTOR layer (no rasterized asset): an image
+  // layer whose pixel source is the recolored SVG data URL. Stays crisp at any scale and recolorable via the
+  // inspector. Persists inside the project graph — no asset/file dependency.
+  async function handleAddGraphic(graphic: LayerGraphic, name: string) {
+    if (!composition) {
+      return;
+    }
+    const selectedTrack = selectedLayer ? composition.tracks.find((item) => item.id === selectedLayer.trackId) : undefined;
+    const track =
+      selectedTrack && selectedTrack.type !== "audio"
+        ? selectedTrack
+        : composition.tracks.find((item) => item.type !== "audio");
+    if (!track) {
+      return;
+    }
+    const base = createEditorLayer("image", track, composition, layers.length + 1, currentTimeRef.current);
+    const layer: TimelineLayer = { ...base, name: name || "Graphic", graphic, fit: "contain" };
+    const nextComposition: TimelineComposition = {
+      ...composition,
+      tracks: composition.tracks.map((item) => (item.id === track.id ? { ...item, layers: [...item.layers, layer] } : item))
+    };
+    setSelectedLayerIds([layer.id]);
+    await updateComposition(nextComposition);
+  }
+
   async function handleUploadAsset(file: File | null, options?: { source?: AssetSource; folder?: string }) {
     if (!file) {
       return;
@@ -5659,6 +5706,8 @@ export function EditorPage() {
             icon={<Sparkles size={16} />}
             onClick={() => setAiPanelOpen((open) => !open)}
             aria-pressed={aiPanelOpen}
+            title={`${aiPanelOpen ? "Hide" : "Show"} AI assistant (${shortcutModifierLabel}+/)`}
+            aria-keyshortcuts={`${shortcutModifierLabel}+/`}
           >
             AI
           </Button>
@@ -5961,6 +6010,7 @@ export function EditorPage() {
                   replaceActive={assetPickerForLayerId !== null}
                   onAssignAsset={stableAssignAsset}
                   onAddAssetToTimeline={stableAddAssetToTimeline}
+                  onAddGraphic={stableAddGraphic}
                   onPickReplacement={stablePickReplacement}
                   onCancelReplace={stableCancelReplace}
                   onDeleteAsset={stableDeleteAsset}
@@ -6523,7 +6573,7 @@ export function EditorPage() {
             <Music size={16} />
             Audio
           </button>
-          <button type="button" className={aiPanelOpen ? "is-active" : ""} onClick={() => { setActiveResponsiveOverlay(null); setAiPanelOpen((open) => !open); }}>
+          <button type="button" className={aiPanelOpen ? "is-active" : ""} title={`Toggle AI assistant (${shortcutModifierLabel}+/)`} aria-keyshortcuts={`${shortcutModifierLabel}+/`} onClick={() => { setActiveResponsiveOverlay(null); setAiPanelOpen((open) => !open); }}>
             <Sparkles size={16} />
             AI
           </button>
@@ -8453,6 +8503,7 @@ function AssetBinImpl({
   clickAssigns = false,
   onAssignAsset,
   onAddAssetToTimeline,
+  onAddGraphic,
   onPickReplacement,
   onCancelReplace,
   onDeleteAsset,
@@ -8480,6 +8531,7 @@ function AssetBinImpl({
   clickAssigns?: boolean;
   onAssignAsset: (asset: SourceAsset) => void;
   onAddAssetToTimeline?: (asset: SourceAsset, mode?: AssetAddMode) => void;
+  onAddGraphic?: (graphic: LayerGraphic, name: string) => void;
   onPickReplacement?: (asset: SourceAsset) => void;
   onCancelReplace?: () => void;
   onDeleteAsset?: ((asset: SourceAsset) => void) | undefined;
@@ -8932,26 +8984,14 @@ function AssetBinImpl({
     }
   }
 
-  /** Import a Graphics-chip pick (bundled shape or Iconify icon) as a real, project-scoped image asset. */
-  async function handleImportGraphic(id: string, name: string, svg: string) {
-    setImportingId(id);
+  /** Add a Graphics-chip pick (bundled shape or Iconify icon) as an editable VECTOR layer — Canva-style: one
+   *  click places it, recolorable in the inspector afterwards. `sourceColor` is the pack's baked fill (bundled)
+   *  so it normalizes to `currentColor`; Iconify mono icons already use `currentColor` (pass undefined). */
+  function handleImportGraphic(id: string, name: string, svg: string, sourceColor?: string) {
     setStockImportError(null);
     try {
-      const file = await rasterizeSvgToFile(svg, `${name.toLowerCase().replace(/\s+/g, "-")}.png`);
-      const asset = await createAsset({
-        file,
-        source: "graphic",
-        folder: "graphic",
-        width: 512,
-        height: 512,
-        durationSeconds: 5,
-        originalName: name,
-        projectId: currentProjectId
-      });
-      // Register it in the bin (shows in Local for reuse) AND drop it on the timeline immediately —
-      // Canva-style: picking a graphic places it, no extra step. Both are best-effort no-ops if absent.
-      onImportedAsset?.(asset);
-      onAddAssetToTimeline?.(asset);
+      const graphic = normalizeGraphicSvg(svg, sourceColor);
+      onAddGraphic?.(graphic, name);
       // Canva-style "magic recommendations": pull related icons keyed off the graphic's name so the strip
       // below the grid fills with on-theme alternatives to keep building. Fails soft (offline/CSP → []).
       const keyword = graphicRecommendKeyword(name);
@@ -8961,9 +9001,7 @@ function AssetBinImpl({
         });
       }
     } catch (error) {
-      setStockImportError(error instanceof Error ? error.message : "Graphic import failed — please try again.");
-    } finally {
-      setImportingId(null);
+      setStockImportError(error instanceof Error ? error.message : "Could not add graphic — please try again.");
     }
   }
 
@@ -9369,7 +9407,7 @@ function AssetBinImpl({
                       aria-busy={importingId === `bundled_${graphic.id}`}
                       disabled={importingId === `bundled_${graphic.id}`}
                       title="Add to timeline"
-                      onClick={() => void handleImportGraphic(`bundled_${graphic.id}`, graphic.name, graphic.svg)}
+                      onClick={() => handleImportGraphic(`bundled_${graphic.id}`, graphic.name, graphic.svg, DEFAULT_GRAPHIC_FILL)}
                     >
                       <Plus size={14} />
                     </button>

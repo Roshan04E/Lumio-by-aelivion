@@ -24,6 +24,7 @@ import {
   createMask,
   getCompositionTransform,
   getCompositionContentTransform,
+  graphicToDataUrl,
   maskShapeToPathD,
   resolveMaskAtTime,
   withAutoTangents,
@@ -4571,9 +4572,35 @@ function resolveLayerUrl(layer: TimelineLayer | undefined, assets: SourceAsset[]
   return resolvePlaybackUrl(resolveLayerAsset(layer, assets, sourceAsset));
 }
 
+/** Synthetic in-memory image asset for a vector graphic layer — its fileUrl is the recolored SVG data URL, so
+ *  the layer needs no persisted SourceAsset. Rebuilt each call (cheap); the data URL is stable per svg+fill so
+ *  the image/texture cache still hits across renders. */
+function graphicLayerAsset(layer: TimelineLayer): SourceAsset {
+  const graphic = layer.graphic!;
+  return {
+    id: `graphic_${layer.id}`,
+    userId: "local",
+    fileName: `${layer.name || "graphic"}.svg`,
+    fileType: "image/svg+xml",
+    fileUrl: graphicToDataUrl(graphic),
+    durationSeconds: layer.durationSeconds || 5,
+    width: graphic.naturalWidth ?? 100,
+    height: graphic.naturalHeight ?? 100,
+    status: "ready",
+    createdAt: layer.id,
+    source: "graphic"
+  } as SourceAsset;
+}
+
 function resolveLayerAsset(layer: TimelineLayer | undefined, assets: SourceAsset[], sourceAsset: SourceAsset | null | undefined) {
   if (!layer) {
     return undefined;
+  }
+
+  // Vector graphic layers are self-contained (no SourceAsset): synthesize an image asset whose fileUrl is the
+  // recolored SVG data URL, so every asset-driven preview path (grade → scene → compositor) works unchanged.
+  if (layer.graphic) {
+    return graphicLayerAsset(layer);
   }
 
   const assignedAsset = layer.assetId ? assets.find((asset) => asset.id === layer.assetId) : undefined;
