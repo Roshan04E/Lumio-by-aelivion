@@ -12174,19 +12174,23 @@ input.scrub-number:focus {
   width: 100%;
   aspect-ratio: 1;
   border-radius: inherit;
-  background: #131316;
+  /* Always white so dark/black graphics + icons are visible (they're often single-color on transparent). */
+  background: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Uniform inset so every graphic — tall, wide, tiny, or full-bleed — reads at a consistent size. */
+  padding: 16%;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .asset-graphic-preview svg,
-.asset-graphic-preview.asset-graphic-preview img,
-img.asset-graphic-preview {
-  width: 60%;
-  height: 60%;
+.asset-graphic-preview img {
+  width: 100%;
+  height: 100%;
   object-fit: contain;
+  display: block;
 }
 
 /* Audio has no frame: a short, fixed card with a centered glyph. */

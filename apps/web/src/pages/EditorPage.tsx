@@ -4160,7 +4160,9 @@ export function EditorPage() {
       void linkAssetToProject(asset.id, project.id);
     }
 
-    await handleDropAsset(asset.id, trackId, currentTimeRef.current, undefined, mode);
+    // Pass the asset object through: a just-imported asset (e.g. a graphic) may not be in `resolvedAssets`
+    // state yet on this tick, so the id-lookup in handleDropAsset would miss it.
+    await handleDropAsset(asset.id, trackId, currentTimeRef.current, undefined, mode, undefined, asset);
   }
 
   async function handleDropAsset(
@@ -4169,13 +4171,14 @@ export function EditorPage() {
     startSeconds: number,
     replaceLayerId?: string | undefined,
     mode: AssetAddMode = "auto",
-    sourceDrag?: SourceDragPayload | undefined
+    sourceDrag?: SourceDragPayload | undefined,
+    assetOverride?: SourceAsset | undefined
   ) {
     if (!composition) {
       return;
     }
 
-    const asset = resolvedAssets.find((item) => item.id === assetId);
+    const asset = assetOverride ?? resolvedAssets.find((item) => item.id === assetId);
     const track = composition.tracks.find((item) => item.id === trackId);
     if (!asset || !track) {
       return;
@@ -8054,15 +8057,16 @@ function matchesAssetTab(asset: SourceAsset, tab: AssetSourceTab, used: boolean)
   const source = assetSourceOf(asset);
   switch (tab) {
     case "local":
-      return source === "local";
+      // Graphics are project-scoped rasterized image media (like uploads), so they live in Local for reuse.
+      return source === "local" || source === "graphic";
     case "ai":
       return source === "ai" || source === "timeline-generated";
     case "brand":
       return source === "brand";
     case "search":
       // Search itself is query-driven (ephemeral results, not filtered via this function); this case only
-      // matters for previously-imported stock/graphic assets encountered elsewhere (e.g. "Used" lookups).
-      return source === "pexels" || source === "unsplash" || source === "graphic";
+      // matters for previously-imported stock assets encountered elsewhere (e.g. "Used" lookups).
+      return source === "pexels" || source === "unsplash";
     case "used":
       return used;
     case "templates":
@@ -8872,7 +8876,10 @@ function AssetBinImpl({
         originalName: name,
         projectId: currentProjectId
       });
+      // Register it in the bin (shows in Local for reuse) AND drop it on the timeline immediately —
+      // Canva-style: picking a graphic places it, no extra step. Both are best-effort no-ops if absent.
       onImportedAsset?.(asset);
+      onAddAssetToTimeline?.(asset);
     } catch (error) {
       setStockImportError(error instanceof Error ? error.message : "Graphic import failed — please try again.");
     } finally {
@@ -9281,10 +9288,10 @@ function AssetBinImpl({
                       className="asset-more-button"
                       aria-busy={importingId === `bundled_${graphic.id}`}
                       disabled={importingId === `bundled_${graphic.id}`}
-                      title="Import to library"
+                      title="Add to timeline"
                       onClick={() => void handleImportGraphic(`bundled_${graphic.id}`, graphic.name, graphic.svg)}
                     >
-                      <Download size={14} />
+                      <Plus size={14} />
                     </button>
                   </div>
                 </div>
@@ -9292,7 +9299,9 @@ function AssetBinImpl({
             ))}
             {graphicsIconify.map((icon) => (
               <div className="asset-tile asset-stock-tile" key={`iconify_${icon.iconId}`} title={icon.name} role="button" tabIndex={0}>
-                <img className="asset-graphic-preview" src={`https://api.iconify.design/${icon.iconId}.svg`} alt={icon.name} loading="lazy" />
+                <div className="asset-graphic-preview">
+                  <img src={`https://api.iconify.design/${icon.iconId}.svg`} alt={icon.name} loading="lazy" />
+                </div>
                 <div className="asset-card-hover">
                   <div className="asset-card-info">
                     <strong>{icon.name}</strong>
@@ -9303,14 +9312,14 @@ function AssetBinImpl({
                       className="asset-more-button"
                       aria-busy={importingId === `iconify_${icon.iconId}`}
                       disabled={importingId === `iconify_${icon.iconId}`}
-                      title="Import to library"
+                      title="Add to timeline"
                       onClick={() =>
                         void fetchIconifySvg(icon.iconId).then((svg) => {
                           if (svg) void handleImportGraphic(`iconify_${icon.iconId}`, icon.name, svg);
                         })
                       }
                     >
-                      <Download size={14} />
+                      <Plus size={14} />
                     </button>
                   </div>
                 </div>
