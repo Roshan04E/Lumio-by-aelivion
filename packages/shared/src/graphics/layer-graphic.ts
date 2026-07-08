@@ -56,13 +56,24 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Longest-side pixel size baked into the SVG root so it rasterizes crisply as an `<img>`/texture (vector
+ *  scales to any display size, but the decode/texture-upload happens at these intrinsic dims). */
+const GRAPHIC_RASTER_SIZE = 1024;
+
 /** Bake `fill` into the SVG root as a `color` presentation attribute (so `currentColor` resolves when the SVG
- *  is used as an `<img>`/texture source) and return a data URL. Deterministic — identical in every renderer. */
+ *  is used as an `<img>`/texture source) AND explicit width/height (an SVG with only a viewBox decodes with an
+ *  ambiguous/zero intrinsic size as an `<img>`, so the compositor would drop it). Returns a data URL —
+ *  deterministic, identical in every renderer. */
 export function graphicToDataUrl(graphic: LayerGraphic): string {
   const fill = sanitizeGraphicFill(graphic.fill);
-  // Drop any existing root color attr, then inject ours right after the opening `<svg`.
-  const withColor = graphic.svg
+  const aspect = (graphic.naturalWidth ?? 1) / (graphic.naturalHeight ?? 1);
+  const width = aspect >= 1 ? GRAPHIC_RASTER_SIZE : Math.round(GRAPHIC_RASTER_SIZE * aspect);
+  const height = aspect >= 1 ? Math.round(GRAPHIC_RASTER_SIZE / aspect) : GRAPHIC_RASTER_SIZE;
+  // Strip any existing root color/width/height, then inject ours right after the opening `<svg`.
+  const cleaned = graphic.svg
     .replace(/(<svg\b[^>]*?)\s+color\s*=\s*["'][^"']*["']/i, "$1")
-    .replace(/<svg\b/i, `<svg color="${fill}"`);
-  return `data:image/svg+xml,${encodeURIComponent(withColor)}`;
+    .replace(/(<svg\b[^>]*?)\s+width\s*=\s*["'][^"']*["']/i, "$1")
+    .replace(/(<svg\b[^>]*?)\s+height\s*=\s*["'][^"']*["']/i, "$1")
+    .replace(/<svg\b/i, `<svg color="${fill}" width="${width}" height="${height}"`);
+  return `data:image/svg+xml,${encodeURIComponent(cleaned)}`;
 }

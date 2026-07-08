@@ -369,7 +369,7 @@ export function buildRenderManifest(input: {
           startSeconds: clippedStartSeconds - inPointSeconds,
           durationSeconds: clippedEndSeconds - clippedStartSeconds,
           assetId: layer.assetId,
-          assetUrl: asset?.fileUrl,
+          assetUrl: layer.graphic ? graphicToDataUrl(layer.graphic) : asset?.fileUrl,
           text: layer.text,
           textRuns: layer.textRuns,
           // Head trim consumes source media at the clip's playback rate (rate stretch / ramp integral).
