@@ -45,6 +45,12 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_MODEL: z.string().default("meta-llama/llama-3.3-70b-instruct:free"),
   GEMINI_PLANNER_MODEL: z.string().default("gemini-2.5-flash"),
+  // Lumio Brain B4 — the gateway's `fast` model class: small NON-reasoning instruct models for
+  // tier-3 transactional compilation (one call, temperature 0, JSON only). Same keys as above.
+  CEREBRAS_FAST_MODEL: z.string().default("llama3.1-8b"),
+  GROQ_FAST_MODEL: z.string().default("llama-3.1-8b-instant"),
+  OPENROUTER_FAST_MODEL: z.string().default("meta-llama/llama-3.1-8b-instruct:free"),
+  GEMINI_FAST_MODEL: z.string().default("gemini-2.5-flash-lite"),
   // Premium last-hop (GP4); opt-in, used only when present.
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_PLANNER_MODEL: z.string().default("claude-opus-4-8"),

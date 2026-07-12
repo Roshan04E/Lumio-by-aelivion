@@ -463,6 +463,15 @@ async function transcodeOnMainThread(
       } else {
         nullRun += 1;
         if (decodedAny && i / fps > durationSeconds - 0.25) {
+          // FROZEN-TAIL PROBE (debug only): the metadata duration overshoots the decodable sample
+          // table — confirm the gap that leaves the timeline clip's tail with no real frames to serve.
+          if (typeof window !== "undefined" && window.localStorage?.getItem("lumio.exportDecodeDebug") === "1") {
+            console.warn(
+              `[frozen-tail] proxy build: decodable content ends at ~${(i / fps).toFixed(3)}s but ` +
+                `metadata duration is ${durationSeconds.toFixed(3)}s ` +
+                `(overshoot ~${(durationSeconds - i / fps).toFixed(3)}s) — clip tail will freeze`
+            );
+          }
           break; // tail overshoot — finish with what we have
         }
         if (nullRun > maxNullRun) {

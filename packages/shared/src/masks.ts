@@ -429,7 +429,8 @@ export function track3dToTransformKeyframes(
 
 export function applyTextBehindPersonComposition(
   composition: TimelineComposition,
-  options: TextBehindPersonOptions
+  options: TextBehindPersonOptions,
+  mode: "insert" | "replace" = "replace"
 ): TimelineComposition {
   const duration = composition.durationSeconds;
   const trackBackgroundId = `${composition.id}_tbp_background`;
@@ -479,33 +480,37 @@ export function applyTextBehindPersonComposition(
     ]
   });
 
+  const newTracks = [
+    {
+      id: trackSubjectId,
+      type: "video" as const,
+      name: "Subject cutout",
+      layers: [withMaskMetadata(subjectLayer, options.maskId, "foreground", options.mask)]
+    },
+    {
+      id: trackTextId,
+      type: "video" as const,
+      name: "Behind text",
+      layers: [textLayer]
+    },
+    {
+      id: trackBackgroundId,
+      type: "video" as const,
+      name: "Background",
+      layers: [backgroundLayer]
+    }
+  ];
+  const newTrackIds = new Set(newTracks.map((track) => track.id));
+
   return {
     ...composition,
-    tracks: [
-      {
-        id: trackSubjectId,
-        type: "video",
-        name: "Subject cutout",
-        layers: [withMaskMetadata(subjectLayer, options.maskId, "foreground", options.mask)]
-      },
-      {
-        id: trackTextId,
-        type: "video",
-        name: "Behind text",
-        layers: [textLayer]
-      },
-      {
-        id: trackBackgroundId,
-        type: "video",
-        name: "Background",
-        layers: [backgroundLayer]
-      }
-      // Intentionally not preserving the incoming composition's other tracks -
-      // applying a composite tool replaces the default-preset/template result
-      // (e.g. createProject's hook/CTA placeholder text) rather than layering
-      // on top of it, since that placeholder content isn't meaningful once a
-      // real composite exists.
-    ]
+    // "replace" (default, for the single-source /tools/:slug template flow) drops the incoming
+    // tracks (e.g. createProject's placeholder hook/CTA). "insert" (one-click / AI on a real
+    // multi-clip timeline) layers the composite on top and KEEPS every existing clip.
+    tracks:
+      mode === "insert"
+        ? [...newTracks, ...composition.tracks.filter((track) => !newTrackIds.has(track.id))]
+        : newTracks
   };
 }
 
@@ -557,7 +562,8 @@ export function applyExtractPersonComposition(
 
 export function applyRemoveBackgroundComposition(
   composition: TimelineComposition,
-  options: RemoveBackgroundOptions
+  options: RemoveBackgroundOptions,
+  mode: "insert" | "replace" = "replace"
 ): TimelineComposition {
   const duration = composition.durationSeconds;
   const trackSubjectId = `${composition.id}_rbg_subject`;
@@ -596,23 +602,30 @@ export function applyRemoveBackgroundComposition(
           durationSeconds: duration
         });
 
+  const newTracks = [
+    {
+      id: trackSubjectId,
+      type: "video" as const,
+      name: "Removed background",
+      layers: [withMaskMetadata(subjectLayer, options.maskId, options.mode, options.mask)]
+    },
+    {
+      id: trackPlateId,
+      type: "video" as const,
+      name: options.mode === "greenScreen" ? "Green screen" : "Transparency preview",
+      layers: [plateLayer]
+    }
+  ];
+  const newTrackIds = new Set(newTracks.map((track) => track.id));
+
   return {
     ...composition,
-    tracks: [
-      {
-        id: trackSubjectId,
-        type: "video",
-        name: "Removed background",
-        layers: [withMaskMetadata(subjectLayer, options.maskId, options.mode, options.mask)]
-      },
-      {
-        id: trackPlateId,
-        type: "video",
-        name: options.mode === "greenScreen" ? "Green screen" : "Transparency preview",
-        layers: [plateLayer]
-      }
-      // See applyTextBehindPersonComposition for why incoming tracks aren't preserved.
-    ]
+    // "insert" (one-click / AI) keeps every existing clip; "replace" (default, /tools/:slug
+    // single-source flow) drops the incoming tracks. See applyTextBehindPersonComposition.
+    tracks:
+      mode === "insert"
+        ? [...newTracks, ...composition.tracks.filter((track) => !newTrackIds.has(track.id))]
+        : newTracks
   };
 }
 
@@ -635,7 +648,8 @@ export interface RemovePersonApplyOptions {
  */
 export function applyRemovePersonComposition(
   composition: TimelineComposition,
-  options: RemovePersonApplyOptions
+  options: RemovePersonApplyOptions,
+  mode: "insert" | "replace" = "replace"
 ): TimelineComposition {
   const duration = Math.max(composition.durationSeconds, options.durationSeconds ?? 0);
   const trackId = `${composition.id}_person_removed`;
@@ -649,18 +663,22 @@ export function applyRemovePersonComposition(
     opacity: 100
   });
 
+  const removedTrack = {
+    id: trackId,
+    type: "video" as const,
+    name: "Person removed",
+    layers: [removedLayer]
+  };
+
   return {
     ...composition,
     durationSeconds: duration,
-    tracks: [
-      {
-        id: trackId,
-        type: "video",
-        name: "Person removed",
-        layers: [removedLayer]
-      }
-      // See applyTextBehindPersonComposition for why incoming tracks aren't preserved.
-    ]
+    // "insert" (one-click / AI) layers the cleaned clip on top and KEEPS every existing clip;
+    // "replace" (default, /tools/:slug single-source flow) drops the incoming tracks.
+    tracks:
+      mode === "insert"
+        ? [removedTrack, ...composition.tracks.filter((track) => track.id !== trackId)]
+        : [removedTrack]
   };
 }
 

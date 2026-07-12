@@ -18,7 +18,7 @@ const addEffectSchema = z.object({
 const addEffect: TimelineActionDefinition<z.infer<typeof addEffectSchema>> = {
   id: "addEffect",
   name: "Add effect",
-  description: "Attach a registered effect to a layer.",
+  description: "Attach a registered effect to a clip.",
   category: "effect",
   inputSchema: addEffectSchema,
   validationRules: (params, ctx) => [
@@ -51,7 +51,7 @@ const removeEffectSchema = z.object({
 const removeEffect: TimelineActionDefinition<z.infer<typeof removeEffectSchema>> = {
   id: "removeEffect",
   name: "Remove effect",
-  description: "Detach an effect from a layer.",
+  description: "Detach an effect from a clip.",
   category: "effect",
   inputSchema: removeEffectSchema,
   validationRules: (params, ctx) => {
@@ -132,7 +132,7 @@ const reorderEffectSchema = z.object({
 const reorderEffect: TimelineActionDefinition<z.infer<typeof reorderEffectSchema>> = {
   id: "reorderEffect",
   name: "Reorder effect",
-  description: "Move an effect to a different position in the layer's effect stack.",
+  description: "Move an effect to a different position in the clip's effect stack.",
   category: "effect",
   inputSchema: reorderEffectSchema,
   validationRules: (params, ctx) => {

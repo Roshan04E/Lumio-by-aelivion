@@ -74,7 +74,10 @@ export class TimelineActionRegistry {
     const issues = definition.validationRules(parsed.data, ctx);
     if (issues.length > 0) {
       recordRejected(id);
-      return { ok: false, code: "validation_failed", message: `Validation failed for "${id}"`, issues };
+      // The issue messages ride IN the message: agent-loop result lines only surface `message`,
+      // and a bare "Validation failed" left the model guessing params blind (real transcript:
+      // three moveLayer retries with invented track ids).
+      return { ok: false, code: "validation_failed", message: `Validation failed for "${id}": ${issues.map((issue) => issue.message).join("; ")}`, issues };
     }
 
     try {

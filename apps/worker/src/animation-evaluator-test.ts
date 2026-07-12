@@ -61,16 +61,32 @@ assert.equal(
   1
 );
 
-const easeInValue = evaluateAnimatedValue({
+// Two-sided interpolation contract (2026-07-12, Premiere/AE semantics): easeIn eases the
+// ARRIVAL into its keyframe (the segment BEFORE it — progress runs ahead mid-segment,
+// then slows into the key); easeOut eases the DEPARTURE from its keyframe (the segment
+// AFTER it — progress lags mid-segment). Previously only the outgoing keyframe's
+// interpolation shaped a segment, so "Ease In" acted on the wrong side.
+const easeInArrival = evaluateAnimatedValue({
   baseValue: 0,
   keyframes: [
-    { id: "ease_1", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 0, value: 0, interpolation: "easeIn", temporal: {} },
-    { id: "ease_2", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 1, value: 100, interpolation: "linear", temporal: {} }
+    { id: "ease_1", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 0, value: 0, interpolation: "linear", temporal: {} },
+    { id: "ease_2", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 1, value: 100, interpolation: "easeIn", temporal: {} }
   ],
   property: "transform.opacity",
   timeSeconds: 0.5
 });
-assert.ok(easeInValue < 50);
+assert.ok(easeInArrival > 50);
+
+const easeOutDeparture = evaluateAnimatedValue({
+  baseValue: 0,
+  keyframes: [
+    { id: "ease_3", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 0, value: 0, interpolation: "easeOut", temporal: {} },
+    { id: "ease_4", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 1, value: 100, interpolation: "linear", temporal: {} }
+  ],
+  property: "transform.opacity",
+  timeSeconds: 0.5
+});
+assert.ok(easeOutDeparture < 50);
 
 const manualBezierValue = evaluateAnimatedValue({
   baseValue: 0,

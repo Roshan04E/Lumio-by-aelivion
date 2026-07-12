@@ -69,10 +69,39 @@ function fontString(style: { fontStyle?: unknown; fontWeight?: unknown; fontSize
   return `${fs}${fw} ${style.fontSize}px ${family}`;
 }
 
+/**
+ * Canvas2D never SYNTHESIZES italic: a family with no italic face (Impact, most display fonts)
+ * silently falls back to the upright face, while the DOM/Remotion path oblique-slants it via CSS
+ * `font-synthesis`. Detect that case (italic vs upright metrics identical ⇒ no real italic face)
+ * and slant the glyph draw manually so the raster matches the DOM. ~ tan(14°), the CSS synthesis
+ * angle. Fonts WITH a real italic face measure differently and are left to their true italics.
+ */
+const ITALIC_SKEW = 0.25;
+const italicSynthesisCache = new Map<string, boolean>();
+function needsItalicSynthesis(ctx: Ctx, italicFont: string): boolean {
+  if (!italicFont.startsWith("italic ")) return false;
+  const cached = italicSynthesisCache.get(italicFont);
+  if (cached !== undefined) return cached;
+  const prev = ctx.font;
+  // Advance widths alone can't tell a real italic MONOSPACE face from fallback (identical
+  // advances) — compare glyph ink bounds too: a true italic face slants the ink of "f".
+  const probe = (font: string) => {
+    ctx.font = font;
+    const m = ctx.measureText("Hf?xy");
+    return `${m.width.toFixed(3)}|${(m.actualBoundingBoxLeft ?? 0).toFixed(3)}|${(m.actualBoundingBoxRight ?? 0).toFixed(3)}`;
+  };
+  const needed = probe(italicFont) === probe(italicFont.slice("italic ".length));
+  ctx.font = prev;
+  italicSynthesisCache.set(italicFont, needed);
+  return needed;
+}
+
 interface Word {
   text: string;
   font: string;
   color: string;
+  /** Per-run highlight (marker) painted behind the word — parity with the DOM span background. */
+  background: string | undefined;
   fontSize: number;
   space: boolean; // trailing space after this word
 }
@@ -90,12 +119,14 @@ function layoutWords(
       fontSize?: number;
       fontWeight?: unknown;
       color?: string;
+      backgroundColor?: string;
       fontFamily?: unknown;
       fontStyle?: unknown;
     };
     const size = num(runStyle.fontSize, baseStyle.fontSize);
     const font = fontString({ fontStyle: runStyle.fontStyle, fontWeight: runStyle.fontWeight, fontSize: size, fontFamily: runStyle.fontFamily });
     const color = String(runStyle.color ?? baseStyle.color ?? "#fff");
+    const background = runStyle.backgroundColor ? String(runStyle.backgroundColor) : undefined;
     const segments = String(run.text ?? "").split("\n");
     segments.forEach((segment, segIndex) => {
       if (segIndex > 0) tokens.push("break");
@@ -106,7 +137,7 @@ function layoutWords(
           const last = tokens[tokens.length - 1];
           if (last && last !== "break") last.space = true;
         } else {
-          tokens.push({ text: part, font, color, fontSize: size, space: false });
+          tokens.push({ text: part, font, color, background, fontSize: size, space: false });
         }
       }
     });
@@ -189,6 +220,9 @@ interface TextLayout {
   background: string;
   textAlign: CanvasTextAlign;
   lines: Word[][];
+  /** Per-line line-box height (px): CSS grows a line box to its LARGEST span, so a line with a
+   *  bigger fontSizeMultiplier run is taller — `lineHeight × max(base, largest word font size)`. */
+  lineHeights: number[];
   boxW: number;
   boxH: number;
 }
@@ -227,10 +261,14 @@ function measureTextLayout(ctx: Ctx, layer: TimelineLayer, t: number, W: number)
   const fixedWidth = widthStr.endsWith("%") ? (num(widthStr) / 100) * W - 2 * padX : 0;
   const contentWidth = fixedWidth > 0 ? fixedWidth : Math.max(0, ...lines.map((l) => lineWidth(ctx, l)));
   const boxW = contentWidth + 2 * padX;
-  const boxH = lines.length * lineHeightPx + 2 * padY;
+  // Per-line heights: a mixed-size line (fontSizeMultiplier runs) is as tall as its LARGEST span
+  // (CSS unitless line-height multiplies each span's own size; the strut keeps the base minimum).
+  // A single base-sized height clipped big runs against the tight box raster (2026-07-12 report).
+  const lineHeights = lines.map((line) => lineHeight * Math.max(fontSize, ...line.map((word) => word.fontSize)));
+  const boxH = lineHeights.reduce((sum, h) => sum + h, 0) + 2 * padY;
   ctx.letterSpacing = "";
 
-  return { runs, style, fontSize, lineHeightPx, letterSpacing, padX, padY, radius, background, textAlign, lines, boxW, boxH };
+  return { runs, style, fontSize, lineHeightPx, letterSpacing, padX, padY, radius, background, textAlign, lines, lineHeights, boxW, boxH };
 }
 
 /** Content-box size (comp px) of a text/shape layer, with no drawing — used to size a "box"-mode raster
@@ -276,7 +314,7 @@ export async function drawTextLayer(
 ): Promise<OverlayBox> {
   const layout = measureTextLayout(ctx, layer, t, W);
   if (!layout) return { boxW: 0, boxH: 0 };
-  const { runs, style, fontSize, lineHeightPx, letterSpacing, padX, padY, radius, background, textAlign, lines, boxW, boxH } = layout;
+  const { runs, style, fontSize, letterSpacing, padX, padY, radius, background, textAlign, lines, lineHeights, boxW, boxH } = layout;
   const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
 
   if (letterSpacing) ctx.letterSpacing = letterSpacing;
@@ -356,8 +394,11 @@ export async function drawTextLayer(
   const contentLeft = -boxW / 2 + padX;
   const contentRight = boxW / 2 - padX;
 
+  let lineOffsetY = 0;
   lines.forEach((line, lineIndex) => {
-    const lineBoxTop = -boxH / 2 + padY + lineIndex * lineHeightPx;
+    const lineHeightPx = lineHeights[lineIndex] ?? fontSize * 1.2;
+    const lineBoxTop = -boxH / 2 + padY + lineOffsetY;
+    lineOffsetY += lineHeightPx;
 
     // One baseline per line, from the max ascent/descent across the line's fonts, so all words
     // share a single baseline (CSS `vertical-align: baseline`) even when runs mix font/size.
@@ -382,6 +423,32 @@ export async function drawTextLayer(
       ctx.font = word.font;
       if (wordIndex > 0) x += ctx.measureText(" ").width;
 
+      // Per-run HIGHLIGHT: paint the marker box behind the word (ascent..descent — the DOM span's
+      // background box). A trailing space is bridged when the NEXT word shares the same highlight,
+      // so a multi-word marker reads as one continuous band. Painted unskewed — CSS font-synthesis
+      // slants glyphs, never the span box.
+      if (word.background) {
+        const wordWidth = ctx.measureText(word.text).width;
+        const nextWord = line[wordIndex + 1];
+        const bridge = word.space && nextWord && nextWord.background === word.background ? ctx.measureText(" ").width : 0;
+        ctx.save();
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = word.background;
+        ctx.fillRect(x, y - lineAscent, wordWidth + bridge, lineAscent + lineDescent);
+        ctx.restore();
+      }
+
+      // Synthetic oblique for italic-less faces (see needsItalicSynthesis) — skew about the
+      // word's baseline origin so the slant matches CSS font-synthesis and advances are unchanged.
+      const synthesizeItalic = needsItalicSynthesis(ctx, word.font);
+      if (synthesizeItalic) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.transform(1, 0, -ITALIC_SKEW, 1, 0, 0);
+        ctx.translate(-x, -y);
+      }
+
       // #3c: fill first (with shadow), then stroke on top — matches CSS -webkit-text-stroke
       // which paints the stroke centered on the glyph outline OVER the fill.
       if (shadow) applyShadow(ctx, shadow);
@@ -398,6 +465,7 @@ export async function drawTextLayer(
         ctx.strokeText(word.text, x, y);
       }
 
+      if (synthesizeItalic) ctx.restore();
       x += ctx.measureText(word.text).width;
     });
   });

@@ -329,6 +329,8 @@ export interface CreateAssetInput {
   ai?: AssetAiRef | undefined;
   /** Detected source color metadata (Rec.709 SDR contract); absent → assume Rec.709. */
   color?: SourceColorMetadata | undefined;
+  /** Container display rotation (0/90/180/270°) read from the tkhd matrix at ingest; absent/0 = none. */
+  rotationDegrees?: 0 | 90 | 180 | 270 | undefined;
 }
 
 export async function createAsset(input: CreateAssetInput) {
@@ -374,7 +376,8 @@ export async function createAsset(input: CreateAssetInput) {
         tags,
         external: input.external,
         ai: input.ai,
-        color: input.color
+        color: input.color,
+        rotationDegrees: input.rotationDegrees
       })
     });
     return withRealDuration(data.asset);
@@ -422,7 +425,8 @@ export async function createAsset(input: CreateAssetInput) {
       ownerProjectId: input.projectId,
       external: input.external,
       ai: input.ai,
-      ...(input.color ? { color: input.color } : {})
+      ...(input.color ? { color: input.color } : {}),
+      ...(input.rotationDegrees ? { rotationDegrees: input.rotationDegrees } : {})
     };
     const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
     writeLocal(localAssetsKey, [asset, ...assets]);
@@ -445,6 +449,7 @@ function appendAssetMetadata(body: FormData, input: CreateAssetInput) {
   if (input.external) body.append("external", JSON.stringify(input.external));
   if (input.ai) body.append("ai", JSON.stringify(input.ai));
   if (input.color) body.append("color", JSON.stringify(input.color));
+  if (input.rotationDegrees) body.append("rotationDegrees", String(input.rotationDegrees));
 }
 
 const ASSET_AUDIO_TRUE_TAG = "lumio:audio=true";

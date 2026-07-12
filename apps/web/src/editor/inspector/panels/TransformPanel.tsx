@@ -1,15 +1,9 @@
-import { useState, useRef, useEffect, type PointerEvent as ReactPointerEvent } from "react";
-import {
+﻿import {
   Box,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Diamond,
   Eye,
   Maximize2,
   Move,
-  MoveHorizontal,
-  MoveVertical,
   Rotate3d,
   RotateCw,
   SlidersHorizontal,
@@ -17,11 +11,9 @@ import {
 } from "lucide-react";
 import {
   evaluateTimelineTransform,
-  evaluateTimelineEffectParam,
   getLayerAnimations,
   type BlendMode,
-  type KeyframeInterpolation,
-  type TimelineKeyframeV2
+  type KeyframeInterpolation
 } from "@lumio-by-aelivion/shared";
 import { ScrubNumberInput } from "../../../components/ScrubNumberInput";
 
@@ -103,612 +95,23 @@ const BLEND_MODE_GROUPS: { label: string; options: { value: BlendMode; label: st
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { InspectorSection } from "../InspectorSection";
 import { NumberControl } from "../controls/NumberControl";
+import { PropertyRowGroup } from "../controls/PropertyRow";
 import { ThemedSelect } from "../controls/ThemedSelect";
 import {
   animationPresets,
   applyAnimationPreset,
   applyTransformValueAtTime,
-  buildEffectGraphTargets,
   clamp,
   clearTransformKeyframes,
   findTransformKeyframeTime,
   getActiveTransformKeyframe,
-  getEffectParamBaseValue,
-  getEffectParamKeyframes,
   getTransformKeyframes,
   getTransformPropertyValue,
-  graphTargetKey,
-  interpolationLabel,
-  interpolationOptions,
-  isKeyframeAt,
-  setGraphTargetInterpolation,
-  setGraphTargetLinked,
   setTransformKeyframeInterpolation,
-  snap,
-  toggleEffectParamKeyframe,
   toggleTransformKeyframe,
-  transformGraphTargets,
-  transformPropertyConfigs,
-  updateGraphTargetHandle,
-  updateGraphTargetKeyframe,
   type AnimationPresetId,
-  type GraphTarget,
   type TransformAnimationProperty
 } from "../keyframeUtils";
-
-// ---------------------------------------------------------------------------
-// TransformGraphEditor
-// ---------------------------------------------------------------------------
-
-function TransformGraphEditor({
-  currentTime,
-  layer,
-  layerTime,
-  onChange,
-  onSeek
-}: {
-  currentTime: number;
-  layer: InspectorPanelProps["layer"];
-  layerTime: number;
-  onChange: InspectorPanelProps["onChange"];
-  onSeek: (seconds: number) => void;
-}) {
-  const effectGraphTargets: GraphTarget[] = buildEffectGraphTargets(layer);
-  const graphTargets = [...transformGraphTargets, ...effectGraphTargets];
-  const [targetKey, setTargetKey] = useState("transform:transform.position.x");
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [view, setView] = useState({ pan: 0, zoom: 1 });
-  const [dragPoint, setDragPoint] = useState<{ id: string; pointerId: number } | null>(null);
-  const [dragHandle, setDragHandle] = useState<{
-    handle: "in" | "out";
-    id: string;
-    pointerId: number;
-  } | null>(null);
-  const [draftLayer, setDraftLayer] = useState<InspectorPanelProps["layer"] | null>(null);
-  const [interpolationMenuOpen, setInterpolationMenuOpen] = useState(false);
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const draftLayerRef = useRef<InspectorPanelProps["layer"] | null>(null);
-
-  const activeTarget =
-    graphTargets.find((t) => graphTargetKey(t) === targetKey) ?? graphTargets[0] ?? transformGraphTargets[0]!;
-  const config = activeTarget;
-  const displayLayer = draftLayer ?? layer;
-  const propertyKeyframes =
-    activeTarget.kind === "transform"
-      ? getTransformKeyframes(displayLayer, activeTarget.property)
-      : getEffectParamKeyframes(displayLayer, activeTarget.effectId, activeTarget.property);
-  const propertyKeyframeIds = propertyKeyframes.map((kf) => kf.id).join("|");
-  const selectedKeyframes = propertyKeyframes.filter((kf) => selectedIds.includes(kf.id));
-  const activeKeyframe =
-    selectedKeyframes[0] ??
-    propertyKeyframes.find((kf) => isKeyframeAt(kf.timeSeconds, layerTime)) ??
-    propertyKeyframes.reduce<TimelineKeyframeV2 | undefined>((nearest, kf) => {
-      if (!nearest) return kf;
-      return Math.abs(kf.timeSeconds - layerTime) < Math.abs(nearest.timeSeconds - layerTime) ? kf : nearest;
-    }, undefined);
-  const activeKeyframeIndex = activeKeyframe
-    ? propertyKeyframes.findIndex((kf) => kf.id === activeKeyframe.id)
-    : -1;
-
-  const viewDuration = Math.max(0.2, displayLayer.durationSeconds / view.zoom);
-  const maxPan = Math.max(0, displayLayer.durationSeconds - viewDuration);
-  const pan = clamp(view.pan, 0, maxPan);
-  const viewEnd = Math.min(displayLayer.durationSeconds, pan + viewDuration);
-  const visibleDuration = Math.max(0.0001, viewEnd - pan);
-
-  const graphPadding = { bottom: 20, left: 32, right: 10, top: 12 };
-  const graphSize = { height: 138, width: 320 };
-  const plot = {
-    height: graphSize.height - graphPadding.top - graphPadding.bottom,
-    width: graphSize.width - graphPadding.left - graphPadding.right
-  };
-
-  const curvePoints = Array.from({ length: 72 }, (_, index) => {
-    const timeSeconds = pan + (visibleDuration * index) / 71;
-    const transform = evaluateTimelineTransform({
-      transform: displayLayer.transform,
-      startSeconds: displayLayer.startSeconds,
-      keyframes: displayLayer.keyframes,
-      animations: displayLayer.animations,
-      timeSeconds: displayLayer.startSeconds + timeSeconds
-    });
-    const value =
-      activeTarget.kind === "transform"
-        ? getTransformPropertyValue(transform, activeTarget.property)
-        : evaluateTimelineEffectParam({
-            animations: displayLayer.animations,
-            baseValue: getEffectParamBaseValue(displayLayer, activeTarget.effectId, activeTarget.property, activeTarget.min),
-            effectId: activeTarget.effectId,
-            paramKey: activeTarget.property,
-            timeSeconds
-          });
-    return `${xForTime(timeSeconds)},${yForValue(value)}`;
-  }).join(" ");
-
-  useEffect(() => {
-    setSelectedIds((current) => current.filter((id) => propertyKeyframes.some((kf) => kf.id === id)));
-  }, [targetKey, propertyKeyframeIds]);
-
-  useEffect(() => {
-    draftLayerRef.current = draftLayer;
-  }, [draftLayer]);
-
-  useEffect(() => {
-    if (!dragPoint && !dragHandle) {
-      setDraftLayer(null);
-      draftLayerRef.current = null;
-    }
-  }, [layer.id, targetKey]);
-
-  useEffect(() => {
-    setInterpolationMenuOpen(false);
-  }, [activeKeyframe?.id, targetKey]);
-
-  function xForTime(timeSeconds: number) {
-    return graphPadding.left + ((timeSeconds - pan) / visibleDuration) * plot.width;
-  }
-
-  function yForValue(value: number) {
-    const progress =
-      (clamp(value, config.min, config.max) - config.min) / Math.max(0.0001, config.max - config.min);
-    return graphPadding.top + (1 - progress) * plot.height;
-  }
-
-  function pointToValue(clientX: number, clientY: number) {
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return { timeSeconds: 0, value: config.min };
-    const x = clamp(
-      ((clientX - rect.left) / rect.width) * graphSize.width,
-      graphPadding.left,
-      graphPadding.left + plot.width
-    );
-    const y = clamp(
-      ((clientY - rect.top) / rect.height) * graphSize.height,
-      graphPadding.top,
-      graphPadding.top + plot.height
-    );
-    return {
-      timeSeconds: snap(pan + ((x - graphPadding.left) / plot.width) * visibleDuration, 0.05),
-      value: snap(config.min + (1 - (y - graphPadding.top) / plot.height) * (config.max - config.min), config.step)
-    };
-  }
-
-  function setDraftFromUpdater(updater: (item: typeof layer) => typeof layer) {
-    setDraftLayer((current) => {
-      const next = updater(current ?? draftLayerRef.current ?? layer);
-      draftLayerRef.current = next;
-      return next;
-    });
-  }
-
-  function commitDraftLayer() {
-    const nextLayer = draftLayerRef.current;
-    if (!nextLayer) return;
-    onChange(() => nextLayer);
-    window.setTimeout(() => {
-      setDraftLayer(null);
-      draftLayerRef.current = null;
-    }, 120);
-  }
-
-  function getBezierHandlePoint(keyframe: TimelineKeyframeV2, handle: "in" | "out") {
-    const keyframeIndex = propertyKeyframes.findIndex((item) => item.id === keyframe.id);
-    const neighbor = handle === "in" ? propertyKeyframes[keyframeIndex - 1] : propertyKeyframes[keyframeIndex + 1];
-    if (!neighbor) return undefined;
-    const duration = Math.max(0.0001, Math.abs(keyframe.timeSeconds - neighbor.timeSeconds));
-    const valueDelta =
-      Number(handle === "in" ? keyframe.value : neighbor.value) -
-      Number(handle === "in" ? neighbor.value : keyframe.value);
-    const defaultHandle = handle === "in" ? { dx: -0.33, dy: -0.33 } : { dx: 0.33, dy: 0.33 };
-    const storedHandle = keyframe.temporal[handle] ?? defaultHandle;
-    return {
-      timeSeconds: keyframe.timeSeconds + storedHandle.dx * duration,
-      value: Number(keyframe.value) + storedHandle.dy * valueDelta,
-      keyframe,
-      neighbor,
-      storedHandle
-    };
-  }
-
-  function startHandleDrag(event: ReactPointerEvent<SVGCircleElement>, keyframe: TimelineKeyframeV2, handle: "in" | "out") {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    selectKeyframe(keyframe.id, false);
-    setDraftLayer(layer);
-    draftLayerRef.current = layer;
-    setDragHandle({ handle, id: keyframe.id, pointerId: event.pointerId });
-  }
-
-  function moveHandleDrag(event: ReactPointerEvent<SVGCircleElement>) {
-    if (!dragHandle || dragHandle.pointerId !== event.pointerId) return;
-    const keyframe = propertyKeyframes.find((item) => item.id === dragHandle.id);
-    const handlePoint = keyframe ? getBezierHandlePoint(keyframe, dragHandle.handle) : undefined;
-    if (!keyframe || !handlePoint) return;
-
-    const next = pointToValue(event.clientX, event.clientY);
-    const duration = Math.max(0.0001, Math.abs(keyframe.timeSeconds - handlePoint.neighbor.timeSeconds));
-    const valueDelta =
-      Number(dragHandle.handle === "in" ? keyframe.value : handlePoint.neighbor.value) -
-      Number(dragHandle.handle === "in" ? handlePoint.neighbor.value : keyframe.value);
-    const dx =
-      dragHandle.handle === "in"
-        ? clamp((next.timeSeconds - keyframe.timeSeconds) / duration, -0.98, -0.02)
-        : clamp((next.timeSeconds - keyframe.timeSeconds) / duration, 0.02, 0.98);
-    const dy = Math.abs(valueDelta) < 0.0001 ? 0 : clamp((next.value - Number(keyframe.value)) / valueDelta, -2, 2);
-
-    setDraftFromUpdater((item) =>
-      updateGraphTargetHandle(item, activeTarget, keyframe.id, dragHandle.handle, { dx, dy }, !event.altKey && keyframe.temporal.linked !== false)
-    );
-  }
-
-  function finishHandleDrag(event: ReactPointerEvent<SVGCircleElement>) {
-    if (!dragHandle || dragHandle.pointerId !== event.pointerId) return;
-    setDragHandle(null);
-    commitDraftLayer();
-  }
-
-  function selectKeyframe(keyframeId: string, additive: boolean) {
-    setSelectedIds((current) => {
-      if (!additive) return [keyframeId];
-      return current.includes(keyframeId)
-        ? current.filter((id) => id !== keyframeId)
-        : [...current, keyframeId];
-    });
-  }
-
-  function startPointDrag(event: ReactPointerEvent<SVGCircleElement>, keyframe: TimelineKeyframeV2) {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    selectKeyframe(keyframe.id, event.shiftKey);
-    onSeek(layer.startSeconds + keyframe.timeSeconds);
-    setDraftLayer(layer);
-    draftLayerRef.current = layer;
-    setDragPoint({ id: keyframe.id, pointerId: event.pointerId });
-  }
-
-  function movePointDrag(event: ReactPointerEvent<SVGCircleElement>) {
-    if (!dragPoint || dragPoint.pointerId !== event.pointerId) return;
-    const next = pointToValue(event.clientX, event.clientY);
-    setDraftFromUpdater((item) => updateGraphTargetKeyframe(item, activeTarget, dragPoint.id, next));
-  }
-
-  function finishPointDrag(event: ReactPointerEvent<SVGCircleElement>) {
-    if (!dragPoint || dragPoint.pointerId !== event.pointerId) return;
-    setDragPoint(null);
-    const nextLayer = draftLayerRef.current;
-    const movedKeyframe =
-      nextLayer && activeTarget.kind === "transform"
-        ? getTransformKeyframes(nextLayer, activeTarget.property).find((kf) => kf.id === dragPoint.id)
-        : nextLayer && activeTarget.kind === "effect"
-          ? getEffectParamKeyframes(nextLayer, activeTarget.effectId, activeTarget.property).find(
-              (kf) => kf.id === dragPoint.id
-            )
-          : undefined;
-    if (movedKeyframe) {
-      onSeek(layer.startSeconds + movedKeyframe.timeSeconds);
-    }
-    commitDraftLayer();
-  }
-
-  function updateSelectedKeyframe(patch: { timeSeconds?: number; value?: number }) {
-    if (!activeKeyframe) return;
-    onChange((item) => updateGraphTargetKeyframe(item, activeTarget, activeKeyframe.id, patch));
-    if (patch.timeSeconds !== undefined) {
-      onSeek(layer.startSeconds + patch.timeSeconds);
-    }
-  }
-
-  // --- Playhead keyframe controls for the active property (add / remove / step) ---
-  const keyframeAtPlayhead = propertyKeyframes.find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
-  const previousKeyframeTime = [...propertyKeyframes]
-    .reverse()
-    .find((kf) => kf.timeSeconds < layerTime - 0.025)?.timeSeconds;
-  const nextKeyframeTime = propertyKeyframes.find((kf) => kf.timeSeconds > layerTime + 0.025)?.timeSeconds;
-
-  function valueAtPlayhead(): number {
-    if (activeTarget.kind === "transform") {
-      const transform = evaluateTimelineTransform({
-        transform: layer.transform,
-        startSeconds: layer.startSeconds,
-        keyframes: layer.keyframes,
-        animations: layer.animations,
-        timeSeconds: layer.startSeconds + layerTime
-      });
-      return getTransformPropertyValue(transform, activeTarget.property);
-    }
-    return evaluateTimelineEffectParam({
-      animations: layer.animations,
-      baseValue: getEffectParamBaseValue(layer, activeTarget.effectId, activeTarget.property, activeTarget.min),
-      effectId: activeTarget.effectId,
-      paramKey: activeTarget.property,
-      timeSeconds: layerTime
-    });
-  }
-
-  function toggleKeyframeAtPlayhead() {
-    const value = valueAtPlayhead();
-    if (activeTarget.kind === "transform") {
-      onChange((item) => toggleTransformKeyframe(item, activeTarget.property, layerTime, value));
-    } else {
-      onChange((item) => toggleEffectParamKeyframe(item, activeTarget.effectId, activeTarget.property, layerTime, value));
-    }
-  }
-
-  return (
-    <div className="graph-editor">
-      <div className="panel-heading">
-        <h2>
-          <SlidersHorizontal size={15} />
-          Graph Editor
-        </h2>
-        <span className={`badge badge--${propertyKeyframes.length ? "lime" : "muted"}`}>{propertyKeyframes.length}</span>
-      </div>
-      <div className="graph-property-tabs" aria-label="Graph property">
-        {graphTargets.map((item) => (
-          <button
-            className={graphTargetKey(item) === graphTargetKey(activeTarget) ? "is-active" : ""}
-            key={graphTargetKey(item)}
-            type="button"
-            onClick={() => {
-              setTargetKey(graphTargetKey(item));
-              setSelectedIds([]);
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-      <div className="graph-editor-kf-nav" aria-label="Keyframe navigation">
-        <button
-          type="button"
-          title="Previous keyframe"
-          disabled={previousKeyframeTime === undefined}
-          onClick={() => previousKeyframeTime !== undefined && onSeek(layer.startSeconds + previousKeyframeTime)}
-        >
-          <ChevronLeft size={15} />
-        </button>
-        <button
-          type="button"
-          className={`graph-editor-kf-toggle${keyframeAtPlayhead ? " is-active" : ""}`}
-          title={keyframeAtPlayhead ? `Remove ${activeTarget.label} keyframe` : `Add ${activeTarget.label} keyframe`}
-          onClick={toggleKeyframeAtPlayhead}
-        >
-          <Diamond size={13} />
-          <span>{keyframeAtPlayhead ? "Remove" : "Add"} key</span>
-        </button>
-        <button
-          type="button"
-          title="Next keyframe"
-          disabled={nextKeyframeTime === undefined}
-          onClick={() => nextKeyframeTime !== undefined && onSeek(layer.startSeconds + nextKeyframeTime)}
-        >
-          <ChevronRight size={15} />
-        </button>
-        <span className="graph-editor-kf-count">
-          {activeKeyframeIndex >= 0 ? `${activeKeyframeIndex + 1} / ${propertyKeyframes.length}` : `${propertyKeyframes.length}`}
-        </span>
-      </div>
-      <div className="graph-editor-frame">
-        <svg
-          className="graph-editor-svg"
-          ref={svgRef}
-          role="img"
-          viewBox={`0 0 ${graphSize.width} ${graphSize.height}`}
-        >
-          <rect
-            className="graph-editor-plot"
-            x={graphPadding.left}
-            y={graphPadding.top}
-            width={plot.width}
-            height={plot.height}
-            rx="6"
-          />
-          {[0, 0.25, 0.5, 0.75, 1].map((tick) => (
-            <line
-              className="graph-editor-grid-line"
-              key={`h_${tick}`}
-              x1={graphPadding.left}
-              x2={graphPadding.left + plot.width}
-              y1={graphPadding.top + plot.height * tick}
-              y2={graphPadding.top + plot.height * tick}
-            />
-          ))}
-          {[0, 0.25, 0.5, 0.75, 1].map((tick) => (
-            <line
-              className="graph-editor-grid-line"
-              key={`v_${tick}`}
-              x1={graphPadding.left + plot.width * tick}
-              x2={graphPadding.left + plot.width * tick}
-              y1={graphPadding.top}
-              y2={graphPadding.top + plot.height}
-            />
-          ))}
-          <polyline className="graph-editor-curve" points={curvePoints} />
-          {layerTime >= pan && layerTime <= viewEnd ? (
-            <line
-              className="graph-editor-playhead"
-              x1={xForTime(layerTime)}
-              x2={xForTime(layerTime)}
-              y1={graphPadding.top}
-              y2={graphPadding.top + plot.height}
-            />
-          ) : null}
-          {propertyKeyframes.map((keyframe) => {
-            if (keyframe.timeSeconds < pan || keyframe.timeSeconds > viewEnd) return null;
-            const selected = selectedIds.includes(keyframe.id);
-            return (
-              <circle
-                className={`graph-editor-point ${selected ? "is-selected" : ""}`}
-                cx={xForTime(keyframe.timeSeconds)}
-                cy={yForValue(Number(keyframe.value))}
-                key={keyframe.id}
-                r={selected ? 5 : 4}
-                tabIndex={0}
-                onClick={(event) => {
-                  event.preventDefault();
-                  selectKeyframe(keyframe.id, event.shiftKey);
-                  onSeek(layer.startSeconds + keyframe.timeSeconds);
-                }}
-                onPointerCancel={finishPointDrag}
-                onPointerDown={(event) => startPointDrag(event, keyframe)}
-                onPointerMove={movePointDrag}
-                onPointerUp={finishPointDrag}
-              />
-            );
-          })}
-          {activeKeyframe ? (
-            <>
-              {(["in", "out"] as const).map((handle) => {
-                const point = getBezierHandlePoint(activeKeyframe, handle);
-                if (!point || point.timeSeconds < pan || point.timeSeconds > viewEnd) return null;
-                return (
-                  <g className="graph-editor-handle" key={`${activeKeyframe.id}_${handle}`}>
-                    <line
-                      x1={xForTime(activeKeyframe.timeSeconds)}
-                      x2={xForTime(point.timeSeconds)}
-                      y1={yForValue(Number(activeKeyframe.value))}
-                      y2={yForValue(point.value)}
-                    />
-                    <circle
-                      className={
-                        dragHandle?.id === activeKeyframe.id && dragHandle.handle === handle
-                          ? "is-dragging"
-                          : ""
-                      }
-                      cx={xForTime(point.timeSeconds)}
-                      cy={yForValue(point.value)}
-                      r={4}
-                      onPointerCancel={finishHandleDrag}
-                      onPointerDown={(event) => startHandleDrag(event, activeKeyframe, handle)}
-                      onPointerMove={moveHandleDrag}
-                      onPointerUp={finishHandleDrag}
-                    />
-                  </g>
-                );
-              })}
-            </>
-          ) : null}
-        </svg>
-      </div>
-      <div className="graph-editor-controls">
-        <label>
-          <span>Zoom</span>
-          <input
-            min={1}
-            max={8}
-            step={0.25}
-            type="range"
-            value={view.zoom}
-            onChange={(event) =>
-              setView((current) => ({ ...current, zoom: Number(event.target.value) }))
-            }
-          />
-        </label>
-        <label>
-          <span>Pan</span>
-          <input
-            min={0}
-            max={maxPan}
-            step={0.05}
-            type="range"
-            value={pan}
-            onChange={(event) =>
-              setView((current) => ({ ...current, pan: Number(event.target.value) }))
-            }
-          />
-        </label>
-      </div>
-      {activeKeyframe ? (
-        <div className="graph-editor-exact">
-          <label>
-            <span>Time</span>
-            <ScrubNumberInput
-              min={0}
-              max={displayLayer.durationSeconds}
-              step={0.05}
-              value={activeKeyframe.timeSeconds}
-              onScrubChange={(next) => updateSelectedKeyframe({ timeSeconds: next })}
-              onChange={(event) => updateSelectedKeyframe({ timeSeconds: Number(event.target.value) })}
-            />
-          </label>
-          <label>
-            <span>Value</span>
-            <ScrubNumberInput
-              min={config.min}
-              max={config.max}
-              step={config.step}
-              value={Number(activeKeyframe.value)}
-              onScrubChange={(next) => updateSelectedKeyframe({ value: next })}
-              onChange={(event) => updateSelectedKeyframe({ value: Number(event.target.value) })}
-            />
-          </label>
-          <button
-            className={activeKeyframe.temporal.linked !== false ? "is-active" : ""}
-            type="button"
-            title={activeKeyframe.temporal.linked !== false ? "Linked handles" : "Split handles"}
-            onClick={() =>
-              onChange((item) =>
-                setGraphTargetLinked(
-                  item,
-                  activeTarget,
-                  activeKeyframe.id,
-                  activeKeyframe.temporal.linked === false
-                )
-              )
-            }
-          >
-            {activeKeyframe.temporal.linked !== false ? "Linked" : "Split"}
-          </button>
-          <div
-            className={`graph-interpolation-control ${interpolationMenuOpen ? "is-open" : ""}`}
-            aria-label="Interpolation"
-            onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) {
-                setInterpolationMenuOpen(false);
-              }
-            }}
-          >
-            <span>{selectedIds.length > 1 ? `${selectedIds.length} selected` : "Interpolation"}</span>
-            <button
-              className="graph-interpolation-trigger"
-              type="button"
-              onClick={() => setInterpolationMenuOpen((open) => !open)}
-            >
-              <span>{interpolationLabel(activeKeyframe.interpolation)}</span>
-              <ChevronDown size={13} />
-            </button>
-            {interpolationMenuOpen ? (
-              <div className="graph-interpolation-menu">
-                {interpolationOptions.map((option) => (
-                  <button
-                    className={activeKeyframe.interpolation === option.value ? "is-active" : ""}
-                    key={option.value}
-                    type="button"
-                    onClick={() => {
-                      onChange((item) =>
-                        setGraphTargetInterpolation(item, activeTarget, activeKeyframe.id, option.value)
-                      );
-                      setInterpolationMenuOpen(false);
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : (
-        <div className="empty-mini">
-          <Diamond size={16} />
-          Add or select a {config.label} keyframe
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // TransformPanel — registered inspector panel
@@ -778,27 +181,53 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
     <>
       <InspectorSection title="Transform" icon={<Move size={13} />} collapsible={false}>
       <div className="control-grid">
-        <NumberControl
-          icon={<MoveHorizontal size={14} />}
-          keyframe={transformKeyframe("transform.position.x")}
-          label="X"
-          value={animatedTransform.position.x}
-          min={0}
-          max={100}
-          step={1}
-          onReset={() => changeTransformProperty("transform.position.x", 50)}
-          onChange={(value) => changeTransformProperty("transform.position.x", value)}
-        />
-        <NumberControl
-          icon={<MoveVertical size={14} />}
-          keyframe={transformKeyframe("transform.position.y")}
-          label="Y"
-          value={animatedTransform.position.y}
-          min={0}
-          max={100}
-          step={1}
-          onReset={() => changeTransformProperty("transform.position.y", defaultPositionY(layer.type))}
-          onChange={(value) => changeTransformProperty("transform.position.y", value)}
+        <PropertyRowGroup
+          icon={<Move size={14} />}
+          label="Position"
+          fields={[
+            {
+              tag: "X",
+              keyframe: transformKeyframe("transform.position.x"),
+              onReset: () => changeTransformProperty("transform.position.x", 50),
+              value: (
+                <ScrubNumberInput
+                  aria-label="Position X"
+                  className="effect-slider-number"
+                  inputMode="decimal"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={animatedTransform.position.x.toFixed(0)}
+                  onScrubChange={(value) => changeTransformProperty("transform.position.x", clamp(value, 0, 100))}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (Number.isFinite(next)) changeTransformProperty("transform.position.x", clamp(next, 0, 100));
+                  }}
+                />
+              )
+            },
+            {
+              tag: "Y",
+              keyframe: transformKeyframe("transform.position.y"),
+              onReset: () => changeTransformProperty("transform.position.y", defaultPositionY(layer.type)),
+              value: (
+                <ScrubNumberInput
+                  aria-label="Position Y"
+                  className="effect-slider-number"
+                  inputMode="decimal"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={animatedTransform.position.y.toFixed(0)}
+                  onScrubChange={(value) => changeTransformProperty("transform.position.y", clamp(value, 0, 100))}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (Number.isFinite(next)) changeTransformProperty("transform.position.y", clamp(next, 0, 100));
+                  }}
+                />
+              )
+            }
+          ]}
         />
         <NumberControl
           icon={<Maximize2 size={14} />}
@@ -866,27 +295,53 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
 
       <InspectorSection title="3D Tilt" icon={<Box size={13} />} defaultOpen={false}>
       <div className="control-grid">
-        <NumberControl
+        <PropertyRowGroup
           icon={<Rotate3d size={14} />}
-          keyframe={transformKeyframe("transform.rotateX")}
-          label="Rotate X"
-          value={animatedTransform.rotateX ?? 0}
-          min={-180}
-          max={180}
-          step={1}
-          onReset={() => changeTransformProperty("transform.rotateX", 0)}
-          onChange={(value) => changeTransformProperty("transform.rotateX", value)}
-        />
-        <NumberControl
-          icon={<Rotate3d size={14} />}
-          keyframe={transformKeyframe("transform.rotateY")}
-          label="Rotate Y"
-          value={animatedTransform.rotateY ?? 0}
-          min={-180}
-          max={180}
-          step={1}
-          onReset={() => changeTransformProperty("transform.rotateY", 0)}
-          onChange={(value) => changeTransformProperty("transform.rotateY", value)}
+          label="Tilt"
+          fields={[
+            {
+              tag: "X",
+              keyframe: transformKeyframe("transform.rotateX"),
+              onReset: () => changeTransformProperty("transform.rotateX", 0),
+              value: (
+                <ScrubNumberInput
+                  aria-label="Rotate X"
+                  className="effect-slider-number"
+                  inputMode="decimal"
+                  min={-180}
+                  max={180}
+                  step={1}
+                  value={(animatedTransform.rotateX ?? 0).toFixed(0)}
+                  onScrubChange={(value) => changeTransformProperty("transform.rotateX", clamp(value, -180, 180))}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (Number.isFinite(next)) changeTransformProperty("transform.rotateX", clamp(next, -180, 180));
+                  }}
+                />
+              )
+            },
+            {
+              tag: "Y",
+              keyframe: transformKeyframe("transform.rotateY"),
+              onReset: () => changeTransformProperty("transform.rotateY", 0),
+              value: (
+                <ScrubNumberInput
+                  aria-label="Rotate Y"
+                  className="effect-slider-number"
+                  inputMode="decimal"
+                  min={-180}
+                  max={180}
+                  step={1}
+                  value={(animatedTransform.rotateY ?? 0).toFixed(0)}
+                  onScrubChange={(value) => changeTransformProperty("transform.rotateY", clamp(value, -180, 180))}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (Number.isFinite(next)) changeTransformProperty("transform.rotateY", clamp(next, -180, 180));
+                  }}
+                />
+              )
+            }
+          ]}
         />
         <NumberControl
           icon={<Box size={14} />}
@@ -908,15 +363,18 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
         icon={<SlidersHorizontal size={13} />}
         count={keyframeCount}
         active={keyframeCount > 0}
-        defaultOpen={false}
       >
-        <TransformGraphEditor
-          currentTime={currentTime}
-          layer={layer}
-          layerTime={layerTime}
-          onChange={onChange}
-          onSeek={seek}
-        />
+        {/* The interactive graph moved to the bottom workspace (Shift+G) — a full
+            canvas surface beats the old 320px SVG buried in this panel. */}
+        <button
+          className="graph-open-button"
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent("lumio:open-graph-editor"))}
+        >
+          <SlidersHorizontal size={13} />
+          Open Graph Editor
+          <kbd>Shift+G</kbd>
+        </button>
       </InspectorSection>
 
       <InspectorSection
@@ -936,6 +394,8 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
             </button>
           ))}
         </div>
+        {/* Typewriter SPEED moved to the Effects subtab: an applied Typewriter now shows as an
+            effect card there with the "Reveal duration (s)" control (user request 2026-07-12). */}
       </InspectorSection>
 
       <InspectorSection

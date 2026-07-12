@@ -7,4 +7,12 @@
  *
  * Keep in sync with `layerToolEffectHandlers` in `layer-effect-handlers.ts`.
  */
-export const READY_TOOL_SLUGS: readonly string[] = ["auto-captions", "extract-person", "smart-3d-follow-text"];
+export const READY_TOOL_SLUGS: readonly string[] = [
+  "auto-captions",
+  "extract-person",
+  "smart-3d-follow-text",
+  "remove-background",
+  "text-behind-person",
+  "ai-roto",
+  "remove-person"
+];

@@ -3,13 +3,15 @@ import {
   buildCapabilityIndex,
   buildPlannerUserContent,
   classifyToolCost,
+  computeLayerOrdinals,
   extractPlanJson,
   getSkill,
   getSkillTaskKind,
   logUnsupported,
   PLANNER_SYSTEM_PROMPT,
   recordEffectDemand,
-  recordToolDemand
+  recordToolDemand,
+  type LayerOrdinal
 } from "@lumio-by-aelivion/shared";
 import { loadByoKey } from "../byok";
 import { isOllamaLocalActive, loadOllamaConfig, streamOllamaChat } from "../ollama";
@@ -33,6 +35,9 @@ interface RawPlan {
   steps?: unknown;
   confidence?: unknown;
   notes?: unknown;
+  /** B5 final-batch contract — the model marks a batch as completing the request. */
+  final?: unknown;
+  finalSummary?: unknown;
 }
 
 interface StreamedPlan {
@@ -58,7 +63,46 @@ function stepId(): string {
 export class LlmPlanner implements PlannerProvider {
   readonly id = "llm";
 
+  /** B5 slice diffs — the previous iteration's slice, keyed per run (prompt + composition). */
+  private lastSlice: { key: string; layers: Map<string, string> } | null = null;
+
   constructor(private readonly fallback: PlannerProvider) {}
+
+  /**
+   * B5 — loop economy: iteration 1 of an agent run sends the full bounded slice; iterations 2+
+   * (detected by the loop's "ACTION RESULT:" turns in history) send only a DIFF — added/changed
+   * layers in full, unchanged ones as ref+id stubs. Cuts the repeated per-iteration payload.
+   */
+  private buildSliceContext(prompt: string, ctx: PlannerContext): string {
+    const { header, entries } = buildSliceParts(ctx, prompt);
+    const continuation = (ctx.history ?? []).some((turn) => turn.role === "ai" && turn.text.startsWith("ACTION RESULT:"));
+    const key = `${prompt}::${ctx.composition.id}`;
+    const current = new Map(entries.map((entry) => [entry.id, entry.json]));
+
+    if (!continuation || !this.lastSlice || this.lastSlice.key !== key) {
+      this.lastSlice = { key, layers: current };
+      return `${header}\nRELEVANT LAYERS (slice only — not the whole project):\n[${entries.map((entry) => entry.json).join(",")}]`;
+    }
+
+    const previous = this.lastSlice.layers;
+    this.lastSlice = { key, layers: current };
+    const added = entries.filter((entry) => !previous.has(entry.id));
+    const changed = entries.filter((entry) => previous.has(entry.id) && previous.get(entry.id) !== entry.json);
+    const removedIds = [...previous.keys()].filter((id) => !current.has(id));
+    const unchanged = entries.filter((entry) => previous.get(entry.id) === entry.json);
+    return [
+      header,
+      "SLICE DIFF since your last action (unchanged layers appear as ref+id stubs — every other field is the same as the last full slice; their ids stay valid targets):",
+      added.length ? `ADDED: [${added.map((entry) => entry.json).join(",")}]` : "",
+      changed.length ? `CHANGED: [${changed.map((entry) => entry.json).join(",")}]` : "",
+      removedIds.length ? `REMOVED ids: ${removedIds.join(", ")}` : "",
+      unchanged.length
+        ? `UNCHANGED: [${unchanged.map((entry) => JSON.stringify({ ...(entry.ref ? { ref: entry.ref } : {}), id: entry.id })).join(",")}]`
+        : ""
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
 
   async plan(prompt: string, ctx: PlannerContext, onEvent?: PlanEventHandler): Promise<AiPlan> {
     const index = buildCapabilityIndex();
@@ -67,7 +111,7 @@ export class LlmPlanner implements PlannerProvider {
     onEvent?.({ type: "phase", index: 0 });
     const byo = loadByoKey();
     const capabilities = index.describeForPlanner();
-    const context = summarizeContext(ctx);
+    const context = this.buildSliceContext(prompt, ctx);
     const history = (ctx.history ?? []).slice(-8);
     const images = ctx.referenceImages?.length ? ctx.referenceImages : undefined;
     const payload = {
@@ -79,7 +123,9 @@ export class LlmPlanner implements PlannerProvider {
       // GP4 — "Best Quality" opts into the shared paid Claude hop (server uses it only if a key is set).
       ...(ctx.memory?.qualityMode === "best" ? { premium: true } : {}),
       // Reference image(s) → routed server-side to a vision-capable provider.
-      ...(images ? { images } : {})
+      ...(images ? { images } : {}),
+      // Voice session → spoken-conversation register (short, varied, no lists).
+      ...(ctx.voiceMode ? { voiceMode: true } : {})
     };
     onEvent?.({ type: "phase", index: 1 });
     onEvent?.({ type: "phase", index: 2 });
@@ -92,7 +138,12 @@ export class LlmPlanner implements PlannerProvider {
     const localConfig = ctx.useLocalLlm && isOllamaLocalActive() ? loadOllamaConfig() : null;
     if (localConfig) {
       try {
-        streamed = await this.streamLocal(buildPlannerUserContent({ prompt, capabilities, context, history }), images, localConfig, onEvent);
+        streamed = await this.streamLocal(
+          buildPlannerUserContent({ prompt, capabilities, context, history, ...(ctx.voiceMode ? { voiceMode: true } : {}) }),
+          images,
+          localConfig,
+          onEvent
+        );
       } catch {
         streamed = null;
       }
@@ -127,7 +178,12 @@ export class LlmPlanner implements PlannerProvider {
     }
 
     logUnsupported({ prompt, missingCapability: "llm-no-valid-steps", acceptedApproximation: false });
-    return this.fallback.plan(prompt, ctx, onEvent);
+    // The model DID answer but none of its steps survived validation (even after one repair). Don't
+    // silently pass off the keyword fallback as if it were the AI plan — mark it and say so, same as
+    // the unavailable path, so the user knows this result is offline best-effort, not the model's work.
+    const plan = await this.fallback.plan(prompt, ctx, onEvent);
+    const nudge = "The AI couldn't produce a valid edit for this, so I planned it offline (keyword match) — try rephrasing, or add your own key (🔑) / turn on Pro for a stronger model.";
+    return plan.notes.includes(nudge) ? plan : { ...plan, notes: [...plan.notes, nudge] };
   }
 
   /**
@@ -303,7 +359,11 @@ export class LlmPlanner implements PlannerProvider {
         confidencePercent,
         notes,
         ...(streamed.reasoning && streamed.reasoning.trim() ? { reasoning: streamed.reasoning } : {}),
-        ...(streamed.provider ? { provider: streamed.provider } : {})
+        ...(streamed.provider ? { provider: streamed.provider } : {}),
+        // B5 final-batch contract — but only when validation dropped nothing: if steps were
+        // dropped, the "final" claim covered work that won't run, so the loop must verify.
+        ...(raw.final === true && dropped.length === 0 ? { final: true } : {}),
+        ...(typeof raw.finalSummary === "string" && raw.finalSummary.trim() ? { finalSummary: raw.finalSummary.trim() } : {})
       },
       dropped
     };
@@ -404,6 +464,32 @@ function validateSteps(
         summary: summary || "Ask for clarification",
         cost: actionCost()
       });
+      continue;
+    }
+
+    // Conversational answer — the model decided the message needs no edit/tool/skill. Carried as a
+    // step so it flows through the same plan contract; the panel renders it as a chat reply.
+    if (candidate.kind === "answer" && typeof candidate.text === "string" && candidate.text.trim()) {
+      steps.push({
+        id: stepId(),
+        kind: "answer",
+        text: candidate.text.trim(),
+        summary: summary || "Answer the user",
+        cost: actionCost()
+      });
+      continue;
+    }
+
+    // Inspect — the agent reads a capability's full doc client-side before using it (free, no
+    // mutation). Resolved by the AgentLoop; never reaches the executor.
+    if (candidate.kind === "inspect" && typeof candidate.capabilityId === "string" && candidate.capabilityId.trim()) {
+      steps.push({
+        id: stepId(),
+        kind: "inspect",
+        capabilityId: candidate.capabilityId.trim(),
+        summary: summary || `Reading tool: ${candidate.capabilityId.trim()}`,
+        cost: actionCost()
+      });
     }
   }
   return { steps, dropped };
@@ -466,7 +552,10 @@ const SLICE_LAYER_CAP = 12;
  * blobs, asset binaries, and off-screen layers are all omitted. This is the
  * 80–95% payload reduction vs. serialising the full `TimelineComposition`.
  */
-function summarizeContext(ctx: PlannerContext): string {
+function buildSliceParts(
+  ctx: PlannerContext,
+  prompt: string
+): { header: string; entries: { id: string; ref?: string | undefined; json: string }[] } {
   const allLayers = ctx.composition.tracks.flatMap((track) => track.layers);
   const byType = allLayers.reduce<Record<string, number>>((acc, layer) => {
     acc[layer.type] = (acc[layer.type] ?? 0) + 1;
@@ -476,7 +565,14 @@ function summarizeContext(ctx: PlannerContext): string {
     .map(([type, count]) => `${count} ${type}`)
     .join(", ");
 
-  const slice = relevantLayers(ctx).slice(0, SLICE_LAYER_CAP).map((layer) => trimLayer(layer));
+  const ordinals = computeLayerOrdinals(ctx.composition);
+  const entries = relevantLayers(ctx, ordinals, promptNamedOrdinals(prompt))
+    .slice(0, SLICE_LAYER_CAP)
+    .map((layer) => ({
+      id: layer.id,
+      ref: ordinals.get(layer.id)?.label,
+      json: JSON.stringify(trimLayer(layer, ordinals.get(layer.id)))
+    }));
 
   // P10 — tell the model whether this message continues the previous request or
   // starts a new one, so it doesn't assume an edit targets a prior layer.
@@ -487,10 +583,29 @@ function summarizeContext(ctx: PlannerContext): string {
         ? "Intent: this is a NEW request — do NOT assume it edits a previously created layer; create new layers as needed."
         : "";
 
+  // Track inventory with per-type ordinals (V1/V2/A1… in array order) — real ids the model can
+  // use for moveLayer.trackId / deleteTrack. Without this it invented ids like "video_3" (real
+  // transcript: three failed moveLayer attempts for "put clip 1 in video layer 3").
+  const typeCounters: Record<string, number> = {};
+  const trackList = ctx.composition.tracks
+    .map((track) => {
+      typeCounters[track.type] = (typeCounters[track.type] ?? 0) + 1;
+      return `${track.type[0]!.toUpperCase()}${typeCounters[track.type]}=${track.id} (${track.type})`;
+    })
+    .join(", ");
+
   const header = [
     `Playhead at ${ctx.nowSeconds.toFixed(2)}s.`,
     allLayers.length ? `Project totals: ${counts} (${allLayers.length} layers).` : "Empty timeline.",
+    trackList
+      ? `Tracks: ${trackList} — "video track/layer N" = VN; use these ids for moveLayer.trackId. The FIRST listed track draws ON TOP (reorderTrack position "top" = first). If the named track doesn't exist yet, createTrack first (its result returns the new id).`
+      : "",
     ctx.selection.length ? `Selected: ${ctx.selection.length} layer(s).` : "Nothing selected.",
+    // Clip targeting: each slice layer carries a `ref` label (e.g. "clip 4"). To target a clip,
+    // set the step's params.layerId to that layer's id. "clip N" = the slice layer whose ref is
+    // "clip N". If the user names NO clip, target the selected layer, else the clip under the
+    // playhead — you may omit params.layerId to accept that default.
+    "Clip targeting: use a slice layer's `id` as params.layerId; 'clip N' = the layer whose `ref` is 'clip N'; if no clip is named, the editor targets the selected/playhead clip by default.",
     intentHint,
     // P11 — learned preferences (a steer to fill defaults; never a hard rule).
     ctx.memoryNote ? `Memory: ${ctx.memoryNote}` : ""
@@ -499,37 +614,86 @@ function summarizeContext(ctx: PlannerContext): string {
     .join(" ");
 
   // The slice carries real layer ids the planner may target directly.
-  return `${header}\nRELEVANT LAYERS (slice only — not the whole project):\n${JSON.stringify(slice)}`;
+  return { header, entries };
 }
 
-/** Selected layers first, then layers playing at the playhead; de-duplicated, order-stable. */
-function relevantLayers(ctx: PlannerContext) {
+const ORDINAL_WORDS: Record<string, number> = {
+  first: 1,
+  second: 2,
+  third: 3,
+  fourth: 4,
+  fifth: 5,
+  sixth: 6,
+  seventh: 7,
+  eighth: 8,
+  ninth: 9,
+  tenth: 10
+};
+
+/**
+ * Every clip ordinal the prompt names explicitly ("clip 1", "the 2nd clip", "third clip").
+ * These layers MUST ride in the slice: a real incident (2026-07-10, "detect beat from clip 2
+ * and apply it on clip 1") had clip 1 outside the selected+playhead slice — the model, holding
+ * only clip 2's id, split the audio while its summary claimed clip 1.
+ */
+function promptNamedOrdinals(prompt: string): Set<number> {
+  const text = prompt.toLowerCase();
+  const named = new Set<number>();
+  for (const match of text.matchAll(/\b(?:clip|layer)\s*#?(\d{1,3})\b/g)) {
+    named.add(Number(match[1]));
+  }
+  for (const match of text.matchAll(/\b(\d{1,3})(?:st|nd|rd|th)\s+(?:clip|layer)\b/g)) {
+    named.add(Number(match[1]));
+  }
+  for (const match of text.matchAll(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:clip|layer)\b/g)) {
+    named.add(ORDINAL_WORDS[match[1]!]!);
+  }
+  return named;
+}
+
+/** Prompt-named clips first (they can never be capped out), then selected, then playhead-active. */
+function relevantLayers(
+  ctx: PlannerContext,
+  ordinals: Map<string, LayerOrdinal>,
+  namedOrdinals: Set<number>
+) {
   const all = ctx.composition.tracks.flatMap((track) => track.layers);
   const selected = new Set(ctx.selection);
   const now = ctx.nowSeconds;
   const isActive = (layer: { startSeconds: number; durationSeconds: number }) =>
     now >= layer.startSeconds && now <= layer.startSeconds + layer.durationSeconds;
+  const isNamed = (layerId: string) => {
+    const ordinal = ordinals.get(layerId)?.ordinal;
+    return ordinal !== undefined && namedOrdinals.has(ordinal);
+  };
 
-  const picked = all.filter((layer) => selected.has(layer.id) || isActive(layer));
-  // If nothing is selected and the playhead is over empty space, fall back to the first few.
+  const named = all.filter((layer) => isNamed(layer.id));
+  const rest = all.filter((layer) => !isNamed(layer.id) && (selected.has(layer.id) || isActive(layer)));
+  const picked = [...named, ...rest];
+  // If nothing is named/selected and the playhead is over empty space, fall back to the first few.
   return picked.length > 0 ? picked : all.slice(0, SLICE_LAYER_CAP);
 }
 
 /** Keep only planner-relevant fields; drop heavy/irrelevant data and trim text. */
-function trimLayer(layer: {
-  id: string;
-  type: string;
-  name: string;
-  startSeconds: number;
-  durationSeconds: number;
-  text?: string | undefined;
-  fontSize?: number | undefined;
-  color?: string | undefined;
-  effects?: { id: string; type: string }[];
-}) {
+function trimLayer(
+  layer: {
+    id: string;
+    type: string;
+    name: string;
+    startSeconds: number;
+    durationSeconds: number;
+    text?: string | undefined;
+    fontSize?: number | undefined;
+    color?: string | undefined;
+    effects?: { id: string; type: string }[];
+  },
+  ordinal?: LayerOrdinal | undefined
+) {
   return {
     id: layer.id,
     type: layer.type,
+    // Human ordinal ("clip 4") so the planner can resolve "clip N" to this layer's id.
+    ...(ordinal ? { ref: ordinal.label } : {}),
     name: layer.name.slice(0, 40),
     start: Number(layer.startSeconds.toFixed(2)),
     duration: Number(layer.durationSeconds.toFixed(2)),

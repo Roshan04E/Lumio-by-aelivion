@@ -587,8 +587,42 @@ export function createBoxMask(shape: "rectangle" | "ellipse", x0: number, y0: nu
   return createMask(shape, rectPoints(x0, y0, x1, y1), `${shape === "ellipse" ? "Ellipse" : "Rectangle"} ${index}`);
 }
 
-/** A centered default mask covering ~60% of the comp, for the "+ Rectangle/Ellipse" inspector buttons. */
-export function createDefaultMask(shape: "rectangle" | "ellipse", width: number, height: number, index: number): Mask {
+/**
+ * The centered rect a `contain` source actually paints into (layer-local comp px) — the comp box
+ * shrunk on one axis to the source's natural aspect. Null when unknown or effectively full-frame.
+ * Used to size default masks (and anything else that should hug the CONTENT, not the comp box —
+ * e.g. a letterboxed vector graphic).
+ */
+export function containContentRect(
+  compWidth: number,
+  compHeight: number,
+  sourceAspect: number | undefined
+): { x: number; y: number; width: number; height: number } | null {
+  if (!sourceAspect || sourceAspect <= 0 || compWidth <= 0 || compHeight <= 0) return null;
+  const frameAspect = compWidth / compHeight;
+  let w = compWidth;
+  let h = compHeight;
+  if (sourceAspect > frameAspect) h = compWidth / sourceAspect;
+  else w = compHeight * sourceAspect;
+  if (w / compWidth >= 0.999 && h / compHeight >= 0.999) return null;
+  return { x: (compWidth - w) / 2, y: (compHeight - h) / 2, width: w, height: h };
+}
+
+/**
+ * A centered default mask, for the "+ Rectangle/Ellipse" inspector buttons / Shift+M. Covers ~60%
+ * of the comp — or, when `contentRect` is passed (a `contain` layer's painted rect, see
+ * {@link containContentRect}), hugs that rect instead so the default mask lands ON the artwork.
+ */
+export function createDefaultMask(
+  shape: "rectangle" | "ellipse",
+  width: number,
+  height: number,
+  index: number,
+  contentRect?: { x: number; y: number; width: number; height: number } | null
+): Mask {
+  if (contentRect) {
+    return createBoxMask(shape, contentRect.x, contentRect.y, contentRect.x + contentRect.width, contentRect.y + contentRect.height, index);
+  }
   const mw = width * 0.6;
   const mh = height * 0.6;
   const x0 = (width - mw) / 2;

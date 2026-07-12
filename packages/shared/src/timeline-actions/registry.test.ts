@@ -89,6 +89,38 @@ const registry = createTimelineActionRegistry();
   }
 }
 
+// --- Acceptance: reorderTrack "move V3 to the top" ---------------------------
+{
+  const base = fixture();
+  // Grow to 3 tracks so there is a real stack to reorder.
+  const withOne = registry.execute("createTrack", { type: "video", name: "Extra A" }, ctxFor(base));
+  const afterOne = withOne.ok ? withOne.result.after : base;
+  const withTwo = registry.execute("createTrack", { type: "video", name: "Extra B" }, ctxFor(afterOne));
+  const stacked = withTwo.ok ? withTwo.result.after : afterOne;
+  const last = stacked.tracks[stacked.tracks.length - 1]!;
+
+  const outcome = registry.execute("reorderTrack", { trackId: last.id, position: "top" }, ctxFor(stacked));
+  check("reorderTrack to top succeeds", outcome.ok);
+  if (outcome.ok) {
+    check("reorderTrack: track is now first (drawn on top)", outcome.result.after.tracks[0]?.id === last.id);
+    check("reorderTrack: no track lost", outcome.result.after.tracks.length === stacked.tracks.length);
+    check("reorderTrack summary names the track", outcome.result.summary.includes(last.name));
+    check("reorderTrack undo round-trips", equal(applyPatch(outcome.result.after, outcome.result.undoPatch), stacked));
+    check("reorderTrack forward patch matches", equal(applyPatch(stacked, outcome.result.patch), outcome.result.after));
+  }
+
+  const toIndex = registry.execute("reorderTrack", { trackId: stacked.tracks[0]!.id, toIndex: 2 }, ctxFor(stacked));
+  check("reorderTrack toIndex succeeds", toIndex.ok);
+  if (toIndex.ok) {
+    check("reorderTrack: toIndex lands at index 2", toIndex.result.after.tracks[2]?.id === stacked.tracks[0]!.id);
+  }
+
+  const both = registry.execute("reorderTrack", { trackId: last.id, toIndex: 0, position: "top" }, ctxFor(stacked));
+  check("reorderTrack rejects toIndex AND position", !both.ok);
+  const missing = registry.execute("reorderTrack", { trackId: "no_such_track", position: "top" }, ctxFor(stacked));
+  check("reorderTrack rejects unknown track", !missing.ok);
+}
+
 // --- Shape primitive params -------------------------------------------------
 {
   const base = fixture();

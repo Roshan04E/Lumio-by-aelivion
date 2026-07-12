@@ -35,17 +35,42 @@ function maskCenter(points: Mask["points"]): { x: number; y: number } {
   return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 }
 
+/**
+ * The LAYER transform a media matte must ride (see `get`): center position in percent of comp
+ * (50/50 = centered), uniform scale, rotation in degrees — the same resolved values the composite
+ * quad uses. Text/shape layers pass none (their masks are comp-fixed by design).
+ */
+export interface MatteLayerTransform {
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+}
+
 function renderMaskAlpha(
   ctx: Ctx2D,
   invertCtx: Ctx2D,
   mask: Mask,
   w: number,
   h: number,
+  layerT?: MatteLayerTransform,
 ): Ctx2D | null {
   const d = maskShapeToPathD(mask);
   if (!d) return null;
   ctx.clearRect(0, 0, w, h);
   ctx.save();
+  // MEDIA masks are layer-attached (AE/Premiere semantics): the DOM path puts the mask CSS on the
+  // TRANSFORMED comp-sized element and the mask editor maps handles through the layer transform, so
+  // the matte must ride it too (it used to be comp-fixed here — the one outlier — which made a mask
+  // on any moved/scaled graphic clip somewhere other than where it was drawn). Same math as
+  // MaskEditorOverlay.toComp: translate(center) · rotate · scale · translate(-comp/2).
+  const layerScale = layerT ? layerT.scale || 1 : 1;
+  if (layerT) {
+    ctx.translate((layerT.x / 100) * w, (layerT.y / 100) * h);
+    if (layerT.rotation) ctx.rotate((layerT.rotation * Math.PI) / 180);
+    ctx.scale(layerScale, layerScale);
+    ctx.translate(-w / 2, -h / 2);
+  }
   const c = maskCenter(mask.points);
   const t = mask.transform;
   if (t.x || t.y) ctx.translate(t.x, t.y);
@@ -84,7 +109,10 @@ function renderMaskAlpha(
   // it into a gradient (softer / more translucent) — exactly as in every NLE. A solid interior AND a soft
   // symmetric edge cannot coexist when feather ≳ shape size; use a smaller feather for a crisp core.
   if (mask.feather > 0) {
-    const r = mask.feather / 2;
+    // Feather rides the layer scale like the DOM path (where the feathered SVG filter is baked in
+    // element-local px and the whole masked element is then CSS-scaled). The blur below runs in
+    // device space (post-restore), so the layer scale must be folded in manually.
+    const r = (mask.feather / 2) * layerScale;
     ctx.restore(); // pop the transform; ctx now holds the crisp shape rasterized in device space
     invertCtx.clearRect(0, 0, w, h);
     invertCtx.save();
@@ -154,8 +182,13 @@ export class SceneMaskMatteCache {
     this.versions.clear();
   }
 
-  /** The layer's clip-mask matte at `tLocal` (layer-local seconds), rebuilt only on change, or null. */
-  get(layer: TimelineLayer, tLocal: number): AnyCanvas2D | null {
+  /**
+   * The layer's clip-mask matte at `tLocal` (layer-local seconds), rebuilt only on change, or null.
+   * `layerTransform` (media layers only — pass none for text/shape): the layer's resolved
+   * position/scale/rotation, baked into the matte so the mask follows the clip like every other
+   * renderer; keyed below, so an animated transform rebuilds per change.
+   */
+  get(layer: TimelineLayer, tLocal: number, layerTransform?: MatteLayerTransform): AnyCanvas2D | null {
     const masks = (layer.masks ?? []).filter(isRenderableMask);
     if (!masks.length) {
       this.keys.delete(layer.id);
@@ -163,9 +196,10 @@ export class SceneMaskMatteCache {
       return null;
     }
     const resolved = masks.map((raw) => resolveMaskAtTime(raw, layer.animations, tLocal));
-    const key = JSON.stringify(
-      resolved.map((m) => [maskShapeToPathD(m), m.feather, m.expansion, m.opacity, m.mode, m.inverted, m.transform])
-    );
+    const key = JSON.stringify([
+      resolved.map((m) => [maskShapeToPathD(m), m.feather, m.expansion, m.opacity, m.mode, m.inverted, m.transform]),
+      layerTransform ? [layerTransform.x, layerTransform.y, layerTransform.scale, layerTransform.rotation] : null,
+    ]);
     const pooled = this.pool.get(layer.id);
     if (pooled && this.keys.get(layer.id) === key) return pooled.canvas as AnyCanvas2D;
 
@@ -173,7 +207,7 @@ export class SceneMaskMatteCache {
     if (!pooled) this.pool.set(layer.id, mctx);
     mctx.clearRect(0, 0, this.w, this.h);
     resolved.forEach((mask, index) => {
-      const shape = renderMaskAlpha(this.shape, this.invert, mask, this.w, this.h);
+      const shape = renderMaskAlpha(this.shape, this.invert, mask, this.w, this.h, layerTransform);
       if (!shape) return;
       mctx.globalAlpha = Math.max(0, Math.min(1, mask.opacity / 100));
       mctx.globalCompositeOperation = index === 0 ? "source-over" : MASK_GCO[mask.mode];

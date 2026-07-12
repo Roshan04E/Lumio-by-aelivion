@@ -33,19 +33,34 @@ export async function transcribeAssetLocally(
   if (!asset.fileUrl) {
     throw new Error("Selected asset has no playable URL.");
   }
+  // Behavior-preserving delegation: the whisper pipeline only ever reads the URL + duration, so the
+  // asset path stays a thin wrapper over the URL path (which the mic dictation fallback also uses).
+  return transcribeAudioUrlLocally(asset.fileUrl, asset.durationSeconds, onProgress, isCancelled);
+}
 
+/**
+ * Transcribe any playable audio/video URL (http(s)/relative/`blob:`) with the local whisper pipeline.
+ * Extracted verbatim from `transcribeAssetLocally` so the mic dictation fallback (a recorded `blob:`)
+ * can reuse the exact same path without fabricating a full `SourceAsset`.
+ */
+export async function transcribeAudioUrlLocally(
+  fileUrl: string,
+  durationSeconds: number,
+  onProgress?: ProgressCallback,
+  isCancelled?: () => boolean
+): Promise<TranscriptArtifactData> {
   assertNotCancelled(isCancelled);
   onProgress?.("Loading local speech model. First run can take a while.");
   const transcriber = await getTranscriber();
   assertNotCancelled(isCancelled);
   onProgress?.("Transcribing media locally. Keep this tab open.");
-  const output = await transcriber(resolveTranscriptionUrl(asset.fileUrl), {
+  const output = await transcriber(resolveTranscriptionUrl(fileUrl), {
     chunk_length_s: 30,
     stride_length_s: 5,
     return_timestamps: "word"
   });
   assertNotCancelled(isCancelled);
-  const transcript = whisperOutputToTranscript(output, asset.durationSeconds);
+  const transcript = whisperOutputToTranscript(output, durationSeconds);
   if (!transcript.segments.length) {
     throw new Error("Local transcription returned no words. Try audio-only input or paste transcript manually.");
   }

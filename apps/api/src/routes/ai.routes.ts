@@ -2,9 +2,12 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   PLANNER_SYSTEM_PROMPT,
+  ACK_SYSTEM_PROMPT,
   CONSULTANT_SYSTEM_PROMPT,
+  FAST_PLANNER_SYSTEM_PROMPT,
   buildPlannerUserContent,
   buildConsultantUserContent,
+  buildFastPlannerUserContent,
   extractPlanJson
 } from "@lumio-by-aelivion/shared";
 import { asyncHandler, ok, validateBody } from "../lib/http";
@@ -62,7 +65,9 @@ const planRequestSchema = z.object({
       previous: z.string().max(6000),
       errors: z.array(z.string().max(400)).max(12)
     })
-    .optional()
+    .optional(),
+  /** Hands-free voice session — replies get the spoken-conversation register (VOICE_MODE_NOTE). */
+  voiceMode: z.boolean().optional()
 });
 
 // --- Lightweight per-IP rate limit + short-TTL plan cache (protects small free quotas) ---
@@ -114,7 +119,7 @@ aiRouter.post(
 
     // Don't cache image-bearing requests (the reference varies per call).
     const key = cacheKey(
-      `${body.byo?.provider ?? "pool"}|${body.premium ? "best" : "free"}|${body.prompt}|${body.context ?? ""}|${body.capabilities.length}|${body.repair ? "repair" : "fresh"}`
+      `${body.byo?.provider ?? "pool"}|${body.premium ? "best" : "free"}|${body.voiceMode ? "voice" : "typed"}|${body.prompt}|${body.context ?? ""}|${body.capabilities.length}|${body.repair ? "repair" : "fresh"}`
     );
     const cached = !body.images?.length ? planCache.get(key) : undefined;
     if (cached && cached.expires > Date.now()) {
@@ -145,6 +150,109 @@ aiRouter.post(
       planCache.set(key, { value: parsed, expires: Date.now() + CACHE_TTL_MS });
     }
     return ok(res, "LLM plan", payload);
+  })
+);
+
+// --- Lumio Brain B4 — tier-3 transactional compiler (`fast` model class) -----
+
+const fastPlanRequestSchema = z.object({
+  prompt: z.string().min(1).max(300),
+  /** Compact action catalog (ids + param hints) built client-side from the live registry. */
+  actions: z.string().min(1).max(8000),
+  /** Target-clip-only slice. */
+  context: z.string().max(2500).optional()
+});
+
+const fastPlanReplySchema = z.object({
+  escalate: z.boolean().optional(),
+  steps: z
+    .array(
+      z.object({
+        actionId: z.string().min(1).max(60),
+        params: z.unknown().optional(),
+        summary: z.string().max(200).optional()
+      })
+    )
+    .max(6)
+    .optional()
+});
+
+/**
+ * One non-reasoning call, JSON steps or escalate. The client re-validates every step against
+ * the Timeline Action Registry's Zod schemas before anything runs — this endpoint only routes.
+ */
+aiRouter.post(
+  "/plan/fast",
+  asyncHandler(async (req, res) => {
+    const body = validateBody(fastPlanRequestSchema, req.body);
+    if (!gatewayHasProvider()) {
+      return ok(res, "No LLM provider configured", { available: false });
+    }
+    const ip = (req.headers["x-forwarded-for"]?.toString().split(",")[0] ?? req.ip ?? "unknown").trim();
+    if (rateLimited(ip)) {
+      aiLog.debug(`fast ${promptHash(body.prompt)}: rate limited`);
+      return ok(res, "Rate limited", { available: true, escalate: true, rateLimited: true });
+    }
+
+    const key = cacheKey(`fast|${body.prompt}|${body.context ?? ""}|${body.actions.length}`);
+    const cached = planCache.get(key);
+    if (cached && cached.expires > Date.now()) {
+      return ok(res, "Fast plan (cached)", { available: true, ...(cached.value as object), cached: true });
+    }
+
+    const hash = promptHash(body.prompt);
+    const result = await planWithGateway(FAST_PLANNER_SYSTEM_PROMPT, buildFastPlannerUserContent(body), {
+      modelClass: "fast"
+    });
+    if (!result) {
+      aiLog.debug(`fast ${hash}: fast pool exhausted`);
+      return ok(res, "Fast pool exhausted", { available: true, escalate: true });
+    }
+
+    const parsed = fastPlanReplySchema.safeParse(extractPlanJson(result.text));
+    if (!parsed.success || parsed.data.escalate || !parsed.data.steps?.length) {
+      if (!parsed.success) {
+        aiLog.debug(`fast ${hash}: ${result.providerId} unparseable reply: ${snippet(result.text)}`);
+      }
+      const payload = { escalate: true as const, provider: result.providerId };
+      planCache.set(key, { value: payload, expires: Date.now() + CACHE_TTL_MS });
+      return ok(res, "Fast plan escalated", { available: true, ...payload });
+    }
+
+    const payload = { steps: parsed.data.steps, provider: result.providerId };
+    planCache.set(key, { value: payload, expires: Date.now() + CACHE_TTL_MS });
+    return ok(res, "Fast plan", { available: true, ...payload });
+  })
+);
+
+const ackRequestSchema = z.object({ prompt: z.string().min(1).max(500) });
+
+/**
+ * Voice progressive-response ack: ONE prompt-specific spoken line from the fast pool while the
+ * real planner thinks. Payload-free by contract (no context/capabilities/history) — its whole
+ * value is landing in well under a second. Not counted against the per-IP planner budget (it
+ * always accompanies a /plan call that IS counted); cached per prompt like everything else.
+ */
+aiRouter.post(
+  "/ack",
+  asyncHandler(async (req, res) => {
+    const body = validateBody(ackRequestSchema, req.body);
+    if (!gatewayHasProvider()) {
+      return ok(res, "No LLM provider configured", { available: false, text: null });
+    }
+    const key = cacheKey(`ack|${body.prompt}`);
+    const cached = planCache.get(key);
+    if (cached && cached.expires > Date.now()) {
+      return ok(res, "Ack (cached)", { available: true, text: cached.value, cached: true });
+    }
+    const result = await planWithGateway(ACK_SYSTEM_PROMPT, `REQUEST:\n${body.prompt}`, { modelClass: "fast" });
+    if (!result) {
+      return ok(res, "Fast pool exhausted", { available: true, text: null });
+    }
+    // One line, unquoted, spoken-length — defend against chatty fast models.
+    const text = result.text.trim().split("\n")[0]!.replace(/^["'“]+|["'”]+$/g, "").slice(0, 140).trim() || null;
+    planCache.set(key, { value: text, expires: Date.now() + CACHE_TTL_MS });
+    return ok(res, "Ack", { available: true, text, provider: result.providerId });
   })
 );
 
@@ -185,7 +293,7 @@ aiRouter.post(
     }
 
     const key = cacheKey(
-      `${body.byo?.provider ?? "pool"}|${body.premium ? "best" : "free"}|${body.prompt}|${body.context ?? ""}|${body.capabilities.length}|${body.repair ? "repair" : "fresh"}`
+      `${body.byo?.provider ?? "pool"}|${body.premium ? "best" : "free"}|${body.voiceMode ? "voice" : "typed"}|${body.prompt}|${body.context ?? ""}|${body.capabilities.length}|${body.repair ? "repair" : "fresh"}`
     );
     // Image-bearing requests vary by reference — never serve/store them from cache.
     const cached = !body.images?.length ? planCache.get(key) : undefined;
@@ -248,7 +356,9 @@ const chatRequestSchema = z.object({
     })
     .optional(),
   premium: z.boolean().optional(),
-  images: imageArraySchema
+  images: imageArraySchema,
+  /** Hands-free voice session — replies get the spoken-conversation register (VOICE_MODE_NOTE). */
+  voiceMode: z.boolean().optional()
 });
 
 /**

@@ -1,5 +1,13 @@
 import { useMemo, useRef, useState } from "react";
-import type { SourceAsset, TimelineComposition, TimelineLayer, ToolCapabilityDefinition } from "@lumio-by-aelivion/shared";
+import {
+  getSkillTaskForToolSlug,
+  resolveExecutors,
+  type SourceAsset,
+  type TimelineComposition,
+  type TimelineLayer,
+  type ToolCapabilityDefinition
+} from "@lumio-by-aelivion/shared";
+import { currentExecutorAvailability } from "./executor-availability";
 import { getLayerToolEffectHandler, type LayerToolEffectOptionField } from "./layer-effect-handlers";
 
 /**
@@ -54,6 +62,15 @@ export function useLayerToolEffectRunner({
     if (!handler) {
       setError(`No runner is registered for ${tool.name} yet.`);
       return;
+    }
+    const task = getSkillTaskForToolSlug(tool.slug);
+    if (task) {
+      const ranked = resolveExecutors({ taskKind: task.id }, currentExecutorAvailability(), "localFirst");
+      const best = ranked[0];
+      if (!best || best.executor.kind !== "browser-real") {
+        setError(`This device can't run ${tool.name} locally (Web Workers unavailable), and cloud isn't enabled yet.`);
+        return;
+      }
     }
     setRunning(true);
     setError(undefined);

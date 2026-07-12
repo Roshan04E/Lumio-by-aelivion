@@ -10,14 +10,17 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preview": "vite preview --host 0.0.0.0",
     "editor:test": "tsx src/editor/editor.test.ts",
+    "brain:eval": "tsx src/ai/brain/router-eval.test.ts",
     "continuity:test": "tsx src/ai/planner/continuity.test.ts",
     "memory:test": "tsx src/ai/memory.test.ts"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@huggingface/transformers": "^3.8.1",
     "@lumio-by-aelivion/shared": "workspace:*",
     "@vitejs/plugin-react": "^5.0.1",
+    "kokoro-js": "^1.2.1",
     "lucide-react": "^0.542.0",
     "mp4-muxer": "^5.1.5",
     "mp4box": "^0.5.2",
@@ -27,6 +30,7 @@
     "webm-muxer": "^5.0.3",
     "wink-eng-lite-web-model": "^1.8.1",
     "wink-nlp": "^2.4.0",
+    "zod": "^3.25.76",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

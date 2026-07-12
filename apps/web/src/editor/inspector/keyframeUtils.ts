@@ -1,10 +1,13 @@
 import {
+  evaluateAnimatedValue,
   evaluateTimelineTransform,
   evaluateTimelineEffectParam,
   getLayerAnimations,
   getTimelineEffectDefinition,
   normalizeTimelineEffect,
   type KeyframeInterpolation,
+  type SourceTextKeyframe,
+  type TextRun,
   type TimelineKeyframeV2,
   type TimelineLayer,
   type TimelineEffectParamDefinition
@@ -37,6 +40,26 @@ export type GraphTarget =
   | {
       effectId: string;
       kind: "effect";
+      label: string;
+      max: number;
+      min: number;
+      property: string;
+      step: number;
+    }
+  | {
+      /** SOURCE TEXT (Premiere-style): hold keys on `layer.sourceTextKeyframes` — a flat lane in
+       *  the graph (no value curve); keys can be moved in time, added, and deleted. */
+      kind: "sourceText";
+      label: string;
+      max: number;
+      min: number;
+      property: string;
+      step: number;
+    }
+  | {
+      /** Generic layer-scope numeric track in `layer.animations` (e.g. `textRevealProgress` — the
+       *  Typewriter reveal — or the `style.*` text-style tracks). Full curve editing. */
+      kind: "layer";
       label: string;
       max: number;
       min: number;
@@ -834,9 +857,71 @@ export function getEffectParamBaseValue(
 }
 
 export function graphTargetKey(target: GraphTarget) {
-  return target.kind === "transform"
-    ? `transform:${target.property}`
-    : `effect:${target.effectId}:${target.property}`;
+  if (target.kind === "transform") return `transform:${target.property}`;
+  if (target.kind === "sourceText") return "sourceText";
+  if (target.kind === "layer") return `layer:${target.property}`;
+  return `effect:${target.effectId}:${target.property}`;
+}
+
+/** Typewriter reveal lane (`textRevealProgress` 0..1) — shows when the preset wrote keys. */
+export const typewriterGraphTarget: GraphTarget = {
+  kind: "layer",
+  label: "Typewriter reveal",
+  min: 0,
+  max: 1,
+  property: "textRevealProgress",
+  step: 0.05
+};
+
+/** The single source-text graph lane (text layers). */
+export const sourceTextGraphTarget: GraphTarget = {
+  kind: "sourceText",
+  label: "Source Text",
+  min: 0,
+  max: 1,
+  property: "sourceText",
+  step: 1
+};
+
+/** Source-text keys as pseudo keyframes (hold, value 0) so the graph machinery can draw/move them. */
+export function sourceTextTargetKeyframes(layer: TimelineLayer): TimelineKeyframeV2[] {
+  return [...(layer.sourceTextKeyframes ?? [])]
+    .sort((a, b) => a.timeSeconds - b.timeSeconds)
+    .map((key) => ({
+      id: key.id,
+      target: { scope: "layer", property: "sourceText" },
+      timeSeconds: key.timeSeconds,
+      value: 0,
+      interpolation: "hold" as const,
+      temporal: {}
+    }));
+}
+
+/** Add/remove a source-text key at `layerTime` (hold; adding captures the text governing that time). */
+export function toggleSourceTextKeyframe(layer: TimelineLayer, layerTime: number): TimelineLayer {
+  const keys = layer.sourceTextKeyframes ?? [];
+  const existing = keys.find((key) => isKeyframeAt(key.timeSeconds, layerTime));
+  if (existing) {
+    const remaining = keys.filter((key) => key.id !== existing.id);
+    return { ...layer, sourceTextKeyframes: remaining.length ? remaining : undefined };
+  }
+  const ordered = [...keys].sort((a, b) => a.timeSeconds - b.timeSeconds);
+  let governing = ordered[0];
+  for (const key of ordered) {
+    if (key.timeSeconds <= layerTime + keyframeTimeTolerance) governing = key;
+    else break;
+  }
+  const runs: TextRun[] = governing
+    ? governing.runs.map((run) => ({ ...run }))
+    : layer.textRuns?.length
+      ? layer.textRuns.map((run) => ({ ...run }))
+      : [{ text: layer.text ?? "" }];
+  const captured: SourceTextKeyframe = {
+    id: `stk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
+    runs
+  };
+  return { ...layer, sourceTextKeyframes: [...keys, captured].sort((a, b) => a.timeSeconds - b.timeSeconds) };
 }
 
 export function shortKeyframeProperty(property: string) {
@@ -883,6 +968,16 @@ export function updateGraphTargetKeyframe(
   if (target.kind === "transform") {
     return updateTransformKeyframe(layer, target.property, keyframeId, patch);
   }
+  if (target.kind === "sourceText") {
+    // Hold lane: only TIME moves (value drags are meaningless for text keys).
+    if (patch.timeSeconds === undefined) return layer;
+    return {
+      ...layer,
+      sourceTextKeyframes: (layer.sourceTextKeyframes ?? [])
+        .map((key) => (key.id === keyframeId ? { ...key, timeSeconds: clamp(patch.timeSeconds!, 0, layer.durationSeconds) } : key))
+        .sort((a, b) => a.timeSeconds - b.timeSeconds)
+    };
+  }
 
   return {
     ...layer,
@@ -906,6 +1001,7 @@ export function setGraphTargetInterpolation(
   keyframeId: string,
   interpolation: KeyframeInterpolation
 ): TimelineLayer {
+  if (target.kind === "sourceText") return layer; // hold-only lane
   if (target.kind === "transform") {
     const layerWithAnimation = (layer.animations ?? []).some((item) => item.id === keyframeId)
       ? layer
@@ -935,6 +1031,7 @@ export function updateGraphTargetHandle(
   nextHandle: { dx: number; dy: number },
   linked: boolean
 ): TimelineLayer {
+  if (target.kind === "sourceText") return layer; // hold-only lane
   if (target.kind === "transform") {
     return updateTransformKeyframeHandle(layer, target.property, keyframeId, handle, nextHandle, linked);
   }
@@ -965,6 +1062,7 @@ export function setGraphTargetLinked(
   keyframeId: string,
   linked: boolean
 ): TimelineLayer {
+  if (target.kind === "sourceText") return layer; // hold-only lane
   if (target.kind === "transform") {
     return setTransformKeyframeLinked(layer, target.property, keyframeId, linked);
   }
@@ -975,6 +1073,118 @@ export function setGraphTargetLinked(
       kf.id === keyframeId ? { ...kf, temporal: { ...kf.temporal, linked } } : kf
     )
   };
+}
+
+// ---------------------------------------------------------------------------
+// Text-style keyframes (scope "layer", property "style.<field>") — evaluated by
+// getCompositionTextStyle's animStyleNumber in every renderer (2026-07-12).
+// ---------------------------------------------------------------------------
+
+/** The flat layer field a `style.<field>` keyframe track shadows (its static base value). */
+function styleFieldOf(property: string): keyof TimelineLayer {
+  return property.slice("style.".length) as keyof TimelineLayer;
+}
+
+export function getStyleKeyframes(layer: TimelineLayer, property: string) {
+  return (layer.animations ?? [])
+    .filter((kf) => kf.target.scope === "layer" && kf.target.property === property)
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+}
+
+export function hasStyleKeyframeAt(layer: TimelineLayer, property: string, layerTime: number) {
+  return getStyleKeyframes(layer, property).some((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
+}
+
+export function getActiveStyleKeyframe(layer: TimelineLayer, property: string, layerTime: number) {
+  return getStyleKeyframes(layer, property).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
+}
+
+export function findStyleKeyframeTime(layer: TimelineLayer, property: string, layerTime: number, direction: -1 | 1) {
+  const keyframes = getStyleKeyframes(layer, property);
+  if (direction < 0) {
+    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
+  }
+  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+}
+
+export function toggleStyleKeyframe(layer: TimelineLayer, property: string, layerTime: number, value: number): TimelineLayer {
+  if (hasStyleKeyframeAt(layer, property, layerTime)) {
+    return {
+      ...layer,
+      animations: (layer.animations ?? []).filter(
+        (kf) => !(kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime))
+      )
+    };
+  }
+  const keyframe: TimelineKeyframeV2 = {
+    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    target: { scope: "layer", property },
+    timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
+    value,
+    interpolation: "linear",
+    temporal: {}
+  };
+  return {
+    ...layer,
+    animations: [...(layer.animations ?? []), keyframe].sort((a, b) => a.timeSeconds - b.timeSeconds)
+  };
+}
+
+export function setStyleKeyframeInterpolation(
+  layer: TimelineLayer,
+  property: string,
+  layerTime: number,
+  interpolation: KeyframeInterpolation
+): TimelineLayer {
+  return {
+    ...layer,
+    animations: (layer.animations ?? []).map((kf) =>
+      kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime)
+        ? { ...kf, interpolation }
+        : kf
+    )
+  };
+}
+
+export function clearStyleKeyframes(layer: TimelineLayer, property: string): TimelineLayer {
+  return {
+    ...layer,
+    animations: (layer.animations ?? []).filter((kf) => !(kf.target.scope === "layer" && kf.target.property === property))
+  };
+}
+
+/** The style track's value at the playhead (the flat field's base when unanimated) — for row display. */
+export function styleValueAt(layer: TimelineLayer, property: string, layerTime: number, base: number): number {
+  const keyframes = getStyleKeyframes(layer, property);
+  if (!keyframes.length) return base;
+  return evaluateAnimatedValue({ baseValue: base, keyframes, property, scope: "layer", timeSeconds: layerTime }) as number;
+}
+
+/** Four-way style write — same auto-keyframe rule as {@link applyTransformValueAtTime}; the
+ *  static branch writes the flat layer field the track shadows (e.g. `letterSpacing`). */
+export function applyStyleValueAtTime(
+  layer: TimelineLayer,
+  property: string,
+  layerTime: number,
+  value: number,
+  options: AutoKeyframeOptions = {}
+): TimelineLayer {
+  const hasKeyframeAtPlayhead = hasStyleKeyframeAt(layer, property, layerTime);
+  const isAnimated = getStyleKeyframes(layer, property).length > 0;
+  if (!hasKeyframeAtPlayhead && (isAnimated || options.autoKeyframe)) {
+    return toggleStyleKeyframe(layer, property, layerTime, value);
+  }
+  if (hasKeyframeAtPlayhead) {
+    return {
+      ...layer,
+      animations: (layer.animations ?? []).map((kf) =>
+        kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime)
+          ? { ...kf, value }
+          : kf
+      )
+    };
+  }
+  return { ...layer, [styleFieldOf(property)]: value };
 }
 
 // ---------------------------------------------------------------------------

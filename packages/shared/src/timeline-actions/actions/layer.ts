@@ -12,8 +12,8 @@ const deleteLayerSchema = z.object({
 
 const deleteLayer: TimelineActionDefinition<z.infer<typeof deleteLayerSchema>> = {
   id: "deleteLayer",
-  name: "Delete layer",
-  description: "Remove a layer (optionally closing the gap it leaves).",
+  name: "Delete clip",
+  description: "Remove a clip (optionally closing the gap it leaves).",
   category: "layer",
   inputSchema: deleteLayerSchema,
   validationRules: (params, ctx) => assertLayerExists(ctx, params.layerId),
@@ -26,7 +26,7 @@ const deleteLayer: TimelineActionDefinition<z.infer<typeof deleteLayerSchema>> =
             track.layers = track.layers.filter((layer) => layer.id !== params.layerId);
           }
         });
-    return actionResult(ctx.composition, mutation, `Delete layer`);
+    return actionResult(ctx.composition, mutation, `Delete clip`);
   }
 };
 
@@ -43,8 +43,8 @@ const moveLayerSchema = z
 
 const moveLayer: TimelineActionDefinition<z.infer<typeof moveLayerSchema>> = {
   id: "moveLayer",
-  name: "Move layer",
-  description: "Re-time a layer or move it to another track.",
+  name: "Move clip",
+  description: "Re-time a clip or move it to another track.",
   category: "layer",
   inputSchema: moveLayerSchema,
   validationRules: (params, ctx) => [
@@ -73,7 +73,7 @@ const moveLayer: TimelineActionDefinition<z.infer<typeof moveLayerSchema>> = {
         }
       }
     });
-    return actionResult(ctx.composition, mutation, `Move layer`);
+    return actionResult(ctx.composition, mutation, `Move clip`);
   }
 };
 
@@ -87,7 +87,7 @@ const replaceAssetSchema = z.object({
 const replaceAsset: TimelineActionDefinition<z.infer<typeof replaceAssetSchema>> = {
   id: "replaceAsset",
   name: "Replace asset",
-  description: "Swap the media behind a layer, keeping its placement.",
+  description: "Swap the media behind a clip, keeping its placement.",
   category: "layer",
   inputSchema: replaceAssetSchema,
   validationRules: (params, ctx) => {
@@ -121,8 +121,8 @@ const groupLayersSchema = z.object({
 
 const groupLayers: TimelineActionDefinition<z.infer<typeof groupLayersSchema>> = {
   id: "groupLayers",
-  name: "Group layers",
-  description: "Link layers together under a shared group id.",
+  name: "Group clips",
+  description: "Link clips together under a shared group id.",
   category: "group",
   inputSchema: groupLayersSchema,
   validationRules: (params, ctx) => params.layerIds.flatMap((id) => assertLayerExists(ctx, id, "layerIds")),
@@ -139,7 +139,7 @@ const groupLayers: TimelineActionDefinition<z.infer<typeof groupLayersSchema>> =
         }
       }
     });
-    return actionResult(ctx.composition, mutation, `Group ${params.layerIds.length} layers`);
+    return actionResult(ctx.composition, mutation, `Group ${params.layerIds.length} clips`);
   }
 };
 
@@ -154,8 +154,8 @@ const ungroupLayersSchema = z
 
 const ungroupLayers: TimelineActionDefinition<z.infer<typeof ungroupLayersSchema>> = {
   id: "ungroupLayers",
-  name: "Ungroup layers",
-  description: "Clear the group link from layers.",
+  name: "Ungroup clips",
+  description: "Clear the group link from clips.",
   category: "group",
   inputSchema: ungroupLayersSchema,
   validationRules: (params, ctx) => (params.layerIds ?? []).flatMap((id) => assertLayerExists(ctx, id, "layerIds")),
@@ -173,7 +173,7 @@ const ungroupLayers: TimelineActionDefinition<z.infer<typeof ungroupLayersSchema
         }
       }
     });
-    return actionResult(ctx.composition, mutation, `Ungroup layers`);
+    return actionResult(ctx.composition, mutation, `Ungroup clips`);
   }
 };
 

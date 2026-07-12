@@ -4,6 +4,7 @@ import { clipActions } from "./clip";
 import { effectActions } from "./effect";
 import { keyframeActions } from "./keyframe";
 import { layerActions } from "./layer";
+import { markerActions } from "./marker";
 import { maskActions } from "./mask";
 import { textActions } from "./text";
 import { trackActions } from "./track";
@@ -20,7 +21,8 @@ export const allTimelineActions: TimelineActionDefinition<unknown>[] = [
   ...keyframeActions,
   ...transitionActions,
   ...trackActions,
-  ...maskActions
+  ...maskActions,
+  ...markerActions
 ] as TimelineActionDefinition<unknown>[];
 
 /** Build a registry pre-loaded with all built-in actions (used for tests/isolation). */

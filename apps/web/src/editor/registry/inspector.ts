@@ -41,11 +41,16 @@ export interface InspectorPanelProps {
 /** Mask drawing/editing tools shared by the preview toolbar, overlay, and inspector. */
 export type MaskTool = "select" | "rectangle" | "ellipse" | "pen" | "polygon";
 
+/** Top-level inspector tab a panel belongs to (Resolve-style Video/Audio/Effects/Color). */
+export type InspectorGroup = "video" | "audio" | "effects" | "color";
+
 export interface InspectorPanelProvider {
   id: string;
   /** Section title, e.g. "Transform", "Typography", "Mask". */
   title: string;
   tier: InspectorTier;
+  /** Inspector tab this panel renders under. Default "video". */
+  group?: InspectorGroup;
   /** Layer types this panel applies to. */
   appliesTo: TimelineLayerType[];
   /** Lower sorts first within a tier. */

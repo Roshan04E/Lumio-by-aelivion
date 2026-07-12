@@ -90,7 +90,8 @@ export async function streamTalk(prompt: string, ctx: PlannerContext, options: T
     history: (ctx.history ?? []).slice(-8),
     ...(byo ? { byo } : {}),
     ...(ctx.memory?.qualityMode === "best" ? { premium: true } : {}),
-    ...(options.images && options.images.length ? { images: options.images } : {})
+    ...(options.images && options.images.length ? { images: options.images } : {}),
+    ...(ctx.voiceMode ? { voiceMode: true } : {})
   };
 
   let response: Response;
@@ -167,7 +168,8 @@ async function streamTalkLocal(prompt: string, ctx: PlannerContext, options: Tal
     prompt,
     ...(summary ? { context: summary } : {}),
     ...(ctx.memoryNote ? { memoryNote: ctx.memoryNote } : {}),
-    history: (ctx.history ?? []).slice(-8)
+    history: (ctx.history ?? []).slice(-8),
+    ...(ctx.voiceMode ? { voiceMode: true } : {})
   });
   let message = "";
   try {

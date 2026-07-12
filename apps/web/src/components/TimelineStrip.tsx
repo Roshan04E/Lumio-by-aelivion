@@ -1,7 +1,7 @@
 import { Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { computeSnapTargets, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@lumio-by-aelivion/shared";
+import { computeLayerOrdinals, computeSnapTargets, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@lumio-by-aelivion/shared";
 import { useAudioPeaksSlice } from "../lib/audioPeaks";
 import { getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { ASSET_LABEL_COLORS, layerLabelOf } from "../lib/assetLabels";
@@ -258,6 +258,9 @@ const shortcutCheatSheet: Array<{ keys: string; label: string }> = [
   { keys: "→", label: "Next frame" },
   { keys: "⇧←/→", label: "Step 5 frames" },
   { keys: "↑ / ↓", label: "Previous / next edit point" },
+  { keys: "/", label: "Focus the AI edit box (opens the AI panel)" },
+  { keys: ".", label: "Voice input — dictate to the AI (⌘. or ⌥M while typing)" },
+  { keys: "⌥L", label: "Voice mode — hands-free AI session (or say “Hey Lumio” with the wake word on)" },
   { keys: "?", label: "Toggle this cheat sheet" }
 ];
 
@@ -494,6 +497,10 @@ function TimelineStripImpl({
     }
     return byTrack;
   }, [composition.tracks]);
+  // Positional clip numbers ("clip N") for the badge + natural-language/AI targeting. Derived once
+  // per structural edit (keyed on tracks), never on playhead/scrub, so the perf-critical strip is
+  // untouched by a moving playhead.
+  const clipOrdinals = useMemo(() => computeLayerOrdinals(composition), [composition.tracks]); // eslint-disable-line react-hooks/exhaustive-deps
   const [pixelsPerSecond, setPixelsPerSecond] = useState(56);
   const pixelsPerSecondRef = useRef(pixelsPerSecond);
   const laneWidthPx = Math.max(560, Math.ceil(timelineDurationSeconds * pixelsPerSecond));
@@ -662,7 +669,9 @@ function TimelineStripImpl({
    * lives in EditorPage. Replace-mode paths only; modifier selections keep the current highlight
    * until React catches up.
    */
+  const pendingInstantSelectionRef = useRef<string[] | null>(null);
   const applyInstantSelectionHighlight = useCallback((layerIds: string[]) => {
+    pendingInstantSelectionRef.current = layerIds;
     const next = new Set(layerIds);
     for (const el of document.querySelectorAll<HTMLElement>(".timeline-clip.is-selected")) {
       if (!next.has(el.dataset.layerId ?? "")) {
@@ -673,6 +682,35 @@ function TimelineStripImpl({
       document.querySelector<HTMLElement>(`.timeline-clip[data-layer-id="${CSS.escape(layerId)}"]`)?.classList.add("is-selected");
     }
   }, []);
+  /**
+   * KEEP THE INSTANT HIGHLIGHT ALIVE UNTIL STATE CATCHES UP (flicker fix, 2026-07-09): the same
+   * pointerdown that writes the imperative `is-selected` also sets drag state, so the clicked
+   * clip's `isDragging` prop flips and the memo'd TimelineClip RE-RENDERS with the STALE
+   * `isSelected` (selection commits through a transition, landing ~hundreds of ms later) — that
+   * render rewrote className WITHOUT `is-selected`, visibly dropping the glow until the transition
+   * landed (glow → gone → glow). This layout effect re-asserts the pending imperative classes after
+   * EVERY strip render, before paint, and self-clears once the committed selection contains them —
+   * at which point React's own classes are authoritative (incl. linked-group partners).
+   */
+  useLayoutEffect(() => {
+    const pending = pendingInstantSelectionRef.current;
+    if (!pending) {
+      return;
+    }
+    if (pending.every((layerId) => selectedLayerSet.has(layerId))) {
+      pendingInstantSelectionRef.current = null;
+      return;
+    }
+    const next = new Set(pending);
+    for (const el of document.querySelectorAll<HTMLElement>(".timeline-clip.is-selected")) {
+      if (!next.has(el.dataset.layerId ?? "")) {
+        el.classList.remove("is-selected");
+      }
+    }
+    for (const layerId of next) {
+      document.querySelector<HTMLElement>(`.timeline-clip[data-layer-id="${CSS.escape(layerId)}"]`)?.classList.add("is-selected");
+    }
+  });
   /**
    * NO-OP-CLICK GUARD: a plain click on a clip runs the full drag lifecycle (pointerdown →
    * pointerup) without moving anything — committing it anyway called `onMoveLayer` with identical
@@ -1222,7 +1260,14 @@ function TimelineStripImpl({
       }
 
       event.currentTarget.setPointerCapture(event.pointerId);
-      if (!selectedLayerSet.has(layer.id)) {
+      // Re-commit selection on a plain click unless the clip is part of a genuine multi-selection
+      // (length > 1) — that group must stay intact so the drag moves it together (collapse happens on
+      // a motionless release in finishDrag). For a single selection we ALWAYS re-commit, even when the
+      // clip is already in selectedLayerSet: this matches the resize-handle path (startResize selects
+      // unconditionally) and heals the transient desync where a superseded selection transition cleared
+      // the imperative `is-selected` highlight while React state still held this clip, making a body
+      // click a silent no-op ("can't select the middle, but the ends work; refresh fixes it").
+      if (!selectedLayerSet.has(layer.id) || selectedLayerIds.length <= 1) {
         applyInstantSelectionHighlight([layer.id]);
         onSelectLayer(layer.id, "replace");
       }
@@ -1409,11 +1454,19 @@ function TimelineStripImpl({
           drag.movedLayerIds.length > 1 ? drag.movedLayerIds : undefined,
           drag.movedLayerIds.length > 1 ? drag.previewTrackByLayerId : undefined
         );
+      } else if (drag.movedLayerIds.length > 1) {
+        // Motionless click on a clip that was part of a MULTI-selection → collapse to just that clip
+        // (Premiere/Resolve behavior). On pointerdown we keep the whole group selected so a real drag
+        // can move them together; a click that never moved should focus the clicked clip so the
+        // Inspector shows it. This commits NO move — it only narrows the selection (respects the
+        // no-op-click guard: `dragChangedAnything` was false here).
+        applyInstantSelectionHighlight([drag.layerId]);
+        onSelectLayer(drag.layerId, "replace");
       }
       settleDragPreviewForCommit();
       setDrag(null);
     },
-    [onMoveLayer, onSlipLayer, onRollEdit, onSlideLayer, settleDragPreviewForCommit, dragChangedAnything, setDrag]
+    [onMoveLayer, onSlipLayer, onRollEdit, onSlideLayer, settleDragPreviewForCommit, dragChangedAnything, setDrag, applyInstantSelectionHighlight, onSelectLayer]
   );
 
   // STUCK-DRAG SAFETY NET (2026-07-03 user report: a clip chased the mouse and could not be
@@ -2057,8 +2110,9 @@ function TimelineStripImpl({
           onToggleSnap?.();
           return;
         case "m":
-          // ⇧M belongs to the mask-add shortcut (EditorPage) — plain M is the marker toggle.
-          if (event.shiftKey) return;
+          // ⇧M belongs to the mask-add shortcut and ⌥M to the AI voice-dictation shortcut (both in
+          // EditorPage) — plain M is the marker toggle.
+          if (event.shiftKey || event.altKey) return;
           event.preventDefault();
           onToggleMarkerAtPlayhead?.();
           return;
@@ -2909,6 +2963,7 @@ function TimelineStripImpl({
                   return (
                     <TimelineClip
                       assets={assets}
+                      clipNumber={clipOrdinals.get(layer.id)?.ordinal}
                       durationSeconds={preview?.durationSeconds ?? layer.durationSeconds}
                       draggingKeyframeId={draggingKeyframe?.keyframeId ?? null}
                       draggingKeyframePreviewTime={draggingKeyframe?.previewTimeSeconds ?? null}
@@ -3764,6 +3819,8 @@ interface TimelineClipProps {
   draggingKeyframeId: string | null;
   draggingKeyframePreviewTime: number | null;
   assets: SourceAsset[];
+  /** Positional clip number ("clip N") for the badge, so users (and voice/AI) can name this clip. */
+  clipNumber?: number | undefined;
   onClipContextMenu: (event: ReactMouseEvent<HTMLDivElement>, layer: TimelineLayer) => void;
   onEnterSlipMode: (layerId: string) => void;
   onStartDrag: (event: PointerEvent<HTMLDivElement>, layer: TimelineLayer) => void;
@@ -3819,6 +3876,7 @@ const TimelineClip = memo(function TimelineClip({
   draggingKeyframeId,
   draggingKeyframePreviewTime,
   assets,
+  clipNumber,
   onClipContextMenu,
   onEnterSlipMode,
   onStartDrag,
@@ -4029,6 +4087,9 @@ const TimelineClip = memo(function TimelineClip({
           {trimPreview.mode} {trimPreview.deltaSeconds >= 0 ? "+" : ""}{trimPreview.deltaSeconds.toFixed(2)}s
         </span>
       ) : null}
+      {clipNumber !== undefined ? (
+        <span className="clip-number" aria-hidden="true">{clipNumber}</span>
+      ) : null}
       <span className="clip-label">
         <span className="clip-icon" aria-hidden="true">{clipTypeIcon(layer.type)}</span>
         {layer.linkedGroupId ? <span className="clip-kind">linked</span> : null}
@@ -4045,9 +4106,9 @@ const TimelineClip = memo(function TimelineClip({
                 aria-label={`${shortKeyframeProperty(keyframe.target.property)} keyframe at ${previewTime.toFixed(2)} seconds`}
                 className={`clip-keyframe-marker ${isSelectedKeyframe ? "is-selected" : ""} ${
                   draggingKeyframeId === keyframe.id ? "is-dragging" : ""
-                } clip-keyframe-${keyframe.interpolation}`}
+                } clip-keyframe-${keyframe.interpolation} clip-keyframe-scope-${keyframeMarkerScope(keyframe)}`}
                 key={`${keyframe.id}_${keyframe.target.property}`}
-                title={`${shortKeyframeProperty(keyframe.target.property)} · ${previewTime.toFixed(2)}s`}
+                title={`${shortKeyframeProperty(keyframe.target.property)} · ${previewTime.toFixed(2)}s — double-click to open the graph editor`}
                 type="button"
                 onClick={(event) => {
                   event.preventDefault();
@@ -4057,10 +4118,15 @@ const TimelineClip = memo(function TimelineClip({
                   onChangeCurrentTime(layer.startSeconds + keyframe.timeSeconds);
                 }}
                 onDoubleClick={(event) => {
+                  // Double-click OPENS THE GRAPH EDITOR focused on this property (2026-07-12,
+                  // user-specified drawer behavior). Deleting stays on the lane trash button,
+                  // Delete in the graph editor, and the diamond toggles in the inspector.
                   event.preventDefault();
                   event.stopPropagation();
-                  onDeleteKeyframe(layer.id, keyframe.id);
-                  onSelectKeyframe(null);
+                  onSelectLayer(layer.id, "replace");
+                  window.dispatchEvent(
+                    new CustomEvent("lumio:open-graph-editor", { detail: { targetKey: keyframeGraphTargetKey(keyframe) } })
+                  );
                 }}
                 onPointerCancel={onCancelKeyframeDrag}
                 onPointerDown={(event) => onStartKeyframeDrag(event, layer, keyframe)}
@@ -4105,12 +4171,28 @@ function getVisibleLayerKeyframes(layer: TimelineLayer) {
   return getLayerAnimations(layer)
     .filter(
       (keyframe) =>
-        keyframe.target.scope === "layer" &&
-        keyframe.target.property.startsWith("transform.") &&
+        // Transform + content (layer scope) AND effect-param keyframes all surface in the
+        // lane (2026-07-12) — effect/content ones draw as color-coded dots.
+        ((keyframe.target.scope === "layer" &&
+          (keyframe.target.property.startsWith("transform.") || keyframe.target.property.startsWith("content."))) ||
+          keyframe.target.scope === "effect") &&
         // Fades render as friendly bands (getClipFades), not as raw keyframe diamonds.
         !keyframe.id.includes(TRANSITION_MARKER)
     )
     .sort((a, b) => a.timeSeconds - b.timeSeconds || a.target.property.localeCompare(b.target.property));
+}
+
+/** Lane marker family: transform diamonds vs content/effect dots (styling hook). */
+function keyframeMarkerScope(keyframe: TimelineKeyframeV2): "transform" | "content" | "effect" {
+  if (keyframe.target.scope === "effect") return "effect";
+  return keyframe.target.property.startsWith("content.") ? "content" : "transform";
+}
+
+/** GraphTarget key for the graph editor drawer ("open focused on this property"). */
+function keyframeGraphTargetKey(keyframe: TimelineKeyframeV2): string {
+  return keyframe.target.scope === "effect"
+    ? `effect:${keyframe.target.effectId}:${keyframe.target.property}`
+    : `transform:${keyframe.target.property}`;
 }
 
 /** Derive a clip's fade-in / fade-out durations (seconds) from its `_transition_` opacity keyframes. */

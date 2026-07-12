@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { ActionAnalyticsSnapshot } from "@lumio-by-aelivion/shared";
 import { readAnalytics } from "../../ai/analytics-store";
+import { summarizeRouting, type RoutingSummary } from "../../ai/brain/ledger";
 
 /**
  * Missing-Capability Dashboard (P7). Reads the persisted analytics snapshot and
@@ -22,6 +23,7 @@ function average(values: number[]): number {
 export function AiInsightsDashboard({ onClose }: { onClose: () => void }) {
   // Snapshot is read once on mount; the dashboard is a point-in-time view.
   const data: ActionAnalyticsSnapshot = useMemo(() => readAnalytics(), []);
+  const routing: RoutingSummary = useMemo(() => summarizeRouting(), []);
 
   const tools = rankedEntries(data.toolDemand);
   const effects = rankedEntries(data.effectDemand);
@@ -45,6 +47,24 @@ export function AiInsightsDashboard({ onClose }: { onClose: () => void }) {
         <Stat label="Avg run" value={data.executionMs.length === 0 ? "—" : `${avgMs}ms`} />
         <Stat label="Failed" value={String(data.failedCount)} />
         <Stat label="Rejected by registry" value={String(data.rejectedCount)} />
+      </div>
+
+      <div className="ai-insights-section">
+        <h4>Brain routing (last {routing.total} requests)</h4>
+        {routing.total === 0 ? (
+          <p className="ai-insights-empty">No routed requests yet — ask the AI something.</p>
+        ) : (
+          <div className="ai-insights-stats">
+            <Stat
+              label="Resolved instantly"
+              value={`${Math.round(routing.instantShare * 100)}%`}
+              sub={`${routing.instant}/${routing.total} · ${Math.round(routing.avgInstantMs)}ms avg`}
+            />
+            <Stat label="Model runs" value={String(routing.total - routing.instant)} sub={routing.avgLlmMs > 0 ? `${(routing.avgLlmMs / 1000).toFixed(1)}s avg` : undefined} />
+            <Stat label="Est. tokens spent" value={routing.estTokensSpent.toLocaleString()} />
+            <Stat label="Est. tokens saved" value={routing.estTokensSaved.toLocaleString()} sub="by local tiers" />
+          </div>
+        )}
       </div>
 
       <Section title="Most-requested tools" entries={tools} empty="No tool requests yet." />
@@ -73,7 +93,7 @@ export function AiInsightsDashboard({ onClose }: { onClose: () => void }) {
   );
 }
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string | undefined }) {
   return (
     <div className="ai-insights-stat">
       <span className="ai-insights-stat-value">{value}</span>

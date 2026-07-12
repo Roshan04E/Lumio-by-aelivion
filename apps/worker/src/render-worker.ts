@@ -20,7 +20,38 @@ process.env.DATABASE_URL ??= "postgresql://lumio:lumio@localhost:5432/lumio?sche
 process.env.API_PUBLIC_URL ??= "http://localhost:4100";
 process.env.STORAGE_ROOT ??= "apps/api/storage";
 
-const prisma = new PrismaClient();
+// Singleton Prisma client. The worker runs under `tsx watch`, which reloads on every change to its
+// own files OR to imported workspace packages (@lumio-by-aelivion/shared / render-templates). A bare
+// `new PrismaClient()` per reload opened a fresh pool (default 9 connections) and never disconnected
+// the old one, so orphaned pools accumulated until Postgres hit max_connections → P2024 "Timed out
+// fetching a connection from the pool". Two guards: (1) cache the client on globalThis like the API
+// (apps/api/src/lib/prisma.ts) so in-process reloads reuse one pool; (2) cap this poller's pool small —
+// it's a single sequential job loop that never needs 9 connections — so even a full-restart leak can't
+// exhaust Postgres.
+declare global {
+  // eslint-disable-next-line no-var
+  var __lumioWorkerPrisma: PrismaClient | undefined;
+}
+
+function workerPrismaUrl(): string {
+  const base = process.env.DATABASE_URL ?? "postgresql://lumio:lumio@localhost:5432/lumio?schema=public";
+  try {
+    const url = new URL(base);
+    if (!url.searchParams.has("connection_limit")) {
+      url.searchParams.set("connection_limit", "3");
+    }
+    return url.toString();
+  } catch {
+    return base;
+  }
+}
+
+const prisma =
+  globalThis.__lumioWorkerPrisma ?? new PrismaClient({ datasources: { db: { url: workerPrismaUrl() } } });
+
+if (process.env.NODE_ENV !== "production") {
+  globalThis.__lumioWorkerPrisma = prisma;
+}
 
 export async function processNextRenderJob() {
   const job = await prisma.renderJob.findFirst({

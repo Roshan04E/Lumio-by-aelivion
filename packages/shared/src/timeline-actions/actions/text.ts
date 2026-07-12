@@ -24,7 +24,7 @@ const addTextSchema = z.object({
 const addText: TimelineActionDefinition<z.infer<typeof addTextSchema>> = {
   id: "addText",
   name: "Add text",
-  description: "Insert a new text layer.",
+  description: "Insert a new text clip.",
   category: "text",
   inputSchema: addTextSchema,
   validationRules: (params, ctx) =>
@@ -64,7 +64,7 @@ const updateTextSchema = z.object({
 const updateText: TimelineActionDefinition<z.infer<typeof updateTextSchema>> = {
   id: "updateText",
   name: "Update text",
-  description: "Edit the content or style of an existing text layer.",
+  description: "Edit the content or style of an existing text clip.",
   category: "text",
   inputSchema: updateTextSchema,
   validationRules: (params, ctx) => {
@@ -94,7 +94,7 @@ const updateText: TimelineActionDefinition<z.infer<typeof updateTextSchema>> = {
       if (params.x !== undefined) layer.transform.position.x = params.x;
       if (params.y !== undefined) layer.transform.position.y = params.y;
     });
-    return actionResult(ctx.composition, mutation, `Update text layer`);
+    return actionResult(ctx.composition, mutation, `Update text`);
   }
 };
 
@@ -116,7 +116,7 @@ const addShapeSchema = z.object({
 const addShape: TimelineActionDefinition<z.infer<typeof addShapeSchema>> = {
   id: "addShape",
   name: "Add shape",
-  description: "Insert a new shape layer.",
+  description: "Insert a new shape clip.",
   category: "text",
   inputSchema: addShapeSchema,
   validationRules: (params, ctx) =>

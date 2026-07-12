@@ -97,24 +97,64 @@ function readColrFromInfo(file: MP4File, info: MP4Info): SourceColorMetadata | n
   return colr ? colrToMetadata(colr) : null;
 }
 
+export type SourceRotation = 0 | 90 | 180 | 270;
+
+/**
+ * Derive the display rotation from a `tkhd` matrix. The matrix is [a,b,u, c,d,v, x,y,w] in 16.16
+ * fixed-point (a,b,c,d) — rotation is `atan2(b, a)`. Snap to the nearest quarter-turn; anything else
+ * (skew/flip) → 0 (we only correct clean 90° multiples).
+ */
+export function rotationFromMatrix(matrix: number[] | undefined): SourceRotation {
+  if (!matrix || matrix.length < 2) return 0;
+  const a = matrix[0]! / 65536;
+  const b = matrix[1]! / 65536;
+  if (Math.abs(a) < 1e-3 && Math.abs(b) < 1e-3) return 0;
+  const deg = ((Math.round(Math.atan2(b, a) * (180 / Math.PI)) % 360) + 360) % 360;
+  if (deg >= 45 && deg < 135) return 90;
+  if (deg >= 135 && deg < 225) return 180;
+  if (deg >= 225 && deg < 315) return 270;
+  return 0;
+}
+
+function readRotationFromInfo(file: MP4File, info: MP4Info): SourceRotation {
+  const trackId = info.videoTracks?.[0]?.id;
+  if (trackId == null) return 0;
+  try {
+    return rotationFromMatrix(file.getTrackById(trackId)?.tkhd?.matrix);
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Detect a source file's signalled color space. Resolves to the detected metadata, or null when it
  * can't be determined (caller assumes Rec.709). Never throws.
  */
-export async function detectSourceColorFromFile(file: Blob): Promise<SourceColorMetadata | null> {
-  if (file.size > MAX_PROBE_BYTES) return null;
+export interface SourceProbeResult {
+  color: SourceColorMetadata | null;
+  rotationDegrees: SourceRotation;
+}
+
+/**
+ * Detect a source file's signalled color space AND display rotation in ONE mp4box probe (off the
+ * render loop). Resolves with `{ color, rotationDegrees }`; color is null and rotation is 0 when they
+ * can't be determined (unsupported container, no signalling, too large, or a parse error). Never throws.
+ */
+export async function detectSourceMetadataFromFile(file: Blob): Promise<SourceProbeResult> {
+  const empty: SourceProbeResult = { color: null, rotationDegrees: 0 };
+  if (file.size > MAX_PROBE_BYTES) return empty;
   try {
     const buffer = (await file.arrayBuffer()) as ArrayBuffer & { fileStart: number };
     buffer.fileStart = 0;
     const mp4 = createFile();
-    let result: SourceColorMetadata | null = null;
+    let result: SourceProbeResult = empty;
     let ready = false;
     mp4.onReady = (info) => {
       ready = true;
       try {
-        result = readColrFromInfo(mp4, info);
+        result = { color: readColrFromInfo(mp4, info), rotationDegrees: readRotationFromInfo(mp4, info) };
       } catch {
-        result = null;
+        result = empty;
       }
     };
     mp4.onError = () => {
@@ -133,6 +173,11 @@ export async function detectSourceColorFromFile(file: Blob): Promise<SourceColor
     }
     return result;
   } catch {
-    return null;
+    return empty;
   }
+}
+
+/** Back-compat: color-only probe (kept for existing callers). Prefer {@link detectSourceMetadataFromFile}. */
+export async function detectSourceColorFromFile(file: Blob): Promise<SourceColorMetadata | null> {
+  return (await detectSourceMetadataFromFile(file)).color;
 }

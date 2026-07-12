@@ -38,9 +38,16 @@ export function assertLayerExists(ctx: ActionContext, layerId: string, path = "l
 }
 
 export function assertTrackExists(ctx: ActionContext, trackId: string, path = "trackId"): ValidationIssue[] {
-  return findTrack(ctx.composition, trackId)
-    ? []
-    : [{ code: "invalid_track_reference", message: `No track with id "${trackId}"`, path }];
+  if (findTrack(ctx.composition, trackId)) {
+    return [];
+  }
+  // Enumerate the real ids — an AI caller that guessed (e.g. "video_3") can self-repair from
+  // this message alone instead of guessing again.
+  const available = ctx.composition.tracks
+    .slice(0, 8)
+    .map((track) => `${track.id} (${track.type})`)
+    .join(", ");
+  return [{ code: "invalid_track_reference", message: `No track with id "${trackId}". Existing tracks: ${available || "none"}`, path }];
 }
 
 /** Effect type must exist in `timelineEffectRegistry`. */

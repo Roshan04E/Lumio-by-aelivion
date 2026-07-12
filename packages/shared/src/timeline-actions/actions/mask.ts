@@ -52,7 +52,7 @@ const createMaskSchema = z.object({ layerId: z.string(), artifactId: z.string(),
 const createMask: TimelineActionDefinition<z.infer<typeof createMaskSchema>> = {
   id: "createMask",
   name: "Create mask",
-  description: "Build a matte from a mask-sequence artifact and attach it to a layer.",
+  description: "Build a matte from a mask-sequence artifact and attach it to a clip.",
   category: "mask",
   inputSchema: createMaskSchema,
   validationRules: (params, ctx) => assertLayerExists(ctx, params.layerId),
@@ -74,7 +74,7 @@ const attachMaskSchema = z.object({ layerId: z.string(), artifactId: z.string(),
 const attachMask: TimelineActionDefinition<z.infer<typeof attachMaskSchema>> = {
   id: "attachMask",
   name: "Attach mask",
-  description: "Attach an existing matte to a layer (reuse a mask across layers).",
+  description: "Attach an existing matte to a clip (reuse a mask across clips).",
   category: "mask",
   inputSchema: attachMaskSchema,
   validationRules: (params, ctx) => assertLayerExists(ctx, params.layerId),
@@ -96,7 +96,7 @@ const detachMaskSchema = z.object({ layerId: z.string() });
 const detachMask: TimelineActionDefinition<z.infer<typeof detachMaskSchema>> = {
   id: "detachMask",
   name: "Detach mask",
-  description: "Remove a layer's matte.",
+  description: "Remove a clip's matte.",
   category: "mask",
   inputSchema: detachMaskSchema,
   validationRules: (params, ctx) => {

@@ -24,3 +24,4 @@ export * from "./blend";
 export * from "./scene-compositor";
 export * from "./cube-parser";
 export * from "./looks";
+export * from "./grade-intent";

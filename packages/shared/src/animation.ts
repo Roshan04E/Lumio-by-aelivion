@@ -1,7 +1,6 @@
 import type {
   AnimatedValue,
   KeyframeHandle,
-  KeyframeInterpolation,
   TimelineKeyframe,
   TimelineKeyframeV2,
   TimelineTransform
@@ -67,12 +66,44 @@ export function evaluateAnimatedValue<T extends AnimatedValue>({
   const next = propertyKeyframes[nextIndex]!;
   const duration = Math.max(0.0001, next.timeSeconds - previous.timeSeconds);
   const rawProgress = (timeSeconds - previous.timeSeconds) / duration;
+  // Premiere/AE-style TWO-SIDED interpolation (2026-07-12): a segment's easing is the
+  // combination of the OUTGOING keyframe's leave behavior (its out-handle / easeOut) and
+  // the INCOMING keyframe's arrive behavior (its in-handle / easeIn). Previously only
+  // `previous.interpolation` shaped the whole segment, so "Ease In" on a keyframe eased
+  // the WRONG side (the segment after it) and bezier in-handles were ignored unless the
+  // left neighbor was also bezier. Every non-hold segment now evaluates as one cubic
+  // bezier whose ends are derived per keyframe:
+  //   leave  (previous): bezier → temporal.out;  easeOut/easeInOut/ease/autoBezier → flat; else linear
+  //   arrive (next):     bezier → temporal.in;   easeIn/easeInOut/ease/autoBezier  → flat; else linear
+  // Flat (dy 0) = zero speed at the keyframe (AE Easy Ease); linear (|dy|=|dx|) keeps
+  // straight-line speed on that side.
+  const easeFlat = 1 / 3;
+  const outHandle: KeyframeHandle =
+    previous.interpolation === "bezier"
+      ? previous.temporal.out ?? { dx: easeFlat, dy: 0 }
+      : previous.interpolation === "easeOut" ||
+          previous.interpolation === "easeInOut" ||
+          previous.interpolation === "ease" ||
+          previous.interpolation === "autoBezier"
+        ? { dx: easeFlat, dy: 0 }
+        : { dx: easeFlat, dy: easeFlat };
+  const inHandle: KeyframeHandle =
+    next.interpolation === "bezier"
+      ? next.temporal.in ?? { dx: -easeFlat, dy: 0 }
+      : next.interpolation === "easeIn" ||
+          next.interpolation === "easeInOut" ||
+          next.interpolation === "ease" ||
+          next.interpolation === "autoBezier"
+        ? { dx: -easeFlat, dy: 0 }
+        : { dx: -easeFlat, dy: -easeFlat };
+  const isLinearSegment =
+    outHandle.dx === easeFlat && outHandle.dy === easeFlat && inHandle.dx === -easeFlat && inHandle.dy === -easeFlat;
   const progress =
     previous.interpolation === "hold"
       ? 0
-      : previous.interpolation === "bezier"
-        ? bezierProgress(rawProgress, previous.temporal.out, next.temporal.in)
-        : easeProgress(rawProgress, previous.interpolation);
+      : isLinearSegment
+        ? clamp(rawProgress, 0, 1)
+        : bezierProgress(rawProgress, outHandle, inHandle);
 
   return interpolateValue(previous.value, next.value, progress) as T;
 }
@@ -243,16 +274,6 @@ function legacyPropertyPath(property: TimelineKeyframe["property"]) {
   return "transform.opacity";
 }
 
-function easeProgress(progress: number, interpolation: KeyframeInterpolation) {
-  const t = clamp(progress, 0, 1);
-  if (interpolation === "easeIn") return t * t * t;
-  if (interpolation === "easeOut") return 1 - (1 - t) * (1 - t) * (1 - t);
-  if (interpolation === "easeInOut" || interpolation === "ease" || interpolation === "autoBezier" || interpolation === "bezier") {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-  }
-  return t;
-}
-
 function bezierProgress(progress: number, outHandle: KeyframeHandle | undefined, inHandle: KeyframeHandle | undefined) {
   const x = clamp(progress, 0, 1);
   const p1 = {
@@ -321,4 +342,75 @@ function lerp(from: number, to: number, progress: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+// ---------------------------------------------------------------------------
+// Easing authoring helpers (2026-07-12, graph editor).
+//
+// PURE, ADDITIVE helpers — they never change how existing data evaluates. Each
+// returns explicit `temporal` bezier handles for `interpolation: "bezier"`
+// keyframes, so anything authored with them renders identically in the web
+// preview and the Remotion export through the evaluator above. Handle semantics
+// match `bezierProgress`: dx/dy are FRACTIONS of the neighboring segment's
+// duration / value delta.
+// ---------------------------------------------------------------------------
+
+export interface TangentKeyframeSample {
+  timeSeconds: number;
+  value: number;
+}
+
+/**
+ * Catmull-Rom style auto tangents for a keyframe between two neighbors: the
+ * through-slope `(next.value − prev.value) / (next.time − prev.time)` applied to
+ * both handles, overshoot-clamped so the curve stays within the neighbor values
+ * (the After Effects "auto bezier" feel). Boundary keyframes (missing neighbor)
+ * get a flat handle on the open side.
+ */
+export function computeAutoTangents(
+  prev: TangentKeyframeSample | undefined,
+  keyframe: TangentKeyframeSample,
+  next: TangentKeyframeSample | undefined,
+  influence = 1 / 3
+): { in?: KeyframeHandle; out?: KeyframeHandle } {
+  const slope =
+    prev && next && next.timeSeconds - prev.timeSeconds > 1e-6
+      ? (next.value - prev.value) / (next.timeSeconds - prev.timeSeconds)
+      : 0;
+
+  const result: { in?: KeyframeHandle; out?: KeyframeHandle } = {};
+  if (prev) {
+    const duration = Math.max(1e-6, keyframe.timeSeconds - prev.timeSeconds);
+    const valueDelta = keyframe.value - prev.value;
+    const rawDy =
+      Math.abs(valueDelta) < 1e-9 ? 0 : (slope * (influence * duration)) / valueDelta;
+    // Clamp so the handle never overshoots the segment's value span (monotone-safe).
+    result.in = { dx: -influence, dy: -clamp(rawDy, -1, 1) };
+  }
+  if (next) {
+    const duration = Math.max(1e-6, next.timeSeconds - keyframe.timeSeconds);
+    const valueDelta = next.value - keyframe.value;
+    const rawDy =
+      Math.abs(valueDelta) < 1e-9 ? 0 : (slope * (influence * duration)) / valueDelta;
+    result.out = { dx: influence, dy: clamp(rawDy, -1, 1) };
+  }
+  return result;
+}
+
+/**
+ * AE-style easing preset handles. `influencePct` is the classic Easy Ease 33%.
+ * A flat handle (dy 0) means zero speed at the keyframe; dy = dx keeps the
+ * segment linear on that side.
+ */
+export function easyEaseHandles(
+  kind: "both" | "in" | "out",
+  influencePct = 33
+): { in: KeyframeHandle; out: KeyframeHandle } {
+  const influence = clamp(influencePct, 1, 100) / 100;
+  const flat = { dx: influence, dy: 0 };
+  const linear = { dx: influence, dy: influence };
+  return {
+    in: kind === "out" ? { dx: -linear.dx, dy: -linear.dy } : { dx: -flat.dx, dy: -flat.dy },
+    out: kind === "in" ? linear : flat
+  };
 }

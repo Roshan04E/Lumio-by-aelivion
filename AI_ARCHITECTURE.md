@@ -1,158 +1,381 @@
-# Lumio — AI Operating System Architecture & Phase Tracker
+# Lumio Brain — AI Architecture & Build Plan
 
-> **What this file is:** the *what-phase-are-we-in* roadmap for Lumio's AI. It tracks every phase with a live status, maps shipped work to where it lives, and records the open gaps (including the 50-prompt acceptance findings) as a bug ledger.
+> **What this file is:** the architecture and phased build plan for Lumio's AI **brain** — the
+> tiered decision system that makes the editor itself intelligent and demotes the LLM to a
+> last resort. It replaces the old flat phase tracker (that content is preserved in
+> [Current state](#current-state--what-already-exists-and-where-it-fits) and the appendices).
 >
-> **Sibling docs (don't duplicate):** [`AI_FEATURE_MAP.md`](AI_FEATURE_MAP.md) is the *where-things-live* file index — read it before touching the AI chat. [`architecture.md`](architecture.md) is the shipped/deferred product log. [`AGENTS.md`](AGENTS.md) is the live multi-agent handoff log.
+> **Evidence + input docs:** [`AI_REFINEMENT.md`](AI_REFINEMENT.md) is the raw session log that
+> motivated this redesign (keep it — it's the before-picture and the regression corpus).
+> [`AI_STRUCTURE_SUGGESTIONS.md`](AI_STRUCTURE_SUGGESTIONS.md) is the brainstorm input; where
+> this plan diverges from it, the [divergences section](#where-this-plan-diverges-from-ai_structure_suggestionsmd)
+> says why.
+>
+> **Sibling docs (don't duplicate):** [`AI_FEATURE_MAP.md`](AI_FEATURE_MAP.md) is the
+> *where-things-live* file index. [`architecture.md`](architecture.md) is the shipped/deferred
+> product log. [`AGENTS.md`](AGENTS.md) is the live multi-agent handoff log.
 
 ---
 
-## Philosophy (unchanged)
+## Philosophy
 
-Lumio is **a professional video editor with an AI operating system on top** — not an "AI video generator." The editor is fully usable without AI; the AI *operates the editor's tools*. The relationship is always:
+Lumio is **a professional video editor with an AI operating system on top** — not an "AI video
+generator." The editor is fully usable without AI; the AI *operates the editor's tools*:
 
 ```
 User → Lumio AI → Editor Tools → Timeline / Layers / Effects
 ```
 
-never `User → AI → Final Video`. **Every AI action is editable and undoable.** The AI must think, inspect, plan, ask clarifying questions, execute, show progress, and explain — never silently make important assumptions, never run destructive actions automatically.
+never `User → AI → Final Video`. **Every AI action is editable and undoable.**
 
-**Golden rules (enforced in code):** AI mutates only via the **Timeline Action Registry**; every LLM/NLU step is **registry + param validated** client-side before it can run; **the renderer is never touched** by AI work; keys stay server-side (except per-request BYO). `pnpm -r typecheck` is the lint.
+The brain redesign adds one sentence to that philosophy, and it changes everything:
 
----
+> **The editor knows the project. The LLM only fills gaps.**
+>
+> Intelligence does not scale — systems do. A request should cost tokens only when it
+> genuinely needs language understanding or creativity that the editor's own knowledge
+> cannot supply. Everything else is the editor's job, answered in milliseconds for free.
 
-## Legend
-
-✅ Shipped · 🚧 In progress · 🔜 Next · 🧭 Planned (exploratory, not scheduled)
-
-## Phase tracker
-
-| # | Phase | Status | Lives in |
-|---|-------|--------|----------|
-| 1 | Editor Foundation (timeline / layers / inspector / keyframes / export) | ✅ | `apps/web` editor |
-| 2 | Tool Registry | ✅ | `packages/shared/src/tools.ts` |
-| 3 | Effects Registry | ✅ · 🚧 maturity (**Color system 🚧 — see [`COLOR_SYSTEM_PLAN.md`](COLOR_SYSTEM_PLAN.md)**) | `packages/shared/src/effects.ts`, `packages/shared/src/color/` |
-| 4 | Timeline Action Registry (the mutation layer) | ✅ | `packages/shared/src/timeline-actions/` |
-| 5 | Capability Index + param grammar | ✅ | `packages/shared/src/capability-index.ts` |
-| 6 | Planning Engine (deterministic NLU + LLM gateway) | ✅ · 🚧 accuracy | `apps/web/src/ai/planner/`, `apps/api/.../aiGateway` |
-| 7 | Execution Engine + undo | ✅ | `apps/web/src/ai/executor/` |
-| 8 | Conversation Layer (chat, clarify, confidence, permission, **Talk mode**) | ✅ · 🚧 UX | `apps/web/src/components/ai/` |
-| 9 | **Planner Accuracy & Safety Hardening** | 🚧 | this doc → Phase 9 |
-| 10 | Intent Continuity (follow-up vs new request) | ✅ | `apps/web/src/ai/planner/intent-continuity.ts` |
-| 11 | Memory OS (Session / Project / Creator / Style) | 🚧 (Creator+Project shipped) | `MemoryFact` (Prisma) + `apps/web/src/ai/memory*.ts` |
-| 12 | Reference-driven editing (image input shipped; style fingerprint ahead) | 🚧 | multimodal gateway + `ai/talk.ts` |
-| 13 | Tool Registry Expansion (the moat) | 🧭 | `tools.ts` + adapters |
-| 14 | Agentic loop (feed action/tool results back to planner) | 🧭 | `apps/web/src/ai/planner/` |
-| 15 | Memory Panel UI + trust controls | ✅ | `apps/web/src/components/ai/MemoryPanel.tsx` |
-| 16 | AI Cost & Scaling (multi-user capacity) | 🔜 (degradation+nudge shipped) | gateway + `ai.routes.ts` + BYO |
+**Golden rules (enforced in code, unchanged):** AI mutates only via the **Timeline Action
+Registry**; every step is **registry + Zod param validated** client-side before it can run;
+**the renderer is never touched** by AI work; keys stay server-side (except per-request BYO).
+`pnpm -r typecheck` is the lint.
 
 ---
 
-## Phases 1–8 — Shipped foundation (with known gaps)
+## The problem (measured, not hypothetical)
 
-These exist and work today; see `AI_FEATURE_MAP.md` for exact files. The gaps below are why several carry 🚧.
+[`AI_REFINEMENT.md`](AI_REFINEMENT.md) is a real session transcript. What it shows:
 
-- **1. Editor Foundation** ✅ — timeline, tracks, layers, inspector, keyframes (V2 evaluator), web preview, Remotion export. Every system works manually and exposes metadata the AI consumes.
-- **2. Tool Registry** ✅ — `toolCapabilityDefinitions`: each tool declares slug/name/`aiDescription`/adapters/credits. *Gap:* several tools are mock/immature (see Phase 13).
-- **3. Effects Registry** ✅ · 🚧 — schema-driven effect params drive both editor controls and renderers. *Gap (maturity):* color grade is a single preset, blur ignores "subtle"/"strong" nuance, no curves/wheels/LUT. **A full Premiere-grade color system is now planned + in progress — see [`COLOR_SYSTEM_PLAN.md`](COLOR_SYSTEM_PLAN.md)** (shared `color/` engine compiling effects → one transform emitted as SVG filter primitives for the DOM renderers + a CPU reference, WebGL/3D-LUT for the advanced phases; sub-phases 13C.0–13C.6). This is the one place AI work is *authorized* to touch the renderers (it's Phase-3 foundation, not AI-planner work); the AI planner gains the new params at 13C.6.
-- **4. Timeline Action Registry** ✅ — ~24 Zod-validated, reversible actions; the **only** path AI mutates the timeline. `addShape`, `addText`/`updateText` (now incl. bold/italic + spatial x/y), `addEffect`/`removeEffect`/`updateEffect`, `addTransition`/`removeTransition` (now additive), `moveLayer`, `deleteLayer`, masks, keyframes, …
-- **5. Capability Index** ✅ — `describeForPlanner()` emits the tool/effect/action grammar the planner reads (Zod-reflected `field:type(constraints)` + an INTENT-NOTES disambiguation block); `validateActionParams()` param-checks each step.
-- **6. Planning Engine** ✅ · 🚧 — two tiers: the **LLM planner** (streaming multi-provider gateway, validated + one bounded repair pass) over a **deterministic wink-NLU floor** (offline, zero-key, verb-family-first). *Gap (accuracy):* the 50-prompt pass — see the Bug Ledger.
-- **7. Execution Engine** ✅ — `executePlan` runs validated steps through the registry, each committed as a normal snapshot-undo; tool steps open the real tool modal; clarify steps pause for the user.
-- **8. Conversation Layer** ✅ · 🚧 — chat panel with planning→review→execute phases, live thinking log, confidence, permission modes, BYO key, in-panel undo. *Gap (UX):* per-step apply (now landing in Phase 9), terminology clarity, verbose banners.
+| Request | What happened | What it should be |
+|---|---|---|
+| "change text color of clip 3 to white" | 3–6 s LLM reasoning + a second 6 s closing call | <50 ms, 0 tokens — one registry action |
+| "move clip 3 5 seconds earlier" | 10 s reasoning | <50 ms, 0 tokens |
+| "what are your capabilities" | 17 s LLM call | instant — the registries ARE the answer |
+| "play the video" / "enter Pan mode" | 9–13 s LLM calls to say "press Space" | instant local answer |
+| beat-detect → cut chain | 3 LLM iterations + a closing "already done" iteration | 1 iteration (tool chain), 0 closing call |
+| blur-amount keyframing (unsupported) | thousands of reasoning tokens re-discovering the gap, three times | instant honest "not keyframeable — here's the nearest alternative" |
 
----
+The six structural failures behind those rows:
 
-## Phase 9 — Planner Accuracy & Safety Hardening 🚧
-
-The fixes from the 50-prompt acceptance pass. Status reflects this batch.
-
-- [x] **Additive fades** — `addTransition` only replaces keyframes for the *same* direction, so fade-in and fade-out coexist; "fade in and fade out" applies both. ([transition.ts](packages/shared/src/timeline-actions/actions/transition.ts))
-- [x] **Bold / italic text** — `addText`/`updateText` gained `bold`/`italic` params → mapped to `fontWeight`/`italic` (renderer already reads them); detected via `extractTextStyle` on both planner paths. ([text.ts](packages/shared/src/timeline-actions/actions/text.ts), [entities.ts](apps/web/src/ai/planner/entities.ts))
-- [x] **On-frame placement** — new text/shape centres are clamped to a 22–78 % safe area so "top left" / "bottom" boxes no longer clip off-frame. ([shared.ts](packages/shared/src/timeline-actions/actions/shared.ts))
-- [x] **Spatial reposition** — `updateText` gained `x`/`y` → `transform.position`; the planner routes "put the selected text in the center" to a move, not a stray new layer. ([layer/text actions], [DeterministicPlanner.ts](apps/web/src/ai/planner/DeterministicPlanner.ts))
-- [x] **Remove-effect & target taxonomy** — "remove the blur" resolves the effect on the carrier layer → `removeEffect{layerId, effectId}`; "remove the fade" → `removeTransition`; a vague "delete this" on a **media clip** asks instead of deleting. ([DeterministicPlanner.ts](apps/web/src/ai/planner/DeterministicPlanner.ts), grammar in [capability-index.ts](packages/shared/src/capability-index.ts))
-- [x] **Truncated-clarify salvage + safety** — completion budget raised to 4096; `extractJson` recovers a clarify question from truncated JSON instead of returning null (which previously let a destructive deterministic guess delete the user's clip). ([ai.routes.ts](apps/api/src/routes/ai.routes.ts), [aiGateway.service.ts](apps/api/src/services/aiGateway.service.ts))
-- [x] **Per-step apply** — `PlanReviewCard` shows a checkbox per runnable step; the user applies a subset of a multi-step plan. ([PlanReviewCard.tsx](apps/web/src/components/ai/PlanReviewCard.tsx))
-- [x] **Banner trim** — "Effect applied · track saved" replaces the long inspector sentence.
-- [ ] **Shape geometry on the live LLM path** — geometry override is wired and the math is aspect-correct; re-verify once with keys set (earlier failures coincided with an exhausted provider pool).
-
-**Deferred from this batch (tracked, not done):** Remove-Background runner registration (#27/#28/#30) and a professional person-removal tool → Phase 13. "Start 2s later" clip-offset / start-time intent (#41) → small follow-up. Caption-label styling (#14) → Phase 13. Effect maturity / "subtle" nuance (#32–#35) → Phase 13.
+1. **Transactional commands pay creative-brain prices.** Single registry actions route through
+   a reasoning LLM with the full bounded slice.
+2. **Every agent-loop run pays a closing iteration** — after the work is applied, the model is
+   called again just to say "done" (and weak models sometimes re-emit the batch instead,
+   tripping the loop-breaker).
+3. **One model pool for everything.** The gateway is "a prioritized pool of free *reasoning*
+   models" — there is no non-reasoning fast class, so even trivial JSON emissions buy a
+   40–90 s thought blob.
+4. **Registry-answerable questions go to the LLM** (capabilities, editor how-tos).
+5. **Known capability gaps are re-discovered by the model at token cost, per turn**, instead
+   of being knowledge the system consults instantly.
+6. **Nothing learned ever makes the next request cheaper.** The same ask re-pays full cost;
+   an undo teaches the system nothing.
 
 ---
 
-## Phase 10 — Intent Continuity ✅
+## Design principles
 
-A lightweight, synchronous pre-classifier ([`intent-continuity.ts`](apps/web/src/ai/planner/intent-continuity.ts)) deciding, per message, whether it **continues the last request** or **starts a new one**, *before* planning — and gating what context is threaded.
-
-- **Continue** signals: pronouns/deixis ("it", "this", "that"), delta phrases ("bigger", "more", "the same but"), leading connectives ("also", "now", "instead"), or an explicit selection with no new object. → `lastAction` (the prior target) is threaded; the LLM gets an `Intent: CONTINUES…` steer; the chat shows "↪ continuing your last edit".
-- **New** signals (override recency): a fresh object marker — shape kind, content marker (quote/"saying"), tool noun (captions/track/background), or "add/create a/new <noun>". → `lastAction` is withheld; the LLM gets `Intent: NEW…`; the deterministic floor won't resolve onto an unrelated recent layer. Ties default to **new** (never silently edit the wrong thing).
-
-Gates today's only implicit tier (`lastAction`); Phase 11 will gate the Project/Creator/Style tiers off the same `intentScope`. Verified by `continuity:test` (14 cases). **Acceptance met:** "add a red circle" → "make it bigger" edits the circle; "add captions" → "add a blue box" creates a box, not an edit of the captions; an explicit selection always wins.
-
----
-
-## Phase 11 — Memory OS (4 tiers, scalable hybrid) 🚧 — Creator + Project shipped
-
-**Shipped this slice:** a single flexible `MemoryFact` table (Prisma; scope=creator|project|style, key/value/`confidence`/`source`/`lastUsedAt`), an auth-gated `/api/memory` (GET/PUT/DELETE) with a server-side **confidence merge** (re-observation compounds toward 1; explicit pins ≥0.9), and a **client-first** store ([`ai/memory.ts`](apps/web/src/ai/memory.ts) — localStorage is the offline source of truth, server syncs when authed; legacy `AiMemoryPreferences` migrated in, `loadMemory`/`rememberPreferences` kept as adapters). A **Memory Extractor** ([`ai/memory-extractor.ts`](apps/web/src/ai/memory-extractor.ts)) distils reusable creator+project facts from each *applied* plan (text color, color grade, captions usage, quality mode); a **bounded Retriever** ([`ai/memory-retriever.ts`](apps/web/src/ai/memory-retriever.ts)) injects a small high-confidence slice (project overrides creator) into both planners — a `Memory:` steer for the LLM, defaults for the deterministic floor. `AiChatPanel` hydrates on mount and extracts after apply, project-scoped via `projectId`. Verified by `memory:test`. **Deferred:** Style fingerprints (Phase 12). _(Memory Panel UI + low-confidence "save as default?" prompts now shipped — Phase 15.)_
-
-Original tier design (target):
-
-**Chosen architecture:** ephemeral memory stays client-side for zero-latency and privacy; durable memory is server-backed (Prisma/Postgres on the existing api layer) for cross-device sync, the "learn my style" workflow, and multi-user/suite scalability. It graduates from a client-first MVP to server sync **without changing the retrieval contract**.
-
-| Tier | Scope | Store | Holds |
-|------|-------|-------|-------|
-| Session (working) | this chat | client (`ai/memory.ts` / component state) | current goal, selected clip, last AI action, recent corrections — dies with the session |
-| Project | one video project | client cache + **Prisma** | theme, preferred caption style, music mood, do-not-use list, approved reference |
-| Creator | the user, long-term | **Prisma** | default caption style, language, preferred video style, avoids |
-| Style fingerprints | per reference upload | **Prisma** | pacing, avg shot length, color mood, text style, transitions, music energy → mapped to Lumio tool actions |
-
-**Cross-cutting rules:**
-- **Never send all memory to the model.** A *Memory Extractor* classifies + stores only reusable signals; a *retriever* injects a **small** relevant slice — mirroring the existing bounded `summarizeContext()` cost rule.
-- Every memory carries `confidence`, `source`, `last_used`, `scope`. Low-confidence facts prompt *"Save this as your default?"* rather than being assumed.
-- The "learn my style" workflow: after N edits, surface the inferred profile and offer to save it as the creator default.
+1. **LLM last.** Every request descends a cascade of tiers ordered by cost; each tier either
+   resolves the request with near-certainty or **declines silently** and escalates.
+2. **Precision-first fast paths — never guess.** The old deterministic planner earned user
+   distrust by chasing *recall* (guessing on ambiguous input and labeling it "Exact"). The
+   brain's cheap tiers chase *precision*: they fire only on structurally unambiguous input,
+   and the LLM catches everything they decline. A fast path that is sometimes wrong is worse
+   than no fast path.
+3. **Honest labels per route.** The UI says how a result was produced — "Instant · local"
+   vs the actual model name. Never dress a rule match up as model output or vice versa.
+4. **Learning = statistics on our own data structures.** Success/undo counters on rules,
+   recipes, and phrases (bandit-style Beta scores) — not model training. Feedback the user
+   already gives (apply, undo, modify, re-ask) is the reward signal.
+5. **Instrument everything.** Every request logs its route, latency, and estimated tokens.
+   Savings must be measurable, not vibes.
+6. **Safety rules are tier-independent.** Registry-only mutation, destructive-action guards,
+   clarify-on-ambiguity, and mode gating (Professional approval) apply identically no matter
+   which tier produced the plan.
 
 ---
 
-## Phase 12 — Reference-driven editing 🚧 — image input shipped
+## The decision cascade
 
-**Shipped groundwork (multimodal):** the chat composer accepts a **reference image** (📎, downscaled client-side to a ≤1024px JPEG data URL). The gateway is now multimodal — `ProviderConfig.supportsVision`, OpenAI `image_url` content parts, and a `needsVision` filter that **routes image requests to a vision-capable provider** (Gemini in the free pool; premium Claude / BYO). Both `/ai/plan/stream` and `/ai/chat/stream` accept `images`; if no vision provider is available the user gets a clear "needs a vision model" note (image never blocks the text paths). Reference images flow through `PlannerContext.referenceImages`.
+```
+                        User (chat / voice / UI)
+                                  │
+                     ┌────────────▼─────────────┐
+                     │        THE ROUTER        │  focus state · intent continuity
+                     └────────────┬─────────────┘
+        ┌──────────┬──────────────┼────────────────┬───────────────┐
+        ▼          ▼              ▼                ▼               ▼
+   Tier 0       Tier 1         Tier 2           Tier 3          Tier 4
+   REFLEX       COMMAND        SEMANTIC         TRANSACTIONAL   CREATIVE BRAIN
+   <5ms         COMPILER       LAYER            LLM             (agent loop)
+   0 tokens     <50ms          <150ms           1 call          N bounded calls
+                0 tokens       0 tokens         ~300 tokens     reasoning models
+        │          │              │                │               │
+        └──────────┴──────┬───────┴────────────────┴───────────────┘
+                          ▼
+              Timeline Action Registry (Zod-validated, undoable)
+                          │
+                  Timeline / Layers / Effects
+```
 
-**Still ahead (the full vision):** upload a reference *video*, extract a **style fingerprint** (Phase 11 `style` scope), and **map** it onto Lumio tools as an editable plan. **Hard dependency:** only as strong as the tool coverage in Phase 13.
+Each tier escalates to the next on anything less than near-certainty. Expected distribution
+for a mature brain: **70–90 % of requests resolve at tier ≤ 2 (zero tokens)**.
 
-### Talk mode (Conversation layer, Phase 8)
-A 4th permission mode — **Talk** — for inspiration: a prompt streams a conversational reply from `/ai/chat/stream` (a "creative consultant" — no plan, no registry mutation) and ends with runnable **suggestion chips** that one-tap switch to Professional and execute. Memory-aware and image-aware. Lives in [`ai/talk.ts`](apps/web/src/ai/talk.ts) + `AiChatPanel`.
+### Tier 0 — Reflex (<5 ms, 0 tokens) — `apps/web/src/ai/brain/`
+
+Exact and near-exact matches, answered or compiled locally:
+
+- **Command table**: `undo` (the panel's existing AI-undo), `delete clip 3`, `split clip 2 at
+  playhead` — resolved via [`clip-reference.ts`](packages/shared/src/clip-reference.ts)
+  (ordinals + playhead/selection) into ordinary registry plans.
+- **Registry-generated FAQ**: "what can you do", "what are your capabilities" — the answer is
+  *generated from* the capability index / tools / skills registries, so it is always current
+  and costs nothing. Kills the 17 s capability call.
+- **Editor knowledge**: "play the video", "how do I pan" — answered from a small curated table
+  of real Lumio shortcuts (the timeline cheat-sheet is the source of truth), instantly and
+  correctly (the LLM was *inventing* generic-NLE answers for these).
+- **Read-only lookups**: "what is clip 2" — described from the composition slice locally.
+
+### Tier 1 — Command Compiler (<50 ms, 0 tokens)
+
+A grammar, not a guesser: **verb family + target + params → registry action(s)**.
+
+- Verb families and entity extractors already exist
+  ([`DeterministicPlanner.ts`](apps/web/src/ai/planner/DeterministicPlanner.ts),
+  [`entities.ts`](apps/web/src/ai/planner/entities.ts)) — this tier repurposes that corpus as
+  a *precision fast path*, which is a different job from its old *recall fallback* role (the
+  offline fallback stays, demoted, for when the LLM is unreachable).
+- Fires **only** when the parse is structurally complete: every slot filled, the target
+  resolves uniquely (clip-reference / selection / focus state), and the params pass the
+  action's own Zod schema. Plus a per-rule feedback-adjusted confidence gate (~0.98, see
+  [Learning loop](#learning-loop--the-reinforcement-from-feedback)). Anything less: silent escalation.
+- Examples that should compile here: "change clip 3 text to white", "move clip 3 5 seconds
+  earlier", "set blur to 10 on clip 2", "fade in clip 1".
+
+### Tier 2 — Semantic layer (<150 ms, 0 tokens)
+
+Local embeddings over a **phrase index** — MiniLM-class model via `@huggingface/transformers`
+(lazy singleton, cached, the proven [`local-transcription.ts`](apps/web/src/tools/local-transcription.ts)
+pattern; the model downloads once, ~25 MB).
+
+- **Synonym lexicon**: "soften" → blur, "get rid of" → delete.
+- **Concept → recipe**: "dreamy" → the Dream look recipe; "cinematic" → the cinematic grade
+  skill. Recipes are data (the skills registry), not prompts.
+- **Learned user phrases**: mappings the LLM resolved before, cached per user (see Learning
+  loop) — the second time "make it pop like last time" is free.
+- **Plan cache** (v2 2026-07-11, retargetable): normalized prompt → a previously validated
+  plan; replays while every clip the plan REFERENCES is byte-identical (unrelated edits and
+  playhead moves don't invalidate). Deictic prompts ("it", "here", "selected") additionally pin
+  the exact selection + playhead. LLM turns carry 👍/👎: 👍 blesses the replay, 👎 or an undo
+  within 60s forgets the plan + any learned phrase (never auto re-runs the model on 👎 — it
+  would repeat itself). Repeats cost nothing, and never wrong-target.
+- High similarity threshold; below it, escalate. Same honesty rule: the result is labeled
+  "Instant · semantic" and still flows through mode gating.
+
+### Tier 3 — Transactional LLM (1 call, ~300 input tokens)
+
+For commands that *look* transactional but tiers 0–2 couldn't parse:
+
+- A **new gateway model class `fast`** — non-reasoning instruct models (llama-8b-instant
+  class, flash-lite class), temperature 0, JSON-only.
+- **Micro-prompt**: tool-selection contract only ("emit registry steps or `ESCALATE`"), and a
+  **target-clip-only context** (not the full slice).
+- Output is validated exactly like any plan; `ESCALATE` or validation failure promotes the
+  request to tier 4. One call, no loop, no reasoning tokens.
+
+### Tier 4 — Creative brain (the agent loop, bounded)
+
+The existing [`AgentLoop.ts`](apps/web/src/ai/agent/AgentLoop.ts) — observe → think → act →
+observe real results — keeps its role for creative, multi-step, and ambiguous work. Four
+upgrades make it dramatically cheaper:
+
+1. **Final-batch contract.** A plan can mark its batch `final: true` and carry a completion
+   summary. If every step succeeds, the run ends **without a closing LLM call** — killing the
+   wasted "done" iteration every run pays today (and the loop-breaker's weak-model repeats).
+2. **Intent DSLs.** Generalize the proven [`GradeIntent`](packages/shared/src/color/grade-intent.ts)
+   pattern (LLM emits a compact intent, a deterministic compiler expands it into a real
+   editable effect stack): `MotionIntent` (entrance/exit/emphasis animation), `TextLookIntent`
+   (styled text treatments), `RecipeRef` (invoke a knowledge-layer recipe by id). Creative
+   quality goes up while tokens go down — the model describes *intent*, our compilers do the
+   craft.
+3. **Slice diffs after iteration 1.** Iteration 1 sends the bounded slice; iterations 2+ send
+   only `CHANGES SINCE LAST ACTION` plus `ref` labels for unchanged layers.
+4. **Capability-gap pre-check.** Known-impossible asks (e.g. "keyframe the blur amount" today)
+   are detected against the capability index *before* planning and answered instantly and
+   honestly with the nearest supported alternative — instead of the model burning 40 s
+   re-discovering the gap, three times, as in the refinement log.
 
 ---
 
-## Phase 13 — Tool Registry Expansion (the moat) 🧭
+## Cross-cutting systems
 
-The honest gate: **AI can only do what exists.** With a rich tool registry the planning layer becomes powerful; without it even the best model can't produce professional edits. The durable moat is *timeline-aware AI + capability registry + planning layer + editable execution + reference-driven editing* — not the model. Candidate tools to build (checklist):
+### Knowledge layer (the moat)
 
-- [ ] Professional Person / Background Removal (replace the immature stand-in)
-- [ ] Scene Detection
-- [ ] Speed Ramp
-- [ ] Auto-Reframe
-- [ ] Audio Ducking
-- [ ] Motion Blur
-- [ ] Mature Color (curves, wheels, LUTs, skin-tone-safe grades)
-- [ ] Nuanced / intensity-aware Blur
-- [ ] Register runners for tools whose modals open but can't yet run (e.g. Remove Background)
+The [capability index](packages/shared/src/capability-index.ts) grows from a planner grammar
+into an **editing ontology** — all data, all local, all token-free:
+
+- **Synonym lexicon** (word → capability) and **concept trees** (mood/style → recipe).
+- **Recipes**: the skills registry *is* the recipe store (progressive disclosure already
+  built); grow it — looks, intros, genre presets are rows, not prompts.
+- **Tool chains**: typed artifact outputs feed the next action without an LLM. Beat detection
+  already returns `beats[]` that `addMarkersAtTimes` / `splitClipAtTimes` consume — formalize
+  the pattern: any tool's artifact declares which actions can consume it, so "detect beats and
+  cut" is one chain, not a conversation.
+- **Heuristics**: editing rules (subtitles ≤ 2 lines, music fades in, logos keep safe margin)
+  applied by compilers, not asked of a model.
+- **Capability gaps**: what is *not* supported, as first-class knowledge (feeds the tier-4
+  pre-check and honest answers).
+
+### Working memory / focus state
+
+Extends [`intent-continuity.ts`](apps/web/src/ai/planner/intent-continuity.ts) (the shipped
+continue-vs-new classifier) and [`memory.ts`](apps/web/src/ai/memory.ts) into an explicit
+session focus: **current target, last action, editing mode**. "Blur it" then resolves at
+tier 1 without any history re-send; follow-ups carry deltas only.
+
+### Learning loop — the "reinforcement from feedback"
+
+Honest scope: **bandit-style statistics, not model training.** Every applied plan already
+produces the reward signal — the user applies, undoes, modifies, or re-asks.
+
+**Learning happens in TWO STAGES (user requirement, 2026-07-09):**
+- **Stage 1 — local (shipping now):** per-user, on-device. Rule trust, learned phrases,
+  parameter preferences — the editor adapts to THIS user immediately, privately, for free.
+- **Stage 2 — universal (deferred behind consent):** the same events, anonymized (ruleId +
+  outcome only, never prompt text), aggregated server-side to train the SHARED editor
+  intelligence — global rule/recipe confidence, auto-discovered recipes, learned defaults.
+  Every event is recorded aggregate-ready TODAY: `ai/brain/feedback.ts` keeps the bounded raw
+  event feed and `drainFeedbackEvents()` is the future sync worker's hook.
+
+- **Outcome events**: explicit **👍/👎 on every brain-resolved turn (✅ shipped)** — 👎 also
+  reverts the local edits and re-runs the same prompt through the model — plus `applied` /
+  `undone-within-60s` / `modified` / `re-asked` (ahead), recorded per
+  plan with the rule/recipe/phrase that produced it.
+- **Per-rule, per-recipe, per-phrase Beta(success, failure) scores**, stored in the existing
+  MemoryFact-style local-first store (client is source of truth, server sync per user —
+  the same contract memory uses today). Effects:
+  - a tier-1 rule whose plans keep getting undone **drops below its gate and stops firing**
+    (escalates instead) — the system self-corrects toward precision;
+  - a phrase the LLM had to resolve is cached as `phrase → plan template`; next time tier 2
+    catches it free — **the brain converts tokens into knowledge**;
+  - parameter statistics (typical blur amount, favorite font, caption style) feed defaults —
+    "blur the intro" uses *your* usual amount.
+- **Fleet aggregation is deferred** (no telemetry/consent system yet) but the event schema is
+  aggregate-ready: when consented telemetry exists, the same events can build global recipe
+  confidence and auto-discovered recipes ("this 5-step sequence appears 12 000 times").
+
+### Context compiler
+
+One module owns what each tier is allowed to send:
+
+| Tier | Context budget |
+|---|---|
+| 0–2 | none (local state only) |
+| 3 | target clip summary only (~300 tokens total request) |
+| 4 iter 1 | bounded slice (existing `summarizeContext` rules) |
+| 4 iter 2+ | diff since last action + `ref` labels |
+
+Capability docs use progressive disclosure everywhere (skills already do this — extend to
+actions/effects): one-liners in the catalog, full doc only via the `inspect` step.
+
+### Instrumentation — the routing ledger
+
+Per request: `{route, provider?, latency ms, est tokens in/out, outcome}` — bounded ring,
+surfaced in the Insights panel (route counts, average latency, estimated tokens spent/saved).
+Plus a **router acceptance suite** (the 50-prompt ledger reborn, `brain:eval`): a transactional
+corpus that must resolve at tier ≤ 2, and an ambiguity corpus that must **escalate** — the
+wrong-fast-path count must be **zero**. A rule that fails eval doesn't ship.
 
 ---
 
-## Phase 14 — Agentic loop 🧭
+## Where this plan diverges from AI_STRUCTURE_SUGGESTIONS.md
 
-Feed tool/action **results** back into the planner for multi-turn replanning (today: one-shot plan → execute). Enables "inspect → act → observe → refine" instead of a single pass.
+The brainstorm doc is directionally right (LLM last resort, editor intelligence, layered
+routing, learning from behavior). Four deliberate departures:
 
-## Phase 15 — Memory Panel UI + trust ✅
-
-A surface where the user sees exactly what Lumio remembers, with **Edit / Forget / Use-for-this-project-only** — makes memory feel professional, not creepy. Shipped as [`MemoryPanel.tsx`](apps/web/src/components/ai/MemoryPanel.tsx) (a full-panel sibling opened from a `Brain` header icon in `AiChatPanel`, mirroring the Insights/BYO panels). Groups facts into **This project** (project-scoped) and **About you** (creator), filtering out `style` scope (Phase 12). Each fact shows a human label, value, a Pinned/Learned source badge, and a confidence meter; **Edit** pins an explicit value, **Forget** removes it, **This project only** copies a creator default down to the active project (the retriever already prefers project on a key collision). Low-confidence inferred facts (below the retriever's 0.45 steer threshold) surface as a **"Lumio noticed… save as your default?"** nudge rather than being silently assumed — the missing trust piece from Phase 11. Pure client, zero AI cost; reuses `memory.ts` (`loadFacts`/`rememberFact`/`forgetFact`) with no new store API. **Deferred:** style-fingerprint facts (Phase 12) once those exist; the panel renders them automatically when added.
+1. **No trained micro-models / no 4B intent-router model, day 1.** There is no training data
+   or infra, and a lexical + embedding router is <150 ms and free. A local tiny-LLM router is
+   an exploratory phase (B8) for Ollama/WebGPU users only.
+2. **"RL" = bandit counters on rules/recipes/phrases**, not policy training. Same feedback
+   signal, shippable now, explainable, and reversible.
+3. **The knowledge graph starts as ontology tables on the existing registries** (capability
+   index, skills, effects) — not a 15 000-node graph store. The registries already are the
+   seed graph; we grow them.
+4. **Fleet-scale learning ("50 000 users") is deferred** behind consent/telemetry that doesn't
+   exist yet. Per-user, on-device learning ships first with an aggregate-ready schema.
 
 ---
 
-## Bug Ledger — 50-prompt acceptance pass
+## Build plan
 
-Status as of Phase 9. ✅ pass · ❌ fail · 🆕 fixed this batch (re-test) · 🔜/🧭 deferred to a later phase.
+Statuses: ✅ shipped · 🚧 in progress · 🔜 next · 🧭 planned
+
+| # | Phase | Status | What ships |
+|---|-------|--------|------------|
+| B0 | **Instrument first** | ✅ 2026-07-09 | Routing ledger (`ai/brain/ledger.ts`), token estimator, Insights "Brain routing" block, eval harness. Measure before optimizing. |
+| B1 | **Reflex + router skeleton** | ✅ 2026-07-09 | `ai/brain/router.ts` ahead of the planner in `AiChatPanel`; tier-0 command table; registry-generated FAQ (`ai/brain/faq.ts`); honest "⚡ Instant" labels; `brain:eval`. |
+| B2 | **Command compiler** | ✅ first slice 2026-07-10 | Tier-1 grammar (`ai/brain/rules.ts`): text-color / move-in-time / fades / blur rule families, type-gated targets, decline-don't-guess. Grow rule coverage + the eval corpus toward the full 50-prompt set. |
+| B3 | **Semantic layer** | ✅ 2026-07-10 | `ai/brain/semantic.ts`: slot extraction (targets/times/colors/numbers) → intent skeletons; curated phrase index (exact match free, lazy-MiniLM embeddings for near-paraphrases, threshold 0.9 + margin 0.04); matches select INTENT only — the rewrite re-enters tiers 0/1 so every structural/type/Zod gate still applies. Plan cache: normalized prompt + exact composition signature → free replay (undo-then-repeat). Async in the panel; escalates instantly while the model is cold. |
+| B4 | **Model classes** | ✅ 2026-07-10 | Gateway `fast` pool (llama-8b-instant / flash-lite class; own cooldowns, 8 s timeout, temp 0, 900-token cap); `POST /ai/plan/fast`; `ai/brain/fast.ts` tier-3: `looksTransactional` economic gate → micro context (target clip only + compact action catalog ≈300 tokens) → JSON steps or `escalate`, every step re-validated via Zod. Honest "⚡ Fast lane" label; ledger route `llm-fast`; 👎-gated as `t3.fast-lane`. |
+| B5 | **Loop economy v2** | ✅ core 2026-07-10 | Final-batch contract (`"final": true` + `finalSummary` → all-steps-success ends the run with NO closing LLM call); slice diffs after iteration 1 (added/changed layers full, unchanged as ref+id stubs); capability-gap pre-check ("keyframe the blur amount" → instant honest answer + alternatives; keyframeable properties still pass through). Ahead: MotionIntent/TextLookIntent compilers (generalizing GradeIntent — own build slice, renderer-parity rules apply). |
+| B6 | **Learning loop** | ✅ 2026-07-10 | 👍/👎 feedback row + per-rule trust gate (`ai/brain/feedback.ts`); implicit signals (undo-a-brain-edit-within-60 s = reject; moving on to a new prompt with edits standing = weak confirm); learned-phrase WRITE path (`maybeLearnPhrase`: a single-action LLM resolution teaches the user's skeleton to tier 2 — slot-arity-gated so only generalizable phrasings are learned); aggregate-ready event feed (`drainFeedbackEvents`) for Stage-2 universal learning. Preference stats ride the existing P6/P11 memory facts. |
+| B7 | **Knowledge expansion** | 🚧 first slice 2026-07-10 | Concept → recipe shipped: exact-phrase named looks ("make it cinematic" / teal & orange / noir) compile straight to the color-grade skill with a registered `CreativeLook` — deterministic, free, 👎-gated. Ongoing: more recipes, formalized tool chains, heuristics — this is the moat. |
+| B8 | **Exploratory** | 🧭 | Local tiny-LLM router (Ollama/WebGPU); fleet aggregation behind consent; TTS read-back pairing for voice sessions. |
+| CP1 | **Editor command plane** | ✅ v1 2026-07-11 | Second control surface next to timeline actions: `editor-commands.ts` registry (web) + EditorPage dispatcher + tier-0 rules (`ai/brain/commands.ts`) — "pan mode"/"pause"/"select clip 3"/"go to 12 seconds"/"half res"/"toggle snapping"/"redo"/"export" EXECUTE instantly (no approval — view/transport state; saying the opposite is the undo). FAQ tips for play/pan retired in favor of execution. Semantic exemplars map paraphrases ("freeze playback") to commands. `openPanel` added same day (user hit "open effects tab" escalating to the LLM): open/close/toggle Media Pool / Effects / Color / Project Settings / Inspector — "effects"/"color" need a tab/panel suffix (bare "show effects" stays ambiguous → escalates). Voice mode v1 (2026-07-11): AI-panel header toggle, **Alt+L** shortcut, and an opt-in **"Hey Lumio" wake word** (standby Web Speech recognizer, Ear header toggle, persisted; never contends with dictation) (+ long-press mic, + spoken "stop listening" exit) with a full-window `.voice-aurora` portal. Voice round 2 (same day): **trainable wake word** (fuzzy matcher `ai/wake-word.ts` + "were you calling me?" learning card — mishearings like "hello mia" are confirmed once and learned), **TTS read-back** (`ai/tts.ts`, voice-session-only, mic gated while speaking), **carry-through** ("hey lumio, blur clip 2" executes in one breath), **Kokoro-82M natural voice** (kokoro-js, Apache-2.0, in-browser WebGPU fp32 / WASM q8; background warm with visible download % in the chat; Web Speech = instant fallback) — cool slow edge glow while listening, warm fast sweep while executing, status pill with live transcript tail. Voice round 4 (2026-07-12): **streaming TTS** (worker speech sessions on kokoro-js `stream()` — one WAV per sentence, first sound after ONE sentence's inference, no reply length cap, 12s budget now = time-to-first-chunk), **talk mode speaks live** (completed sentences pushed while the LLM streams; SUGGESTIONS tail never spoken), **multi-point answers read in full** (`speakable()` truncation removed, line-aware bullets→sentences), **gender-matched system fallback** (Michael selected → male system voice during warm-up). Voice round 5 (2026-07-12): **accurate ears** — `transcript-normalizer.ts` (deterministic editor-lexicon vocabulary biasing on dictation finals, precision-first context gates, eval-covered: "lip one in lower be to layer" → "clip 1 in lower V2 layer") + opt-in **Moonshine-base local ASR** (`asr.worker.ts`, q8/wasm ~60MB, ⚙ "High-accuracy hearing": the recorded utterance is re-transcribed locally and replaces the Web Speech final) + **clarify dedupe in AgentLoop** (affirmatives annotated CONFIRMED; identical re-asked question auto-answered once, third ask stops the run). Voice round 6 (2026-07-12): **WebGPU Kokoro** (same q8 files, sanity-generation guard → auto WASM fallback; ⚙ shows GPU/CPU), **instant ack cache** ("Okay."/"Done."/"Yes?" pre-generated per voice), **network-voice fallback preference** (Google network voices over SAPI). v2: timeline-zoom lift, LLM-composable `editorCommand` step kind, barge-in voice, streaming Moonshine interim. |
+
+**Expected impact (estimates, to be verified against the ledger):** replaying the
+`AI_REFINEMENT.md` session, ~70 %+ of its requests resolve at 0 tokens; every tier-4 run saves
+at least one LLM call (the closing iteration); trivial edits go from 6–17 s to <100 ms. The
+acceptance bar for each phase is the routing ledger showing the predicted shift, not typecheck.
+
+---
+
+## Current state — what already exists and where it fits
+
+The old phase tracker (1–16), mapped into the brain. Nothing shipped is lost; several pieces
+turn out to be seeds of brain organs.
+
+| Old phase | Status | Where it lives in the brain |
+|---|---|---|
+| 1. Editor Foundation | ✅ | The body the brain operates. `apps/web` editor. |
+| 2. Tool Registry (`tools.ts`) | ✅ | Knowledge layer substrate. |
+| 3. Effects Registry (+ color system 🚧, see [`COLOR_SYSTEM_PLAN.md`](COLOR_SYSTEM_PLAN.md)) | ✅ | Knowledge layer substrate; GradeIntent is the intent-DSL template (tier 4). |
+| 4. Timeline Action Registry | ✅ | The execution engine every tier compiles into. The only mutation path. |
+| 5. Capability Index + grammar | ✅ | Seed of the ontology; `describeCapability` powers `inspect` and the FAQ. |
+| 6. Planning Engine (LLM + deterministic floor) | ✅ | LLM planner → tiers 3/4. Deterministic planner → tier-1 corpus + demoted offline fallback (honest labeling shipped 2026-07-08). |
+| 7. Execution Engine + undo | ✅ | Unchanged; also the learning loop's reward source (undo = negative signal). |
+| 8. Conversation Layer | ✅ | The transcript UI (Claude-Code-style agent transcript, shipped 2026-07-09) renders every tier's work with honest route labels. |
+| 9. Planner accuracy hardening | ✅ (batch done) | Its 50-prompt ledger becomes the `brain:eval` acceptance corpus — see Appendix A. |
+| 10. Intent Continuity | ✅ | Seed of the router's focus state. |
+| 11. Memory OS (Creator+Project) | 🚧 | The learning loop's storage substrate (MemoryFact local-first + sync). |
+| 12. Reference-driven editing (image input ✅) | 🚧 | Tier-4 concern; style fingerprints later feed the knowledge layer. |
+| 13. Tool Registry Expansion | 🧭 | Knowledge layer growth (B7) — AI can only do what exists. |
+| 14. Agentic loop | ✅ (shipped 2026-07-09) | Tier 4 itself: `AgentLoop.ts`, iteration caps, inspect steps, action log, loop-breaker. B5 upgrades it. |
+| 15. Memory Panel UI + trust | ✅ | Trust surface; will also expose learned phrases/preferences (B6) with Edit/Forget. |
+| 16. AI Cost & Scaling | superseded | This document *is* the cost plan: the cascade replaces "pay per request" with "route around the LLM". BYO / deterministic-floor / degrade-notice work stays shipped. |
+
+Voice (dictation, hands-free sessions, spoken approvals) and beat detection (real DSP →
+markers/cuts) shipped 2026-07-09 and sit on top of the cascade unchanged — voice is an input
+method; the router is input-agnostic.
+
+---
+
+## AI safety (always, tier-independent)
+
+AI must never, without confirmation: delete user content, overwrite/replace media, run
+destructive actions automatically, or export. A malformed/empty model reply must **never**
+fall through to a destructive guess (clarify salvage + the media-clip delete guard, Phase 9).
+**Brain addendum:** fast paths obey the same gates — a tier-0/1 compiled plan flows through
+the identical mode pipeline (Professional approval bar, destructive-action clarify guards);
+only structurally exact commands may fast-path at all, and a fast path with a nonzero
+wrong-fire rate in eval does not ship.
+
+---
+
+## Appendix A — 50-prompt acceptance ledger (Phase 9 pass, preserved)
+
+Now the seed of the `brain:eval` corpus. ✅ pass · ❌ fail · 🆕 fixed that batch · 🔜/🧭 deferred.
 
 | # | Prompt | Before | Now |
 |---|--------|--------|-----|
@@ -162,42 +385,31 @@ Status as of Phase 9. ✅ pass · ❌ fail · 🆕 fixed this batch (re-test) ·
 | 9–13 | add text / WARNING / bottom-center / large white SUBSCRIBE | ✅ | ✅ |
 | 10 / 10.1 | bold red SALE / italic SALE | ❌ no bold/italic | 🆕 bold/italic params + detection |
 | 12 / 15 | "50% OFF" top-left / "hello" bottom | ❌ off-frame | 🆕 safe-area clamp |
-| 14 | caption label LIVE | ❌ | 🧭 Phase 13 (caption-label styling) |
+| 14 | caption label LIVE | ❌ | 🧭 caption-label styling |
 | 16–22 | bigger / smaller / recolor / dramatic / rename / huge | ✅ | ✅ |
 | 16b | put selected text to center | ❌ | 🆕 `updateText` x/y move |
 | 23–26 | captions / subtitles / transcribe / usual style | ✅ | ✅ |
-| 27–28,30 | remove/cut background | ❌ runner not registered | 🧭 Phase 13 |
-| 29 | remove the person | ⚠️ immature tool | 🧭 Phase 13 |
+| 27–28,30 | remove/cut background | ❌ runner not registered | 🧭 tool expansion |
+| 29 | remove the person | ⚠️ immature tool | 🧭 tool expansion |
 | 31 | remove the blur | ❌ couldn't remove | 🆕 `removeEffect` by type |
-| 32–35 | cinematic / color grade / moody / subtle blur | ⚠️ shallow | 🧭 Phase 13 (effect maturity) |
-| 36–37 | track + follow text | ✅ (⚠️ forces extract first) | 🔜 selectable sub-steps (per-step apply helps) |
+| 32–35 | cinematic / color grade / moody / subtle blur | ⚠️ shallow | 🚧 color system + recipes |
+| 36–37 | track + follow text | ✅ (⚠️ forces extract first) | 🔜 selectable sub-steps |
 | 38 | fade in | ✅ | ✅ |
 | 39 | fade out | ❌ removed fade-in | 🆕 additive fades |
 | 40 | fade in **and** fade out | ❌ only one | 🆕 additive fades |
 | 41 | start two seconds later | ❌ asked to clarify | 🔜 start-time intent |
 | 42 | delay selected layer 3s | ✅ | ✅ |
 | 43 | delete this layer | ❌ nuked the clip | 🆕 media-clip clarify guard |
-| 44 | remove selected layer | ✅ (deletes selected) | ✅ |
+| 44 | remove selected layer | ✅ | ✅ |
 | 45 | delete the text | ✅ | ✅ |
-| 46–48 | compound (captions+cinematic / circle+fade / bold text+blur) | ⚠️ untested | 🔜 verify + per-step apply |
+| 46–48 | compound (captions+cinematic / circle+fade / bold text+blur) | ⚠️ untested | 🔜 verify |
 | 49–50 | "make it pop" / "do something cool" | should clarify | ✅ clarify |
 
----
+## Appendix B — Cost & scaling notes (from old Phase 16, still true)
 
-## Phase 16 — AI Cost & Scaling (multi-user capacity) 🔜
-
-**The problem.** The shared free-tier provider keys (Cerebras/Groq/OpenRouter/Gemini) are rate-limited **per account, not per user** — so a real userbase collectively trips 429/503 in seconds, the cooldowns cycle through an exhausted pool, and everyone gets degraded results. Shared free keys are a *demo convenience, not production capacity*; they also expose the owner to cost/abuse. No client-side rate limit fixes an upstream quota.
-
-**Constraint (`CLAUDE.md`).** Pricing/credits are **metadata only** today — *no subscription gating, no hard credit blockers, no enforcement*, results must always stay editable. So the enforcement pieces below are **planned, not built**; they only ship if/when that rule is intentionally lifted.
-
-**Tiered model (target):**
-1. **Deterministic floor (✅ shipped).** Offline, zero-key, instant — the always-available base. Core editing never depends on the pool.
-2. **BYO key (✅ shipped, the free-to-operate scaling path).** Each user runs on *their own* provider quota → zero load/cost on the owner. Should become the default nudge for free users.
-3. **Graceful degradation + BYO/Pro nudge (✅ shipped this slice).** When the shared pool is exhausted, the planner transparently falls back to the deterministic floor **and surfaces a note** ("planned offline — shared AI pool busy; add your key 🔑 or turn on Pro"); Talk mode shows an honest "couldn't reach a model" message instead of an empty reply.
-4. **Paid pooled keys + per-user limits (🧭 deferred — needs the no-enforcement rule lifted).** Move the shared pool to paid tiers (far higher RPM), **auth-gate the AI routes**, apply **per-user rate limits + quotas**, and **meter usage against the existing wallet/credits** — Free → BYO/deterministic, Paid → pooled paid keys metered by credits. Requires auth on `/api/ai/*` (currently public + per-IP 12/min) **without breaking the unauthenticated demo/local flow** (BYO + deterministic must stay keyless).
-
-**Honest takeaway:** treat the shared free pool as a demo. Real capacity = BYO (offload) + the deterministic floor (free tier) + paid pooled keys behind auth/quotas/credits (monetized tier).
-
-## AI safety (always)
-
-AI must never, without confirmation: delete user content, overwrite/replace media, run destructive actions automatically, or export. A malformed/empty model reply must **never** fall through to a destructive guess (enforced via clarify salvage + the media-clip delete guard in Phase 9).
+Shared free-tier provider keys are rate-limited per *account*, not per user — a real userbase
+trips 429/503 fast. Shared free keys are demo convenience, not production capacity. Real
+capacity = **the cascade** (most requests never reach a model) + **BYO keys** (user's own
+quota; zero owner cost) + the **deterministic offline floor** (always available) + eventually
+paid pooled keys behind auth/quotas/credits — the last piece stays 🧭 while the
+`CLAUDE.md` no-enforcement rule holds (pricing/credits are metadata only; no gating).

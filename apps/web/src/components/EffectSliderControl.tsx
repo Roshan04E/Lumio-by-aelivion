@@ -1,14 +1,15 @@
 /**
  * Shared tone-colored effect slider — label (with optional keyframe diamond) + range
- * + numeric field + reset. Used by the Controls-tab effect cards and the Color-tab
- * Lumetri panel so both render pixel-identical sliders with the same tonal track colors
- * (warmth/tint/saturation/shadow/highlight/light/neutral) defined in global.css.
+ * + numeric field + reset, rendered through the PropertyRow shell so it stays
+ * pixel-identical with the Transform/Text/Shape number rows. Used by the
+ * Controls-tab effect cards and the Color-tab Lumetri panel with the same tonal
+ * track colors (warmth/tint/saturation/shadow/highlight/light/neutral) defined
+ * in global.css.
  */
 
-import { RotateCcw } from "lucide-react";
-import type { CSSProperties } from "react";
 import { clamp } from "../editor/inspector/keyframeUtils";
-import { KeyframeButtons, type KeyframeButtonsProps } from "../editor/inspector/controls/KeyframeButtons";
+import type { KeyframeButtonsProps } from "../editor/inspector/controls/KeyframeButtons";
+import { PropertyRow } from "../editor/inspector/controls/PropertyRow";
 import { formatEffectValue, type SliderTone } from "./effectSliderTone";
 import { ScrubNumberInput } from "./ScrubNumberInput";
 
@@ -45,56 +46,29 @@ export function EffectSliderControl({
   };
 
   return (
-    <label
-      className={`effect-slider-control effect-slider-${tone}`}
-      style={{ "--slider-percent": `${percent}%` } as CSSProperties}
-      title={label}
-    >
-      <span className="effect-slider-label">
-        <span className="effect-slider-label-text">{label}</span>
-        {keyframe ? (
-          <KeyframeButtons
-            active={keyframe.active}
-            hasAny={keyframe.hasAny}
-            hasNext={keyframe.hasNext}
-            hasPrevious={keyframe.hasPrevious}
-            label={label}
-            onClearAll={keyframe.onClearAll}
-            onNext={keyframe.onNext}
-            onPrevious={keyframe.onPrevious}
-            onToggle={keyframe.onToggle}
-          />
-        ) : null}
-      </span>
-      <input min={min} max={max} step={step} type="range" value={safeValue} onChange={(event) => commitValue(Number(event.target.value))} />
-      <ScrubNumberInput
-        aria-label={`${label} value`}
-        className="effect-slider-number"
-        inputMode="decimal"
-        max={max}
-        min={min}
-        step={step}
-        value={formatEffectValue(value, step)}
-        onScrubChange={commitValue}
-        onChange={(event) => commitValue(Number(event.target.value))}
-        onClick={(event) => event.stopPropagation()}
-      />
-      {onReset ? (
-        <button
-          className="effect-slider-reset"
-          type="button"
-          title="Reset"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onReset();
-          }}
-        >
-          <RotateCcw size={12} />
-        </button>
-      ) : (
-        <span />
-      )}
-    </label>
+    <PropertyRow
+      keyframe={keyframe}
+      label={label}
+      sliderPercent={percent}
+      tone={tone}
+      onReset={onReset}
+      control={
+        <input min={min} max={max} step={step} type="range" value={safeValue} onChange={(event) => commitValue(Number(event.target.value))} />
+      }
+      value={
+        <ScrubNumberInput
+          aria-label={`${label} value`}
+          className="effect-slider-number"
+          inputMode="decimal"
+          max={max}
+          min={min}
+          step={step}
+          value={formatEffectValue(value, step)}
+          onScrubChange={commitValue}
+          onChange={(event) => commitValue(Number(event.target.value))}
+          onClick={(event) => event.stopPropagation()}
+        />
+      }
+    />
   );
 }

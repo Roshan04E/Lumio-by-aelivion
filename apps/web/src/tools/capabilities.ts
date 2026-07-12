@@ -9,6 +9,10 @@ export interface BrowserToolCapabilities {
   audioContext: boolean;
   sharedArrayBuffer: boolean;
   crossOriginIsolated: boolean;
+  /** Web Speech API present — enables live interim voice dictation. */
+  speechRecognition: boolean;
+  /** getUserMedia present — enables mic capture (recorder fallback when speechRecognition is absent). */
+  microphone: boolean;
 }
 
 export function detectBrowserToolCapabilities(): BrowserToolCapabilities {
@@ -19,6 +23,10 @@ export function detectBrowserToolCapabilities(): BrowserToolCapabilities {
     };
   };
   const globalWithAudio = globalThis as typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+  const globalWithSpeech = globalThis as typeof globalThis & {
+    SpeechRecognition?: unknown;
+    webkitSpeechRecognition?: unknown;
+  };
 
   return {
     webWorkers: typeof Worker !== "undefined",
@@ -28,7 +36,10 @@ export function detectBrowserToolCapabilities(): BrowserToolCapabilities {
     opfs: Boolean(navigatorWithStorage.storage?.getDirectory),
     audioContext: typeof AudioContext !== "undefined" || typeof globalWithAudio.webkitAudioContext !== "undefined",
     sharedArrayBuffer: typeof SharedArrayBuffer !== "undefined",
-    crossOriginIsolated: Boolean(globalThis.crossOriginIsolated)
+    crossOriginIsolated: Boolean(globalThis.crossOriginIsolated),
+    speechRecognition:
+      typeof globalWithSpeech.SpeechRecognition !== "undefined" || typeof globalWithSpeech.webkitSpeechRecognition !== "undefined",
+    microphone: typeof navigator.mediaDevices?.getUserMedia === "function"
   };
 }
 

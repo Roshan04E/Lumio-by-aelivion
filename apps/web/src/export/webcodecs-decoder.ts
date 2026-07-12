@@ -20,6 +20,7 @@
  */
 
 import { createFile, DataStream, type MP4File, type MP4VideoTrackInfo } from "mp4box";
+import { rotationFromMatrix, type SourceRotation } from "./source-color";
 import type { FrameProvider } from "./source-decoder";
 
 /** Disk-backed source Blobs (browser spools to disk); LRU so long sessions can't pin every source. */
@@ -149,6 +150,12 @@ interface DemuxedIndex {
   index: SampleIndexEntry[];
   /** Non-null only on the fragmented-MP4 fallback path (chunks fully RAM-resident). */
   ramChunks: EncodedVideoChunk[] | null;
+  /**
+   * Container display rotation (`tkhd` matrix, phone footage). WebCodecs emits CODED-orientation
+   * frames — unlike the `<video>` fallback, which auto-rotates — so the provider must bake this
+   * quarter-turn or rotated sources export/proxy tilted (2026-07-12 user report).
+   */
+  rotationDegrees: SourceRotation;
 }
 
 /**
@@ -196,6 +203,12 @@ async function demuxIndex(blob: Blob): Promise<DemuxedIndex | null> {
     description: Uint8Array | undefined;
     fragmented: boolean;
   };
+  let rotationDegrees: SourceRotation = 0;
+  try {
+    rotationDegrees = rotationFromMatrix(file.getTrackById(track.id)?.tkhd?.matrix);
+  } catch {
+    /* no tkhd → no rotation */
+  }
 
   // FRAGMENTED MP4 with a streaming-friendly layout (Pexels downloads, CMAF): at onReady the sample
   // table only holds the fragments parsed so far — for these files that's the FIRST ~8-10s fragment.
@@ -258,19 +271,20 @@ async function demuxIndex(blob: Blob): Promise<DemuxedIndex | null> {
       );
     }
     wcDecoderStats.streaming += 1;
-    return { track, description, index, ramChunks: null };
+    return { track, description, index, ramChunks: null, rotationDegrees };
   }
 
   // Fragmented MP4 (sample table lives in moofs): sequential full-extraction fallback. Chunks are
   // RAM-resident like v1, but mp4box's internal buffers are released as we capture each sample.
-  return demuxFragmented(blob, track, description, toMicros);
+  return demuxFragmented(blob, track, description, toMicros, rotationDegrees);
 }
 
 async function demuxFragmented(
   blob: Blob,
   infoTrack: MP4VideoTrackInfo,
   infoDescription: Uint8Array | undefined,
-  toMicros: (t: number) => number
+  toMicros: (t: number) => number,
+  rotationDegrees: SourceRotation
 ): Promise<DemuxedIndex | null> {
   const file = createFile();
   const ramChunks: EncodedVideoChunk[] = [];
@@ -340,7 +354,7 @@ async function demuxFragmented(
     duration: chunk.duration ?? 0,
     isKey: chunk.type === "key",
   }));
-  return { track: resolved.track ?? infoTrack, description: resolved.description ?? infoDescription, index, ramChunks };
+  return { track: resolved.track ?? infoTrack, description: resolved.description ?? infoDescription, index, ramChunks, rotationDegrees };
 }
 
 /**
@@ -421,6 +435,36 @@ function createRamChunkWindow(chunks: EncodedVideoChunk[]): ChunkWindow {
   };
 }
 
+/**
+ * True DECODABLE end of a video source, in seconds, from its sample table — `lastSample.timestamp +
+ * lastSample.duration`. This is authoritative where container `duration` metadata is not: many MP4s
+ * report a `duration` that overshoots the last real sample by a frame to ~1s, and a clip authored to
+ * that metadata length freezes on its final frame for the overshoot (the decoder clamps every
+ * beyond-EOF getFrame to the last sample). Callers clamp clip length to this to avoid the frozen tail.
+ *
+ * Returns null when the file can't be demuxed here (non-MP4, parse failure) — the caller then keeps
+ * its metadata duration unchanged.
+ */
+export async function probeDecodableEndSeconds(blobOrUrl: Blob | string): Promise<number | null> {
+  if (typeof VideoDecoder === "undefined") return null;
+  let blob: Blob;
+  try {
+    blob = typeof blobOrUrl === "string" ? await fetchSourceBlob(blobOrUrl) : blobOrUrl;
+  } catch {
+    return null;
+  }
+  let demuxed: DemuxedIndex | null;
+  try {
+    demuxed = await Promise.race([demuxIndex(blob), rejectAfter(20_000)]);
+  } catch {
+    return null;
+  }
+  if (!demuxed || !demuxed.index.length) return null;
+  const last = demuxed.index[demuxed.index.length - 1]!;
+  const endMicros = last.timestamp + Math.max(0, last.duration);
+  return endMicros > 0 ? endMicros / 1_000_000 : null;
+}
+
 export async function createWebCodecsVideoSource(
   url: string,
   opts: {
@@ -449,7 +493,7 @@ export async function createWebCodecsVideoSource(
     return null;
   }
   if (!demuxed || !demuxed.index.length) return null;
-  const { track, description, index } = demuxed;
+  const { track, description, index, rotationDegrees } = demuxed;
   const win = demuxed.ramChunks ? createRamChunkWindow(demuxed.ramChunks) : createBlobChunkWindow(blob, index);
   const chunkCount = index.length;
 
@@ -466,6 +510,11 @@ export async function createWebCodecsVideoSource(
   let failed = false;
   let reclaimed = false;
   let outputCount = 0;
+  // Frozen-tail probe: last overshoot micros already logged, so the debug warning fires once per new
+  // beyond-EOF region instead of every rAF while the tail sits frozen. lastSampleMicros is hoisted
+  // ONCE here so the per-frame guard is a single integer compare (no index access, no debug read).
+  let lastLoggedOvershootMicros = -1;
+  const lastSampleMicros = chunkCount > 0 ? index[chunkCount - 1]!.timestamp : 0;
   const onOutput = (frame: VideoFrame) => {
     outputCount += 1;
     queue.push(frame);
@@ -656,6 +705,19 @@ export async function createWebCodecsVideoSource(
     }
     if (failed) return null;
     const micros = Math.max(0, Math.round(sourceTimeSeconds * 1_000_000));
+    // FROZEN-TAIL PROBE (debug only): chunkIndexForMicros clamps any micros past the final sample to
+    // the last index entry, so getFrame keeps serving the same last frame (never null) — the tail
+    // freezes without any heal/fallback firing. The guard is CHEAP arithmetic first (a compare against
+    // a hoisted last-sample micros); the expensive webcodecsDebugEnabled() read only runs in the rare
+    // beyond-EOF region, NEVER on the normal per-frame path. Logs once per new overshoot region.
+    if (chunkCount > 0 && micros > lastSampleMicros && micros > lastLoggedOvershootMicros && webcodecsDebugEnabled()) {
+      lastLoggedOvershootMicros = micros;
+      console.warn(
+        `[frozen-tail] getFrame(${sourceTimeSeconds.toFixed(3)}s) is past media end ` +
+          `${(lastSampleMicros / 1e6).toFixed(3)}s — clamping to last sample ` +
+          `(overshoot ${((micros - lastSampleMicros) / 1e6).toFixed(3)}s; samples=${chunkCount})`
+      );
+    }
     if (lastMicros < 0) {
       fed = keyAtOrBefore(chunkIndexForMicros(micros));
     } else if (micros + 1000 < lastMicros) {
@@ -912,15 +974,53 @@ export async function createWebCodecsVideoSource(
     }
   }
 
+  // ── Container display rotation (phone footage) ───────────────────────────
+  // Decoded frames are CODED orientation; the tkhd matrix says how to display them. Bake the
+  // quarter-turn into a reused 2D canvas so EVERY consumer of this provider (export compositor,
+  // preview frame pool, ingest-proxy transcode) sees display-oriented pixels and dims — matching
+  // the <video> fallback provider, which the browser auto-rotates. rotation 0 (the common case)
+  // takes the untouched raw-VideoFrame path below.
+  let rotateCanvas: OffscreenCanvas | null = null;
+  let rotateCtx: OffscreenCanvasRenderingContext2D | null = null;
+  function rotateForDisplay(frame: VideoFrame): CanvasImageSource | null {
+    const w = frame.displayWidth || frame.codedWidth;
+    const h = frame.displayHeight || frame.codedHeight;
+    const outW = rotationDegrees % 180 === 0 ? w : h;
+    const outH = rotationDegrees % 180 === 0 ? h : w;
+    if (!rotateCanvas || rotateCanvas.width !== outW || rotateCanvas.height !== outH) {
+      rotateCanvas = new OffscreenCanvas(outW, outH);
+      rotateCtx = rotateCanvas.getContext("2d");
+    }
+    if (!rotateCtx) return frame; // no 2D context — serve unrotated rather than nothing
+    rotateCtx.setTransform(1, 0, 0, 1, 0, 0);
+    rotateCtx.translate(outW / 2, outH / 2);
+    rotateCtx.rotate((rotationDegrees * Math.PI) / 180);
+    rotateCtx.drawImage(frame, -w / 2, -h / 2, w, h);
+    rotateCtx.setTransform(1, 0, 0, 1, 0, 0);
+    return rotateCanvas;
+  }
+
+  const displaySize = () => {
+    const w = current?.displayWidth ?? trackW;
+    const h = current?.displayHeight ?? trackH;
+    return rotationDegrees % 180 === 0 ? { w, h } : { w: h, h: w };
+  };
+
   const provider: FrameProvider = {
     get width() {
-      return current?.displayWidth ?? trackW;
+      return displaySize().w;
     },
     get height() {
-      return current?.displayHeight ?? trackH;
+      return displaySize().h;
     },
     nominalFps,
-    getFrame,
+    getFrame:
+      rotationDegrees === 0
+        ? getFrame
+        : async (sourceTimeSeconds: number) => {
+            const frame = await getFrame(sourceTimeSeconds);
+            return frame instanceof VideoFrame ? rotateForDisplay(frame) : frame;
+          },
     get lastFrameLagSeconds() {
       return lastServedLagSeconds;
     },

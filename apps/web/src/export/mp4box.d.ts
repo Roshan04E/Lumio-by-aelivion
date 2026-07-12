@@ -59,7 +59,12 @@ declare module "mp4box" {
     av1C?: BoxWritable;
     colr?: ColrBox;
   }
+  /** `tkhd` (track header) — carries the 3x3 display `matrix` (9 fixed-point ints) for rotation/flip. */
+  interface Tkhd {
+    matrix?: number[];
+  }
   interface Trak {
+    tkhd?: Tkhd;
     mdia: { minf: { stbl: { stsd: { entries: SampleEntry[] } } } };
   }
 

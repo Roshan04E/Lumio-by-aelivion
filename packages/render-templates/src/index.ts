@@ -12,6 +12,7 @@ import type {
   ProjectGraph,
   SourceAsset,
   SourceColorMetadata,
+  SourceTextKeyframe,
   SpeedKeyframe,
   TemplateDefinition,
   TextRun,
@@ -117,6 +118,7 @@ export interface RenderManifestLayer {
   assetUrl?: string | undefined;
   text?: string | undefined;
   textRuns?: TextRun[] | undefined;
+  sourceTextKeyframes?: SourceTextKeyframe[] | undefined;
   /** Source media in-point (seconds), carried verbatim from the timeline layer for source-aware trimming. */
   sourceInSeconds?: number | undefined;
   /** Constant playback rate (rate stretch), carried verbatim. 1/absent = normal. */
@@ -306,6 +308,7 @@ export function buildRenderManifest(input: {
             assetUrl: layer.graphic ? graphicToDataUrl(layer.graphic) : asset?.fileUrl,
             text: layer.text,
             textRuns: layer.textRuns,
+            sourceTextKeyframes: layer.sourceTextKeyframes,
             sourceInSeconds: layer.sourceInSeconds,
             speed: layer.speed,
             speedKeyframes: layer.speedKeyframes,
@@ -372,6 +375,7 @@ export function buildRenderManifest(input: {
           assetUrl: layer.graphic ? graphicToDataUrl(layer.graphic) : asset?.fileUrl,
           text: layer.text,
           textRuns: layer.textRuns,
+          sourceTextKeyframes: layer.sourceTextKeyframes,
           // Head trim consumes source media at the clip's playback rate (rate stretch / ramp integral).
           sourceInSeconds:
             layer.sourceInSeconds !== undefined

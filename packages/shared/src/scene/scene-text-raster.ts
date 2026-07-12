@@ -130,7 +130,9 @@ export class SceneTextRasterizer {
     // deliberate re-raster (resolution-aware), and box vs comp mode produce different rasters. The raw
     // (continuous) scale is still EXCLUDED — only the bucket — so within a bucket the raster is reused.
     if (layer.type === "text") {
-      const runs = getVisibleTextRuns(layer, t).map((r) => [r.text, r.color, r.fontSizeMultiplier]);
+      // EVERY run field that changes drawn pixels must key the cache (bold/italic/highlight/font
+      // were missing — a rich-text edit or a source-text keyframe crossing wouldn't re-raster).
+      const runs = getVisibleTextRuns(layer, t).map((r) => [r.text, r.color, r.backgroundColor, r.bold, r.italic, r.fontFamily, r.fontSizeMultiplier]);
       const style = contentStyleForKey(getCompositionTextStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>);
       // textWarp is NOT part of getCompositionTextStyle (it's a vector overlay, not a CSS style), so it
       // MUST be in the key explicitly — otherwise applying/changing warp doesn't invalidate the cached

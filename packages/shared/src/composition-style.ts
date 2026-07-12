@@ -2,7 +2,7 @@ import { evaluateAnimatedValue, evaluateTimelineEffectParam, evaluateTimelineTra
 import { COLOR_EFFECT_TYPES, compileColorPipeline, DEFAULT_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
-import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
+import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, SourceTextKeyframe, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
 
 export interface CompositionTransform {
   x: number;
@@ -498,17 +498,42 @@ export function getCompositionContentTransform(
   };
 }
 
+/**
+ * Evaluate a numeric layer-scope keyframe track (`style.*` text-style properties) at the playhead —
+ * the same shared primitive transform/content keyframes use, so every renderer (DOM preview, GPU
+ * scene raster, Remotion) animates text style identically. `base` when no time or no keyframes.
+ */
+function animStyleNumber(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  options: CompositionStyleOptions,
+  property: string,
+  base: number
+): number {
+  if (typeof options.currentTimeSeconds !== "number") return base;
+  const animations = (layer.animations ?? []) as TimelineKeyframeV2[];
+  if (!animations.length) return base;
+  const keyframes = animations.filter((kf) => kf.target.scope === "layer" && kf.target.property === property);
+  if (!keyframes.length) return base;
+  const layerTime = Math.max(0, options.currentTimeSeconds - numberOr(layer.startSeconds, 0));
+  return evaluateAnimatedValue({ baseValue: base, keyframes, property, scope: "layer", timeSeconds: layerTime }) as number;
+}
+
 export function getCompositionTextStyle(layer: CompositionLayerStyleInput | TimelineLayer, options: CompositionStyleOptions = {}) {
   const style = styleOf(layer);
   const transform = getCompositionTransform(layer, options);
-  const shadowCss = getTextShadowCss(layer, style);
-  const textWidth = numberOr(layer.textWidthPercent ?? style.textWidthPercent, 0);
-  const strokeWidth = numberOr(layer.strokeWidth ?? style.strokeWidth, 0);
+  const shadowCss = getTextShadowCss(layer, style, options);
+  const textWidth = animStyleNumber(layer, options, "style.textWidthPercent", numberOr(layer.textWidthPercent ?? style.textWidthPercent, 0));
+  const strokeWidth = animStyleNumber(layer, options, "style.strokeWidth", numberOr(layer.strokeWidth ?? style.strokeWidth, 0));
   const strokeColor = stringOr(layer.strokeColor ?? style.strokeColor, "#000000");
   const effectCss = getEffectCss(layer.effects, layer.animations as TimelineKeyframeV2[] | undefined, layer.startSeconds, options.currentTimeSeconds);
-  const paddingEmY = numberOr(layer.backgroundPaddingEm ?? style.backgroundPaddingEm, compositionTextDefaults.paddingEmY);
+  const paddingEmY = animStyleNumber(
+    layer,
+    options,
+    "style.backgroundPaddingEm",
+    numberOr(layer.backgroundPaddingEm ?? style.backgroundPaddingEm, compositionTextDefaults.paddingEmY)
+  );
   const paddingEmX = paddingEmY * 2;
-  const letterSpacing = numberOr(layer.letterSpacing ?? style.letterSpacing, 0);
+  const letterSpacing = animStyleNumber(layer, options, "style.letterSpacing", numberOr(layer.letterSpacing ?? style.letterSpacing, 0));
   // NOTE: text warp is NOT a CSS filter here. It is rendered as a vector <path>
   // overlay (opentype outline + envelope mesh) by buildWarpedTextPathSvg; see
   // VideoPreview.tsx / remotion/Root.tsx and font-outlines.ts.
@@ -519,15 +544,15 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     top: `${transform.y}%`,
     maxWidth: `${compositionTextDefaults.maxWidthPercent}%`,
     padding: `${paddingEmY}em ${paddingEmX}em`,
-    borderRadius: `${numberOr(layer.backgroundRadiusEm ?? style.backgroundRadiusEm, compositionTextDefaults.borderRadiusEm)}em`,
+    borderRadius: `${animStyleNumber(layer, options, "style.backgroundRadiusEm", numberOr(layer.backgroundRadiusEm ?? style.backgroundRadiusEm, compositionTextDefaults.borderRadiusEm))}em`,
     background: stringOr(layer.backgroundColor ?? style.backgroundColor, compositionTextDefaults.backgroundColor),
     color: stringOr(layer.color ?? style.color, compositionTextDefaults.color),
     fontFamily: stringOr(layer.fontFamily ?? style.fontFamily, compositionTextDefaults.fontFamily),
-    fontSize: numberOr(layer.fontSize ?? style.fontSize, compositionTextDefaults.fontSize),
+    fontSize: animStyleNumber(layer, options, "style.fontSize", numberOr(layer.fontSize ?? style.fontSize, compositionTextDefaults.fontSize)),
     fontWeight: numberOr(layer.fontWeight ?? style.fontWeight, compositionTextDefaults.fontWeight),
     fontStyle: (layer.italic ?? style.italic) ? "italic" : "normal",
     letterSpacing: letterSpacing !== 0 ? `${letterSpacing}px` : undefined,
-    lineHeight: numberOr(layer.lineHeight ?? style.lineHeight, compositionTextDefaults.lineHeight),
+    lineHeight: animStyleNumber(layer, options, "style.lineHeight", numberOr(layer.lineHeight ?? style.lineHeight, compositionTextDefaults.lineHeight)),
     opacity: transform.opacity / 100,
     mixBlendMode: cssBlendMode(getCompositionBlendMode(layer)),
     textAlign: getTextAlign(layer.textAlign ?? style.textAlign),
@@ -592,11 +617,33 @@ export function sliceTextRuns<T extends { text: string }>(runs: T[], charsToShow
  * local canvas) call this instead of `getCompositionTextRuns` directly.
  */
 export function getVisibleTextRuns(
-  layer: { text?: string | undefined; textRuns?: TextRun[] | undefined; startSeconds?: number | undefined; animations?: unknown[] | undefined; textRevealProgress?: number | undefined },
+  layer: {
+    text?: string | undefined;
+    textRuns?: TextRun[] | undefined;
+    sourceTextKeyframes?: SourceTextKeyframe[] | undefined;
+    startSeconds?: number | undefined;
+    animations?: unknown[] | undefined;
+    textRevealProgress?: number | undefined;
+  },
   currentTimeSeconds: number
 ): TextRun[] {
-  const runs = getCompositionTextRuns(layer);
   const layerTime = Math.max(0, currentTimeSeconds - (layer.startSeconds ?? 0));
+  // SOURCE TEXT keyframes (Premiere-style, HOLD): the active entry is the last one at/before the
+  // playhead; before the first entry, the first entry shows. Typewriter slicing still applies on
+  // top, so both animation styles compose.
+  const sourceKeys = layer.sourceTextKeyframes;
+  let runs: TextRun[];
+  if (sourceKeys?.length) {
+    const ordered = [...sourceKeys].sort((a, b) => a.timeSeconds - b.timeSeconds);
+    let active = ordered[0]!;
+    for (const key of ordered) {
+      if (key.timeSeconds <= layerTime + 1e-6) active = key;
+      else break;
+    }
+    runs = active.runs.length ? active.runs : [{ text: "" }];
+  } else {
+    runs = getCompositionTextRuns(layer);
+  }
   const progress = evaluateTextRevealProgress(layer, layerTime);
   if (progress >= 1) return runs;
   const totalChars = runs.reduce((sum, run) => sum + run.text.length, 0);
@@ -606,13 +653,24 @@ export function getVisibleTextRuns(
 
 export function getCompositionTextRunStyle(
   run: TextRun,
-  baseStyle: { fontSize?: number | string | undefined; fontWeight?: number | string | undefined; color?: string | undefined; fontFamily?: string | undefined }
+  baseStyle: {
+    fontSize?: number | string | undefined;
+    fontWeight?: number | string | undefined;
+    color?: string | undefined;
+    fontFamily?: string | undefined;
+    fontStyle?: string | undefined;
+  }
 ): Record<string, unknown> {
   const baseFontSize = numberOr(baseStyle.fontSize, compositionTextDefaults.fontSize);
   return {
     fontWeight: run.bold ? 900 : baseStyle.fontWeight,
-    fontStyle: run.italic ? "italic" : "normal",
+    // Like fontWeight above, the run only OVERRIDES the layer style — it must not zero it out.
+    // This used to force "normal" whenever the run had no italic flag, which silently discarded
+    // the layer-level Italic toggle in EVERY renderer (plain text = one flagless run).
+    fontStyle: run.italic ? "italic" : baseStyle.fontStyle ?? "normal",
     color: run.color ?? baseStyle.color,
+    // Per-run highlight (marker). Distinct from the layer's background pill.
+    backgroundColor: run.backgroundColor,
     fontFamily: run.fontFamily ?? baseStyle.fontFamily,
     fontSize: run.fontSizeMultiplier ? baseFontSize * run.fontSizeMultiplier : baseStyle.fontSize
   };
@@ -711,16 +769,25 @@ function getTextAlign(value: unknown): "left" | "center" | "right" {
   return value === "left" || value === "right" || value === "center" ? value : "center";
 }
 
-function getTextShadowCss(layer: CompositionLayerStyleInput | TimelineLayer, style: Record<string, unknown>) {
+function getTextShadowCss(
+  layer: CompositionLayerStyleInput | TimelineLayer,
+  style: Record<string, unknown>,
+  options: CompositionStyleOptions = {}
+) {
   const hasShadow = hasCompositionEffect(layer.effects, "shadow");
-  const blur = numberOr(layer.shadowBlur ?? style.shadowBlur, hasShadow ? compositionTextDefaults.shadowBlur : 0);
+  const blur = animStyleNumber(
+    layer,
+    options,
+    "style.shadowBlur",
+    numberOr(layer.shadowBlur ?? style.shadowBlur, hasShadow ? compositionTextDefaults.shadowBlur : 0)
+  );
   if (blur <= 0) {
     return undefined;
   }
 
   const color = stringOr(layer.shadowColor ?? style.shadowColor, compositionTextDefaults.shadowColor);
-  const offsetX = numberOr(layer.shadowOffsetX ?? style.shadowOffsetX, compositionTextDefaults.shadowOffsetX);
-  const offsetY = numberOr(layer.shadowOffsetY ?? style.shadowOffsetY, compositionTextDefaults.shadowOffsetY);
+  const offsetX = animStyleNumber(layer, options, "style.shadowOffsetX", numberOr(layer.shadowOffsetX ?? style.shadowOffsetX, compositionTextDefaults.shadowOffsetX));
+  const offsetY = animStyleNumber(layer, options, "style.shadowOffsetY", numberOr(layer.shadowOffsetY ?? style.shadowOffsetY, compositionTextDefaults.shadowOffsetY));
   return `${offsetX}px ${offsetY}px ${blur}px ${color}`;
 }
 

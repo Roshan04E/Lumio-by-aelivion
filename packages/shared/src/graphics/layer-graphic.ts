@@ -56,6 +56,32 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Distinct paint colors used by an SVG's `fill`/`stroke` (attributes and inline `style`), in first-seen
+ * order; `none`/`currentColor`/url() paints excluded. Drives import-time recolorability: exactly ONE
+ * color → normalize it to `currentColor` (simple Fill control works, like the bundled pack); several →
+ * a per-color palette (each entry an exact-literal substitution slot). Case-insensitive de-dupe,
+ * original casing preserved (substitutions replace case-insensitively).
+ */
+export function extractSvgPalette(svg: string): string[] {
+  const colors: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string | undefined) => {
+    const value = (raw ?? "").trim();
+    if (!value) return;
+    const lower = value.toLowerCase();
+    if (lower === "none" || lower === "currentcolor" || lower === "transparent" || lower.startsWith("url(")) return;
+    // Only real color tokens (hex / rgb / hsl / keyword) — same shapes sanitizeGraphicFill accepts.
+    if (!/^#[0-9a-fA-F]{3,8}$/.test(value) && !/^(rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$/.test(value) && !/^[a-zA-Z]{3,20}$/.test(value)) return;
+    if (seen.has(lower)) return;
+    seen.add(lower);
+    colors.push(value);
+  };
+  for (const match of svg.matchAll(/\b(?:fill|stroke)\s*=\s*["']([^"']+)["']/gi)) add(match[1]);
+  for (const match of svg.matchAll(/\b(?:fill|stroke)\s*:\s*([^;"'}]+)/gi)) add(match[1]);
+  return colors;
+}
+
 /** Longest-side pixel size baked into the SVG root so it rasterizes crisply as an `<img>`/texture (vector
  *  scales to any display size, but the decode/texture-upload happens at these intrinsic dims). */
 const GRAPHIC_RASTER_SIZE = 1024;
@@ -69,8 +95,20 @@ export function graphicToDataUrl(graphic: LayerGraphic): string {
   const aspect = (graphic.naturalWidth ?? 1) / (graphic.naturalHeight ?? 1);
   const width = aspect >= 1 ? GRAPHIC_RASTER_SIZE : Math.round(GRAPHIC_RASTER_SIZE * aspect);
   const height = aspect >= 1 ? Math.round(GRAPHIC_RASTER_SIZE / aspect) : GRAPHIC_RASTER_SIZE;
+  // Multicolor palette: substitute each changed source color literal (the `currentColor` normalize
+  // trick generalized — exact-literal, case-insensitive, sanitized so a stored value can't inject
+  // markup). Same bake for every renderer, so recolors stay pixel-aligned preview↔export.
+  let svg = graphic.svg;
+  const slots = (graphic.palette ?? []).filter((slot) => slot.from && slot.to !== slot.from);
+  if (slots.length) {
+    // Single combined pass (a chained per-slot replace could re-substitute another slot's output),
+    // with boundary guards so a keyword like `red` never matches inside `darkred`.
+    const to = new Map(slots.map((slot) => [slot.from.toLowerCase(), sanitizeGraphicFill(slot.to)]));
+    const combined = new RegExp(`(?<![\\w#-])(${slots.map((slot) => escapeRegExp(slot.from)).join("|")})(?![\\w-])`, "gi");
+    svg = svg.replace(combined, (match) => to.get(match.toLowerCase()) ?? match);
+  }
   // Strip any existing root color/width/height, then inject ours right after the opening `<svg`.
-  const cleaned = graphic.svg
+  const cleaned = svg
     .replace(/(<svg\b[^>]*?)\s+color\s*=\s*["'][^"']*["']/i, "$1")
     .replace(/(<svg\b[^>]*?)\s+width\s*=\s*["'][^"']*["']/i, "$1")
     .replace(/(<svg\b[^>]*?)\s+height\s*=\s*["'][^"']*["']/i, "$1")

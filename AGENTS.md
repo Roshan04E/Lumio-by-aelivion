@@ -14,6 +14,878 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-12 — Claude (Fable): Rotated phone footage in export + Typewriter card in Effects subtab
+
+- **Mobile footage exported tilted 90°** (user report with screenshot): the WebCodecs export
+  decoder (`webcodecs-decoder.ts`) served CODED-orientation frames — it never read the container's
+  `tkhd` display-rotation matrix, unlike the `<video>` fallback which the browser auto-rotates
+  (editor preview looked fine for the same reason). Fix inside the provider so every consumer
+  (export compositor, preview frame pool, ingest-proxy transcode — rotated proxies were silently
+  tilted too) is corrected at once: `demuxIndex` captures `rotationFromMatrix(tkhd.matrix)`
+  (helper now exported from `source-color.ts`), and `createWebCodecsVideoSource` bakes the
+  quarter-turn via a reused OffscreenCanvas + reports swapped display dims. rotation 0 (common
+  case) keeps the untouched raw-VideoFrame path. GATE: scratchpad `rot/rotation-parity.mjs` —
+  ffmpeg-static synthesizes `-display_rotation 90/270` files, real Chromium compares provider
+  output pixel-by-pixel against a same-origin `<video>` element (ground truth): 6/6 pass
+  (dims + <2% pixel diff; fixtures grayscale because BT.601/709 ambiguity on saturated bars is
+  ~33% RGB diff regardless of rotation).
+- **Typewriter now surfaces in the Effects subtab** (user request): the preset lives as
+  `textRevealProgress` keyframes in `layer.animations`, not `layer.effects`, so the effect list
+  never showed it. New `TypewriterEffectCard` (EditorPage) renders in the Effects subtab when
+  reveal keys exist — "Reveal duration (s)" speed control (proportional key rescale), delete
+  button (strips the reveal keys), graph-editor hint; section count includes it. The duplicate
+  control was REMOVED from TransformPanel's Animation Presets section (moved, not copied).
+
+### 2026-07-12 — Claude (Fable): Rich text round — per-run editor, highlights, source-text keyframes, typewriter speed
+
+- **Rich text Content editor** replaces the plain textarea (`RichTextEditor.tsx` +
+  `rich-text-serialize.ts`): contentEditable + execCommand (Chromium-only product) authoring the
+  ALREADY-SHIPPED `TextRun[]` model — per-run bold/italic/color/highlight/font/size render in all
+  three renderers via `getCompositionTextRunStyle`, so the feature is render-parity-free. DOM↔runs
+  round-trip is covered by a real-Chromium test (11 checks incl. execCommand bold/hiliteColor,
+  Chromium-shaped HTML, font-family quote normalization); paste is plain-text-only (style
+  smuggling); unstyled results collapse back to `text`-only. Toolbar font picker is ThemedSelect
+  (custom dropdown, user call); a saved selection Range survives portal-menu focus steals.
+- **Per-run HIGHLIGHT** (user call): new `TextRun.backgroundColor` — DOM/Remotion get it via the
+  run style; the GPU raster paints marker boxes behind words (ascent..descent, spaces bridged
+  between same-highlight words) in `text-shape.ts`.
+- **SOURCE TEXT keyframes** (Premiere-style, user call): `TimelineLayer.sourceTextKeyframes`
+  (hold; `SourceTextKeyframe {id,timeSeconds,runs}`) resolved centrally in `getVisibleTextRuns`
+  → every renderer follows; passed through the render manifest. Content field gets the standard
+  KeyframeButtons (diamond captures the current text; arrows hop keys); the editor edits the
+  GOVERNING key while scrubbing. Manual typewriter/word-reveals = keyframe progressively longer
+  text.
+- **Graph editor lanes** (user call): new GraphTarget kinds — `sourceText` (flat HOLD lane: move
+  in time, add via click-on-lane capturing governing text, delete; interpolation/handles/value
+  drags are no-ops) and generic `layer` (numeric layer-scope tracks; first user: "Typewriter
+  reveal" = `textRevealProgress`). Clipboard paste skips sourceText (non-numeric).
+- **Typewriter speed** (user call): "Reveal duration (s)" NumberControl in Animation Presets
+  (TransformPanel) — proportionally rescales the reveal keys; same keys editable in the graph.
+- **Speed ramp keyframe buttons** (user call): standard diamond/nav/clear cluster on the Speed
+  section head, writing `speedKeyframes` ramp points at the playhead.
+- **BUG (user report): mixed-size text clipped in the viewer** — the raster's box math used ONE
+  base-font line height for every line; CSS grows a line box to its largest span. Latent until
+  the rich editor made mixed `fontSizeMultiplier` lines authorable. `measureTextLayout` now
+  computes per-line heights (`lineHeight × max(base, largest word size)`), and the draw pass
+  stacks lines by those heights.
+- Raster cache key now includes ALL run fields (bold/italic/highlight/font were missing — an
+  edit/keyframe crossing wouldn't re-raster) — `scene-text-raster.ts`.
+- Keyframe nav is always-visible on rows outside the slider grid (Content field, Speed ramp head).
+- Gates: shared build ✓, full typecheck ✓, Chromium round-trip 11/11 ✓, scene:compare run.
+
+### 2026-07-12 — Claude (Fable): Essential Graphics round — Graphics inspector sub-tab + graphics bug fixes
+
+- **BUG: masks "literally off" on graphic clips** — the SceneCompositor samples clip-mask mattes
+  at `gl_FragCoord` (comp-fixed) but the mask editor, DOM path, and Remotion all ride the LAYER
+  transform for media masks. Fixed the one outlier: `SceneMaskMatteCache.get` now takes the
+  layer's resolved transform (media/clone/effect masks in `build-scene-draws.ts` pass it;
+  text/shape stay comp-fixed by design), applied outermost around the mask's own transform,
+  feather scaled to match the DOM path, keyed for keyframed moves (`scene-mask-matte.ts`).
+- **BUG: graphics slow/never loading** — the still-image texture path awaited the idle-gated
+  still-proxy chain (600ms of no playback/gesture, serialized) before decoding; pure loss for
+  data-URL graphics (proxy always null). data: URLs now decode immediately; `img.decode()`
+  failure gets one retry + a console.warn instead of silently staying blank forever
+  (`WebglMediaLayer.tsx`). Duplicate aspect-measure decode skipped for graphics (viewBox naturals).
+- **BUG: Search-tab vectors "not editable"** — two causes: (1) Iconify picks passed no
+  `sourceColor`, so multicolor icons never got `currentColor` mapping → Fill was a visual no-op;
+  (2) the registered GraphicPanel (id "graphic") was in NO panelIds array since the tab refactor —
+  the Fill control rendered nowhere. Import now runs `extractSvgPalette` (new, shared): one baked
+  color → normalized like the bundled pack; several → stored as `LayerGraphic.palette` slots,
+  substituted at `graphicToDataUrl` bake (single combined pass, boundary-guarded) so every
+  renderer recolors identically. GraphicPanel rehomed (see below) with per-slot color rows.
+- **Graphics inspector sub-tab** (right of Effects, all visual layer types — Premiere v25's
+  Properties-panel model): `GraphicsStackPanel` (draw-ordered stack of text/shape/graphic layers:
+  select, eye = `layer.muted` (already hides in both renderers), rename) + `GraphicsAlignPanel`
+  (6 align-to-frame buttons on the PAINTED content box, writes via `applyTransformValueAtTime` so
+  auto-keyframe rules hold) + the rehomed GraphicPanel with palette editing and "Save graphic".
+- **Round-trip**: `graphic-presets.ts` (localStorage, mirrors effect-presets) + Saved tiles and an
+  "Import SVG" tile in the Graphics chip (external .svg files → the same normalize/palette path,
+  fully editable). Deferred: selection-scoped save-as-template (topbar Save-as-template + slot
+  marking already cover it); drag-reorder in the stack panel; keyframeable graphic colors (data-URL
+  re-bake would thrash the texture cache — needs a shader tint path).
+- Shift+M default mask now hugs a `contain` layer's content rect (`containContentRect`, shared).
+- Gates: shared build ✓, full `pnpm typecheck` ✓, `scene:compare` (mask parity) 22/22 ✓.
+- **Follow-up fixes (same day, user report)**:
+  - *Italic ROOT CAUSE (second pass — first fix was necessary but downstream)*:
+    `getCompositionTextRunStyle` forced `fontStyle: run.italic ? "italic" : "normal"`, silently
+    DISCARDING the layer-level Italic toggle in every renderer (plain text = one flagless run;
+    fontWeight on the adjacent line correctly fell back to base). Now falls back to
+    `baseStyle.fontStyle` like fontWeight. Verified: layer.italic survives run resolution.
+  - *Italic did nothing on Impact & other italic-less fonts*: canvas2D never synthesizes italic
+    (silently falls back to the upright face) while the DOM/Remotion path oblique-slants via CSS
+    `font-synthesis`. `text-shape.ts` now detects a missing italic face (italic vs upright probe
+    metrics identical — advance width AND glyph ink bounds, so a real italic monospace face is
+    never double-slanted) and skews the glyph draw ~tan(14°) about the word baseline. Cached per
+    font string.
+  - *Position X/Y rows had no keyframe navigation*: the grouped-row CSS suppressed prev/next/clear
+    entirely (hover-reveal used to grow the row). Prev/next are now ALWAYS visible at fixed 14px in
+    groups (zero layout shift; fields already flex-wrap), clear stays graph-only.
+  - *Graph editor X/Y*: the mutation pipeline (bezier convert, handle write, curve-click add) was
+    empirically verified working for transform.position.x/y in BOTH storage forms (V2 animations
+    and legacy `layer.keyframes` — by-id migration on write). No code defect found; awaiting a
+    precise repro if the user still hits it in the UI.
+  - *Color controls truncated ("#F…") + swatches wrapping to 2 lines*: auto-fill grids pack cells
+    to the 88px minimum regardless of panel width; `.color-control` now spans 2 grid cells in
+    `.graphic-controls`/`.control-grid` — full hex + one swatch row.
+  - *TEXT STYLE KEYFRAMING (new)*: font size, letter spacing, line height, text box width, stroke
+    width, background padding/corner radius, shadow blur/X/Y are now keyframeable. One shared
+    evaluation point — `animStyleNumber` in `getCompositionTextStyle` (composition-style.ts),
+    tracks are V2 animations `{scope:"layer", property:"style.<field>"}` — so DOM preview, GPU
+    scene raster (cache re-keys off the evaluated style), and Remotion animate identically.
+    Panel side: `getStyleKeyframes`/`toggleStyleKeyframe`/`applyStyleValueAtTime` (four-way
+    auto-keyframe rule; static branch writes the flat layer field) in keyframeUtils +
+    `makeStyleKeyframeTools` wiring KeyframeButtons onto the text rows (EditorPage). Background
+    OPACITY not keyframeable (baked into the rgba string); shape-layer style rows + graph-editor
+    lanes for style tracks deferred.
+  - *`subscribeGraphicPresets is not defined` + unclickable clip middles*: stale Vite HMR state
+    (EditorPage too large to hot-swap); production build compiles clean — hard reload clears it.
+  - *On-clip keyframe lane retired*: the diamond "KF" lane on selected timeline clips is hidden
+    (`.clip-keyframe-lane { display:none }`) — the graph editor drawer is the dedicated keyframe
+    surface; markup/drag machinery left intact behind the CSS for easy revival.
+  - *Motion-path dots in the viewer were distracting*: `.preview-motion-path` is now hidden by
+    default and shown only while the graph editor drawer is open
+    (`.editor-page:has(.graph-workspace)` — CSS-only, Chromium `:has()`, zero React/perf-path
+    changes; spatial handles stay fully functional in the motion-editing context).
+
+### 2026-07-12 — Claude (Fable): Voice round 9 — self-echo loop killed (one command executed ×3) + reorderTrack
+
+- **Root cause (real transcript)**: "move clip 1 to V3" ran three times because the assistant
+  transcribed its OWN TTS as new commands. Chain: (1) the final batch carried both an `answer`
+  step and `finalSummary` → `AgentLoop` spoke twice; (2) `speakReply` cancels the previous
+  speech, and the cancelled speak's `.finally` cleared the boolean `speaking` flag while the
+  newer speech was still playing; (3) the mic re-armed 140ms later mid-audio and heard "Moved
+  clip 1 onto V3." as "Move to clip 1 onto V3." → auto-submit → repeat.
+- **Fixes**: speak hold is now a COUNTER (`speakDepthRef` — drops only when every pending speak
+  settled; talk-mode stream included); hard speaker/mic mutual exclusion in `speakIfVoice`
+  (open idle mic is cancelled before speaking; if the user already started talking, the speak
+  is dropped — user wins the channel); `AgentLoop` no longer re-announces `finalSummary` when
+  the batch had an answer step; NEW `ai/echo-guard.ts` `looksLikeSelfEcho()` (token-set Dice ≥
+  0.8, -ed tolerant, ≥3 tokens, 6s window) discards voice transcripts matching
+  `recentlySpokenLines()` (new tts.ts ring buffer, recorded at push time) before auto-submit —
+  6 new eval checks incl. the real corpus pair. History summary turns now read "…the requested
+  edit is complete." (weak models burned 30–50s deliberating whether a repeated-looking
+  request was already done).
+- **NEW `reorderTrack` action** ("move layer V3 to top" was impossible — the model rightly
+  refused): `{trackId, toIndex | position: top|bottom}` in shared track actions; verified both
+  renderers draw `tracks[0]` ON TOP (preview sorts descending trackIndex; manifest
+  `zIndex = visualTracks.length - trackIndex`); slice header + DISAMBIGUATION note route
+  whole-track moves to it (clip-named moves stay on moveLayer); registry test covers
+  top/toIndex/rejections/undo round-trip.
+- Gates: shared typecheck-build + `actions:test` all green, `pnpm typecheck` all packages,
+  `brain:eval` all checks passed.
+
+### 2026-07-12 — Claude (Fable): Dense tabbed inspector + dedicated graph editor (bottom workspace)
+
+- **Inspector density (Phase 1)**: new `PropertyRow`/`PropertyRowGroup` primitives
+  (`editor/inspector/controls/PropertyRow.tsx`) — NumberControl + EffectSliderControl now render
+  through ONE row shell; select/toggle effect params flattened from 38px stacks to the same
+  label-left 24px row grid; new `--insp-*` density tokens; Position X/Y and Tilt X/Y merged into
+  single multi-value rows; inspector triple header stack (h2 + chip + subtitle + TemplateSlot)
+  collapsed to one chip-titled header, TemplateSlotControl moved below the properties.
+- **Inspector structure (Phase 2)**: Resolve-style top-level tabs (Video/Text/Shape | Audio |
+  Effects | Color) via `editor/inspector/InspectorTabs.tsx`, remembered per layer type; flat 22px
+  uppercase section headers (CSS-scoped to `.editor-inspector`); registry gained a `group` field.
+  **Color grading is now reachable from the right inspector** (Color tab hosts `LumetriPanel`;
+  the left panel Color tab still works — same component, two mounts).
+- **Graph editor (Phase 4/5)**: new `editor/graph/` — `BottomWorkspace.tsx` (tabbed drawer under
+  the timeline: Graph | Audio | Scopes | Metadata; Shift+G; height-resizable, persisted, snap
+  200/300/450), `GraphEditor.tsx` (canvas-based multi-curve editor: property tree, marquee +
+  multi-kf drag, bezier handle editing w/ Alt-split, cursor-anchored wheel zoom, pan, F fit,
+  frame/keyframe/playhead snapping, per-selection interpolation, easing preset bar, Ctrl+C/V
+  keyframe clipboard, arrow nudge, ruler seek, imperative playhead via `subscribePlaybackClock`),
+  plus pure `graph-view.ts`/`graph-scene.ts` (samples through the SHARED evaluator) and
+  `useDraftLayer.ts` (one gesture = one undo snapshot). `packages/shared/animation.ts` gained
+  ADDITIVE `computeAutoTangents`/`easyEaseHandles` (evaluator behavior unchanged;
+  `render:compare` passed). The old 320px SVG `TransformGraphEditor` in TransformPanel was
+  REMOVED — replaced by an "Open Graph Editor" button (dispatches `lumio:open-graph-editor`,
+  optional `detail.targetKey` focuses a property).
+- **Timeline lane (Phase 6)**: `clip-keyframe-lane` now also shows effect + content keyframes
+  (color-coded); **double-click a lane marker now OPENS the graph editor focused on that property**
+  (was: delete — deleting stays on the lane trash button / Delete key / inspector diamonds).
+- Deferred (follow-ups): EffectsPanel extraction out of EditorPage (3a), velocity/speed graph
+  mode, mask/speed/audio keyframes in the graph tree, real Audio/Scopes workspace tabs.
+- Same-day fixes (user report + screenshots): inspector **Color tab REMOVED** (three color
+  surfaces was two too many — the left Color panel stays the one color surface; tabs are now
+  Video/Text/Shape | Audio | Effects); timeline layout regression fixed — `.timeline-stack`
+  (the new wrapper for dock row + drawer) is the grid item, so the expanded/tablet/phone
+  grid-placement rules were migrated from `.timeline-dock-row` to `.timeline-stack`.
+- Same-day round 2 (user testing): **canvas ↔ background differentiation** (lighter vignette
+  matte on `.editor-viewer .preview-viewport` + 1px ring on `.phone-frame`; media was always
+  clipped by `.preview-comp-clip` — the boundary was just invisible on black); drawer got the
+  standard pane-resizer pill affordance; Position/Tilt group rows widened (X/Y values clipped
+  at 256px); graph editor hover cursor = grab over keys (no crosshair); **bezier handle model
+  fixed**: (1) `animation.ts` segment easing now honors the incoming key's `in` handle even
+  when the outgoing key isn't bezier (was: left segment ignored the handle; linear surrogate
+  `{dx:.33,dy:.33}` for the non-bezier end — `animation:test` + `render:compare` green),
+  (2) grabbing a handle on any selected key converts it to bezier with SEEDED linear handles
+  (evaluator default dy:0 made the curve jump), (3) linked mirroring is now slope-preserving
+  in display space (negating `{dx,dy}` fractions across segments with different value deltas
+  produced a cusp at value peaks), (4) Alt-drag permanently splits handles (linked:false).
+- Round 4: **two-sided interpolation (Premiere/AE semantics)** in `animation.ts` — a segment
+  now combines the outgoing key's LEAVE behavior (bezier out-handle / easeOut→flat) with the
+  incoming key's ARRIVE behavior (bezier in-handle / easeIn→flat); previously only
+  `previous.interpolation` shaped the segment, so "Ease In" eased the wrong side. `easeProgress`
+  cubic removed — every non-hold segment is one bezier (linear = fast path). The evaluator
+  CONTRACT TEST was updated to the new semantics (easeIn asserts arrival-side, easeOut
+  departure-side). Also: graph curve sampling now scales with plot pixel width (~2px/sample,
+  was fixed 160 → faceted when zoomed); single click ON the curve line adds a keyframe
+  (crosshair over line, grab over keys, arrow elsewhere); per-property reset button in the
+  graph tree clears every keyframe of that property.
+- Round 5: viewer toggles (auto-key diamond + graph) resized to the flat 28×20 transport
+  footprint; **keyframed clips are draggable in the viewer again** — `handlePreviewMoveLayer`
+  wrote the base `transform.position` which the animation overrode (drag looked dead); it now
+  routes both axes through `applyTransformValueAtTime` like scale/rotate already did, so a
+  drag on an animated clip drops/updates a position keyframe at the playhead.
+- Round 3: graph plot cursor = crosshair with grab ONLY over keys/handles; Position/Tilt
+  group rows reworked — prev/next/clear are display:none in groups (their hover-reveal grew
+  the row and made the X/Y fields overlap), each axis got its own always-reserved 15px reset
+  (X→50 / Y→type default, Tilt→0) replacing the group-level reset.
+
+### 2026-07-12 — Claude (Fable): Voice round 8 — prompt-specific acks, track targeting, hear-check reflex
+
+- **Progressive ack, done right** (user feedback: a canned phrase is NOT an acknowledgment):
+  NEW `/ai/ack` endpoint (fast pool, `ACK_SYSTEM_PROMPT` in shared — one ≤12-word line naming
+  THIS request's subject; payload-free by contract: prompt only, no slice/capabilities/history,
+  per-prompt cached, not rate-bucket-counted) + web `ai/ack.ts` `requestSpokenAck()`. The
+  agentic path fires it in PARALLEL with the planner and speaks it only while still planning
+  (never over a clarify/answer; voice sessions only). Canned `THINKING_ACKS` removed; talk mode
+  relies on its own live first sentence.
+- **Track targeting fixed** (real transcript: "put clip 1 in video layer 3" → three failed
+  moveLayer attempts with invented ids): the planner slice header now lists the TRACK INVENTORY
+  (`V1=<id> (video), A1=<id> (audio)…` + guidance); `createTrack`'s result message includes the
+  new track's id (the loop's next step needs it); `assertTrackExists` failures enumerate the
+  real ids; registry `validation_failed` messages now EMBED the issue texts (result lines only
+  surface `message` — the model was repairing blind).
+- **Hear-check reflex** — "are you listening (to me)" / "can you hear me" (+ the observed
+  mishearing "you're listening to me") answer instantly from tier-0 FAQ (varied lines) instead
+  of a 4–15s LLM round-trip; gated so "listening to the audio track" still escalates. NOTE
+  learned: the router's `normalize()` strips leading "can you/could you/please" — FAQ patterns
+  must match the STRIPPED form. 7 new eval checks.
+
+### 2026-07-12 — Claude (Fable): Voice on/off loop ROOT-CAUSED (two-way binding ping-pong) + Ollama 403 surfaced
+
+- **The recurring voice-session on/off loop is dead.** Root cause (from a Maximum-update-depth
+  stack): `voiceDesired` was a two-way-bound boolean — the panel mirrored real session state up
+  (`onVoiceSessionChange` → EditorPage `setAiVoiceWanted(active)`), and the panel's sync effect
+  converged the session to the prop. The two sides ran half a render out of phase, each
+  "correcting" to the other's stale value → infinite enter/exit. Edge-triggering (round 6.2's
+  guard) couldn't fix a bidirectional convergence. FIX: the Alt+L intent now travels as a
+  monotonic **`voiceToggleToken`** COMMAND (micToggleToken house pattern) — panel toggles once
+  per token (`handledVoiceTokenRef`), owns the session, and the report-back is one-way (can't
+  re-command). `aiVoiceWanted` is now just the mount hint (set true on Alt+L, follows reports).
+  RULE for future host↔panel state: reports must never round-trip into commands.
+- **Ollama CORS 403 surfaced to the user** — Ollama rejects browser calls unless
+  `OLLAMA_ORIGINS` allows the origin; Local mode silently fell back to the cloud and looked
+  broken. `ollama.ts` now recognizes the 403: one actionable console warning +
+  `onOllamaCorsBlocked()` (replays if already fired) → AiChatPanel pushes ONE visible warn
+  notice with the fix (`setx OLLAMA_ORIGINS "*"` + restart Ollama). Fallback unchanged.
+
+### 2026-07-12 — Claude (Fable): Voice round 7.3 — progressive-response acks ("heard you, thinking…")
+
+- The Claude/Alexa progressive-response pattern: the instant an LLM run starts, the assistant
+  SAYS a short varied ack, then thinks. `THINKING_ACKS` (tts.ts, 5 variants) are pre-generated
+  into the ack cache at ready → zero-wait playback. Agentic runs: `speakIfVoice(randomThinkingAck())`
+  right after `setPhase("planning")` (brain-instant paths return earlier and never ack; clarify
+  ANSWERS resolve via `pendingInputRef` before the branch and never ack). Talk mode (voice):
+  the ack is pushed as the live speech stream's FIRST sentence, speaking while the model
+  streams. Voice-session only; typed chat unchanged (the dot-wave/thinking log already covers
+  visual feedback).
+
+### 2026-07-12 — Claude (Fable): Voice round 7.2 — truthful "listening" + ready earcon (first words eaten)
+
+- Real report: in voice mode the first words of an utterance were lost ("hey do you listen to
+  me" heard as "you listen to me"). Root cause: Chrome's recognizer drops audio during its
+  ~300–800ms service handshake after `start()`, while our pill claimed "Listening" instantly.
+- `useDictation` gained `capturing` (from `recognition.onaudiostart`, safety-set on first
+  result; recorder path sets it immediately; reset on start/end/teardown). The aurora shows
+  "Starting the mic…" until capture is REAL, and `playReadyBlip()` (tts.ts, WebAudio
+  osc 880→1318Hz, ~120ms, quiet) marks the actual talk-now moment in voice sessions — the
+  standard VUI earcon pattern. Next architectural step if gaps still annoy: ONE persistent
+  session recognizer (open ear) with echo filtering, replacing per-turn start/stop.
+
+### 2026-07-12 — Claude (Fable): Voice round 7.1 — "System voice" opt-out in the picker
+
+- Assistant-voice picker gained a third radio: **"System voice — instant, no download"**
+  (`AssistantVoiceChoice = NaturalVoiceId | "system"`, same `lumio.voice.tts.voice.v1` key).
+  When chosen: `warmNaturalVoice()` is a no-op (Kokoro never downloads/runs), speech + the ack
+  cache route to the system engine, and the ⚙ status line reads "off — you chose the system
+  voice" (no Retry). `kokoroVoice` keeps the last natural pick so the gender-matched system
+  fallback keeps the chosen gender; picking a natural voice again re-warms download + acks.
+
+### 2026-07-12 — Claude (Fable): Voice round 7 — spoken-conversation register (natural talking)
+
+- **VOICE_MODE_NOTE** (shared `ai-prompts.ts`, VUI practice: brevity, easy-breezy reprompts,
+  phrase variation, no formal echo): appended to BOTH the planner and consultant user turns
+  when the request came from a live voice session. Rules: 1–2 spoken sentences, no
+  lists/markdown/example menus, vary phrasing (never repeat a canned line), never "It seems
+  like you want to…", garbled ASR → just ask to say it again.
+- Plumbing: `PlannerContext.voiceMode` (web `types.ts`, set in AiChatPanel `buildContext` from
+  `voiceSessionRef`) → LlmPlanner cloud payload + local builder; talk.ts both paths;
+  `voiceMode: z.boolean().optional()` in api plan/chat schemas; server plan-cache key includes
+  voice|typed (a voice-register reply must not be served to a typed chat).
+- Wake ack varies ("Yes?"/"I'm listening."/"Go ahead." — all pre-generated in the ack cache);
+  the deterministic fallback line shortened to a conversational reprompt (was a 4-example menu
+  that sounded maximally robotic read aloud).
+
+### 2026-07-12 — Claude (Fable): Voice round 6.2 — conversation timing + barge-in
+
+- **Two-phase silence budget** (`useDictation` gained `initialSilenceTimeoutMs`; heard-speech
+  flag picks the budget): voice sessions get ~7s of thinking time BEFORE the first word, then
+  a 2.6s pause submits (the 1.6s from round 6.1 cut users off — real feedback). Typed
+  dictation keeps the 3.5s default. Approvals still fire instantly via the interim
+  fast-accept ("yes"/"no"/"cancel"/"stop" as a lone interim submits immediately — Web Speech
+  often never finalizes single words).
+- **Barge-in v1 (interrupt words)** — while `speaking && voiceSession`, a dedicated standby
+  recognizer listens; a short utterance starting with stop/wait/quiet/enough/shut up/hey
+  lumio calls `stopSpeaking()` → speech halts, the fast re-arm (140ms post-TTS) opens the mic.
+  Interrupt-words-ONLY by design: this recognizer hears our own TTS through the speakers, and
+  the interrupt set is the precision-safe subset. Aurora pill now says “Speaking — say ‘stop’
+  to interrupt”. Fast re-arm from 6.2's sibling fix: re-arm delay is 140ms within 2s of TTS
+  ending (was a flat 450ms that ate the user's first words — "play the video" → "the video"),
+  450ms otherwise (wake handoff still needs the beat).
+
+### 2026-07-12 — Claude (Fable): Voice round 6.1 — "Stream is already closed" cascade fixed (evidence from kokoro-js source)
+
+- Real user crash: `first chunk timed out` → `failed to load Kokoro — Stream is already
+  closed.` Root causes CONFIRMED in kokoro-js 1.2.1 dist source: (a)
+  `TextSplitterStream.close()` THROWS on a second call — our `speak-cancel` after `speak-end`
+  (exactly what the timeout fallback sends) double-closed, the uncaught throw hit
+  `worker.onerror`, and `failNaturalVoice` terminated the whole engine; (b) kokoro-js fetches
+  `voices/<voice>.bin` from huggingface.co AT FIRST GENERATION per voice — our sanity warmup
+  used af_heart while the user had Michael selected, so the first real reply paid a network
+  fetch inside the 12s budget.
+- Fixes: worker sessions track `closed` (idempotent `closeSplitter`, push ignored after
+  close), the entire worker `onmessage` is try/caught (a message can never kill the worker),
+  main-thread `worker.onerror` is fatal only pre-ready (post-ready: warn + keep the engine),
+  and the `warm` request now carries the USER'S voice so its style file is cached before
+  "ready" (voice switches were already covered by the ack-cache warm).
+
+### 2026-07-12 — Claude (Fable): Voice round 6 — WebGPU Kokoro (2–10×), instant acks, less-robotic fallback
+
+- **Kokoro on WebGPU** — `tts.worker.ts` now tries `device:"webgpu"` with the SAME q8 files
+  (zero new download; the "WebGPU needs 326MB fp32" assumption was outdated — kokoro-js 1.2.1
+  caps dtypes at q8 so q8/webgpu it is), guarded by a worker-side SANITY GENERATION (NaN /
+  silence / clipped-noise checks on a test utterance) that falls back to wasm/q8 automatically.
+  The sanity generation also pays the session compile, so "ready" now means genuinely warm —
+  the main-thread `warmFirstGeneration` + warmup-window strike logic was deleted (ready resets
+  strikes; first-chunk budget is a flat 12s again). `ready` carries `device`; ⚙ shows
+  "ready (Kokoro · GPU/CPU)"; console logs the landing device.
+- **Instant acks** — `ackCache` pre-generates "Okay."/"Done."/"Yes?" per voice at ready (and on
+  voice switch); `speakReply` plays them with ZERO generation wait (the wake "Yes?" is now the
+  assistant's reaction time on any device).
+- **Less-robotic system fallback** — `pickVoice()` now prefers NETWORK voices
+  (`localService === false`, Chrome's Google voices) over local SAPI ("Microsoft David
+  Desktop" tier) within the gender pool.
+
+### 2026-07-12 — Claude (Fable): Voice round 5 — accurate EARS (lexicon normalizer + Moonshine local ASR) + "yes"-loop fix + warmup-strike fix
+
+- **Transcript normalizer (vocabulary biasing)** — NEW `apps/web/src/ai/transcript-normalizer.ts`,
+  pure + eval-tested: deterministic editor-lexicon rewrites on dictation FINALS (wired at
+  AiChatPanel's `onFinal` + wake-word carry-through). Real corpus: "just make lip one in lower
+  be to layer" → "just make clip 1 in lower V2 layer". PRECISION-FIRST context gates: "lip"
+  corrects only next to an ordinal (lip sync survives), V/A-track homophones ("be to"/"we too")
+  only against an adjacent layer/track word, "clip to/for" never treated as ordinals, fuzzy
+  (Levenshtein ≤1) editor terms only for non-everyday tokens. 11 eval checks incl. 5 must-NOT.
+- **Local high-accuracy ears (Moonshine)** — NEW `asr.worker.ts`/`asr.ts` pattern-copying the
+  Kokoro pair: `@huggingface/transformers` (now a direct web dep; was already in the tree via
+  kokoro-js — zero install weight) loads `onnx-community/moonshine-base-ONNX` (q8/wasm, ~60MB
+  one-time, visible progress, honest failure reason, ↻ retry, 35s auto-retry). Opt-in ⚙ toggle
+  "High-accuracy hearing" (`lumio.voice.ears.v1`). Hybrid dictation: Web Speech keeps instant
+  interim + mic lifecycle; `useDictation` gained `refineFinal`/`onRefined` — the session is ALSO
+  recorded (from the existing waveform stream, no extra permission) and on stop the local
+  transcript (through the normalizer) REPLACES the Web Speech finals; status holds at
+  "transcribing" so voice auto-submit waits; any failure keeps the Web Speech text. Wake-word
+  standby stays pure Web Speech. Aurora pill shows "⬇ hearing N%" during the download.
+- **AgentLoop "yes"-loop FIXED** (real transcript: five spoken confirmations, five identical
+  re-asks): affirmative clarify answers are annotated `— CONFIRMED. Do NOT ask again; execute
+  now.`; an IDENTICAL re-asked question is auto-answered once from the stored answer (never
+  re-asks the user); a third identical ask stops with "The model kept asking the same question".
+- **Kokoro warmup strikes voided** — real console: two "too slow" strikes straight after load.
+  The first WASM generation's session-compile hogs the single-threaded worker, so real replies
+  queue behind it. Now: 30s (not 12s) first-chunk budget until the warmup generation completes,
+  timeouts in that window never strike, and warmup completion clears any strikes/demotion
+  earned during the compile (status returns to ready).
+- **Voice-session on/off loop guard** — the host-desire sync effect (`voiceDesired`) is now
+  EDGE-triggered (acts only when the desire value changes; first mount included), so a
+  remount/re-render with a stale `aiVoiceWanted=true` can no longer force re-entry after an
+  internal exit (the observed on/off notice spam was HMR remounts re-entering each time).
+
+### 2026-07-12 — Claude (Fable): Voice round 4 — streaming Kokoro, talk-mode read-back, full-length multi-point speech, gender-matched fallback
+
+- **Streaming TTS (worker protocol v2)** — `tts.worker.ts` replaced one-shot `generate` with
+  speech SESSIONS (`speak-start/push/end/cancel` → `chunk/speak-done/speak-error`): kokoro-js
+  `tts.stream()` + `TextSplitterStream` yields one WAV per SENTENCE, so the first sound arrives
+  after one sentence's inference (was: whole-reply generation), replies have no length cap, and
+  generation pipelines ahead of playback. `tts.ts` gained `startSpeechStream()` (the one
+  primitive under `speakReply` AND live push) with an ordered chunk queue + player loop; the
+  12s timeout / 2-strike too-slow demotion now measures TIME TO FIRST CHUNK (fair on the new
+  math); a post-`end()` 20s stall guard stops a wedged reply without a strike; pre-first-chunk
+  failure replays the full text through the system voice (nothing lost), mid-reply failure
+  never replays (no duplicates). `stopSpeaking()` reaches inside the session
+  (`cancelActiveStream`: worker cancel + player wake) and `playWav` settles on `pause` too —
+  a Stop mid-chunk used to leave the mic-gate promise hanging.
+- **"After the 1st point it stops" FIXED** — `speakable()` lost its 240-char truncation and is
+  now line-aware: bullet/number markers stripped, every line gets terminal punctuation, so
+  multi-point answers are read IN FULL with natural pauses. New pure `splitSpeakable()` chunks
+  cleaned text (~280 chars, sentence-merged) for the system engine — also dodges Chrome's
+  long-utterance mid-speech silence. Both exported + covered by 8 new brain:eval checks.
+- **Talk mode speaks, LIVE** — the talk branch (AiChatPanel) opens a speech stream in a voice
+  session and pushes each COMPLETED sentence from `onDelta` while the LLM is still streaming
+  (guards: never past the `SUGGESTIONS:` marker — its delta can leak into onDelta; local
+  models that return text without deltas get a final full push; error lines are spoken).
+- **Gender-matched system fallback** — `NATURAL_VOICES` gained `gender`; `pickVoice()` filters
+  the system-voice pool by the selected Kokoro voice's gender (Michael selected → male system
+  voice while the model downloads; honest full-pool fallback when no male voice is installed);
+  `setNaturalVoice()` busts the cached pick.
+- Engine analysis (researched): Kokoro stays — Piper is faster but audibly mechanical,
+  KittenTTS smaller but lower quality, Supertonic fewer natural English voices; the latency
+  answer was streaming, not an engine swap. WebGPU/fp32 (326MB) still deferred.
+
+### 2026-07-11 — Claude (Fable): Editor Command Plane v1 (voice-first editor control) + feedback thank-yous + small UX fixes
+
+- **Editor command plane** — the AI can now OPERATE the editor, not just edit timeline data.
+  NEW `apps/web/src/editor/editor-commands.ts` (Zod-validated command registry: setTool /
+  transport / seek / selectClip / setPreviewQuality / setSnapping / editorUndoRedo / openExport;
+  web gained a direct `zod` dep) + `runEditorCommand` dispatcher in EditorPage (reuses the exact
+  keyboard/button handlers — togglePlayback, startShuttle, setEditorCurrentTime,
+  expandLayerSelection, the ¼/½/1/A quality logic incl. the adaptive-quality DUAL source of
+  truth) passed as a prop to AiChatPanel. NEW `apps/web/src/ai/brain/commands.ts` tier-0 compiler
+  ("pan mode", "pause", "go to 12 seconds"/"0:45", "next marker", "select clip 3", "half
+  resolution", "toggle snapping", "redo", "export") — zero tokens, <5 ms, precision-anchored
+  (bare "cut" NEVER fires — blade needs "blade"/"cut tool"). Router gained a `command` result
+  kind checked before the FAQ; the play/pan FAQ *tips* were retired (commands execute instead);
+  commands run with NO approval bar in any mode (non-destructive view/transport state).
+  "undo" with nothing AI-applied now drives the editor's real history instead of a Ctrl+Z tip.
+  Semantic tier passes command rewrites through + new exemplars ("freeze playback"→pause,
+  "lowest quality"→quarter res). `brain:eval` grew to 160 checks incl. command corpus + new
+  ambiguity rows ("play something fun", "cut it", "go to the good part" must escalate).
+- **"ripple delete clip N" / "delete clip N and close the gap"** → tier-0 `deleteLayer{ripple:true}`.
+- **`openPanel` command added same day** (user hit "open effects tab" escalating to the LLM,
+  which refused): open/close/toggle Media Pool / Effects / Color / Project Settings / Inspector
+  ("open effects tab", "open inspector", "hide the inspector"). Dispatcher reuses the topbar
+  toggle logic incl. responsive-overlay mode. Ambiguity guard: "effects"/"color" require a
+  tab/panel suffix — bare "show effects" (could mean a clip's applied effects) escalates.
+  Semantic exemplars: "open the media browser"→media pool, "show clip properties"→inspector.
+- **Plan cache v2 (retargetable) + feedback on LLM turns** — the v1 cache keyed on the FULL
+  composition + playhead-ms, so "same request twice" almost never replayed. v2
+  (`lumio.brain.plancache.v2`): keyed on normalized prompt; replay-valid while every clip the
+  plan's steps REFERENCE is byte-identical (unrelated edits/playhead moves don't invalidate);
+  deictic prompts ("it"/"here"/"selected"…) additionally pin exact selection + playhead-ms.
+  Every successful LLM turn now shows 👍/👎 ("Was this what you wanted?"): 👍 confirms the
+  cached replay (same ask = 0 tokens forever), 👎 (or undo within 60s) `forgetLearnedPlan()`s —
+  drops the cached plan AND the phrase learned from it — reverts, and asks for a correction
+  (deliberately no auto re-run: the same model would repeat itself). brain:eval covers replay-
+  despite-drift, referenced-clip-change → escalate, and forget → escalate.
+- **Voice mode toggle + full-window aurora** — new AudioLines header button in the AI panel
+  toggles the hands-free voice session (long-press mic still works; "stop listening"/"exit voice
+  mode" spoken also exits). While live, a portal renders `.voice-aurora` on <body>: Gemini-style
+  animated conic-gradient edge frame + breathing inset glow over the ENTIRE window
+  (pointer-events: none — the editor stays fully usable), cool/slow while listening, warm/fast
+  while executing, plus a top-center status pill (state dot, live transcript tail, ✕ exit).
+  Reduced-motion honored. CSS at the end of global.css.
+- **⚙ natural-voice status + ↻ Retry, theme-accent voice UI, cancel fixes** — the ⚙ menu's
+  natural-voice line now shows the stored FAILURE REASON (`lastFailureReason`, included in the
+  progress replay) + a ↻ Retry button (`retryNaturalVoice()` clears cooldown AND too-slow
+  strikes for a fresh verdict — pre-worker verdicts are stale). All voice-UI colors (aurora
+  gradient/glow/dots, AI-live dot, ⚙ On pill) now derive from `--accent`/`--nle-accent` via
+  color-mix (`--va-accent/--va-soft/--va-bright` on .voice-aurora) — states read via
+  brightness+speed, not foreign hues. AgentLoop: isCancelled checked right after planning
+  (Stop during a long stream no longer pops a question), and a cancel-shaped CLARIFY ANSWER
+  ("don't do anything", "never mind", "stop"…) ends the run instead of being fed back to the
+  model (which just asked again — real transcript).
+- **Kokoro moved into a Web Worker** (`ai/tts.worker.ts`, protocol types exported; same
+  pattern as sourceProxy.worker.ts) — WASM inference on the main thread froze the whole editor
+  per reply ("page unresponsive"). The worker owns from_pretrained (forwards raw per-file
+  download progress; main thread aggregates) + generate → transferable WAV ArrayBuffer; tts.ts
+  is now a worker client (pending-generation map, load-error → terminate + retry cooldown,
+  12s generation timeout + 2-strike too-slow demotion to the system voice). Also: Chrome
+  speechSynthesis fixes — 80ms cancel→speak gap (same-tick speak is silently DROPPED),
+  resume() before speak, module-held utterance ref (GC kills speech mid-sentence), 30s safety
+  resolve; system-voice audition always answers from the ⚙ voice picker.
+- **AI panel ⚙ settings menu + voice picker** — the header had piled up one icon per feature;
+  now: Voice (Alt+L) · New chat · ⚙ · ✕. The ⚙ dropdown holds: "Hey Lumio" wake-word On/Off,
+  "Train my wake phrase…" (re-runs the sample-capture card any time), Assistant voice picker
+  (Kokoro `af_heart` "Heart — American female" / `am_michael` "Michael — American male";
+  persisted `lumio.voice.tts.voice.v1`, tiny per-voice style file, instant spoken audition on
+  switch when ready), BYO key / Memory / Insights, and a natural-voice status line. tts.ts
+  exports NATURAL_VOICES/get/setNaturalVoice. Kokoro playback hardening same day: warmup
+  generation at load (first-reply silence was WASM compile), 20s generation timeout, playback-
+  blocked → system-voice fallback (was silently swallowed), q8/WASM ~86MB always (fp32/WebGPU
+  326MB dropped — undownloadable on flaky networks), MB shown in progress.
+- **Voice round 3: first-run wake training + Alt+L/panel-closed fixes** — (1) Alt+L with the
+  chat closed was broken by a mount-race: AiChatPanel's session-mirror effect reported its
+  INITIAL `false` up on hidden-mount, flipping `aiVoiceWanted` off before the session started —
+  the mirror now skips the initial value, and toggle/exit write `voiceSessionRef` synchronously.
+  (2) "Hey Lumio" was DEAF with the chat closed (standby lives inside the unmounted panel):
+  EditorPage now keeps the dock mounted-hidden whenever the Ear is armed (`aiWakeArmed`, fed by
+  the new `onWakeWordChange` prop + `loadWakeWordEnabled()` from wake-word.ts). (3) Matcher:
+  "heya"/"hiya"/"yo" greetings added; distinctive l-variant names wake WITHOUT a greeting
+  ("Lumio, pause" → carry-through) while mia/miu/mio stay greeting-anchored. (4) **First-run
+  voice training** (`wakeSetup` transcript card, flag `lumio.voice.wakesetup.v1`): offered once
+  on first panel open ("Teach me your wake phrase — say whatever feels natural"), and
+  auto-starts when the Ear is armed with zero learned phrases; captures 3 spoken finals
+  verbatim via the standby recognizer (never wakes mid-training) and learns them
+  (`learnWakePhrase`), so "heya lumio" works exactly as the user says it. (5) Kokoro load
+  failures are now RETRYABLE (30s cooldown + auto-retry timer; browser-cached files resume) —
+  a mid-download "network error" no longer kills the natural voice for the session.
+- **Alt+L fixes: shuttle collision + voice-only mode** — (1) the editor's transport keydown
+  handler only bailed on Ctrl/Meta, so Alt+L ALSO fired the bare "L" JKL shuttle; it now bails
+  on any Alt combo (they all have dedicated listeners). (2) Alt+L no longer opens the chat
+  panel (user request): EditorPage keeps `aiVoiceWanted`/`aiVoiceActive`, mounts the ai-dock
+  HIDDEN (`.ai-dock.is-voice-only { display:none }`) so the session can run panel-less, and the
+  topbar AI button becomes "AI ● live" (pulsing dot + green glow). AiChatPanel's
+  `voiceToggleToken` prop was replaced by `voiceDesired` + `onVoiceSessionChange` (two-way sync
+  — Esc/"stop listening"/Ear exits report up). Kokoro download % additionally shows in the
+  aurora pill (`voice-aurora-sub`) since the transcript notice is invisible in voice-only mode.
+- **Natural voice: Kokoro-82M in the browser** — `apps/web` gained `kokoro-js` (Apache-2.0,
+  commercial OK). `ai/tts.ts` is now two-engine: Web Speech answers instantly day one;
+  `warmNaturalVoice()` (fired when a voice session starts or the wake word arms) lazily
+  downloads Kokoro (`onnx-community/Kokoro-82M-v1.0-ONNX`, ALWAYS wasm+q8 ≈86MB — webgpu needs fp32 ≈326MB
+  which flaky connections never finish, and the browser cache can't resume one interrupted
+  file; revisit fp32 as opt-in later. Browser-cached, voice `af_heart`) with a LIVE percentage row in the chat (user requirement:
+  visible progress, no magic — `onNaturalVoiceProgress` subscriber, aggregated per-file
+  loaded/total). Once ready, `speakReply` routes through Kokoro (generate → wav blob →
+  HTMLAudio; monotonic speak-token so stop/next-reply silences in-flight generations); any
+  failure falls back to the system voice honestly. pnpm note: kokoro-js pulls Node-only
+  onnxruntime-node/protobufjs/sharp — their build scripts are declared `false` in
+  pnpm-workspace.yaml `allowBuilds` (browser uses onnxruntime-web; do NOT approve them).
+- **Voice round 2: trainable wake word + TTS read-back + carry-through** — real transcripts
+  showed Web Speech hears "hey lumio" as "hello Mia/miu/Lumia". NEW `apps/web/src/ai/wake-word.ts`
+  (pure, eval-tested): greeting-anchored matcher over a variant set + Levenshtein ≤2 + split
+  tokens, PLUS learned phrases (`lumio.voice.wakephrases.v1`) — standby near-misses (short
+  greeting-led finals) raise a `wakeTrain` transcript card ("I heard 'hello mia' — were you
+  calling me?"); confirming LEARNS that exact mishearing forever (this is the user-facing
+  training loop). NEW `apps/web/src/ai/tts.ts` (speechSynthesis wrapper: emoji/markdown
+  stripped, 240-char sentence truncation, voice pick cached): replies are SPOKEN only in a
+  voice session via `speakIfVoice` (command says, brain answers, agent answers/finalSummary,
+  clarify questions, approval prompt "say yes to apply"); the mic re-arm effect blocks while
+  `speaking` so the recognizer never transcribes our own reply; aurora gained a "speaking"
+  state. Carry-through: "hey lumio, blur clip 2" submits the command in one breath
+  (`handleSubmitVoiceRef` late-binding); bare wake answers "Yes?". brain:eval gained a WAKE
+  WORD section (~17 checks incl. learn/clear lifecycle).
+- **"Hey Lumio" wake word + Alt+L** — Alt+L toggles the voice session from anywhere (token
+  pattern like Alt+M; opens the AI panel if closed). New Ear header button enables the opt-in
+  wake word: a standby Web Speech recognizer (`createSpeechRecognition` exported from
+  useDictation.ts) runs whenever the mic is otherwise free (never contends with dictation),
+  auto-restarts on Chrome's ~60s session ends, matches /hey,? lumio/ + misheard variants
+  (loomio/lumeo), and on match aborts itself → enters the voice session (150ms handoff before
+  dictation grabs the mic). Permission revocation auto-disables the toggle. Persisted in
+  `lumio.voice.wakeword.v1`; the Ear breathes while standby is live.
+- **👍/👎 feedback acknowledgments** — 👍: "Thanks — feedback like this literally trains me…";
+  👎: reverts (if edits), dials the rule down, thanks the user, re-runs via the model.
+- **Inspector starts collapsed** by default (user request).
+- **Alt+R/Alt+T → Alt+E/Alt+R** — left-panel expand is now Alt+E, inspector expand Alt+R
+  (labels/aria updated).
+- Note: a transient `handleNewChat is not defined` crash on 2026-07-11 was HMR mid-edit state,
+  not a code bug — definition precedes use in the committed file.
+
+### 2026-07-10 — Claude (Fable): AI chat persistence + asset-scope leak fix
+
+- **AI chat history persists per project** — `transcript.ts` gained `loadTranscript`/
+  `saveTranscript`/`clearTranscript` (localStorage `lumio.ai.transcript.v1.<projectId>`, capped
+  150 items, streaming/running flags sanitized on restore so nothing comes back "live");
+  AiChatPanel restores on mount + debounce-saves on change; the planner's follow-up history is
+  derived from the transcript so follow-ups survive reloads too. New ✏️ "New chat" header button
+  clears the persisted conversation (disabled mid-run).
+- **Asset-scope leak (user report: "videos vacant in new projects, audio persists")** — root
+  cause: `EditorPage.handleUploadAsset` (and the .lumio package import) never passed `projectId`
+  to `createAsset`, so those uploads were created OWNERLESS and appeared in every project's bin
+  forever (e.g. `atlasaudio-calm-nature`), while older project-owned uploads were correctly
+  hidden by the bin's pile-fix filter — the two behaviors looked contradictory. Fix (user chose
+  per-project scoping): non-brand editor uploads + package-import media now pass
+  `projectId: project.id`; brand uploads stay user-level by design. Pre-existing ownerless rows
+  were deliberately NOT migrated (user declined repair) — they can be deleted from the bin.
+
+### 2026-07-10 — Claude (Fable): Lumio Brain B3–B7 — semantic tier, fast model class, loop economy, learning write path, concept recipes
+
+- **B3 semantic tier** — NEW `apps/web/src/ai/brain/semantic.ts`: slot extraction (clip refs /
+  times / colors / numbers → intent skeletons), curated phrase index (exact skeleton match is
+  free; lazy MiniLM embeddings via the local-transcription CDN pattern for unseen paraphrases,
+  cosine ≥0.9 + 0.04 margin + slot-arity gate), matches select INTENT only — the canonical
+  rewrite re-enters tier 0/1 so target/type/Zod gates still decide. Plan cache (normalized
+  prompt + exact full-composition signature → free replay; written from fully-successful
+  all-action loop runs in AiChatPanel). Async tier in `handleSubmit` after the sync router;
+  escalates instantly while the embedding model is cold (download continues in background).
+- **B4 fast model class + tier 3** — gateway `fast` pool (`aiGateway.service.ts` fastPool:
+  llama-8b-instant/flash-lite class models, distinct `-fast` provider ids/cooldowns, 8s
+  timeout, temp 0, 900-token cap; env: `*_FAST_MODEL`); NEW `POST /ai/plan/fast`
+  (micro-prompt `FAST_PLANNER_SYSTEM_PROMPT` in shared/ai-prompts.ts, Zod-parsed steps-or-
+  escalate reply, shared rate bucket + cache); NEW `apps/web/src/ai/brain/fast.ts`
+  (`looksTransactional` gate, target-clip-only micro context + compact action catalog,
+  `brainPlan` Zod re-validation, `t3.fast-lane` trust gating). Panel shows "⚡ Fast lane · one
+  small model call"; ledger route `llm-fast`; escalated fast attempts' tokens are added to the
+  following loop record.
+- **B5 loop economy v2 (core)** — final-batch contract: planner prompt + `AiPlan.final/
+  finalSummary` + AgentLoop ends the run with NO closing LLM call when a final batch fully
+  succeeds (validation-dropped steps void the claim). Slice diffs: `LlmPlanner.buildSliceContext`
+  sends the full slice on iteration 1, then ADDED/CHANGED/REMOVED + ref-id stubs for unchanged
+  layers (keyed per prompt+composition; continuation detected via ACTION RESULT turns).
+  Capability-gap pre-check in `ai/brain/faq.ts`: "keyframe/animate <effect>" answers instantly
+  with the honest limit + alternatives (exact effect type/name match only; keyframeable
+  properties like opacity pass through to the model). Intent DSLs (MotionIntent etc.) remain a
+  future slice.
+- **B6 learning loop (complete slice)** — implicit signals in AiChatPanel: undoing a brain edit
+  within 60s = rejection; submitting a new prompt with a brain edit still standing = weak
+  confirmation (ref-mirrored `brainTurn` so undo/submit consume it exactly once). Learned-phrase
+  WRITE path `maybeLearnPhrase(prompt, steps)` in semantic.ts: a fully-successful single-action
+  LLM run whose intent the phrase index knows teaches this user's skeleton (slot-arity-gated —
+  non-generalizable phrasings like "the intro" are never learned).
+- **B7 concept → recipe (first slice)** — exact phrases ("make it cinematic", "teal and
+  orange", "make it noir") compile to ONE color-grade skill step with a registered
+  `CreativeLook` (task inputSchema-validated), deterministic + free + per-recipe 👎-gated.
+- **Eval** — `brain:eval` grew to ~105 checks: tier-2 exemplars/deixis/type-gates, mocked-
+  embedder threshold + margin cases, learned-phrase read AND write paths, plan-cache
+  hit/drift, fast-lane gate, capability-gap answers, concept recipes, and the full ambiguity
+  corpus re-run through tier 2 (still zero wrong fast-paths). Gates green: shared/api/web/worker
+  typecheck + brain:eval.
+- Docs: AI_ARCHITECTURE.md build-plan statuses updated (B3 ✅, B4 ✅, B5 ✅ core, B6 ✅, B7 🚧).
+- **Wrong-target fix (real incident)** — "detect beat from clip 2 and apply it on clip 1" split the
+  AUDIO: clip 1 wasn't selected/on-playhead so it was missing from the slice, and the model used
+  the only id it had while its summary claimed clip 1. Fix in `LlmPlanner.ts`: prompt-named clip
+  ordinals ("clip 1", "the 2nd clip", "third clip") are now ALWAYS included in the slice, ahead of
+  the cap (`promptNamedOrdinals` + reordered `relevantLayers`); plus a PLANNER_SYSTEM_PROMPT rule
+  that a named-but-invisible clip must never be substituted with another layer's id (answer/clarify
+  instead — wrong target is the worst outcome).
+
+### 2026-07-10 — Claude (Fable): Lumio Brain B2 — tier-1 command compiler + 👍/👎 feedback trust loop (two-stage learning)
+
+- **B2 command compiler** — NEW `apps/web/src/ai/brain/rules.ts`: grammar rules (verb family +
+  target + params → registry actions), zero tokens, <50ms. Rule families: **text-color**
+  (updateText; TYPE-GATED — "make clip 1 white" on video escalates to grade territory; suffix-split
+  parsing so "make clip 2 white" splits correctly), **move-in-time** (moveLayer deltaSeconds;
+  earlier/later/delay/push), **fades** (addTransition fadeIn/fadeOut, additive, optional duration),
+  **blur** (addEffect, or updateEffect when a blur already exists; explicit amounts). Targets
+  resolve via the clip-reference ladder (explicit ordinal → single selection → single playhead;
+  ambiguous NEVER fires). Politeness prefixes ("can you… please") + trailing punctuation
+  normalized. Router runs tier 0 → tier 1 → escalate; ledger route "rules".
+- **👍/👎 feedback trust loop (B6 slice, user request)** — NEW `apps/web/src/ai/brain/feedback.ts`
+  + a slim feedback row after every brain-resolved turn ("⚡ Instant — was this right?").
+  👍 = rule earns trust. 👎 = rule LOSES trust, the local edits are auto-reverted, and the SAME
+  prompt re-runs through the LLM (skipBrainRef one-shot bypass) — no retyping. A rule with 2+ net
+  rejections fails `isRuleTrusted` and stops fast-pathing for this user (recovers if 👍s outweigh).
+  **Two-stage learning (user requirement)**: Stage 1 local (this), Stage 2 universal — every
+  feedback event is stored aggregate-ready (ruleId+outcome only, no prompt text) with
+  `drainFeedbackEvents()` as the future consent-gated server sync hook.
+- `brain:eval` grew to 50 checks incl. a trust-gate test (fire → 2×👎 → escalates → cleared →
+  fires again) and new ambiguity entries (type-gate cases, fuzzy magnitudes, missing params).
+  All green + web typecheck.
+- **Clip-wording pass (user approved "go")** — user-facing registry copy renamed "layer"→"clip"
+  across `packages/shared/src/timeline-actions/actions/*` (names, execute summaries,
+  descriptions: "Delete clip", "Move clip", "Update text", "Group N clips", "…attach it to a
+  clip", etc.). Action IDS unchanged (`deleteLayer`, `moveLayer`, …) so the planner contract,
+  params, and all call sites are untouched; grep confirmed zero code/test references to the old
+  strings. Rationale: timeline badges + clip-reference already say "clip N" — a clip IS a
+  TimelineLayer internally; this was copy drift, not a model change.
+- **FAQ paraphrase widening** — capability-question patterns now catch real paraphrases the
+  user hit ("what you can do for me", "what are you capable of", "show me what you can do")
+  while "what can i do" (about the user) still escalates. Safe to widen: answer-only + 👎-gated.
+  Deeper paraphrase coverage is B3's job (local embeddings), not more regex.
+- **Mic shortcut** — "." now toggles AI voice dictation (one-hand; user request), with a
+  typing-context bail so "." types normally in fields; Source Monitor's scoped "." (overwrite
+  edit) is untouched (it stopPropagation()s first). ⌘/Ctrl+"." added (user request) and Alt+M
+  kept — both have NO typing bail, so they toggle the mic while the composer is focused. Cheat
+  sheet updated. Ctrl+/ (panel toggle) and "/" (focus composer) unchanged.
+- Gates: shared+web+worker typecheck ✓, `brain:eval` 55 checks ✓.
+
+### 2026-07-09 (cont. 2) — Claude (Fable): Lumio Brain — architecture doc rewrite + B0 routing ledger + B1 tier-0 reflex router
+
+Motivated by `AI_REFINEMENT.md` (real session log: 6–17s reasoning-LLM round trips for trivial
+commands, a wasted closing loop iteration per run, "what can you do" costing a 17s model call).
+`AI_ARCHITECTURE.md` was **fully rewritten** as the Lumio Brain plan: a 5-tier decision cascade
+(reflex → command compiler → semantic/embeddings → transactional fast-LLM → creative agent loop),
+precision-first fast paths that NEVER guess (escalate silently), bandit-style learning from
+apply/undo feedback, phased build plan B0–B8. Old phase tracker 1–16 preserved inside it
+(Current state + appendices). `AI_STRUCTURE_SUGGESTIONS.md` = the brainstorm input, kept.
+
+Shipped this session (B0+B1):
+- **B0 routing ledger** — NEW `apps/web/src/ai/brain/ledger.ts`: per-request {route, provider, ms,
+  estTokens, outcome} in a localStorage-backed ring (200); `summarizeRouting()` surfaces a
+  "Brain routing" block in `AiInsightsDashboard` (instant share, avg latencies, est tokens
+  spent/saved). `AgentRunReport` gained `estChars`; loop/talk/reflex paths all record.
+- **B1 tier-0 reflex router** — NEW `apps/web/src/ai/brain/router.ts` + `faq.ts`: exact commands
+  compile locally into ordinary AiPlans (provider "brain", 0 tokens, <5ms): "delete clip 3",
+  "split clip 2 at playhead" (with honest bounds answers), "add a marker", "undo"; registry-
+  GENERATED capabilities answer; real-shortcut editor answers (Space/H/S/C/M… from the timeline
+  cheat sheet); "what is clip 2" described from the slice. Wired into `AiChatPanel.handleSubmit`
+  ahead of any model/network (Talk mode + image turns bypass). Mode gating unchanged: reflex
+  plans flow through the same approval/execute pipeline; transcript shows "⚡ Instant · … — 0
+  tokens" notices (honest labels).
+- **brain:eval** — NEW `apps/web/src/ai/brain/router-eval.test.ts` (+ web script): transactional
+  corpus must resolve at tier 0, ambiguity corpus must escalate with ZERO wrong fast paths
+  (the do-not-repeat-the-deterministic-planner-frustration contract). All green + web typecheck.
+
+Next per AI_ARCHITECTURE.md: B2 command compiler (tier 1), B3 embeddings, B4 gateway `fast`
+model class, B5 loop economy v2 (final-batch contract kills the closing iteration).
+
+### 2026-07-09 (cont.) — Claude (Fable): "Claude Code for video" — agent transcript UI, real agentic loop, tool-awareness (inspect/markers/beat-sync), hands-free voice sessions
+
+Plan: `~/.claude/plans/after-this-plan-a-zesty-karp.md` (approved). The AI panel is no longer a
+chatbot — it's an agent work log driving a real observe→think→act loop. All gates green
+(typecheck 5/5, `editor:test`, worker `skills:test`/`executor:test`/`clipref:test`). NOT yet
+live-tested against a real LLM turn — needs a `pnpm dev` E2E pass.
+
+- **Agent transcript UI (replaces bubbles + PlanReviewCard + AiProgressList — both files DELETED).**
+  New `apps/web/src/ai/transcript.ts` (typed `TranscriptItem` union: user/thought/step/text/
+  question/summary/notice + pure append/patch helpers) and
+  `apps/web/src/components/ai/AgentTranscript.tsx` (flat rows: accent-bulleted step lines with the
+  executor's REAL `detail` always shown + real durations; dim streaming thought clamped to the last
+  ~6 lines, collapsing to "Thought for Ns ▸"; inline questions with the answer patched onto the row;
+  slim `ApprovalBar` replacing the boxy card). `AiChatPanel` keeps `pushMessage(role,text)` as a
+  compat shim over the transcript; planner history is derived from user/text/question/summary items
+  only (work rows never round-trip — token economy).
+- **Real agentic loop** — new `apps/web/src/ai/agent/AgentLoop.ts` (`runAgentLoop`): per iteration,
+  fresh timeline slice + compact one-line `ACTION RESULT:` log (capped 8, reasoning never echoed) →
+  `planner.plan()` (same `/ai/plan/stream`, ZERO server changes; `PLANNER_SYSTEM_PROMPT` gained a
+  static AGENTIC MODE section) → validate → execute ONE batch via the existing `executePlan` →
+  feed real outcomes back. Finish = answer-only plan; clarify-only = inline question that CONTINUES
+  the same run; loop-breaker on identical repeated batches; offline plan mid-run stops honestly;
+  per-mode iteration caps (quick 3 / professional 8 / agent 12) + char-budget guard that injects
+  "FINISH NOW" at 80%; Stop button (send button flips to ■ while running) cancels between steps.
+  Professional = approve-ONCE-per-run via the slim bar (per-step checkboxes preserved), then
+  free-runs — a semantics change from approve-every-plan, deliberate.
+- **Tool-awareness.** New `inspect` step kind (`{"kind":"inspect","capabilityId"}`): resolved
+  ENTIRELY client-side by the loop via `capability-index.describeCapability(id)` (NEW — full doc for
+  any action/effect/tool/skill incl. Zod param reflection), doc rides into the next iteration's
+  action log (≤800 chars), shown as a "Reading tool: X" row. Registry parity: NEW
+  `timeline-actions/actions/marker.ts` (`addMarker`/`removeMarker`/`addMarkersAtTimes`, tolerant of
+  legacy bare-number markers) and `splitClipAtTimes` in `clip.ts` (batch cut; applies times
+  DESCENDING because `splitLayerAtTime` keeps the original id on the LEFT half).
+- **Beat detection — REAL DSP, no mock.** New `apps/web/src/tools/beat-detection.ts`
+  (fetch→decodeAudioData→mono→energy-flux onsets→adaptive threshold→IOI-histogram BPM; lazy-imported,
+  cancellable). Exposed as a new `audio-analysis` skill (`skill-registry.ts`, taskKind
+  `beat-detection`, NEW `execution: "analysis"` discriminator in skill-types) with
+  `params.apply: report|markers|cuts|both` — `runSkillStep` in AiChatPanel detects beats and applies
+  markers/cuts via the registry in ONE step/commit. New `AiChatPanelProps.resolveAssetUrl` (EditorPage
+  passes `assets.find(...).fileUrl`) resolves the media. Speed-ramped clips approximated at 1x
+  (documented in the skill procedure).
+- **Hands-free voice session (E).** LONG-PRESS the mic (550ms) → session mode (`is-session` ring):
+  dictation auto-submits on silence, the mic re-arms ~450ms after the agent goes idle/review/
+  awaiting-answer (NEVER mid-execution), and a pending approval accepts spoken/typed
+  "yes/apply/…" / "no/cancel/…" (regex intercept at the top of `handleSubmit`, works typed too).
+  Esc or mic tap exits; Stop exits too. Transitions announced as transcript notices.
+- **Theming fix (user report):** all hardcoded `#c9ff4a`/`rgba(201,255,74,…)` literals in the AI
+  panel region of `global.css` (mic states, wave bars, pulse ring, plus-btn/pro-toggle active,
+  checkbox accent) → `var(--nle-accent)` / `color-mix`, so the panel re-tints with the theme picker.
+  Two remaining lime literals OUTSIDE the AI panel (l.2390 stroke, l.6667 background) left as-is —
+  other shipped UI, not touched.
+- **Known follow-ups:** loop provider pinning (iterations may hop providers — server-side change),
+  slice DIFFS between iterations (currently each iteration re-sends the bounded slice; the action
+  log is the only growth), TTS read-back (E4, deferred), `permission.ts`'s `shouldAutoApply` now
+  unused by the panel (kept — other callers may exist).
+
+### 2026-07-09 — Claude (Opus): AI panel — autonomous talk-vs-edit (`answer` step), honest thinking log, voice dictation, planner-honesty
+
+A cluster of AI-composer work. All ADDITIVE to the planner contract — the executor, server plan
+endpoint, and deterministic planner core were not restructured. `apps/web/src/components/ai/*`,
+`apps/web/src/ai/*`, `packages/shared/src/ai-prompts.ts`, plus small `EditorPage`/`TimelineStrip`
+shortcut edits.
+
+- **Autonomous talk-vs-edit routing (new `answer` step kind).** The planner used to route purely on
+  the selected MODE — every message in Agent/Pro/Quick went to the edit planner, so a plain question
+  ("what is my clip 2?") got the "couldn't map to a tool" fallback. Now the LLM DECIDES: if the
+  message needs no edit/tool/skill, it emits a single `{"kind":"answer","text":"…"}` step answered from
+  the timeline slice. Wiring: `PLANNER_SYSTEM_PROMPT` gained the `answer` kind + a "decide first" rule
+  + two examples (`ai-prompts.ts`); `LlmPlanner.validateSteps` accepts it; `types.ts` `PlanStepKind`
+  gained `"answer"` + a `text?` field; `AiChatPanel` short-circuits an answer-only plan to a chat
+  reply (parallel to the existing `onlyClarify` path) — no Apply card. The executor needs no change:
+  its fall-through already skips non-action/tool/skill steps, and answer-only plans never reach it.
+  A MIXED plan (answer + edits) currently drops the answer text (prompt tells the model to keep
+  `answer` standalone) — render mixed answers if that ever shows up.
+- **Thinking log is now real activity, not a scripted timer** (`AiThinkingLog.tsx` rewritten). The old
+  version pre-listed 6 fixed phases and auto-advanced the checkmarks on a 620ms `setInterval` (the
+  "magic box" feel). Now steps are revealed ONLY as real `activePhase` stream events arrive, the live
+  step shows a spinner + its real elapsed seconds, finished steps show honest durations ("Thought for
+  Ns"), and the real provider/reasoning are surfaced. The one remaining timer just advances the live
+  seconds READOUT — it never moves steps forward. CSS: `.ai-thinking-spinner`/`.ai-thinking-time` +
+  reduced-motion guard. Note: phases 0–2 are client-side prep and flash by instantly; the real dwell
+  is the "Thinking" step.
+- **Planner honesty (earlier same session).** `DeterministicPlanner` now tags plans `provider:"offline"`
+  and is capped at "Approximation ≤55%" (was claiming "Exact 90%" for keyword guesses); the silent
+  case where the LLM answered but all steps failed validation now routes through a nudge instead of
+  passing the keyword fallback off as the model's work (`LlmPlanner`); `AiChatPanel` labels an offline
+  plan "Offline plan (no AI)…" instead of "Here's my plan (Exact)".
+- **Voice dictation (mic) in the composer.** New `apps/web/src/ai/useDictation.ts` — Web Speech API
+  primary (live interim, `continuous`, silence auto-stop, Chrome ~60s restart handling), MediaRecorder
+  → local whisper FALLBACK for Firefox (reuses `local-transcription.ts` via a NEW behavior-preserving
+  `transcribeAudioUrlLocally` extraction). Mic button sits to the RIGHT of the composer input (new
+  `.ai-composer-input-row`), live level meter + pulse ring. `capabilities.ts` gained
+  `speechRecognition`/`microphone` flags. Shortcut **Alt+M** toggles it (own keydown effect in
+  EditorPage, `event.code==="KeyM"` + preventDefault for Mac "µ"; opens the panel and bumps a
+  `micToggleToken`, same bridge pattern as the `/`-focus `focusToken`). Cheat-sheet entry ⌥M.
+- **Two composer fixes.** Bare `/` focuses the AI composer (opens the panel); the composer textarea is
+  no longer `disabled` while busy (a disabled element was blurred by the browser, stealing focus on
+  every send — submits are guarded in `handleSubmit` instead). Timeline bug: Alt+M also fired the bare
+  `M` marker toggle — the `case "m"` in `TimelineStrip`'s keydown now bails on `event.altKey` too (it
+  already special-cased ⇧M). NOTE: that same handler still doesn't bail on Alt generally, so other bare
+  keys (V/N/I/O…) fire with Alt held — left as-is (only M collided); widen the top-level modifier bail
+  if that becomes a problem.
+- **Also fixed:** timeline clip body-click sometimes didn't select (transient desync where a superseded
+  selection transition cleared the imperative `is-selected` highlight while state still held the clip);
+  `startDrag` now re-commits selection for a single-selection click, matching the resize-handle path.
+- Gate: `pnpm --filter @lumio-by-aelivion/web typecheck` + `@lumio-by-aelivion/shared typecheck` green.
+  NOT live-tested (mic + LLM turns need the running app + a real browser) — verify dictation and the
+  answer/thinking-log flows manually.
+
+### 2026-07-08 — Claude (Opus): AI colorist (grade-intent compiler) + glass AI dock + Ctrl+/ toggle
+
+Made the AI a genuine colorist (not a default-drop stub) and reskinned the AI dock.
+
+- **`packages/shared/src/color/grade-intent.ts` (NEW):** compact `GradeIntent`
+  (`{look?, primary?, tone?, balance?, hue?, secondary?}`) + `compileGradeIntent` → a STACK of real,
+  editable color effects (brightnessContrast + colorCurves + colorWheels + hueSatCurves + hslSecondary).
+  Pure/deterministic; reuses shipped color math (`looks/curve/wheels/hsl`), emits the graph params as
+  JSON strings the existing pipeline already parses (no renderer change). `gradeIntentSchema` (Zod,
+  strict) validates the intent. Worker gate `grade:test` — passing. Exported via the color barrel.
+- **Skill (`skill-registry.ts`):** new `color-grade` skill, category `"color"`, task `color-grade` with
+  `execution: "grade"` (new discriminator in skill-types). aiSummary always disclosed; the intent
+  vocabulary rides in `procedure` (loaded only for color prompts — the token saver). `capability-index.ts`
+  now routes ANY color/look request to this skill and tells the planner NOT to hand-author curve JSON.
+- **Executor (`AiChatPanel.runSkillStep`):** color branch compiles the intent and applies the stack via
+  `timelineActionRegistry.execute("addEffect", …)` on the `resolveTargetLayer` target, committing once
+  (one undo entry). Fully local — no cloud, no tokens for the heavy structure work.
+- **Deterministic floor (`DeterministicPlanner.ts`):** the color-family effect branch now emits a
+  `color-grade` skill step built by a local `extractGradeIntent(prompt)`. So color grades stay REAL
+  offline / on LLM fallback — removes the "deterministic catches up, can't bypass color" degradation.
+  Bare "add curves" with no direction still falls back to adding the tool at default.
+- **Glass AI dock (`global.css`):** `--nle-glass{,-2,-border}` tokens (theme-tinted, inherit `--nle-accent`
+  per `data-lumio-theme`); `.ai-dock` is accent-frosted glass with ONE blur layer; bubbles/composer use
+  translucent accent fills with NO per-bubble backdrop-filter (GPU-cheap). `@supports` solid fallback.
+- **Shortcuts (`EditorPage.tsx`):** ⌘/Ctrl+/ toggles the AI panel (works even while its composer is
+  focused). Alt+1/2/3 → left panel Assets/Effects/Color; Alt+4 → toggle Inspector; Alt+R / Alt+T →
+  left-panel / inspector full⇄half height. All Alt-based + LEFT-HAND-only (1–4, R, T) so the panel
+  scheme is one-handed for power users and never collides with the bare tool keys or ⌘/Ctrl combos;
+  uses `event.code` for layout independence. Surfaced on hover via `title` + `aria-keyshortcuts` on the
+  matching buttons (platform-correct ⌘/⌥ vs Ctrl/Alt labels).
+
+### 2026-07-08 — Claude (Opus): Clip references + reference-clip resolution + non-destructive tool edits
+
+Natural-language clip targeting foundation (typed now; voice is a later thin mic add-on). Also fixes a
+verified destructive bug in the newly-wired one-click composite tools.
+
+- **`packages/shared/src/clip-reference.ts` (NEW):** `computeLayerOrdinals` (positional "clip N" per
+  spoken kind clip/text/audio/shape, eye order = start time then top track; adjustment layers excluded),
+  `parseClipReference` ("clip 4"/"the 4th clip"/"second caption"), `resolveTargetLayer` (priority:
+  explicit id → spoken ordinal → single selection → single playhead clip → ambiguous → none). Exported
+  from shared index. Worker gate `clipref:test` (apps/worker) — passing.
+- **Planner (`LlmPlanner.ts`):** the relevant-layers slice now tags each layer with a `ref` label
+  ("clip 4") and the header carries the targeting rule; `capability-index.ts` DISAMBIGUATION gained one
+  line. The planner sets `params.layerId` to target a clip; omitting it accepts the selection/playhead
+  default.
+- **Executor (`EditorPage.tsx` `openToolForAi`):** replaced the "selected-or-first-video" guess with
+  `resolveTargetLayer` (explicit `params.layerId` → selection → playhead). Ambiguous/none → asks "which
+  clip?" instead of guessing. NOTE: only `openToolForAi` was touched (far from the media-library area);
+  the `PlanExecutor` layerId-backfill for timelineActions was DEFERRED to avoid regressing those flows.
+- **Bug fix — non-destructive builders (`masks.ts`):** `applyRemoveBackgroundComposition`,
+  `applyTextBehindPersonComposition`, `applyRemovePersonComposition` gained a `mode: "insert"|"replace"`
+  (default `"replace"`, so the `/tools/:slug` single-source flow is unchanged). The three one-click
+  handlers in `layer-effect-handlers.ts` now pass `"insert"` → they add on top and KEEP all existing
+  clips instead of replacing the whole timeline. (`ai-roto` already used insert via extract-person.)
+- **Timeline badge (`TimelineStrip.tsx` + `global.css`):** each clip shows its ordinal as a top-left
+  `.clip-number` corner badge (direct child of the clip, since `.timeline-clip-video .clip-label` is
+  `display:none`). Ordinals memoized on `composition.tracks` only — NOT on playhead/scrub (perf-safe).
+- Gates: `pnpm -r typecheck` 5/5 green; worker `clipref:test`/`skills:test`/`executor:test` pass;
+  `editor:test` passes.
+
 ### 2026-07-08 — Claude: Phase 5 — docs + final verification (media/library plan COMPLETE)
 
 Executes Phase 5, the last phase of `~/.claude/plans/project-scoped-media-and-libraries.md`. All 5

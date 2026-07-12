@@ -640,21 +640,27 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         // original — a 4K still is a ~64–90MB GPU texture from ANY file size/format, and an
         // image-heavy timeline of them overwhelms an iGPU. null → original path below (image small
         // enough, OPFS unavailable, or generation failed). Export never sees proxies.
-        try {
-          const proxy = await getStillProxyBlob(src, proxyEdge);
-          if (cancelled) return;
-          if (proxy) {
-            const bitmap = await createImageBitmap(proxy, { imageOrientation: "flipY" });
-            if (cancelled) {
-              bitmap.close();
+        // data: URLs (vector graphic layers) skip the proxy entirely: their baked raster is already
+        // ≤ the proxy base edge so generation always returns null, but the await alone parks them
+        // behind the idle-gated generation chain (no decode until ~600ms of no playback/gesture) —
+        // a just-added graphic looked like it "didn't load". Decode immediately instead.
+        if (!src.startsWith("data:")) {
+          try {
+            const proxy = await getStillProxyBlob(src, proxyEdge);
+            if (cancelled) return;
+            if (proxy) {
+              const bitmap = await createImageBitmap(proxy, { imageOrientation: "flipY" });
+              if (cancelled) {
+                bitmap.close();
+                return;
+              }
+              imageRef.current = { source: bitmap, width: bitmap.width, height: bitmap.height };
+              drawImage();
               return;
             }
-            imageRef.current = { source: bitmap, width: bitmap.width, height: bitmap.height };
-            drawImage();
-            return;
+          } catch {
+            /* fall through to the original-decode path */
           }
-        } catch {
-          /* fall through to the original-decode path */
         }
         const img = new Image();
         img.crossOrigin = "anonymous";
@@ -662,7 +668,16 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         try {
           await img.decode();
         } catch {
-          return; // load/decode failed — poster/empty stays, same as the old onload-never-fired path
+          // One retry (a fresh element) covers transient decode failures; a still-failing source is
+          // surfaced instead of silently staying blank forever (reported: graphics "never load").
+          try {
+            img.src = "";
+            img.src = src;
+            await img.decode();
+          } catch (error) {
+            if (!cancelled) console.warn("[lumio] still decode failed — layer stays empty:", src.slice(0, 128), error);
+            return; // poster/empty stays, same as the old onload-never-fired path
+          }
         }
         if (cancelled || img.naturalWidth === 0) return;
         let entry: { source: TexImageSource; width: number; height: number } = {

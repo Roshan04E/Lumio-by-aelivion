@@ -1,10 +1,14 @@
 import {
   applyCaptionTrackToComposition,
   applyExtractPersonComposition,
+  applyRemoveBackgroundComposition,
+  applyRemovePersonComposition,
   applySmartFollowTextComposition,
   applyStabilizationComposition,
+  applyTextBehindPersonComposition,
   captionStylePresets,
   createCaptionTrack,
+  type MaskSequenceArtifactData,
   type SourceAsset,
   type TimelineComposition,
   type TimelineLayer,
@@ -13,10 +17,14 @@ import {
 import { createAsset } from "../lib/api";
 import { createToolArtifactStore } from "./artifact-store";
 import { detectBrowserToolCapabilities } from "./capabilities";
+import { storeInpaintArtifact } from "./inpaint-store";
+import { chooseSamDeviceProfile, isSamSupported, segmentVideoPrompted, type SamPrompt } from "./local-sam";
 import { chooseSegmentationDeviceProfile, segmentVideoFast, segmentVideoQuality } from "./local-segmentation";
 import { trackSubjectPlanar3D } from "./local-tracking";
 import { transcribeAssetLocally } from "./local-transcription";
 import { storeMatteArtifact } from "./matte-store";
+import type { InpaintMask } from "./mock-inpaint";
+import { runVideoInpaint } from "./video-inpaint";
 
 export interface LayerToolEffectOptionChoice {
   value: string;
@@ -195,10 +203,202 @@ const smartFollowTextLayerEffect = defineLayerToolEffectHandler<TrackingPathArti
         })
 });
 
+/**
+ * Shared by remove-background and text-behind-person: both need the same fast
+ * person-segmentation matte, stored the same way extract-person stores it.
+ */
+async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskSequenceArtifactData> {
+  const { asset, fps, onProgress, isCancelled } = args;
+  const result = await segmentVideoFast({
+    videoUrl: asset.fileUrl,
+    durationSeconds: asset.durationSeconds,
+    width: asset.width || 720,
+    height: asset.height || 1280,
+    targetFps: fps,
+    tier: "fast",
+    onProgress,
+    isCancelled
+  });
+  onProgress("Saving matte...");
+  const store = await createToolArtifactStore();
+  const runId = `matte_${Date.now()}`;
+  const { maskSequence, blob } = await storeMatteArtifact(result, store, runId);
+  try {
+    const matteAsset = await createAsset({
+      file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" }),
+      source: "timeline-generated",
+      folder: "generated/background-removed",
+      originalName: "Subject matte"
+    });
+    return { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
+  } catch {
+    return maskSequence;
+  }
+}
+
+const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
+  toolSlug: "remove-background",
+  optionFields: [
+    {
+      key: "mode",
+      label: "Output",
+      defaultValue: "timelineMask",
+      choices: [
+        { value: "timelineMask", label: "Transparent", description: "Keeps the subject with a transparent timeline matte." },
+        { value: "greenScreen", label: "Green screen", description: "Composites the subject over a solid green plate." }
+      ]
+    }
+  ],
+  run: async (args) => runSegmentationMatte(args),
+  applyResult: ({ composition, asset, result, options }) =>
+    applyRemoveBackgroundComposition(
+      composition,
+      {
+        mode: options.mode === "greenScreen" ? "greenScreen" : "timelineMask",
+        maskId: result.id,
+        mask: result,
+        sourceAssetId: asset.id
+      },
+      "insert"
+    )
+});
+
+const textBehindPersonLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
+  toolSlug: "text-behind-person",
+  run: async (args) => runSegmentationMatte(args),
+  applyResult: ({ composition, asset, result }) =>
+    applyTextBehindPersonComposition(
+      composition,
+      {
+        text: "TEXT",
+        textColor: "#FFFFFF",
+        maskId: result.id,
+        mask: result,
+        sourceAssetId: asset.id
+      },
+      "insert"
+    )
+});
+
+const aiRotoLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
+  toolSlug: "ai-roto",
+  run: async ({ asset, fps, onProgress, isCancelled }) => {
+    const capabilities = detectBrowserToolCapabilities();
+    if (!isSamSupported(capabilities)) {
+      throw new Error("AI Roto needs a browser with Web Workers support.");
+    }
+    // One-click path: seed a single center-frame positive point. The full /tools/ai-roto
+    // page lets the user place their own include/exclude clicks for precise selections.
+    const prompt: SamPrompt = { positive: [{ x: 0.5, y: 0.5 }], negative: [] };
+    const result = await segmentVideoPrompted({
+      videoUrl: asset.fileUrl,
+      durationSeconds: asset.durationSeconds,
+      width: asset.width || 720,
+      height: asset.height || 1280,
+      targetFps: fps,
+      prompt,
+      profile: chooseSamDeviceProfile(capabilities, asset.durationSeconds),
+      onProgress,
+      isCancelled
+    });
+    onProgress("Saving matte...");
+    const store = await createToolArtifactStore();
+    const runId = `roto_${Date.now()}`;
+    const { maskSequence, blob } = await storeMatteArtifact(result, store, runId);
+    try {
+      const matteAsset = await createAsset({
+        file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" }),
+        source: "timeline-generated",
+        folder: "generated/roto",
+        originalName: "Subject matte"
+      });
+      return { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
+    } catch {
+      return maskSequence;
+    }
+  },
+  applyResult: ({ composition, asset, result }) =>
+    applyExtractPersonComposition(composition, { mask: result, sourceAssetId: asset.id }, "insert")
+});
+
+interface RemovePersonResult {
+  inpaintedAssetId: string;
+  inpaintedUri: string;
+  durationSeconds: number;
+}
+
+/** One-click seed: a static centered box covering roughly the middle third of the frame. */
+function buildCenteredInpaintMask(width: number, height: number): InpaintMask {
+  const maskW = 100;
+  const maskH = 100;
+  const coverage = new Uint8Array(maskW * maskH);
+  const x0 = Math.round(maskW * 0.3);
+  const x1 = Math.round(maskW * 0.7);
+  const y0 = Math.round(maskH * 0.15);
+  const y1 = Math.round(maskH * 0.85);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      coverage[y * maskW + x] = 255;
+    }
+  }
+  return { width: maskW, height: maskH, frames: [{ timeSeconds: 0, coverage }] };
+}
+
+const removePersonLayerEffect = defineLayerToolEffectHandler<RemovePersonResult>({
+  toolSlug: "remove-person",
+  run: async ({ asset, fps, onProgress, isCancelled }) => {
+    onProgress("Seeding a centered selection (use the full Remove Person tool to brush a precise area)...");
+    const capabilities = detectBrowserToolCapabilities();
+    const width = asset.width || 720;
+    const height = asset.height || 1280;
+    const result = await runVideoInpaint({
+      videoUrl: asset.fileUrl,
+      durationSeconds: asset.durationSeconds,
+      width,
+      height,
+      fps,
+      mask: buildCenteredInpaintMask(width, height),
+      capabilities,
+      onProgress,
+      isCancelled
+    });
+    onProgress("Encoding the reconstructed clip...");
+    const store = await createToolArtifactStore();
+    const runId = `inpaint_${Date.now()}`;
+    const { clip, blob } = await storeInpaintArtifact(result, store, runId, "browser", asset.id);
+    const createdAsset = await createAsset({
+      file: new File([blob], `${clip.id}.webm`, { type: blob.type || "video/webm" }),
+      source: "timeline-generated",
+      folder: "generated/person-removed",
+      originalName: "Person removed"
+    });
+    return {
+      inpaintedAssetId: createdAsset.id,
+      inpaintedUri: createdAsset.fileUrl,
+      durationSeconds: asset.durationSeconds
+    };
+  },
+  applyResult: ({ composition, asset, result }) =>
+    applyRemovePersonComposition(
+      composition,
+      {
+        inpaintedAssetId: result.inpaintedAssetId,
+        inpaintedUri: result.inpaintedUri,
+        durationSeconds: result.durationSeconds,
+        sourceAssetId: asset.id
+      },
+      "insert"
+    )
+});
+
 export const layerToolEffectHandlers: LayerToolEffectHandler[] = [
   autoCaptionsLayerEffect,
   extractPersonLayerEffect,
-  smartFollowTextLayerEffect
+  smartFollowTextLayerEffect,
+  removeBackgroundLayerEffect,
+  textBehindPersonLayerEffect,
+  aiRotoLayerEffect,
+  removePersonLayerEffect
 ];
 
 export function getLayerToolEffectHandler(toolSlug: string): LayerToolEffectHandler | undefined {

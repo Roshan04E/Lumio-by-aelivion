@@ -69,4 +69,46 @@ const splitClip: TimelineActionDefinition<z.infer<typeof splitClipSchema>> = {
   }
 };
 
-export const clipActions = [trimClip, splitClip];
+const splitClipAtTimesSchema = z.object({
+  layerId: z.string(),
+  /** Timeline times in seconds — e.g. detected beats. Out-of-bounds times are skipped, not errors. */
+  times: z.array(z.number().min(0)).min(1).max(500)
+});
+
+/**
+ * Batch cut — one observable action for "cut this clip at every beat" (D3 of the agent plan),
+ * instead of N loop iterations. Cuts apply in DESCENDING time order because `splitLayerAtTime`
+ * keeps the ORIGINAL layer id on the LEFT half: every earlier cut point still falls inside the
+ * original-id layer, so the whole batch resolves against one stable id.
+ */
+const splitClipAtTimes: TimelineActionDefinition<z.infer<typeof splitClipAtTimesSchema>> = {
+  id: "splitClipAtTimes",
+  name: "Split clip at times",
+  description: "Cut a clip at each of the given times (seconds) in one action — e.g. every detected beat.",
+  category: "clip",
+  inputSchema: splitClipAtTimesSchema,
+  validationRules: (params, ctx) => assertLayerExists(ctx, params.layerId),
+  canUndo: true,
+  execute: (params, ctx) => {
+    const located = findLayer(ctx.composition, params.layerId);
+    const layer = located?.layer;
+    const inBounds = layer
+      ? [...new Set(params.times)]
+          .filter((time) => time > layer.startSeconds && time < layer.startSeconds + layer.durationSeconds)
+          .sort((a, b) => b - a)
+      : [];
+    const mutation = runReplace(ctx.composition, (before) =>
+      inBounds.reduce((composition, time) => splitLayerAtTime(composition, params.layerId, time), before)
+    );
+    const segments = inBounds.length + 1;
+    return actionResult(
+      ctx.composition,
+      mutation,
+      inBounds.length
+        ? `Split clip into ${segments} segments at ${inBounds.length} time${inBounds.length === 1 ? "" : "s"}`
+        : "No cut times fell inside the clip"
+    );
+  }
+};
+
+export const clipActions = [trimClip, splitClip, splitClipAtTimes];

@@ -10,8 +10,9 @@ export type { IntentScope } from "./planner/intent-continuity";
  *  - `tool` — open an existing tool window (e.g. tracker); may pause for input.
  *  - `skill` — run a Skill (e.g. AI asset generation); may hand off to a studio.
  *  - `clarify` — ask the user a question before continuing.
+ *  - `answer` — a plain conversational reply when the message needs no edit/tool/skill (a question or chat).
  */
-export type PlanStepKind = "timelineAction" | "tool" | "skill" | "clarify";
+export type PlanStepKind = "timelineAction" | "tool" | "skill" | "clarify" | "answer" | "inspect";
 
 export interface PlanStep {
   id: string;
@@ -30,6 +31,10 @@ export interface PlanStep {
   taskKind?: string;
   /** For `clarify`. */
   question?: string;
+  /** For `answer` — the conversational reply text shown directly in chat (no plan card). */
+  text?: string;
+  /** For `inspect` — read a capability's full doc client-side (free) before using it. */
+  capabilityId?: string;
   cost: CostEstimate;
 }
 
@@ -48,6 +53,13 @@ export interface AiPlan {
   reasoning?: string;
   /** Which gateway provider produced the plan (e.g. "groq"), for the activity log. */
   provider?: string;
+  /**
+   * B5 final-batch contract: the model marks a batch as completing the request. If every step
+   * succeeds, the agent loop ends WITHOUT a closing LLM call, using `finalSummary` as the
+   * run's answer — killing the wasted "done" iteration every run used to pay.
+   */
+  final?: boolean;
+  finalSummary?: string;
 }
 
 /** One turn of the AI conversation, fed back to the planner for follow-ups (P5). */
@@ -92,6 +104,9 @@ export interface PlannerContext {
    * the planner can assume Local is reachable; any mid-run failure still falls back to the gateway.
    */
   useLocalLlm?: boolean | undefined;
+  /** Live hands-free voice session — replies are read aloud, so the prompts switch to the
+   * spoken-conversation register (short, varied, no lists; see shared VOICE_MODE_NOTE). */
+  voiceMode?: boolean | undefined;
 }
 
 /**

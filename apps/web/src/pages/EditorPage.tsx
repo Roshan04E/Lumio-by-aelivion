@@ -1,4 +1,4 @@
-import { Fragment, lazy, memo, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Fragment, lazy, memo, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Download,
@@ -127,6 +127,7 @@ import {
   timelineTemplatePackageToJson,
   updateTimelineLayer,
   createDefaultMask,
+  containContentRect,
   type AssetSource,
   type ImportedExternalTimeline,
   type Mask,
@@ -151,6 +152,8 @@ import {
   type TimelineEffectParamDefinition,
   type TimelineImportReportItem,
   type KeyframeInterpolation,
+  type SourceTextKeyframe,
+  type TextRun,
   type MaskPoint,
   type TimelineKeyframeV2,
   type TimelineLayer,
@@ -173,13 +176,27 @@ import type { GenerateStudioPrefill } from "../components/generate/GenerateStudi
 import type { ToolStepResult } from "../ai/executor/PlanExecutor";
 import type { PlanStep } from "../ai/types";
 import { NumberControl } from "../editor/inspector/controls/NumberControl";
+import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
 import { InspectorHost } from "../editor/inspector/InspectorHost";
+import {
+  validateEditorCommand,
+  type EditorCommandId,
+  type EditorCommandParams,
+  type EditorCommandResult
+} from "../editor/editor-commands";
+import { loadWakeWordEnabled } from "../ai/wake-word";
 import { AutoKeyframeContext } from "../editor/inspector/autoKeyframeContext";
 import type { MaskTool } from "../editor/registry/inspector";
 import { recordMaskPoints } from "../editor/inspector/maskKeyframeUtils";
 import { EffectMaskControls } from "../editor/inspector/EffectMaskControls";
 import { InspectorSection } from "../editor/inspector/InspectorSection";
+import { InspectorTabs, rememberInspectorTab, rememberedInspectorTab, type InspectorTabId } from "../editor/inspector/InspectorTabs";
+import GraphicsStackPanel from "../editor/inspector/panels/GraphicsStackPanel";
+import GraphicsAlignPanel from "../editor/inspector/panels/GraphicsAlignPanel";
+import { deleteGraphicPreset, listGraphicPresets, subscribeGraphicPresets } from "../editor/graphic-presets";
+import { RichTextEditor } from "../components/RichTextEditor";
+import { BottomWorkspace } from "../editor/graph/BottomWorkspace";
 import { seedBuiltinRegistries } from "../editor";
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
 import { isAdaptiveQualityOn, setAdaptiveQualityOn } from "../editor/performance/adaptive-quality";
@@ -208,8 +225,17 @@ import {
   applyAnimationPreset,
   applyContentValueAtTime,
   applyEffectParamValueAtTime,
+  applyStyleValueAtTime,
   applyTransformValueAtTime,
   clearEffectParamKeyframes,
+  clearStyleKeyframes,
+  findStyleKeyframeTime,
+  getActiveStyleKeyframe,
+  getStyleKeyframes,
+  keyframeTimeTolerance,
+  setStyleKeyframeInterpolation,
+  styleValueAt,
+  toggleStyleKeyframe,
   findEffectParamKeyframeTime,
   getActiveEffectParamKeyframe,
   getEffectParamKeyframes,
@@ -297,6 +323,9 @@ import {
   searchBundledGraphics,
   instantiateTemplateComposition,
   normalizeGraphicSvg,
+  extractSvgPalette,
+  getCompositionTextRuns,
+  graphicToDataUrl,
   DEFAULT_GRAPHIC_FILL,
   type BundledGraphic,
   type LayerGraphic,
@@ -326,7 +355,8 @@ import { SyncBadge } from "../components/SyncBadge";
 import { RelinkMediaModal } from "../components/RelinkMediaModal";
 import { canExportLocally, exportLocally, saveExportedFile } from "../export/local-export";
 import type { ExportFormat } from "../export/video-encoder";
-import { detectSourceColorFromFile } from "../export/source-color";
+import { detectSourceMetadataFromFile } from "../export/source-color";
+import { probeDecodableEndSeconds } from "../export/webcodecs-decoder";
 import { Modal } from "../components/Modal";
 import { AssetViewerModal, type AssetViewerTarget } from "../components/AssetViewerModal";
 import { buildBackgroundColor, parseBackgroundColor } from "../lib/colorBackground";
@@ -565,8 +595,9 @@ export function EditorPage() {
   const [panelExpanded, setPanelExpanded] = useState(false);
   const [inspectorExpanded, setInspectorExpanded] = useState(false);
   // Fully collapse the Inspector to a slim rail — reclaims its width (handy when the AI
-  // dock is open and the viewer gets cramped).
-  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  // dock is open and the viewer gets cramped). Starts COLLAPSED (user request 2026-07-11):
+  // the viewer gets the space until the user opens the inspector.
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(true);
   // Same idea for the left browse panel — collapse to a rail to give the viewer full width.
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   // Masking (Phase 2): active draw tool, the mask being edited in the preview, and overlay visibility.
@@ -584,6 +615,30 @@ export function EditorPage() {
   // Auto-keyframe ("stopwatch") mode — when on, editing any keyframeable value (inspector or in-viewer
   // gesture) drops a keyframe at the playhead. Default off, matching After Effects / Premiere.
   const [autoKeyframe, setAutoKeyframe] = useState(false);
+  // Bottom workspace (Graph editor drawer, Shift+G). Also opened by the
+  // "lumio:open-graph-editor" event from inspector rows / timeline keyframe diamonds.
+  const [bottomWorkspaceOpen, setBottomWorkspaceOpen] = useState(false);
+  const [graphFocusTargetKey, setGraphFocusTargetKey] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.shiftKey && (event.key === "G" || event.key === "g"))) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      event.preventDefault();
+      setBottomWorkspaceOpen((open) => !open);
+    };
+    const onOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ targetKey?: string }>).detail;
+      setGraphFocusTargetKey(detail?.targetKey);
+      setBottomWorkspaceOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("lumio:open-graph-editor", onOpen);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("lumio:open-graph-editor", onOpen);
+    };
+  }, []);
   // Remember the last single-selected layer so the Controls tab keeps showing
   // its controls after the user deselects (better UX than collapsing to empty).
   const [lastInspectedLayerId, setLastInspectedLayerId] = useState<string | null>(null);
@@ -605,6 +660,25 @@ export function EditorPage() {
     { tool: ToolCapabilityDefinition; layer: TimelineLayer; asset: SourceAsset } | undefined
   >(undefined);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  // Bumped by the "/" shortcut to (re)focus the AI composer — a monotonic token so the panel
+  // re-focuses even when it was already open. See the "/" keydown effect and AiChatPanel's focusToken.
+  const [aiFocusToken, setAiFocusToken] = useState(0);
+  // Bumped by the Alt+M shortcut to toggle voice dictation in the AI composer — same token pattern as
+  // aiFocusToken. See the Alt+M keydown effect and AiChatPanel's micToggleToken.
+  const [aiMicToggleToken, setAiMicToggleToken] = useState(0);
+  // Alt+L ("Lumio, listen") → toggle the hands-free VOICE SESSION (distinct from Alt+M dictation).
+  // Deliberately does NOT open the chat panel: `aiVoiceWanted` mounts the dock HIDDEN so the
+  // session can run, the aurora + the topbar AI button carry the "AI is live" signal, and
+  // `aiVoiceActive` mirrors the panel's real session state back up for that button.
+  // The toggle travels as a monotonic TOKEN (micToggleToken pattern) — a COMMAND, not state to
+  // converge on: the earlier two-way `voiceDesired` boolean ping-ponged with the panel's mirror
+  // (each side "correcting" the other's stale value = the infinite on/off loop, seen live).
+  const [aiVoiceWanted, setAiVoiceWanted] = useState(false);
+  const [aiVoiceActive, setAiVoiceActive] = useState(false);
+  const [aiVoiceToggleToken, setAiVoiceToggleToken] = useState(0);
+  // "Hey Lumio" standby lives INSIDE AiChatPanel — while the Ear is armed the dock must stay
+  // mounted (hidden) even with the chat closed, or the wake word is deaf.
+  const [aiWakeArmed, setAiWakeArmed] = useState(loadWakeWordEnabled);
   const [generateStudioOpen, setGenerateStudioOpen] = useState(false);
   const [generateStudioPrefill, setGenerateStudioPrefill] = useState<GenerateStudioPrefill | undefined>(undefined);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1932,6 +2006,10 @@ export function EditorPage() {
       if (wantsModifierShortcut) {
         return; // leave other Ctrl/Cmd combos to their own handlers
       }
+      if (event.altKey) {
+        return; // Alt combos (Alt+1..4/E/R/M/L panel+AI shortcuts) have their own listeners —
+        // without this bail, Alt+L would ALSO hit the bare "L" shuttle below.
+      }
       // Playback transport (matches the viewer buttons): Space play/pause, Home/End jump,
       // ← → step one frame (⇧ = 5 frames), ↑ ↓ previous/next edit point, J K L shuttle,
       // Q W ripple-trim head/tail of the clip under the playhead.
@@ -2068,7 +2146,17 @@ export function EditorPage() {
         const layer = selectedLayer;
         if (layer && (layer.type === "video" || layer.type === "image") && composition) {
           event.preventDefault();
-          const mask = createDefaultMask("rectangle", composition.width, composition.height, (layer.masks?.length ?? 0) + 1);
+          // A `contain` layer with a known natural aspect (vector graphics know theirs from the
+          // parsed viewBox) gets a default mask hugging the painted content rect, not 60% of comp.
+          const sourceAspect =
+            layer.graphic?.naturalWidth && layer.graphic.naturalHeight
+              ? layer.graphic.naturalWidth / layer.graphic.naturalHeight
+              : undefined;
+          const contentRect =
+            (layer.fit ?? (layer.graphic ? "contain" : undefined)) === "contain"
+              ? containContentRect(composition.width, composition.height, sourceAspect)
+              : null;
+          const mask = createDefaultMask("rectangle", composition.width, composition.height, (layer.masks?.length ?? 0) + 1, contentRect);
           void updateLayer(layer.id, (current) => ({ ...current, masks: [...(current.masks ?? []), mask] }));
           setActiveMaskId(mask.id);
         }
@@ -2125,6 +2213,91 @@ export function EditorPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // Bare "/" → jump to the AI composer (opens the panel if closed, then focuses its input). Guarded
+  // against typing contexts so "/" types normally in any field — including the AI box itself, so it
+  // never hijacks a slash you meant to type.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setAiPanelOpen(true);
+      setAiFocusToken((token) => token + 1);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // "." → toggle AI voice dictation (user request 2026-07-10: one-hand key instead of two-hand
+  // Alt+M). Bails in typing contexts so "." still types normally in any field (incl. the AI
+  // composer); the Source Monitor's scoped "." (overwrite edit) stopPropagation()s before this
+  // window listener, so its behavior is untouched. ⌘/Ctrl+"." (user request) and Alt+M have NO
+  // typing bail — they toggle the mic even while the composer is focused (already in input mode).
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const altM = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.code === "KeyM";
+      const ctrlDot = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key === ".";
+      const bareDot = event.key === "." && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+      if (!altM && !ctrlDot && !bareDot) {
+        return;
+      }
+      if (bareDot) {
+        const target = event.target;
+        if (
+          target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          (target instanceof HTMLElement && target.isContentEditable)
+        ) {
+          return;
+        }
+      }
+      event.preventDefault();
+      setAiPanelOpen(true);
+      setAiMicToggleToken((token) => token + 1);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Alt+L → toggle hands-free voice mode ("Lumio, listen"). No typing bail on purpose — it must
+  // work mid-edit and even while the composer is focused, exactly like Alt+M. It does NOT open
+  // the chat panel (user request): the aurora + topbar AI button show the session instead.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.code !== "KeyL") {
+        return;
+      }
+      event.preventDefault();
+      // Mount the dock (hidden) if needed, and COMMAND a toggle — the panel owns the session.
+      setAiVoiceWanted(true);
+      setAiVoiceToggleToken((token) => token + 1);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // The panel owns the real session (Esc / "stop listening" / Ear exits happen there) — mirror
+  // its state up so the header button and the hidden-dock mount stay truthful. This is a
+  // one-way report: it must NEVER feed back into a command to the panel (that was the loop).
+  const handleVoiceSessionChange = useCallback((active: boolean) => {
+    setAiVoiceActive(active);
+    setAiVoiceWanted(active);
+  }, []);
+  const handleWakeWordChange = useCallback((on: boolean) => {
+    setAiWakeArmed(on);
+  }, []);
+
   // Panel shortcuts (Alt-based so they never collide with the bare tool keys or ⌘/Ctrl combos):
   //   Alt+1/2/3 → left panel Assets/Effects/Color · Alt+[ / Alt+] → left panel / inspector full⇄half.
   // Uses event.code so it's layout-independent (Alt+[ is a dead key on some layouts).
@@ -2159,14 +2332,14 @@ export function EditorPage() {
           event.preventDefault();
           toggleInspectorFromTopbar();
           break;
-        // Left-hand-only height toggles (R/T are under the left index finger while the left thumb
-        // holds Alt) — keeps the whole panel scheme one-handed for power users. R = left panel, T =
-        // inspector (ordered left→right to match the panel positions).
-        case "KeyR":
+        // Left-hand-only height toggles (E/R sit under the left fingers while the thumb holds
+        // Alt) — one-handed panel scheme. E = left panel, R = inspector (ordered left→right to
+        // match the panel positions). Was R/T; remapped to E/R on user request 2026-07-11.
+        case "KeyE":
           event.preventDefault();
           setPanelExpanded((value) => !value);
           break;
-        case "KeyT":
+        case "KeyR":
           event.preventDefault();
           setInspectorExpanded((value) => !value);
           break;
@@ -2622,16 +2795,21 @@ export function EditorPage() {
   }
 
   function handlePreviewMoveLayer(layerId: string, position: { x: number; y: number }, commit: boolean) {
-    const updater = (layer: TimelineLayer): TimelineLayer => ({
-      ...layer,
-      transform: {
-        ...layer.transform,
-        position: {
-          x: roundEditorNumber(position.x),
-          y: roundEditorNumber(position.y)
-        }
-      }
-    });
+    // Same routing as scale/rotate: animated (or auto-keyframe) position drags land as
+    // keyframes at the playhead — a bare base write is overridden by the animation, which
+    // made keyframed clips undraggable in the viewer (user report 2026-07-12).
+    const updater = (layer: TimelineLayer): TimelineLayer => {
+      const layerTime = clamp(currentTimeRef.current - layer.startSeconds, 0, layer.durationSeconds);
+      return applyTransformValueAtTime(
+        applyTransformValueAtTime(layer, "transform.position.x", layerTime, roundEditorNumber(position.x), {
+          autoKeyframe
+        }),
+        "transform.position.y",
+        layerTime,
+        roundEditorNumber(position.y),
+        { autoKeyframe }
+      );
+    };
 
     if (commit) {
       void updateLayer(layerId, updater);
@@ -3885,7 +4063,9 @@ export function EditorPage() {
             source: assetRef.source ?? "local",
             folder: `local/${kind}`,
             originalName: assetRef.fileName,
-            sizeBytes: embedded.byteLength
+            sizeBytes: embedded.byteLength,
+            // Package media is imported FOR this project — own it here (same "pile" rule as uploads).
+            projectId: project.id
           });
           idMap.set(assetRef.id, created.id);
           registerAsset(created);
@@ -4098,7 +4278,11 @@ export function EditorPage() {
       source,
       folder: options?.folder ?? `${source === "brand" ? "brand" : "local"}/${kind}`,
       originalName: file.name,
-      sizeBytes: file.size
+      sizeBytes: file.size,
+      // Local uploads are OWNED by this project (the "pile" fix): without this they were created
+      // ownerless and leaked into every project's bin forever. Brand uploads stay user-level by
+      // design — the brand kit is a cross-project library.
+      ...(source !== "brand" && project?.id ? { projectId: project.id } : {})
     });
     setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
     setBusy(null);
@@ -5671,7 +5855,12 @@ export function EditorPage() {
       setActiveMaskEffectId(effectId);
       setActiveMaskId(maskId);
     },
-    onChangeMaskTool: changeMaskTool
+    onChangeMaskTool: changeMaskTool,
+    // Graphics tab layer stack: select / edit layers OTHER than the inspected one.
+    onSelectLayer: (layerId: string) => setSelectedLayerIds([layerId]),
+    onChangeLayer: (layerId: string, updater: (layer: TimelineLayer) => TimelineLayer) => {
+      void updateLayer(layerId, updater);
+    }
   });
 
   const stablePreviewCommitMaskPoints = useStableHandler((layerId: string, maskId: string, points: MaskPoint[]) =>
@@ -5688,6 +5877,154 @@ export function EditorPage() {
         : recordMaskPoints(current, maskId, Math.max(0, currentTimeRef.current - current.startSeconds), points)
     )
   );
+
+  /**
+   * Editor Command Plane (v1) — the dispatcher behind the AI brain's tier-0 command rules
+   * ("pan mode", "pause", "select clip 3"). Non-destructive view/transport state only; every
+   * branch reuses the SAME handlers the keyboard/buttons use, so a voice command can never do
+   * something a keypress couldn't. Stable identity (AI panel props doctrine).
+   */
+  const runEditorCommand = useStableHandler((id: EditorCommandId, rawParams: unknown): EditorCommandResult => {
+    const validation = validateEditorCommand(id, rawParams);
+    if (!validation.ok) {
+      return { ok: false, say: "That command didn't parse cleanly — try rephrasing." };
+    }
+    switch (id) {
+      case "setTool": {
+        const { tool } = rawParams as EditorCommandParams<"setTool">;
+        setTimelineTool(tool);
+        return { ok: true, say: "" };
+      }
+      case "transport": {
+        const { op } = rawParams as EditorCommandParams<"transport">;
+        if (op === "play") {
+          stopShuttle();
+          if (!isPlayingRef.current) setIsPlaying(true);
+        } else if (op === "pause" || op === "stop") {
+          stopShuttle();
+          pausePlaybackAtLiveClock();
+        } else if (op === "toggle") {
+          togglePlayback();
+        } else if (op === "shuttleForward") {
+          startShuttle(1);
+        } else {
+          startShuttle(-1);
+        }
+        return { ok: true, say: "" };
+      }
+      case "seek": {
+        const params = rawParams as EditorCommandParams<"seek">;
+        if (params.toSeconds !== undefined) {
+          setEditorCurrentTime(params.toSeconds);
+        } else if (params.deltaSeconds !== undefined) {
+          setEditorCurrentTime(currentTimeRef.current + params.deltaSeconds);
+        } else if (params.frames !== undefined) {
+          stepFrame(params.frames >= 0 ? 1 : -1, Math.abs(params.frames));
+        } else if (params.target === "start") {
+          goToStart();
+        } else if (params.target === "end") {
+          goToEnd();
+        } else if (params.target === "nextCut" || params.target === "prevCut") {
+          jumpToEditPoint(params.target === "nextCut" ? 1 : -1);
+        } else if (params.target === "nextMarker" || params.target === "prevMarker") {
+          const forward = params.target === "nextMarker";
+          const now = currentTimeRef.current;
+          const times = timelineMarkers.map((marker) => marker.timeSeconds).sort((a, b) => a - b);
+          const found = forward ? times.find((time) => time > now + 0.001) : [...times].reverse().find((time) => time < now - 0.001);
+          if (found === undefined) {
+            return { ok: false, say: forward ? "No marker ahead of the playhead." : "No marker behind the playhead." };
+          }
+          setEditorCurrentTime(found);
+        }
+        return { ok: true, say: "" };
+      }
+      case "selectClip": {
+        const params = rawParams as EditorCommandParams<"selectClip">;
+        if (params.clear || !params.layerId) {
+          setSelectedLayerIds([]);
+        } else {
+          setSelectedLayerIds(expandLayerSelection([params.layerId]));
+        }
+        return { ok: true, say: "" };
+      }
+      case "setPreviewQuality": {
+        const { quality } = rawParams as EditorCommandParams<"setPreviewQuality">;
+        // Mirrors the ¼/½/1/A buttons exactly — the adaptive flag is a DUAL source of truth
+        // (React state + adaptive-quality module singleton); both must move together.
+        if (quality === "auto") {
+          setPreviewQuality("balanced");
+          setAdaptiveQualityOn(true);
+          setAdaptiveResOn(true);
+        } else {
+          setPreviewQuality(quality === "quarter" ? "performance" : quality === "half" ? "balanced" : "quality");
+          setAdaptiveQualityOn(false);
+          setAdaptiveResOn(false);
+        }
+        return { ok: true, say: "" };
+      }
+      case "setSnapping": {
+        const params = rawParams as EditorCommandParams<"setSnapping">;
+        if (params.on !== undefined) {
+          setSnapEnabled(params.on);
+        } else {
+          setSnapEnabled((value) => !value);
+        }
+        return { ok: true, say: "" };
+      }
+      case "editorUndoRedo": {
+        const { op } = rawParams as EditorCommandParams<"editorUndoRedo">;
+        if (op === "undo") {
+          if (undoStackRef.current.length === 0) {
+            return { ok: false, say: "Nothing to undo." };
+          }
+          void undo();
+        } else {
+          if (redoStackRef.current.length === 0) {
+            return { ok: false, say: "Nothing to redo." };
+          }
+          void redo();
+        }
+        return { ok: true, say: "" };
+      }
+      case "openExport": {
+        // Same gate + setup as the on-device Export button / Ctrl+M.
+        if (!localExportSupported || localExport || !composition) {
+          return { ok: false, say: "Local export isn't available right now." };
+        }
+        setExportFps(null);
+        setExportFormat("mp4");
+        setExportDialogOpen(true);
+        return { ok: true, say: "" };
+      }
+      case "openPanel": {
+        const params = rawParams as EditorCommandParams<"openPanel">;
+        const op = params.op ?? "open";
+        if (params.panel === "inspector") {
+          if (op === "toggle") {
+            toggleInspectorFromTopbar();
+          } else if (responsiveLayout.usesOverlayPanels) {
+            setActiveResponsiveOverlay(op === "open" ? "inspector" : null);
+          } else {
+            setInspectorCollapsed(op !== "open");
+          }
+          return { ok: true, say: "" };
+        }
+        // Left browse tabs — same open/close semantics as the topbar toggles.
+        const tab = params.panel;
+        if (op === "toggle") {
+          toggleLeftPanelTab(tab);
+        } else if (op === "open") {
+          setPanelTab(tab);
+          if (responsiveLayout.usesOverlayPanels) setActiveResponsiveOverlay("assets");
+          else setPanelCollapsed(false);
+        } else if (isLeftPanelTabActive(tab)) {
+          if (responsiveLayout.usesOverlayPanels) setActiveResponsiveOverlay(null);
+          else setPanelCollapsed(true);
+        }
+        return { ok: true, say: "" };
+      }
+    }
+  });
 
   if (!project || !graph || !composition) {
     return (
@@ -5757,15 +6094,25 @@ export function EditorPage() {
             </button>
           </div>
           <Button
-            className="editor-ai-topbar-button topbar-toggle"
-            variant={aiPanelOpen ? "primary" : "secondary"}
+            className={`editor-ai-topbar-button topbar-toggle${aiVoiceActive ? " is-voice-live" : ""}`}
+            variant={aiPanelOpen || aiVoiceActive ? "primary" : "secondary"}
             icon={<Sparkles size={16} />}
             onClick={() => setAiPanelOpen((open) => !open)}
             aria-pressed={aiPanelOpen}
-            title={`${aiPanelOpen ? "Hide" : "Show"} AI assistant (${shortcutModifierLabel}+/)`}
+            title={
+              aiVoiceActive
+                ? `AI is live — listening hands-free (${altKeyLabel}+L to stop). Click to ${aiPanelOpen ? "hide" : "show"} the chat.`
+                : `${aiPanelOpen ? "Hide" : "Show"} AI assistant (${shortcutModifierLabel}+/)`
+            }
             aria-keyshortcuts={`${shortcutModifierLabel}+/`}
           >
-            AI
+            {aiVoiceActive ? (
+              <>
+                AI <span className="ai-live-dot" aria-hidden="true" /> live
+              </>
+            ) : (
+              "AI"
+            )}
           </Button>
         </div>
         <div className="topbar-center">
@@ -6040,9 +6387,9 @@ export function EditorPage() {
                     <button
                       className={`tabbar-icon-button${panelExpanded ? " is-active" : ""}`}
                       type="button"
-                      title={`${panelExpanded ? "Restore left panel height" : "Expand left panel — full height, timeline under the viewer"} (${altKeyLabel}+R)`}
+                      title={`${panelExpanded ? "Restore left panel height" : "Expand left panel — full height, timeline under the viewer"} (${altKeyLabel}+E)`}
                       aria-label={panelExpanded ? "Restore left panel height" : "Expand left panel to full height"}
-                      aria-keyshortcuts={`${altKeyLabel}+R`}
+                      aria-keyshortcuts={`${altKeyLabel}+E`}
                       aria-pressed={panelExpanded}
                       onClick={() => setPanelExpanded((value) => !value)}
                     >
@@ -6378,6 +6725,15 @@ export function EditorPage() {
               >
                 <Diamond size={15} />
               </button>
+              <button
+                type="button"
+                className={`viewer-autokey-toggle${bottomWorkspaceOpen ? " is-active" : ""}`}
+                aria-pressed={bottomWorkspaceOpen}
+                title={bottomWorkspaceOpen ? "Close graph editor (Shift+G)" : "Graph editor — animation curves (Shift+G)"}
+                onClick={() => setBottomWorkspaceOpen((open) => !open)}
+              >
+                <Spline size={15} />
+              </button>
               {/* Zoom: preset dropdown + Fit only — the old range slider ate ~120px of this row and
                   duplicated ctrl+wheel (user request 2026-07-05). Percentages are ACTUAL-SIZE zoom
                   (100% = 1 comp pixel per screen pixel), so the fit% option shows what fits. */}
@@ -6418,7 +6774,8 @@ export function EditorPage() {
           {inspectorCollapsed && activeResponsiveOverlay !== "inspector" ? null : (
           <aside className={`editor-inspector scroll-performance-pane${activeResponsiveOverlay === "inspector" ? " is-responsive-overlay-open" : ""}${isResponsiveOverlayExpanded("inspector") ? " is-responsive-overlay-expanded" : ""}`} aria-label="Inspector">
             <div className="inspector-head">
-              <h2>Inspector</h2>
+              {/* One header row (density pass 2026-07-12): the clip chip IS the title — the old
+                  "Inspector" h2 + chip + repeated .inspector-subtitle stack cost three rows. */}
               {inspectorLayer ? (
                 <span className="inspector-head-badge" title={inspectorLayer.name || inspectorLayer.type}>
                   <Badge tone="muted">
@@ -6433,7 +6790,9 @@ export function EditorPage() {
                     </span>
                   </Badge>
                 </span>
-              ) : null}
+              ) : (
+                <h2>Inspector</h2>
+              )}
               <div className="inspector-head-actions">
                 {inspectorLayer ? (
                   <button
@@ -6448,9 +6807,9 @@ export function EditorPage() {
                 <button
                   type="button"
                   className={responsiveLayout.usesPhoneShell ? (isResponsiveOverlayExpanded("inspector") ? "is-active" : "") : inspectorExpanded ? "is-active" : ""}
-                  title={`${inspectorExpanded ? "Restore inspector height" : "Expand inspector — full height"} (${altKeyLabel}+T)`}
+                  title={`${inspectorExpanded ? "Restore inspector height" : "Expand inspector — full height"} (${altKeyLabel}+R)`}
                   aria-label={inspectorExpanded ? "Restore inspector height" : "Expand inspector to full height"}
-                  aria-keyshortcuts={`${altKeyLabel}+T`}
+                  aria-keyshortcuts={`${altKeyLabel}+R`}
                   aria-pressed={responsiveLayout.usesPhoneShell ? isResponsiveOverlayExpanded("inspector") : inspectorExpanded}
                   onClick={() => {
                     if (responsiveLayout.usesPhoneShell) toggleResponsiveOverlayExpansion("inspector");
@@ -6463,15 +6822,11 @@ export function EditorPage() {
             </div>
             {inspectorLayer ? (
               <>
-                <span className="inspector-subtitle" title={inspectorLayer.name}>
-                  {inspectorLayer.name}
-                </span>
                 {!selectedLayer ? (
                   <div className="inspector-persisted-hint">
                     <Eye size={13} /> Showing last selected
                   </div>
                 ) : null}
-                <TemplateSlotControl layer={inspectorLayer} onChange={inspectorHandlers.onChange} />
                 <ColdTime>
                   {(currentTime) => (
                 <LayerInspector
@@ -6488,6 +6843,9 @@ export function EditorPage() {
                 />
                   )}
                 </ColdTime>
+                {/* Template-slot marking lives BELOW the properties (density pass 2026-07-12) —
+                    it's a save-as-template concern, not a per-edit control. */}
+                <TemplateSlotControl layer={inspectorLayer} onChange={inspectorHandlers.onChange} />
               </>
             ) : selectedLayerIds.length > 1 ? (
               <div className="empty-mini">
@@ -6510,6 +6868,9 @@ export function EditorPage() {
         {/* Flex row: [scrolling timeline dock | audio meters]. The wrapper takes the dock's grid cell;
             the dock itself stays the untouched scroll container TimelineStrip's auto-follow depends on,
             and the meters get REAL reserved space outside the scroll area (no overlap, no click-block). */}
+        {/* Column stack so the bottom workspace (graph editor drawer) borrows track space
+            while the dock row above keeps its untouched scroll/auto-follow behavior. */}
+        <div className="timeline-stack">
         <div className="timeline-dock-row">
         <section className="editor-timeline-dock">
           {/* All callback props arrive pre-stabilized via the timelineHandlers useStableHandlers
@@ -6557,6 +6918,22 @@ export function EditorPage() {
           </ColdTime>
         ) : null}
         {responsiveLayout.showDedicatedAudio ? <TimelineAudioMeters isPlaying={isPlaying} /> : null}
+        </div>
+        {bottomWorkspaceOpen ? (
+          <ColdTime>
+            {(currentTime) => (
+              <BottomWorkspace
+                layer={inspectorLayer ?? null}
+                onChange={inspectorHandlers.onChange}
+                currentTime={currentTime}
+                onSeek={setEditorCurrentTime}
+                fps={composition.fps}
+                focusTargetKey={graphFocusTargetKey}
+                onClose={() => setBottomWorkspaceOpen(false)}
+              />
+            )}
+          </ColdTime>
+        ) : null}
         </div>
       </div>
       {responsiveLayout.usesOverlayPanels && activeResponsiveOverlay ? (
@@ -6654,8 +7031,11 @@ export function EditorPage() {
           </button>
         </nav>
       ) : null}
-      {aiPanelOpen && composition ? (
-        <aside className={`ai-dock${isResponsiveOverlayExpanded("ai") ? " is-responsive-overlay-expanded" : ""}`} aria-label="AI">
+      {(aiPanelOpen || aiVoiceWanted || aiVoiceActive || aiWakeArmed) && composition ? (
+        <aside
+          className={`ai-dock${isResponsiveOverlayExpanded("ai") ? " is-responsive-overlay-expanded" : ""}${aiPanelOpen ? "" : " is-voice-only"}`}
+          aria-label="AI"
+        >
           {responsiveLayout.usesPhoneShell ? (
             <button
               type="button"
@@ -6670,10 +7050,17 @@ export function EditorPage() {
           ) : null}
           <Suspense fallback={null}>
           <AiChatPanel
+            focusToken={aiFocusToken}
+            micToggleToken={aiMicToggleToken}
+            voiceToggleToken={aiVoiceToggleToken}
+            onVoiceSessionChange={handleVoiceSessionChange}
+            onWakeWordChange={handleWakeWordChange}
+            resolveAssetUrl={(assetId) => assets.find((asset) => asset.id === assetId)?.fileUrl}
             getContext={() => ({ composition, selection: selectedLayerIds, nowSeconds: currentTimeRef.current })}
             commitComposition={(after) => updateComposition(after)}
             openTool={openToolForAi}
             onUndo={() => undo()}
+            runEditorCommand={runEditorCommand}
             onClose={() => setAiPanelOpen(false)}
             onOpenGenerate={(prefill) => {
               setGenerateStudioPrefill(prefill);
@@ -7774,7 +8161,7 @@ function getAssetUseCounts(layers: TimelineLayer[]) {
 }
 
 type AssetAddMode = "auto" | "video" | "audio" | "both";
-type MediaMetadata = { durationSeconds: number; width: number; height: number; hasAudio?: boolean | undefined; color?: SourceColorMetadata | undefined };
+type MediaMetadata = { durationSeconds: number; width: number; height: number; hasAudio?: boolean | undefined; color?: SourceColorMetadata | undefined; rotationDegrees?: 0 | 90 | 180 | 270 | undefined };
 
 /** Rewrites `layer.assetId` through a package→created-asset id map (this composition's own tracks only). */
 function remapCompositionAssetIds(composition: TimelineComposition, idMap: Map<string, string>): TimelineComposition {
@@ -7814,17 +8201,29 @@ function readMediaMetadata(file: File): Promise<MediaMetadata> {
         URL.revokeObjectURL(url);
         // Probe audio + source color space in parallel (both off the render loop). Color is best-effort:
         // MP4 `colr` box → detected; anything else → left undefined so the asset assumes Rec.709.
-        void Promise.all([detectVideoFileHasAudio(file), detectSourceColorFromFile(file).catch(() => null)]).then(
-          ([hasAudio, color]) => resolve({
-            // The REAL fractional duration — never rounded up. A too-long clip freezes on the last frame
-            // for the overshoot; a finite-but-default 12s on a short clip is the worst case (a long freeze).
-            durationSeconds: clamp(Number.isFinite(duration) && duration > 0 ? duration : 12, 0.2, 7200),
+        void Promise.all([
+          detectVideoFileHasAudio(file),
+          detectSourceMetadataFromFile(file).catch(() => ({ color: null, rotationDegrees: 0 as const })),
+          // Container `duration` metadata routinely OVERSHOOTS the decodable sample table (a frame to
+          // ~1s). A clip authored to that length freezes on its last frame for the overshoot — every
+          // beyond-EOF getFrame clamps to the final sample (confirmed: 0.72s tail freeze). Clamp to the
+          // true sample-table end when we can demux it; null (non-MP4/parse fail) keeps metadata.
+          probeDecodableEndSeconds(file).catch(() => null)
+        ]).then(([hasAudio, meta, decodableEnd]) => {
+          const metaDuration = Number.isFinite(duration) && duration > 0 ? duration : 12;
+          const usableDuration =
+            decodableEnd !== null && decodableEnd > 0.2 && decodableEnd < metaDuration
+              ? decodableEnd
+              : metaDuration;
+          resolve({
+            durationSeconds: clamp(usableDuration, 0.2, 7200),
             width: Math.max(320, video.videoWidth || 1080),
             height: Math.max(320, video.videoHeight || 1920),
             ...(hasAudio !== undefined ? { hasAudio } : {}),
-            ...(color ? { color } : {})
-          })
-        );
+            ...(meta.color ? { color: meta.color } : {}),
+            ...(meta.rotationDegrees ? { rotationDegrees: meta.rotationDegrees } : {})
+          });
+        });
       };
       video.onloadedmetadata = () => {
         if (Number.isFinite(video.duration) && video.duration > 0) {
@@ -8675,6 +9074,9 @@ function AssetBinImpl({
   const [graphicsHasMore, setGraphicsHasMore] = useState(false);
   // Canva-style "magic recommendations": after a graphic is added, surface related icons below the grid.
   const [graphicsRecommend, setGraphicsRecommend] = useState<{ keyword: string; results: IconifyGraphicResult[] } | null>(null);
+  // Saved graphic presets (EGP round-trip) + external .svg file import.
+  const savedGraphics = useSyncExternalStore(subscribeGraphicPresets, listGraphicPresets, listGraphicPresets);
+  const svgFileInputRef = useRef<HTMLInputElement | null>(null);
   // Asset viewer modal — opened by double-clicking a library asset or a stock result.
   const [viewerTarget, setViewerTarget] = useState<AssetViewerTarget | null>(null);
 
@@ -9044,11 +9446,23 @@ function AssetBinImpl({
 
   /** Add a Graphics-chip pick (bundled shape or Iconify icon) as an editable VECTOR layer — Canva-style: one
    *  click places it, recolorable in the inspector afterwards. `sourceColor` is the pack's baked fill (bundled)
-   *  so it normalizes to `currentColor`; Iconify mono icons already use `currentColor` (pass undefined). */
+   *  so it normalizes to `currentColor`. When none is passed (Iconify), the SVG's own paints decide:
+   *  exactly one baked color → treat it as the source color (Fill recolor then works exactly like the
+   *  bundled pack — previously a silent no-op); several → store them as a palette (per-color editing). */
   function handleImportGraphic(id: string, name: string, svg: string, sourceColor?: string) {
     setStockImportError(null);
     try {
-      const graphic = normalizeGraphicSvg(svg, sourceColor);
+      let effectiveSource = sourceColor;
+      let palette: string[] = [];
+      if (!effectiveSource) {
+        palette = extractSvgPalette(svg);
+        if (palette.length === 1) {
+          effectiveSource = palette[0];
+          palette = [];
+        }
+      }
+      const graphic = normalizeGraphicSvg(svg, effectiveSource);
+      if (palette.length > 1) graphic.palette = palette.map((from) => ({ from, to: from }));
       onAddGraphic?.(graphic, name);
       // Canva-style "magic recommendations": pull related icons keyed off the graphic's name so the strip
       // below the grid fills with on-theme alternatives to keep building. Fails soft (offline/CSP → []).
@@ -9060,6 +9474,20 @@ function AssetBinImpl({
       }
     } catch (error) {
       setStockImportError(error instanceof Error ? error.message : "Could not add graphic — please try again.");
+    }
+  }
+
+  /** Import external .svg files from disk as editable vector graphic layers — the identical
+   *  normalize/palette path a Graphics-chip pick takes, so external files stay recolorable. */
+  function handleImportSvgFiles(files: FileList | null) {
+    if (!files) return;
+    for (const file of Array.from(files)) {
+      if (!file.name.toLowerCase().endsWith(".svg") && file.type !== "image/svg+xml") continue;
+      const name = file.name.replace(/\.svg$/i, "") || "Graphic";
+      void file.text().then((svg) => {
+        if (svg.includes("<svg")) handleImportGraphic(`file_${name}`, name, svg);
+        else setStockImportError(`"${file.name}" doesn't look like an SVG file.`);
+      });
     }
   }
 
@@ -9444,6 +9872,57 @@ function AssetBinImpl({
         ) : null}
         {sourceTab === "search" && stockType === "graphics" ? (
           <div className="asset-grid">
+            <input
+              ref={svgFileInputRef}
+              type="file"
+              accept=".svg,image/svg+xml"
+              multiple
+              style={{ display: "none" }}
+              onChange={(event) => {
+                handleImportSvgFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <div
+              className="asset-tile asset-stock-tile asset-import-tile"
+              role="button"
+              tabIndex={0}
+              title="Import .svg files from disk as editable vector graphics"
+              onClick={() => svgFileInputRef.current?.click()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") svgFileInputRef.current?.click();
+              }}
+            >
+              <div className="asset-graphic-preview asset-import-preview">
+                <Upload size={18} />
+                <span>Import SVG</span>
+              </div>
+            </div>
+            {savedGraphics.map((preset) => (
+              <div className="asset-tile asset-stock-tile" key={preset.id} title={`${preset.name} (saved)`} role="button" tabIndex={0}>
+                <div className="asset-graphic-preview">
+                  <img src={graphicToDataUrl(preset.graphic)} alt={preset.name} loading="lazy" />
+                </div>
+                <div className="asset-card-hover">
+                  <div className="asset-card-info">
+                    <strong>{preset.name}</strong>
+                  </div>
+                  <div className="asset-card-actions">
+                    <button
+                      type="button"
+                      className="asset-more-button"
+                      title="Add to timeline"
+                      onClick={() => onAddGraphic?.({ ...preset.graphic, palette: preset.graphic.palette?.map((slot) => ({ ...slot })) }, preset.name)}
+                    >
+                      <Plus size={14} />
+                    </button>
+                    <button type="button" className="asset-more-button" title="Delete saved graphic" onClick={() => deleteGraphicPreset(preset.id)}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
             {graphicsLoading ? <div className="empty-mini">Searching graphics…</div> : null}
             {graphicsBundled.map((graphic) => (
               <div
@@ -10180,6 +10659,7 @@ const TRANSFORM_PANEL_IDS = ["transform"];
 const CONTENT_PANEL_IDS = ["content"];
 const MASK_PANEL_IDS = ["mask"];
 const TEXT_WARP_PANEL_IDS = ["text.warp"];
+const GRAPHIC_PANEL_IDS = ["graphic"];
 
 /**
  * memo(): rides <ColdTime>, whose render-prop re-runs on every EditorPage render. All callbacks
@@ -10212,6 +10692,8 @@ function LayerInspectorImpl({
   onSelectMask,
   onChangeMaskTool,
   onSelectEffectMask,
+  onSelectLayer,
+  onChangeLayer,
   autoKeyframe
 }: {
   assets: SourceAsset[];
@@ -10237,6 +10719,9 @@ function LayerInspectorImpl({
   onSelectMask?: ((maskId: string | null) => void) | undefined;
   onChangeMaskTool?: ((tool: MaskTool) => void) | undefined;
   onSelectEffectMask?: ((effectId: string, maskId: string | null) => void) | undefined;
+  /** Graphics tab (layer stack): select / edit a layer OTHER than the inspected one. */
+  onSelectLayer?: ((layerId: string) => void) | undefined;
+  onChangeLayer?: ((layerId: string, updater: (layer: TimelineLayer) => TimelineLayer) => void) | undefined;
 }) {
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
   const [dragEffectId, setDragEffectId] = useState<string | null>(null);
@@ -10247,13 +10732,44 @@ function LayerInspectorImpl({
     [composition.width, composition.height]
   );
 
+  // Resolve-style top-level tabs (2026-07-12): Video/Text/Shape | Audio | Effects | Color.
+  // Remembered per layer type so switching clips keeps you on the tab you were working in.
+  const [inspectorTab, setInspectorTab] = useState<InspectorTabId>(() => rememberedInspectorTab(layer.type));
+  useEffect(() => {
+    setInspectorTab(rememberedInspectorTab(layer.type));
+  }, [layer.type]);
+  const selectInspectorTab = (tab: InspectorTabId) => {
+    rememberInspectorTab(layer.type, tab);
+    setInspectorTab(tab);
+  };
+  // Video and Audio are both the "clip" tab — the blocks inside self-gate on layer.type.
+  const isClipTab = inspectorTab === "video" || inspectorTab === "audio";
+
+  // The Typewriter preset lives as textRevealProgress keyframes (layer.animations), not in
+  // layer.effects — surface it in the Effects subtab as its own card so its speed is editable
+  // where the user applied it from.
+  const typewriterActive = layer.type === "text" && getStyleKeyframes(layer, "textRevealProgress").length > 0;
+
   return (
     <div className="inspector-panel">
       {!hideAssetBin && (layer.type === "video" || layer.type === "image") ? (
         <AssetBin assets={assets} selectedAssetId={layer.assetId} clickAssigns onAssignAsset={onAssignAsset} onDeleteAsset={onDeleteAsset} onUploadAsset={onUploadAsset} />
       ) : null}
 
-      {layer.type === "text" ? <TextGraphicControls layer={layer} palette={palette} onChange={onChange} /> : null}
+      <InspectorTabs layerType={layer.type} active={inspectorTab} onChange={selectInspectorTab} />
+
+      {isClipTab ? (
+        <>
+      {layer.type === "text" ? (
+        <TextGraphicControls
+          layer={layer}
+          palette={palette}
+          onChange={onChange}
+          styleKf={makeStyleKeyframeTools(layer, currentTime, onChange, onSeek, autoKeyframe)}
+          currentTime={currentTime}
+          onSeek={onSeek}
+        />
+      ) : null}
       {layer.type === "shape" ? <ShapeGraphicControls layer={layer} palette={palette} onChange={onChange} /> : null}
 
       <InspectorHost
@@ -10271,7 +10787,7 @@ function LayerInspectorImpl({
 
       {onChangeSpeed && (layer.type === "video" || layer.type === "audio") && layer.assetId ? (
         <InspectorSection title="Speed" icon={<ChevronsRight size={13} />} count={0} defaultOpen={false}>
-          <ClipSpeedControl layer={layer} layerTime={layerTime} onChange={onChange} onChangeSpeed={onChangeSpeed} />
+          <ClipSpeedControl layer={layer} layerTime={layerTime} onChange={onChange} onChangeSpeed={onChangeSpeed} onSeek={onSeek} />
         </InspectorSection>
       ) : null}
 
@@ -10291,9 +10807,17 @@ function LayerInspectorImpl({
         />
       ) : null}
 
-      <InspectorSection title="Effects" icon={<SlidersHorizontal size={13} />} count={layer.effects.length}>
+      <InspectorSection title="Track" icon={<Move size={13} />} count={tracks.length} defaultOpen={false}>
+        <AttachTrackPanel layer={layer} tracks={tracks} onAttach={onAttachTrack} onEditTrack={onEditTrack} onOpenTrackModal={onOpenTrackModal} onRemoveTrack={onRemoveTrack} />
+      </InspectorSection>
+        </>
+      ) : null}
+
+      {inspectorTab === "effects" ? (
+      <InspectorSection title="Effects" icon={<SlidersHorizontal size={13} />} count={layer.effects.length + (typewriterActive ? 1 : 0)}>
       <EffectPresetRow layer={layer} onChange={onChange} />
       <div className="effect-controls">
+        {typewriterActive ? <TypewriterEffectCard layer={layer} onChange={onChange} /> : null}
         {layer.effects.length ? (
           layer.effects.map((effect, index) => (
             <div
@@ -10365,7 +10889,7 @@ function LayerInspectorImpl({
               />
             </div>
           ))
-        ) : (
+        ) : typewriterActive ? null : (
           <div className="empty-mini">
             <Eye size={16} />
             No layer effects yet
@@ -10373,10 +10897,29 @@ function LayerInspectorImpl({
         )}
       </div>
       </InspectorSection>
+      ) : null}
 
-      <InspectorSection title="Track" icon={<Move size={13} />} count={tracks.length} defaultOpen={false}>
-        <AttachTrackPanel layer={layer} tracks={tracks} onAttach={onAttachTrack} onEditTrack={onEditTrack} onOpenTrackModal={onOpenTrackModal} onRemoveTrack={onRemoveTrack} />
-      </InspectorSection>
+      {inspectorTab === "graphics" ? (
+        <>
+          <GraphicsStackPanel
+            composition={composition}
+            currentTime={currentTime}
+            selectedLayerId={layer.id}
+            onSelectLayer={onSelectLayer}
+            onChangeLayer={onChangeLayer}
+          />
+          <GraphicsAlignPanel
+            layer={layer}
+            composition={compositionSize}
+            currentTime={currentTime}
+            autoKeyframe={autoKeyframe}
+            onChange={onChange}
+          />
+          {layer.graphic ? (
+            <InspectorHost layer={layer} onChange={onChange} panelIds={GRAPHIC_PANEL_IDS} currentTime={currentTime} autoKeyframe={autoKeyframe} />
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -10398,13 +10941,15 @@ function ClipSpeedControl({
   layer,
   layerTime,
   onChange,
-  onChangeSpeed
+  onChangeSpeed,
+  onSeek
 }: {
   layer: TimelineLayer;
   /** Playhead in layer-local seconds (for placing ramp points). */
   layerTime: number;
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
   onChangeSpeed: (layerId: string, speed: number) => void;
+  onSeek?: ((seconds: number) => void) | undefined;
 }) {
   const speed = getLayerSpeed(layer);
   const ramp = getSpeedRamp(layer);
@@ -10467,6 +11012,29 @@ function ClipSpeedControl({
       <div className="clip-speed-ramp">
         <div className="clip-speed-ramp-head">
           <span>Speed ramp</span>
+          {/* Standard keyframe affordance on ramp points (user request 2026-07-12): diamond
+              adds/removes a point at the playhead, arrows hop between points. */}
+          <KeyframeButtons
+            label="Speed ramp"
+            active={ramp?.some((point) => Math.abs(point.timeSeconds - layerTime) <= keyframeTimeTolerance) ?? false}
+            hasAny={(ramp?.length ?? 0) > 0}
+            hasNext={ramp?.some((point) => point.timeSeconds > layerTime + keyframeTimeTolerance) ?? false}
+            hasPrevious={ramp?.some((point) => point.timeSeconds < layerTime - keyframeTimeTolerance) ?? false}
+            onToggle={() => {
+              const existing = ramp?.find((point) => Math.abs(point.timeSeconds - layerTime) <= keyframeTimeTolerance);
+              if (existing) removeRampPoint(existing.timeSeconds);
+              else upsertRampPoint(Number(layerTime.toFixed(2)), getLayerSpeedAt(layer, layerTime));
+            }}
+            onNext={() => {
+              const next = ramp?.filter((point) => point.timeSeconds > layerTime + keyframeTimeTolerance).sort((a, b) => a.timeSeconds - b.timeSeconds)[0];
+              if (next) onSeek?.(layer.startSeconds + next.timeSeconds);
+            }}
+            onPrevious={() => {
+              const previous = ramp?.filter((point) => point.timeSeconds < layerTime - keyframeTimeTolerance).sort((a, b) => b.timeSeconds - a.timeSeconds)[0];
+              if (previous) onSeek?.(layer.startSeconds + previous.timeSeconds);
+            }}
+            onClearAll={() => onChange((current) => ({ ...current, speedKeyframes: undefined }))}
+          />
           <button
             type="button"
             className="button button-ghost"
@@ -10572,33 +11140,180 @@ function AttachTrackPanel({
   );
 }
 
+/**
+ * Keyframe wiring for text-STYLE numeric rows (font size, tracking, line height, stroke width,
+ * background padding/radius, shadow) — evaluated by getCompositionTextStyle's `style.*` tracks in
+ * every renderer (2026-07-12). `scale` maps a display unit to the stored unit (padding shows ×100).
+ */
+interface StyleKeyframeTools {
+  value: (property: string, base: number, scale?: number) => number;
+  change: (property: string, value: number, scale?: number) => void;
+  keyframe: (property: string, currentValue: number, scale?: number) => {
+    active: boolean;
+    hasAny: boolean;
+    hasNext: boolean;
+    hasPrevious: boolean;
+    interpolation: KeyframeInterpolation | undefined;
+    onChangeInterpolation: (interpolation: KeyframeInterpolation) => void;
+    onClearAll: () => void;
+    onToggle: () => void;
+    onNext: () => void;
+    onPrevious: () => void;
+  };
+}
+
+function makeStyleKeyframeTools(
+  layer: TimelineLayer,
+  currentTime: number,
+  onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void,
+  onSeek?: ((seconds: number) => void) | undefined,
+  autoKeyframe?: boolean | undefined
+): StyleKeyframeTools {
+  const layerTime = Math.max(0, Math.min(currentTime - layer.startSeconds, layer.durationSeconds));
+  return {
+    value: (property, base, scale = 1) => styleValueAt(layer, property, layerTime, base / scale) * scale,
+    change: (property, value, scale = 1) =>
+      onChange((item) => applyStyleValueAtTime(item, property, layerTime, value / scale, { autoKeyframe })),
+    keyframe: (property, currentValue, scale = 1) => {
+      const activeKeyframe = getActiveStyleKeyframe(layer, property, layerTime);
+      return {
+        active: Boolean(activeKeyframe),
+        hasAny: getStyleKeyframes(layer, property).length > 0,
+        hasNext: findStyleKeyframeTime(layer, property, layerTime, 1) !== undefined,
+        hasPrevious: findStyleKeyframeTime(layer, property, layerTime, -1) !== undefined,
+        interpolation: activeKeyframe?.interpolation,
+        onChangeInterpolation: (interpolation: KeyframeInterpolation) =>
+          onChange((item) => setStyleKeyframeInterpolation(item, property, layerTime, interpolation)),
+        onClearAll: () => onChange((item) => clearStyleKeyframes(item, property)),
+        onToggle: () => onChange((item) => toggleStyleKeyframe(item, property, layerTime, currentValue / scale)),
+        onNext: () => {
+          const t = findStyleKeyframeTime(layer, property, layerTime, 1);
+          if (t !== undefined) onSeek?.(layer.startSeconds + t);
+        },
+        onPrevious: () => {
+          const t = findStyleKeyframeTime(layer, property, layerTime, -1);
+          if (t !== undefined) onSeek?.(layer.startSeconds + t);
+        }
+      };
+    }
+  };
+}
+
+/** The source-text keyframe governing `layerTime` (hold semantics: last at/before, else first). */
+function governingSourceTextKeyframe(keys: SourceTextKeyframe[], layerTime: number): SourceTextKeyframe | null {
+  if (!keys.length) return null;
+  const ordered = [...keys].sort((a, b) => a.timeSeconds - b.timeSeconds);
+  let active = ordered[0]!;
+  for (const key of ordered) {
+    if (key.timeSeconds <= layerTime + keyframeTimeTolerance) active = key;
+    else break;
+  }
+  return active;
+}
+
 function TextGraphicControls({
   layer,
   palette,
-  onChange
+  onChange,
+  styleKf,
+  currentTime = 0,
+  onSeek
 }: {
   layer: TimelineLayer;
   palette: string[];
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+  styleKf?: StyleKeyframeTools | undefined;
+  currentTime?: number | undefined;
+  onSeek?: ((seconds: number) => void) | undefined;
 }) {
+  const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
+  // SOURCE TEXT keyframes (Premiere-style, hold): the editor shows/edits the runs governing the
+  // playhead; the renderers resolve the same entry via getVisibleTextRuns, so what you see while
+  // scrubbing is exactly what renders. Keyframing progressively longer text = manual typewriter.
+  const sourceKeys = layer.sourceTextKeyframes ?? [];
+  const governing = governingSourceTextKeyframe(sourceKeys, layerTime);
+  const keyAtPlayhead = sourceKeys.find((key) => Math.abs(key.timeSeconds - layerTime) <= keyframeTimeTolerance) ?? null;
+  const displayedRuns = sourceKeys.length ? governing?.runs ?? [{ text: "" }] : getCompositionTextRuns(layer);
+  const nextKeyTime = [...sourceKeys].sort((a, b) => a.timeSeconds - b.timeSeconds).find((key) => key.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+  const previousKeyTime = [...sourceKeys]
+    .sort((a, b) => b.timeSeconds - a.timeSeconds)
+    .find((key) => key.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
+
+  function commitText(runs: TextRun[] | undefined, plainText: string) {
+    onChange((item) => {
+      const keys = item.sourceTextKeyframes ?? [];
+      if (keys.length) {
+        const target = governingSourceTextKeyframe(keys, layerTime);
+        if (target) {
+          return {
+            ...item,
+            text: plainText,
+            sourceTextKeyframes: keys.map((key) => (key.id === target.id ? { ...key, runs: runs ?? [{ text: plainText }] } : key))
+          };
+        }
+      }
+      return { ...item, text: plainText, textRuns: runs };
+    });
+  }
+
   return (
     <>
       <InspectorSection icon={<Type size={15} />} title="Text">
-        <label className="control-field">
+        <div className="control-field">
           <span>
             <Type size={14} />
             Content
+            {/* Source-text keyframes: diamond captures the CURRENT text at the playhead (hold).
+                Keyframe progressively longer text for a hand-authored typewriter/word reveal. */}
+            <KeyframeButtons
+              label="Source text"
+              active={Boolean(keyAtPlayhead)}
+              hasAny={sourceKeys.length > 0}
+              hasNext={nextKeyTime !== undefined}
+              hasPrevious={previousKeyTime !== undefined}
+              onToggle={() =>
+                onChange((item) => {
+                  const keys = item.sourceTextKeyframes ?? [];
+                  const existing = keys.find((key) => Math.abs(key.timeSeconds - layerTime) <= keyframeTimeTolerance);
+                  if (existing) {
+                    const remaining = keys.filter((key) => key.id !== existing.id);
+                    return { ...item, sourceTextKeyframes: remaining.length ? remaining : undefined };
+                  }
+                  const captured: SourceTextKeyframe = {
+                    id: `stk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+                    timeSeconds: layerTime,
+                    runs: displayedRuns.map((run) => ({ ...run }))
+                  };
+                  return { ...item, sourceTextKeyframes: [...keys, captured].sort((a, b) => a.timeSeconds - b.timeSeconds) };
+                })
+              }
+              onNext={() => {
+                if (nextKeyTime !== undefined) onSeek?.(layer.startSeconds + nextKeyTime);
+              }}
+              onPrevious={() => {
+                if (previousKeyTime !== undefined) onSeek?.(layer.startSeconds + previousKeyTime);
+              }}
+              onClearAll={() => onChange((item) => ({ ...item, sourceTextKeyframes: undefined }))}
+            />
           </span>
-          <textarea
-            rows={3}
-            value={layer.text ?? ""}
-            onChange={(event) => onChange((item) => ({ ...item, text: event.target.value }))}
+          {/* Rich text: authors the TextRun[] model all three renderers already consume — select
+              a word, style it (bold/italic/color/highlight/size/font), and preview + export follow. */}
+          <RichTextEditor
+            layerId={layer.id}
+            runs={displayedRuns}
+            palette={palette}
+            onCommit={commitText}
           />
-        </label>
+          {sourceKeys.length ? (
+            <small className="rich-text-kf-hint">
+              Source text is keyframed — you're editing the text at {governing ? `${governing.timeSeconds.toFixed(2)}s` : "the start"}.
+            </small>
+          ) : null}
+        </div>
         <div className="graphic-controls">
           <div className="icon-control-row">
             <FontControl value={layer.fontFamily ?? renderSafeFonts[0].family} onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily }))} onChange={(value) => onChange((item) => ({ ...item, fontFamily: value }))} />
-            <NumberControl icon={<CaseSensitive size={14} />} label="Font size" value={layer.fontSize ?? defaultTextStyle.fontSize} min={10} max={260} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => onChange((item) => ({ ...item, fontSize: value }))} />
+            <NumberControl icon={<CaseSensitive size={14} />} label="Font size" keyframe={styleKf?.keyframe("style.fontSize", styleKf.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize))} value={styleKf?.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize) ?? layer.fontSize ?? defaultTextStyle.fontSize} min={10} max={260} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => (styleKf ? styleKf.change("style.fontSize", value) : onChange((item) => ({ ...item, fontSize: value })))} />
           </div>
           <div className="icon-control-row">
             <ToggleControl icon={<Bold size={15} />} label="Bold" active={(layer.fontWeight ?? defaultTextStyle.fontWeight) >= 700} onChange={(active) => onChange((item) => ({ ...item, fontWeight: active ? 900 : 400 }))} />
@@ -10606,9 +11321,9 @@ function TextGraphicControls({
             <AlignmentControl value={layer.textAlign ?? "center"} onChange={(value) => onChange((item) => ({ ...item, textAlign: value }))} />
           </div>
           <div className="icon-control-row">
-            <NumberControl icon={<MoveHorizontal size={14} />} label="Letter spacing" value={layer.letterSpacing ?? 0} min={-10} max={40} step={0.5} onReset={() => onChange((item) => ({ ...item, letterSpacing: defaultTextStyle.letterSpacing }))} onChange={(value) => onChange((item) => ({ ...item, letterSpacing: value }))} />
-            <NumberControl icon={<MoveVertical size={14} />} label="Line height" value={layer.lineHeight ?? defaultTextStyle.lineHeight} min={0.6} max={2.4} step={0.05} onReset={() => onChange((item) => ({ ...item, lineHeight: defaultTextStyle.lineHeight }))} onChange={(value) => onChange((item) => ({ ...item, lineHeight: value }))} />
-            <NumberControl icon={<MoveHorizontal size={14} />} label="Text box width" value={layer.textWidthPercent ?? 0} min={0} max={100} step={1} onReset={() => onChange((item) => ({ ...item, textWidthPercent: defaultTextStyle.textWidthPercent }))} onChange={(value) => onChange((item) => ({ ...item, textWidthPercent: value }))} />
+            <NumberControl icon={<MoveHorizontal size={14} />} label="Letter spacing" keyframe={styleKf?.keyframe("style.letterSpacing", styleKf.value("style.letterSpacing", layer.letterSpacing ?? 0))} value={styleKf?.value("style.letterSpacing", layer.letterSpacing ?? 0) ?? layer.letterSpacing ?? 0} min={-10} max={40} step={0.5} onReset={() => onChange((item) => ({ ...item, letterSpacing: defaultTextStyle.letterSpacing }))} onChange={(value) => (styleKf ? styleKf.change("style.letterSpacing", value) : onChange((item) => ({ ...item, letterSpacing: value })))} />
+            <NumberControl icon={<MoveVertical size={14} />} label="Line height" keyframe={styleKf?.keyframe("style.lineHeight", styleKf.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight))} value={styleKf?.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight) ?? layer.lineHeight ?? defaultTextStyle.lineHeight} min={0.6} max={2.4} step={0.05} onReset={() => onChange((item) => ({ ...item, lineHeight: defaultTextStyle.lineHeight }))} onChange={(value) => (styleKf ? styleKf.change("style.lineHeight", value) : onChange((item) => ({ ...item, lineHeight: value })))} />
+            <NumberControl icon={<MoveHorizontal size={14} />} label="Text box width" keyframe={styleKf?.keyframe("style.textWidthPercent", styleKf.value("style.textWidthPercent", layer.textWidthPercent ?? 0))} value={styleKf?.value("style.textWidthPercent", layer.textWidthPercent ?? 0) ?? layer.textWidthPercent ?? 0} min={0} max={100} step={1} onReset={() => onChange((item) => ({ ...item, textWidthPercent: defaultTextStyle.textWidthPercent }))} onChange={(value) => (styleKf ? styleKf.change("style.textWidthPercent", value) : onChange((item) => ({ ...item, textWidthPercent: value })))} />
           </div>
         </div>
       </InspectorSection>
@@ -10618,13 +11333,13 @@ function TextGraphicControls({
           <div className="icon-control-row">
             <ColorControl icon={<PaintBucket size={14} />} label="Fill color" palette={palette} value={layer.color ?? "#ffffff"} onReset={() => onChange((item) => ({ ...item, color: defaultTextStyle.color }))} onChange={(value) => onChange((item) => ({ ...item, color: value }))} />
             <ColorControl icon={<PenLine size={14} />} label="Stroke color" palette={palette} value={layer.strokeColor ?? "#161618"} onReset={() => onChange((item) => ({ ...item, strokeColor: defaultTextStyle.strokeColor }))} onChange={(value) => onChange((item) => ({ ...item, strokeColor: value }))} />
-            <NumberControl icon={<PenLine size={14} />} label="Stroke width" value={layer.strokeWidth ?? 0} min={0} max={24} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultTextStyle.strokeWidth }))} onChange={(value) => onChange((item) => ({ ...item, strokeWidth: value }))} />
+            <NumberControl icon={<PenLine size={14} />} label="Stroke width" keyframe={styleKf?.keyframe("style.strokeWidth", styleKf.value("style.strokeWidth", layer.strokeWidth ?? 0))} value={styleKf?.value("style.strokeWidth", layer.strokeWidth ?? 0) ?? layer.strokeWidth ?? 0} min={0} max={24} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultTextStyle.strokeWidth }))} onChange={(value) => (styleKf ? styleKf.change("style.strokeWidth", value) : onChange((item) => ({ ...item, strokeWidth: value })))} />
           </div>
         </div>
       </InspectorSection>
 
       <InspectorSection icon={<Square size={15} />} title="Background">
-        <BackgroundControls layer={layer} palette={palette} onChange={onChange} />
+        <BackgroundControls layer={layer} palette={palette} onChange={onChange} styleKf={styleKf} />
       </InspectorSection>
 
       <InspectorSection icon={<Spline size={15} />} title="Warp">
@@ -10633,7 +11348,7 @@ function TextGraphicControls({
 
       <InspectorSection icon={<Sparkles size={15} />} title="Shadow">
         <div className="graphic-controls">
-          <ShadowControls layer={layer} palette={palette} onChange={onChange} />
+          <ShadowControls layer={layer} palette={palette} onChange={onChange} styleKf={styleKf} />
         </div>
       </InspectorSection>
     </>
@@ -10714,13 +11429,18 @@ function ToggleControl({ icon, label, active, onChange }: { icon: ReactNode; lab
 function BackgroundControls({
   layer,
   palette,
-  onChange
+  onChange,
+  styleKf
 }: {
   layer: TimelineLayer;
   palette: string[];
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+  styleKf?: StyleKeyframeTools | undefined;
 }) {
   const background = parseBackgroundColor(layer.backgroundColor, "#08090d");
+  // Padding/radius rows display the em value ×100 — the keyframe track stores the raw em.
+  const paddingBase = Math.round((layer.backgroundPaddingEm ?? defaultTextStyle.backgroundPaddingEm) * 100);
+  const radiusBase = Math.round((layer.backgroundRadiusEm ?? defaultTextStyle.backgroundRadiusEm) * 100);
   return (
     <div className="graphic-controls">
       <div className="icon-control-row">
@@ -10747,22 +11467,24 @@ function BackgroundControls({
         <NumberControl
           icon={<Maximize2 size={14} />}
           label="Padding"
-          value={Math.round((layer.backgroundPaddingEm ?? defaultTextStyle.backgroundPaddingEm) * 100)}
+          keyframe={styleKf?.keyframe("style.backgroundPaddingEm", styleKf.value("style.backgroundPaddingEm", paddingBase, 100), 100)}
+          value={styleKf?.value("style.backgroundPaddingEm", paddingBase, 100) ?? paddingBase}
           min={0}
           max={100}
           step={1}
           onReset={() => onChange((item) => ({ ...item, backgroundPaddingEm: defaultTextStyle.backgroundPaddingEm }))}
-          onChange={(value) => onChange((item) => ({ ...item, backgroundPaddingEm: value / 100 }))}
+          onChange={(value) => (styleKf ? styleKf.change("style.backgroundPaddingEm", value, 100) : onChange((item) => ({ ...item, backgroundPaddingEm: value / 100 })))}
         />
         <NumberControl
           icon={<Radius size={14} />}
           label="Corner radius"
-          value={Math.round((layer.backgroundRadiusEm ?? defaultTextStyle.backgroundRadiusEm) * 100)}
+          keyframe={styleKf?.keyframe("style.backgroundRadiusEm", styleKf.value("style.backgroundRadiusEm", radiusBase, 100), 100)}
+          value={styleKf?.value("style.backgroundRadiusEm", radiusBase, 100) ?? radiusBase}
           min={0}
           max={200}
           step={1}
           onReset={() => onChange((item) => ({ ...item, backgroundRadiusEm: defaultTextStyle.backgroundRadiusEm }))}
-          onChange={(value) => onChange((item) => ({ ...item, backgroundRadiusEm: value / 100 }))}
+          onChange={(value) => (styleKf ? styleKf.change("style.backgroundRadiusEm", value, 100) : onChange((item) => ({ ...item, backgroundRadiusEm: value / 100 })))}
         />
       </div>
     </div>
@@ -10808,6 +11530,69 @@ function buildPluginShaderParamDefinitions(effect: TimelineEffect): TimelineEffe
     }
   }
   return out;
+}
+
+/**
+ * Typewriter as an Effects-subtab card. The preset is not a TimelineEffect — it writes
+ * `textRevealProgress` keyframes into `layer.animations` — so the effect list alone would never
+ * show it. Speed = "Reveal duration (s)": rescales the reveal keys proportionally so the curve
+ * shape survives; the same keys are the "Typewriter reveal" lane in the graph editor.
+ */
+function TypewriterEffectCard({
+  layer,
+  onChange
+}: {
+  layer: TimelineLayer;
+  onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+}) {
+  const revealKeyframes = getStyleKeyframes(layer, "textRevealProgress");
+  if (!revealKeyframes.length) return null;
+  const revealDuration = Math.max(...revealKeyframes.map((kf) => kf.timeSeconds));
+  return (
+    <div className="effect-control-card">
+      <div className="effect-control-header">
+        <strong>Typewriter</strong>
+        <button
+          aria-label="Delete effect"
+          type="button"
+          onClick={() =>
+            onChange((item) => {
+              const animations = (item.animations ?? []).filter(
+                (kf) => !(kf.target.scope === "layer" && kf.target.property === "textRevealProgress")
+              );
+              return { ...item, animations: animations.length ? animations : undefined };
+            })
+          }
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+      <NumberControl
+        icon={<Sparkles size={14} />}
+        label="Reveal duration (s)"
+        value={Number(revealDuration.toFixed(2))}
+        min={0.1}
+        max={Math.max(0.1, layer.durationSeconds)}
+        step={0.1}
+        onChange={(value) =>
+          onChange((item) => {
+            const keys = getStyleKeyframes(item, "textRevealProgress");
+            const currentEnd = Math.max(0.0001, ...keys.map((kf) => kf.timeSeconds));
+            const scale = Math.max(0.1, Math.min(value, item.durationSeconds)) / currentEnd;
+            return {
+              ...item,
+              animations: (item.animations ?? []).map((kf) =>
+                kf.target.scope === "layer" && kf.target.property === "textRevealProgress"
+                  ? { ...kf, timeSeconds: Math.min(item.durationSeconds, kf.timeSeconds * scale) }
+                  : kf
+              )
+            };
+          })
+        }
+      />
+      <p className="rich-text-kf-hint">Curve editable as “Typewriter reveal” in the graph editor (Shift+G).</p>
+    </div>
+  );
 }
 
 function TimelineEffectControl({
@@ -11134,19 +11919,28 @@ function AlignmentControl({
 function ShadowControls({
   layer,
   palette,
-  onChange
+  onChange,
+  styleKf
 }: {
   layer: TimelineLayer;
   palette: string[];
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+  styleKf?: StyleKeyframeTools | undefined;
 }) {
   const defaults = layer.type === "shape" ? defaultShapeStyle : defaultTextStyle;
   return (
     <div className="icon-control-row">
       <ColorControl icon={<Sparkles size={14} />} label="Shadow color" palette={palette} value={layer.shadowColor ?? "#000000"} onReset={() => onChange((item) => ({ ...item, shadowColor: defaults.shadowColor }))} onChange={(value) => onChange((item) => ({ ...item, shadowColor: value }))} />
-      <NumberControl icon={<Sparkles size={14} />} label="Shadow blur" value={layer.shadowBlur ?? 0} min={0} max={80} step={1} onReset={() => onChange((item) => setShadowEnabled({ ...item, shadowBlur: defaults.shadowBlur }, defaults.shadowBlur > 0))} onChange={(value) => onChange((item) => setShadowEnabled({ ...item, shadowBlur: value }, value > 0))} />
-      <NumberControl icon={<MoveHorizontal size={14} />} label="Shadow X" value={layer.shadowOffsetX ?? 0} min={-80} max={80} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetX: defaults.shadowOffsetX }))} onChange={(value) => onChange((item) => ({ ...item, shadowOffsetX: value }))} />
-      <NumberControl icon={<MoveVertical size={14} />} label="Shadow Y" value={layer.shadowOffsetY ?? 0} min={-80} max={80} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetY: defaults.shadowOffsetY }))} onChange={(value) => onChange((item) => ({ ...item, shadowOffsetY: value }))} />
+      <NumberControl icon={<Sparkles size={14} />} label="Shadow blur" keyframe={styleKf?.keyframe("style.shadowBlur", styleKf.value("style.shadowBlur", layer.shadowBlur ?? 0))} value={styleKf?.value("style.shadowBlur", layer.shadowBlur ?? 0) ?? layer.shadowBlur ?? 0} min={0} max={80} step={1} onReset={() => onChange((item) => setShadowEnabled({ ...item, shadowBlur: defaults.shadowBlur }, defaults.shadowBlur > 0))} onChange={(value) => {
+        if (styleKf) {
+          styleKf.change("style.shadowBlur", value);
+          if (value > 0) onChange((item) => setShadowEnabled(item, true));
+        } else {
+          onChange((item) => setShadowEnabled({ ...item, shadowBlur: value }, value > 0));
+        }
+      }} />
+      <NumberControl icon={<MoveHorizontal size={14} />} label="Shadow X" keyframe={styleKf?.keyframe("style.shadowOffsetX", styleKf.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0))} value={styleKf?.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0) ?? layer.shadowOffsetX ?? 0} min={-80} max={80} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetX: defaults.shadowOffsetX }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetX", value) : onChange((item) => ({ ...item, shadowOffsetX: value })))} />
+      <NumberControl icon={<MoveVertical size={14} />} label="Shadow Y" keyframe={styleKf?.keyframe("style.shadowOffsetY", styleKf.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0))} value={styleKf?.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0) ?? layer.shadowOffsetY ?? 0} min={-80} max={80} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetY: defaults.shadowOffsetY }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetY", value) : onChange((item) => ({ ...item, shadowOffsetY: value })))} />
     </div>
   );
 }

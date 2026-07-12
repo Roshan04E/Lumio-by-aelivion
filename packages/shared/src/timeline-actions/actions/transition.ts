@@ -193,7 +193,7 @@ const removeTransitionSchema = z.object({ layerId: z.string() });
 const removeTransition: TimelineActionDefinition<z.infer<typeof removeTransitionSchema>> = {
   id: "removeTransition",
   name: "Remove transition",
-  description: "Strip a layer's transition keyframes and its transition spec.",
+  description: "Strip a clip's transition keyframes and its transition spec.",
   category: "transition",
   inputSchema: removeTransitionSchema,
   validationRules: (params, ctx) => assertLayerExists(ctx, params.layerId),

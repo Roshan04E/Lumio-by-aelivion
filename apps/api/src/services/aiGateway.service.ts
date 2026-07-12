@@ -113,6 +113,26 @@ function pool(): ProviderConfig[] {
   ];
 }
 
+/**
+ * Lumio Brain B4 — the `fast` model class: small NON-reasoning instruct models for tier-3
+ * transactional compilation. Same keys/endpoints as the reasoning pool but distinct provider
+ * ids, so a rate-limited fast model doesn't cool down its reasoning sibling (and vice versa).
+ */
+function fastPool(): ProviderConfig[] {
+  return [
+    { id: "cerebras-fast", baseUrl: "https://api.cerebras.ai/v1", apiKey: env.CEREBRAS_API_KEY, model: env.CEREBRAS_FAST_MODEL },
+    { id: "groq-fast", baseUrl: "https://api.groq.com/openai/v1", apiKey: env.GROQ_API_KEY, model: env.GROQ_FAST_MODEL },
+    {
+      id: "gemini-fast",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      apiKey: env.GEMINI_API_KEY,
+      model: env.GEMINI_FAST_MODEL,
+      supportsVision: true
+    },
+    { id: "openrouter-fast", baseUrl: "https://openrouter.ai/api/v1", apiKey: env.OPENROUTER_API_KEY, model: env.OPENROUTER_FAST_MODEL }
+  ];
+}
+
 /** Provider id → epoch ms until which it is "cooling down" after a failure. */
 const cooldownUntil = new Map<string, number>();
 const COOLDOWN_BUSY_MS = 60_000; // 429 / 503 / 5xx / timeout
@@ -149,6 +169,11 @@ export interface GatewayOptions {
   premium?: boolean | undefined;
   /** Reference images (data URLs) to attach to the user turn. */
   images?: string[] | undefined;
+  /**
+   * B4 — "fast" swaps in the small non-reasoning instruct pool (temperature 0, tight token cap)
+   * for tier-3 transactional calls. BYO/premium hops are skipped: fast is the cheap lane.
+   */
+  modelClass?: "fast" | undefined;
 }
 
 /** True when the caller attached at least one image (routes to a vision-capable provider). */
@@ -159,7 +184,10 @@ function needsVision(options: GatewayOptions): boolean {
 /** Build the ordered candidate list: BYO key → premium Claude → free pool (each gated). */
 function candidatesFor(options: GatewayOptions): ProviderConfig[] {
   const now = Date.now();
-  const ordered = [byoConfig(options.byo), options.premium ? premiumClaudeConfig() : null, ...pool()];
+  const ordered =
+    options.modelClass === "fast"
+      ? [...fastPool()]
+      : [byoConfig(options.byo), options.premium ? premiumClaudeConfig() : null, ...pool()];
   const visionFiltered = needsVision(options) ? ordered.filter((provider) => provider?.supportsVision) : ordered;
   const candidates = visionFiltered.filter(
     (provider): provider is ProviderConfig =>
@@ -186,7 +214,7 @@ export async function planWithGateway(
   for (const provider of candidates) {
     try {
       aiLog.debug(`try ${provider.id} (${provider.model})`);
-      const result = await callProvider(provider, system, user, options.images);
+      const result = await callProvider(provider, system, user, options.images, options.modelClass);
       if (result.text && result.text.trim()) {
         aiLog.debug(`ok ${provider.id} (${result.text.length} chars)`);
         return { providerId: provider.id, text: result.text, ...(result.reasoning ? { reasoning: result.reasoning } : {}) };
@@ -215,10 +243,13 @@ async function callProvider(
   provider: ProviderConfig,
   system: string,
   user: string,
-  images?: string[]
+  images?: string[],
+  modelClass?: "fast"
 ): Promise<{ text: string; reasoning?: string }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  // Fast class: small instruct models answer in ~1-2s or not at all — fail over quickly.
+  const timeoutMs = modelClass === "fast" ? 8_000 : REQUEST_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${provider.baseUrl}/chat/completions`, {
       method: "POST",
@@ -232,8 +263,8 @@ async function callProvider(
       },
       body: JSON.stringify({
         model: provider.model,
-        max_tokens: 4096,
-        temperature: 0.2,
+        max_tokens: modelClass === "fast" ? 900 : 4096,
+        temperature: modelClass === "fast" ? 0 : 0.2,
         messages: [
           { role: "system", content: system },
           { role: "user", content: buildUserMessage(user, images) }

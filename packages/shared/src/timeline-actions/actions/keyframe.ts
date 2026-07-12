@@ -19,7 +19,7 @@ const addKeyframeSchema = z.object({
 const addKeyframe: TimelineActionDefinition<z.infer<typeof addKeyframeSchema>> = {
   id: "addKeyframe",
   name: "Add keyframe",
-  description: "Add an animation keyframe to a layer property (local layer time).",
+  description: "Add an animation keyframe to a clip property (local clip time).",
   category: "keyframe",
   inputSchema: addKeyframeSchema,
   validationRules: (params, ctx) => [...assertLayerExists(ctx, params.layerId), ...assertKeyframeTarget(params.property)],
@@ -102,7 +102,7 @@ const deleteKeyframeSchema = z.object({
 const deleteKeyframe: TimelineActionDefinition<z.infer<typeof deleteKeyframeSchema>> = {
   id: "deleteKeyframe",
   name: "Delete keyframe",
-  description: "Remove a keyframe from a layer.",
+  description: "Remove a keyframe from a clip.",
   category: "keyframe",
   inputSchema: deleteKeyframeSchema,
   validationRules: (params, ctx) => {

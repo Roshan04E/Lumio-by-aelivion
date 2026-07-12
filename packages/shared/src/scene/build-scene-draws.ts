@@ -275,7 +275,17 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       ? { radiusPx: fx.glow.radiusPx * rScale, color: parseCssColor(fx.glow.color), mode: fx.glow.mode, threshold: fx.glow.threshold, strength: fx.glow.strength }
       : null;
     const transform = getCompositionTransform(layer, { currentTimeSeconds: t });
-    const mask = mc ? mc.get(layer, Math.max(0, t - layer.startSeconds)) : null;
+    // Media clip masks are LAYER-ATTACHED (mask editor + DOM + Remotion all ride the layer
+    // transform) — bake the resolved transform into the matte so the comp-fixed gl_FragCoord
+    // sampling still lands the mask on the clip. Text/shape mattes stay comp-fixed (by design).
+    const mask = mc
+      ? mc.get(layer, Math.max(0, t - layer.startSeconds), {
+          x: transform.x,
+          y: transform.y,
+          scale: transform.scale,
+          rotation: transform.rotation,
+        })
+      : null;
     // Content transform (source-within-frame pan/zoom/crop). offsetX/Y (-1..1 frame fractions) → pan
     // ±0.5 frame; crop → [left, right, top, bottom]. null when identity so the compositor skips it.
     const ct = getCompositionContentTransform(layer, { currentTimeSeconds: t });
@@ -431,7 +441,17 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // list, so the matte cache builds exactly the pass mask.
       const extra = clone.effects.filter((effect) => !baseEffectIds.has(effect.id));
       if (extra.length === 0) continue;
-      const mask = mc ? mc.get(clone, Math.max(0, t - clone.startSeconds)) : null;
+      // Region masks on a media clone ride the layer transform exactly like clip masks (the clone
+      // shares the base layer's transform; see buildShellPresentation).
+      const cloneTransform = getCompositionTransform(clone, { currentTimeSeconds: t });
+      const mask = mc
+        ? mc.get(clone, Math.max(0, t - clone.startSeconds), {
+            x: cloneTransform.x,
+            y: cloneTransform.y,
+            scale: cloneTransform.scale,
+            rotation: cloneTransform.rotation,
+          })
+        : null;
       if (!mask) continue;
       if (extra.every((effect) => effect.type === "blur")) {
         // BLUR pass: gaussian the RUNNING nest image masked to the region — combines with the base grade /
@@ -483,7 +503,18 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       }
       const params = fragmentEffectParamsFromStorage(def, keyframeResolved);
       const hasMasks = Array.isArray(effect.masks) && effect.masks.length > 0;
-      const mask = hasMasks && mc ? mc.get({ id: effect.id, masks: effect.masks, animations: layer.animations } as TimelineLayer, layerTimeSeconds) : null;
+      // Effect masks on MEDIA layers ride the layer transform like clip masks (same editor, same
+      // semantics); text/shape masks stay comp-fixed.
+      const overlayType = layer.type === "text" || layer.type === "shape";
+      const fxT = hasMasks && !overlayType ? getCompositionTransform(layer, { currentTimeSeconds: t }) : null;
+      const mask =
+        hasMasks && mc
+          ? mc.get(
+              { id: effect.id, masks: effect.masks, animations: layer.animations } as TimelineLayer,
+              layerTimeSeconds,
+              fxT ? { x: fxT.x, y: fxT.y, scale: fxT.scale, rotation: fxT.rotation } : undefined
+            )
+          : null;
       passes.push({
         effectKey: effect.id,
         def,

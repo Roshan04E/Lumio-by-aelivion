@@ -156,7 +156,41 @@ export async function streamOllamaChat(request: OllamaChatRequest, handlers: Ope
     })
   });
   if (!response.ok || !response.body) {
-    throw new Error(`Ollama chat failed: HTTP ${response.status}`);
+    // 403 = Ollama's CORS gate: browser requests carry an Origin header, and Ollama only
+    // accepts origins listed in OLLAMA_ORIGINS. Tell the user the actual fix once — otherwise
+    // Local mode just silently falls back to the cloud and looks broken.
+    if (response.status === 403 && !warnedCors) {
+      warnedCors = true;
+      console.warn(
+        "[lumio] Ollama rejected the browser request (403 — CORS). Allow this origin and restart Ollama:\n" +
+          '  Windows:  setx OLLAMA_ORIGINS "*"   (then quit the Ollama tray app and start it again)\n' +
+          "  mac/linux:  OLLAMA_ORIGINS=* ollama serve\n" +
+          `  (or list the exact origin, e.g. "${typeof location !== "undefined" ? location.origin : "http://localhost:5173"}")`
+      );
+      // Surface it to the USER too (once) — a silent cloud fallback makes Local look broken.
+      for (const listener of corsBlockedListeners) {
+        try {
+          listener();
+        } catch {
+          // listener errors must not break the fallback path
+        }
+      }
+    }
+    throw new Error(response.status === 403 ? "Ollama blocked the browser (403) — set OLLAMA_ORIGINS and restart Ollama" : `Ollama chat failed: HTTP ${response.status}`);
   }
   return consumeOpenAiSse(response.body, handlers);
+}
+
+/** One console warning per session — the 403 fires on every local call otherwise. */
+let warnedCors = false;
+const corsBlockedListeners = new Set<() => void>();
+
+/** Notifies ONCE per session when Ollama rejects the browser with 403 (CORS) — the chat panel
+ * turns this into a visible notice with the fix, instead of a silent cloud fallback. */
+export function onOllamaCorsBlocked(listener: () => void): () => void {
+  corsBlockedListeners.add(listener);
+  if (warnedCors) {
+    listener(); // already happened this session — replay so a late-mounting panel still shows it
+  }
+  return () => corsBlockedListeners.delete(listener);
 }

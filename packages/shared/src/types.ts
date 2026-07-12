@@ -144,6 +144,14 @@ export interface SourceAsset {
    * render manifest so both export paths know each source's color space.
    */
   color?: SourceColorMetadata | undefined;
+  /**
+   * Container display rotation (0/90/180/270°) read from the MP4 `tkhd` matrix at ingest. Phone
+   * footage is often stored landscape-coded with a rotation flag; `<video>` playback applies it, but
+   * the WebCodecs decode path emits CODED (unrotated) frames, so the render engine must rotate them to
+   * match. Absent/0 = no rotation (the common case) and takes an untouched no-op path in the renderer.
+   * Note: `width`/`height` are the DISPLAY dims (read from a `<video>`, already rotation-corrected).
+   */
+  rotationDegrees?: 0 | 90 | 180 | 270 | undefined;
 }
 
 export interface DerivedAsset {
@@ -275,6 +283,14 @@ export interface LayerGraphic {
   fill: string;
   naturalWidth?: number | undefined;
   naturalHeight?: number | undefined;
+  /**
+   * Multicolor graphics (SVGs baked with several paints, e.g. Iconify color icons): one slot per
+   * distinct source color. `from` is the literal in the stored SVG, `to` the user's current choice
+   * (initially === `from`). Applied as exact-literal substitutions at `graphicToDataUrl` bake time —
+   * shared code, so preview/local export/Remotion recolor identically. Single-color graphics use
+   * `fill` + `currentColor` instead and carry no palette.
+   */
+  palette?: Array<{ from: string; to: string }> | undefined;
 }
 
 /**
@@ -422,8 +438,22 @@ export interface TextRun {
   bold?: boolean | undefined;
   italic?: boolean | undefined;
   color?: string | undefined;
+  /** Per-run highlight (text marker) — rendered as the run's background in every renderer. */
+  backgroundColor?: string | undefined;
   fontFamily?: string | undefined;
   fontSizeMultiplier?: number | undefined;
+}
+
+/**
+ * A SOURCE TEXT keyframe (Premiere-style): the layer's text content at/after `timeSeconds`
+ * (layer-local), HOLD semantics — the active entry is the last one at or before the playhead,
+ * and the first entry also covers t=0..first. Lets users author word/line reveals (typewriter
+ * variants) by keyframing the text itself; `getVisibleTextRuns` resolves it in every renderer.
+ */
+export interface SourceTextKeyframe {
+  id: string;
+  timeSeconds: number;
+  runs: TextRun[];
 }
 
 /**
@@ -559,6 +589,9 @@ export interface TimelineLayer {
   nestedCompositionId?: string | undefined;
   text?: string | undefined;
   textRuns?: TextRun[] | undefined;
+  /** Source-text keyframes (hold): when present they OVERRIDE `text`/`textRuns` at render time —
+   *  resolved by `getVisibleTextRuns` in every renderer. See {@link SourceTextKeyframe}. */
+  sourceTextKeyframes?: SourceTextKeyframe[] | undefined;
   fontFamily?: string | undefined;
   fontSize?: number | undefined;
   fontWeight?: number | undefined;

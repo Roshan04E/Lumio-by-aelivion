@@ -2,10 +2,14 @@ import {
   actionCost,
   buildCapabilityIndex,
   classifyToolCost,
+  compileGradeIntent,
   logUnsupported,
   recordEffectDemand,
   recordToolDemand,
+  resolveTargetLayer,
   type CapabilityIndex,
+  type GradeIntent,
+  type HueName,
   type TimelineComposition,
   type TimelineLayer
 } from "@lumio-by-aelivion/shared";
@@ -41,10 +45,16 @@ function findLayerById(composition: TimelineComposition, id: string | undefined)
   return allLayers(composition).find((layer) => layer.id === id);
 }
 
-/** Pick the layer most edits should target: explicit selection, else the main video layer, else first. */
+/**
+ * Pick the layer most edits should target — type-agnostic, so "blur it" works whether the target is
+ * a video, image/graphic, text, or shape. Priority: selection → the visual clip under the playhead
+ * (any editable type) → the main video → the first layer. Uses the shared reference resolver so this
+ * matches how the LLM slice and the tool path resolve "this clip".
+ */
 function defaultTargetLayerId(ctx: PlannerContext): string | undefined {
-  if (ctx.selection[0]) {
-    return ctx.selection[0];
+  const resolved = resolveTargetLayer(ctx.composition, { selection: ctx.selection, nowSeconds: ctx.nowSeconds });
+  if (resolved.layerId) {
+    return resolved.layerId;
   }
   const layers = allLayers(ctx.composition);
   return (layers.find((layer) => layer.type === "video") ?? layers[0])?.id;
@@ -194,6 +204,80 @@ function matchEffectType(doc: NluDoc, index: CapabilityIndex): string | undefine
     }
   }
   return undefined;
+}
+
+/** The color-family effect types that route through the color-grade skill (not a bare addEffect). */
+const COLOR_GRADE_EFFECTS = new Set([
+  "brightnessContrast",
+  "colorGrade",
+  "colorCurves",
+  "colorWheels",
+  "hueSatCurves",
+  "hslSecondary",
+  "creativeLook"
+]);
+
+/**
+ * The deterministic floor's "colorist": turn a plain-language grade request into a compact
+ * GradeIntent (the same shape the LLM emits). Keeps color grading a REAL grade offline / on
+ * fallback — no default-drop. Intentionally modest; the LLM is the primary brain when available.
+ */
+function extractGradeIntent(lower: string): GradeIntent {
+  const intent: GradeIntent = {};
+  const primary: NonNullable<GradeIntent["primary"]> = {};
+  const tone: NonNullable<GradeIntent["tone"]> = {};
+
+  const looks: [RegExp, string][] = [
+    [/teal.{0,6}orange/, "Teal & Orange"],
+    [/faded.{0,4}film|analog/, "Faded Film"],
+    [/noir|black.{0,4}and.{0,4}white|monochrome/, "Noir"],
+    [/warm.{0,4}sunset|golden.{0,4}hour/, "Warm Sunset"],
+    [/cold.{0,4}morning/, "Cold Morning"],
+    [/bleach.{0,4}bypass/, "Bleach Bypass"],
+    [/cross.{0,4}process/, "Cross Process"],
+    [/cinematic|filmic|film look|movie look/, "Cinematic"]
+  ];
+  for (const [re, name] of looks) {
+    if (re.test(lower)) {
+      intent.look = name;
+      break;
+    }
+  }
+
+  if (/\bwarm(er|th)?\b/.test(lower)) primary.temperature = 20;
+  if (/\bcool(er)?\b|colder|\bcold\b/.test(lower)) primary.temperature = -20;
+  if (/brighter|brighten|lighter|more exposure/.test(lower)) primary.exposure = 20;
+  if (/darker|darken/.test(lower)) primary.exposure = -20;
+  if (/more contrast|higher contrast|punchy|contrasty/.test(lower)) primary.contrast = 25;
+  if (/less contrast|\bflat(ter)?\b|low contrast/.test(lower)) primary.contrast = -20;
+  if (/more saturat|vivid|vibrant|colou?rful/.test(lower)) primary.saturation = 130;
+  if (/desaturat|muted|less saturat|wash(ed)? out/.test(lower)) primary.saturation = 70;
+
+  if (/crush.{0,4}black|deep(er)? black|deep shadows/.test(lower)) tone.crush = 0.4;
+  if (/lift.{0,4}(shadow|black)|raise.{0,4}(shadow|black)|faded black/.test(lower)) tone.lift = 0.3;
+  if (/roll.{0,4}off.{0,4}highlight|soft(er)? highlight|tame.{0,4}highlight/.test(lower)) tone.rolloff = 0.4;
+  if (Object.keys(tone).length) intent.tone = tone;
+
+  // "make the reds pop", "boost the blues" → hue-selective saturation.
+  const hueWords: HueName[] = ["red", "orange", "yellow", "green", "teal", "cyan", "blue", "purple", "magenta"];
+  if (/(pop|boost|enhance|more|vivid|saturat)/.test(lower)) {
+    const hue = hueWords
+      .filter((h) => new RegExp(`\\b${h}s?\\b`).test(lower))
+      .map((h) => ({ target: h, sat: 0.4 }));
+    if (hue.length) intent.hue = hue;
+  }
+
+  // "keep skin warm, desaturate the background", "isolate the sky".
+  const secondary: NonNullable<GradeIntent["secondary"]> = [];
+  if (/isolate.{0,10}skin|keep.{0,6}skin|skin.{0,6}(warm|tone)/.test(lower)) {
+    secondary.push({ target: "skin", sat: 0.1 });
+    if (/desaturat|mute|background/.test(lower)) secondary.push({ target: "skin", invert: true, sat: -0.5 });
+  }
+  if (/isolate.{0,10}sky|boost.{0,6}sky|bluer sky/.test(lower)) secondary.push({ target: "sky", sat: 0.4 });
+  if (secondary.length) intent.secondary = secondary;
+
+  if (Object.keys(primary).length) intent.primary = primary;
+  return intent;
 }
 
 export class DeterministicPlanner implements PlannerProvider {
@@ -438,15 +522,32 @@ export class DeterministicPlanner implements PlannerProvider {
     if (effectType && !addedNewLayer) {
       const target = needsTarget(`apply ${effectType}`);
       if (target) {
-        recordEffectDemand(effectType);
-        steps.push({
-          id: stepId(),
-          kind: "timelineAction",
-          actionId: "addEffect",
-          params: { layerId: target, effectType },
-          summary: memory.colorGrade && effectType.includes("grade") ? `Apply a color grade (${memory.colorGrade})` : `Apply ${effectType}`,
-          cost: actionCost()
-        });
+        // Color-family effects route through the color-grade skill so the request produces a REAL
+        // grade (compiled to an editable effect stack), never a neutral default-drop. If the prompt
+        // carries no gradable signal (e.g. bare "add curves"), fall back to adding the tool at default.
+        const intent = COLOR_GRADE_EFFECTS.has(effectType) ? extractGradeIntent(doc.lower) : null;
+        if (intent && compileGradeIntent(intent).length > 0) {
+          recordEffectDemand(effectType);
+          steps.push({
+            id: stepId(),
+            kind: "skill",
+            skillId: "color-grade",
+            taskKind: "color-grade",
+            params: intent,
+            summary: memory.colorGrade ? `Color grade (${memory.colorGrade})` : "Color grade",
+            cost: { tier: "browser", credits: 0 }
+          });
+        } else {
+          recordEffectDemand(effectType);
+          steps.push({
+            id: stepId(),
+            kind: "timelineAction",
+            actionId: "addEffect",
+            params: { layerId: target, effectType },
+            summary: `Apply ${effectType}`,
+            cost: actionCost()
+          });
+        }
       }
     } else if (effectType && addedNewLayer) {
       notes.push(`Couldn't auto-apply ${effectType} to the new layer — select it and ask again.`);
@@ -490,7 +591,7 @@ export class DeterministicPlanner implements PlannerProvider {
         question:
           missing === "follow-up-reference"
             ? "I'm not sure which layer you mean — select it, or name the exact change (e.g. \"make the title bigger\")."
-            : "I couldn't map that to a known tool or edit yet. Try e.g. \"add captions\", \"add an orange circle\", \"make it cinematic\", or \"add red text saying WARNING\".",
+            : "Sorry — I didn't catch an edit in that. Tell me what you'd like changed, like \"add captions\" or \"make it cinematic\".",
         summary: "Ask for clarification",
         cost: actionCost()
       });
@@ -499,7 +600,23 @@ export class DeterministicPlanner implements PlannerProvider {
     const totalCredits = steps.reduce((sum, step) => sum + step.cost.credits, 0);
     const { confidence, confidencePercent } = pickConfidence(steps, notes);
 
-    return { id: `plan_${Date.now().toString(36)}`, prompt, steps, totalCredits, confidence, confidencePercent, notes };
+    // The deterministic planner is the LAST-RESORT keyword matcher — it only runs when the LLM is
+    // unreachable or returned nothing usable. Tag it as `offline` so the UI can say so, and never let
+    // it claim more than "Approximation": its best-case "Exact · 90%" made a wrong keyword guess look
+    // like a confident AI plan (user report 2026-07-08). Real confidence lives on the LLM path.
+    const cappedPercent = Math.min(confidencePercent, 55);
+    const cappedConfidence: AiPlan["confidence"] = confidence === "Exact" || confidence === "High Quality" ? "Approximation" : confidence;
+
+    return {
+      id: `plan_${Date.now().toString(36)}`,
+      prompt,
+      steps,
+      totalCredits,
+      confidence: cappedConfidence,
+      confidencePercent: cappedPercent,
+      notes,
+      provider: "offline"
+    };
   }
 }
 
