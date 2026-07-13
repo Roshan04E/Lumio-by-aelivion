@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — tier-3 Transactional LLM (B4). For prompts that LOOK like a single edit
+ * Kimera Brain — tier-3 Transactional LLM (B4). For prompts that LOOK like a single edit
  * command but tiers 0–2 couldn't parse: ONE call to the gateway's `fast` class (small
  * non-reasoning instruct models, temperature 0) with a micro context — the target clip only
  * plus a compact action catalog — instead of a full agent-loop run with reasoning models.
@@ -11,8 +11,8 @@
  * the creative path so loop runs don't pay a wasted extra call.
  */
 
-import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
-import { buildCapabilityIndex, computeLayerOrdinals, describeZodShape, parseClipReference } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
+import { buildCapabilityIndex, computeLayerOrdinals, describeZodShape, parseClipReference } from "@kimera-by-aelivion/shared";
 import type { AiPlan } from "../types";
 import { brainPlan, normalizePrompt, type BrainContext } from "./router";
 import { isRuleTrusted } from "./feedback";

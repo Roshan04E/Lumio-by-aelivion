@@ -295,6 +295,18 @@ function transitionOverrides(def: TransitionDefinition, spec: TransitionSpec): R
 }
 
 /**
+ * Resolve a spec's CURRENT param values against its definition — the same legacy-field folding
+ * (`direction`/`mode`/`softness`/`color` → named params) + registry defaults that `getActiveTransition`
+ * feeds the shaders. Used by the junction params popover so its controls read exactly what renders.
+ */
+export function resolveSpecParams(
+  def: TransitionDefinition,
+  spec: TransitionSpec
+): Record<string, number | number[] | boolean> {
+  return resolveTransitionParams(def, transitionOverrides(def, spec));
+}
+
+/**
  * The active junction transition for the INCOMING clip at `currentTimeSeconds`, or null. Window is
  * `[start, start + duration]` (start-aligned on the cut, matching the shipped handle model). Returns
  * null outside the window, for edge fades (no registry entry), or when no spec. Progress is eased here
@@ -987,7 +999,7 @@ export function getMaskedEffectOverlays(
 export interface CompositionColorFilter {
   /** SVG `<filter>` id, stable per layer. */
   id: string;
-  /** CSS value to append to a layer's `filter` (e.g. `"url(#lumio-color-…)"`). */
+  /** CSS value to append to a layer's `filter` (e.g. `"url(#kimera-color-…)"`). */
   filterRef: string;
   /** The serializable filter spec, for the renderer's `<defs>` injection. */
   svg: SvgColorFilter;
@@ -999,6 +1011,21 @@ export interface CompositionColorFilter {
  * system). Returns `null` when the layer has no non-identity color effect, so the layer
  * carries no `filter` reference. Keyframed color params are resolved at `currentTimeSeconds`.
  */
+interface ColorPipelineCacheEntry {
+  animations: unknown;
+  colorSettings: unknown;
+  /** Any effect-scope keyframe forces a per-time recompile (over-conservative on purpose). */
+  animated: boolean;
+  timeKey: number | undefined;
+  result: ColorPipeline | null;
+}
+
+// Keyed on the effects ARRAY identity: editor edits replace it immutably, so identity is the
+// invalidation signal; WeakMap keeps entries GC-collectable in long sessions and across the
+// Remotion worker's per-frame renders. Without this, every graded layer recompiled its full
+// pipeline (stage allocation + tone-curve bakes) every frame — pure GC churn for static grades.
+const colorPipelineCache = new WeakMap<object, ColorPipelineCacheEntry>();
+
 export function getCompositionColorPipeline(
   layer: CompositionLayerStyleInput | TimelineLayer,
   options: CompositionStyleOptions = {}
@@ -1011,6 +1038,19 @@ export function getCompositionColorPipeline(
   const layerStartSeconds = layer.startSeconds ?? 0;
   const currentTimeSeconds = options.currentTimeSeconds;
   const layerTimeSeconds = typeof currentTimeSeconds === "number" ? Math.max(0, currentTimeSeconds - layerStartSeconds) : undefined;
+
+  const colorSettings = options.colorSettings ?? DEFAULT_PROJECT_COLOR_SETTINGS;
+  const cached = colorPipelineCache.get(effects);
+  if (
+    cached &&
+    cached.animations === animations &&
+    cached.colorSettings === colorSettings &&
+    // Keyframed layers only hit on the exact same resolved time — they recompile per new
+    // frame time exactly like the uncached path (no quantization, zero pixel risk).
+    (!cached.animated || cached.timeKey === layerTimeSeconds)
+  ) {
+    return cached.result;
+  }
 
   const inputs: ColorEffectInput[] = [];
   for (const rawEffect of effects) {
@@ -1099,11 +1139,19 @@ export function getCompositionColorPipeline(
     inputs.push({ type, params: resolved, intensity: numberOr(effect.intensity, 100) });
   }
 
-  if (inputs.length === 0) {
-    return null;
+  let result: ColorPipeline | null = null;
+  if (inputs.length > 0) {
+    const pipeline = compileColorPipeline(inputs, colorSettings);
+    result = pipeline.identity ? null : pipeline;
   }
-  const pipeline = compileColorPipeline(inputs, options.colorSettings ?? DEFAULT_PROJECT_COLOR_SETTINGS);
-  return pipeline.identity ? null : pipeline;
+  colorPipelineCache.set(effects, {
+    animations,
+    colorSettings,
+    animated: (animations ?? []).some((keyframe) => keyframe.target.scope === "effect"),
+    timeKey: layerTimeSeconds,
+    result
+  });
+  return result;
 }
 
 /** Parse `#rgb`/`#rrggbb` to linear-ish 0..1 rgb (sRGB values, matches shader space). */
@@ -1155,20 +1203,33 @@ export function getCompositionMediaEffects(
     if (type === "vignette") {
       const amount = (num("amount", 35) / 100) * intensity;
       if (amount > 0.001) {
-        vignette = { amount: Math.min(1, amount), size: Math.min(1, Math.max(0, num("size", 58) / 100)) };
+        vignette = {
+          amount: Math.min(1, amount),
+          size: Math.min(1, Math.max(0, num("size", 58) / 100)),
+          // Defaults reproduce the pre-param shader exactly: feather 100% = fall to the frame
+          // corner, roundness 0 = legacy UV circle, highlights 0 = plain multiply.
+          feather: Math.min(1, Math.max(0, num("feather", 100) / 100)),
+          roundness: Math.min(1, Math.max(0, num("roundness", 0) / 100)),
+          highlights: Math.min(1, Math.max(0, num("highlights", 0) / 100))
+        };
       }
     } else if (type === "grain") {
       const amount = (num("amount", 18) / 100) * intensity;
       if (amount > 0.001) {
         // Scale to a tasteful range — full slider ≈ 0.25 rgb noise, not blowout.
-        grain = { amount: Math.min(1, amount) * 0.25 };
+        // size 100% = the legacy 1280×720 virtual grain grid; >100% = coarser grain.
+        grain = { amount: Math.min(1, amount) * 0.25, size: Math.min(4, Math.max(0.25, num("size", 100) / 100)) };
       }
     } else if (type === "chromaKey") {
-      const tolerance = (num("tolerance", 30) / 100) * Math.SQRT2; // map 0..1 → rgb-distance domain
+      // tolerance/softness live in the normalized CbCr-distance domain (0 = the key color's
+      // chroma, ~1 = a full key-chroma-magnitude away) — luminance-independent, any key color.
       chromaKey = {
         color: hexToRgb01(stringOr(params.color, "#00FF00")),
-        tolerance: Math.max(0.001, tolerance),
-        softness: Math.max(0.02, num("softness", 12) / 100)
+        tolerance: Math.max(0.001, num("tolerance", 30) / 100),
+        softness: Math.max(0.02, num("softness", 12) / 100),
+        despill: Math.min(1, Math.max(0, num("despill", 60) / 100)),
+        choke: Math.min(0.99, Math.max(0, num("choke", 0) / 100)),
+        matteView: params.matteView === true
       };
     }
   }
@@ -1236,7 +1297,7 @@ export function getCompositionColorFilter(
   if (!pipeline) {
     return null;
   }
-  const id = `lumio-color-${layerId}`;
+  const id = `kimera-color-${layerId}`;
   const svg = pipelineToSvgFilter(pipeline, id);
   if (!svg) {
     return null;

@@ -21,7 +21,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderComparisonFixtureKeys, type RenderComparisonFixtureKey } from "@lumio-by-aelivion/shared";
+import { renderComparisonFixtureKeys, type RenderComparisonFixtureKey } from "@kimera-by-aelivion/shared";
 import pixelmatch from "pixelmatch";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";
@@ -71,8 +71,9 @@ const fixtureMaxDiff: Partial<Record<RenderComparisonFixtureKey, number>> = {
   // is independent of that day's decoder/image/sourceVersion work (A/B'd against a revert).
   "region-text": 0.0125,
   "tilted-text": 0.0085,
-  // Phase 4.2 transition fold: scene mixes the junction in-canvas via the SAME `TransitionCompositor` as
-  // the DOM overlay, so scene-vs-DOM should be near the ~0.26% baseline (the gate proves the mix lands at
+  // Phase 4.2 transition fold: scene mixes the junction in-canvas with the SAME assembled transition
+  // shaders as the DOM overlay's `TransitionCompositor` (SceneCompositor.drawTransition, nest pre-compose),
+  // so scene-vs-DOM should be near the ~0.26% baseline (the gate proves the mix lands at
   // the right z-slot with no offset + the DOM overlay is suppressed). A regression — missing/double mix or
   // wrong placement — diffs the whole frame, well past this.
   "transition": 0.006

@@ -6,7 +6,7 @@
  * representative warp-style SVG (one filled <path>) WITH and WITHOUT the xmlns, draws each onto a
  * canvas, and counts non-transparent pixels. Proves the namespace is required (without it → 0 pixels).
  *
- * Run: pnpm --filter @lumio-by-aelivion/worker exec tsx src/warp-raster-probe.ts
+ * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/warp-raster-probe.ts
  */
 import { chromium } from "playwright";
 

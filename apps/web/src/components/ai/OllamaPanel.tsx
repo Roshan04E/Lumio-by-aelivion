@@ -11,7 +11,7 @@ import {
 import { ThemedSelect } from "../../editor/inspector/controls/ThemedSelect";
 
 /**
- * "Local" mode setup — point Lumio at your own Ollama model. Requests then run browser-direct on your
+ * "Local" mode setup — point Kimera at your own Ollama model. Requests then run browser-direct on your
  * machine (private/offline, unmetered) instead of the cloud pool. Config is stored only in this
  * browser. Ollama must allow this site's origin (`OLLAMA_ORIGINS=<this origin> ollama serve`).
  */

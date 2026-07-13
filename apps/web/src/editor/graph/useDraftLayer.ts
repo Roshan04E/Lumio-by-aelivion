@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineLayer } from "@kimera-by-aelivion/shared";
 
 /**
  * Draft-during-drag / commit-on-release — the lifted TransformPanel pattern.

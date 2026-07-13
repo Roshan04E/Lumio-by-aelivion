@@ -5,10 +5,11 @@ import {
   type GenerationModel,
   type GenerationPref,
   type ResolveTask
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { env } from "../config/env";
 import { prisma } from "../lib/prisma";
 import { saveBuffer } from "./storage.service";
+import { recordUsage } from "./usageLedger.service";
 
 /**
  * Cloud generation router — the server-side half of the "which model is capable" flow.
@@ -331,6 +332,15 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     await prisma.generationJob.update({
       where: { id: jobId },
       data: { status: "completed", progress: 100, resultAssetId: asset.id }
+    });
+
+    // Phase 0 shadow-billing: record what this generation would have cost — telemetry only,
+    // never gates and never touches user.walletCredits. See billing/pricing.ts.
+    void recordUsage({
+      userId: job.userId,
+      action: `generate.${job.taskKind}`,
+      units: isVideo ? durationSeconds : 1,
+      provider: model.provider
     });
   } catch (error) {
     await prisma.generationJob.update({

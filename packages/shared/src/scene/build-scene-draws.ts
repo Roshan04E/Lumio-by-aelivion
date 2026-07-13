@@ -14,6 +14,7 @@
 
 import { getTexImageSourceProducerInfo } from "../color/gl-context";
 import { MediaWebGLRenderer } from "../color/media-renderer";
+import { colorPipelineCacheKey } from "../color/pipeline";
 import type { ColorPipeline } from "../color/types";
 import { getFragmentEffect } from "../color/fragment-effects/registry";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass, SceneTextureSource } from "../color/scene-compositor";
@@ -229,7 +230,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       }
       gradeRenderers.set(layerId, entry);
     }
-    const key = JSON.stringify(pipeline);
+    const key = colorPipelineCacheKey(pipeline);
     if (entry.pipelineKey !== key) {
       entry.renderer.setPipeline(pipeline);
       entry.pipelineKey = key;
@@ -606,14 +607,16 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // Region-pass-model clones fold into their base's `regionPasses` exactly as outside a nest — no special
   // case needed since `buildLayerDrawWithPasses` already handles that uniformly for any layer id.
   const membersByGroup = new Map<string, TimelineLayer[]>();
-  for (const layer of ls) {
-    const owner = layerOwnerGroup.get(layer.id);
-    if (!owner) continue;
-    if (transitionOutgoingIds.has(layer.id) || foldedIds.has(layer.id)) continue;
-    if (regionPassModel && regionCloneBaseId(layer.id)) continue;
-    const list = membersByGroup.get(owner);
-    if (list) list.push(layer);
-    else membersByGroup.set(owner, [layer]);
+  if (groupKeys.length > 0) {
+    for (const layer of ls) {
+      const owner = layerOwnerGroup.get(layer.id);
+      if (!owner) continue;
+      if (transitionOutgoingIds.has(layer.id) || foldedIds.has(layer.id)) continue;
+      if (regionPassModel && regionCloneBaseId(layer.id)) continue;
+      const list = membersByGroup.get(owner);
+      if (list) list.push(layer);
+      else membersByGroup.set(owner, [layer]);
+    }
   }
   // DIRECT child group keys per PARENT group (top-level groups have owner `null` — see `topGroupKeyAtIndex`).
   const childGroupsByOwner = new Map<string, string[]>();
@@ -628,9 +631,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // child groups' own positions, propagated bottom-up (deepest groups first, since an ancestor's position
   // depends on its children's). Depth = number of `__nest_` occurrences in the key (deeper = more).
   const layerIndex = new Map<string, number>();
-  ls.forEach((layer, i) => layerIndex.set(layer.id, i));
+  // Per-frame guard: `layerIndex` (an O(layers) Map fill) and the depth walk only feed group
+  // positioning — with no nested groups every read below is a `.get() → undefined` no-op, so
+  // skip building them entirely (they were pure per-frame GC churn for non-nested comps).
+  if (groupKeys.length > 0) {
+    ls.forEach((layer, i) => layerIndex.set(layer.id, i));
+  }
   const countSeparators = (key: string): number => key.split(NEST_ID_SEPARATOR).length - 1;
-  const groupKeysByDepthDesc = [...groupKeys].sort((a, b) => countSeparators(b) - countSeparators(a));
+  const groupKeysByDepthDesc = groupKeys.length > 0 ? [...groupKeys].sort((a, b) => countSeparators(b) - countSeparators(a)) : groupKeys;
   const groupFirstIndex = new Map<string, number>();
   for (const key of groupKeysByDepthDesc) {
     let min = Number.POSITIVE_INFINITY;

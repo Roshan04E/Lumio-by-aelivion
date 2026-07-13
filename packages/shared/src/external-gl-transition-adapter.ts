@@ -30,7 +30,7 @@ export function glTransitionToManifest(input: {
     id,
     name,
     version: source.version ?? "1.0.0",
-    description: source.description ?? `Imported GL transition for Lumio.`,
+    description: source.description ?? `Imported GL transition for Kimera.`,
     author: source.author ? { name: source.author } : { name: "External GL Transition" },
     license: { type: "unknown", ...(source.license ? { name: source.license } : {}) },
     tags: ["gl-transition", "external", ...source.tags],
@@ -112,7 +112,7 @@ function normalizeGlsl(source: string, warnings: string[]): string {
   glsl = glsl.replace(/\btexture\s*\(\s*uFrom\s*,/g, "getFromColor(");
   glsl = glsl.replace(/\btexture\s*\(\s*uTo\s*,/g, "getToColor(");
   if (glsl !== source.trim()) {
-    warnings.push("GL transition boilerplate was normalized for Lumio's shader harness.");
+    warnings.push("GL transition boilerplate was normalized for Kimera's shader harness.");
   }
   return glsl.trim();
 }

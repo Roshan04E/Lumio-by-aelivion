@@ -1,4 +1,4 @@
-import { getLayerSpeed, type TimelineComposition, type TimelineLayer } from "@lumio-by-aelivion/shared";
+import { getLayerSpeed, type TimelineComposition, type TimelineLayer } from "@kimera-by-aelivion/shared";
 
 export type ThreePointOp = "insert" | "overwrite";
 

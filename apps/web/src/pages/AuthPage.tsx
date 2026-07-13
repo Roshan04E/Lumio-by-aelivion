@@ -53,7 +53,7 @@ export function AuthPage() {
   return (
     <main className="mkt-auth">
       <aside className="mkt-auth-aside">
-        <Link to="/" aria-label="Lumio home"><BrandMark /></Link>
+        <Link to="/" aria-label="Kimera home"><BrandMark /></Link>
         <div>
           <h2>Pro video editing in the browser. <span className="mkt-grad">AI on your terms.</span></h2>
           <ul className="mkt-auth-points">
@@ -67,7 +67,7 @@ export function AuthPage() {
 
       <section className="mkt-auth-main">
         <div className="mkt-auth-card">
-          <Link to="/" aria-label="Lumio home"><BrandMark /></Link>
+          <Link to="/" aria-label="Kimera home"><BrandMark /></Link>
           <h1 className="mkt-auth-title">{mode === "signup" ? "Create your account" : "Welcome back"}</h1>
           <p className="mkt-auth-lede">{mode === "signup" ? "Start editing free — no credit card." : "Sign in to pick up where you left off."}</p>
 

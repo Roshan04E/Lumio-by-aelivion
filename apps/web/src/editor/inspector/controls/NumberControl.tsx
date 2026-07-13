@@ -1,5 +1,5 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import type { KeyframeInterpolation } from "@lumio-by-aelivion/shared";
+import type { KeyframeInterpolation } from "@kimera-by-aelivion/shared";
 import { ScrubNumberInput } from "../../../components/ScrubNumberInput";
 import { PropertyRow } from "./PropertyRow";
 

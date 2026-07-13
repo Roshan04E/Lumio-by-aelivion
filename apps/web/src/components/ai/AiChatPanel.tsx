@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AudioLines, BarChart3, Brain, Cpu, Ear, ImagePlus, KeyRound, Mic, Plus, SendHorizontal, Settings2, Sparkles, Square, SquarePen, Undo2, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { buildCapabilityIndex, compileGradeIntent, getSkill, getSkillTaskKind, gradeIntentSchema, logUnsupported, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type SourceAsset } from "@lumio-by-aelivion/shared";
+import { buildCapabilityIndex, compileGradeIntent, getSkill, getSkillTaskKind, gradeIntentSchema, logUnsupported, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { createPlanner } from "../../ai/planner/createPlanner";
 import { createSpeechRecognition, useDictation } from "../../ai/useDictation";
 import { looksLikeSelfEcho } from "../../ai/echo-guard";
@@ -162,7 +162,7 @@ async function encodeReferenceImage(file: File): Promise<string> {
 
 /** Clickable starter prompts shown on the empty chat (one tap → runs a plan). */
 /** First-run wake-phrase onboarding flag: "offered" | "done" | "dismissed" (never re-offered). */
-const WAKE_SETUP_KEY = "lumio.voice.wakesetup.v1";
+const WAKE_SETUP_KEY = "kimera.voice.wakesetup.v1";
 
 const STARTER_PROMPTS = [
   "Add captions",
@@ -174,13 +174,16 @@ const STARTER_PROMPTS = [
 ];
 
 /**
- * The Lumio AI chat panel. Type → see a plan → Apply. AI never mutates the
+ * The Kimera AI chat panel. Type → see a plan → Apply. AI never mutates the
  * timeline directly: every applied edit flows through the Timeline Action
  * Registry and the editor's existing undo. It is project- AND conversation-aware
  * (P5: follow-ups), respects remembered preferences (P6), runs under a permission
  * mode (P4: Quick auto-applies safe edits), and surfaces demand analytics (P7).
  */
-export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId, focusToken, micToggleToken, voiceToggleToken, onVoiceSessionChange, onWakeWordChange, resolveAssetUrl, runEditorCommand }: AiChatPanelProps) {
+// memo: EditorPage re-renders on every discrete edit; with identity-stable props (host wraps the
+// callbacks in useStableHandlers), this keeps the whole panel out of those renders. The token props
+// (focusToken/micToggleToken/voiceToggleToken) are deliberate change-signals and still get through.
+export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId, focusToken, micToggleToken, voiceToggleToken, onVoiceSessionChange, onWakeWordChange, resolveAssetUrl, runEditorCommand }: AiChatPanelProps) {
   const planner = useMemo(() => createPlanner(), []);
   const initialMemory = useMemo(() => loadMemory(), []);
   /** The agent work-log — the panel's single display truth (replaces chat bubbles/plan card/progress).
@@ -467,7 +470,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
     toggleDictationRef.current();
   }, [micToggleToken]);
 
-  // Host Alt+L command ("Lumio, listen"): each token bump toggles the session ONCE. Pure
+  // Host Alt+L command ("Kimera, listen"): each token bump toggles the session ONCE. Pure
   // command — no state convergence, so the report-back mirror below can never ping-pong with
   // it (the old two-way `voiceDesired` boolean oscillated on/off forever: the panel and the
   // host ran half a render out of phase, each "correcting" to the other's stale value). Works
@@ -501,7 +504,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
     onVoiceSessionChangeRef.current?.(voiceSession);
   }, [voiceSession]);
 
-  // ---- "Hey Lumio" wake word (opt-in, persisted) ----
+  // ---- "Hey Kimera" wake word (opt-in, persisted) ----
   // A standby Web Speech recognizer runs whenever the mic is otherwise free; hearing the wake
   // word enters the voice session (aurora + hands-free loop). Deliberately opt-in: standby
   // keeps the browser mic indicator on the tab the whole time.
@@ -522,13 +525,13 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
 
   const startDictationRef = useRef(startDictation);
   startDictationRef.current = startDictation;
-  /** Late-bound submit for the wake handler's carry-through ("hey lumio, blur clip 2") —
+  /** Late-bound submit for the wake handler's carry-through ("hey kimera, blur clip 2") —
    * handleSubmit is declared much later; same pattern as handleUndoRef. */
   const handleSubmitVoiceRef = useRef<(prompt: string) => void>(() => {});
   /** At most ONE pending "were you calling me?" card at a time. */
   const pendingWakeTrainRef = useRef<string | null>(null);
   /** Live first-run wake-phrase training: while set, standby finals are captured as SAMPLES
-   * (learned verbatim) instead of being matched — the user teaches Lumio THEIR phrase. */
+   * (learned verbatim) instead of being matched — the user teaches Kimera THEIR phrase. */
   const wakeSetupRef = useRef<{ itemId: string; samples: string[] } | null>(null);
   // Standby runs only while the mic is otherwise free — the dictation engine and the wake
   // recognizer must never contend for Web Speech.
@@ -560,7 +563,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
       voiceSessionRef.current = true;
       setVoiceSession(true);
       if (command && command.length >= 2) {
-        // Carry-through: "hey lumio, blur clip 2" executes in one breath. 150ms lets the
+        // Carry-through: "hey kimera, blur clip 2" executes in one breath. 150ms lets the
         // standby recognizer release the mic first.
         setTimeout(() => handleSubmitVoiceRef.current(normalizeTranscript(command)), 150);
       } else {
@@ -609,7 +612,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
           return;
         }
         // Near-miss ("hello mia") → offer to LEARN it. This is how the wake word is trained:
-        // the recognizer will never hear "lumio" the same way twice across voices/accents.
+        // the recognizer will never hear "kimera" the same way twice across voices/accents.
         if (looksLikeWakeAttempt(text) && !pendingWakeTrainRef.current) {
           pendingWakeTrainRef.current = pushItem({
             kind: "wakeTrain",
@@ -670,7 +673,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
   }, []);
 
   // Arming the Ear with NOTHING learned yet auto-starts training (visible card) — an untrained
-  // ear is what made "hey lumio" fall on deaf ears. Only on a user-initiated off→on transition,
+  // ear is what made "hey kimera" fall on deaf ears. Only on a user-initiated off→on transition,
   // never silently on mount.
   const prevWakeWordOnRef = useRef(wakeWordOn);
   useEffect(() => {
@@ -1314,7 +1317,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
       return;
     }
 
-    // ---- Lumio Brain (B1 reflex + B2 rules): exact commands + registry questions resolve locally,
+    // ---- Kimera Brain (B1 reflex + B2 rules): exact commands + registry questions resolve locally,
     // BEFORE any model or network (see AI_ARCHITECTURE.md). Precision-first: the router escalates
     // silently on anything it isn't structurally certain about. Talk mode, image turns, and a
     // 👎 re-run (skipBrainRef) bypass the brain.
@@ -1943,7 +1946,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
       // catching the tail of our own TTS, not the user — discard it instead of executing it
       // as a command (the "move clip 1 to V3" ×3 loop). Voice-only; typed submits never pass here.
       if (looksLikeSelfEcho(inputStateRef.current, recentlySpokenLines())) {
-        console.debug("[lumio] voice: discarded self-echo transcript:", inputStateRef.current);
+        console.debug("[kimera] voice: discarded self-echo transcript:", inputStateRef.current);
         setInput("");
         return;
       }
@@ -1952,7 +1955,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
   }, [dictationStatus, handleSubmit]);
 
   // Barge-in: while the assistant is SPEAKING, a lightweight recognizer listens for interrupt
-  // words — "stop"/"wait"/"quiet"/"hey lumio" cut the speech short and hand the mic straight
+  // words — "stop"/"wait"/"quiet"/"hey kimera" cut the speech short and hand the mic straight
   // back (the fast re-arm below). Deliberately interrupt-words-only, not any-speech: this
   // recognizer hears our own TTS through the speakers, and interrupt words are the
   // precision-safe subset (replies never transcribe to a lone "stop").
@@ -1970,7 +1973,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
     recognition.onresult = (event) => {
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const text = (event.results[i]?.[0]?.transcript ?? "").trim().toLowerCase();
-        if (text && text.split(/\s+/).length <= 4 && /^(?:stop|wait|okay stop|ok stop|shut up|be quiet|quiet|enough|hey (?:lumio|lumia)|lumio)\b/.test(text)) {
+        if (text && text.split(/\s+/).length <= 4 && /^(?:stop|wait|okay stop|ok stop|shut up|be quiet|quiet|enough|hey (?:kimera|chimera)|kimera)\b/.test(text)) {
           stopSpeaking(); // speakReply resolves → speaking=false → this recognizer is torn down and the mic re-arms
           return;
         }
@@ -2104,7 +2107,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
               voiceSession
                 ? "Exit voice mode (Alt+L / Esc)"
                 : wakeStandby
-                  ? "Voice mode (Alt+L) — wake-word standby is listening for “Hey Lumio”"
+                  ? "Voice mode (Alt+L) — wake-word standby is listening for “Hey Kimera”"
                   : "Voice mode — hands-free, continuous listening (Alt+L)"
             }
             aria-label={voiceSession ? "Exit voice mode" : "Enter voice mode"}
@@ -2141,7 +2144,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
                 <div className="ai-settings-backdrop" onClick={() => setShowSettingsMenu(false)} />
                 <div className="ai-settings-menu" role="menu" aria-label="AI settings">
                   <button type="button" role="menuitemcheckbox" aria-checked={wakeWordOn} onClick={toggleWakeWord}>
-                    <Ear size={14} /> “Hey Lumio” wake word
+                    <Ear size={14} /> “Hey Kimera” wake word
                     <span className={`ai-settings-state${wakeWordOn ? " is-on" : ""}`}>{wakeWordOn ? "On" : "Off"}</span>
                   </button>
                   <button
@@ -2173,7 +2176,7 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
                       setShowMemory(true);
                     }}
                   >
-                    <Brain size={14} /> What Lumio remembers…
+                    <Brain size={14} /> What Kimera remembers…
                   </button>
                   <button
                     type="button"
@@ -2631,4 +2634,4 @@ export function AiChatPanel({ getContext, commitComposition, openTool, onUndo, o
         : null}
     </div>
   );
-}
+});

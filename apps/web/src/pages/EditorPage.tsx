@@ -69,16 +69,20 @@ import {
 } from "lucide-react";
 import {
   applyTimelineTemplatePackage,
-  buildLumioPackageZipAsync,
+  buildKimeraPackageZipAsync,
   buildTimelineTemplatePackage,
   buildTemplateGraphFromProject,
   exportCompositionToFcpxml,
-  isLumioPackageZipBytes,
-  parseLumioPackageZipAsync,
+  isKimeraPackageZipBytes,
+  parseKimeraPackageZipAsync,
   buildTransitionKeyframes,
   COLOR_EFFECT_TYPES,
   getTransition,
   TRANSITION_MARKER,
+  applyJunctionTransition,
+  removeJunctionTransition,
+  findTransitionCutForClip,
+  DEFAULT_CROSS_DISSOLVE_SECONDS,
   canApplyEffectManifestToLayer,
   createTimelineEffect,
   createTimelineEffectFromManifest,
@@ -165,7 +169,7 @@ import {
   type TrackingPathArtifactData,
   type TransitionKind,
   type TransitionSpec
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { AiActivityIndicator } from "../components/AiActivityIndicator";
 // Lazy: the AI chat panel pulls the whole ai/ graph (planner, executor, memory, talk streaming)
 // — none of it should load until the AI dock is actually opened.
@@ -330,7 +334,7 @@ import {
   type BundledGraphic,
   type LayerGraphic,
   type TemplateDefinition
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { ASSET_LABEL_COLORS, assetLabelOf, defaultAssetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
 import { assetHasAudioStream } from "../lib/assetAudio";
@@ -392,8 +396,8 @@ function proxyDebugEnabled(): boolean {
     return (
       params.get("debugGl") === "1" ||
       params.get("debugProxy") === "1" ||
-      window.localStorage?.getItem("lumio_debug_gl") === "1" ||
-      window.localStorage?.getItem("lumio_debug_proxy") === "1"
+      window.localStorage?.getItem("kimera_debug_gl") === "1" ||
+      window.localStorage?.getItem("kimera_debug_proxy") === "1"
     );
   } catch {
     return false;
@@ -534,7 +538,7 @@ function safeFileStem(value: string) {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "lumio-template"
+      .replace(/^-+|-+$/g, "") || "kimera-template"
   );
 }
 
@@ -616,7 +620,7 @@ export function EditorPage() {
   // gesture) drops a keyframe at the playhead. Default off, matching After Effects / Premiere.
   const [autoKeyframe, setAutoKeyframe] = useState(false);
   // Bottom workspace (Graph editor drawer, Shift+G). Also opened by the
-  // "lumio:open-graph-editor" event from inspector rows / timeline keyframe diamonds.
+  // "kimera:open-graph-editor" event from inspector rows / timeline keyframe diamonds.
   const [bottomWorkspaceOpen, setBottomWorkspaceOpen] = useState(false);
   const [graphFocusTargetKey, setGraphFocusTargetKey] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -633,10 +637,10 @@ export function EditorPage() {
       setBottomWorkspaceOpen(true);
     };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("lumio:open-graph-editor", onOpen);
+    window.addEventListener("kimera:open-graph-editor", onOpen);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("lumio:open-graph-editor", onOpen);
+      window.removeEventListener("kimera:open-graph-editor", onOpen);
     };
   }, []);
   // Remember the last single-selected layer so the Controls tab keeps showing
@@ -666,7 +670,7 @@ export function EditorPage() {
   // Bumped by the Alt+M shortcut to toggle voice dictation in the AI composer — same token pattern as
   // aiFocusToken. See the Alt+M keydown effect and AiChatPanel's micToggleToken.
   const [aiMicToggleToken, setAiMicToggleToken] = useState(0);
-  // Alt+L ("Lumio, listen") → toggle the hands-free VOICE SESSION (distinct from Alt+M dictation).
+  // Alt+L ("Kimera, listen") → toggle the hands-free VOICE SESSION (distinct from Alt+M dictation).
   // Deliberately does NOT open the chat panel: `aiVoiceWanted` mounts the dock HIDDEN so the
   // session can run, the aurora + the topbar AI button carry the "AI is live" signal, and
   // `aiVoiceActive` mirrors the panel's real session state back up for that button.
@@ -676,7 +680,7 @@ export function EditorPage() {
   const [aiVoiceWanted, setAiVoiceWanted] = useState(false);
   const [aiVoiceActive, setAiVoiceActive] = useState(false);
   const [aiVoiceToggleToken, setAiVoiceToggleToken] = useState(0);
-  // "Hey Lumio" standby lives INSIDE AiChatPanel — while the Ear is armed the dock must stay
+  // "Hey Kimera" standby lives INSIDE AiChatPanel — while the Ear is armed the dock must stay
   // mounted (hidden) even with the chat closed, or the wake word is deaf.
   const [aiWakeArmed, setAiWakeArmed] = useState(loadWakeWordEnabled);
   const [generateStudioOpen, setGenerateStudioOpen] = useState(false);
@@ -687,7 +691,7 @@ export function EditorPage() {
   // profile under load; OFF = the manual ¼/½/1 choice is absolute (strong-GPU users).
   const [adaptiveResOn, setAdaptiveResOn] = useState(() => isAdaptiveQualityOn());
   const [previewQuality, setPreviewQuality] = useState<"performance" | "balanced" | "quality">(() =>
-    readStoredChoice("lumio_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
+    readStoredChoice("kimera_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
   );
   const previewCacheControllerRef = useRef<PreviewCacheController | null>(null);
   const previewCacheRenderStateRef = useRef<{ signature: string; renderScale: number; fps: number; durationSeconds: number } | null>(null);
@@ -738,7 +742,7 @@ export function EditorPage() {
   // generated and playback never substitutes one — the viewer is always authoritative (useful while proxy
   // faithfulness is being fixed, or on a machine where generation is costly). Persisted across sessions.
   const [livePlaybackMode, setLivePlaybackMode] = useState(
-    () => readStoredChoice("lumio_live_playback", "off", ["on", "off"] as const) === "on"
+    () => readStoredChoice("kimera_live_playback", "off", ["on", "off"] as const) === "on"
   );
   // Transport "1" with Auto off = FULL-quality playback (see the effect further down): originals play
   // raw, and the span-proxy system goes DORMANT — no generation at scale 1 (expensive, nobody plays it),
@@ -751,30 +755,30 @@ export function EditorPage() {
   // manual In/Out regenerate, which marks spans dirty without altering the composition reference.
   const [proxyGenNonce, setProxyGenNonce] = useState(0);
   const editorPageRef = useRef<HTMLDivElement | null>(null);
-  const [leftPaneWidth, setLeftPaneWidth] = useState(() => readStoredNumber("lumio_editor_left_width", EDITOR_RESPONSIVE_LAYOUT.panes.left.preferred));
-  const [rightPaneWidth, setRightPaneWidth] = useState(() => readStoredNumber("lumio_editor_right_width", EDITOR_RESPONSIVE_LAYOUT.panes.right.preferred));
-  const [timelineHeight, setTimelineHeight] = useState(() => readStoredNumber("lumio_editor_timeline_height", EDITOR_RESPONSIVE_LAYOUT.panes.timeline.preferred));
-  const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("lumio_editor_track_height", 44));
+  const [leftPaneWidth, setLeftPaneWidth] = useState(() => readStoredNumber("kimera_editor_left_width", EDITOR_RESPONSIVE_LAYOUT.panes.left.preferred));
+  const [rightPaneWidth, setRightPaneWidth] = useState(() => readStoredNumber("kimera_editor_right_width", EDITOR_RESPONSIVE_LAYOUT.panes.right.preferred));
+  const [timelineHeight, setTimelineHeight] = useState(() => readStoredNumber("kimera_editor_timeline_height", EDITOR_RESPONSIVE_LAYOUT.panes.timeline.preferred));
+  const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("kimera_editor_track_height", 44));
   // Fraction (0-1) of .viewer-monitors width given to the source monitor in dual-monitor mode.
-  const [sourceMonitorSplit, setSourceMonitorSplit] = useState(() => readStoredNumber("lumio_editor_source_split", 0.5));
+  const [sourceMonitorSplit, setSourceMonitorSplit] = useState(() => readStoredNumber("kimera_editor_source_split", 0.5));
   const responsiveLayout = useEditorResponsiveLayout(editorPageRef, { leftPaneWidth, rightPaneWidth, timelineHeight });
   const [activeResponsiveOverlay, setActiveResponsiveOverlay] = useState<EditorOverlayPanel>(null);
   const [expandedResponsiveOverlays, setExpandedResponsiveOverlays] = useState<Set<NonNullable<EditorOverlayPanel>>>(() => new Set());
   const [topbarMenuOpen, setTopbarMenuOpen] = useState(false);
   const [editorTheme, setEditorTheme] = useState<EditorThemeId>(() =>
-    readStoredChoice("lumio_editor_theme", "blue", EDITOR_THEME_IDS)
+    readStoredChoice("kimera_editor_theme", "blue", EDITOR_THEME_IDS)
   );
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [timelineTool, setTimelineTool] = useState<TimelineToolMode>("select");
-  const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("lumio_timeline_snap", "on", ["on", "off"] as const) === "on");
+  const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("kimera_timeline_snap", "on", ["on", "off"] as const) === "on");
   // Viewer scaling (Premiere-style): "fit" auto-scales the comp to the viewer (re-fits on panel resize);
   // "manual" uses `manualScale` (1:1 — 1.0 = 100% actual pixels). `fitScale` is reported up from the
   // preview (measured from the stable viewer box, no feedback) purely so the toolbar can show the % in
   // fit mode. Single scale end-to-end — no width/height fit modes, no zoom² coupling.
   const [viewMode, setViewMode] = useState<"fit" | "manual">(() =>
-    readStoredChoice("lumio_viewer_view_mode", "fit", ["fit", "manual"] as const)
+    readStoredChoice("kimera_viewer_view_mode", "fit", ["fit", "manual"] as const)
   );
-  const [manualScale, setManualScale] = useState(() => readStoredNumber("lumio_viewer_manual_scale", 1));
+  const [manualScale, setManualScale] = useState(() => readStoredNumber("kimera_viewer_manual_scale", 1));
   const [fitScale, setFitScale] = useState(1);
   const isResponsiveOverlayExpanded = useCallback(
     (panel: NonNullable<EditorOverlayPanel>) => responsiveLayout.usesPhoneShell && expandedResponsiveOverlays.has(panel),
@@ -793,7 +797,7 @@ export function EditorPage() {
     setViewMode("manual");
   }, []);
   useEffect(() => {
-    localStorage.setItem("lumio_viewer_view_mode", viewMode);
+    localStorage.setItem("kimera_viewer_view_mode", viewMode);
   }, [viewMode]);
   const [imagePalette, setImagePalette] = useState(defaultColorPalette);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -1313,7 +1317,7 @@ export function EditorPage() {
   }, [activeRenderJob, projectId]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_preview_quality", previewQuality);
+    localStorage.setItem("kimera_preview_quality", previewQuality);
   }, [previewQuality]);
 
   // FULL-QUALITY PLAYBACK (pro ask, 2026-07-05): fixed "1" (quality, Auto off) also bypasses the
@@ -1921,7 +1925,7 @@ export function EditorPage() {
   }, [runProxyGeneration]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_live_playback", livePlaybackMode ? "on" : "off");
+    localStorage.setItem("kimera_live_playback", livePlaybackMode ? "on" : "off");
   }, [livePlaybackMode]);
 
   // On project switch/unmount: release object URLs only — the OPFS blobs + span index stay so the
@@ -2270,7 +2274,7 @@ export function EditorPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Alt+L → toggle hands-free voice mode ("Lumio, listen"). No typing bail on purpose — it must
+  // Alt+L → toggle hands-free voice mode ("Kimera, listen"). No typing bail on purpose — it must
   // work mid-edit and even while the composer is focused, exactly like Alt+M. It does NOT open
   // the chat panel (user request): the aurora + topbar AI button show the session instead.
   useEffect(() => {
@@ -2352,19 +2356,19 @@ export function EditorPage() {
   }, [toggleLeftPanelTab, toggleInspectorFromTopbar]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_editor_left_width", String(leftPaneWidth));
+    localStorage.setItem("kimera_editor_left_width", String(leftPaneWidth));
   }, [leftPaneWidth]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_editor_right_width", String(rightPaneWidth));
+    localStorage.setItem("kimera_editor_right_width", String(rightPaneWidth));
   }, [rightPaneWidth]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_editor_timeline_height", String(timelineHeight));
+    localStorage.setItem("kimera_editor_timeline_height", String(timelineHeight));
   }, [timelineHeight]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_editor_source_split", String(sourceMonitorSplit));
+    localStorage.setItem("kimera_editor_source_split", String(sourceMonitorSplit));
   }, [sourceMonitorSplit]);
 
   useEffect(() => {
@@ -2398,7 +2402,7 @@ export function EditorPage() {
   }, [topbarMenuOpen]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_editor_theme", editorTheme);
+    localStorage.setItem("kimera_editor_theme", editorTheme);
   }, [editorTheme]);
 
   useEffect(() => {
@@ -2420,11 +2424,11 @@ export function EditorPage() {
   }, [themeMenuOpen]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_timeline_snap", snapEnabled ? "on" : "off");
+    localStorage.setItem("kimera_timeline_snap", snapEnabled ? "on" : "off");
   }, [snapEnabled]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_editor_track_height", String(timelineTrackHeight));
+    localStorage.setItem("kimera_editor_track_height", String(timelineTrackHeight));
   }, [timelineTrackHeight]);
 
   useEffect(() => {
@@ -2434,7 +2438,7 @@ export function EditorPage() {
   }, [selectedLayerId]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_viewer_manual_scale", String(manualScale));
+    localStorage.setItem("kimera_viewer_manual_scale", String(manualScale));
   }, [manualScale]);
 
   useEffect(() => {
@@ -3556,11 +3560,13 @@ export function EditorPage() {
     if (!composition) {
       return;
     }
-    // Split every selected clip the playhead actually passes through.
+    // Split every selected clip the playhead passes through; with NO selection, split every
+    // editable clip under the playhead (Premiere ⌘K / Resolve ⌘B behaviour — before this, the
+    // S key and the scissors button were silent no-ops until you selected something).
     const time = currentTimeRef.current;
     const splittable = flattenTimelineLayers(composition).filter(
       (layer) =>
-        selectedLayerIds.includes(layer.id) &&
+        (selectedLayerIds.length === 0 || selectedLayerIds.includes(layer.id)) &&
         isLayerEditable(layer.id) &&
         time > layer.startSeconds + 0.0001 &&
         time < layer.startSeconds + layer.durationSeconds - 0.0001
@@ -3892,8 +3898,8 @@ export function EditorPage() {
       setNotice("Open a timeline before exporting a template package");
       return;
     }
-    // Default = ".lumio" ZIP with embedded media (self-contained, no relink warnings on import).
-    // Shift+click = the lightweight bare ".lumio-template.json" (no media, git-friendly).
+    // Default = ".kimera" ZIP with embedded media (self-contained, no relink warnings on import).
+    // Shift+click = the lightweight bare ".kimera-template.json" (no media, git-friendly).
     if (!event?.shiftKey) {
       void exportTimelineTemplatePackageZip();
       return;
@@ -3902,12 +3908,12 @@ export function EditorPage() {
       const pkg = buildTimelineTemplatePackage({
         projectId: project.id,
         title: `${project.title} Template`,
-        description: `Lumio template package exported from ${project.title}.`,
+        description: `Kimera template package exported from ${project.title}.`,
         graph,
         composition,
         assets: resolvedAssets
       });
-      downloadJsonFile(timelineTemplatePackageToJson(pkg), `${safeFileStem(project.title)}.lumio-template.json`);
+      downloadJsonFile(timelineTemplatePackageToJson(pkg), `${safeFileStem(project.title)}.kimera-template.json`);
       const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
       setNotice(`Template package exported${warningText}`);
     } catch (error) {
@@ -3941,12 +3947,12 @@ export function EditorPage() {
       return;
     }
     setBusy("template-package");
-    setNotice("Building .lumio package (embedding media)…");
+    setNotice("Building .kimera package (embedding media)…");
     try {
       const pkg = buildTimelineTemplatePackage({
         projectId: project.id,
         title: `${project.title} Template`,
-        description: `Lumio template package exported from ${project.title}.`,
+        description: `Kimera template package exported from ${project.title}.`,
         graph,
         composition,
         assets: resolvedAssets
@@ -3959,8 +3965,8 @@ export function EditorPage() {
         })
       );
       const embeddedAssets = assetBytesById.filter((a): a is { id: string; fileName: string; bytes: Uint8Array } => a !== null);
-      const zip = await buildLumioPackageZipAsync({ pkg, assets: embeddedAssets });
-      downloadBlobFile(new Blob([zip.slice()], { type: "application/zip" }), `${safeFileStem(project.title)}.lumio`);
+      const zip = await buildKimeraPackageZipAsync({ pkg, assets: embeddedAssets });
+      downloadBlobFile(new Blob([zip.slice()], { type: "application/zip" }), `${safeFileStem(project.title)}.kimera`);
       const skipped = pkg.assets.length - embeddedAssets.length;
       const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
       const skippedText = skipped > 0 ? ` · ${skipped} asset${skipped === 1 ? "" : "s"} could not be embedded and stay relink-by-name` : "";
@@ -3977,15 +3983,15 @@ export function EditorPage() {
       return;
     }
 
-    if (file.name.toLowerCase().endsWith(".lumio")) {
-      await importLumioPackageZip(file);
+    if (file.name.toLowerCase().endsWith(".kimera")) {
+      await importKimeraPackageZip(file);
       return;
     }
-    // Non-".lumio"-named files still get sniffed for the ZIP magic (a renamed/downloaded package),
+    // Non-".kimera"-named files still get sniffed for the ZIP magic (a renamed/downloaded package),
     // matching how the JSON branch below already sniffs content rather than trusting the extension.
     const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-    if (isLumioPackageZipBytes(head)) {
-      await importLumioPackageZip(file);
+    if (isKimeraPackageZipBytes(head)) {
+      await importKimeraPackageZip(file);
       return;
     }
 
@@ -4029,17 +4035,17 @@ export function EditorPage() {
   }
 
   /**
-   * Import a ".lumio" ZIP package: unzip, create a real local `SourceAsset` per embedded asset (via the
+   * Import a ".kimera" ZIP package: unzip, create a real local `SourceAsset` per embedded asset (via the
    * normal `createAsset` — local OPFS-first with an opt-in server fallback, same as any drag-drop upload),
    * then remap `layer.assetId` from the package's original ids to the freshly created ones so the applied
    * composition points at real, present media instead of relink-by-name placeholders.
    */
-  async function importLumioPackageZip(file: File) {
+  async function importKimeraPackageZip(file: File) {
     if (!project) return;
     setBusy("template-package");
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const { pkg, assetBytes } = await parseLumioPackageZipAsync(bytes);
+      const { pkg, assetBytes } = await parseKimeraPackageZipAsync(bytes);
       const idMap = new Map<string, string>();
       const assetWarnings: string[] = [];
       for (const assetRef of pkg.assets) {
@@ -4094,7 +4100,7 @@ export function EditorPage() {
       setEditorCurrentTime(0);
       const warnings = [...applied.warnings, ...assetWarnings];
       if (warnings.length) {
-        console.warn("[templates] .lumio import warnings", warnings);
+        console.warn("[templates] .kimera import warnings", warnings);
       }
       setNotice(
         warnings[0]
@@ -4102,7 +4108,7 @@ export function EditorPage() {
           : `Imported "${pkg.manifest.name}" with ${idMap.size} embedded asset(s)`
       );
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : ".lumio package import failed");
+      setNotice(error instanceof Error ? error.message : ".kimera package import failed");
     } finally {
       setBusy(null);
     }
@@ -4975,14 +4981,19 @@ export function EditorPage() {
   /**
    * Apply (or replace) a junction transition between two touching same-track clips. `spec` carries the
    * kind + params; right-click "default transition" passes a 0.5s cross-dissolve. Drag-from-the-browser
-   * passes the dropped kind. The same handler re-applies on a kind/param change.
+   * passes the dropped kind (+ its plugin `manifest` for uploaded transitions — registered in the same
+   * update so `applyJunctionTransition`'s registry check sees the kind, mirroring applyTransitionToClip).
+   * The same handler re-applies on a kind/param change.
    */
-  function handleAddCrossDissolve(leftId: string, rightId: string, spec?: TransitionSpec) {
+  function handleAddCrossDissolve(leftId: string, rightId: string, spec?: TransitionSpec, manifest?: PluginTransitionManifest) {
     if (!composition) {
       return;
     }
     const applied = spec ?? { kind: "crossDissolve" as const, durationSeconds: DEFAULT_CROSS_DISSOLVE_SECONDS };
-    void updateComposition(applyJunctionTransition(composition, leftId, rightId, applied));
+    void updateComposition(
+      applyJunctionTransition(composition, leftId, rightId, applied),
+      manifest ? { plugins: projectPluginLibraryWithTransitionManifest(manifest) } : {}
+    );
     setNotice("Transition added");
   }
 
@@ -5228,7 +5239,7 @@ export function EditorPage() {
         onProgress: (progress, label) => setLocalExport({ progress, label })
       });
       const ext = format === "webm" ? "webm" : "mp4";
-      await saveExportedFile(blob, `${project.title || "lumio"}.${ext}`);
+      await saveExportedFile(blob, `${project.title || "kimera"}.${ext}`);
       setNotice("Exported on this device");
     } catch (error) {
       if (!(error instanceof Error && error.name === "Aborted")) {
@@ -5246,7 +5257,7 @@ export function EditorPage() {
       return;
     }
     setExportDialogOpen(false);
-    const handoffKey = `lumio.localExportHandoff.${project.id}.${Date.now()}`;
+    const handoffKey = `kimera.localExportHandoff.${project.id}.${Date.now()}`;
     let handoffWritten = false;
     try {
       localStorage.setItem(handoffKey, JSON.stringify({ project, assets: resolvedAssets, createdAt: Date.now() }));
@@ -5265,7 +5276,7 @@ export function EditorPage() {
     const url = `/editor/__local-export?${params.toString()}`;
     const opened = window.open(url, "_blank");
     if (!opened) {
-      setNotice("Popup blocked. Allow popups for Lumio, then export again.");
+      setNotice("Popup blocked. Allow popups for Kimera, then export again.");
       return;
     }
     try {
@@ -5798,6 +5809,7 @@ export function EditorPage() {
     onSplitAtPlayhead: () => {
       void handleSplitAtPlayhead();
     },
+    onNotice: setNotice,
     onRippleDeleteLayer: (layerId: string) => {
       void handleRippleDeleteLayer(layerId);
     },
@@ -5877,6 +5889,28 @@ export function EditorPage() {
         : recordMaskPoints(current, maskId, Math.max(0, currentTimeRef.current - current.startSeconds), points)
     )
   );
+
+  // AI dock props doctrine: AiChatPanel is memo'd, so every callback prop must be identity-stable
+  // (same useStableHandlers pattern as timelineHandlers/inspectorHandlers). Each wrapper dispatches
+  // to the latest closure; the token props stay the only intentional change-signals.
+  const aiAssetUrlById = useMemo(() => new Map(assets.map((asset) => [asset.id, asset.fileUrl])), [assets]);
+  const aiPanelHandlers = useStableHandlers({
+    resolveAssetUrl: (assetId: string) => aiAssetUrlById.get(assetId),
+    // The dock only renders under the `… && composition` guard below, so composition is present
+    // whenever the panel can call this (the assertion mirrors the old inline closure's narrowing).
+    getContext: () => ({ composition: composition!, selection: selectedLayerIds, nowSeconds: currentTimeRef.current }),
+    commitComposition: (after: TimelineComposition) => updateComposition(after),
+    openTool: (step: Parameters<typeof openToolForAi>[0]) => openToolForAi(step),
+    onUndo: () => {
+      void undo();
+    },
+    onClose: () => setAiPanelOpen(false),
+    onOpenGenerate: (prefill?: GenerateStudioPrefill) => {
+      setGenerateStudioPrefill(prefill);
+      setGenerateStudioOpen(true);
+    },
+    onAddAssetToTimeline: (asset: SourceAsset) => void stableAddAssetToTimeline(asset, "auto")
+  });
 
   /**
    * Editor Command Plane (v1) — the dispatcher behind the AI brain's tier-0 command rules
@@ -6041,12 +6075,12 @@ export function EditorPage() {
       className={`editor-page${aiPanelOpen ? " is-ai-open" : ""}${topbarMenuOpen ? " is-topbar-menu-open" : ""}`}
       data-editor-mode={responsiveLayout.mode}
       data-editor-density={responsiveLayout.density}
-      data-lumio-theme={editorTheme}
+      data-kimera-theme={editorTheme}
     >
       <div className="editor-topbar" data-overflow={responsiveLayout.usesTopbarOverflow ? "menu" : "inline"}>
         <div className="topbar-left">
           <Link to="/" className="editor-brand">
-            Lumio
+            Kimera
           </Link>
           <div className="topbar-panel-toggles" role="toolbar" aria-label="Panels">
             <button
@@ -6136,7 +6170,7 @@ export function EditorPage() {
           <input
             ref={templatePackageInputRef}
             type="file"
-            accept="application/json,.json,.lumio-template,.lumio,.edl,.fcpxml,.xml,.prproj"
+            accept="application/json,.json,.kimera-template,.kimera,.edl,.fcpxml,.xml,.prproj"
             className="effect-import-input"
             onChange={(event) => {
               const file = event.currentTarget.files?.[0];
@@ -6182,7 +6216,7 @@ export function EditorPage() {
             disabled={busy === "template-package" || !composition}
             onClick={(event) => exportTimelineTemplatePackage(event)}
             aria-label="Export template package"
-            title="Export .lumio package with embedded media (Shift+click: lightweight .lumio-template.json)"
+            title="Export .kimera package with embedded media (Shift+click: lightweight .kimera-template.json)"
           />
           <Button
             className="icon-only"
@@ -6589,13 +6623,13 @@ export function EditorPage() {
               onDragOver={(event) => {
                 // A source-monitor drag dropped on the program viewer = INSERT at the playhead,
                 // respecting the marked In/Out range + dragged V/A mode.
-                if (event.dataTransfer.types.includes("application/x-lumio-source-drag")) {
+                if (event.dataTransfer.types.includes("application/x-kimera-source-drag")) {
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "copy";
                 }
               }}
               onDrop={(event) => {
-                const raw = event.dataTransfer.getData("application/x-lumio-source-drag");
+                const raw = event.dataTransfer.getData("application/x-kimera-source-drag");
                 if (!raw) return;
                 event.preventDefault();
                 try {
@@ -6684,7 +6718,7 @@ export function EditorPage() {
                 <button
                   className={adaptiveResOn ? "is-active" : ""}
                   type="button"
-                  title="Auto: Lumio adjusts playback resolution while playing — drops it when frames are dropped, recovers when smooth. Pick ¼/½/1 for a fixed resolution instead."
+                  title="Auto: Kimera adjusts playback resolution while playing — drops it when frames are dropped, recovers when smooth. Pick ¼/½/1 for a fixed resolution instead."
                   onClick={() => {
                     if (adaptiveResOn) return; // radio semantics: deselect by picking a manual res
                     setPreviewQuality("balanced");
@@ -7055,18 +7089,15 @@ export function EditorPage() {
             voiceToggleToken={aiVoiceToggleToken}
             onVoiceSessionChange={handleVoiceSessionChange}
             onWakeWordChange={handleWakeWordChange}
-            resolveAssetUrl={(assetId) => assets.find((asset) => asset.id === assetId)?.fileUrl}
-            getContext={() => ({ composition, selection: selectedLayerIds, nowSeconds: currentTimeRef.current })}
-            commitComposition={(after) => updateComposition(after)}
-            openTool={openToolForAi}
-            onUndo={() => undo()}
+            resolveAssetUrl={aiPanelHandlers.resolveAssetUrl}
+            getContext={aiPanelHandlers.getContext}
+            commitComposition={aiPanelHandlers.commitComposition}
+            openTool={aiPanelHandlers.openTool}
+            onUndo={aiPanelHandlers.onUndo}
             runEditorCommand={runEditorCommand}
-            onClose={() => setAiPanelOpen(false)}
-            onOpenGenerate={(prefill) => {
-              setGenerateStudioPrefill(prefill);
-              setGenerateStudioOpen(true);
-            }}
-            onAddAssetToTimeline={(asset) => void stableAddAssetToTimeline(asset, "auto")}
+            onClose={aiPanelHandlers.onClose}
+            onOpenGenerate={aiPanelHandlers.onOpenGenerate}
+            onAddAssetToTimeline={aiPanelHandlers.onAddAssetToTimeline}
             {...(projectId ? { projectId } : {})}
           />
           </Suspense>
@@ -7835,83 +7866,11 @@ function moveLayerAndLinkedCompanions(
   };
 }
 
-const DEFAULT_CROSS_DISSOLVE_SECONDS = 0.5;
-const OVERLAY_TRACK_ID = "track_transitions";
-const DIP_MARKER = `${TRANSITION_MARKER}dip`;
-
-/** A junction transition kind is anything the GPU transition engine registers (excludes edge fades). */
-function isJunctionTransitionKind(kind: TransitionKind): boolean {
-  return getTransition(kind) !== undefined;
-}
-
-function dipLayerId(leftId: string, rightId: string): string {
-  return `${leftId}__dip__${rightId}`;
-}
-
-/** The clip immediately before `rightId` on the same track that touches/overlaps its start, or null. */
-function findLeftNeighbor(composition: TimelineComposition, rightId: string): TimelineLayer | null {
-  const track = composition.tracks.find((item) => item.layers.some((layer) => layer.id === rightId));
-  const right = track?.layers.find((layer) => layer.id === rightId);
-  if (!track || !right) {
-    return null;
-  }
-  const epsilon = 1 / (Math.round(composition.fps) || 30) + 1e-3;
-  let best: TimelineLayer | null = null;
-  for (const layer of track.layers) {
-    if (layer.id === rightId || layer.startSeconds >= right.startSeconds) {
-      continue;
-    }
-    // Touching or overlapping the cut, and the nearest such clip to the left.
-    if (layer.startSeconds + layer.durationSeconds >= right.startSeconds - epsilon) {
-      if (!best || layer.startSeconds > best.startSeconds) {
-        best = layer;
-      }
-    }
-  }
-  return best;
-}
-
-/** The clip immediately after `leftId` on the same track that touches/overlaps its end, or null. */
-function findRightNeighbor(composition: TimelineComposition, leftId: string): TimelineLayer | null {
-  const track = composition.tracks.find((item) => item.layers.some((layer) => layer.id === leftId));
-  const left = track?.layers.find((layer) => layer.id === leftId);
-  if (!track || !left) {
-    return null;
-  }
-  const epsilon = 1 / (Math.round(composition.fps) || 30) + 1e-3;
-  const cut = left.startSeconds + left.durationSeconds;
-  let best: TimelineLayer | null = null;
-  for (const layer of track.layers) {
-    if (layer.id === leftId || layer.startSeconds <= left.startSeconds) {
-      continue;
-    }
-    if (layer.startSeconds <= cut + epsilon) {
-      if (!best || layer.startSeconds < best.startSeconds) {
-        best = layer;
-      }
-    }
-  }
-  return best;
-}
-
-function findTransitionCutForClip(
-  composition: TimelineComposition,
-  clipId: string
-): { left: TimelineLayer; right: TimelineLayer; side: "left" | "right" } | null {
-  const clip = flattenTimelineLayers(composition).find((layer) => layer.id === clipId);
-  if (!clip || clip.type === "audio") {
-    return null;
-  }
-  const right = findRightNeighbor(composition, clipId);
-  if (right) {
-    return { left: clip, right, side: "right" };
-  }
-  const left = findLeftNeighbor(composition, clipId);
-  if (left) {
-    return { left, right: clip, side: "left" };
-  }
-  return null;
-}
+// Junction transition model (isJunctionTransitionKind / findLeftNeighbor / findRightNeighbor /
+// findTransitionCutForClip / applyJunctionTransition / removeJunctionTransition /
+// DEFAULT_CROSS_DISSOLVE_SECONDS) now lives in @kimera-by-aelivion/shared
+// (timeline-actions/actions/transition.ts) so the editor UI and the AI action surface
+// (setJunctionTransition / removeJunctionTransition actions) mutate the cut through one code path.
 
 function describeTransitionCutForClip(composition: TimelineComposition | null | undefined, clipId: string): string {
   if (!composition) {
@@ -7924,109 +7883,6 @@ function describeTransitionCutForClip(composition: TimelineComposition | null | 
   return target.side === "right"
     ? `Right cut: ${target.left.name} -> ${target.right.name}`
     : `Left cut: ${target.left.name} -> ${target.right.name}`;
-}
-
-/**
- * Apply (or replace) a junction transition between two touching same-track clips — the professional,
- * handle-based model: a transition is **pure metadata** on the cut. NOTHING on the timeline moves or
- * changes length. The transition spans `[cut, cut+D]` (cut = incoming start): the incoming clip reveals
- * in (opacity for dissolve, transform keyframes for slide/zoom, or the shader spec for wipe/iris/dip),
- * while the renderers render the OUTGOING clip into that same window from its source handle (clamped to
- * the asset → real handle frames, or a held/repeated frame when the clip has no spare media — exactly
- * like Premiere). The `transitionIn` spec on the incoming clip is the single source of truth; resizing
- * only rewrites its `durationSeconds`, so clip lengths/positions never change.
- */
-function applyJunctionTransition(
-  composition: TimelineComposition,
-  leftId: string,
-  rightId: string,
-  spec: TransitionSpec
-): TimelineComposition {
-  if (!isJunctionTransitionKind(spec.kind)) {
-    return composition;
-  }
-  const track = composition.tracks.find(
-    (item) => item.layers.some((layer) => layer.id === leftId) && item.layers.some((layer) => layer.id === rightId)
-  );
-  const left = track?.layers.find((layer) => layer.id === leftId);
-  const right = track?.layers.find((layer) => layer.id === rightId);
-  if (!track || !left || !right) {
-    return composition;
-  }
-  const frameStep = 1 / (Math.round(composition.fps) || 30);
-  // The window can't exceed either clip (so the reveal + the outgoing post-roll stay within the cut).
-  const duration = Math.max(frameStep, Math.min(spec.durationSeconds, left.durationSeconds, right.durationSeconds));
-  const appliedSpec: TransitionSpec = { ...spec, durationSeconds: duration };
-  return {
-    ...composition,
-    tracks: composition.tracks.map((item) => {
-      if (item.id !== track.id) {
-        return item;
-      }
-      return {
-        ...item,
-        layers: item.layers.map((layer) => {
-          // Outgoing clip is untouched (no extend) — only clear any stale fade-out keyframes.
-          if (layer.id === leftId) {
-            const cleaned = (layer.animations ?? []).filter((kf) => !kf.id.includes(`${TRANSITION_MARKER}out`));
-            return cleaned.length === (layer.animations?.length ?? 0) ? layer : { ...layer, animations: cleaned };
-          }
-          // Incoming clip carries the spec. The unified GPU engine drives the entire reveal from the
-          // spec + time (no per-clip keyframes), so strip any stale `_transition_` keyframes from the
-          // legacy keyframe path so they can't double-apply once the window ends.
-          if (layer.id === rightId) {
-            const cleaned = (layer.animations ?? []).filter((kf) => !kf.id.includes(TRANSITION_MARKER));
-            return { ...layer, transitionIn: appliedSpec, animations: cleaned };
-          }
-          return layer;
-        })
-      };
-    })
-  };
-}
-
-/**
- * Remove a junction transition: clear the incoming clip's spec + reveal keyframes and any stale fade-out
- * on the outgoing clip. Metadata-only — no clip length/position changes. Also cleans up any legacy
- * shape-based dip overlay layer/track from the earlier implementation.
- */
-function removeJunctionTransition(composition: TimelineComposition, leftId: string, rightId: string): TimelineComposition {
-  const track = composition.tracks.find(
-    (item) => item.layers.some((layer) => layer.id === leftId) && item.layers.some((layer) => layer.id === rightId)
-  );
-  if (!track) {
-    return composition;
-  }
-  const legacyDipId = dipLayerId(leftId, rightId);
-  const tracks = composition.tracks
-    .map((item) => {
-      if (item.id === track.id) {
-        return {
-          ...item,
-          layers: item.layers.map((layer) => {
-            if (layer.id === leftId) {
-              return { ...layer, animations: (layer.animations ?? []).filter((kf) => !kf.id.includes(`${TRANSITION_MARKER}out`)) };
-            }
-            if (layer.id === rightId) {
-              return {
-                ...layer,
-                transitionIn: undefined,
-                animations: (layer.animations ?? []).filter((kf) => !kf.id.includes(`${TRANSITION_MARKER}in`))
-              };
-            }
-            return layer;
-          })
-        };
-      }
-      // Legacy cleanup: drop any shape-based dip layer for this pair from the old overlay track.
-      if (item.id === OVERLAY_TRACK_ID) {
-        return { ...item, layers: item.layers.filter((layer) => layer.id !== legacyDipId) };
-      }
-      return item;
-    })
-    .filter((item) => item.id !== OVERLAY_TRACK_ID || item.layers.length > 0);
-
-  return { ...composition, tracks };
 }
 
 function getLayerMaxDuration(layer: TimelineLayer, assets: SourceAsset[], compositionDuration: number) {
@@ -8593,7 +8449,7 @@ type AssetUploadOptions = { source?: AssetSource; folder?: string };
 
 function isTimelineOrTemplateImportFile(file: File): boolean {
   const lower = file.name.toLowerCase();
-  return isExternalTimelineFile(file.name) || lower.endsWith(".json") || lower.endsWith(".lumio-template");
+  return isExternalTimelineFile(file.name) || lower.endsWith(".json") || lower.endsWith(".kimera-template");
 }
 
 function assetKind(asset: SourceAsset): "video" | "image" | "audio" | "graphic" {
@@ -8698,7 +8554,7 @@ function sanitizeAssetFolderName(value: string): string {
 
 function readStoredAssetFolders(): string[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem("lumio_asset_custom_folders") ?? "[]");
+    const parsed = JSON.parse(localStorage.getItem("kimera_asset_custom_folders") ?? "[]");
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch {
     return [];
@@ -8929,14 +8785,15 @@ function StockCardMedia({ result }: { result: StockResult }) {
   if (result.type === "video" && result.previewUrl) {
     return (
       <div className="asset-card-media" style={style}>
-        <video src={result.previewUrl} poster={result.thumbnailUrl} muted loop playsInline preload="none" />
+        <video src={result.previewUrl} {...(result.thumbnailUrl ? { poster: result.thumbnailUrl } : {})} muted loop playsInline preload="none" />
       </div>
     );
   }
 
   return (
     <div className="asset-card-media" style={style}>
-      <img src={result.thumbnailUrl} alt="" loading="lazy" />
+      {/* Some stock providers return an empty thumbnail URL — an <img src=""> re-requests the page. */}
+      {result.thumbnailUrl ? <img src={result.thumbnailUrl} alt="" loading="lazy" /> : null}
     </div>
   );
 }
@@ -9028,19 +8885,19 @@ function AssetBinImpl({
   };
   const [query, setQuery] = useState("");
   const [sourceTab, setSourceTab] = useState<AssetSourceTab>(() =>
-    readStoredChoice("lumio_asset_tab", "local", ["local", "ai", "search", "brand", "used"] as const)
+    readStoredChoice("kimera_asset_tab", "local", ["local", "ai", "search", "brand", "used"] as const)
   );
   const [filter, setFilter] = useState<AssetTypeFilter>(() =>
-    readStoredChoice("lumio_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
+    readStoredChoice("kimera_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
   );
-  const [view, setView] = useState<"tiles" | "list">(() => readStoredChoice("lumio_asset_view", "tiles", ["tiles", "list"] as const));
+  const [view, setView] = useState<"tiles" | "list">(() => readStoredChoice("kimera_asset_view", "tiles", ["tiles", "list"] as const));
   const [size, setSize] = useState<"small" | "medium" | "large">(() =>
-    readStoredChoice("lumio_asset_size", "medium", ["small", "medium", "large"] as const)
+    readStoredChoice("kimera_asset_size", "medium", ["small", "medium", "large"] as const)
   );
   const [activeAssetFolders, setActiveAssetFolders] = useState<Record<FolderAssetTab, string>>(() => ({
-    local: localStorage.getItem("lumio_asset_folder_local") || defaultAssetFolder("local"),
-    brand: localStorage.getItem("lumio_asset_folder_brand") || defaultAssetFolder("brand"),
-    ai: localStorage.getItem("lumio_asset_folder_ai") || defaultAssetFolder("ai")
+    local: localStorage.getItem("kimera_asset_folder_local") || defaultAssetFolder("local"),
+    brand: localStorage.getItem("kimera_asset_folder_brand") || defaultAssetFolder("brand"),
+    ai: localStorage.getItem("kimera_asset_folder_ai") || defaultAssetFolder("ai")
   }));
   const [customAssetFolders, setCustomAssetFolders] = useState<string[]>(readStoredAssetFolders);
   const [menuAssetId, setMenuAssetId] = useState<string | null>(null);
@@ -9051,10 +8908,10 @@ function AssetBinImpl({
   // No provider identity in the UI — `stockType` doubles as the type chip (photos/videos/graphics).
   const [stockType, setStockType] = useState<"image" | "video" | "graphics" | "templates">("image");
   const [stockOrientation, setStockOrientation] = useState<StockOrientation>(() =>
-    readStoredChoice("lumio_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
+    readStoredChoice("kimera_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
   );
   const [stockQuality, setStockQuality] = useState<StockQuality>(() =>
-    readStoredChoice("lumio_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
+    readStoredChoice("kimera_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
   );
   const [stockStatus, setStockStatus] = useState<{ configured: boolean } | null>(null);
   const [stockResults, setStockResults] = useState<StockResult[]>([]);
@@ -9146,22 +9003,22 @@ function AssetBinImpl({
   // Premiere-style list-view sorting (2026-07-04): click a column header to sort, click again to
   // flip direction. Persisted like every other bin preference. Tiles view keeps library order.
   const [sortKey, setSortKey] = useState<"name" | "type" | "duration" | "dimensions" | "used">(() =>
-    readStoredChoice("lumio_asset_sort", "name", ["name", "type", "duration", "dimensions", "used"] as const)
+    readStoredChoice("kimera_asset_sort", "name", ["name", "type", "duration", "dimensions", "used"] as const)
   );
-  const [sortDir, setSortDir] = useState<1 | -1>(() => (localStorage.getItem("lumio_asset_sort_dir") === "-1" ? -1 : 1));
+  const [sortDir, setSortDir] = useState<1 | -1>(() => (localStorage.getItem("kimera_asset_sort_dir") === "-1" ? -1 : 1));
   const toggleSort = (key: typeof sortKey) => {
     if (sortKey === key) {
       setSortDir((dir) => {
         const next = dir === 1 ? -1 : 1;
-        localStorage.setItem("lumio_asset_sort_dir", String(next));
+        localStorage.setItem("kimera_asset_sort_dir", String(next));
         return next as 1 | -1;
       });
       return;
     }
     setSortKey(key);
     setSortDir(1);
-    localStorage.setItem("lumio_asset_sort", key);
-    localStorage.setItem("lumio_asset_sort_dir", "1");
+    localStorage.setItem("kimera_asset_sort", key);
+    localStorage.setItem("kimera_asset_sort_dir", "1");
   };
   const compareAssets = (a: SourceAsset, b: SourceAsset): number => {
     const nameOf = (asset: SourceAsset) => (asset.originalName ?? asset.fileName).toLowerCase();
@@ -9193,14 +9050,14 @@ function AssetBinImpl({
   // Inline bin tree (list view): expanded bins persist like every other bin preference.
   const [expandedBins, setExpandedBins] = useState<string[]>(() => {
     try {
-      const raw = JSON.parse(localStorage.getItem("lumio_asset_expanded_bins") || "[]");
+      const raw = JSON.parse(localStorage.getItem("kimera_asset_expanded_bins") || "[]");
       return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
     } catch {
       return [];
     }
   });
   useEffect(() => {
-    localStorage.setItem("lumio_asset_expanded_bins", JSON.stringify(expandedBins));
+    localStorage.setItem("kimera_asset_expanded_bins", JSON.stringify(expandedBins));
   }, [expandedBins]);
   const toggleBinExpanded = (path: string) =>
     setExpandedBins((current) => (current.includes(path) ? current.filter((entry) => entry !== path) : [...current, path]));
@@ -9283,37 +9140,37 @@ function AssetBinImpl({
   );
 
   useEffect(() => {
-    localStorage.setItem("lumio_asset_tab", sourceTab);
+    localStorage.setItem("kimera_asset_tab", sourceTab);
   }, [sourceTab]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_asset_folder_local", activeAssetFolders.local);
-    localStorage.setItem("lumio_asset_folder_brand", activeAssetFolders.brand);
-    localStorage.setItem("lumio_asset_folder_ai", activeAssetFolders.ai);
+    localStorage.setItem("kimera_asset_folder_local", activeAssetFolders.local);
+    localStorage.setItem("kimera_asset_folder_brand", activeAssetFolders.brand);
+    localStorage.setItem("kimera_asset_folder_ai", activeAssetFolders.ai);
   }, [activeAssetFolders]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_asset_custom_folders", JSON.stringify(customAssetFolders));
+    localStorage.setItem("kimera_asset_custom_folders", JSON.stringify(customAssetFolders));
   }, [customAssetFolders]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_asset_filter", filter);
+    localStorage.setItem("kimera_asset_filter", filter);
   }, [filter]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_asset_view", view);
+    localStorage.setItem("kimera_asset_view", view);
   }, [view]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_asset_size", size);
+    localStorage.setItem("kimera_asset_size", size);
   }, [size]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_stock_orientation", stockOrientation);
+    localStorage.setItem("kimera_stock_orientation", stockOrientation);
   }, [stockOrientation]);
 
   useEffect(() => {
-    localStorage.setItem("lumio_stock_quality", stockQuality);
+    localStorage.setItem("kimera_stock_quality", stockQuality);
   }, [stockQuality]);
 
   // Close the per-card "More" menu when clicking elsewhere or pressing Escape.
@@ -9517,7 +9374,7 @@ function AssetBinImpl({
   const uploadSource: AssetUploadOptions | undefined = folderTab ? { source: folderTab, folder: activeFolder || folderRoot } : undefined;
   const showUpload = sourceTab === "local" || sourceTab === "brand";
   const canDropFiles = showUpload;
-  const uploadAccept = onImportFile ? "video/*,image/*,audio/*,.json,.lumio-template,.edl,.fcpxml,.xml,.prproj" : "video/*,image/*,audio/*";
+  const uploadAccept = onImportFile ? "video/*,image/*,audio/*,.json,.kimera-template,.edl,.fcpxml,.xml,.prproj" : "video/*,image/*,audio/*";
   const showDropPrompt = showUpload && filteredAssets.length === 0;
 
   function selectAssetFolder(folder: string) {
@@ -9537,7 +9394,7 @@ function AssetBinImpl({
   }
 
   function assetByDragEvent(event: ReactDragEvent<HTMLElement>): SourceAsset | null {
-    const assetId = event.dataTransfer.getData("application/x-lumio-asset");
+    const assetId = event.dataTransfer.getData("application/x-kimera-asset");
     return assetId ? assets.find((asset) => asset.id === assetId) ?? null : null;
   }
 
@@ -9548,13 +9405,13 @@ function AssetBinImpl({
   function handleAssetFolderDragOver(event: ReactDragEvent<HTMLElement>, folder: string) {
     if (!folderTab) return;
     const types = event.dataTransfer.types;
-    if (!types.includes("application/x-lumio-asset") && !types.includes("application/x-lumio-asset-folder")) return;
+    if (!types.includes("application/x-kimera-asset") && !types.includes("application/x-kimera-asset-folder")) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
   }
 
   function handleAssetFolderDrop(event: ReactDragEvent<HTMLElement>, folder: string) {
-    const draggedFolder = event.dataTransfer.getData("application/x-lumio-asset-folder");
+    const draggedFolder = event.dataTransfer.getData("application/x-kimera-asset-folder");
     if (draggedFolder) {
       event.preventDefault();
       event.stopPropagation();
@@ -10170,7 +10027,7 @@ function AssetBinImpl({
                           if (event.key === "Enter") toggleBinExpanded(folder.path);
                         }}
                         onDragStart={(event) => {
-                          event.dataTransfer.setData("application/x-lumio-asset-folder", folder.path);
+                          event.dataTransfer.setData("application/x-kimera-asset-folder", folder.path);
                           event.dataTransfer.effectAllowed = "move";
                         }}
                         onDragOver={(event) => handleAssetFolderDragOver(event, folder.path)}
@@ -10239,7 +10096,7 @@ function AssetBinImpl({
                         setMenuAssetId(asset.id);
                       }}
                       onDragStart={(event) => {
-                        event.dataTransfer.setData("application/x-lumio-asset", asset.id);
+                        event.dataTransfer.setData("application/x-kimera-asset", asset.id);
                         event.dataTransfer.effectAllowed = "copyMove";
                       }}
                       onKeyDown={(event) => {
@@ -10367,7 +10224,7 @@ function AssetBinImpl({
                   draggable
                   onClick={() => selectAssetFolder(folder.path)}
                   onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-lumio-asset-folder", folder.path);
+                    event.dataTransfer.setData("application/x-kimera-asset-folder", folder.path);
                     event.dataTransfer.effectAllowed = "move";
                   }}
                   onDragOver={(event) => handleAssetFolderDragOver(event, folder.path)}
@@ -10423,7 +10280,7 @@ function AssetBinImpl({
                     setMenuAssetId(asset.id);
                   }}
                   onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-lumio-asset", asset.id);
+                    event.dataTransfer.setData("application/x-kimera-asset", asset.id);
                     event.dataTransfer.effectAllowed = "copyMove";
                   }}
                   onKeyDown={(event) => {

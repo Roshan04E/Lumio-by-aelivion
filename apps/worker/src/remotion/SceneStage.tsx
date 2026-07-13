@@ -10,13 +10,14 @@ import {
   useVideoConfig,
   type OnVideoFrame
 } from "remotion";
-import type { RenderManifest, RenderManifestLayer } from "@lumio-by-aelivion/render-templates";
+import type { RenderManifest, RenderManifestLayer } from "@kimera-by-aelivion/render-templates";
 import {
   MediaWebGLRenderer,
   SceneCompositor,
   SceneMaskMatteCache,
   SceneTextRasterizer,
   buildSceneDraws,
+  colorPipelineCacheKey,
   findTransitionPairs,
   getActiveTransition,
   getCompositionColorPipeline,
@@ -35,7 +36,7 @@ import {
   type ScenePreviewTransition,
   type TimelineLayer,
   type TransitionSpec
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 /**
  * Method-3 Phase 6.4 — Remotion SceneStage (default cloud compositor; see `getRemotionCompositor`).
@@ -176,7 +177,7 @@ class SceneController {
     const renderer = this.mediaRendererFor(layer.id);
     const pipeline = getCompositionColorPipeline(layer as unknown as TimelineLayer, { currentTimeSeconds: t });
     const mediaEffects = getCompositionMediaEffects(layer as unknown as TimelineLayer, { currentTimeSeconds: t });
-    const pipelineKey = JSON.stringify(pipeline);
+    const pipelineKey = colorPipelineCacheKey(pipeline);
     if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
       renderer.setPipeline(pipeline);
       this.mediaPipelineKeys.set(layer.id, pipelineKey);

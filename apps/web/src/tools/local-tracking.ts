@@ -1,5 +1,5 @@
-import type { TrackingPathArtifactData, TrackingPoint } from "@lumio-by-aelivion/shared";
-import { smoothTrackingPoints } from "@lumio-by-aelivion/shared";
+import type { TrackingPathArtifactData, TrackingPoint } from "@kimera-by-aelivion/shared";
+import { smoothTrackingPoints } from "@kimera-by-aelivion/shared";
 import { detectInitialSubjectBox, loadVideoElement, sampleFrameTimes, seekVideo } from "./local-segmentation";
 import { downsampleGrayHalf, extractPatch, nccToConfidence, prepareTemplate, searchNcc, type GrayImage } from "./tracking-core";
 
@@ -475,12 +475,17 @@ function createTrackingWorker(): TrackingWorkerHandle | undefined {
           const requestId = nextRequestId;
           nextRequestId += 1;
           pending = { requestId, resolve, reject };
+          // Transfer a COPY of the frame's grayscale (≈8MB at 1080p): the transfer list removes the
+          // per-frame structured-clone on the receiving side, and copying first keeps the caller's
+          // buffer intact for the trackOneInline fallback that reads `image` after a worker failure.
+          // Templates persist across frames on the main thread — they stay structured-cloned.
+          const grayCopy = input.currentGray.slice();
           worker.postMessage({
             type: "track",
             requestId,
             width: input.width,
             height: input.height,
-            currentGray: input.currentGray,
+            currentGray: grayCopy,
             targets: input.targets.map((target) => ({
               id: target.id,
               templateFull: target.templateFull,
@@ -493,7 +498,7 @@ function createTrackingWorker(): TrackingWorkerHandle | undefined {
               searchRadiusHalf: target.searchRadiusHalf,
               usePyramid: target.usePyramid
             }))
-          });
+          }, [grayCopy.buffer]);
         }),
       terminate: () => worker.terminate()
     };

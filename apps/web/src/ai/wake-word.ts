@@ -1,10 +1,10 @@
 /**
- * "Hey Lumio" wake-word matcher — pure and eval-tested (router-eval.test.ts).
+ * "Hey Kimera" wake-word matcher — pure and eval-tested (router-eval.test.ts).
  *
- * Web Speech never hears the brand name cleanly: real transcripts of "hey lumio" came back as
- * "hello Mia", "hello miu", "hello Lumia", "hey Lumia". So matching is three-layered:
- *   1. a builtin variant set (every observed/adjacent mishearing),
- *   2. edit-distance ≤ 2 from "lumio" for l-initial tokens (catches new mishearings),
+ * Web Speech never hears the brand name cleanly: "hey kimera" (spoken like "chimera") comes back
+ * as "hey chimera", "hey camera", "hello kimira", "hey kimmer". So matching is three-layered:
+ *   1. a builtin variant set (every observed/adjacent mishearing, incl. the "chimera"/"camera" homophones),
+ *   2. edit-distance ≤ 2 from "kimera" for k-/c-initial tokens (catches new mishearings),
  *   3. LEARNED phrases — exact transcripts the user confirmed via the "were you calling me?"
  *      card, persisted per browser. This is how the user trains the ear to THEIR voice/accent.
  *
@@ -14,27 +14,28 @@
 
 const GREETINGS = new Set(["hey", "heya", "hello", "hi", "hiya", "hay", "aye", "okay", "ok", "yo"]);
 
-/** Observed mishearings + close neighbours. Short risky ones (mia/miu/mio) are safe here
- * because the greeting requirement already anchors the phrase shape. */
+/** Observed mishearings + close neighbours. The c-initial homophones (chimera/camera/cimera) are
+ * safe here because the greeting requirement already anchors the phrase shape — only the distinctive
+ * k-initial tokens are allowed to wake WITHOUT a greeting (isStrongNameToken). */
 const NAME_VARIANTS = new Set([
-  "lumio",
-  "lumia",
-  "loomio",
-  "lumeo",
-  "lumino",
-  "lume",
-  "lumi",
-  "luma",
-  "lumo",
-  "mia",
-  "miu",
-  "mio",
-  "illumio"
+  "kimera",
+  "kimira",
+  "kymera",
+  "kimmera",
+  "kimerra",
+  "kemera",
+  "khimera",
+  "kimara",
+  "kimero",
+  "kimmer",
+  "chimera",
+  "cimera",
+  "camera"
 ]);
 
 export interface WakeWordMatch {
   matched: boolean;
-  /** Trailing words after the name — "hey lumio blur clip 2" → "blur clip 2". */
+  /** Trailing words after the name — "hey kimera blur clip 2" → "blur clip 2". */
   command?: string;
 }
 
@@ -67,13 +68,13 @@ function isNameToken(token: string): boolean {
   if (NAME_VARIANTS.has(token)) {
     return true;
   }
-  return token.length >= 4 && token.startsWith("l") && levenshtein(token, "lumio") <= 2;
+  return token.length >= 4 && (token.startsWith("k") || token.startsWith("c")) && levenshtein(token, "kimera") <= 2;
 }
 
-/** l-initial variants are distinctive enough to wake WITHOUT a greeting ("Lumio, pause");
- * the short mishearings (mia/miu/mio) stay greeting-anchored. */
+/** k-initial variants are distinctive enough to wake WITHOUT a greeting ("Kimera, pause");
+ * the c-initial homophones (chimera/camera) stay greeting-anchored to avoid ambient false wakes. */
 function isStrongNameToken(token: string): boolean {
-  return token.startsWith("l") && token.length >= 4 && isNameToken(token);
+  return token.startsWith("k") && token.length >= 4 && isNameToken(token);
 }
 
 /**
@@ -94,7 +95,7 @@ export function matchWakeWord(transcript: string, learnedPhrases: readonly strin
   }
 
   const tokens = normalized.split(" ");
-  // Name-first wake ("Lumio, pause") — no greeting needed for the distinctive l-variants.
+  // Name-first wake ("Kimera, pause") — no greeting needed for the distinctive k-variants.
   if (isStrongNameToken(tokens[0]!)) {
     const command = tokens.slice(1).join(" ").trim();
     return command ? { matched: true, command } : { matched: true };
@@ -109,7 +110,7 @@ export function matchWakeWord(transcript: string, learnedPhrases: readonly strin
       const command = tokens.slice(i + 2).join(" ").trim();
       return command ? { matched: true, command } : { matched: true };
     }
-    // Split name ("lume o", "lu mio") — join the next two tokens.
+    // Split name ("kim era", "ki mera") — join the next two tokens.
     const pair = tokens[i + 2] ? next + tokens[i + 2]! : "";
     if (pair && isNameToken(pair)) {
       const command = tokens.slice(i + 3).join(" ").trim();
@@ -130,10 +131,10 @@ export function looksLikeWakeAttempt(transcript: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Learned phrases — the user's confirmed mishearings ("hello mia" → wakes)
+// Learned phrases — the user's confirmed mishearings ("hello camera" → wakes)
 // ---------------------------------------------------------------------------
 
-const WAKE_PHRASES_KEY = "lumio.voice.wakephrases.v1";
+const WAKE_PHRASES_KEY = "kimera.voice.wakephrases.v1";
 const MAX_WAKE_PHRASES = 12;
 
 let memoryWakePhrases: string[] = [];
@@ -180,7 +181,7 @@ export function clearWakePhrases(): void {
 // (which must keep the AI dock mounted for standby even with the chat closed)
 // ---------------------------------------------------------------------------
 
-const WAKE_ENABLED_KEY = "lumio.voice.wakeword.v1";
+const WAKE_ENABLED_KEY = "kimera.voice.wakeword.v1";
 
 export function loadWakeWordEnabled(): boolean {
   try {

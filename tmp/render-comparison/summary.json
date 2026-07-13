@@ -338,6 +338,48 @@
       "diffPixels": 0,
       "totalPixels": 2073600,
       "diffRatio": 0
+    },
+    {
+      "fixture": "vignette",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-vignette.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-vignette.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-vignette.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "grain",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-grain.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-grain.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-grain.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 14,
+      "totalPixels": 2073600,
+      "diffRatio": 0.000006751543209876544
+    },
+    {
+      "fixture": "chroma-key",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-chroma-key.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-chroma-key.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-chroma-key.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 14,
+      "totalPixels": 2073600,
+      "diffRatio": 0.000006751543209876544
     }
   ]
 }

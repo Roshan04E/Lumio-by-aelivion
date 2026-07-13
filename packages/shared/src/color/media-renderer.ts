@@ -158,13 +158,21 @@ export class MediaWebGLRenderer {
   private readonly uHasVignette: WebGLUniformLocation | null;
   private readonly uVigAmount: WebGLUniformLocation | null;
   private readonly uVigSize: WebGLUniformLocation | null;
+  private readonly uVigFeather: WebGLUniformLocation | null;
+  private readonly uVigRound: WebGLUniformLocation | null;
+  private readonly uVigHighlights: WebGLUniformLocation | null;
+  private readonly uAspect: WebGLUniformLocation | null;
   private readonly uHasGrain: WebGLUniformLocation | null;
   private readonly uGrainAmount: WebGLUniformLocation | null;
+  private readonly uGrainSize: WebGLUniformLocation | null;
   private readonly uTime: WebGLUniformLocation | null;
   private readonly uHasChroma: WebGLUniformLocation | null;
   private readonly uChromaColor: WebGLUniformLocation | null;
   private readonly uChromaTol: WebGLUniformLocation | null;
   private readonly uChromaSoft: WebGLUniformLocation | null;
+  private readonly uChromaDespill: WebGLUniformLocation | null;
+  private readonly uChromaChoke: WebGLUniformLocation | null;
+  private readonly uChromaMatteView: WebGLUniformLocation | null;
   private readonly uTransitionKind: WebGLUniformLocation | null;
   private readonly uTransitionProgress: WebGLUniformLocation | null;
   private readonly uTransitionDir: WebGLUniformLocation | null;
@@ -238,13 +246,21 @@ export class MediaWebGLRenderer {
     this.uHasVignette = gl.getUniformLocation(program, "u_hasVignette");
     this.uVigAmount = gl.getUniformLocation(program, "u_vigAmount");
     this.uVigSize = gl.getUniformLocation(program, "u_vigSize");
+    this.uVigFeather = gl.getUniformLocation(program, "u_vigFeather");
+    this.uVigRound = gl.getUniformLocation(program, "u_vigRound");
+    this.uVigHighlights = gl.getUniformLocation(program, "u_vigHighlights");
+    this.uAspect = gl.getUniformLocation(program, "u_aspect");
     this.uHasGrain = gl.getUniformLocation(program, "u_hasGrain");
     this.uGrainAmount = gl.getUniformLocation(program, "u_grainAmount");
+    this.uGrainSize = gl.getUniformLocation(program, "u_grainSize");
     this.uTime = gl.getUniformLocation(program, "u_time");
     this.uHasChroma = gl.getUniformLocation(program, "u_hasChroma");
     this.uChromaColor = gl.getUniformLocation(program, "u_chromaColor");
     this.uChromaTol = gl.getUniformLocation(program, "u_chromaTol");
     this.uChromaSoft = gl.getUniformLocation(program, "u_chromaSoft");
+    this.uChromaDespill = gl.getUniformLocation(program, "u_chromaDespill");
+    this.uChromaChoke = gl.getUniformLocation(program, "u_chromaChoke");
+    this.uChromaMatteView = gl.getUniformLocation(program, "u_chromaMatteView");
     this.uTransitionKind = gl.getUniformLocation(program, "u_transitionKind");
     this.uTransitionProgress = gl.getUniformLocation(program, "u_transitionProgress");
     this.uTransitionDir = gl.getUniformLocation(program, "u_transitionDir");
@@ -485,26 +501,39 @@ export class MediaWebGLRenderer {
     gl.uniform1f(this.uOpacity, Math.max(0, Math.min(1, opacity)));
 
     // Pro stylize effects — single-pass, branch-gated so identity layers pay nothing.
+    // Every uniform is written on EVERY draw (identity values when absent): the program can be
+    // shared across many layers on one context, so stale uniforms must never leak between draws.
     const vignette = mediaEffects?.vignette ?? null;
     gl.uniform1i(this.uHasVignette, vignette ? 1 : 0);
     gl.uniform1f(this.uVigAmount, vignette ? Math.max(0, Math.min(1, vignette.amount)) : 0);
     gl.uniform1f(this.uVigSize, vignette ? Math.max(0, Math.min(1, vignette.size)) : 0);
+    gl.uniform1f(this.uVigFeather, vignette ? Math.max(0, Math.min(1, vignette.feather)) : 1);
+    gl.uniform1f(this.uVigRound, vignette ? Math.max(0, Math.min(1, vignette.roundness)) : 0);
+    gl.uniform1f(this.uVigHighlights, vignette ? Math.max(0, Math.min(1, vignette.highlights)) : 0);
+    gl.uniform1f(this.uAspect, h > 0 ? w / h : 1);
 
     const grain = mediaEffects?.grain ?? null;
     gl.uniform1i(this.uHasGrain, grain ? 1 : 0);
     gl.uniform1f(this.uGrainAmount, grain ? Math.max(0, Math.min(1, grain.amount)) : 0);
+    gl.uniform1f(this.uGrainSize, grain ? Math.max(0.25, Math.min(4, grain.size)) : 1);
     gl.uniform1f(this.uTime, mediaEffects?.timeSeconds ?? 0);
 
     const chroma = mediaEffects?.chromaKey ?? null;
     gl.uniform1i(this.uHasChroma, chroma ? 1 : 0);
     if (chroma) {
       gl.uniform3f(this.uChromaColor, chroma.color[0], chroma.color[1], chroma.color[2]);
-      gl.uniform1f(this.uChromaTol, Math.max(0, Math.min(1, chroma.tolerance)));
+      gl.uniform1f(this.uChromaTol, Math.max(0, Math.min(2, chroma.tolerance)));
       gl.uniform1f(this.uChromaSoft, Math.max(0, Math.min(1, chroma.softness)));
+      gl.uniform1f(this.uChromaDespill, Math.max(0, Math.min(1, chroma.despill)));
+      gl.uniform1f(this.uChromaChoke, Math.max(0, Math.min(0.99, chroma.choke)));
+      gl.uniform1i(this.uChromaMatteView, chroma.matteView ? 1 : 0);
     } else {
       gl.uniform3f(this.uChromaColor, 0, 0, 0);
       gl.uniform1f(this.uChromaTol, 0);
       gl.uniform1f(this.uChromaSoft, 0);
+      gl.uniform1f(this.uChromaDespill, 0);
+      gl.uniform1f(this.uChromaChoke, 0);
+      gl.uniform1i(this.uChromaMatteView, 0);
     }
 
     // Transition reveal (wipe / iris / dip) on the incoming clip.

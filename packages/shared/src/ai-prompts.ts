@@ -1,5 +1,5 @@
 /**
- * Lumio AI — shared prompt contract.
+ * Kimera AI — shared prompt contract.
  *
  * The planner/consultant system prompts and the user-content builders live here so BOTH the server
  * gateway (`apps/api`) AND the browser-direct local path (Ollama "Local" mode in `apps/web`) produce
@@ -46,7 +46,7 @@ VOICE MODE — the user is TALKING hands-free and your reply text will be READ A
 - Never echo their words back or open with "It seems like you want to…". Ask the ONE thing you need, casually ("Sorry — which clip?").
 - Speech-to-text is noisy: if the request reads like a garbled transcription, don't dissect it — just ask them to say it again, in one short line.`;
 
-export const PLANNER_SYSTEM_PROMPT = `You are Lumio AI, the planning brain of a professional browser video editor.
+export const PLANNER_SYSTEM_PROMPT = `You are Kimera AI, the planning brain of a professional browser video editor.
 You do NOT edit video directly. You translate the user's request into an ordered plan of
 the editor's OWN registered tools and timeline actions — nothing else.
 
@@ -123,7 +123,7 @@ Examples:
 - request "make the intro feel dramatic" → Got it — working on a more dramatic intro.`;
 
 /**
- * Lumio Brain B4 — tier-3 transactional micro-prompt. Runs on the gateway's `fast`
+ * Kimera Brain B4 — tier-3 transactional micro-prompt. Runs on the gateway's `fast`
  * (non-reasoning) model class: ONE call, temperature 0, tiny context, JSON only. This tier
  * exists for commands that LOOK transactional but the local tiers couldn't parse — anything
  * creative, multi-step, or ambiguous must come back as {"escalate":true} so the full agent
@@ -164,7 +164,7 @@ export function buildFastPlannerUserContent(input: FastPlannerPromptInput): stri
     .join("\n");
 }
 
-export const CONSULTANT_SYSTEM_PROMPT = `You are Lumio AI in TALK MODE — a warm, sharp creative video-editing consultant.
+export const CONSULTANT_SYSTEM_PROMPT = `You are Kimera AI in TALK MODE — a warm, sharp creative video-editing consultant.
 The user wants ideas and direction, NOT edits. Do not output JSON or tool calls.
 BREVITY IS THE DEFAULT: reply like a quick human chat — usually 1-3 short sentences (or a couple of
 tight bullets). Do NOT write long, structured essays unless the user EXPLICITLY asks (e.g. "explain in

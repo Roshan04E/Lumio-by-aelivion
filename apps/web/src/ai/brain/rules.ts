@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — tier-1 Command Compiler (B2). A grammar, not a guesser: verb family + target +
+ * Kimera Brain — tier-1 Command Compiler (B2). A grammar, not a guesser: verb family + target +
  * params → registry action(s), compiled locally in <50ms for zero tokens.
  *
  * PRECISION CONTRACT (same as tier 0, see router.ts): a rule fires ONLY when the parse is
@@ -13,8 +13,8 @@
  * so a rule THIS user keeps rejecting stops firing for them (checked in router.ts).
  */
 
-import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
-import { layerIdForOrdinal, resolveTargetLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
+import { layerIdForOrdinal, resolveTargetLayer } from "@kimera-by-aelivion/shared";
 import { extractColor } from "../planner/entities";
 
 export interface RuleStepInput {

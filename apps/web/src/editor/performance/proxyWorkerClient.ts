@@ -13,7 +13,7 @@
  * so a proxy is a faithful low-bitrate stand-in for live preview.
  */
 
-import { clipCompositionToWorkArea, isGlBudgetOverTarget, isGlGovernorEnabled, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@lumio-by-aelivion/shared";
+import { clipCompositionToWorkArea, isGlBudgetOverTarget, isGlGovernorEnabled, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@kimera-by-aelivion/shared";
 import { Aborted, buildSourceUrlMap, runExportCore, type ExportCoreInput } from "../../export/export-core";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "../../export/export-worker-protocol";
 

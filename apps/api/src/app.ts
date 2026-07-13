@@ -36,7 +36,7 @@ export function createApp() {
   app.use("/storage", express.static(storagePaths.root));
 
   app.get("/health", (_req, res) => {
-    res.json({ success: true, message: "Lumio API is healthy", data: { uptime: process.uptime() } });
+    res.json({ success: true, message: "Kimera API is healthy", data: { uptime: process.uptime() } });
   });
 
   app.use("/api/auth", authRouter);

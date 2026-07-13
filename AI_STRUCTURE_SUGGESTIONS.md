@@ -276,7 +276,7 @@ Conversation AI: answer questions and explain capabilities.
 
 This is much faster than routing every request through a single large model.
 
-What I would build for Lumio
+What I would build for Kimera
 User
  │
  ▼
@@ -316,7 +316,7 @@ If every user message goes to GPT-5, Claude, or Gemini with the full timeline, y
 
 The solution is to make the LLM the last resort, not the first.
 
-Here's the architecture I'd use for Lumio.
+Here's the architecture I'd use for Kimera.
 
 Layer 0: Editor Intelligence (0 tokens)
 
@@ -470,7 +470,7 @@ Only this JSON goes to the AI.
 
 Layer 6: Event Bus
 
-Everything happening inside Lumio becomes an event.
+Everything happening inside Kimera becomes an event.
 
 Clip Added
 
@@ -808,7 +808,7 @@ In fact, I think this is the real competitive advantage. Most companies think:
 
 User → LLM → Tool
 
-I think Lumio should become:
+I think Kimera should become:
 
 User → Editor Intelligence → Tool
 
@@ -1296,7 +1296,7 @@ Knowledge Graph
 
 100 Micro Models
 
-That becomes Lumio's brain.
+That becomes Kimera's brain.
 
 The LLM only fills the gaps.
 
@@ -1340,7 +1340,7 @@ or another domain-specific predictor.
 
 That knowledge is yours. It's fast, explainable, deterministic, and cheap to run. Competitors can switch from one LLM provider to another in a day, but they can't easily replicate years of accumulated editing knowledge encoded into a specialized engine.
 
-If Lumio succeeds, I believe users won't stay because it uses a particular LLM. They'll stay because Lumio itself has become an expert video editor. The LLM is just how they communicate with that expertise.
+If Kimera succeeds, I believe users won't stay because it uses a particular LLM. They'll stay because Kimera itself has become an expert video editor. The LLM is just how they communicate with that expertise.
 
 so you are ssaying editor intelligence (not llm) can learn and grow.. how .. explain
 
@@ -1572,7 +1572,7 @@ Warm Shadows
 
 After 100,000 projects
 
-Lumio discovers
+Kimera discovers
 
 "Cinematic"
 
@@ -1908,7 +1908,7 @@ The **knowledge base**.
 
 Think of it like this:
 
-                Lumio Brain
+                Kimera Brain
 
     ┌───────────────────────────┐
     │ Rules                     │
@@ -1936,7 +1936,7 @@ Think of it like this:
 
 Don't let users teach **the AI model**.
 
-Let them teach **Lumio**.
+Let them teach **Kimera**.
 
 Every accepted suggestion, every undo, every manual adjustment, every exported project becomes anonymous feedback that updates the editor's knowledge: recipes, confidence scores, style patterns, tool sequences, and recommendations.
 

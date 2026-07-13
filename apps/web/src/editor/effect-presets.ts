@@ -1,17 +1,19 @@
 /**
  * Saved effect presets ("looks") — Premiere-style Save Preset for a clip's effect stack.
  *
- * A preset stores a {@link LayerAttributes} snapshot with `transform` deliberately stripped:
- * applying a look must never move/scale the target clip (that's what paste-attributes ⌃⌥C/⌃⌥V is
- * for). Application goes through the same shared `applyAttributesToLayer` as paste, so effect ids
- * are re-minted per target layer and editing one applied preset never aliases another.
+ * A preset stores a {@link LayerAttributes} snapshot with `transform` (and transform keyframes)
+ * deliberately stripped: applying a look must never move/scale the target clip (that's what
+ * paste-attributes ⌃⌥C/⌃⌥V is for). Effect-param keyframes DO travel with the preset. Application
+ * goes through the same shared `applyAttributesToLayer` as paste, so effect ids are re-minted per
+ * target layer (keyframes remapped with them) and editing one applied preset never aliases another.
+ * Presets saved before keyframe support (no `animations` field) apply exactly as before.
  *
- * Persistence: localStorage `lumio.effectPresets` (device-local, like the rest of the editor's
+ * Persistence: localStorage `kimera.effectPresets` (device-local, like the rest of the editor's
  * lightweight prefs). Corrupt/legacy payloads are dropped silently — presets are convenience data.
  */
 
-import type { LayerAttributes, TimelineLayer } from "@lumio-by-aelivion/shared";
-import { snapshotLayerAttributes } from "@lumio-by-aelivion/shared";
+import type { LayerAttributes, TimelineLayer } from "@kimera-by-aelivion/shared";
+import { snapshotLayerAttributes } from "@kimera-by-aelivion/shared";
 
 export interface EffectPreset {
   id: string;
@@ -20,7 +22,7 @@ export interface EffectPreset {
   attributes: LayerAttributes;
 }
 
-const STORAGE_KEY = "lumio.effectPresets";
+const STORAGE_KEY = "kimera.effectPresets";
 
 function readAll(): EffectPreset[] {
   if (typeof window === "undefined") return [];
@@ -59,10 +61,11 @@ export function listEffectPresets(): EffectPreset[] {
   return cache;
 }
 
-/** Save the layer's current effect stack (+fit, NOT transform) under `name`. Returns the preset. */
+/** Save the layer's current effect stack (+fit +effect keyframes, NOT transform) under `name`. Returns the preset. */
 export function saveEffectPreset(name: string, layer: TimelineLayer): EffectPreset {
   const attributes = snapshotLayerAttributes(layer);
   attributes.transform = undefined; // looks must not reposition targets
+  attributes.animations = attributes.animations?.filter((keyframe) => keyframe.target.scope === "effect");
   const preset: EffectPreset = {
     id: `preset_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
     name: name.trim() || "Untitled preset",

@@ -7,7 +7,7 @@ import {
   type CapabilityConstraints,
   type GenerationPref,
   type ResolveTask
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { serializeAsset } from "../lib/asset-serializer";

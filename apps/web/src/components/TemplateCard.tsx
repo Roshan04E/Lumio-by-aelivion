@@ -1,5 +1,5 @@
 import { ArrowRight, Clock3, Layers3 } from "lucide-react";
-import type { TemplateDefinition } from "@lumio-by-aelivion/shared";
+import type { TemplateDefinition } from "@kimera-by-aelivion/shared";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { CreditBadge } from "./CreditBadge";
@@ -7,7 +7,7 @@ import { CreditBadge } from "./CreditBadge";
 export function TemplateCard({ template, onUse }: { template: TemplateDefinition; onUse: () => void }) {
   return (
     <Card className="template-card">
-      <div className="template-poster" style={{ backgroundImage: "url('/assets/lumio-by-aelivion-hero.png')" }}>
+      <div className="template-poster" style={{ backgroundImage: "url('/assets/kimera-by-aelivion-hero.png')" }}>
         <span>{template.category}</span>
       </div>
       <div className="template-card-body">

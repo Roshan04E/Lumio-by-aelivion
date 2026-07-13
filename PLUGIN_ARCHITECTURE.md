@@ -1,21 +1,21 @@
-# Lumio Plugin Architecture
+# Kimera Plugin Architecture
 
 This tracker turns effects, looks, transitions, and full timeline templates into portable packages instead of hardcoded editor features. The north star is simple: the editor should not care whether an item came from built-in code, the backend database, an imported local package, or a future creator marketplace.
 
 ## Principles
 
-- **Canonical first.** Lumio uses its own versioned manifest format internally. Other formats are imported through adapters into that format.
-- **Adapters at the edge.** Premiere/FCPXML/LUT/GLSL importers should translate into Lumio manifests, not leak foreign project assumptions into the renderer.
+- **Canonical first.** Kimera uses its own versioned manifest format internally. Other formats are imported through adapters into that format.
+- **Adapters at the edge.** Premiere/FCPXML/LUT/GLSL importers should translate into Kimera manifests, not leak foreign project assumptions into the renderer.
 - **Renderer-safe.** Dynamic effects and transitions must declare their engine and compatibility. No arbitrary code execution.
 - **Timeline-action compatible.** Applying a plugin item should still route through the existing timeline action registry wherever a timeline mutation happens.
 - **Graceful degradation.** Unsupported imported features should be reported as warnings, not silently dropped.
 
 ## Package Shape
 
-Lumio packages use a zipped folder format, named `.lumio`.
+Kimera packages use a zipped folder format, named `.kimera`.
 
 ```txt
-example.lumio
+example.kimera
   manifest.json
   timeline.json
   assets/
@@ -24,7 +24,7 @@ example.lumio
 
 The root `manifest.json` identifies the package kind, version, author, compatibility, entry files, assets, and warnings. The individual entries are validated against shared schemas before registration.
 
-Status: Complete - `packages/shared/src/plugin-package-zip.ts` (fflate) builds/parses real `.lumio` ZIPs with embedded media: `manifest.json` + `timeline.json` (the full bare `LumioTimelineTemplatePackage`) + `assets/<assetId>.<ext>` + an optional `previews/` image. `isLumioPackageZipBytes` sniffs the ZIP magic so bare `.lumio-template.json` (no media) keeps working unchanged. The editor's export button (Shift+click) builds the ZIP with every referenced asset's real bytes (local blob store first, `fetch(fileUrl)` fallback) and downloads `.lumio`; import detects the ZIP (by extension or magic), creates a real local `SourceAsset` per embedded file via the normal upload path, and remaps `layer.assetId` (root + auxiliary compositions) from the package's ids to the newly created ones - no relink-by-warning. `examples/plugin-manifests/sample-template.lumio` is a worked example. `effects/`/`transitions/`/`looks/` subfolders from the original sketch above are not used - manifests are embedded in `timeline.json`'s `graph.plugins`, not as separate zip entries.
+Status: Complete - `packages/shared/src/plugin-package-zip.ts` (fflate) builds/parses real `.kimera` ZIPs with embedded media: `manifest.json` + `timeline.json` (the full bare `KimeraTimelineTemplatePackage`) + `assets/<assetId>.<ext>` + an optional `previews/` image. `isKimeraPackageZipBytes` sniffs the ZIP magic so bare `.kimera-template.json` (no media) keeps working unchanged. The editor's export button (Shift+click) builds the ZIP with every referenced asset's real bytes (local blob store first, `fetch(fileUrl)` fallback) and downloads `.kimera`; import detects the ZIP (by extension or magic), creates a real local `SourceAsset` per embedded file via the normal upload path, and remaps `layer.assetId` (root + auxiliary compositions) from the package's ids to the newly created ones - no relink-by-warning. `examples/plugin-manifests/sample-template.kimera` is a worked example. `effects/`/`transitions/`/`looks/` subfolders from the original sketch above are not used - manifests are embedded in `timeline.json`'s `graph.plugins`, not as separate zip entries.
 
 ## Task 1 - Shared Manifest Contract
 
@@ -36,9 +36,9 @@ Implementation:
 - Support these package kinds: `effect`, `transition`, `look`, `timeline-template`, `look-pack`, and `bundle`.
 - Model metadata, author, license, tags, thumbnails, preview media, compatibility, declared assets, editable params, warnings, and entries.
 - Keep the schema renderer-agnostic, so backend and frontend can use the same validator.
-- Export the manifest module from `@lumio-by-aelivion/shared`.
+- Export the manifest module from `@kimera-by-aelivion/shared`.
 
-Status: Complete - initial shared contract added in `packages/shared/src/plugin-manifest.ts` and exported from `@lumio-by-aelivion/shared`.
+Status: Complete - initial shared contract added in `packages/shared/src/plugin-manifest.ts` and exported from `@kimera-by-aelivion/shared`.
 
 TODO: Manually verify `packages/shared/src/plugin-manifest.ts` has the expected package fields and rejects malformed manifests.
 
@@ -69,7 +69,7 @@ Implementation:
 - Add clear unsupported-engine warnings.
 - Keep built-in effect IDs backwards compatible.
 
-Status: Complete for safe V1, and `webgl-fragment` is now REAL (flagship gap closed) - `packages/shared/src/plugin-effect-adapter.ts` resolves imported effect manifests into existing renderable Lumio timeline effects, applies creator-defined params/intensity/name, checks layer compatibility, and reports unsupported-engine warnings. A `webgl-fragment` manifest's GLSL registers as a `FragmentEffectDefinition` (`packages/shared/src/color/fragment-effects/registry.ts`, the same registry+harness pattern as the transition engine) and produces a `pluginShader` `TimelineEffect`; `SceneCompositor` runs it as a real fragment-shader pass (`packages/shared/src/color/scene-compositor.ts` `renderLayerWithRegionPasses`/`runFragmentPass`) in preview, local export, AND Remotion (`apps/worker/src/remotion/SceneStage.tsx` now calls `registerEffectManifests`), so a user's own GLSL renders identically everywhere - verified by `render:compare:pixels` at 0.000% for the `plugin-shader` fixture. `css-filter` and `composite` remain deferred.
+Status: Complete for safe V1, and `webgl-fragment` is now REAL (flagship gap closed) - `packages/shared/src/plugin-effect-adapter.ts` resolves imported effect manifests into existing renderable Kimera timeline effects, applies creator-defined params/intensity/name, checks layer compatibility, and reports unsupported-engine warnings. A `webgl-fragment` manifest's GLSL registers as a `FragmentEffectDefinition` (`packages/shared/src/color/fragment-effects/registry.ts`, the same registry+harness pattern as the transition engine) and produces a `pluginShader` `TimelineEffect`; `SceneCompositor` runs it as a real fragment-shader pass (`packages/shared/src/color/scene-compositor.ts` `renderLayerWithRegionPasses`/`runFragmentPass`) in preview, local export, AND Remotion (`apps/worker/src/remotion/SceneStage.tsx` now calls `registerEffectManifests`), so a user's own GLSL renders identically everywhere - verified by `render:compare:pixels` at 0.000% for the `plugin-shader` fixture. `css-filter` and `composite` remain deferred.
 
 TODO: Manually import one JSON effect manifest and verify it appears in the Effects tab without adding a hardcoded entry. For a `webgl-fragment` manifest (e.g. `examples/plugin-manifests/invert.effect.json`), verify the shader renders live in preview, scrubs with intensity/params, and matches in a local export.
 
@@ -106,7 +106,7 @@ TODO: Manually import `examples/plugin-manifests/warm-cinema.look.json`, verify 
 
 ## Task 6 - Template Import/Export V1
 
-Goal: Export and import full Lumio timeline templates.
+Goal: Export and import full Kimera timeline templates.
 
 Implementation:
 
@@ -116,7 +116,7 @@ Implementation:
 - Import into a new project or current project.
 - Report missing assets and unsupported entries clearly.
 
-Status: Complete - V1 adds a portable `.lumio-template.json` package contract for Lumio by Aelivion Studio. The package contains a validated timeline-template manifest, the reusable project graph/composition, slot metadata, referenced media metadata, preview metadata, and import warnings. The editor top bar now exports the active timeline to a package and imports a package back into the current project through the normal graph/history path.
+Status: Complete - V1 adds a portable `.kimera-template.json` package contract for Kimera by Aelivion Studio. The package contains a validated timeline-template manifest, the reusable project graph/composition, slot metadata, referenced media metadata, preview metadata, and import warnings. The editor top bar now exports the active timeline to a package and imports a package back into the current project through the normal graph/history path.
 
 TODO: Manually use the top-bar Export template package button, then Import template package into another project/current project and compare timeline layer count, timing, effects, transitions, masks, text styles, and missing-media warnings.
 
@@ -133,7 +133,7 @@ Implementation:
 
 Status: Complete - V1 adds a Prisma-backed `PluginPackage` catalog for effects, transitions, looks, bundles, and timeline-template manifests. The API now exposes `/api/plugin-packages` for public listing/resolution and authenticated publish/update, seeds the Soft Bloom effect and Warm Cinema look manifests, and the web client fetches the catalog through a revisioned local cache. Fetched catalog manifests hydrate the Effects tab, and any backend manifest the user applies is copied into `ProjectGraph.plugins` so local/cloud export can carry it.
 
-TODO: Run `pnpm --filter @lumio-by-aelivion/api prisma:migrate` and `pnpm --filter @lumio-by-aelivion/api db:seed`, open the editor, verify Soft Bloom and Warm Cinema appear from the backend catalog, apply each, refresh, then local/cloud export to confirm the project retains only the used manifest(s).
+TODO: Run `pnpm --filter @kimera-by-aelivion/api prisma:migrate` and `pnpm --filter @kimera-by-aelivion/api db:seed`, open the editor, verify Soft Bloom and Warm Cinema appear from the backend catalog, apply each, refresh, then local/cloud export to confirm the project retains only the used manifest(s).
 
 ## Task 8 - Package Import Safety
 
@@ -162,7 +162,7 @@ Implementation:
 - Add limited `.prproj` import/export later for timeline structure, media references, basic transforms, cuts, and mappable transitions.
 - Produce an import report with `imported`, `mapped`, `skipped`, and `unsupported` sections.
 
-Status: Partial, with Day 2 fidelity + FCPXML export shipped - V1 adds a universal Effects upload button that auto-detects effect/look/transition manifest JSON, `.cube` LUT files, and external GL transition files. `.cube` files are parsed with the existing Lumio LUT parser, wrapped into portable `effect` manifests using the `importedLut` renderer, and imported into Uploaded Effects. Raw `.glsl`/`.frag` files and GL-transition-style JSON with a `glsl`, `fragment`, `shader`, or `transition` string are wrapped into portable `transition` manifests using the `webgl-transition` renderer. Imported LUT effects now preserve the LUT display name and blend through the LUT intensity pipeline instead of applying at full strength. Uploaded effects, looks, and transitions can be removed from their panels and stay hidden across refresh until re-uploaded. Task 9B adds external timeline import adapters for CMX-style `.edl`, FCPXML `.fcpxml`, and Final Cut/Premiere XML `.xml`: the editor's timeline/template import button now detects those files, parses them into Lumio timeline compositions with media placeholder slots, shows an import report before applying, preserves source in-points/timing, and records imported/mapped/skipped/unsupported details in `ProjectGraph.editableFields.timelineImportReport`. Task 9C adds limited `.prproj` import: the editor accepts gzip-compressed or plain XML Premiere project files, imports a readable sequence's clip timing/media placeholders, and reports effects/components, nested sequences, and other unsupported features for manual remapping.
+Status: Partial, with Day 2 fidelity + FCPXML export shipped - V1 adds a universal Effects upload button that auto-detects effect/look/transition manifest JSON, `.cube` LUT files, and external GL transition files. `.cube` files are parsed with the existing Kimera LUT parser, wrapped into portable `effect` manifests using the `importedLut` renderer, and imported into Uploaded Effects. Raw `.glsl`/`.frag` files and GL-transition-style JSON with a `glsl`, `fragment`, `shader`, or `transition` string are wrapped into portable `transition` manifests using the `webgl-transition` renderer. Imported LUT effects now preserve the LUT display name and blend through the LUT intensity pipeline instead of applying at full strength. Uploaded effects, looks, and transitions can be removed from their panels and stay hidden across refresh until re-uploaded. Task 9B adds external timeline import adapters for CMX-style `.edl`, FCPXML `.fcpxml`, and Final Cut/Premiere XML `.xml`: the editor's timeline/template import button now detects those files, parses them into Kimera timeline compositions with media placeholder slots, shows an import report before applying, preserves source in-points/timing, and records imported/mapped/skipped/unsupported details in `ProjectGraph.editableFields.timelineImportReport`. Task 9C adds limited `.prproj` import: the editor accepts gzip-compressed or plain XML Premiere project files, imports a readable sequence's clip timing/media placeholders, and reports effects/components, nested sequences, and other unsupported features for manual remapping.
 
 **Day 2 fidelity (this pass):** a shared `mapExternalTransition(name)` table (`external-timeline-adapter.ts`) maps Premiere/FCPXML/Resolve transition NAMES to registry kinds (Cross Dissolve, Dip to Black/White, Wipe, Push, Slide, Cross Zoom, Iris; unknown names still map to Cross Dissolve rather than being dropped) — both `.prproj` and FCPXML transitions now route through it instead of the old dissolve-only check. FCPXML import gained: `<title>` → an editable text layer (text + basic font/color/alignment from `<text-style>`), `<transition>` elements → `transitionIn` on the following clip via the shared table, and `<adjust-opacity>` keyframes → layer `animations`. `.prproj` import gained a **multi-sequence picker**: every candidate sequence is now returned in `report.availableSequences` (id/name/clip count), and the report modal lets a user re-parse against any of them (`sequenceId` param) instead of only the auto-picked "most readable clips" one. New `external-timeline-exporter.ts` adds **FCPXML export** (`exportCompositionToFcpxml`) — the hand-off direction: clips, titles, and transitions (reverse of the same mapping table), with masks/text-warp/plugin-shader effects/blend-modes/keyframes honestly reported as lossy in `report.unsupported` rather than silently dropped. Round-trip verified (export → re-import via `parseFcpxml`) in `editor.test.ts`. `.prproj` motion-keyframe extraction (Position/Scale/Rotation) remains a known ceiling — the object-ref-graph parser is regex-based over an escaped/nested real-world format; see `project-tracker/nle-import-export.md`.
 

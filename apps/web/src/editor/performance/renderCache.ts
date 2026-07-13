@@ -1,4 +1,4 @@
-import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
 
 /**
  * Frame render cache (Phase 3 interface + a small LRU impl; wired in Phase 5).
@@ -545,8 +545,17 @@ export function planAdaptiveCacheSpans(options: AdaptiveCachePlanOptions): Adapt
  * does not perturb an unaffected span's signature.
  */
 function spanContentSignature(layers: readonly TimelineCacheLayerInput[]): string {
+  // Z-order participates as a DENSE RANK of the tracks actually present, not the absolute track
+  // index: inserting an empty track (the "Add visual layer" button unshifts at the top) shifts
+  // every layer's absolute index without changing a single pixel — absolute indices regenerated
+  // the ENTIRE timeline's proxies on every empty-track add. Relative rank preserves exactly what
+  // pixels depend on (which track draws over which), so a real track reorder still flips the hash.
+  const trackRank = new Map<number, number>();
+  for (const index of [...new Set(layers.map((layer) => layer.trackIndex ?? 0))].sort((a, b) => a - b)) {
+    trackRank.set(index, trackRank.size);
+  }
   // Sorted by id ONLY for hash stability across plan runs — the actual z-order is inside the
-  // payload (`trackIndex`), so a track reorder changes the hash even though the sort doesn't.
+  // payload (`trackIndex` rank), so a track reorder changes the hash even though the sort doesn't.
   const payload = [...layers]
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map((layer) => ({
@@ -566,7 +575,7 @@ function spanContentSignature(layers: readonly TimelineCacheLayerInput[]): strin
       // Completeness fields (see TimelineCacheLayerInput doc): z-order, track enable state, and the
       // full render-relevant layer object — transform, content pan/zoom, blend, fit, text/shape
       // styling, matte, mute… anything that changes pixels changes this hash.
-      trackIndex: layer.trackIndex ?? 0,
+      trackIndex: trackRank.get(layer.trackIndex ?? 0) ?? 0,
       trackMuted: layer.trackMuted ?? false,
       trackSolo: layer.trackSolo ?? false,
       renderProps: layer.renderProps ?? null
@@ -708,7 +717,7 @@ export function baseCompositionSignature(composition: TimelineComposition): stri
       // it → whole store regenerates — the 2026-07-03 frozen-stale-span incident cannot recur from
       // a forgotten manual bump. The constant above remains for coarse manual invalidation and as
       // the only key in non-vite consumers (tsx tests), where the fingerprint is undefined.
-      renderFingerprint: typeof __LUMIO_RENDER_FINGERPRINT__ === "string" ? __LUMIO_RENDER_FINGERPRINT__ : "test"
+      renderFingerprint: typeof __KIMERA_RENDER_FINGERPRINT__ === "string" ? __KIMERA_RENDER_FINGERPRINT__ : "test"
     })
   );
 }

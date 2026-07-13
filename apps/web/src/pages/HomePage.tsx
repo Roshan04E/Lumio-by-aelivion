@@ -24,7 +24,7 @@ export function HomePage() {
           </h1>
           <p className="mkt-sub">
             A real timeline with WebGL effects, color grading, and keyframes — plus AI tools you can run
-            free with your own chat assistant, or run instantly inside Lumio. Same editable result either way.
+            free with your own chat assistant, or run instantly inside Kimera. Same editable result either way.
           </p>
           <div className="mkt-cta-row">
             <button type="button" className="mkt-btn mkt-btn-primary" onClick={() => navigate("/create")}>
@@ -40,11 +40,11 @@ export function HomePage() {
           <div className="mkt-shell">
             <div className="mkt-shell-bar">
               <span className="mkt-tl"><i className="r" /><i className="y" /><i className="g" /></span>
-              <span className="proj">your_reel.lumio</span>
+              <span className="proj">your_reel.kimera</span>
               <span className="push" />
               <button type="button" className="exp" onClick={() => navigate("/create")}>Try it →</button>
             </div>
-            <div className="mkt-nle" role="img" aria-label="The Lumio editor: media bin, effects, a viewer with live scopes and color wheels, an inspector, and a multi-track timeline with clips, waveforms, keyframes, and a transition.">
+            <div className="mkt-nle" role="img" aria-label="The Kimera editor: media bin, effects, a viewer with live scopes and color wheels, an inspector, and a multi-track timeline with clips, waveforms, keyframes, and a transition.">
               {/* app toolbar */}
               <div className="mkt-nle-toolbar">
                 <span className="mkt-nle-menu"><span>File</span><span>Edit</span><span>Clip</span><span>Timeline</span></span>
@@ -174,8 +174,8 @@ export function HomePage() {
             <span className="mkt-eyebrow">The signature idea</span>
             <h2>Every AI tool, two ways to run it.</h2>
             <p>
-              Lumio never locks results behind a subscription. Bring your own chat assistant for free, or
-              let Lumio run the model for you — both produce the same editable timeline data.
+              Kimera never locks results behind a subscription. Bring your own chat assistant for free, or
+              let Kimera run the model for you — both produce the same editable timeline data.
             </p>
           </div>
 
@@ -185,10 +185,10 @@ export function HomePage() {
               <h3>Prompt bridge</h3>
               <span className="price">$0 — use ChatGPT, Claude, or any chat AI you already have</span>
               <div className="mkt-flow">
-                <div className="mkt-step"><span className="n">01</span> Open a tool — Lumio builds a precise prompt</div>
+                <div className="mkt-step"><span className="n">01</span> Open a tool — Kimera builds a precise prompt</div>
                 <div className="mkt-step"><span className="n">02</span> Paste it into your own chat assistant</div>
-                <div className="mkt-step"><span className="n">03</span> Paste the result back into Lumio</div>
-                <div className="mkt-step"><span className="n">04</span> Lumio validates it into editable layers</div>
+                <div className="mkt-step"><span className="n">03</span> Paste the result back into Kimera</div>
+                <div className="mkt-step"><span className="n">04</span> Kimera validates it into editable layers</div>
               </div>
             </div>
 
@@ -196,10 +196,10 @@ export function HomePage() {
 
             <div className="mkt-path integrated">
               <span className="tag">Path 2 · Integrated</span>
-              <h3>Run it inside Lumio</h3>
+              <h3>Run it inside Kimera</h3>
               <span className="price">Included with a plan — no copy-paste</span>
               <div className="mkt-flow">
-                <div className="mkt-step"><span className="n">01</span> Ask Lumio chat what you want</div>
+                <div className="mkt-step"><span className="n">01</span> Ask Kimera chat what you want</div>
                 <div className="mkt-step"><span className="n">02</span> AI picks the tool and fills the params</div>
                 <div className="mkt-step"><span className="n">03</span> Confirm — it runs in-browser or in the cloud</div>
                 <div className="mkt-step"><span className="n">04</span> Artifacts drop straight onto your timeline</div>

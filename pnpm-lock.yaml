@@ -13,10 +13,10 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.69.0
         version: 0.69.0(zod@3.25.76)
-      '@lumio-by-aelivion/render-templates':
+      '@kimera-by-aelivion/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
-      '@lumio-by-aelivion/shared':
+      '@kimera-by-aelivion/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@prisma/client':
@@ -83,7 +83,7 @@ importers:
       '@huggingface/transformers':
         specifier: ^3.8.1
         version: 3.8.1
-      '@lumio-by-aelivion/shared':
+      '@kimera-by-aelivion/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@vitejs/plugin-react':
@@ -150,10 +150,10 @@ importers:
 
   apps/worker:
     dependencies:
-      '@lumio-by-aelivion/render-templates':
+      '@kimera-by-aelivion/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
-      '@lumio-by-aelivion/shared':
+      '@kimera-by-aelivion/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@prisma/client':
@@ -214,7 +214,7 @@ importers:
 
   packages/render-templates:
     dependencies:
-      '@lumio-by-aelivion/shared':
+      '@kimera-by-aelivion/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:

@@ -24,7 +24,7 @@ import { MediaEncoder } from "../../export/video-encoder";
 import { markHotSpot } from "../../lib/perfDiagnostics";
 import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable } from "./sourceProxyStore";
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
-import type { SourceAsset } from "@lumio-by-aelivion/shared";
+import type { SourceAsset } from "@kimera-by-aelivion/shared";
 
 const PROXY_LONG_EDGE = 854; // ≈480p — Premiere-ballpark ingest proxy size for phone-vertical media
 const PROXY_FPS = 30;
@@ -90,7 +90,7 @@ function record(assetId: string, outcome: "built" | "failed" | "skipped", ms: nu
   s.recent.push({ assetId, outcome, ms: Math.round(ms), ...(note ? { note } : {}) });
   if (s.recent.length > 20) s.recent.shift();
   try {
-    if (localStorage.getItem("lumio.perfLog") === "1") {
+    if (localStorage.getItem("kimera.perfLog") === "1") {
       console.info(`[source-proxy] ${assetId}: ${outcome}${note ? ` (${note})` : ""} in ${Math.round(ms)}ms`);
     }
   } catch {
@@ -307,7 +307,7 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
       throw error;
     }
     try {
-      if (localStorage.getItem("lumio.perfLog") === "1") {
+      if (localStorage.getItem("kimera.perfLog") === "1") {
         console.info(`[source-proxy] ${asset.id}: worker unavailable (${message}) — main-thread fallback`);
       }
     } catch {
@@ -465,7 +465,7 @@ async function transcodeOnMainThread(
         if (decodedAny && i / fps > durationSeconds - 0.25) {
           // FROZEN-TAIL PROBE (debug only): the metadata duration overshoots the decodable sample
           // table — confirm the gap that leaves the timeline clip's tail with no real frames to serve.
-          if (typeof window !== "undefined" && window.localStorage?.getItem("lumio.exportDecodeDebug") === "1") {
+          if (typeof window !== "undefined" && window.localStorage?.getItem("kimera.exportDecodeDebug") === "1") {
             console.warn(
               `[frozen-tail] proxy build: decodable content ends at ~${(i / fps).toFixed(3)}s but ` +
                 `metadata duration is ${durationSeconds.toFixed(3)}s ` +

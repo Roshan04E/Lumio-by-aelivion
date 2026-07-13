@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — router acceptance suite (B1). Run: `pnpm --filter @lumio-by-aelivion/web brain:eval`
+ * Kimera Brain — router acceptance suite (B1). Run: `pnpm --filter @kimera-by-aelivion/web brain:eval`
  *
  * Two corpora, per AI_ARCHITECTURE.md → Instrumentation:
  *  - TRANSACTIONAL: prompts that MUST resolve locally at tier 0 (plan / answer / undo);
@@ -9,7 +9,7 @@
  * Standalone tsx assert script (no test framework), same convention as editor:test / memory:test.
  */
 
-import type { TimelineComposition, TimelineLayer, TimelineTrackType } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer, TimelineTrackType } from "@kimera-by-aelivion/shared";
 import { routePrompt, type BrainContext, type BrainRouteResult } from "./router";
 import { clearRuleStats, recordRuleRejected } from "./feedback";
 import {
@@ -573,37 +573,37 @@ async function main(): Promise<void> {
 
   console.log("\nWAKE WORD (voice — fuzzy matcher + user training, ai/wake-word.ts):");
   clearWakePhrases();
-  check("'Hey Lumio!' wakes", matchWakeWord("Hey Lumio!").matched);
-  check("'hello Lumia' (observed mishearing) wakes", matchWakeWord("hello Lumia").matched);
-  check("'hello Mia' (observed mishearing) wakes", matchWakeWord("hello Mia").matched);
-  check("'hey loomio' wakes", matchWakeWord("hey loomio").matched);
-  check("'hay lumio' wakes", matchWakeWord("hay lumio").matched);
-  check("'hey lumiya' (unseen, edit-distance 2) wakes", matchWakeWord("hey lumiya").matched);
-  check("'heya lumio' wakes (user-requested greeting)", matchWakeWord("heya Lumio").matched);
+  check("'Hey Kimera!' wakes", matchWakeWord("Hey Kimera!").matched);
+  check("'hello chimera' (homophone mishearing) wakes", matchWakeWord("hello chimera").matched);
+  check("'hello camera' (observed mishearing) wakes", matchWakeWord("hello camera").matched);
+  check("'hey kimira' wakes", matchWakeWord("hey kimira").matched);
+  check("'hay kimera' wakes", matchWakeWord("hay kimera").matched);
+  check("'hey kimana' (unseen, edit-distance 2) wakes", matchWakeWord("hey kimana").matched);
+  check("'heya kimera' wakes (user-requested greeting)", matchWakeWord("heya Kimera").matched);
   {
-    const nameFirst = matchWakeWord("Lumio, pause the video");
-    check("'Lumio, pause the video' (name-first, no greeting) wakes with command", nameFirst.matched && nameFirst.command === "pause the video");
+    const nameFirst = matchWakeWord("Kimera, pause the video");
+    check("'Kimera, pause the video' (name-first, no greeting) wakes with command", nameFirst.matched && nameFirst.command === "pause the video");
   }
-  check("'mia pause' (short mishearing WITHOUT greeting) does NOT wake", !matchWakeWord("mia pause").matched);
-  check("'hey lume o' (split name) wakes", matchWakeWord("hey lume o").matched);
+  check("'camera pause' (homophone WITHOUT greeting) does NOT wake", !matchWakeWord("camera pause").matched);
+  check("'hey kim era' (split name) wakes", matchWakeWord("hey kim era").matched);
   {
-    const carry = matchWakeWord("hey lumio blur clip 2");
-    check("carry-through: 'hey lumio blur clip 2' → command 'blur clip 2'", carry.matched && carry.command === "blur clip 2");
+    const carry = matchWakeWord("hey kimera blur clip 2");
+    check("carry-through: 'hey kimera blur clip 2' → command 'blur clip 2'", carry.matched && carry.command === "blur clip 2");
   }
   check("'hello there how are you' does NOT wake", !matchWakeWord("hello there how are you").matched);
   check("'hey can you help me' does NOT wake", !matchWakeWord("hey can you help me").matched);
-  check("'mia come here' (no greeting) does NOT wake", !matchWakeWord("mia come here").matched);
-  check("'numio pause' (no greeting) does NOT wake", !matchWakeWord("numio pause").matched);
-  check("'hello numio' unmatched but flagged as a wake ATTEMPT (training card)", looksLikeWakeAttempt("hello numio"));
+  check("'camera come here' (no greeting) does NOT wake", !matchWakeWord("camera come here").matched);
+  check("'gimera pause' (no greeting) does NOT wake", !matchWakeWord("gimera pause").matched);
+  check("'hello gimera' unmatched but flagged as a wake ATTEMPT (training card)", looksLikeWakeAttempt("hello gimera"));
   check("'blur clip 2 please' is NOT a wake attempt", !looksLikeWakeAttempt("blur clip 2 please"));
   {
-    learnWakePhrase("hello numio");
-    const learned = matchWakeWord("hello numio", loadWakePhrases());
-    const learnedCarry = matchWakeWord("hello numio pause", loadWakePhrases());
+    learnWakePhrase("hello gimera");
+    const learned = matchWakeWord("hello gimera", loadWakePhrases());
+    const learnedCarry = matchWakeWord("hello gimera pause", loadWakePhrases());
     clearWakePhrases();
-    check("learned phrase: 'hello numio' wakes after training", learned.matched);
+    check("learned phrase: 'hello gimera' wakes after training", learned.matched);
     check("learned phrase carries a command too ('… pause')", learnedCarry.matched && learnedCarry.command === "pause");
-    check("cleared training → 'hello numio' no longer wakes", !matchWakeWord("hello numio", loadWakePhrases()).matched);
+    check("cleared training → 'hello gimera' no longer wakes", !matchWakeWord("hello gimera", loadWakePhrases()).matched);
   }
 
   console.log("\nTTS read-back — speakable/splitSpeakable (pure; voice round 4):");
@@ -670,10 +670,20 @@ async function main(): Promise<void> {
     );
   }
 
-  console.log("\nB5 — capability-gap pre-check (honest instant answers for known-impossible asks):");
+  console.log("\nB5 — effect-keyframe pre-check (instant registry-derived answers):");
   {
     const result = route("keyframe the blur amount");
-    check("'keyframe the blur amount' → instant honest gap answer", result.kind === "answer" && /can't be keyframed/.test(answerText(result)));
+    check(
+      "'keyframe the blur amount' → instant affirmative how-to (effect keys ship in all 3 renderers)",
+      result.kind === "answer" && /diamond|can be keyframed/i.test(answerText(result)) && !/can't be keyframed/.test(answerText(result))
+    );
+  }
+  {
+    const result = route("keyframe the eq");
+    check(
+      "'keyframe the eq' → honest static-per-clip answer (audio dynamics stay non-keyframeable)",
+      result.kind === "answer" && /static per clip/i.test(answerText(result))
+    );
   }
   check("'animate the opacity' (keyframeable property) → escalates to the model", route("animate the opacity").kind === "escalate");
   check("'animate the text' (not an effect) → escalates", route("animate the text").kind === "escalate");

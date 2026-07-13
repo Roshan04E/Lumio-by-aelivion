@@ -1,4 +1,4 @@
-import type { TimelineLayerType } from "@lumio-by-aelivion/shared";
+import type { TimelineLayerType } from "@kimera-by-aelivion/shared";
 
 /**
  * Resolve-style top-level inspector tabs (Video/Text/Shape | Audio | Effects).

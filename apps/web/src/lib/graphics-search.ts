@@ -1,7 +1,7 @@
 /**
  * Searchable icon/SVG source for the unified Search "Graphics" chip — Iconify's public search API
  * (https://iconify.design), no API key. Complements the offline bundled shape pack
- * (`@lumio-by-aelivion/shared`'s `searchBundledGraphics`) so Graphics always has both curated shapes and a
+ * (`@kimera-by-aelivion/shared`'s `searchBundledGraphics`) so Graphics always has both curated shapes and a
  * huge searchable icon set. Feature-detected: if the host is blocked (strict CSP / offline), search fails
  * soft (empty array) rather than throwing — the bundled pack still renders.
  */

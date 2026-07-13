@@ -5,14 +5,14 @@ Goal: stop preview WebGL context loss during normal playback, backward seek, and
 ## Status update — 2026-07-02 (governor + recovery + cache verification)
 
 Landed this pass (see also `GAPS.md` §1):
-- **Phase 2 context governor — BUILT, flag-gated default-off** (`?glGovernor=1` / `localStorage lumio.glGovernor` /
+- **Phase 2 context governor — BUILT, flag-gated default-off** (`?glGovernor=1` / `localStorage kimera.glGovernor` /
   `VITE_GL_GOVERNOR`; `getGlGovernorEnabled` in `apps/web/src/color/render-engine.ts`). Enforcement lives in
   `packages/shared/src/color/gl-context.ts`: `requestContextSlot()` evicts the least-recently-used **idle**
   evictable context (never the root `scene-compositor`, never a context touched within `EVICT_IDLE_MS`) via a
   registered disposer; `touchContext()` marks per-frame liveness; `registerContextDisposer()` lets an evictable
   renderer be reclaimed. `MediaWebGLRenderer` reserves a slot before creating its context; `WebglMediaLayer`
   registers a disposer and **lazily recreates** after eviction (no permanent legacy fallback). Telemetry is
-  unchanged/always-on. Gate: `pnpm --filter @lumio-by-aelivion/shared governor:test` (15 checks).
+  unchanged/always-on. Gate: `pnpm --filter @kimera-by-aelivion/shared governor:test` (15 checks).
 - **GPU reset/recovery — BUILT.** `ScenePreviewCanvas` now does a **bounded auto-rebuild** of the compositor on
   a fresh context (`MAX_SCENE_REBUILDS=3`, backoff) instead of latching permanently to the DOM path; a sustained
   run of clean frames restores the retry budget; logging is de-spammed (once per loss). DOM is the last resort
@@ -97,7 +97,7 @@ historical leak shape (renderer waves that idle without unmounting + a backward-
 real `ScenePreviewCanvas`. Enforced run: peak 7 (bounded = root + active wave + not-yet-idle previous wave),
 12 LRU evictions, 0 recreate failures, preview alive, settled to the hard cap 4. Control run (`glGovernor=0`):
 unbounded peak 13, 0 evictions — proves genuine contention so the gate can't rot into a tautology.
-Run: `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker governor:stress`. Escape hatch: `?glGovernor=0`.
+Run: `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker governor:stress`. Escape hatch: `?glGovernor=0`.
 
 - [x] Add a preview-only governor. (in `gl-context.ts`: `requestContextSlot`/`touchContext`/`registerContextDisposer` + `setGlGovernorEnabled`)
 - [x] Configure a conservative preview budget:
@@ -388,9 +388,9 @@ Start only after preview context ownership is stable.
 ## Phase 9 - Verification Gates
 
 - [x] `pnpm -r typecheck`
-- [x] `pnpm --filter @lumio-by-aelivion/web build`
-- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker scene:compare`
-- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker render:compare:pixels`
+- [x] `pnpm --filter @kimera-by-aelivion/web build`
+- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker scene:compare`
+- [x] `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`
 
 ## Manual Verification
 

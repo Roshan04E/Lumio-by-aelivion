@@ -70,7 +70,7 @@ export interface CaptionTrackData {
 }
 
 export interface CaptionInterchangeArtifact {
-  kind: "lumio.caption-artifact";
+  kind: "kimera.caption-artifact";
   version: 1;
   transcript: TranscriptArtifactData;
   captionTrack: CaptionTrackData;
@@ -223,7 +223,7 @@ export function createAutoCaptionPrompt(input: {
   highlightedWords?: string | undefined;
 }): string {
   const duration = input.durationSeconds ? `${input.durationSeconds.toFixed(2)} seconds` : "the full media duration";
-  return `You are creating short-form video captions for Lumio.
+  return `You are creating short-form video captions for Kimera.
 
 Return ONLY valid JSON. Do not include markdown.
 
@@ -344,7 +344,7 @@ export function createCaptionInterchangeArtifact(input: {
   stylePresetId: string;
 }): CaptionInterchangeArtifact {
   return {
-    kind: "lumio.caption-artifact",
+    kind: "kimera.caption-artifact",
     version: 1,
     transcript: input.transcript,
     captionTrack: input.captionTrack,
@@ -360,7 +360,7 @@ export function createCaptionInterchangeArtifact(input: {
 export function parseCaptionInterchangeArtifact(input: string): CaptionInterchangeArtifact | undefined {
   try {
     const parsed = JSON.parse(input) as Partial<CaptionInterchangeArtifact>;
-    if (parsed.kind !== "lumio.caption-artifact" || parsed.version !== 1 || !parsed.transcript || !parsed.captionTrack) {
+    if (parsed.kind !== "kimera.caption-artifact" || parsed.version !== 1 || !parsed.transcript || !parsed.captionTrack) {
       return undefined;
     }
     return parsed as CaptionInterchangeArtifact;

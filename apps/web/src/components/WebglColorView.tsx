@@ -1,5 +1,5 @@
 import { useEffect, useRef, type CSSProperties } from "react";
-import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, type ColorPipeline } from "@lumio-by-aelivion/shared";
+import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, colorPipelineCacheKey, type ColorPipeline } from "@kimera-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3) — WebGL color OVERLAY for images (flag-gated).
@@ -48,7 +48,7 @@ export function WebglColorView({
   }, []);
 
   // Re-bake only when the grade changes (pipeline is a fresh object each render).
-  const pipelineKey = JSON.stringify(pipeline);
+  const pipelineKey = colorPipelineCacheKey(pipeline);
   useEffect(() => {
     if (failedRef.current) return;
     try {

@@ -6,6 +6,8 @@ const qualitySchema = z.object({
   quality: z.enum(["preview", "balanced", "final"]).default("preview")
 });
 
+// TODO(phase1): source estimatedCostCredits from creditCost() (billing/pricing.ts) instead of a
+// hardcoded flat number per module — left as-is this phase (additive-only, don't touch shipped code).
 export const moduleCatalog: EffectModule[] = [
   {
     id: "mod_person_extraction",

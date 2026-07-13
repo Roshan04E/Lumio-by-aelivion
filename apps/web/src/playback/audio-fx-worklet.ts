@@ -17,9 +17,9 @@
  * followers per 128-frame quantum on the AUDIO thread — microseconds, no main-thread work.
  */
 
-import { createAudioFxProcessor, type AudioFxStep } from "@lumio-by-aelivion/shared";
+import { createAudioFxProcessor, type AudioFxStep } from "@kimera-by-aelivion/shared";
 
-const WORKLET_NAME = "lumio-audio-fx";
+const WORKLET_NAME = "kimera-audio-fx";
 
 function buildModuleSource(): string {
   return `
@@ -28,7 +28,7 @@ function buildModuleSource(): string {
 // outer helper. Shim it as identity; it only tags function names.
 const __name = (fn) => fn;
 const createAudioFxProcessor = ${createAudioFxProcessor.toString()};
-class LumioAudioFxProcessor extends AudioWorkletProcessor {
+class KimeraAudioFxProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const chain = (options && options.processorOptions && options.processorOptions.chain) || [];
@@ -54,7 +54,7 @@ class LumioAudioFxProcessor extends AudioWorkletProcessor {
     return true;
   }
 }
-registerProcessor(${JSON.stringify(WORKLET_NAME)}, LumioAudioFxProcessor);
+registerProcessor(${JSON.stringify(WORKLET_NAME)}, KimeraAudioFxProcessor);
 `;
 }
 

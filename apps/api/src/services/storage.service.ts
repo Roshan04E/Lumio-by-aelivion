@@ -32,7 +32,7 @@ export async function saveUpload(file: Express.Multer.File | undefined, fallback
   if (file?.buffer) {
     await fs.writeFile(destination, file.buffer);
   } else {
-    await fs.writeFile(destination, "Mock upload placeholder for Lumio.\n");
+    await fs.writeFile(destination, "Mock upload placeholder for Kimera.\n");
   }
 
   return getPublicUrl(`uploads/${fileName}`);

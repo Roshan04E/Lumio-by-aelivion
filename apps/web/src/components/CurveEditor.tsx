@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Spline, Undo2 } from "lucide-react";
-import { evaluateCurve, identityCurvePoints, type CurvePoint } from "@lumio-by-aelivion/shared";
+import { evaluateCurve, identityCurvePoints, type CurvePoint } from "@kimera-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3, 13C.1) — the Curves graph editor.

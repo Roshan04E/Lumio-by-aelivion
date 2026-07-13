@@ -1,7 +1,7 @@
 /**
  * Gated WebGL-budget debug logging for local export.
  *
- * Opt-in (`?exportGlDebug=1` or `localStorage["lumio.exportGlDebug"] = "1"`), OFF by default so the normal
+ * Opt-in (`?exportGlDebug=1` or `localStorage["kimera.exportGlDebug"] = "1"`), OFF by default so the normal
  * export console stays clean. When on, the export pipeline emits `[export-gl]` lines — preview-suspend state,
  * media renderers created/reused, live + peak WebGL context counts — so the context budget (the media-renderer
  * pool, the threshold warn, the stress gate) is observable. The flag check mirrors the query → localStorage
@@ -20,7 +20,7 @@ function debugEnabled(): boolean {
   try {
     if (typeof window !== "undefined") {
       if (new URLSearchParams(window.location.search).get("exportGlDebug") === "1") enabled = true;
-      else if (window.localStorage?.getItem("lumio.exportGlDebug") === "1") enabled = true;
+      else if (window.localStorage?.getItem("kimera.exportGlDebug") === "1") enabled = true;
     }
   } catch {
     /* no window/localStorage (export Worker) → stay off */

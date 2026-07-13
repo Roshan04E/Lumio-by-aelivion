@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Circle, Eye, EyeOff, Hexagon, PenTool, Pencil, Square, Trash2 } from "lucide-react";
-import { type Mask, type TimelineLayer } from "@lumio-by-aelivion/shared";
+import { type Mask, type TimelineLayer } from "@kimera-by-aelivion/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { InspectorSection } from "../InspectorSection";
 import { MaskItemBody } from "../MaskItemBody";

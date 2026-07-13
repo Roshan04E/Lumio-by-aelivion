@@ -5,7 +5,7 @@
  * bumps `versionOf(layerId)` on each ACTUAL re-raster — so a flat version across the sweep = reuse
  * (4.1b working, no flicker source); a growing version = re-raster per frame (the flicker).
  *
- * Run: pnpm --filter @lumio-by-aelivion/worker exec tsx src/raster-reuse-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/raster-reuse-probe.ts   (dev server must be up)
  */
 import { chromium } from "playwright";
 

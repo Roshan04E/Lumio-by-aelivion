@@ -12,7 +12,7 @@ export function Navbar() {
   return (
     <header className="mkt-nav">
       <div className="mkt-nav-inner">
-        <Link to="/" aria-label="Lumio home">
+        <Link to="/" aria-label="Kimera home">
           <BrandMark />
         </Link>
 

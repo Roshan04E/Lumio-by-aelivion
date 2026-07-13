@@ -25,7 +25,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { createExportStressFixture, type TimelineComposition } from "@lumio-by-aelivion/shared";
+import { createExportStressFixture, type TimelineComposition } from "@kimera-by-aelivion/shared";
 import { type ExportCoreInput, type SourceUrlMap } from "../export/export-core";
 import { createFrameProvider, type FrameProvider } from "../export/source-decoder";
 import { SceneFrameCompositor } from "../export/scene-frame-compositor";

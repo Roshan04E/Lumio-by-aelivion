@@ -1,4 +1,4 @@
-import { normalizeSourceColorMetadata, type AssetAiRef, type AssetExternalRef, type AssetSource, type SourceAsset } from "@lumio-by-aelivion/shared";
+import { normalizeSourceColorMetadata, type AssetAiRef, type AssetExternalRef, type AssetSource, type SourceAsset } from "@kimera-by-aelivion/shared";
 
 /** The Prisma `SourceAsset` row shape (subset we read). */
 interface SourceAssetRow {

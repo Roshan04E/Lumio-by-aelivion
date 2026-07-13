@@ -279,9 +279,21 @@ model Payment {
 model WalletTransaction {
   id        String   @id @default(cuid())
   userId    String
-  type      String
+  type      String // "credit" | "debit" | "usage" (Phase 0 shadow-billing telemetry)
   credits   Int
   reason    String
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Phase 0 shadow-billing telemetry (nullable — existing rows/migrations unaffected).
+  // See packages/shared/src/billing/pricing.ts. Additive only: never gates, never decrements
+  // user.walletCredits — shadow rows are metadata for the future margin audit.
+  action       String?
+  unit         String?
+  units        Float?
+  provider     String?
+  providerCost Float? // USD COGS estimate
+  shadow       Boolean @default(true)
+
+  @@index([userId, createdAt])
 }

@@ -1,25 +1,25 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: lumio-postgres
+    container_name: kimera-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: lumio
-      POSTGRES_PASSWORD: lumio
-      POSTGRES_DB: lumio
+      POSTGRES_USER: kimera
+      POSTGRES_PASSWORD: kimera
+      POSTGRES_DB: kimera
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lumio -d lumio"]
+      test: ["CMD-SHELL", "pg_isready -U kimera -d kimera"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   redis:
     image: redis:7-alpine
-    container_name: lumio-redis
+    container_name: kimera-redis
     restart: unless-stopped
     ports:
       - "6379:6379"

@@ -18,7 +18,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TimelineTrackType
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 function layer(partial: Partial<TimelineLayer> & Pick<TimelineLayer, "id" | "type" | "startSeconds" | "durationSeconds">): TimelineLayer {
   return {

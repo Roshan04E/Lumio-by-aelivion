@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — tier-0 EDITOR COMMANDS (the command plane's compiler). Turns exact spoken/typed
+ * Kimera Brain — tier-0 EDITOR COMMANDS (the command plane's compiler). Turns exact spoken/typed
  * control phrases into editor commands ("pan mode" → setTool(hand), "pause" → transport,
  * "select clip 3" → selectClip) for the EditorPage dispatcher to execute. Zero tokens, <5 ms —
  * the latency class always-on voice needs.
@@ -10,8 +10,8 @@
  * coverage before it ships. Rules are 👎-gated per ruleId (t0.cmd.*) like every brain rule.
  */
 
-import type { TimelineComposition } from "@lumio-by-aelivion/shared";
-import { computeLayerOrdinals, layerIdForOrdinal } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition } from "@kimera-by-aelivion/shared";
+import { computeLayerOrdinals, layerIdForOrdinal } from "@kimera-by-aelivion/shared";
 import type { EditorCommandId } from "../../editor/editor-commands";
 
 export interface CompiledCommand {

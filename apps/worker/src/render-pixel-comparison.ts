@@ -4,14 +4,14 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRenderManifest } from "@lumio-by-aelivion/render-templates";
+import { buildRenderManifest } from "@kimera-by-aelivion/render-templates";
 import {
   createRenderComparisonFixture,
   renderComparisonArtifactDir,
   renderComparisonFixtureKeys,
   renderComparisonFrameSeconds,
   type RenderComparisonFixtureKey
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import pixelmatch from "pixelmatch";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";

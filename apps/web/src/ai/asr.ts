@@ -22,7 +22,7 @@ export interface LocalEarsProgress {
 }
 
 const ASR_MODEL_ID = "onnx-community/moonshine-base-ONNX";
-const EARS_STORE_KEY = "lumio.voice.ears.v1";
+const EARS_STORE_KEY = "kimera.voice.ears.v1";
 /** Moonshine expects 16kHz mono input. */
 const TARGET_SAMPLE_RATE = 16_000;
 const TRANSCRIBE_TIMEOUT_MS = 15_000;
@@ -96,7 +96,7 @@ export function retryLocalEars(): void {
 }
 
 function failLocalEars(reason: string): void {
-  console.warn("[lumio] local ears: failed to load Moonshine —", reason);
+  console.warn("[kimera] local ears: failed to load Moonshine —", reason);
   lastFailureReason = reason;
   asrWorker?.terminate();
   asrWorker = null;
@@ -181,7 +181,7 @@ export function warmLocalEars(): void {
           if (message.ok) {
             resolve(message.text);
           } else {
-            console.warn("[lumio] local ears: transcription failed in worker —", message.message);
+            console.warn("[kimera] local ears: transcription failed in worker —", message.message);
             resolve(null);
           }
         }
@@ -226,7 +226,7 @@ async function decodeTo16kMono(blob: Blob): Promise<Float32Array | null> {
     const rendered = await offline.startRendering();
     return rendered.getChannelData(0);
   } catch (error) {
-    console.warn("[lumio] local ears: couldn't decode the recording", error);
+    console.warn("[kimera] local ears: couldn't decode the recording", error);
     return null;
   }
 }
@@ -259,7 +259,7 @@ export async function transcribeBlobLocally(blob: Blob): Promise<string | null> 
     )
   ]);
   if (result) {
-    console.debug(`[lumio] local ears: transcribed ${Math.round(audio.length / TARGET_SAMPLE_RATE)}s in ${Math.round(performance.now() - startedAt)}ms`);
+    console.debug(`[kimera] local ears: transcribed ${Math.round(audio.length / TARGET_SAMPLE_RATE)}s in ${Math.round(performance.now() - startedAt)}ms`);
   }
   return result;
 }

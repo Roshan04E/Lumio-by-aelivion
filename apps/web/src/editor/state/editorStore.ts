@@ -1,6 +1,6 @@
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
-import { timelineActionRegistry, type RegistryOutcome, type TimelineComposition } from "@lumio-by-aelivion/shared";
+import { timelineActionRegistry, type RegistryOutcome, type TimelineComposition } from "@kimera-by-aelivion/shared";
 
 /**
  * Canonical editor state (Phase 3 scaffolding).

@@ -33,7 +33,7 @@ import {
   type KeyframeInterpolation,
   type TimelineKeyframeV2,
   type TimelineLayer
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { copyKeyframes, hasClipboardKeyframes, pasteKeyframes } from "./graph-clipboard";
 import { ScrubNumberInput } from "../../components/ScrubNumberInput";
 import { ThemedSelect } from "../inspector/controls/ThemedSelect";

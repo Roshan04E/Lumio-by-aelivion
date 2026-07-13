@@ -3,8 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
-import { buildRenderManifest, type RenderManifest } from "@lumio-by-aelivion/render-templates";
-import { type ProjectGraph, type SourceAsset } from "@lumio-by-aelivion/shared";
+import { buildRenderManifest, type RenderManifest } from "@kimera-by-aelivion/render-templates";
+import { type ProjectGraph, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { makeCancelSignal } from "@remotion/renderer";
 import { renderManifestToMp4 } from "./remotion-renderer";
 
@@ -16,12 +16,12 @@ dotenv.config({ path: path.join(workspaceRoot, ".env.local"), override: true });
 dotenv.config({ path: path.join(workerRoot, ".env") });
 dotenv.config({ path: path.join(workerRoot, ".env.local"), override: true });
 
-process.env.DATABASE_URL ??= "postgresql://lumio:lumio@localhost:5432/lumio?schema=public";
+process.env.DATABASE_URL ??= "postgresql://kimera:kimera@localhost:5432/kimera?schema=public";
 process.env.API_PUBLIC_URL ??= "http://localhost:4100";
 process.env.STORAGE_ROOT ??= "apps/api/storage";
 
 // Singleton Prisma client. The worker runs under `tsx watch`, which reloads on every change to its
-// own files OR to imported workspace packages (@lumio-by-aelivion/shared / render-templates). A bare
+// own files OR to imported workspace packages (@kimera-by-aelivion/shared / render-templates). A bare
 // `new PrismaClient()` per reload opened a fresh pool (default 9 connections) and never disconnected
 // the old one, so orphaned pools accumulated until Postgres hit max_connections → P2024 "Timed out
 // fetching a connection from the pool". Two guards: (1) cache the client on globalThis like the API
@@ -30,11 +30,11 @@ process.env.STORAGE_ROOT ??= "apps/api/storage";
 // exhaust Postgres.
 declare global {
   // eslint-disable-next-line no-var
-  var __lumioWorkerPrisma: PrismaClient | undefined;
+  var __kimeraWorkerPrisma: PrismaClient | undefined;
 }
 
 function workerPrismaUrl(): string {
-  const base = process.env.DATABASE_URL ?? "postgresql://lumio:lumio@localhost:5432/lumio?schema=public";
+  const base = process.env.DATABASE_URL ?? "postgresql://kimera:kimera@localhost:5432/kimera?schema=public";
   try {
     const url = new URL(base);
     if (!url.searchParams.has("connection_limit")) {
@@ -47,10 +47,10 @@ function workerPrismaUrl(): string {
 }
 
 const prisma =
-  globalThis.__lumioWorkerPrisma ?? new PrismaClient({ datasources: { db: { url: workerPrismaUrl() } } });
+  globalThis.__kimeraWorkerPrisma ?? new PrismaClient({ datasources: { db: { url: workerPrismaUrl() } } });
 
 if (process.env.NODE_ENV !== "production") {
-  globalThis.__lumioWorkerPrisma = prisma;
+  globalThis.__kimeraWorkerPrisma = prisma;
 }
 
 export async function processNextRenderJob() {

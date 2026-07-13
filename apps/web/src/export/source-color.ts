@@ -9,8 +9,8 @@
  */
 
 import { createFile, type ColrBox, type MP4File, type MP4Info } from "mp4box";
-import type { ColorMatrix, ColorPrimaries, ColorTransfer, SourceColorMetadata } from "@lumio-by-aelivion/shared";
-import { normalizeSourceColorMetadata } from "@lumio-by-aelivion/shared";
+import type { ColorMatrix, ColorPrimaries, ColorTransfer, SourceColorMetadata } from "@kimera-by-aelivion/shared";
+import { normalizeSourceColorMetadata } from "@kimera-by-aelivion/shared";
 
 // Cap probe memory: skip very large files (they'd need a full in-memory buffer for a tail `moov`).
 const MAX_PROBE_BYTES = 300 * 1024 * 1024;

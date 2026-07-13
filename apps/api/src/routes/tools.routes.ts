@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { moduleCatalog, mvpLimits, toPublicModule, toolDefinitions, type SourceAsset } from "@lumio-by-aelivion/shared";
+import { moduleCatalog, mvpLimits, toPublicModule, toolDefinitions, type SourceAsset } from "@kimera-by-aelivion/shared";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { suggestHighlightWordsWithGemini, transcribeWithGemini, transformCaptionsWithGemini } from "../services/geminiTranscription.service";
+import { recordUsage } from "../services/usageLedger.service";
 
 export const toolsRouter = Router();
 
@@ -180,6 +181,17 @@ async function runAutoCaptionJob(
     const current = autoCaptionJobs.get(jobId);
     if (current?.status === "cancelled") {
       return;
+    }
+
+    // Phase 0 shadow-billing: record what this cloud transcription would have cost — telemetry
+    // only, never gates and never touches user.walletCredits. See billing/pricing.ts.
+    if (current) {
+      void recordUsage({
+        userId: current.userId,
+        action: "caption.cloud-transcribe",
+        units: input.asset.durationSeconds / 60,
+        provider: result.provider
+      });
     }
 
     updateAutoCaptionJob(jobId, { status: "processing", progress: 88, message: "Saving transcript artifacts." });

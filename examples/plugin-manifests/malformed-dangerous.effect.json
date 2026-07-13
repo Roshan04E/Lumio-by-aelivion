@@ -4,7 +4,7 @@
   "id": "bad.dangerous-effect",
   "name": "Dangerous Test Effect",
   "version": "1.0.0",
-  "description": "Intentionally malformed manifest for testing Lumio package safety rejection.",
+  "description": "Intentionally malformed manifest for testing Kimera package safety rejection.",
   "author": {
     "name": "Aelivion Studio"
   },

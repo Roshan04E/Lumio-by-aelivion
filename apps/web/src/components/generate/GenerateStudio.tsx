@@ -7,13 +7,14 @@ import {
   type RankedModel,
   type SkillTaskKind,
   type SourceAsset
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { ThemedSelect } from "../../editor/inspector/controls/ThemedSelect";
 import {
   getGenerationAvailability,
   rankModelsForTask,
   runGeneration
 } from "../../generate/generateClient";
+import { ShadowCostBadge } from "../ShadowCostBadge";
 import { LocalGenPanel } from "./LocalGenPanel";
 
 /**
@@ -439,6 +440,10 @@ export function GenerateStudio({
               </label>
 
               {error ? <p className="gen-error">{error}</p> : null}
+
+              {ranked.length > 0 && ranked.find((r) => r.model.id === selectedModelId)?.model.provider !== "local" ? (
+                <ShadowCostBadge action={`generate.${task.id}`} units={isVideo ? durationSeconds : 1} />
+              ) : null}
 
               <button type="button" className="gen-generate" disabled={!canGenerate} onClick={() => void handleGenerate()}>
                 {running ? `${note || "Generating"} · ${progress}%` : "Generate"}

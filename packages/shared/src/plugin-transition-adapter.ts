@@ -23,9 +23,9 @@ export interface RegisterTransitionManifestResult {
 const TRANSITION_CATEGORIES: TransitionCategory[] = ["basic", "creator", "cinematic", "glitch", "mask"];
 
 const FORBIDDEN_GLSL_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
-  { pattern: /#\s*version\b/, message: "Do not include #version; Lumio injects the shader harness." },
+  { pattern: /#\s*version\b/, message: "Do not include #version; Kimera injects the shader harness." },
   { pattern: /\bvoid\s+main\s*\(/, message: "Do not define main(); provide only vec4 transition(vec2 uv)." },
-  { pattern: /\bprecision\s+(lowp|mediump|highp)\b/, message: "Do not declare precision; Lumio injects it." },
+  { pattern: /\bprecision\s+(lowp|mediump|highp)\b/, message: "Do not declare precision; Kimera injects it." },
   { pattern: /\buniform\s+sampler2D\b/, message: "Do not declare sampler uniforms; use getFromColor() and getToColor()." },
   { pattern: /\bgl_FragColor\b/, message: "Do not write gl_FragColor; return a vec4 from transition()." },
   { pattern: /\bdiscard\s*;/, message: "discard is not allowed in portable transition manifests." }

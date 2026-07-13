@@ -79,7 +79,10 @@ export type RenderComparisonFixtureKey =
   | "region-text"
   | "tilted-text"
   | "transition"
-  | "plugin-shader";
+  | "plugin-shader"
+  | "vignette"
+  | "grain"
+  | "chroma-key";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -105,7 +108,10 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "region-text",
   "tilted-text",
   "transition",
-  "plugin-shader"
+  "plugin-shader",
+  "vignette",
+  "grain",
+  "chroma-key"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -212,7 +218,7 @@ const glowEffects: TimelineLayer["effects"] = [
 // manifest-import step first; `examples/plugin-manifests/invert.effect.json` carries the SAME GLSL for the
 // user-facing import flow. Deterministic (pure invert, no randomness) so preview/export/Remotion should
 // match at ~0.000% at a strict pixel-gate tolerance.
-export const EXAMPLE_INVERT_FRAGMENT_EFFECT_ID = "com.lumio.examples.invert";
+export const EXAMPLE_INVERT_FRAGMENT_EFFECT_ID = "com.kimera.examples.invert";
 registerFragmentEffect(
   {
     id: EXAMPLE_INVERT_FRAGMENT_EFFECT_ID,
@@ -350,6 +356,45 @@ const featherRegionBlurEffects: TimelineLayer["effects"] = [
   }
 ];
 
+// Stylize/keyer fixtures (unified media shader): exercise every NEW param so a normalization or
+// uniform-wiring regression trips the gate. All three render through the SAME MediaWebGLRenderer
+// in every path. Grain is deterministic here: u_time = layer time at the fixed fixture frame
+// (renderComparisonFrameSeconds) in preview, browser export, and Remotion alike.
+const vignetteEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_vignette",
+    type: "vignette",
+    name: "Vignette",
+    enabled: true,
+    intensity: 100,
+    params: { amount: 55, size: 40, feather: 60, roundness: 100, highlights: 40 }
+  }
+];
+
+const grainEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_grain",
+    type: "grain",
+    name: "Film Grain",
+    enabled: true,
+    intensity: 100,
+    params: { amount: 60, size: 150 }
+  }
+];
+
+// Keys the fixture's hill ORANGE (#b85b20) — proves the CbCr keyer is generic (not green-only)
+// without any new asset plumbing; despill + choke exercise the new matte controls.
+const chromaKeyEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_chroma_key",
+    type: "chromaKey",
+    name: "Chroma Key",
+    enabled: true,
+    intensity: 100,
+    params: { color: "#b85b20", tolerance: 35, softness: 15, despill: 60, choke: 20, matteView: false }
+  }
+];
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -454,6 +499,12 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", transition: true };
     case "plugin-shader":
       return { effects: pluginShaderEffects, fit: "cover" };
+    case "vignette":
+      return { effects: vignetteEffects, fit: "cover" };
+    case "grain":
+      return { effects: grainEffects, fit: "cover" };
+    case "chroma-key":
+      return { effects: chromaKeyEffects, fit: "cover" };
     case "default":
     default:
       return { effects: fullColorEffects, fit: "cover" };

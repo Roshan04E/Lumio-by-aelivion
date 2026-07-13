@@ -9,7 +9,7 @@
  *   1. `?colorEngine=webgl|dom` query param  — lets the comparison harness / fixture
  *      page render either engine from the same timeline JSON (and is a per-session escape
  *      hatch: `?colorEngine=dom` forces the SVG path).
- *   2. `localStorage["lumio.colorEngine"]`    — dev opt-in / opt-out.
+ *   2. `localStorage["kimera.colorEngine"]`    — dev opt-in / opt-out.
  *   3. `VITE_COLOR_ENGINE` build env.
  *   4. default → "webgl" (the high-end float / 3D-LUT engine is now the backbone).
  *
@@ -22,7 +22,7 @@
  * can't express a 3D LUT), which is why webgl is the default rather than an opt-in.
  */
 
-import { REGION_PASS_MODEL_DEFAULT } from "@lumio-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT } from "@kimera-by-aelivion/shared";
 
 export type ColorEngine = "dom" | "webgl";
 export type RendererMode = "legacy" | "webgl";
@@ -40,7 +40,7 @@ export function getColorEngine(): ColorEngine {
     try {
       const param = normalize(new URLSearchParams(window.location.search).get("colorEngine"));
       if (param) return param;
-      const stored = normalize(window.localStorage?.getItem("lumio.colorEngine"));
+      const stored = normalize(window.localStorage?.getItem("kimera.colorEngine"));
       if (stored) return stored;
     } catch {
       /* SSR / restricted storage — fall through */
@@ -63,7 +63,7 @@ export function getColorEngine(): ColorEngine {
  * Default is "webgl": the unified path is the backbone (it's the only path that can apply
  * the pro in-shader stylize effects — vignette/grain/chroma — that effects.ts now marks
  * `native`). The worker mirrors this default (Root.getRendererMode → process.env
- * RENDERER_MODE). The formal pixel sweep (`pnpm --filter @lumio-by-aelivion/worker render:compare:pixels`
+ * RENDERER_MODE). The formal pixel sweep (`pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`
  * in a GPU env) should still be run to confirm; force the old path with `?rendererMode=legacy`
  * / localStorage if a regression appears. See COLOR_SYSTEM_PLAN.md.
  */
@@ -72,7 +72,7 @@ export function getRendererMode(): RendererMode {
     try {
       const param = normalizeMode(new URLSearchParams(window.location.search).get("rendererMode"));
       if (param) return param;
-      const stored = normalizeMode(window.localStorage?.getItem("lumio.rendererMode"));
+      const stored = normalizeMode(window.localStorage?.getItem("kimera.rendererMode"));
       if (stored) return stored;
     } catch {
       /* SSR / restricted storage — fall through */
@@ -112,7 +112,7 @@ function normalizeCompositor(value: string | null | undefined): CompositorMode |
  * `render:compare:pixels`). So the default flips to "scene" for good.
  *
  * Still WebGL2-gated (`useSceneCompositor`) + a runtime GL-failure fallback (`sceneFailed`), so even as the
- * default it can never blank a comp; `?compositor=dom` / `localStorage["lumio.compositor"]` /
+ * default it can never blank a comp; `?compositor=dom` / `localStorage["kimera.compositor"]` /
  * `VITE_COMPOSITOR_MODE` force the DOM path.
  *
  * Resolution order: `?compositor=scene|dom` → localStorage → VITE_COMPOSITOR_MODE → default "scene".
@@ -122,7 +122,7 @@ export function getCompositorMode(): CompositorMode {
     try {
       const param = normalizeCompositor(new URLSearchParams(window.location.search).get("compositor"));
       if (param) return param;
-      const stored = normalizeCompositor(window.localStorage?.getItem("lumio.compositor"));
+      const stored = normalizeCompositor(window.localStorage?.getItem("kimera.compositor"));
       if (stored) return stored;
     } catch {
       /* SSR / restricted storage — fall through */
@@ -157,7 +157,7 @@ export function useSceneCompositor(supported: boolean): boolean {
  *
  * ON by default (Phase 2 Stage 4). Query/localStorage/VITE env overrides remain so the legacy
  * multi-context scene path can be forced for debugging or emergency rollback.
- * Resolution order: `?exportSingleContext=0|1` → localStorage `lumio.exportSingleContext` → VITE env → true.
+ * Resolution order: `?exportSingleContext=0|1` → localStorage `kimera.exportSingleContext` → VITE env → true.
  */
 export function getExportSingleContext(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
@@ -166,7 +166,7 @@ export function getExportSingleContext(): boolean {
       if (new URLSearchParams(window.location.search).has("exportSingleContext")) {
         return truthy(new URLSearchParams(window.location.search).get("exportSingleContext"));
       }
-      const stored = window.localStorage?.getItem("lumio.exportSingleContext");
+      const stored = window.localStorage?.getItem("kimera.exportSingleContext");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */
@@ -186,7 +186,7 @@ export function getExportSingleContext(): boolean {
  * path. If Worker scene export fails, `local-export.ts` falls back to the main-thread scene path (NOT directly
  * to canvas2D).
  *
- * Resolution order: `?exportWorkerScene=0|1` → localStorage `lumio.exportWorkerScene` → VITE env → true.
+ * Resolution order: `?exportWorkerScene=0|1` → localStorage `kimera.exportWorkerScene` → VITE env → true.
  */
 export function getExportWorkerScene(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
@@ -195,7 +195,7 @@ export function getExportWorkerScene(): boolean {
       if (new URLSearchParams(window.location.search).has("exportWorkerScene")) {
         return truthy(new URLSearchParams(window.location.search).get("exportWorkerScene"));
       }
-      const stored = window.localStorage?.getItem("lumio.exportWorkerScene");
+      const stored = window.localStorage?.getItem("kimera.exportWorkerScene");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */
@@ -217,7 +217,7 @@ export function useWebglRenderer(supported: boolean): boolean {
  * unchanged in this stage — only the composite differs, so the flag is a clean A/B. Default OFF until the
  * scene:compare region fixtures pass with it on (then flip, the governor playbook).
  *
- * Resolution order: `?regionPasses=0|1` → localStorage `lumio.regionPasses` → `VITE_REGION_PASSES` →
+ * Resolution order: `?regionPasses=0|1` → localStorage `kimera.regionPasses` → `VITE_REGION_PASSES` →
  * `REGION_PASS_MODEL_DEFAULT` (the shared single flip point — the render-manifest builder derives the cloud
  * renderer's value from the same constant, so all three renderers flip together).
  */
@@ -228,7 +228,7 @@ export function getRegionPassesEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("regionPasses")) {
         return truthy(new URLSearchParams(window.location.search).get("regionPasses"));
       }
-      const stored = window.localStorage?.getItem("lumio.regionPasses");
+      const stored = window.localStorage?.getItem("kimera.regionPasses");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */
@@ -249,7 +249,7 @@ export function getRegionPassesEnabled(): boolean {
  * `parity-ok` worst-diff 0.00% and zero worker fallbacks, on top of the Playwright live gate
  * (viewer-ready + parity-ok, fallback chain verified). Escape hatch `?proxyViewerCapture=0`.
  *
- * Resolution order: `?proxyViewerCapture=0|1` → localStorage `lumio.proxyViewerCapture` →
+ * Resolution order: `?proxyViewerCapture=0|1` → localStorage `kimera.proxyViewerCapture` →
  * `VITE_PROXY_VIEWER_CAPTURE` → true.
  */
 export function getProxyViewerCaptureEnabled(): boolean {
@@ -259,7 +259,7 @@ export function getProxyViewerCaptureEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("proxyViewerCapture")) {
         return truthy(new URLSearchParams(window.location.search).get("proxyViewerCapture"));
       }
-      const stored = window.localStorage?.getItem("lumio.proxyViewerCapture");
+      const stored = window.localStorage?.getItem("kimera.proxyViewerCapture");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */
@@ -286,7 +286,7 @@ export function getProxyViewerCaptureEnabled(): boolean {
  * playback-preview v9). The per-clip-context path stays fully intact behind the escape hatch —
  * `?singleCtxPreview=0` / localStorage `"0"` — and remains what DOM-compositor mode uses.
  *
- * Resolution order: `?singleCtxPreview=0|1` → localStorage `lumio.singleCtxPreview` →
+ * Resolution order: `?singleCtxPreview=0|1` → localStorage `kimera.singleCtxPreview` →
  * `VITE_SINGLE_CTX_PREVIEW` → true.
  */
 export function getSingleCtxPreviewEnabled(): boolean {
@@ -296,7 +296,7 @@ export function getSingleCtxPreviewEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("singleCtxPreview")) {
         return truthy(new URLSearchParams(window.location.search).get("singleCtxPreview"));
       }
-      const stored = window.localStorage?.getItem("lumio.singleCtxPreview");
+      const stored = window.localStorage?.getItem("kimera.singleCtxPreview");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */
@@ -315,13 +315,13 @@ export function getSingleCtxPreviewEnabled(): boolean {
  * after a grace period once their clip leaves the active window.
  *
  * DEFAULT ON (flipped 2026-07-02) — proven via the GPU preview-contention stress gate
- * (`pnpm --filter @lumio-by-aelivion/worker governor:stress`, real Chrome): enforced run bounded peak at 7
+ * (`pnpm --filter @kimera-by-aelivion/worker governor:stress`, real Chrome): enforced run bounded peak at 7
  * live contexts with 12 LRU evictions + clean lazy recreation + the root scene preview alive (settling to
  * the hard cap 4), while the control run (governor off) climbed unbounded to 13 on the same fixture.
  * Telemetry (`__rfGlContextBudget`) is always on regardless of this flag; only ENFORCEMENT is gated.
  * Escape hatch: `?glGovernor=0`.
  *
- * Resolution order: `?glGovernor=0|1` → localStorage `lumio.glGovernor` → `VITE_GL_GOVERNOR` → true.
+ * Resolution order: `?glGovernor=0|1` → localStorage `kimera.glGovernor` → `VITE_GL_GOVERNOR` → true.
  */
 export function getGlGovernorEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
@@ -330,7 +330,7 @@ export function getGlGovernorEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("glGovernor")) {
         return truthy(new URLSearchParams(window.location.search).get("glGovernor"));
       }
-      const stored = window.localStorage?.getItem("lumio.glGovernor");
+      const stored = window.localStorage?.getItem("kimera.glGovernor");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

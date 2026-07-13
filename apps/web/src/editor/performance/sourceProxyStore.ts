@@ -9,7 +9,7 @@
  * for every playhead drop; its 480p 1s-GOP proxy seeks in ~15 delta frames). Exports always read
  * the ORIGINAL bytes — proxies are a preview-only substitution via `SourceAsset.proxyUrl`.
  *
- * Storage: OPFS directory `lumio-source-proxies/` — `<assetId>.mp4` blobs plus an `index.json` of
+ * Storage: OPFS directory `kimera-source-proxies/` — `<assetId>.mp4` blobs plus an `index.json` of
  * metadata records. A record is valid only while its `sourceByteSize` matches the current asset
  * bytes (relinking different footage under the same id invalidates the proxy). No IndexedDB/memory
  * fallback: proxies are a performance layer, and where OPFS is unavailable the editor simply plays
@@ -43,7 +43,7 @@ export interface SourceProxyRecord {
 // re-encodes fine). The demuxer now walks all fragments; rebuild everything decoded before that.
 export const SOURCE_PROXY_VERSION = 4;
 
-const OPFS_DIR = "lumio-source-proxies";
+const OPFS_DIR = "kimera-source-proxies";
 const INDEX_FILE = "index.json";
 
 interface OpfsHandle {
@@ -77,6 +77,17 @@ async function readIndex(dir: FileSystemDirectoryHandle): Promise<SourceProxyRec
   }
 }
 
+// index.json is read ONCE per session into this map, and every mutation rewrites the file from
+// it — previously each getSourceProxy/saveSourceProxy re-read + re-parsed the whole file per
+// asset (O(assets) OPFS reads on import). The store stays best-effort/self-healing: a lost or
+// stale index only means a proxy rebuild. (Two tabs racing writes was last-writer-wins before
+// this cache and still is.)
+let recordsPromise: Promise<SourceProxyRecord[]> | null = null;
+
+function loadRecords(dir: FileSystemDirectoryHandle): Promise<SourceProxyRecord[]> {
+  return (recordsPromise ??= readIndex(dir));
+}
+
 async function writeIndex(dir: FileSystemDirectoryHandle, records: SourceProxyRecord[]): Promise<void> {
   const handle = await dir.getFileHandle(INDEX_FILE, { create: true });
   const writable = await handle.createWritable();
@@ -108,7 +119,7 @@ export async function getSourceProxy(
 ): Promise<{ url: string; record: SourceProxyRecord } | null> {
   const handle = await getHandle();
   if (!handle) return null;
-  const records = await readIndex(handle.dir);
+  const records = await loadRecords(handle.dir);
   const record = records.find((item) => item.assetId === assetId);
   if (!record) return null;
   if (record.sourceByteSize !== sourceByteSize || record.version !== SOURCE_PROXY_VERSION) {
@@ -124,8 +135,10 @@ export async function getSourceProxy(
     urlCache.set(assetId, url);
     return { url, record };
   } catch {
-    // Index points at a missing blob — drop the record.
-    await writeIndex(handle.dir, records.filter((item) => item.assetId !== assetId)).catch(() => undefined);
+    // Index points at a missing blob — drop the record (in-memory + persisted).
+    const remaining = records.filter((item) => item.assetId !== assetId);
+    recordsPromise = Promise.resolve(remaining);
+    await writeIndex(handle.dir, remaining).catch(() => undefined);
     return null;
   }
 }
@@ -139,8 +152,9 @@ export async function saveSourceProxy(record: Omit<SourceProxyRecord, "byteSize"
     const writable = await fileHandle.createWritable();
     await writable.write(blob);
     await writable.close();
-    const records = (await readIndex(handle.dir)).filter((item) => item.assetId !== record.assetId);
+    const records = (await loadRecords(handle.dir)).filter((item) => item.assetId !== record.assetId);
     records.push({ ...record, byteSize: blob.size, savedAt: Date.now(), version: SOURCE_PROXY_VERSION });
+    recordsPromise = Promise.resolve(records);
     await writeIndex(handle.dir, records);
     const previous = urlCache.get(record.assetId);
     if (previous) URL.revokeObjectURL(previous);
@@ -161,6 +175,7 @@ export async function removeSourceProxy(assetId: string): Promise<void> {
     urlCache.delete(assetId);
   }
   await handle.dir.removeEntry(blobName(assetId)).catch(() => undefined);
-  const records = await readIndex(handle.dir);
-  await writeIndex(handle.dir, records.filter((item) => item.assetId !== assetId)).catch(() => undefined);
+  const records = (await loadRecords(handle.dir)).filter((item) => item.assetId !== assetId);
+  recordsPromise = Promise.resolve(records);
+  await writeIndex(handle.dir, records).catch(() => undefined);
 }

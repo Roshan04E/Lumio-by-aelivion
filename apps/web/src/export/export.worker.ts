@@ -8,7 +8,7 @@
  * <video> fallback in here, so it reports an error and the main thread re-runs the export.
  */
 
-import { configureFontResolver, warpFontFile } from "@lumio-by-aelivion/shared";
+import { configureFontResolver, warpFontFile } from "@kimera-by-aelivion/shared";
 import { Aborted, runExportCore } from "./export-core";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "./export-worker-protocol";
 

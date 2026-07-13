@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { registerSW } from "virtual:pwa-register";
-import { configureFontResolver, warpFontFile } from "@lumio-by-aelivion/shared";
+import { configureFontResolver, warpFontFile } from "@kimera-by-aelivion/shared";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";
@@ -30,11 +30,11 @@ if (typeof navigator !== "undefined" && navigator.storage?.persist) {
 // /public/fonts. The catalog (warpFontFile) is the seam for the future font library.
 configureFontResolver((family, weight) => `/${warpFontFile(family, weight)}`);
 
-// Lumio AI — hydrate + persist the action/AI analytics counters (P7) across reloads.
+// Kimera AI — hydrate + persist the action/AI analytics counters (P7) across reloads.
 initAnalyticsPersistence();
 
 // Main-thread responsiveness telemetry (__rfLongTasks / __rfClickLatency / __rfLoopLag on window;
-// verbose logs behind localStorage lumio.perfLog="1") — laggy-UI reports get data, not theories.
+// verbose logs behind localStorage kimera.perfLog="1") — laggy-UI reports get data, not theories.
 installPerfDiagnostics();
 
 // Crash forensics: onerror/unhandledrejection → localStorage ring buffer (survives a hard crash);

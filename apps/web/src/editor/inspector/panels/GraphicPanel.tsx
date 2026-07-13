@@ -8,7 +8,7 @@
 
 import { useState } from "react";
 import { Shapes, Palette, Save } from "lucide-react";
-import { sanitizeGraphicFill, DEFAULT_GRAPHIC_FILL, type LayerGraphic } from "@lumio-by-aelivion/shared";
+import { sanitizeGraphicFill, DEFAULT_GRAPHIC_FILL, type LayerGraphic } from "@kimera-by-aelivion/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { InspectorSection } from "../InspectorSection";
 import { ColorControl } from "../../../components/ColorControl";

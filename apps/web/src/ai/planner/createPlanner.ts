@@ -10,7 +10,7 @@ import type { PlannerProvider } from "../types";
  */
 export function createPlanner(): PlannerProvider {
   const fallback = new DeterministicPlanner();
-  if (import.meta.env.VITE_LUMIO_LLM_PLANNER === "off") {
+  if (import.meta.env.VITE_KIMERA_LLM_PLANNER === "off") {
     return fallback;
   }
   return new LlmPlanner(fallback);

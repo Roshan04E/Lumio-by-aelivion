@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — routing ledger (B0). Every AI request records which tier resolved it, how long
+ * Kimera Brain — routing ledger (B0). Every AI request records which tier resolved it, how long
  * it took, and a rough token estimate, so the cascade's savings are MEASURABLE, not vibes
  * (see AI_ARCHITECTURE.md → Instrumentation). Bounded ring persisted to localStorage; pure
  * module with no DOM assumptions so the eval harness can import it under node/tsx.
@@ -35,7 +35,7 @@ export const LLM_STATIC_TOKENS_PER_CALL = 2_500;
 /** Fallback per-request saving credited to a locally-resolved request when no LLM samples exist yet. */
 const DEFAULT_LLM_REQUEST_TOKENS = 2_200;
 
-const STORAGE_KEY = "lumio.brain.ledger.v1";
+const STORAGE_KEY = "kimera.brain.ledger.v1";
 const MAX_RECORDS = 200;
 
 const LOCAL_ROUTES: ReadonlySet<BrainRoute> = new Set(["reflex", "rules", "semantic"]);

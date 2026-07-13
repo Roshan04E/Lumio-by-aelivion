@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — per-rule feedback trust (the first slice of B6, pulled forward). Every
+ * Kimera Brain — per-rule feedback trust (the first slice of B6, pulled forward). Every
  * brain-resolved turn shows 👍/👎; the counts gate whether that rule may keep fast-pathing:
  * a rule the user keeps rejecting LOSES TRUST and stops firing (its prompts escalate to the
  * model instead). This is the honest "reinforcement from feedback" — bandit-style counters on
@@ -15,7 +15,7 @@ export interface RuleStats {
   rejected: number;
 }
 
-const STORAGE_KEY = "lumio.brain.rulestats.v1";
+const STORAGE_KEY = "kimera.brain.rulestats.v1";
 
 let memoryStats: Record<string, RuleStats> | null = null;
 
@@ -111,7 +111,7 @@ export interface FeedbackEvent {
   at: number;
 }
 
-const EVENTS_KEY = "lumio.brain.feedback-events.v1";
+const EVENTS_KEY = "kimera.brain.feedback-events.v1";
 const MAX_EVENTS = 500;
 
 function loadEvents(): FeedbackEvent[] {

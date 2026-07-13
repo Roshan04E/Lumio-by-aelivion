@@ -1,4 +1,5 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
+import jwt from "jsonwebtoken";
 import { z } from "zod";
 import {
   PLANNER_SYSTEM_PROMPT,
@@ -9,7 +10,8 @@ import {
   buildConsultantUserContent,
   buildFastPlannerUserContent,
   extractPlanJson
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
+import { env } from "../config/env";
 import { asyncHandler, ok, validateBody } from "../lib/http";
 import { aiLog, promptHash, snippet } from "../lib/logger";
 import {
@@ -18,9 +20,28 @@ import {
   planWithGateway,
   streamPlanWithGateway
 } from "../services/aiGateway.service";
+import { recordUsage } from "../services/usageLedger.service";
 
 /**
- * Lumio AI — planner gateway route (GP1). The browser's `LlmPlanner` POSTs here;
+ * These routes are intentionally NOT behind `requireAuth` (guests can use the planner). For
+ * Phase 0 shadow-billing we still want to attribute usage to a signed-in user when possible,
+ * without making auth required or changing any route's behavior — so this only decodes a
+ * bearer token if present and never throws/blocks on a missing or invalid one.
+ */
+function optionalUserId(req: Request): string | undefined {
+  try {
+    const header = req.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : undefined;
+    if (!token) return undefined;
+    const payload = jwt.verify(token, env.JWT_SECRET) as { sub: string };
+    return payload.sub;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Kimera AI — planner gateway route (GP1). The browser's `LlmPlanner` POSTs here;
  * this turns a prompt + the live capability description + a relevant project slice
  * into an ordered plan of REGISTERED tools/actions, via the multi-provider failover
  * gateway. It never mutates anything — the web side validates every step against the
@@ -29,7 +50,7 @@ import {
  *
  * No provider key configured → `{ available: false }` (200), so the client falls back.
  * AI is an operator, not a magic box: the model only *selects* among capabilities
- * Lumio already exposes, and returns a numeric confidence the UI surfaces directly.
+ * Kimera already exposes, and returns a numeric confidence the UI surfaces directly.
  */
 export const aiRouter = Router();
 
@@ -132,6 +153,10 @@ aiRouter.post(
       aiLog.warn(`plan ${hash}: pool exhausted, no plan returned`);
       return ok(res, "LLM pool exhausted", { available: true, plan: null });
     }
+    const usageUserId = optionalUserId(req);
+    if (usageUserId) {
+      void recordUsage({ userId: usageUserId, action: "assistant.plan", units: 1, provider: result.providerId });
+    }
 
     const parsed = extractPlanJson(result.text);
     if (!parsed) {
@@ -153,7 +178,7 @@ aiRouter.post(
   })
 );
 
-// --- Lumio Brain B4 — tier-3 transactional compiler (`fast` model class) -----
+// --- Kimera Brain B4 — tier-3 transactional compiler (`fast` model class) -----
 
 const fastPlanRequestSchema = z.object({
   prompt: z.string().min(1).max(300),
@@ -208,6 +233,10 @@ aiRouter.post(
       aiLog.debug(`fast ${hash}: fast pool exhausted`);
       return ok(res, "Fast pool exhausted", { available: true, escalate: true });
     }
+    const usageUserId = optionalUserId(req);
+    if (usageUserId) {
+      void recordUsage({ userId: usageUserId, action: "assistant.plan.fast", units: 1, provider: result.providerId });
+    }
 
     const parsed = fastPlanReplySchema.safeParse(extractPlanJson(result.text));
     if (!parsed.success || parsed.data.escalate || !parsed.data.steps?.length) {
@@ -248,6 +277,10 @@ aiRouter.post(
     const result = await planWithGateway(ACK_SYSTEM_PROMPT, `REQUEST:\n${body.prompt}`, { modelClass: "fast" });
     if (!result) {
       return ok(res, "Fast pool exhausted", { available: true, text: null });
+    }
+    const usageUserId = optionalUserId(req);
+    if (usageUserId) {
+      void recordUsage({ userId: usageUserId, action: "assistant.ack", units: 1, provider: result.providerId });
     }
     // One line, unquoted, spoken-length — defend against chatty fast models.
     const text = result.text.trim().split("\n")[0]!.replace(/^["'“]+|["'”]+$/g, "").slice(0, 140).trim() || null;
@@ -320,6 +353,10 @@ aiRouter.post(
         aiLog.warn(`stream ${promptHash(body.prompt)}: pool exhausted, no plan returned`);
         send({ e: "done", plan: null });
         return res.end();
+      }
+      const usageUserId = optionalUserId(req);
+      if (usageUserId) {
+        void recordUsage({ userId: usageUserId, action: "assistant.plan.stream", units: 1, provider: result.providerId });
       }
       const parsed = extractPlanJson(result.text);
       if (parsed && !body.images?.length) {
@@ -409,6 +446,10 @@ aiRouter.post(
         // Honest signal — the client shows "couldn't reach a model", not an empty reply.
         send({ e: "unavailable", reason: "exhausted" });
         return res.end();
+      }
+      const usageUserId = optionalUserId(req);
+      if (usageUserId) {
+        void recordUsage({ userId: usageUserId, action: "assistant.chat.stream", units: 1, provider: result.providerId });
       }
       send({ e: "done", provider: result.providerId });
       return res.end();

@@ -1,4 +1,4 @@
-import type { SourceAsset, TimelineComposition, TimelineLayer, ToolCapabilityDefinition } from "@lumio-by-aelivion/shared";
+import type { SourceAsset, TimelineComposition, TimelineLayer, ToolCapabilityDefinition } from "@kimera-by-aelivion/shared";
 import { useLayerToolEffectRunner } from "../tools/useLayerToolEffectRunner";
 import { AiActivityIndicator } from "./AiActivityIndicator";
 import { Button } from "./Button";

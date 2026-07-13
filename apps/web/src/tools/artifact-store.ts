@@ -1,4 +1,4 @@
-import type { ToolArtifact } from "@lumio-by-aelivion/shared";
+import type { ToolArtifact } from "@kimera-by-aelivion/shared";
 
 export interface StoredToolArtifact extends ToolArtifact {
   blob?: Blob | undefined;
@@ -27,7 +27,7 @@ export async function createToolArtifactStore(): Promise<ToolArtifactStore> {
 
   try {
     const root = await storage.getDirectory();
-    const directory = await root.getDirectoryHandle("lumio-tool-artifacts", { create: true });
+    const directory = await root.getDirectoryHandle("kimera-tool-artifacts", { create: true });
     return createOpfsArtifactStore(directory);
   } catch {
     return createMemoryArtifactStore();
@@ -70,7 +70,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
         const writable = await file.createWritable();
         await writable.write(artifact.blob);
         await writable.close();
-        nextArtifact.uri = `opfs://lumio-tool-artifacts/${fileName}`;
+        nextArtifact.uri = `opfs://kimera-tool-artifacts/${fileName}`;
       }
       metadata.set(artifact.id, nextArtifact);
       return stripBlob(nextArtifact);
@@ -81,7 +81,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
         return undefined;
       }
 
-      const fileName = artifact.uri?.replace("opfs://lumio-tool-artifacts/", "");
+      const fileName = artifact.uri?.replace("opfs://kimera-tool-artifacts/", "");
       if (!fileName) {
         return artifact;
       }
@@ -97,7 +97,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
     async remove(artifactId) {
       const artifact = metadata.get(artifactId);
       metadata.delete(artifactId);
-      const fileName = artifact?.uri?.replace("opfs://lumio-tool-artifacts/", "");
+      const fileName = artifact?.uri?.replace("opfs://kimera-tool-artifacts/", "");
       if (fileName) {
         await directory.removeEntry(fileName).catch(() => undefined);
       }

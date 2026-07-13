@@ -1,10 +1,10 @@
-import type { CostEstimate, TimelineComposition } from "@lumio-by-aelivion/shared";
+import type { CostEstimate, TimelineComposition } from "@kimera-by-aelivion/shared";
 import type { IntentScope } from "./planner/intent-continuity";
 
 export type { IntentScope } from "./planner/intent-continuity";
 
 /**
- * Lumio AI — shared plan types. A plan is an ordered list of steps the user
+ * Kimera AI — shared plan types. A plan is an ordered list of steps the user
  * reviews before anything is applied. Steps are one of:
  *  - `timelineAction` — invoke a registered Timeline Action (free, local).
  *  - `tool` — open an existing tool window (e.g. tracker); may pause for input.

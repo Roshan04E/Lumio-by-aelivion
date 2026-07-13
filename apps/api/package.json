@@ -1,5 +1,5 @@
 {
-  "name": "@lumio-by-aelivion/api",
+  "name": "@kimera-by-aelivion/api",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,8 +17,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.69.0",
     "@prisma/client": "^6.14.0",
-    "@lumio-by-aelivion/render-templates": "workspace:*",
-    "@lumio-by-aelivion/shared": "workspace:*",
+    "@kimera-by-aelivion/render-templates": "workspace:*",
+    "@kimera-by-aelivion/shared": "workspace:*",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",

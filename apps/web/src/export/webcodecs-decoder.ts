@@ -50,7 +50,7 @@ function webcodecsDebugEnabled(): boolean {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       if (params.get("exportDecodeDebug") === "1" || params.get("exportGlDebug") === "1") return true;
-      if (window.localStorage?.getItem("lumio.exportDecodeDebug") === "1" || window.localStorage?.getItem("lumio.exportGlDebug") === "1") {
+      if (window.localStorage?.getItem("kimera.exportDecodeDebug") === "1" || window.localStorage?.getItem("kimera.exportGlDebug") === "1") {
         return true;
       }
     }
@@ -629,21 +629,38 @@ export async function createWebCodecsVideoSource(
   // catch) poisons the whole provider → the clip goes black. This flag makes flush-then-continue legal.
   let needKey = false;
 
+  // keyIndices is ascending by construction (built by array index above) — binary-search the
+  // largest key ≤ chunkIndex. When chunkIndex precedes the first key, return keyIndices[0]
+  // (the historical clamp, preserved exactly).
   const keyAtOrBefore = (chunkIndex: number) => {
+    let low = 0;
+    let high = keyIndices.length - 1;
     let k = keyIndices[0]!;
-    for (const ki of keyIndices) {
-      if (ki <= chunkIndex) k = ki;
-      else break;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (keyIndices[mid]! <= chunkIndex) {
+        k = keyIndices[mid]!;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
     }
     return k;
   };
+  // index[].timestamp is cts (presentation) order — B-frame streams aren't strictly sorted, so a
+  // plain binary search is unsafe. The scan stays linear, but a FORWARD CURSOR makes monotonic
+  // playback/export amortized O(1): every entry below the cursor already satisfied ts ≤ cursorMicros
+  // ≤ micros, so resuming there returns the same break point the from-zero scan would (backward
+  // seeks fall back to a full rescan — today's cost, today's result). Previously each getFrame
+  // rescanned from 0, O(n²) across a long clip.
+  let chunkCursorMicros = Number.NEGATIVE_INFINITY;
+  let chunkCursorJ = 0;
   const chunkIndexForMicros = (micros: number) => {
-    let i = 0;
-    for (let j = 0; j < chunkCount; j += 1) {
-      if (index[j]!.timestamp <= micros) i = j;
-      else break;
-    }
-    return i;
+    let j = micros >= chunkCursorMicros ? chunkCursorJ : 0;
+    while (j < chunkCount && index[j]!.timestamp <= micros) j += 1;
+    chunkCursorMicros = micros;
+    chunkCursorJ = j;
+    return Math.max(0, j - 1);
   };
 
   function resetTo(chunkIndex: number) {

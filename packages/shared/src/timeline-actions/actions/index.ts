@@ -10,7 +10,20 @@ import { textActions } from "./text";
 import { trackActions } from "./track";
 import { transitionActions } from "./transition";
 
-export { buildTransitionAnimations, buildTransitionKeyframes, TRANSITION_MARKER, type TransitionKind, type TransitionSpec } from "./transition";
+export {
+  applyJunctionTransition,
+  buildTransitionAnimations,
+  buildTransitionKeyframes,
+  DEFAULT_CROSS_DISSOLVE_SECONDS,
+  findLeftNeighbor,
+  findRightNeighbor,
+  findTransitionCutForClip,
+  isJunctionTransitionKind,
+  removeJunctionTransition,
+  TRANSITION_MARKER,
+  type TransitionKind,
+  type TransitionSpec
+} from "./transition";
 
 /** Every built-in timeline action, grouped by file. */
 export const allTimelineActions: TimelineActionDefinition<unknown>[] = [

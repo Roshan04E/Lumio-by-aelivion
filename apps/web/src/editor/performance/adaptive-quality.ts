@@ -2,7 +2,7 @@
  * Adaptive playback quality (P0 — see the 2026-07-02 NLE gap analysis).
  *
  * Premiere/Resolve auto-degrade playback resolution when the machine can't hold the frame budget; this
- * is Lumio's equivalent. It watches the frame-stats window (`frame-stats.ts`) DURING PLAYBACK and steps
+ * is Kimera's equivalent. It watches the frame-stats window (`frame-stats.ts`) DURING PLAYBACK and steps
  * an additional render-scale CAP down the already-tested profile ladder (1 → 0.5 → 0.25) when frames are
  * being dropped, then recovers upward after a sustained clean run. The viewer applies
  * `min(userProfileScale, adaptiveScaleCap)` while playing — so this only ever LOWERS below the user's
@@ -14,7 +14,7 @@
  *    playback before stepping back up — no per-frame thrash;
  *  - decisions need a half-full sample window, so a single hitch can't trigger a drop;
  *  - kill switch mirroring `getGlGovernorEnabled`: `?adaptiveQuality=0` → localStorage
- *    `lumio.adaptiveQuality` → `VITE_ADAPTIVE_QUALITY` → ON by default.
+ *    `kimera.adaptiveQuality` → `VITE_ADAPTIVE_QUALITY` → ON by default.
  */
 
 import { getFrameStatsSnapshot, subscribeFrameStats } from "./frame-stats";
@@ -29,7 +29,7 @@ const STEP_DOWN_COOLDOWN_MS = 1500;
 const RECOVER_AFTER_MS = 4000;
 
 /**
- * Resolution order: `?adaptiveQuality=0|1` → localStorage `lumio.adaptiveQuality` →
+ * Resolution order: `?adaptiveQuality=0|1` → localStorage `kimera.adaptiveQuality` →
  * `VITE_ADAPTIVE_QUALITY` → true. (Same pattern as `getGlGovernorEnabled` / `getExportWorkerScene`.)
  */
 export function getAdaptiveQualityEnabled(): boolean {
@@ -39,7 +39,7 @@ export function getAdaptiveQualityEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("adaptiveQuality")) {
         return truthy(new URLSearchParams(window.location.search).get("adaptiveQuality"));
       }
-      const stored = window.localStorage?.getItem("lumio.adaptiveQuality");
+      const stored = window.localStorage?.getItem("kimera.adaptiveQuality");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */
@@ -65,11 +65,11 @@ export function isAdaptiveQualityOn(): boolean {
   return runtimeEnabled ?? getAdaptiveQualityEnabled();
 }
 
-/** Toggle auto-degrade at runtime (persisted to the existing `lumio.adaptiveQuality` key). */
+/** Toggle auto-degrade at runtime (persisted to the existing `kimera.adaptiveQuality` key). */
 export function setAdaptiveQualityOn(on: boolean): void {
   runtimeEnabled = on;
   try {
-    window.localStorage?.setItem("lumio.adaptiveQuality", on ? "1" : "0");
+    window.localStorage?.setItem("kimera.adaptiveQuality", on ? "1" : "0");
   } catch {
     /* restricted storage — runtime flag still applies this session */
   }

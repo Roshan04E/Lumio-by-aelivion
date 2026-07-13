@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Captions, Eraser, Layers, Scissors, Move3d, Wrench, type LucideIcon } from "lucide-react";
-import { stageLabel, toolCapabilityDefinitions, type ToolCapabilityDefinition, type ToolIconKey } from "@lumio-by-aelivion/shared";
+import { stageLabel, toolCapabilityDefinitions, type ToolCapabilityDefinition, type ToolIconKey } from "@kimera-by-aelivion/shared";
 
 /** Single seam between the registry's icon keys and web's glyph set.
  *  A new tool declares `icon` in packages/shared; add its key here (or it falls back to the wrench). */
@@ -29,7 +29,7 @@ export function ToolsPage() {
             Creator AI tools. <span className="mkt-grad">Yours to run, free or integrated.</span>
           </h1>
           <p className="mkt-sub">
-            Run any tool with your own chat assistant for free, or let Lumio run it for you. Every result
+            Run any tool with your own chat assistant for free, or let Kimera run it for you. Every result
             comes back as editable timeline data — never a locked export.
           </p>
         </div>

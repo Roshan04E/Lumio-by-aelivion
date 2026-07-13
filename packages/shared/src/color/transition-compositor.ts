@@ -6,8 +6,11 @@
  * runs a per-transition fragment shader to produce the blended result. One instance is reused across
  * windows/transitions; programs are compiled once per transition id and cached.
  *
- * The SAME class + the SAME assembled shaders (`buildTransitionFragmentShader`) are used by web preview,
- * browser export, and Remotion, which is what keeps the three renderers pixel-identical.
+ * CONSUMERS (2026-07): only the editor's DOM-fallback `TransitionOverlay` (TransitionLayer.tsx) still
+ * instantiates this class. The scene-compositor path — default preview, browser export, and Remotion —
+ * compiles the SAME assembled shaders (`buildTransitionFragmentShader`) inside `SceneCompositor`
+ * (`drawTransition`, sides nest-pre-composed with full transforms), which is what keeps the renderers
+ * pixel-identical. The fallback overlay pre-bakes each side's transform before calling `draw`.
  *
  * Context attributes / unpack flags mirror `MediaWebGLRenderer` exactly (premultipliedAlpha:false,
  * UNPACK_FLIP_Y=true, no premultiply) so the mix operates on the same straight-alpha sRGB pixels the

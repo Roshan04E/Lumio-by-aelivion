@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Star, Trash2 } from "lucide-react";
-import type { TransitionKind } from "@lumio-by-aelivion/shared";
+import type { TransitionKind } from "@kimera-by-aelivion/shared";
 import { transitionPreviewStyle, type TransitionPreviewParams } from "../editor/effects/transition-preview";
 
 /**
@@ -23,7 +23,8 @@ export function TransitionThumb({
   bSrc,
   onApply,
   onToggleStar,
-  onRemove
+  onRemove,
+  dragPayload
 }: {
   kind: TransitionKind;
   params: TransitionPreviewParams;
@@ -35,6 +36,8 @@ export function TransitionThumb({
   onApply: () => void;
   onToggleStar: () => void;
   onRemove?: (() => void) | undefined;
+  /** JSON payload for `application/x-kimera-transition` — set on junction kinds so the tile can be dragged onto a timeline cut. */
+  dragPayload?: string | undefined;
 }) {
   const aRef = useRef<HTMLDivElement | null>(null);
   const bRef = useRef<HTMLDivElement | null>(null);
@@ -92,10 +95,20 @@ export function TransitionThumb({
       <button
         type="button"
         className="transition-thumb"
-        title={`${label} — click to apply to the selected cut`}
+        title={dragPayload ? `${label} — click to apply to the selected cut, or drag onto a cut` : `${label} — click to apply to the selected cut`}
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
         onClick={onApply}
+        draggable={Boolean(dragPayload)}
+        onDragStart={
+          dragPayload
+            ? (event) => {
+                event.dataTransfer.effectAllowed = "copy";
+                event.dataTransfer.setData("application/x-kimera-transition", dragPayload);
+                event.dataTransfer.setData("text/plain", label);
+              }
+            : undefined
+        }
       >
         <div className="transition-thumb-a" ref={aRef} style={{ backgroundImage: aSrc ? `url("${aSrc}")` : A_BG }} />
         <div className="transition-thumb-b" ref={bRef} style={{ backgroundImage: bSrc ? `url("${bSrc}")` : B_BG }} />

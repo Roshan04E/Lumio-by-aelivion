@@ -6,7 +6,7 @@ import {
   type ProjectGraph,
   type SourceAsset,
   type ToolCapabilityDefinition
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";

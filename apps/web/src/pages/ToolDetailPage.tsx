@@ -72,7 +72,7 @@ import {
   type ToolAdapterType,
   type ToolRun,
   type TranscriptSegment,
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { AiRotoToolPanel } from "./AiRotoToolPanel";
 import { RemovePersonToolPanel } from "./RemovePersonToolPanel";
 import { SmartFollowTextToolPanel } from "./SmartFollowTextToolPanel";
@@ -83,6 +83,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { ColorControl } from "../components/ColorControl";
 import { CreditBadge } from "../components/CreditBadge";
+import { ShadowCostBadge } from "../components/ShadowCostBadge";
 import { addEffect, createAsset, createProject, listAssets, patchProject, suggestAutoCaptionHighlights, transformAutoCaptions } from "../lib/api";
 import { buildBackgroundColor, parseBackgroundColor } from "../lib/colorBackground";
 import { defaultColorPalette, extractPaletteFromAsset } from "../lib/colorPalette";
@@ -749,7 +750,7 @@ export function ToolDetailPage() {
       setHighlightedWords(artifact.style.highlightedWords.join(", "));
       setCaptionStyleOverrides(artifact.style.segmentStyleOverrides ?? {});
       setLastLocalTranscript(artifact.transcript);
-      setLocalTranscriptionStatus("Imported Lumio caption artifact.");
+      setLocalTranscriptionStatus("Imported Kimera caption artifact.");
       return;
     }
 
@@ -774,7 +775,7 @@ export function ToolDetailPage() {
         : format === "srt"
           ? exportTranscriptToSrt(transcript)
           : exportTranscriptToVtt(transcript);
-    const extension = format === "json" ? "lumio-captions.json" : format;
+    const extension = format === "json" ? "kimera-captions.json" : format;
     downloadTextFile(`auto-captions.${extension}`, body, format === "json" ? "application/json" : "text/plain");
   }
 
@@ -2035,6 +2036,9 @@ function AutoCaptionsPanel({
             <button disabled={busy || !selectedAsset} type="button" onClick={onCloudTranscribe}>
               Cloud transcribe
             </button>
+            {selectedAsset ? (
+              <ShadowCostBadge action="caption.cloud-transcribe" units={selectedAsset.durationSeconds / 60} />
+            ) : null}
             {cloudTranscriptionRunId ? (
               <button className="is-secondary" type="button" onClick={onCancelCloudTranscribe}>
                 Cancel
@@ -2470,7 +2474,7 @@ function AutoCaptionsPanel({
           ) : null}
 
           <div className="caption-interchange-panel">
-            <p>Move captions between Lumio, editors, chat agents, and subtitle tools.</p>
+            <p>Move captions between Kimera, editors, chat agents, and subtitle tools.</p>
             <div className="caption-interchange-actions">
               <button type="button" onClick={() => onExportCaptionData("json")}>
                 <FileJson size={13} />

@@ -5,7 +5,7 @@
  * samples the displayed viewer-zoom % over ~3s. A healthy fit CONVERGES (stable value); the bug is a
  * 2-cycle oscillation (e.g. 57↔100 / 74↔78). Reports min/max/spread + the sample sequence.
  *
- * Run: pnpm --filter @lumio-by-aelivion/worker exec tsx src/zoom-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/zoom-probe.ts   (dev server must be up)
  */
 import { chromium, type Page } from "playwright";
 

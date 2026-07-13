@@ -12,7 +12,7 @@ import {
   recordEffectDemand,
   recordToolDemand,
   type LayerOrdinal
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { loadByoKey } from "../byok";
 import { isOllamaLocalActive, loadOllamaConfig, streamOllamaChat } from "../ollama";
 import type { AiPlan, PlanEventHandler, PlanStep, PlannerContext, PlannerProvider } from "../types";
@@ -23,7 +23,7 @@ import { extractColor, extractSize, extractTextStyle, resolveShapeGeometry } fro
  * the deterministic planner, so the executor and UI don't change. It STREAMS from
  * the backend gateway (`/ai/plan/stream`, NDJSON) so reasoning/phases render live,
  * then *validates every returned step against the live registries* before trusting
- * it — the model may only select tools/actions Lumio already has.
+ * it — the model may only select tools/actions Kimera already has.
  *
  * Any failure (no provider, network error, empty/invalid plan) transparently falls
  * back to the injected deterministic planner, so the editor is never blocked.
@@ -371,7 +371,7 @@ export class LlmPlanner implements PlannerProvider {
 }
 
 /**
- * Keep only steps that reference capabilities Lumio actually has AND whose params
+ * Keep only steps that reference capabilities Kimera actually has AND whose params
  * pass the action's Zod schema; recompute costs locally. `dropped` collects
  * param-validation failures so the planner can hand them back for one repair pass.
  */

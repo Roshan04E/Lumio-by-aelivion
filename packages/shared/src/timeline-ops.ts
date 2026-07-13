@@ -1,4 +1,5 @@
-import type { TimelineComposition, TimelineLayer, TimelineMarker } from "./types";
+import type { TimelineComposition, TimelineKeyframeV2, TimelineLayer, TimelineMarker } from "./types";
+import { getLayerAnimations } from "./animation";
 import { getLayerSpeedAt, layerSourceTimeSeconds, shiftSpeedKeyframes } from "./timeline";
 
 /** Timeline interaction tools (hybrid model): smart select, blade/razor split, hand pan, roll trim, slide. */
@@ -568,22 +569,68 @@ export function snapValue(
 
 // --- Paste attributes (Premiere Ctrl+Alt+C / Ctrl+Alt+V) ---------------------
 
-/** The copyable "look" of a clip: static styling, not content or timing. */
+/** The copyable "look" of a clip: styling + its keyframes, not content or timing. */
 export interface LayerAttributes {
   effects: TimelineLayer["effects"];
   /** Undefined = "don't touch transform on apply" (effect presets strip it; clipboard keeps it). */
   transform: TimelineLayer["transform"] | undefined;
   fit: TimelineLayer["fit"];
+  /**
+   * Keyframes riding along with the attributes: effect-scope keys (carrying the SOURCE effect ids —
+   * remapped to the fresh ids at apply time) and layer-scope `transform.*` keys. Times are
+   * layer-local, so they apply as-is; keys past a shorter target clip are simply never reached.
+   * Undefined = pre-keyframe snapshot (old saved presets) → apply leaves target animations alone.
+   */
+  animations?: TimelineKeyframeV2[] | undefined;
 }
 
 let clipboardAttributes: LayerAttributes | null = null;
 
+function isTransformKeyframe(keyframe: TimelineKeyframeV2): boolean {
+  return keyframe.target?.scope === "layer" && keyframe.target.property.startsWith("transform.");
+}
+
+/** Deep clone a keyframe (targets/handles/object values) so stored snapshots and multi-target pastes never share references. */
+function cloneKeyframe(keyframe: TimelineKeyframeV2, id: string = keyframe.id): TimelineKeyframeV2 {
+  return {
+    ...keyframe,
+    id,
+    target: { ...keyframe.target },
+    value: typeof keyframe.value === "object" && keyframe.value !== null ? { ...keyframe.value } : keyframe.value,
+    temporal: {
+      ...keyframe.temporal,
+      in: keyframe.temporal.in ? { ...keyframe.temporal.in } : keyframe.temporal.in,
+      out: keyframe.temporal.out ? { ...keyframe.temporal.out } : keyframe.temporal.out
+    },
+    spatial: keyframe.spatial
+      ? {
+          ...keyframe.spatial,
+          inTangent: keyframe.spatial.inTangent ? { ...keyframe.spatial.inTangent } : keyframe.spatial.inTangent,
+          outTangent: keyframe.spatial.outTangent ? { ...keyframe.spatial.outTangent } : keyframe.spatial.outTangent
+        }
+      : keyframe.spatial
+  };
+}
+
 /** Deep-copied attribute snapshot of a clip — safe to store (presets) or hold (clipboard). */
 export function snapshotLayerAttributes(layer: TimelineLayer): LayerAttributes {
+  const effectIds = new Set(layer.effects.map((effect) => effect.id));
+  // getLayerAnimations folds legacy v1 keyframes in as layer-local `transform.*` V2 keys, so
+  // snapshots of old clips carry their animation too.
+  const animations = getLayerAnimations(layer)
+    .filter(
+      (keyframe) =>
+        (keyframe.target?.scope === "effect" &&
+          keyframe.target.effectId !== undefined &&
+          effectIds.has(keyframe.target.effectId)) ||
+        isTransformKeyframe(keyframe)
+    )
+    .map((keyframe) => cloneKeyframe(keyframe));
   return {
     effects: layer.effects.map((effect) => ({ ...effect, params: { ...effect.params } })),
     transform: layer.transform ? { ...layer.transform, position: { ...layer.transform.position } } : layer.transform,
-    fit: layer.fit
+    fit: layer.fit,
+    animations
   };
 }
 
@@ -599,8 +646,9 @@ export function hasClipboardAttributes(): boolean {
 /**
  * Apply the copied attributes to every target layer: effects are REPLACED with fresh-id clones
  * (per-layer ids so editing one pasted effect never aliases another), transform/fit copied when
- * the source had them. Content, timing, keyframes, and masks are untouched (v1: static
- * attributes only — keyframed values don't travel).
+ * the source had them, and the source's effect/transform keyframes travel too (effect keys are
+ * remapped to the fresh effect ids; the target's own keys in the replaced scopes are dropped,
+ * mask/other-scope keys untouched). Content and timing are untouched.
  */
 export function pasteLayerAttributes(composition: TimelineComposition, layerIds: string[]): TimelineComposition {
   return applyLayerAttributes(composition, layerIds, clipboardAttributes);
@@ -628,16 +676,48 @@ export function applyLayerAttributes(
 
 /** Layer-scoped application of an attribute snapshot (used by paste and by saved effect presets). */
 export function applyAttributesToLayer(item: TimelineLayer, attributes: LayerAttributes): TimelineLayer {
-  return {
+  const effects = attributes.effects.map((effect, index) => ({
+    ...effect,
+    id: `${item.id}_pfx_${index}_${freshId("e").slice(-6)}`,
+    params: { ...effect.params }
+  }));
+  const next: TimelineLayer = {
     ...item,
-    effects: attributes.effects.map((effect, index) => ({
-      ...effect,
-      id: `${item.id}_pfx_${index}_${freshId("e").slice(-6)}`,
-      params: { ...effect.params }
-    })),
+    effects,
     ...(attributes.transform ? { transform: { ...attributes.transform, position: { ...attributes.transform.position } } } : {}),
     ...(attributes.fit !== undefined && (item.type === "video" || item.type === "image") ? { fit: attributes.fit } : {})
   };
+  if (attributes.animations !== undefined) {
+    // Remap snapshot effect ids → the fresh per-target ids minted above (index-aligned).
+    const freshEffectIdByOldId = new Map<string, string>();
+    attributes.effects.forEach((effect, index) => freshEffectIdByOldId.set(effect.id, effects[index]!.id));
+    const applyTransformKeys = attributes.transform !== undefined;
+    // Replace semantics per scope: the whole effect stack was just replaced, so ALL of the
+    // target's effect-scope keys are orphans; transform.* keys are replaced only when the
+    // snapshot carries a transform. Mask/track/other-scope keys are never touched.
+    const kept = (item.animations ?? []).filter(
+      (keyframe) => keyframe.target?.scope !== "effect" && !(applyTransformKeys && isTransformKeyframe(keyframe))
+    );
+    const incoming: TimelineKeyframeV2[] = [];
+    for (const keyframe of attributes.animations) {
+      if (keyframe.target?.scope === "effect") {
+        const freshEffectId = keyframe.target.effectId ? freshEffectIdByOldId.get(keyframe.target.effectId) : undefined;
+        if (!freshEffectId) continue; // key no longer maps to a snapshotted effect
+        const clone = cloneKeyframe(keyframe, freshId("kf"));
+        clone.target.effectId = freshEffectId;
+        incoming.push(clone);
+      } else if (applyTransformKeys && isTransformKeyframe(keyframe)) {
+        incoming.push(cloneKeyframe(keyframe, freshId("kf")));
+      }
+    }
+    next.animations = [...kept, ...incoming];
+    if (applyTransformKeys && item.keyframes?.length) {
+      // Legacy v1 keys are all transform.* and merge in via getLayerAnimations — leaving them
+      // would double-animate the freshly replaced transform scope.
+      next.keyframes = [];
+    }
+  }
+  return next;
 }
 
 // --- Clipboard (in-memory, single slot) ------------------------------------

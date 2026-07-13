@@ -29,7 +29,7 @@ import { whenBackgroundIdle } from "./backgroundScheduler";
 export const STILL_PROXY_EDGES = { base: 1920, zoomed: 2560 } as const;
 const STILL_PROXY_VERSION = 1;
 const WEBP_QUALITY = 0.82;
-const DIR_NAME = "lumio-still-proxies";
+const DIR_NAME = "kimera-still-proxies";
 /** Serialize generations — decode+encode of a 4K image is heavy; two at once doubles the jank. */
 let generationChain: Promise<unknown> = Promise.resolve();
 /** Per-session results: Blob (ready), null (proxy not applicable / failed — use original). */

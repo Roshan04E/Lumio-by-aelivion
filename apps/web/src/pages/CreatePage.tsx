@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, ChevronDown, FilePlus2, LayoutTemplate, Sparkles } from "lucide-react";
-import { templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
+import { templateDefinitions, type TemplateDefinition } from "@kimera-by-aelivion/shared";
 import { UploadDropzone } from "../components/UploadDropzone";
 import { createAsset, createProject, listTemplates } from "../lib/api";
 
@@ -10,7 +10,7 @@ export function CreatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [templates, setTemplates] = useState<TemplateDefinition[]>(templateDefinitions);
   const [templateId, setTemplateId] = useState(templateDefinitions[0]?.id ?? "");
-  const [title, setTitle] = useState("My Lumio edit");
+  const [title, setTitle] = useState("My Kimera edit");
   const [prompt, setPrompt] = useState("Make this like a fast product promo with bold price text.");
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [busy, setBusy] = useState(false);
@@ -114,7 +114,7 @@ export function CreatePage() {
               <span className="mkt-ic"><Sparkles size={18} /></span>
               <div>
                 <h3>Describe it with a prompt</h3>
-                <p>Lumio plans a starting graph from your words — you edit everything after.</p>
+                <p>Kimera plans a starting graph from your words — you edit everything after.</p>
               </div>
             </div>
             <div className="mkt-start-action">

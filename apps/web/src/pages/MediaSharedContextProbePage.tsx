@@ -23,7 +23,7 @@ import {
   type MediaEffects,
   type MediaRendererDrawParams,
   type TimelineLayer,
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 const W = 256;
 const H = 256;
@@ -87,7 +87,12 @@ export function MediaSharedContextProbePage() {
     try {
       const source = makeSource();
       const pipeline = makePipeline();
-      const effects: MediaEffects = { vignette: { amount: 0.6, size: 0.5 }, timeSeconds: 0 } as MediaEffects;
+      const effects: MediaEffects = {
+        vignette: { amount: 0.6, size: 0.5, feather: 1, roundness: 0, highlights: 0 },
+        grain: null,
+        chromaKey: null,
+        timeSeconds: 0
+      };
       const drawBase: Omit<MediaRendererDrawParams, "target"> = {
         source,
         sourceWidth: W,

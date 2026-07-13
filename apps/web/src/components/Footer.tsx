@@ -5,7 +5,7 @@ export function Footer() {
   return (
     <footer className="mkt-footer">
       <div className="mkt-foot">
-        <Link to="/" aria-label="Lumio home">
+        <Link to="/" aria-label="Kimera home">
           <BrandMark />
         </Link>
         <span className="push" />
@@ -13,7 +13,7 @@ export function Footer() {
         <Link to="/templates">Templates</Link>
         <Link to="/cookbook">Cookbook</Link>
         <Link to="/dashboard">Dashboard</Link>
-        <span className="copy">© 2026 Lumio by Aelivion — pro video editing in the browser.</span>
+        <span className="copy">© 2026 Kimera by Aelivion — pro video editing in the browser.</span>
       </div>
     </footer>
   );

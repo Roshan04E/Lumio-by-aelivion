@@ -7,5 +7,5 @@ await ensureStorage();
 const app = createApp();
 
 app.listen(env.PORT, () => {
-  console.log(`Lumio API listening on http://localhost:${env.PORT}`);
+  console.log(`Kimera API listening on http://localhost:${env.PORT}`);
 });

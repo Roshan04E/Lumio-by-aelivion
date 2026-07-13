@@ -1,5 +1,5 @@
 {
-  "name": "@lumio-by-aelivion/worker",
+  "name": "@kimera-by-aelivion/worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -33,8 +33,8 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "@lumio-by-aelivion/render-templates": "workspace:*",
-    "@lumio-by-aelivion/shared": "workspace:*",
+    "@kimera-by-aelivion/render-templates": "workspace:*",
+    "@kimera-by-aelivion/shared": "workspace:*",
     "@prisma/client": "^6.14.0",
     "@remotion/bundler": "^4.0.479",
     "@remotion/renderer": "^4.0.479",

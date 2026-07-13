@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0.0",
   "kind": "effect",
-  "id": "com.lumio.examples.invert",
+  "id": "com.kimera.examples.invert",
   "name": "Invert",
   "version": "1.0.0",
   "description": "A minimal real GLSL fragment-shader effect (webgl-fragment engine) that inverts the layer's RGB, mixed by intensity.",

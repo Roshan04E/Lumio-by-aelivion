@@ -1,5 +1,5 @@
 {
-  "name": "@lumio-by-aelivion/web",
+  "name": "@kimera-by-aelivion/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -18,7 +18,7 @@
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@huggingface/transformers": "^3.8.1",
-    "@lumio-by-aelivion/shared": "workspace:*",
+    "@kimera-by-aelivion/shared": "workspace:*",
     "@vitejs/plugin-react": "^5.0.1",
     "kokoro-js": "^1.2.1",
     "lucide-react": "^0.542.0",

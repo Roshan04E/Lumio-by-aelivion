@@ -12,6 +12,7 @@ import {
   expandEffectRegionMasks,
   expandNestedCompositions,
   getCompositionFontsUsed,
+  graphicToDataUrl,
   normalizeProjectColorSettings,
   registerLookManifests,
   registerTransitionManifests,
@@ -19,11 +20,11 @@ import {
   type PluginTransitionManifest,
   type TimelineComposition,
   type TimelineLayer
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { EncoderStallRecoveredError, MediaEncoder, REC709_SDR_LIMITED, type ExportFormat } from "./video-encoder";
 import { getRegionPassesEnabled } from "../color/render-engine";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
-import { clipSourceKey, createFrameProvider, type FrameProvider } from "./source-decoder";
+import { clipSourceKey, createFrameProvider, graphicSourceKey, type FrameProvider } from "./source-decoder";
 import { audioConfig, encodeMixedChannels, type MixedAudioChannels } from "./audio-mixer";
 
 type StageProbe = { stage: "decode" | "rtt" | "final" | "draws" | "gl"; timeSeconds: number; meanLuma?: number; layerId?: string; assetId?: string; detail?: string };
@@ -130,13 +131,14 @@ function sampleCanvasLuma(source: CanvasImageSource, sourceWidth: number, source
 function hasActiveMediaAt(composition: TimelineComposition, t: number): boolean {
   return composition.tracks.some((track) =>
     track.layers.some((layer) => {
-      if ((layer.type !== "video" && layer.type !== "image") || !layer.assetId) return false;
+      if ((layer.type !== "video" && layer.type !== "image") || (!layer.assetId && !layer.graphic)) return false;
       return t >= layer.startSeconds && t < layer.startSeconds + layer.durationSeconds;
     })
   );
 }
 
 function mediaSourceKey(layer: TimelineLayer): string | null {
+  if (layer.type === "image" && layer.graphic) return graphicSourceKey(layer.id);
   if ((layer.type !== "video" && layer.type !== "image") || !layer.assetId) return null;
   return layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
 }
@@ -450,6 +452,12 @@ export function buildSourceUrlMap(
   const map: SourceUrlMap = {};
   for (const track of composition.tracks) {
     for (const layer of track.layers) {
+      if (layer.type === "image" && layer.graphic) {
+        // Self-contained vector graphic: bake the recolored SVG data URL (same bake as preview/Remotion).
+        map[graphicSourceKey(layer.id)] = { url: graphicToDataUrl(layer.graphic), kind: "image" };
+        if (layer.matte?.uri) map[`matte:${layer.id}`] = { url: layer.matte.uri, kind: layer.type };
+        continue;
+      }
       if ((layer.type === "video" || layer.type === "image") && layer.assetId) {
         const url = urlForAsset(layer.assetId);
         if (url && !map[layer.assetId]) map[layer.assetId] = { url, kind: layer.type };

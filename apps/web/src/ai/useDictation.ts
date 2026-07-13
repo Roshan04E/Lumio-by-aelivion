@@ -105,7 +105,7 @@ function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
 
 const DEFAULT_SILENCE_MS = 3500;
 
-/** Bare Web Speech recognizer for auxiliary listeners (the "hey lumio" wake-word standby);
+/** Bare Web Speech recognizer for auxiliary listeners (the "hey kimera" wake-word standby);
  * null where Web Speech is unavailable (the whisper fallback can't run continuously). */
 export function createSpeechRecognition(): SpeechRecognitionLike | null {
   const Ctor = getSpeechRecognitionCtor();

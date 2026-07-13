@@ -10,7 +10,7 @@
  *     at scale 1, while the composite element box (`boxHalfW`, comp px) stays the SAME (the quad applies
  *     transform.scale separately). Same logical box, 8× the texels = crisp when magnified.
  *
- * Run: pnpm --filter @lumio-by-aelivion/worker exec tsx src/raster-resolution-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/raster-resolution-probe.ts   (dev server must be up)
  */
 import { chromium } from "playwright";
 

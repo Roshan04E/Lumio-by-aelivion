@@ -2,9 +2,9 @@ Yes — **you can integrate this**, but position it as a **“Copyright Risk Che
 
 YouTube’s actual Content ID system scans uploaded videos and creates claims when it finds matches. Claims are different from strikes: strikes usually come from a valid copyright removal request. ([Google Help][1])
 
-The important limitation: **YouTube Content ID API is only for approved YouTube content partners**, not normal apps/users. So Lumio/ReelForge cannot directly ask YouTube, “will this get claimed?” before upload. ([Google for Developers][2])
+The important limitation: **YouTube Content ID API is only for approved YouTube content partners**, not normal apps/users. So Kimera/ReelForge cannot directly ask YouTube, “will this get claimed?” before upload. ([Google for Developers][2])
 
-## What Lumio can build
+## What Kimera can build
 
 ### 1. Asset license tracking — must-have
 
@@ -12,7 +12,7 @@ Every asset should carry a license status:
 
 ```ts
 AssetCopyrightStatus =
-  | "lumio_safe"
+  | "kimera_safe"
   | "verified_free"
   | "license_uploaded"
   | "unknown"
@@ -24,7 +24,7 @@ For every asset, store:
 
 ```ts
 {
-  source: "local" | "pexels" | "pixabay" | "ai_generated" | "lumio_library",
+  source: "local" | "pexels" | "pixabay" | "ai_generated" | "kimera_library",
   licenseType: "Pexels License" | "Pixabay Content License" | "User Provided" | "Unknown",
   sourceUrl,
   creatorName,
@@ -78,7 +78,7 @@ You can still do:
 * watermark detection
 * movie/TV/game footage risk classifier
 * reverse-search-like matching through third-party APIs
-* “known source” validation for Pexels/Pixabay/Lumio library
+* “known source” validation for Pexels/Pixabay/Kimera library
 
 But don’t promise certainty.
 
@@ -115,7 +115,7 @@ Download rights report
 Build in this order:
 
 1. **License metadata system** for all assets.
-2. **Safe asset sources**: Pexels, Pixabay, Lumio library.
+2. **Safe asset sources**: Pexels, Pixabay, Kimera library.
 3. **Rights Report** before export.
 4. **Audio fingerprint check** using ACRCloud/AudD.
 5. **User license upload** for paid assets.
@@ -135,7 +135,7 @@ Call it:
 
 Because only YouTube’s own upload checks and Content ID can finally decide claim behavior, and even YouTube’s system can still produce claims later.
 
-For Lumio, this feature is still very powerful. It makes your editor feel professional and creator-safe. It can become a strong differentiator, especially for beginners who don’t understand claims, strikes, licenses, stock assets, and music rights.
+For Kimera, this feature is still very powerful. It makes your editor feel professional and creator-safe. It can become a strong differentiator, especially for beginners who don’t understand claims, strikes, licenses, stock assets, and music rights.
 
 [1]: https://support.google.com/youtube/answer/2797370?hl=en&utm_source=chatgpt.com "How Content ID works - YouTube Help"
 [2]: https://developers.google.com/youtube/partner?utm_source=chatgpt.com "What is the YouTube Content ID API?"

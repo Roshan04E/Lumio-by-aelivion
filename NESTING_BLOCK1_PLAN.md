@@ -145,13 +145,13 @@ Seam: [export-core.ts:187](apps/web/src/export/export-core.ts#L187).
 ## Task 6 — gates (all must pass before handoff)
 
 1. `pnpm -r typecheck`.
-2. `pnpm --filter @lumio-by-aelivion/web editor:test` — ADD checks: (a) group folding produces one group draw
+2. `pnpm --filter @kimera-by-aelivion/web editor:test` — ADD checks: (a) group folding produces one group draw
    at the compound's z-slot with children in nested order; (b) nested-comp `w/h` override reaches the child
    fit box; (c) nest-in-nest folds hierarchically (`outer__nest_inner` group inside `outer` group);
    (d) zero-ready-children group emits nothing; (e) shell carries mask/blur/blend from the compound clip.
 3. `scene:compare` fixture: nested comp (one media child + one text child) under a compound transform + grade
    — scene vs DOM parity per the existing fixture pattern.
-4. `pnpm --filter @lumio-by-aelivion/worker render:compare:pixels` with a nested fixture (media child +
+4. `pnpm --filter @kimera-by-aelivion/worker render:compare:pixels` with a nested fixture (media child +
    compound transform) — preview↔Remotion parity.
 5. `render:manifest` smoke: render a manifest containing a nest to mp4; eyeball frames (document the command
    output in handoff notes).
@@ -282,7 +282,7 @@ Remotion-specific special-casing.
   authoring new E2E fixtures; spend the remaining budget confirming NO REGRESSION on the fixtures that
   already exist instead (higher confidence per unit cost, since it validates Tasks 1-2's rewrite of
   `buildLayerDraw`/`buildRegionPasses` against everything the gate ladder already tunes for).
-  **What WAS run**: `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker scene:compare`
+  **What WAS run**: `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker scene:compare`
   (full default fixture set, no PIXEL_FIXTURES filter). 8 fixtures completed clean at their tuned thresholds
   (default 0.269%/0.80%, plain-image 0.257%/0.80%, brightness-contrast 0.279%/0.80%, color-curves
   0.239%/0.80%, object-fit-cover 0.257%/0.80%, object-fit-contain 0.367%/0.80%, blur 0.004%/2.00%, glow
@@ -335,7 +335,7 @@ list doesn't require this for Block 1.
 ### Gate outputs
 
 - `pnpm -r typecheck` (5 packages): clean, run repeatedly through the session and once more at the end.
-- `pnpm --filter @lumio-by-aelivion/web editor:test`: all 148 checks pass (138 pre-existing + 10 new).
+- `pnpm --filter @kimera-by-aelivion/web editor:test`: all 148 checks pass (138 pre-existing + 10 new).
 - `scene:compare` (partial, see above): 8/22 fixtures ran clean; 1 hit an infra flake; 13 not attempted.
 - `render:compare:pixels`, `render:manifest`: not attempted.
 

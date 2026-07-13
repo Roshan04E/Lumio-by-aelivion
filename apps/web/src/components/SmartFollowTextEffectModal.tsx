@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { SourceAsset, TimelineComposition, ToolCapabilityDefinition } from "@lumio-by-aelivion/shared";
+import type { SourceAsset, TimelineComposition, ToolCapabilityDefinition } from "@kimera-by-aelivion/shared";
 import type { SavedTrack } from "../lib/trackLibrary";
 import { SmartFollowTextToolPanel } from "../pages/SmartFollowTextToolPanel";
 import { Modal } from "./Modal";

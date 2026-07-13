@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { CONFIDENCE_INFO, confidenceClass } from "../../ai/confidence";
 import { thoughtTail, type TranscriptItem } from "../../ai/transcript";
 import type { AiPlan } from "../../ai/types";
@@ -10,7 +10,10 @@ import { Markdown } from "./Markdown";
  * once done), one accent-bulleted line per REAL action with live status + the registry's
  * result detail + real duration, inline questions, and an honest run summary.
  */
-export function AgentTranscript({
+// memo: AiChatPanel re-renders on every composer keystroke; the transcript's props are
+// identity-stable across those (items is a state array, the callbacks are useCallback), so
+// this skips re-mapping the whole conversation history per character typed.
+export const AgentTranscript = memo(function AgentTranscript({
   items,
   onWakeTrain,
   onWakeSetup
@@ -28,7 +31,7 @@ export function AgentTranscript({
       ))}
     </div>
   );
-}
+});
 
 function TranscriptRow({
   item,
@@ -145,7 +148,7 @@ function TranscriptRow({
             {item.stage === "offer" ? (
               <>
                 Want hands-free control? Teach me your wake phrase — say whatever feels natural
-                (“hey lumio”, “heya lumio”, anything).
+                (“hey kimera”, “heya kimera”, anything).
                 <span className="ai-tr-wake-train-actions">
                   <button type="button" onClick={() => onWakeSetup?.(item.id, true)}>
                     🎙 Teach me

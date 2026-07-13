@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Loader2, MonitorDown, XCircle } from "lucide-react";
-import { ensureComposition, type SourceAsset } from "@lumio-by-aelivion/shared";
+import { ensureComposition, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { Button } from "../components/Button";
 import { exportLocally, saveExportedFile } from "../export/local-export";
 import type { ExportFormat } from "../export/video-encoder";
@@ -206,7 +206,7 @@ export function LocalExportPage() {
       });
       if (cancelled) return;
       const ext = format === "webm" ? "webm" : "mp4";
-      await saveExportedFile(blob, `${project.title || "lumio"}.${ext}`);
+      await saveExportedFile(blob, `${project.title || "kimera"}.${ext}`);
       if (cancelled) return;
       setProgress(1);
       setLabel("Export saved.");

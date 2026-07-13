@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — the local router (B1 tier-0 reflex + B2 tier-1 command compiler). The entry
+ * Kimera Brain — the local router (B1 tier-0 reflex + B2 tier-1 command compiler). The entry
  * point every non-Talk prompt hits BEFORE any model or network: exact commands and registry
  * questions resolve at tier 0 (<5ms), grammar-parseable commands compile at tier 1 (<50ms) —
  * both zero tokens.
@@ -18,14 +18,14 @@
  * SAME pipeline as an LLM plan (Professional still shows the approval bar; everything undoable).
  */
 
-import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
 import {
   actionCost,
   buildCapabilityIndex,
   computeLayerOrdinals,
   layerIdForOrdinal,
   resolveTargetLayer
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import type { AiPlan, PlanStep } from "../types";
 import type { EditorCommandId } from "../../editor/editor-commands";
 import { compileEditorCommand } from "./commands";

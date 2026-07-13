@@ -19,8 +19,8 @@
 import { spawn } from "node:child_process";
 import { rename, rm } from "node:fs/promises";
 import ffmpegPath from "ffmpeg-static";
-import { getCompositionVolume, getTrackAudioGainAt, getTrackPanAt, layerSourceTimeSeconds, processAudioFxBuffer, resolveAudioFxChain, type TimelineLayer } from "@lumio-by-aelivion/shared";
-import type { RenderManifest, RenderManifestLayer } from "@lumio-by-aelivion/render-templates";
+import { getCompositionVolume, getTrackAudioGainAt, getTrackPanAt, layerSourceTimeSeconds, processAudioFxBuffer, resolveAudioFxChain, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { RenderManifest, RenderManifestLayer } from "@kimera-by-aelivion/render-templates";
 
 const SAMPLE_RATE = 48_000;
 // Volume-envelope sampling rate — matches the local mixer's GAIN_SAMPLE_HZ for identical fades.

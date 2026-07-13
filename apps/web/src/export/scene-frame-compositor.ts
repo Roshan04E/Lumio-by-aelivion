@@ -29,6 +29,7 @@ import {
   MediaWebGLRenderer,
   RenderTarget,
   SceneCompositor,
+  colorPipelineCacheKey,
   findTransitionPairs,
   getActiveGlContextCount,
   getActiveTransition,
@@ -54,10 +55,10 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { getExportSingleContext, getRegionPassesEnabled } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
-import { clipSourceKey, type FrameProvider } from "./source-decoder";
+import { clipSourceKey, graphicSourceKey, type FrameProvider } from "./source-decoder";
 
 /** A `<canvas>` (main-thread fallback) or `OffscreenCanvas` (export Worker). */
 type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
@@ -397,7 +398,7 @@ export class SceneFrameCompositor {
       entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "" };
       this.overlaySharedRenderers.set(layerId, entry);
     }
-    const key = JSON.stringify(pipeline);
+    const key = colorPipelineCacheKey(pipeline);
     if (entry.pipelineKey !== key) {
       entry.renderer.setPipeline(pipeline);
       entry.pipelineKey = key;
@@ -434,8 +435,10 @@ export class SceneFrameCompositor {
    */
   private async gradeMediaLayer(item: FlatLayer, t: number): Promise<AnyCanvas | SceneTextureSource | null> {
     const { layer } = item;
-    if (!layer.assetId) return null;
-    const providerKey = layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
+    // Vector graphic layers carry no assetId — their provider is keyed by layer id (graphic:<id>),
+    // registered from the baked SVG data URL in buildSourceUrlMap (mirrors preview/Remotion).
+    const providerKey = layer.graphic ? graphicSourceKey(layer.id) : layer.type === "video" && layer.assetId ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
+    if (!providerKey) return null;
     const source = this.getSource(providerKey);
     // Speed-aware (rate stretch + ramps): the shared mapper — exact integral for ramped clips.
     const sourceTime = layer.type === "video" ? layerSourceTimeSeconds(layer, t - layer.startSeconds) : 0;
@@ -446,7 +449,7 @@ export class SceneFrameCompositor {
           timeSeconds: t,
           meanLuma: 0,
           layerId: layer.id,
-          assetId: layer.assetId,
+          ...(layer.assetId ? { assetId: layer.assetId } : {}),
           detail: `missing-source providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)}`,
         });
       }
@@ -460,7 +463,7 @@ export class SceneFrameCompositor {
           timeSeconds: t,
           meanLuma: 0,
           layerId: layer.id,
-          assetId: layer.assetId,
+          ...(layer.assetId ? { assetId: layer.assetId } : {}),
           detail: `no-frame providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)} provider=${source.width}x${source.height}`,
         });
       }
@@ -471,7 +474,7 @@ export class SceneFrameCompositor {
         stage: "decode",
         timeSeconds: t,
         layerId: layer.id,
-        assetId: layer.assetId,
+        ...(layer.assetId ? { assetId: layer.assetId } : {}),
         meanLuma: this.sampleSourceLuma(frame, source.width, source.height),
         detail: `providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)} provider=${source.width}x${source.height}`,
       });
@@ -507,7 +510,7 @@ export class SceneFrameCompositor {
     if (this.singleContext) {
       // Single-context: grade into a shared-context RenderTarget and hand back the texture directly (no canvas).
       const { renderer, target } = this.mediaSharedFor(layer.id);
-      const pipelineKey = JSON.stringify(pipeline);
+      const pipelineKey = colorPipelineCacheKey(pipeline);
       if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
         renderer.setPipeline(pipeline);
         this.mediaPipelineKeys.set(layer.id, pipelineKey);
@@ -522,7 +525,7 @@ export class SceneFrameCompositor {
           stage: "rtt",
           timeSeconds: t,
           layerId: layer.id,
-          assetId: layer.assetId,
+          ...(layer.assetId ? { assetId: layer.assetId } : {}),
           meanLuma: this.meanLumaFromRgba(pixels, w * h),
           detail: `providerKey=${providerKey} target=${w}x${h}:${this.debugRenderTarget(target).framebufferStatus}`,
         });
@@ -531,7 +534,7 @@ export class SceneFrameCompositor {
     }
 
     const renderer = this.mediaRendererFor(layer.id);
-    const pipelineKey = JSON.stringify(pipeline);
+    const pipelineKey = colorPipelineCacheKey(pipeline);
     if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
       renderer.setPipeline(pipeline);
       this.mediaPipelineKeys.set(layer.id, pipelineKey);

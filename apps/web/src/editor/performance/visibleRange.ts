@@ -1,4 +1,4 @@
-import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
 
 /**
  * Visible-range helpers (Phase 3 interface; consumed by preview + timeline in

@@ -152,9 +152,12 @@ export const COLOR_EFFECT_TYPES: ReadonlySet<string> = new Set([
  * rgb) so the shader uniforms map 1:1. `null` fields = effect absent (branch disabled).
  */
 export interface MediaEffects {
-  vignette: { amount: number; size: number } | null;
-  grain: { amount: number } | null;
-  chromaKey: { color: [number, number, number]; tolerance: number; softness: number } | null;
+  /** feather 0..1 (1 = legacy fall-to-frame-edge), roundness 0..1 (1 = pixel-circular), highlights 0..1 protection. */
+  vignette: { amount: number; size: number; feather: number; roundness: number; highlights: number } | null;
+  /** size is a multiplier (1 = legacy 1280×720 virtual grid; >1 = coarser grain). */
+  grain: { amount: number; size: number } | null;
+  /** tolerance/softness in normalized CbCr-distance domain; despill/choke 0..1; matteView renders the alpha matte. */
+  chromaKey: { color: [number, number, number]; tolerance: number; softness: number; despill: number; choke: number; matteView: boolean } | null;
   /** Composition time in seconds — deterministic grain seed (identical in preview + export). */
   timeSeconds: number;
 }

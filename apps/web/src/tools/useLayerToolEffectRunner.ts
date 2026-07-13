@@ -6,7 +6,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type ToolCapabilityDefinition
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { currentExecutorAvailability } from "./executor-availability";
 import { getLayerToolEffectHandler, type LayerToolEffectOptionField } from "./layer-effect-handlers";
 

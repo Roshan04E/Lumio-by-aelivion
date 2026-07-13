@@ -7,7 +7,7 @@
 
 import { useState } from "react";
 import { Eye, EyeOff, Layers, Shapes, Square, Type } from "lucide-react";
-import type { TimelineComposition, TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
 import { InspectorSection } from "../InspectorSection";
 
 export interface GraphicsStackEntry {

@@ -1,7 +1,7 @@
-import { Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
+import { Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { computeLayerOrdinals, computeSnapTargets, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@lumio-by-aelivion/shared";
+import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@kimera-by-aelivion/shared";
 import { useAudioPeaksSlice } from "../lib/audioPeaks";
 import { getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { ASSET_LABEL_COLORS, layerLabelOf } from "../lib/assetLabels";
@@ -23,6 +23,7 @@ import {
 } from "../editor/audioVolume";
 import { useVideoThumbnails } from "../lib/videoThumbnails";
 import { SOURCE_DRAG_MIME, type SourceDragPayload } from "./SourceMonitor";
+import { JunctionTransitionPopover } from "./JunctionTransitionPopover";
 import { useWheelScrollPerformance } from "../lib/useWheelScrollPerformance";
 import { favouriteTransitionSpecs } from "../editor/effects/catalog";
 import { loadFavourites } from "../editor/effects/favourites";
@@ -119,7 +120,17 @@ type CrossDragState = {
   baseDurationSeconds: number;
   downLaneSeconds: number;
   previewDurationSeconds: number;
+  downClientX: number;
+  downClientY: number;
+  /** True once the pointer travelled past the click slop — a motionless release opens the params popover instead. */
+  moved: boolean;
 } | null;
+
+/** MIME the Effects-panel transition tiles/rows write on drag (see EffectGraphPanel/TransitionThumb). */
+const TRANSITION_DRAG_MIME = "application/x-kimera-transition";
+
+/** The cut currently highlighted while a transition tile is dragged over a lane. */
+type JunctionDropTarget = { trackId: string; leftLayerId: string; rightLayerId: string; cutSeconds: number } | null;
 
 /** A detected junction transition between two same-track clips. */
 type TimelineJunction = {
@@ -260,7 +271,7 @@ const shortcutCheatSheet: Array<{ keys: string; label: string }> = [
   { keys: "↑ / ↓", label: "Previous / next edit point" },
   { keys: "/", label: "Focus the AI edit box (opens the AI panel)" },
   { keys: ".", label: "Voice input — dictate to the AI (⌘. or ⌥M while typing)" },
-  { keys: "⌥L", label: "Voice mode — hands-free AI session (or say “Hey Lumio” with the wake word on)" },
+  { keys: "⌥L", label: "Voice mode — hands-free AI session (or say “Hey Kimera” with the wake word on)" },
   { keys: "?", label: "Toggle this cheat sheet" }
 ];
 
@@ -318,6 +329,17 @@ function TimebarClock({ fallback }: { fallback: number }) {
 type TrackJunctionInfo = { junctions: TimelineJunction[]; junctionLeftIds: Set<string>; junctionRightIds: Set<string> };
 const EMPTY_TRACK_JUNCTIONS: TrackJunctionInfo = { junctions: [], junctionLeftIds: new Set(), junctionRightIds: new Set() };
 
+// Minimap bar colors per layer type — brighter cousins of the clip fills so the tiny
+// bars stay legible at 2-4px tall (per-clip label colors override these).
+const MINIMAP_TYPE_COLORS: Record<string, string> = {
+  text: "#8b5cf6",
+  video: "#64748b",
+  image: "#2f9dd6",
+  shape: "#d97706",
+  adjustment: "#14b8a6",
+  audio: "#57a06f"
+};
+
 /**
  * memo() so EditorPage's frequent unrelated renders (toasts, inspector edits on other panels,
  * modal state) skip the 4k-line strip entirely — this is what lets the per-clip TimelineClip memo
@@ -374,6 +396,7 @@ function TimelineStripImpl({
   onToggleSnap,
   onSplitLayerAt,
   onSplitAtPlayhead,
+  onNotice,
   onRippleDeleteLayer,
   onDuplicateLayer,
   markers = [],
@@ -430,7 +453,7 @@ function TimelineStripImpl({
   onMoveKeyframe: (layerId: string, keyframeId: string, timeSeconds: number) => void;
   onSetTransition: (layerId: string, kind: TransitionKind, durationSeconds: number) => void;
   onRemoveTransition: (layerId: string, side: "fadeIn" | "fadeOut") => void;
-  onAddCrossDissolve: (leftLayerId: string, rightLayerId: string, spec?: TransitionSpec) => void;
+  onAddCrossDissolve: (leftLayerId: string, rightLayerId: string, spec?: TransitionSpec, manifest?: PluginTransitionManifest) => void;
   onSetCrossDissolve: (leftLayerId: string, rightLayerId: string, durationSeconds: number) => void;
   onRemoveCrossDissolve: (leftLayerId: string, rightLayerId: string) => void;
   onChangeTrackHeight: (height: number) => void;
@@ -444,6 +467,8 @@ function TimelineStripImpl({
   onToggleSnap?: (() => void) | undefined;
   onSplitLayerAt?: ((layerId: string, atSeconds: number) => void) | undefined;
   onSplitAtPlayhead?: (() => void) | undefined;
+  /** Transient editor toast — used for "why did nothing happen" feedback (roll/slide preconditions). */
+  onNotice?: ((message: string) => void) | undefined;
   onRippleDeleteLayer?: ((layerId: string) => void) | undefined;
   onRollEdit?: ((leftLayerId: string, rightLayerId: string, deltaSeconds: number) => void) | undefined;
   onSlideLayer?: ((layerId: string, deltaSeconds: number) => void) | undefined;
@@ -472,7 +497,9 @@ function TimelineStripImpl({
   onSetLayerLabel?: ((layerId: string, label: string | null) => void) | undefined;
 }) {
   useRenderCost("TimelineStrip");
-  const laneOffsetPx = trackHeight <= 30 ? 64 : trackHeight <= 42 ? 84 : trackHeight <= 60 ? 112 : 124;
+  // Must mirror the CSS: --timeline-label-width per row size, with --timeline-label-gap now 0
+  // (the header rail abuts the lanes with a 1px inner divider instead of a gutter).
+  const laneOffsetPx = trackHeight <= 30 ? 58 : trackHeight <= 42 ? 78 : trackHeight <= 60 ? 104 : 108;
   const interactionDurationSeconds = useMemo(() => {
     const maxPotentialEnd = Math.max(
       composition.durationSeconds,
@@ -494,6 +521,15 @@ function TimelineStripImpl({
         junctionLeftIds: new Set(junctions.map((item) => item.leftLayerId)),
         junctionRightIds: new Set(junctions.map((item) => item.rightLayerId))
       });
+    }
+    return byTrack;
+  }, [composition.tracks]);
+  // All adjacent-clip cuts (with or without a transition) — the drop targets for a dragged transition
+  // tile. Distinct from junctionsByTrackId, which only lists cuts that ALREADY carry a transition.
+  const cutsByTrackId = useMemo(() => {
+    const byTrack = new Map<string, TimelineCut[]>();
+    for (const track of composition.tracks) {
+      byTrack.set(track.id, getTrackCuts(track));
     }
     return byTrack;
   }, [composition.tracks]);
@@ -784,7 +820,52 @@ function TimelineStripImpl({
   }, []);
   const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(null);
   const [effectDropTargetLayerId, setEffectDropTargetLayerId] = useState<string | null>(null);
+  // Transition-tile drag → nearest-cut drop target. dragover fires continuously, so the current target
+  // lives in a ref and React state only changes when the TARGET changes (same doctrine as the other
+  // gesture ref-mirrors — never a setState per pointer event).
+  const junctionDropTargetRef = useRef<JunctionDropTarget>(null);
+  const [junctionDropTarget, setJunctionDropTargetState] = useState<JunctionDropTarget>(null);
+  const updateJunctionDropTarget = useCallback((next: JunctionDropTarget) => {
+    const prev = junctionDropTargetRef.current;
+    if (prev === next) return;
+    if (prev && next && prev.trackId === next.trackId && prev.rightLayerId === next.rightLayerId) return;
+    junctionDropTargetRef.current = next;
+    setJunctionDropTargetState(next);
+  }, []);
+  // Junction params popover — opened by a motionless click on the junction element (finishCrossDrag).
+  // Stores IDS + the click point only; the spec is re-derived from `composition` each render so external
+  // edits show live and the popover self-closes when the transition disappears (double-click, undo).
+  const [junctionEditor, setJunctionEditor] = useState<{ leftLayerId: string; rightLayerId: string; x: number; y: number } | null>(null);
+  // Live spec for the open junction popover (null once the pair loses its transition → self-close below).
+  const junctionEditorTarget = useMemo(() => {
+    if (!junctionEditor) {
+      return null;
+    }
+    const track = composition.tracks.find((item) => item.layers.some((layer) => layer.id === junctionEditor.rightLayerId));
+    const left = track?.layers.find((layer) => layer.id === junctionEditor.leftLayerId);
+    const right = track?.layers.find((layer) => layer.id === junctionEditor.rightLayerId);
+    if (!left || !right?.transitionIn) {
+      return null;
+    }
+    return { spec: right.transitionIn, leftDurationSeconds: left.durationSeconds, rightDurationSeconds: right.durationSeconds };
+  }, [junctionEditor, composition.tracks]);
+  useEffect(() => {
+    if (junctionEditor && !junctionEditorTarget) {
+      setJunctionEditor(null);
+    }
+  }, [junctionEditor, junctionEditorTarget]);
   const [toolbarViewportWidth, setToolbarViewportWidth] = useState(0);
+  // Collapsible full-project minimap (thin strip under the tracks); persisted across sessions.
+  const [showMinimap, setShowMinimap] = useState(() => {
+    try {
+      return window.localStorage.getItem("kimera:timeline-minimap") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const minimapWindowRef = useRef<HTMLDivElement | null>(null);
+  const minimapPlayheadRef = useRef<HTMLDivElement | null>(null);
+  const minimapPanPointerRef = useRef<number | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showProxyInfo, setShowProxyInfo] = useState(false);
   const [trackContextMenu, setTrackContextMenu] = useState<{ x: number; y: number; timeSeconds: number } | null>(null);
@@ -959,7 +1040,9 @@ function TimelineStripImpl({
       const currentPixelsPerSecond = pixelsPerSecondRef.current;
       const delta = event.deltaY || event.deltaX;
       const zoomFactor = delta < 0 ? 1.12 : 1 / 1.12;
-      const nextPixelsPerSecond = clamp(currentPixelsPerSecond * zoomFactor, 24, 480);
+      // Min 1px/s (~2% of the 56px/s base) — Premiere-style: long projects can squeeze until the
+      // whole edit is in view. The old 24px/s floor stopped at ~43% and never fully fit.
+      const nextPixelsPerSecond = clamp(currentPixelsPerSecond * zoomFactor, 1, 480);
       if (Math.abs(nextPixelsPerSecond - currentPixelsPerSecond) < 0.01) {
         return;
       }
@@ -1016,7 +1099,10 @@ function TimelineStripImpl({
     // instantly with ZERO React renders per seek — before this, every scrub pointermove re-rendered
     // the entire editor tree just to move this one element (2026-07-04 __rfRenderCost capture).
     const position = (timeSeconds: number, seekIntoView: boolean) => {
-      playhead.style.setProperty("--playhead-percent", playheadOffsetPercent(timeSeconds, timelineDurationSeconds));
+      const playheadPercent = playheadOffsetPercent(timeSeconds, timelineDurationSeconds);
+      playhead.style.setProperty("--playhead-percent", playheadPercent);
+      // Mirror onto the minimap playhead through the same zero-render imperative path.
+      minimapPlayheadRef.current?.style.setProperty("--playhead-percent", playheadPercent);
       const liveProxyBar = liveProxyBarRef.current;
       if (liveProxyBar) {
         liveProxyBar.style.display = "none";
@@ -1115,7 +1201,9 @@ function TimelineStripImpl({
       const scrollLeft = dock?.scrollLeft ?? 0;
       const nextTime = clamp(playbackStart.timeSeconds + (clockMs - playbackStart.clockMs) / 1000, 0, composition.durationSeconds);
       if (dock) followPlaybackPlayhead(nextTime, scrollLeft);
-      playhead.style.setProperty("--playhead-percent", playheadOffsetPercent(nextTime, timelineDurationSeconds));
+      const playheadPercent = playheadOffsetPercent(nextTime, timelineDurationSeconds);
+      playhead.style.setProperty("--playhead-percent", playheadPercent);
+      minimapPlayheadRef.current?.style.setProperty("--playhead-percent", playheadPercent);
       updateLiveProxyBar(nextTime);
       if (nextTime < composition.durationSeconds) {
         frame = window.requestAnimationFrame(animate);
@@ -1123,7 +1211,9 @@ function TimelineStripImpl({
     };
 
     if (dock) followPlaybackPlayhead(playbackStart.timeSeconds, dock.scrollLeft);
-    playhead.style.setProperty("--playhead-percent", playheadOffsetPercent(playbackStart.timeSeconds, timelineDurationSeconds));
+    const startPercent = playheadOffsetPercent(playbackStart.timeSeconds, timelineDurationSeconds);
+    playhead.style.setProperty("--playhead-percent", startPercent);
+    minimapPlayheadRef.current?.style.setProperty("--playhead-percent", startPercent);
     updateLiveProxyBar(playbackStart.timeSeconds);
     frame = window.requestAnimationFrame(animate);
     return () => {
@@ -1198,9 +1288,10 @@ function TimelineStripImpl({
       }
 
       // Blade tool: clicking a clip splits it at the click point instead of dragging.
+      // Frame-quantized like every other edit op, so cuts always land on the frame grid.
       if (toolMode === "blade") {
         const pointerSeconds = getLaneTime(event.clientX, lane, timelineDurationSeconds, interactionDurationSeconds, true);
-        onSplitLayerAt?.(layer.id, pointerSeconds);
+        onSplitLayerAt?.(layer.id, snap(pointerSeconds, frameStepSeconds));
         return;
       }
 
@@ -1220,7 +1311,10 @@ function TimelineStripImpl({
           if (next) candidates.push({ left: layer, right: next, cut: layer.startSeconds + layer.durationSeconds });
           const nearest = candidates.sort((a, b) => Math.abs(a.cut - pointerSeconds) - Math.abs(b.cut - pointerSeconds))[0];
           const limits = nearest ? rollEditLimits(composition, nearest.left.id, nearest.right.id, limitOptions) : null;
-          if (!nearest || !limits) return;
+          if (!nearest || !limits) {
+            onNotice?.("Roll edits a cut between two touching clips — butt this clip against a neighbour first");
+            return;
+          }
           event.currentTarget.setPointerCapture(event.pointerId);
           trimDragRef.current = {
             mode: "roll",
@@ -1237,7 +1331,10 @@ function TimelineStripImpl({
           return;
         }
         const limits = slideLayerLimits(composition, layer.id, limitOptions);
-        if (!limits) return; // slide needs touching neighbours on both sides
+        if (!limits) {
+          onNotice?.("Slide needs touching clips on both sides — this clip has a free edge");
+          return;
+        }
         event.currentTarget.setPointerCapture(event.pointerId);
         trimDragRef.current = {
           mode: "slide",
@@ -1313,7 +1410,7 @@ function TimelineStripImpl({
         snappedTo: null
       });
     },
-    [composition, toolMode, slipLayerId, layerMaxDurations, frameStepSeconds, selectedLayerSet, selectedLayerIds, applyInstantSelectionHighlight, onSelectLayer, onSplitLayerAt, timelineDurationSeconds, interactionDurationSeconds, setDrag, startTimelinePan]
+    [composition, toolMode, slipLayerId, layerMaxDurations, frameStepSeconds, selectedLayerSet, selectedLayerIds, applyInstantSelectionHighlight, onSelectLayer, onSplitLayerAt, onNotice, timelineDurationSeconds, interactionDurationSeconds, setDrag, startTimelinePan]
   );
 
   const moveDrag = useCallback(
@@ -1965,7 +2062,10 @@ function TimelineStripImpl({
         pointerId: event.pointerId,
         baseDurationSeconds: junction.durationSeconds,
         downLaneSeconds: getLaneTime(event.clientX, lane, timelineDurationSeconds, interactionDurationSeconds, true),
-        previewDurationSeconds: junction.durationSeconds
+        previewDurationSeconds: junction.durationSeconds,
+        downClientX: event.clientX,
+        downClientY: event.clientY,
+        moved: false
       });
     },
     [setCrossDrag, timelineDurationSeconds, interactionDurationSeconds, startTimelinePan, toolMode]
@@ -1994,7 +2094,11 @@ function TimelineStripImpl({
       const delta = laneSeconds - drag.downLaneSeconds;
       const maxDuration = Math.min(left.durationSeconds, right.durationSeconds);
       const next = clamp(snap(drag.baseDurationSeconds - delta, frameStepSeconds), frameStepSeconds, maxDuration);
-      setCrossDrag({ ...drag, previewDurationSeconds: next });
+      const moved =
+        drag.moved ||
+        Math.abs(event.clientX - drag.downClientX) > 3 ||
+        Math.abs(event.clientY - drag.downClientY) > 3;
+      setCrossDrag({ ...drag, previewDurationSeconds: next, moved });
     },
     [composition, timelineDurationSeconds, interactionDurationSeconds, frameStepSeconds, setCrossDrag]
   );
@@ -2013,6 +2117,16 @@ function TimelineStripImpl({
       }
       if (drag.previewDurationSeconds !== drag.baseDurationSeconds) {
         onSetCrossDissolve(drag.leftLayerId, drag.rightLayerId, drag.previewDurationSeconds);
+      } else if (!drag.moved) {
+        // Motionless release = a click: open the params popover on this junction. A double-click's
+        // remove closes it again via the junction-gone guard (the popover re-derives its spec from
+        // the composition each render and self-closes when the pair loses its transitionIn).
+        setJunctionEditor({
+          leftLayerId: drag.leftLayerId,
+          rightLayerId: drag.rightLayerId,
+          x: event.clientX,
+          y: event.clientY
+        });
       }
       setCrossDrag(null);
     },
@@ -2035,10 +2149,89 @@ function TimelineStripImpl({
       1,
       ...composition.tracks.flatMap((track) => track.layers.map((layer) => layer.startSeconds + layer.durationSeconds))
     );
-    const next = clamp(usable / contentEnd, 2, 480);
+    const next = clamp(usable / contentEnd, 1, 480);
     pixelsPerSecondRef.current = next;
     setPixelsPerSecond(next);
   }, [laneOffsetPx, composition]);
+
+  // ---- Timeline minimap (thin full-project overview strip under the tracks) ----
+  // Bars re-derive only on composition edits; the viewport window + playhead update
+  // imperatively (scroll listener / playback clock) with zero React renders.
+  const minimapBars = useMemo(() => {
+    const trackCount = Math.max(1, composition.tracks.length);
+    const denominator = Math.max(0.001, timelineDurationSeconds);
+    return composition.tracks.flatMap((track, trackIndex) =>
+      track.layers.map((layer) => {
+        const labelName = layerLabelOf(layer, assets);
+        return {
+          id: layer.id,
+          left: `${(layer.startSeconds / denominator) * 100}%`,
+          width: `${Math.max(0.15, (layer.durationSeconds / denominator) * 100)}%`,
+          top: `${(trackIndex / trackCount) * 100}%`,
+          height: `calc(${100 / trackCount}% - 1px)`,
+          background: (labelName ? ASSET_LABEL_COLORS[labelName] : undefined) ?? MINIMAP_TYPE_COLORS[layer.type] ?? "#64748b"
+        };
+      })
+    );
+  }, [composition, assets, timelineDurationSeconds]);
+
+  // Keep the minimap's viewport window in sync with the dock's scroll/zoom — imperative
+  // (ref writes on the dock scroll event), matching the timeline's no-render gesture style.
+  useEffect(() => {
+    if (!showMinimap) {
+      return;
+    }
+    const dock = editorRef.current?.closest(".editor-timeline-dock");
+    const windowElement = minimapWindowRef.current;
+    if (!(dock instanceof HTMLElement) || !windowElement) {
+      return;
+    }
+    const sync = () => {
+      const laneWidth = Math.max(1, laneWidthPx);
+      const visibleLane = Math.max(0, dock.clientWidth - laneOffsetPx);
+      const left = clamp(dock.scrollLeft / laneWidth, 0, 1);
+      const width = clamp(visibleLane / laneWidth, 0.01, 1);
+      windowElement.style.left = `${left * 100}%`;
+      windowElement.style.width = `${Math.min(width, 1 - left) * 100}%`;
+    };
+    sync();
+    dock.addEventListener("scroll", sync, { passive: true });
+    const observer = new ResizeObserver(sync);
+    observer.observe(dock);
+    return () => {
+      dock.removeEventListener("scroll", sync);
+      observer.disconnect();
+    };
+  }, [showMinimap, laneWidthPx, laneOffsetPx]);
+
+  // Click/drag anywhere on the minimap pans the dock so the clicked time is centered
+  // (grab-anywhere behaviour, like Resolve/CapCut overview strips).
+  const panMinimapTo = useCallback(
+    (clientX: number, minimapElement: HTMLElement) => {
+      const dock = editorRef.current?.closest(".editor-timeline-dock");
+      if (!(dock instanceof HTMLElement)) {
+        return;
+      }
+      const rect = minimapElement.getBoundingClientRect();
+      const frac = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      const visibleLane = Math.max(0, dock.clientWidth - laneOffsetPx);
+      const maxScroll = Math.max(0, dock.scrollWidth - dock.clientWidth);
+      dock.scrollLeft = clamp(frac * laneWidthPx - visibleLane / 2, 0, maxScroll);
+    },
+    [laneOffsetPx, laneWidthPx]
+  );
+
+  const toggleMinimap = useCallback(() => {
+    setShowMinimap((value) => {
+      const next = !value;
+      try {
+        window.localStorage.setItem("kimera:timeline-minimap", next ? "1" : "0");
+      } catch {
+        // localStorage unavailable (private mode) — session-only toggle is fine.
+      }
+      return next;
+    });
+  }, []);
 
   // Full keyboard shortcut map (Phase 4): tool modes, edit ops, snap/fit, markers,
   // and the "?" cheat sheet. Ignored while typing in a form field so shortcuts
@@ -2176,7 +2369,8 @@ function TimelineStripImpl({
       };
     }
 
-    const rowPitchPx = trackHeight + 6;
+    // Row pitch = track height + the 1px hairline row gap (.timeline-tracks grid gap).
+    const rowPitchPx = trackHeight + 1;
     const tracksByAudioKind = (isAudio: boolean) => composition.tracks.filter((track) => (track.type === "audio") === isAudio);
     const draggedCompatibleTracks = tracksByAudioKind(draggedLayer.type === "audio");
     const baseFamilyIndex = draggedCompatibleTracks.findIndex((track) => track.id === draggedLayer.trackId);
@@ -2227,6 +2421,59 @@ function TimelineStripImpl({
 
   function getDropTime(event: DragEvent<HTMLDivElement>) {
     return snap(getLaneTime(event.clientX, event.currentTarget, timelineDurationSeconds, interactionDurationSeconds, true), snapStepSeconds);
+  }
+
+  /** Nearest same-track cut to a dragged transition tile, within a zoom-aware ~24px radius, or null. */
+  function findNearestCut(event: DragEvent<HTMLDivElement>, trackId: string): TimelineCut | null {
+    const cuts = cutsByTrackId.get(trackId);
+    if (!cuts || cuts.length === 0) {
+      return null;
+    }
+    const pointerSeconds = getLaneTime(event.clientX, event.currentTarget, timelineDurationSeconds, interactionDurationSeconds, true);
+    const radiusSeconds = Math.max(0.05, 24 / Math.max(1, pixelsPerSecondRef.current));
+    let best: TimelineCut | null = null;
+    let bestDistance = radiusSeconds;
+    for (const cut of cuts) {
+      const distance = Math.abs(cut.cutSeconds - pointerSeconds);
+      if (distance <= bestDistance) {
+        best = cut;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /** Drop a gallery transition payload on the nearest cut (replaces any existing junction transition). */
+  function dropTransitionOnLane(event: DragEvent<HTMLDivElement>, trackId: string): void {
+    updateJunctionDropTarget(null);
+    const cut = findNearestCut(event, trackId);
+    if (!cut) {
+      return;
+    }
+    try {
+      const payload = JSON.parse(event.dataTransfer.getData(TRANSITION_DRAG_MIME)) as {
+        kind?: unknown;
+        direction?: TransitionSpec["direction"];
+        mode?: TransitionSpec["mode"];
+        color?: string;
+        params?: TransitionSpec["params"];
+        manifest?: PluginTransitionManifest;
+      };
+      if (!payload || typeof payload.kind !== "string") {
+        return;
+      }
+      const spec: TransitionSpec = {
+        kind: payload.kind,
+        durationSeconds: getTransition(payload.kind)?.defaultDurationSeconds ?? DEFAULT_CROSS_DISSOLVE_SECONDS,
+        direction: payload.direction,
+        mode: payload.mode,
+        color: payload.color,
+        params: payload.params
+      };
+      onAddCrossDissolve(cut.leftLayerId, cut.rightLayerId, spec, payload.manifest);
+    } catch {
+      /* malformed drag payload — ignore */
+    }
   }
 
   // Right-click on the empty track/lane area (never on a clip - TimelineClip
@@ -2301,7 +2548,7 @@ function TimelineStripImpl({
   }
 
   function handleTrackDragOver(event: DragEvent<HTMLElement>, targetTrackId: string) {
-    const sourceTrackId = trackDrag?.trackId || event.dataTransfer.getData("application/x-lumio-track");
+    const sourceTrackId = trackDrag?.trackId || event.dataTransfer.getData("application/x-kimera-track");
     if (!sourceTrackId || !canDropTrackOnTarget(sourceTrackId, targetTrackId)) {
       return;
     }
@@ -2311,7 +2558,7 @@ function TimelineStripImpl({
   }
 
   function handleTrackDrop(event: DragEvent<HTMLElement>, targetTrackId: string) {
-    const sourceTrackId = event.dataTransfer.getData("application/x-lumio-track") || trackDrag?.trackId;
+    const sourceTrackId = event.dataTransfer.getData("application/x-kimera-track") || trackDrag?.trackId;
     const placement = trackDropPlacement(event);
     setTrackDrag(null);
     if (!sourceTrackId || !canDropTrackOnTarget(sourceTrackId, targetTrackId)) {
@@ -2374,7 +2621,9 @@ function TimelineStripImpl({
       <div
         className={`timeline-editor scroll-performance-pane ${
           trackHeight <= 30 ? "is-xs-rows" : trackHeight <= 42 ? "is-s-rows" : trackHeight <= 60 ? "is-m-rows" : "is-l-rows"
-        } ${toolMode === "hand" ? "is-hand-tool" : ""} ${timelinePanning ? "is-panning" : ""}`}
+        } ${toolMode === "hand" ? "is-hand-tool" : ""} ${toolMode === "blade" ? "is-blade-tool" : ""} ${
+          toolMode === "roll" ? "is-roll-tool" : ""
+        } ${toolMode === "slide" ? "is-slide-tool" : ""} ${timelinePanning ? "is-panning" : ""}`}
         aria-label="Timeline. Shift plus mouse wheel pans horizontally. Alt plus mouse wheel zooms horizontally."
         ref={editorRef}
         style={
@@ -2640,6 +2889,14 @@ function TimelineStripImpl({
               >
                 {Math.round((pixelsPerSecond / 56) * 100)}%
               </button>
+              <button
+                type="button"
+                className={showMinimap ? "is-active" : ""}
+                title={showMinimap ? "Hide timeline minimap" : "Show timeline minimap"}
+                onClick={toggleMinimap}
+              >
+                <MapIcon size={13} />
+              </button>
               <span className="timeline-toolbar-divider" />
               <button type="button" className={showShortcuts ? "is-active" : ""} title="Keyboard shortcuts (?)" onClick={() => setShowShortcuts((value) => !value)}>
                 <Keyboard size={13} />
@@ -2890,7 +3147,7 @@ function TimelineStripImpl({
                     onDragStart={(event) => {
                       event.stopPropagation();
                       event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("application/x-lumio-track", track.id);
+                      event.dataTransfer.setData("application/x-kimera-track", track.id);
                       setTrackDrag({ trackId: track.id, targetTrackId: null, placement: "before" });
                     }}
                     onDragEnd={() => setTrackDrag(null)}
@@ -2937,13 +3194,38 @@ function TimelineStripImpl({
                 data-track-id={track.id}
                 style={{ "--timeline-ruler-step-percent": `${(rulerStepSeconds / Math.max(0.001, timelineDurationSeconds)) * 100}%` } as CSSProperties & Record<"--timeline-ruler-step-percent", string>}
                 onDragOver={(event) => {
-                  if (!track.locked && event.dataTransfer.types.includes("application/x-lumio-asset")) {
+                  if (!track.locked && event.dataTransfer.types.includes("application/x-kimera-asset")) {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
+                    return;
+                  }
+                  // Transition tile drag → highlight the nearest cut. Fires continuously; the ref-guarded
+                  // updater only touches React state when the TARGET cut changes.
+                  if (!track.locked && track.type !== "audio" && event.dataTransfer.types.includes(TRANSITION_DRAG_MIME)) {
+                    event.preventDefault();
+                    const cut = findNearestCut(event, track.id);
+                    event.dataTransfer.dropEffect = cut ? "copy" : "none";
+                    updateJunctionDropTarget(cut ? { trackId: track.id, ...cut } : null);
+                  }
+                }}
+                onDragLeave={(event) => {
+                  // Clear only when truly leaving the lane (not when entering a child clip element).
+                  if (
+                    junctionDropTargetRef.current?.trackId === track.id &&
+                    !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))
+                  ) {
+                    updateJunctionDropTarget(null);
                   }
                 }}
                 onDrop={(event) => {
-                  const assetId = event.dataTransfer.getData("application/x-lumio-asset");
+                  if (event.dataTransfer.types.includes(TRANSITION_DRAG_MIME)) {
+                    if (!track.locked && track.type !== "audio") {
+                      event.preventDefault();
+                      dropTransitionOnLane(event, track.id);
+                    }
+                    return;
+                  }
+                  const assetId = event.dataTransfer.getData("application/x-kimera-asset");
                   if (!assetId || track.locked) {
                     return;
                   }
@@ -3044,11 +3326,62 @@ function TimelineStripImpl({
                     </button>
                   );
                 })}
+                {junctionDropTarget?.trackId === track.id ? (
+                  <div
+                    className="timeline-junction-drop-indicator"
+                    style={{ left: `${(junctionDropTarget.cutSeconds / Math.max(0.001, timelineDurationSeconds)) * 100}%` }}
+                    aria-hidden="true"
+                  />
+                ) : null}
               </div>
             </div>
             );
           })}
         </div>
+        {showMinimap ? (
+          <div
+            className="timeline-minimap"
+            style={toolbarViewportWidth ? { width: `${toolbarViewportWidth}px` } : undefined}
+            title="Project overview — click or drag to pan the view"
+            onPointerDown={(event) => {
+              if (event.button !== 0) {
+                return;
+              }
+              // Keep the editor's scrub/marquee pointerdown out of the minimap.
+              event.stopPropagation();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              minimapPanPointerRef.current = event.pointerId;
+              panMinimapTo(event.clientX, event.currentTarget);
+            }}
+            onPointerMove={(event) => {
+              if (minimapPanPointerRef.current !== event.pointerId) {
+                return;
+              }
+              event.stopPropagation();
+              panMinimapTo(event.clientX, event.currentTarget);
+            }}
+            onPointerUp={(event) => {
+              if (minimapPanPointerRef.current === event.pointerId) {
+                minimapPanPointerRef.current = null;
+              }
+            }}
+            onPointerCancel={() => {
+              minimapPanPointerRef.current = null;
+            }}
+          >
+            <div className="timeline-minimap-lanes" aria-hidden="true">
+              {minimapBars.map((bar) => (
+                <i key={bar.id} style={{ left: bar.left, width: bar.width, top: bar.top, height: bar.height, background: bar.background }} />
+              ))}
+            </div>
+            <div className="timeline-minimap-window" ref={minimapWindowRef} />
+            <div
+              className="timeline-minimap-playhead"
+              ref={minimapPlayheadRef}
+              style={{ "--playhead-percent": playheadOffsetPercent(currentTime, timelineDurationSeconds) } as CSSProperties & Record<"--playhead-percent", string>}
+            />
+          </div>
+        ) : null}
       </div>
       {showShortcuts ? (
         <div className="timeline-shortcuts-backdrop" onClick={() => setShowShortcuts(false)}>
@@ -3251,6 +3584,18 @@ function TimelineStripImpl({
             </button>
           </div>
         </div>
+      ) : null}
+      {junctionEditor && junctionEditorTarget ? (
+        <JunctionTransitionPopover
+          spec={junctionEditorTarget.spec}
+          leftDurationSeconds={junctionEditorTarget.leftDurationSeconds}
+          rightDurationSeconds={junctionEditorTarget.rightDurationSeconds}
+          frameStepSeconds={frameStepSeconds}
+          anchor={{ x: junctionEditor.x, y: junctionEditor.y }}
+          onApply={(spec) => onAddCrossDissolve(junctionEditor.leftLayerId, junctionEditor.rightLayerId, spec)}
+          onRemove={() => onRemoveCrossDissolve(junctionEditor.leftLayerId, junctionEditor.rightLayerId)}
+          onClose={() => setJunctionEditor(null)}
+        />
       ) : null}
       {clipContextMenu ? (
         <div
@@ -3472,24 +3817,45 @@ const Waveform = memo(function Waveform({
   const bucketCount = clamp(Math.round(w / 3), 24, 2000);
   const peaks = useAudioPeaksSlice(url, sourceInSeconds, durationSeconds, bucketCount);
   const data = peaks ?? Array.from({ length: bucketCount }, (_, index) => 0.25 + pseudoRandom(layerId, index) * 0.6);
-  const bars = useMemo(() => {
+  const isReal = Boolean(peaks);
+  // One <canvas> instead of up to 2000 SVG <rect> nodes per audio clip: same bar geometry
+  // (slot/barW/rx/maxH math unchanged), DPR-scaled for crispness, fill colors matching the
+  // .clip-waveform rect / .is-loading rect CSS tokens. Zoom/resize now redraws one bitmap
+  // instead of reconciling thousands of DOM nodes.
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    canvas.width = Math.max(1, Math.round(w * dpr));
+    canvas.height = Math.max(1, Math.round(h * dpr));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = isReal ? "rgba(233, 255, 246, 0.88)" : "rgba(233, 255, 246, 0.5)";
     const n = data.length;
     const slot = w / n;
     const barW = Math.min(2, Math.max(1, slot * 0.62));
-    const rx = (barW / 2).toFixed(2);
+    const radius = barW / 2;
     const maxH = h * 0.9;
-    return data.map((value, index) => {
-      const bh = Math.max(barW, Math.min(1, value) * maxH);
+    const hasRoundRect = typeof ctx.roundRect === "function";
+    for (let index = 0; index < n; index += 1) {
+      const bh = Math.max(barW, Math.min(1, data[index] ?? 0) * maxH);
       const x = index * slot + (slot - barW) / 2;
       const y = (h - bh) / 2;
-      return <rect key={index} x={x.toFixed(2)} y={y.toFixed(2)} width={barW.toFixed(2)} height={bh.toFixed(2)} rx={rx} ry={rx} />;
-    });
-  }, [data, w, h]);
+      if (hasRoundRect) {
+        ctx.beginPath();
+        ctx.roundRect(x, y, barW, bh, radius);
+        ctx.fill();
+      } else {
+        ctx.fillRect(x, y, barW, bh);
+      }
+    }
+  }, [data, w, h, isReal]);
   return (
     <span ref={hostRef} className={`clip-waveform ${peaks ? "is-real" : "is-loading"}`} aria-hidden="true">
-      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-        {bars}
-      </svg>
+      <canvas ref={canvasRef} />
     </span>
   );
 });
@@ -3792,7 +4158,7 @@ const Filmstrip = memo(function Filmstrip({ url }: { url?: string | undefined })
 });
 
 function getDraggedTimelineEffect(event: DragEvent<HTMLElement>): TimelineEffectType | undefined {
-  const type = event.dataTransfer.getData("application/x-lumio-timeline-effect");
+  const type = event.dataTransfer.getData("application/x-kimera-timeline-effect");
   return getTimelineEffectDefinition(type as TimelineEffectType) ? (type as TimelineEffectType) : undefined;
 }
 
@@ -3956,13 +4322,13 @@ const TimelineClip = memo(function TimelineClip({
         }
       }}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes("application/x-lumio-asset")) {
+        if (event.dataTransfer.types.includes("application/x-kimera-asset")) {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
           return;
         }
 
-        if (event.dataTransfer.types.includes("application/x-lumio-timeline-effect")) {
+        if (event.dataTransfer.types.includes("application/x-kimera-timeline-effect")) {
           const effectType = getDraggedTimelineEffect(event);
           if (effectType && canDropTimelineEffect(effectType, layer)) {
             event.preventDefault();
@@ -3981,7 +4347,7 @@ const TimelineClip = memo(function TimelineClip({
       }}
       onDrop={(event) => {
         onSetEffectDropTarget(null);
-        const assetId = event.dataTransfer.getData("application/x-lumio-asset");
+        const assetId = event.dataTransfer.getData("application/x-kimera-asset");
         if (assetId) {
           event.preventDefault();
           event.stopPropagation();
@@ -4125,7 +4491,7 @@ const TimelineClip = memo(function TimelineClip({
                   event.stopPropagation();
                   onSelectLayer(layer.id, "replace");
                   window.dispatchEvent(
-                    new CustomEvent("lumio:open-graph-editor", { detail: { targetKey: keyframeGraphTargetKey(keyframe) } })
+                    new CustomEvent("kimera:open-graph-editor", { detail: { targetKey: keyframeGraphTargetKey(keyframe) } })
                   );
                 }}
                 onPointerCancel={onCancelKeyframeDrag}
@@ -4245,6 +4611,30 @@ function getTrackJunctions(track: TimelineTrack): TimelineJunction[] {
     });
   }
   return junctions;
+}
+
+/** A cut between two touching same-track clips — a junction drop target whether or not it already has a transition. */
+interface TimelineCut {
+  leftLayerId: string;
+  rightLayerId: string;
+  cutSeconds: number;
+}
+
+/** Every adjacent-pair cut on a visual track (same 0.02s touch tolerance as findTouchingNeighbor). */
+function getTrackCuts(track: TimelineTrack): TimelineCut[] {
+  if (track.type === "audio") {
+    return [];
+  }
+  const layers = [...track.layers].sort((a, b) => a.startSeconds - b.startSeconds);
+  const cuts: TimelineCut[] = [];
+  for (let index = 0; index < layers.length - 1; index += 1) {
+    const left = layers[index]!;
+    const right = layers[index + 1]!;
+    if (Math.abs(left.startSeconds + left.durationSeconds - right.startSeconds) < 0.02) {
+      cuts.push({ leftLayerId: left.id, rightLayerId: right.id, cutSeconds: right.startSeconds });
+    }
+  }
+  return cuts;
 }
 
 /** Find a same-track clip that touches `layer` at a cut, returning the (left, right) pair for a default transition. */

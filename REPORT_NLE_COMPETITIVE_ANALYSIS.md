@@ -1,4 +1,4 @@
-# Lumio vs. Professional NLEs - Competitive Analysis
+# Kimera vs. Professional NLEs - Competitive Analysis
 
 **Generated:** 2026-07-06  
 **Focus:** Browser-first video editor positioning against desktop and web competitors
@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Lumio occupies a unique position in the video editing landscape: **a browser-first editor targeting short-form creators with professional-grade AI capabilities**. It's not trying to replace Premiere Pro for feature films, nor is it trying to be a CapCut clone. Instead, it targets creators who need:
+Kimera occupies a unique position in the video editing landscape: **a browser-first editor targeting short-form creators with professional-grade AI capabilities**. It's not trying to replace Premiere Pro for feature films, nor is it trying to be a CapCut clone. Instead, it targets creators who need:
 
 - Professional output quality
 - AI-assisted editing workflows
@@ -15,13 +15,13 @@ Lumio occupies a unique position in the video editing landscape: **a browser-fir
 - Cross-platform consistency
 - Cloud collaboration readiness
 
-This report compares Lumio against established desktop NLEs (Premiere Pro, DaVinci Resolve, Final Cut) and web-based competitors (CapCut, Canva, Runway) across key dimensions.
+This report compares Kimera against established desktop NLEs (Premiere Pro, DaVinci Resolve, Final Cut) and web-based competitors (CapCut, Canva, Runway) across key dimensions.
 
 ---
 
 ## Competitive Landscape Matrix
 
-| Dimension | Lumio | Premiere Pro | DaVinci Resolve | Final Cut Pro | CapCut | Runway |
+| Dimension | Kimera | Premiere Pro | DaVinci Resolve | Final Cut Pro | CapCut | Runway |
 |-----------|-------|--------------|-----------------|---------------|--------|--------|
 | **Platform** | Web (Chrome/Firefox/Safari) | Desktop (Win/macOS) | Desktop (Win/macOS/Linux) | Desktop (macOS only) | Web + Desktop | Web + Desktop |
 | **Install Required** | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes (optional web) | ✅ Yes (optional web) |
@@ -37,114 +37,114 @@ This report compares Lumio against established desktop NLEs (Premiere Pro, DaVin
 
 ---
 
-## Detailed Comparison: Lumio vs. Desktop NLEs
+## Detailed Comparison: Kimera vs. Desktop NLEs
 
-### 1. Lumio vs. Adobe Premiere Pro
+### 1. Kimera vs. Adobe Premiere Pro
 
-| Feature | Lumio | Premiere Pro | Verdict |
+| Feature | Kimera | Premiere Pro | Verdict |
 |---------|-------|--------------|---------|
 | **Timeline Editing** | ✅ Modern NLE (slip, roll, slide, ripple) | ✅ Industry standard | Tie - Premiere more refined |
 | **Effects & Transitions** | ✅ 40+ GPU transitions, 30+ effects | ✅ 100+ effects, 50+ transitions | Premiere - more variety |
 | **Color Grading** | ✅ Lumetri-class (curves, wheels, HSL) | ✅ Lumetri (same) | Tie - both professional |
 | **Keyframes** | ✅ Graph editor, spatial handles | ✅ Graph editor, spatial | Tie |
-| **AI Tools** | ✅ Auto-captions, person extraction, follow text | ❌ Limited (Firefly, auto-reframe) | Lumio - more integrated |
+| **AI Tools** | ✅ Auto-captions, person extraction, follow text | ❌ Limited (Firefly, auto-reframe) | Kimera - more integrated |
 | **Asset Management** | ✅ Local/AI/Stock/Brand bins | ✅ Project Manager, Bins | Tie |
-| **Collaboration** | ✅ Cloud projects, real-time sync | ✅ Cloud Projects | Lumio - cleaner implementation |
+| **Collaboration** | ✅ Cloud projects, real-time sync | ✅ Cloud Projects | Kimera - cleaner implementation |
 | **Offline Workflow** | ✅ Proxies, media offline | ✅ Proxy media, offline | Tie |
 | **Performance** | ⚡ WebGL (GPU-first) | ⚡ Mercury Transmit (GPU) | Tie - both modern |
-| **Learning Curve** | ✅ Premiere-inspired layout | ⚓ Steeper | Lumio easier |
-| **Cost** | 💰 Subscription | 💰💰 $21/mo (Creative Cloud) | Lumio competitive |
+| **Learning Curve** | ✅ Premiere-inspired layout | ⚓ Steeper | Kimera easier |
+| **Cost** | 💰 Subscription | 💰💰 $21/mo (Creative Cloud) | Kimera competitive |
 
-**Verdict:** Lumio matches Premiere on core editing and color, exceeds on AI integration, and beats on cost. Premiere has more effects and industry adoption.
+**Verdict:** Kimera matches Premiere on core editing and color, exceeds on AI integration, and beats on cost. Premiere has more effects and industry adoption.
 
 ---
 
-### 2. Lumio vs. DaVinci Resolve
+### 2. Kimera vs. DaVinci Resolve
 
-| Feature | Lumio | DaVinci Resolve | Verdict |
+| Feature | Kimera | DaVinci Resolve | Verdict |
 |---------|-------|-----------------|---------|
 | **Color Grading** | ✅ Lumetri-class | ✅ Professional (Fusion) | Tie - different strengths |
 | **Fusion VFX** | ❌ None | ✅ Node-based compositing | Resolve - superior |
 | **Fairlight Audio** | ⚠️ Basic mixer | ✅ Professional audio suite | Resolve - superior |
-| **Collaboration** | ✅ Cloud projects | ❌ Limited (Studio) | Lumio - better |
+| **Collaboration** | ✅ Cloud projects | ❌ Limited (Studio) | Kimera - better |
 | **Export Formats** | ✅ MP4, WebM | ✅ 40+ formats | Resolve - more options |
 | **Hardware Acceleration** | ✅ WebGPU/WebCodecs | ✅ Blackmagic GPU | Resolve - deeper optimization |
 | **AI Tools** | ✅ Captions, extraction, follow | ✅ Magic Mask, Sound Remover | Resolve - more mature |
 | **Price** | 💰 Subscription | 💰 Free / $295 | Resolve - free version |
 
-**Verdict:** DaVinci Resolve is the professional powerhouse with superior color/audio. Lumio wins on simplicity, cost (free tier potential), and web accessibility.
+**Verdict:** DaVinci Resolve is the professional powerhouse with superior color/audio. Kimera wins on simplicity, cost (free tier potential), and web accessibility.
 
 ---
 
-### 3. Lumio vs. Final Cut Pro
+### 3. Kimera vs. Final Cut Pro
 
-| Feature | Lumio | Final Cut Pro | Verdict |
+| Feature | Kimera | Final Cut Pro | Verdict |
 |---------|-------|---------------|---------|
 | **Magnetic Timeline** | ✅ Smart trimming | ✅ Magnetic Timeline | Tie |
 | **Performance** | ⚡ GPU-first | ⚡ Metal-optimized | Tie |
 | **Effects** | ✅ 30+ GPU effects | ✅ 100+ effects | FCP - more |
 | **Motion Graphics** | ❌ None (basic text) | ✅ Motion 5 templates | FCP - superior |
 | **Workflow Speed** | ✅ No install, instant start | ✅ Fast on Mac | Tie |
-| **AI Tools** | ✅ Integrated | ❌ Limited | Lumio - more |
-| **Platform** | ✅ Cross-platform | ❌ macOS only | Lumio - broader |
+| **AI Tools** | ✅ Integrated | ❌ Limited | Kimera - more |
+| **Platform** | ✅ Cross-platform | ❌ macOS only | Kimera - broader |
 
-**Verdict:** FCP is Mac-optimized and feature-complete. Lumio wins on cross-platform support and AI integration, loses on macOS-only optimization.
+**Verdict:** FCP is Mac-optimized and feature-complete. Kimera wins on cross-platform support and AI integration, loses on macOS-only optimization.
 
 ---
 
-## Detailed Comparison: Lumio vs. Web-Based NLEs
+## Detailed Comparison: Kimera vs. Web-Based NLEs
 
-### 4. Lumio vs. CapCut
+### 4. Kimera vs. CapCut
 
-| Feature | Lumio | CapCut | Verdict |
+| Feature | Kimera | CapCut | Verdict |
 |---------|-------|--------|---------|
 | **Target Audience** | Professional creators | TikTok/Short-form | CapCut - more casual |
 | **AI Capabilities** | ✅ Integrated (captions, extraction) | ✅ Extensive (auto-captions, effects) | Tie - both strong |
 | **Export Quality** | ✅ 4K browser export | ✅ 4K web export | Tie |
-| **Local Files** | ✅ Works offline | ⚠️ Limited offline | Lumio - better offline |
+| **Local Files** | ✅ Works offline | ⚠️ Limited offline | Kimera - better offline |
 | **Asset Library** | ✅ Stock, local, AI | ✅ Stock, templates | Tie |
 | **Collaboration** | ✅ Cloud projects | ✅ Real-time co-edit | CapCut - better |
 | **Learning Curve** | ✅ Professional interface | ✅ Simple, viral | CapCut - easier |
 | **Price** | 💰 Subscription | ✅ Free | CapCut - free |
 
-**Verdict:** CapCut dominates TikTok/short-form with ease of use and free access. Lumio targets creators who outgrow CapCut's limitations and need professional output.
+**Verdict:** CapCut dominates TikTok/short-form with ease of use and free access. Kimera targets creators who outgrow CapCut's limitations and need professional output.
 
 ---
 
-### 5. Lumio vs. RunwayML
+### 5. Kimera vs. RunwayML
 
-| Feature | Lumio | Runway | Verdict |
+| Feature | Kimera | Runway | Verdict |
 |---------|-------|--------|---------|
 | **AI Focus** | ✅ Editing AI (captions, extraction) | ✅ Generative AI (inpainting, motion) | Runway - more generative |
-| **Editing Tools** | ✅ Full NLE (timeline, effects) | ⚠️ Limited editing | Lumio - more complete |
+| **Editing Tools** | ✅ Full NLE (timeline, effects) | ⚠️ Limited editing | Kimera - more complete |
 | **Video Generation** | ❌ None | ✅ Text-to-video, inpainting | Runway - superior |
 | **Workflow** | ✅ Edit → Export | ✅ Edit + Generate | Runway - broader |
-| **Cost** | 💰 Subscription | 💰💰 $12/mo | Lumio - more competitive |
+| **Cost** | 💰 Subscription | 💰💰 $12/mo | Kimera - more competitive |
 
-**Verdict:** Runway is the generative AI leader. Lumio is the editing AI leader. They serve different needs (generative vs. editing).
+**Verdict:** Runway is the generative AI leader. Kimera is the editing AI leader. They serve different needs (generative vs. editing).
 
 ---
 
-### 6. Lumio vs. Canva
+### 6. Kimera vs. Canva
 
-| Feature | Lumio | Canva | Verdict |
+| Feature | Kimera | Canva | Verdict |
 |---------|-------|-------|---------|
 | **Primary Focus** | Video editing | Design + simple video | Canva - broader |
-| **Video Editing** | ✅ Professional NLE | ⚠️ Basic timeline | Lumio - more capable |
-| **Templates** | ✅ Lumio templates | ✅ 1000+ templates | Canva - more templates |
+| **Video Editing** | ✅ Professional NLE | ⚠️ Basic timeline | Kimera - more capable |
+| **Templates** | ✅ Kimera templates | ✅ 1000+ templates | Canva - more templates |
 | **Collaboration** | ✅ Cloud projects | ✅ Real-time co-edit | Tie |
 | **Learning Curve** | ✅ Professional | ✅ Very easy | Canva - easier |
 | **Export** | ✅ 4K video | ✅ 4K video | Tie |
 
-**Verdict:** Canva is for quick, template-based content. Lumio is for creators who want full control over professional output.
+**Verdict:** Canva is for quick, template-based content. Kimera is for creators who want full control over professional output.
 
 ---
 
 ## Competitive Positioning
 
-### Lumio's Sweet Spot
+### Kimera's Sweet Spot
 
-Lumio's ideal customer is the **professional short-form creator** who:
+Kimera's ideal customer is the **professional short-form creator** who:
 
 1. **Outgrows CapCut** - needs more control, better export, professional tools
 2. **Cannot use Premiere** - Mac-only, expensive, steep learning curve
@@ -152,9 +152,9 @@ Lumio's ideal customer is the **professional short-form creator** who:
 4. **Values accessibility** - no install, works on any device
 5. **Creates for social media** - TikTok, YouTube Shorts, Instagram Reels
 
-### Competitor Weaknesses Lumio Exploits
+### Competitor Weaknesses Kimera Exploits
 
-| Competitor | Weakness | Lumio's Edge |
+| Competitor | Weakness | Kimera's Edge |
 |------------|----------|--------------|
 | **Premiere Pro** | Expensive ($21/mo), desktop-only, complex | Free tier possible, web-based, simpler |
 | **DaVinci Resolve** | Steep learning curve, no cloud | Web-first, collaborative |
@@ -167,9 +167,9 @@ Lumio's ideal customer is the **professional short-form creator** who:
 
 ## Feature Gap Analysis
 
-### What Lumio Has That Competitors Lack
+### What Kimera Has That Competitors Lack
 
-| Feature | Lumio | Others |
+| Feature | Kimera | Others |
 |---------|-------|--------|
 | **AI-first design** | ✅ Core to architecture | ❌ Afterthought |
 | **Browser-native rendering** | ✅ WebGL/WebCodecs | ❌ Plugin-dependent |
@@ -178,9 +178,9 @@ Lumio's ideal customer is the **professional short-form creator** who:
 | **Integrated AI tools** | ✅ All in one place | ❌ Separate tools |
 | **Cross-platform (Windows/macOS/Linux)** | ✅ Chrome/Firefox/Safari | ❌ Platform locked |
 
-### What Competitors Have That Lumio Lacks
+### What Competitors Have That Kimera Lacks
 
-| Feature | Competitors | Lumio Status |
+| Feature | Competitors | Kimera Status |
 |---------|-------------|--------------|
 | **Fusion VFX (node-based)** | DaVinci | Not planned (scope creep) |
 | **Fairlight Audio Suite** | DaVinci | Basic mixer (sufficient for target) |
@@ -196,7 +196,7 @@ Lumio's ideal customer is the **professional short-form creator** who:
 
 ### 1. Double Down on AI Differentiation
 
-Lumio's strongest advantage is **integrated AI**. Competitors treat AI as add-ons; Lumio has it in the core architecture.
+Kimera's strongest advantage is **integrated AI**. Competitors treat AI as add-ons; Kimera has it in the core architecture.
 
 **Actions:**
 - Continue expanding AI tools (Scene Detection, Auto-Reframe, Motion Blur)
@@ -218,7 +218,7 @@ The sweet spot is creators who need:
 
 ### 3. Build the "Free Tier" Path
 
-CapCut and Canva succeeded with free tiers. Lumio should too.
+CapCut and Canva succeeded with free tiers. Kimera should too.
 
 **Actions:**
 - Free tier with AI limits (e.g., 5 AI captions/day)
@@ -247,9 +247,9 @@ Web users worry about uploading videos to "the cloud."
 
 ## Market Position
 
-### Lumio's Market Segment
+### Kimera's Market Segment
 
-| Segment | Description | Lumio Fit |
+| Segment | Description | Kimera Fit |
 |---------|-------------|-----------|
 | **Professional Creators** | Full-time video editors | ✅ Strong fit |
 | **SMB Creators** | Small businesses, agencies | ✅ Strong fit |
@@ -261,7 +261,7 @@ Web users worry about uploading videos to "the cloud."
 
 | Product | Free Tier | Paid Tier | Best For |
 |---------|-----------|-----------|----------|
-| **Lumio** | ✅ Limited AI | $19/mo | Creators needing AI |
+| **Kimera** | ✅ Limited AI | $19/mo | Creators needing AI |
 | **Premiere Pro** | ❌ No | $21/mo | Professionals, teams |
 | **DaVinci Resolve** | ✅ Yes (Studio $295) | $295 | Professionals, colorists |
 | **Final Cut Pro** | ❌ No | $299 | Mac professionals |
@@ -281,7 +281,7 @@ Web users worry about uploading videos to "the cloud."
 
 ### 2. AI Dependency
 
-**Risk:** Competitors improve AI, making Lumio's advantage less significant.
+**Risk:** Competitors improve AI, making Kimera's advantage less significant.
 
 **Mitigation:** Deepen AI integration (not just features, but workflow integration), build proprietary AI capabilities.
 
@@ -293,9 +293,9 @@ Web users worry about uploading videos to "the cloud."
 
 ---
 
-## Summary Table: Lumio vs. Key Competitors
+## Summary Table: Kimera vs. Key Competitors
 
-| | Lumio | Premiere | Resolve | CapCut | Runway |
+| | Kimera | Premiere | Resolve | CapCut | Runway |
 |---|---|---|---|---|---|
 | **Best For** | Pro short-form | Feature films | Colorists | TikTok/Reels | Generative AI |
 | **Price** | $19/mo | $21/mo | Free/$295 | Free | $12/mo |
@@ -309,7 +309,7 @@ Web users worry about uploading videos to "the cloud."
 
 ## Conclusion
 
-Lumio's competitive position is strong in the **browser-first, AI-enhanced video editing** space. It's not trying to beat Premiere Pro at its own game (which is fine - it would lose), but instead creating a new category:
+Kimera's competitive position is strong in the **browser-first, AI-enhanced video editing** space. It's not trying to beat Premiere Pro at its own game (which is fine - it would lose), but instead creating a new category:
 
 **"The AI-powered, browser-first video editor for professional short-form creators."**
 

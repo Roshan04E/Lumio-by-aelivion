@@ -1,14 +1,14 @@
-# Lumio Architecture Status Report
+# Kimera Architecture Status Report
 
 **Generated:** 2026-07-06  
-**Project:** Lumio (trendcut) - Browser-first video editor for short-form creators  
+**Project:** Kimera (trendcut) - Browser-first video editor for short-form creators  
 **Current Branch:** `method-3-gpu-compositor`
 
 ---
 
 ## Executive Summary
 
-Lumio has completed its foundational GPU-rendered preview architecture (Method 3), a professional color system, and many AI tooling capabilities. The codebase shows strong technical maturity with a focus on pixel-identical rendering across preview, local export, and cloud export paths.
+Kimera has completed its foundational GPU-rendered preview architecture (Method 3), a professional color system, and many AI tooling capabilities. The codebase shows strong technical maturity with a focus on pixel-identical rendering across preview, local export, and cloud export paths.
 
 **Status:** Production-ready foundation with AI capabilities in use, remaining work primarily focused on export path completion, advanced AI features, and some cleanup tasks.
 
@@ -18,7 +18,7 @@ Lumio has completed its foundational GPU-rendered preview architecture (Method 3
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Lumio Application Stack                             │
+│                         Kimera Application Stack                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ apps/web         - React/Vite editor + tool pages                          │
 │ apps/api         - Express + Prisma/Postgres, JWT auth                     │
@@ -188,7 +188,7 @@ Lumio has completed its foundational GPU-rendered preview architecture (Method 3
 
 | Component | Status |
 |-----------|--------|
-| Plugin manifest contract | ✅ `.lumio` packages |
+| Plugin manifest contract | ✅ `.kimera` packages |
 | Effect providers | ✅ Built-in + manifest |
 | Transition providers | ✅ |
 | Looks providers | ✅ |
@@ -324,7 +324,7 @@ Based on the current branch (`method-3-gpu-compositor`) and architecture.md:
 
 ## Conclusion
 
-Lumio has a **production-grade foundation** with most critical path items complete. The remaining work falls into:
+Kimera has a **production-grade foundation** with most critical path items complete. The remaining work falls into:
 
 - **Cleanup tasks** (deferred items that can wait)
 - **Export path expansion** (browser/local desktop renderers)
@@ -342,17 +342,17 @@ The architecture is solid, well-tested, and ready for production use. The remain
 pnpm typecheck
 
 # Run all fixtures in GPU environment (requires PIXEL_BROWSER_CHANNEL=chrome)
-PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker render:compare:pixels
-PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @lumio-by-aelivion/worker scene:compare
+PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker render:compare:pixels
+PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker scene:compare
 
 # Test context governor
-pnpm --filter @lumio-by-aelivion/shared governor:test
+pnpm --filter @kimera-by-aelivion/shared governor:test
 
 # Render manifest to MP4 (manual verification)
-pnpm --filter @lumio-by-aelivion/worker render:manifest <manifest.json>
+pnpm --filter @kimera-by-aelivion/worker render:manifest <manifest.json>
 
 # Editor tests
-pnpm --filter @lumio-by-aelivion/web editor:test
+pnpm --filter @kimera-by-aelivion/web editor:test
 ```
 
 ---

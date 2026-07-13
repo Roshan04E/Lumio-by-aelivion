@@ -6,7 +6,7 @@
  * console stays clean — i.e. moving the high-frequency tick into the external store didn't break the
  * preview/transport wiring.
  *
- * Run: pnpm --filter @lumio-by-aelivion/worker exec tsx src/playback-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/playback-probe.ts   (dev server must be up)
  */
 import { chromium, type Page } from "playwright";
 

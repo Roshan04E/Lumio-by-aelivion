@@ -28,12 +28,54 @@ export function migrateTimelineKeyframes(keyframes: TimelineKeyframe[] | undefin
   }));
 }
 
+const EMPTY_ANIMATIONS: TimelineKeyframeV2[] = [];
+
 export function getLayerAnimations(layer: {
   startSeconds?: number | undefined;
   keyframes?: TimelineKeyframe[] | undefined;
   animations?: TimelineKeyframeV2[] | undefined;
 }) {
+  // Hot path: no legacy keyframes → return the layer's array by reference (callers
+  // only read; the stable identity also feeds the sorted-keyframe cache below).
+  if (!layer.keyframes?.length) {
+    return layer.animations ?? EMPTY_ANIMATIONS;
+  }
   return [...migrateTimelineKeyframes(layer.keyframes, layer.startSeconds ?? 0), ...(layer.animations ?? [])];
+}
+
+// Per-property sorted keyframe lists, cached on the animations array identity.
+// Editor edits replace the array immutably, so identity is the invalidation key;
+// WeakMap keeps fresh/legacy merged arrays GC-collectable (no growth in long
+// sessions or across Remotion worker frames).
+const sortedKeyframeCache = new WeakMap<TimelineKeyframeV2[], Map<string, TimelineKeyframeV2[]>>();
+
+function sortedKeyframesFor(
+  animations: TimelineKeyframeV2[],
+  scope: "effect" | "layer" | "mask",
+  property: string,
+  effectId?: string
+): TimelineKeyframeV2[] {
+  let byKey = sortedKeyframeCache.get(animations);
+  if (!byKey) {
+    byKey = new Map();
+    sortedKeyframeCache.set(animations, byKey);
+  }
+  const key = `${scope}::${effectId ?? ""}::${property}`;
+  let sorted = byKey.get(key);
+  if (!sorted) {
+    // Same filter (original order) + same stable-sort comparator as
+    // evaluateAnimatedValue, so equal-time ties keep their historical order.
+    sorted = animations
+      .filter(
+        (keyframe) =>
+          keyframe.target.scope === scope &&
+          keyframe.target.property === property &&
+          (effectId === undefined || keyframe.target.effectId === effectId)
+      )
+      .sort((a, b) => a.timeSeconds - b.timeSeconds);
+    byKey.set(key, sorted);
+  }
+  return sorted;
 }
 
 export function evaluateAnimatedValue<T extends AnimatedValue>({
@@ -47,6 +89,11 @@ export function evaluateAnimatedValue<T extends AnimatedValue>({
     .filter((keyframe) => keyframe.target.scope === scope && keyframe.target.property === property)
     .sort((a, b) => a.timeSeconds - b.timeSeconds);
 
+  return evaluateSortedKeyframes(propertyKeyframes, baseValue, timeSeconds);
+}
+
+/** Evaluate an already filtered+sorted keyframe list (the body of evaluateAnimatedValue). */
+function evaluateSortedKeyframes<T extends AnimatedValue>(propertyKeyframes: TimelineKeyframeV2[], baseValue: T, timeSeconds: number): T {
   if (!propertyKeyframes.length) {
     return baseValue;
   }
@@ -119,20 +166,9 @@ export function evaluateTimelineEffectParam(input: {
     return input.baseValue;
   }
 
-  const keyframes = (input.animations ?? []).filter(
-    (keyframe) =>
-      keyframe.target.scope === "effect" &&
-      keyframe.target.effectId === input.effectId &&
-      keyframe.target.property === input.paramKey
-  );
-
-  return evaluateAnimatedValue({
-    baseValue: input.baseValue,
-    keyframes,
-    property: input.paramKey,
-    scope: "effect",
-    timeSeconds: input.timeSeconds
-  });
+  // Composes to the same predicate the old filter + evaluateAnimatedValue re-filter did.
+  const sorted = sortedKeyframesFor(input.animations ?? EMPTY_ANIMATIONS, "effect", input.paramKey, input.effectId);
+  return evaluateSortedKeyframes(sorted, input.baseValue, input.timeSeconds);
 }
 
 export function evaluateTimelineTransform(input: {
@@ -149,89 +185,51 @@ export function evaluateTimelineTransform(input: {
   const animations = getLayerAnimations(input);
   const layerTimeSeconds = Math.max(0, input.timeSeconds - (input.startSeconds ?? 0));
   const position = evaluateSpatialPosition(input.transform.position, animations, layerTimeSeconds);
+  const evalProp = <T extends AnimatedValue>(property: string, baseValue: T): T =>
+    evaluateSortedKeyframes(sortedKeyframesFor(animations, "layer", property), baseValue, layerTimeSeconds);
   return {
     position,
-    scale: evaluateAnimatedValue({
-      baseValue: input.transform.scale,
-      keyframes: animations,
-      property: "transform.scale",
-      timeSeconds: layerTimeSeconds
-    }),
-    rotation: evaluateAnimatedValue({
-      baseValue: input.transform.rotation,
-      keyframes: animations,
-      property: "transform.rotation",
-      timeSeconds: layerTimeSeconds
-    }),
-    opacity: evaluateAnimatedValue({
-      baseValue: input.transform.opacity,
-      keyframes: animations,
-      property: "transform.opacity",
-      timeSeconds: layerTimeSeconds
-    }),
-    rotateX: evaluateAnimatedValue({
-      baseValue: input.transform.rotateX ?? 0,
-      keyframes: animations,
-      property: "transform.rotateX",
-      timeSeconds: layerTimeSeconds
-    }),
-    rotateY: evaluateAnimatedValue({
-      baseValue: input.transform.rotateY ?? 0,
-      keyframes: animations,
-      property: "transform.rotateY",
-      timeSeconds: layerTimeSeconds
-    }),
-    perspective: evaluateAnimatedValue({
-      baseValue: input.transform.perspective ?? 0,
-      keyframes: animations,
-      property: "transform.perspective",
-      timeSeconds: layerTimeSeconds
-    }),
-    z: evaluateAnimatedValue({
-      baseValue: input.transform.z ?? 0,
-      keyframes: animations,
-      property: "transform.z",
-      timeSeconds: layerTimeSeconds
-    })
+    scale: evalProp("transform.scale", input.transform.scale),
+    rotation: evalProp("transform.rotation", input.transform.rotation),
+    opacity: evalProp("transform.opacity", input.transform.opacity),
+    rotateX: evalProp("transform.rotateX", input.transform.rotateX ?? 0),
+    rotateY: evalProp("transform.rotateY", input.transform.rotateY ?? 0),
+    perspective: evalProp("transform.perspective", input.transform.perspective ?? 0),
+    z: evalProp("transform.z", input.transform.z ?? 0)
   };
 }
 
 function evaluateSpatialPosition(basePosition: TimelineTransform["position"], animations: TimelineKeyframeV2[], timeSeconds: number) {
-  const xKeyframes = animations
-    .filter((keyframe) => keyframe.target.scope === "layer" && keyframe.target.property === "transform.position.x")
-    .sort((a, b) => a.timeSeconds - b.timeSeconds);
-  const yKeyframes = animations
-    .filter((keyframe) => keyframe.target.scope === "layer" && keyframe.target.property === "transform.position.y")
-    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+  const xKeyframes = sortedKeyframesFor(animations, "layer", "transform.position.x");
+  const yKeyframes = sortedKeyframesFor(animations, "layer", "transform.position.y");
 
-  const keyedPositions = xKeyframes
-    .map((xKeyframe) => {
-      const yKeyframe = yKeyframes.find((candidate) => Math.abs(candidate.timeSeconds - xKeyframe.timeSeconds) < 0.001);
-      return yKeyframe
-        ? {
-            timeSeconds: xKeyframe.timeSeconds,
-            x: Number(xKeyframe.value),
-            y: Number(yKeyframe.value),
-            spatial: xKeyframe.spatial ?? yKeyframe.spatial
-          }
-        : undefined;
-    })
-    .filter((point): point is NonNullable<typeof point> => Boolean(point));
+  const keyedPositions: { timeSeconds: number; x: number; y: number; spatial: TimelineKeyframeV2["spatial"] }[] = [];
+  for (const xKeyframe of xKeyframes) {
+    // yKeyframes is sorted, so the first |Δt| < 0.001 match in array order is the
+    // first candidate at or after the lower bound (binary search + forward scan).
+    let low = 0;
+    let high = yKeyframes.length;
+    const bound = xKeyframe.timeSeconds - 0.001;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (yKeyframes[mid]!.timeSeconds <= bound) low = mid + 1;
+      else high = mid;
+    }
+    const yKeyframe = low < yKeyframes.length && Math.abs(yKeyframes[low]!.timeSeconds - xKeyframe.timeSeconds) < 0.001 ? yKeyframes[low] : undefined;
+    if (yKeyframe) {
+      keyedPositions.push({
+        timeSeconds: xKeyframe.timeSeconds,
+        x: Number(xKeyframe.value),
+        y: Number(yKeyframe.value),
+        spatial: xKeyframe.spatial ?? yKeyframe.spatial
+      });
+    }
+  }
 
   if (keyedPositions.length < 2) {
     return {
-      x: evaluateAnimatedValue({
-        baseValue: basePosition.x,
-        keyframes: animations,
-        property: "transform.position.x",
-        timeSeconds
-      }),
-      y: evaluateAnimatedValue({
-        baseValue: basePosition.y,
-        keyframes: animations,
-        property: "transform.position.y",
-        timeSeconds
-      })
+      x: evaluateSortedKeyframes(xKeyframes, basePosition.x, timeSeconds),
+      y: evaluateSortedKeyframes(yKeyframes, basePosition.y, timeSeconds)
     };
   }
 

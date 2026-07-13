@@ -2,7 +2,7 @@
  * Standalone assert script for the cloud audio post-mix (repo convention: no framework,
  * exits non-zero on failure).
  *
- *   pnpm --filter @lumio-by-aelivion/worker audio:postmix:test
+ *   pnpm --filter @kimera-by-aelivion/worker audio:postmix:test
  *
  * Part 1 (pure): mixManifestAudioPcm with an injected decoder — trim/speed/gain/pan math.
  * Part 2 (integration): real ffmpeg — synthesize a sine WAV + a color video, run the full
@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
-import type { RenderManifest, RenderManifestLayer } from "@lumio-by-aelivion/render-templates";
+import type { RenderManifest, RenderManifestLayer } from "@kimera-by-aelivion/render-templates";
 import { manifestNeedsAudioPostMix, mixManifestAudioPcm, postMixManifestAudio } from "./audio-post-mix";
 
 let failures = 0;
@@ -201,7 +201,7 @@ async function integrationChecks() {
     console.log("  skip integration (no ffmpeg binary)");
     return;
   }
-  const dir = mkdtempSync(path.join(tmpdir(), "lumio-postmix-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "kimera-postmix-"));
   try {
     const wav = path.join(dir, "tone.wav");
     const video = path.join(dir, "video.mp4");

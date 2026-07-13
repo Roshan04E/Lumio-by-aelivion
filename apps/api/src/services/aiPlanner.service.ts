@@ -1,4 +1,4 @@
-import type { AiPlan, ModuleType } from "@lumio-by-aelivion/shared";
+import type { AiPlan, ModuleType } from "@kimera-by-aelivion/shared";
 
 const keywordPlans: Array<{
   keywords: string[];

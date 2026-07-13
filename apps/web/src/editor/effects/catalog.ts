@@ -1,7 +1,7 @@
 /**
  * Effects-tab catalog: the single, lightweight source that powers the categorized
  * (Video / Text / Audio / Transition / AI) dropdown. It only assembles *descriptors* from the
- * existing registries — timeline effects + AI tools ([@lumio-by-aelivion/shared]) and animation presets —
+ * existing registries — timeline effects + AI tools ([@kimera-by-aelivion/shared]) and animation presets —
  * so importing it pulls no effect-control UI, no ML handlers, and no renderer code. The actual
  * implementations load lazily when an item is added/run (see EditorPage handlers + lazy modals).
  */
@@ -22,7 +22,7 @@ import {
   type ToolInputType,
   type TransitionDirection,
   type TransitionKind
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { animationPresets } from "../inspector/keyframeUtils";
 import { READY_TOOL_SLUGS } from "../../tools/ready-tool-slugs";
 
@@ -357,7 +357,7 @@ export function buildEffectCatalog(
 
   // Opacity transitions are visual — audio layers fade via the Audio items instead.
   const importedTransitionProvider = options.transitionManifests?.length
-    ? createManifestTransitionProvider("lumio.imported.transitions", "Imported Transitions", options.transitionManifests)
+    ? createManifestTransitionProvider("kimera.imported.transitions", "Imported Transitions", options.transitionManifests)
     : null;
   const importedTransitions: CatalogItem[] =
     importedTransitionProvider && (!selectedLayerType || selectedLayerType !== "audio")

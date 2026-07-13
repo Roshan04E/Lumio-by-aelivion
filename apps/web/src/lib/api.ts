@@ -25,7 +25,7 @@ import {
   type TranscriptArtifactData,
   type TemplateDefinition,
   type ToolDefinition
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { getAssetBlobStore, requestPersistentAssetStorage } from "./asset-blob-store";
 // Runtime-only use (inside function bodies) — safe across the api⇄sync circular edge; no top-level call.
 import { candidateProjectIds, resolveProjectId } from "./sync";
@@ -42,13 +42,13 @@ export class ProjectLoadError extends Error {
 }
 
 const LOCAL_PROJECT_ID_PREFIX = "project_local_";
-const tokenKey = "lumio_token";
-const localProjectsKey = "lumio_local_projects";
-const localAssetsKey = "lumio_local_assets";
+const tokenKey = "kimera_token";
+const localProjectsKey = "kimera_local_projects";
+const localAssetsKey = "kimera_local_assets";
 // Mirrors the server ProjectAsset join for the offline/local-first path: projectId -> linked assetIds.
 // Keep the filtering logic here in lockstep with the server GET /assets scope in apps/api.
-const localProjectLinksKey = "lumio_project_asset_links";
-const pluginCatalogLatestKey = "lumio_plugin_catalog_latest";
+const localProjectLinksKey = "kimera_project_asset_links";
+const pluginCatalogLatestKey = "kimera_plugin_catalog_latest";
 
 type LocalProjectLinks = Record<string, string[]>;
 
@@ -225,7 +225,7 @@ export async function getMe(): Promise<UserRecord> {
       id: "local_demo",
       name: "Demo Creator",
       email: "demo@aelivion.studio",
-      walletCredits: Number(localStorage.getItem("lumio_wallet") ?? 120)
+      walletCredits: Number(localStorage.getItem("kimera_wallet") ?? 120)
     };
   }
 }
@@ -389,7 +389,7 @@ export async function createAsset(input: CreateAssetInput) {
     // Persist the actual bytes on-device so the asset survives refresh and large clips load
     // instantly. Only a stable marker is stored as the URL; the live object URL is resolved
     // now (for immediate use) and re-resolved by listAssets() / resolveLocalAssetUrls() later.
-    let liveUrl = "/assets/lumio-by-aelivion-hero.png";
+    let liveUrl = "/assets/kimera-by-aelivion-hero.png";
     if (file) {
       try {
         const store = await getAssetBlobStore();
@@ -452,8 +452,8 @@ function appendAssetMetadata(body: FormData, input: CreateAssetInput) {
   if (input.rotationDegrees) body.append("rotationDegrees", String(input.rotationDegrees));
 }
 
-const ASSET_AUDIO_TRUE_TAG = "lumio:audio=true";
-const ASSET_AUDIO_FALSE_TAG = "lumio:audio=false";
+const ASSET_AUDIO_TRUE_TAG = "kimera:audio=true";
+const ASSET_AUDIO_FALSE_TAG = "kimera:audio=false";
 
 function withAssetAudioTag(tags: string[] | undefined, hasAudio: boolean | undefined): string[] | undefined {
   const clean = (tags ?? []).filter((tag) => tag !== ASSET_AUDIO_TRUE_TAG && tag !== ASSET_AUDIO_FALSE_TAG);
@@ -924,9 +924,36 @@ export async function buyCredits(packId: "starter" | "creator" | "growth", proje
     return true;
   } catch {
     const pack = walletPacks.find((item) => item.id === packId);
-    const wallet = Number(localStorage.getItem("lumio_wallet") ?? 120);
-    localStorage.setItem("lumio_wallet", String(wallet + (pack?.credits ?? 0)));
+    const wallet = Number(localStorage.getItem("kimera_wallet") ?? 120);
+    localStorage.setItem("kimera_wallet", String(wallet + (pack?.credits ?? 0)));
     return true;
+  }
+}
+
+// --- Phase 0 shadow-billing (MONETIZATION_STRATEGY.md §4): usage telemetry readout ---
+// Additive-only: this NEVER represents a debit. Every row/aggregate is "free during beta".
+
+export interface UsageActionSummary {
+  action: string;
+  units: number;
+  credits: number;
+  count: number;
+}
+
+export interface UsageSummary {
+  totalShadowCredits: number;
+  byAction: UsageActionSummary[];
+  periodStart: string;
+}
+
+/** Recent shadow-billing usage + per-action aggregates for the account/checkout "usage this
+ *  month (free during beta)" panel. Returns an empty summary (never throws) for guests/offline. */
+export async function fetchUsage(): Promise<UsageSummary> {
+  try {
+    const data = await apiRequest<UsageSummary & { rows: unknown[] }>("/payments/usage");
+    return { totalShadowCredits: data.totalShadowCredits, byAction: data.byAction, periodStart: data.periodStart };
+  } catch {
+    return { totalShadowCredits: 0, byAction: [], periodStart: new Date().toISOString() };
   }
 }
 
@@ -1198,13 +1225,13 @@ function saveLocalProject(project: ProjectRecord) {
 function readPluginCatalogCache(namespace: string): PluginCatalogResponse | undefined {
   const latest = readLocal<Record<string, string>>(pluginCatalogLatestKey, {});
   const revision = latest[namespace];
-  return revision ? readLocal<PluginCatalogResponse | undefined>(`lumio_plugin_catalog_${namespace}_${revision}`, undefined) : undefined;
+  return revision ? readLocal<PluginCatalogResponse | undefined>(`kimera_plugin_catalog_${namespace}_${revision}`, undefined) : undefined;
 }
 
 function writePluginCatalogCache(namespace: string, value: PluginCatalogResponse) {
   const latest = readLocal<Record<string, string>>(pluginCatalogLatestKey, {});
   writeLocal(pluginCatalogLatestKey, { ...latest, [namespace]: value.revision });
-  writeLocal(`lumio_plugin_catalog_${namespace}_${value.revision}`, value);
+  writeLocal(`kimera_plugin_catalog_${namespace}_${value.revision}`, value);
 }
 
 function readLocal<T>(key: string, fallback: T): T {
@@ -1222,7 +1249,7 @@ function writeLocal<T>(key: string, value: T) {
   } catch (error) {
     // Quota overflow (large graphs) or restricted storage must not break the caller —
     // every writeLocal consumer is a best-effort local cache/registry.
-    console.warn(`[lumio] localStorage write failed for "${key}"`, error);
+    console.warn(`[kimera] localStorage write failed for "${key}"`, error);
   }
 }
 

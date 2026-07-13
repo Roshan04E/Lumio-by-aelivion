@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildRenderManifest } from "@lumio-by-aelivion/render-templates";
+import { buildRenderManifest } from "@kimera-by-aelivion/render-templates";
 import {
   getCompositionMediaStyle,
   getCompositionShapeStyle,
@@ -7,7 +7,7 @@ import {
   type ProjectGraph,
   type SourceAsset,
   type TimelineLayer
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 const visualLayer: TimelineLayer = {
   id: "video_1",

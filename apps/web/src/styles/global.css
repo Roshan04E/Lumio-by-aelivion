@@ -474,6 +474,21 @@ main {
   color: var(--primary);
 }
 
+/* Phase 0 shadow-billing badge — "this used N credits, free during beta" (never a gate). */
+.shadow-cost-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .badge-success {
   border-color: rgba(34, 197, 94, 0.34);
   background: rgba(34, 197, 94, 0.12);
@@ -3332,38 +3347,38 @@ input[type="checkbox"] {
    fixed — every professional NLE keeps a neutral dark workstation shell — only the ACCENT triad
    (--nle-accent / -soft / -border) is swappable, which is enough to make the whole app feel
    re-colored since every selection/focus/active state reads from these three vars. "blue" is the
-   default (unscoped :root values above); each other option is its own [data-lumio-theme] block. */
-.editor-page[data-lumio-theme="warm"] {
+   default (unscoped :root values above); each other option is its own [data-kimera-theme] block. */
+.editor-page[data-kimera-theme="warm"] {
   --nle-accent: #e0a458;
   --nle-accent-soft: rgba(224, 164, 88, 0.16);
   --nle-accent-border: rgba(224, 164, 88, 0.42);
 }
 
-.editor-page[data-lumio-theme="grey"] {
+.editor-page[data-kimera-theme="grey"] {
   --nle-accent: #9aa4b2;
   --nle-accent-soft: rgba(154, 164, 178, 0.18);
   --nle-accent-border: rgba(154, 164, 178, 0.44);
 }
 
-.editor-page[data-lumio-theme="red"] {
+.editor-page[data-kimera-theme="red"] {
   --nle-accent: #e06672;
   --nle-accent-soft: rgba(224, 102, 114, 0.16);
   --nle-accent-border: rgba(224, 102, 114, 0.42);
 }
 
-.editor-page[data-lumio-theme="green"] {
+.editor-page[data-kimera-theme="green"] {
   --nle-accent: #6fbf8b;
   --nle-accent-soft: rgba(111, 191, 139, 0.17);
   --nle-accent-border: rgba(111, 191, 139, 0.42);
 }
 
-.editor-page[data-lumio-theme="orange"] {
+.editor-page[data-kimera-theme="orange"] {
   --nle-accent: #e0893c;
   --nle-accent-soft: rgba(224, 137, 60, 0.17);
   --nle-accent-border: rgba(224, 137, 60, 0.42);
 }
 
-.editor-page[data-lumio-theme="neon"] {
+.editor-page[data-kimera-theme="neon"] {
   --nle-accent: #4cf07a;
   --nle-accent-soft: rgba(76, 240, 122, 0.18);
   --nle-accent-border: rgba(76, 240, 122, 0.48);
@@ -4096,6 +4111,23 @@ input[type="checkbox"] {
   font-size: 0.76rem;
   color: var(--muted);
   padding: 0 2px;
+}
+/* Phase 0 shadow-billing readout — measured, never charged. */
+.account-usage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 2px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+.account-usage-title em {
+  font-style: normal;
+  color: var(--primary);
+  margin-left: 4px;
 }
 .account-action {
   display: flex;
@@ -9565,13 +9597,16 @@ input.scrub-number:focus {
 .timeline-editor {
   --timeline-track-height: 44px;
   --timeline-label-width: 108px;
-  --timeline-label-gap: 8px;
+  /* Resolve-style rail: the header column abuts the lanes (1px divider drawn by the
+     label's border-right), no gutter. laneOffsetPx in TimelineStrip mirrors this. */
+  --timeline-label-gap: 0px;
   --timeline-lane-offset: calc(var(--timeline-label-width) + var(--timeline-label-gap));
   position: relative;
   min-height: 0;
   height: max-content;
   display: grid;
-  grid-template-rows: auto auto auto;
+  /* toolbar → ruler → tracks → minimap */
+  grid-template-rows: auto auto auto auto;
   align-content: start;
   /* No row gap: toolbar → ruler → tracks stack flush (sticky header block reads as one unit;
      an 8px row gap left a dead see-through band between the pinned ruler and the tools). */
@@ -9664,22 +9699,18 @@ input.scrub-number:focus {
 
 .timeline-editor.is-xs-rows {
   --timeline-label-width: 58px;
-  --timeline-label-gap: 6px;
 }
 
 .timeline-editor.is-s-rows {
   --timeline-label-width: 78px;
-  --timeline-label-gap: 6px;
 }
 
 .timeline-editor.is-m-rows {
   --timeline-label-width: 104px;
-  --timeline-label-gap: 8px;
 }
 
 .timeline-editor.is-l-rows {
   --timeline-label-width: 108px;
-  --timeline-label-gap: 8px;
 }
 
 .timeline-timebar {
@@ -10156,7 +10187,9 @@ input.scrub-number:focus {
   min-width: 680px;
   display: grid;
   align-content: start;
-  gap: 6px;
+  /* Hairline row separation (Resolve-style flush rows). TimelineStrip's rowPitchPx
+     (trackHeight + 1) must stay in sync with this gap. */
+  gap: 1px;
 }
 
 /* The sticky per-row .timeline-track-label only covers its own row's height, not
@@ -10422,6 +10455,115 @@ input.scrub-number:focus {
   /* Never spill past the viewport — JS clamps the position, this caps a very tall menu. */
   max-height: calc(100vh - 16px);
   overflow-y: auto;
+}
+
+/* Junction transition params popover — motionless click on the on-timeline transition element.
+   Same floating chrome as the clip context menu; rows are schema-driven controls. */
+.timeline-junction-popover {
+  position: fixed;
+  min-width: 248px;
+  max-width: 300px;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, #1b1d22);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+.timeline-junction-popover .junction-popover-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.timeline-junction-popover .junction-popover-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: var(--text, #e7e9ee);
+}
+
+.timeline-junction-popover .junction-popover-kind {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.timeline-junction-popover .junction-popover-row {
+  display: grid;
+  grid-template-columns: 74px 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.timeline-junction-popover .junction-popover-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-junction-popover input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--nle-accent);
+}
+
+.timeline-junction-popover .junction-popover-number {
+  width: 56px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg, #101115);
+  color: var(--text, #e7e9ee);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-junction-popover .junction-popover-unit {
+  font-size: 0.64rem;
+  color: var(--muted);
+}
+
+.timeline-junction-popover input[type="color"] {
+  width: 40px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+}
+
+.timeline-junction-popover .junction-popover-foot {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.timeline-junction-popover .junction-popover-remove {
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, #ef4444 40%, transparent);
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+  color: #f87171;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.timeline-junction-popover .junction-popover-remove:hover {
+  background: color-mix(in srgb, #ef4444 22%, transparent);
 }
 
 .timeline-context-menu-label {
@@ -10732,11 +10874,14 @@ input.scrub-number:focus {
   align-content: center;
   gap: 2px;
   min-height: var(--timeline-track-height);
-  padding: 0 8px;
+  padding: 0 6px;
   color: #fff;
   /* The dock's own surface — the header rail is part of the timeline window, not a
-     floating card; square corners + a crisp right divider keep it reading as one rail. */
+     floating card; square corners + a crisp right divider keep it reading as one rail.
+     border-right IS the rail/lane divider (label-gap is 0 — border-box keeps the
+     column width equal to --timeline-label-width). */
   background: var(--editor-surface);
+  border-right: 1px solid var(--editor-border);
   border-radius: 0;
   box-shadow: 7px 0 11px -8px rgba(0, 0, 0, 0.6);
 }
@@ -10775,22 +10920,23 @@ input.scrub-number:focus {
   left: 0;
   right: 0;
   top: 100%;
-  height: 6px;
-  background: var(--editor-surface);
+  height: 1px;
+  /* Doubles as the header-rail row separator now that the row gap is a 1px hairline. */
+  background: var(--editor-border);
   pointer-events: none;
 }
 
 .track-label-main {
   min-width: 0;
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 
 .track-reorder-handle {
-  width: 20px;
-  height: 24px;
+  width: 16px;
+  height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -10838,7 +10984,7 @@ input.scrub-number:focus {
 
 .timeline-track-label strong {
   overflow: hidden;
-  font-size: clamp(0.7rem, calc(var(--timeline-track-height) * 0.02), 0.95rem);
+  font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.01em;
   text-overflow: ellipsis;
@@ -10875,27 +11021,27 @@ input.scrub-number:focus {
   /* Flexible columns so all four actions (lock / eye / solo / delete) always fit the header width —
      fixed 24px columns + gaps needed 111px but the header is only ~100px, so delete overflowed. */
   grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
-  margin-top: 5px;
+  gap: 2px;
+  margin-top: 2px;
 }
 
+/* Flat Resolve-style icon strip — no boxed chrome at rest; states carry the color. */
 .track-controls button {
   width: 100%;
   min-width: 0;
-  height: 22px;
+  height: 18px;
   display: grid;
   place-items: center;
   padding: 0;
   border-radius: var(--editor-radius-sm);
   color: var(--muted);
   border: 1px solid transparent;
-  background: var(--editor-input-bg);
+  background: transparent;
 }
 
 .track-controls button:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.08);
-  border-color: var(--border);
 }
 
 .track-controls button.is-active {
@@ -10904,9 +11050,21 @@ input.scrub-number:focus {
 
 /* Solo reads as the classic amber "S". */
 .track-controls .track-solo-btn {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 800;
   line-height: 1;
+}
+
+/* The "S" is a text glyph, not a 13px SVG: its cap height rides above the line-box
+   center, so it sat visibly high next to the icon buttons. Pin it to the icons' box
+   and nudge it back onto their optical center line. */
+.track-controls .track-solo-btn span {
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  line-height: 1;
+  transform: translateY(0.5px);
 }
 
 .track-controls .track-solo-btn.is-active {
@@ -10960,12 +11118,13 @@ input.scrub-number:focus {
 .timeline-lane {
   position: relative;
   min-height: var(--timeline-track-height);
-  border: 1px solid transparent;
-  border-bottom: 1px solid var(--editor-border);
-  border-radius: var(--editor-radius-sm);
+  /* Flat flush lane: the 1px .timeline-tracks row gap is the only separator (no per-lane
+     border/rounding — rows read as one continuous surface like Resolve). */
+  border: none;
+  border-radius: 0;
   background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.065) 0, rgba(255, 255, 255, 0.065) 1px, transparent 1px),
-    rgba(255, 255, 255, 0.03);
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 0, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    rgba(255, 255, 255, 0.022);
   background-size: var(--timeline-ruler-step-percent, 8.33%) 100%, auto;
   background-repeat: repeat-x, no-repeat;
 }
@@ -10978,22 +11137,81 @@ input.scrub-number:focus {
   opacity: 0.45;
 }
 
+/* ---- Timeline minimap: thin full-project overview pinned to the bottom of the dock. ----
+   Sticky in BOTH axes (left pins it against horizontal scroll like the timebar; bottom keeps
+   it visible when the track stack is taller than the dock). Width is set inline from
+   toolbarViewportWidth, same trick as .timeline-timebar. */
+.timeline-minimap {
+  position: sticky;
+  bottom: 0;
+  left: var(--timeline-tools-width);
+  z-index: 9;
+  height: 30px;
+  margin-top: 1px;
+  border-top: 1px solid var(--editor-border);
+  background: var(--editor-surface);
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+.timeline-minimap:active {
+  cursor: grabbing;
+}
+
+/* Bars keep the full-width x-domain (no horizontal inset) so they line up exactly with
+   the viewport window and playhead percentages. */
+.timeline-minimap-lanes {
+  position: absolute;
+  inset: 3px 0;
+  pointer-events: none;
+}
+
+.timeline-minimap-lanes i {
+  position: absolute;
+  min-width: 2px;
+  border-radius: 1px;
+  opacity: 0.85;
+}
+
+.timeline-minimap-window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+}
+
+.timeline-minimap-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--playhead-percent, 0%);
+  width: 1px;
+  background: var(--nle-accent, #60b2ff);
+  pointer-events: none;
+}
+
 .timeline-editor .timeline-clip {
   position: absolute;
-  top: max(2px, min(5px, calc(var(--timeline-track-height) * 0.12)));
-  bottom: max(2px, min(5px, calc(var(--timeline-track-height) * 0.12)));
+  /* Full-height clips (Resolve-style): 1px breathing room against the lane edges. */
+  top: 1px;
+  bottom: 1px;
   z-index: 1;
   /* Stay grabbable when extremely short (e.g. a 1-frame clip) without faking its length. */
   min-width: 4px;
   min-height: 0;
   display: flex;
   align-items: center;
-  gap: max(2px, min(5px, calc(var(--timeline-track-height) * 0.1)));
-  padding: 0 max(4px, min(7px, calc(var(--timeline-track-height) * 0.16)));
-  /* Clean-timeline pass (2026-07-03): no resting border — selection draws the only outline. */
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--nle-accent) 22%, transparent), rgba(108, 92, 231, 0.16));
+  gap: 3px;
+  padding: 0 4px;
+  /* Thin dark seam so butted clips separate at cuts without a bright outline. */
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--nle-accent) 20%, #171922);
   color: #fff;
   cursor: grab;
   text-align: left;
@@ -11012,11 +11230,9 @@ input.scrub-number:focus {
 .timeline-editor .timeline-clip.is-selected {
   z-index: 6;
   border-color: var(--nle-accent);
-  background: linear-gradient(135deg, rgba(96, 178, 255, 0.52), rgba(129, 112, 255, 0.4));
-  filter: saturate(1.35) brightness(1.28);
-  box-shadow:
-    0 0 0 1px var(--nle-accent-soft),
-    0 6px 18px rgba(0, 0, 0, 0.4);
+  filter: saturate(1.3) brightness(1.22);
+  /* Crisp 1px halo only — no drop-shadow blob; flat clips keep a flat selection. */
+  box-shadow: 0 0 0 1px var(--nle-accent-soft);
 }
 
 /* Instant press feedback: :active is pure CSS (no React round-trip), so the clip acknowledges the
@@ -11057,6 +11273,58 @@ input.scrub-number:focus {
 .timeline-editor.is-hand-tool.is-panning .clip-keyframe-marker,
 .timeline-editor.is-hand-tool.is-panning .timeline-transition {
   cursor: grabbing;
+}
+
+/* Blade / roll / slide: the whole clip body is the tool's gesture surface — the sub-controls
+   (trim handles, fade buttons, volume envelope, keyframe lane, transition glyphs) must not
+   intercept the pointer, or a blade click near an edge trims instead of cutting and roll can't
+   grab a junction that has a transition glyph straddling it. The cve-* elements re-enable their
+   own pointer-events in their base rules, so they need explicit shutdown too. */
+.timeline-editor.is-blade-tool .clip-resize,
+.timeline-editor.is-blade-tool .clip-fade-create,
+.timeline-editor.is-blade-tool .clip-fade-handle,
+.timeline-editor.is-blade-tool .clip-keyframe-lane,
+.timeline-editor.is-blade-tool .clip-keyframe-marker,
+.timeline-editor.is-blade-tool .clip-keyframe-delete,
+.timeline-editor.is-blade-tool .cve-hit,
+.timeline-editor.is-blade-tool .cve-point,
+.timeline-editor.is-blade-tool .cve-handle,
+.timeline-editor.is-blade-tool .timeline-transition,
+.timeline-editor.is-roll-tool .clip-resize,
+.timeline-editor.is-roll-tool .clip-fade-create,
+.timeline-editor.is-roll-tool .clip-fade-handle,
+.timeline-editor.is-roll-tool .clip-keyframe-lane,
+.timeline-editor.is-roll-tool .clip-keyframe-marker,
+.timeline-editor.is-roll-tool .clip-keyframe-delete,
+.timeline-editor.is-roll-tool .cve-hit,
+.timeline-editor.is-roll-tool .cve-point,
+.timeline-editor.is-roll-tool .cve-handle,
+.timeline-editor.is-roll-tool .timeline-transition,
+.timeline-editor.is-slide-tool .clip-resize,
+.timeline-editor.is-slide-tool .clip-fade-create,
+.timeline-editor.is-slide-tool .clip-fade-handle,
+.timeline-editor.is-slide-tool .clip-keyframe-lane,
+.timeline-editor.is-slide-tool .clip-keyframe-marker,
+.timeline-editor.is-slide-tool .clip-keyframe-delete,
+.timeline-editor.is-slide-tool .cve-hit,
+.timeline-editor.is-slide-tool .cve-point,
+.timeline-editor.is-slide-tool .cve-handle,
+.timeline-editor.is-slide-tool .timeline-transition {
+  pointer-events: none;
+}
+
+/* Tool-mode cursors so the active tool is legible before the first click. */
+.timeline-editor.is-blade-tool .timeline-lane,
+.timeline-editor.is-blade-tool .timeline-clip {
+  cursor: crosshair;
+}
+
+.timeline-editor.is-roll-tool .timeline-clip {
+  cursor: col-resize;
+}
+
+.timeline-editor.is-slide-tool .timeline-clip {
+  cursor: ew-resize;
 }
 
 .clip-slip-badge {
@@ -11170,6 +11438,20 @@ input.scrub-number:focus {
 .timeline-editor .timeline-clip.is-effect-drop-target {
   border-color: color-mix(in srgb, var(--nle-accent) 92%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--nle-accent) 20%, transparent);
+}
+
+/* Transition-tile drag → nearest-cut highlight: a vertical accent bar centred on the cut. */
+.timeline-editor .timeline-junction-drop-indicator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: var(--nle-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--nle-accent) 25%, transparent), 0 0 8px color-mix(in srgb, var(--nle-accent) 55%, transparent);
+  pointer-events: none;
+  z-index: 5;
 }
 
 /* Fade bands — beginner-friendly transitions: a short translucent ramp on the clip edge,
@@ -11477,34 +11759,35 @@ input.scrub-number:focus {
 /* Per-type clip colors — solid, opaque bands like a pro NLE (text=purple, audio=green,
    video/image=slate with media, shape=amber, adjustment=cyan). Each type exposes a
    --clip-accent used for the bottom name bar so it reads as a clear, defined color. */
+/* Solid flat fills (no gradients) — muted pro-NLE hues that read as calm color bands. */
 .timeline-editor .timeline-clip-text {
   --clip-accent: #7c3aed;
-  background: linear-gradient(135deg, #6d28d9, #5b21b6);
+  background: #62249f;
 }
 
 .timeline-editor .timeline-clip-video {
   --clip-accent: #475569;
-  background: linear-gradient(135deg, #334155, #1e293b);
+  background: #2a3547;
 }
 
 .timeline-editor .timeline-clip-image {
   --clip-accent: #0284c7;
-  background: linear-gradient(135deg, #0369a1, #075985);
+  background: #0a5580;
 }
 
 .timeline-editor .timeline-clip-shape {
   --clip-accent: #d97706;
-  background: linear-gradient(135deg, #b45309, #92400e);
+  background: #a34c0c;
 }
 
 .timeline-editor .timeline-clip-adjustment {
   --clip-accent: #0d9488;
-  background: linear-gradient(135deg, #0f766e, #115e59);
+  background: #126b62;
 }
 
 .timeline-editor .timeline-clip-audio {
   --clip-accent: #4f7a5f;
-  background: linear-gradient(135deg, #3d6450, #2c4a3b);
+  background: #345745;
 }
 
 /* Premiere-style label color: overrides the type gradient with the clip's label (per-clip
@@ -11512,13 +11795,7 @@ input.scrub-number:focus {
    signals via the existing brightness/saturation lift + shadow instead of the blue fill. */
 .timeline-editor .timeline-clip.has-label {
   --clip-accent: var(--clip-label);
-  /* No border: the label lives in the fill alone — keeps the timeline's minimal-border look
-     (labeled and unlabeled clips read the same weight, just different hues). */
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--clip-label) 58%, #171922),
-    color-mix(in srgb, var(--clip-label) 34%, #14161d)
-  );
+  background: color-mix(in srgb, var(--clip-label) 46%, #14161d);
 }
 
 /* Filmstrip/waveform clips bury the background tint, so the label ALSO paints a thin strip along
@@ -11531,18 +11808,14 @@ input.scrub-number:focus {
   left: 0;
   right: 0;
   z-index: 4;
-  height: 4px;
-  border-radius: 6px 6px 0 0;
+  height: 3px;
+  border-radius: 2px 2px 0 0;
   background: var(--clip-label);
   pointer-events: none;
 }
 
 .timeline-editor .timeline-clip.has-label.is-selected {
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--clip-label) 72%, #171922),
-    color-mix(in srgb, var(--clip-label) 46%, #14161d)
-  );
+  background: color-mix(in srgb, var(--clip-label) 60%, #14161d);
 }
 
 /* Swatch row inside the clip context menu (shares .asset-label-swatches sizing). */
@@ -11553,15 +11826,16 @@ input.scrub-number:focus {
 /* Real audio waveform — a mirrored filled SVG stretched across the clip. */
 .clip-waveform {
   position: absolute;
-  top: 4px;
-  right: 6px;
-  bottom: 4px;
-  left: 6px;
+  top: 2px;
+  right: 3px;
+  bottom: 2px;
+  left: 3px;
   display: block;
   pointer-events: none;
 }
 
-.clip-waveform svg {
+.clip-waveform svg,
+.clip-waveform canvas {
   width: 100%;
   height: 100%;
   display: block;
@@ -11571,7 +11845,7 @@ input.scrub-number:focus {
    works on the empty body. */
 .clip-volume-envelope {
   position: absolute;
-  inset: 4px 6px;
+  inset: 2px 3px;
   display: block;
   pointer-events: none;
   opacity: 0;
@@ -11684,11 +11958,11 @@ input.scrub-number:focus {
   z-index: 3;
   display: flex;
   align-items: center;
-  gap: 5px;
-  height: 17px;
-  padding: 0 6px;
+  gap: 4px;
+  height: 14px;
+  padding: 0 5px;
   background: var(--clip-accent, rgba(8, 10, 16, 0.78));
-  border-radius: 0 0 5px 5px;
+  border-radius: 0 0 2px 2px;
   box-shadow: none;
 }
 
@@ -11696,8 +11970,8 @@ input.scrub-number:focus {
   flex: 0 0 auto;
   display: inline-grid;
   place-items: center;
-  width: 13px;
-  height: 13px;
+  width: 11px;
+  height: 11px;
   color: #fff;
 }
 
@@ -11707,19 +11981,19 @@ input.scrub-number:focus {
 .timeline-editor .timeline-clip .clip-number {
   position: absolute;
   top: 2px;
-  left: 3px;
+  left: 2px;
   z-index: 4;
-  min-width: 14px;
-  height: 14px;
+  min-width: 12px;
+  height: 12px;
   padding: 0 3px;
   display: inline-grid;
   place-items: center;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   line-height: 1;
-  color: #fff;
-  background: rgba(8, 10, 16, 0.72);
-  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(8, 10, 16, 0.6);
+  border-radius: 3px;
   pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
@@ -11742,15 +12016,21 @@ input.scrub-number:focus {
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
+  /* Type chip duplicates the icon — reserved for tall (L) rows only to cut noise. */
+  display: none;
+}
+
+.timeline-editor.is-l-rows .timeline-clip .clip-kind {
+  display: inline-block;
 }
 
 .timeline-editor .timeline-clip strong {
   flex: 1 1 auto;
   min-width: 0;
   color: #fff;
-  font-size: 0.6rem;
-  font-weight: 800;
-  line-height: 17px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
@@ -11772,7 +12052,7 @@ input.scrub-number:focus {
   bottom: 0;
   height: auto;
   align-items: center;
-  border-radius: 5px;
+  border-radius: 2px;
   background: transparent;
   box-shadow: none;
 }
@@ -11784,8 +12064,25 @@ input.scrub-number:focus {
   line-height: 1.2;
 }
 
-/* Video clips read by their filmstrip frames (like a pro NLE), so no name bar. */
+/* Video clips: Resolve-style always-on name overlay — a thin top scrim over the filmstrip
+   instead of a solid bottom bar. padding-left clears the clip-number badge. */
 .timeline-editor .timeline-clip-video .clip-label {
+  top: 0;
+  bottom: auto;
+  height: 15px;
+  padding: 0 5px 0 18px;
+  align-items: center;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(180deg, rgba(8, 10, 16, 0.72) 0%, rgba(8, 10, 16, 0.3) 70%, rgba(8, 10, 16, 0) 100%);
+  pointer-events: none;
+}
+
+.timeline-editor .timeline-clip-video .clip-label strong {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+
+/* At S rows the filmstrip is only ~34px tall — the overlay would eat a third of it. */
+.timeline-editor.is-s-rows .timeline-clip-video .clip-label {
   display: none;
 }
 
@@ -11797,10 +12094,10 @@ input.scrub-number:focus {
 .timeline-editor .timeline-clip-audio .clip-label {
   top: 0;
   bottom: auto;
-  height: 20px;
+  height: 18px;
   align-items: flex-start;
-  padding-top: 3px;
-  border-radius: 5px 5px 0 0;
+  padding-top: 2px;
+  border-radius: 2px 2px 0 0;
   background: linear-gradient(180deg, rgba(5, 30, 16, 0.82) 0%, rgba(5, 30, 16, 0.34) 62%, rgba(5, 30, 16, 0) 100%);
   box-shadow: none;
   opacity: 0;
@@ -16429,7 +16726,7 @@ input.scrub-number:focus {
   }
 }
 
-/* --- Lumio AI chat panel (P3) ------------------------------------------- */
+/* --- Kimera AI chat panel (P3) ------------------------------------------- */
 .ai-chat-panel {
   display: flex;
   flex-direction: column;
@@ -18365,7 +18662,7 @@ input.scrub-number:focus {
   font-size: 11px;
 }
 
-/* --- Lumio AI right-side dock (full-height, open/close) ----------------- */
+/* --- Kimera AI right-side dock (full-height, open/close) ----------------- */
 .editor-page.is-ai-open {
   /* Reserve room so the fixed dock never covers the timeline/inspector. 364, not 352+10+10 —
      .editor-layout already contributes its own 8px right padding, so the extra was double-
@@ -20150,7 +20447,7 @@ input.scrub-number:focus {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--nle-accent, #7c6cff) 55%, transparent) inset;
   border-radius: 6px;
 }
-/* Wake-word standby: the ear gently breathes while it's actually listening for "Hey Lumio". */
+/* Wake-word standby: the ear gently breathes while it's actually listening for "Hey Kimera". */
 .ai-icon-btn.is-wake-standby {
   animation: va-wake-breathe 2.6s ease-in-out infinite;
 }

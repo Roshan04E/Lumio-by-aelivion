@@ -108,7 +108,7 @@ tick (with `[]` deps it kept watching the discarded element).
 to watch: "controlled rebuild N/3" should now be followed by a successful rebuild, not the DOM
 fallback, unless the GPU is genuinely gone.
 
-## v8 — Phase 5 SHIPPED behind flag: GPU-first single-context preview (`lumio.singleCtxPreview`, default OFF) (2026-07-07)
+## v8 — Phase 5 SHIPPED behind flag: GPU-first single-context preview (`kimera.singleCtxPreview`, default OFF) (2026-07-07)
 **Problem:** In scene mode every media clip still ran its own `MediaWebGLRenderer` context/canvas:
 2 GPU uploads per layer per frame (raw→per-clip canvas, canvas→compositor texture), one WebGL
 context per clip (governor churn, context-loss storms at the browser's ~16 cap), extra VRAM. The
@@ -141,12 +141,12 @@ untouched flag-off.
 raced the scene compositor's first paint → randomly captured a BLACK canvas (~88% diff on
 arbitrary fixtures per run; failing web captures meanLuma≈0 vs remotion≈110). Added the same
 250ms settle its sibling `scene-compositor-compare.ts` always had. Capture-sync only.
-**Flip procedure:** soak with `localStorage.setItem("lumio.singleCtxPreview","1")` on :4173 →
+**Flip procedure:** soak with `localStorage.setItem("kimera.singleCtxPreview","1")` on :4173 →
 watch `__rfSingleCtxPreview`, `__rfGlContextBudget` (media contexts should drop to ~0),
 `__rfLiveFreeze` → then default ON in `getSingleCtxPreviewEnabled` (render-engine.ts).
 
 ## v9 — singleCtxPreview soak bug: black flicker on ruler clicks (2026-07-07)
-**Problem:** With `lumio.singleCtxPreview=1` on :4173, clicking the playhead around the ruler
+**Problem:** With `kimera.singleCtxPreview=1` on :4173, clicking the playhead around the ruler
 flickered the viewer black (~11 flickers over 19s of scrubbing). Playback itself was clean
 (377 grades / 596 skips, `__rfLiveFreeze` clean).
 **Root cause:** behavioral gap vs the own-canvas path. Mid-seek, a `<video>` element drops
@@ -163,7 +163,7 @@ the graded canvas provided. Never-drawn layers still return null (poster covers 
 flickers; soak signed off ("done happy"). Flag stays OFF by default; flip = one line in
 `getSingleCtxPreviewEnabled()` after a longer real-editing soak.
 
-## v10 — DEFAULT FLIPPED: `lumio.singleCtxPreview` ON (2026-07-07)
+## v10 — DEFAULT FLIPPED: `kimera.singleCtxPreview` ON (2026-07-07)
 **Decision:** user go ("we should flip.. we are ready") after the v8 gate ladder + v9 soak fix.
 **Change:** `getSingleCtxPreviewEnabled()` env fallback `false` → `true` (render-engine.ts) + doc.
 **Gate ladder re-run on the flipped default (plain runs now exercise the single-ctx path):**
@@ -171,7 +171,56 @@ typecheck 5/5 · editor:test · governor:test · `scene:compare` (chrome) 22/22 
 `render:compare:pixels` 23/23 — the in-context-graded preview is pixel-aligned with the Remotion
 export at 0.000%. Rebuilt: `index-CGNM5ptK.js` on :4173.
 **Escape hatches (permanent):** `?singleCtxPreview=0` per session, localStorage
-`lumio.singleCtxPreview="0"`, or `VITE_SINGLE_CTX_PREVIEW=0`. The per-clip-context path stays
+`kimera.singleCtxPreview="0"`, or `VITE_SINGLE_CTX_PREVIEW=0`. The per-clip-context path stays
 intact (DOM-compositor mode still uses it) — rollback is the same one line back to `false`.
 **Watch in the field:** `__rfSingleCtxPreview` {grades, skips}; `__rfGlContextBudget.owners`
 media-renderer count ~0; `__rfLiveFreeze` stays clean; no "Too many active WebGL contexts".
+
+## v11 — Stylize effects hardening: grain pattern reset, non-aspect vignette, green-only chroma keyer (2026-07-13)
+**Problem:** Three shipped WebGL stylize effects were "real shaders" but not pro-grade: film grain
+visibly RESET its noise pattern every whole second (seed was `fract(u_time)`); vignette was a UV-space
+circle (elliptical on 9:16/16:9 frames, no feather control, darkened highlights linearly); chroma key
+used Euclidean RGB distance (dark/bright shades of the key color keyed differently) with a hardwired
+green-only 0.6 desaturate spill fix — useless on blue/orange screens, no choke, no matte view.
+**Root cause:** v1 implementations in the shared `MEDIA_FRAGMENT_SHADER` (media-shader.ts) were
+minimal branch blocks; params were never extended past the initial amount/size/tolerance set.
+**Fix:** all in the ONE shared shader so preview/browser-export/Remotion stay aligned by construction:
+grain seed → `mod(u_time, 61.7)` (long non-integer period, no repeat) + new `size` param (25–400%,
+100 = legacy grid); vignette → aspect-corrected via new `u_aspect` + `roundness` param (0 = legacy UV
+circle), `feather` (100 = legacy fall-to-corner), `highlights` protection (0 = legacy multiply) — all
+defaults bit-equal to the old math; chroma key → BT.709 CbCr-plane normalized distance (any key color,
+luminance-robust), key-direction despill with luma-preserving reconstruction (`despill` default 60 ≈
+old 0.6 desaturate), `choke` matte erosion (default 0 = identity), `matteView` boolean (first boolean
+registry param). Files: media-shader.ts, media-renderer.ts, effects.ts, composition-style.ts,
+color/types.ts. New pixel fixtures `vignette` / `grain` / `chroma-key` (keys the fixture's ORANGE hill
+— proves non-green keying) in render-comparison-fixture.ts.
+**Accepted deltas:** grain pattern re-rolls once (statistically identical); existing chroma-key edges
+shift slightly (metric change, generally better). Vignette defaults are exactly the old output.
+**Verify:** `render:compare:pixels` (chrome) plain-image/blur 0.000% (no default drift), vignette
+0.000%, grain 0.001%, chroma-key 0.001%; `scene:compare` on the same fixtures; typecheck 5/5.
+
+## v12 — DOM-fallback transition: transformed clips snapped at the window boundary (2026-07-13)
+**Problem:** with scene preview OFF (`?singleCtxPreview=0` escape hatch), a scaled/positioned/rotated
+clip visibly JUMPED at a junction transition's start/end — the mix rendered both clips full-frame
+(only object-fit remapped in the shader), then the clip snapped back to its real transform when the
+window ended.
+**Root cause:** the DOM `TransitionOverlay` (TransitionLayer.tsx) feeds the two-texture
+`TransitionCompositor` the clips' GRADED canvases — which are PRE-transform images; in normal frames
+the transform is applied as CSS on the element (`getCompositionMediaStyle`), so the overlay's mix
+never saw it. The scene-compositor path (default preview + export + Remotion) was already correct via
+P2a nest pre-compose (sides pre-composed with full transforms, fit hardcoded (1,1)) — this bug was
+FALLBACK-ONLY, so exports were never wrong.
+**Fix (minimal, fallback-contained — user decision over retiring the overlay):** the overlay now
+PRE-BAKES each side through exactly the DOM element's CSS geometry (comp-sized box at `x%,y%`,
+centered, rotate, scale, object-fit inside the box, box-clipped) into a reused comp-sized 2D canvas,
+then mixes with fit "fill" — the same pre-baked-sides architecture as the scene path, without
+touching the shared shader harness or `TransitionCompositor`. Identity transforms skip the bake
+(byte-identical to before, and the pixel-gate `transition` fixture uses identity transforms).
+Keyframed transforms evaluate per frame via the shared `getCompositionTransform`. Accepted
+fallback-only limits, matching what the DOM element path itself renders outside the window: 3D tilt
+approximated by its 2D part; content pan/zoom/crop not applied (the DOM style doesn't apply it
+either — adding it in the window would CREATE a boundary jump). Also fixed the stale
+transition-compositor.ts header claiming export/Remotion still use that class.
+**Verify:** typecheck clean; scene path untouched (grep: no scene-compositor/build-scene-draws
+changes). Manual: `?singleCtxPreview=0`, right clip scaled 50% + offset + rotated, crossDissolve →
+blend stays in place through the window, no snap at either boundary.

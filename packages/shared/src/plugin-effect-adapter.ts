@@ -94,13 +94,13 @@ export interface FragmentEffectGlslValidation {
 }
 
 const FORBIDDEN_FRAGMENT_GLSL_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
-  { pattern: /#\s*version\b/, message: "Do not include #version; Lumio injects the shader harness." },
+  { pattern: /#\s*version\b/, message: "Do not include #version; Kimera injects the shader harness." },
   { pattern: /\bvoid\s+main\s*\(/, message: "Do not define main(); provide only vec4 effect(vec2 uv)." },
-  { pattern: /\bprecision\s+(lowp|mediump|highp)\b/, message: "Do not declare precision; Lumio injects it." },
+  { pattern: /\bprecision\s+(lowp|mediump|highp)\b/, message: "Do not declare precision; Kimera injects it." },
   { pattern: /\buniform\s+sampler2D\b/, message: "Do not declare sampler uniforms; use getSrcColor()." },
   { pattern: /\bgl_FragColor\b/, message: "Do not write gl_FragColor; return a vec4 from effect()." },
   { pattern: /\bdiscard\s*;/, message: "discard is not allowed in portable effect manifests." },
-  { pattern: /#\s*extension\b/, message: "Do not declare #extension; Lumio injects the shader harness." }
+  { pattern: /#\s*extension\b/, message: "Do not declare #extension; Kimera injects the shader harness." }
 ];
 
 export function validateFragmentEffectGlsl(glsl: string): FragmentEffectGlslValidation {
@@ -352,7 +352,7 @@ function effectTypeForManifest(
   if (manifest.engine === "lut3d") {
     return LUT_EFFECT_TYPE;
   }
-  warnings.push("Native effect manifests should declare effect.type with a supported Lumio effect id.");
+  warnings.push("Native effect manifests should declare effect.type with a supported Kimera effect id.");
   return COLOR_PIPELINE_EFFECT_TYPE;
 }
 

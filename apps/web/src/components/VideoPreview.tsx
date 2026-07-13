@@ -73,7 +73,7 @@ import {
   type TimelineLayer,
   type TimelineTrack,
   type TransitionSpec
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { MaskedVideoLayer } from "./MaskedVideoLayer";
 import { TransitionOverlay } from "./TransitionLayer";
 import { ColorEngineBoundary } from "./ColorEngineBoundary";
@@ -170,7 +170,7 @@ const eqTransitionPair = (a: TransitionPairEntry, b: TransitionPairEntry): boole
   a.toFit === b.toFit;
 
 // Dev-only, opt-in render instrumentation for the playback-jank investigation. Enable with
-// `?debugRenders=1` or localStorage["lumio_debug_renders"]="1"; counts accumulate on
+// `?debugRenders=1` or localStorage["kimera_debug_renders"]="1"; counts accumulate on
 // `window.__rfRenderCounts` (inspect in the console). Off by default and never logs → no prod noise.
 let renderDebugFlag: boolean | null = null;
 function renderDebugEnabled(): boolean {
@@ -178,7 +178,7 @@ function renderDebugEnabled(): boolean {
     try {
       renderDebugFlag =
         new URLSearchParams(window.location.search).get("debugRenders") === "1" ||
-        window.localStorage?.getItem("lumio_debug_renders") === "1";
+        window.localStorage?.getItem("kimera_debug_renders") === "1";
     } catch {
       renderDebugFlag = false;
     }
@@ -552,7 +552,7 @@ function VideoPreviewImpl({
   // Collapse the floating tool bar to a single chevron to free up viewer room.
   const [toolsCollapsed, setToolsCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("lumio_preview_tools_collapsed") === "1";
+      return localStorage.getItem("kimera_preview_tools_collapsed") === "1";
     } catch {
       return false;
     }
@@ -831,7 +831,7 @@ function VideoPreviewImpl({
   // while PAUSED) re-arms a recomposite — otherwise the new graded frame only lands via the settle
   // window and the paused viewer can show a stale frame after an edit.
   const sceneRedrawRef = useRef<(() => void) | null>(null);
-  // Single-context GPU-first preview (Phase 5, `lumio.singleCtxPreview`): media layers publish a raw
+  // Single-context GPU-first preview (Phase 5, `kimera.singleCtxPreview`): media layers publish a raw
   // frame-source descriptor here (keyed by layer id) instead of grading into `gradedCanvasesRef`;
   // ScenePreviewCanvas grades them in-context. The per-layer sinks are cached (stable identity) so
   // toggling other props never re-registers a descriptor. Flag read once (doesn't change mid-session).
@@ -899,6 +899,11 @@ function VideoPreviewImpl({
     for (const pair of transitionPairs) ids.add(pair.incomingId);
     return ids;
   }, [transitionPairs]);
+  // Layer lookup for the DOM transition overlay's transform pre-bake (fromLayer/toLayer props).
+  const renderedLayerById = useMemo(
+    () => new Map(renderedLayerEntries.map((entry) => [entry.layer.id, entry.layer])),
+    [renderedLayerEntries]
+  );
   // Anchor each overlay to whichever of its two source clips appears LAST in the render order, so the
   // overlay sits just above the transitioning clips' track in the DOM but below any higher-track layers.
   const overlaysByAnchorId = useMemo(() => {
@@ -1277,7 +1282,7 @@ function VideoPreviewImpl({
             setToolsCollapsed((v) => {
               const next = !v;
               try {
-                localStorage.setItem("lumio_preview_tools_collapsed", next ? "1" : "0");
+                localStorage.setItem("kimera_preview_tools_collapsed", next ? "1" : "0");
               } catch {
                 /* ignore storage failures */
               }
@@ -1595,23 +1600,33 @@ function VideoPreviewImpl({
                   {/* DOM transition overlay — suppressed in scene mode (Phase 4.2): the scene pass mixes
                       the junction in-canvas via ScenePreviewCanvas's TransitionCompositor, so a DOM overlay
                       on top would double-render. The DOM path keeps using it. */}
-                  {(sceneEnabled ? [] : (overlaysByAnchorId.get(layer.id) ?? [])).map((pair) => (
-                    <TransitionOverlay
-                      key={`${pair.outgoingId}->${pair.incomingId}`}
-                      spec={pair.spec}
-                      startSeconds={pair.startSeconds}
-                      clipDurationSeconds={pair.incomingDurationSeconds}
-                      currentTime={currentTime}
-                      isPlaying={isPlaying}
-                      width={composition.width}
-                      height={composition.height}
-                      fromId={pair.outgoingId}
-                      toId={pair.incomingId}
-                      fromFit={pair.fromFit}
-                      toFit={pair.toFit}
-                      gradedRef={gradedCanvasesRef}
-                    />
-                  ))}
+                  {(sceneEnabled ? [] : (overlaysByAnchorId.get(layer.id) ?? [])).map((pair) => {
+                    // The two layer objects drive the overlay's transform pre-bake (position/scale/rotation
+                    // parity with the clips' normal CSS rendering). Pairs derive from renderedLayerEntries,
+                    // so both lookups exist; guard anyway against a mid-edit frame.
+                    const fromLayer = renderedLayerById.get(pair.outgoingId);
+                    const toLayer = renderedLayerById.get(pair.incomingId);
+                    if (!fromLayer || !toLayer) return null;
+                    return (
+                      <TransitionOverlay
+                        key={`${pair.outgoingId}->${pair.incomingId}`}
+                        spec={pair.spec}
+                        startSeconds={pair.startSeconds}
+                        clipDurationSeconds={pair.incomingDurationSeconds}
+                        currentTime={currentTime}
+                        isPlaying={isPlaying}
+                        width={composition.width}
+                        height={composition.height}
+                        fromId={pair.outgoingId}
+                        toId={pair.incomingId}
+                        fromFit={pair.fromFit}
+                        toFit={pair.toFit}
+                        fromLayer={fromLayer}
+                        toLayer={toLayer}
+                        gradedRef={gradedCanvasesRef}
+                      />
+                    );
+                  })}
                 </Fragment>
               )
               ))}
@@ -1707,7 +1722,7 @@ type PreviewLayerProps = {
   /** Report the graded canvas so the transition overlay can sample it as a from/to texture. */
   onGradedFrame?: ((canvas: HTMLCanvasElement) => void) | undefined;
   /** Single-ctx preview (Phase 5): publish this media layer's raw frame source to the scene compositor
-   *  (no own GL context); set only for scene-composited media when `lumio.singleCtxPreview` is on. */
+   *  (no own GL context); set only for scene-composited media when `kimera.singleCtxPreview` is on. */
   sceneMediaSink?: SceneMediaSink | undefined;
   /** False for scene-composited media → opacity is applied LIVE at composite, not baked (no seek staleness). */
   bakeOpacity?: boolean | undefined;
@@ -2596,14 +2611,6 @@ const PreviewLayer = memo(function PreviewLayer({
   }
 
   if (isVideo && mediaUrl) {
-    const baseStyle = getCompositionMediaStyle(layer, { currentTimeSeconds: currentTime }) as CSSProperties;
-    // Pre-rolled but not yet on-screen: keep it invisible and click-through until active. Render-only clones
-    // (!interactive) stay click-through too so the real base layer beneath gets the pointer.
-    const style: CSSProperties = pending
-      ? { ...baseStyle, opacity: 0, pointerEvents: "none" }
-      : interactive
-        ? baseStyle
-        : { ...baseStyle, pointerEvents: "none" };
     const effectiveDragHandlers = pending ? undefined : dragHandlers;
     const isSelectedVisible = selected && !pending;
     const videoColorPipeline = bypassColor ? null : getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
@@ -2702,6 +2709,16 @@ const PreviewLayer = memo(function PreviewLayer({
     // Legacy DOM path (rendererMode=legacy or WebGL init failed). Overlay a graded canvas
     // over the plain video (not the matte path). The video keeps all its logic and is the
     // pixel source; on WebGL failure the SVG-graded video shows through.
+    // Computed BELOW the WebGL branch: that path styles via webglLayerStyle only, so building
+    // this per tick for it was a second getCompositionMediaStyle call thrown away every frame.
+    const baseStyle = getCompositionMediaStyle(layer, { currentTimeSeconds: currentTime }) as CSSProperties;
+    // Pre-rolled but not yet on-screen: keep it invisible and click-through until active. Render-only clones
+    // (!interactive) stay click-through too so the real base layer beneath gets the pointer.
+    const style: CSSProperties = pending
+      ? { ...baseStyle, opacity: 0, pointerEvents: "none" }
+      : interactive
+        ? baseStyle
+        : { ...baseStyle, pointerEvents: "none" };
     const useWebglVideo = useWebglColorEngine(webgl2Supported()) && videoColorPipeline !== null && !layer.matte?.uri && !pending;
 
     return (
@@ -3470,7 +3487,7 @@ function PreviewSelectionOverlay({
 
 /**
  * Phase 3 color system — injects the shared SVG color-filter `<defs>` for every
- * visible layer, referenced by each layer's `filter: url(#lumio-color-…)`. Same
+ * visible layer, referenced by each layer's `filter: url(#kimera-color-…)`. Same
  * shared generator + inline-SVG pattern the text-warp overlay uses, so the web
  * preview and the Remotion export stay pixel-aligned. Recomputed per frame
  * (currentTime) so keyframed color params animate.

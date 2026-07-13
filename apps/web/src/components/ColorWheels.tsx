@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Undo2 } from "lucide-react";
-import type { ColorWheel, ColorWheels as ColorWheelsValue } from "@lumio-by-aelivion/shared";
+import type { ColorWheel, ColorWheels as ColorWheelsValue } from "@kimera-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3, 13C.2) — the 3-way Color Wheels editor.

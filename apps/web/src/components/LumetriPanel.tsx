@@ -17,13 +17,13 @@
 
 import { ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { createTimelineEffect, evaluateTimelineEffectParam, type TimelineEffect, type TimelineLayer } from "@lumio-by-aelivion/shared";
+import { createTimelineEffect, evaluateTimelineEffectParam, type TimelineEffect, type TimelineLayer } from "@kimera-by-aelivion/shared";
 import { CurveEditor } from "./CurveEditor";
 import { ColorWheels } from "./ColorWheels";
 import { HueSatCurves } from "./HueSatCurves";
 import { HslSecondary } from "./HslSecondary";
 import { LutFileImport } from "./LutFileImport";
-import { CREATIVE_LOOK_NAMES } from "@lumio-by-aelivion/shared";
+import { CREATIVE_LOOK_NAMES } from "@kimera-by-aelivion/shared";
 import { EffectSliderControl } from "./EffectSliderControl";
 import { effectSliderTone } from "./effectSliderTone";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";

@@ -15,7 +15,7 @@
  */
 
 import assert from "node:assert/strict";
-import { resolveExecutors, skillRegistry, type ExecutorAvailability } from "@lumio-by-aelivion/shared";
+import { resolveExecutors, skillRegistry, type ExecutorAvailability } from "@kimera-by-aelivion/shared";
 
 const DEVICE_READY: ExecutorAvailability = { device: { webWorkers: true }, cloud: false };
 const DEVICE_READY_CLOUD: ExecutorAvailability = { device: { webWorkers: true }, cloud: true };

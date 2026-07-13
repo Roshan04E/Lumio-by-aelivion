@@ -29,8 +29,13 @@ const createTrack: TimelineActionDefinition<z.infer<typeof createTrackSchema>> =
     const mutation = runMutation(ctx.composition, (draft) => {
       if (params.index !== undefined && params.index <= draft.tracks.length) {
         draft.tracks.splice(params.index, 0, track);
-      } else {
+      } else if (params.type === "audio") {
         draft.tracks.push(track);
+      } else {
+        // Visual tracks land ON TOP by default (tracks[0] draws above everything) — the same
+        // placement as the editor's "Add visual layer" button, so AI-created tracks don't hide
+        // their content under existing clips. Audio stays at the bottom of the stack.
+        draft.tracks.unshift(track);
       }
     });
     // The id rides in the result line — the agent loop's NEXT step needs it (e.g. create a

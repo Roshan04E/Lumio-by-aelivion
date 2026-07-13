@@ -35,6 +35,12 @@ export function clipSourceKey(layerId: string, assetId: string): string {
   return `clip:${layerId}:${assetId}`;
 }
 
+/** Vector graphic layers are self-contained (no SourceAsset) — their baked-SVG image source is
+ *  keyed by layer id, mirroring how the preview/Remotion synthesize the data URL per layer. */
+export function graphicSourceKey(layerId: string): string {
+  return `graphic:${layerId}`;
+}
+
 /** Pick the fastest provider for a source; `<video>` is the universal fallback. */
 export async function createFrameProvider(
   url: string,

@@ -1,4 +1,4 @@
-# Lumio
+# Kimera
 
 Production-minded MVP for turning normal videos into modular reel-style edits.
 
@@ -31,7 +31,7 @@ Web: `http://localhost:5173`
 
 API: `http://localhost:4100`
 
-> **Dev vs production-preview origins:** `pnpm --filter @lumio-by-aelivion/web build && pnpm --filter @lumio-by-aelivion/web preview`
+> **Dev vs production-preview origins:** `pnpm --filter @kimera-by-aelivion/web build && pnpm --filter @kimera-by-aelivion/web preview`
 > serves the production bundle on `http://localhost:4173` — a **separate browser-storage universe**
 > from `:5173` (its own localStorage, OPFS, IndexedDB, service worker). Ingest proxies, feature
 > flags, and local media built on one origin do not exist on the other; the first session on `:4173`

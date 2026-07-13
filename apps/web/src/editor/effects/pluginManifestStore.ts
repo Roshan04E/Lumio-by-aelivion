@@ -9,12 +9,12 @@ import {
   type PluginCatalogPackage,
   type PluginLookManifest,
   type PluginTransitionManifest
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
-const STORE_KEY = "lumio.importedPluginLibrary.v1";
-const HIDDEN_EFFECTS_KEY = "lumio.hiddenImportedEffectIds.v1";
-const HIDDEN_LOOKS_KEY = "lumio.hiddenImportedLookIds.v1";
-const HIDDEN_TRANSITIONS_KEY = "lumio.hiddenImportedTransitionIds.v1";
+const STORE_KEY = "kimera.importedPluginLibrary.v1";
+const HIDDEN_EFFECTS_KEY = "kimera.hiddenImportedEffectIds.v1";
+const HIDDEN_LOOKS_KEY = "kimera.hiddenImportedLookIds.v1";
+const HIDDEN_TRANSITIONS_KEY = "kimera.hiddenImportedTransitionIds.v1";
 
 export interface ImportedPluginLibrary {
   effects: PluginEffectManifest[];

@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { estimateCreditsForEffects, walletPacks } from "@lumio-by-aelivion/shared";
-import { buyCredits, getMe, getProject, type ProjectRecord, type UserRecord } from "../lib/api";
+import { estimateCreditsForEffects, walletPacks } from "@kimera-by-aelivion/shared";
+import { buyCredits, fetchUsage, getMe, getProject, type ProjectRecord, type UsageSummary, type UserRecord } from "../lib/api";
 import { inr } from "../lib/format";
 
 export function CheckoutPage() {
   const { projectId } = useParams();
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [user, setUser] = useState<UserRecord | null>(null);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [message, setMessage] = useState("Mock payment ready");
 
   useEffect(() => {
@@ -16,6 +17,7 @@ export function CheckoutPage() {
       getProject(projectId).then(setProject);
     }
     getMe().then(setUser);
+    fetchUsage().then(setUsage);
   }, [projectId]);
 
   const requiredCredits = useMemo(
@@ -55,6 +57,21 @@ export function CheckoutPage() {
             <p className="mkt-co-msg">// {message}</p>
             {project ? (
               <Link to={`/editor/${project.id}`} className="mkt-co-back"><ArrowLeft size={14} /> Back to editor</Link>
+            ) : null}
+
+            {usage && usage.byAction.length > 0 ? (
+              <div className="mkt-co-usage">
+                <h3>Usage this month <span className="mkt-co-usage-free">free during beta</span></h3>
+                <ul>
+                  {usage.byAction.map((entry) => (
+                    <li key={entry.action}>
+                      <span>{entry.action}</span>
+                      <span>{entry.credits} cr</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mkt-co-usage-total">{usage.totalShadowCredits} credits measured — nothing charged.</p>
+              </div>
             ) : null}
           </aside>
 

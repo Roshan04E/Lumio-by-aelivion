@@ -1,4 +1,4 @@
-import type { TrackingPathArtifactData } from "@lumio-by-aelivion/shared";
+import type { TrackingPathArtifactData } from "@kimera-by-aelivion/shared";
 
 /**
  * A single named, saved tracking result that can be attached to any timeline layer

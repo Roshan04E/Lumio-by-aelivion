@@ -10,7 +10,7 @@ import {
   type ToolDiagnostic,
   type ToolRun,
   type ToolStage
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { createToolArtifactStore, type ToolArtifactStore } from "./artifact-store";
 import { browserCapabilityDiagnostics, detectBrowserToolCapabilities, type BrowserToolCapabilities } from "./capabilities";
 

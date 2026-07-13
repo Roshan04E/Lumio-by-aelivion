@@ -1,4 +1,4 @@
-# Lumio — Consolidated Gaps & Missing Work
+# Kimera — Consolidated Gaps & Missing Work
 
 > Reference index of what is **still missing / deferred** across all plan docs, as of 2026-07-02.
 > Source docs: [architecture.md](architecture.md), [todo.md](todo.md), [COLOR_SYSTEM_PLAN.md](COLOR_SYSTEM_PLAN.md),
@@ -11,7 +11,7 @@ Doc: [todo.md](todo.md). Shipped: producer-canvas safety (P3), lifecycle fixes (
 cache manifest + ruler UI (P6 partial). **Mostly landed 2026-07-02:**
 - ✅ **Context governor** — built, flag-gated default-off (`getGlGovernorEnabled`; enforcement in `gl-context.ts`:
   `requestContextSlot`/`touchContext`/`registerContextDisposer`). LRU-idle eviction, root-protected; `MediaWebGLRenderer`
-  reserves a slot, `WebglMediaLayer` lazily recreates. Gate: `pnpm --filter @lumio-by-aelivion/shared governor:test`.
+  reserves a slot, `WebglMediaLayer` lazily recreates. Gate: `pnpm --filter @kimera-by-aelivion/shared governor:test`.
 - ✅ **GPU reset/recovery** — bounded auto-rebuild on a fresh context (de-spammed); DOM only after retries exhaust.
 - ✅ **Persistent proxy cache** — verified already-built + wired + active by default (OPFS blobs, LRU, content-signature
   invalidation, double-buffered `<video>` playback, background Worker generator). Playback proxies are export-grade.

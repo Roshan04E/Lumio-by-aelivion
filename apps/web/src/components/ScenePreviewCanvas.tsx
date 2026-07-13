@@ -32,19 +32,20 @@ import {
   SceneMaskMatteCache,
   SceneTextRasterizer,
   buildSceneDraws,
+  colorPipelineCacheKey,
   type ColorPipeline,
   type NestedGroupSpec,
   type SceneFrameSpec,
   type SceneTextureSource,
   type TimelineLayer,
   type ScenePreviewTransition,
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { getRegionPassesEnabled } from "../color/render-engine";
 import type { ScenePreviewMediaSource } from "./scene-media-source";
 
-export type { ScenePreviewTransition } from "@lumio-by-aelivion/shared";
+export type { ScenePreviewTransition } from "@kimera-by-aelivion/shared";
 
 /** Soak telemetry (__rf* convention) for the single-ctx preview: `grades` = in-context media grades that
  *  actually ran, `skips` = frames a media layer's cached RenderTarget was reused (unchanged frame + grade).
@@ -121,7 +122,7 @@ export interface ScenePreviewCanvasProps {
   /** Live map of each layer's graded canvas, populated by the hidden WebglMediaLayers. */
   gradedRef: React.MutableRefObject<Record<string, HTMLCanvasElement | null>>;
   /**
-   * Single-context GPU-first preview (Phase 5, `lumio.singleCtxPreview`). When true, media layers do NOT
+   * Single-context GPU-first preview (Phase 5, `kimera.singleCtxPreview`). When true, media layers do NOT
    * grade into `gradedRef`; instead each publishes a raw frame-source descriptor into `mediaSourcesRef`,
    * and THIS component grades the frame in-context through a shared-context `MediaWebGLRenderer` +
    * `RenderTarget` on the SceneCompositor's own WebGL2 context (one upload/layer/frame, zero per-clip GL
@@ -463,7 +464,7 @@ export function ScenePreviewCanvas({
         sharedGradeRenderersRef.current.set(key, entry);
       }
       entry.target.resize(targetW, targetH);
-      const pipelineKey = JSON.stringify(pipeline);
+      const pipelineKey = colorPipelineCacheKey(pipeline);
       if (entry.pipelineKey !== pipelineKey) {
         entry.renderer.setPipeline(pipeline);
         entry.pipelineKey = pipelineKey;
@@ -501,10 +502,14 @@ export function ScenePreviewCanvas({
     };
     const getMediaGradedSource = (id: string): HTMLCanvasElement | null => {
       let resolvedId = id;
-      const seen = new Set<string>();
-      while (alias?.has(resolvedId) && !seen.has(resolvedId)) {
-        seen.add(resolvedId);
-        resolvedId = alias.get(resolvedId)!;
+      // Cycle-guard Set only when an alias chain actually starts here — the common no-alias
+      // case allocated a Set per media layer per frame for a walk that was a no-op.
+      if (alias?.has(resolvedId)) {
+        const seen = new Set<string>();
+        while (alias.has(resolvedId) && !seen.has(resolvedId)) {
+          seen.add(resolvedId);
+          resolvedId = alias.get(resolvedId)!;
+        }
       }
       const explicit = gradedRef.current[resolvedId];
       if (isLiveMediaCanvas(explicit)) return explicit;
@@ -585,10 +590,12 @@ export function ScenePreviewCanvas({
       const sources = mediaSourcesRef?.current;
       if (!sources) return null;
       let resolvedId = id;
-      const seen = new Set<string>();
-      while (alias?.has(resolvedId) && !seen.has(resolvedId)) {
-        seen.add(resolvedId);
-        resolvedId = alias.get(resolvedId)!;
+      if (alias?.has(resolvedId)) {
+        const seen = new Set<string>();
+        while (alias.has(resolvedId) && !seen.has(resolvedId)) {
+          seen.add(resolvedId);
+          resolvedId = alias.get(resolvedId)!;
+        }
       }
       let src = sources[resolvedId];
       if (!src) {

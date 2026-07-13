@@ -10,7 +10,7 @@
  * happened?" is answered by the console of the NEW session.
  */
 
-const STORAGE_KEY = "lumio.crashLog";
+const STORAGE_KEY = "kimera.crashLog";
 const MAX_ENTRIES = 20;
 const BOOT_SURFACE_WINDOW_MS = 30 * 60_000;
 

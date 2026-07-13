@@ -120,7 +120,7 @@ export type NaturalVoiceId = (typeof NATURAL_VOICES)[number]["id"];
  * never download or run Kokoro. */
 export type AssistantVoiceChoice = NaturalVoiceId | "system";
 
-const VOICE_STORE_KEY = "lumio.voice.tts.voice.v1";
+const VOICE_STORE_KEY = "kimera.voice.tts.voice.v1";
 
 function loadVoiceChoice(): AssistantVoiceChoice {
   try {
@@ -232,7 +232,7 @@ let lastFailureAt = 0;
 let lastFailureReason: string | undefined;
 
 function failNaturalVoice(reason: string): void {
-  console.warn("[lumio] natural voice: failed to load Kokoro —", reason);
+  console.warn("[kimera] natural voice: failed to load Kokoro —", reason);
   lastFailureReason = reason;
   kokoroWorker?.terminate();
   kokoroWorker = null;
@@ -318,7 +318,7 @@ export function warmNaturalVoice(): void {
         kokoroDevice = message.device;
         kokoroStatus = "ready";
         kokoroSlowStrikes = 0; // ready = the worker's own warm generation already succeeded
-        console.debug(`[lumio] natural voice: ready on ${message.device === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)"}`);
+        console.debug(`[kimera] natural voice: ready on ${message.device === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)"}`);
         emitProgress({ status: "ready", percent: 100, device: message.device });
         warmAckCache();
       } else if (message.type === "load-error") {
@@ -335,7 +335,7 @@ export function warmNaturalVoice(): void {
           session.onDone();
         } else {
           speakSessions.delete(message.id);
-          console.warn("[lumio] natural voice: generation failed in worker —", message.message);
+          console.warn("[kimera] natural voice: generation failed in worker —", message.message);
           session.onError(message.message);
         }
       }
@@ -346,7 +346,7 @@ export function warmNaturalVoice(): void {
       if (!kokoroReady) {
         failNaturalVoice(event.message || "worker crashed");
       } else {
-        console.warn("[lumio] natural voice: worker error (engine kept alive)", event.message);
+        console.warn("[kimera] natural voice: worker error (engine kept alive)", event.message);
       }
     };
     worker.postMessage({ type: "warm", modelId: KOKORO_MODEL_ID, voice: kokoroVoice } satisfies import("./tts.worker").TtsWorkerRequest);
@@ -526,7 +526,7 @@ function playWav(wav: ArrayBuffer, token: number): Promise<void> {
     element.onpause = settle;
     element.play().catch((playError: unknown) => {
       // Autoplay policy or decode refusal — surface it; the session falls back for the rest.
-      console.warn("[lumio] natural voice: playback blocked", playError);
+      console.warn("[kimera] natural voice: playback blocked", playError);
       settle();
     });
   });
@@ -631,14 +631,14 @@ export function startSpeechStream(): SpeechStreamHandle {
     }
     if (strike) {
       kokoroSlowStrikes += 1;
-      console.warn(`[lumio] natural voice: ${reason} (strike ${kokoroSlowStrikes}) — using the system voice`);
+      console.warn(`[kimera] natural voice: ${reason} (strike ${kokoroSlowStrikes}) — using the system voice`);
       if (kokoroSlowStrikes >= 2) {
         kokoroStatus = "unavailable";
         lastFailureReason = "too slow on this device";
         emitProgress({ status: "unavailable", reason: lastFailureReason });
       }
     } else {
-      console.warn(`[lumio] natural voice: ${reason} — using the system voice`);
+      console.warn(`[kimera] natural voice: ${reason} — using the system voice`);
     }
     dropKokoroSession();
     engine = "system";
@@ -685,7 +685,7 @@ export function startSpeechStream(): SpeechStreamHandle {
           if (!firstChunkSeen) {
             firstChunkSeen = true;
             kokoroSlowStrikes = 0;
-            console.debug(`[lumio] natural voice: first chunk in ${Math.round(performance.now() - (firstPushAt || startedAt))}ms`);
+            console.debug(`[kimera] natural voice: first chunk in ${Math.round(performance.now() - (firstPushAt || startedAt))}ms`);
           }
           await playWav(wav, token);
           continue;
@@ -708,7 +708,7 @@ export function startSpeechStream(): SpeechStreamHandle {
           const before = chunkCount;
           await wait(CHUNK_STALL_MS);
           if (chunkCount === before && queue.length === 0 && !workerDone && token === speakToken) {
-            console.warn("[lumio] natural voice: stream stalled mid-reply — stopping this reply");
+            console.warn("[kimera] natural voice: stream stalled mid-reply — stopping this reply");
             dropKokoroSession();
             break;
           }

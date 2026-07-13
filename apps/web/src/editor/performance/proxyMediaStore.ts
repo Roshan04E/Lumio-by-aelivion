@@ -77,7 +77,7 @@ export interface ProxyBlobStore {
   releaseAllUrls: () => void;
 }
 
-const PROXY_DIR = "lumio-preview-proxies";
+const PROXY_DIR = "kimera-preview-proxies";
 const PROXY_INDEX_FILE = "proxy-span-index.json";
 const INDEX_FLUSH_DELAY_MS = 400;
 

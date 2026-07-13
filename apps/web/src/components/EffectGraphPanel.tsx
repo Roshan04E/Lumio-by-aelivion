@@ -16,7 +16,7 @@ import {
   type TimelineLayerType,
   type TransitionDirection,
   type TransitionKind
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import {
   buildEffectCatalog,
   effectPanelCategories,
@@ -47,7 +47,7 @@ export interface TransitionApplySpec {
 }
 
 // ── Folder open/closed state (persisted; folders start closed) ─────────────────────────────
-const FOLDERS_KEY = "lumio.effectFoldersCollapsed";
+const FOLDERS_KEY = "kimera.effectFoldersCollapsed";
 const ALL_FOLDER_IDS = ["favourites", ...effectPanelCategories.map((entry) => entry.id)];
 
 function loadCollapsed(): Set<string> {
@@ -347,12 +347,12 @@ export function EffectGraphPanel({
           onDragStart={(event) => {
             if (draggableEffect) {
               event.dataTransfer.effectAllowed = "copy";
-              event.dataTransfer.setData("application/x-lumio-timeline-effect", item.effectType);
+              event.dataTransfer.setData("application/x-kimera-timeline-effect", item.effectType);
               event.dataTransfer.setData("text/plain", item.label);
             } else if (draggableTransition && item.kind === "transition") {
               event.dataTransfer.effectAllowed = "copy";
               event.dataTransfer.setData(
-                "application/x-lumio-transition",
+                "application/x-kimera-transition",
                 JSON.stringify({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params, manifest: item.manifest })
               );
               event.dataTransfer.setData("text/plain", item.label);
@@ -433,6 +433,12 @@ export function EffectGraphPanel({
         onApply={() => addItem(item)}
         onToggleStar={() => toggleFavourite(item.id)}
         onRemove={removeTransition}
+        // Junction kinds can be dragged onto a timeline cut (same payload the tree rows write).
+        dragPayload={
+          item.junction
+            ? JSON.stringify({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params, manifest: item.manifest })
+            : undefined
+        }
       />
     );
   }

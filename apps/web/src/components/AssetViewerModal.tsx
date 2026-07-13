@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Cloud, CloudUpload, Download, Film, Layers, Music, Plus, Trash2 } from "lucide-react";
-import type { SourceAsset, StockResult, StockVariant } from "@lumio-by-aelivion/shared";
+import type { SourceAsset, StockResult, StockVariant } from "@kimera-by-aelivion/shared";
 import { Modal } from "./Modal";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
 

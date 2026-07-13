@@ -1,4 +1,4 @@
-import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes } from "@lumio-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes } from "@kimera-by-aelivion/shared";
 import type {
   BlendMode,
   LayerContentTransform,
@@ -20,7 +20,7 @@ import type {
   TimelineKeyframeV2,
   TrackAudioKeyframe,
   TransitionSpec
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 export interface RenderComposition {
   id: string;
@@ -83,7 +83,7 @@ export function buildCompositionFromGraph(
 
 export function createPreviewOverlay(graph: ProjectGraph) {
   return {
-    watermark: "Lumio Preview",
+    watermark: "Kimera Preview",
     effectBadges: graph.effects.map((effect) => effect.name),
     trackingDots: graph.effects.some((effect) => effect.type === "SMART_3D_FOLLOW_TEXT"),
     personCutoutLayer: graph.effects.some((effect) => effect.type === "TEXT_BEHIND_PERSON")
@@ -207,7 +207,7 @@ export interface RenderManifest {
   nestedGroups?: Record<string, NestedGroupSpec> | undefined;
   createdAt: string;
   renderer: {
-    engine: "lumio-manifest";
+    engine: "kimera-manifest";
     version: 1;
     note: string;
   };
@@ -472,7 +472,7 @@ export function buildRenderManifest(input: {
     ...(nestExpansion.groups.size > 0 ? { nestedGroups: Object.fromEntries(nestExpansion.groups) } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
     renderer: {
-      engine: "lumio-manifest",
+      engine: "kimera-manifest",
       version: 1,
       note: "This manifest is the render contract. Remotion/FFmpeg encoding plugs into this boundary next."
     }

@@ -15,7 +15,7 @@ import {
   type ColorWheels,
   type HslSecondary,
   type HueSatCurves
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 // 1. Empty intent → no effects.
 {

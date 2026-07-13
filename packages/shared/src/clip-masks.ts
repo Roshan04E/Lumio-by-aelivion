@@ -39,7 +39,7 @@ export const maskScalarProperties: MaskScalarProperty[] = [
  * needs `destination-out`, which the standard `mask-composite` can't express) — see `getMaskCss`.
  */
 
-const MASK_DEF_PREFIX = "lumio-mask-";
+const MASK_DEF_PREFIX = "kimera-mask-";
 
 let maskCounter = 0;
 /** Stable-ish unique id for a new mask. */

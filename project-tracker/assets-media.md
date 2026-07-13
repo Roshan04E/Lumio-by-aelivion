@@ -4,7 +4,7 @@
 **Problem:** Live playback decoded original camera files (sparse-GOP 4K) against ~2-3 hardware decode
 sessions — the root of the seek-catch-up/starvation/wedge family.
 **Fix:** Per-SOURCE ingest proxies (Premiere model): H.264 ≤854px, source-fps capped 30, 1s GOP, AAC,
-OPFS `lumio-source-proxies/`. `SOURCE_PROXY_VERSION` chronicle:
+OPFS `kimera-source-proxies/`. `SOURCE_PROXY_VERSION` chronicle:
 - v1: could bake a frozen tail (encoder kept last canvas after decoder death) + hardcoded 30fps judder.
 - v2 (2026-07-05): frozen-tail guard + source-fps sampling.
 - v3 (2026-07-06): invalidated everything the pre-worker engine built mid-playback (starved decoder).
@@ -46,7 +46,7 @@ the background-work gate (see background-tasks.md v1), AudioContext closed after
 `hvc1.1.6.H120.b0` (107B hvcC) → `<video>` fallback message from both the worker and the shared
 `source-decoder` module, plus the BoxParser ASCII-as-length stumble (this file: `"hear"` =
 1751411826; v4's was `"hint"`). Fallback chain engaged as designed, no freeze/regression — occurs
-identically with `lumio.singleCtxPreview` on or off (decode pipeline, unrelated to Phase 5).
+identically with `kimera.singleCtxPreview` on or off (decode pipeline, unrelated to Phase 5).
 No action; v4's "HEVC clip — optimizing takes longer" badge remains the future nicety.
 
 ## v6 — Global asset pile across projects; AI folder structure (2026-07-07)
@@ -57,7 +57,7 @@ giant undifferentiated pile instead of per-project media.
 `projectId` column, no data dropped) binds an upload to the project it was added to. Brand/AI assets
 stay user-level & reusable; a new `ProjectAsset` join links a reusable asset into a project's bin
 without duplicating bytes. `GET /assets?projectId&scope=project|library|all` scopes server-side; the
-web local-first fallback mirrors the same filter via a `lumio_project_asset_links` localStorage map.
+web local-first fallback mirrors the same filter via a `kimera_project_asset_links` localStorage map.
 A one-shot backfill (`assets:backfill`) walked every existing project's `projectGraph` to link/assign
 already-referenced assets so old projects didn't lose their bin media on migration (ran clean: 77
 projects, 75 links, 27 sole-owner uploads assigned). Editor's `AssetBin` takes a `currentProjectId` and

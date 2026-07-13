@@ -56,7 +56,7 @@ originals for the render.
 ## 3. Phases
 
 - **P1 — automatic render fingerprint** (this session): vite build-time hash of render-critical
-  sources injected as `__LUMIO_RENDER_FINGERPRINT__`; `baseCompositionSignature` consumes it (the
+  sources injected as `__KIMERA_RENDER_FINGERPRINT__`; `baseCompositionSignature` consumes it (the
   hand-bumped constant remains only as the non-vite/test fallback). Whole-store invalidation on any
   render-code change — conservative and correct; regeneration is background work.
 - **P2 — import-time still proxies**: per-image preview proxy (long edge ≈ comp long edge × ~1.3,

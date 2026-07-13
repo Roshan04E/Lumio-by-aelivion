@@ -4,7 +4,7 @@ import {
   type CloudTranscriptionProgress,
   type CloudTranscriptionResult,
   type SourceAsset
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import {
   cancelAutoCaptionTranscriptionJob,
   getAutoCaptionTranscriptionJob,

@@ -15,7 +15,7 @@ import {
   AlignVerticalJustifyStart,
   LayoutPanelTop
 } from "lucide-react";
-import { containContentRect, getCompositionTransform, type TimelineLayer } from "@lumio-by-aelivion/shared";
+import { containContentRect, getCompositionTransform, type TimelineLayer } from "@kimera-by-aelivion/shared";
 import { InspectorSection } from "../InspectorSection";
 import { applyTransformValueAtTime } from "../keyframeUtils";
 

@@ -44,6 +44,8 @@ export interface GenerationModel {
 const IMAGE_ASPECTS = ["1:1", "16:9", "9:16", "4:3", "3:4"];
 const VIDEO_ASPECTS = ["16:9", "9:16", "1:1"];
 
+// TODO(phase1): source model.cost from creditCost() (billing/pricing.ts) instead of a hardcoded
+// per-model number — left as-is this phase (additive-only, don't touch shipped code).
 export const modelCapabilityRegistry: GenerationModel[] = [
   // ---- Local (free, image-only) — mirrors the local-first Ollama route ----
   {

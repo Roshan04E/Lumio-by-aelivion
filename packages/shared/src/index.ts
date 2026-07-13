@@ -2,6 +2,7 @@ export * from "./catalog";
 export * from "./ai-prompts";
 export * from "./animation";
 export * from "./audio-fx";
+export * from "./billing/pricing";
 export * from "./color";
 export * from "./auto-caption-assistant";
 export * from "./graphics/catalog";

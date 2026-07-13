@@ -21,8 +21,10 @@
  */
 
 import {
+  colorPipelineCacheKey,
   findTransitionPairs,
   getActiveTransition,
+  graphicToDataUrl,
   getCompositionColorPipeline,
   getCompositionMediaEffects,
   getCompositionObjectFit,
@@ -35,7 +37,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 import { MediaEncoder } from "../../export/video-encoder";
 import { acquireVideo, type VideoLease } from "../../lib/video-element-pool";
 import { applyActiveAdjustmentEffects, isLayerActive, isOutgoingInPostroll } from "../../components/VideoPreview";
@@ -205,7 +207,10 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
   try {
     for (const { layer } of spanEntries) {
       if (layer.type !== "video" && layer.type !== "image") continue;
-      const url = resolveAssetUrl(layer.assetId);
+      // Vector graphic layers are self-contained (no SourceAsset) — their pixel source is the baked
+      // SVG data URL, same as the live preview/Remotion. Without this, any span containing a graphic
+      // failed viewer capture ("no source url") and the worker fallback rendered the graphic missing.
+      const url = layer.graphic ? graphicToDataUrl(layer.graphic) : resolveAssetUrl(layer.assetId);
       if (!url) throw new ViewerCaptureUnavailable(`no source url for layer ${layer.id}`);
       const entry: MediaSourceEntry = { layer, pipelineKey: "" };
       if (layer.type === "video") {
@@ -297,7 +302,7 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
         matte = entry.matteLease.video;
       }
       const pipeline = getCompositionColorPipeline(layer, { currentTimeSeconds: t });
-      const pipelineKey = JSON.stringify(pipeline);
+      const pipelineKey = colorPipelineCacheKey(pipeline);
       if (entry.pipelineKey !== pipelineKey) {
         entry.renderer.setPipeline(pipeline);
         entry.pipelineKey = pipelineKey;

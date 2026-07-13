@@ -30,7 +30,7 @@ export interface LocalGenConfig {
 export const DEFAULT_LOCAL_GEN_BASE_URL = "http://localhost:7860";
 /** ComfyUI's default port. */
 export const DEFAULT_COMFY_BASE_URL = "http://localhost:8188";
-const STORAGE_KEY = "lumio.gen.local.v1";
+const STORAGE_KEY = "kimera.gen.local.v1";
 
 function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, "");
@@ -268,7 +268,7 @@ function buildComfyTxt2ImgGraph(args: {
       }
     },
     "8": { class_type: "VAEDecode", inputs: { samples: ["3", 0], vae: ["4", 2] } },
-    "9": { class_type: "SaveImage", inputs: { filename_prefix: "lumio", images: ["8", 0] } }
+    "9": { class_type: "SaveImage", inputs: { filename_prefix: "kimera", images: ["8", 0] } }
   };
 }
 
@@ -315,7 +315,7 @@ async function generateComfyImage(request: LocalGenRequest): Promise<LocalGenRes
     height: dims.height,
     seed
   });
-  const clientId = `lumio-${Math.random().toString(36).slice(2)}`;
+  const clientId = `kimera-${Math.random().toString(36).slice(2)}`;
 
   const submit = await fetch(`${base}/prompt`, {
     method: "POST",

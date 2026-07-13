@@ -14,6 +14,240 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-13 — Claude: Monetization Phase 0 — Instrument & Shadow-Bill
+
+Additive telemetry only, per MONETIZATION_STRATEGY.md §4 (editor free forever; charge only real
+COGS later). Nothing gates, nothing blocks, `user.walletCredits` is never decremented — a reviewer
+can confirm this from the diff.
+
+- **`packages/shared/src/billing/pricing.ts`** (new): `BillableSurface`/`BillableUnit` vocabulary +
+  `billableSurfaces` registry + `creditCost(action, units)`. Credits-per-unit reconciled from
+  existing numbers (`model-registry.ts` model costs, `catalog.ts` `estimatedCostCredits`) — not
+  invented. `// TODO(phase1)` markers left on both source files (not collapsed this phase, per
+  "don't touch shipped code" directive). Exported from `packages/shared/src/index.ts`.
+- **`apps/api/prisma/schema.prisma`**: `WalletTransaction` gains nullable `action`/`unit`/`units`/
+  `provider`/`providerCost` + `shadow Boolean @default(true)` and a `[userId, createdAt]` index —
+  additive columns, existing rows/migrations unaffected. Migration `phase0_usage_ledger` applied.
+- **`apps/api/src/services/usageLedger.service.ts`** (new): `recordUsage()` writes
+  `{ type: "usage", shadow: true }` rows; whole body try/caught (telemetry can never break a real
+  user action); never touches `user.walletCredits`.
+- **Three real hook points, all fire-and-forget (`void recordUsage(...)`)**:
+  `generationRouter.service.ts` (fal generation, after the job completes — image units=1,
+  video units=durationSeconds), `tools.routes.ts` `runAutoCaptionJob` (cloud Gemini transcription,
+  units=minutes), `ai.routes.ts` (5 call sites: `/plan`, `/plan/fast`, `/ack`, `/plan/stream`,
+  `/chat/stream`, units=1 per call). **Deviation from the original plan**: those AI routes are
+  genuinely unauthenticated by design (guests can use the planner) — added a non-blocking
+  `optionalUserId(req)` that decodes a bearer token if present and no-ops otherwise, so usage is
+  attributed for signed-in users without adding `requireAuth` or changing any route's behavior.
+- **`GET /api/payments/usage`** (new, `requireAuth`): recent `type:"usage"` rows (30-day window) +
+  per-action aggregates + total shadow credits.
+- **Web**: `fetchUsage()` + `UsageSummary` type (`lib/api.ts`); new `ShadowCostBadge` component
+  (`components/ShadowCostBadge.tsx`) — "~N credits · free during beta", renders nothing for
+  zero-cost/unknown actions — mounted next to the Generate button (`GenerateStudio.tsx`, skipped
+  for local/free models) and the Cloud transcribe button (`ToolDetailPage.tsx`
+  `AutoCaptionsPanel`). `CheckoutPage.tsx` + `AccountMenu.tsx` grew a read-only "usage this month
+  (free during beta)" section from `fetchUsage()` — the real `walletCredits` display is untouched.
+- Gates: `pnpm -r typecheck` clean (shared/api/web all 0 errors).
+- Deferred (Phase 1, explicitly out of scope this round): real payments, credit
+  enforcement/debits, BYOK settings UI, daily-allowance *blocking* (the `freeDailyAllowance` field
+  is informational only), per-token LLM cost accuracy, collapsing `estimatedCostCredits`/
+  `model.cost` into `creditCost()`.
+
+### 2026-07-13 — Claude (Fable): Transitions round — fallback transform fix, junction params popover, drag-tile-to-cut, shared junction actions
+
+- **DOM-fallback transition transform fix** (`TransitionLayer.tsx`, VideoPreview overlay wiring): with
+  scene preview off (`?singleCtxPreview=0`), a scaled/positioned/rotated clip snapped at the transition
+  window boundary — the two-texture mix only remapped object-fit. The overlay now pre-bakes each side
+  through the clip's exact DOM CSS geometry (keyframe-aware, box-clipped) into a reused comp-sized 2D
+  canvas and mixes with fit "fill" (same pre-baked-sides model as the scene path's P2a nest pre-compose;
+  scene/export/Remotion were already correct and are untouched). Identity transforms skip the bake —
+  byte-identical fast path. Stale transition-compositor.ts header fixed. Tracker: playback-preview v12.
+- **Junction params popover** (`JunctionTransitionPopover.tsx` + TimelineStrip gesture): motionless
+  click on the on-cut element opens schema-driven controls (duration + `getTransition(kind).params`,
+  plugin transitions included, NO kind switch); drag still resizes (3px slop `moved` flag), double-click
+  still removes (popover self-closes via composition-derived spec). Draft-local scrubbing, commit on
+  release → one undo step, zero strip re-renders. New shared `resolveSpecParams` (composition-style.ts)
+  keeps the legacy direction/mode/softness/color folding single-sourced.
+- **Drag transition tile → cut** (TimelineStrip lanes + TransitionThumb `dragPayload`): lanes consume
+  the previously-orphaned `application/x-kimera-transition` MIME; `getTrackCuts` derives ALL adjacent
+  cuts; nearest-cut hit-test within a zoom-aware ~24px radius with a REF-GUARDED highlight (setState
+  only on target change); drop applies with registry default duration, replaces occupied junctions,
+  and passes plugin manifests through a new optional 4th arg on `handleAddCrossDissolve`.
+- **Shared junction actions** (timeline-actions/actions/transition.ts): `applyJunctionTransition` /
+  `removeJunctionTransition` / neighbor finders / `DEFAULT_CROSS_DISSOLVE_SECONDS` moved verbatim out
+  of EditorPage; NEW registered actions `setJunctionTransition` + `removeJunctionTransition` (validated
+  touching-pair, `runReplace`-wrapped) — junction edits are now AI/voice reachable. Tracker: timeline v3.
+- Gates: typecheck 4/4, shared `actions:test`, web `editor:test` all pass. `render:compare:pixels`
+  (chrome) 27/27 fixtures pass — `transition` 0.000% (identity fast path byte-identical), all others
+  0.000% except grain/chroma-key at their standing 0.001%.
+
+### 2026-07-13 — Claude (Fable): Effects completeness round — FAQ truth-up, keyframes travel with paste/presets, pro chroma/grain/vignette
+
+Four-item round; every new param defaults to current-equivalent output (existing projects don't shift).
+
+- **Brain FAQ was LYING about effect keyframes** (supersedes the "capability-gap" honest-limit FAQ
+  described in earlier brain changelog entries): "keyframe the blur amount" returned "can't be
+  keyframed yet" — but effect-param keyframes shipped and evaluate in all 3 renderers. The B5
+  pre-check (`ai/brain/faq.ts`) now derives its answer from the registry's `keyframeable` flags:
+  how-to (slider diamond, Shift+G graph editor) for keyframeable params, honest "static per clip"
+  for audio dynamics/graph-param color effects. `brain:eval` assertions flipped + a new
+  "keyframe the eq" static case. See project-tracker/editor-ui.md v2.
+- **Keyframes travel with paste-attributes (⌃⌥C/⌃⌥V) AND effect presets**: `LayerAttributes.animations`
+  (timeline-ops.ts) — effect-scope keys remapped to the fresh per-target effect ids at apply,
+  `transform.*` layer keys clipboard-only (presets strip them with transform). Replace-per-scope
+  semantics; mask/other-scope keys untouched; legacy v1 `keyframes` cleared when transform keys apply
+  (they'd double-animate through the `getLayerAnimations` merge); old saved presets (no `animations`
+  field) apply exactly as before. 9 new editor:test checks.
+- **Chroma key → pro CbCr keyer; vignette + grain hardened** — all in the ONE shared
+  `MEDIA_FRAGMENT_SHADER`: BT.709 chroma-plane distance (any key color, luminance-robust) + new
+  `despill` (default 60 ≈ old fixed green desaturate) / `choke` / `matteView` params (matteView =
+  first boolean registry param, renders as the existing checkbox control); vignette `feather` /
+  `roundness` (aspect-corrected via new `u_aspect`) / `highlights` protection, defaults bit-equal to
+  the old math; grain `size` (25–400%) + continuous seed (`mod(t, 61.7)` — old `fract(u_time)` reset
+  the pattern every whole second). ACCEPTED DELTAS: grain pattern re-rolls once (statistically
+  identical); existing chroma-key edges shift slightly (metric change, generally better). New pixel
+  fixtures `vignette`/`grain`/`chroma-key` (keys the fixture ORANGE hill — proves non-green keying).
+  See project-tracker/playback-preview.md v11.
+- Gates: typecheck 5/5 · `brain:eval` all pass · `editor:test` all pass (incl. 9 new) ·
+  `render:compare:pixels` (chrome) plain-image/blur 0.000% (no default drift) + vignette 0.000% /
+  grain 0.001% / chroma-key 0.001% · `scene:compare` 4/4 under the global bar (no per-fixture
+  override needed) · Remotion still verify: keyframed vignette/grain/chroma stills at t=0.2/3/6s
+  animate correctly end-to-end.
+
+### 2026-07-13 — Claude (Fable): Empty-track add no longer dirties every proxy + AI createTrack lands on top
+
+- **Adding an empty track regenerated the whole timeline's proxies**: the span content signature
+  hashed each layer's ABSOLUTE `trackIndex`; the "Add visual layer" button unshifts the new track at
+  the top, shifting every index → every span flipped with zero pixel change. `spanContentSignature`
+  (renderCache.ts) now hashes a DENSE RANK of the tracks present — relative draw order (what pixels
+  actually depend on) still flips on a real reorder (existing check), but empty-track inserts are
+  no-ops (new check: "inserting an empty track does NOT flip it"). One-time cost: all existing span
+  signatures change once (rank vs absolute), so proxies regenerate once after this lands.
+- **AI `createTrack` placed new tracks at the BOTTOM of the stack** (hidden under existing clips)
+  while the editor button adds visual tracks on top. Default placement in the shared action
+  (timeline-actions/actions/track.ts) now matches the button: visual types unshift to index 0
+  (drawn on top), audio stays at the bottom; explicit `index` still honored. Gates: `actions:test`
+  (undo/patch round-trips), `editor:test`, typecheck 5/5.
+
+### 2026-07-13 — Claude (Fable): Timeline pro-density redesign + minimap + deep zoom-out
+
+DaVinci-style visual compaction of `TimelineStrip.tsx` + `global.css` (perf architecture untouched —
+all gesture/clock-tier code intact, changes are CSS + a few constants + one new imperative strip):
+
+- **Flush rows**: `.timeline-tracks` gap 6px → 1px hairline; clips fill the row (1px inset, was
+  2–5px). GESTURE-MATH SYNC: `rowPitchPx = trackHeight + 1` and `laneOffsetPx = 58/78/104/108`
+  (label widths, `--timeline-label-gap` now 0) must track the CSS if either changes again.
+- **Header rail**: no gutter (border-right divider), flat borderless track-control icons, solo "S"
+  glyph pinned to the icons' 13px optical box (was riding ~1px high).
+- **Flat clips**: solid muted fills (no 135° gradients), 3px corners, thin dark seam border, crisp
+  1px selection halo (no shadow blob), 14px name bars, clip-kind chip only at L rows, video clips
+  get a Resolve-style always-on top name scrim (hidden at XS/S), full-bleed waveforms.
+- **Deep zoom-out**: wheel-zoom min 24 → 1 px/s (~2% like Premiere; readout used to floor at 43%);
+  Fit floor 2 → 1 px/s.
+- **Minimap** (new): thin 30px full-project strip, 4th grid row of `.timeline-editor`, sticky
+  bottom+left; per-clip bars from composition (type hues / label colors), viewport window synced
+  imperatively off dock scroll, playhead mirrored in the SAME zero-render clock paths as the main
+  playhead (`minimapPlayheadRef` writes next to `playheadRef` writes — keep them paired). Grab
+  anywhere to pan (centers view). Toolbar toggle (map icon, right group), persisted at
+  `localStorage["kimera:timeline-minimap"]`.
+
+Gates: web typecheck clean. Renderers untouched (no render:compare needed — zero manifest/draw changes).
+
+**Follow-up same day — timeline tool audit (cut tools misbehaving, user report):**
+- Split-at-playhead (S / scissors button) was a silent no-op with nothing selected — now falls back
+  to splitting EVERY editable clip under the playhead (Premiere ⌘K semantics); selection still
+  scopes it when present (`handleSplitAtPlayhead`, EditorPage).
+- Blade clicks near clip edges trimmed instead of cutting: in blade/roll/slide modes the clip
+  sub-controls (trim handles, fade buttons, volume-envelope cve-* hits, keyframe lane, transition
+  glyphs) are now `pointer-events: none` via `.is-blade-tool`/`.is-roll-tool`/`.is-slide-tool`
+  editor classes — the whole clip body is the tool's gesture surface. Also lets roll grab a
+  junction that has a transition glyph straddling it (previously unreachable).
+- Blade cut point is now frame-quantized (`snap(pointerSeconds, frameStepSeconds)`) like every
+  other edit op.
+- Tool cursors: blade = crosshair, roll = col-resize, slide = ew-resize.
+- Roll/slide precondition feedback: failed starts (clips not touching) now toast via a new
+  `onNotice` TimelineStrip prop wired to EditorPage's `setNotice` (was a silent return).
+
+Gates: web typecheck clean, `editor:test` full suite green (roll/slide/split/ramp conventions all pass).
+
+### 2026-07-13 — Claude (Fable): Vector graphics — missing from proxies/local export + ~2–10% of icons rastering invisible
+
+User reports: (1) graphic layers invisible during proxy-span playback (visible only at "1"/proxy-off),
+(2) ~10% of imported graphics never render on the preview canvas. Three root causes, all fixed:
+
+- **Graphics missing from the worker pipelines** (the proxy symptom): every worker-side consumer keyed
+  media off `layer.assetId` — vector graphic layers are self-contained (no SourceAsset), so span proxies
+  AND the local WebCodecs export silently dropped them (Remotion was fixed earlier in b9f2360; these
+  paths were missed the same way). Fix: new `graphicSourceKey(layerId)` (`source-decoder.ts`) +
+  `buildSourceUrlMap`/`mediaSourceKey`/`hasActiveMediaAt` register a `graphic:<layerId>` image source
+  from `graphicToDataUrl` (export-core.ts); `SceneFrameCompositor.gradeMediaLayer` resolves it
+  (scene-frame-compositor.ts); `viewerProxyCapture` synthesizes the same data URL instead of throwing
+  "no source url". Span signatures already hash the full layer (incl. `graphic`) → recolors invalidate.
+- **SMIL `fill="freeze"` read as a paint color** (`extractSvgPalette`, shared layer-graphic.ts): the
+  palette scan matched `fill=` on `<animate>` tags, so animated icons imported with `color="freeze"`
+  and their animation keywords rewritten to `currentColor`. Fix: palette scan strips SMIL elements
+  first + excludes non-paint keywords (freeze/remove/inherit/initial/unset/revert); same keywords
+  rejected in `sanitizeGraphicFill` (heals stored `fill:"freeze"` graphics to the default fill).
+- **Animated icon packs raster invisible** (line-md etc.): their base state is hidden
+  (`fill-opacity="0"`, dash-hidden strokes) and only the SMIL animation draws them in — a static
+  `<img>`/texture raster paints ZERO pixels. Fix: new `settleSvgAnimations()` (shared) bakes each
+  `<animate>`/`<set>`'s final value onto its parent and strips all animation elements; applied at
+  import (`normalizeGraphicSvg`) AND at bake (`graphicToDataUrl`) so previously imported animated
+  graphics heal without re-import.
+- **Evidence**: headless Chrome probe over 256 real Iconify icons (8 queries, mixed packs) through the
+  real import pipeline — before: 6/256 invisible (all line-md); after: 256/256 decode + paint. Gates:
+  typecheck 5/5, editor:test, `render:compare:pixels` 24/24 @ 0.000%, `scene:compare` 22/22.
+- Also: stock result cards no longer render `<img src="">`/`poster=""` when a provider returns an
+  empty thumbnail URL (the console's "empty string passed to src" warning; an empty src re-requests
+  the page). Not-a-bug: `hvc1` (HEVC) sources correctly fall back to the native `<video>` decoder
+  (the BoxParser size warnings come from mp4box probing those files).
+
+### 2026-07-12 — Claude (Fable): Editor performance round — per-frame CPU/GC churn removal (zero-behavior-change)
+
+Five independently gated phases from a full-codebase perf audit. Every change is designed to be
+bit-identical in output; gates re-run per phase: typecheck 5/5, `animation:test`, `governor:test`,
+`editor:test`, `render:compare:pixels` 24/24 @ 0.000% (×3 runs), `scene:compare` 22/22.
+
+- **`animation.ts` fast paths** (shared): `getLayerAnimations` returns `layer.animations` by
+  reference when no legacy keyframes (callers verified read-only); per-property sorted keyframe
+  lists cached in a WeakMap keyed on the animations ARRAY identity (same filter order + same
+  stable-sort comparator → tie order preserved); `evaluateTimelineTransform` stops re-filter+
+  sorting 9× per layer per frame; `evaluateSpatialPosition` x/y pairing is now binary-search
+  (was O(n²) find-per-key). Public `evaluateAnimatedValue` semantics untouched (delegates to the
+  extracted `evaluateSortedKeyframes`).
+- **ColorPipeline memoized** (`getCompositionColorPipeline`, composition-style.ts): WeakMap keyed
+  on the `effects` array reference + guards (animations ref, colorSettings ref); layers with ANY
+  effect-scope keyframe only cache-hit on the exact same resolved layer time (keyframed grades
+  recompile per frame exactly as before — no quantization). Unchanged grades now return the SAME
+  object every frame → downstream identity memos work. New `colorPipelineCacheKey(pipeline)`
+  (pipeline.ts, WeakMap-memoized `JSON.stringify`) replaced the per-frame stringify at ALL
+  change-detection sites: build-scene-draws, ScenePreviewCanvas, scene-frame-compositor (×3),
+  SceneStage (Remotion), viewerProxyCapture, WebglMediaLayer (incl. single-ctx snapshot key),
+  WebglVideoOverlay, WebglColorView. Key values are byte-identical to the old stringify.
+- **WebCodecs decoder cursors** (`webcodecs-decoder.ts`): `chunkIndexForMicros` keeps a forward
+  cursor (monotonic playback/export now amortized O(1); backward seek = full rescan, same result;
+  scan stays linear because cts order isn't sorted under B-frames); `keyAtOrBefore` is a binary
+  search over the ascending `keyIndices` (preserves the before-first-key → `keyIndices[0]` clamp).
+  Was O(n²) across long clips for export AND WC preview.
+- **React UI**: `VideoPreview` video branch no longer computes `getCompositionMediaStyle` twice
+  per tick (dead `baseStyle` in the WebGL branch — moved below it); `AgentTranscript` + `AiChatPanel`
+  are `memo`'d and EditorPage now feeds the panel identity-stable props via a `useStableHandlers`
+  block (`aiPanelHandlers`, + `aiAssetUrlById` Map for O(1) `resolveAssetUrl`) — typing in the AI
+  composer no longer re-maps the transcript per keystroke, and EditorPage edits no longer re-render
+  the panel. Timeline `Waveform` draws to ONE dpr-scaled `<canvas>` (same bar geometry/colors)
+  instead of up to 2000 SVG `<rect>`s per audio clip (`.clip-waveform canvas` CSS added).
+  Composer input-state extraction deliberately deferred (entangled with voice/dictation).
+- **Small wins**: `build-scene-draws` skips the nesting bookkeeping (incl. the O(layers)
+  `layerIndex` fill) when there are no nested groups; ScenePreviewCanvas allocates the alias-walk
+  Set only when an alias chain exists; `sourceProxyStore` loads index.json ONCE per session
+  (in-memory records + write-through, was full read+parse per asset); `local-tracking` transfers a
+  COPY of the per-frame grayscale to the worker (transfer list; original kept intact for the
+  inline fallback).
+- **Deferred (not in this pass)**: EditorPage→zustand store migration; asset-bin/chat virtualization;
+  composer state extraction; `getCompositionMediaEffects` memoization (embeds timeSeconds by design);
+  segmentation/tracking loops → worker; unifying the two `@huggingface/transformers` copies
+  (CDN 3.7.2 in local-transcription/local-sam vs npm 3.8.1 in asr/tts workers).
+
 ### 2026-07-12 — Claude (Fable): Rotated phone footage in export + Typewriter card in Effects subtab
 
 - **Mobile footage exported tilted 90°** (user report with screenshot): the WebCodecs export
@@ -197,7 +431,7 @@ working WHERE right now.
   `useDraftLayer.ts` (one gesture = one undo snapshot). `packages/shared/animation.ts` gained
   ADDITIVE `computeAutoTangents`/`easyEaseHandles` (evaluator behavior unchanged;
   `render:compare` passed). The old 320px SVG `TransformGraphEditor` in TransformPanel was
-  REMOVED — replaced by an "Open Graph Editor" button (dispatches `lumio:open-graph-editor`,
+  REMOVED — replaced by an "Open Graph Editor" button (dispatches `kimera:open-graph-editor`,
   optional `detail.targetKey` focuses a property).
 - **Timeline lane (Phase 6)**: `clip-keyframe-lane` now also shows effect + content keyframes
   (color-coded); **double-click a lane marker now OPENS the graph editor focused on that property**
@@ -306,7 +540,7 @@ working WHERE right now.
 ### 2026-07-12 — Claude (Fable): Voice round 7.1 — "System voice" opt-out in the picker
 
 - Assistant-voice picker gained a third radio: **"System voice — instant, no download"**
-  (`AssistantVoiceChoice = NaturalVoiceId | "system"`, same `lumio.voice.tts.voice.v1` key).
+  (`AssistantVoiceChoice = NaturalVoiceId | "system"`, same `kimera.voice.tts.voice.v1` key).
   When chosen: `warmNaturalVoice()` is a no-op (Kokoro never downloads/runs), speech + the ack
   cache route to the system engine, and the ⚙ status line reads "off — you chose the system
   voice" (no Retry). `kokoroVoice` keeps the last natural pick so the gender-matched system
@@ -337,7 +571,7 @@ working WHERE right now.
   often never finalizes single words).
 - **Barge-in v1 (interrupt words)** — while `speaking && voiceSession`, a dedicated standby
   recognizer listens; a short utterance starting with stop/wait/quiet/enough/shut up/hey
-  lumio calls `stopSpeaking()` → speech halts, the fast re-arm (140ms post-TTS) opens the mic.
+  kimera calls `stopSpeaking()` → speech halts, the fast re-arm (140ms post-TTS) opens the mic.
   Interrupt-words-ONLY by design: this recognizer hears our own TTS through the speakers, and
   the interrupt set is the precision-safe subset. Aurora pill now says “Speaking — say ‘stop’
   to interrupt”. Fast re-arm from 6.2's sibling fix: re-arm delay is 140ms within 2s of TTS
@@ -390,7 +624,7 @@ working WHERE right now.
   Kokoro pair: `@huggingface/transformers` (now a direct web dep; was already in the tree via
   kokoro-js — zero install weight) loads `onnx-community/moonshine-base-ONNX` (q8/wasm, ~60MB
   one-time, visible progress, honest failure reason, ↻ retry, 35s auto-retry). Opt-in ⚙ toggle
-  "High-accuracy hearing" (`lumio.voice.ears.v1`). Hybrid dictation: Web Speech keeps instant
+  "High-accuracy hearing" (`kimera.voice.ears.v1`). Hybrid dictation: Web Speech keeps instant
   interim + mic lifecycle; `useDictation` gained `refineFinal`/`onRefined` — the session is ALSO
   recorded (from the existing waveform stream, no extra permission) and on stop the local
   transcript (through the normalizer) REPLACES the Web Speech finals; status holds at
@@ -468,7 +702,7 @@ working WHERE right now.
   Semantic exemplars: "open the media browser"→media pool, "show clip properties"→inspector.
 - **Plan cache v2 (retargetable) + feedback on LLM turns** — the v1 cache keyed on the FULL
   composition + playhead-ms, so "same request twice" almost never replayed. v2
-  (`lumio.brain.plancache.v2`): keyed on normalized prompt; replay-valid while every clip the
+  (`kimera.brain.plancache.v2`): keyed on normalized prompt; replay-valid while every clip the
   plan's steps REFERENCE is byte-identical (unrelated edits/playhead moves don't invalidate);
   deictic prompts ("it"/"here"/"selected"…) additionally pin exact selection + playhead-ms.
   Every successful LLM turn now shows 👍/👎 ("Was this what you wanted?"): 👍 confirms the
@@ -503,10 +737,10 @@ working WHERE right now.
   resume() before speak, module-held utterance ref (GC kills speech mid-sentence), 30s safety
   resolve; system-voice audition always answers from the ⚙ voice picker.
 - **AI panel ⚙ settings menu + voice picker** — the header had piled up one icon per feature;
-  now: Voice (Alt+L) · New chat · ⚙ · ✕. The ⚙ dropdown holds: "Hey Lumio" wake-word On/Off,
+  now: Voice (Alt+L) · New chat · ⚙ · ✕. The ⚙ dropdown holds: "Hey Kimera" wake-word On/Off,
   "Train my wake phrase…" (re-runs the sample-capture card any time), Assistant voice picker
   (Kokoro `af_heart` "Heart — American female" / `am_michael` "Michael — American male";
-  persisted `lumio.voice.tts.voice.v1`, tiny per-voice style file, instant spoken audition on
+  persisted `kimera.voice.tts.voice.v1`, tiny per-voice style file, instant spoken audition on
   switch when ready), BYO key / Memory / Insights, and a natural-voice status line. tts.ts
   exports NATURAL_VOICES/get/setNaturalVoice. Kokoro playback hardening same day: warmup
   generation at load (first-reply silence was WASM compile), 20s generation timeout, playback-
@@ -516,16 +750,16 @@ working WHERE right now.
   chat closed was broken by a mount-race: AiChatPanel's session-mirror effect reported its
   INITIAL `false` up on hidden-mount, flipping `aiVoiceWanted` off before the session started —
   the mirror now skips the initial value, and toggle/exit write `voiceSessionRef` synchronously.
-  (2) "Hey Lumio" was DEAF with the chat closed (standby lives inside the unmounted panel):
+  (2) "Hey Kimera" was DEAF with the chat closed (standby lives inside the unmounted panel):
   EditorPage now keeps the dock mounted-hidden whenever the Ear is armed (`aiWakeArmed`, fed by
   the new `onWakeWordChange` prop + `loadWakeWordEnabled()` from wake-word.ts). (3) Matcher:
   "heya"/"hiya"/"yo" greetings added; distinctive l-variant names wake WITHOUT a greeting
-  ("Lumio, pause" → carry-through) while mia/miu/mio stay greeting-anchored. (4) **First-run
-  voice training** (`wakeSetup` transcript card, flag `lumio.voice.wakesetup.v1`): offered once
+  ("Kimera, pause" → carry-through) while mia/miu/mio stay greeting-anchored. (4) **First-run
+  voice training** (`wakeSetup` transcript card, flag `kimera.voice.wakesetup.v1`): offered once
   on first panel open ("Teach me your wake phrase — say whatever feels natural"), and
   auto-starts when the Ear is armed with zero learned phrases; captures 3 spoken finals
   verbatim via the standby recognizer (never wakes mid-training) and learns them
-  (`learnWakePhrase`), so "heya lumio" works exactly as the user says it. (5) Kokoro load
+  (`learnWakePhrase`), so "heya kimera" works exactly as the user says it. (5) Kokoro load
   failures are now RETRYABLE (30s cooldown + auto-retry timer; browser-cached files resume) —
   a mid-download "network error" no longer kills the natural voice for the session.
 - **Alt+L fixes: shuttle collision + voice-only mode** — (1) the editor's transport keydown
@@ -550,9 +784,9 @@ working WHERE right now.
   onnxruntime-node/protobufjs/sharp — their build scripts are declared `false` in
   pnpm-workspace.yaml `allowBuilds` (browser uses onnxruntime-web; do NOT approve them).
 - **Voice round 2: trainable wake word + TTS read-back + carry-through** — real transcripts
-  showed Web Speech hears "hey lumio" as "hello Mia/miu/Lumia". NEW `apps/web/src/ai/wake-word.ts`
+  showed Web Speech hears "hey kimera" as "hello Mia/miu/Lumia". NEW `apps/web/src/ai/wake-word.ts`
   (pure, eval-tested): greeting-anchored matcher over a variant set + Levenshtein ≤2 + split
-  tokens, PLUS learned phrases (`lumio.voice.wakephrases.v1`) — standby near-misses (short
+  tokens, PLUS learned phrases (`kimera.voice.wakephrases.v1`) — standby near-misses (short
   greeting-led finals) raise a `wakeTrain` transcript card ("I heard 'hello mia' — were you
   calling me?"); confirming LEARNS that exact mishearing forever (this is the user-facing
   training loop). NEW `apps/web/src/ai/tts.ts` (speechSynthesis wrapper: emoji/markdown
@@ -560,17 +794,17 @@ working WHERE right now.
   voice session via `speakIfVoice` (command says, brain answers, agent answers/finalSummary,
   clarify questions, approval prompt "say yes to apply"); the mic re-arm effect blocks while
   `speaking` so the recognizer never transcribes our own reply; aurora gained a "speaking"
-  state. Carry-through: "hey lumio, blur clip 2" submits the command in one breath
+  state. Carry-through: "hey kimera, blur clip 2" submits the command in one breath
   (`handleSubmitVoiceRef` late-binding); bare wake answers "Yes?". brain:eval gained a WAKE
   WORD section (~17 checks incl. learn/clear lifecycle).
-- **"Hey Lumio" wake word + Alt+L** — Alt+L toggles the voice session from anywhere (token
+- **"Hey Kimera" wake word + Alt+L** — Alt+L toggles the voice session from anywhere (token
   pattern like Alt+M; opens the AI panel if closed). New Ear header button enables the opt-in
   wake word: a standby Web Speech recognizer (`createSpeechRecognition` exported from
   useDictation.ts) runs whenever the mic is otherwise free (never contends with dictation),
-  auto-restarts on Chrome's ~60s session ends, matches /hey,? lumio/ + misheard variants
+  auto-restarts on Chrome's ~60s session ends, matches /hey,? kimera/ + misheard variants
   (loomio/lumeo), and on match aborts itself → enters the voice session (150ms handoff before
   dictation grabs the mic). Permission revocation auto-disables the toggle. Persisted in
-  `lumio.voice.wakeword.v1`; the Ear breathes while standby is live.
+  `kimera.voice.wakeword.v1`; the Ear breathes while standby is live.
 - **👍/👎 feedback acknowledgments** — 👍: "Thanks — feedback like this literally trains me…";
   👎: reverts (if edits), dials the rule down, thanks the user, re-runs via the model.
 - **Inspector starts collapsed** by default (user request).
@@ -582,13 +816,13 @@ working WHERE right now.
 ### 2026-07-10 — Claude (Fable): AI chat persistence + asset-scope leak fix
 
 - **AI chat history persists per project** — `transcript.ts` gained `loadTranscript`/
-  `saveTranscript`/`clearTranscript` (localStorage `lumio.ai.transcript.v1.<projectId>`, capped
+  `saveTranscript`/`clearTranscript` (localStorage `kimera.ai.transcript.v1.<projectId>`, capped
   150 items, streaming/running flags sanitized on restore so nothing comes back "live");
   AiChatPanel restores on mount + debounce-saves on change; the planner's follow-up history is
   derived from the transcript so follow-ups survive reloads too. New ✏️ "New chat" header button
   clears the persisted conversation (disabled mid-run).
 - **Asset-scope leak (user report: "videos vacant in new projects, audio persists")** — root
-  cause: `EditorPage.handleUploadAsset` (and the .lumio package import) never passed `projectId`
+  cause: `EditorPage.handleUploadAsset` (and the .kimera package import) never passed `projectId`
   to `createAsset`, so those uploads were created OWNERLESS and appeared in every project's bin
   forever (e.g. `atlasaudio-calm-nature`), while older project-owned uploads were correctly
   hidden by the bin's pile-fix filter — the two behaviors looked contradictory. Fix (user chose
@@ -596,7 +830,7 @@ working WHERE right now.
   `projectId: project.id`; brand uploads stay user-level by design. Pre-existing ownerless rows
   were deliberately NOT migrated (user declined repair) — they can be deleted from the bin.
 
-### 2026-07-10 — Claude (Fable): Lumio Brain B3–B7 — semantic tier, fast model class, loop economy, learning write path, concept recipes
+### 2026-07-10 — Claude (Fable): Kimera Brain B3–B7 — semantic tier, fast model class, loop economy, learning write path, concept recipes
 
 - **B3 semantic tier** — NEW `apps/web/src/ai/brain/semantic.ts`: slot extraction (clip refs /
   times / colors / numbers → intent skeletons), curated phrase index (exact skeleton match is
@@ -647,7 +881,7 @@ working WHERE right now.
   that a named-but-invisible clip must never be substituted with another layer's id (answer/clarify
   instead — wrong target is the worst outcome).
 
-### 2026-07-10 — Claude (Fable): Lumio Brain B2 — tier-1 command compiler + 👍/👎 feedback trust loop (two-stage learning)
+### 2026-07-10 — Claude (Fable): Kimera Brain B2 — tier-1 command compiler + 👍/👎 feedback trust loop (two-stage learning)
 
 - **B2 command compiler** — NEW `apps/web/src/ai/brain/rules.ts`: grammar rules (verb family +
   target + params → registry actions), zero tokens, <50ms. Rule families: **text-color**
@@ -687,11 +921,11 @@ working WHERE right now.
   sheet updated. Ctrl+/ (panel toggle) and "/" (focus composer) unchanged.
 - Gates: shared+web+worker typecheck ✓, `brain:eval` 55 checks ✓.
 
-### 2026-07-09 (cont. 2) — Claude (Fable): Lumio Brain — architecture doc rewrite + B0 routing ledger + B1 tier-0 reflex router
+### 2026-07-09 (cont. 2) — Claude (Fable): Kimera Brain — architecture doc rewrite + B0 routing ledger + B1 tier-0 reflex router
 
 Motivated by `AI_REFINEMENT.md` (real session log: 6–17s reasoning-LLM round trips for trivial
 commands, a wasted closing loop iteration per run, "what can you do" costing a 17s model call).
-`AI_ARCHITECTURE.md` was **fully rewritten** as the Lumio Brain plan: a 5-tier decision cascade
+`AI_ARCHITECTURE.md` was **fully rewritten** as the Kimera Brain plan: a 5-tier decision cascade
 (reflex → command compiler → semantic/embeddings → transactional fast-LLM → creative agent loop),
 precision-first fast paths that NEVER guess (escalate silently), bandit-style learning from
 apply/undo feedback, phased build plan B0–B8. Old phase tracker 1–16 preserved inside it
@@ -822,7 +1056,7 @@ shortcut edits.
 - **Also fixed:** timeline clip body-click sometimes didn't select (transient desync where a superseded
   selection transition cleared the imperative `is-selected` highlight while state still held the clip);
   `startDrag` now re-commits selection for a single-selection click, matching the resize-handle path.
-- Gate: `pnpm --filter @lumio-by-aelivion/web typecheck` + `@lumio-by-aelivion/shared typecheck` green.
+- Gate: `pnpm --filter @kimera-by-aelivion/web typecheck` + `@kimera-by-aelivion/shared typecheck` green.
   NOT live-tested (mic + LLM turns need the running app + a real browser) — verify dictation and the
   answer/thinking-log flows manually.
 
@@ -848,7 +1082,7 @@ Made the AI a genuine colorist (not a default-drop stub) and reskinned the AI do
   offline / on LLM fallback — removes the "deterministic catches up, can't bypass color" degradation.
   Bare "add curves" with no direction still falls back to adding the tool at default.
 - **Glass AI dock (`global.css`):** `--nle-glass{,-2,-border}` tokens (theme-tinted, inherit `--nle-accent`
-  per `data-lumio-theme`); `.ai-dock` is accent-frosted glass with ONE blur layer; bubbles/composer use
+  per `data-kimera-theme`); `.ai-dock` is accent-frosted glass with ONE blur layer; bubbles/composer use
   translucent accent fills with NO per-bubble backdrop-filter (GPU-cheap). `@supports` solid fallback.
 - **Shortcuts (`EditorPage.tsx`):** ⌘/Ctrl+/ toggles the AI panel (works even while its composer is
   focused). Alt+1/2/3 → left panel Assets/Effects/Color; Alt+4 → toggle Inspector; Alt+R / Alt+T →
@@ -978,7 +1212,7 @@ provider-agnostic Search + Graphics, curated/user-saved Templates, docs) still P
 
 - `EditorPage.tsx`: `FolderAssetTab` widened to `"local" | "brand" | "ai"`; `isFolderAssetTab` updated.
   AI tab now gets the same folder rail as Local/Brand (create/rename/move bins, per-tab active-folder
-  state persisted to `localStorage["lumio_asset_folder_ai"]`).
+  state persisted to `localStorage["kimera_asset_folder_ai"]`).
   Fixed two spots that indexed `activeAssetFolders` / labeled the folder tab without an `"ai"` case
   (would have been `undefined` at runtime): the `activeAssetFolders` initial state and
   `currentFolderLabel`'s tab-name ternary (now a `folderTabLabel` lookup covering all three tabs).
@@ -986,7 +1220,7 @@ provider-agnostic Search + Graphics, curated/user-saved Templates, docs) still P
   generation, not drag-drop upload; folder organization/navigation works regardless.
 - AI asset creation (`apps/web/src/generate/generateClient.ts`) already wrote `folder: ai/<taskId>` — no
   change needed there; confirmed it's the only client-side AI creation site.
-- Gates green: `pnpm --filter @lumio-by-aelivion/web typecheck`, `editor:test`.
+- Gates green: `pnpm --filter @kimera-by-aelivion/web typecheck`, `editor:test`.
 - NOTE: an unrelated concurrent session has uncommitted changes to `apps/web/src/tools/*` and
   `packages/shared/src/skills/*` (executor/skills work) — left untouched, not staged in this commit.
 
@@ -1003,9 +1237,9 @@ another agent — read that plan file before continuing.
 - **API:** `GET /assets?projectId&scope=project|library|all`; create sets owner + auto-links; `POST`/`DELETE`
   `/assets/:id/link`; serializer emits `ownerProjectId` (mirrors to legacy `projectId` for back-compat). AI
   generations stay user-level and link to the generating project.
-- **Backfill:** `pnpm --filter @lumio-by-aelivion/api assets:backfill` (ran: 77 projects, 75 links, 27 sole-owner
+- **Backfill:** `pnpm --filter @kimera-by-aelivion/api assets:backfill` (ran: 77 projects, 75 links, 27 sole-owner
   uploads) so existing projects keep their bin media. Idempotent.
-- **Web:** `listAssets(projectId?, scope?)` + local-first links mirror (`lumio_project_asset_links`) +
+- **Web:** `listAssets(projectId?, scope?)` + local-first links mirror (`kimera_project_asset_links`) +
   `linkAssetToProject`/`unlinkAssetFromProject`. `AssetBin` takes `currentProjectId` and hides uploads owned by
   OTHER projects (the "pile" fix) while keeping library tabs global; link-on-add for library assets.
 - **Known gap (deferred):** the inspector's replacement-picker AssetBin isn't project-scoped yet (no projectId in
@@ -1026,13 +1260,13 @@ into a portrait layer box → rotated export. Only clips carrying a rotation fla
 the decoded source, and rotate the `VideoFrame` 90/180/270 in the export scene compositor before compositing
 (or bake rotation during a normalization transcode) — must land shared so preview/export stay pixel-aligned.
 
-### 2026-07-07 — Claude: `.lumio` export/import hardening (default `.lumio`, async zip, trust-split caps)
+### 2026-07-07 — Claude: `.kimera` export/import hardening (default `.kimera`, async zip, trust-split caps)
 
-- **Default export is now `.lumio`** (self-contained ZIP with embedded media), not the bare `.lumio-template.json` — plain click = `.lumio`, Shift+click = the lightweight bare JSON (`EditorPage.tsx` export button + tooltip).
-- **Export no longer freezes the UI:** `buildLumioPackageZip` ran `zipSync(level 6)` on the main thread, re-DEFLATEing already-compressed media. Now media is STORED (`level 0`) and there's a new `buildLumioPackageZipAsync` (fflate worker threads) that the editor uses, with a "Building…" notice. Sync builder kept for tests.
-- **`.lumio` has NO size limits by default** (it's the user's own project; export was uncapped, so import must be too). Old 512 MB / 256 MB-per-asset / 64-asset caps removed from the default path. `parseLumioPackageZipAsync` (new, off-thread) is what the editor imports with; sync `parseLumioPackageZip` kept for tests. Untrusted callers can still pass `maxPackageBytes`/`maxAssetBytes`/`maxAssetCount` explicitly ("others").
-- **Zip-bomb guard retained (crash-prevention, not a product limit):** only the DEFLATE'd metadata (`manifest.json`/`timeline.json`) is capped at 512 MB decompressed via fflate's pre-decompress `filter`; embedded media under `assets/` is STORED so it can't amplify and stays unlimited. Manifest content-safety scan (`javascript:`/`importScripts` deny-list) is unchanged — `.lumio` is declarative data, no arbitrary-code execution.
-- **Gates green:** `pnpm -r typecheck` (5/5), `editor:test` (`.lumio` round-trip incl. byte-for-byte asset survival).
+- **Default export is now `.kimera`** (self-contained ZIP with embedded media), not the bare `.kimera-template.json` — plain click = `.kimera`, Shift+click = the lightweight bare JSON (`EditorPage.tsx` export button + tooltip).
+- **Export no longer freezes the UI:** `buildKimeraPackageZip` ran `zipSync(level 6)` on the main thread, re-DEFLATEing already-compressed media. Now media is STORED (`level 0`) and there's a new `buildKimeraPackageZipAsync` (fflate worker threads) that the editor uses, with a "Building…" notice. Sync builder kept for tests.
+- **`.kimera` has NO size limits by default** (it's the user's own project; export was uncapped, so import must be too). Old 512 MB / 256 MB-per-asset / 64-asset caps removed from the default path. `parseKimeraPackageZipAsync` (new, off-thread) is what the editor imports with; sync `parseKimeraPackageZip` kept for tests. Untrusted callers can still pass `maxPackageBytes`/`maxAssetBytes`/`maxAssetCount` explicitly ("others").
+- **Zip-bomb guard retained (crash-prevention, not a product limit):** only the DEFLATE'd metadata (`manifest.json`/`timeline.json`) is capped at 512 MB decompressed via fflate's pre-decompress `filter`; embedded media under `assets/` is STORED so it can't amplify and stays unlimited. Manifest content-safety scan (`javascript:`/`importScripts` deny-list) is unchanged — `.kimera` is declarative data, no arbitrary-code execution.
+- **Gates green:** `pnpm -r typecheck` (5/5), `editor:test` (`.kimera` round-trip incl. byte-for-byte asset survival).
 - Files: `packages/shared/src/plugin-package-zip.ts`, `apps/web/src/pages/EditorPage.tsx`.
 
 ### 2026-07-07 — Claude: Day 2 — NLE import fidelity (titles/transitions/multi-sequence) + FCPXML export
@@ -1045,16 +1279,16 @@ the decoded source, and rotate the `VideoFrame` 90/180/270 in the export scene c
 - **Gates green:** `pnpm -r typecheck`, `editor:test` (24 new asserts across transition-mapping/FCPXML-fidelity/multi-sequence/FCPXML-export-round-trip, zero failures).
 - Files touched: `packages/shared/src/external-timeline-adapter.ts`, `external-timeline-exporter.ts` (new), `index.ts`; `apps/web/src/pages/EditorPage.tsx` (multi-sequence picker state + FCPXML export button), `apps/web/src/editor/editor.test.ts`; `examples/timeline-imports/simple-fcpxml.fcpxml` (extended with title/transition/keyframe); `project-tracker/nle-import-export.md` (new), `project-tracker/README.md`, `PLUGIN_ARCHITECTURE.md`.
 
-### 2026-07-07 — Claude: Day 1 — real `webgl-fragment` effect engine + `.lumio` ZIP packages (plugin system)
+### 2026-07-07 — Claude: Day 1 — real `webgl-fragment` effect engine + `.kimera` ZIP packages (plugin system)
 
 - **Real GLSL "Custom Shader" effect (flagship plugin gap closed).** New `packages/shared/src/color/fragment-effects/registry.ts` mirrors the transition engine's registry+harness pattern: a plugin's `vec4 effect(vec2 uv)` body compiles into the SAME shader on preview/export/Remotion. New `pluginShader` `TimelineEffectType` (`types.ts`, `effects.ts`); `plugin-effect-adapter.ts` now supports `engine: "webgl-fragment"` — registers the GLSL and produces a `pluginShader` effect carrying `params.__shaderManifestId` + defaulted params (vec3→hex string, vec2→JSON string, matching existing param-storage conventions).
 - **Render seam:** `SceneCompositor` gets a new `fragmentPasses` array on `SceneLayerDraw` (`SceneFragmentPass`), rendered inside the SAME per-layer nest `regionPasses` already uses (`renderLayerWithRegionPasses`), AFTER region passes, in effects-index order — never a second nest (would double-apply opacity/blend). Compile failures skip the pass + warn once, never black-frame. `build-scene-draws.ts`'s new `buildFragmentPasses` scans `layer.effects` for enabled `pluginShader` entries, resolves keyframed params via the existing `evaluateTimelineEffectParam`, and builds a per-effect mask via `SceneMaskMatteCache` when the effect carries its own `masks`.
 - **Remotion registration gap (the #1 preview/export-divergence trap, per the plan's own risk list) is fixed:** `SceneStage.tsx` now calls `registerEffectManifests(manifest.plugins.effects, {override:true})` — previously effects were never re-registered for Remotion (fine for presets, would have rendered fragment effects BLANK in export).
 - **Inspector:** `pluginShader` effects render their param controls dynamically from the fragment def (`EditorPage.tsx` `buildPluginShaderParamDefinitions`), reusing the existing number/color/boolean controls — no new control types.
 - **Verified:** `render:compare:pixels` — 24/24 fixtures (incl. new `plugin-shader`) at **0.000%** diff, proving preview == export == Remotion for a real user shader. `scene:compare` 22/22 (the DOM-parity gate correctly excludes `plugin-shader` by default — the DOM renderer has no fragment-shader pass, so that comparison isn't meaningful; still available via `PIXEL_FIXTURES=plugin-shader` for manual inspection). Example manifest: `examples/plugin-manifests/invert.effect.json`.
-- **`.lumio` ZIP packages with embedded media:** new `packages/shared/src/plugin-package-zip.ts` (fflate) builds/parses a `.lumio` ZIP (`manifest.json` + `timeline.json` + `assets/<id>.<ext>` + optional `previews/`), detected by ZIP magic bytes so bare `.lumio-template.json` keeps working. Editor: Shift+click the export-template-package button for the ZIP-with-media path (reads bytes from the local blob store or `fetch(fileUrl)`); import creates real local assets per embedded file and remaps `layer.assetId` (root + `graph.compositions`) to the new ids — no relink-by-warning. Example: `examples/plugin-manifests/sample-template.lumio`.
+- **`.kimera` ZIP packages with embedded media:** new `packages/shared/src/plugin-package-zip.ts` (fflate) builds/parses a `.kimera` ZIP (`manifest.json` + `timeline.json` + `assets/<id>.<ext>` + optional `previews/`), detected by ZIP magic bytes so bare `.kimera-template.json` keeps working. Editor: Shift+click the export-template-package button for the ZIP-with-media path (reads bytes from the local blob store or `fetch(fileUrl)`); import creates real local assets per embedded file and remaps `layer.assetId` (root + `graph.compositions`) to the new ids — no relink-by-warning. Example: `examples/plugin-manifests/sample-template.kimera`.
 - **Gates green:** `pnpm -r typecheck`, `editor:test` (incl. new zip round-trip + fixture asserts), `scene:compare` 22/22, `render:compare:pixels` 24/24 @ 0.000%.
-- Files touched: `packages/shared/src/color/fragment-effects/registry.ts` (new), `color/scene-compositor.ts`, `color/index.ts`, `scene/build-scene-draws.ts`, `types.ts`, `effects.ts`, `plugin-effect-adapter.ts`, `plugin-manifest.ts` (none needed — `webgl-fragment`/`vec2`/`vec3` param types already existed), `plugin-safety.ts` (added `webgl-fragment` to supported-engine check), `plugin-package-zip.ts` (new), `index.ts`; `apps/web/src/pages/EditorPage.tsx`, `apps/web/src/editor/effects/pluginManifestStore.ts`, `apps/web/src/lib/asset-blob-store.ts` (import only); `apps/worker/src/remotion/SceneStage.tsx`, `apps/worker/src/scene-compositor-compare.ts`; `examples/plugin-manifests/invert.effect.json` + `sample-template.lumio` (new); `apps/web/src/editor/editor.test.ts`.
+- Files touched: `packages/shared/src/color/fragment-effects/registry.ts` (new), `color/scene-compositor.ts`, `color/index.ts`, `scene/build-scene-draws.ts`, `types.ts`, `effects.ts`, `plugin-effect-adapter.ts`, `plugin-manifest.ts` (none needed — `webgl-fragment`/`vec2`/`vec3` param types already existed), `plugin-safety.ts` (added `webgl-fragment` to supported-engine check), `plugin-package-zip.ts` (new), `index.ts`; `apps/web/src/pages/EditorPage.tsx`, `apps/web/src/editor/effects/pluginManifestStore.ts`, `apps/web/src/lib/asset-blob-store.ts` (import only); `apps/worker/src/remotion/SceneStage.tsx`, `apps/worker/src/scene-compositor-compare.ts`; `examples/plugin-manifests/invert.effect.json` + `sample-template.kimera` (new); `apps/web/src/editor/editor.test.ts`.
 
 ### 2026-07-07 — Claude (Fable): Phase 5 GPU-first single-context preview — DEFAULT ON (flipped same day, user go)
 
@@ -1098,7 +1332,7 @@ the decoded source, and rotate the `VideoFrame` 90/180/270 in the export scene c
   is capable, and is it available" answer. Filters by capability (task/modality/inputs/constraints) AND
   availability (fal key / reachable local endpoint / BYO), then ranks **local-first** (image) with
   video always resolving to cloud. Asserted by `apps/worker/src/skills-resolver-test.ts` (`pnpm
-  --filter @lumio-by-aelivion/worker skills:test`).
+  --filter @kimera-by-aelivion/worker skills:test`).
 - **API cloud route** — `GenerationJob` Prisma model (+ migration `20260707120000_add_generation_job`,
   APPLIED to dev DB), `generationRouter.service.ts` (fal.ai queue submit/poll/download, `FAL_KEY` held
   server-side, mirrors the aiGateway pool pattern), `routes/generate.routes.ts` (`POST /api/generate`,
@@ -1145,7 +1379,7 @@ the decoded source, and rotate the `VideoFrame` 90/180/270 in the export scene c
   telemetry `__rfDegradation`. `BackgroundGateReason` union grew — the gate is still the single
   authority, add new suspension conditions THERE, not in producers.
 - **`crash-telemetry.ts`** (installed in main.tsx): onerror/unhandledrejection → localStorage ring
-  buffer `lumio.crashLog` (survives hard crashes); next boot surfaces the previous session's tail;
+  buffer `kimera.crashLog` (survives hard crashes); next boot surfaces the previous session's tail;
   `window.__rfCrashLog`.
 - README documents the `:5173`/`:4173` separate-storage-universe rule + stale-SW bundle-hash check.
 - Gates: web typecheck, editor:test, production build.
@@ -1257,7 +1491,7 @@ unconditionally, exposing whatever silently-wedged frame the live layer produced
 
 ### 2026-07-06 — Claude (Sonnet): DaVinci-style redesign polish — theme system, source monitor drag-drop, timeline header rework, inspector/color parity
 
-- **Multi-accent theme system**: `data-lumio-theme` attribute on `.editor-page` + a topbar Theme picker
+- **Multi-accent theme system**: `data-kimera-theme` attribute on `.editor-page` + a topbar Theme picker
   (7 presets: Ocean Blue/Warm Amber/Neutral Graphite/Ember Red/Bamboo Green/Sunset Orange/Neon Green).
   Bulk-converted ~200 hardcoded `rgba(77,159,255,*)`/`#4d9fff`/`#4f9cff` literals in `global.css` to
   `color-mix(in srgb, var(--nle-accent) N%, transparent)`. **Gotcha**: the `--editor-accent`/`--primary`
@@ -1539,7 +1773,7 @@ Gates (real Chrome/GPU, this box): `color:test` 60/60, `animation:test`, `render
 **Source proxies** (the structural cure for the 108MB sparse-GOP seek/starvation family — we only had a
 timeline render cache, never Premiere's other half):
 
-- `apps/web/src/editor/performance/sourceProxyStore.ts` — OPFS `lumio-source-proxies/` (`<assetId>.mp4`
+- `apps/web/src/editor/performance/sourceProxyStore.ts` — OPFS `kimera-source-proxies/` (`<assetId>.mp4`
   + `index.json`), validated by source byte-size fingerprint + `SOURCE_PROXY_VERSION`; no fallback store
   (no OPFS → feature off, originals play like before).
 - `apps/web/src/editor/performance/sourceProxyEngine.ts` — FIFO background transcoder: H.264 ≤854px long
@@ -1650,7 +1884,7 @@ consumers (inspector/scopes/lumetri/audiomixer) subscribe to a throttled clock s
 never re-renders EditorPage at all.
 
 **Follow-up 2 (same evening): wcDecode DEFAULT FLIPPED ON** (`preview-frame-pool.ts` —
-`?wcDecode=0` / `lumio.wcDecode="0"` / `VITE_WC_DECODE=0` are now the kill switches). Evidence: days of
+`?wcDecode=0` / `kimera.wcDecode="0"` / `VITE_WC_DECODE=0` are now the kill switches). Evidence: days of
 ON-flag soaks, final soak fully clean (`__rfSourceProxy {built:3, failed:0}`, `__rfHotSpots` worst 50ms,
 `__rfWcHeals {noSource:7, pausedStall:1}` all self-healed, zero duplicate-id events), every WC failure
 mode has a bounded element-fallback path, and source proxies made the decode side cheap. NEXT UP: the
@@ -1781,11 +2015,11 @@ User asleep, auto mode. Gates on everything: shared/web/api/worker typecheck, we
   max-content and the bin collapsed to content height (footer floated mid-panel). Rows moved: panel =
   `minmax(0,1fr)`, `.studio-tabs` = `max-content minmax(0,1fr)` (global.css ~4428).
 - **Asset bin list view = real bin TREE**: expanded bins inline their children (persisted
-  `lumio_asset_expanded_bins`), twisty + folder-open icon, click toggles / double-click opens, files indent
+  `kimera_asset_expanded_bins`), twisty + folder-open icon, click toggles / double-click opens, files indent
   one step inside their parent (thumb carries the indent; first grid column is max-content so the data
   columns stay aligned). Flat list for search / non-folder tabs.
 - **Bins nest by drag-and-drop**: bin rows (list) and bin tiles are draggable
-  (`application/x-lumio-asset-folder`); dropping bin A on bin B (or a breadcrumb) re-parents A's whole
+  (`application/x-kimera-asset-folder`); dropping bin A on bin B (or a breadcrumb) re-parents A's whole
   subtree — per-asset folder PATCHes + custom-bin path rename + active-folder follow + auto-expand target.
   Guards: self/descendant/current-parent drops are no-ops (`moveFolderIntoFolder` in AssetBin).
 - **Multi-select in the bin**: ctrl/cmd toggle, shift range (visible order), plain click keeps
@@ -1874,14 +2108,14 @@ All found during the user's `wcDecode=1` soak; every fix gate-verified (shared+w
   name instead of the bare type label.
 - **PREVIEW_PIPELINE.md (new)**: the agreed proxy/cache + rendering architecture block — soak case file,
   Premiere-aligned target design, phases P1–P5 (fingerprint / still proxies / span verification / generation
-  scheduling / single-context preview grading). **P1 SHIPPED**: `__LUMIO_RENDER_FINGERPRINT__` — vite
+  scheduling / single-context preview grading). **P1 SHIPPED**: `__KIMERA_RENDER_FINGERPRINT__` — vite
   build-time sha1 of the render-critical sources (list in vite.config.ts — keep it in sync when adding
   render-affecting modules!) folded into `baseCompositionSignature`, so any decoder/compositor/effects code
   change auto-invalidates cached spans; the manual `PREVIEW_PROXY_RENDER_VERSION` stays as coarse fallback.
 - **GL context governor made enableable mid-soak** (user hit GL ctx 15 ≈ Chromium's ~16 force-loss): budget
   now settable (`setGlContextBudget`, shared defaults 3/4 kept for governor:test; web app boots 8/12) and
   eviction is RECOVERABLE (disposer no longer stops the WC rAF frame loop — evicted layers recreate on next
-  draw). User instructed to set `lumio.glGovernor=1`. Root cause (4K stills ≈ 64–90MB GPU each, per-layer
+  draw). User instructed to set `kimera.glGovernor=1`. Root cause (4K stills ≈ 64–90MB GPU each, per-layer
   contexts) confirmed by user A/B; still-proxy pipeline is P2, single-context grading is P5.
 - **Stuck clip-drag fixed** (clip chased the mouse, couldn't be dropped): clip-move lifecycle was
   element-bound behind setPointerCapture — a dropped capture left the drag state live while every hovered
@@ -1904,7 +2138,7 @@ All found during the user's `wcDecode=1` soak; every fix gate-verified (shared+w
   was already safe in LOCAL and CLOUD export (both derive z from the live track array; no cache involved).
   P3 half 2 (span verification gate) still open.
 - **Asset bin: Premiere-style LIST view** (user request while soaking): real column list (Name/Type/
-  Duration/Size/Used) with click-to-sort headers (persisted `lumio_asset_sort`/`_dir`), dense zebra rows,
+  Duration/Size/Used) with click-to-sort headers (persisted `kimera_asset_sort`/`_dir`), dense zebra rows,
   left-accent selection, thumbnailUrl-only thumbs (no per-row decoders), hover actions (add/preview),
   used-count → focus-on-timeline, folder rows keep drag-to-bin. Tiles view unchanged; empty state shared
   (`assetEmptyState`). All inside `AssetBin` in EditorPage + `.asset-list*` CSS.
@@ -2019,7 +2253,7 @@ All found during the user's `wcDecode=1` soak; every fix gate-verified (shared+w
   `VideoPreview.tsx` (ramped clips excluded — they already resync per tick).
 - **Transport res control is now a RADIO** (user request): ¼/½/1 = fixed (Auto off), A = adaptive
   (balanced base); exactly one lights up.
-- **User-session note**: `lumio.wcDecode=1` persisting from the soak explains fast-forward
+- **User-session note**: `kimera.wcDecode=1` persisting from the soak explains fast-forward
   catch-up on backward jumps (sparse-key sources re-decode from the GOP key under the 24ms budget)
   — advised OFF for daily editing until re-soak. Open follow-ups: intermittent PHOTO clip not
   rendering (image path — awaiting flag-off retest), boundary-freeze re-verify after these fixes.
@@ -2166,7 +2400,7 @@ through the new shared helpers `getSpeedRamp`/`hasSpeedRamp`/`getLayerSpeedAt`/
 **Playback resolution Auto toggle** (user request) — new "A" button in the transport next to ¼/½/1:
 ON = adaptive-quality may drop below the chosen profile under load (default); OFF = the manual
 choice is absolute (strong-GPU users). `adaptive-quality.ts` gained `isAdaptiveQualityOn`/
-`setAdaptiveQualityOn` (persists to the existing `lumio.adaptiveQuality` key, releases the cap
+`setAdaptiveQualityOn` (persists to the existing `kimera.adaptiveQuality` key, releases the cap
 immediately on OFF, and evaluate() now gates on the LIVE state so re-enabling needs no reload —
 the frame-stats subscription is now unconditional).
 
@@ -2289,7 +2523,7 @@ holds at 3 even after playback), web typecheck green.
 - Added centralized editor responsive layout config/hook in `apps/web/src/editor/responsive-layout.ts` for mode thresholds, panel sizes, resize bounds, density, and CSS vars.
 - Wired `EditorPage` to use fluid computed panel/timeline sizing, mode/density data attributes, compact topbar overflow, and tablet/phone overlay state.
 - Added tablet/phone panel sheets for Assets/Inspector, a mobile bottom rail, and an Audio overlay while preserving dedicated desktop/laptop spaces when width allows.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 - Chrome/Playwright responsive smoke captured `1920x1080`, `1440x900`, `1280x800`, `768x1024`, `390x844`, and `430x932` under `apps/worker/tmp/responsive-layout/`; horizontal overflow is 0 in the verified tablet/phone modes.
 
 ### 2026-07-03 - Codex: custom dropdown sweep
@@ -2297,12 +2531,12 @@ holds at 3 even after playback), web typecheck green.
 - Replaced the remaining native JSX dropdown (`EffectPresetRow` presets) with the shared `ThemedSelect` component.
 - Polished the shared dropdown trigger/menu styling so existing custom dropdowns get a cleaner dark menu, hover, and active state.
 - Verified no user-facing JSX `<select>` remains outside `ThemedSelect`.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 — Claude: pro-floor feature batch (presets, markers, SPEED, mixer+pan, pre-warm, cloud audio post-mix)
 
 - **Effect presets**: shared `snapshotLayerAttributes`/`applyLayerAttributes`/`applyAttributesToLayer`
-  (timeline-ops); web store `editor/effect-presets.ts` (localStorage `lumio.effectPresets`); UI row in
+  (timeline-ops); web store `editor/effect-presets.ts` (localStorage `kimera.effectPresets`); UI row in
   the Effects inspector (`EffectPresetRow.tsx`). Presets strip `transform` — a look never moves a clip.
 - **Named/colored markers**: `TimelineMarker {timeSeconds,name?,color?}` + `normalizeTimelineMarkers`
   (settings.timeline.markers now `(number | TimelineMarker)[]` — ALWAYS read through the normalizer).
@@ -2333,46 +2567,46 @@ holds at 3 even after playback), web typecheck green.
 - Local/Brand asset panels now show folder controls with All, created/found folders, and a Create folder action.
 - Uploads and dropped files land in the selected Local/Brand folder; root All still shows the full source library.
 - The "Drop media, Premiere/XML, or template files here" prompt only appears when the current asset view is empty, while the whole asset panel remains a drop target.
-- Gate run: `pnpm --filter @lumio-by-aelivion/web typecheck`.
+- Gate run: `pnpm --filter @kimera-by-aelivion/web typecheck`.
 
 ### 2026-07-03 - Codex: asset-bin drag-and-drop upload/import
 
 - Local/Brand asset panels now accept dragged files; media files upload to the asset library.
-- Dropped `.prproj`, `.edl`, `.fcpxml`, `.xml`, `.json`, and `.lumio-template` files in the main Assets panel route through the existing timeline/template import flow.
+- Dropped `.prproj`, `.edl`, `.fcpxml`, `.xml`, `.json`, and `.kimera-template` files in the main Assets panel route through the existing timeline/template import flow.
 - File picker now supports multi-select and the same media/import file routing in the main Assets panel.
-- Gate run: `pnpm --filter @lumio-by-aelivion/web typecheck`.
+- Gate run: `pnpm --filter @kimera-by-aelivion/web typecheck`.
 
 ### 2026-07-03 - Codex: timeline whole-track reorder handles
 
 - Added a drag handle to the left track label rail; dragging it onto another compatible track reorders the entire track with all its layers intact.
 - Track reordering is constrained within visual-vs-audio families, so audio stays below visual tracks while V tracks and A tracks can be rearranged internally.
 - Added drop-position styling on the track header rail.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web editor:test`, `pnpm --filter @lumio-by-aelivion/web typecheck`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web editor:test`, `pnpm --filter @kimera-by-aelivion/web typecheck`.
 
 ### 2026-07-03 - Codex: timeline Ctrl+A selects all clips
 
 - Added Ctrl/Cmd+A in the editor keyboard handler to select every timeline layer while preserving normal text selection inside inputs, textareas, selects, and contenteditable fields.
-- Gate run: `pnpm --filter @lumio-by-aelivion/web editor:test`.
-- Note: `pnpm --filter @lumio-by-aelivion/web typecheck` is currently blocked by unrelated `VideoPreview.tsx` audio prop/helper errors (`trackGain`, `getTrackAudioGain`, `getTrackPan`).
+- Gate run: `pnpm --filter @kimera-by-aelivion/web editor:test`.
+- Note: `pnpm --filter @kimera-by-aelivion/web typecheck` is currently blocked by unrelated `VideoPreview.tsx` audio prop/helper errors (`trackGain`, `getTrackAudioGain`, `getTrackPan`).
 
 ### 2026-07-03 - Codex: editor toolbar import button order
 
 - Swapped the top editor toolbar template/timeline controls so Import timeline/template appears before Export template package.
-- Gate run: `pnpm --filter @lumio-by-aelivion/web typecheck`.
+- Gate run: `pnpm --filter @kimera-by-aelivion/web typecheck`.
 
 ### 2026-07-03 - Codex: `.prproj` successful sequence selection no longer unsupported
 
 - Moved `prproj.multiple_sequences` from Unsupported to Mapped because the importer now intentionally selects the clip-heavy sequence and preserves nested sequence links.
 - Verified the user's `Visualizer_Slideshow.prproj` report now has `unsupportedCount: 0`.
-- Gates run: `pnpm --filter @lumio-by-aelivion/shared typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/shared typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 - Codex: `.prproj` nested sequence import foundation
 
-- Added optional `ProjectGraph.compositions` and `TimelineLayer.nestedCompositionId` so imports can preserve Premiere nested sequences as linked Lumio compositions.
+- Added optional `ProjectGraph.compositions` and `TimelineLayer.nestedCompositionId` so imports can preserve Premiere nested sequences as linked Kimera compositions.
 - The `.prproj` object fallback now catalogs every sequence, links parent clips whose SubClip/MasterClip name matches a sequence, and stores nested timelines alongside the root composition.
-- Obvious Premiere `Graphic` title clips import as native Lumio text layers with editable placeholder text, ready for later private-data text/animation decoding.
+- Obvious Premiere `Graphic` title clips import as native Kimera text layers with editable placeholder text, ready for later private-data text/animation decoding.
 - Verified the user's `Visualizer_Slideshow.prproj`: root `Work` sequence imports 20 clips, 15 nested sequence links, 12 compositions, and 10 native text layers.
-- Gates run: `pnpm --filter @lumio-by-aelivion/shared typecheck`, `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/shared typecheck`, `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 — Claude: paste attributes (⌃⌥C/⌃⌥V) + asset-bin preview chip & Download
 
@@ -2395,7 +2629,7 @@ holds at 3 even after playback), web typecheck green.
 - Fallback scans `ObjectID`/`ObjectUID` blocks and follows sequence -> track group -> track -> clip refs, then selects the sequence with the most readable clips.
 - Verified the user's `Visualizer_Slideshow.prproj` now imports `Work` with 20 clips instead of `Placeholder_1` with 0 clips.
 - Added editor-test coverage for placeholder-first fallback sequence selection.
-- Gates run: `pnpm --filter @lumio-by-aelivion/shared typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/shared typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 - Codex: real `.prproj` object-graph import hardening
 
@@ -2403,7 +2637,7 @@ holds at 3 even after playback), web typecheck green.
 - Sequence import now resolves track groups -> track objects -> ref-only clip items -> actual clip objects; audio track fallback is authoritative when referenced clip objects omit an explicit media type.
 - Empty sequence imports now add a clearer `prproj.no_clips` unsupported report with track/clip-ref counts and the Final Cut Pro XML fallback suggestion.
 - Added editor-test coverage for referenced object-graph video/audio clips.
-- Gates run: `pnpm --filter @lumio-by-aelivion/shared typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/shared typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 - Codex: limited `.prproj` timeline import
 
@@ -2411,19 +2645,19 @@ holds at 3 even after playback), web typecheck green.
 - Browser import now accepts gzip-compressed `.prproj` files and plain XML `.prproj` files, then feeds decoded XML through the shared adapter.
 - V1 imports the first readable Premiere sequence's video/audio clip timing, source in-points, media placeholders, and obvious Cross Dissolve transitions; reports multiple sequences, effects/components, nested sequences, invalid clips, and unmapped transitions.
 - Added `examples/timeline-imports/simple-premiere.prproj`, docs tracker updates, and editor-test coverage.
-- Gates run: `pnpm --filter @lumio-by-aelivion/shared typecheck`, `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/shared typecheck`, `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 - Codex: smooth multi-select vertical drag
 
 - Replaced DOM hover-based track targeting with pointer-delta/row-pitch targeting, so dragging through the gap between tracks no longer flips the target up/down.
 - Selected clips now follow the pointer smoothly in Y while the destination track is snapped separately on release; all moved clips get the dragging state so CSS transitions do not lag behind the pointer.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 - Codex: imported track placement + multi-select vertical track drag
 
 - Append timeline imports now insert imported visual tracks above all existing visual tracks and keep audio tracks grouped below visuals.
 - Multi-selected clip drags now preserve the selected clips' relative track spacing when dragged up/down, with per-clip target tracks and live vertical preview offsets; visual clips cannot be dropped into audio tracks and audio stays in audio tracks.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-03 — Claude: trim suite complete (roll R / slide U tools, E extend edit) + color-parity elimination work
 
@@ -2564,7 +2798,7 @@ holds at 3 even after playback), web typecheck green.
 
 - Made the timeline duration/end ruler tick explicit instead of relying on `span:last-child`.
 - Suppressed the previous ruler tick when it is too close to the duration label, avoiding overlap/flicker at the right edge.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web editor:test`; web typecheck is currently blocked by Claude's claimed `scene-compositor.ts` region-effect work.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web editor:test`; web typecheck is currently blocked by Claude's claimed `scene-compositor.ts` region-effect work.
 
 ### 2026-07-02 - Codex: timeline import append, relink, and audio-track guards
 
@@ -2573,7 +2807,7 @@ holds at 3 even after playback), web typecheck green.
 - Right-click `Replace asset...` keeps original clip start/track/duration and no longer creates companion audio while relinking.
 - Asset-bin hover add buttons route to replacement while replace mode is active.
 - New MP4/MOV uploads are tagged with detected audio presence; auto companion audio is only created when audio is present, and known no-audio videos disable audio-only/linked-audio actions.
-- Gates run: `pnpm --filter @lumio-by-aelivion/web typecheck`, `pnpm --filter @lumio-by-aelivion/web editor:test`.
+- Gates run: `pnpm --filter @kimera-by-aelivion/web typecheck`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
 
 ### 2026-07-02 — Claude: crash recovery + persistence hardening (P1 slice 1)
 
@@ -2596,10 +2830,10 @@ holds at 3 even after playback), web typecheck green.
 ### 2026-07-02 - Codex: Task 9B external timeline import adapters
 
 - Added shared external timeline adapter in `packages/shared/src/external-timeline-adapter.ts` and exported it from shared.
-- Supports CMX-style `.edl`, FCPXML `.fcpxml`, and Final Cut/Premiere XML `.xml` imports into native Lumio compositions with media placeholder slots and import reports.
+- Supports CMX-style `.edl`, FCPXML `.fcpxml`, and Final Cut/Premiere XML `.xml` imports into native Kimera compositions with media placeholder slots and import reports.
 - Wired the editor top-bar Import timeline/template button to detect those files, show a report modal before applying, preserve existing project plugin manifests, and store the report in `editableFields.timelineImportReport`.
 - Added manual examples in `examples/timeline-imports/`; updated `PLUGIN_ARCHITECTURE.md` and `architecture.md`.
-- Gates run: `pnpm --filter @lumio-by-aelivion/shared typecheck`, `pnpm --filter @lumio-by-aelivion/web typecheck`, and shared smoke imports for EDL/FCPXML/XML.
+- Gates run: `pnpm --filter @kimera-by-aelivion/shared typecheck`, `pnpm --filter @kimera-by-aelivion/web typecheck`, and shared smoke imports for EDL/FCPXML/XML.
 
 ### 2026-07-02 — Claude: NLE gap analysis + full P0 performance track + timeline polish
 

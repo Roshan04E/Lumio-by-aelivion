@@ -44,17 +44,25 @@ uniform float u_opacity;
 
 // Stylize effects (real per-pixel shader ops, not DOM overlays).
 uniform bool u_hasVignette;
-uniform float u_vigAmount;   // 0..1 darkening strength at the corners
-uniform float u_vigSize;     // 0..1 size of the clear center
+uniform float u_vigAmount;     // 0..1 darkening strength at the corners
+uniform float u_vigSize;       // 0..1 size of the clear center
+uniform float u_vigFeather;    // 0..1 falloff width (1 = legacy fall-to-corner)
+uniform float u_vigRound;      // 0..1 aspect correction (0 = legacy UV circle, 1 = pixel-circular)
+uniform float u_vigHighlights; // 0..1 highlight protection (0 = plain multiply)
+uniform float u_aspect;        // frame width / height (for u_vigRound)
 
 uniform bool u_hasGrain;
 uniform float u_grainAmount; // 0..1 film-grain intensity
-uniform float u_time;        // composition time (s) — deterministic grain across preview+export
+uniform float u_grainSize;   // grain size multiplier (1 = legacy 1280×720 virtual grid)
+uniform float u_time;        // layer time (s) — deterministic grain across preview+export
 
 uniform bool u_hasChroma;
-uniform vec3 u_chromaColor;  // key color, linear 0..1
-uniform float u_chromaTol;   // 0..1 base tolerance (how close counts as key)
-uniform float u_chromaSoft;  // 0..1 edge softness
+uniform vec3 u_chromaColor;   // key color, linear 0..1
+uniform float u_chromaTol;    // base tolerance in normalized CbCr distance (how close counts as key)
+uniform float u_chromaSoft;   // edge softness (same domain)
+uniform float u_chromaDespill;   // 0..1 key-chroma suppression on kept spill pixels
+uniform float u_chromaChoke;     // 0..1 matte erosion after softness
+uniform bool u_chromaMatteView;  // render the grayscale alpha matte instead of the frame (tuning)
 
 // Transition reveal — a real per-pixel GPU wipe/iris on the INCOMING clip's alpha. The outgoing clip
 // is composited opaque underneath in every renderer, so masking the incoming alpha produces a true
@@ -100,6 +108,21 @@ float grainHash(vec2 p) {
   return fract(p.x * p.y);
 }
 
+// BT.709 chroma plane — luminance-independent (Cb, Cr) so dark and bright shades of the
+// key color key together, and the keyer works for ANY key color (not just green).
+vec2 toCbCr(vec3 c) {
+  float y = dot(c, LUMA);
+  return vec2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
+}
+
+// Reconstruct RGB from luma + a (possibly despilled) chroma pair — BT.709 inverse.
+vec3 fromYCbCr(float y, vec2 cc) {
+  float r = y + 1.5748 * cc.y;
+  float b = y + 1.8556 * cc.x;
+  float g = (y - 0.2126 * r - 0.0722 * b) / 0.7152;
+  return vec3(r, g, b);
+}
+
 vec3 lutLookup(vec3 c) {
   float n = u_lutSize;
   vec3 p = clamp(c, 0.0, 1.0) * (n - 1.0);
@@ -129,28 +152,53 @@ void main() {
     src.rgb = mix(src.rgb, graded, u_amount);
   }
 
-  // Chroma key — real color-distance keyer with soft edge + green-spill suppression.
+  // Chroma key — YCbCr chroma-plane keyer: soft edge, matte choke, key-direction despill.
   if (u_hasChroma) {
-    float dist = distance(src.rgb, u_chromaColor);
+    vec2 keyCC = toCbCr(u_chromaColor);
+    float keyLen = max(length(keyCC), 0.10); // near-gray key colors: keep the normalization sane
+    vec2 srcCC = toCbCr(src.rgb);
+    float dist = distance(srcCC, keyCC) / keyLen;
     float keyAlpha = smoothstep(u_chromaTol, u_chromaTol + u_chromaSoft + 0.001, dist);
-    // Suppress spill: where we're near the key, pull the dominant key channel toward luma.
+    // Choke: erode the matte after the soft edge (0 = identity).
+    keyAlpha = clamp((keyAlpha - u_chromaChoke) / max(1.0 - u_chromaChoke, 0.001), 0.0, 1.0);
+    if (u_chromaMatteView) {
+      fragColor = vec4(vec3(keyAlpha), 1.0);
+      return;
+    }
+    // Despill: suppress the chroma component along the key direction on kept pixels near the
+    // key (edge fringe), reconstructing luma-preserving RGB. Works for any key color.
     float spill = 1.0 - keyAlpha;
     float l = dot(src.rgb, LUMA);
-    src.rgb = mix(src.rgb, mix(src.rgb, vec3(l), 0.6), spill * step(max(src.r, src.b), src.g));
+    vec2 keyDir = keyCC / max(length(keyCC), 1e-4);
+    float along = max(dot(srcCC, keyDir), 0.0);
+    vec2 despilled = srcCC - keyDir * (along * u_chromaDespill * spill);
+    src.rgb = clamp(fromYCbCr(l, despilled), 0.0, 1.0);
     src.a *= keyAlpha;
   }
 
-  // Vignette — smooth radial darkening in source UV space (gamma-correct on the graded rgb).
+  // Vignette — smooth radial darkening (gamma-correct on the graded rgb). Roundness blends the
+  // legacy UV-space circle (0) toward a pixel-circular falloff (1); at roundness 0 + feather 1
+  // + highlights 0 this is exactly the pre-param shader: length(d)*sqrt(2) vs smoothstep(start, 1).
   if (u_hasVignette) {
-    float r = length(v_uv - 0.5) * 1.41421356;   // 0 center → ~1 corners
+    vec2 d = v_uv - 0.5;
+    d.x *= mix(1.0, u_aspect, u_vigRound);
+    float corner = length(vec2(0.5 * mix(1.0, u_aspect, u_vigRound), 0.5));
+    float r = length(d) / corner;                  // 0 center → 1 corners
     float start = mix(0.15, 0.95, u_vigSize);
-    float v = 1.0 - u_vigAmount * smoothstep(start, 1.0, r);
+    float end = mix(start + 0.02, 1.0, u_vigFeather);
+    float v = 1.0 - u_vigAmount * smoothstep(start, end, r);
+    // Protect highlights: bright pixels resist the darkening (filmic vignette, not a flat multiply).
+    float vl = dot(src.rgb, LUMA);
+    v = mix(v, 1.0, u_vigHighlights * smoothstep(0.6, 1.0, vl));
     src.rgb *= v;
   }
 
-  // Film grain — luminance-aware (strongest in midtones), deterministic per frame.
+  // Film grain — luminance-aware (strongest in midtones), deterministic per frame. The seed uses
+  // a long non-integer period so the pattern never visibly repeats (the old fract(u_time) reset
+  // the pattern every whole second); u_grainSize scales the virtual grain cell (1 = legacy grid).
   if (u_hasGrain) {
-    float n = grainHash(v_uv * vec2(1280.0, 720.0) + fract(u_time) * 97.13);
+    vec2 grid = vec2(1280.0, 720.0) / max(u_grainSize, 0.01);
+    float n = grainHash(v_uv * grid + mod(u_time, 61.7) * 97.13);
     float l = dot(src.rgb, LUMA);
     float midWeight = 1.0 - abs(l - 0.5) * 1.4;
     src.rgb += (n - 0.5) * u_grainAmount * max(0.0, midWeight);

@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { parsePluginManifest, templateDefinitions, toolDefinitions } from "@lumio-by-aelivion/shared";
+import { parsePluginManifest, templateDefinitions, toolDefinitions } from "@kimera-by-aelivion/shared";
 import { prisma } from "../src/lib/prisma";
 import { asJson } from "../src/lib/json";
 

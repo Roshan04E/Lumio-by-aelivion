@@ -58,10 +58,10 @@ export interface TemplateProvider {
   listTemplates(): RuntimeTemplateItem[];
 }
 
-const BUILTIN_SOURCE: PluginSource = { kind: "builtin", id: "lumio.builtin", name: "Lumio Built-ins" };
+const BUILTIN_SOURCE: PluginSource = { kind: "builtin", id: "kimera.builtin", name: "Kimera Built-ins" };
 
 export const builtInEffectProvider: EffectProvider = {
-  id: "lumio.builtin.effects",
+  id: "kimera.builtin.effects",
   name: "Built-in Effects",
   listEffects() {
     return timelineEffectRegistry.map((definition) => ({
@@ -76,7 +76,7 @@ export const builtInEffectProvider: EffectProvider = {
 };
 
 export const builtInTransitionProvider: TransitionProvider = {
-  id: "lumio.builtin.transitions",
+  id: "kimera.builtin.transitions",
   name: "Built-in Transitions",
   listTransitions() {
     return listTransitions().map((definition) => ({
@@ -90,7 +90,7 @@ export const builtInTransitionProvider: TransitionProvider = {
 };
 
 export const builtInLookProvider: LookProvider = {
-  id: "lumio.builtin.looks",
+  id: "kimera.builtin.looks",
   name: "Built-in Looks",
   listLooks() {
     return CREATIVE_LOOKS.map((definition) => ({

@@ -32,7 +32,7 @@ load), and a hard crash left no record of WHY (in-memory telemetry dies with the
   (`clearThumbnailCaches` / `clearAudioPeakCaches` — new exports) + suspend background until under.
 Started idempotently from EditorPage mount. Telemetry: `window.__rfDegradation`.
 `crash-telemetry.ts` (installed in main.tsx): onerror/unhandledrejection → 20-entry localStorage
-ring buffer (`lumio.crashLog`) that SURVIVES the crash; next boot console.warns the previous
+ring buffer (`kimera.crashLog`) that SURVIVES the crash; next boot console.warns the previous
 session's last-30-min tail; read via `window.__rfCrashLog`.
 **Verify:** typecheck + editor:test + build clean. Field check: `__rfDegradation` counters move
 under artificial load; `__rfCrashLog` captures a thrown error across a reload.

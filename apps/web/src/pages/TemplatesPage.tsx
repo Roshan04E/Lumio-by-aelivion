@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Clock3, FilePlus2, Layers, Search } from "lucide-react";
-import { templateDefinitions, type TemplateDefinition } from "@lumio-by-aelivion/shared";
+import { templateDefinitions, type TemplateDefinition } from "@kimera-by-aelivion/shared";
 import { createAsset, createProject, listTemplates } from "../lib/api";
 
 /** Stable hue per string so each template/category gets its own colorful poster. */

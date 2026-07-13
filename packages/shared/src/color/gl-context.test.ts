@@ -2,7 +2,7 @@
  * Standalone assert script for the preview WebGL context GOVERNOR (todo.md Phase 2).
  * Repo convention: no test framework — exits non-zero on first failure.
  *
- *   pnpm --filter @lumio-by-aelivion/shared governor:test
+ *   pnpm --filter @kimera-by-aelivion/shared governor:test
  *
  * Verifies the enforcement semantics that keep large timelines under the browser context cap:
  *   - telemetry (active count) is accurate regardless of the enforcement flag;

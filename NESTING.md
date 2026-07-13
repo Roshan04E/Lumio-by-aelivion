@@ -4,7 +4,7 @@ Status: **design approved-pending, Phase A starting** (2026-07-03). Owner: Claud
 
 ## Why this shape
 
-Lumio already imports Premiere projects and **preserves nested sequences** (`external-timeline-adapter.ts` emits
+Kimera already imports Premiere projects and **preserves nested sequences** (`external-timeline-adapter.ts` emits
 `TimelineLayer.nestedCompositionId` + `ProjectGraph.compositions`). Native nesting must therefore be the SAME
 mechanism — an imported Premiere nest and a user-created compound are one feature, one data model, one renderer
 path. No parallel "compound clip" concept.
@@ -12,14 +12,14 @@ path. No parallel "compound clip" concept.
 ## Premiere semantics we replicate (researched 2026-07-03)
 
 1. **A nest is a real sequence** used as a clip. It lives at project level; the clip is a *reference*.
-   Lumio: nested sequence = `TimelineComposition` in `ProjectGraph.compositions`; `graph.composition` stays the
+   Kimera: nested sequence = `TimelineComposition` in `ProjectGraph.compositions`; `graph.composition` stays the
    root/active deliverable. The clip is a `type:"video"` layer with `nestedCompositionId` (matches the importer).
 2. **Live reference**: editing the source sequence updates every instance. (By-reference storage gives us this.)
 3. **The nested clip behaves like any clip**: trim (`sourceInSeconds`/`durationSeconds`), constant `speed`,
    transforms, effects, masks, blend modes, transitions — all apply to the **composited output** of the nest.
    Its "media length" = the nested sequence's duration.
 4. **Duration is not live**: shortening the source sequence does NOT shrink placed clips — the overhang renders
-   as empty (Premiere: black/silence; Lumio: transparent + silence, see §Alpha). Lengthening the source doesn't
+   as empty (Premiere: black/silence; Kimera: transparent + silence, see §Alpha). Lengthening the source doesn't
    auto-extend clips; the user trims to reveal (max duration = nested comp duration via `buildLayerMaxDurations`).
 5. **Alpha is preserved** (nesting a title stays transparent over lower parent tracks). The nested comp's
    `backgroundColor` applies only when it is opened/rendered as the root — as a clip source it composites with

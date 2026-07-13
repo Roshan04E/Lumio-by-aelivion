@@ -5,7 +5,7 @@
  * with a 2s image + an 8s audio layer (comp duration 8s), and runs `exportLocally`. Detects the three
  * outcomes: completes (blob bytes), throws (clean error message — the real cause), or HANGS (the bug).
  *
- * Run: pnpm --filter @lumio-by-aelivion/worker exec tsx src/export-audio-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/export-audio-probe.ts   (dev server must be up)
  */
 import { chromium } from "playwright";
 

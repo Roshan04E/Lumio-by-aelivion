@@ -2,9 +2,9 @@
  * Standalone assert script for the editor foundation (Phase 3). Repo convention:
  * no test framework — exits non-zero on first failure.
  *
- *   pnpm --filter @lumio-by-aelivion/web editor:test
+ *   pnpm --filter @kimera-by-aelivion/web editor:test
  */
-import { applyLayerAttributes, buildLumioPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isLumioPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestParentClipId, parseExternalTimelineFile, parseLumioPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer, type SourceAsset } from "@lumio-by-aelivion/shared";
+import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -309,7 +309,7 @@ function check(name: string, condition: boolean): void {
     <asset id="r3" name="bus-closeup.mov" src="file:///Volumes/Media/bus-closeup.mov" duration="6s"/>
   </resources>
   <library>
-    <event name="Lumio Import Tests">
+    <event name="Kimera Import Tests">
       <project name="Titled Transition FCPXML">
         <sequence format="r1" duration="12s">
           <spine>
@@ -322,7 +322,7 @@ function check(name: string, condition: boolean): void {
             <transition name="Cross Dissolve" offset="4s" duration="1s"/>
             <asset-clip name="Bus Closeup" ref="r3" offset="5s" start="1s" duration="5s"/>
             <title name="Intro Title" offset="10s" duration="2s">
-              <text>Hello Lumio</text>
+              <text>Hello Kimera</text>
             </title>
           </spine>
         </sequence>
@@ -336,7 +336,7 @@ function check(name: string, condition: boolean): void {
   const busLayer = fcpxmlClips.find((layer) => layer.name === "Bus Closeup");
   const cityLayer = fcpxmlClips.find((layer) => layer.name === "City Wide");
   check("fcpxml import detects format", fcpxml.report.format === "fcpxml");
-  check("fcpxml title maps to an editable text layer", titleLayer?.text === "Hello Lumio");
+  check("fcpxml title maps to an editable text layer", titleLayer?.text === "Hello Kimera");
   check("fcpxml reports the title mapping", fcpxml.report.mapped.some((item) => item.code === "fcpxml.title"));
   check("fcpxml transition maps to crossDissolve on the incoming clip", busLayer?.transitionIn?.kind === "crossDissolve");
   check("fcpxml reports the transition mapping", fcpxml.report.mapped.some((item) => item.code === "fcpxml.transition"));
@@ -790,6 +790,92 @@ function check(name: string, condition: boolean): void {
     return (sourceLayer.effects[0]!.params as { exposure?: number }).exposure === -8;
   })());
 
+  // --- Keyframes travel with paste-attributes / presets ---------------------------------------
+  type KfLayer = TimelineLayer & { animations?: { id: string; target: { scope: string; effectId?: string; property: string; maskId?: string }; timeSeconds: number }[] };
+  const animatedSource = {
+    ...sourceLayer,
+    animations: [
+      { id: "k_fx", target: { scope: "effect", effectId: "src_fx", property: "exposure" }, timeSeconds: 1, value: -8, interpolation: "linear", temporal: {} },
+      { id: "k_stray", target: { scope: "effect", effectId: "not_in_stack", property: "amount" }, timeSeconds: 1, value: 3, interpolation: "linear", temporal: {} },
+      { id: "k_tr", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 2, value: 50, interpolation: "linear", temporal: {} },
+      { id: "k_mask", target: { scope: "mask", maskId: "m1", property: "feather" }, timeSeconds: 1, value: 4, interpolation: "linear", temporal: {} }
+    ]
+  } as never as (typeof comp.tracks[0])["layers"][0];
+  const kfSnapshot = snapshotLayerAttributes(animatedSource);
+  const snapKeys = (kfSnapshot.animations ?? []) as KfLayer["animations"] & {};
+  check(
+    "snapshot carries effect + transform keys only (mask + orphan-effect keys excluded)",
+    snapKeys.length === 2 && snapKeys.some((k) => k.id === "k_fx") && snapKeys.some((k) => k.id === "k_tr")
+  );
+  // Target with its own keys in every scope + a legacy v1 keyframe: paste must replace the
+  // effect/transform scopes, keep the mask key, and clear the legacy (transform-ish) keyframes.
+  const kfTargetComp = {
+    ...comp,
+    tracks: comp.tracks.map((t) => ({
+      ...t,
+      layers: t.layers.map((l) =>
+        l.id === "b"
+          ? ({
+              ...l,
+              keyframes: [{ id: "legacy1", property: "opacity", timeSeconds: 5, value: 20, easing: "linear" }],
+              animations: [
+                { id: "old_fx", target: { scope: "effect", effectId: "b_fx", property: "amount" }, timeSeconds: 0.5, value: 9, interpolation: "linear", temporal: {} },
+                { id: "old_tr", target: { scope: "layer", property: "transform.scale" }, timeSeconds: 0.5, value: 2, interpolation: "linear", temporal: {} },
+                { id: "old_mask", target: { scope: "mask", maskId: "m9", property: "feather" }, timeSeconds: 0.5, value: 1, interpolation: "linear", temporal: {} }
+              ]
+            } as never)
+          : l
+      )
+    }))
+  } as typeof comp;
+  const kfPasted = applyLayerAttributes(kfTargetComp, ["b", "c"], kfSnapshot);
+  const kfB = kfPasted.tracks[0]!.layers.find((l) => l.id === "b")! as never as KfLayer;
+  const kfC = kfPasted.tracks[0]!.layers.find((l) => l.id === "c")! as never as KfLayer;
+  const bEffectKey = (kfB.animations ?? []).find((k) => k.target?.scope === "effect");
+  const cEffectKey = (kfC.animations ?? []).find((k) => k.target?.scope === "effect");
+  check(
+    "pasted effect keys are remapped to each target's own fresh effect id",
+    bEffectKey?.target.effectId === kfB.effects[0]!.id && cEffectKey?.target.effectId === kfC.effects[0]!.id && bEffectKey?.target.effectId !== cEffectKey?.target.effectId
+  );
+  check("multi-target paste never shares keyframe references", bEffectKey !== cEffectKey && bEffectKey?.id !== cEffectKey?.id);
+  check(
+    "paste replaces effect/transform-scope keys but keeps mask keys",
+    !(kfB.animations ?? []).some((k) => k.id === "old_fx" || k.id === "old_tr") && (kfB.animations ?? []).some((k) => k.id === "old_mask")
+  );
+  check(
+    "pasted transform key travels and legacy v1 keyframes are cleared (no double-animation)",
+    (kfB.animations ?? []).some((k) => k.target?.property === "transform.opacity") && (kfB.keyframes ?? []).length === 0
+  );
+  check("orphan effect keys (unknown effect id) never paste", !(kfB.animations ?? []).some((k) => k.target?.property === "amount"));
+  // Preset semantics: transform stripped → its keys must not travel; effect keys still do.
+  const presetSnapshot = snapshotLayerAttributes(animatedSource);
+  presetSnapshot.transform = undefined;
+  presetSnapshot.animations = presetSnapshot.animations?.filter((k) => k.target?.scope === "effect");
+  const kfPreset = applyLayerAttributes(kfTargetComp, ["b"], presetSnapshot);
+  const kfPresetB = kfPreset.tracks[0]!.layers.find((l) => l.id === "b")! as never as KfLayer;
+  check(
+    "preset apply keeps the target's transform keys and legacy keyframes, applies effect keys",
+    (kfPresetB.animations ?? []).some((k) => k.id === "old_tr") &&
+      (kfPresetB.keyframes ?? []).length === 1 &&
+      (kfPresetB.animations ?? []).some((k) => k.target?.scope === "effect" && k.target.effectId === kfPresetB.effects[0]!.id)
+  );
+  // Pre-keyframe snapshots (old saved presets: no animations field) leave target keys alone.
+  const legacySnapshot = { ...snapshotLayerAttributes(animatedSource), animations: undefined };
+  const legacyApplied = applyLayerAttributes(kfTargetComp, ["b"], legacySnapshot);
+  const legacyB = legacyApplied.tracks[0]!.layers.find((l) => l.id === "b")! as never as KfLayer;
+  check(
+    "old presets (no animations field) apply exactly as before (target keys untouched)",
+    (legacyB.animations ?? []).length === 3 && (legacyB.keyframes ?? []).length === 1
+  );
+  // Legacy-only sources: v1 keyframes are folded into the snapshot as layer-local transform keys.
+  const legacySource = { ...animatedSource, animations: [], keyframes: [{ id: "v1k", property: "opacity", timeSeconds: 4.5, value: 10, easing: "linear" }] } as never as (typeof comp.tracks[0])["layers"][0];
+  const legacySourceSnap = snapshotLayerAttributes(legacySource);
+  const migrated = (legacySourceSnap.animations ?? []) as KfLayer["animations"] & {};
+  check(
+    "legacy v1 source keyframes snapshot as layer-local transform.* V2 keys",
+    migrated.length === 1 && migrated[0]!.target.property === "transform.opacity" && migrated[0]!.timeSeconds === 4.5 - (legacySource.startSeconds ?? 0)
+  );
+
   // --- Rate stretch (constant clip speed): source math scales by speed ------------------------
   const spedComp = {
     ...comp,
@@ -921,6 +1007,15 @@ function check(name: string, condition: boolean): void {
     { id: "t1", layers: [sigLayer("a", "t1")] }
   ]);
   check("span signature: track reorder flips it", sigOf(base) !== sigOf(reordered));
+  // Inserting an EMPTY track at the top shifts every layer's absolute track index without changing
+  // any pixels — it must NOT flip signatures (2026-07-13 report: adding a layer via the "+" button
+  // regenerated every proxy on the timeline).
+  const emptyTopTrack = sigComp([
+    { id: "t0", layers: [] },
+    { id: "t1", layers: [sigLayer("a", "t1")] },
+    { id: "t2", layers: [sigLayer("b", "t2")] }
+  ]);
+  check("span signature: inserting an empty track does NOT flip it", sigOf(base) === sigOf(emptyTopTrack));
   const louder = sigComp([
     { id: "t1", layers: [sigLayer("a", "t1")], volume: 1.6 },
     { id: "t2", layers: [sigLayer("b", "t2")] }
@@ -1198,7 +1293,7 @@ function check(name: string, condition: boolean): void {
   );
 }
 
-// --- .lumio ZIP package round-trip (Task 1.6: embedded-media packages) --------
+// --- .kimera ZIP package round-trip (Task 1.6: embedded-media packages) --------
 {
   const layer: TimelineLayer = {
     id: "v1",
@@ -1243,17 +1338,17 @@ function check(name: string, condition: boolean): void {
   };
   const pkg = buildTimelineTemplatePackage({ projectId: graph.projectId, title: "Zip Test", graph, composition, assets: [asset] });
   const assetBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
-  const zip = buildLumioPackageZip({ pkg, assets: [{ id: "asset_test", fileName: "clip.mp4", bytes: assetBytes }] });
-  check("lumio zip: produces ZIP magic bytes", isLumioPackageZipBytes(zip));
-  const parsed = parseLumioPackageZip(zip);
-  check("lumio zip: timeline layer count survives", parsed.pkg.graph.composition?.tracks[0]?.layers.length === 1);
-  check("lumio zip: manifest name survives", parsed.pkg.manifest.name === "Zip Test");
+  const zip = buildKimeraPackageZip({ pkg, assets: [{ id: "asset_test", fileName: "clip.mp4", bytes: assetBytes }] });
+  check("kimera zip: produces ZIP magic bytes", isKimeraPackageZipBytes(zip));
+  const parsed = parseKimeraPackageZip(zip);
+  check("kimera zip: timeline layer count survives", parsed.pkg.graph.composition?.tracks[0]?.layers.length === 1);
+  check("kimera zip: manifest name survives", parsed.pkg.manifest.name === "Zip Test");
   const roundTrippedBytes = parsed.assetBytes.get("asset_test");
   check(
-    "lumio zip: asset bytes survive byte-for-byte",
+    "kimera zip: asset bytes survive byte-for-byte",
     Boolean(roundTrippedBytes) && roundTrippedBytes!.length === assetBytes.length && roundTrippedBytes!.every((b, i) => b === assetBytes[i])
   );
-  check("lumio zip: bare JSON bytes are NOT sniffed as ZIP", !isLumioPackageZipBytes(new TextEncoder().encode(JSON.stringify(pkg))));
+  check("kimera zip: bare JSON bytes are NOT sniffed as ZIP", !isKimeraPackageZipBytes(new TextEncoder().encode(JSON.stringify(pkg))));
 }
 
 // --- Shared transition-name mapping table (Task 2.1) --------------------------

@@ -7,12 +7,12 @@
  */
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Activity, AudioLines, Info, Spline, X } from "lucide-react";
-import type { TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineLayer } from "@kimera-by-aelivion/shared";
 import { GraphEditor } from "./GraphEditor";
 
 export type BottomWorkspaceTab = "graph" | "audio" | "scopes" | "metadata";
 
-const HEIGHT_STORAGE_KEY = "lumio.bottomWorkspace.height";
+const HEIGHT_STORAGE_KEY = "kimera.bottomWorkspace.height";
 const SNAP_HEIGHTS = [200, 300, 450];
 const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 560;

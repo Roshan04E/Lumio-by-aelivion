@@ -8,10 +8,10 @@ import {
 } from "./plugin-manifest";
 import type { ProjectGraph, SourceAsset, TimelineComposition, TimelineLayer } from "./types";
 
-export const lumioTimelineTemplatePackageFormat = "lumio.timeline-template.package" as const;
-export const lumioTimelineTemplatePackageVersion = 1 as const;
+export const kimeraTimelineTemplatePackageFormat = "kimera.timeline-template.package" as const;
+export const kimeraTimelineTemplatePackageVersion = 1 as const;
 
-export interface LumioTemplateAssetRef {
+export interface KimeraTemplateAssetRef {
   id: string;
   fileName: string;
   fileType: string;
@@ -23,17 +23,17 @@ export interface LumioTemplateAssetRef {
   source?: SourceAsset["source"] | undefined;
 }
 
-export interface LumioTimelineTemplatePackage {
-  format: typeof lumioTimelineTemplatePackageFormat;
-  formatVersion: typeof lumioTimelineTemplatePackageVersion;
+export interface KimeraTimelineTemplatePackage {
+  format: typeof kimeraTimelineTemplatePackageFormat;
+  formatVersion: typeof kimeraTimelineTemplatePackageVersion;
   exportedAt: string;
   app: {
-    name: "Lumio";
+    name: "Kimera";
     company: "Aelivion Studio";
   };
   manifest: PluginTimelineTemplateManifest;
   graph: ProjectGraph;
-  assets: LumioTemplateAssetRef[];
+  assets: KimeraTemplateAssetRef[];
   preview?: {
     durationSeconds: number;
     width: number;
@@ -56,7 +56,7 @@ export interface BuildTimelineTemplatePackageInput {
 }
 
 export interface ApplyTimelineTemplatePackageInput {
-  package: LumioTimelineTemplatePackage;
+  package: KimeraTimelineTemplatePackage;
   projectId: string;
   projectTitle: string;
   sourceAssetId?: string | undefined;
@@ -70,15 +70,15 @@ export interface AppliedTimelineTemplatePackage {
 }
 
 const timelineTemplatePackageSchema = z.object({
-  format: z.literal(lumioTimelineTemplatePackageFormat),
-  formatVersion: z.literal(lumioTimelineTemplatePackageVersion),
+  format: z.literal(kimeraTimelineTemplatePackageFormat),
+  formatVersion: z.literal(kimeraTimelineTemplatePackageVersion),
   exportedAt: z.string().min(1),
   app: z.object({
-    name: z.literal("Lumio"),
+    name: z.literal("Kimera"),
     company: z.literal("Aelivion Studio")
   }),
   manifest: pluginTimelineTemplateManifestSchema,
-  graph: z.custom<ProjectGraph>((value) => isProjectGraphLike(value), "Package graph is not a Lumio project graph."),
+  graph: z.custom<ProjectGraph>((value) => isProjectGraphLike(value), "Package graph is not a Kimera project graph."),
   assets: z
     .array(
       z.object({
@@ -114,7 +114,7 @@ const timelineTemplatePackageSchema = z.object({
     .default([])
 });
 
-export function buildTimelineTemplatePackage(input: BuildTimelineTemplatePackageInput): LumioTimelineTemplatePackage {
+export function buildTimelineTemplatePackage(input: BuildTimelineTemplatePackageInput): KimeraTimelineTemplatePackage {
   const templateGraph = {
     ...buildTemplateGraphFromProject({
       ...input.graph,
@@ -131,10 +131,10 @@ export function buildTimelineTemplatePackage(input: BuildTimelineTemplatePackage
     id: `template.${slugify(title)}.${Date.now()}`,
     name: title,
     version: "1.0.0",
-    description: input.description?.trim() || `Lumio timeline template exported from ${title}.`,
+    description: input.description?.trim() || `Kimera timeline template exported from ${title}.`,
     author: { name: "Aelivion Studio" },
     license: { type: "unknown" },
-    tags: ["timeline", "template", "lumio"],
+    tags: ["timeline", "template", "kimera"],
     category: input.category?.trim() || "User Templates",
     entry: "timeline.json",
     compatibility: {
@@ -147,11 +147,11 @@ export function buildTimelineTemplatePackage(input: BuildTimelineTemplatePackage
   });
 
   return {
-    format: lumioTimelineTemplatePackageFormat,
-    formatVersion: lumioTimelineTemplatePackageVersion,
+    format: kimeraTimelineTemplatePackageFormat,
+    formatVersion: kimeraTimelineTemplatePackageVersion,
     exportedAt: input.createdAt ?? new Date().toISOString(),
     app: {
-      name: "Lumio",
+      name: "Kimera",
       company: "Aelivion Studio"
     },
     manifest,
@@ -169,7 +169,7 @@ export function buildTimelineTemplatePackage(input: BuildTimelineTemplatePackage
   };
 }
 
-export function parseTimelineTemplatePackage(value: unknown): LumioTimelineTemplatePackage {
+export function parseTimelineTemplatePackage(value: unknown): KimeraTimelineTemplatePackage {
   return timelineTemplatePackageSchema.parse(value);
 }
 
@@ -198,7 +198,7 @@ export function applyTimelineTemplatePackage(input: ApplyTimelineTemplatePackage
   return { graph, composition, warnings: unique(warnings) };
 }
 
-export function timelineTemplatePackageToJson(pkg: LumioTimelineTemplatePackage): string {
+export function timelineTemplatePackageToJson(pkg: KimeraTimelineTemplatePackage): string {
   return JSON.stringify(pkg, null, 2);
 }
 
@@ -237,7 +237,7 @@ function slotAccepts(layer: TimelineLayer): PluginTimelineTemplateManifest["slot
   return ["video", "image"];
 }
 
-function collectAssetRefs(graph: ProjectGraph, assets: SourceAsset[]): LumioTemplateAssetRef[] {
+function collectAssetRefs(graph: ProjectGraph, assets: SourceAsset[]): KimeraTemplateAssetRef[] {
   const ids = new Set(flattenCompositionLayers(graph.composition).map((layer) => layer.assetId).filter((id): id is string => Boolean(id)));
   return assets
     .filter((asset) => ids.has(asset.id))
@@ -274,7 +274,7 @@ function collectPackageWarnings(graph: ProjectGraph): PluginWarning[] {
   return warnings;
 }
 
-function missingAssetWarnings(graph: ProjectGraph, availableAssetIds: string[], packageAssets: LumioTemplateAssetRef[]): string[] {
+function missingAssetWarnings(graph: ProjectGraph, availableAssetIds: string[], packageAssets: KimeraTemplateAssetRef[]): string[] {
   const available = new Set(availableAssetIds);
   const packaged = new Set(packageAssets.map((asset) => asset.id));
   const missing = unique(

@@ -18,7 +18,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Baseline, Bold, Highlighter, Italic, Pipette } from "lucide-react";
-import { renderSafeFonts, type TextRun } from "@lumio-by-aelivion/shared";
+import { renderSafeFonts, type TextRun } from "@kimera-by-aelivion/shared";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import { htmlToRuns, runsArePlain, runsToHtml, serializeRuns } from "./rich-text-serialize";
 

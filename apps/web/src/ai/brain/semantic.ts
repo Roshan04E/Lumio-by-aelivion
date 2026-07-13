@@ -1,5 +1,5 @@
 /**
- * Lumio Brain — tier-2 Semantic layer (B3). Catches PARAPHRASES of commands the lower tiers
+ * Kimera Brain — tier-2 Semantic layer (B3). Catches PARAPHRASES of commands the lower tiers
  * already know how to compile, for zero tokens:
  *
  *   1. Slot extraction: clip references, times, colors, and numbers are lifted out of the
@@ -23,8 +23,8 @@
  * `t2.*` ruleId, so 👎 feedback can distrust a mapping per-user like any other rule.
  */
 
-import type { TimelineComposition } from "@lumio-by-aelivion/shared";
-import { getSkill, getSkillTaskKind } from "@lumio-by-aelivion/shared";
+import type { TimelineComposition } from "@kimera-by-aelivion/shared";
+import { getSkill, getSkillTaskKind } from "@kimera-by-aelivion/shared";
 import { extractColor } from "../planner/entities";
 import type { AiPlan } from "../types";
 import { brainPlan, normalizePrompt, routePrompt, type BrainContext, type BrainRouteResult } from "./router";
@@ -493,7 +493,7 @@ async function loadRealEmbedder(): Promise<SemanticEmbedder | null> {
   }
   if (lastError) {
     // Embeddings are an enhancement — the exact-skeleton path keeps working without them.
-    console.warn("Lumio Brain: local embedding model unavailable; tier-2 stays on exact matching.", lastError);
+    console.warn("Kimera Brain: local embedding model unavailable; tier-2 stays on exact matching.", lastError);
   }
   return null;
 }
@@ -559,7 +559,7 @@ interface LearnedPhrase {
   at: number;
 }
 
-const PHRASES_KEY = "lumio.brain.phrases.v1";
+const PHRASES_KEY = "kimera.brain.phrases.v1";
 const MAX_PHRASES = 200;
 
 let memoryPhrases: LearnedPhrase[] = [];
@@ -685,7 +685,7 @@ interface CachedPlan {
   at: number;
 }
 
-const PLAN_CACHE_KEY = "lumio.brain.plancache.v2";
+const PLAN_CACHE_KEY = "kimera.brain.plancache.v2";
 const MAX_CACHED_PLANS = 50;
 
 function djb2(payload: string): string {

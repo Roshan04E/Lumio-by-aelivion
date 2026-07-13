@@ -304,3 +304,23 @@ export function compileColorPipeline(
 }
 
 export const COLOR_IDENTITY_MATRIX_3x4 = IDENTITY_MATRIX_3x4;
+
+// Change-detection key for a compiled pipeline, memoized on object identity. Byte-identical to
+// JSON.stringify(pipeline) (consumers key LUT re-bakes on it), but computed once per distinct
+// pipeline object instead of per frame — getCompositionColorPipeline returns a stable object
+// for unchanged grades, so per-frame stringify of LUT/curve arrays was pure main-thread churn.
+const pipelineKeyCache = new WeakMap<ColorPipeline, string>();
+
+export function colorPipelineCacheKey(pipeline: ColorPipeline | null | undefined): string {
+  if (!pipeline) {
+    // JSON.stringify(null) === "null"; stringify(undefined) is undefined — normalize to "null"
+    // (no consumer distinguishes the two absent forms).
+    return "null";
+  }
+  let key = pipelineKeyCache.get(pipeline);
+  if (key === undefined) {
+    key = JSON.stringify(pipeline);
+    pipelineKeyCache.set(pipeline, key);
+  }
+  return key;
+}

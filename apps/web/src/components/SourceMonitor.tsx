@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Pause, Play, StepBack, StepForward, X } from "lucide-react";
-import type { SourceAsset } from "@lumio-by-aelivion/shared";
+import type { SourceAsset } from "@kimera-by-aelivion/shared";
 import { useAudioPeaks } from "../lib/audioPeaks";
 import { assetHasAudioStream } from "../lib/assetAudio";
 
@@ -9,7 +9,7 @@ type ThreePointOp = "insert" | "overwrite";
 
 const WAVEFORM_BUCKETS = 200;
 
-export const SOURCE_DRAG_MIME = "application/x-lumio-source-drag";
+export const SOURCE_DRAG_MIME = "application/x-kimera-source-drag";
 
 export type SourceDragPayload = {
   assetId: string;
@@ -208,7 +208,7 @@ export function SourceMonitor({
       mode: dragMode
     };
     event.dataTransfer.setData(SOURCE_DRAG_MIME, JSON.stringify(payload));
-    event.dataTransfer.setData("application/x-lumio-asset", asset.id);
+    event.dataTransfer.setData("application/x-kimera-asset", asset.id);
     event.dataTransfer.effectAllowed = "copy";
 
     // Custom drag ghost: a thin timeline-clip-shaped bar (scaled loosely by duration) instead of
@@ -235,14 +235,14 @@ export function SourceMonitor({
       aria-label="Source monitor"
       onDragOver={(event) => {
         // Accept bin-tile drags only — not our OWN outgoing drags (those carry SOURCE_DRAG_MIME).
-        if (onLoadAssetId && event.dataTransfer.types.includes("application/x-lumio-asset") && !event.dataTransfer.types.includes(SOURCE_DRAG_MIME)) {
+        if (onLoadAssetId && event.dataTransfer.types.includes("application/x-kimera-asset") && !event.dataTransfer.types.includes(SOURCE_DRAG_MIME)) {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }
       }}
       onDrop={(event) => {
         if (!onLoadAssetId || event.dataTransfer.types.includes(SOURCE_DRAG_MIME)) return;
-        const assetId = event.dataTransfer.getData("application/x-lumio-asset");
+        const assetId = event.dataTransfer.getData("application/x-kimera-asset");
         if (!assetId) return;
         event.preventDefault();
         onLoadAssetId(assetId);

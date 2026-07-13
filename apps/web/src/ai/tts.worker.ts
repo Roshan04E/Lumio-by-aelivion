@@ -139,7 +139,7 @@ function warm(modelId: string, voice: string): Promise<void> {
         activeDevice = "webgpu";
         return;
       } catch (error) {
-        console.warn("[lumio] tts worker: WebGPU path failed sanity — falling back to WASM.", error);
+        console.warn("[kimera] tts worker: WebGPU path failed sanity — falling back to WASM.", error);
       }
     }
     const cpu = await KokoroTTS.from_pretrained(modelId, { dtype: "q8", device: "wasm", progress_callback: progressCallback });
@@ -214,6 +214,6 @@ scope.onmessage = (event) => {
       closeSplitter(session);
     }
   } catch (error) {
-    console.warn("[lumio] tts worker: message handling failed", error);
+    console.warn("[kimera] tts worker: message handling failed", error);
   }
 };

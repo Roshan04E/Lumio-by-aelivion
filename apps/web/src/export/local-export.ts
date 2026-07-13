@@ -9,7 +9,7 @@
  * pipeline on the main thread (where the `<video>`-seek fallback exists).
  */
 
-import { clipCompositionToWorkArea, expandNestedCompositions, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@lumio-by-aelivion/shared";
+import { clipCompositionToWorkArea, expandNestedCompositions, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@kimera-by-aelivion/shared";
 import { detectBrowserToolCapabilities } from "../tools/capabilities";
 import { type ExportFormat } from "./video-encoder";
 import {
@@ -21,7 +21,7 @@ import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./au
 import { getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
 import { beginPreviewSuspendForExport, endPreviewSuspendForExport } from "./export-preview-suspend";
 import { logExportGl } from "./export-gl-debug";
-import { getActiveGlContextCount } from "@lumio-by-aelivion/shared";
+import { getActiveGlContextCount } from "@kimera-by-aelivion/shared";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "./export-worker-protocol";
 
 export interface LocalExportRequest {

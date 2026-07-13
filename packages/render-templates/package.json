@@ -1,5 +1,5 @@
 {
-  "name": "@lumio-by-aelivion/render-templates",
+  "name": "@kimera-by-aelivion/render-templates",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@lumio-by-aelivion/shared": "workspace:*"
+    "@kimera-by-aelivion/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, type CSSProperties, type RefObject } from "react";
-import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, type ColorPipeline } from "@lumio-by-aelivion/shared";
+import { WebglColorApplicator, bakeMatteLut3d, bakePipelineToLut3d, colorPipelineCacheKey, type ColorPipeline } from "@kimera-by-aelivion/shared";
 
 /**
  * Professional Color System (Phase 3) — WebGL video grading overlay (flag-gated).
@@ -58,7 +58,7 @@ export function WebglVideoOverlay({
     };
   }, []);
 
-  const pipelineKey = JSON.stringify(pipeline);
+  const pipelineKey = colorPipelineCacheKey(pipeline);
   useEffect(() => {
     if (failedRef.current) return;
     try {

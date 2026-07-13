@@ -4,7 +4,7 @@
  * whenever the copied curve's property still exists on the layer; values are
  * clamped into the destination target's range.
  */
-import type { KeyframeHandle, KeyframeInterpolation, TimelineKeyframeV2, TimelineLayer } from "@lumio-by-aelivion/shared";
+import type { KeyframeHandle, KeyframeInterpolation, TimelineKeyframeV2, TimelineLayer } from "@kimera-by-aelivion/shared";
 import { graphTargetKey, type GraphTarget } from "../inspector/keyframeUtils";
 
 export interface ClipboardKeyframe {

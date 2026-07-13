@@ -2,7 +2,7 @@ import { env } from "../config/env";
 import { aiLog, snippet } from "../lib/logger";
 
 /**
- * Lumio AI — multi-provider planner gateway (GP1).
+ * Kimera AI — multi-provider planner gateway (GP1).
  *
  * One OpenAI-compatible client over a prioritized pool of free reasoning models,
  * with automatic failover: on 429/503/5xx/timeout a provider is put in a short
@@ -114,7 +114,7 @@ function pool(): ProviderConfig[] {
 }
 
 /**
- * Lumio Brain B4 — the `fast` model class: small NON-reasoning instruct models for tier-3
+ * Kimera Brain B4 — the `fast` model class: small NON-reasoning instruct models for tier-3
  * transactional compilation. Same keys/endpoints as the reasoning pool but distinct provider
  * ids, so a rate-limited fast model doesn't cool down its reasoning sibling (and vice versa).
  */
@@ -259,7 +259,7 @@ async function callProvider(
         Authorization: `Bearer ${provider.apiKey}`,
         // OpenRouter attribution headers (ignored by the others).
         "HTTP-Referer": env.WEB_ORIGIN,
-        "X-Title": "Lumio AI"
+        "X-Title": "Kimera AI"
       },
       body: JSON.stringify({
         model: provider.model,
@@ -336,7 +336,7 @@ export async function streamPlanWithGateway(
           "Content-Type": "application/json",
           Authorization: `Bearer ${provider.apiKey}`,
           "HTTP-Referer": env.WEB_ORIGIN,
-          "X-Title": "Lumio AI"
+          "X-Title": "Kimera AI"
         },
         body: JSON.stringify({
           model: provider.model,

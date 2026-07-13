@@ -1,12 +1,12 @@
 /**
- * Lumio Brain — tier-0 FAQ (B1). Answers registry-answerable questions locally, instantly, for
+ * Kimera Brain — tier-0 FAQ (B1). Answers registry-answerable questions locally, instantly, for
  * zero tokens: capability questions are GENERATED from the live registries (so the answer is
- * always current), and editor how-tos come from a small table of REAL Lumio shortcuts (the
+ * always current), and editor how-tos come from a small table of REAL Kimera shortcuts (the
  * timeline cheat sheet is the source of truth — the LLM used to invent generic-NLE answers).
  * Precision-first: anchored patterns only; anything else returns null and escalates.
  */
 
-import { buildCapabilityIndex, skillRegistry } from "@lumio-by-aelivion/shared";
+import { buildCapabilityIndex, getTimelineEffectDefinition, skillRegistry } from "@kimera-by-aelivion/shared";
 
 /**
  * Capability questions — the ONE place a slightly wider net is safe: the response is a local
@@ -28,7 +28,7 @@ interface EditorKnowledgeEntry {
 }
 
 /**
- * Real Lumio shortcuts only (mirrors the timeline cheat sheet in TimelineStrip.tsx). Every entry
+ * Real Kimera shortcuts only (mirrors the timeline cheat sheet in TimelineStrip.tsx). Every entry
  * is verified against that sheet — do not add folklore.
  */
 /** NOTE: playback/pan-mode IMPERATIVES used to live here as shortcut tips — they now EXECUTE
@@ -87,11 +87,12 @@ function capabilitiesAnswer(): string {
 }
 
 /**
- * B5 — capability-gap pre-check. Known-impossible asks get an instant honest answer with the
- * nearest supported alternative, instead of the model burning a full reasoning run re-discovering
- * the gap (the refinement log paid this three times for "keyframe the blur"). Precision rule:
- * only fire when the named thing IS an effect — layer properties (opacity/position/scale/
- * rotation/pan/zoom) ARE keyframeable, so those questions pass through to the model untouched.
+ * B5 — effect-keyframe pre-check. "Keyframe the blur" gets an instant registry-derived answer
+ * for zero tokens: effect params ARE keyframeable (evaluated in preview, browser export, and
+ * Remotion via the shared evaluator), so the answer is a how-to for effects with keyframeable
+ * params and an honest "static per clip" only for effects without any (audio dynamics,
+ * graph-param color effects). Precision rule: only fire when the named thing IS an effect —
+ * layer properties (opacity/position/scale/rotation/pan/zoom) pass through to the model.
  */
 const KEYFRAME_EFFECT_RE =
   /^(?:can (?:you|i) )?(?:keyframe|animate) (?:the )?(.{2,40}?)(?: (?:amount|intensity|strength|effect))?(?: (?:of|on|for) .{1,40})?(?: over time)?\s*\??$/;
@@ -115,9 +116,20 @@ function capabilityGapAnswer(normalized: string): string | null {
   if (!effect) {
     return null;
   }
+  const definition = getTimelineEffectDefinition(effect.type);
+  const keyframeable = (definition?.params ?? []).filter(
+    (param) => param.type === "number" && param.keyframeable === true
+  );
+  if (keyframeable.length === 0) {
+    return [
+      `**${effect.name}**'s parameters are static per clip — they aren't keyframeable.`,
+      `Nearest alternative: split the clip and set a different ${effect.name.toLowerCase()} setting on each piece.`
+    ].join("\n");
+  }
+  const labels = keyframeable.map((param) => `**${param.label}**`).join(", ");
   return [
-    `Honest limit: **${effect.name}**'s parameters can't be keyframed yet — keyframes currently animate clip properties (opacity, position, scale, rotation, pan/zoom/crop), not effect params.`,
-    `Nearest alternatives: split the clip and set a different ${effect.name.toLowerCase()} amount on each piece, or animate the clip's opacity/transform with keyframes for a similar feel.`
+    `Yes — **${effect.name}**'s ${labels} can be keyframed.`,
+    `Select the clip, open **Effects**, and click the **diamond** next to the slider to drop a key at the playhead (the arrows hop between keys, and the graph editor — **Shift+G** — shapes the easing). Or just tell me, e.g. “keyframe the ${effect.name.toLowerCase()} from 0 to 100”.`
   ].join("\n");
 }
 

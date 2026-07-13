@@ -12,7 +12,7 @@ import {
   parseTranscriptInput,
   validateTranscriptArtifact,
   type SourceAsset
-} from "@lumio-by-aelivion/shared";
+} from "@kimera-by-aelivion/shared";
 
 const transcript = parseTranscriptInput(`WEBVTT
 

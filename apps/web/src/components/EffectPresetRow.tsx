@@ -6,8 +6,8 @@
  */
 import { useState, useSyncExternalStore } from "react";
 import { Save, Trash2, Wand2 } from "lucide-react";
-import type { TimelineLayer } from "@lumio-by-aelivion/shared";
-import { applyAttributesToLayer } from "@lumio-by-aelivion/shared";
+import type { TimelineLayer } from "@kimera-by-aelivion/shared";
+import { applyAttributesToLayer } from "@kimera-by-aelivion/shared";
 import { deleteEffectPreset, listEffectPresets, saveEffectPreset, subscribeEffectPresets } from "../editor/effect-presets";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 

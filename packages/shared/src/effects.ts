@@ -199,12 +199,15 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     defaultIntensity: 25,
     previewSupport: "native",
     renderSupport: "native",
-    params: [{ key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 18, unit: "%", keyframeable: true }]
+    params: [
+      { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 18, unit: "%", keyframeable: true },
+      { key: "size", label: "Size", type: "number", min: 25, max: 400, step: 1, defaultValue: 100, unit: "%", keyframeable: true }
+    ]
   },
   {
     type: "vignette",
     name: "Vignette",
-    description: "Smooth radial edge darkening with adjustable size (WebGL shader).",
+    description: "Smooth radial edge darkening with size, feather, roundness, and highlight protection (WebGL shader).",
     category: "Stylize",
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "adjustment"],
@@ -213,13 +216,16 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     renderSupport: "native",
     params: [
       { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 35, unit: "%", keyframeable: true },
-      { key: "size", label: "Size", type: "number", min: 0, max: 100, step: 1, defaultValue: 58, unit: "%", keyframeable: true }
+      { key: "size", label: "Size", type: "number", min: 0, max: 100, step: 1, defaultValue: 58, unit: "%", keyframeable: true },
+      { key: "feather", label: "Feather", type: "number", min: 0, max: 100, step: 1, defaultValue: 100, unit: "%", keyframeable: true },
+      { key: "roundness", label: "Roundness", type: "number", min: 0, max: 100, step: 1, defaultValue: 0, unit: "%", keyframeable: true },
+      { key: "highlights", label: "Protect highlights", type: "number", min: 0, max: 100, step: 1, defaultValue: 0, unit: "%", keyframeable: true }
     ]
   },
   {
     type: "chromaKey",
     name: "Chroma Key",
-    description: "Real color-distance keyer with soft edge + spill suppression (WebGL).",
+    description: "Chroma-plane (YCbCr) keyer for any key color: soft edge, despill, matte choke, and a matte view for tuning (WebGL).",
     category: "Keying",
     scope: ["clip"],
     compatibleLayerTypes: ["video", "image"],
@@ -229,7 +235,10 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     params: [
       { key: "color", label: "Key color", type: "color", defaultValue: "#00FF00" },
       { key: "tolerance", label: "Tolerance", type: "number", min: 0, max: 100, step: 1, defaultValue: 30, unit: "%", keyframeable: true },
-      { key: "softness", label: "Edge softness", type: "number", min: 0, max: 100, step: 1, defaultValue: 12, unit: "%", keyframeable: true }
+      { key: "softness", label: "Edge softness", type: "number", min: 0, max: 100, step: 1, defaultValue: 12, unit: "%", keyframeable: true },
+      { key: "despill", label: "Despill", type: "number", min: 0, max: 100, step: 1, defaultValue: 60, unit: "%", keyframeable: true },
+      { key: "choke", label: "Choke", type: "number", min: 0, max: 100, step: 1, defaultValue: 0, unit: "%", keyframeable: true },
+      { key: "matteView", label: "Show matte", type: "boolean", defaultValue: false }
     ]
   },
   {

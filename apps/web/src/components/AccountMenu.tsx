@@ -1,11 +1,19 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { LogOut, User } from "lucide-react";
 import { useAuth } from "../lib/auth";
+import { fetchUsage, type UsageSummary } from "../lib/api";
 
 export function AccountMenu() {
   const { status, user, logout } = useAuth();
   const [open, setOpen] = useState(false);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
+
+  useEffect(() => {
+    if (open && status === "authenticated" && !usage) {
+      fetchUsage().then(setUsage);
+    }
+  }, [open, status, usage]);
 
   if (status === "loading") {
     return <span className="account-menu-loading" aria-hidden="true" />;
@@ -47,6 +55,12 @@ export function AccountMenu() {
               </div>
             </div>
             <div className="account-credits">{user.walletCredits} credits</div>
+            {usage && usage.byAction.length > 0 ? (
+              <div className="account-usage">
+                <span className="account-usage-title">Usage this month <em>free during beta</em></span>
+                <span className="account-usage-total">{usage.totalShadowCredits} credits measured</span>
+              </div>
+            ) : null}
             <button
               type="button"
               className="account-action"
