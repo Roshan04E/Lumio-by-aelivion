@@ -7,6 +7,7 @@
  * frame's lifetime (callers draw it synchronously and must not close it).
  */
 
+import { graphicAnimationFrameAt, type GraphicAnimationPlan } from "@kimera-by-aelivion/shared";
 import { createWebCodecsVideoSource } from "./webcodecs-decoder";
 
 export interface FrameProvider {
@@ -28,6 +29,14 @@ export interface FrameProvider {
    * transcode) sample at this cadence so 24fps content isn't forced onto a 30fps grid (judder).
    */
   readonly nominalFps?: number | undefined;
+  /**
+   * True decodable end of the source from its sample table (last sample timestamp + duration),
+   * WebCodecs provider only. Container/asset duration metadata routinely OVERSHOOTS this by a
+   * frame to ~1s; getFrame past it clamps to the final frame (never null), so a transcode that
+   * trusts the metadata bakes a frozen tail into its output. Resampling consumers must clamp
+   * their frame loop to this when present.
+   */
+  readonly decodableEndSeconds?: number | undefined;
   dispose(): void;
 }
 
@@ -139,25 +148,45 @@ export async function createVideoSource(url: string): Promise<FrameProvider> {
   };
 }
 
+/**
+ * Decode an image URL to a flipped, GPU-ready bitmap.
+ *
+ * createImageBitmap works on both the main thread and inside a Worker (unlike `new Image()`), decodes
+ * once up front, and returns a GPU-friendly CanvasImageSource/TexImageSource.
+ * imageOrientation "flipY": texImage2D IGNORES UNPACK_FLIP_Y_WEBGL for ImageBitmap sources, but the
+ * media-renderer's upload convention assumes flipped uploads (true for the preview's HTMLImageElement
+ * stills) — an unflipped bitmap exported every photo UPSIDE DOWN (2026-07-03 report). Baking the flip
+ * into the bitmap restores preview↔export parity; the preview's own bitmap path (WebglMediaLayer)
+ * applies the same option.
+ */
+async function decodeImageBitmap(url: string): Promise<ImageBitmap> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const blob = await (await fetch(url, { signal: controller.signal, cache: "no-store" })).blob();
+    if (blob.type.includes("svg") || /^data:image\/svg/i.test(url)) {
+      // createImageBitmap CANNOT rasterize an SVG blob without a layout engine: it throws inside the
+      // export Worker (no DOM) and on Firefox/Safari even on the main thread — that was the
+      // "Failed to load image source for export" reported on vector-graphic layers (Remotion's own
+      // <img> rasterization made server exports fine while local export failed). Decode through an
+      // <img> (the preview's proven SVG path) then snapshot to a bitmap; works wherever the DOM
+      // exists. With no DOM (Worker), signal the caller to retry on the main thread — local-export
+      // rasterizes graphics to PNG up front so this is only a safety net.
+      if (typeof document === "undefined") throw new Error("SVG_REQUIRES_DOM");
+      return await createSvgBitmapViaImage(url);
+    }
+    return await createImageBitmap(blob, { imageOrientation: "flipY" }).catch(() => createImageBitmap(blob));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function createImageSource(url: string): Promise<FrameProvider> {
-  // createImageBitmap works on both the main thread and inside a Worker (unlike `new Image()`),
-  // decodes once up front, and returns a GPU-friendly CanvasImageSource/TexImageSource.
-  // imageOrientation "flipY": texImage2D IGNORES UNPACK_FLIP_Y_WEBGL for ImageBitmap sources, but
-  // the media-renderer's upload convention assumes flipped uploads (true for the preview's
-  // HTMLImageElement stills) — an unflipped bitmap exported every photo UPSIDE DOWN
-  // (2026-07-03 report). Baking the flip into the bitmap restores preview↔export parity; the
-  // preview's own bitmap path (WebglMediaLayer) applies the same option.
   let bitmap: ImageBitmap;
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15_000);
-    try {
-      const blob = await (await fetch(url, { signal: controller.signal, cache: "no-store" })).blob();
-      bitmap = await createImageBitmap(blob, { imageOrientation: "flipY" }).catch(() => createImageBitmap(blob));
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
+    bitmap = await decodeImageBitmap(url);
+  } catch (error) {
+    if (error instanceof Error && error.message === "SVG_REQUIRES_DOM") throw error;
     throw new Error("Failed to load image source for export");
   }
   return {
@@ -174,4 +203,51 @@ export async function createImageSource(url: string): Promise<FrameProvider> {
       bitmap.close();
     },
   };
+}
+
+/**
+ * Frame provider for an ANIMATED vector graphic: the pre-baked cycle frames (one per
+ * `graphicAnimationFrame` index), selected by CLIP-LOCAL time. `local-export` bakes `frameUrls` to PNG on
+ * the main thread, so this decodes plain bitmaps and needs no DOM — the Worker path works unchanged.
+ * The same shared selection math runs in the preview and Remotion, so all three stay frame-aligned.
+ */
+export async function createAnimatedGraphicSource(frameUrls: string[], plan: GraphicAnimationPlan): Promise<FrameProvider> {
+  let frames: ImageBitmap[];
+  try {
+    frames = await Promise.all(frameUrls.map((url) => decodeImageBitmap(url)));
+  } catch (error) {
+    if (error instanceof Error && error.message === "SVG_REQUIRES_DOM") throw error;
+    throw new Error("Failed to load image source for export");
+  }
+  if (!frames.length) throw new Error("Failed to load image source for export");
+  const pick = (localSeconds: number) => {
+    const frameIndex = graphicAnimationFrameAt(plan, localSeconds);
+    return frames[Math.min(frameIndex, frames.length - 1)]!;
+  };
+  return {
+    get width() {
+      return frames[0]!.width;
+    },
+    get height() {
+      return frames[0]!.height;
+    },
+    async getFrame(localSeconds: number) {
+      return pick(localSeconds);
+    },
+    dispose() {
+      for (const frame of frames) frame.close();
+      frames = [];
+    },
+  };
+}
+
+/** Rasterize an SVG (data) URL to a bitmap via a decoded `<img>` — the browser's layout engine handles
+ *  SVG that `createImageBitmap(blob)` refuses. Requires the DOM (main thread only). The `flipY` matches
+ *  the raster/image path so preview↔export stay pixel-aligned (see the note in `createImageSource`). */
+async function createSvgBitmapViaImage(url: string): Promise<ImageBitmap> {
+  const img = new Image();
+  img.decoding = "async";
+  img.src = url;
+  await img.decode();
+  return createImageBitmap(img, { imageOrientation: "flipY" }).catch(() => createImageBitmap(img));
 }

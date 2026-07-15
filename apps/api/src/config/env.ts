@@ -11,6 +11,11 @@ dotenv.config({ path: path.join(workspaceRoot, ".env.local"), override: true });
 dotenv.config({ path: path.join(apiRoot, ".env") });
 dotenv.config({ path: path.join(apiRoot, ".env.local"), override: true });
 
+/** Treat a blank env value (`FOO=`) as unset, so an empty optional URL doesn't fail validation. */
+function emptyAsUndefined<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((value) => (value === "" ? undefined : value), schema);
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().default(4100),
@@ -23,6 +28,18 @@ const envSchema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6379"),
   JWT_SECRET: z.string().min(16).default("local-dev-secret-change-me"),
   STORAGE_ROOT: z.string().default("apps/api/storage"),
+  // Object storage driver. "local" = on-disk (dev default, unchanged). "r2" = Cloudflare R2
+  // (S3-compatible) — only active when the R2_* creds below are present. Media stays LOCAL-FIRST
+  // in the browser regardless; this only backs the opt-in "upload to cloud" path.
+  STORAGE_DRIVER: z.enum(["local", "r2"]).default("local"),
+  // Empty-string env values (a blank `R2_ENDPOINT=`) must read as "unset", not fail url() validation.
+  R2_ENDPOINT: emptyAsUndefined(z.string().url().optional()), // https://<accountid>.r2.cloudflarestorage.com
+  R2_BUCKET: emptyAsUndefined(z.string().optional()),
+  R2_ACCESS_KEY_ID: emptyAsUndefined(z.string().optional()),
+  R2_SECRET_ACCESS_KEY: emptyAsUndefined(z.string().optional()),
+  // Optional stable public base (R2 public dev URL or custom domain). When set, uploaded media is
+  // served directly from it; otherwise the API proxies reads (works with a private bucket).
+  R2_PUBLIC_BASE_URL: emptyAsUndefined(z.string().url().optional()),
   // Google Sign-In. Optional: the web Google button only renders when its client id is set.
   GOOGLE_CLIENT_ID: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),

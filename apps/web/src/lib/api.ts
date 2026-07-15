@@ -28,7 +28,13 @@ import {
 } from "@kimera-by-aelivion/shared";
 import { getAssetBlobStore, requestPersistentAssetStorage } from "./asset-blob-store";
 // Runtime-only use (inside function bodies) — safe across the api⇄sync circular edge; no top-level call.
-import { candidateProjectIds, resolveProjectId } from "./sync";
+import {
+  candidateProjectIds,
+  clearLocalAssetPromotion,
+  getAssetPromotionMap,
+  markLocalAssetPromoted,
+  resolveProjectId
+} from "./sync";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4100/api";
 
@@ -99,7 +105,9 @@ async function resolveLocalAssetUrls(assets: SourceAsset[]): Promise<SourceAsset
       if (!asset.fileUrl?.startsWith(LOCAL_BLOB_PREFIX)) return asset;
       const id = asset.fileUrl.slice(LOCAL_BLOB_PREFIX.length);
       const url = await store.getObjectUrl(id);
-      return url ? { ...asset, fileUrl: url } : asset;
+      if (url) return { ...asset, fileUrl: url };
+      // On-device bytes missing (evicted/other machine) but a cloud copy exists → play from cloud.
+      return asset.cloudUrl ? { ...asset, fileUrl: asset.cloudUrl } : asset;
     })
   );
 }
@@ -331,60 +339,35 @@ export interface CreateAssetInput {
   color?: SourceColorMetadata | undefined;
   /** Container display rotation (0/90/180/270°) read from the tkhd matrix at ingest; absent/0 = none. */
   rotationDegrees?: 0 | 90 | 180 | 270 | undefined;
+  /**
+   * Local-first import: keep the bytes on-device (OPFS) and NEVER auto-upload them to the server.
+   * The asset only reaches the cloud when the user explicitly pushes it (the Media Pool cloud toggle)
+   * or when the export preflight (ensureExportReady) promotes it. Used by user file imports so large
+   * footage isn't silently shipped to R2 on drop.
+   */
+  localOnly?: boolean | undefined;
 }
 
 export async function createAsset(input: CreateAssetInput) {
-  await ensureDemoSession();
-
-  // SourceAsset.durationSeconds is a Postgres Int column, so the SERVER payload must be an int. But the
-  // rounded value must NOT come back to the timeline: rounding UP makes a clip ~1s LONGER than the video
-  // → the tail freezes on the last frame during playback. So we send the ceiled int to the server but
-  // keep the REAL fractional duration on the returned asset (clips read that) — for both the server and
-  // local-first paths.
-  const durationSeconds = Math.max(1, Math.ceil(input.durationSeconds ?? 12));
-  const realDuration = Math.max(0.2, Math.min(7200, input.durationSeconds ?? durationSeconds));
+  // Send the EXACT fractional duration — SourceAsset.durationSeconds is a Float column now. The old
+  // scheme (ceil to Int for the server, restore the real value only on THIS response) silently lost
+  // the real duration on every reload/listAssets: clips created from a reloaded asset ran up to ~1s
+  // past the decodable media and froze on their last frame (2026-07-13 frozen-tail report).
+  // withRealDuration stays as a belt-and-braces fixup against any stale server still returning ints.
+  const durationSeconds = Math.max(0.2, Math.min(7200, input.durationSeconds ?? 12));
+  const realDuration = durationSeconds;
   const tags = withAssetAudioTag(input.tags, input.hasAudio);
   const withRealDuration = (asset: SourceAsset): SourceAsset => ({ ...asset, durationSeconds: realDuration });
 
-  try {
-    if (input.file) {
-      const body = new FormData();
-      body.append("file", input.file);
-      body.append("durationSeconds", String(durationSeconds));
-      body.append("width", String(input.width ?? 1080));
-      body.append("height", String(input.height ?? 1920));
-      appendAssetMetadata(body, { ...input, tags });
-      const data = await apiRequest<{ asset: SourceAsset }>("/assets", { method: "POST", body });
-      return withRealDuration(data.asset);
-    }
-
-    const data = await apiRequest<{ asset: SourceAsset }>("/assets", {
-      method: "POST",
-      body: JSON.stringify({
-        fileName: input.fileName ?? "demo-clip.mp4",
-        fileType: input.fileType ?? "video/mp4",
-        durationSeconds,
-        width: input.width ?? 1080,
-        height: input.height ?? 1920,
-        source: input.source,
-        folder: input.folder,
-        originalName: input.originalName,
-        thumbnailUrl: input.thumbnailUrl,
-        fps: input.fps,
-        sizeBytes: input.sizeBytes,
-        projectId: input.projectId,
-        tags,
-        external: input.external,
-        ai: input.ai,
-        color: input.color,
-        rotationDegrees: input.rotationDegrees
-      })
-    });
-    return withRealDuration(data.asset);
-  } catch {
+  // Persist the bytes on-device and record a local asset — no server round-trip. This is the
+  // local-first path (used explicitly via `localOnly`, and as the offline fallback below).
+  async function persistLocally(): Promise<SourceAsset> {
     const file = input.file;
     const isFileVideo = file?.type.startsWith("video/");
-    const id = `asset_local_${Date.now()}`;
+    // Random suffix: a bare Date.now() id COLLIDES when two imports land in the same millisecond —
+    // both assets then share one id, the second OPFS put overwrites the first file's bytes (data
+    // loss), and every id-keyed UI (menus, selection, used-counts) matches both tiles.
+    const id = `asset_local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     // Persist the actual bytes on-device so the asset survives refresh and large clips load
     // instantly. Only a stable marker is stored as the URL; the live object URL is resolved
@@ -434,6 +417,100 @@ export async function createAsset(input: CreateAssetInput) {
     if (input.projectId) addLocalProjectLink(input.projectId, id);
     return { ...asset, fileUrl: liveUrl };
   }
+
+  // Local-first import: never ship the bytes to the server on drop. They stay in OPFS until the
+  // user opts in (Media Pool cloud toggle) or the export preflight promotes them. This is the
+  // whole point of the editor being local-first — big footage isn't auto-uploaded.
+  if (input.localOnly) {
+    return persistLocally();
+  }
+
+  await ensureDemoSession();
+
+  try {
+    if (input.file) {
+      const body = new FormData();
+      body.append("file", input.file);
+      body.append("durationSeconds", String(durationSeconds));
+      body.append("width", String(input.width ?? 1080));
+      body.append("height", String(input.height ?? 1920));
+      appendAssetMetadata(body, { ...input, tags });
+      const data = await apiRequest<{ asset: SourceAsset }>("/assets", { method: "POST", body });
+      return withRealDuration(data.asset);
+    }
+
+    const data = await apiRequest<{ asset: SourceAsset }>("/assets", {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: input.fileName ?? "demo-clip.mp4",
+        fileType: input.fileType ?? "video/mp4",
+        durationSeconds,
+        width: input.width ?? 1080,
+        height: input.height ?? 1920,
+        source: input.source,
+        folder: input.folder,
+        originalName: input.originalName,
+        thumbnailUrl: input.thumbnailUrl,
+        fps: input.fps,
+        sizeBytes: input.sizeBytes,
+        projectId: input.projectId,
+        tags,
+        external: input.external,
+        ai: input.ai,
+        color: input.color,
+        rotationDegrees: input.rotationDegrees
+      })
+    });
+    return withRealDuration(data.asset);
+  } catch {
+    // Backend unreachable (or the upload failed): fall back to the same on-device persist.
+    return persistLocally();
+  }
+}
+
+export interface PresignedAssetUpload {
+  asset: SourceAsset;
+  uploadUrl: string;
+}
+
+/**
+ * Request a presigned direct-to-R2 upload: the server creates the SourceAsset row and returns a
+ * PUT URL the browser streams bytes to itself (see cloud-upload.ts) — no API RAM buffering, no
+ * double bandwidth. Returns `null` when the backend is on local-disk storage (no presign); callers
+ * then fall back to the multipart `createAsset` path. On a failed PUT, delete the returned asset id.
+ */
+export async function presignAssetUpload(input: CreateAssetInput): Promise<PresignedAssetUpload | null> {
+  await ensureDemoSession();
+  const durationSeconds = Math.max(0.2, Math.min(7200, input.durationSeconds ?? 12));
+  const tags = withAssetAudioTag(input.tags, input.hasAudio);
+  const data = await apiRequest<{ supported: boolean; asset?: SourceAsset; uploadUrl?: string }>(
+    "/assets/presign",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: input.fileName ?? "demo-clip.mp4",
+        fileType: input.fileType ?? "video/mp4",
+        durationSeconds,
+        width: input.width ?? 1080,
+        height: input.height ?? 1920,
+        source: input.source,
+        folder: input.folder,
+        originalName: input.originalName,
+        thumbnailUrl: input.thumbnailUrl,
+        fps: input.fps,
+        sizeBytes: input.sizeBytes,
+        projectId: input.projectId,
+        tags,
+        external: input.external,
+        ai: input.ai,
+        color: input.color,
+        rotationDegrees: input.rotationDegrees
+      })
+    }
+  );
+  if (!data.supported || !data.asset || !data.uploadUrl) return null;
+  // Send back the EXACT fractional duration, same as createAsset (Float column; server clamps).
+  return { asset: { ...data.asset, durationSeconds }, uploadUrl: data.uploadUrl };
 }
 
 /** Append optional media-library metadata to the multipart upload body. */
@@ -478,11 +555,103 @@ export async function listAssets(
 
   try {
     const data = await apiRequest<{ assets: SourceAsset[] }>(`/assets${query ? `?${query}` : ""}`);
-    return data.assets;
+    // ONE ASSET, TWO LOCATIONS. Imports are local-first (createAsset localOnly), so browser-local
+    // records must merge into the online list — the server alone doesn't know them, and dropping
+    // them would orphan every timeline clip that references them. An uploaded local asset keeps its
+    // LOCAL id and tile; its cloud copy is recorded in the sync registry (localId → serverId), and
+    // the paired SERVER asset is hidden here — so an upload never shows as a duplicate tile.
+    const localRecords = filterLocalAssetsByScope(readLocal<SourceAsset[]>(localAssetsKey, []), projectId, scope).filter(
+      (asset) => asset.id.startsWith(LOCAL_ASSET_ID_PREFIX)
+    );
+    if (localRecords.length === 0) return data.assets;
+
+    const promotions = getAssetPromotionMap();
+    const claimed = new Set(Object.values(promotions));
+    const serverById = new Map(data.assets.map((asset) => [asset.id, asset]));
+
+    // Adoption (one-time healing for uploads made before pairing existed): a server asset that
+    // matches an unpaired local by exact name + nonzero size IS that local's cloud copy — record
+    // the pairing so it collapses into the local tile from now on.
+    for (const local of localRecords) {
+      if (promotions[local.id]) continue;
+      const twin = data.assets.find(
+        (server) =>
+          !claimed.has(server.id) &&
+          server.fileName === local.fileName &&
+          typeof server.sizeBytes === "number" &&
+          server.sizeBytes > 0 &&
+          server.sizeBytes === local.sizeBytes
+      );
+      if (twin) {
+        markLocalAssetPromoted(local.id, twin.id, twin.fileUrl);
+        promotions[local.id] = twin.id;
+        claimed.add(twin.id);
+      }
+    }
+
+    // Overlay each paired local with its cloudUrl (persisting it once) so the tile reads "synced".
+    const locals = localRecords.map((local) => {
+      const serverId = promotions[local.id];
+      if (!serverId) return local;
+      const cloudUrl = serverById.get(serverId)?.fileUrl ?? local.cloudUrl;
+      if (cloudUrl && local.cloudUrl !== cloudUrl) void updateLocalAssetRecord(local.id, { cloudUrl });
+      return cloudUrl ? { ...local, cloudUrl } : local;
+    });
+
+    // Return EVERYTHING — including paired server assets. Timelines saved by the old remap-era
+    // upload flow (and export-promoted server graphs) reference SERVER ids; dropping those records
+    // here broke their clip resolution ("Missing video asset"). The bin hides paired server assets
+    // at the DISPLAY layer instead (AssetBin filters via getAssetPromotionMap), so there is still
+    // exactly one visible tile per logical asset.
+    return [...(await resolveLocalAssetUrls(locals)), ...data.assets];
   } catch {
     const local = filterLocalAssetsByScope(readLocal<SourceAsset[]>(localAssetsKey, []), projectId, scope);
     return resolveLocalAssetUrls(local);
   }
+}
+
+/** Prefix of ids minted by the local-first `createAsset` persist path (asset_local_<ts>). */
+const LOCAL_ASSET_ID_PREFIX = "asset_local_";
+
+/**
+ * Remove a browser-local asset from the on-device stores WITHOUT touching the server (record +
+ * OPFS bytes). Used by full asset deletion; callers must ensure nothing still references the id.
+ */
+export async function removeLocalAssetRecord(assetId: string): Promise<void> {
+  if (!assetId.startsWith(LOCAL_ASSET_ID_PREFIX)) return;
+  await withLocalAssetsWriteLock(async () => {
+    const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
+    writeLocal(localAssetsKey, assets.filter((asset) => asset.id !== assetId));
+  });
+  try {
+    const store = await getAssetBlobStore();
+    await store.remove(assetId);
+  } catch {
+    /* best-effort — reclaiming the OPFS blob must never block the caller */
+  }
+}
+
+/**
+ * Patch a browser-local asset record in place (e.g. stamp `cloudUrl` after an upload, or clear it
+ * after "Remove from cloud"). A key explicitly set to `undefined` in the patch is DELETED from the
+ * record. No-op for server ids.
+ */
+export async function updateLocalAssetRecord(assetId: string, patch: Partial<SourceAsset>): Promise<void> {
+  if (!assetId.startsWith(LOCAL_ASSET_ID_PREFIX)) return;
+  await withLocalAssetsWriteLock(async () => {
+    const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
+    writeLocal(
+      localAssetsKey,
+      assets.map((asset) => {
+        if (asset.id !== assetId) return asset;
+        const next = { ...asset, ...patch } as unknown as Record<string, unknown>;
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === undefined) delete next[key];
+        }
+        return next as unknown as SourceAsset;
+      })
+    );
+  });
 }
 
 /** Link a reusable library asset (brand/ai/stock) into a project's bin. Server + local-first mirror. */
@@ -509,6 +678,22 @@ export async function unlinkAssetFromProject(assetId: string, projectId: string)
 
 export async function deleteAsset(assetId: string) {
   await ensureDemoSession();
+
+  // Local asset: remove the on-device record + bytes, AND its recorded cloud copy (if it was
+  // uploaded) — otherwise the hidden paired server asset would linger as an unreachable orphan.
+  if (assetId.startsWith(LOCAL_ASSET_ID_PREFIX)) {
+    const serverId = getAssetPromotionMap()[assetId];
+    if (serverId) {
+      try {
+        await apiRequest<{ id: string }>(`/assets/${serverId}`, { method: "DELETE" });
+      } catch {
+        /* cloud copy already gone or offline — the local delete still proceeds */
+      }
+      clearLocalAssetPromotion(assetId);
+    }
+    await removeLocalAssetRecord(assetId);
+    return;
+  }
 
   try {
     await apiRequest<{ id: string }>(`/assets/${assetId}`, { method: "DELETE" });
@@ -586,6 +771,31 @@ export async function updateAssetTags(assetId: string, tags: string[]): Promise<
       return (await resolveLocalAssetUrls([updated]))[0] ?? updated;
     });
   }
+}
+
+/**
+ * Duration HEAL: shrink a stored asset duration to the true decodable end demuxed by the proxy
+ * transcode. Legacy rows (ceil-to-Int era) overshoot their media by up to ~1s, so clips authored
+ * to that length freeze on the last frame for the overshoot. Downward-only (the server enforces
+ * it too) and best-effort — a failure just means the next proxy build retries the heal.
+ */
+export async function healAssetDurationSeconds(assetId: string, durationSeconds: number): Promise<void> {
+  const clamped = Math.max(0.2, Math.min(7200, durationSeconds));
+  try {
+    await apiRequest(`/assets/${assetId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ durationSeconds: clamped })
+    });
+  } catch {
+    /* offline/local — fall through to the local record below */
+  }
+  await withLocalAssetsWriteLock(async () => {
+    const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
+    const next = assets.map((asset) =>
+      asset.id === assetId && asset.durationSeconds > clamped ? { ...asset, durationSeconds: clamped } : asset
+    );
+    writeLocal(localAssetsKey, next);
+  }).catch(() => undefined);
 }
 
 // --- Stock media ------------------------------------------------------------------
@@ -727,6 +937,9 @@ export async function createProject(input: {
   sourceAssetId?: string | undefined;
   prompt?: string | undefined;
   orientation?: "portrait" | "landscape" | undefined;
+  fps?: number | undefined;
+  effects?: ModuleType[] | undefined;
+  durationSeconds?: number | undefined;
 }): Promise<ProjectRecord> {
   await ensureDemoSession();
 
@@ -851,9 +1064,9 @@ export async function addEffect(projectId: string, type: ModuleType, config: Rec
     return data;
   } catch {
     const project = await getProject(projectId);
-    const insertedEffects = resolveModuleInsertions(project.projectGraph.effects, type).map((effect) =>
-      effect.type === type ? { ...effect, config: { ...effect.config, ...config } } : effect
-    );
+    const insertedEffects = resolveModuleInsertions(project.projectGraph.effects, type, {
+      editableFields: project.projectGraph.editableFields
+    }).map((effect) => (effect.type === type ? { ...effect, config: { ...effect.config, ...config } } : effect));
     const updatedGraph = {
       ...project.projectGraph,
       effects: [...project.projectGraph.effects, ...insertedEffects],
@@ -1158,15 +1371,19 @@ function createLocalProject(input: {
   sourceAssetId?: string | undefined;
   prompt?: string | undefined;
   orientation?: "portrait" | "landscape" | undefined;
+  fps?: number | undefined;
+  effects?: ModuleType[] | undefined;
+  durationSeconds?: number | undefined;
 }): ProjectRecord {
   const template = templateDefinitions.find((item) => item.id === input.templateId || item.slug === input.templateId) ?? templateDefinitions[0]!;
   const sourceAsset = input.sourceAssetId ? readLocal<SourceAsset[]>(localAssetsKey, []).find((asset) => asset.id === input.sourceAssetId) : undefined;
   const id = `project_local_${Date.now()}`;
-  // "Continue without a template": no templateId AND no prompt → a genuinely blank project.
-  // Mirrors the server, which only instantiates a template's authored composition when one was
-  // actually selected. Without this the local fallback silently seeded templateDefinitions[0]'s
-  // modules onto the timeline ("unwanted stuff").
-  const isBlank = !input.templateId && !input.prompt;
+  const presetEffects = (input.effects ?? []).map((type) => createProjectEffect(type));
+  // "Continue without a template": no templateId, no prompt AND no preset stack → a genuinely
+  // blank project. Mirrors the server, which only instantiates a template's authored composition
+  // when one was actually selected.
+  const usesTemplate = Boolean(input.templateId);
+  const isBlank = !usesTemplate && !input.prompt && presetEffects.length === 0;
   const graph: ProjectGraph = input.prompt
     ? {
         projectId: id,
@@ -1175,26 +1392,27 @@ function createLocalProject(input: {
         editableFields: { hookText: input.prompt, captionStyle: "bold_yellow" },
         version: 1
       }
-    : isBlank
-      ? { projectId: id, sourceAssetId: input.sourceAssetId, effects: [], editableFields: {}, version: 1 }
-      : {
+    : usesTemplate
+      ? {
           ...template.templateGraph,
           projectId: id,
           sourceAssetId: input.sourceAssetId,
           version: 1
-        };
+        }
+      : { projectId: id, sourceAssetId: input.sourceAssetId, effects: presetEffects, editableFields: {}, version: 1 };
 
   // A composition-based (save-as-template) template carries an authored composition - instantiate
-  // it. Prompt drafts and blank projects both get the clean default timeline instead.
-  const templateComposition = !input.prompt && !isBlank ? template.templateGraph.composition : undefined;
+  // it. Prompt drafts, goal presets, and blank projects all get the clean default timeline instead.
+  const templateComposition = !input.prompt && usesTemplate ? template.templateGraph.composition : undefined;
   graph.composition = templateComposition
     ? instantiateTemplateComposition(templateComposition, id, { sourceAssetId: input.sourceAssetId, name: input.title })
     : createDefaultComposition({
         id,
         name: input.title,
-        durationSeconds: sourceAsset?.durationSeconds ?? template.durationSeconds,
+        durationSeconds: sourceAsset?.durationSeconds ?? input.durationSeconds ?? template.durationSeconds,
         assetId: input.sourceAssetId,
         orientation: input.orientation,
+        fps: input.fps,
         blank: isBlank
       });
   const projectDurationSeconds = graph.composition.durationSeconds;

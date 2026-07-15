@@ -64,7 +64,10 @@ export function listEffectPresets(): EffectPreset[] {
 /** Save the layer's current effect stack (+fit +effect keyframes, NOT transform) under `name`. Returns the preset. */
 export function saveEffectPreset(name: string, layer: TimelineLayer): EffectPreset {
   const attributes = snapshotLayerAttributes(layer);
-  attributes.transform = undefined; // looks must not reposition targets
+  attributes.transform = undefined; // looks must not reposition, reshape, or reframe targets
+  attributes.masks = undefined;
+  attributes.content = undefined;
+  attributes.speed = undefined;
   attributes.animations = attributes.animations?.filter((keyframe) => keyframe.target.scope === "effect");
   const preset: EffectPreset = {
     id: `preset_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,

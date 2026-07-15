@@ -1,4 +1,5 @@
 import type { MaskSequenceArtifactData } from "@kimera-by-aelivion/shared";
+import { createAsset } from "../lib/api";
 import type { SegmentVideoResult } from "./local-segmentation";
 import type { ToolArtifactStore } from "./artifact-store";
 
@@ -34,7 +35,14 @@ export async function storeMatteArtifact(
   await store.put({
     id: maskSequence.id,
     type: "maskSequence",
-    metadata: { runId, source: maskSequence.source, edgeMode: maskSequence.edgeMode, fps: maskSequence.fps, editable: true },
+    metadata: {
+      runId,
+      source: maskSequence.source,
+      edgeMode: maskSequence.edgeMode,
+      fps: maskSequence.fps,
+      editable: true,
+      ...(maskSequence.sourceAssetId ? { sourceAssetId: maskSequence.sourceAssetId } : {})
+    },
     blob
   });
 
@@ -42,6 +50,49 @@ export async function storeMatteArtifact(
   // `uri` is an opfs:// reference that no <video>/fetch can load directly.
   const matteVideoUri = URL.createObjectURL(blob);
   return { maskSequence: { ...maskSequence, matteVideoUri }, blob };
+}
+
+export interface MatteUploadOutcome {
+  maskSequence: MaskSequenceArtifactData;
+  /** False when the upload failed and `matteVideoUri` is still a this-tab-only blob: URL. */
+  uploaded: boolean;
+  warning?: string | undefined;
+}
+
+/**
+ * Uploads a freshly-baked matte so `matteVideoUri` becomes a persistent http(s)
+ * URL — required for the Remotion worker to fetch it on cloud export and for
+ * the matte to survive a page reload. Every tool flow that bakes a matte must
+ * go through this one helper instead of a bespoke try/catch so failures are
+ * consistent and VISIBLE (the old per-tool silent fallbacks left projects
+ * carrying dead blob: URIs that made cloud export hang without explanation).
+ *
+ * Never throws: local-first editing must keep working offline. On failure the
+ * blob: URI is kept for this session, the warning is surfaced through
+ * `onProgress`, and the pre-export resolve step (export/matte-resolve.ts) gets
+ * a second chance to upload the bytes from OPFS before a render job is created.
+ */
+export async function uploadMatteForExport(input: {
+  maskSequence: MaskSequenceArtifactData;
+  blob: Blob;
+  folder: string;
+  originalName?: string | undefined;
+  onProgress?: ((message: string) => void) | undefined;
+}): Promise<MatteUploadOutcome> {
+  try {
+    const matteAsset = await createAsset({
+      file: new File([input.blob], `${input.maskSequence.id}.webm`, { type: input.blob.type || "video/webm" }),
+      source: "timeline-generated",
+      folder: input.folder,
+      originalName: input.originalName ?? "Subject matte"
+    });
+    return { maskSequence: { ...input.maskSequence, matteVideoUri: matteAsset.fileUrl }, uploaded: true };
+  } catch {
+    const warning =
+      "Matte saved on this device only (upload failed — offline?). Editing keeps working; cloud export will retry the upload automatically and tell you if it still can't.";
+    input.onProgress?.(warning);
+    return { maskSequence: input.maskSequence, uploaded: false, warning };
+  }
 }
 
 const webmMuxerUrls = [

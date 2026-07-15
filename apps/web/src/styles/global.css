@@ -3500,12 +3500,11 @@ input[type="checkbox"] {
 }
 
 .topbar-theme-menu {
-  /* FIXED, not absolute: .topbar-right clips its children (overflow:hidden shrink guard), which
-     swallowed an absolutely-positioned dropdown entirely — the button looked decorative/dead. */
+  /* FIXED + portaled into .editor-page, anchored at the trigger's rect (inline left/top from
+     React) — same pattern as ThemedSelect. The old CSS-hardcoded top/right drifted whenever the
+     topbar layout changed, and rendering inside .topbar-right got clipped by its shrink guard. */
   position: fixed;
-  top: calc(var(--nle-topbar-h) + 4px);
-  right: 56px;
-  z-index: 40;
+  z-index: 1200;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -5312,6 +5311,32 @@ input[type="checkbox"] {
   color: var(--nle-accent);
 }
 
+/* "Sync all to cloud" chip — sits immediately left of the full-height toggle in the Media Pool
+   header. Accented while there's local media to push; muted + disabled once everything is synced. */
+.studio-panel-cloud-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--nle-accent-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--nle-accent);
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.studio-panel-cloud-sync:hover:not(:disabled) {
+  background: var(--nle-accent-soft);
+}
+.studio-panel-cloud-sync:disabled {
+  border-color: transparent;
+  color: var(--nle-text-muted);
+  cursor: default;
+}
+
 .panel-tab-content {
   display: grid;
   gap: 8px;
@@ -6203,6 +6228,38 @@ input[type="checkbox"] {
   scrollbar-width: thin;
 }
 
+.timeline-nest-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.timeline-nest-breadcrumb button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 5px;
+  font-size: 0.72rem;
+}
+
+.timeline-nest-breadcrumb button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.timeline-nest-breadcrumb-current {
+  color: #ffffff;
+  font-weight: 700;
+}
+
 .pane-resizer {
   position: relative;
   z-index: 8;
@@ -6402,6 +6459,19 @@ input[type="checkbox"] {
   gap: 1px;
   padding: 4px;
   border-top: 1px solid var(--editor-border);
+}
+
+.effect-tree-subgroup + .effect-tree-subgroup {
+  margin-top: 6px;
+}
+
+.effect-tree-subgroup-head {
+  padding: 4px 8px 2px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .effect-tree-row {
@@ -8259,6 +8329,12 @@ input[type="checkbox"] {
   color: var(--editor-accent);
 }
 
+/* The one layer the inspector controls are editing (multiSelectPrimaryLayer): a solid
+   accent rail on the left so it stands out from the other selected rows. */
+.graphics-stack-row.is-primary {
+  box-shadow: inset 2px 0 0 0 var(--editor-accent);
+}
+
 .graphics-stack-row.is-inactive {
   opacity: 0.45;
 }
@@ -8287,7 +8363,7 @@ input[type="checkbox"] {
   padding: 0 4px;
 }
 
-.graphics-stack-eye {
+.graphics-stack-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -8298,16 +8374,287 @@ input[type="checkbox"] {
   background: transparent;
   color: var(--editor-text-dim);
   cursor: pointer;
+  flex: 0 0 auto;
 }
 
-.graphics-stack-eye:hover {
+.graphics-stack-action:hover {
   background: var(--editor-input-bg);
   color: var(--editor-text);
+}
+
+.graphics-stack-action.is-on {
+  color: var(--editor-accent);
+}
+
+/* Collapse caret for group (nested composition) rows; spacer keeps leaf rows aligned. */
+.graphics-stack-caret,
+.graphics-stack-caret-spacer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.graphics-stack-caret {
+  border: none;
+  background: transparent;
+  color: var(--editor-text-dim);
+  cursor: pointer;
+  border-radius: var(--editor-radius-sm);
+}
+
+.graphics-stack-caret:hover {
+  color: var(--editor-text);
+}
+
+/* Locked rows: dimmed name, but eye/lock/rename stay usable (lock guards geometry edits only). */
+.graphics-stack-row.is-locked .graphics-stack-name {
+  opacity: 0.6;
+}
+
+/* Drag-reorder (§4): a draggable top-level row shows a grab affordance; the dragged row fades; the
+   drop target shows a rule on the side the layer will land (front = above, behind = below). */
+.graphics-stack-row[draggable="true"] {
+  cursor: grab;
+}
+
+.graphics-stack-row.is-dragging {
+  opacity: 0.45;
+}
+
+.graphics-stack-row.is-drop-front,
+.graphics-stack-row.is-drop-behind {
+  position: relative;
+}
+
+.graphics-stack-row.is-drop-front::before,
+.graphics-stack-row.is-drop-behind::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--editor-accent);
+  pointer-events: none;
+}
+
+.graphics-stack-row.is-drop-front::before {
+  top: -1px;
+}
+
+.graphics-stack-row.is-drop-behind::after {
+  bottom: -1px;
+}
+
+/* Reuses .timeline-context-menu; just needs the row-icon gap the timeline menu buttons already have. */
+.graphics-stack-menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* §4 full lock — inspector banner + dimmed, non-interactive property body while a layer is locked.
+   The banner (and the stack row's lock toggle) sit ABOVE the dim so Unlock stays clickable; the hard
+   enforcement is the locked-onChange guard in EditorPage, this just makes the read-only state legible. */
+.inspector-lock-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 4px;
+  padding: 7px 10px;
+  border-radius: var(--editor-radius-sm);
+  background: color-mix(in srgb, var(--editor-accent, #6ea8fe) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--editor-accent, #6ea8fe) 34%, transparent);
+  color: var(--editor-text);
+  font-size: 12px;
+}
+
+.inspector-lock-banner span {
+  flex: 1;
+  min-width: 0;
+}
+
+.inspector-lock-banner button {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: var(--editor-radius-sm);
+  border: 1px solid var(--editor-border, rgba(255, 255, 255, 0.16));
+  background: var(--editor-surface-2, rgba(255, 255, 255, 0.06));
+  color: var(--editor-text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inspector-lock-banner button:hover {
+  background: var(--editor-surface-3, rgba(255, 255, 255, 0.12));
+}
+
+/* Dim + block pointer events on the property body when locked; the lock banner re-enables itself so
+   Unlock still works. Editing is already a no-op via the onChange guard — this removes the dead feel. */
+.inspector-panel.is-locked > *:not(.inspector-lock-banner):not(.inspector-tabs) {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Text Styles (§2) — reusable-asset panel in the Text tab. */
+.text-styles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.text-styles-save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  color: var(--editor-text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.text-styles-save:hover {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.text-styles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.text-styles-row {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: var(--editor-radius-sm);
+  color: var(--editor-text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.text-styles-row:hover {
+  background: var(--editor-input-bg);
+}
+
+.text-styles-row.is-selected {
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.text-styles-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-styles-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  border: 1px solid var(--editor-accent-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  color: var(--editor-text);
+  font-size: 0.72rem;
+  padding: 0 4px;
+}
+
+.text-styles-empty {
+  margin: 0;
+  padding: 4px 2px;
+  color: var(--editor-text-dim);
+  font-size: 0.7rem;
+}
+
+.text-styles-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.text-styles-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  color: var(--editor-text-muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.text-styles-actions button:hover:not(:disabled) {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.text-styles-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.text-styles-actions button.text-styles-danger:hover:not(:disabled) {
+  border-color: #b4453a;
+  background: rgba(180, 69, 58, 0.16);
+  color: #e06a5c;
+}
+
+/* "Align to: Frame | Selection" segmented control — sits above the align buttons. */
+.graphics-align-to {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.graphics-align-to button {
+  flex: 1 1 0;
+  height: 24px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  color: var(--editor-text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.graphics-align-to button.is-active {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+.graphics-align-to button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .graphics-align-row {
   display: flex;
   gap: 6px;
+}
+
+.graphics-align-row + .graphics-align-row {
+  margin-top: 6px;
 }
 
 .graphics-align-row button {
@@ -8323,10 +8670,211 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
-.graphics-align-row button:hover {
+.graphics-align-row button:hover:not(:disabled) {
   border-color: var(--editor-accent-border);
   background: var(--editor-accent-bg);
   color: var(--editor-accent);
+}
+
+.graphics-align-row button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* §1 Responsive Pin — 3×3 anchor grid (AE/Figma constraint picker). */
+.graphics-pin {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.graphics-pin-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  width: 96px;
+}
+
+.graphics-pin-cell {
+  aspect-ratio: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-input-bg);
+  cursor: pointer;
+}
+
+.graphics-pin-cell:hover {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+}
+
+.graphics-pin-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--editor-text-dim);
+}
+
+.graphics-pin-cell:hover .graphics-pin-dot {
+  background: var(--editor-accent);
+}
+
+.graphics-pin-cell.is-active {
+  border-color: var(--editor-accent-border);
+  background: var(--editor-accent-bg);
+}
+
+.graphics-pin-cell.is-active .graphics-pin-dot {
+  background: var(--editor-accent);
+  box-shadow: 0 0 0 3px var(--editor-accent-bg);
+}
+
+.graphics-pin-hint {
+  margin: 0;
+  color: var(--editor-text-dim);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+/* Frames (see FRAMES.md) — the applied frame's param card in the Effects subpanel. */
+.frame-effect-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm);
+  background: var(--editor-panel-soft);
+}
+
+.frame-effect-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.frame-effect-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--editor-text);
+}
+
+.frame-effect-card-remove {
+  display: inline-flex;
+  padding: 3px;
+  border: 0;
+  border-radius: var(--editor-radius-sm);
+  background: transparent;
+  color: var(--editor-text-muted);
+  cursor: pointer;
+}
+
+.frame-effect-card-remove:hover {
+  background: var(--editor-surface-2, rgba(255, 255, 255, 0.08));
+  color: var(--editor-text);
+}
+
+.frame-effect-card-empty {
+  margin: 0;
+  color: var(--editor-text-dim);
+  font-size: 0.7rem;
+}
+
+/* Content mode (FRAMES.md D3): double-clicked into a frame — drag/wheel now move the MEDIA inside it,
+   not the clip. The box goes dashed + accented so it's obvious why dragging stopped moving the layer. */
+.preview-selection-box.is-content-mode {
+  outline: 1px dashed var(--editor-accent, #6ea8fe);
+  outline-offset: 2px;
+  cursor: move;
+}
+
+/* Handles stay FULLY live in content mode — they now belong to the clip itself (scale/rotate the media
+   inside the frame), so dimming them would hide a real affordance rather than signal a disabled one. */
+
+/* Param tiers (FRAMES.md D1): the frame's own generator knobs ("Shape") vs the universal box ("Box"). */
+.frame-effect-card-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.frame-effect-card-section-title {
+  color: var(--editor-text-dim);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Boolean row switch (BooleanControl) — sits in PropertyRow's control cell. */
+.boolean-row-switch {
+  justify-self: start;
+  width: 26px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid var(--editor-border);
+  border-radius: 999px;
+  background: var(--editor-surface-2, rgba(255, 255, 255, 0.06));
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.boolean-row-switch.is-on {
+  border-color: var(--editor-accent, #6ea8fe);
+  background: var(--editor-accent, #6ea8fe);
+}
+
+.boolean-row-knob {
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: var(--editor-text-dim);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.boolean-row-switch.is-on .boolean-row-knob {
+  background: #fff;
+  transform: translateX(12px);
+}
+
+.boolean-row-state {
+  color: var(--editor-text-dim);
+  font-size: 0.68rem;
+}
+
+/* Frames section in the Graphics search panel — tiles preview the shape (unit-box SVG path). */
+.frames-grid-hint {
+  grid-column: 1 / -1;
+  margin: 0 0 2px;
+  color: var(--editor-text-dim);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.frame-tile-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.frame-tile-preview svg {
+  width: 100%;
+  height: 100%;
+}
+
+.frame-tile-preview svg path {
+  fill: color-mix(in srgb, var(--editor-accent, #6ea8fe) 55%, transparent);
+  stroke: var(--editor-accent, #6ea8fe);
+  stroke-width: 0.02;
 }
 
 .mask-hint {
@@ -10192,6 +10740,19 @@ input.scrub-number:focus {
   gap: 1px;
 }
 
+/* GPU waveform surface (Phase 2B). A single canvas pinned to the dock viewport via a JS transform
+   (WaveformGLLayer). z-index 7 keeps it ABOVE clips (selected 6 / slipping 7) so waveforms always
+   show, but BELOW the playhead and track-label gutter (both 8) so it never paints over them. It
+   only draws waveforms (transparent elsewhere) and is click-through. */
+.waveform-gl-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 7;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
 /* The sticky per-row .timeline-track-label only covers its own row's height, not
    the 6px gaps between rows - without this, the full-height playhead line (which
    spans the whole .timeline-tracks column) shows through those gaps as stray blue
@@ -11562,6 +12123,110 @@ input.scrub-number:focus {
   right: 2px;
 }
 
+/* Responsive-Time (§5): protected intro/outro zones drawn along the clip BOTTOM (fades own the top).
+   A subtle accent tint + a diagonal hatch marks the "locked timing" region; the draggable inner edge
+   has a handle. Create-grips (bottom corners) appear on hover to pull a zone out from zero. */
+.clip-resp-band {
+  position: absolute;
+  bottom: 0;
+  height: max(6px, min(12px, calc(var(--timeline-track-height) * 0.28)));
+  /* Above the resize handles (z-index 5) and fade band (4). The resize-END handle renders LATER in
+     the DOM, so at an equal z-index it would win the pointer on the RIGHT edge and steal the outro
+     drag (the intro side worked because resize-start renders earlier). A higher z-index fixes it. */
+  z-index: 7;
+  cursor: ew-resize;
+  /* Idle clips stay clean: the whole responsive overlay only reveals on clip hover (user request —
+     always-on bands/grips clutter the timeline). Not hovered → invisible AND non-interactive. */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+  background-color: color-mix(in srgb, var(--editor-accent, #6ea8fe) 30%, transparent);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255, 255, 255, 0.28) 0,
+    rgba(255, 255, 255, 0.28) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+  border-top: 1px solid color-mix(in srgb, var(--editor-accent, #6ea8fe) 60%, transparent);
+}
+
+.timeline-clip:hover .clip-resp-band,
+.clip-resp-band:active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.clip-resp-band-in {
+  left: 0;
+  border-top-right-radius: 3px;
+  border-bottom-left-radius: inherit;
+}
+
+.clip-resp-band-out {
+  right: 0;
+  border-top-left-radius: 3px;
+  border-bottom-right-radius: inherit;
+}
+
+.clip-resp-handle {
+  position: absolute;
+  bottom: 1px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  background: var(--editor-accent, #6ea8fe);
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.clip-resp-band-in .clip-resp-handle {
+  right: -4px;
+}
+
+.clip-resp-band-out .clip-resp-handle {
+  left: -4px;
+}
+
+.timeline-clip:hover .clip-resp-handle,
+.clip-resp-band:active .clip-resp-handle {
+  opacity: 1;
+}
+
+.clip-resp-create {
+  position: absolute;
+  bottom: 1px;
+  z-index: 8;
+  width: 11px;
+  height: 8px;
+  border-radius: 2px;
+  border: 1px solid color-mix(in srgb, var(--editor-accent, #6ea8fe) 70%, rgba(0, 0, 0, 0.4));
+  background: color-mix(in srgb, var(--editor-accent, #6ea8fe) 45%, transparent);
+  cursor: ew-resize;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+  touch-action: none;
+}
+
+.timeline-clip:hover .clip-resp-create {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.clip-resp-create:hover {
+  background: color-mix(in srgb, var(--editor-accent, #6ea8fe) 70%, transparent);
+}
+
+.clip-resp-create-in {
+  left: 2px;
+}
+
+.clip-resp-create-out {
+  right: 2px;
+}
+
 /* Cross-dissolve junction: a Premiere-style element straddling a cut between two same-track clips.
    It sits above both clips so it stays grabbable; drag to change the overlap, double-click to remove. */
 .timeline-editor .timeline-transition {
@@ -11834,9 +12499,18 @@ input.scrub-number:focus {
   pointer-events: none;
 }
 
-.clip-waveform svg,
-.clip-waveform canvas {
+.clip-waveform svg {
   width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* The waveform canvas is a VIEWPORT renderer: it covers only the on-screen band of the clip, with
+   its left/width/height set imperatively each repaint (see the Waveform component). Absolutely
+   positioned inside the clip so it scrolls with the clip for free between repaints. */
+.clip-waveform canvas {
+  position: absolute;
+  top: 0;
   height: 100%;
   display: block;
 }
@@ -13478,6 +14152,15 @@ input.scrub-number:focus {
   color: var(--editor-accent);
 }
 
+.asset-cloud-spin {
+  animation: asset-cloud-spin 1s linear infinite;
+}
+@keyframes asset-cloud-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .asset-bin-controls-top {
   display: flex;
   align-items: center;
@@ -13767,6 +14450,18 @@ input.scrub-number:focus {
   pointer-events: none;
 }
 
+/* Cloud-synced marker (bottom-left, opposite the duration chip): this asset's bytes are on-device
+   AND a cloud copy is recorded — one tile, two locations. */
+.asset-chip-cloud {
+  left: 8px;
+  bottom: 8px;
+  pointer-events: none;
+  color: #9ec9ff;
+}
+.asset-bin-list .asset-chip-cloud {
+  display: none;
+}
+
 /* Used-count chip sits under the source badge and stays above the hover overlay so it
    remains clickable (jump to its use on the timeline). */
 .asset-chip-used {
@@ -13857,16 +14552,19 @@ input.scrub-number:focus {
 }
 
 .asset-tile-menu {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  z-index: 5;
+  /* FIXED positioning at the cursor / ⋮ button (inline left/top from React). The menu must NOT be
+     positioned inside the tile: the grid is a CSS multi-column layout, where an absolute menu
+     paints across neighbouring tiles/columns ("menu on the wrong clip") and gets clipped by the
+     scroll container. Fixed + viewport-clamped coordinates escape both. */
+  position: fixed;
+  z-index: 1200;
   display: grid;
   gap: 1px;
   min-width: 150px;
-  max-width: min(240px, calc(100% - 16px));
-  max-height: min(320px, calc(100% - 16px));
-  overflow: auto;
+  max-width: min(240px, calc(100vw - 32px));
+  max-height: min(300px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 5px;
   border: 1px solid var(--editor-border);
   border-radius: var(--editor-radius-md);
@@ -14044,24 +14742,8 @@ input.scrub-number:focus {
   transform: rotate(90deg);
 }
 
-/* Per-row "More" menu reuses the tile menu styling, anchored under the actions cell. The tile
-   base sizes itself against the TILE (bottom: 8px + max-height: 100% - 16px); inside a ~24px row
-   that collapsed the menu to a sliver — reset the bottom anchor and give it fixed caps. */
-.asset-list-menu {
-  position: absolute;
-  top: calc(100% - 2px);
-  right: 6px;
-  bottom: auto;
-  z-index: 30;
-  max-width: 240px;
-  max-height: 320px;
-}
-
-/* Last rows: let the menu escape the scroll well instead of growing it awkwardly. */
-.asset-list-row:nth-last-child(-n + 2) .asset-list-menu {
-  top: auto;
-  bottom: calc(100% - 2px);
-}
+/* Per-row "More" menu reuses the tile menu styling. Positioning is FIXED at the cursor/button
+   (inline left/top) for both grid and list — no per-row overrides needed. */
 
 .asset-list-thumb {
   display: grid;
@@ -15803,6 +16485,35 @@ input.scrub-number:focus {
   color: #ffffff;
 }
 
+.fit-canvas-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.fit-canvas-actions button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 900;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fit-canvas-actions button:hover {
+  border-color: color-mix(in srgb, var(--nle-accent) 34%, transparent);
+  background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
+  color: #ffffff;
+}
+
 .empty-mini {
   display: flex;
   align-items: center;
@@ -15890,6 +16601,62 @@ input.scrub-number:focus {
   position: static;
   min-height: auto;
   max-height: none;
+}
+
+.paste-attributes-modal {
+  width: min(420px, 100%);
+}
+
+.paste-attributes-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.paste-attributes-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.paste-attributes-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.paste-attributes-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.paste-attributes-group:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.paste-attributes-group input[type="checkbox"] {
+  margin-top: 3px;
+}
+
+.paste-attributes-group span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.paste-attributes-group small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.paste-attributes-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .modal-header {

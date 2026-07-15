@@ -103,7 +103,7 @@ import {
   applyTransformValueAtTime,
   clamp,
   clearTransformKeyframes,
-  findTransformKeyframeTime,
+  findTransformKeyframe,
   getActiveTransformKeyframe,
   getTransformKeyframes,
   getTransformPropertyValue,
@@ -145,26 +145,38 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
     return {
       active: Boolean(activeKeyframe),
       hasAny: getTransformKeyframes(layer, property).length > 0,
-      hasNext: Boolean(findTransformKeyframeTime(layer, property, layerTime, 1)),
-      hasPrevious: Boolean(findTransformKeyframeTime(layer, property, layerTime, -1)),
+      hasNext: Boolean(findTransformKeyframe(layer, property, layerTime, 1)),
+      hasPrevious: Boolean(findTransformKeyframe(layer, property, layerTime, -1)),
       interpolation: activeKeyframe?.interpolation,
       onClearAll: () => onChange((item) => clearTransformKeyframes(item, property)),
       onChangeInterpolation: (interpolation: KeyframeInterpolation) =>
         onChange((item) => setTransformKeyframeInterpolation(item, property, layerTime, interpolation)),
       onToggle: () => onChange((item) => toggleTransformKeyframe(item, property, layerTime, currentValue)),
       onNext: () => {
-        const nextTime = findTransformKeyframeTime(layer, property, layerTime, 1);
-        if (nextTime !== undefined) seek(layer.startSeconds + nextTime);
+        const next = findTransformKeyframe(layer, property, layerTime, 1);
+        if (next) seek(layer.startSeconds + next.timeSeconds);
       },
       onPrevious: () => {
-        const previousTime = findTransformKeyframeTime(layer, property, layerTime, -1);
-        if (previousTime !== undefined) seek(layer.startSeconds + previousTime);
+        const previous = findTransformKeyframe(layer, property, layerTime, -1);
+        if (previous) seek(layer.startSeconds + previous.timeSeconds);
       }
     };
   }
 
   function changeTransformProperty(property: TransformAnimationProperty, value: number) {
     onChange((item) => applyTransformValueAtTime(item, property, layerTime, value, { autoKeyframe }));
+  }
+
+  // "Fit"/"Fill" canvas: resets scale/position to canonical (matching the object-fit box the renderer
+  // already computes) and sets the fit mode, so a mismatched-aspect clip snaps back to a known-good frame
+  // in one click instead of the user hand-tuning scale + position to approximate it.
+  function fitToCanvas(fit: "contain" | "cover") {
+    onChange((item) => {
+      let next = applyTransformValueAtTime(item, "transform.position.x", layerTime, 50, { autoKeyframe });
+      next = applyTransformValueAtTime(next, "transform.position.y", layerTime, defaultPositionY(next.type), { autoKeyframe });
+      next = applyTransformValueAtTime(next, "transform.scale", layerTime, 1, { autoKeyframe });
+      return { ...next, fit };
+    });
   }
 
   // 3D tilt is static (not keyframed) for now — set the base transform field directly. Both the
@@ -194,14 +206,14 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
                   aria-label="Position X"
                   className="effect-slider-number"
                   inputMode="decimal"
-                  min={0}
-                  max={100}
+                  min={-200}
+                  max={300}
                   step={1}
                   value={animatedTransform.position.x.toFixed(0)}
-                  onScrubChange={(value) => changeTransformProperty("transform.position.x", clamp(value, 0, 100))}
+                  onScrubChange={(value) => changeTransformProperty("transform.position.x", clamp(value, -200, 300))}
                   onChange={(event) => {
                     const next = Number(event.target.value);
-                    if (Number.isFinite(next)) changeTransformProperty("transform.position.x", clamp(next, 0, 100));
+                    if (Number.isFinite(next)) changeTransformProperty("transform.position.x", clamp(next, -200, 300));
                   }}
                 />
               )
@@ -215,14 +227,14 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
                   aria-label="Position Y"
                   className="effect-slider-number"
                   inputMode="decimal"
-                  min={0}
-                  max={100}
+                  min={-200}
+                  max={300}
                   step={1}
                   value={animatedTransform.position.y.toFixed(0)}
-                  onScrubChange={(value) => changeTransformProperty("transform.position.y", clamp(value, 0, 100))}
+                  onScrubChange={(value) => changeTransformProperty("transform.position.y", clamp(value, -200, 300))}
                   onChange={(event) => {
                     const next = Number(event.target.value);
-                    if (Number.isFinite(next)) changeTransformProperty("transform.position.y", clamp(next, 0, 100));
+                    if (Number.isFinite(next)) changeTransformProperty("transform.position.y", clamp(next, -200, 300));
                   }}
                 />
               )
@@ -274,21 +286,31 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
           />
         </div>
         {layer.type === "video" || layer.type === "image" ? (
-          <div className="number-row-select">
-            <span className="effect-slider-label">
-              <span className="effect-slider-label-text">Fit</span>
-            </span>
-            <ThemedSelect
-              ariaLabel="Fit"
-              value={layer.fit ?? "cover"}
-              options={[
-                { value: "cover", label: "Cover" },
-                { value: "contain", label: "Contain" },
-                { value: "fill", label: "Stretch" }
-              ]}
-              onChange={(fit) => onChange((item) => ({ ...item, fit: fit as typeof layer.fit }))}
-            />
-          </div>
+          <>
+            <div className="number-row-select">
+              <span className="effect-slider-label">
+                <span className="effect-slider-label-text">Fit</span>
+              </span>
+              <ThemedSelect
+                ariaLabel="Fit"
+                value={layer.fit ?? "cover"}
+                options={[
+                  { value: "cover", label: "Cover" },
+                  { value: "contain", label: "Contain" },
+                  { value: "fill", label: "Stretch" }
+                ]}
+                onChange={(fit) => onChange((item) => ({ ...item, fit: fit as typeof layer.fit }))}
+              />
+            </div>
+            <div className="fit-canvas-actions">
+              <button type="button" title="Fit whole clip inside the canvas, letterboxed if needed" onClick={() => fitToCanvas("contain")}>
+                Fit canvas
+              </button>
+              <button type="button" title="Fill the canvas edge-to-edge, cropping if needed" onClick={() => fitToCanvas("cover")}>
+                Fill canvas
+              </button>
+            </div>
+          </>
         ) : null}
       </div>
       </InspectorSection>

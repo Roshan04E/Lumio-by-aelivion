@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Cloud, CloudUpload, Download, Film, Layers, Music, Plus, Trash2 } from "lucide-react";
+import { Cloud, CloudOff, CloudUpload, Download, Film, Layers, Music, Plus, Trash2 } from "lucide-react";
 import type { SourceAsset, StockResult, StockVariant } from "@kimera-by-aelivion/shared";
 import { Modal } from "./Modal";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
@@ -55,6 +55,7 @@ export function AssetViewerModal({
   onAddToTimeline,
   onImport,
   onUploadToCloud,
+  onRemoveFromCloud,
   onDelete
 }: {
   target: AssetViewerTarget | null;
@@ -63,6 +64,7 @@ export function AssetViewerModal({
   onAddToTimeline?: ((asset: SourceAsset, mode?: AssetAddMode) => void) | undefined;
   onImport?: ((result: StockResult, variant?: StockVariant) => void) | undefined;
   onUploadToCloud?: ((asset: SourceAsset) => void) | undefined;
+  onRemoveFromCloud?: ((asset: SourceAsset) => void) | undefined;
   onDelete?: ((asset: SourceAsset) => void) | undefined;
 }) {
   const variants = target?.kind === "stock" ? target.result.variants ?? [] : [];
@@ -158,8 +160,11 @@ export function AssetViewerModal({
   }
   if (fileType) metaParts.push(fileType);
 
+  // No cloud copy recorded yet (a synced local asset has cloudUrl → not local-only).
   const isLocalOnly =
-    target.kind === "asset" && (target.asset.fileUrl.startsWith("localblob:") || (!target.asset.cloudUrl && target.asset.id.startsWith("asset_local_")));
+    target.kind === "asset" &&
+    !target.asset.cloudUrl &&
+    (target.asset.fileUrl.startsWith("localblob:") || target.asset.id.startsWith("asset_local_"));
 
   return (
     <Modal title={title} open className="asset-viewer-modal" onClose={onClose}>
@@ -213,10 +218,20 @@ export function AssetViewerModal({
               <button type="button" title="Upload to cloud" onClick={() => onUploadToCloud(target.asset)}>
                 <CloudUpload size={15} /> Upload to cloud
               </button>
-            ) : target.asset.cloudUrl ? (
-              <span className="asset-viewer-note">
-                <Cloud size={14} /> In cloud
-              </span>
+            ) : target.asset.cloudUrl && !isLocalOnly ? (
+              onRemoveFromCloud ? (
+                <button
+                  type="button"
+                  title="Remove from cloud (keeps a copy on this device)"
+                  onClick={() => { onRemoveFromCloud(target.asset); onClose(); }}
+                >
+                  <CloudOff size={15} /> Remove from cloud
+                </button>
+              ) : (
+                <span className="asset-viewer-note">
+                  <Cloud size={14} /> In cloud
+                </span>
+              )
             ) : null}
             {onDelete ? (
               <button type="button" className="is-danger" onClick={() => { onDelete(target.asset); onClose(); }}>

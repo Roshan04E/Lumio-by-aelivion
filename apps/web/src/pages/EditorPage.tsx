@@ -1,4 +1,5 @@
 import { Fragment, lazy, memo, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Download,
@@ -7,6 +8,7 @@ import {
   ChevronRight,
   ChevronsRight,
   Cloud,
+  CloudOff,
   CloudUpload,
   Diamond,
   Droplet,
@@ -30,6 +32,7 @@ import {
   CaseSensitive,
   Italic,
   LayoutList,
+  Lock,
   Maximize2,
   Minimize2,
   MonitorDown,
@@ -105,17 +108,21 @@ import {
   parseExternalTimelineFile,
   renderSafeFonts,
   splitLayerAtTime,
+  commitGroupMove,
+  DEFAULT_EDITING_POLICY,
   rippleDeleteLayer,
   rippleTrimLayer,
   rollEditAtCut,
   slideLayer,
   trimLayerEdgeTo,
-  trimLayerKeyframesTo,
+  resolveEdgeTrim,
+  applyEdgeTrim,
   collectEditPoints,
   copyLayerAttributes,
   hasClipboardAttributes,
   pasteLayerAttributes,
   duplicateLayer,
+  moveLayerWithinTrack,
   copyLayerToClipboard,
   getLayerSpeed,
   getLayerSpeedAt,
@@ -130,12 +137,20 @@ import {
   trackingPathToPositionKeyframes,
   timelineTemplatePackageToJson,
   updateTimelineLayer,
+  updateTimelineLayers,
+  getNestedSourceDurationSeconds,
+  nestLayersIntoComposition,
+  unnestClip,
+  applyTextStyle,
+  captureTextStyle,
+  createTextStyleFromLayer,
   createDefaultMask,
   containContentRect,
   type AssetSource,
   type ImportedExternalTimeline,
   type Mask,
   type ProjectGraph,
+  type TextStyle,
   type PluginEffectManifest,
   type PluginLookManifest,
   type PluginTransitionManifest,
@@ -198,6 +213,10 @@ import { InspectorSection } from "../editor/inspector/InspectorSection";
 import { InspectorTabs, rememberInspectorTab, rememberedInspectorTab, type InspectorTabId } from "../editor/inspector/InspectorTabs";
 import GraphicsStackPanel from "../editor/inspector/panels/GraphicsStackPanel";
 import GraphicsAlignPanel from "../editor/inspector/panels/GraphicsAlignPanel";
+import GraphicsPinPanel from "../editor/inspector/panels/GraphicsPinPanel";
+import { reflowCompositionForResize } from "../editor/inspector/panels/graphicsReflow";
+import { TextStylesSection } from "../editor/inspector/TextStylesSection";
+import { FrameEffectCard } from "../editor/inspector/FrameEffectCard";
 import { deleteGraphicPreset, listGraphicPresets, subscribeGraphicPresets } from "../editor/graphic-presets";
 import { RichTextEditor } from "../components/RichTextEditor";
 import { BottomWorkspace } from "../editor/graph/BottomWorkspace";
@@ -233,14 +252,14 @@ import {
   applyTransformValueAtTime,
   clearEffectParamKeyframes,
   clearStyleKeyframes,
-  findStyleKeyframeTime,
+  findStyleKeyframe,
   getActiveStyleKeyframe,
   getStyleKeyframes,
   keyframeTimeTolerance,
   setStyleKeyframeInterpolation,
   styleValueAt,
   toggleStyleKeyframe,
-  findEffectParamKeyframeTime,
+  findEffectParamKeyframe,
   getActiveEffectParamKeyframe,
   getEffectParamKeyframes,
   setEffectParamInterpolation,
@@ -294,6 +313,8 @@ import {
   linkAssetToProject,
   listAssets,
   listMyTemplates,
+  presignAssetUpload,
+  updateLocalAssetRecord,
   listPluginPackages,
   searchStock,
   STOCK_PAGE_SIZE,
@@ -302,6 +323,8 @@ import {
   AuthRequiredError,
   type ProjectRecord
 } from "../lib/api";
+import { usePro } from "../lib/proMode";
+import { putBlobToCloud } from "../lib/cloud-upload";
 import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
 
 /** How many Iconify results the Graphics chip requests per "Show more" step (the API has no offset paging,
@@ -325,6 +348,11 @@ function graphicRecommendKeyword(name: string): string {
 import {
   listBundledGraphics,
   searchBundledGraphics,
+  builtInFrames,
+  makeLayerFrame,
+  setFrameBoxFromResize,
+  frameOutlinePathD,
+  type FrameDefinition,
   instantiateTemplateComposition,
   normalizeGraphicSvg,
   extractSvgPalette,
@@ -344,7 +372,12 @@ import { useStableHandler, useStableHandlers } from "../lib/useStableHandler";
 import { NoticeToast, getNotice, setNotice } from "../lib/noticeStore";
 import {
   checkNow,
+  clearLocalAssetPromotion,
+  countLocalProjectsUsingAsset,
   ensureExportReady,
+  getAssetPromotionMap,
+  getRecordedServerAssetId,
+  markLocalAssetPromoted,
   markServerProjectSynced,
   promoteProject,
   resolveProjectId,
@@ -362,6 +395,7 @@ import type { ExportFormat } from "../export/video-encoder";
 import { detectSourceMetadataFromFile } from "../export/source-color";
 import { probeDecodableEndSeconds } from "../export/webcodecs-decoder";
 import { Modal } from "../components/Modal";
+import { PasteAttributesModal } from "../components/PasteAttributesModal";
 import { AssetViewerModal, type AssetViewerTarget } from "../components/AssetViewerModal";
 import { buildBackgroundColor, parseBackgroundColor } from "../lib/colorBackground";
 import { defaultColorPalette, extractPaletteFromAsset } from "../lib/colorPalette";
@@ -563,6 +597,7 @@ export function EditorPage() {
   seedBuiltinRegistries();
   const { projectId } = useParams();
   const navigate = useNavigate();
+  const [pro] = usePro();
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // `notice` toasts live in the noticeStore module (leaf <NoticeToast/> below) — the ~106 setNotice
@@ -582,6 +617,11 @@ export function EditorPage() {
   // Which saved track (if any) the Track modal is currently editing/retracking - undefined id means "new track".
   const [trackModalState, setTrackModalState] = useState<{ editingTrackId?: string | undefined } | undefined>(undefined);
   const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
+  // Nesting (compound clips, NESTING.md Phase B): when set, `composition`/`graph.composition` is
+  // currently a NESTED sequence being edited in place (swap trick — see `handleOpenNestedClip`), and
+  // this remembers the root composition's id/name so the breadcrumb can restore it. One level only
+  // (v1): opening a nest while already inside one is rejected.
+  const [nestBreadcrumb, setNestBreadcrumb] = useState<{ rootCompositionId: string; rootCompositionName: string } | null>(null);
   // The playhead lives in `currentTimeRef` + the clock store ONLY — no React `currentTime` state.
   // Hot leaves (preview, timeline playhead, timecode) ride the clock store; cold panels (inspector,
   // scopes, mixer) subscribe to the throttled cold clock via <ColdTime>. A playhead move therefore
@@ -597,7 +637,10 @@ export function EditorPage() {
   // moves under the viewer (giving controls/effects room when they get dense). The left
   // (browse) panel and the right (Inspector) each get their own toggle.
   const [panelExpanded, setPanelExpanded] = useState(false);
-  const [inspectorExpanded, setInspectorExpanded] = useState(false);
+  // Inspector opens FULL height (founder call 2026-07-15): editors spend most of their time in property
+  // edits, so the dense panel gets the room by default and half-height is the opt-in (Alt+R / the
+  // header toggle). Only the DEFAULT flipped — the toggle itself is unchanged.
+  const [inspectorExpanded, setInspectorExpanded] = useState(true);
   // Fully collapse the Inspector to a slim rail — reclaims its width (handy when the AI
   // dock is open and the viewer gets cramped). Starts COLLAPSED (user request 2026-07-11):
   // the viewer gets the space until the user opens the inspector.
@@ -650,6 +693,7 @@ export function EditorPage() {
   // clicks swap the clip's asset instead of adding a new layer.
   const [assetPickerForLayerId, setAssetPickerForLayerId] = useState<string | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [pasteAttributesModalOpen, setPasteAttributesModalOpen] = useState(false);
   const [pendingExternalTimelineImport, setPendingExternalTimelineImport] = useState<ImportedExternalTimeline | null>(null);
   const [externalTimelineImportMode, setExternalTimelineImportMode] = useState<ExternalTimelineImportMode>("append");
   // Raw source kept alongside the parsed report so the multi-sequence picker (Task 2.3) can re-parse
@@ -741,8 +785,10 @@ export function EditorPage() {
   // User escape hatch: play the LIVE compositor instead of preview proxies. When on, no proxies are
   // generated and playback never substitutes one — the viewer is always authoritative (useful while proxy
   // faithfulness is being fixed, or on a machine where generation is costly). Persisted across sessions.
+  // Default ON: preview-proxy generation is opt-in (user request 2026-07-14) — most users should get the
+  // live compositor by default and turn proxy generation on deliberately if their machine needs it.
   const [livePlaybackMode, setLivePlaybackMode] = useState(
-    () => readStoredChoice("kimera_live_playback", "off", ["on", "off"] as const) === "on"
+    () => readStoredChoice("kimera_live_playback", "on", ["on", "off"] as const) === "on"
   );
   // Transport "1" with Auto off = FULL-quality playback (see the effect further down): originals play
   // raw, and the span-proxy system goes DORMANT — no generation at scale 1 (expensive, nobody plays it),
@@ -768,9 +814,14 @@ export function EditorPage() {
   const [editorTheme, setEditorTheme] = useState<EditorThemeId>(() =>
     readStoredChoice("kimera_editor_theme", "blue", EDITOR_THEME_IDS)
   );
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  // Accent-theme dropdown — portaled to <body> at the trigger's rect (same pattern as ThemedSelect
+  // and the asset menu): CSS-hardcoded fixed coords drifted whenever the topbar layout changed.
+  const [themeMenu, setThemeMenu] = useState<{ left: number; top: number } | null>(null);
   const [timelineTool, setTimelineTool] = useState<TimelineToolMode>("select");
   const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("kimera_timeline_snap", "on", ["on", "off"] as const) === "on");
+  // Magnetic timeline (opt-in, off by default so free positioning stays the norm): when on, a move
+  // compacts the touched tracks gapless + overlap-free through the editing-policy seam (commitGroupMove).
+  const [magneticEnabled, setMagneticEnabled] = useState(() => readStoredChoice("kimera_timeline_magnetic", "off", ["on", "off"] as const) === "on");
   // Viewer scaling (Premiere-style): "fit" auto-scales the comp to the viewer (re-fits on panel resize);
   // "manual" uses `manualScale` (1:1 — 1.0 = 100% actual pixels). `fitScale` is reported up from the
   // preview (measured from the stable viewer box, no feedback) purely so the toolbar can show the % in
@@ -865,6 +916,14 @@ export function EditorPage() {
   const isInspectorOpenFromTopbar = responsiveLayout.usesOverlayPanels
     ? activeResponsiveOverlay === "inspector"
     : !inspectorCollapsed;
+  /**
+   * Full-height Inspector drives the EXPANDED grid (`is-any-expanded` hoists .editor-main via
+   * `display: contents` and re-lays the whole editor). A COLLAPSED inspector isn't even mounted, so it
+   * must not drag the layout into that mode — otherwise the now-default `inspectorExpanded` would
+   * silently drop the viewer's min-height and the panels' min-widths on first load, while the inspector
+   * is still a rail. Height intent is remembered; it just doesn't apply until the panel is actually open.
+   */
+  const inspectorFullHeight = inspectorExpanded && !inspectorCollapsed;
 
   // Dual source/program monitor (3-point editing): a source asset open + enough width to show
   // both side by side (DaVinci's comfortable-density layout). Below that, a Source|Program tab
@@ -1090,6 +1149,7 @@ export function EditorPage() {
   const stableAssignAsset = useStableHandler(handleAssignAsset);
   const stableAddAssetToTimeline = useStableHandler(handleAddAssetToTimeline);
   const stableAddGraphic = useStableHandler(handleAddGraphic);
+  const stableApplyFrame = useStableHandler(handleApplyFrame);
   const stablePickReplacement = useStableHandler(handlePickReplacement);
   const stableCancelReplace = useStableHandler(() => setAssetPickerForLayerId(null));
   const stableDeleteAsset = useStableHandler(handleDeleteAsset);
@@ -1101,10 +1161,14 @@ export function EditorPage() {
   const stableMoveAssetFolder = useStableHandler(handleMoveAssetFolder);
   const stableSetAssetLabel = useStableHandler(handleSetAssetLabel);
   const stableUploadToCloud = useStableHandler(handleUploadAssetToCloud);
+  const stableSyncAllToCloud = useStableHandler(handleSyncAllToCloud);
+  const stableRemoveFromCloud = useStableHandler(handleRemoveAssetFromCloud);
   const stableOpenSourceMonitor = useStableHandler(handleOpenInSourceMonitor);
+  // Browser-local assets awaiting cloud upload — drives the Media Pool header "sync all" chip.
+  const cloudPendingLocalCount = useMemo(() => assets.filter(isAssetLocalOnly).length, [assets]);
   const layerMaxDurations = useMemo(
-    () => (composition ? buildLayerMaxDurations(composition, resolvedAssets) : {}),
-    [composition, resolvedAssets]
+    () => (composition ? buildLayerMaxDurations(composition, resolvedAssets, graph?.compositions) : {}),
+    [composition, resolvedAssets, graph?.compositions]
   );
   const selectedLayerId = selectedLayerIds.length === 1 ? selectedLayerIds[0] : undefined;
   const selectedLayer = selectedLayerId ? layers.find((layer) => layer.id === selectedLayerId) : undefined;
@@ -1123,11 +1187,19 @@ export function EditorPage() {
     }
     return out;
   }, [layers, resolvedAssets]);
-  // The layer whose controls the Controls tab shows: the current single selection,
-  // or — when nothing is selected — the last one inspected (kept alive so controls
+  // Multiselect property editing: with 2+ clips selected, the inspector edits the PRIMARY clip (the
+  // last one clicked, tracked by selectionAnchorRef — falls back to the last array entry if the anchor
+  // isn't in the current selection, e.g. after a "Select All") and broadcasts every change to the rest.
+  const multiSelectPrimaryLayer =
+    selectedLayerIds.length > 1
+      ? layers.find((layer) => layer.id === selectionAnchorRef.current && selectedLayerIds.includes(layer.id)) ??
+        layers.find((layer) => layer.id === selectedLayerIds[selectedLayerIds.length - 1])
+      : undefined;
+  // The layer whose controls the Controls tab shows: the current single selection, the multiselect
+  // primary above, or — when nothing is selected — the last one inspected (kept alive so controls
   // stay put after deselecting). Falls back to empty if that layer is gone.
   const inspectorLayer =
-    selectedLayer ?? (selectedLayerIds.length === 0 ? layers.find((layer) => layer.id === lastInspectedLayerId) : undefined);
+    selectedLayer ?? multiSelectPrimaryLayer ?? (selectedLayerIds.length === 0 ? layers.find((layer) => layer.id === lastInspectedLayerId) : undefined);
   const selectedPaletteAsset = useMemo(() => {
     const selectedAsset = selectedLayer?.assetId ? resolvedAssets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
     return selectedAsset ?? project?.sourceAsset ?? resolvedAssets.find((asset) => asset.fileType.startsWith("image/") || asset.fileType.startsWith("video/"));
@@ -1988,9 +2060,29 @@ export function EditorPage() {
         }
         const editable = selection.filter((id) => isLayerEditable(id));
         if (!editable.length) return;
-        void updateComposition(pasteLayerAttributes(composition, editable)).then(() => {
-          setNotice(`Attributes pasted onto ${editable.length} clip${editable.length === 1 ? "" : "s"}`);
-        });
+        if (event.shiftKey) {
+          // Fast path: paste every attribute group without opening the chooser.
+          void updateComposition(pasteLayerAttributes(composition, editable)).then(() => {
+            setNotice(`Attributes pasted onto ${editable.length} clip${editable.length === 1 ? "" : "s"}`);
+          });
+          return;
+        }
+        setPasteAttributesModalOpen(true);
+        return;
+      }
+      // Nest / un-nest (Ctrl/Cmd+G, Shift = un-nest) — the industry "Group"/"Ungroup" shortcut.
+      if (wantsModifierShortcut && !event.altKey && event.key.toLowerCase() === "g") {
+        event.preventDefault();
+        const selection = selectedLayerIdsRef.current;
+        if (event.shiftKey) {
+          if (selection.length !== 1) {
+            setNotice("Select one group to ungroup");
+            return;
+          }
+          void handleUnnestClip(selection[0]!);
+          return;
+        }
+        void handleNestSelection();
         return;
       }
       if (wantsModifierShortcut && event.key.toLowerCase() === "z") {
@@ -2406,14 +2498,14 @@ export function EditorPage() {
   }, [editorTheme]);
 
   useEffect(() => {
-    if (!themeMenuOpen) return;
+    if (!themeMenu) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest(".topbar-theme-picker")) return;
-      setThemeMenuOpen(false);
+      if (target?.closest(".topbar-theme-picker") || target?.closest(".topbar-theme-menu")) return;
+      setThemeMenu(null);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setThemeMenuOpen(false);
+      if (event.key === "Escape") setThemeMenu(null);
     };
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
@@ -2421,11 +2513,15 @@ export function EditorPage() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [themeMenuOpen]);
+  }, [themeMenu]);
 
   useEffect(() => {
     localStorage.setItem("kimera_timeline_snap", snapEnabled ? "on" : "off");
   }, [snapEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem("kimera_timeline_magnetic", magneticEnabled ? "on" : "off");
+  }, [magneticEnabled]);
 
   useEffect(() => {
     localStorage.setItem("kimera_editor_track_height", String(timelineTrackHeight));
@@ -2590,6 +2686,30 @@ export function EditorPage() {
     setNotice(savedTracks.length > 0 ? "Effect applied · track saved" : "Effect applied");
   }
 
+  /**
+   * Apply a one-click tool result plus the handler's durable artifact patch
+   * (describeEditableFields: masks/tracking) in ONE graph update — same atomic
+   * pattern as applySmartFollowTextResult, avoiding a stale-graph race between
+   * separate composition/editableFields writes. With no patch it stays on the
+   * plain composition path.
+   */
+  async function applyToolEffectResult(nextComposition: TimelineComposition, editableFieldsPatch?: Record<string, unknown>) {
+    if (!graph || !editableFieldsPatch || Object.keys(editableFieldsPatch).length === 0) {
+      await updateComposition(nextComposition);
+      return;
+    }
+    const normalizedComposition = normalizeCompositionDuration(nextComposition);
+    await updateGraph(
+      {
+        ...graph,
+        composition: normalizedComposition,
+        editableFields: { ...graph.editableFields, ...editableFieldsPatch },
+        version: graph.version + 1
+      },
+      normalizedComposition.durationSeconds
+    );
+  }
+
   function updateCompositionSettings(updater: (settings: TimelineCompositionSettings) => TimelineCompositionSettings) {
     if (!composition) {
       return;
@@ -2597,7 +2717,13 @@ export function EditorPage() {
 
     const settings = updater(getCompositionSettings(composition));
     const nextComposition = applyCompositionSettings(composition, settings);
-    void updateComposition(nextComposition);
+    // Responsive Pin (§1): if the CANVAS was reframed, bake pinned layers' new positions now so both
+    // renderers keep consuming plain percents (no render-time pin logic). No-op when dims are unchanged.
+    const reflowed =
+      nextComposition.width !== composition.width || nextComposition.height !== composition.height
+        ? reflowCompositionForResize(nextComposition, { width: composition.width, height: composition.height }, currentTimeRef.current)
+        : nextComposition;
+    void updateComposition(reflowed);
   }
 
   async function updateLayer(layerId: string, updater: (layer: TimelineLayer) => TimelineLayer) {
@@ -2606,6 +2732,15 @@ export function EditorPage() {
     }
 
     await updateComposition(updateTimelineLayer(composition, layerId, updater));
+  }
+
+  /** Multiselect property editing: applies `updater` to every layer in `layerIds`, each against its OWN value. */
+  async function updateLayers(layerIds: readonly string[], updater: (layer: TimelineLayer) => TimelineLayer) {
+    if (!composition) {
+      return;
+    }
+
+    await updateComposition(updateTimelineLayers(composition, layerIds, updater));
   }
 
   /**
@@ -3048,6 +3183,100 @@ export function EditorPage() {
     });
   }
 
+  /**
+   * Frame-box resize from the canvas handles (Step C / decision D2). Mirrors the shape-layer resize
+   * flow above — live drags go straight to local state, only the release commits — but writes the FRAME's
+   * own box params. `setFrameBoxFromResize` owns the geometry (aspectLock linking, per-axis edges), so the
+   * canvas and the inspector's Width/Height fields go through the exact same rule and can't disagree.
+   */
+  function handlePreviewResizeFrameLayer(
+    layerId: string,
+    size: { widthPercent: number; heightPercent: number },
+    axis: "x" | "y" | "both",
+    commit: boolean
+  ) {
+    // Read the comp through the ref: a resize drag fires continuously, and the ref is always current.
+    const activeComposition = compositionRef.current;
+    if (!activeComposition) return;
+    const comp = { width: activeComposition.width, height: activeComposition.height };
+    const updater = (layer: TimelineLayer): TimelineLayer =>
+      layer.frame
+        ? {
+            ...layer,
+            frame: {
+              ...layer.frame,
+              params: setFrameBoxFromResize(layer.frame, { width: size.widthPercent, height: size.heightPercent }, axis, comp)
+            }
+          }
+        : layer;
+
+    if (commit) {
+      void updateLayer(layerId, updater);
+      return;
+    }
+
+    setNotice("Unsaved");
+    setProject((current) => {
+      const currentGraph = current?.projectGraph;
+      if (!current || !currentGraph?.composition) {
+        return current;
+      }
+      return {
+        ...current,
+        projectGraph: {
+          ...currentGraph,
+          composition: updateTimelineLayer(currentGraph.composition, layerId, updater)
+        }
+      };
+    });
+  }
+
+  /**
+   * Content mode (decision D3) — double-click a framed clip, then drag/wheel to reposition the media
+   * INSIDE the frame. Writes through `applyContentValueAtTime`, the same rule the inspector's Content/Crop
+   * panel uses, so auto-keyframe / already-animated routing behaves identically whether you adjust the
+   * media on canvas or in the panel (they are the same `content.*` properties).
+   */
+  function handlePreviewContentTransformLayer(
+    layerId: string,
+    next: { offsetX?: number; offsetY?: number; scale?: number },
+    commit: boolean
+  ) {
+    const updater = (layer: TimelineLayer): TimelineLayer => {
+      const layerTime = clamp(currentTimeRef.current - layer.startSeconds, 0, layer.durationSeconds);
+      let updated = layer;
+      for (const [property, value] of [
+        ["content.offsetX", next.offsetX],
+        ["content.offsetY", next.offsetY],
+        ["content.scale", next.scale]
+      ] as const) {
+        if (value === undefined) continue;
+        updated = applyContentValueAtTime(updated, property, layerTime, roundEditorNumber(value), { autoKeyframe });
+      }
+      return updated;
+    };
+
+    if (commit) {
+      void updateLayer(layerId, updater);
+      return;
+    }
+
+    setNotice("Unsaved");
+    setProject((current) => {
+      const currentGraph = current?.projectGraph;
+      if (!current || !currentGraph?.composition) {
+        return current;
+      }
+      return {
+        ...current,
+        projectGraph: {
+          ...currentGraph,
+          composition: updateTimelineLayer(currentGraph.composition, layerId, updater)
+        }
+      };
+    });
+  }
+
   function handlePreviewRotateLayer(layerId: string, rotation: number, commit: boolean) {
     // Auto-keyframe / already-animated routing drops the rotation as a keyframe at the playhead;
     // otherwise it edits the base rotation (unchanged behavior).
@@ -3088,61 +3317,35 @@ export function EditorPage() {
     startSeconds: number,
     trackId?: string | undefined,
     movedLayerIds?: string[] | undefined,
-    targetTrackByLayerId?: Record<string, string> | undefined
+    targetTrackByLayerId?: Record<string, string> | undefined,
+    targetStartByLayerId?: Record<string, number> | undefined
   ) {
     if (!composition) {
       return;
     }
 
-    const layer = layers.find((item) => item.id === layerId);
-    if (layer && movedLayerIds?.length && movedLayerIds.length > 1) {
-      const movedSet = new Set(movedLayerIds);
-      const deltaSeconds = startSeconds - layer.startSeconds;
-      const trackById = new Map(composition.tracks.map((item) => [item.id, item]));
-      const movedUpdates = new Map<string, TimelineLayer>();
-      for (const item of layers) {
-        if (!movedSet.has(item.id) || item.locked) {
-          continue;
-        }
-
-        const sourceTrack = trackById.get(item.trackId);
-        if (sourceTrack?.locked) {
-          continue;
-        }
-
-        const targetTrackId = targetTrackByLayerId?.[item.id] ?? item.trackId;
-        const targetTrack = trackById.get(targetTrackId);
-        const targetMatchesLayerKind = targetTrack ? (targetTrack.type === "audio") === (item.type === "audio") : false;
-        const nextTrackId = targetTrack && !targetTrack.locked && targetMatchesLayerKind ? targetTrack.id : item.trackId;
-        movedUpdates.set(item.id, {
-          ...item,
-          startSeconds: Math.max(0, item.startSeconds + deltaSeconds),
-          trackId: nextTrackId
-        });
-      }
-
-      await updateComposition({
-        ...composition,
-        tracks: composition.tracks.map((track) => {
-          const existing = track.layers.flatMap((item) => {
-            const moved = movedUpdates.get(item.id);
-            if (!moved) {
-              return [item];
-            }
-            return moved.trackId === track.id ? [moved] : [];
-          });
-          const incoming = Array.from(movedUpdates.values()).filter(
-            (item) => item.trackId === track.id && !track.layers.some((layerItem) => layerItem.id === item.id)
-          );
-          return {
-            ...track,
-            layers: [...existing, ...incoming]
-          };
+    // Drag path: apply the resolver's exact placements verbatim (start + track per affected layer).
+    // The clamping/track-family/linked-companion logic already ran in `resolveGroupMove` during the
+    // preview, so commit just writes what was shown — preview and commit can't diverge.
+    if (targetStartByLayerId) {
+      const layerById = new Map(layers.map((item) => [item.id, item]));
+      const placements = Object.entries(targetStartByLayerId)
+        .map(([id, start]) => {
+          const item = layerById.get(id);
+          return item ? { layerId: id, startSeconds: start, trackId: targetTrackByLayerId?.[id] ?? item.trackId, member: true } : null;
         })
+        .filter((placement): placement is NonNullable<typeof placement> => placement !== null);
+      // Commit through the editing-policy seam. Magnetic mode (opt-in toggle) compacts the touched
+      // tracks gapless + overlap-free; otherwise overlap stays "allow" (free positioning, today's default).
+      const committed = commitGroupMove(composition, placements, placements.map((p) => p.layerId), {
+        ...DEFAULT_EDITING_POLICY,
+        magnetic: magneticEnabled
       });
+      await updateComposition(committed.composition);
       return;
     }
 
+    const layer = layers.find((item) => item.id === layerId);
     const targetTrack = trackId ? composition.tracks.find((track) => track.id === trackId) : undefined;
     const deltaSeconds = layer ? startSeconds - layer.startSeconds : 0;
     if (!layer || !targetTrack || targetTrack.type === "audio" !== (layer.type === "audio")) {
@@ -3254,6 +3457,169 @@ export function EditorPage() {
     setNotice("Clips unlinked");
   }
 
+  // --- Nesting (compound clips, NESTING.md Phase B) --------------------------------------------
+  async function handleNestSelection() {
+    if (!composition || !graph) {
+      return;
+    }
+    const result = nestLayersIntoComposition(composition, selectedLayerIds, { name: "Group" });
+    if (!result) {
+      setNotice("Select 2+ clips to group");
+      return;
+    }
+    const normalized = normalizeCompositionDuration(result.composition);
+    await updateGraph(
+      {
+        ...graph,
+        composition: normalized,
+        compositions: { ...(graph.compositions ?? {}), [result.nestedComposition.id]: result.nestedComposition },
+        version: graph.version + 1
+      },
+      normalized.durationSeconds
+    );
+    setSelectedLayerIds([result.clipId]);
+    setNotice(`Grouped ${selectedLayerIds.length} clips`);
+  }
+
+  async function handleUnnestClip(layerId: string) {
+    if (!composition) {
+      return;
+    }
+    const result = unnestClip(composition, graph?.compositions, layerId);
+    if (!result) {
+      setNotice("Can't ungroup a trimmed or sped-up group");
+      return;
+    }
+    await updateComposition(result.composition);
+    setSelectedLayerIds([]);
+    setNotice("Ungrouped");
+  }
+
+  // --- Text Styles (§2) — reusable text looks saved project-local in graph.textStyles ------------
+  /** Selected TEXT layers, else fall back to the inspected layer when it's text (Align parity). */
+  function textStyleTargetIds(): string[] {
+    const selected = new Set(selectedLayerIds);
+    const ids = layers.filter((item) => selected.has(item.id) && item.type === "text").map((item) => item.id);
+    if (ids.length) return ids;
+    return inspectorLayer?.type === "text" ? [inspectorLayer.id] : [];
+  }
+
+  async function handleSaveTextStyle() {
+    if (!graph || inspectorLayer?.type !== "text") {
+      setNotice("Select a text layer to save its style");
+      return;
+    }
+    const name = `Style ${(graph.textStyles?.length ?? 0) + 1}`;
+    const style = createTextStyleFromLayer(inspectorLayer, name);
+    await updateGraph({ ...graph, textStyles: [...(graph.textStyles ?? []), style], version: graph.version + 1 });
+    setNotice(`Saved "${style.name}"`);
+  }
+
+  async function handleApplyTextStyle(style: TextStyle) {
+    const targetIds = textStyleTargetIds();
+    if (!targetIds.length) {
+      setNotice("Select a text layer to apply a style");
+      return;
+    }
+    // One history entry across all targets (batch), mirroring Align/distribute.
+    await updateLayers(targetIds, (item) => applyTextStyle(item, style.style));
+    setNotice(targetIds.length > 1 ? `Applied "${style.name}" to ${targetIds.length} layers` : `Applied "${style.name}"`);
+  }
+
+  async function handleUpdateTextStyle(styleId: string) {
+    if (!graph || inspectorLayer?.type !== "text") {
+      setNotice("Select a text layer to update the style from");
+      return;
+    }
+    const captured = captureTextStyle(inspectorLayer);
+    await updateGraph({
+      ...graph,
+      textStyles: (graph.textStyles ?? []).map((style) => (style.id === styleId ? { ...style, style: captured } : style)),
+      version: graph.version + 1
+    });
+    setNotice("Style updated");
+  }
+
+  async function handleRenameTextStyle(styleId: string, name: string) {
+    if (!graph) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    await updateGraph({
+      ...graph,
+      textStyles: (graph.textStyles ?? []).map((style) => (style.id === styleId ? { ...style, name: trimmed } : style)),
+      version: graph.version + 1
+    });
+  }
+
+  async function handleDeleteTextStyle(styleId: string) {
+    if (!graph) return;
+    await updateGraph({
+      ...graph,
+      textStyles: (graph.textStyles ?? []).filter((style) => style.id !== styleId),
+      version: graph.version + 1
+    });
+  }
+
+  // "Open" a compound clip: swap the currently-edited composition to its nested sequence (the SAME
+  // `graph.composition` slot every existing read/write site already targets, so nothing else in this
+  // file needs to change) and stash the current one under its own id in `graph.compositions` so the
+  // breadcrumb can restore it. Kept OUT of undo history — it's navigation, not an edit; edits made
+  // while inside the nest still record normally through the usual updateComposition/updateGraph calls.
+  function handleOpenNestedClip(layerId: string) {
+    if (!composition || !graph) {
+      return;
+    }
+    if (nestBreadcrumb) {
+      setNotice("Already editing a nested sequence — nests-in-nests aren't supported yet");
+      return;
+    }
+    const clip = layers.find((item) => item.id === layerId);
+    const nested = clip?.nestedCompositionId ? graph.compositions?.[clip.nestedCompositionId] : undefined;
+    if (!clip || !nested) {
+      setNotice("Group not found");
+      return;
+    }
+    void updateGraph(
+      {
+        ...graph,
+        composition: nested,
+        compositions: { ...(graph.compositions ?? {}), [composition.id]: composition },
+        version: graph.version + 1
+      },
+      nested.durationSeconds,
+      { recordHistory: false }
+    );
+    setNestBreadcrumb({ rootCompositionId: composition.id, rootCompositionName: composition.name });
+    setSelectedLayerIds([]);
+    setNotice(`Editing "${nested.name}"`);
+  }
+
+  function handleReturnToRootComposition() {
+    if (!composition || !graph || !nestBreadcrumb) {
+      return;
+    }
+    const root = graph.compositions?.[nestBreadcrumb.rootCompositionId];
+    if (!root) {
+      setNotice("Root sequence not found");
+      setNestBreadcrumb(null);
+      return;
+    }
+    void updateGraph(
+      {
+        ...graph,
+        composition: root,
+        compositions: { ...(graph.compositions ?? {}), [composition.id]: composition },
+        version: graph.version + 1
+      },
+      root.durationSeconds,
+      { recordHistory: false }
+    );
+    setNestBreadcrumb(null);
+    setSelectedLayerIds([]);
+    setNotice(`Back to "${root.name}"`);
+  }
+
+
   async function handleResizeLayer(layerId: string, startSeconds: number, durationSeconds: number) {
     if (!composition) {
       return;
@@ -3262,48 +3628,13 @@ export function EditorPage() {
     // Minimum clip length is a single frame — applies to every layer type.
     const minDur = 1 / Math.max(1, Math.round(composition.fps) || 30);
 
+    // Edge-trim geometry (source reveal, duration cap, keyframe/anim timing) lives in the shared
+    // resolveEdgeTrim/applyEdgeTrim primitive — the SAME one the drag preview calls, so what the user
+    // sees while dragging a handle is exactly what commits (no head-overshoot snap-back).
     await updateLayer(layerId, (layer) => {
-      const mediaDuration = getLayerMaxDuration(layer, resolvedAssets, composition.durationSeconds);
-      const isSourceBound = (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId);
-
-      if (!isSourceBound) {
-        // Non-source media (text/shape/image): no source in-point to track.
-        const oldEnd = layer.startSeconds + layer.durationSeconds;
-        const nextStart = startSeconds < layer.startSeconds && durationSeconds > mediaDuration ? Math.max(0, oldEnd - mediaDuration) : startSeconds;
-        const nextDur = clamp(durationSeconds, minDur, mediaDuration);
-        return { ...layer, startSeconds: nextStart, durationSeconds: nextDur, ...trimLayerKeyframesTo(layer, nextStart, nextDur) };
-      }
-
-      // Source-aware trim. Moving the start edge reveals/hides source: the
-      // in-point shifts by the same delta the start moved. Trimming the end
-      // edge leaves the start (and in-point) untouched.
-      const oldSourceIn = layer.sourceInSeconds ?? 0;
-      const startDelta = startSeconds - layer.startSeconds;
-      let nextStart = startSeconds;
-      let nextDuration = durationSeconds;
-      let nextSourceIn = oldSourceIn + startDelta;
-
-      if (nextSourceIn < 0) {
-        // Can't reveal source before frame 0 — cap how far the start can move left.
-        nextStart = layer.startSeconds - oldSourceIn;
-        nextDuration = layer.durationSeconds + oldSourceIn;
-        nextSourceIn = 0;
-      }
-
-      const maxDurationFromIn = Math.max(minDur, mediaDuration - nextSourceIn);
-      nextDuration = clamp(nextDuration, minDur, maxDurationFromIn);
-
-      const finalStart = Math.max(0, nextStart);
-      return {
-        ...layer,
-        startSeconds: finalStart,
-        durationSeconds: nextDuration,
-        sourceInSeconds: nextSourceIn,
-        // Shared trim conventions (timeline-ops): head trims rebase/drop animation data with the
-        // content, tail trims drop keyframes past the new end. The drag path previously skipped
-        // this, leaving keyframes floating beyond the trimmed clip (user report 2026-07-03).
-        ...trimLayerKeyframesTo(layer, finalStart, nextDuration)
-      };
+      const maxDurationSeconds = getLayerMaxDuration(layer, resolvedAssets, composition.durationSeconds, graph?.compositions);
+      const resolution = resolveEdgeTrim(layer, { startSeconds, durationSeconds }, { maxDurationSeconds, minDurationSeconds: minDur });
+      return applyEdgeTrim(layer, resolution);
     });
   }
 
@@ -3549,6 +3880,31 @@ export function EditorPage() {
     setNotice(`${removable.size} clips deleted`);
   }
 
+  /** Duplicate every selected clip in one history step (skips locked clips/tracks); selects the copies. */
+  async function handleDuplicateLayers(layerIds: string[]) {
+    if (!composition || !layerIds.length) {
+      return;
+    }
+    if (layerIds.length === 1) {
+      await handleDuplicateLayer(layerIds[0]!);
+      return;
+    }
+    let next = composition;
+    const newIds: string[] = [];
+    for (const id of layerIds) {
+      if (!isLayerEditable(id)) continue;
+      const result = duplicateLayer(next, id);
+      next = result.composition;
+      if (result.newLayerId) newIds.push(result.newLayerId);
+    }
+    if (next === composition) {
+      return;
+    }
+    setSelectedLayerIds(newIds);
+    await updateComposition(next);
+    setNotice(`${newIds.length} clips duplicated`);
+  }
+
   async function handleSplitLayerAt(layerId: string, atSeconds: number) {
     if (!composition || !isLayerEditable(layerId)) {
       return;
@@ -3638,6 +3994,26 @@ export function EditorPage() {
           ? rollEditAtCut(composition, neighbour.id, layerId, time - cut, options)
           : rollEditAtCut(composition, layerId, neighbour.id, time - cut, options)
         : trimLayerEdgeTo(composition, layerId, side, time, options);
+    if (next !== composition) await updateComposition(next);
+  }
+
+  /** Responsive-Time (§5): set/clear a clip's protected intro/outro. Both 0 → clears the field. */
+  async function handleSetResponsiveTime(layerId: string, value: { introSeconds: number; outroSeconds: number }) {
+    if (!composition) {
+      return;
+    }
+    const introSeconds = Math.max(0, value.introSeconds);
+    const outroSeconds = Math.max(0, value.outroSeconds);
+    const responsiveTime = introSeconds <= 0.0001 && outroSeconds <= 0.0001 ? undefined : { introSeconds, outroSeconds };
+    await updateLayer(layerId, (item) => ({ ...item, responsiveTime }));
+  }
+
+  /** Graphics-stack drag-reorder: change a layer's Z relative to a same-track sibling (one history step). */
+  async function handleReorderLayerWithinTrack(layerId: string, targetLayerId: string, place: "front-of" | "behind") {
+    if (!composition) {
+      return;
+    }
+    const next = moveLayerWithinTrack(composition, layerId, targetLayerId, place);
     if (next !== composition) await updateComposition(next);
   }
 
@@ -3750,7 +4126,7 @@ export function EditorPage() {
     }
     // Slip bounds live in SOURCE seconds: the clip consumes durationSeconds * speed of media.
     const speed = getLayerSpeed(layer);
-    const maxDuration = getLayerMaxDuration(layer, resolvedAssets, composition.durationSeconds);
+    const maxDuration = getLayerMaxDuration(layer, resolvedAssets, composition.durationSeconds, graph?.compositions);
     const clamped = clamp(Number(sourceInSeconds.toFixed(3)), 0, Math.max(0, (maxDuration - layer.durationSeconds) * speed));
     if (clamped === (layer.sourceInSeconds ?? 0)) {
       return;
@@ -4067,6 +4443,8 @@ export function EditorPage() {
             height: metadata?.height ?? assetRef.height,
             hasAudio: metadata?.hasAudio,
             source: assetRef.source ?? "local",
+            // Local-first, like a normal import: embedded package media stays on-device until pushed.
+            localOnly: true,
             folder: `local/${kind}`,
             originalName: assetRef.fileName,
             sizeBytes: embedded.byteLength,
@@ -4269,6 +4647,18 @@ export function EditorPage() {
     await updateComposition(nextComposition);
   }
 
+  /** Frames (Phase 1): apply a picked frame to the selected image/video clip (media clips to its shape). */
+  async function handleApplyFrame(def: FrameDefinition) {
+    const target = selectedLayer;
+    if (!composition || !target || (target.type !== "image" && target.type !== "video")) {
+      setNotice("Select an image or video clip, then pick a frame");
+      return;
+    }
+    await updateLayer(target.id, (item) => ({ ...item, frame: makeLayerFrame(def) }));
+    focusInspector();
+    setNotice(`Framed with ${def.name}`);
+  }
+
   async function handleUploadAsset(file: File | null, options?: { source?: AssetSource; folder?: string }) {
     if (!file) {
       return;
@@ -4282,6 +4672,9 @@ export function EditorPage() {
       file,
       ...metadata,
       source,
+      // Local-first: keep the bytes on-device. Nothing is auto-uploaded on import — the user pushes
+      // to the cloud explicitly (Media Pool cloud toggle), or the export preflight promotes it.
+      localOnly: true,
       folder: options?.folder ?? `${source === "brand" ? "brand" : "local"}/${kind}`,
       originalName: file.name,
       sizeBytes: file.size,
@@ -4299,44 +4692,218 @@ export function EditorPage() {
     setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
   }
 
+  /** True when an asset still lives only in the browser (no cloud copy recorded yet). */
+  function isAssetLocalOnly(asset: SourceAsset) {
+    return !asset.cloudUrl && (asset.fileUrl.startsWith("localblob:") || asset.id.startsWith("asset_local_"));
+  }
+
   /**
-   * Push a browser-local asset to server storage so the cloud render worker can fetch it
-   * (the worker can only read HTTP URLs). Uploads the bytes, then remaps any timeline clips
-   * + the project's source asset from the local id to the new server id.
+   * Push one browser-local asset's bytes to the cloud and return the server asset. Prefers the
+   * presigned direct-to-R2 path (streams browser → bucket in a worker: off the main thread, no API
+   * RAM buffering, no double bandwidth); falls back to the multipart API upload when the backend is
+   * on local-disk storage (presign unsupported). Never touches the timeline — the caller records
+   * the local↔server pairing via recordAssetCloudCopy (one asset, two locations).
    */
+  async function uploadAssetBytesToCloud(asset: SourceAsset): Promise<SourceAsset> {
+    const response = await fetch(asset.fileUrl, { cache: "no-store" });
+    const blob = await response.blob();
+    const contentType = asset.fileType || blob.type || "application/octet-stream";
+    const meta = {
+      fileName: asset.fileName,
+      fileType: contentType,
+      durationSeconds: asset.durationSeconds,
+      width: asset.width,
+      height: asset.height,
+      source: asset.source ?? "local",
+      folder: asset.folder,
+      originalName: asset.originalName ?? asset.fileName,
+      sizeBytes: blob.size,
+      // Preserve ownership: a project-owned local asset stays owned by that project on the server
+      // (keeps the bin scoping identical). Library assets (no owner) stay user-level.
+      ...(asset.ownerProjectId ? { projectId: asset.ownerProjectId } : {})
+    };
+
+    const presigned = await presignAssetUpload(meta);
+    if (presigned) {
+      try {
+        await putBlobToCloud(presigned.uploadUrl, blob, contentType);
+      } catch (error) {
+        // The row was created before the PUT; drop it so a failed upload leaves no orphan asset.
+        await deleteAsset(presigned.asset.id).catch(() => {});
+        throw error;
+      }
+      return presigned.asset;
+    }
+
+    // Local-disk backend: no presign. Buffer through the API as before.
+    const file = new File([blob], asset.fileName, { type: contentType });
+    return createAsset({ file, ...meta });
+  }
+
+  /**
+   * Record that a local asset now has a cloud copy — ONE asset, two locations. The LOCAL id stays
+   * on the timeline (playback keeps reading on-device bytes; local-first is never violated) and the
+   * bin keeps ONE tile, now showing the synced state. listAssets hides the paired server asset, and
+   * export (ensureExportReady) remaps local→server ids from this same registry without re-uploading.
+   */
+  function recordAssetCloudCopy(local: SourceAsset, serverAsset: SourceAsset): SourceAsset {
+    markLocalAssetPromoted(local.id, serverAsset.id, serverAsset.fileUrl);
+    void updateLocalAssetRecord(local.id, { cloudUrl: serverAsset.fileUrl });
+    return { ...local, cloudUrl: serverAsset.fileUrl };
+  }
+
+  /** Remap every timeline clip + the project's source asset from `fromId` → `toId`. */
+  function remapGraphAssetId(fromId: string, toId: string) {
+    if (!composition || !graph || fromId === toId) return null;
+    const nextTracks = composition.tracks.map((track) => ({
+      ...track,
+      layers: track.layers.map((layer) => (layer.assetId === fromId ? { ...layer, assetId: toId } : layer))
+    }));
+    return {
+      ...graph,
+      sourceAssetId: graph.sourceAssetId === fromId ? toId : graph.sourceAssetId,
+      composition: { ...composition, tracks: nextTracks },
+      version: graph.version + 1
+    };
+  }
+
   async function handleUploadAssetToCloud(asset: SourceAsset) {
+    if (!pro) {
+      setNotice("Turn on the ✨ toggle in the header to upload media to the cloud");
+      return;
+    }
     setBusy(`asset-cloud-${asset.id}`);
     try {
+      const serverAsset = await uploadAssetBytesToCloud(asset);
+      // NO timeline remap and NO second bin entry: the local id + on-device playback stay exactly
+      // as they are; the cloud copy is only recorded (see recordAssetCloudCopy).
+      const synced = recordAssetCloudCopy(asset, serverAsset);
+      setAssets((current) => current.map((item) => (item.id === asset.id ? { ...item, cloudUrl: synced.cloudUrl } : item)));
+      setNotice("Uploaded to cloud");
+    } catch {
+      setNotice("Cloud upload failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Sync ALL browser-local assets to the cloud in one action (the media-pool header chip).
+   * Uploads run sequentially (bandwidth-friendly, predictable memory). Each success only RECORDS
+   * the cloud pairing — the timeline is never touched, so a failed batch can't corrupt a project.
+   */
+  async function handleSyncAllToCloud() {
+    if (!pro) {
+      setNotice("Turn on the ✨ toggle in the header to upload media to the cloud");
+      return;
+    }
+    const pending = assets.filter(isAssetLocalOnly);
+    if (pending.length === 0) {
+      setNotice("Everything's already in the cloud");
+      return;
+    }
+    setBusy("assets-cloud-sync-all");
+    let synced = 0;
+    let failures = 0;
+    try {
+      for (const asset of pending) {
+        try {
+          const serverAsset = await uploadAssetBytesToCloud(asset);
+          const updated = recordAssetCloudCopy(asset, serverAsset);
+          setAssets((current) => current.map((item) => (item.id === asset.id ? { ...item, cloudUrl: updated.cloudUrl } : item)));
+          synced += 1;
+        } catch {
+          failures += 1;
+        }
+      }
+
+      if (failures === 0) setNotice(`Synced ${synced} to the cloud`);
+      else if (synced === 0) setNotice("Cloud sync failed");
+      else setNotice(`Synced ${synced}, ${failures} failed`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Remove an asset's cloud copy (the inverse of "upload to cloud").
+   *
+   * Synced LOCAL asset (the normal case): the bytes are already on this device and the timeline
+   * still uses the local id, so removal is trivially safe — delete the paired server row + R2
+   * object and forget the pairing. A later export simply re-uploads on demand.
+   *
+   * Pure SERVER asset (stock/AI/legacy uploads with no local bytes): pull the bytes back to the
+   * device FIRST (re-import as a local asset + remap the timeline), and only then delete the cloud
+   * copy. If the pull-back fails we abort WITHOUT deleting — media is never destroyed.
+   */
+  async function handleRemoveAssetFromCloud(asset: SourceAsset) {
+    if (asset.id.startsWith("asset_local_")) {
+      const serverId = getRecordedServerAssetId(asset.id);
+      setBusy(`asset-cloud-del-${asset.id}`);
+      try {
+        if (serverId) {
+          // Graphs saved by the old remap-era flow (or export promotion) may reference the SERVER
+          // id — point them back at the local id before its cloud copy disappears.
+          const healed = remapGraphAssetId(serverId, asset.id);
+          if (healed) await updateGraph(healed);
+          await deleteAsset(serverId).catch(() => {});
+        }
+        clearLocalAssetPromotion(asset.id);
+        await updateLocalAssetRecord(asset.id, { cloudUrl: undefined });
+        setAssets((current) =>
+          current.map((item) => {
+            if (item.id !== asset.id) return item;
+            const { cloudUrl: _dropped, ...rest } = item;
+            return rest as SourceAsset;
+          })
+        );
+        setNotice("Removed from cloud — kept on this device");
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
+
+    // Warn if the cloud copy is shared: pulling it local serves THIS project, but clips in any
+    // OTHER project pointing at the same server file lose their media source.
+    const othersUsing = countLocalProjectsUsingAsset(asset.id, project?.id);
+    if (othersUsing > 0) {
+      const confirmed = window.confirm(
+        `This media is also used in ${othersUsing} other project${othersUsing === 1 ? "" : "s"}. ` +
+          `Removing it from the cloud keeps a copy in this project, but ${othersUsing === 1 ? "that project's" : "those projects'"} ` +
+          `clips will break (they can no longer reach the cloud file). Continue?`
+      );
+      if (!confirmed) return;
+    }
+    setBusy(`asset-cloud-del-${asset.id}`);
+    try {
       const response = await fetch(asset.fileUrl, { cache: "no-store" });
+      if (!response.ok) throw new Error("Could not read the cloud copy");
       const blob = await response.blob();
-      const file = new File([blob], asset.fileName, { type: asset.fileType || blob.type });
-      const serverAsset = await createAsset({
+      const contentType = asset.fileType || blob.type || "application/octet-stream";
+      const file = new File([blob], asset.fileName, { type: contentType });
+      const localAsset = await createAsset({
         file,
+        localOnly: true,
         fileName: asset.fileName,
-        fileType: asset.fileType,
+        fileType: contentType,
         durationSeconds: asset.durationSeconds,
         width: asset.width,
         height: asset.height,
         source: asset.source ?? "local",
         folder: asset.folder,
-        originalName: asset.originalName ?? asset.fileName
+        originalName: asset.originalName ?? asset.fileName,
+        sizeBytes: blob.size,
+        ...(asset.ownerProjectId ? { projectId: asset.ownerProjectId } : {})
       });
-      if (composition && graph && serverAsset.id !== asset.id) {
-        const nextTracks = composition.tracks.map((track) => ({
-          ...track,
-          layers: track.layers.map((layer) => (layer.assetId === asset.id ? { ...layer, assetId: serverAsset.id } : layer))
-        }));
-        await updateGraph({
-          ...graph,
-          sourceAssetId: graph.sourceAssetId === asset.id ? serverAsset.id : graph.sourceAssetId,
-          composition: { ...composition, tracks: nextTracks },
-          version: graph.version + 1
-        });
-      }
-      setAssets((current) => [serverAsset, ...current.filter((item) => item.id !== asset.id && item.id !== serverAsset.id)]);
-      setNotice("Uploaded to cloud");
+      const nextGraph = remapGraphAssetId(asset.id, localAsset.id);
+      if (nextGraph) await updateGraph(nextGraph);
+      // Bytes are safely on-device + timeline remapped → now delete the cloud copy (DB row + R2 object).
+      await deleteAsset(asset.id).catch(() => {});
+      setAssets((current) => [localAsset, ...current.filter((item) => item.id !== asset.id && item.id !== localAsset.id)]);
+      setNotice("Removed from cloud — kept on this device");
     } catch {
-      setNotice("Cloud upload failed");
+      setNotice("Couldn't remove from cloud — media left untouched");
     } finally {
       setBusy(null);
     }
@@ -4724,6 +5291,17 @@ export function EditorPage() {
   }
 
   function handleAddTimelineEffect(type: TimelineEffect["type"]) {
+    if (selectedLayerIds.length > 1) {
+      // Multiselect: add to every selected clip, each with its own fresh effect id (createTimelineEffect's
+      // Date.now()-based id can collide when called repeatedly in the same tick — mint per-layer here).
+      void updateLayers(selectedLayerIds, (layer) => ({
+        ...layer,
+        effects: [...layer.effects, { ...createTimelineEffect(type), id: `effect_${type}_${layer.id}_${Math.random().toString(36).slice(2, 8)}` }]
+      }));
+      focusInspector();
+      setNotice(`Effect added to ${selectedLayerIds.length} clips`);
+      return;
+    }
     if (!selectedLayer) {
       setNotice("Select a timeline element first");
       focusInspector();
@@ -5723,6 +6301,8 @@ export function EditorPage() {
   const stablePreviewMovePositionKeyframe = useStableHandler(handlePreviewMovePositionKeyframe);
   const stablePreviewMoveSpatialHandle = useStableHandler(handlePreviewMoveSpatialHandle);
   const stablePreviewResizeShapeLayer = useStableHandler(handlePreviewResizeShapeLayer);
+  const stablePreviewResizeFrameLayer = useStableHandler(handlePreviewResizeFrameLayer);
+  const stablePreviewContentTransformLayer = useStableHandler(handlePreviewContentTransformLayer);
   const stablePreviewRotateLayer = useStableHandler(handlePreviewRotateLayer);
   const stablePreviewScaleLayer = useStableHandler(handlePreviewScaleLayer);
   const stablePreviewCropLayer = useStableHandler(handlePreviewCropLayer);
@@ -5785,6 +6365,9 @@ export function EditorPage() {
     onDeleteSelectedLayers: () => {
       void handleDeleteLayers(selectedLayerIds);
     },
+    onDuplicateSelectedLayers: () => {
+      void handleDuplicateLayers(selectedLayerIds);
+    },
     onMoveLayer: handleMoveLayer,
     onMoveKeyframe: (layerId: string, keyframeId: string, timeSeconds: number) => {
       void handleMoveKeyframe(layerId, keyframeId, timeSeconds);
@@ -5792,6 +6375,8 @@ export function EditorPage() {
     },
     onSetTransition: handleSetTransition,
     onRemoveTransition: handleRemoveTransition,
+    onSetResponsiveTime: (layerId: string, value: { introSeconds: number; outroSeconds: number }) =>
+      void handleSetResponsiveTime(layerId, value),
     onAddCrossDissolve: handleAddCrossDissolve,
     onSetCrossDissolve: handleSetCrossDissolve,
     onRemoveCrossDissolve: handleRemoveCrossDissolve,
@@ -5801,8 +6386,16 @@ export function EditorPage() {
     onToggleTrack: handleToggleTrack,
     onUnlinkLayer: handleUnlinkLayer,
     onUnlinkSelectedLayers: handleUnlinkSelectedLayers,
+    onNestSelection: () => {
+      void handleNestSelection();
+    },
+    onUnnestClip: (layerId: string) => {
+      void handleUnnestClip(layerId);
+    },
+    onOpenNestedClip: handleOpenNestedClip,
     onChangeToolMode: setTimelineTool,
     onToggleSnap: () => setSnapEnabled((value) => !value),
+    onToggleMagnetic: () => setMagneticEnabled((value) => !value),
     onSplitLayerAt: (layerId: string, atSeconds: number) => {
       void handleSplitLayerAt(layerId, atSeconds);
     },
@@ -5845,7 +6438,21 @@ export function EditorPage() {
     },
     onDeleteAsset: handleDeleteAsset,
     onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => {
-      if (inspectorLayer) void updateLayer(inspectorLayer.id, updater);
+      if (!inspectorLayer) return;
+      // Locked layers are read-only in the inspector too (§4 full lock): canvas handles already
+      // bail on `layer.locked`; this is the property-panel chokepoint that every registered panel
+      // (Transform, Effects, blend, …) commits through. Unlock stays available via the stack row
+      // and the inspector's lock banner, both of which write through onChangeLayer (unguarded).
+      // Multiselect: broadcast the SAME change to every selected clip (each against its own value),
+      // not just the primary the inspector is showing — skipping any that are locked (like align).
+      if (multiSelectPrimaryLayer && multiSelectPrimaryLayer.id === inspectorLayer.id) {
+        const editable = selectedLayerIds.filter((id) => isLayerEditable(id));
+        if (!editable.length) return;
+        void updateLayers(editable, updater);
+        return;
+      }
+      if (!isLayerEditable(inspectorLayer.id)) return;
+      void updateLayer(inspectorLayer.id, updater);
     },
     onChangeSpeed: handleChangeLayerSpeed,
     onEditTrack: (trackId: string) => setTrackModalState({ editingTrackId: trackId }),
@@ -5869,10 +6476,31 @@ export function EditorPage() {
     },
     onChangeMaskTool: changeMaskTool,
     // Graphics tab layer stack: select / edit layers OTHER than the inspected one.
-    onSelectLayer: (layerId: string) => setSelectedLayerIds([layerId]),
+    // Mode-aware so the stack mirrors the timeline's click/shift/ctrl selection exactly.
+    onSelectLayer: (layerId: string, mode: LayerSelectMode = "replace") => selectLayer(layerId, mode),
     onChangeLayer: (layerId: string, updater: (layer: TimelineLayer) => TimelineLayer) => {
       void updateLayer(layerId, updater);
-    }
+    },
+    // Graphics tab align/distribute: apply per-layer targets to many layers in ONE history entry.
+    onChangeLayers: (layerIds: string[], updater: (layer: TimelineLayer) => TimelineLayer) => {
+      void updateLayers(layerIds, updater);
+    },
+    // Graphics tab stack ops — dispatch the SAME operations the timeline uses (stack owns no state).
+    onDuplicateLayer: (layerId: string) => void handleDuplicateLayer(layerId),
+    onDeleteLayer: (layerId: string) => void handleDeleteLayer(layerId),
+    // Selection-aware variants: when the stack acts on a multi-selection, duplicate/delete them all in ONE undo.
+    onDuplicateLayers: (layerIds: string[]) => void handleDuplicateLayers(layerIds),
+    onDeleteLayers: (layerIds: string[]) => void handleDeleteLayers(layerIds),
+    onGroupLayers: () => void handleNestSelection(),
+    onUngroupLayer: (layerId: string) => void handleUnnestClip(layerId),
+    onReorderLayer: (layerId: string, targetLayerId: string, place: "front-of" | "behind") =>
+      void handleReorderLayerWithinTrack(layerId, targetLayerId, place),
+    // Text tab — reusable Text Styles (§2).
+    onSaveTextStyle: () => void handleSaveTextStyle(),
+    onApplyTextStyle: (style: TextStyle) => void handleApplyTextStyle(style),
+    onUpdateTextStyle: (styleId: string) => void handleUpdateTextStyle(styleId),
+    onRenameTextStyle: (styleId: string, name: string) => void handleRenameTextStyle(styleId, name),
+    onDeleteTextStyle: (styleId: string) => void handleDeleteTextStyle(styleId)
   });
 
   const stablePreviewCommitMaskPoints = useStableHandler((layerId: string, maskId: string, points: MaskPoint[]) =>
@@ -6286,35 +6914,51 @@ export function EditorPage() {
           <div className="topbar-theme-picker">
             <button
               type="button"
-              className={`topbar-toggle${themeMenuOpen ? " is-active" : ""}`}
-              aria-pressed={themeMenuOpen}
-              aria-expanded={themeMenuOpen}
-              onClick={() => setThemeMenuOpen((open) => !open)}
+              className={`topbar-toggle${themeMenu ? " is-active" : ""}`}
+              aria-pressed={Boolean(themeMenu)}
+              aria-expanded={Boolean(themeMenu)}
+              onClick={(event) => {
+                if (themeMenu) {
+                  setThemeMenu(null);
+                  return;
+                }
+                // Anchor to the trigger; menu is 176px wide and right-aligned to the button.
+                const rect = event.currentTarget.getBoundingClientRect();
+                setThemeMenu({
+                  left: Math.max(8, Math.min(rect.right - 176, window.innerWidth - 184)),
+                  top: rect.bottom + 4
+                });
+              }}
               title="Theme"
             >
               <Droplet size={14} style={{ color: EDITOR_THEMES.find((theme) => theme.id === editorTheme)?.swatch }} />
               <span>Theme</span>
             </button>
-            {themeMenuOpen ? (
-              <div className="topbar-theme-menu" role="menu" aria-label="Accent theme">
-                {EDITOR_THEMES.map((theme) => (
-                  <button
-                    key={theme.id}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={editorTheme === theme.id}
-                    className={`topbar-theme-option${editorTheme === theme.id ? " is-active" : ""}`}
-                    onClick={() => {
-                      setEditorTheme(theme.id);
-                      setThemeMenuOpen(false);
-                    }}
-                  >
-                    <span className="topbar-theme-swatch" style={{ background: theme.swatch }} aria-hidden="true" />
-                    {theme.label}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+            {themeMenu
+              ? createPortal(
+                  <div className="topbar-theme-menu" role="menu" aria-label="Accent theme" style={{ left: themeMenu.left, top: themeMenu.top }}>
+                    {EDITOR_THEMES.map((theme) => (
+                      <button
+                        key={theme.id}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={editorTheme === theme.id}
+                        className={`topbar-theme-option${editorTheme === theme.id ? " is-active" : ""}`}
+                        onClick={() => {
+                          setEditorTheme(theme.id);
+                          setThemeMenu(null);
+                        }}
+                      >
+                        <span className="topbar-theme-swatch" style={{ background: theme.swatch }} aria-hidden="true" />
+                        {theme.label}
+                      </button>
+                    ))}
+                  </div>,
+                  // Portal into .editor-page (NOT body): fixed coords escape the topbar's clipping
+                  // while the menu keeps the [data-kimera-theme] accent variable scope.
+                  editorPageRef.current ?? document.body
+                )
+              : null}
           </div>
           <button
             type="button"
@@ -6362,7 +7006,7 @@ export function EditorPage() {
       ) : null}
 
       <div
-        className={`editor-layout${panelExpanded ? " is-left-expanded" : ""}${inspectorExpanded ? " is-right-expanded" : ""}${panelExpanded || inspectorExpanded ? " is-any-expanded" : ""}${inspectorCollapsed ? " is-inspector-collapsed" : ""}${panelCollapsed ? " is-left-collapsed" : ""}`}
+        className={`editor-layout${panelExpanded ? " is-left-expanded" : ""}${inspectorFullHeight ? " is-right-expanded" : ""}${panelExpanded || inspectorFullHeight ? " is-any-expanded" : ""}${inspectorCollapsed ? " is-inspector-collapsed" : ""}${panelCollapsed ? " is-left-collapsed" : ""}`}
         data-editor-mode={responsiveLayout.mode}
         data-editor-density={responsiveLayout.density}
         data-overlay={activeResponsiveOverlay ?? "none"}
@@ -6418,6 +7062,29 @@ export function EditorPage() {
                     {panelTab === "assets" ? "Media Pool" : panelTab === "effects" ? "Effects" : panelTab === "color" ? "Color" : "Project Settings"}
                   </span>
                   <div className="studio-panel-head-actions">
+                    {panelTab === "assets" && pro ? (
+                      <button
+                        type="button"
+                        className="studio-panel-cloud-sync"
+                        title={
+                          cloudPendingLocalCount > 0
+                            ? `Upload ${cloudPendingLocalCount} local asset${cloudPendingLocalCount === 1 ? "" : "s"} to the cloud`
+                            : "All assets are already in the cloud"
+                        }
+                        aria-label="Sync all local assets to the cloud"
+                        disabled={busy === "assets-cloud-sync-all" || cloudPendingLocalCount === 0}
+                        onClick={() => stableSyncAllToCloud()}
+                      >
+                        <CloudUpload size={13} className={busy === "assets-cloud-sync-all" ? "asset-cloud-spin" : ""} />
+                        <span>
+                          {busy === "assets-cloud-sync-all"
+                            ? "Syncing…"
+                            : cloudPendingLocalCount > 0
+                              ? `Sync ${cloudPendingLocalCount}`
+                              : "Synced"}
+                        </span>
+                      </button>
+                    ) : null}
                     <button
                       className={`tabbar-icon-button${panelExpanded ? " is-active" : ""}`}
                       type="button"
@@ -6450,6 +7117,7 @@ export function EditorPage() {
                   onAssignAsset={stableAssignAsset}
                   onAddAssetToTimeline={stableAddAssetToTimeline}
                   onAddGraphic={stableAddGraphic}
+                  onApplyFrame={stableApplyFrame}
                   onPickReplacement={stablePickReplacement}
                   onCancelReplace={stableCancelReplace}
                   onDeleteAsset={stableDeleteAsset}
@@ -6459,7 +7127,8 @@ export function EditorPage() {
                   onImportedAsset={stableRegisterAsset}
                   onMoveAssetFolder={stableMoveAssetFolder}
                   onSetAssetLabel={stableSetAssetLabel}
-                  onUploadToCloud={stableUploadToCloud}
+                  onUploadToCloud={pro ? stableUploadToCloud : undefined}
+                  onRemoveFromCloud={stableRemoveFromCloud}
                   onOpenSourceMonitor={responsiveLayout.usesOverlayPanels ? undefined : stableOpenSourceMonitor}
                 />
               </div>
@@ -6663,6 +7332,8 @@ export function EditorPage() {
               onMovePositionKeyframe={stablePreviewMovePositionKeyframe}
               onMoveSpatialHandle={stablePreviewMoveSpatialHandle}
               onResizeShapeLayer={stablePreviewResizeShapeLayer}
+              onResizeFrameLayer={stablePreviewResizeFrameLayer}
+              onContentTransformLayer={stablePreviewContentTransformLayer}
               onRotateLayer={stablePreviewRotateLayer}
               onScaleLayer={stablePreviewScaleLayer}
               onCropLayer={stablePreviewCropLayer}
@@ -6833,7 +7504,11 @@ export function EditorPage() {
                     type="button"
                     title="Reset all controls"
                     aria-label="Reset all controls"
-                    onClick={() => updateLayer(inspectorLayer.id, resetLayerControls)}
+                    onClick={() =>
+                      multiSelectPrimaryLayer && multiSelectPrimaryLayer.id === inspectorLayer.id
+                        ? updateLayers(selectedLayerIds, resetLayerControls)
+                        : updateLayer(inspectorLayer.id, resetLayerControls)
+                    }
                   >
                     <RotateCcw size={14} />
                   </button>
@@ -6856,7 +7531,11 @@ export function EditorPage() {
             </div>
             {inspectorLayer ? (
               <>
-                {!selectedLayer ? (
+                {multiSelectPrimaryLayer ? (
+                  <div className="inspector-persisted-hint">
+                    <Diamond size={13} /> Editing {selectedLayerIds.length} clips — changes apply to all
+                  </div>
+                ) : !selectedLayer ? (
                   <div className="inspector-persisted-hint">
                     <Eye size={13} /> Showing last selected
                   </div>
@@ -6874,6 +7553,10 @@ export function EditorPage() {
                   tracks={trackLibrary}
                   activeMaskId={activeMaskId ?? undefined}
                   autoKeyframe={autoKeyframe}
+                  selectedLayerIds={selectedLayerIds}
+                  primaryLayerId={multiSelectPrimaryLayer?.id ?? inspectorLayer.id}
+                  nestedCompositions={graph?.compositions}
+                  textStyles={graph?.textStyles}
                 />
                   )}
                 </ColdTime>
@@ -6907,6 +7590,15 @@ export function EditorPage() {
         <div className="timeline-stack">
         <div className="timeline-dock-row">
         <section className="editor-timeline-dock">
+          {nestBreadcrumb ? (
+            <div className="timeline-nest-breadcrumb">
+              <button type="button" onClick={handleReturnToRootComposition}>
+                <ChevronLeft size={13} /> {nestBreadcrumb.rootCompositionName}
+              </button>
+              <span>/</span>
+              <span className="timeline-nest-breadcrumb-current">{composition.name}</span>
+            </div>
+          ) : null}
           {/* All callback props arrive pre-stabilized via the timelineHandlers useStableHandlers
               block (see above the early return) so the memo'd strip only re-renders on real data
               changes: composition edits, selection, tool/zoom, and the cold playhead commit. */}
@@ -6925,6 +7617,7 @@ export function EditorPage() {
             canRedo={historyVersion >= 0 && redoStackRef.current.length > 0}
             toolMode={timelineTool}
             snapEnabled={snapEnabled}
+            magneticEnabled={magneticEnabled}
             markers={timelineMarkers}
             inPointSeconds={composition.settings?.timeline.inPointSeconds ?? undefined}
             outPointSeconds={composition.settings?.timeline.outPointSeconds ?? undefined}
@@ -7139,8 +7832,9 @@ export function EditorPage() {
             layer={activeLayerToolEffect.layer}
             asset={activeLayerToolEffect.asset}
             composition={composition}
-            onApplied={(nextComposition) => {
-              void updateComposition(nextComposition);
+            editableFields={graph?.editableFields}
+            onApplied={(nextComposition, editableFieldsPatch) => {
+              void applyToolEffectResult(nextComposition, editableFieldsPatch);
               setActiveLayerToolEffect(undefined);
               setNotice("Effect applied");
               resolveToolStep({ applied: true, composition: nextComposition, detail: "Applied" });
@@ -7171,6 +7865,19 @@ export function EditorPage() {
           onSave={handleSaveAsTemplate}
         />
       ) : null}
+      <PasteAttributesModal
+        open={pasteAttributesModalOpen}
+        targetCount={selectedLayerIdsRef.current.filter((id) => isLayerEditable(id)).length}
+        onClose={() => setPasteAttributesModalOpen(false)}
+        onApply={(groups) => {
+          if (!composition) return;
+          const editable = selectedLayerIdsRef.current.filter((id) => isLayerEditable(id));
+          if (!editable.length) return;
+          void updateComposition(pasteLayerAttributes(composition, editable, groups)).then(() => {
+            setNotice(`Attributes pasted onto ${editable.length} clip${editable.length === 1 ? "" : "s"}`);
+          });
+        }}
+      />
       <ExternalTimelineImportModal
         imported={pendingExternalTimelineImport}
         mode={externalTimelineImportMode}
@@ -7757,9 +8464,9 @@ function getRenderNotice(activeJob: RenderJob | undefined, latestFinalJob: Rende
   return fallback;
 }
 
-function buildLayerMaxDurations(composition: TimelineComposition, assets: SourceAsset[]) {
+function buildLayerMaxDurations(composition: TimelineComposition, assets: SourceAsset[], compositions?: Record<string, TimelineComposition> | undefined) {
   return flattenTimelineLayers(composition).reduce<Record<string, number>>((durations, layer) => {
-    durations[layer.id] = getLayerMaxDuration(layer, assets, composition.durationSeconds);
+    durations[layer.id] = getLayerMaxDuration(layer, assets, composition.durationSeconds, compositions);
     return durations;
   }, {});
 }
@@ -7885,13 +8592,28 @@ function describeTransitionCutForClip(composition: TimelineComposition | null | 
     : `Left cut: ${target.left.name} -> ${target.right.name}`;
 }
 
-function getLayerMaxDuration(layer: TimelineLayer, assets: SourceAsset[], compositionDuration: number) {
+function getLayerMaxDuration(
+  layer: TimelineLayer,
+  assets: SourceAsset[],
+  compositionDuration: number,
+  compositions?: Record<string, TimelineComposition> | undefined
+) {
   if ((layer.type === "video" || layer.type === "audio") && layer.assetId) {
     const asset = assets.find((item) => item.id === layer.assetId);
     if (asset?.durationSeconds) {
       // Rate stretch: a clip playing at 2x consumes media twice as fast, so its max
       // TIMELINE duration is the asset duration divided by speed.
       return Math.max(0.05, Math.max(0.2, asset.durationSeconds) / getLayerSpeed(layer));
+    }
+  }
+
+  // Compound clip: max timeline duration is its nested sequence's length, divided by speed —
+  // same rate-stretch rule as a real asset (NESTING.md "Duration is not live": a clip trimmed
+  // past the nest's end simply can't grow further; it doesn't extend/shrink the nest).
+  if (layer.nestedCompositionId) {
+    const nestedDuration = getNestedSourceDurationSeconds(layer, compositions);
+    if (nestedDuration) {
+      return Math.max(0.05, nestedDuration / getLayerSpeed(layer));
     }
   }
 
@@ -8684,34 +9406,39 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
   }
 
   if (kind === "image" || kind === "graphic") {
+    // `||`, not `??`: an EMPTY-STRING url must fall through too — React warns that src="" makes the
+    // browser re-download the whole page, and a record can carry thumbnailUrl/fileUrl as "".
+    const imgSrc = asset.thumbnailUrl || asset.fileUrl;
     return (
       <div className="asset-card-media" style={style}>
-        <img
-          src={asset.thumbnailUrl ?? asset.fileUrl}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          onLoad={(event) => {
-            if (measured.current) return;
-            const el = event.currentTarget;
-            if (el.naturalWidth && el.naturalHeight) {
-              measured.current = true;
-              setRatio(el.naturalWidth / el.naturalHeight);
-            }
-          }}
-        />
+        {imgSrc ? (
+          <img
+            src={imgSrc}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            onLoad={(event) => {
+              if (measured.current) return;
+              const el = event.currentTarget;
+              if (el.naturalWidth && el.naturalHeight) {
+                measured.current = true;
+                setRatio(el.naturalWidth / el.naturalHeight);
+              }
+            }}
+          />
+        ) : null}
       </div>
     );
   }
 
-  const videoSrc = asset.proxyUrl ?? asset.previewUrl ?? asset.fileUrl;
+  const videoSrc = asset.proxyUrl || asset.previewUrl || asset.fileUrl;
   // Show a STILL by default — never mount a <video> per card. A live <video preload="metadata"> on every
   // card fired a metadata fetch + decoder for every video asset the moment the bin opened, flooding the
   // browser's ~6 connections (starving playback AND the thumbnail extractor). The poster comes from the
   // server thumbnail when present, else a ONE-shot, throttled+cached first-frame extraction (useVideoPoster,
   // max 2 concurrent). A real <video> mounts only while hovered, for the live preview.
   const extractedPoster = useVideoPoster(asset.thumbnailUrl ? undefined : videoSrc, 0);
-  const posterSrc = asset.thumbnailUrl ?? extractedPoster ?? undefined;
+  const posterSrc = asset.thumbnailUrl || extractedPoster || undefined;
   const [hovering, setHovering] = useState(false);
   // Premiere-style hover scrub: pointer X maps to source time (still only ONE <video>, mounted on
   // hover). No autoplay — the video stays paused on its poster frame until the pointer moves and
@@ -8741,11 +9468,11 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
         setScrubFrac(frac);
       }}
     >
-      {hovering ? (
+      {hovering && videoSrc ? (
         <video
           ref={videoRef}
           src={videoSrc}
-          poster={posterSrc}
+          {...(posterSrc ? { poster: posterSrc } : {})}
           muted
           loop
           playsInline
@@ -8818,6 +9545,7 @@ function AssetBinImpl({
   onAssignAsset,
   onAddAssetToTimeline,
   onAddGraphic,
+  onApplyFrame,
   onPickReplacement,
   onCancelReplace,
   onDeleteAsset,
@@ -8828,6 +9556,7 @@ function AssetBinImpl({
   onMoveAssetFolder,
   onSetAssetLabel,
   onUploadToCloud,
+  onRemoveFromCloud,
   onOpenSourceMonitor
 }: {
   assets: SourceAsset[];
@@ -8846,6 +9575,8 @@ function AssetBinImpl({
   onAssignAsset: (asset: SourceAsset) => void;
   onAddAssetToTimeline?: (asset: SourceAsset, mode?: AssetAddMode) => void;
   onAddGraphic?: (graphic: LayerGraphic, name: string) => void;
+  /** Frames (Phase 1): apply the picked frame to the selected image/video clip. */
+  onApplyFrame?: (def: FrameDefinition) => void;
   onPickReplacement?: (asset: SourceAsset) => void;
   onCancelReplace?: () => void;
   onDeleteAsset?: ((asset: SourceAsset) => void) | undefined;
@@ -8856,6 +9587,8 @@ function AssetBinImpl({
   onMoveAssetFolder?: (asset: SourceAsset, folder: string | null) => void | Promise<void>;
   onSetAssetLabel?: (asset: SourceAsset, label: string | null) => void | Promise<void>;
   onUploadToCloud?: ((asset: SourceAsset) => void) | undefined;
+  /** Remove an asset's cloud copy (pulls bytes back to device first, then deletes the server/R2 copy). */
+  onRemoveFromCloud?: ((asset: SourceAsset) => void) | undefined;
   /** Video/audio double-click target when the dual-monitor source viewer is available (desktop
       widths only — see showSourceMonitor in EditorPage). Undefined on tablet/phone, where
       double-click keeps opening the AssetViewerModal below. */
@@ -8864,13 +9597,17 @@ function AssetBinImpl({
   useRenderCost("AssetBin");
   // Project-scoped bin: drop uploads owned by another project (the "pile" fix). Library assets (ownerProjectId
   // null — brand/ai/stock) and this project's own uploads pass through. Mirrors GET /assets scope=project.
-  const assets = useMemo(
-    () =>
-      currentProjectId
-        ? rawAssets.filter((a) => !a.ownerProjectId || a.ownerProjectId === currentProjectId)
-        : rawAssets,
-    [rawAssets, currentProjectId]
-  );
+  // ALSO: DISPLAY-level dedupe of paired cloud copies — a server asset recorded as some local asset's
+  // cloud twin is represented by its local tile. This must stay display-only: dropping paired server
+  // records from the DATA (listAssets) broke clip resolution for graphs saved with server ids
+  // ("Missing video asset", 2026-07-14).
+  const assets = useMemo(() => {
+    const scoped = currentProjectId
+      ? rawAssets.filter((a) => !a.ownerProjectId || a.ownerProjectId === currentProjectId)
+      : rawAssets;
+    const paired = new Set(Object.values(getAssetPromotionMap()));
+    return paired.size ? scoped.filter((a) => !paired.has(a.id)) : scoped;
+  }, [rawAssets, currentProjectId]);
   const handleTileActivate = (asset: SourceAsset) => {
     if (replaceActive) {
       onPickReplacement?.(asset);
@@ -8900,13 +9637,28 @@ function AssetBinImpl({
     ai: localStorage.getItem("kimera_asset_folder_ai") || defaultAssetFolder("ai")
   }));
   const [customAssetFolders, setCustomAssetFolders] = useState<string[]>(readStoredAssetFolders);
-  const [menuAssetId, setMenuAssetId] = useState<string | null>(null);
+  // Per-asset context menu. Anchored at FIXED viewport coordinates (cursor / ⋮ button), NOT inside
+  // the tile: the grid is a CSS multi-column layout, where an absolutely-positioned menu inside a
+  // tile paints across neighbouring tiles/columns and gets clipped by the scroll container — the
+  // menu visually landed on the wrong clip.
+  // `left` XOR `right`: a right-click anchors the menu's LEFT edge at the cursor; the ⋮ button
+  // anchors the menu's RIGHT edge to the button (the menu is content-sized, so left-edge math from
+  // an assumed width visibly drifts — right-edge alignment is exact regardless of menu width).
+  const [assetMenu, setAssetMenu] = useState<{ id: string; top: number; left?: number; right?: number } | null>(null);
+  const clampMenuTop = (y: number) => Math.max(8, Math.min(y, window.innerHeight - 324));
+  const openAssetMenuAtCursor = (assetId: string, clientX: number, clientY: number) => {
+    setAssetMenu({ id: assetId, left: Math.max(8, Math.min(clientX, window.innerWidth - 252)), top: clampMenuTop(clientY) });
+  };
+  const openAssetMenuAtTrigger = (assetId: string, trigger: HTMLElement) => {
+    const rect = trigger.getBoundingClientRect();
+    setAssetMenu({ id: assetId, right: Math.max(8, window.innerWidth - rect.right), top: clampMenuTop(rect.bottom + 4) });
+  };
   const [dropActive, setDropActive] = useState(false);
   const dragDepthRef = useRef(0);
 
   // --- Unified Search state (Stock: photos/videos; Graphics: bundled + Iconify) ---
   // No provider identity in the UI — `stockType` doubles as the type chip (photos/videos/graphics).
-  const [stockType, setStockType] = useState<"image" | "video" | "graphics" | "templates">("image");
+  const [stockType, setStockType] = useState<"image" | "video" | "graphics" | "frames" | "templates">("image");
   const [stockOrientation, setStockOrientation] = useState<StockOrientation>(() =>
     readStoredChoice("kimera_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
   );
@@ -9175,14 +9927,14 @@ function AssetBinImpl({
 
   // Close the per-card "More" menu when clicking elsewhere or pressing Escape.
   useEffect(() => {
-    if (!menuAssetId) return;
+    if (!assetMenu) return;
     function handlePointerDown(event: PointerEvent) {
       const target = event.target as HTMLElement | null;
       if (target?.closest(".asset-tile-menu") || target?.closest(".asset-more-button")) return;
-      setMenuAssetId(null);
+      setAssetMenu(null);
     }
     function handleKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setMenuAssetId(null);
+      if (event.key === "Escape") setAssetMenu(null);
     }
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKey);
@@ -9190,7 +9942,7 @@ function AssetBinImpl({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKey);
     };
-  }, [menuAssetId]);
+  }, [assetMenu]);
 
   // Probe whether stock search is configured (once the Search tab is opened).
   useEffect(() => {
@@ -9654,9 +10406,9 @@ function AssetBinImpl({
           {/* Type chips — no provider identity shown anywhere; Photos/Videos hit stock search, Graphics
               merges the offline bundled pack with searchable Iconify icons. */}
           <div className="asset-subtabs" role="tablist" aria-label="Search type">
-            {(["image", "video", "graphics", "templates"] as const).map((kind) => (
+            {(["image", "video", "graphics", "frames", "templates"] as const).map((kind) => (
               <button key={kind} type="button" className={stockType === kind ? "is-active" : ""} onClick={() => setStockType(kind)}>
-                {kind === "image" ? "Photos" : kind === "video" ? "Videos" : kind === "graphics" ? "Graphics" : "Templates"}
+                {kind === "image" ? "Photos" : kind === "video" ? "Videos" : kind === "graphics" ? "Graphics" : kind === "frames" ? "Frames" : "Templates"}
               </button>
             ))}
           </div>
@@ -9668,7 +10420,7 @@ function AssetBinImpl({
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          {stockType !== "graphics" ? (
+          {stockType !== "graphics" && stockType !== "frames" ? (
             <div className="asset-stock-filters">
               <div className="asset-stock-filter">
                 <ThemedSelect ariaLabel="Orientation" value={stockOrientation} groups={STOCK_ORIENTATION_GROUPS} onChange={setStockOrientation} />
@@ -9725,6 +10477,38 @@ function AssetBinImpl({
             <button type="button" title="Dismiss" onClick={() => setStockImportError(null)}>
               ×
             </button>
+          </div>
+        ) : null}
+        {sourceTab === "search" && stockType === "frames" ? (
+          <div className="asset-grid frames-grid">
+            <div className="frames-grid-hint">Select an image or video clip, then pick a frame to shape it. Adjust it in the inspector's Effects tab.</div>
+            {builtInFrames.map((def) => {
+              const d = frameOutlinePathD(makeLayerFrame(def));
+              return (
+                <div
+                  key={def.id}
+                  className="asset-tile asset-stock-tile frame-tile"
+                  role="button"
+                  tabIndex={0}
+                  title={`${def.name} — apply to the selected clip`}
+                  onClick={() => onApplyFrame?.(def)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") onApplyFrame?.(def);
+                  }}
+                >
+                  <div className="asset-graphic-preview frame-tile-preview">
+                    <svg viewBox="0 0 1 1" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                      <path d={d} />
+                    </svg>
+                  </div>
+                  <div className="asset-card-hover">
+                    <div className="asset-card-info">
+                      <strong>{def.name}</strong>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         ) : null}
         {sourceTab === "search" && stockType === "graphics" ? (
@@ -10093,7 +10877,7 @@ function AssetBinImpl({
                       }}
                       onContextMenu={(event) => {
                         event.preventDefault();
-                        setMenuAssetId(asset.id);
+                        openAssetMenuAtCursor(asset.id, event.clientX, event.clientY);
                       }}
                       onDragStart={(event) => {
                         event.dataTransfer.setData("application/x-kimera-asset", asset.id);
@@ -10148,14 +10932,26 @@ function AssetBinImpl({
                           title="More"
                           onClick={(event) => {
                             event.stopPropagation();
-                            setMenuAssetId((id) => (id === asset.id ? null : asset.id));
+                            if (assetMenu?.id === asset.id) {
+                              setAssetMenu(null);
+                            } else {
+                              openAssetMenuAtTrigger(asset.id, event.currentTarget);
+                            }
                           }}
                         >
                           <MoreVertical size={13} />
                         </button>
                       </span>
-                      {menuAssetId === asset.id ? (
-                        <div className="asset-tile-menu asset-list-menu" role="menu" onClick={(event) => event.stopPropagation()}>
+                      {/* Portaled into .editor-page (ThemedSelect pattern): escapes the panel's
+                          transform/backdrop-filter containing blocks so fixed coords are viewport-
+                          true, while keeping the [data-kimera-theme] accent variable scope. */}
+                      {assetMenu?.id === asset.id ? createPortal(
+                        <div
+                          className="asset-tile-menu asset-list-menu"
+                          role="menu"
+                          style={{ top: assetMenu.top, ...(assetMenu.left !== undefined ? { left: assetMenu.left } : { right: assetMenu.right }) }}
+                          onClick={(event) => event.stopPropagation()}
+                        >
                           {onSetAssetLabel ? (
                             <div className="asset-label-swatches" role="group" aria-label="Color label">
                               {Object.entries(ASSET_LABEL_COLORS).map(([name, color]) => (
@@ -10166,17 +10962,17 @@ function AssetBinImpl({
                                   style={{ background: color }}
                                   title={`Label: ${name}`}
                                   onClick={() => {
-                                    setMenuAssetId(null);
+                                    setAssetMenu(null);
                                     void onSetAssetLabel(asset, labelName === name ? null : name);
                                   }}
                                 />
                               ))}
                             </div>
                           ) : null}
-                          <button type="button" onClick={() => { setMenuAssetId(null); setViewerTarget({ kind: "asset", asset }); }}>
+                          <button type="button" onClick={() => { setAssetMenu(null); setViewerTarget({ kind: "asset", asset }); }}>
                             <Eye size={13} /> Preview
                           </button>
-                          <button type="button" onClick={() => { setMenuAssetId(null); void downloadAssetFile(asset); }}>
+                          <button type="button" onClick={() => { setAssetMenu(null); void downloadAssetFile(asset); }}>
                             <Download size={13} /> Download
                           </button>
                           {moveTargets.length ? (
@@ -10187,7 +10983,7 @@ function AssetBinImpl({
                                   key={folder.path}
                                   type="button"
                                   onClick={() => {
-                                    setMenuAssetId(null);
+                                    setAssetMenu(null);
                                     void onMoveAssetFolder?.(asset, folder.path);
                                   }}
                                 >
@@ -10197,11 +10993,12 @@ function AssetBinImpl({
                             </>
                           ) : null}
                           {onDeleteAsset ? (
-                            <button type="button" className="is-danger" onClick={() => { setMenuAssetId(null); onDeleteAsset(asset); }}>
+                            <button type="button" className="is-danger" onClick={() => { setAssetMenu(null); onDeleteAsset(asset); }}>
                               <Trash2 size={13} /> Delete
                             </button>
                           ) : null}
-                        </div>
+                        </div>,
+                        document.querySelector(".editor-page") ?? document.body
                       ) : null}
                     </div>
                   );
@@ -10248,7 +11045,8 @@ function AssetBinImpl({
               const kind = assetKind(asset);
               const labelName = assetLabelOf(asset);
               const meta = formatAssetMeta(asset);
-              const isLocalOnly = asset.fileUrl.startsWith("localblob:") || (!asset.cloudUrl && asset.id.startsWith("asset_local_"));
+              // No cloud copy recorded yet (a synced local asset has cloudUrl → not local-only).
+              const isLocalOnly = !asset.cloudUrl && (asset.fileUrl.startsWith("localblob:") || asset.id.startsWith("asset_local_"));
               const used = usedCounts[asset.id] ?? 0;
               const hasAudio = assetHasAudioStream(asset);
               const assetFolder = normalizeAssetFolder(asset.folder) || (folderTab ? folderRoot : "");
@@ -10277,7 +11075,7 @@ function AssetBinImpl({
                       }}
                   onContextMenu={(event) => {
                     event.preventDefault();
-                    setMenuAssetId(asset.id);
+                    openAssetMenuAtCursor(asset.id, event.clientX, event.clientY);
                   }}
                   onDragStart={(event) => {
                     event.dataTransfer.setData("application/x-kimera-asset", asset.id);
@@ -10307,6 +11105,11 @@ function AssetBinImpl({
                     {ASSET_SOURCE_BADGE[source]}
                   </span>
                   {durationLabel ? <span className="asset-chip asset-chip-duration">{durationLabel}</span> : null}
+                  {asset.cloudUrl ? (
+                    <span className="asset-chip asset-chip-cloud" title="Synced to cloud">
+                      <Cloud size={10} />
+                    </span>
+                  ) : null}
                   {used ? (
                     <button
                       type="button"
@@ -10349,15 +11152,27 @@ function AssetBinImpl({
                         title="More"
                         onClick={(event) => {
                           event.stopPropagation();
-                          setMenuAssetId((id) => (id === asset.id ? null : asset.id));
+                          if (assetMenu?.id === asset.id) {
+                            setAssetMenu(null);
+                          } else {
+                            openAssetMenuAtTrigger(asset.id, event.currentTarget);
+                          }
                         }}
                       >
                         <MoreVertical size={14} />
                       </button>
                     </div>
                   </div>
-                  {menuAssetId === asset.id ? (
-                    <div className="asset-tile-menu" role="menu" onClick={(event) => event.stopPropagation()}>
+                  {/* Portaled into .editor-page (ThemedSelect pattern): escapes the panel's
+                      transform/backdrop-filter containing blocks so fixed coords are viewport-
+                      true, while keeping the [data-kimera-theme] accent variable scope. */}
+                  {assetMenu?.id === asset.id ? createPortal(
+                    <div
+                      className="asset-tile-menu"
+                      role="menu"
+                      style={{ top: assetMenu.top, ...(assetMenu.left !== undefined ? { left: assetMenu.left } : { right: assetMenu.right }) }}
+                      onClick={(event) => event.stopPropagation()}
+                    >
                       {onSetAssetLabel ? (
                         <div className="asset-label-swatches" role="group" aria-label="Color label">
                           {Object.entries(ASSET_LABEL_COLORS).map(([name, color]) => (
@@ -10368,7 +11183,7 @@ function AssetBinImpl({
                               style={{ background: color }}
                               title={`Label: ${name}`}
                               onClick={() => {
-                                setMenuAssetId(null);
+                                setAssetMenu(null);
                                 void onSetAssetLabel(asset, labelName === name ? null : name);
                               }}
                             />
@@ -10376,15 +11191,22 @@ function AssetBinImpl({
                         </div>
                       ) : null}
                       {onUploadToCloud && isLocalOnly ? (
-                        <button type="button" onClick={() => { setMenuAssetId(null); onUploadToCloud(asset); }}>
+                        <button type="button" onClick={() => { setAssetMenu(null); onUploadToCloud(asset); }}>
                           <CloudUpload size={13} /> Upload to cloud
                         </button>
-                      ) : asset.cloudUrl ? (
-                        <span className="asset-tile-menu-note">
-                          <Cloud size={13} /> In cloud
-                        </span>
+                      ) : asset.cloudUrl && !isLocalOnly ? (
+                        <>
+                          <span className="asset-tile-menu-note">
+                            <Cloud size={13} /> In cloud
+                          </span>
+                          {onRemoveFromCloud ? (
+                            <button type="button" onClick={() => { setAssetMenu(null); onRemoveFromCloud(asset); }}>
+                              <CloudOff size={13} /> Remove from cloud
+                            </button>
+                          ) : null}
+                        </>
                       ) : null}
-                      <button type="button" onClick={() => { setMenuAssetId(null); void downloadAssetFile(asset); }}>
+                      <button type="button" onClick={() => { setAssetMenu(null); void downloadAssetFile(asset); }}>
                         <Download size={13} /> Download
                       </button>
                       {moveTargets.length ? (
@@ -10395,7 +11217,7 @@ function AssetBinImpl({
                               key={folder.path}
                               type="button"
                               onClick={() => {
-                                setMenuAssetId(null);
+                                setAssetMenu(null);
                                 void onMoveAssetFolder?.(asset, folder.path);
                               }}
                             >
@@ -10405,11 +11227,12 @@ function AssetBinImpl({
                         </>
                       ) : null}
                       {onDeleteAsset ? (
-                        <button type="button" className="is-danger" onClick={() => { setMenuAssetId(null); onDeleteAsset(asset); }}>
+                        <button type="button" className="is-danger" onClick={() => { setAssetMenu(null); onDeleteAsset(asset); }}>
                           <Trash2 size={13} /> Delete
                         </button>
                       ) : null}
-                    </div>
+                    </div>,
+                    document.querySelector(".editor-page") ?? document.body
                   ) : null}
                 </div>
               );
@@ -10504,6 +11327,7 @@ function AssetBinImpl({
         onAddToTimeline={onAddAssetToTimeline}
         onImport={(result, variant) => void handleImportStock(result, variant)}
         onUploadToCloud={onUploadToCloud}
+        onRemoveFromCloud={onRemoveFromCloud}
         onDelete={onDeleteAsset}
       />
     </div>
@@ -10551,6 +11375,23 @@ function LayerInspectorImpl({
   onSelectEffectMask,
   onSelectLayer,
   onChangeLayer,
+  onChangeLayers,
+  onDuplicateLayer,
+  onDeleteLayer,
+  onDuplicateLayers,
+  onDeleteLayers,
+  onGroupLayers,
+  onUngroupLayer,
+  onReorderLayer,
+  nestedCompositions,
+  selectedLayerIds,
+  primaryLayerId,
+  textStyles,
+  onSaveTextStyle,
+  onApplyTextStyle,
+  onUpdateTextStyle,
+  onRenameTextStyle,
+  onDeleteTextStyle,
   autoKeyframe
 }: {
   assets: SourceAsset[];
@@ -10577,8 +11418,33 @@ function LayerInspectorImpl({
   onChangeMaskTool?: ((tool: MaskTool) => void) | undefined;
   onSelectEffectMask?: ((effectId: string, maskId: string | null) => void) | undefined;
   /** Graphics tab (layer stack): select / edit a layer OTHER than the inspected one. */
-  onSelectLayer?: ((layerId: string) => void) | undefined;
+  onSelectLayer?: ((layerId: string, mode?: LayerSelectMode) => void) | undefined;
   onChangeLayer?: ((layerId: string, updater: (layer: TimelineLayer) => TimelineLayer) => void) | undefined;
+  /** Graphics tab align/distribute: batch-apply per-layer targets in one history entry. */
+  onChangeLayers?: ((layerIds: string[], updater: (layer: TimelineLayer) => TimelineLayer) => void) | undefined;
+  /** Graphics tab stack ops — same operations the timeline dispatches. */
+  onDuplicateLayer?: ((layerId: string) => void) | undefined;
+  onDeleteLayer?: ((layerId: string) => void) | undefined;
+  /** Selection-aware stack ops — duplicate/delete an entire multi-selection in one history entry. */
+  onDuplicateLayers?: ((layerIds: string[]) => void) | undefined;
+  onDeleteLayers?: ((layerIds: string[]) => void) | undefined;
+  onGroupLayers?: (() => void) | undefined;
+  onUngroupLayer?: ((layerId: string) => void) | undefined;
+  /** Graphics stack drag-reorder — change a layer's Z among same-track siblings. */
+  onReorderLayer?: ((layerId: string, targetLayerId: string, place: "front-of" | "behind") => void) | undefined;
+  /** graph.compositions — lets the Graphics stack render nested compositions (groups) hierarchically. */
+  nestedCompositions?: Record<string, TimelineComposition> | undefined;
+  /** Full editor selection (shared with the timeline) — drives multi-select align/distribute. */
+  selectedLayerIds?: string[] | undefined;
+  /** The layer whose controls the inspector is editing (multiSelectPrimaryLayer). */
+  primaryLayerId?: string | undefined;
+  /** Text tab — saved reusable Text Styles (§2) + their save/apply/update/rename/delete ops. */
+  textStyles?: TextStyle[] | undefined;
+  onSaveTextStyle?: (() => void) | undefined;
+  onApplyTextStyle?: ((style: TextStyle) => void) | undefined;
+  onUpdateTextStyle?: ((styleId: string) => void) | undefined;
+  onRenameTextStyle?: ((styleId: string, name: string) => void) | undefined;
+  onDeleteTextStyle?: ((styleId: string) => void) | undefined;
 }) {
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
   const [dragEffectId, setDragEffectId] = useState<string | null>(null);
@@ -10588,6 +11454,18 @@ function LayerInspectorImpl({
     () => ({ width: composition.width, height: composition.height }),
     [composition.width, composition.height]
   );
+
+  // Graphics tab align/distribute participants: the selected layer OBJECTS (shared
+  // editor selection), resolved against the composition. Falls back to the inspected
+  // layer so a single selection still aligns. Kept as objects (not ids) so the panel
+  // can compute geometry without re-walking the tree.
+  const graphicsSelectedLayers = useMemo(() => {
+    const ids = new Set(selectedLayerIds ?? []);
+    if (!ids.size) return [layer];
+    const all = composition.tracks.flatMap((track) => track.layers);
+    const picked = all.filter((item) => ids.has(item.id));
+    return picked.length ? picked : [layer];
+  }, [selectedLayerIds, composition, layer]);
 
   // Resolve-style top-level tabs (2026-07-12): Video/Text/Shape | Audio | Effects | Color.
   // Remembered per layer type so switching clips keeps you on the tab you were working in.
@@ -10608,16 +11486,34 @@ function LayerInspectorImpl({
   const typewriterActive = layer.type === "text" && getStyleKeyframes(layer, "textRevealProgress").length > 0;
 
   return (
-    <div className="inspector-panel">
+    // Dim/block the property body while locked — EXCEPT on the Graphics tab, whose layer stack is a
+    // multi-layer manager (you must still be able to select/unlock other layers there).
+    <div className={`inspector-panel${layer.locked && inspectorTab !== "graphics" ? " is-locked" : ""}`}>
       {!hideAssetBin && (layer.type === "video" || layer.type === "image") ? (
         <AssetBin assets={assets} selectedAssetId={layer.assetId} clickAssigns onAssignAsset={onAssignAsset} onDeleteAsset={onDeleteAsset} onUploadAsset={onUploadAsset} />
       ) : null}
 
       <InspectorTabs layerType={layer.type} active={inspectorTab} onChange={selectInspectorTab} />
 
+      {layer.locked ? (
+        // §4 full lock: every property edit below is a no-op while locked (canvas handles bail too).
+        // Unlock writes through onChangeLayer, which bypasses the locked-onChange guard.
+        <div className="inspector-lock-banner">
+          <Lock size={13} />
+          <span>Layer locked — properties are read-only.</span>
+          <button
+            type="button"
+            onClick={() => onChangeLayer?.(layer.id, (item) => ({ ...item, locked: false }))}
+          >
+            Unlock
+          </button>
+        </div>
+      ) : null}
+
       {isClipTab ? (
         <>
       {layer.type === "text" ? (
+        <>
         <TextGraphicControls
           layer={layer}
           palette={palette}
@@ -10626,6 +11522,17 @@ function LayerInspectorImpl({
           currentTime={currentTime}
           onSeek={onSeek}
         />
+        {onSaveTextStyle && onApplyTextStyle && onUpdateTextStyle && onRenameTextStyle && onDeleteTextStyle ? (
+          <TextStylesSection
+            styles={textStyles ?? []}
+            onSave={onSaveTextStyle}
+            onApply={onApplyTextStyle}
+            onUpdate={onUpdateTextStyle}
+            onRename={onRenameTextStyle}
+            onDelete={onDeleteTextStyle}
+          />
+        ) : null}
+        </>
       ) : null}
       {layer.type === "shape" ? <ShapeGraphicControls layer={layer} palette={palette} onChange={onChange} /> : null}
 
@@ -10671,9 +11578,10 @@ function LayerInspectorImpl({
       ) : null}
 
       {inspectorTab === "effects" ? (
-      <InspectorSection title="Effects" icon={<SlidersHorizontal size={13} />} count={layer.effects.length + (typewriterActive ? 1 : 0)}>
+      <InspectorSection title="Effects" icon={<SlidersHorizontal size={13} />} count={layer.effects.length + (typewriterActive ? 1 : 0) + (layer.frame ? 1 : 0)}>
       <EffectPresetRow layer={layer} onChange={onChange} />
       <div className="effect-controls">
+        {layer.frame ? <FrameEffectCard layer={layer} comp={{ width: composition.width, height: composition.height }} onChange={onChange} /> : null}
         {typewriterActive ? <TypewriterEffectCard layer={layer} onChange={onChange} /> : null}
         {layer.effects.length ? (
           layer.effects.map((effect, index) => (
@@ -10746,7 +11654,7 @@ function LayerInspectorImpl({
               />
             </div>
           ))
-        ) : typewriterActive ? null : (
+        ) : typewriterActive || layer.frame ? null : (
           <div className="empty-mini">
             <Eye size={16} />
             No layer effects yet
@@ -10760,20 +11668,37 @@ function LayerInspectorImpl({
         <>
           <GraphicsStackPanel
             composition={composition}
+            nestedCompositions={nestedCompositions}
             currentTime={currentTime}
-            selectedLayerId={layer.id}
+            selectedLayerIds={selectedLayerIds ?? [layer.id]}
+            primaryLayerId={primaryLayerId ?? layer.id}
             onSelectLayer={onSelectLayer}
             onChangeLayer={onChangeLayer}
+            onDuplicateLayer={onDuplicateLayer}
+            onDeleteLayer={onDeleteLayer}
+            onDuplicateLayers={onDuplicateLayers}
+            onDeleteLayers={onDeleteLayers}
+            onGroup={onGroupLayers}
+            onUngroup={onUngroupLayer}
+            onReorderLayer={onReorderLayer}
           />
           <GraphicsAlignPanel
             layer={layer}
+            selectedLayers={graphicsSelectedLayers}
             composition={compositionSize}
             currentTime={currentTime}
             autoKeyframe={autoKeyframe}
             onChange={onChange}
+            onChangeLayers={onChangeLayers}
+          />
+          <GraphicsPinPanel
+            layer={layer}
+            selectedLayers={graphicsSelectedLayers}
+            onChange={onChange}
+            onChangeLayers={onChangeLayers}
           />
           {layer.graphic ? (
-            <InspectorHost layer={layer} onChange={onChange} panelIds={GRAPHIC_PANEL_IDS} currentTime={currentTime} autoKeyframe={autoKeyframe} />
+            <InspectorHost layer={layer} onChange={onChange} panelIds={GRAPHIC_PANEL_IDS} currentTime={currentTime} onSeek={onSeek} autoKeyframe={autoKeyframe} />
           ) : null}
         </>
       ) : null}
@@ -11036,20 +11961,20 @@ function makeStyleKeyframeTools(
       return {
         active: Boolean(activeKeyframe),
         hasAny: getStyleKeyframes(layer, property).length > 0,
-        hasNext: findStyleKeyframeTime(layer, property, layerTime, 1) !== undefined,
-        hasPrevious: findStyleKeyframeTime(layer, property, layerTime, -1) !== undefined,
+        hasNext: Boolean(findStyleKeyframe(layer, property, layerTime, 1)),
+        hasPrevious: Boolean(findStyleKeyframe(layer, property, layerTime, -1)),
         interpolation: activeKeyframe?.interpolation,
         onChangeInterpolation: (interpolation: KeyframeInterpolation) =>
           onChange((item) => setStyleKeyframeInterpolation(item, property, layerTime, interpolation)),
         onClearAll: () => onChange((item) => clearStyleKeyframes(item, property)),
         onToggle: () => onChange((item) => toggleStyleKeyframe(item, property, layerTime, currentValue / scale)),
         onNext: () => {
-          const t = findStyleKeyframeTime(layer, property, layerTime, 1);
-          if (t !== undefined) onSeek?.(layer.startSeconds + t);
+          const next = findStyleKeyframe(layer, property, layerTime, 1);
+          if (next) onSeek?.(layer.startSeconds + next.timeSeconds);
         },
         onPrevious: () => {
-          const t = findStyleKeyframeTime(layer, property, layerTime, -1);
-          if (t !== undefined) onSeek?.(layer.startSeconds + t);
+          const previous = findStyleKeyframe(layer, property, layerTime, -1);
+          if (previous) onSeek?.(layer.startSeconds + previous.timeSeconds);
         }
       };
     }
@@ -11200,7 +12125,7 @@ function TextGraphicControls({
       </InspectorSection>
 
       <InspectorSection icon={<Spline size={15} />} title="Warp">
-        <InspectorHost layer={layer} onChange={onChange} panelIds={TEXT_WARP_PANEL_IDS} />
+        <InspectorHost layer={layer} onChange={onChange} panelIds={TEXT_WARP_PANEL_IDS} currentTime={currentTime} onSeek={onSeek} />
       </InspectorSection>
 
       <InspectorSection icon={<Sparkles size={15} />} title="Shadow">
@@ -11608,8 +12533,8 @@ function EffectParamControl({
       timeSeconds: layerTime
     });
     const activeKeyframe = getActiveEffectParamKeyframe(layer, effect.id, param.key, layerTime);
-    const nextKeyframeTime = param.keyframeable ? findEffectParamKeyframeTime(layer, effect.id, param.key, layerTime, 1) : undefined;
-    const previousKeyframeTime = param.keyframeable ? findEffectParamKeyframeTime(layer, effect.id, param.key, layerTime, -1) : undefined;
+    const nextKeyframe = param.keyframeable ? findEffectParamKeyframe(layer, effect.id, param.key, layerTime, 1) : undefined;
+    const previousKeyframe = param.keyframeable ? findEffectParamKeyframe(layer, effect.id, param.key, layerTime, -1) : undefined;
     return (
       <EffectSliderControl
         keyframe={
@@ -11617,17 +12542,17 @@ function EffectParamControl({
             ? {
                 active: Boolean(activeKeyframe),
                 hasAny: getEffectParamKeyframes(layer, effect.id, param.key).length > 0,
-                hasNext: nextKeyframeTime !== undefined,
-                hasPrevious: previousKeyframeTime !== undefined,
+                hasNext: Boolean(nextKeyframe),
+                hasPrevious: Boolean(previousKeyframe),
                 interpolation: activeKeyframe?.interpolation,
                 onChangeInterpolation: (interpolation) =>
                   onChangeLayer((item) => setEffectParamInterpolation(item, effect.id, param.key, layerTime, interpolation)),
                 onClearAll: () => onChangeLayer((item) => clearEffectParamKeyframes(item, effect.id, param.key)),
                 onNext: () => {
-                  if (nextKeyframeTime !== undefined) onSeek?.(layer.startSeconds + nextKeyframeTime);
+                  if (nextKeyframe) onSeek?.(layer.startSeconds + nextKeyframe.timeSeconds);
                 },
                 onPrevious: () => {
-                  if (previousKeyframeTime !== undefined) onSeek?.(layer.startSeconds + previousKeyframeTime);
+                  if (previousKeyframe) onSeek?.(layer.startSeconds + previousKeyframe.timeSeconds);
                 },
                 onToggle: () => onChangeLayer((item) => toggleEffectParamKeyframe(item, effect.id, param.key, layerTime, animatedValue))
               }

@@ -1,5 +1,11 @@
 import type { TimelineEffect, TimelineEffectParamValue, TimelineEffectType, TimelineLayerType } from "./types";
 import { CREATIVE_LOOK_NAMES } from "./color/looks";
+import { registerBuiltinFragmentEffects } from "./color/fragment-effects/builtins";
+
+// Ensures the 5 builtin fragment-shader effects (radial/directional blur, sharpen, pixelate,
+// chromatic aberration) are registered wherever this module (the central effect registry) loads —
+// web, worker, and tests alike. See `color/fragment-effects/builtins.ts`.
+registerBuiltinFragmentEffects();
 
 export type TimelineEffectCategory = "Adjust" | "Stylize" | "Blur" | "Keying" | "Motion" | "Texture" | "Audio";
 export type TimelineEffectScope = "clip" | "track" | "adjustment" | "transition";
@@ -438,6 +444,80 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     previewSupport: "native",
     renderSupport: "native",
     params: []
+  },
+  // Builtin fragment-shader effects (2026-07-14) — real GLSL passes, same harness as Custom Shader
+  // above, but first-class registry types (see `color/fragment-effects/builtins.ts`) rather than a
+  // user-uploaded manifest. `buildFragmentPasses` in `scene/build-scene-draws.ts` maps these types
+  // straight to their `builtin.<type>` fragment definition.
+  {
+    type: "radialBlur",
+    name: "Radial Blur",
+    description: "Zoom-style blur radiating from a center point (real GLSL shader).",
+    category: "Blur",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 40, unit: "%", keyframeable: true },
+      { key: "centerX", label: "Center X", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%", keyframeable: true },
+      { key: "centerY", label: "Center Y", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%", keyframeable: true }
+    ]
+  },
+  {
+    type: "directionalBlur",
+    name: "Directional Blur",
+    description: "Linear motion-streak blur along an angle (real GLSL shader).",
+    category: "Blur",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 40, unit: "%", keyframeable: true },
+      { key: "angle", label: "Angle", type: "number", min: -180, max: 180, step: 1, defaultValue: 0, unit: "°", keyframeable: true }
+    ]
+  },
+  {
+    type: "sharpen",
+    name: "Sharpen",
+    description: "Unsharp-mask edge sharpening (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [{ key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 40, unit: "%", keyframeable: true }]
+  },
+  {
+    type: "pixelate",
+    name: "Pixelate",
+    description: "Mosaic pixelation block effect (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [{ key: "blockSize", label: "Block Size", type: "number", min: 1, max: 200, step: 1, defaultValue: 16, unit: "px", keyframeable: true }]
+  },
+  {
+    type: "chromaticAberration",
+    name: "Chromatic Aberration",
+    description: "RGB channel offset along an angle for a lens/glitch fringing look (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 30, unit: "%", keyframeable: true },
+      { key: "angle", label: "Angle", type: "number", min: -180, max: 180, step: 1, defaultValue: 0, unit: "°", keyframeable: true }
+    ]
   }
 ];
 

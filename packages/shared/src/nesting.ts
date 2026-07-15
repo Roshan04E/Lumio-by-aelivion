@@ -214,8 +214,15 @@ export function expandNestedCompositions(
     // this lands, an imported/nested sequence's own track fader and clip volume automation do not
     // affect nested playback volume — a real but narrow gap, not a crash or wrong-in-the-common-case bug
     // (unity gain — the default — is unaffected).
+    // Z-ORDER: the active-composition render paints tracks[0] on TOP (VideoPreview sorts by
+    // `b.trackIndex - a.trackIndex`), and within a track higher layerIndex on top. The derived children
+    // all collapse onto the compound clip's single parent track, so their PARENT layerIndex (== push
+    // order) becomes their z. To make the composited stack match how the SAME sequence looks when opened
+    // in place, we must push bottom-to-top: inner tracks LAST→FIRST (so inner track0 lands highest =
+    // top), each track's own layers in natural order. (Pushing tracks front-first inverted this — a
+    // multi-track nest, e.g. a Canvas Frame's background track, rendered on the wrong side.)
     const children: TimelineLayer[] = [];
-    for (const track of inner.composition.tracks) {
+    for (const track of [...inner.composition.tracks].reverse()) {
       if (!isTrackEnabled(track, inner.composition.tracks)) continue;
       for (const child of track.layers) {
         if (child.muted) continue;
@@ -252,3 +259,164 @@ export function expandNestedCompositions(
 export function expandGraphNestedCompositions(graph: ProjectGraph, composition: TimelineComposition): ExpandedNestedComposition {
   return expandNestedCompositions(composition, graph.compositions);
 }
+
+// ---------------------------------------------------------------------------
+// Phase B — editor UX: creating/undoing a compound clip (NESTING.md §"Nest command"/"Un-nest").
+// Pure structural transforms; the render-side expansion above is unaffected — it just sees one more
+// (or one fewer) `nestedCompositionId` clip in the composition it's handed.
+// ---------------------------------------------------------------------------
+
+function freshNestId(prefix: string): string {
+  const suffix = globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10);
+  return `${prefix}_${suffix}`;
+}
+
+export interface NestSelectionResult {
+  /** The host composition with the selection replaced by one compound clip. */
+  composition: TimelineComposition;
+  /** The new nested sequence — caller stores this in `ProjectGraph.compositions[nestedComposition.id]`. */
+  nestedComposition: TimelineComposition;
+  /** The new compound clip's id (== the layer replacing the selection). */
+  clipId: string;
+}
+
+/**
+ * Collapses 2+ selected layers (any tracks) into a NEW nested sequence, replacing them in `composition`
+ * with one compound clip spanning their combined time range, on the topmost affected track. Layer
+ * relative positions/durations and their track grouping are preserved inside the nest (times normalized
+ * to nest-local t=0). Already-compound clips in the selection are left alone — nesting a nest is
+ * rejected (v1, matches NESTING.md "Self-nesting forbidden" spirit: no nests-in-nests from this action).
+ * Returns null when fewer than 2 nestable layers are selected.
+ */
+export function nestLayersIntoComposition(
+  composition: TimelineComposition,
+  layerIds: readonly string[],
+  options?: { name?: string }
+): NestSelectionResult | null {
+  const selected = new Set(layerIds);
+  const found: Array<{ track: TimelineTrack; trackIndex: number; layer: TimelineLayer }> = [];
+  composition.tracks.forEach((track, trackIndex) => {
+    for (const layer of track.layers) {
+      if (selected.has(layer.id) && !layer.nestedCompositionId) {
+        found.push({ track, trackIndex, layer });
+      }
+    }
+  });
+  if (found.length < 2) return null;
+
+  const spanStart = Math.min(...found.map((f) => f.layer.startSeconds));
+  const spanEnd = Math.max(...found.map((f) => f.layer.startSeconds + f.layer.durationSeconds));
+  const topTrackIndex = Math.min(...found.map((f) => f.trackIndex));
+
+  const nestId = freshNestId("nest");
+  const nestedTrackIdByParentTrackId = new Map<string, string>();
+  const nestedTracks: TimelineTrack[] = [];
+  for (const { track } of found) {
+    if (nestedTrackIdByParentTrackId.has(track.id)) continue;
+    const nestedTrackId = freshNestId("ntrack");
+    nestedTrackIdByParentTrackId.set(track.id, nestedTrackId);
+    nestedTracks.push({ id: nestedTrackId, type: track.type, name: track.name, layers: [] });
+  }
+  for (const { track, layer } of found) {
+    const nestedTrack = nestedTracks.find((t) => t.id === nestedTrackIdByParentTrackId.get(track.id))!;
+    nestedTrack.layers.push({ ...layer, trackId: nestedTrack.id, startSeconds: layer.startSeconds - spanStart });
+  }
+
+  const nestedComposition: TimelineComposition = {
+    id: nestId,
+    name: options?.name ?? "Nested Sequence",
+    width: composition.width,
+    height: composition.height,
+    fps: composition.fps,
+    durationSeconds: spanEnd - spanStart,
+    tracks: nestedTracks,
+    backgroundColor: composition.backgroundColor
+  };
+
+  const clipId = freshNestId("clip");
+  const replacementClip: TimelineLayer = {
+    id: clipId,
+    trackId: composition.tracks[topTrackIndex]!.id,
+    type: "video",
+    name: nestedComposition.name,
+    startSeconds: spanStart,
+    durationSeconds: spanEnd - spanStart,
+    sourceInSeconds: 0,
+    nestedCompositionId: nestId,
+    fit: "cover",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: [],
+    animations: []
+  };
+
+  const tracks = composition.tracks.map((track, index) => {
+    // Keep unselected layers, and any already-compound clip in the selection (nesting a nest is a no-op skip).
+    const remaining = track.layers.filter((layer) => !selected.has(layer.id) || Boolean(layer.nestedCompositionId));
+    if (index === topTrackIndex) {
+      return { ...track, layers: [...remaining, replacementClip].sort((a, b) => a.startSeconds - b.startSeconds) };
+    }
+    return remaining.length === track.layers.length ? track : { ...track, layers: remaining };
+  });
+
+  return { composition: { ...composition, tracks }, nestedComposition, clipId };
+}
+
+/**
+ * Un-nest: splices a compound clip's nested sequence tracks back into `composition` at the clip's
+ * position (in new tracks inserted right after the clip's own track), removing the clip. v1 only
+ * supports an UNTRIMMED, UNSPED compound clip (`sourceInSeconds` 0, `speed` 1/absent) — a trimmed/sped
+ * un-nest needs the full time-remap `expandNestedCompositions` does for rendering, not a simple splice;
+ * returns null (caller surfaces "can't un-nest a trimmed clip") rather than silently losing the trim.
+ */
+export function unnestClip(
+  composition: TimelineComposition,
+  compositions: Record<string, TimelineComposition> | undefined,
+  clipId: string
+): { composition: TimelineComposition } | null {
+  let clip: TimelineLayer | undefined;
+  let clipTrackIndex = -1;
+  composition.tracks.forEach((track, index) => {
+    const match = track.layers.find((layer) => layer.id === clipId);
+    if (match) {
+      clip = match;
+      clipTrackIndex = index;
+    }
+  });
+  if (!clip || !clip.nestedCompositionId) return null;
+  const nested = compositions?.[clip.nestedCompositionId];
+  if (!nested) return null;
+  if ((clip.sourceInSeconds ?? 0) !== 0 || (clip.speed ?? 1) !== 1) return null;
+
+  const shift = clip.startSeconds;
+  const insertedTracks: TimelineTrack[] = nested.tracks.map((track) => {
+    const nextTrackId = freshNestId("utrack");
+    return {
+      ...track,
+      id: nextTrackId,
+      layers: track.layers.map((layer) => ({
+        ...layer,
+        id: freshNestId("uclip"),
+        trackId: nextTrackId,
+        startSeconds: layer.startSeconds + shift
+      }))
+    };
+  });
+
+  const tracks: TimelineTrack[] = [];
+  composition.tracks.forEach((track, index) => {
+    if (index === clipTrackIndex) {
+      tracks.push({ ...track, layers: track.layers.filter((layer) => layer.id !== clipId) });
+      tracks.push(...insertedTracks);
+    } else {
+      tracks.push(track);
+    }
+  });
+
+  return { composition: { ...composition, tracks } };
+}
+
+// Canvas Frames (createFrame) were removed 2026-07-14: a "frame" was just a nest + a full-bleed
+// background, a confusing near-duplicate of grouping. One grouping primitive now — nest/group above.
+// A future Canva-style "Frames" feature (shape placeholders that clip dropped media) is a separate
+// masks/shapes concept, not this. See GRAPHICS_TAB.md.

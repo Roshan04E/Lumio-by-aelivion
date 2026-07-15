@@ -61,6 +61,8 @@ export interface NamedTrackingResult {
 
 export interface PlanarTrackOptions {
   videoUrl: string;
+  /** Source asset the video came from — stamped onto the produced tracking paths so consumers can find them by asset later. */
+  sourceAssetId?: string | undefined;
   durationSeconds: number;
   width: number;
   height: number;
@@ -132,6 +134,7 @@ const TEMPLATE_REFRESH_MIN_INTERVAL_FRAMES = 3;
 /** Backward-compatible single-target wrapper around {@link trackTargetsPlanar3D}. */
 export async function trackSubjectPlanar3D(options: {
   videoUrl: string;
+  sourceAssetId?: string | undefined;
   durationSeconds: number;
   width: number;
   height: number;
@@ -143,6 +146,7 @@ export async function trackSubjectPlanar3D(options: {
 }): Promise<TrackingPathArtifactData> {
   const results = await trackTargetsPlanar3D({
     videoUrl: options.videoUrl,
+    sourceAssetId: options.sourceAssetId,
     durationSeconds: options.durationSeconds,
     width: options.width,
     height: options.height,
@@ -296,6 +300,7 @@ export async function trackTargetsPlanar3D(options: PlanarTrackOptions): Promise
     }
     const trackingPath: TrackingPathArtifactData = {
       id: `track_browser_${target.id}_${Date.now()}`,
+      sourceAssetId: options.sourceAssetId,
       durationSeconds: options.durationSeconds,
       smoothing: 0.4,
       source: "browser",

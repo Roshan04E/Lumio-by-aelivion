@@ -60,4 +60,4 @@ There is no per-test filtering - these scripts run a fixed scenario end to end. 
 
 ## Coordination
 
-`AGENTS.md` is the live handoff log between AI coding agents working this repo concurrently (Claude/Codex) - it lists active file claims and a dated changelog. Check "Active Work Claims" there before editing a file another agent has marked active, and add an entry when you finish non-trivial work. `architecture.md` is the product/feature tracker (shipped vs deferred vs next) - update it when you ship or defer something, don't duplicate its content here.
+`AGENTS.md` is **retired** (2026-07-14) - do not read or update it; it's a stale multi-agent handoff log kept only for history. `architecture.md` is the product/feature tracker (shipped vs deferred vs next) - update it when you ship or defer something, don't duplicate its content here. Recurring problem/solution logs live in `project-tracker/` (append-only, versioned per category).

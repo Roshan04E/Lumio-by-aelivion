@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @kimera-by-aelivion/web editor:test
  */
-import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, wouldCreateCompositionCycle, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -106,6 +106,54 @@ function check(name: string, condition: boolean): void {
   const clippedVideo = clipped.tracks.flatMap((track) => track.layers).find((layer) => layer.type === "video");
   check("work-area clip advances implicit media source time", clippedVideo?.startSeconds === 0 && clippedVideo.sourceInSeconds === 32);
   check("work-area clip uses range duration", Math.abs(clipped.durationSeconds - 5) < 0.001 && clippedVideo?.durationSeconds === 5);
+
+  // REGRESSION (project-tracker/timeline.md v1): the work-area clip rebased sourceInSeconds and the
+  // speed ramp onto the trimmed head but left the KEYFRAMES behind, so exporting with an in-point that
+  // cut into a keyframed clip rendered every key `trimmedFromHead` seconds late. Local export runs this
+  // (clipCompositionToWorkArea), so the bug was export-only and invisible in the editor.
+  {
+    const base = createDefaultComposition({ id: "wa-kf", name: "Work Area Keyframes", durationSeconds: 60 });
+    const source = base.tracks.flatMap((track) => track.layers).find((layer) => layer.type === "video")!;
+    const animation = (timeSeconds: number, value: number) => ({
+      id: `kf_${timeSeconds}`,
+      target: { scope: "layer" as const, property: "transform.opacity" },
+      timeSeconds,
+      value,
+      interpolation: "linear" as const,
+      temporal: {}
+    });
+    const keyed: TimelineLayer = {
+      ...source,
+      startSeconds: 30,
+      durationSeconds: 10,
+      sourceInSeconds: 0,
+      // V1 (absolute composition time): one inside the window, one before the in-point.
+      keyframes: [
+        { id: "v1_in", property: "opacity", timeSeconds: 34, value: 50, easing: "linear" },
+        { id: "v1_cut", property: "opacity", timeSeconds: 31, value: 10, easing: "linear" }
+      ],
+      // V2 (layer-local): 0 and 1 fall in the removed head, 8 falls past the new tail.
+      animations: [animation(0, 0), animation(1, 10), animation(2, 25), animation(5, 100), animation(8, 100)]
+    };
+    const clippedKf = clipCompositionToWorkArea({
+      ...base,
+      tracks: base.tracks.map((track, index) => (index === 0 ? { ...track, layers: [keyed] } : { ...track, layers: [] })),
+      settings: { ...base.settings, timeline: { ...base.settings.timeline, inPointSeconds: 32, outPointSeconds: 37 } }
+    });
+    const layer = clippedKf.tracks.flatMap((track) => track.layers).find((item) => item.id === keyed.id);
+    const times = (layer?.animations ?? []).map((item) => item.timeSeconds);
+    // Head trim = 2s (in-point 32 into a clip starting at 30), new span = 5s.
+    check("work-area clip drops v2 keys inside the removed head", !times.some((t) => t < 0));
+    check("work-area clip rebases v2 keys with the content", times.length === 2 && Math.abs(times[0]! - 0) < 0.001 && Math.abs(times[1]! - 3) < 0.001);
+    check("work-area clip drops v2 keys past the new tail", !times.some((t) => t > 5.001));
+    // V1 keys are ABSOLUTE, so they follow the clip's move to the new t=0 origin (−inPoint), and the
+    // one before the in-point is cut.
+    const v1 = layer?.keyframes ?? [];
+    check("work-area clip cuts v1 keys outside the window", v1.length === 1 && v1[0]!.id === "v1_in");
+    check("work-area clip shifts surviving v1 keys to the new origin", Math.abs((v1[0]?.timeSeconds ?? -1) - 2) < 0.001);
+    // The content rebase that already worked must not regress.
+    check("work-area clip still advances source time", layer?.sourceInSeconds === 2 && layer.startSeconds === 0 && layer.durationSeconds === 5);
+  }
 
   const cache = createFrameCache<string>(2);
   cache.set({ signature: "a", timeSeconds: 0 }, "f0");
@@ -760,6 +808,24 @@ function check(name: string, condition: boolean): void {
   const edgeTrimmed = trimLayerEdgeTo(comp, "c", "tail", 10, trimOptions);
   check("edge trim moves a free tail to the target time", edgeTrimmed.tracks[0]!.layers.find((l) => l.id === "c")!.durationSeconds === 2);
 
+  // --- Trim SQUEEZES keyframes on non-source layers (text/shape/image), unlike video/audio --
+  const textLayer = {
+    ...comp.tracks[0]!.layers[0]!,
+    id: "txt",
+    type: "text",
+    assetId: undefined,
+    startSeconds: 0,
+    durationSeconds: 4,
+    animations: [{ id: "txtkf", target: { scope: "layer", property: "transform.opacity" }, timeSeconds: 2, value: 50, interpolation: "linear", temporal: {} }]
+  } as never as (typeof comp.tracks[0])["layers"][0];
+  const textComp = { ...comp, tracks: [{ ...comp.tracks[0]!, layers: [textLayer] }] } as typeof comp;
+  const textTailTrimmed = trimLayerEdgeTo(textComp, "txt", "tail", 2, { minDurationSeconds: 1 / 30 });
+  const trimmedText = textTailTrimmed.tracks[0]!.layers.find((l) => l.id === "txt")! as never as typeof textLayer;
+  check(
+    "non-source tail trim squeezes (rescales) the keyframe instead of dropping it",
+    trimmedText.durationSeconds === 2 && (trimmedText.animations ?? []).length === 1 && (trimmedText.animations ?? [])[0]!.timeSeconds === 1
+  );
+
   // --- Paste attributes (⌃⌥C / ⌃⌥V) ----------------------------------------------------------
   const sourceLayer = {
     ...comp.tracks[0]!.layers[0]!,
@@ -777,6 +843,21 @@ function check(name: string, condition: boolean): void {
   check("paste copies transform + fit", pb.transform!.scale === 1.2 && pb.fit === "contain");
   check("paste leaves timing/content alone", pb.startSeconds === 4 && pb.durationSeconds === 4 && (pb as { sourceInSeconds?: number }).sourceInSeconds === 1);
   check("paste ignores unselected clips", pasted.tracks[0]!.layers.find((l) => l.id === "a")!.effects.length === 0);
+
+  // --- Group-filtered paste (paste-attributes chooser) ----------------------------------------
+  const targetBBefore = comp.tracks[0]!.layers.find((l) => l.id === "b")!;
+  const transformOnlyPasted = pasteLayerAttributes(comp, ["b"], new Set(["transform"]));
+  const transformOnlyB = transformOnlyPasted.tracks[0]!.layers.find((l) => l.id === "b")! as never as typeof sourceLayer;
+  check(
+    "group-filtered paste (transform only) copies transform but leaves effects/fit untouched",
+    transformOnlyB.transform!.scale === 1.2 && transformOnlyB.effects.length === targetBBefore.effects.length && transformOnlyB.fit === targetBBefore.fit
+  );
+  const effectsOnlyPasted = pasteLayerAttributes(comp, ["b"], new Set(["effects"]));
+  const effectsOnlyB = effectsOnlyPasted.tracks[0]!.layers.find((l) => l.id === "b")! as never as typeof sourceLayer;
+  check(
+    "group-filtered paste (effects only) copies effects but leaves transform untouched",
+    effectsOnlyB.effects.length === 1 && effectsOnlyB.transform === targetBBefore.transform
+  );
 
   // --- Effect presets path: applyLayerAttributes with transform stripped ----------------------
   const snapshot = snapshotLayerAttributes(sourceLayer);
@@ -1133,6 +1214,39 @@ function check(name: string, condition: boolean): void {
   );
   check("nesting: non-cycle passes the guard", !wouldCreateCompositionCycle(compositions, "root", "nestA"));
   check("nesting: compound source length = nested duration", getNestedSourceDurationSeconds(compoundClip, compositions) === 10);
+
+  // --- Phase B: Nest / Un-nest editor actions ---------------------------------------------------
+  const nestA1 = mkLayer({ id: "a1", trackId: "root_t1", startSeconds: 0, durationSeconds: 3 });
+  const nestB1 = mkLayer({ id: "b1", trackId: "root_t1", startSeconds: 3, durationSeconds: 2 });
+  const untouched = mkLayer({ id: "c1", trackId: "root_t1", startSeconds: 5, durationSeconds: 4 });
+  const nestSourceComp = mkComp("nestsrc", 9, [nestA1, nestB1, untouched]);
+
+  const nestResult = nestLayersIntoComposition(nestSourceComp, ["a1", "b1"]);
+  check("nest: returns a result for a 2-layer selection", nestResult !== null);
+  const compoundLayers = nestResult!.composition.tracks[0]!.layers;
+  check("nest: selection replaced by one compound clip", compoundLayers.length === 2 && compoundLayers.some((l) => l.nestedCompositionId === nestResult!.nestedComposition.id));
+  check("nest: unselected layer untouched", compoundLayers.some((l) => l.id === "c1"));
+  const compound = compoundLayers.find((l) => l.nestedCompositionId)!;
+  check("nest: compound clip spans the selection's combined range", compound.startSeconds === 0 && compound.durationSeconds === 5);
+  check("nest: nested comp normalizes child times to t=0", nestResult!.nestedComposition.tracks[0]!.layers.find((l) => l.id === "a1")!.startSeconds === 0);
+  check("nest: nested comp preserves relative offsets", nestResult!.nestedComposition.tracks[0]!.layers.find((l) => l.id === "b1")!.startSeconds === 3);
+  check("nest: nested comp duration = selection span", nestResult!.nestedComposition.durationSeconds === 5);
+  check("nest: fewer than 2 layers is rejected", nestLayersIntoComposition(nestSourceComp, ["a1"]) === null);
+  check("nest: nesting an already-compound clip is excluded from a new nest", nestLayersIntoComposition(nestResult!.composition, [compound.id, "c1"]) === null);
+
+  const nestCompositions = { [nestResult!.nestedComposition.id]: nestResult!.nestedComposition };
+  const unnested = unnestClip(nestResult!.composition, nestCompositions, compound.id);
+  check("un-nest: returns a result for an untrimmed/unsped compound clip", unnested !== null);
+  const unnestedLayerIds = unnested!.composition.tracks.flatMap((t) => t.layers.map((l) => l.id));
+  check("un-nest: compound clip removed", !unnestedLayerIds.includes(compound.id));
+  const restoredA1 = unnested!.composition.tracks.flatMap((t) => t.layers).find((l) => l.startSeconds === 0 && l.durationSeconds === 3);
+  const restoredB1 = unnested!.composition.tracks.flatMap((t) => t.layers).find((l) => l.startSeconds === 3 && l.durationSeconds === 2);
+  check("un-nest: children reinserted at the clip's original position", Boolean(restoredA1) && Boolean(restoredB1));
+  check("un-nest: sibling layer untouched", unnestedLayerIds.includes("c1"));
+
+  const trimmedCompound = { ...compound, sourceInSeconds: 1 };
+  const trimmedComp = { ...nestResult!.composition, tracks: [{ ...nestResult!.composition.tracks[0]!, layers: [trimmedCompound, ...nestResult!.composition.tracks[0]!.layers.filter((l) => l.id !== compound.id)] }] };
+  check("un-nest: a trimmed compound clip is rejected (v1)", unnestClip(trimmedComp, nestCompositions, compound.id) === null);
 }
 
 // --- buildSceneDraws: compound-clip GROUP folding (NESTING.md Phase C, Block 1) -----------------
@@ -1468,6 +1582,220 @@ function check(name: string, condition: boolean): void {
   );
   check("fcpxml export round-trip: title text survives", reimportedTitle?.text === "Round Trip Title");
   check("fcpxml export round-trip: transition kind survives", reimportedClipB?.transitionIn?.kind === "crossDissolve");
+}
+
+// --- Cross-tool mask reuse: mask-resolver lookup tiers -------------------------
+{
+  const {
+    clearSessionArtifactIndex,
+    findReusableMask,
+    findReusableTrackingPath,
+    isDurableMatteUri,
+    maskFromMatteRef,
+    registerMaskForAsset,
+    registerTrackingForAsset
+  } = await import("../tools/mask-resolver");
+
+  check("mask reuse: durable uri accepts http(s) only", isDurableMatteUri("https://api.test/storage/m.webm") && !isDurableMatteUri("blob:https://app/x") && !isDurableMatteUri("opfs://kimera-tool-artifacts/a.bin") && !isDurableMatteUri(undefined));
+
+  const matte = {
+    artifactId: "mask_browser_1",
+    uri: "https://api.test/storage/uploads/matte.webm",
+    kind: "luma" as const,
+    fps: 24,
+    feather: 4,
+    edgeMode: "clean" as const
+  };
+  const maskedLayer: TimelineLayer = {
+    id: "mv1",
+    trackId: "mt1",
+    type: "video",
+    name: "Subject",
+    startSeconds: 0,
+    durationSeconds: 6,
+    assetId: "asset_mask_src",
+    matte,
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+  const blobMattedLayer: TimelineLayer = {
+    ...maskedLayer,
+    id: "mv2",
+    assetId: "asset_blob_only",
+    matte: { ...matte, artifactId: "mask_blob_1", uri: "blob:https://app/dead" }
+  };
+  const maskComposition = {
+    id: "maskReuse",
+    name: "maskReuse",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 6,
+    backgroundColor: "#000",
+    tracks: [{ id: "mt1", type: "video" as const, name: "V1", layers: [maskedLayer, blobMattedLayer] }]
+  };
+  const asset = { width: 1080, height: 1920, durationSeconds: 6 };
+
+  clearSessionArtifactIndex();
+  const compositionHit = findReusableMask({ sourceAssetId: "asset_mask_src", asset, composition: maskComposition });
+  check(
+    "mask reuse: composition scan finds a durable matte and rebuilds the artifact",
+    compositionHit?.origin === "composition" &&
+      compositionHit.mask.id === "mask_browser_1" &&
+      compositionHit.mask.matteVideoUri === matte.uri &&
+      compositionHit.mask.width === 1080 &&
+      compositionHit.mask.durationSeconds === 6 &&
+      compositionHit.mask.edgeMode === "clean"
+  );
+  check("mask reuse: blob: matte on a layer is never reused", findReusableMask({ sourceAssetId: "asset_blob_only", asset, composition: maskComposition }) === undefined);
+  check("mask reuse: unrelated asset finds nothing", findReusableMask({ sourceAssetId: "asset_other", asset, composition: maskComposition }) === undefined);
+
+  const durableFieldsMask = {
+    id: "mask_fields_1",
+    sourceAssetId: "asset_fields",
+    width: 720,
+    height: 1280,
+    fps: 24,
+    durationSeconds: 5,
+    frames: [],
+    matteVideoUri: "https://api.test/storage/uploads/fields.webm",
+    feather: 4,
+    edgeMode: "clean" as const,
+    source: "browser" as const
+  };
+  const fieldsHit = findReusableMask({ sourceAssetId: "asset_fields", editableFields: { maskSequence: durableFieldsMask } });
+  check("mask reuse: editableFields mask with matching sourceAssetId is reused", fieldsHit?.origin === "editableFields" && fieldsHit.mask.id === "mask_fields_1");
+  check(
+    "mask reuse: editableFields mask with a dead blob: uri is skipped",
+    findReusableMask({ sourceAssetId: "asset_fields", editableFields: { maskSequence: { ...durableFieldsMask, matteVideoUri: "blob:https://app/dead" } } }) === undefined
+  );
+  check(
+    "mask reuse: editableFields mask for a different asset is skipped",
+    findReusableMask({ sourceAssetId: "asset_other", editableFields: { maskSequence: durableFieldsMask } }) === undefined
+  );
+
+  // Session index outranks everything and prefers the clean (quality) bake.
+  registerMaskForAsset("asset_mask_src", { ...durableFieldsMask, id: "mask_session_fast", sourceAssetId: "asset_mask_src", edgeMode: "fast", matteVideoUri: "blob:https://app/live-fast" });
+  const fastSessionHit = findReusableMask({ sourceAssetId: "asset_mask_src", asset, composition: maskComposition });
+  check("mask reuse: session index outranks the composition scan", fastSessionHit?.origin === "session" && fastSessionHit.mask.id === "mask_session_fast");
+  registerMaskForAsset("asset_mask_src", { ...durableFieldsMask, id: "mask_session_clean", sourceAssetId: "asset_mask_src", edgeMode: "clean", matteVideoUri: "blob:https://app/live-clean" });
+  const cleanSessionHit = findReusableMask({ sourceAssetId: "asset_mask_src", asset, composition: maskComposition });
+  check("mask reuse: clean session bake preferred over fast", cleanSessionHit?.mask.id === "mask_session_clean");
+
+  const rebuilt = maskFromMatteRef(matte, "asset_mask_src", asset);
+  check("mask reuse: maskFromMatteRef round-trips ref fields", rebuilt.id === matte.artifactId && rebuilt.fps === 24 && rebuilt.feather === 4 && rebuilt.frames.length === 0 && rebuilt.sourceAssetId === "asset_mask_src");
+
+  const trackingPath = {
+    id: "track_1",
+    sourceAssetId: "asset_track",
+    durationSeconds: 6,
+    smoothing: 0.4,
+    source: "browser" as const,
+    points: [{ timeSeconds: 0, position: { x: 50, y: 50 }, bounds: { timeSeconds: 0, x: 40, y: 30, width: 20, height: 40, confidence: 0.9 }, confidence: 0.9 }]
+  };
+  registerTrackingForAsset("asset_track", trackingPath);
+  check("track reuse: session tracking path found", findReusableTrackingPath({ sourceAssetId: "asset_track", minimumDurationSeconds: 6 })?.origin === "session");
+  check("track reuse: too-short tracking path rejected", findReusableTrackingPath({ sourceAssetId: "asset_track", minimumDurationSeconds: 9 }) === undefined);
+  check(
+    "track reuse: editableFields tracking path honored",
+    findReusableTrackingPath({ sourceAssetId: "asset_track2", editableFields: { trackingPath: { ...trackingPath, sourceAssetId: "asset_track2" } } })?.origin === "editableFields"
+  );
+  clearSessionArtifactIndex();
+
+  // --- Matte export choke point: collect + rewrite ------------------------------
+  const { collectUnresolvedMattes, rewriteMatteUris } = await import("../export/matte-resolve");
+
+  const blobLayer: TimelineLayer = { ...maskedLayer, id: "e1", name: "Blob matte", matte: { ...matte, artifactId: "m_blob", uri: "blob:https://app/x" } };
+  const opfsLayer: TimelineLayer = { ...maskedLayer, id: "e2", name: "OPFS matte", matte: { ...matte, artifactId: "m_opfs", uri: "opfs://kimera-tool-artifacts/m_opfs.bin" } };
+  const missingUriLayer: TimelineLayer = { ...maskedLayer, id: "e3", name: "No uri", matte: { ...matte, artifactId: "m_none", uri: undefined } };
+  const httpLayer: TimelineLayer = { ...maskedLayer, id: "e4", name: "Http matte", matte: { ...matte, artifactId: "m_http" } };
+  const plainLayer: TimelineLayer = { ...maskedLayer, id: "e5", name: "No matte" };
+  delete (plainLayer as { matte?: unknown }).matte;
+  const exportComposition2 = {
+    ...maskComposition,
+    id: "matteResolve",
+    tracks: [
+      { id: "rt1", type: "video" as const, name: "V1", layers: [blobLayer, opfsLayer, missingUriLayer] },
+      { id: "rt2", type: "video" as const, name: "V2", layers: [httpLayer, plainLayer] }
+    ]
+  };
+
+  const unresolved = collectUnresolvedMattes(exportComposition2);
+  check(
+    "matte resolve: collect flags blob:/opfs:/missing and passes http(s)",
+    unresolved.length === 3 &&
+      unresolved.some((item) => item.artifactId === "m_blob") &&
+      unresolved.some((item) => item.artifactId === "m_opfs") &&
+      unresolved.some((item) => item.artifactId === "m_none" && item.layerName === "No uri") &&
+      !unresolved.some((item) => item.artifactId === "m_http")
+  );
+  check("matte resolve: collect on undefined composition is empty", collectUnresolvedMattes(undefined).length === 0);
+
+  const rewritten = rewriteMatteUris(exportComposition2, {
+    m_blob: "https://api.test/storage/uploads/resolved-blob.webm",
+    m_opfs: "https://api.test/storage/uploads/resolved-opfs.webm"
+  });
+  const rewrittenLayers = rewritten.tracks.flatMap((track) => track.layers);
+  check(
+    "matte resolve: rewrite swaps only matching artifact uris",
+    rewrittenLayers.find((l) => l.id === "e1")?.matte?.uri === "https://api.test/storage/uploads/resolved-blob.webm" &&
+      rewrittenLayers.find((l) => l.id === "e2")?.matte?.uri === "https://api.test/storage/uploads/resolved-opfs.webm" &&
+      rewrittenLayers.find((l) => l.id === "e3")?.matte?.uri === undefined
+  );
+  check(
+    "matte resolve: rewrite preserves other matte fields and untouched references",
+    rewrittenLayers.find((l) => l.id === "e1")?.matte?.feather === matte.feather &&
+      rewritten.tracks[1] === exportComposition2.tracks[1] &&
+      rewrittenLayers.find((l) => l.id === "e4") === httpLayer
+  );
+  check("matte resolve: rewrite with no matches returns the same composition", rewriteMatteUris(exportComposition2, { unrelated: "https://x" }) === exportComposition2);
+  check("matte resolve: no-uri matte still resolvable by artifactId", rewriteMatteUris(exportComposition2, { m_none: "https://api.test/m.webm" }).tracks[0]!.layers[2]!.matte?.uri === "https://api.test/m.webm");
+
+  // --- Dependency resolver: durable artifacts satisfy auto-inserted prerequisites ---
+  const { artifactSatisfiesModule, resolveModuleInsertions } = await import("@kimera-by-aelivion/shared");
+
+  const durableFields = { maskSequence: durableFieldsMask, trackingPath: { ...trackingPath, sourceAssetId: "asset_fields" } };
+  check(
+    "dep threading: durable mask satisfies PERSON_EXTRACTION with artifact ref",
+    artifactSatisfiesModule("PERSON_EXTRACTION", durableFields)?.maskSequenceId === durableFieldsMask.id
+  );
+  check(
+    "dep threading: blob: mask never satisfies a dependency",
+    artifactSatisfiesModule("PERSON_EXTRACTION", { maskSequence: { ...durableFieldsMask, matteVideoUri: "blob:https://app/x" } }) === undefined
+  );
+  check("dep threading: tracking path satisfies PERSON_TRACKING", artifactSatisfiesModule("PERSON_TRACKING", durableFields)?.trackingPathId === "track_1");
+  check("dep threading: empty points never satisfy PERSON_TRACKING", artifactSatisfiesModule("PERSON_TRACKING", { trackingPath: { ...trackingPath, points: [] } }) === undefined);
+
+  const threaded = resolveModuleInsertions([], "TEXT_BEHIND_PERSON", { editableFields: durableFields });
+  const threadedExtract = threaded.find((effect) => effect.type === "PERSON_EXTRACTION");
+  const threadedRequested = threaded.find((effect) => effect.type === "TEXT_BEHIND_PERSON");
+  check(
+    "dep threading: satisfied prerequisite inserts as ready with the artifact in config",
+    threadedExtract?.status === "ready" && threadedExtract.config.satisfiedByArtifact === true && threadedExtract.config.maskSequenceId === durableFieldsMask.id
+  );
+  check("dep threading: the requested module itself always inserts idle", threadedRequested?.status === "idle");
+
+  const unthreaded = resolveModuleInsertions([], "TEXT_BEHIND_PERSON");
+  check(
+    "dep threading: without artifacts the prerequisite inserts idle with default config",
+    unthreaded.find((effect) => effect.type === "PERSON_EXTRACTION")?.status === "idle" &&
+      unthreaded.find((effect) => effect.type === "PERSON_EXTRACTION")?.config.satisfiedByArtifact === undefined
+  );
+  check(
+    "dep threading: follow-text threads both mask and tracking prerequisites",
+    resolveModuleInsertions([], "SMART_3D_FOLLOW_TEXT", { editableFields: durableFields }).filter((effect) => effect.status === "ready").length === 2
+  );
+
+  // --- Standalone vs editor apply modes (the handler contract's `context` maps onto these) ---
+  const { applyTextBehindPersonComposition } = await import("@kimera-by-aelivion/shared");
+  const tbpOptions = { text: "HELLO", textColor: "#fff", maskId: durableFieldsMask.id, mask: durableFieldsMask, sourceAssetId: "asset_mask_src" };
+  const editorApply = applyTextBehindPersonComposition(maskComposition, tbpOptions, "insert");
+  const standaloneApply = applyTextBehindPersonComposition(maskComposition, tbpOptions, "replace");
+  check(
+    "apply modes: editor insert keeps existing timeline tracks, standalone replace drops them",
+    editorApply.tracks.some((track) => track.id === "mt1") && !standaloneApply.tracks.some((track) => track.id === "mt1") && standaloneApply.tracks.length === 3
+  );
 }
 
 if (failures > 0) {

@@ -8,6 +8,10 @@
 import {
   evaluateTimelineEffectParam,
   evaluateTimelineTransform,
+  graphicAnimationPhase,
+  resolveGraphicAnimation,
+  GRAPHIC_DURATION_PROPERTY,
+  GRAPHIC_PROGRESS_PROPERTY,
   type TimelineKeyframeV2,
   type TimelineLayer
 } from "@kimera-by-aelivion/shared";
@@ -59,6 +63,16 @@ function evaluateTargetValue(layer: TimelineLayer, target: GraphTarget, layerTim
   // Source text is a HOLD lane, not a value curve — draw it flat mid-band.
   if (target.kind === "sourceText") return 0;
   if (target.kind === "layer") {
+    // Animated graphics: read the SHARED resolver rather than the raw keyframe track, so the lane
+    // draws the phase the renderers actually run. It matters when Progress ISN'T keyed — the phase
+    // then comes from the static cycle or a Duration ramp's integral, which no keyframe track holds.
+    if (target.property === GRAPHIC_PROGRESS_PROPERTY || target.property === GRAPHIC_DURATION_PROPERTY) {
+      const plan = resolveGraphicAnimation(layer.graphic, { animations: layer.animations });
+      if (!plan) return 0;
+      return target.property === GRAPHIC_PROGRESS_PROPERTY
+        ? graphicAnimationPhase(plan, layerTime)
+        : styleValueAt(layer, target.property, layerTime, plan.playDurationSeconds);
+    }
     return styleValueAt(layer, target.property, layerTime, target.property === "textRevealProgress" ? 1 : target.min);
   }
   return evaluateTimelineEffectParam({

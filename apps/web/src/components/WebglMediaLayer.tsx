@@ -9,12 +9,12 @@ import {
   type CSSProperties,
   type HTMLAttributes,
 } from "react";
-import { colorPipelineCacheKey, MediaWebGLRenderer, registerContextDisposer, type ColorPipeline, type MatteRef, type MediaEffects, type MediaTransition } from "@kimera-by-aelivion/shared";
+import { colorPipelineCacheKey, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@kimera-by-aelivion/shared";
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
 import { acquirePreviewFrameProvider } from "../playback/preview-frame-pool";
-import { getLivePlaybackTime } from "../playback/playback-clock";
+import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
 import type { FrameProvider } from "../export/source-decoder";
 import type { SceneMediaSink, ScenePreviewMediaFrame, ScenePreviewMediaSource } from "./scene-media-source";
 
@@ -103,6 +103,61 @@ function recordWcHeal(kind: "initTimeout" | "noSource" | "busyWedge" | "divergen
   }
 }
 
+/** Preview raster edge for baked animation frames — smaller than the 1024px export bake to bound GPU
+ *  memory (frameCount × edge² × 4 bytes per animated graphic); vector scales, so this stays crisp on screen. */
+const GRAPHIC_ANIM_PREVIEW_EDGE = 512;
+
+/**
+ * Pre-bake an animated vector graphic's SMIL cycle into flipped frame bitmaps (one per
+ * graphicAnimationFrame index) by rasterizing the deep-linked SVG at each sample time. Main-thread only
+ * (needs an <img> decode). `flipY` matches the still/export upload convention for preview↔export parity.
+ */
+async function bakeAnimatedGraphicFrames(
+  graphic: LayerGraphic,
+  plan: GraphicAnimationPlan,
+  edge: number,
+  isCancelled: () => boolean
+): Promise<ImageBitmap[]> {
+  const aspect = (graphic.naturalWidth ?? 1) / (graphic.naturalHeight ?? 1);
+  const w = Math.max(1, aspect >= 1 ? edge : Math.round(edge * aspect));
+  const h = Math.max(1, aspect >= 1 ? Math.round(edge / aspect) : edge);
+  // Baked SPARSELY on purpose: frame selection indexes the result by FRAME NUMBER, so a failed frame
+  // must never be dropped — a shorter array silently shifts every later frame, and the preview would
+  // then run a different phase than the export (which bakes its own sequence and can't skip, since its
+  // Promise.all rejects instead). Gaps are backfilled from the nearest baked neighbour below, keeping
+  // index === frame number. A near-duplicate frame is a far better failure than a desynced animation.
+  const baked: Array<ImageBitmap | undefined> = new Array(plan.frameCount);
+  for (let i = 0; i < plan.frameCount; i += 1) {
+    if (isCancelled()) break;
+    const img = new Image();
+    img.decoding = "async";
+    img.src = graphicToAnimatedDataUrl(graphic, graphicAnimationBakeTime(plan, i));
+    try {
+      await img.decode();
+      if (isCancelled()) break;
+      baked[i] = await createImageBitmap(img, { imageOrientation: "flipY", resizeWidth: w, resizeHeight: h, resizeQuality: "high" });
+    } catch {
+      /* bad decode, or an engine without bitmap options — leave the gap for the backfill */
+    }
+  }
+  const first = baked.find(Boolean);
+  if (isCancelled() || !first) {
+    // Nothing usable (or we were cancelled mid-bake): no aligned sequence is possible, so report none
+    // rather than a partial one. Closing here keeps a cancelled bake from leaking its bitmaps.
+    for (const frame of baked) frame?.close();
+    return [];
+  }
+  // Backfilled entries repeat a bitmap reference, so the caller's dispose closes some twice — which is
+  // a no-op on an already-detached ImageBitmap, not an error.
+  const frames: ImageBitmap[] = [];
+  let last = first; // leading gaps hold the first baked frame until a real one arrives
+  for (let i = 0; i < plan.frameCount; i += 1) {
+    last = baked[i] ?? last;
+    frames.push(last);
+  }
+  return frames;
+}
+
 interface BaseProps {
   pipeline: ColorPipeline | null;
   /** Pro stylize effects (vignette/grain/chroma) applied in the same shader pass. */
@@ -161,6 +216,13 @@ interface ImageProps extends BaseProps {
   /** Max of the clip's static transform/content zoom — picks the still-proxy size tier (P2):
    *  a zoomed-in clip decodes the larger tier so it stays crisp. Absent = 1. */
   stillZoomFactor?: number | undefined;
+  /** Vector-graphic layer source. When it carries SMIL animation, the layer plays it live: pre-baked
+   *  frames selected against the playhead (see graphicAnimationFrame), instead of the static still. */
+  graphic?: LayerGraphic | undefined;
+  /** Clip start (timeline seconds) — clip-local time drives animated-graphic frame selection. */
+  graphicStartSeconds?: number | undefined;
+  /** The layer's keyframes — `graphicProgress` / `graphicDuration` keys drive the animation's phase. */
+  graphicAnimations?: TimelineKeyframeV2[] | undefined;
   fullResSrc?: never;
   preferNativeDecode?: never;
   currentTime?: never;
@@ -266,6 +328,32 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // Decoded still source. Preferred form is a pre-flipped, downscale-capped ImageBitmap (see the
     // image effect below); the raw <img> element is the fallback for engines without bitmap options.
     const imageRef = useRef<{ source: TexImageSource; width: number; height: number } | null>(null);
+    // Animated (SMIL) vector graphics: pre-baked frame bitmaps + the cycle they were sampled over. The
+    // playhead selects a frame at composite time (graphicAnimationFrame) — identical math to local
+    // export + Remotion, so preview stays pixel-aligned. `epoch` invalidates the compositor's re-grade
+    // skip when a recolor re-bakes the sequence (same frame index, different pixels).
+    const graphicFramesRef = useRef<{ frames: ImageBitmap[]; epoch: number } | null>(null);
+    const graphicBakeEpochRef = useRef(0);
+    const graphic = mediaType === "image" ? props.graphic : undefined;
+    const graphicStartSeconds = mediaType === "image" ? (props.graphicStartSeconds ?? 0) : 0;
+    const graphicPlan =
+      mediaType === "image"
+        ? resolveGraphicAnimation(graphic, { animations: props.graphicAnimations })
+        : null;
+    // Re-bake signature: recolor (fill/palette), a new SVG, or anything that changes the BAKED SEQUENCE.
+    // Loop mode changes the bake times ([0,cycle) wrapping vs [0,cycle] inclusive) and keyframes change
+    // frameCount (via the slowest cycle) — phase itself is read live, so keyframe TIMES/VALUES don't
+    // need a re-bake beyond that.
+    const graphicBakeSig = graphic && graphicPlan
+      ? `${graphic.svg.length}|${graphic.fill}|${JSON.stringify(graphic.palette ?? [])}|${graphicPlan.naturalCycleSeconds}|${graphicPlan.loop}|${graphicPlan.frameCount}`
+      : "";
+    // The compositor's snapshot() closure is created once per (singleCtx, mediaType) — it would otherwise
+    // pin the plan + clip start from THAT render, so live keyframe edits (and a clip drag) never reached
+    // frame selection. Frames are baked from the signature above; the PHASE is always read live.
+    const graphicPlanRef = useRef<GraphicAnimationPlan | null>(null);
+    graphicPlanRef.current = graphicPlan;
+    const graphicStartRef = useRef(0);
+    graphicStartRef.current = graphicStartSeconds;
     const rafRef = useRef<number | null>(null);
     const vfcRef = useRef<number | null>(null);
     const disposeTimerRef = useRef<number | null>(null);
@@ -631,6 +719,9 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // keep the element (correct, just slower).
     useEffect(() => {
       if (mediaType !== "image") return undefined;
+      // Animated graphics own the image source via their pre-baked frame sequence (below) — skip the
+      // static still decode so the two don't fight over imageRef.
+      if (graphicPlan) return undefined;
       let cancelled = false;
       const MAX_STILL_EDGE = 2560;
       const zoom = (props as ImageProps).stillZoomFactor ?? 1;
@@ -717,9 +808,73 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [src, mediaType]);
 
+    // ── ANIMATED GRAPHIC: pre-bake the SMIL cycle, select a frame per playhead ─────────────────────
+    // Bake the frame sequence once (re-bake on recolor / svg change via graphicBakeSig). The playhead
+    // then selects a frame at composite time (selectGraphicFrame) — no per-frame SVG decode on the hot path.
+    useEffect(() => {
+      if (mediaType !== "image" || !graphic || !graphicPlan) return undefined;
+      let cancelled = false;
+      const epoch = (graphicBakeEpochRef.current += 1);
+      const plan = graphicPlan;
+      void (async () => {
+        const frames = await bakeAnimatedGraphicFrames(graphic, plan, GRAPHIC_ANIM_PREVIEW_EDGE, () => cancelled);
+        if (cancelled) {
+          for (const f of frames) f.close();
+          return;
+        }
+        const prev = graphicFramesRef.current;
+        graphicFramesRef.current = frames.length ? { frames, epoch } : null;
+        for (const f of prev?.frames ?? []) f.close();
+        const sel = selectGraphicFrame();
+        if (sel) imageRef.current = { source: sel.source, width: sel.width, height: sel.height };
+        if (singleCtx) publishSceneFrame();
+        else drawImage();
+      })();
+      return () => {
+        cancelled = true;
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [mediaType, graphicBakeSig]);
+
+    // Close baked frames on unmount.
+    useEffect(
+      () => () => {
+        for (const f of graphicFramesRef.current?.frames ?? []) f.close();
+        graphicFramesRef.current = null;
+      },
+      []
+    );
+
+    // Re-select the animated-graphic frame as the playhead moves (playback AND scrub): single-ctx just
+    // re-arms the compositor (its snapshot reads selectGraphicFrame live); the legacy path repaints.
+    useEffect(() => {
+      if (mediaType !== "image" || !graphicPlan) return undefined;
+      return subscribePlaybackClock(() => {
+        if (!graphicFramesRef.current) return;
+        if (singleCtx) sceneSinkRef.current?.onFrame();
+        else drawImage();
+      });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [mediaType, graphicPlan === null, singleCtx]);
+
+    /** The animated-graphic frame for the current playhead (clip-local time → shared frame math), or null
+     *  when the layer isn't an animated graphic / hasn't baked yet. */
+    function selectGraphicFrame(): { source: ImageBitmap; width: number; height: number; frameIndex: number; epoch: number } | null {
+      const baked = graphicFramesRef.current;
+      // LIVE plan + start (not the baked plan): a keyframe edit changes the phase without changing the
+      // frame sequence, so selection must read current values while the bitmaps stay cached.
+      const plan = graphicPlanRef.current;
+      if (!baked || !plan || baked.frames.length === 0) return null;
+      const frameIndex = graphicAnimationFrameAt(plan, getLivePlaybackTime() - graphicStartRef.current);
+      const bmp = baked.frames[Math.min(frameIndex, baked.frames.length - 1)]!;
+      return { source: bmp, width: bmp.width, height: bmp.height, frameIndex, epoch: baked.epoch };
+    }
+
     function drawImage() {
       if (failedRef.current) return;
-      const still = imageRef.current;
+      // Animated graphic → the playhead-selected frame; otherwise the decoded still.
+      const animated = selectGraphicFrame();
+      const still = animated ?? imageRef.current;
       // SINGLE-CTX PREVIEW: publish + re-arm; the compositor grades the still in-context (snapshot reads
       // imageRef live at composite time). No own GL context is created for scene-composited stills.
       if (singleCtx) {
@@ -1379,18 +1534,28 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       const source: ScenePreviewMediaSource = {
         snapshot() {
           let frame: ScenePreviewMediaFrame | null = null;
+          // Animated graphic → the playhead-selected baked frame; its version encodes (bake epoch, frame
+          // index) so the compositor re-uploads on frame change AND after a recolor re-bake, but skips
+          // within a held frame. Falls back to the decoded still.
+          let animatedVersion: number | null = null;
           if (mediaType === "video") {
             const picked = selectVideoDrawSource();
             if (picked) frame = { source: picked.source as TexImageSource, width: picked.width, height: picked.height };
           } else {
-            const still = imageRef.current;
-            if (still && still.width > 0 && still.height > 0) frame = { source: still.source, width: still.width, height: still.height };
+            const sel = selectGraphicFrame();
+            if (sel) {
+              frame = { source: sel.source, width: sel.width, height: sel.height };
+              animatedVersion = sel.epoch * 100000 + sel.frameIndex;
+            } else {
+              const still = imageRef.current;
+              if (still && still.width > 0 && still.height > 0) frame = { source: still.source, width: still.width, height: still.height };
+            }
           }
           const gi = gradeInputsRef.current;
           const matteVideo = matteVideoRef.current;
           return {
             frame,
-            frameVersion: frameVersionRef.current,
+            frameVersion: animatedVersion ?? frameVersionRef.current,
             pipeline: gi.pipeline,
             pipelineKey: gi.pipelineKey,
             mediaEffects: gi.mediaEffects,

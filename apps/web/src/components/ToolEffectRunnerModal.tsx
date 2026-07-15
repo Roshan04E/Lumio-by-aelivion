@@ -15,6 +15,7 @@ export function ToolEffectRunnerModal({
   layer,
   asset,
   composition,
+  editableFields,
   onApplied,
   onClose
 }: {
@@ -22,10 +23,13 @@ export function ToolEffectRunnerModal({
   layer: TimelineLayer;
   asset: SourceAsset;
   composition: TimelineComposition;
-  onApplied: (nextComposition: TimelineComposition) => void;
+  /** Project graph editableFields — feeds cross-tool mask reuse inside the handler run. */
+  editableFields?: Record<string, unknown> | undefined;
+  /** `editableFieldsPatch` is the handler's durable artifact patch (masks/tracking) for the project graph. */
+  onApplied: (nextComposition: TimelineComposition, editableFieldsPatch?: Record<string, unknown>) => void;
   onClose: () => void;
 }) {
-  const runner = useLayerToolEffectRunner({ tool, layer, asset, composition, onApplied });
+  const runner = useLayerToolEffectRunner({ tool, layer, asset, composition, editableFields, onApplied });
   const { status, running, error, optionFields, selectedOptions, setOption } = runner;
 
   function handleCancel() {

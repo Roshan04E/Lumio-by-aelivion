@@ -13,6 +13,7 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "actions:test": "tsx src/timeline-actions/registry.test.ts",
+    "resolver:test": "tsx src/timeline-ops.resolveGroupMove.test.ts",
     "color:test": "tsx src/color/color.test.ts",
     "governor:test": "tsx src/color/gl-context.test.ts"
   },

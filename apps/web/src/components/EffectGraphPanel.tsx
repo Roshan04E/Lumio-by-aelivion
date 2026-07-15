@@ -36,6 +36,10 @@ import { TransitionThumb } from "./TransitionThumb";
 const TRANSITION_STRIP_CAP = 7;
 const LOOK_STRIP_CAP = 7;
 
+/** Display order for effect subcategory headers inside the Video/Text folders. "Other" (presets,
+ *  imported effects — anything without a registry category) always sorts last. */
+const EFFECT_CATEGORY_ORDER = ["Adjust", "Blur", "Stylize", "Keying", "Texture", "Motion", "Other"];
+
 /** The transition spec the panel hands to the editor (duration is filled in there). */
 export interface TransitionApplySpec {
   kind: TransitionKind;
@@ -406,9 +410,35 @@ export function EffectGraphPanel({
           <span>{label}</span>
           <span className="effect-tree-count">{items.length}</span>
         </button>
-        {isOpen ? <div className="effect-tree-folder-body">{items.map(renderRow)}</div> : null}
+        {isOpen ? <div className="effect-tree-folder-body">{renderFolderBody(items)}</div> : null}
       </div>
     );
+  }
+
+  /**
+   * Video/Text folders mix many effect categories (Blur/Adjust/Stylize/Keying/Texture) once the
+   * registry grows past a handful of items — sub-group by category (with an "Other" bucket for
+   * items that don't carry one: presets, imported effects) so the list reads as sections instead of
+   * one long flat pile. A folder with only one distinct category renders flat, unchanged from before.
+   */
+  function renderFolderBody(items: CatalogItem[]) {
+    const groups = new Map<string, CatalogItem[]>();
+    for (const item of items) {
+      const key = item.kind === "effect" && item.category ? item.category : "Other";
+      const list = groups.get(key);
+      if (list) list.push(item);
+      else groups.set(key, [item]);
+    }
+    if (groups.size <= 1) {
+      return items.map(renderRow);
+    }
+    const orderedKeys = [...EFFECT_CATEGORY_ORDER.filter((key) => groups.has(key)), ...[...groups.keys()].filter((key) => !EFFECT_CATEGORY_ORDER.includes(key))];
+    return orderedKeys.map((key) => (
+      <div className="effect-tree-subgroup" key={key}>
+        <div className="effect-tree-subgroup-head">{key}</div>
+        {groups.get(key)!.map(renderRow)}
+      </div>
+    ));
   }
 
   // The top tree holds only effect categories; Transitions + AI live in the bottom strip.

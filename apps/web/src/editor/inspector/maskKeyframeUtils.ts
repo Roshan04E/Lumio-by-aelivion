@@ -8,7 +8,7 @@ import {
   type TimelineKeyframeV2,
   type TimelineLayer
 } from "@kimera-by-aelivion/shared";
-import { clamp, isKeyframeAt, keyframeTimeTolerance } from "./keyframeUtils";
+import { clamp, findKeyframeIn, isKeyframeAt } from "./keyframeUtils";
 
 /**
  * Mask keyframe mutations — the mask analogue of the transform/effect helpers in `keyframeUtils.ts`.
@@ -38,18 +38,14 @@ export function getActiveMaskScalarKeyframe(
   return getMaskScalarKeyframes(layer, maskId, property).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
 }
 
-export function findMaskScalarKeyframeTime(
+export function findMaskScalarKeyframe(
   layer: TimelineLayer,
   maskId: string,
   property: MaskScalarProperty,
   layerTime: number,
   direction: -1 | 1
 ) {
-  const keyframes = getMaskScalarKeyframes(layer, maskId, property);
-  if (direction < 0) {
-    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
-  }
-  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+  return findKeyframeIn(getMaskScalarKeyframes(layer, maskId, property), layerTime, direction);
 }
 
 /** Pure setter for a mask scalar's static base value. */
@@ -246,12 +242,8 @@ export function hasMaskPathKeyframeAt(mask: Mask, layerTime: number): boolean {
   return getMaskPathKeyframes(mask).some((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
 }
 
-export function findMaskPathKeyframeTime(mask: Mask, layerTime: number, direction: -1 | 1) {
-  const keyframes = getMaskPathKeyframes(mask);
-  if (direction < 0) {
-    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
-  }
-  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+export function findMaskPathKeyframe(mask: Mask, layerTime: number, direction: -1 | 1) {
+  return findKeyframeIn(getMaskPathKeyframes(mask), layerTime, direction);
 }
 
 function clonePoints(points: MaskPoint[]): MaskPoint[] {

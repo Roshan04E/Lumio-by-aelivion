@@ -1023,6 +1023,13 @@ export async function createWebCodecsVideoSource(
     return rotationDegrees % 180 === 0 ? { w, h } : { w: h, h: w };
   };
 
+  // True decodable end from the sample table — see FrameProvider.decodableEndSeconds. The proxy
+  // build clamps to this so overshooting duration metadata can never bake a frozen tail again.
+  const lastSample = index[index.length - 1];
+  const decodableEndSeconds = lastSample
+    ? Math.max(0, (lastSample.timestamp + Math.max(0, lastSample.duration)) / 1_000_000)
+    : undefined;
+
   const provider: FrameProvider = {
     get width() {
       return displaySize().w;
@@ -1031,6 +1038,7 @@ export async function createWebCodecsVideoSource(
       return displaySize().h;
     },
     nominalFps,
+    decodableEndSeconds,
     getFrame:
       rotationDegrees === 0
         ? getFrame

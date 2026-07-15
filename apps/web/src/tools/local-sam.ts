@@ -292,6 +292,8 @@ function bestMaskToLuma(mask: SamTensor, iouScores: SamTensor, width: number, he
 
 export interface PromptedSegmentOptions {
   videoUrl: string;
+  /** Source asset the video came from — stamped onto the produced artifacts so consumers can find them by asset later. */
+  sourceAssetId?: string | undefined;
   durationSeconds: number;
   width: number;
   height: number;
@@ -349,6 +351,7 @@ export async function segmentVideoPrompted(options: PromptedSegmentOptions): Pro
 
   const maskSequence: MaskSequenceArtifactData = {
     id: `mask_browser_sam_${Date.now()}`,
+    sourceAssetId: options.sourceAssetId,
     width,
     height,
     fps,
@@ -360,6 +363,7 @@ export async function segmentVideoPrompted(options: PromptedSegmentOptions): Pro
   };
   const trackingPath: TrackingPathArtifactData = {
     id: `track_browser_sam_${Date.now()}`,
+    sourceAssetId: options.sourceAssetId,
     durationSeconds: options.durationSeconds,
     smoothing: 0.4,
     source: "browser",

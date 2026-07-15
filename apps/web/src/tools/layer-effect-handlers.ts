@@ -10,6 +10,7 @@ import {
   createCaptionTrack,
   type MaskSequenceArtifactData,
   type SourceAsset,
+  type SubjectAnalysisArtifacts,
   type TimelineComposition,
   type TimelineLayer,
   type TrackingPathArtifactData
@@ -22,7 +23,8 @@ import { chooseSamDeviceProfile, isSamSupported, segmentVideoPrompted, type SamP
 import { chooseSegmentationDeviceProfile, segmentVideoFast, segmentVideoQuality } from "./local-segmentation";
 import { trackSubjectPlanar3D } from "./local-tracking";
 import { transcribeAssetLocally } from "./local-transcription";
-import { storeMatteArtifact } from "./matte-store";
+import { findReusableMask, findReusableTrackingPath, registerMaskForAsset, registerTrackingForAsset } from "./mask-resolver";
+import { storeMatteArtifact, uploadMatteForExport } from "./matte-store";
 import type { InpaintMask } from "./mock-inpaint";
 import { runVideoInpaint } from "./video-inpaint";
 
@@ -46,9 +48,18 @@ export interface LayerToolEffectOptionField {
 
 export interface LayerToolEffectRunArgs {
   asset: SourceAsset;
-  layer: TimelineLayer;
+  /** The selected timeline layer in the editor; undefined on standalone surfaces (the /tools page has no timeline yet). */
+  layer: TimelineLayer | undefined;
   /** Composition frame rate, so tools can frame-lock their output to the timeline. */
   fps: number;
+  /**
+   * The current composition, when the surface has one (the editor always does).
+   * Used for cross-tool artifact reuse: a layer already compositing this asset
+   * through a durable matte lets mask consumers skip a fresh segmentation.
+   */
+  composition?: TimelineComposition | undefined;
+  /** The project graph's durable per-tool artifacts (the /tools page supplies these). */
+  editableFields?: Record<string, unknown> | undefined;
   options: Record<string, string>;
   onProgress: (message: string) => void;
   isCancelled: () => boolean;
@@ -56,11 +67,17 @@ export interface LayerToolEffectRunArgs {
 
 export interface LayerToolEffectApplyArgs<TResult> {
   composition: TimelineComposition;
-  layer: TimelineLayer;
+  layer: TimelineLayer | undefined;
   asset: SourceAsset;
   result: TResult;
   /** The same run-time choices the user selected before Run (see optionFields). */
   options: Record<string, string>;
+  /**
+   * "editor" (default) applies into the live timeline non-destructively (the
+   * shared builders' "insert" mode). "standalone" is the /tools page building a
+   * fresh draft project, where the builders' default "replace" mode is correct.
+   */
+  context?: "editor" | "standalone" | undefined;
 }
 
 /**
@@ -76,11 +93,34 @@ export interface LayerToolEffectHandler<TResult = unknown> {
   optionFields?: LayerToolEffectOptionField[];
   run: (args: LayerToolEffectRunArgs) => Promise<TResult>;
   applyResult: (args: LayerToolEffectApplyArgs<TResult>) => TimelineComposition;
+  /**
+   * The durable per-project artifact patch a standalone surface should merge
+   * into `projectGraph.editableFields` after applying (the /tools page persists
+   * masks/tracking there so later sessions — and the cross-tool mask-reuse
+   * lookup — can find them). Editor surfaces don't consume this yet.
+   */
+  describeEditableFields?: (args: LayerToolEffectApplyArgs<TResult>) => Record<string, unknown>;
 }
 
 function defineLayerToolEffectHandler<TResult>(handler: LayerToolEffectHandler<TResult>): LayerToolEffectHandler<unknown> {
   return handler as LayerToolEffectHandler<unknown>;
 }
+
+/**
+ * Shared "extract once, reuse everywhere" choice for every mask consumer.
+ * Default reuses a real mask already produced for the same source asset
+ * (a prior Extract Person run, a masked layer on the timeline); "Re-analyze"
+ * is the escape hatch when the old mask is stale (clip retrimmed/replaced).
+ */
+const maskSourceOptionField: LayerToolEffectOptionField = {
+  key: "maskSource",
+  label: "Subject mask",
+  defaultValue: "auto",
+  choices: [
+    { value: "auto", label: "Reuse if available", description: "Uses a mask already extracted for this clip; runs a fresh analysis otherwise." },
+    { value: "reanalyze", label: "Re-analyze", description: "Ignore any existing mask and run segmentation again." }
+  ]
+};
 
 const autoCaptionsLayerEffect = defineLayerToolEffectHandler({
   toolSlug: "auto-captions",
@@ -92,7 +132,7 @@ const autoCaptionsLayerEffect = defineLayerToolEffectHandler({
   }
 });
 
-const extractPersonLayerEffect = defineLayerToolEffectHandler({
+const extractPersonLayerEffect = defineLayerToolEffectHandler<SubjectAnalysisArtifacts>({
   toolSlug: "extract-person",
   optionFields: [
     {
@@ -103,11 +143,37 @@ const extractPersonLayerEffect = defineLayerToolEffectHandler({
         { value: "fast", label: "Fast preview", description: "Quick, lower-quality edges." },
         { value: "quality", label: "High quality", description: "Slower, temporally stable edges - recommended before export." }
       ]
-    }
+    },
+    maskSourceOptionField
   ],
-  run: async ({ asset, fps, options, onProgress, isCancelled }) => {
+  run: async ({ asset, fps, composition, editableFields, options, onProgress, isCancelled }) => {
+    // A fast-preview request is trivially satisfied by an existing high-quality
+    // bake; an explicit quality bake always runs fresh (that's its whole point).
+    if (options.quality !== "quality" && options.maskSource !== "reanalyze") {
+      const reused = findReusableMask({ sourceAssetId: asset.id, asset, composition, editableFields });
+      if (reused && reused.mask.edgeMode === "clean") {
+        onProgress('Reusing the high-quality subject mask already extracted for this clip. Choose "Re-analyze" to regenerate.');
+        const reusedTrack = findReusableTrackingPath({ sourceAssetId: asset.id, editableFields });
+        return {
+          maskSequence: reused.mask,
+          trackingPath:
+            reusedTrack?.trackingPath ??
+            ({
+              id: `track_reused_${Date.now()}`,
+              sourceAssetId: asset.id,
+              durationSeconds: asset.durationSeconds,
+              smoothing: 0.4,
+              source: "browser",
+              points: []
+            } satisfies TrackingPathArtifactData),
+          subjectBounds: []
+        };
+      }
+    }
+
     const segmentOptions = {
       videoUrl: asset.fileUrl,
+      sourceAssetId: asset.id,
       durationSeconds: asset.durationSeconds,
       width: asset.width || 720,
       height: asset.height || 1280,
@@ -126,21 +192,28 @@ const extractPersonLayerEffect = defineLayerToolEffectHandler({
     onProgress("Saving preview matte...");
     const store = await createToolArtifactStore();
     const runId = `extract_${Date.now()}`;
-    const { maskSequence, blob } = await storeMatteArtifact(result, store, runId);
-    try {
-      const matteAsset = await createAsset({
-        file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" }),
-        source: "timeline-generated",
-        folder: "generated/background-removed",
-        originalName: "Subject matte"
-      });
-      return { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
-    } catch {
-      return maskSequence;
-    }
+    const baked = await storeMatteArtifact(result, store, runId);
+    const outcome = await uploadMatteForExport({
+      maskSequence: baked.maskSequence,
+      blob: baked.blob,
+      folder: "generated/background-removed",
+      onProgress
+    });
+    registerMaskForAsset(asset.id, outcome.maskSequence);
+    registerTrackingForAsset(asset.id, result.trackingPath);
+    return { maskSequence: outcome.maskSequence, trackingPath: result.trackingPath, subjectBounds: result.subjectBounds };
   },
-  applyResult: ({ composition, asset, result }) =>
-    applyExtractPersonComposition(composition, { mask: result, sourceAssetId: asset.id }, "insert")
+  applyResult: ({ composition, asset, result, context }) =>
+    applyExtractPersonComposition(
+      composition,
+      { mask: result.maskSequence, sourceAssetId: asset.id },
+      context === "standalone" ? "replace" : "insert"
+    ),
+  describeEditableFields: ({ result }) => ({
+    maskSequence: result.maskSequence,
+    trackingPath: result.trackingPath,
+    subjectBounds: result.subjectBounds
+  })
 });
 
 /**
@@ -173,11 +246,32 @@ const smartFollowTextLayerEffect = defineLayerToolEffectHandler<TrackingPathArti
         { value: "fast", label: "Fast", description: "Single-scale search - quick." },
         { value: "quality", label: "High quality", description: "Coarse-to-fine multi-scale - more robust to fast motion." }
       ]
+    },
+    {
+      key: "trackSource",
+      label: "Tracking data",
+      defaultValue: "auto",
+      choices: [
+        { value: "auto", label: "Reuse if available", description: "Uses a tracking path already produced for this clip; tracks fresh otherwise." },
+        { value: "reanalyze", label: "Re-track", description: "Ignore any existing tracking path and track the subject again." }
+      ]
     }
   ],
-  run: async ({ asset, fps, options, onProgress, isCancelled }) =>
-    trackSubjectPlanar3D({
+  run: async ({ asset, fps, editableFields, options, onProgress, isCancelled }) => {
+    if (options.trackSource !== "reanalyze") {
+      const reused = findReusableTrackingPath({
+        sourceAssetId: asset.id,
+        minimumDurationSeconds: asset.durationSeconds,
+        editableFields
+      });
+      if (reused) {
+        onProgress('Reusing the tracking path already produced for this clip. Choose "Re-track" to regenerate.');
+        return reused.trackingPath;
+      }
+    }
+    const trackingPath = await trackSubjectPlanar3D({
       videoUrl: asset.fileUrl,
+      sourceAssetId: asset.id,
       durationSeconds: asset.durationSeconds,
       width: asset.width || 720,
       height: asset.height || 1280,
@@ -185,7 +279,10 @@ const smartFollowTextLayerEffect = defineLayerToolEffectHandler<TrackingPathArti
       trackFps: Math.min(15, Math.max(6, Math.round(fps))),
       onProgress,
       isCancelled
-    }),
+    });
+    registerTrackingForAsset(asset.id, trackingPath);
+    return trackingPath;
+  },
   applyResult: ({ composition, asset, result, options }) =>
     options.mode === "stabilize"
       ? applyStabilizationComposition(composition, {
@@ -204,13 +301,28 @@ const smartFollowTextLayerEffect = defineLayerToolEffectHandler<TrackingPathArti
 });
 
 /**
- * Shared by remove-background and text-behind-person: both need the same fast
+ * Shared by remove-background and text-behind-person: both need the same
  * person-segmentation matte, stored the same way extract-person stores it.
+ * Before segmenting from scratch, this reuses a real mask already produced for
+ * the same source asset ("extract once, reuse everywhere") — a prior Extract
+ * Person run in this session, the project's durable editableFields copy, or a
+ * masked layer already on the timeline. `maskSource: "reanalyze"` skips reuse.
  */
 async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskSequenceArtifactData> {
-  const { asset, fps, onProgress, isCancelled } = args;
+  const { asset, fps, composition, editableFields, options, onProgress, isCancelled } = args;
+  if (options.maskSource !== "reanalyze") {
+    const reused = findReusableMask({ sourceAssetId: asset.id, asset, composition, editableFields });
+    if (reused) {
+      onProgress(
+        `Reusing the subject mask already extracted for this clip (${reused.mask.edgeMode === "clean" ? "high quality" : "fast preview"}). Choose "Re-analyze" to regenerate.`
+      );
+      return reused.mask;
+    }
+  }
+
   const result = await segmentVideoFast({
     videoUrl: asset.fileUrl,
+    sourceAssetId: asset.id,
     durationSeconds: asset.durationSeconds,
     width: asset.width || 720,
     height: asset.height || 1280,
@@ -222,18 +334,16 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
   onProgress("Saving matte...");
   const store = await createToolArtifactStore();
   const runId = `matte_${Date.now()}`;
-  const { maskSequence, blob } = await storeMatteArtifact(result, store, runId);
-  try {
-    const matteAsset = await createAsset({
-      file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" }),
-      source: "timeline-generated",
-      folder: "generated/background-removed",
-      originalName: "Subject matte"
-    });
-    return { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
-  } catch {
-    return maskSequence;
-  }
+  const baked = await storeMatteArtifact(result, store, runId);
+  const outcome = await uploadMatteForExport({
+    maskSequence: baked.maskSequence,
+    blob: baked.blob,
+    folder: "generated/background-removed",
+    onProgress
+  });
+  registerMaskForAsset(asset.id, outcome.maskSequence);
+  registerTrackingForAsset(asset.id, result.trackingPath);
+  return outcome.maskSequence;
 }
 
 const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
@@ -247,10 +357,11 @@ const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArt
         { value: "timelineMask", label: "Transparent", description: "Keeps the subject with a transparent timeline matte." },
         { value: "greenScreen", label: "Green screen", description: "Composites the subject over a solid green plate." }
       ]
-    }
+    },
+    maskSourceOptionField
   ],
   run: async (args) => runSegmentationMatte(args),
-  applyResult: ({ composition, asset, result, options }) =>
+  applyResult: ({ composition, asset, result, options, context }) =>
     applyRemoveBackgroundComposition(
       composition,
       {
@@ -259,25 +370,38 @@ const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArt
         mask: result,
         sourceAssetId: asset.id
       },
-      "insert"
-    )
+      context === "standalone" ? "replace" : "insert"
+    ),
+  describeEditableFields: ({ result, options }) => ({
+    maskSequence: result,
+    compositingTool: "remove-background",
+    compositingMode: options.mode === "greenScreen" ? "greenScreen" : "timelineMask"
+  })
 });
 
 const textBehindPersonLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
   toolSlug: "text-behind-person",
+  optionFields: [maskSourceOptionField],
   run: async (args) => runSegmentationMatte(args),
-  applyResult: ({ composition, asset, result }) =>
+  applyResult: ({ composition, asset, result, options, context }) =>
     applyTextBehindPersonComposition(
       composition,
       {
-        text: "TEXT",
-        textColor: "#FFFFFF",
+        text: options.text || "TEXT",
+        textColor: options.textColor || "#FFFFFF",
         maskId: result.id,
         mask: result,
         sourceAssetId: asset.id
       },
-      "insert"
-    )
+      context === "standalone" ? "replace" : "insert"
+    ),
+  describeEditableFields: ({ result, options }) => ({
+    maskSequence: result,
+    compositingTool: "text-behind-person",
+    compositingMode: "textBehindPerson",
+    behindText: options.text || "TEXT",
+    behindTextColor: options.textColor || "#FFFFFF"
+  })
 });
 
 const aiRotoLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
@@ -292,6 +416,7 @@ const aiRotoLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>
     const prompt: SamPrompt = { positive: [{ x: 0.5, y: 0.5 }], negative: [] };
     const result = await segmentVideoPrompted({
       videoUrl: asset.fileUrl,
+      sourceAssetId: asset.id,
       durationSeconds: asset.durationSeconds,
       width: asset.width || 720,
       height: asset.height || 1280,
@@ -304,21 +429,23 @@ const aiRotoLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>
     onProgress("Saving matte...");
     const store = await createToolArtifactStore();
     const runId = `roto_${Date.now()}`;
-    const { maskSequence, blob } = await storeMatteArtifact(result, store, runId);
-    try {
-      const matteAsset = await createAsset({
-        file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" }),
-        source: "timeline-generated",
-        folder: "generated/roto",
-        originalName: "Subject matte"
-      });
-      return { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
-    } catch {
-      return maskSequence;
-    }
+    const baked = await storeMatteArtifact(result, store, runId);
+    const outcome = await uploadMatteForExport({
+      maskSequence: baked.maskSequence,
+      blob: baked.blob,
+      folder: "generated/roto",
+      onProgress
+    });
+    // Deliberately NOT registered for cross-tool reuse: an AI-roto matte keys an
+    // arbitrary prompted object, not the person mask the other tools expect.
+    return outcome.maskSequence;
   },
-  applyResult: ({ composition, asset, result }) =>
-    applyExtractPersonComposition(composition, { mask: result, sourceAssetId: asset.id }, "insert")
+  applyResult: ({ composition, asset, result, context }) =>
+    applyExtractPersonComposition(
+      composition,
+      { mask: result, sourceAssetId: asset.id },
+      context === "standalone" ? "replace" : "insert"
+    )
 });
 
 interface RemovePersonResult {
@@ -378,7 +505,7 @@ const removePersonLayerEffect = defineLayerToolEffectHandler<RemovePersonResult>
       durationSeconds: asset.durationSeconds
     };
   },
-  applyResult: ({ composition, asset, result }) =>
+  applyResult: ({ composition, asset, result, context }) =>
     applyRemovePersonComposition(
       composition,
       {
@@ -387,7 +514,7 @@ const removePersonLayerEffect = defineLayerToolEffectHandler<RemovePersonResult>
         durationSeconds: result.durationSeconds,
         sourceAssetId: asset.id
       },
-      "insert"
+      context === "standalone" ? "replace" : "insert"
     )
 });
 

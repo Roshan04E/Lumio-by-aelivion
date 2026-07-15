@@ -30,6 +30,8 @@ import { Diamond, Magnet, Maximize, RotateCcw, Trash2 } from "lucide-react";
 import {
   computeAutoTangents,
   easyEaseHandles,
+  GRAPHIC_DURATION_PROPERTY,
+  GRAPHIC_PROGRESS_PROPERTY,
   type KeyframeInterpolation,
   type TimelineKeyframeV2,
   type TimelineLayer
@@ -39,6 +41,7 @@ import { ScrubNumberInput } from "../../components/ScrubNumberInput";
 import { ThemedSelect } from "../inspector/controls/ThemedSelect";
 import {
   buildEffectGraphTargets,
+  buildGraphicGraphTargets,
   clamp,
   clearEffectParamKeyframes,
   clearTransformKeyframes,
@@ -123,6 +126,8 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       // Text layers: SOURCE TEXT hold lane + Typewriter reveal curve (both user-visible only
       // once they carry keys — the default visible set filters to animated targets).
       ...(layer.type === "text" ? [sourceTextGraphTarget, typewriterGraphTarget] : []),
+      // Animated (SMIL) graphics: Progress (cycles) + Duration lanes. Empty for static graphics.
+      ...buildGraphicGraphTargets(layer),
       ...buildEffectGraphTargets(layer)
     ],
     [layer]
@@ -897,6 +902,13 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
   // ── Property tree ────────────────────────────────────────────────────────────
   const treeGroups = useMemo(() => {
     const transform = { label: "Transform", targets: transformGraphTargets };
+    // Animated-graphic lanes get their own group so they can be toggled visible even before they
+    // carry keys (the default visible set only auto-shows ANIMATED curves).
+    const graphicTargets = allTargets.filter(
+      (target) =>
+        target.kind === "layer" &&
+        (target.property === GRAPHIC_PROGRESS_PROPERTY || target.property === GRAPHIC_DURATION_PROPERTY)
+    );
     const byEffect = new Map<string, { label: string; targets: GraphTarget[] }>();
     for (const target of allTargets) {
       if (target.kind !== "effect") continue;
@@ -905,7 +917,11 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       group.targets.push(target);
       byEffect.set(target.effectId, group);
     }
-    return [transform, ...byEffect.values()];
+    return [
+      transform,
+      ...(graphicTargets.length ? [{ label: "Graphic", targets: graphicTargets }] : []),
+      ...byEffect.values()
+    ];
   }, [allTargets]);
 
   function toggleVisible(key: string) {

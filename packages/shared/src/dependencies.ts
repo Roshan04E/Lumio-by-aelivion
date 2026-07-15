@@ -86,7 +86,44 @@ export function getDependenciesForModule(type: ModuleType, existingTypes: Module
   return dependencyRules[type] ?? [];
 }
 
-export function resolveModuleInsertions(existingEffects: ProjectEffect[], requestedType: ModuleType): ProjectEffect[] {
+/**
+ * Checks whether a durable artifact already stored on the project graph
+ * (`editableFields` — where every tool surface persists masks/tracking)
+ * satisfies a module's OUTPUT, honoring the `accepts: ["mask"/"trackingPath"]`
+ * declarations in tools.ts. Returns the config patch to record on the inserted
+ * effect (which artifact satisfied it), or undefined when nothing durable exists.
+ * Durable = an http(s) URI every render path (including the Remotion worker)
+ * can fetch — a browser-local blob:/opfs: URI never satisfies a dependency.
+ */
+export function artifactSatisfiesModule(
+  type: ModuleType,
+  editableFields: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!editableFields) {
+    return undefined;
+  }
+  if (type === "PERSON_EXTRACTION") {
+    const mask = editableFields.maskSequence as { id?: string; matteVideoUri?: string } | undefined;
+    if (mask && typeof mask.matteVideoUri === "string" && /^https?:\/\//i.test(mask.matteVideoUri)) {
+      return { satisfiedByArtifact: true, maskSequenceId: mask.id };
+    }
+    return undefined;
+  }
+  if (type === "PERSON_TRACKING") {
+    const track = editableFields.trackingPath as { id?: string; points?: unknown[] } | undefined;
+    if (track && Array.isArray(track.points) && track.points.length > 0) {
+      return { satisfiedByArtifact: true, trackingPathId: track.id };
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+export function resolveModuleInsertions(
+  existingEffects: ProjectEffect[],
+  requestedType: ModuleType,
+  context?: { editableFields?: Record<string, unknown> | undefined }
+): ProjectEffect[] {
   const existingTypes = existingEffects.map((effect) => effect.type);
   const chain: ModuleType[] = [];
   const addWithDependencies = (type: ModuleType) => {
@@ -100,7 +137,21 @@ export function resolveModuleInsertions(existingEffects: ProjectEffect[], reques
   };
 
   addWithDependencies(requestedType);
-  return chain.map((type) => createProjectEffect(type));
+  return chain.map((type) => {
+    // Thread existing durable artifacts into auto-inserted PREREQUISITES: adding
+    // e.g. Text Behind Person to a project that already extracted a person mask
+    // records the PERSON_EXTRACTION dependency as already satisfied ("ready",
+    // config pointing at the artifact) instead of an idle effect that implies a
+    // re-run. The requested module itself always inserts idle — the user asked
+    // for it to run.
+    if (type !== requestedType) {
+      const satisfiedConfig = artifactSatisfiesModule(type, context?.editableFields);
+      if (satisfiedConfig) {
+        return { ...createProjectEffect(type, satisfiedConfig), status: "ready" as const };
+      }
+    }
+    return createProjectEffect(type);
+  });
 }
 
 export function estimateCreditsForEffects(effects: ProjectEffect[], durationSeconds: number): number {

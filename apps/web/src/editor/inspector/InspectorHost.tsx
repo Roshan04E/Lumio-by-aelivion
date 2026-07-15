@@ -33,10 +33,21 @@ export interface InspectorHostProps {
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
   /** Optional: restrict to specific registered panel ids (used during incremental migration). */
   panelIds?: string[];
-  /** Current playback position (absolute composition seconds). Forwarded to panels that use it. */
-  currentTime?: number | undefined;
+  /**
+   * Current playback position (absolute composition seconds). Forwarded to panels that use it.
+   *
+   * REQUIRED at every call site (the value may be `undefined`, but the prop must be written out).
+   * These two are the playhead wiring every keyframeable row depends on, and omitting either fails
+   * SILENTLY — a panel with no `onSeek` renders enabled prev/next buttons whose `onSeek?.()` is a
+   * no-op, and a panel with no `currentTime` computes every keyframe against layer-local time 0.
+   * Optional props made forgetting them invisible to both the compiler and the runtime (the Graphics
+   * tab shipped with dead keyframe navigation exactly this way — project-tracker/editor-ui.md v4), so
+   * they are deliberately non-optional: leaving one out is now a build error, and passing `undefined`
+   * has to be a decision someone typed.
+   */
+  currentTime: number | undefined;
   /** Seek the playhead. Forwarded to panels that use it (e.g. TransformPanel graph editor). */
-  onSeek?: ((seconds: number) => void) | undefined;
+  onSeek: ((seconds: number) => void) | undefined;
   /** Composition pixel dimensions, forwarded to panels that author comp-space geometry (masks). */
   composition?: { width: number; height: number } | undefined;
   /** Mask currently edited in the preview, forwarded to the Mask panel. */

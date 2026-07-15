@@ -18,6 +18,7 @@ import {
   SceneTextRasterizer,
   buildSceneDraws,
   colorPipelineCacheKey,
+  effectsWithLayerRegionMask,
   findTransitionPairs,
   getActiveTransition,
   getCompositionColorPipeline,
@@ -26,11 +27,16 @@ import {
   getCompositionObjectFit,
   getCompositionVolume,
   getTrackAudioGainAt,
+  graphicAnimationBakeTime,
+  graphicAnimationFrameAt,
+  graphicToAnimatedDataUrl,
+  resolveGraphicAnimation,
   layerSourceTimeSeconds,
   registerEffectManifests,
   registerLookManifests,
   registerTransitionManifests,
   type ColorPipeline,
+  type Mask,
   type NestedGroupSpec,
   type SceneFrameSpec,
   type ScenePreviewTransition,
@@ -119,7 +125,7 @@ function mergedLayer(
 ): RenderManifestLayer {
   const extra = adjustments
     .filter((a) => a.zIndex > layer.zIndex && t >= a.startSeconds && t < a.startSeconds + a.durationSeconds)
-    .flatMap((a) => a.effects);
+    .flatMap((a) => effectsWithLayerRegionMask(a as unknown as { masks?: Mask[]; effects: TimelineLayer["effects"] }));
   if (!extra.length) return layer;
   return { ...layer, effects: [...layer.effects, ...extra] };
 }
@@ -380,7 +386,22 @@ function ImageGrabber({
   layer: RenderManifestLayer;
   onFrame: (id: string, raw: RawFrame) => void;
 }) {
-  const src = layer.assetUrl;
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  // ANIMATED vector graphic: rebuild a deep-linked data URL for THIS frame's point in the SMIL cycle
+  // (`begin="-Ts"` renders frame T regardless of the frozen document clock), so the animation plays
+  // instead of showing the settled final frame. `useCurrentFrame` is Sequence-local (the clip's own
+  // Sequence starts at its start), and hiddenLead covers a clip starting before 0 — together that's the
+  // same CLIP-LOCAL time the preview and local export feed the shared frame math, so all three align.
+  // src changes per frame ⇒ the effect re-decodes it, with delayRender already blocking until ready.
+  const hiddenLeadSeconds = Math.max(0, -layer.startSeconds);
+  const plan = resolveGraphicAnimation(layer.graphic, { animations: layer.animations });
+  // Go through the SAME frame-index quantization the pre-baked renderers use (frameAt → bakeTime), not
+  // the raw continuous time — otherwise Remotion would render between their frames and drift off parity.
+  const src =
+    layer.graphic && plan
+      ? graphicToAnimatedDataUrl(layer.graphic, graphicAnimationBakeTime(plan, graphicAnimationFrameAt(plan, hiddenLeadSeconds + frame / fps)))
+      : layer.assetUrl;
   useEffect(() => {
     if (!src) return undefined;
     const handle = delayRender(`scene-stage image ${layer.id}`);
@@ -569,7 +590,9 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
             1,
             Math.round((layer.durationSeconds + outgoingPostrollSeconds(layer, sorted)) * fps)
           );
-          const matteLayer = layer.matte?.uri ? { ...layer, assetUrl: layer.matte.uri } : null;
+          // The matte reuses the layer's shape but MUST decode `matte.uri` — drop the graphic fields or
+          // ImageGrabber would render the animated graphic as this layer's matte instead.
+          const matteLayer = layer.matte?.uri ? { ...layer, assetUrl: layer.matte.uri, graphic: undefined } : null;
           return (
             <Sequence key={layer.id} from={from} durationInFrames={durationInFrames}>
               {layer.type === "video" ? <VideoGrabber layer={layer} onFrame={onFrame} /> : <ImageGrabber layer={layer} onFrame={onFrame} />}

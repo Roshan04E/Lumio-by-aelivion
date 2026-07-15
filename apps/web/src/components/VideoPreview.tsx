@@ -12,7 +12,8 @@ import {
   useSyncExternalStore,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent
 } from "react";
 import { createPortal } from "react-dom";
 import { Activity, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
@@ -39,6 +40,7 @@ import {
   expandEffectRegionMasks,
   expandNestedCompositions,
   buildRegionBlurCloneAliases,
+  effectsWithLayerRegionMask,
   isWebgl2ColorSupported,
   getCompositionMediaStyle,
   getOverlayMaskWrapperStyle,
@@ -66,6 +68,7 @@ import {
   COLOR_EFFECT_TYPES,
   colorWarningsLabel,
   type NestedGroupSpec,
+  frameBoxPercent,
   type ProjectGraph,
   type SourceAsset,
   type TimelineComposition,
@@ -437,6 +440,8 @@ function VideoPreviewImpl({
   onMovePositionKeyframe,
   onMoveSpatialHandle,
   onResizeShapeLayer,
+  onResizeFrameLayer,
+  onContentTransformLayer,
   onRotateLayer,
   onScaleLayer,
   onCropLayer,
@@ -492,6 +497,16 @@ function VideoPreviewImpl({
     | ((layerId: string, timeSeconds: number, handle: "in" | "out", tangent: { x: number; y: number }, linked: boolean, commit: boolean) => void)
     | undefined;
   onResizeShapeLayer?: ((layerId: string, size: { widthPercent: number; heightPercent: number }, commit: boolean) => void) | undefined;
+  /** Frame-box resize (Step C / D2): `axis` is what the grabbed handle controls so edges move one
+   *  axis and aspectLock can drive the square from the dragged side. */
+  onResizeFrameLayer?:
+    | ((layerId: string, size: { widthPercent: number; heightPercent: number }, axis: "x" | "y" | "both", commit: boolean) => void)
+    | undefined;
+  /** Content mode (D3): reposition the media INSIDE a frame. Writes the same `content.*` properties
+   *  the inspector Content/Crop panel writes. */
+  onContentTransformLayer?:
+    | ((layerId: string, next: { offsetX?: number; offsetY?: number; scale?: number }, commit: boolean) => void)
+    | undefined;
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
   onCropLayer?: ((layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) => void) | undefined;
@@ -625,6 +640,25 @@ function VideoPreviewImpl({
   const [displayScale, setDisplayScale] = useState(1);
   const displayScaleRef = useRef(displayScale);
   displayScaleRef.current = displayScale;
+  /**
+   * Content mode (D3): the framed layer whose MEDIA is being repositioned inside its frame (entered by
+   * double-clicking it). One layer at a time. Held here rather than per-layer so entering it on one clip
+   * leaves any other, and so Escape / selecting something else can drop it.
+   */
+  const [contentModeLayerId, setContentModeLayerId] = useState<string | null>(null);
+  // Leave content mode when this clip stops being the selected one — the mode is a drill-IN on a specific
+  // clip, so it must not survive selecting another (its gestures would silently apply to the wrong layer).
+  useEffect(() => {
+    if (contentModeLayerId && selectedLayerId !== contentModeLayerId) setContentModeLayerId(null);
+  }, [contentModeLayerId, selectedLayerId]);
+  useEffect(() => {
+    if (!contentModeLayerId) return;
+    function handleContentModeKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setContentModeLayerId(null);
+    }
+    window.addEventListener("keydown", handleContentModeKey);
+    return () => window.removeEventListener("keydown", handleContentModeKey);
+  }, [contentModeLayerId]);
   const fitScaleRef = useRef(1);
   const viewModeRef = useRef(viewMode);
   viewModeRef.current = viewMode;
@@ -641,7 +675,6 @@ function VideoPreviewImpl({
   // past the canvas edge (the comp content is still cropped by .preview-comp-clip).
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
-  const shouldRenderRichEffects = previewQuality !== "performance";
   // Premiere-style playback resolution: downscale the scene render backing WHILE PLAYING (Full/Half/Quarter
   // = 1/0.5/0.25 from the previewQuality profile), Full (1) when paused/scrubbing → crisp stills, fast
   // playback. Only the scene compositor honors it (the DOM path is being retired by Method 3).
@@ -661,8 +694,6 @@ function VideoPreviewImpl({
   useEffect(() => {
     noteRenderScale(playbackRenderScale);
   }, [playbackRenderScale]);
-  const hasTracking = shouldRenderRichEffects && graph.effects.some((effect) => effect.type === "SMART_3D_FOLLOW_TEXT");
-  const hasBehindText = shouldRenderRichEffects && graph.effects.some((effect) => effect.type === "TEXT_BEHIND_PERSON");
   const resolvedAssets = useMemo(() => {
     if (!sourceAsset || assets.some((asset) => asset.id === sourceAsset.id)) {
       return assets;
@@ -1557,6 +1588,10 @@ function VideoPreviewImpl({
                     onMovePositionKeyframe={onMovePositionKeyframe}
                     onMoveSpatialHandle={onMoveSpatialHandle}
                     onResizeShapeLayer={onResizeShapeLayer}
+                    onResizeFrameLayer={onResizeFrameLayer}
+                    onContentTransformLayer={onContentTransformLayer}
+                    contentMode={contentModeLayerId === layer.id}
+                    onEnterContentMode={setContentModeLayerId}
                     onRotateLayer={onRotateLayer}
                     onScaleLayer={onScaleLayer}
                     onCropLayer={onCropLayer}
@@ -1630,15 +1665,6 @@ function VideoPreviewImpl({
                 </Fragment>
               )
               ))}
-              {hasBehindText ? <div className="behind-text">FORGE</div> : null}
-              {hasTracking ? (
-                <div className="tracking-layer">
-                  <span />
-                  <span />
-                  <span />
-                  <strong>3D FOLLOW</strong>
-                </div>
-              ) : null}
               <PreviewGuides mode={gridMode} rotate={spiralRotate} width={composition.width} height={composition.height} />
               {showSafeArea ? (
                 <div className="preview-overlay preview-safe-area" aria-hidden="true">
@@ -1738,6 +1764,19 @@ type PreviewLayerProps = {
     | ((layerId: string, timeSeconds: number, handle: "in" | "out", tangent: { x: number; y: number }, linked: boolean, commit: boolean) => void)
     | undefined;
   onResizeShapeLayer?: ((layerId: string, size: { widthPercent: number; heightPercent: number }, commit: boolean) => void) | undefined;
+  /** Frame-box resize (Step C / D2): `axis` is what the grabbed handle controls so edges move one
+   *  axis and aspectLock can drive the square from the dragged side. */
+  onResizeFrameLayer?:
+    | ((layerId: string, size: { widthPercent: number; heightPercent: number }, axis: "x" | "y" | "both", commit: boolean) => void)
+    | undefined;
+  /** Content mode (D3): reposition the media INSIDE a frame. Writes the same `content.*` properties
+   *  the inspector Content/Crop panel writes. */
+  onContentTransformLayer?:
+    | ((layerId: string, next: { offsetX?: number; offsetY?: number; scale?: number }, commit: boolean) => void)
+    | undefined;
+  /** This layer is in content mode — gestures drive the media inside the frame. */
+  contentMode?: boolean | undefined;
+  onEnterContentMode?: ((layerId: string) => void) | undefined;
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
   onCropLayer?: ((layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) => void) | undefined;
@@ -1800,6 +1839,8 @@ const PreviewLayer = memo(function PreviewLayer({
   onMovePositionKeyframe,
   onMoveSpatialHandle,
   onResizeShapeLayer,
+  onResizeFrameLayer,
+  onContentTransformLayer,
   onRotateLayer,
   onScaleLayer,
   onCropLayer,
@@ -1812,7 +1853,9 @@ const PreviewLayer = memo(function PreviewLayer({
   bypassColor = false,
   onGradedFrame,
   sceneMediaSink,
-  bakeOpacity = true
+  bakeOpacity = true,
+  contentMode = false,
+  onEnterContentMode
 }: PreviewLayerProps) {
   bumpRenderCount("PreviewLayer");
   const warpTextSvg = useWarpedTextSvg(layer, currentTime);
@@ -1843,6 +1886,10 @@ const PreviewLayer = memo(function PreviewLayer({
     startHeightPercent: number;
     surfaceWidth: number;
     surfaceHeight: number;
+    /** Set only for a FRAME-box resize — which axis the grabbed handle controls (null = not a frame). */
+    frameAxis: "x" | "y" | "both" | null;
+    /** Content mode: the drag scales the MEDIA inside the frame (content.scale), not the layer. */
+    contentScale: boolean;
     moved: boolean;
   } | null>(null);
   // Edge-handle crop drag. Frame px extents (bounds × evaluated scale) let a pixel drag become a
@@ -1916,7 +1963,7 @@ const PreviewLayer = memo(function PreviewLayer({
   }, [mediaUrl, layer.type, graphicNaturalAspect]);
   const metadataAspect = asset && asset.width && asset.height ? asset.width / asset.height : undefined;
   const sourceAspect = measuredAspect ?? metadataAspect;
-  const contentBoxOverride = contentBoxSizeOverride(layer, sourceAspect, frameAspect);
+  const contentBoxOverride = contentBoxSizeOverride(layer, sourceAspect, frameAspect, contentMode);
   const isVideo = layer.type === "video" && Boolean(mediaUrl) && (asset?.fileType.startsWith("video/") ?? true);
   // First-frame still at the clip's in-point — held over the canvas/video until the real frame
   // decodes so the viewer never shows black (start, cut, or seek). Captured once, cached.
@@ -1963,13 +2010,18 @@ const PreviewLayer = memo(function PreviewLayer({
     event.currentTarget.setPointerCapture(event.pointerId);
     onSelectLayer(layer.id);
     const bounds = surface.getBoundingClientRect();
+    // Drag from the CURRENTLY RENDERED (keyframe-evaluated) position, not the raw base
+    // transform.position — a keyframed clip's on-screen position at the playhead can differ from its
+    // base value, and starting the drag from the base caused a visible jump the instant the drag began
+    // (the very first pointermove snapped it from the base to base+delta instead of rendered+delta).
+    const evaluatedPosition = getCompositionTransform(layer, { currentTimeSeconds: currentTime });
     dragRef.current = {
       layerId: layer.id,
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startX: layer.transform.position.x,
-      startY: layer.transform.position.y,
+      startX: evaluatedPosition.x,
+      startY: evaluatedPosition.y,
       surfaceWidth: bounds.width,
       surfaceHeight: bounds.height,
       moved: false
@@ -2018,14 +2070,20 @@ const PreviewLayer = memo(function PreviewLayer({
   }
 
   function startPreviewResize(event: ReactPointerEvent<HTMLSpanElement>) {
+    // A FRAMED layer's handles resize the FRAME BOX (decision D2) — every handle, so they never fall
+    // through to the crop/scale routing below. Media is re-fit inside the frame by the clip mask, and
+    // repositioning the media within it is the double-click content mode (D3) instead of edge-crop.
+    // In content mode the handles belong to the CLIP (scale/rotate it inside the frame), so they must
+    // NOT take the frame-box path — that is what makes double-click a true drill-in on the media.
+    const frameAxis = layer.frame && !contentMode ? frameResizeAxisFromHandle(event.currentTarget) : null;
     // Edge handles (N/E/S/W) crop media; corner handles (NW/NE/SW/SE) scale. Shapes/text have no source to
     // crop, so all of their handles keep scaling/resizing. The edge is encoded in the handle's className.
-    const cropEdge = mediaCropEdgeFromHandle(event.currentTarget);
+    const cropEdge = frameAxis ? null : mediaCropEdgeFromHandle(event.currentTarget);
     if (cropEdge && onCropLayer && (layer.type === "video" || layer.type === "image")) {
       startPreviewCrop(event, cropEdge);
       return;
     }
-    if ((!onScaleLayer && !onResizeShapeLayer) || event.button !== 0 || layer.locked) {
+    if ((!onScaleLayer && !onResizeShapeLayer && !(frameAxis && onResizeFrameLayer)) || event.button !== 0 || layer.locked) {
       return;
     }
 
@@ -2039,19 +2097,31 @@ const PreviewLayer = memo(function PreviewLayer({
     event.currentTarget.setPointerCapture(event.pointerId);
     onSelectLayer(layer.id);
     const bounds = surface.getBoundingClientRect();
-    const centerClientX = bounds.left + (layer.transform.position.x / 100) * bounds.width;
-    const centerClientY = bounds.top + (layer.transform.position.y / 100) * bounds.height;
+    // Same evaluated-vs-base fix as startPreviewDrag: pivot + starting scale must be the CURRENTLY
+    // RENDERED (keyframe-evaluated) values, or a keyframed clip's resize jumps the instant it starts.
+    const evaluatedResizeTransform = getCompositionTransform(layer, { currentTimeSeconds: currentTime });
+    const centerClientX = bounds.left + (evaluatedResizeTransform.x / 100) * bounds.width;
+    const centerClientY = bounds.top + (evaluatedResizeTransform.y / 100) * bounds.height;
+    // Content mode: scaling the LAYER would scale the frame with it (the frame mask rides the layer
+    // transform), which reads as "resizing the frame". The media must zoom INSIDE a fixed frame, so the
+    // drag drives content.scale and seeds from the CONTENT scale.
+    const contentScaleMode = Boolean(contentMode && layer.frame && onContentTransformLayer);
+    const startScale = contentScaleMode
+      ? getCompositionContentTransform(layer, { currentTimeSeconds: currentTime }).scale
+      : evaluatedResizeTransform.scale;
     resizeRef.current = {
       layerId: layer.id,
       pointerId: event.pointerId,
       centerClientX,
       centerClientY,
       startDistance: Math.max(12, distance(event.clientX, event.clientY, centerClientX, centerClientY)),
-      startScale: layer.transform.scale,
+      startScale,
       startWidthPercent: layer.widthPercent ?? 44,
       startHeightPercent: layer.heightPercent ?? 18,
       surfaceWidth: bounds.width,
       surfaceHeight: bounds.height,
+      frameAxis,
+      contentScale: contentScaleMode,
       moved: false
     };
   }
@@ -2068,6 +2138,20 @@ const PreviewLayer = memo(function PreviewLayer({
 
     event.preventDefault();
     event.stopPropagation();
+    if (resize.contentScale && onContentTransformLayer) {
+      const nextScale = scaleFromResize(event, resize);
+      resize.moved = true;
+      showTransformHud(scaleHud(nextScale));
+      onContentTransformLayer(resize.layerId, { scale: nextScale }, false);
+      return;
+    }
+    if (resize.frameAxis && onResizeFrameLayer) {
+      const nextSize = frameSizeFromResize(event, resize);
+      resize.moved = true;
+      showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent));
+      onResizeFrameLayer(resize.layerId, nextSize, resize.frameAxis, false);
+      return;
+    }
     if (layer.type === "shape" && onResizeShapeLayer) {
       const nextSize = shapeSizeFromResize(event, resize);
       resize.moved = resize.moved || Math.abs(nextSize.widthPercent - resize.startWidthPercent) > 0.2 || Math.abs(nextSize.heightPercent - resize.startHeightPercent) > 0.2;
@@ -2097,6 +2181,18 @@ const PreviewLayer = memo(function PreviewLayer({
     event.preventDefault();
     event.stopPropagation();
     resizeRef.current = null;
+    if (resize.contentScale && onContentTransformLayer) {
+      const nextScale = scaleFromResize(event, resize);
+      showTransformHud(scaleHud(nextScale), true);
+      onContentTransformLayer(resize.layerId, { scale: nextScale }, true);
+      return;
+    }
+    if (resize.frameAxis && onResizeFrameLayer) {
+      const nextSize = frameSizeFromResize(event, resize);
+      showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent), true);
+      onResizeFrameLayer(resize.layerId, nextSize, resize.frameAxis, true);
+      return;
+    }
     if (layer.type === "shape" && onResizeShapeLayer) {
       const nextSize = shapeSizeFromResize(event, resize);
       showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent), true);
@@ -2198,15 +2294,17 @@ const PreviewLayer = memo(function PreviewLayer({
     event.currentTarget.setPointerCapture(event.pointerId);
     onSelectLayer(layer.id);
     const bounds = surface.getBoundingClientRect();
-    const centerClientX = bounds.left + (layer.transform.position.x / 100) * bounds.width;
-    const centerClientY = bounds.top + (layer.transform.position.y / 100) * bounds.height;
+    // Same evaluated-vs-base fix as startPreviewDrag/startPreviewResize.
+    const evaluatedRotateTransform = getCompositionTransform(layer, { currentTimeSeconds: currentTime });
+    const centerClientX = bounds.left + (evaluatedRotateTransform.x / 100) * bounds.width;
+    const centerClientY = bounds.top + (evaluatedRotateTransform.y / 100) * bounds.height;
     rotateRef.current = {
       layerId: layer.id,
       pointerId: event.pointerId,
       centerClientX,
       centerClientY,
       startAngle: angleDegrees(event.clientX, event.clientY, centerClientX, centerClientY),
-      startRotation: layer.transform.rotation,
+      startRotation: evaluatedRotateTransform.rotation,
       moved: false
     };
     showTransformHud(rotationHud(layer.transform.rotation, false));
@@ -2335,16 +2433,126 @@ const PreviewLayer = memo(function PreviewLayer({
     spatialHandleDragRef.current = null;
   }
 
+  // --- Content mode (decision D3): double-click a FRAMED clip to reposition the media INSIDE the frame,
+  // mirroring the inspector's Content/Crop model. Drag pans, wheel zooms; the layer itself stays put.
+  // Writes go through the same `content.*` properties the inspector writes, so the two agree (and the
+  // EditorPage handler routes them through applyContentValueAtTime → auto-keyframe behaves identically).
+  const contentPanRef = useRef<{
+    layerId: string;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startOffsetX: number;
+    startOffsetY: number;
+    surfaceWidth: number;
+    surfaceHeight: number;
+    /** Evaluated layer scale — the frame is drawn at scale×, so a screen delta maps back through it. */
+    scale: number;
+    moved: boolean;
+  } | null>(null);
+
+  function startContentPan(event: ReactPointerEvent<HTMLElement>) {
+    if (!onContentTransformLayer || event.button !== 0 || layer.locked) return;
+    const surface = event.currentTarget.closest(".preview-composition-space");
+    if (!(surface instanceof HTMLElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const bounds = surface.getBoundingClientRect();
+    const content = getCompositionContentTransform(layer, { currentTimeSeconds: currentTime });
+    contentPanRef.current = {
+      layerId: layer.id,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffsetX: content.offsetX,
+      startOffsetY: content.offsetY,
+      surfaceWidth: bounds.width,
+      surfaceHeight: bounds.height,
+      scale: Math.max(0.01, getCompositionTransform(layer, { currentTimeSeconds: currentTime }).scale),
+      moved: false
+    };
+  }
+
+  /**
+   * Screen delta → content offset delta. `offset` is a FRACTION of the frame, and the frame renders at
+   * surface × scale, so the media tracks the pointer 1:1 at any zoom.
+   *
+   * Y IS NEGATED: the compositor samples `mediaUv = (v_uv - 0.5 - uContentPan) * uFitScale + 0.5` where
+   * `v_uv.y` is Y-UP (its crop test reads `v_uv.y > 1 - cropTop` for the TOP edge), so a POSITIVE
+   * `offsetY` moves the media UP — the opposite of screen Y. Feeding the raw screen delta in made
+   * dragging down move the media up.
+   */
+  function contentOffsetFromPan(event: ReactPointerEvent<HTMLElement>, pan: NonNullable<typeof contentPanRef.current>) {
+    // ×2 because an offset of 1 pans only HALF a frame: build-scene-draws maps `offsetX/Y (-1..1 frame
+    // fractions) → pan ±0.5 frame` before it reaches uContentPan. Without this the media tracks the
+    // pointer at half speed.
+    const frameFractionX = (2 * (event.clientX - pan.startClientX)) / (pan.surfaceWidth * pan.scale);
+    const frameFractionY = (2 * (event.clientY - pan.startClientY)) / (pan.surfaceHeight * pan.scale);
+    return {
+      offsetX: clamp(pan.startOffsetX + frameFractionX, -1, 1),
+      offsetY: clamp(pan.startOffsetY - frameFractionY, -1, 1)
+    };
+  }
+
+  function updateContentPan(event: ReactPointerEvent<HTMLElement>) {
+    const pan = contentPanRef.current;
+    if (!pan || !onContentTransformLayer || event.pointerId !== pan.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    pan.moved = pan.moved || Math.abs(event.clientX - pan.startClientX) > 2 || Math.abs(event.clientY - pan.startClientY) > 2;
+    onContentTransformLayer(pan.layerId, contentOffsetFromPan(event, pan), false);
+  }
+
+  function finishContentPan(event: ReactPointerEvent<HTMLElement>) {
+    const pan = contentPanRef.current;
+    if (!pan || !onContentTransformLayer || event.pointerId !== pan.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    contentPanRef.current = null;
+    onContentTransformLayer(pan.layerId, contentOffsetFromPan(event, pan), true);
+  }
+
+  function handleContentWheel(event: ReactWheelEvent<HTMLElement>) {
+    if (!onContentTransformLayer || layer.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const current = getCompositionContentTransform(layer, { currentTimeSeconds: currentTime }).scale;
+    // Multiplicative so each notch feels the same at any zoom; commit per notch (a wheel has no "release").
+    const next = clamp(current * (event.deltaY < 0 ? 1.08 : 1 / 1.08), 0.1, 10);
+    onContentTransformLayer(layer.id, { scale: next }, true);
+  }
+
+  function handlePreviewDoubleClick(event: ReactMouseEvent<HTMLElement>) {
+    // Only framed media has an "inside" to reposition — leave every other layer's dblclick alone.
+    if (!layer.frame || !onEnterContentMode || layer.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onEnterContentMode(layer.id);
+  }
+
   // Render-only region clones are pointer-transparent (no handlers + pointerEvents:none below) so clicks fall
   // through to the real base layer; only real layers get the select/drag handlers.
+  // In content mode the SAME gestures drive the media inside the frame instead of the layer itself.
   const dragHandlers = interactive
-    ? {
-        onClick: handlePreviewClick,
-        onPointerCancel: finishPreviewDrag,
-        onPointerDown: startPreviewDrag,
-        onPointerMove: updatePreviewDrag,
-        onPointerUp: finishPreviewDrag
-      }
+    ? contentMode
+      ? {
+          onClick: handlePreviewClick,
+          onDoubleClick: handlePreviewDoubleClick,
+          onPointerCancel: finishContentPan,
+          onPointerDown: startContentPan,
+          onPointerMove: updateContentPan,
+          onPointerUp: finishContentPan,
+          onWheel: handleContentWheel
+        }
+      : {
+          onClick: handlePreviewClick,
+          onDoubleClick: handlePreviewDoubleClick,
+          onPointerCancel: finishPreviewDrag,
+          onPointerDown: startPreviewDrag,
+          onPointerMove: updatePreviewDrag,
+          onPointerUp: finishPreviewDrag
+        }
     : undefined;
 
   // Speed-ramp "tangent": the matte/WC sync paths map time LINEARLY (sourceIn + local × speed).
@@ -2531,6 +2739,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
             boxOverride={contentBoxOverride}
+            contentMode={contentMode}
           />
         ) : null}
         {selected ? (
@@ -2590,6 +2799,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
             boxOverride={contentBoxOverride}
+            contentMode={contentMode}
           />
         ) : null}
         {selected ? (
@@ -2686,6 +2896,7 @@ const PreviewLayer = memo(function PreviewLayer({
               onRotatePointerMove={updatePreviewRotate}
               onRotatePointerUp={finishPreviewRotate}
               boxOverride={contentBoxOverride}
+              contentMode={contentMode}
             />
           ) : null}
           {isSelectedVisible ? (
@@ -2783,6 +2994,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
             boxOverride={contentBoxOverride}
+            contentMode={contentMode}
           />
         ) : null}
         {isSelectedVisible ? (
@@ -2830,6 +3042,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
             boxOverride={contentBoxOverride}
+            contentMode={contentMode}
           />
         ) : null}
         {selected ? (
@@ -2873,6 +3086,11 @@ const PreviewLayer = memo(function PreviewLayer({
           // Still-proxy size tier (P2): static transform/content zoom only — animated scale
           // spikes are rare on stills and degrade to softness, never breakage.
           stillZoomFactor={Math.max(layer.transform?.scale ?? 1, layer.content?.scale ?? 1)}
+          // Animated vector graphics play their SMIL live (frames selected against the playhead);
+          // `graphicProgress`/`graphicDuration` keyframes drive the phase.
+          graphic={layer.graphic}
+          graphicStartSeconds={layer.startSeconds}
+          graphicAnimations={layer.animations}
           pipeline={imageColorPipeline}
           mediaEffects={imageMediaEffects}
           transition={onGradedFrame || sceneMediaSink ? null : imageTransition}
@@ -2901,6 +3119,7 @@ const PreviewLayer = memo(function PreviewLayer({
             onRotatePointerMove={updatePreviewRotate}
             onRotatePointerUp={finishPreviewRotate}
             boxOverride={contentBoxOverride}
+            contentMode={contentMode}
           />
         ) : null}
         {selected ? (
@@ -3243,7 +3462,7 @@ export function applyActiveAdjustmentEffects(
 ): TimelineLayer {
   const adjustmentEffects = activeLayerEntries
     .filter((entry) => entry.layer.type === "adjustment" && entry.trackIndex < trackIndex)
-    .flatMap((entry) => entry.layer.effects);
+    .flatMap((entry) => effectsWithLayerRegionMask(entry.layer));
 
   if (!adjustmentEffects.length) {
     return layer;
@@ -3416,7 +3635,8 @@ function PreviewSelectionOverlay({
   onRotatePointerDown,
   onRotatePointerMove,
   onRotatePointerUp,
-  boxOverride
+  boxOverride,
+  contentMode = false
 }: {
   layer: TimelineLayer;
   style: CSSProperties;
@@ -3433,6 +3653,9 @@ function PreviewSelectionOverlay({
   onRotatePointerUp: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   /** Shrinks the box to a `contain` media layer's natural rect so handles hug the source (adaptive). */
   boxOverride?: { width: string; height: string } | undefined;
+  /** Content mode (D3): the media inside the frame is being repositioned — mark the box so the user
+   *  can see WHY dragging no longer moves the clip. */
+  contentMode?: boolean | undefined;
 }) {
   // Counter the box's scale so the handles stay a constant on-screen size. Use the KEYFRAME-EVALUATED
   // scale (the exact value compositionTransformCss bakes into the box transform), not the raw base
@@ -3449,7 +3672,7 @@ function PreviewSelectionOverlay({
 
   const portalTarget = useContext(OverlayPortalContext);
   const node = (
-    <div className={`preview-selection-box preview-selection-box-${layer.type}`} style={overlayStyle}>
+    <div className={`preview-selection-box preview-selection-box-${layer.type}${contentMode ? " is-content-mode" : ""}`} style={overlayStyle}>
       {text ? <span className="preview-selection-measure">{text}</span> : null}
       {transformHud ? (
         <span className={`preview-transform-hud preview-transform-hud-${transformHud.mode} ${transformHud.snapped ? "is-snapped" : ""}`}>
@@ -4334,6 +4557,12 @@ function selectionOverlayStyle(style: CSSProperties): CSSProperties {
   // The overlay copies only the clip's GEOMETRY (position / size / transform). Strip every appearance
   // property so the selection box + handles render as plain UI chrome — in particular `mixBlendMode`
   // and `opacity`, or a clip's blend mode / fade would also blend/fade the handles.
+  //
+  // The MASK properties matter most: a clip-mask (a hand-drawn mask, or a Frame's synthesized clip)
+  // would otherwise clip the selection box AND its handles to the shape — handles sitting on the shape's
+  // edge get cut in half and ones outside it vanish entirely. That is the real cause of the reported
+  // "frames are consuming the handles": the frame was masking away its own selection chrome. UI chrome
+  // must never inherit the content's mask.
   const {
     background: _background,
     backgroundColor: _backgroundColor,
@@ -4344,6 +4573,11 @@ function selectionOverlayStyle(style: CSSProperties): CSSProperties {
     opacity: _opacity,
     textShadow: _textShadow,
     WebkitTextStroke: _webkitTextStroke,
+    maskImage: _maskImage,
+    maskRepeat: _maskRepeat,
+    WebkitMaskImage: _webkitMaskImage,
+    WebkitMaskRepeat: _webkitMaskRepeat,
+    WebkitMaskComposite: _webkitMaskComposite,
     ...layoutStyle
   } = style;
 
@@ -4362,8 +4596,11 @@ function positionFromDrag(
   }
 ) {
   return {
-    x: clamp(drag.startX + ((event.clientX - drag.startClientX) / drag.surfaceWidth) * 100, -50, 150),
-    y: clamp(drag.startY + ((event.clientY - drag.startClientY) / drag.surfaceHeight) * 100, -50, 150)
+    // Matches the inspector's Position X/Y range (TransformPanel) — a narrower clamp here than there
+    // caused a jump-to-clamped-value on the first drag frame whenever a layer's position (set via the
+    // slider, paste-attributes, or a preset) already sat outside this range.
+    x: clamp(drag.startX + ((event.clientX - drag.startClientX) / drag.surfaceWidth) * 100, -200, 300),
+    y: clamp(drag.startY + ((event.clientY - drag.startClientY) / drag.surfaceHeight) * 100, -200, 300)
   };
 }
 
@@ -4381,8 +4618,8 @@ function positionFromSurfacePoint(
   }
 
   return {
-    x: clamp(((event.clientX - bounds.left) / surface.surfaceWidth) * 100, -50, 150),
-    y: clamp(((event.clientY - bounds.top) / surface.surfaceHeight) * 100, -50, 150)
+    x: clamp(((event.clientX - bounds.left) / surface.surfaceWidth) * 100, -200, 300),
+    y: clamp(((event.clientY - bounds.top) / surface.surfaceHeight) * 100, -200, 300)
   };
 }
 
@@ -4448,9 +4685,23 @@ function sizeHud(widthPercent: number, heightPercent: number): PreviewTransformH
 function contentBoxSizeOverride(
   layer: TimelineLayer,
   sourceAspect: number | undefined,
-  frameAspect: number | undefined
+  frameAspect: number | undefined,
+  contentMode: boolean
 ): { width: string; height: string } | undefined {
   if (layer.type !== "image" && layer.type !== "video") return undefined;
+  // A FRAMED layer's visible rect is the frame box, not the media box — so the handles hug the shape the
+  // user can see (Step C: "they are consuming the handles"). This wins over the `contain` rect below,
+  // because the frame clips the media: the frame IS the visible extent.
+  // frameBoxPercent's result depends only on the comp's ASPECT (the percentages are scale-invariant),
+  // so the aspect alone is enough here — the layer doesn't need the comp's pixel dimensions.
+  //
+  // EXCEPT in content mode: there the user is working on the CLIP inside the frame, so the box falls back
+  // to the clip's own rect and its handles scale/rotate the clip (not the frame box) — the frame stays
+  // put while the media is refitted within it.
+  if (layer.frame && frameAspect && frameAspect > 0 && !contentMode) {
+    const box = frameBoxPercent(layer.frame, { width: frameAspect, height: 1 });
+    return { width: `${box.width.toFixed(4)}%`, height: `${box.height.toFixed(4)}%` };
+  }
   if (getCompositionObjectFit(layer) !== "contain") return undefined;
   if (!sourceAspect || !frameAspect || sourceAspect <= 0 || frameAspect <= 0) return undefined;
   let w = 1;
@@ -4462,6 +4713,30 @@ function contentBoxSizeOverride(
   }
   if (w >= 0.999 && h >= 0.999) return undefined;
   return { width: `${(w * 100).toFixed(4)}%`, height: `${(h * 100).toFixed(4)}%` };
+}
+
+/** Which axis a handle drives when resizing a FRAME box: edges move their own axis only (an edge handle
+ *  shearing both would be indefensible), corners move both. Null = not a resize handle. */
+function frameResizeAxisFromHandle(el: Element): "x" | "y" | "both" | null {
+  if (el.classList.contains("preview-resize-handle-e") || el.classList.contains("preview-resize-handle-w")) return "x";
+  if (el.classList.contains("preview-resize-handle-n") || el.classList.contains("preview-resize-handle-s")) return "y";
+  if (["nw", "ne", "sw", "se"].some((corner) => el.classList.contains(`preview-resize-handle-${corner}`))) return "both";
+  return null;
+}
+
+/** Frame-box size (% of the COMP) from a handle drag. Unlike `shapeSizeFromResize` this divides out the
+ *  layer's evaluated SCALE: the frame box is a percentage of the comp but is rendered THROUGH the layer
+ *  transform, so on a scaled clip the handle sits at scale× the distance the raw percentage implies —
+ *  without this, resizing a scaled framed clip would run away from the pointer. */
+function frameSizeFromResize(
+  event: ReactPointerEvent<HTMLElement>,
+  resize: { centerClientX: number; centerClientY: number; surfaceWidth: number; surfaceHeight: number; startScale: number }
+) {
+  const scale = Math.max(0.01, resize.startScale);
+  return {
+    widthPercent: clamp((Math.abs(event.clientX - resize.centerClientX) / (resize.surfaceWidth * scale)) * 200, 1, 100),
+    heightPercent: clamp((Math.abs(event.clientY - resize.centerClientY) / (resize.surfaceHeight * scale)) * 200, 1, 100)
+  };
 }
 
 /** Map an edge resize handle (by its `preview-resize-handle-<n|e|s|w>` class) to the crop edge it trims.

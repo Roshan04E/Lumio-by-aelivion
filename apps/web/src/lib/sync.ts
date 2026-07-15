@@ -34,6 +34,7 @@ import {
   writeLocalProjectRecord,
   type ProjectRecord,
 } from "./api";
+import { collectUnresolvedMattes, MatteResolveError, resolveGraphMattes } from "../export/matte-resolve";
 import { getAssetBlobStore } from "./asset-blob-store";
 import { scheduleRecoveryCheckpoint } from "./crash-recovery";
 
@@ -289,7 +290,9 @@ async function serverCreateAsset(
 ): Promise<SourceAsset> {
   const body = new FormData();
   body.append("file", file);
-  body.append("durationSeconds", String(Math.max(1, Math.ceil(meta.durationSeconds ?? 12))));
+  // Exact fractional duration (Float column) — ceiling here made promoted assets overshoot their
+  // media on later loads, freezing clip tails (see createAsset in api.ts for the full story).
+  body.append("durationSeconds", String(Math.max(0.2, meta.durationSeconds ?? 12)));
   body.append("width", String(meta.width ?? 1080));
   body.append("height", String(meta.height ?? 1920));
   const data = await apiRequest<{ asset: SourceAsset }>("/assets", { method: "POST", body });
@@ -443,14 +446,25 @@ export async function promoteAllPending(): Promise<void> {
 }
 
 /**
- * Idempotently make `projectId` a fully-synced server project:
- * upload local assets, remap ids, create the server project (once), save the graph.
+ * Idempotently sync `projectId` to the server: create the server project (once) and save the graph.
  * `overrideGraph` is the freshest in-editor graph (from the debounced save) if available.
+ *
+ * LOCAL-FIRST DOCTRINE: background sync ships the project JSON ONLY. Media bytes leave the device
+ * exclusively when `uploadAssets` is true — passed by the EXPORT gate (ensureExportReady), which is
+ * user intent to render in the cloud. (The other byte paths are the Pro-gated media-pool buttons.)
+ * Without it, un-uploaded local ids stay in the saved graph as-is; already-recorded pairings still
+ * remap. Background sync used to upload every referenced asset's bytes, silently pushing footage
+ * to the server on every edit — the 2026-07-14 "it's in the cloud but I never opted in" report.
  */
-function syncProject(projectId: string, overrideGraph?: ProjectGraph, overrideDuration?: number): Promise<PromoteResult> {
+function syncProject(
+  projectId: string,
+  overrideGraph?: ProjectGraph,
+  overrideDuration?: number,
+  options?: { uploadAssets?: boolean }
+): Promise<PromoteResult> {
   const existing = inflight.get(projectId);
   if (existing) return existing;
-  const run = doSyncProject(projectId, overrideGraph, overrideDuration).finally(() => inflight.delete(projectId));
+  const run = doSyncProject(projectId, overrideGraph, overrideDuration, options).finally(() => inflight.delete(projectId));
   inflight.set(projectId, run);
   return run;
 }
@@ -458,8 +472,10 @@ function syncProject(projectId: string, overrideGraph?: ProjectGraph, overrideDu
 async function doSyncProject(
   projectId: string,
   overrideGraph?: ProjectGraph,
-  overrideDuration?: number
+  overrideDuration?: number,
+  options?: { uploadAssets?: boolean }
 ): Promise<PromoteResult> {
+  const uploadAssets = options?.uploadAssets === true;
   // Promotion paths (reconnect monitor) may run without an override graph — make sure
   // the local record they fall back to includes any still-debounced edit.
   flushLocalPersist(projectId);
@@ -491,7 +507,7 @@ async function doSyncProject(
     const workingGraph = graph ?? (await serverGetProject(serverId!)).projectGraph;
     const durationSeconds = overrideDuration ?? localRecord?.durationSeconds ?? 0;
 
-    // 1. Upload every local asset (idempotent via recorded serverAssetId).
+    // 1. Map local asset ids to recorded cloud copies; upload bytes ONLY in export mode.
     const localAssetIds = [...collectAssetIds(workingGraph)].filter((id) => id.startsWith(LOCAL_ASSET_PREFIX));
     const map: Record<string, string> = {};
     const missing: RelinkAssetNeed[] = [];
@@ -502,6 +518,11 @@ async function doSyncProject(
       const recorded = readState().assets[id];
       if (recorded?.serverAssetId) {
         map[id] = recorded.serverAssetId;
+        continue;
+      }
+      if (!uploadAssets) {
+        // Background sync: leave the un-uploaded local id in the graph. Bytes stay on-device
+        // until the user opts in (media-pool cloud actions) or exports (uploadAssets: true).
         continue;
       }
       const meta = localAssets.find((a) => a.id === id);
@@ -537,7 +558,21 @@ async function doSyncProject(
     }
 
     // 2. Remap local→server asset ids in the graph.
-    const remapped = remapGraph(workingGraph, map);
+    let remapped = remapGraph(workingGraph, map);
+
+    // 2b. Matte resolution uploads blob:/opfs: matte BYTES to the server, so it is export-mode
+    // only (same local-first rule as media above); the export gate is the hard stop for anything
+    // still unresolved at render time.
+    if (uploadAssets) {
+      try {
+        const matteReport = await resolveGraphMattes(remapped);
+        if (matteReport.resolvedCount > 0) {
+          remapped = matteReport.graph;
+        }
+      } catch {
+        /* matte upload is retried by the export gate's direct resolve */
+      }
+    }
 
     // 3. Create the server project once.
     let targetServerId = readState().projects[projectId]?.serverId;
@@ -577,6 +612,54 @@ async function doSyncProject(
 // ── Relink ────────────────────────────────────────────────────────────────--
 
 /**
+ * Record that a browser-local asset now has a cloud copy (the opt-in "upload to cloud" path).
+ * The LOCAL id stays on the timeline and the bin — this only records the pairing, exactly like
+ * syncProject does during an export promotion, so a later export reuses the server id instead of
+ * re-uploading the bytes. ONE asset, two locations — never a second bin entry.
+ */
+export function markLocalAssetPromoted(localAssetId: string, serverAssetId: string, serverUrl?: string): void {
+  upsertAsset(localAssetId, { serverAssetId, ...(serverUrl ? { serverUrl } : {}), syncStatus: "synced" });
+}
+
+/** Forget a local asset's cloud pairing (after "Remove from cloud"). Export will re-upload on demand. */
+export function clearLocalAssetPromotion(localAssetId: string): void {
+  const state = readState();
+  const record = state.assets[localAssetId];
+  if (!record?.serverAssetId) return;
+  delete record.serverAssetId;
+  delete record.serverUrl;
+  record.syncStatus = "local";
+  writeState(state);
+}
+
+/** The recorded cloud copy (server asset id) of a local asset, if it has been uploaded. */
+export function getRecordedServerAssetId(localAssetId: string): string | undefined {
+  return readState().assets[localAssetId]?.serverAssetId;
+}
+
+/** Full localId → serverId pairing map. Drives the bin merge: paired server assets are hidden
+ *  behind their local tile so an uploaded asset never shows as a duplicate. */
+export function getAssetPromotionMap(): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const [id, record] of Object.entries(readState().assets)) {
+    if (record?.serverAssetId) map[id] = record.serverAssetId;
+  }
+  return map;
+}
+
+/** How many local project graphs reference `assetId` (optionally excluding one project). Powers the
+ *  "used in N other projects" warning before removing a shared asset's cloud copy. */
+export function countLocalProjectsUsingAsset(assetId: string, exceptProjectId?: string): number {
+  let count = 0;
+  for (const project of listLocalProjects()) {
+    if (exceptProjectId && project.id === exceptProjectId) continue;
+    const graph = (project as { projectGraph?: ProjectGraph }).projectGraph;
+    if (graph && collectAssetIds(graph).has(assetId)) count += 1;
+  }
+  return count;
+}
+
+/**
  * Re-attach missing media bytes (re-selected by the user) under the SAME local asset id,
  * so existing `layer.assetId` references keep resolving, then clear the missing flag.
  */
@@ -612,20 +695,38 @@ export async function ensureExportReady(projectId: string): Promise<{ projectId:
   // Flush any debounced save for this id so promotion uses the freshest graph.
   await flushPendingSave(projectId).catch(() => undefined);
 
-  const result = await syncProject(projectId);
+  // Export IS user intent to put the project's media in the cloud — the only sync mode that
+  // uploads bytes (uploadAssets). Background saves never do (local-first doctrine).
+  const result = await syncProject(projectId, undefined, undefined, { uploadAssets: true });
   if (result.status === "needs-relink") throw new RelinkRequiredError(result.assets);
   if (result.status === "offline") throw new SyncRequiredError();
   if (result.status === "error") throw new Error(result.message);
 
   const serverId = result.status === "promoted" ? result.project.id : resolveProjectId(projectId);
 
-  // Verify no local asset ids slipped through.
+  // Verify no local asset ids slipped through (e.g. the call above coalesced onto an inflight
+  // BACKGROUND sync, which doesn't upload) — one uploading retry closes that race.
   const serverProject = result.status === "promoted" ? result.project : await serverGetProject(serverId);
   const remaining = [...collectAssetIds(serverProject.projectGraph)].filter((id) => id.startsWith(LOCAL_ASSET_PREFIX));
   if (remaining.length > 0) {
-    const retry = await syncProject(projectId, serverProject.projectGraph, serverProject.durationSeconds);
+    const retry = await syncProject(projectId, serverProject.projectGraph, serverProject.durationSeconds, { uploadAssets: true });
     if (retry.status === "needs-relink") throw new RelinkRequiredError(retry.assets);
     if (retry.status !== "promoted") throw new Error("Could not finish preparing media for export.");
+  }
+
+  // Hard matte gate: the worker fetches `layer.matte.uri` like any media URL, and a
+  // blob:/opfs: URI hangs the frame render silently. One direct resolve retry here
+  // (the background-sync pass may have raced or failed), then fail loud naming the
+  // layers so the user can re-run the extraction instead of watching a stuck export.
+  const unresolvedMattes = collectUnresolvedMattes(serverProject.projectGraph.composition);
+  if (unresolvedMattes.length > 0) {
+    const matteReport = await resolveGraphMattes(serverProject.projectGraph);
+    if (matteReport.resolvedCount > 0) {
+      await serverPatchProject(serverId, { projectGraph: matteReport.graph });
+    }
+    if (matteReport.failures.length > 0) {
+      throw new MatteResolveError(matteReport.failures);
+    }
   }
 
   return { projectId: serverId };

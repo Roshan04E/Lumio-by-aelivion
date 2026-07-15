@@ -16,6 +16,7 @@ import {
   buildSourceUrlMap,
   runExportCore,
   type ExportCoreInput,
+  type SourceUrlMap,
 } from "./export-core";
 import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
 import { getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
@@ -94,6 +95,12 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   // buildSourceUrlMap/collectAudioLayers's own signatures untouched.
   const expandedForSourceResolution = expandNestedCompositions(composition, request.compositions).composition;
   const urlMap = buildSourceUrlMap(expandedForSourceResolution, urlForAsset);
+  // Vector-graphic layers resolve to inline SVG data URLs, but the export decoder runs in a Worker
+  // where createImageBitmap can't rasterize SVG (no layout engine) — pre-rasterize to PNG here on the
+  // main thread (Window APIs available) so the Worker path decodes a plain bitmap instead of failing
+  // and forcing a full main-thread re-export. Same 1024px baked raster the preview uses, so recolors
+  // stay pixel-aligned.
+  await rasterizeSvgSources(urlMap);
 
   onProgress?.(0.02, "Mixing audio…");
   await yieldToBrowser();
@@ -175,6 +182,45 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
     endPreviewSuspendForExport();
     logExportGl(() => `main-thread export end: preview suspended=false, active contexts=${getActiveGlContextCount()}`);
   }
+}
+
+/** Replace any inline SVG image sources in `urlMap` with rasterized PNG data URLs (main thread). SVG
+ *  can't be decoded via `createImageBitmap` in the export Worker, so leaving it here fixes the
+ *  "Failed to load image source for export" on graphic layers. Failures fall through unchanged —
+ *  `createImageSource`'s `<img>` path still handles SVG on any main-thread export. */
+async function rasterizeSvgSources(urlMap: SourceUrlMap): Promise<void> {
+  const toPng = async (url: string) => (/^data:image\/svg/i.test(url) ? await rasterizeSvgToPng(url) : url);
+  await Promise.all(
+    Object.entries(urlMap).map(async ([key, source]) => {
+      if (source.kind !== "image") return;
+      try {
+        // Animated graphics: every deep-linked cycle frame must be rasterized too — the Worker's
+        // decoder can't rasterize any of them as SVG.
+        const animation = source.animation
+          ? { ...source.animation, frameUrls: await Promise.all(source.animation.frameUrls.map(toPng)) }
+          : undefined;
+        urlMap[key] = { ...source, url: await toPng(source.url), animation };
+      } catch {
+        // Keep the SVG URLs; the main-thread <img> decode path is the fallback.
+      }
+    })
+  );
+}
+
+async function rasterizeSvgToPng(url: string): Promise<string> {
+  const img = new Image();
+  img.decoding = "async";
+  img.src = url;
+  await img.decode();
+  const width = img.naturalWidth || 1024;
+  const height = img.naturalHeight || 1024;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return url;
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL("image/png");
 }
 
 /** Drive the export Worker, relaying progress and cancellation. */

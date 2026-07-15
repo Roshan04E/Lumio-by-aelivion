@@ -1,8 +1,11 @@
-import { Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
+import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@kimera-by-aelivion/shared";
-import { useAudioPeaksSlice } from "../lib/audioPeaks";
+import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@kimera-by-aelivion/shared";
+import { getAudioPeaks, getCachedPyramid, sampleWaveformWindow, type Pyramid } from "../lib/audioPeaks";
+import { isWaveformGLEnabled } from "./waveform/waveformGLFlag";
+import { registerWaveformClip, unregisterWaveformClip } from "./waveform/waveformGLStore";
+import { WaveformGLLayer } from "./waveform/WaveformGLLayer";
 import { getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { ASSET_LABEL_COLORS, layerLabelOf } from "../lib/assetLabels";
 import { useRenderCost } from "../lib/perfDiagnostics";
@@ -29,8 +32,8 @@ import { favouriteTransitionSpecs } from "../editor/effects/catalog";
 import { loadFavourites } from "../editor/effects/favourites";
 import { ThemedSelect, type ThemedSelectOption } from "../editor/inspector/controls/ThemedSelect";
 import type { PreviewCacheRulerSegment, ProxyCacheStatus } from "../editor/performance/renderCache";
+import { resolveSelectMode, type LayerSelectMode } from "../editor/selectionMode";
 
-type LayerSelectMode = "replace" | "toggle" | "range" | "add-range";
 type LayerCollectionSelectMode = "replace" | "add" | "toggle";
 /** A source-monitor drag carries its own mode + marked in/out range — see SourceMonitor.tsx. */
 type DropAssetHandler = (
@@ -108,6 +111,16 @@ type TransitionDragState = {
   side: "fadeIn" | "fadeOut";
   pointerId: number;
   previewDurationSeconds: number;
+} | null;
+
+// Responsive-Time (§5) region drag: sets the protected intro/outro (seconds from the clip edge). Same
+// commit-on-release model as the fade drag; the band shows a live width via `responsiveDrag`.
+type ResponsiveDragState = {
+  clip: HTMLDivElement;
+  layerId: string;
+  side: "intro" | "outro";
+  pointerId: number;
+  previewSeconds: number;
 } | null;
 
 // Cross-dissolve junction drag: the element straddles a cut between two same-track clips. Its right
@@ -366,6 +379,7 @@ function TimelineStripImpl({
   onSelectLayer,
   onLinkSelectedLayers,
   onDeleteSelectedLayers,
+  onDuplicateSelectedLayers,
   onMoveLayer,
   onReorderTrack,
   onResizeLayer,
@@ -375,6 +389,9 @@ function TimelineStripImpl({
   onDeleteKeyframe,
   onUnlinkLayer,
   onUnlinkSelectedLayers,
+  onNestSelection,
+  onUnnestClip,
+  onOpenNestedClip,
   onAddLayer,
   onAddTrack,
   onDropAsset,
@@ -382,6 +399,7 @@ function TimelineStripImpl({
   onMoveKeyframe,
   onSetTransition,
   onRemoveTransition,
+  onSetResponsiveTime,
   onAddCrossDissolve,
   onSetCrossDissolve,
   onRemoveCrossDissolve,
@@ -394,6 +412,8 @@ function TimelineStripImpl({
   onChangeToolMode,
   snapEnabled = true,
   onToggleSnap,
+  magneticEnabled = false,
+  onToggleMagnetic,
   onSplitLayerAt,
   onSplitAtPlayhead,
   onNotice,
@@ -437,7 +457,18 @@ function TimelineStripImpl({
   onSelectLayer: (layerId: string, mode?: LayerSelectMode) => void;
   onLinkSelectedLayers: () => void;
   onDeleteSelectedLayers?: (() => void) | undefined;
-  onMoveLayer: (layerId: string, startSeconds: number, trackId?: string | undefined, movedLayerIds?: string[] | undefined, targetTrackByLayerId?: Record<string, string> | undefined) => void;
+  /** Duplicate the whole current selection in one history entry (context menu, 2+ selected). */
+  onDuplicateSelectedLayers?: (() => void) | undefined;
+  onMoveLayer: (
+    layerId: string,
+    startSeconds: number,
+    trackId?: string | undefined,
+    movedLayerIds?: string[] | undefined,
+    targetTrackByLayerId?: Record<string, string> | undefined,
+    /** Exact resolved start per affected layer (drag path). When present the commit applies these
+     *  verbatim instead of recomputing a delta — so commit == preview. Legacy callers omit it. */
+    targetStartByLayerId?: Record<string, number> | undefined
+  ) => void;
   onReorderTrack?: ((trackId: string, targetTrackId: string, placement: "before" | "after") => void) | undefined;
   onResizeLayer: (layerId: string, startSeconds: number, durationSeconds: number) => void;
   onToggleTrack: (trackId: string, patch: Partial<Pick<TimelineTrack, "locked" | "muted" | "solo">>) => void;
@@ -446,6 +477,12 @@ function TimelineStripImpl({
   onDeleteKeyframe: (layerId: string, keyframeId: string) => void;
   onUnlinkLayer?: (layerId: string) => void;
   onUnlinkSelectedLayers?: () => void;
+  /** Collapse the current multi-selection into a new nested sequence, replacing it with one compound clip. */
+  onNestSelection?: (() => void) | undefined;
+  /** Splice a compound clip's nested sequence back into this timeline. */
+  onUnnestClip?: ((layerId: string) => void) | undefined;
+  /** Switch the active timeline to a compound clip's nested sequence (double-click / context menu). */
+  onOpenNestedClip?: ((layerId: string) => void) | undefined;
   onAddLayer: (type: TimelineLayerType, options?: ShapeAddOptions) => void;
   onAddTrack: (type: TimelineTrack["type"]) => void;
   onDropAsset: DropAssetHandler;
@@ -453,6 +490,8 @@ function TimelineStripImpl({
   onMoveKeyframe: (layerId: string, keyframeId: string, timeSeconds: number) => void;
   onSetTransition: (layerId: string, kind: TransitionKind, durationSeconds: number) => void;
   onRemoveTransition: (layerId: string, side: "fadeIn" | "fadeOut") => void;
+  /** Responsive-Time (§5): set a clip's protected intro/outro (seconds). Both 0 clears it. */
+  onSetResponsiveTime?: ((layerId: string, value: { introSeconds: number; outroSeconds: number }) => void) | undefined;
   onAddCrossDissolve: (leftLayerId: string, rightLayerId: string, spec?: TransitionSpec, manifest?: PluginTransitionManifest) => void;
   onSetCrossDissolve: (leftLayerId: string, rightLayerId: string, durationSeconds: number) => void;
   onRemoveCrossDissolve: (leftLayerId: string, rightLayerId: string) => void;
@@ -465,6 +504,8 @@ function TimelineStripImpl({
   onChangeToolMode?: ((mode: TimelineToolMode) => void) | undefined;
   snapEnabled?: boolean | undefined;
   onToggleSnap?: (() => void) | undefined;
+  magneticEnabled?: boolean | undefined;
+  onToggleMagnetic?: (() => void) | undefined;
   onSplitLayerAt?: ((layerId: string, atSeconds: number) => void) | undefined;
   onSplitAtPlayhead?: (() => void) | undefined;
   /** Transient editor toast — used for "why did nothing happen" feedback (roll/slide preconditions). */
@@ -565,6 +606,9 @@ function TimelineStripImpl({
     return snapValue(value, targets, tolerance);
   }
   const editorRef = useRef<HTMLDivElement | null>(null);
+  // Phase 2B: the GL waveform surface is a React-owned canvas mounted INSIDE .timeline-tracks (so it
+  // layers below the playhead / gutter and above clips). Captured via callback ref, handed to the layer.
+  const [glCanvasEl, setGlCanvasEl] = useState<HTMLCanvasElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
   const liveProxyBarRef = useRef<HTMLElement | null>(null);
   // Cached timeline geometry for the playback auto-follow, so the per-frame follow does NOT call
@@ -809,6 +853,15 @@ function TimelineStripImpl({
       return next;
     });
   }, []);
+  const [responsiveDrag, setResponsiveDragState] = useState<ResponsiveDragState>(null);
+  const responsiveDragRef = useRef<ResponsiveDragState>(null);
+  const setResponsiveDrag = useCallback((value: ResponsiveDragState | ((current: ResponsiveDragState) => ResponsiveDragState)) => {
+    setResponsiveDragState((current) => {
+      const next = typeof value === "function" ? (value as (current: ResponsiveDragState) => ResponsiveDragState)(current) : value;
+      responsiveDragRef.current = next;
+      return next;
+    });
+  }, []);
   const [crossDrag, setCrossDragState] = useState<CrossDragState>(null);
   const crossDragRef = useRef<CrossDragState>(null);
   const setCrossDrag = useCallback((value: CrossDragState | ((current: CrossDragState) => CrossDragState)) => {
@@ -874,7 +927,7 @@ function TimelineStripImpl({
   const currentShapeTool = SHAPE_TOOL_OPTIONS.find((option) => option.value === lastShapeTool) ?? SHAPE_TOOL_OPTIONS[0]!;
   const shapeSelectOptions = SHAPE_SELECT_OPTIONS;
   const [trackDrag, setTrackDrag] = useState<{ trackId: string; targetTrackId: string | null; placement: "before" | "after" } | null>(null);
-  const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean } | null>(null);
+  const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean; nested: boolean; selectionCount: number } | null>(null);
   // The menu is measured after mount and clamped inside the viewport so it never spills off the
   // bottom/right edge (which was hiding its lower options). Hidden until positioned to avoid a jump.
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1254,6 +1307,14 @@ function TimelineStripImpl({
   // every other clip on each pointer move instead of just the one being dragged.
   const startDrag = useCallback(
     (event: PointerEvent<HTMLDivElement>, layer: TimelineLayer) => {
+      // Only the PRIMARY button drives drag/select. A right-click (button 2) used to run the full
+      // drag lifecycle — pointerdown started a (possibly multi-clip) drag and the motionless pointerup
+      // in finishDrag collapsed the selection to just the clicked clip, so the context menu that opened
+      // on the same gesture saw a single selection and "Nest N clips" was gone. Selection for right-
+      // clicks is handled in handleClipContextMenu instead.
+      if (event.button !== 0) {
+        return;
+      }
       if (toolMode === "hand") {
         startTimelinePan(event, event.currentTarget.closest(".timeline-editor"));
         return;
@@ -1447,37 +1508,62 @@ function TimelineStripImpl({
       const maxStart = Math.max(0, interactionDurationSeconds - Math.min(layer.durationSeconds, maxDuration));
       const snapped = snapTimeWithTarget(pointerSeconds - drag.offsetSeconds, drag.layerId);
       // Snap to a clip edge/marker if one is in range, otherwise quantize to the
-      // frame grid so the clip always lands on an exact frame.
+      // frame grid so the clip always lands on an exact frame. This is the PRIMARY clip's snapped
+      // target; its delta becomes the whole group's shared shift.
       const nextStart = clamp(snapped.snappedTo !== null ? snapped.value : snap(snapped.value, frameStepSeconds), 0, maxStart);
-      const deltaSeconds = nextStart - layer.startSeconds;
-      const previewStartByLayerId = Object.fromEntries(
-        drag.movedLayerIds.map((layerId) => {
-          const candidate = composition.tracks.flatMap((track) => track.layers).find((item) => item.id === layerId);
-          if (!candidate) {
-            return [layerId, drag.baseStartByLayerId[layerId] ?? 0] as const;
-          }
-          const candidateMaxDuration = getLayerMaxDuration(candidate, layerMaxDurations, composition.durationSeconds);
-          const candidateMaxStart = Math.max(0, interactionDurationSeconds - Math.min(candidate.durationSeconds, candidateMaxDuration));
-          const baseStart = drag.baseStartByLayerId[layerId] ?? candidate.startSeconds;
-          return [layerId, snap(clamp(baseStart + deltaSeconds, 0, candidateMaxStart), frameStepSeconds)] as const;
-        })
+      const desiredDeltaSeconds = nextStart - layer.startSeconds;
+
+      // ONE resolver answers the whole move (time + track), rigid-body clamped so the selection never
+      // collapses onto a lane or compresses at t=0. finishDrag re-uses this exact result to commit —
+      // preview and commit can't diverge. See `resolveGroupMove` in shared/timeline-ops.
+      const rowPitchPx = trackHeight + 1;
+      const desiredTrackDelta = Math.round((event.clientY - drag.startClientY) / rowPitchPx);
+      const resolution = resolveGroupMove({
+        composition,
+        movedLayerIds: drag.movedLayerIds,
+        primaryLayerId: drag.layerId,
+        deltaSeconds: desiredDeltaSeconds,
+        trackDelta: desiredTrackDelta,
+        maxStartForLayer: (candidate) =>
+          Math.max(
+            0,
+            interactionDurationSeconds -
+              Math.min(candidate.durationSeconds, getLayerMaxDuration(candidate, layerMaxDurations, composition.durationSeconds))
+          )
+      });
+
+      const previewStartByLayerId: Record<string, number> = {};
+      const previewTrackByLayerId: Record<string, string> = {};
+      const previewVerticalOffsetByLayerId: Record<string, number> = {};
+      // The live vertical offset follows the pointer within the group-clamped row range, so every
+      // member slides together (linked followers keep offset 0 — they relocate on commit).
+      const visualDeltaPx = clamp(
+        event.clientY - drag.startClientY,
+        resolution.trackDeltaBounds.min * rowPitchPx,
+        resolution.trackDeltaBounds.max * rowPitchPx
       );
-      const trackPreview = getDragTrackPreview(drag, event.clientY);
+      for (const placement of resolution.placements) {
+        previewStartByLayerId[placement.layerId] = placement.startSeconds;
+        previewTrackByLayerId[placement.layerId] = placement.trackId;
+        previewVerticalOffsetByLayerId[placement.layerId] = placement.member ? visualDeltaPx : 0;
+      }
+      const primaryPlacement = resolution.placements.find((placement) => placement.layerId === drag.layerId);
+
       // Ref now, render on the next animation frame (see dragRafRef) — one strip render per frame.
       dragRef.current = {
         ...drag,
-        previewStartSeconds: nextStart,
+        previewStartSeconds: primaryPlacement?.startSeconds ?? nextStart,
         previewStartByLayerId,
-        previewTrackId: trackPreview.previewTrackId,
-        previewTrackByLayerId: trackPreview.previewTrackByLayerId,
-        previewVerticalOffsetByLayerId: trackPreview.previewVerticalOffsetByLayerId,
+        previewTrackId: primaryPlacement?.trackId ?? drag.previewTrackId,
+        previewTrackByLayerId,
+        previewVerticalOffsetByLayerId,
         snappedTo: snapped.snappedTo
       };
       if (dragRafRef.current === null) {
         dragRafRef.current = requestAnimationFrame(flushDragPreview);
       }
     },
-    [composition, layerMaxDurations, timelineDurationSeconds, interactionDurationSeconds, frameStepSeconds, snapEnabled, currentTime, pixelsPerSecond, markers, flushDragPreview]
+    [composition, layerMaxDurations, timelineDurationSeconds, interactionDurationSeconds, frameStepSeconds, snapEnabled, currentTime, pixelsPerSecond, markers, trackHeight, flushDragPreview]
   );
 
   // Roll/slide drags listen on WINDOW while active (not the clip element): the gesture starts on
@@ -1544,12 +1630,16 @@ function TimelineStripImpl({
       }
 
       if (dragChangedAnything(drag)) {
+        // Commit the SAME placements the preview computed (all affected layers, incl. linked
+        // followers) — no delta recompute, so what dropped is exactly what was shown.
+        const affectedIds = Object.keys(drag.previewStartByLayerId);
         onMoveLayer(
           drag.layerId,
           drag.previewStartSeconds,
           drag.previewTrackId,
-          drag.movedLayerIds.length > 1 ? drag.movedLayerIds : undefined,
-          drag.movedLayerIds.length > 1 ? drag.previewTrackByLayerId : undefined
+          affectedIds,
+          drag.previewTrackByLayerId,
+          drag.previewStartByLayerId
         );
       } else if (drag.movedLayerIds.length > 1) {
         // Motionless click on a clip that was part of a MULTI-selection → collapse to just that clip
@@ -1581,12 +1671,14 @@ function TimelineStripImpl({
       const active = dragRef.current;
       if (!active || active.pointerId !== event.pointerId) return;
       if (dragChangedAnything(active)) {
+        const affectedIds = Object.keys(active.previewStartByLayerId);
         onMoveLayer(
           active.layerId,
           active.previewStartSeconds,
           active.previewTrackId,
-          active.movedLayerIds.length > 1 ? active.movedLayerIds : undefined,
-          active.movedLayerIds.length > 1 ? active.previewTrackByLayerId : undefined
+          affectedIds,
+          active.previewTrackByLayerId,
+          active.previewStartByLayerId
         );
       }
       settleDragPreviewForCommit();
@@ -1694,25 +1786,24 @@ function TimelineStripImpl({
       const snapped = snapTimeWithTarget(rawSeconds, resize.layerId);
       const pointerSeconds = snapped.value;
       const maxDuration = getLayerMaxDuration(layer, layerMaxDurations, composition.durationSeconds);
+      const oldEnd = layer.startSeconds + layer.durationSeconds;
+      // Desired edges from the pointer, THEN clamped by the shared resolver — the SAME one the commit
+      // uses (resolveEdgeTrim), so a source-bound head drag can no longer overshoot the available source
+      // material and snap back on release. A head drag keeps the tail planted (start capped at end − 1
+      // frame); a tail drag keeps the head planted.
+      const desired =
+        resize.edge === "start"
+          ? { startSeconds: Math.min(pointerSeconds, oldEnd - frameStepSeconds), durationSeconds: oldEnd - Math.min(pointerSeconds, oldEnd - frameStepSeconds) }
+          : { startSeconds: layer.startSeconds, durationSeconds: pointerSeconds - layer.startSeconds };
+      const resolution = resolveEdgeTrim(layer, desired, { maxDurationSeconds: maxDuration, minDurationSeconds: frameStepSeconds });
       // Write the preview to the ref synchronously, render it on the next animation frame (see
       // resizeRafRef above) — never more than one strip re-render per frame while trimming.
-      if (resize.edge === "start") {
-        const maxStart = layer.startSeconds + layer.durationSeconds - frameStepSeconds;
-        const minStart = Math.max(0, layer.startSeconds + layer.durationSeconds - maxDuration);
-        const nextStart = clamp(pointerSeconds, minStart, maxStart);
-        resizeRef.current = {
-          ...resize,
-          previewStartSeconds: nextStart,
-          previewDurationSeconds: layer.durationSeconds + (layer.startSeconds - nextStart),
-          snappedTo: snapped.snappedTo
-        };
-      } else {
-        resizeRef.current = {
-          ...resize,
-          previewDurationSeconds: clamp(pointerSeconds - layer.startSeconds, frameStepSeconds, maxDuration),
-          snappedTo: snapped.snappedTo
-        };
-      }
+      resizeRef.current = {
+        ...resize,
+        previewStartSeconds: resolution.startSeconds,
+        previewDurationSeconds: resolution.durationSeconds,
+        snappedTo: snapped.snappedTo
+      };
       if (resizeRafRef.current === null) {
         resizeRafRef.current = requestAnimationFrame(flushResizePreview);
       }
@@ -1928,11 +2019,11 @@ function TimelineStripImpl({
         return;
       }
 
-      const nextTime = getClipLocalTime(event.clientX, keyframeDrag.clip, layer.durationSeconds);
+      const nextTime = getClipLocalTime(event.clientX, keyframeDrag.clip, layer.durationSeconds, frameStepSeconds);
       setKeyframeDrag({ ...keyframeDrag, previewTimeSeconds: nextTime });
       onChangeCurrentTime(layer.startSeconds + nextTime);
     },
-    [composition, snapStepSeconds, onChangeCurrentTime, setKeyframeDrag]
+    [composition, frameStepSeconds, onChangeCurrentTime, setKeyframeDrag]
   );
 
   const finishKeyframeDrag = useCallback(
@@ -1997,7 +2088,7 @@ function TimelineStripImpl({
       if (!layer) {
         return;
       }
-      const localTime = getClipLocalTime(event.clientX, drag.clip, layer.durationSeconds);
+      const localTime = getClipLocalTime(event.clientX, drag.clip, layer.durationSeconds, frameStepSeconds);
       const raw = drag.side === "fadeIn" ? localTime : layer.durationSeconds - localTime;
       const next = clamp(raw, frameStepSeconds, layer.durationSeconds / 2);
       setTransitionDrag({ ...drag, previewDurationSeconds: next });
@@ -2038,6 +2129,89 @@ function TimelineStripImpl({
       window.removeEventListener("pointercancel", handleUp);
     };
   }, [transitionDragActive, moveTransitionDrag, finishTransitionDrag]);
+
+  // Responsive-Time region drag — mirrors the fade drag exactly (clip-local time, window listeners,
+  // commit on release). Sets the protected intro/outro; the band shows a live width via `responsiveDrag`.
+  const startResponsiveDrag = useCallback(
+    (event: PointerEvent<HTMLSpanElement>, layer: TimelineLayer, side: "intro" | "outro") => {
+      if (toolMode === "hand") {
+        startTimelinePan(event, event.currentTarget.closest(".timeline-editor"));
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const clip = event.currentTarget.closest(".timeline-clip");
+      if (!(clip instanceof HTMLDivElement) || layer.locked) {
+        return;
+      }
+      applyInstantSelectionHighlight([layer.id]);
+      onSelectLayer(layer.id);
+      const region = layer.responsiveTime ?? { introSeconds: 0, outroSeconds: 0 };
+      setResponsiveDrag({
+        clip,
+        layerId: layer.id,
+        side,
+        pointerId: event.pointerId,
+        previewSeconds: side === "intro" ? region.introSeconds : region.outroSeconds
+      });
+    },
+    [applyInstantSelectionHighlight, onSelectLayer, setResponsiveDrag, startTimelinePan, toolMode]
+  );
+
+  const moveResponsiveDrag = useCallback(
+    (event: { pointerId: number; clientX: number }) => {
+      const drag = responsiveDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      const layer = composition.tracks.flatMap((track) => track.layers).find((item) => item.id === drag.layerId);
+      if (!layer) {
+        return;
+      }
+      const localTime = getClipLocalTime(event.clientX, drag.clip, layer.durationSeconds, frameStepSeconds);
+      const raw = drag.side === "intro" ? localTime : layer.durationSeconds - localTime;
+      // Keep the two zones from crossing: cap this side at duration − the other zone − one frame.
+      const other = drag.side === "intro" ? (layer.responsiveTime?.outroSeconds ?? 0) : (layer.responsiveTime?.introSeconds ?? 0);
+      const next = clamp(raw, 0, Math.max(0, layer.durationSeconds - other - frameStepSeconds));
+      setResponsiveDrag({ ...drag, previewSeconds: next });
+    },
+    [composition, frameStepSeconds, setResponsiveDrag]
+  );
+
+  const finishResponsiveDrag = useCallback(
+    (event: { pointerId: number }) => {
+      const drag = responsiveDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      const layer = composition.tracks.flatMap((track) => track.layers).find((item) => item.id === drag.layerId);
+      const current = layer?.responsiveTime ?? { introSeconds: 0, outroSeconds: 0 };
+      const nextValue =
+        drag.side === "intro"
+          ? { introSeconds: drag.previewSeconds, outroSeconds: current.outroSeconds }
+          : { introSeconds: current.introSeconds, outroSeconds: drag.previewSeconds };
+      onSetResponsiveTime?.(drag.layerId, nextValue);
+      setResponsiveDrag(null);
+    },
+    [composition, onSetResponsiveTime, setResponsiveDrag]
+  );
+
+  const responsiveDragActive = responsiveDrag !== null;
+  useEffect(() => {
+    if (!responsiveDragActive) {
+      return;
+    }
+    const handleMove = (event: globalThis.PointerEvent) => moveResponsiveDrag(event);
+    const handleUp = (event: globalThis.PointerEvent) => finishResponsiveDrag(event);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
+    };
+  }, [responsiveDragActive, moveResponsiveDrag, finishResponsiveDrag]);
 
   // Cross-dissolve junction drag — the left clip's end stays anchored; the overlap duration `D`
   // shrinks as the pointer moves right (the left edge of the element follows). Commits on release.
@@ -2354,70 +2528,15 @@ function TimelineStripImpl({
     onClearOutPoint
   ]);
 
-  function getClipLocalTime(clientX: number, clip: HTMLDivElement, durationSeconds: number) {
+  // stepSeconds defaults to the coarse clip-edge snap grid, but fine intra-clip drags (fade handles,
+  // keyframe diamonds) pass frameStepSeconds instead — snapping those to the coarse grid (0.1-1s) made
+  // them visibly jump in discrete steps rather than tracking the cursor smoothly.
+  function getClipLocalTime(clientX: number, clip: HTMLDivElement, durationSeconds: number, stepSeconds: number = snapStepSeconds) {
     const rect = clip.getBoundingClientRect();
-    return snap(clamp(((clientX - rect.left) / Math.max(1, rect.width)) * durationSeconds, 0, durationSeconds), snapStepSeconds);
+    return snap(clamp(((clientX - rect.left) / Math.max(1, rect.width)) * durationSeconds, 0, durationSeconds), stepSeconds);
   }
 
-  function getDragTrackPreview(dragState: NonNullable<DragState>, clientY: number) {
-    const draggedLayer = composition.tracks.flatMap((track) => track.layers).find((item) => item.id === dragState.layerId);
-    if (!draggedLayer) {
-      return {
-        previewTrackId: dragState.previewTrackId,
-        previewTrackByLayerId: dragState.previewTrackByLayerId,
-        previewVerticalOffsetByLayerId: dragState.previewVerticalOffsetByLayerId
-      };
-    }
-
-    // Row pitch = track height + the 1px hairline row gap (.timeline-tracks grid gap).
-    const rowPitchPx = trackHeight + 1;
-    const tracksByAudioKind = (isAudio: boolean) => composition.tracks.filter((track) => (track.type === "audio") === isAudio);
-    const draggedCompatibleTracks = tracksByAudioKind(draggedLayer.type === "audio");
-    const baseFamilyIndex = draggedCompatibleTracks.findIndex((track) => track.id === draggedLayer.trackId);
-    if (baseFamilyIndex === -1) {
-      return {
-        previewTrackId: dragState.previewTrackId,
-        previewTrackByLayerId: dragState.previewTrackByLayerId,
-        previewVerticalOffsetByLayerId: dragState.previewVerticalOffsetByLayerId
-      };
-    }
-
-    const rawFamilyDelta = Math.round((clientY - dragState.startClientY) / rowPitchPx);
-    const familyDelta = clamp(rawFamilyDelta, -baseFamilyIndex, draggedCompatibleTracks.length - 1 - baseFamilyIndex);
-    const visualDeltaPx = clamp(clientY - dragState.startClientY, -baseFamilyIndex * rowPitchPx, (draggedCompatibleTracks.length - 1 - baseFamilyIndex) * rowPitchPx);
-    const layerById = new Map(composition.tracks.flatMap((track) => track.layers).map((item) => [item.id, item]));
-    const previewTrackByLayerId: Record<string, string> = {};
-    const previewVerticalOffsetByLayerId: Record<string, number> = {};
-    for (const layerId of dragState.movedLayerIds) {
-      const candidate = layerById.get(layerId);
-      if (!candidate) {
-        continue;
-      }
-      const compatibleTracks = tracksByAudioKind(candidate.type === "audio");
-      const candidateFamilyIndex = compatibleTracks.findIndex((track) => track.id === candidate.trackId);
-      if (candidateFamilyIndex === -1) {
-        continue;
-      }
-      const targetFamilyIndex = clamp(candidateFamilyIndex + familyDelta, 0, compatibleTracks.length - 1);
-      const targetTrack = compatibleTracks[targetFamilyIndex] ?? compatibleTracks[candidateFamilyIndex];
-      if (!targetTrack || targetTrack.locked || targetTrack.type === "audio" !== (candidate.type === "audio")) {
-        previewTrackByLayerId[layerId] = candidate.trackId;
-        previewVerticalOffsetByLayerId[layerId] = 0;
-        continue;
-      }
-      previewTrackByLayerId[layerId] = targetTrack.id;
-      const maxUpPx = candidateFamilyIndex * rowPitchPx;
-      const maxDownPx = (compatibleTracks.length - 1 - candidateFamilyIndex) * rowPitchPx;
-      previewVerticalOffsetByLayerId[layerId] = clamp(visualDeltaPx, -maxUpPx, maxDownPx);
-    }
-
-    const previewTrack = draggedCompatibleTracks[baseFamilyIndex + familyDelta] ?? draggedCompatibleTracks[baseFamilyIndex];
-    return {
-      previewTrackId: previewTrack && !previewTrack.locked ? previewTrack.id : draggedLayer.trackId,
-      previewTrackByLayerId,
-      previewVerticalOffsetByLayerId
-    };
-  }
+  // (Group track-preview math moved into the shared `resolveGroupMove` resolver — see moveDrag.)
 
   function getDropTime(event: DragEvent<HTMLDivElement>) {
     return snap(getLaneTime(event.clientX, event.currentTarget, timelineDurationSeconds, interactionDurationSeconds, true), snapStepSeconds);
@@ -2579,6 +2698,15 @@ function TimelineStripImpl({
       const junction = track ? findClipTransitionContext(track, layer) : null;
       setTrackContextMenu(null);
       setMobileTrackMenu(null);
+      // Right-clicking a clip that's already part of a multi-selection keeps the whole group selected
+      // (so group actions like Nest operate on all of them); right-clicking a clip OUTSIDE the current
+      // selection focuses just that clip first, matching Premiere/Resolve.
+      const withinSelection = selectedLayerSet.has(layer.id);
+      const selectionCount = withinSelection ? selectedLayerIds.length : 1;
+      if (!withinSelection) {
+        applyInstantSelectionHighlight([layer.id]);
+        onSelectLayer(layer.id, "replace");
+      }
       setClipContextMenu({
         x: event.clientX,
         y: event.clientY,
@@ -2588,10 +2716,12 @@ function TimelineStripImpl({
         replaceable,
         slippable,
         crossPair: junction ? { leftLayerId: junction.leftLayerId, rightLayerId: junction.rightLayerId } : null,
-        hasTransition: junction?.hasTransition ?? false
+        hasTransition: junction?.hasTransition ?? false,
+        nested: Boolean(layer.nestedCompositionId),
+        selectionCount
       });
     },
-    [composition]
+    [composition, selectedLayerIds, selectedLayerSet, applyInstantSelectionHighlight, onSelectLayer]
   );
 
   const enterSlipMode = useCallback(
@@ -2618,6 +2748,7 @@ function TimelineStripImpl({
 
   return (
     <div className="timeline-workspace">
+      {WAVEFORM_GL_ENABLED ? <WaveformGLLayer canvas={glCanvasEl} laneOffsetPx={laneOffsetPx} /> : null}
       <div
         className={`timeline-editor scroll-performance-pane ${
           trackHeight <= 30 ? "is-xs-rows" : trackHeight <= 42 ? "is-s-rows" : trackHeight <= 60 ? "is-m-rows" : "is-l-rows"
@@ -2860,6 +2991,14 @@ function TimelineStripImpl({
               <button type="button" className={snapEnabled ? "is-active" : ""} title="Snapping (N)" onClick={() => onToggleSnap?.()}>
                 <Magnet size={13} />
               </button>
+              <button
+                type="button"
+                className={magneticEnabled ? "is-active" : ""}
+                title="Magnetic timeline — moving a clip closes gaps and prevents overlaps on the tracks it touches"
+                onClick={() => onToggleMagnetic?.()}
+              >
+                <AlignHorizontalJustifyStart size={13} />
+              </button>
               <span className="timeline-toolbar-divider" />
               <span className="timeline-toolbar-label">Rows</span>
               <button type="button" className={trackHeight <= 30 ? "is-active" : ""} title="Extra compact tracks" onClick={() => onChangeTrackHeight(28)}>
@@ -3086,6 +3225,7 @@ function TimelineStripImpl({
           style={{ minWidth: `${timelineWidthPx}px` }}
           onContextMenu={(event) => handleTracksContextMenu(event)}
         >
+          {WAVEFORM_GL_ENABLED ? <canvas className="waveform-gl-layer" ref={setGlCanvasEl} aria-hidden="true" /> : null}
           {inPointSeconds != null || outPointSeconds != null ? (
             <div className="timeline-workarea-overlay" aria-hidden="true">
               <div
@@ -3242,6 +3382,10 @@ function TimelineStripImpl({
                     transitionDrag?.layerId === layer.id
                       ? { side: transitionDrag.side, durationSeconds: transitionDrag.previewDurationSeconds }
                       : null;
+                  const responsivePreview =
+                    responsiveDrag?.layerId === layer.id
+                      ? { side: responsiveDrag.side, seconds: responsiveDrag.previewSeconds }
+                      : null;
                   return (
                     <TimelineClip
                       assets={assets}
@@ -3282,11 +3426,15 @@ function TimelineStripImpl({
                       onStartResize={startResize}
                       onStartTransitionDrag={startTransitionDrag}
                       onRemoveTransition={onRemoveTransition}
+                      onStartResponsiveDrag={startResponsiveDrag}
+                      onSetResponsiveTime={onSetResponsiveTime}
+                      responsivePreview={responsivePreview}
                       onPreviewVolume={onPreviewVolume}
                       transitionPreview={transitionPreview}
                       hideFadeIn={junctionRightIds.has(layer.id)}
                       hideFadeOut={junctionLeftIds.has(layer.id)}
                       onUnlinkLayer={onUnlinkLayer}
+                      onOpenNestedClip={onOpenNestedClip}
                       selectedClipKeyframeId={isLayerSelectedForKeyframes ? selectedKeyframeId : null}
                       startSeconds={preview?.startSeconds ?? layer.startSeconds}
                       timelineDurationSeconds={timelineDurationSeconds}
@@ -3649,6 +3797,46 @@ function TimelineStripImpl({
                 Unlink clip
               </button>
             ) : null}
+            {clipContextMenu.nested ? (
+              <>
+                {onOpenNestedClip ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenNestedClip(clipContextMenu.layerId);
+                      setClipContextMenu(null);
+                    }}
+                  >
+                    Open group
+                  </button>
+                ) : null}
+                {onUnnestClip ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUnnestClip(clipContextMenu.layerId);
+                      setClipContextMenu(null);
+                    }}
+                  >
+                    Ungroup
+                  </button>
+                ) : null}
+              </>
+            ) : clipContextMenu.selectionCount >= 2 ? (
+              <>
+                {onNestSelection ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onNestSelection();
+                      setClipContextMenu(null);
+                    }}
+                  >
+                    Group {clipContextMenu.selectionCount} clips
+                  </button>
+                ) : null}
+              </>
+            ) : null}
             {clipContextMenu.crossPair ? (
               <>
                 <span className="timeline-context-menu-divider" />
@@ -3724,23 +3912,27 @@ function TimelineStripImpl({
                 })()
               : null}
             <span className="timeline-context-menu-divider" />
+            {/* When the right-clicked clip is part of a 2+ selection, act on the WHOLE selection in
+                one undo (selectionCount is already selectedLayerIds.length in that case; else 1). */}
             <button
               type="button"
               onClick={() => {
-                onDuplicateLayer?.(clipContextMenu.layerId);
+                if (clipContextMenu.selectionCount >= 2 && onDuplicateSelectedLayers) onDuplicateSelectedLayers();
+                else onDuplicateLayer?.(clipContextMenu.layerId);
                 setClipContextMenu(null);
               }}
             >
-              Duplicate clip
+              {clipContextMenu.selectionCount >= 2 ? `Duplicate ${clipContextMenu.selectionCount} clips` : "Duplicate clip"}
             </button>
             <button
               type="button"
               onClick={() => {
-                onDeleteLayer(clipContextMenu.layerId);
+                if (clipContextMenu.selectionCount >= 2 && onDeleteSelectedLayers) onDeleteSelectedLayers();
+                else onDeleteLayer(clipContextMenu.layerId);
                 setClipContextMenu(null);
               }}
             >
-              Delete clip
+              {clipContextMenu.selectionCount >= 2 ? `Delete ${clipContextMenu.selectionCount} clips` : "Delete clip"}
             </button>
           </div>
         </div>
@@ -3758,19 +3950,6 @@ function getClientSelectionBox(selection: { startX: number; startY: number; curr
   };
 }
 
-function resolveSelectMode(event: Pick<PointerEvent, "shiftKey" | "metaKey" | "ctrlKey">): LayerSelectMode {
-  if (event.shiftKey && (event.metaKey || event.ctrlKey)) {
-    return "add-range";
-  }
-  if (event.shiftKey) {
-    return "range";
-  }
-  if (event.metaKey || event.ctrlKey) {
-    return "toggle";
-  }
-  return "replace";
-}
-
 function getMarqueeStyle(selection: { startX: number; startY: number; currentX: number; currentY: number }) {
   const box = getClientSelectionBox(selection);
   return {
@@ -3781,81 +3960,255 @@ function getMarqueeStyle(selection: { startX: number; startY: number; currentX: 
   } as CSSProperties;
 }
 
-// Renders the clip's ACTUAL audio waveform (decoded peaks). Falls back to a stable
-// placeholder shape while the asset decodes or if it can't be read (e.g. CORS).
+// Phase 2B: when the WebGL waveform surface is enabled, per-clip `Waveform`s register with the
+// shared store + a single GL overlay draws them, instead of each drawing its own <canvas>.
+const WAVEFORM_GL_ENABLED = isWaveformGLEnabled();
+
+// Neutral fallback tint when a clip has no label color.
+const WAVEFORM_FALLBACK_RGB = { r: 224, g: 244, b: 255 };
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const int = parseInt(m[1]!, 16);
+  return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
+}
+function lightenRgb({ r, g, b }: { r: number; g: number; b: number }, t: number): string {
+  const mix = (c: number) => Math.round(c + (255 - c) * t);
+  return `${mix(r)}, ${mix(g)}, ${mix(b)}`;
+}
+
+// ── Waveform visual tuning (pure display; tune by eye) ──────────────────────────────
+const WF_MAX_AMP = 0.43; // half-height the envelope may reach (0.40–0.46); the rest is padding
+const WF_DISPLAY_GAIN = 1.18; // lift speech vertically without touching the data (1.10–1.30), clamped ≤ 1
+const WF_BODY_SMOOTH = 0; // RMS-body moving-average radius (0–2): 0 keeps syllable micro-detail; the resampled RMS is already max-per-pixel, not noisy PCM
+const WF_PEAK_FLOOR_PX = 0.5; // hairline so quiet/silent regions still read on the peak (0.4–0.8)
+
+// Light moving-average applied ONLY to the RMS body: keeps the mass cohesive and feathers the
+// entry/exit of silence, while the peak envelope is left raw so consonants/transients keep their edges.
+function smoothBody(src: number[], radius: number): number[] {
+  if (radius <= 0) return src;
+  const n = src.length;
+  const out = new Array<number>(n);
+  for (let i = 0; i < n; i += 1) {
+    let sum = 0;
+    let count = 0;
+    for (let k = -radius; k <= radius; k += 1) {
+      const j = i + k;
+      if (j < 0 || j >= n) continue;
+      sum += src[j] ?? 0;
+      count += 1;
+    }
+    out[i] = count ? sum / count : src[i] ?? 0;
+  }
+  return out;
+}
+
+// Renders the clip's ACTUAL audio waveform as a pro-grade two-tone envelope (DaVinci/Logic/Pro
+// Tools style): a faint PEAK envelope (transient tips) with a brighter RMS body (perceived
+// loudness) filled inside it, a faint zero baseline, head/foot padding, and a clip-color tint.
+// Falls back to a stable placeholder while the asset decodes or if it can't be read (e.g. CORS).
 const Waveform = memo(function Waveform({
   layerId,
   url,
   sourceInSeconds,
-  durationSeconds
+  durationSeconds,
+  tint
 }: {
   layerId: string;
   url?: string | undefined;
   sourceInSeconds: number;
   durationSeconds: number;
+  tint?: string | undefined;
 }) {
   const hostRef = useRef<HTMLSpanElement>(null);
-  // We draw in real pixel space (viewBox === element size, 1:1) so bars stay genuinely
-  // thin with crisp rounded caps — a stretched viewBox distorts the corner radius.
-  const [size, setSize] = useState({ w: 240, h: 36 });
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const update = () => {
-      const w = Math.max(1, host.clientWidth);
-      const h = Math.max(1, host.clientHeight);
-      setSize((prev) => (Math.abs(prev.w - w) < 1 && Math.abs(prev.h - h) < 1 ? prev : { w, h }));
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(host);
-    return () => observer.disconnect();
-  }, []);
-
-  const { w, h } = size;
-  // ~3px per bar → very thin, dense bars that multiply as the clip is zoomed/widened.
-  const bucketCount = clamp(Math.round(w / 3), 24, 2000);
-  const peaks = useAudioPeaksSlice(url, sourceInSeconds, durationSeconds, bucketCount);
-  const data = peaks ?? Array.from({ length: bucketCount }, (_, index) => 0.25 + pseudoRandom(layerId, index) * 0.6);
-  const isReal = Boolean(peaks);
-  // One <canvas> instead of up to 2000 SVG <rect> nodes per audio clip: same bar geometry
-  // (slot/barW/rx/maxH math unchanged), DPR-scaled for crispness, fill colors matching the
-  // .clip-waveform rect / .is-loading rect CSS tokens. Zoom/resize now redraws one bitmap
-  // instead of reconciling thousands of DOM nodes.
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const baseRgb = (tint ? hexToRgb(tint) : null) ?? WAVEFORM_FALLBACK_RGB;
+  const bodyRgb = lightenRgb(baseRgb, 0.34); // RMS mass — keeps more tint for color depth
+  const peakFillRgb = lightenRgb(baseRgb, 0.48); // peak fill — muted a touch so it reads softer (was .55)
+  const peakEdgeRgb = lightenRgb(baseRgb, 0.5); // rim, dialled down so spike tips aren't hard/bright (was .6)
+
+  // GL mode: register this clip's host element + data with the shared store; the single
+  // WaveformGLLayer overlay reads the live DOM rect and draws it on the GPU. No per-clip canvas.
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
-    canvas.width = Math.max(1, Math.round(w * dpr));
-    canvas.height = Math.max(1, Math.round(h * dpr));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = isReal ? "rgba(233, 255, 246, 0.88)" : "rgba(233, 255, 246, 0.5)";
-    const n = data.length;
-    const slot = w / n;
-    const barW = Math.min(2, Math.max(1, slot * 0.62));
-    const radius = barW / 2;
-    const maxH = h * 0.9;
-    const hasRoundRect = typeof ctx.roundRect === "function";
-    for (let index = 0; index < n; index += 1) {
-      const bh = Math.max(barW, Math.min(1, data[index] ?? 0) * maxH);
-      const x = index * slot + (slot - barW) / 2;
-      const y = (h - bh) / 2;
-      if (hasRoundRect) {
-        ctx.beginPath();
-        ctx.roundRect(x, y, barW, bh, radius);
-        ctx.fill();
-      } else {
-        ctx.fillRect(x, y, barW, bh);
-      }
+    if (!WAVEFORM_GL_ENABLED) return;
+    const el = hostRef.current;
+    if (!el || !url) return;
+    registerWaveformClip(layerId, {
+      element: el,
+      url,
+      sourceInSeconds,
+      durationSeconds,
+      tint: [baseRgb.r / 255, baseRgb.g / 255, baseRgb.b / 255]
+    });
+    return () => unregisterWaveformClip(layerId);
+  }, [layerId, url, sourceInSeconds, durationSeconds, baseRgb.r, baseRgb.g, baseRgb.b]);
+
+  // Decode the source into the shared LOD pyramid cache. We only need a "ready" signal in React here —
+  // the imperative draw below reads the cached pyramid directly, so scrolling never re-renders.
+  const [pyramid, setPyramid] = useState<Pyramid | null>(() => (url ? getCachedPyramid(url) ?? null : null));
+  useEffect(() => {
+    if (WAVEFORM_GL_ENABLED || !url) {
+      setPyramid(null);
+      return;
     }
-  }, [data, w, h, isReal]);
+    const cached = getCachedPyramid(url);
+    if (cached) {
+      setPyramid(cached);
+      return;
+    }
+    let active = true;
+    void getAudioPeaks(url).then((p) => {
+      if (active) setPyramid(p);
+    });
+    return () => {
+      active = false;
+    };
+  }, [url]);
+
+  // VIEWPORT RENDERER (see sampleWaveformWindow). Draws ONLY the on-screen slice of the clip, at one
+  // device-pixel column per bucket — so visual quality is constant at every zoom and identical to the
+  // GL path (which is the same algorithm as a fragment shader). Fully imperative: reads the dock's
+  // scroll/rects and repaints on scroll/zoom/resize WITHOUT re-rendering React (the timeline's perf
+  // rule — same doctrine as the imperative playhead/gesture code in this file).
+  useEffect(() => {
+    if (WAVEFORM_GL_ENABLED) return;
+    const host = hostRef.current;
+    const canvas = canvasRef.current;
+    if (!host || !canvas) return;
+    const dockNode = host.closest(".editor-timeline-dock");
+    const dock = dockNode instanceof HTMLElement ? dockNode : null;
+
+    let raf = 0;
+    let renderedLeft = 0;
+    let renderedRight = -1; // nothing drawn yet
+    let dirty = true; // force a repaint (size/zoom/trim/data change) regardless of scroll position
+
+    const draw = () => {
+      raf = 0;
+      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      const clipRect = host.getBoundingClientRect();
+      const clipW = clipRect.width;
+      const h = host.clientHeight;
+      if (clipW < 1 || h < 1) return;
+      const viewRect = dock ? dock.getBoundingClientRect() : clipRect;
+
+      // Visible slice of THIS clip, in clip-local px.
+      const visLeft = Math.max(0, viewRect.left - clipRect.left);
+      const visRight = Math.min(clipW, viewRect.right - clipRect.left);
+      if (visRight <= visLeft) return; // off-screen — last paint rides with the clip; nothing to do
+      // Ride for free: if the visible slice is still inside the already-drawn band, skip the repaint.
+      if (!dirty && visLeft >= renderedLeft + 2 && visRight <= renderedRight - 2) return;
+
+      // Draw a viewport-plus-margin band (clamped to the clip) so small scrolls don't repaint.
+      const margin = Math.max(64, viewRect.width * 0.5);
+      const left = Math.max(0, visLeft - margin);
+      const right = Math.min(clipW, visRight + margin);
+      const cssW = right - left;
+      if (cssW < 1) return;
+      const devW = Math.max(1, Math.min(16384, Math.round(cssW * dpr)));
+      const devH = Math.max(1, Math.round(h * dpr));
+
+      // Position + size the canvas over the band (clip-local, so it scrolls with the clip).
+      canvas.style.left = `${left}px`;
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${h}px`;
+      if (canvas.width !== devW) canvas.width = devW;
+      if (canvas.height !== devH) canvas.height = devH;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.clearRect(0, 0, devW, devH);
+      renderedLeft = left;
+      renderedRight = right;
+      dirty = false;
+
+      // Source-time window under the band → sample at exactly one bucket per device column (1:1).
+      const cached = getCachedPyramid(url);
+      const startSec = sourceInSeconds + (left / clipW) * durationSeconds;
+      const endSec = sourceInSeconds + (right / clipW) * durationSeconds;
+      const peaks = cached && durationSeconds > 0 ? sampleWaveformWindow(cached, startSec, endSec, cssW, dpr) : null;
+
+      const mid = devH / 2;
+      const maxAmp = devH * WF_MAX_AMP;
+      const isReal = Boolean(peaks);
+      const maxArr = peaks?.max;
+      const minArr = peaks?.min;
+      const rmsArr = peaks?.rms;
+      // Column count === devW (sampleWaveformWindow returns round(cssW·dpr) buckets), so bucket x maps
+      // to device column x with no stretching. Placeholder is a calm low ribbon while decoding.
+      const up = (v: number) => Math.min(1, Math.max(0, v) * WF_DISPLAY_GAIN) * maxAmp;
+      const down = (v: number) => Math.min(1, Math.max(0, -v) * WF_DISPLAY_GAIN) * maxAmp;
+      const colMax = (x: number) => (maxArr ? maxArr[x] ?? 0 : 0.12 + pseudoRandom(layerId, x) * 0.06);
+      const colMin = (x: number) => (minArr ? minArr[x] ?? 0 : -(0.11 + pseudoRandom(layerId, x + 9973) * 0.06));
+      const colRms = (x: number) => (rmsArr ? rmsArr[x] ?? 0 : 0.07);
+
+      // The whole renderer is a COLUMN RASTERIZER — one integer-aligned device-pixel column per
+      // bucket, layered peak-fill → RMS body → edge rim → seam, matching the GL fragment shader.
+      const edgeDev = Math.max(1, Math.round(dpr));
+
+      // 1) Peak fill (bipolar min/max envelope).
+      ctx.beginPath();
+      for (let x = 0; x < devW; x += 1) {
+        const top = mid - up(colMax(x));
+        const bot = mid + down(colMin(x));
+        ctx.rect(x, top, 1, Math.max(1, bot - top));
+      }
+      ctx.fillStyle = `rgba(${peakFillRgb}, ${isReal ? 0.17 : 0.11})`;
+      ctx.fill();
+
+      // 2) RMS body (symmetric core) with a subtle vertical sheen.
+      const grad = ctx.createLinearGradient(0, mid - maxAmp, 0, mid + maxAmp);
+      const bodyAlpha = isReal ? 0.4 : 0.24;
+      grad.addColorStop(0, `rgba(${bodyRgb}, ${bodyAlpha})`);
+      grad.addColorStop(0.5, `rgba(${bodyRgb}, ${bodyAlpha * 0.92})`);
+      grad.addColorStop(1, `rgba(${bodyRgb}, ${bodyAlpha})`);
+      ctx.beginPath();
+      for (let x = 0; x < devW; x += 1) {
+        const a = up(colRms(x));
+        ctx.rect(x, mid - a, 1, Math.max(1, a * 2));
+      }
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // 3) Edge rim — a thin cap at each column's top (max) and bottom (min) contour.
+      ctx.beginPath();
+      for (let x = 0; x < devW; x += 1) {
+        ctx.rect(x, mid - up(colMax(x)), 1, edgeDev);
+        ctx.rect(x, mid + down(colMin(x)) - edgeDev, 1, edgeDev);
+      }
+      ctx.fillStyle = `rgba(${peakEdgeRgb}, ${isReal ? 0.07 : 0.04})`;
+      ctx.fill();
+
+      // 4) Zero-crossing seam — a thin dark axis line splitting the halves (DaVinci-style).
+      ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+      ctx.fillRect(0, Math.round(mid) - Math.floor(edgeDev / 2), devW, edgeDev);
+    };
+
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(draw);
+    };
+    const markDirty = () => {
+      dirty = true;
+      schedule();
+    };
+    const ro = new ResizeObserver(markDirty);
+    ro.observe(host);
+    dock?.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", markDirty);
+    markDirty();
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      dock?.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", markDirty);
+    };
+  }, [url, sourceInSeconds, durationSeconds, layerId, pyramid, bodyRgb, peakFillRgb, peakEdgeRgb]);
+
   return (
-    <span ref={hostRef} className={`clip-waveform ${peaks ? "is-real" : "is-loading"}`} aria-hidden="true">
-      <canvas ref={canvasRef} />
+    <span ref={hostRef} className={`clip-waveform ${pyramid ? "is-real" : "is-loading"}`} aria-hidden="true">
+      {WAVEFORM_GL_ENABLED ? null : <canvas ref={canvasRef} />}
     </span>
   );
 });
@@ -4212,12 +4565,17 @@ interface TimelineClipProps {
   // is active (the create dot unmounts mid-gesture, so element handlers can't be trusted).
   onStartTransitionDrag: (event: PointerEvent<HTMLSpanElement>, layer: TimelineLayer, side: "fadeIn" | "fadeOut") => void;
   onRemoveTransition: (layerId: string, side: "fadeIn" | "fadeOut") => void;
+  // Responsive-Time region drag: same element-start / window-move model as fades.
+  onStartResponsiveDrag?: ((event: PointerEvent<HTMLSpanElement>, layer: TimelineLayer, side: "intro" | "outro") => void) | undefined;
+  onSetResponsiveTime?: ((layerId: string, value: { introSeconds: number; outroSeconds: number }) => void) | undefined;
+  responsivePreview?: { side: "intro" | "outro"; seconds: number } | null | undefined;
   onPreviewVolume?: ((layerId: string, updater: (layer: TimelineLayer) => TimelineLayer, commit: boolean) => void) | undefined;
   transitionPreview: { side: "fadeIn" | "fadeOut"; durationSeconds: number } | null;
   hideFadeIn: boolean;
   hideFadeOut: boolean;
   onSelectKeyframe: (keyframeId: string | null) => void;
   onSetEffectDropTarget: (layerId: string | null) => void;
+  onOpenNestedClip?: ((layerId: string) => void) | undefined;
 }
 
 // Memoized so dragging/resizing/scrubbing one clip doesn't re-render every other
@@ -4266,12 +4624,16 @@ const TimelineClip = memo(function TimelineClip({
   onCancelKeyframeDrag,
   onStartTransitionDrag,
   onRemoveTransition,
+  onStartResponsiveDrag,
+  onSetResponsiveTime,
+  responsivePreview,
   onPreviewVolume,
   transitionPreview,
   hideFadeIn,
   hideFadeOut,
   onSelectKeyframe,
-  onSetEffectDropTarget
+  onSetEffectDropTarget,
+  onOpenNestedClip
 }: TimelineClipProps) {
   const left = (startSeconds / timelineDurationSeconds) * 100;
   const width = (durationSeconds / timelineDurationSeconds) * 100;
@@ -4283,6 +4645,14 @@ const TimelineClip = memo(function TimelineClip({
   const fadeOutDuration = hideFadeOut ? 0 : transitionPreview?.side === "fadeOut" ? transitionPreview.durationSeconds : fades.fadeOut;
   const fadeInPercent = Math.min(100, (fadeInDuration / Math.max(0.0001, layer.durationSeconds)) * 100);
   const fadeOutPercent = Math.min(100, (fadeOutDuration / Math.max(0.0001, layer.durationSeconds)) * 100);
+  // Responsive-Time (§5): protected intro/outro bands, shown only on the SELECTED non-source clip
+  // (text/shape/image) — the titles/graphics case. Live width follows `responsivePreview` while dragging.
+  const responsiveEditable =
+    isSelected && !trackLocked && !layer.locked && Boolean(onStartResponsiveDrag) && (layer.type === "text" || layer.type === "shape" || layer.type === "image");
+  const introSeconds = responsivePreview?.side === "intro" ? responsivePreview.seconds : layer.responsiveTime?.introSeconds ?? 0;
+  const outroSeconds = responsivePreview?.side === "outro" ? responsivePreview.seconds : layer.responsiveTime?.outroSeconds ?? 0;
+  const introPercent = Math.min(100, (introSeconds / Math.max(0.0001, layer.durationSeconds)) * 100);
+  const outroPercent = Math.min(100, (outroSeconds / Math.max(0.0001, layer.durationSeconds)) * 100);
   const slipReadout = isSlipping ? (slipPreviewSourceInSeconds ?? layer.sourceInSeconds ?? 0) : null;
   const canSlip = (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId);
   const asset = layer.assetId ? assets.find((item) => item.id === layer.assetId) : undefined;
@@ -4303,12 +4673,17 @@ const TimelineClip = memo(function TimelineClip({
       data-layer-id={layer.id}
       role="button"
       tabIndex={0}
-      title={`${layer.name} · ${startSeconds.toFixed(1)}s - ${(startSeconds + durationSeconds).toFixed(1)}s${canSlip ? " · double-click to slip source" : ""}`}
+      title={`${layer.name} · ${startSeconds.toFixed(1)}s - ${(startSeconds + durationSeconds).toFixed(1)}s${canSlip ? " · double-click to slip source" : layer.nestedCompositionId ? " · double-click to open" : ""}`}
       onPointerDown={(event) => onStartDrag(event, layer)}
       onPointerMove={onMoveDrag}
       onPointerUp={onFinishDrag}
       onPointerCancel={onCancelDrag}
       onDoubleClick={(event) => {
+        if (layer.nestedCompositionId && onOpenNestedClip) {
+          event.stopPropagation();
+          onOpenNestedClip(layer.id);
+          return;
+        }
         if (!canSlip) {
           return;
         }
@@ -4435,12 +4810,62 @@ const TimelineClip = memo(function TimelineClip({
           <span className="clip-fade-handle" aria-hidden="true" />
         </span>
       ) : null}
+      {/* Responsive-Time (§5): protected intro/outro region handles along the BOTTOM (distinct from the
+          top-corner fade slants). A zone with 0 shows a small grip to drag inward and CREATE it; a set
+          zone shows a band with a draggable inner edge (double-click clears just that side). */}
+      {responsiveEditable ? (
+        <>
+          {introSeconds > 0 ? (
+            <span
+              className="clip-resp-band clip-resp-band-in"
+              style={{ width: `${introPercent}%` }}
+              title={`Protected intro ${introSeconds.toFixed(2)}s — stays fixed when the clip is resized. Drag to adjust, double-click to clear`}
+              onPointerDown={(event) => onStartResponsiveDrag?.(event, layer, "intro")}
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onSetResponsiveTime?.(layer.id, { introSeconds: 0, outroSeconds: layer.responsiveTime?.outroSeconds ?? 0 });
+              }}
+            >
+              <span className="clip-resp-handle" aria-hidden="true" />
+            </span>
+          ) : (
+            <span
+              className="clip-resp-create clip-resp-create-in"
+              title="Drag right to protect the intro when this clip is resized"
+              onPointerDown={(event) => onStartResponsiveDrag?.(event, layer, "intro")}
+            />
+          )}
+          {outroSeconds > 0 ? (
+            <span
+              className="clip-resp-band clip-resp-band-out"
+              style={{ width: `${outroPercent}%` }}
+              title={`Protected outro ${outroSeconds.toFixed(2)}s — stays fixed when the clip is resized. Drag to adjust, double-click to clear`}
+              onPointerDown={(event) => onStartResponsiveDrag?.(event, layer, "outro")}
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onSetResponsiveTime?.(layer.id, { introSeconds: layer.responsiveTime?.introSeconds ?? 0, outroSeconds: 0 });
+              }}
+            >
+              <span className="clip-resp-handle" aria-hidden="true" />
+            </span>
+          ) : (
+            <span
+              className="clip-resp-create clip-resp-create-out"
+              title="Drag left to protect the outro when this clip is resized"
+              onPointerDown={(event) => onStartResponsiveDrag?.(event, layer, "outro")}
+            />
+          )}
+        </>
+      ) : null}
       {layer.type === "audio" ? (
         <Waveform
           layerId={layer.id}
           url={audioUrl}
           sourceInSeconds={isSlipping ? (slipPreviewSourceInSeconds ?? layer.sourceInSeconds ?? 0) : (layer.sourceInSeconds ?? 0)}
           durationSeconds={layer.durationSeconds}
+          tint={labelColor}
         />
       ) : null}
       {layer.type === "audio" && onPreviewVolume ? (

@@ -520,6 +520,7 @@ export function SmartFollowTextToolPanel({
       }));
       const results = await trackTargetsPlanar3D({
         videoUrl: selectedAsset.fileUrl,
+        sourceAssetId: selectedAsset.id,
         durationSeconds: selectedAsset.durationSeconds,
         width: selectedAsset.width || 720,
         height: selectedAsset.height || 1280,
@@ -597,6 +598,7 @@ export function SmartFollowTextToolPanel({
     try {
       const results = await trackTargetsPlanar3D({
         videoUrl: selectedAsset.fileUrl,
+        sourceAssetId: selectedAsset.id,
         durationSeconds: selectedAsset.durationSeconds,
         width: selectedAsset.width || 720,
         height: selectedAsset.height || 1280,

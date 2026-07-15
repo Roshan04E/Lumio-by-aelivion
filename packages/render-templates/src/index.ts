@@ -1,4 +1,10 @@
-import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes } from "@kimera-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerGraphic } from "@kimera-by-aelivion/shared";
+
+/** Manifest field that lets the renderer PLAY a SMIL-animated graphic (see `RenderManifestLayer.graphic`).
+ *  Static/absent graphics contribute nothing, so the settled `assetUrl` stays the source. */
+function graphicAnimationFields(graphic: LayerGraphic | undefined): { graphic?: LayerGraphic } {
+  return graphic && graphicIsAnimated(graphic) ? { graphic } : {};
+}
 import type {
   BlendMode,
   LayerContentTransform,
@@ -116,6 +122,14 @@ export interface RenderManifestLayer {
   durationSeconds: number;
   assetId?: string | undefined;
   assetUrl?: string | undefined;
+  /**
+   * Vector graphic carrying SMIL animation. `assetUrl` holds the SETTLED (static) bake as a fallback;
+   * when this is present the renderer instead rebuilds a deep-linked data URL PER FRAME
+   * (`graphicToAnimatedDataUrl` at the shared `graphicAnimationBakeTime`) so the animation plays — same
+   * frame math as the web preview + local export. Carries the layer's loop/duration overrides with it,
+   * so the renderer resolves the plan via `resolveGraphicAnimation`. Static graphics leave this undefined.
+   */
+  graphic?: LayerGraphic | undefined;
   text?: string | undefined;
   textRuns?: TextRun[] | undefined;
   sourceTextKeyframes?: SourceTextKeyframe[] | undefined;
@@ -139,10 +153,11 @@ export interface RenderManifestLayer {
   trackPanKeyframes?: TrackAudioKeyframe[] | undefined;
   /**
    * Person-extraction matte, carried through verbatim from the timeline layer.
-   * `matte.uri` must resolve to an http(s) URL the worker can fetch - an OPFS
-   * uri (browser-only storage) needs to be uploaded/resolved before reaching the
-   * render manifest; that resolution step is not built yet (see CLAUDE.md /
-   * Open follow-ups in the Extract Person plan).
+   * `matte.uri` must resolve to an http(s) URL the worker can fetch - blob:/OPFS
+   * uris (browser-only) are uploaded and rewritten client-side before a render
+   * job is created: best-effort on every background sync and hard-gated in
+   * `ensureExportReady` (both via `apps/web/src/export/matte-resolve.ts`, which
+   * throws a MatteResolveError naming the layer when the bytes are unrecoverable).
    */
   matte?: MatteRef | undefined;
   /** Vector masks carried verbatim from the timeline layer; both renderers build the same SVG from them. */
@@ -306,6 +321,7 @@ export function buildRenderManifest(input: {
             durationSeconds: layer.durationSeconds,
             assetId: layer.assetId,
             assetUrl: layer.graphic ? graphicToDataUrl(layer.graphic) : asset?.fileUrl,
+            ...graphicAnimationFields(layer.graphic),
             text: layer.text,
             textRuns: layer.textRuns,
             sourceTextKeyframes: layer.sourceTextKeyframes,
@@ -373,6 +389,7 @@ export function buildRenderManifest(input: {
           durationSeconds: clippedEndSeconds - clippedStartSeconds,
           assetId: layer.assetId,
           assetUrl: layer.graphic ? graphicToDataUrl(layer.graphic) : asset?.fileUrl,
+          ...graphicAnimationFields(layer.graphic),
           text: layer.text,
           textRuns: layer.textRuns,
           sourceTextKeyframes: layer.sourceTextKeyframes,

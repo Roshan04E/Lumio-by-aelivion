@@ -59,7 +59,14 @@ scope.onmessage = (event) => {
     try {
       const result = await build(message.payload);
       scope.postMessage(
-        { type: "done", buffer: result.buffer, mime: result.mime, encodedFrames: result.encodedFrames, fps: result.fps },
+        {
+          type: "done",
+          buffer: result.buffer,
+          mime: result.mime,
+          encodedFrames: result.encodedFrames,
+          fps: result.fps,
+          decodableEndSeconds: result.decodableEndSeconds
+        },
         [result.buffer]
       );
     } catch (error) {
@@ -72,7 +79,9 @@ scope.onmessage = (event) => {
   })();
 };
 
-async function build(payload: SourceProxyWorkerPayload): Promise<{ buffer: ArrayBuffer; mime: string; encodedFrames: number; fps: number }> {
+async function build(
+  payload: SourceProxyWorkerPayload
+): Promise<{ buffer: ArrayBuffer; mime: string; encodedFrames: number; fps: number; decodableEndSeconds: number | undefined }> {
   const { sourceUrl, width, height, durationSeconds, maxFps, keyFrameIntervalSeconds, bitsPerPixelFrame, audio } = payload;
   // Software decode: never steal a hardware session from live playback (proxy playback keeps running
   // on the main thread while we build here). Throws WEBCODECS_REQUIRED_NO_DOM for sources the
@@ -104,7 +113,15 @@ async function build(payload: SourceProxyWorkerPayload): Promise<{ buffer: Array
     const maxNullRun = Math.max(2, Math.ceil(fps * 0.5));
     let nullRun = 0;
     let decodedAny = false;
-    const frameCount = Math.max(1, Math.ceil(durationSeconds * fps));
+    // DECODABLE-END CLAMP (2026-07-13, keep in sync with sourceProxyEngine.ts): asset duration
+    // metadata can OVERSHOOT the sample table (historically up to ~1s via the ceil-to-Int asset
+    // column). Past the last sample getFrame CLAMPS to the final frame — never null — so the
+    // null-based frozen-tail guard below can't see it and the repeats bake into the proxy.
+    // Clamp the frame loop to the demuxed truth instead of trusting the metadata.
+    const decodableEnd = provider.decodableEndSeconds;
+    const effectiveDuration =
+      decodableEnd !== undefined && decodableEnd > 0.2 && decodableEnd < durationSeconds ? decodableEnd : durationSeconds;
+    const frameCount = Math.max(1, Math.ceil(effectiveDuration * fps));
     let encodedFrames = 0;
     for (let i = 0; i < frameCount; i += 1) {
       // Parks an in-flight build the moment playback starts (engine forwards suspend messages);
@@ -118,7 +135,7 @@ async function build(payload: SourceProxyWorkerPayload): Promise<{ buffer: Array
         ctx.drawImage(frame as CanvasImageSource, 0, 0, width, height);
       } else {
         nullRun += 1;
-        if (decodedAny && i / fps > durationSeconds - 0.25) {
+        if (decodedAny && i / fps > effectiveDuration - 0.25) {
           break; // tail overshoot — finish with what we have
         }
         if (nullRun > maxNullRun) {
@@ -141,7 +158,7 @@ async function build(payload: SourceProxyWorkerPayload): Promise<{ buffer: Array
     await waitWhileSuspended();
     const blob = await encoder.finalize();
     const buffer = await blob.arrayBuffer();
-    return { buffer, mime: blob.type, encodedFrames, fps };
+    return { buffer, mime: blob.type, encodedFrames, fps, decodableEndSeconds: decodableEnd };
   } catch (error) {
     encoder.dispose();
     throw error;

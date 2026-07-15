@@ -78,7 +78,24 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
     async get(artifactId) {
       const artifact = metadata.get(artifactId);
       if (!artifact) {
-        return undefined;
+        // The metadata Map is in-memory only, so after a reload it's empty even
+        // though the blob file survived on disk. put() always names the file
+        // `${id}.bin`, so recover by convention and synthesize a minimal record —
+        // this is what lets the pre-export matte resolver rehydrate mattes whose
+        // upload failed in a previous session.
+        try {
+          const fileHandle = await directory.getFileHandle(`${artifactId}.bin`);
+          const file = await fileHandle.getFile();
+          return {
+            id: artifactId,
+            type: "maskSequence",
+            uri: `opfs://kimera-tool-artifacts/${artifactId}.bin`,
+            metadata: {},
+            blob: file
+          };
+        } catch {
+          return undefined;
+        }
       }
 
       const fileName = artifact.uri?.replace("opfs://kimera-tool-artifacts/", "");

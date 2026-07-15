@@ -127,7 +127,10 @@ model SourceAsset {
   fileName        String
   fileType        String
   fileUrl         String
-  durationSeconds Int
+  // Float, not Int: the ingest guard probes the true decodable end (fractional). Storing a
+  // ceiled Int made every reloaded asset overshoot its media by up to ~1s, so clips authored
+  // to that length froze on the last frame for the overshoot (2026-07-13 frozen-tail report).
+  durationSeconds Float
   width           Int
   height          Int
   status          String         @default("uploaded")

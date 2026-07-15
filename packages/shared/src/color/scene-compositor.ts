@@ -586,35 +586,40 @@ export class SceneCompositor {
   private readonly presentProgram: WebGLProgram;
   private readonly presentVao: WebGLVertexArrayObject;
   private readonly uPresentTex: WebGLUniformLocation | null;
-  // Effect passes (blur/glow). Programs are cheap to compile up front; the comp-sized RTTs they need
-  // are allocated LAZILY on first blur/glow use and pooled thereafter — comps with no blur/glow pay
-  // zero extra VRAM, and effect comps allocate the 3 targets once (not per-layer/per-frame).
-  private readonly plateProgram: WebGLProgram;
-  private readonly blurProgram: WebGLProgram;
-  private readonly glowProgram: WebGLProgram;
-  private readonly bloomBrightProgram: WebGLProgram;
-  private readonly bloomAddProgram: WebGLProgram;
-  private readonly uPlateSrc: WebGLUniformLocation | null;
-  private readonly uPlateMask: WebGLUniformLocation | null;
-  private readonly uPlateHasMask: WebGLUniformLocation | null;
-  private readonly uPlateFitScale: WebGLUniformLocation | null;
-  private readonly uPlateContentPan: WebGLUniformLocation | null;
-  private readonly uPlateCrop: WebGLUniformLocation | null;
-  private readonly uBlurTex: WebGLUniformLocation | null;
-  private readonly uBlurStep: WebGLUniformLocation | null;
-  private readonly uBlurRadius: WebGLUniformLocation | null;
-  private readonly uBlurSigma: WebGLUniformLocation | null;
-  private readonly uBlurPremultIn: WebGLUniformLocation | null;
-  private readonly uBlurUnpremultOut: WebGLUniformLocation | null;
-  private readonly uGlowPlate: WebGLUniformLocation | null;
-  private readonly uGlowTex: WebGLUniformLocation | null;
-  private readonly uGlowColor: WebGLUniformLocation | null;
-  private readonly uBloomBrightSrc: WebGLUniformLocation | null;
-  private readonly uBloomBrightThreshold: WebGLUniformLocation | null;
-  private readonly uBloomAddPlate: WebGLUniformLocation | null;
-  private readonly uBloomAddTex: WebGLUniformLocation | null;
-  private readonly uBloomAddTint: WebGLUniformLocation | null;
-  private readonly uBloomAddStrength: WebGLUniformLocation | null;
+  // Effect passes (plate/blur/glow/bloom). These programs are LINKED LAZILY on first blur/glow use
+  // (see ensureEffectPrograms), NOT in the constructor: linking all of them synchronously at mount
+  // blocked the main thread ~1s on the GPU driver's shader compile — the "Page Unresponsive" stall
+  // (2026-07-14, stall-profiler evidence). Most comps have no blur/glow and now never compile them.
+  // The `!` fields stay definitely-typed so the hot-path call sites are byte-identical; the single
+  // choke point (ensureEffectPrograms, called from effectTargets) guarantees they're built first.
+  // The comp-sized RTTs these passes need are likewise allocated lazily in effectTargets and pooled.
+  private effectProgramsBuilt = false;
+  private plateProgram!: WebGLProgram;
+  private blurProgram!: WebGLProgram;
+  private glowProgram!: WebGLProgram;
+  private bloomBrightProgram!: WebGLProgram;
+  private bloomAddProgram!: WebGLProgram;
+  private uPlateSrc!: WebGLUniformLocation | null;
+  private uPlateMask!: WebGLUniformLocation | null;
+  private uPlateHasMask!: WebGLUniformLocation | null;
+  private uPlateFitScale!: WebGLUniformLocation | null;
+  private uPlateContentPan!: WebGLUniformLocation | null;
+  private uPlateCrop!: WebGLUniformLocation | null;
+  private uBlurTex!: WebGLUniformLocation | null;
+  private uBlurStep!: WebGLUniformLocation | null;
+  private uBlurRadius!: WebGLUniformLocation | null;
+  private uBlurSigma!: WebGLUniformLocation | null;
+  private uBlurPremultIn!: WebGLUniformLocation | null;
+  private uBlurUnpremultOut!: WebGLUniformLocation | null;
+  private uGlowPlate!: WebGLUniformLocation | null;
+  private uGlowTex!: WebGLUniformLocation | null;
+  private uGlowColor!: WebGLUniformLocation | null;
+  private uBloomBrightSrc!: WebGLUniformLocation | null;
+  private uBloomBrightThreshold!: WebGLUniformLocation | null;
+  private uBloomAddPlate!: WebGLUniformLocation | null;
+  private uBloomAddTex!: WebGLUniformLocation | null;
+  private uBloomAddTint!: WebGLUniformLocation | null;
+  private uBloomAddStrength!: WebGLUniformLocation | null;
   private plateRT: RenderTarget | null = null;
   private scratch1: RenderTarget | null = null;
   private scratch2: RenderTarget | null = null;
@@ -898,35 +903,9 @@ export class SceneCompositor {
     this.presentVao = createFullscreenVao(gl);
     this.uPresentTex = gl.getUniformLocation(this.presentProgram, "uTex");
 
-    this.plateProgram = linkProgram(gl, FULLSCREEN_TRI_VS, PLATE_FS);
-    this.uPlateSrc = gl.getUniformLocation(this.plateProgram, "uSrc");
-    this.uPlateMask = gl.getUniformLocation(this.plateProgram, "uMask");
-    this.uPlateHasMask = gl.getUniformLocation(this.plateProgram, "uHasMask");
-    this.uPlateFitScale = gl.getUniformLocation(this.plateProgram, "uFitScale");
-    this.uPlateContentPan = gl.getUniformLocation(this.plateProgram, "uContentPan");
-    this.uPlateCrop = gl.getUniformLocation(this.plateProgram, "uCrop");
-
-    this.blurProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLUR_FS);
-    this.uBlurTex = gl.getUniformLocation(this.blurProgram, "uTex");
-    this.uBlurStep = gl.getUniformLocation(this.blurProgram, "uStep");
-    this.uBlurRadius = gl.getUniformLocation(this.blurProgram, "uRadius");
-    this.uBlurSigma = gl.getUniformLocation(this.blurProgram, "uSigma");
-    this.uBlurPremultIn = gl.getUniformLocation(this.blurProgram, "uPremultIn");
-    this.uBlurUnpremultOut = gl.getUniformLocation(this.blurProgram, "uUnpremultOut");
-
-    this.glowProgram = linkProgram(gl, FULLSCREEN_TRI_VS, GLOW_FS);
-    this.uGlowPlate = gl.getUniformLocation(this.glowProgram, "uPlate");
-    this.uGlowTex = gl.getUniformLocation(this.glowProgram, "uGlow");
-    this.uGlowColor = gl.getUniformLocation(this.glowProgram, "uGlowColor");
-
-    this.bloomBrightProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_BRIGHT_FS);
-    this.uBloomBrightSrc = gl.getUniformLocation(this.bloomBrightProgram, "uSrc");
-    this.uBloomBrightThreshold = gl.getUniformLocation(this.bloomBrightProgram, "uThreshold");
-    this.bloomAddProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_ADD_FS);
-    this.uBloomAddPlate = gl.getUniformLocation(this.bloomAddProgram, "uPlate");
-    this.uBloomAddTex = gl.getUniformLocation(this.bloomAddProgram, "uBloom");
-    this.uBloomAddTint = gl.getUniformLocation(this.bloomAddProgram, "uTint");
-    this.uBloomAddStrength = gl.getUniformLocation(this.bloomAddProgram, "uStrength");
+    // NOTE: the plate/blur/glow/bloom programs are NOT linked here — see ensureEffectPrograms(),
+    // called lazily from effectTargets() on the first blur/glow use. Present + the main composite
+    // program stay eager (both needed on frame 1).
 
     this.uSrc = gl.getUniformLocation(program, "uSrc");
     this.uMask = gl.getUniformLocation(program, "uMask");
@@ -971,9 +950,53 @@ export class SceneCompositor {
     this.layerNestB?.resize(width, height);
   }
 
+  /**
+   * Link the plate/blur/glow/bloom pass programs (once). Deferred out of the constructor so mounting
+   * the compositor doesn't block the main thread on the driver's shader compile — comps that never
+   * use blur/glow never pay it. Every effect-program USE is preceded by effectTargets() (it allocates
+   * the RTTs those passes draw into), so calling this there is the single guaranteed choke point.
+   */
+  private ensureEffectPrograms(): void {
+    if (this.effectProgramsBuilt) return;
+    const gl = this.gl;
+
+    this.plateProgram = linkProgram(gl, FULLSCREEN_TRI_VS, PLATE_FS);
+    this.uPlateSrc = gl.getUniformLocation(this.plateProgram, "uSrc");
+    this.uPlateMask = gl.getUniformLocation(this.plateProgram, "uMask");
+    this.uPlateHasMask = gl.getUniformLocation(this.plateProgram, "uHasMask");
+    this.uPlateFitScale = gl.getUniformLocation(this.plateProgram, "uFitScale");
+    this.uPlateContentPan = gl.getUniformLocation(this.plateProgram, "uContentPan");
+    this.uPlateCrop = gl.getUniformLocation(this.plateProgram, "uCrop");
+
+    this.blurProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLUR_FS);
+    this.uBlurTex = gl.getUniformLocation(this.blurProgram, "uTex");
+    this.uBlurStep = gl.getUniformLocation(this.blurProgram, "uStep");
+    this.uBlurRadius = gl.getUniformLocation(this.blurProgram, "uRadius");
+    this.uBlurSigma = gl.getUniformLocation(this.blurProgram, "uSigma");
+    this.uBlurPremultIn = gl.getUniformLocation(this.blurProgram, "uPremultIn");
+    this.uBlurUnpremultOut = gl.getUniformLocation(this.blurProgram, "uUnpremultOut");
+
+    this.glowProgram = linkProgram(gl, FULLSCREEN_TRI_VS, GLOW_FS);
+    this.uGlowPlate = gl.getUniformLocation(this.glowProgram, "uPlate");
+    this.uGlowTex = gl.getUniformLocation(this.glowProgram, "uGlow");
+    this.uGlowColor = gl.getUniformLocation(this.glowProgram, "uGlowColor");
+
+    this.bloomBrightProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_BRIGHT_FS);
+    this.uBloomBrightSrc = gl.getUniformLocation(this.bloomBrightProgram, "uSrc");
+    this.uBloomBrightThreshold = gl.getUniformLocation(this.bloomBrightProgram, "uThreshold");
+    this.bloomAddProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_ADD_FS);
+    this.uBloomAddPlate = gl.getUniformLocation(this.bloomAddProgram, "uPlate");
+    this.uBloomAddTex = gl.getUniformLocation(this.bloomAddProgram, "uBloom");
+    this.uBloomAddTint = gl.getUniformLocation(this.bloomAddProgram, "uTint");
+    this.uBloomAddStrength = gl.getUniformLocation(this.bloomAddProgram, "uStrength");
+
+    this.effectProgramsBuilt = true;
+  }
+
   /** Lazily allocate the comp-sized RTTs the blur/glow passes need (pooled across layers/frames). */
   private effectTargets(): { plate: RenderTarget; s1: RenderTarget; s2: RenderTarget } {
     const gl = this.gl;
+    this.ensureEffectPrograms(); // programs + targets are always needed together — one choke point
     this.plateRT ??= new RenderTarget(gl, this.width, this.height);
     this.scratch1 ??= new RenderTarget(gl, this.width, this.height);
     this.scratch2 ??= new RenderTarget(gl, this.width, this.height);
@@ -2211,11 +2234,14 @@ export class SceneCompositor {
     gl.deleteVertexArray(this.vao);
     gl.deleteVertexArray(this.presentVao);
     gl.deleteProgram(this.presentProgram);
-    gl.deleteProgram(this.plateProgram);
-    gl.deleteProgram(this.blurProgram);
-    gl.deleteProgram(this.glowProgram);
-    gl.deleteProgram(this.bloomBrightProgram);
-    gl.deleteProgram(this.bloomAddProgram);
+    // Effect programs only exist if a blur/glow pass ran (ensureEffectPrograms).
+    if (this.effectProgramsBuilt) {
+      gl.deleteProgram(this.plateProgram);
+      gl.deleteProgram(this.blurProgram);
+      gl.deleteProgram(this.glowProgram);
+      gl.deleteProgram(this.bloomBrightProgram);
+      gl.deleteProgram(this.bloomAddProgram);
+    }
     gl.deleteProgram(this.program);
     releaseContextIfDetached(gl);
   }

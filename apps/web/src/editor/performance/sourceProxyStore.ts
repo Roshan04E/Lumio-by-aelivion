@@ -41,7 +41,12 @@ export interface SourceProxyRecord {
 // demuxIndex — the decoder clamped past it, so v3 proxies of those sources carry a frozen tail
 // BAKED IN from ~the fragment boundary (user matrix: frozen at 8.5/10.4/16.8s by variant; Clipchamp
 // re-encodes fine). The demuxer now walks all fragments; rebuild everything decoded before that.
-export const SOURCE_PROXY_VERSION = 4;
+// v5 (2026-07-13): asset/element duration metadata (ceil-to-Int asset column, stock whole-seconds)
+// OVERSHOOTS the decodable sample table by up to ~1s; the build loop trusted it, and past the last
+// sample getFrame CLAMPS to the final frame (never null) — so v4 proxies bake a frozen last-second
+// repeat the null-based frozen-tail guard cannot see. Builds now clamp their frame loop to the
+// provider's demuxed `decodableEndSeconds`; rebuild everything encoded without that clamp.
+export const SOURCE_PROXY_VERSION = 5;
 
 const OPFS_DIR = "kimera-source-proxies";
 const INDEX_FILE = "index.json";

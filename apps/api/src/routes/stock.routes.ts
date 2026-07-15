@@ -61,7 +61,7 @@ stockRouter.post(
     }
     const input = validateBody(importSchema, req.body);
     const { buffer, fileName } = await downloadStockMedia(input.downloadUrl, input.externalId, input.type);
-    const fileUrl = await saveBuffer(buffer, fileName);
+    const fileUrl = await saveBuffer(buffer, fileName, req.user.id);
 
     const asset = await prisma.sourceAsset.create({
       data: {
@@ -70,7 +70,10 @@ stockRouter.post(
         fileType: input.fileType ?? (input.type === "image" ? "image/jpeg" : "video/mp4"),
         fileUrl,
         cloudUrl: fileUrl,
-        durationSeconds: Math.max(1, Math.ceil(input.durationSeconds ?? (input.type === "image" ? 5 : 12))),
+        // Exact fractional duration (Float column) — the old ceil overshot the media and froze clip tails.
+        // Pexels metadata is whole seconds anyway; the proxy build additionally clamps to the demuxed
+        // decodable end, so provider overshoot can't bake a frozen tail.
+        durationSeconds: Math.max(0.2, input.durationSeconds ?? (input.type === "image" ? 5 : 12)),
         width: input.width ?? 1080,
         height: input.height ?? 1920,
         status: "ready",

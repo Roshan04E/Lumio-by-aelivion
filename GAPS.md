@@ -59,10 +59,10 @@ cache manifest + ruler UI (P6 partial). **Mostly landed 2026-07-02:**
 
 ## 3. Export paths not built
 - **Browser export renderer** & **local desktop renderer**. [architecture.md:148-150](architecture.md#L148)
-- **Server-side matte resolution**: OPFS matte URIs are browser-local; masked layers can't export via Remotion until `matte.uri` is a fetchable http(s) URL. [architecture.md:256](architecture.md#L256)
+- ~~**Server-side matte resolution**~~ SHIPPED 2026-07-13 as a client-side pre-submit choke point (bytes live in the browser, so upload must originate there): background sync + `ensureExportReady` run `apps/web/src/export/matte-resolve.ts` (recover blob:/OPFS bytes → upload → rewrite `matte.uri`), and export fails loud (`MatteResolveError` naming the layer) instead of hanging the worker when the bytes are gone.
 
 ## 4. Person / AI-tool coherence
-- **Cross-tool artifact reuse** (extract once, reuse everywhere). [architecture.md:252](architecture.md#L252)
+- ~~**Cross-tool artifact reuse** (extract once, reuse everywhere)~~ SHIPPED 2026-07-13: `apps/web/src/tools/mask-resolver.ts` + reuse wired into the shared handlers (session index → `editableFields` → composition-scan; "Re-analyze" option to force fresh). Follow-up same day: editor one-click applies now persist masks/tracking into `editableFields` (durable reuse across sessions), and `resolveModuleInsertions` threads existing durable artifacts into auto-inserted prerequisites (`status: "ready"` + artifact ref in config).
 - Reconcile Extract Person's real path with `tool-runner.ts` adapter dispatch. [architecture.md:250](architecture.md#L250)
 - **Cloud adapters** (segmentation, SAM2 + inpainting) are contract-only stubs. [architecture.md:254](architecture.md#L254)
 - Real **SAM2 point-prompt + motion tracking** for Remove Person. [architecture.md:278](architecture.md#L278)
@@ -73,7 +73,7 @@ runner registration for modals that open but can't run (e.g. Remove Background).
 
 ## 6. Editor refactor & smaller gaps
 - **EDITOR_REFACTOR Phase 4-6**: EditorPage (~5.2k LOC) & ToolDetailPage (~2.8k LOC) not yet migrated to Zustand store / inspector registry. [EDITOR_REFACTOR_PLAN.md:136](EDITOR_REFACTOR_PLAN.md#L136)
-- **Save/load effect presets** — not built. [architecture.md:176](architecture.md#L176)
+- ~~**Save/load effect presets**~~ shipped earlier (localStorage store + Effects-tab UI); keyframes travel with presets since 2026-07-13.
 - **Transition transform limitation**: per-clip scale/position/rotation keyframes not applied during transition windows. [architecture.md:178](architecture.md#L178)
 - **Plugin system**: `webgl-fragment` is now real (fragment-shader effect engine shipped, pixel-gated at 0.000%); `css-filter`/`composite` execution still deferred pending renderer sandboxes; creator-tools authoring pending. [PLUGIN_ARCHITECTURE.md:73](PLUGIN_ARCHITECTURE.md#L73)
 - **Color parity gates never run in a real GPU env** — structurally green only; `render:compare:pixels` / `color:compare` / `scene:compare` need a GPU env pass.

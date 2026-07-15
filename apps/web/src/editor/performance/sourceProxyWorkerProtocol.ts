@@ -31,5 +31,13 @@ export type SourceProxyWorkerRequest =
   | { type: "suspend"; suspended: boolean };
 
 export type SourceProxyWorkerResponse =
-  | { type: "done"; buffer: ArrayBuffer; mime: string; encodedFrames: number; fps: number }
+  | {
+      type: "done";
+      buffer: ArrayBuffer;
+      mime: string;
+      encodedFrames: number;
+      fps: number;
+      /** True decodable end from the source's sample table (see FrameProvider.decodableEndSeconds); undefined on the <video> fallback. */
+      decodableEndSeconds?: number | undefined;
+    }
   | { type: "error"; message: string; aborted: boolean };

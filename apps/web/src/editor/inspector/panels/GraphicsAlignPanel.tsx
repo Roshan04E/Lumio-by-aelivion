@@ -1,103 +1,207 @@
 /**
- * Graphics tab — Align (Premiere EGP "Align & Transform"). Six align-to-frame buttons that write
- * the layer's transform position so its PAINTED content box (not the comp-filling element box)
- * lands flush left/center/right/top/middle/bottom. Writes go through applyTransformValueAtTime so
- * keyframed/auto-keyframe layers behave like every other transform edit.
+ * Graphics tab — Align + Distribute (Premiere EGP "Align & Transform").
+ *
+ * Align: six align buttons that write a layer's transform position so its PAINTED
+ * content box (not the comp-filling element box) lands flush to an edge/center. The
+ * "Align to" toggle picks the reference: the comp Frame, or the Selection's union
+ * bounds (enabled only with 2+ visible layers).
+ *
+ * Distribute: space 3+ layers evenly (equal centers or equal gaps, H or V).
+ *
+ * All writes go through applyTransformValueAtTime (the canonical four-way rule) so
+ * keyframed / auto-keyframe layers behave like every other transform edit, and a
+ * whole multi-layer op commits through onChangeLayers as ONE history entry.
+ * Geometry lives in ./graphicsAlignGeometry (pure, testable). See §3 BUILD SPEC.
  */
 
-import type { ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
+  AlignHorizontalDistributeCenter,
   AlignHorizontalJustifyCenter,
   AlignHorizontalJustifyEnd,
   AlignHorizontalJustifyStart,
+  AlignHorizontalSpaceBetween,
+  AlignVerticalDistributeCenter,
   AlignVerticalJustifyCenter,
   AlignVerticalJustifyEnd,
   AlignVerticalJustifyStart,
+  AlignVerticalSpaceBetween,
   LayoutPanelTop
 } from "lucide-react";
-import { containContentRect, getCompositionTransform, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineLayer } from "@kimera-by-aelivion/shared";
 import { InspectorSection } from "../InspectorSection";
 import { applyTransformValueAtTime } from "../keyframeUtils";
-
-type AlignTarget = "left" | "centerH" | "right" | "top" | "middle" | "bottom";
+import {
+  alignTargets,
+  distributeTargets,
+  paintedBoxAt,
+  unionBounds,
+  type AlignMode,
+  type AlignTarget,
+  type AlignWrite,
+  type DistributeAxis,
+  type DistributeMethod,
+  type PaintedBox
+} from "./graphicsAlignGeometry";
+import { measureTextContentFraction } from "./measureTextBox";
 
 /**
- * The layer's painted box as fractions of the comp (before the layer transform's scale).
- * Media/graphics: the `contain` content rect from the natural aspect (full frame for cover/fill or
- * unknown aspect). Shapes: their percent box. Text: the wrap width + a line-count height estimate
- * (Premiere also aligns the text BOX, not glyph ink).
+ * Sticky "Align to" mode for the session (module-level, mirrors InspectorTabs'
+ * lastTabByLayerType). Undefined until the user picks a segment, then it wins;
+ * before that we default by selection count. Reset only on reload.
  */
-function contentFractions(layer: TimelineLayer, compWidth: number, compHeight: number): { w: number; h: number } {
-  if (layer.type === "shape") {
-    return { w: (layer.widthPercent ?? 40) / 100, h: (layer.heightPercent ?? 40) / 100 };
-  }
-  if (layer.type === "text") {
-    const lines = (layer.text ?? "").split("\n").length || 1;
-    const fontSize = layer.fontSize ?? 64;
-    const lineHeight = layer.lineHeight ?? 1.2;
-    return {
-      w: (layer.textWidthPercent ?? 80) / 100,
-      h: Math.min(1, (lines * fontSize * lineHeight) / compHeight)
-    };
-  }
-  const aspect =
-    layer.graphic?.naturalWidth && layer.graphic.naturalHeight
-      ? layer.graphic.naturalWidth / layer.graphic.naturalHeight
-      : undefined;
-  if ((layer.fit ?? (layer.graphic ? "contain" : "cover")) === "contain") {
-    const rect = containContentRect(compWidth, compHeight, aspect);
-    if (rect) return { w: rect.width / compWidth, h: rect.height / compHeight };
-  }
-  return { w: 1, h: 1 };
+let rememberedAlignMode: AlignMode | undefined;
+
+/** A visual layer has geometry to align/distribute; audio does not. */
+function isVisual(layer: TimelineLayer): boolean {
+  return layer.type !== "audio";
 }
 
 export default function GraphicsAlignPanel({
   layer,
+  selectedLayers,
   composition,
   currentTime,
   autoKeyframe,
-  onChange
+  onChange,
+  onChangeLayers
 }: {
+  /** The inspected (primary) layer — the fallback participant when nothing else is multi-selected. */
   layer: TimelineLayer;
+  /** All selected layers (any type); the panel filters to visible visual layers itself. */
+  selectedLayers?: TimelineLayer[] | undefined;
   composition: { width: number; height: number };
   currentTime: number;
   autoKeyframe?: boolean | undefined;
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+  /** Batch commit: applies `updater` to every id in ONE history entry. Required for multi-layer ops. */
+  onChangeLayers?: ((layerIds: string[], updater: (layer: TimelineLayer) => TimelineLayer) => void) | undefined;
 }) {
-  const layerTime = Math.max(0, currentTime - layer.startSeconds);
+  const [, forceRender] = useState(0);
 
-  function align(target: AlignTarget) {
-    onChange((item) => {
-      const resolved = getCompositionTransform(item, { currentTimeSeconds: currentTime });
-      const scale = resolved.scale || 1;
-      const { w, h } = contentFractions(item, composition.width, composition.height);
-      // Position is the content CENTER in percent; a box of fraction `w` scaled by `scale` spans
-      // w*scale*100 percent, so flush-left puts its center at half that span.
-      const halfW = Math.min(50, w * scale * 50);
-      const halfH = Math.min(50, h * scale * 50);
-      if (target === "left" || target === "centerH" || target === "right") {
-        const x = target === "left" ? halfW : target === "right" ? 100 - halfW : 50;
-        return applyTransformValueAtTime(item, "transform.position.x", layerTime, x, { autoKeyframe });
-      }
-      const y = target === "top" ? halfH : target === "bottom" ? 100 - halfH : 50;
-      return applyTransformValueAtTime(item, "transform.position.y", layerTime, y, { autoKeyframe });
-    });
+  // Participants: selected VISIBLE visual layers (locked included — they act as fixed
+  // references). Falls back to the inspected layer so a single selection still aligns.
+  const participants = useMemo(() => {
+    const source = selectedLayers && selectedLayers.length ? selectedLayers : [layer];
+    return source.filter((item) => isVisual(item) && item.muted !== true);
+  }, [selectedLayers, layer]);
+
+  const movableCount = participants.filter((item) => item.locked !== true).length;
+  const selectionAlignable = participants.length >= 2 && movableCount >= 1;
+  const distributable = participants.length >= 3 && movableCount >= 1;
+
+  // Effective mode: forced to "frame" when a selection align isn't possible; otherwise
+  // the remembered choice, else default by count.
+  const mode: AlignMode = !selectionAlignable ? "frame" : rememberedAlignMode ?? (participants.length >= 2 ? "selection" : "frame");
+
+  function setMode(next: AlignMode) {
+    rememberedAlignMode = next;
+    forceRender((value) => value + 1);
   }
 
-  const buttons: Array<{ target: AlignTarget; title: string; icon: ReactNode }> = [
-    { target: "left", title: "Align left edge to frame", icon: <AlignHorizontalJustifyStart size={14} /> },
-    { target: "centerH", title: "Center horizontally", icon: <AlignHorizontalJustifyCenter size={14} /> },
-    { target: "right", title: "Align right edge to frame", icon: <AlignHorizontalJustifyEnd size={14} /> },
-    { target: "top", title: "Align top edge to frame", icon: <AlignVerticalJustifyStart size={14} /> },
-    { target: "middle", title: "Center vertically", icon: <AlignVerticalJustifyCenter size={14} /> },
-    { target: "bottom", title: "Align bottom edge to frame", icon: <AlignVerticalJustifyEnd size={14} /> }
+  /** Apply a precomputed per-layer position map as one batched, undoable edit. */
+  function commit(writes: Map<string, AlignWrite>) {
+    if (!writes.size) return;
+    const ids = [...writes.keys()];
+    const updater = (item: TimelineLayer): TimelineLayer => {
+      const write = writes.get(item.id);
+      if (!write) return item;
+      const layerTime = Math.max(0, currentTime - item.startSeconds);
+      let next = item;
+      if (write.x !== undefined) {
+        next = applyTransformValueAtTime(next, "transform.position.x", layerTime, write.x, { autoKeyframe });
+      }
+      if (write.y !== undefined) {
+        next = applyTransformValueAtTime(next, "transform.position.y", layerTime, write.y, { autoKeyframe });
+      }
+      return next;
+    };
+    if (onChangeLayers) {
+      onChangeLayers(ids, updater);
+    } else if (ids.length === 1 && ids[0] === layer.id) {
+      // Single-layer fallback when no batch handler is wired.
+      onChange(updater);
+    }
+  }
+
+  // Text boxes hug their glyphs / wrap in a frame, so measure the REAL rendered box at
+  // click time (renderer-faithful, one-shot). Media/shapes use the analytic contentFractions.
+  function boxFor(item: TimelineLayer): PaintedBox {
+    const override = item.type === "text" ? measureTextContentFraction(item, composition, currentTime) : undefined;
+    return paintedBoxAt(item, composition, currentTime, override);
+  }
+
+  function align(target: AlignTarget) {
+    const boxes = participants.map(boxFor);
+    const bounds = mode === "selection" ? unionBounds(boxes) : null;
+    commit(alignTargets(boxes, target, mode, bounds));
+  }
+
+  function distribute(axis: DistributeAxis, method: DistributeMethod) {
+    const boxes = participants.map(boxFor);
+    commit(distributeTargets(boxes, axis, method));
+  }
+
+  const alignButtons: Array<{ target: AlignTarget; title: string; icon: ReactNode }> = [
+    { target: "left", title: "Align left edges", icon: <AlignHorizontalJustifyStart size={14} /> },
+    { target: "centerH", title: "Align horizontal centers", icon: <AlignHorizontalJustifyCenter size={14} /> },
+    { target: "right", title: "Align right edges", icon: <AlignHorizontalJustifyEnd size={14} /> },
+    { target: "top", title: "Align top edges", icon: <AlignVerticalJustifyStart size={14} /> },
+    { target: "middle", title: "Align vertical centers", icon: <AlignVerticalJustifyCenter size={14} /> },
+    { target: "bottom", title: "Align bottom edges", icon: <AlignVerticalJustifyEnd size={14} /> }
+  ];
+
+  const distributeDisabledTitle = "Select 3 or more layers to distribute";
+  const distributeButtons: Array<{ axis: DistributeAxis; method: DistributeMethod; title: string; icon: ReactNode }> = [
+    { axis: "h", method: "centers", title: "Distribute horizontal centers", icon: <AlignHorizontalDistributeCenter size={14} /> },
+    { axis: "h", method: "gaps", title: "Distribute horizontal gaps (even spacing)", icon: <AlignHorizontalSpaceBetween size={14} /> },
+    { axis: "v", method: "centers", title: "Distribute vertical centers", icon: <AlignVerticalDistributeCenter size={14} /> },
+    { axis: "v", method: "gaps", title: "Distribute vertical gaps (even spacing)", icon: <AlignVerticalSpaceBetween size={14} /> }
   ];
 
   return (
     <InspectorSection title="Align" icon={<LayoutPanelTop size={13} />}>
+      <div className="graphics-align-to" role="radiogroup" aria-label="Align to">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mode === "frame"}
+          className={mode === "frame" ? "is-active" : ""}
+          onClick={() => setMode("frame")}
+        >
+          Frame
+        </button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={mode === "selection"}
+          className={mode === "selection" ? "is-active" : ""}
+          disabled={!selectionAlignable}
+          title={selectionAlignable ? "Align to the selection's bounds" : "Select 2 or more layers to align to selection"}
+          onClick={() => setMode("selection")}
+        >
+          Selection
+        </button>
+      </div>
+
       <div className="graphics-align-row">
-        {buttons.map(({ target, title, icon }) => (
+        {alignButtons.map(({ target, title, icon }) => (
           <button key={target} type="button" title={title} aria-label={title} onClick={() => align(target)}>
+            {icon}
+          </button>
+        ))}
+      </div>
+
+      <div className="graphics-align-row graphics-distribute-row">
+        {distributeButtons.map(({ axis, method, title, icon }) => (
+          <button
+            key={`${axis}-${method}`}
+            type="button"
+            title={distributable ? title : distributeDisabledTitle}
+            aria-label={title}
+            disabled={!distributable}
+            onClick={() => distribute(axis, method)}
+          >
             {icon}
           </button>
         ))}

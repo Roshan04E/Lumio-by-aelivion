@@ -1,5 +1,7 @@
 import { evaluateAnimatedValue } from "./animation";
 import { COLOR_EFFECT_TYPES } from "./color/types";
+import { frameClipMask } from "./frames";
+import type { LayerFrame } from "./frames";
 import type { Mask, MaskMode, MaskPoint, MaskShape, MaskPathKeyframe, TimelineComposition, TimelineEffect, TimelineKeyframeV2, TimelineLayer } from "./types";
 
 /** The mask scalar properties that can be keyframed via the layer `animations` array (scope "mask"). */
@@ -248,8 +250,50 @@ export function maskShapeToPathD(mask: Mask): string {
 
   // rectangle / polygon / bezier-without-tangents → closed polyline through the actual points
   // (independent corner editing makes a "rectangle" a free quad, like pro editors).
+  if (mask.shape === "rectangle" && (mask.cornerRadius ?? 0) > 0) {
+    return roundedPolygonPathD(pts, mask.cornerRadius!);
+  }
   let d = `M ${round(pts[0]!.x)} ${round(pts[0]!.y)}`;
   for (let i = 1; i < pts.length; i += 1) d += ` L ${round(pts[i]!.x)} ${round(pts[i]!.y)}`;
+  return `${d} Z`;
+}
+
+/** Point on the edge FROM `from` TOWARD `to`, at `distance` px (clamped to the edge's midpoint). */
+function edgePoint(from: MaskPoint, to: MaskPoint, distancePx: number): { x: number; y: number } {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const t = Math.min(distancePx, len / 2) / len;
+  return { x: from.x + dx * t, y: from.y + dy * t };
+}
+
+/**
+ * Closed polygon path with each corner rounded by a quadratic Bezier cut at `radiusPx` — works on any
+ * point count (used today for the rectangle mask's 4-point quad, which may be a free, non-axis-aligned
+ * quad per the independent-corner-editing note above, so this can't rely on a plain SVG `rx`).
+ */
+function roundedPolygonPathD(pts: MaskPoint[], radiusPx: number): string {
+  const n = pts.length;
+  if (n < 3) {
+    let d = `M ${round(pts[0]!.x)} ${round(pts[0]!.y)}`;
+    for (let i = 1; i < n; i += 1) d += ` L ${round(pts[i]!.x)} ${round(pts[i]!.y)}`;
+    return `${d} Z`;
+  }
+  const inward: { x: number; y: number }[] = []; // point on the incoming edge, `radiusPx` before each corner
+  const outward: { x: number; y: number }[] = []; // point on the outgoing edge, `radiusPx` after each corner
+  for (let i = 0; i < n; i += 1) {
+    const prev = pts[(i - 1 + n) % n]!;
+    const cur = pts[i]!;
+    const next = pts[(i + 1) % n]!;
+    inward.push(edgePoint(cur, prev, radiusPx));
+    outward.push(edgePoint(cur, next, radiusPx));
+  }
+  let d = `M ${round(inward[0]!.x)} ${round(inward[0]!.y)}`;
+  for (let i = 0; i < n; i += 1) {
+    d += ` Q ${round(pts[i]!.x)} ${round(pts[i]!.y)} ${round(outward[i]!.x)} ${round(outward[i]!.y)}`;
+    const nextIn = inward[(i + 1) % n]!;
+    d += ` L ${round(nextIn.x)} ${round(nextIn.y)}`;
+  }
   return `${d} Z`;
 }
 
@@ -286,7 +330,10 @@ export function buildMaskDefsSvg(
     const masks = (effect as { masks?: Mask[] | undefined } | null)?.masks;
     return Array.isArray(masks) ? masks : [];
   });
-  const renderable = [...(layer.masks ?? []), ...effectMasks].filter(isRenderableMask);
+  // Frames (see FRAMES.md): a `layer.frame` becomes the BASE clip mask, inscribed in the comp box, so
+  // its media clips to the frame outline through this same pixel-gated mask pipeline (no new clip code).
+  const frameMask = frameClipMask(layer as { id: string; frame?: LayerFrame | undefined }, { width: options.width, height: options.height });
+  const renderable = [...(frameMask ? [frameMask] : []), ...(layer.masks ?? []), ...effectMasks].filter(isRenderableMask);
   if (!renderable.length) return "";
   const { width, height } = options;
 
@@ -402,9 +449,13 @@ export function getMaskCss(layerId: string, masks: Mask[] | undefined): Record<s
   };
 }
 
-/** Clip-level mask CSS for a whole layer (applied to the media element). Wraps {@link getMaskCss}. */
-export function getCompositionMaskCss(layer: { id: string; masks?: Mask[] | undefined }): Record<string, string> {
-  return getMaskCss(layer.id, layer.masks);
+/** Clip-level mask CSS for a whole layer (applied to the media element). Wraps {@link getMaskCss}.
+ *  A `layer.frame` contributes its BASE clip-mask REF here (the geometry def comes from buildMaskDefsSvg);
+ *  the deterministic {@link frameMaskId} keeps ref + def in sync, so no comp dims are needed for the ref. */
+export function getCompositionMaskCss(layer: { id: string; masks?: Mask[] | undefined; frame?: LayerFrame | undefined }): Record<string, string> {
+  const frameMask = frameClipMask(layer);
+  const masks = frameMask ? [frameMask, ...(layer.masks ?? [])] : layer.masks;
+  return getMaskCss(layer.id, masks);
 }
 
 /**
@@ -445,6 +496,22 @@ function isRegionEffectType(type: string): boolean {
 
 function effectHasRenderableMask(effect: TimelineEffect): boolean {
   return Array.isArray(effect.masks) && effect.masks.some(isRenderableMask);
+}
+
+/**
+ * Stamps an adjustment layer's own clip masks onto its region-eligible (color/blur) effects, so that when
+ * those effects are merged into the layers below (`applyActiveAdjustmentEffects` / `mergedLayer`), the
+ * existing effect-region expansion (`expandLayerEffectRegions` et al) clips them to the adjustment layer's
+ * mask shape instead of grading the whole frame. Effect types that can't be region-masked (glow, stylize,
+ * …) ride along unchanged — an adjustment layer's mask simply doesn't constrain those, same limitation as
+ * any other layer's effect masks.
+ */
+export function effectsWithLayerRegionMask(layer: { masks?: Mask[] | undefined; effects: TimelineEffect[] }): TimelineEffect[] {
+  const masks = (layer.masks ?? []).filter(isRenderableMask);
+  if (!masks.length) return layer.effects;
+  return layer.effects.map((effect) =>
+    isRegionEffectType(effect.type) ? { ...effect, masks: [...(effect.masks ?? []), ...masks] } : effect
+  );
 }
 
 /**

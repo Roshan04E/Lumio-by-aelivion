@@ -11,9 +11,14 @@
  *                       last 10 with the pressed element. Distinguishes "main thread blocked"
  *                       (large longtask at the same moment) from "React commit slow".
  *   __rfLoopLag       — 500ms heartbeat drift: how late timers fire (background pressure).
+ *   __rfStallStacks   — sampled JS stacks captured DURING ≥1s freezes ("Page Unresponsive"-class),
+ *                       via Chrome's self-profiling API (needs the `Document-Policy: js-profiling`
+ *                       response header — set in vite dev config). Unlike longtask attribution or
+ *                       markHotSpot probes, this names UN-instrumented blockers with file:line.
  *
  * Reading a report: click latency high + longtask at same t → the longtask's attribution names
  * the script; click latency high + NO longtask → layout/paint cost (huge style recalc), rare.
+ * A "Page Unresponsive" dialog → check __rfStallStacks (also console.warn'd unconditionally).
  */
 
 import { useLayoutEffect } from "react";
@@ -156,13 +161,99 @@ export function installPerfDiagnostics(): void {
     { capture: true, passive: true }
   );
 
-  // 3. Event-loop heartbeat: how late a 500ms timer fires.
+  // 4. Stall stack sampler — the layer that NAMES an un-instrumented freeze. A rolling 10ms
+  //    sampling Profiler runs continuously; when the heartbeat below detects a ≥1s stall, the
+  //    profile is stopped and the hottest stacks inside the stall window are logged with
+  //    function (file:line), then the profiler re-arms. Chrome-only; silently absent elsewhere.
+  interface ProfilerTrace {
+    resources: string[];
+    frames: { name: string; resourceId?: number; line?: number; column?: number }[];
+    stacks: { frameId: number; parentId?: number }[];
+    samples: { timestamp: number; stackId?: number }[];
+  }
+  interface ProfilerLike {
+    stop(): Promise<ProfilerTrace>;
+    addEventListener?(type: "samplebufferfull", listener: () => void): void;
+  }
+  type ProfilerCtor = new (options: { sampleInterval: number; maxBufferSize: number }) => ProfilerLike;
+  const ProfilerClass = (window as unknown as { Profiler?: ProfilerCtor }).Profiler;
+  const stallStacks: { at: number; blockedMs: number; top: { samples: number; where: string }[] }[] = [];
+  w.__rfStallStacks = stallStacks;
+  let profiler: ProfilerLike | null = null;
+  const armProfiler = () => {
+    if (!ProfilerClass) return;
+    try {
+      // 10ms samples; 10k buffer ≈ 100s. Re-armed on every stall report AND when the buffer
+      // fills (otherwise a quiet stretch would exhaust it and the next freeze would go unsampled).
+      profiler = new ProfilerClass({ sampleInterval: 10, maxBufferSize: 10_000 });
+      profiler.addEventListener?.("samplebufferfull", () => {
+        void profiler?.stop().catch(() => undefined);
+        armProfiler();
+      });
+    } catch {
+      profiler = null;
+    }
+  };
+  armProfiler();
+  const reportStall = async (stallStart: number, stallEnd: number, blockedMs: number) => {
+    const active = profiler;
+    profiler = null;
+    if (!active) return;
+    try {
+      const trace = await active.stop();
+      const counts = new Map<string, number>();
+      for (const sample of trace.samples) {
+        if (sample.timestamp < stallStart || sample.timestamp > stallEnd || sample.stackId === undefined) continue;
+        // Leaf frame + a few callers, so the line reads like a mini stack.
+        const parts: string[] = [];
+        let stackId: number | undefined = sample.stackId;
+        for (let depth = 0; depth < 4 && stackId !== undefined; depth += 1) {
+          const stack: { frameId: number; parentId?: number } | undefined = trace.stacks[stackId];
+          if (!stack) break;
+          const frame = trace.frames[stack.frameId];
+          if (frame?.name) {
+            const resource = frame.resourceId !== undefined ? trace.resources[frame.resourceId] : undefined;
+            const file = resource ? resource.split("/").slice(-2).join("/") : "";
+            parts.push(`${frame.name}${file ? ` (${file}:${frame.line ?? "?"})` : ""}`);
+          }
+          stackId = stack.parentId;
+        }
+        const key = parts.join(" < ") || "(anonymous/native)";
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      const top = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([where, samples]) => ({ samples, where }));
+      stallStacks.push({ at: Math.round(stallStart), blockedMs: Math.round(blockedMs), top });
+      if (stallStacks.length > 10) stallStacks.shift();
+      // Unconditional (not behind kimera.perfLog): a Page-Unresponsive-class stall IS the report.
+      if (top.length > 0) {
+        console.warn(`[perf] STALL ${Math.round(blockedMs)}ms — sampled culprits:`);
+        for (const entry of top) console.warn(`  ${String(entry.samples).padStart(4)}×  ${entry.where}`);
+      } else {
+        console.warn(`[perf] STALL ${Math.round(blockedMs)}ms — no JS samples in window (GC / layout / synchronous browser API).`);
+      }
+    } catch {
+      /* profiler already stopped (buffer-full race) */
+    } finally {
+      armProfiler();
+    }
+  };
+
+  // 3. Event-loop heartbeat: how late a 500ms timer fires. A ≥1s lag is a freeze — trigger the
+  //    stall stack report for the blocked window.
   let expected = performance.now() + 500;
   window.setInterval(() => {
-    const lag = Math.max(0, performance.now() - expected);
-    expected = performance.now() + 500;
+    const now = performance.now();
+    const lag = Math.max(0, now - expected);
+    expected = now + 500;
     stats.loopLag.maxMs = Math.max(stats.loopLag.maxMs, Math.round(lag));
     stats.loopLag.avgMs = Math.round((stats.loopLag.avgMs * stats.loopLag.samples + lag) / (stats.loopLag.samples + 1));
     stats.loopLag.samples += 1;
+    if (lag >= 1000) {
+      console.warn(`[perf] MAIN THREAD BLOCKED ~${(lag / 1000).toFixed(1)}s`);
+      void reportStall(now - lag - 500, now, lag);
+    }
   }, 500);
 }

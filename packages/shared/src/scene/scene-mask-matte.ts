@@ -10,6 +10,7 @@
  */
 
 import { isRenderableMask, maskShapeToPathD, resolveMaskAtTime } from "../clip-masks";
+import { frameClipMask } from "../frames";
 import type { Mask, MaskMode, TimelineLayer } from "../types";
 import { makeCanvas2D, type AnyCanvas2D, type Ctx2D } from "./canvas-2d";
 
@@ -189,7 +190,10 @@ export class SceneMaskMatteCache {
    * renderer; keyed below, so an animated transform rebuilds per change.
    */
   get(layer: TimelineLayer, tLocal: number, layerTransform?: MatteLayerTransform): AnyCanvas2D | null {
-    const masks = (layer.masks ?? []).filter(isRenderableMask);
+    // Frames (see FRAMES.md): a `layer.frame` is the BASE clip mask (index 0 = source-over below),
+    // inscribed in the comp box, so framed media clips through this same matte the DOM/export share.
+    const frameMask = frameClipMask(layer, { width: this.w, height: this.h });
+    const masks = [...(frameMask ? [frameMask] : []), ...(layer.masks ?? [])].filter(isRenderableMask);
     if (!masks.length) {
       this.keys.delete(layer.id);
       this.versions.delete(layer.id);

@@ -224,3 +224,37 @@ transition-compositor.ts header claiming export/Remotion still use that class.
 **Verify:** typecheck clean; scene path untouched (grep: no scene-compositor/build-scene-draws
 changes). Manual: `?singleCtxPreview=0`, right clip scaled 50% + offset + rotated, crossDissolve →
 blend stays in place through the window, no snap at either boundary.
+
+## v13 — Frozen LAST ~1s on every clip: ceil-to-Int asset durations overshot the media (2026-07-13)
+**Problem:** user report: "the last one sec is frozen in all" clips — every clip's tail held its
+final frame for up to ~1s. "We added a guard but it's not working."
+**Root cause (two stacked, neither seen by the existing guards):**
+1. `SourceAsset.durationSeconds` was a Postgres **Int**; the API CEILED every upload
+   (`assets.routes.ts`, also `stock.routes.ts` and the sync promoter). The web `createAsset` DID
+   guard this — it restored the real fractional duration on its response (`withRealDuration`) — but
+   only for that session: nothing persisted the real value, so every reload/`listAssets` returned
+   the ceiled Int and every clip added afterwards was authored up to ~1s past the decodable media.
+2. Past the last sample, `getFrame` CLAMPS to the final frame — **never null** — so (a) the live
+   path froze the tail, and (b) proxy builds trusted the metadata duration and BAKED the repeats in;
+   the null-based frozen-tail guard (v2) and the fMP4 index fix (v4) both can't see clamped frames
+   (v4's own text called this trap out).
+**Fix (three layers):**
+- Root: `SourceAsset.durationSeconds` Int → **Float** (migration `source_asset_duration_float`);
+  de-ceiled all four write sites (assets route, stock route, web `createAsset`, sync
+  `serverCreateAsset`). New uploads persist the exact probed decodable end.
+- Defense: `FrameProvider.decodableEndSeconds` (last sample timestamp+duration from the demux
+  index); BOTH proxy build loops (worker + main-thread) clamp their frame loop to it — a frozen
+  tail can never bake into a proxy again regardless of metadata. `SOURCE_PROXY_VERSION` 4 → 5 to
+  rebuild v4 proxies encoded without the clamp.
+- Heal: legacy Int rows can't be un-ceiled server-side (real value unknown there), so the proxy
+  transcode — which demuxes the truth anyway — reports it and `healAssetDurationSeconds` PATCHes
+  the asset (downward-only, server-enforced) + the local record. Assets heal progressively as
+  proxies build.
+**Residual (by design, not silent):** clips ALREADY placed with a ceiled length keep their frozen
+tail until the user re-trims them or deletes+re-adds after the asset heals — auto-shortening
+placed clips would silently change timeline layout.
+**Verify:** typecheck 5/5, editor:test all pass, migration applied. Runtime float writes need the
+Prisma client regenerated with the dev server STOPPED (`prisma generate` EPERM-locks on the running
+API's engine DLL) — flagged to the user.
+**Why v2/v4 weren't enough:** both guards keyed on the decoder (null runs, missing fragments); this
+overshoot produces perfectly valid clamped frames. The new clamp keys on the sample table itself.

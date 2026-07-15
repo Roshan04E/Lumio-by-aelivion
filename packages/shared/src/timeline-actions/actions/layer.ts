@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { rippleDeleteLayer } from "../../timeline-ops";
+import { commitGroupMove, DEFAULT_EDITING_POLICY, resolveGroupMove, rippleDeleteLayer } from "../../timeline-ops";
 import { actionResult, runMutation, runReplace } from "../patches";
 import { assertLayerExists, assertTrackExists, findLayer } from "../validation";
 import type { TimelineActionDefinition } from "../types";
@@ -74,6 +74,55 @@ const moveLayer: TimelineActionDefinition<z.infer<typeof moveLayerSchema>> = {
       }
     });
     return actionResult(ctx.composition, mutation, `Move clip`);
+  }
+};
+
+const moveLayersSchema = z
+  .object({
+    layerIds: z.array(z.string()).min(1),
+    /** The clip whose delta anchors the group; defaults to the first id. */
+    primaryLayerId: z.string().optional(),
+    deltaSeconds: z.number().optional(),
+    /** Whole-row vertical shift within each clip's audio/video track family. */
+    trackDelta: z.number().int().optional(),
+    /** Destination-collision rule (editing policy). Defaults to `allow` (today's behavior). */
+    overlap: z.enum(["allow", "overwrite", "reject"]).optional(),
+    /** Magnetic mode: compact the touched tracks gapless + overlap-free after the move. */
+    magnetic: z.boolean().optional()
+  })
+  .refine((value) => value.deltaSeconds !== undefined || value.trackDelta !== undefined, {
+    message: "Provide deltaSeconds or trackDelta"
+  });
+
+// Group move through the SAME resolver the drag UI uses — one rigid-body answer for time + track, so
+// AI / scripting move a multi-selection exactly as a hand drag would. `moveLayer` above stays as the
+// single-clip shorthand; this is the batch/rigid-group form.
+const moveLayers: TimelineActionDefinition<z.infer<typeof moveLayersSchema>> = {
+  id: "moveLayers",
+  name: "Move clips",
+  description: "Move a group of clips together, keeping their relative timing and track spacing.",
+  category: "layer",
+  inputSchema: moveLayersSchema,
+  validationRules: (params, ctx) => params.layerIds.flatMap((layerId) => assertLayerExists(ctx, layerId)),
+  canUndo: true,
+  execute: (params, ctx) => {
+    const policy = {
+      ...DEFAULT_EDITING_POLICY,
+      overlap: params.overlap ?? DEFAULT_EDITING_POLICY.overlap,
+      magnetic: params.magnetic ?? DEFAULT_EDITING_POLICY.magnetic
+    };
+    const resolution = resolveGroupMove({
+      composition: ctx.composition,
+      movedLayerIds: params.layerIds,
+      primaryLayerId: params.primaryLayerId ?? params.layerIds[0]!,
+      deltaSeconds: params.deltaSeconds ?? 0,
+      trackDelta: params.trackDelta ?? 0,
+      policy
+    });
+    const movedIds = resolution.placements.map((placement) => placement.layerId);
+    const committed = commitGroupMove(ctx.composition, resolution.placements, movedIds, policy);
+    const mutation = runReplace(ctx.composition, () => committed.composition);
+    return actionResult(ctx.composition, mutation, committed.accepted ? `Move ${params.layerIds.length} clips` : `Move refused — would overlap`);
   }
 };
 
@@ -177,4 +226,4 @@ const ungroupLayers: TimelineActionDefinition<z.infer<typeof ungroupLayersSchema
   }
 };
 
-export const layerActions = [deleteLayer, moveLayer, replaceAsset, groupLayers, ungroupLayers];
+export const layerActions = [deleteLayer, moveLayer, moveLayers, replaceAsset, groupLayers, ungroupLayers];

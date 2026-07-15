@@ -18,7 +18,7 @@ import {
   applyContentValueAtTime,
   clamp,
   clearContentKeyframes,
-  findContentKeyframeTime,
+  findContentKeyframe,
   getActiveContentKeyframe,
   getContentKeyframes,
   toggleContentKeyframe,
@@ -45,17 +45,17 @@ export default function ContentPanel({ layer, onChange, currentTime = 0, onSeek,
     return {
       active,
       hasAny: getContentKeyframes(layer, property).length > 0,
-      hasNext: findContentKeyframeTime(layer, property, layerTime, 1) !== undefined,
-      hasPrevious: findContentKeyframeTime(layer, property, layerTime, -1) !== undefined,
+      hasNext: Boolean(findContentKeyframe(layer, property, layerTime, 1)),
+      hasPrevious: Boolean(findContentKeyframe(layer, property, layerTime, -1)),
       onToggle: () => onChange((item) => toggleContentKeyframe(item, property, layerTime, currentRaw)),
       onClearAll: () => onChange((item) => clearContentKeyframes(item, property)),
       onNext: () => {
-        const t = findContentKeyframeTime(layer, property, layerTime, 1);
-        if (t !== undefined) onSeek?.(layer.startSeconds + t);
+        const next = findContentKeyframe(layer, property, layerTime, 1);
+        if (next) onSeek?.(layer.startSeconds + next.timeSeconds);
       },
       onPrevious: () => {
-        const t = findContentKeyframeTime(layer, property, layerTime, -1);
-        if (t !== undefined) onSeek?.(layer.startSeconds + t);
+        const previous = findContentKeyframe(layer, property, layerTime, -1);
+        if (previous) onSeek?.(layer.startSeconds + previous.timeSeconds);
       }
     };
   }

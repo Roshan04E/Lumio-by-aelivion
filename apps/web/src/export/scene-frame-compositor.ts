@@ -441,7 +441,14 @@ export class SceneFrameCompositor {
     if (!providerKey) return null;
     const source = this.getSource(providerKey);
     // Speed-aware (rate stretch + ramps): the shared mapper — exact integral for ramped clips.
-    const sourceTime = layer.type === "video" ? layerSourceTimeSeconds(layer, t - layer.startSeconds) : 0;
+    // Vector graphics: CLIP-LOCAL time — an animated (SMIL) graphic's provider advances its baked frame
+    // sequence with it (static graphics/stills ignore the argument, so this is a no-op for them).
+    const sourceTime =
+      layer.type === "video"
+        ? layerSourceTimeSeconds(layer, t - layer.startSeconds)
+        : layer.graphic
+          ? t - layer.startSeconds
+          : 0;
     if (!source) {
       if (this.stageProbe && this.shouldProbe(t)) {
         this.stageProbe.onProbe({

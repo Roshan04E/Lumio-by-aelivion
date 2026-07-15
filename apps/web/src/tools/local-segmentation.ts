@@ -31,6 +31,8 @@ type ProgressCallback = (message: string) => void;
 
 export interface SegmentVideoOptions {
   videoUrl: string;
+  /** Source asset the video came from — stamped onto the produced artifacts so consumers can find them by asset later. */
+  sourceAssetId?: string | undefined;
   durationSeconds: number;
   width: number;
   height: number;
@@ -264,6 +266,7 @@ function buildSegmentResult(
 ): SegmentVideoResult {
   const maskSequence: MaskSequenceArtifactData = {
     id: `mask_${source}_${Date.now()}`,
+    sourceAssetId: options.sourceAssetId,
     width: options.width,
     height: options.height,
     fps,
@@ -284,6 +287,7 @@ function buildSegmentResult(
     durationSeconds: options.durationSeconds,
     smoothing: 0.4,
     source,
+    sourceAssetId: options.sourceAssetId,
     id: `track_${source}_${Date.now()}`,
     points: bounds.map((item) => ({
       timeSeconds: item.timeSeconds,

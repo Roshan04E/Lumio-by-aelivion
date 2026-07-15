@@ -291,8 +291,8 @@ export function SourceMonitor({
       </div>
       <div className="source-waveform" aria-hidden="true">
         {peaks ? (
-          <svg viewBox={`0 0 ${peaks.length} 100`} preserveAspectRatio="none">
-            {peaks.map((value, index) => {
+          <svg viewBox={`0 0 ${peaks.max.length} 100`} preserveAspectRatio="none">
+            {peaks.max.map((value, index) => {
               const barW = 0.62;
               const barH = Math.max(barW, Math.min(1, value) * 90);
               return <rect key={index} x={index + (1 - barW) / 2} y={(100 - barH) / 2} width={barW} height={barH} rx={barW / 2} />;

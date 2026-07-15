@@ -731,7 +731,8 @@ export function getCompositionMediaStyle(layer: CompositionLayerStyleInput | Tim
     transform: compositionTransformCss(transform),
     // Vector masks (Phase 1): applied to the full-bleed (comp-sized) media element so layer-local
     // comp-px mask coords align, and the mask follows the clip's transform. No-op when mask-free.
-    ...getCompositionMaskCss(layer as { id: string; masks?: Mask[] | undefined })
+    // `frame` is forwarded so a Frame's clip mask ref is emitted too (see getCompositionMaskCss).
+    ...getCompositionMaskCss(layer as { id: string; masks?: Mask[] | undefined; frame?: TimelineLayer["frame"] })
   };
 }
 

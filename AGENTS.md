@@ -14,6 +14,235 @@ working WHERE right now.
 
 ## Changelog
 
+### 2026-07-14 — Claude (Sonnet): Editor bug/feature batch — 16 items (masks, paste-attributes chooser, multiselect, 5 new shader effects, nesting UX, canvas frames)
+
+Worked a user-supplied punch list end to end (plan committed to `functional-snacking-eich.md`), all typechecked
++ `editor:test`-covered + Playwright-verified live against the dev server. Summary by area:
+
+**Inspector/input fixes**: Position X/Y range widened -50..150 → -200..300 (`TransformPanel.tsx`) and matched in
+the canvas drag/resize/rotate clamps (`VideoPreview.tsx`) — the mismatch was also the root cause of a canvas
+drag jump bug. `ScrubNumberInput` now holds a local draft while focused and commits only on blur/Enter (fixes
+typed values getting stomped mid-keystroke by the controlled re-render). Fade-handle and keyframe-diamond timeline
+drags now snap to `frameStepSeconds` instead of the coarse clip-edge `snapStepSeconds` (fixed the reported
+"jumping" handles). `startPreviewDrag`/`startPreviewResize`/`startPreviewRotate` now read the KEYFRAME-EVALUATED
+transform at drag-start instead of the raw base value (a keyframed clip's canvas drag/resize/rotate used to jump
+the instant the gesture began).
+
+**New capabilities**: Masks panel + region-mask folding now cover adjustment layers (`effectsWithLayerRegionMask`
+in `clip-masks.ts`, used by both `VideoPreview.tsx` and Remotion `SceneStage.tsx`). "Fit canvas"/"Fill canvas"
+quick actions on video/image (`TransformPanel.tsx`). Paste-attributes (⌃⌥V) now opens a group chooser modal
+(`PasteAttributesModal.tsx`) — `timeline-ops.ts`'s `applyAttributesToLayer`/`pasteLayerAttributes`/
+`applyLayerAttributes` gained an `AttributeGroup` filter (transform/effects/fit/masks/content/speed), fully
+backward compatible (default = all groups). Multiselect property editing: `updateTimelineLayers` (shared) +
+`updateLayers` (EditorPage) broadcast one inspector edit to every selected clip; `handleAddTimelineEffect` also
+broadcasts. Effects catalog now sub-groups Video/Text folders by registry category (Blur/Adjust/Stylize/…) when
+a folder mixes more than one. Rectangle masks gained `cornerRadius` (`roundedPolygonPathD` in `clip-masks.ts`,
+shared SVG builder — both renderers get it for free). Non-source-layer (text/shape/image) trims now SQUEEZE
+(proportionally rescale) keyframes onto the new duration instead of cutting them off (`squeezeLayerKeyframesTo`
+in `timeline-ops.ts`; video/audio still cut, unchanged).
+
+**5 new GPU shader effects** (Radial Blur, Directional Blur, Sharpen, Pixelate, Chromatic Aberration): real
+single-pass fragment shaders registered as first-class `TimelineEffectType`s
+(`color/fragment-effects/builtins.ts`), riding the EXISTING `SceneFragmentPass`/"Custom Shader" harness
+(`buildFragmentPasses` in `scene/build-scene-draws.ts` now maps these types straight to their `builtin.<type>`
+definition, no manifest indirection) — so preview (scene compositor) and Remotion get them for free, pixel-
+identical by construction. Playwright-verified live: Radial Blur (zoom-streak ghosting), Chromatic Aberration
+(RGB fringing), and Pixelate (mosaic block distortion) are unmistakable on a text layer at default settings;
+Sharpen/Directional Blur added without errors (same shader harness, structurally verified). DOM (non-scene)
+fallback does not render these — documented limitation, matches the existing Custom Shader effect's scope.
+
+**Nesting (compound clips) — Phase B (editor UX)**: the render pipeline (`nesting.ts`'s
+`expandNestedCompositions`, `buildSceneDraws` group-composite, Remotion `SceneStage` group support) was ALREADY
+fully built (NESTING.md Phase A/C, prproj-import support) — only the user-facing actions were missing. Added
+`nestLayersIntoComposition`/`unnestClip` (`nesting.ts`): Ctrl/Cmd+G nests the 2+ selection into a new
+`ProjectGraph.compositions` entry + one compound clip; Shift+Ctrl+G un-nests (v1: untrimmed/unsped clips only).
+Double-click a compound clip (or the timeline context menu) opens it via a "swap trick" — `graph.composition`
+becomes the nested comp, the previous one stashes into `graph.compositions` under its own id, a breadcrumb bar
+(`.timeline-nest-breadcrumb`) restores it — every existing composition read/write site in EditorPage keeps
+working unmodified since they all target the same `graph.composition` slot. `getLayerMaxDuration` now clamps a
+compound clip's trim to its nested sequence's length (`getNestedSourceDurationSeconds`), and trim now runs
+through the source-aware `sourceInSeconds` branch (a compound clip has real "source" — the nest — unlike text/
+shape). Playwright-verified live end to end: nest → "Nested 2 clips into…" toast → timeline collapses to one
+clip → content renders correctly through the group composite → double-click → breadcrumb "My Kimera edit /
+Nested Sequence" → back restores root.
+
+**Canvas Frames v1**: deliberately NOT a new render-pipeline concept — a Frame is a compound clip
+(`TimelineLayer.isFrame: true`) pre-seeded with a full-bleed background "shape" child, so resize/reposition
+reuse the Transform/Fit panel and rounded clipping reuses the Masks panel, both already shipped. `createFrame`
+in `nesting.ts` (empty frame via Ctrl/Cmd+Alt+F, or group 2+ selected layers via the timeline context menu
+"Group into frame"). Playwright-verified: "Frame created" toast, new clip, background renders.
+
+Gates: `pnpm -r typecheck` (web/shared/worker) clean, `editor:test` all green (added ~35 new checks: group-
+filtered paste, non-source squeeze-trim, nest/un-nest/frame structural transforms), live Playwright pass against
+the dev server (screenshots in session scratchpad, not committed).
+
+### 2026-07-14 — Claude (Opus): "Page Unresponsive" mount stall — lazy effect-shader compile in SceneCompositor
+
+Recurring ~1s main-thread freeze, identified by a NEW stall stack-sampler (perfDiagnostics.ts +
+`Document-Policy: js-profiling` dev header in vite.config): sampled stacks during the freeze pointed
+at `SceneCompositor` ctor → `linkProgram`/`compileShader`. The constructor synchronously linked all
+7 shader programs inside a React mount effect; the driver's shader compile blocks the thread.
+
+- **Fix (minimal, behavior-preserving)**: defer only the 5 EFFECT programs (plate/blur/glow/
+  bloomBright/bloomAdd) — used only by blur/glow layers, which most comps lack. Present + the main
+  composite program stay eager (needed on frame 1). Linked once via `ensureEffectPrograms()`, called
+  from `effectTargets()` — the single guaranteed choke point (every effect-program use is preceded by
+  effectTargets(), which allocates the RTTs those passes draw into). Fields kept byte-identical at
+  the ~36 hot-path call sites (only `readonly`→`!`); dispose() guards the 5 deletes by a built-flag.
+- **NOT touched**: shaders, uniforms, draw order, timeline/editor code — identical render output;
+  only WHEN the effect programs link (lazy, once) changes. Web/worker/shared typecheck green.
+- If a mount stall persists, the remaining eager main-composite compile is the suspect → escalate to
+  KHR_parallel_shader_compile (bigger change, deferred). Re-check via the stall sampler (__rfStallStacks).
+
+### 2026-07-14 — Claude (Fable): Asset cloud model rebuilt — "one asset, two locations" (fixes dup tiles + wrong-clip menu)
+
+Audit of the 2026-07-13 cloud round found the upload flow fought the existing sync.ts design:
+it created a SECOND asset (server id), remapped the timeline onto it (playback silently switched
+from OPFS to network — local-first violation), then hid the local copy with heuristics that kept
+both tiles whenever the local was still referenced → the reported duplicate. Rebuilt:
+
+- **One asset, two locations**: "Upload to cloud" now only RECORDS the pairing
+  (sync.ts `markLocalAssetPromoted` → localId→serverId + `cloudUrl` stamped on the local record via
+  `updateLocalAssetRecord`). NO timeline remap, NO second tile, NO local deletion; playback stays
+  on-device. Export needs zero changes — `ensureExportReady` already remaps ids from this registry
+  and skips re-upload when `serverAssetId` is recorded.
+- **listAssets merge is deterministic**: paired server assets are hidden behind their local tile
+  (`getAssetPromotionMap`); a one-time ADOPTION pass pairs legacy pre-registry uploads by exact
+  name+nonzero-size. Removed the referenced/twin hide heuristics (could orphan timeline media).
+- **Remove from cloud**, synced-local case: delete server row + R2 object + clear pairing — bytes
+  are already local, nothing to pull back. Pure server assets (stock/AI) keep the pull-back-first
+  flow with the multi-project warning. `deleteAsset(localId)` also deletes the paired server copy.
+- **Local id collision fix**: `asset_local_<ts>` → `asset_local_<ts>_<rand>`. Same-millisecond
+  imports used to share an id — second OPFS put overwrote the first file's bytes (data loss) and
+  id-keyed UI matched both tiles.
+- **Asset context menu + topbar Theme menu**: PORTALED into `.editor-page` with fixed coords at
+  the cursor/trigger rect (viewport-clamped) — the ThemedSelect pattern. Fixed-in-place alone was
+  NOT enough: panel ancestors with transform/backdrop-filter hijack `position: fixed` (containing
+  block), which is why the menu still landed on the wrong clip. Portal target is `.editor-page`
+  (not body) so the [data-kimera-theme] accent variable scope is preserved; it carries no
+  transform/filter in any state — keep it that way or portaled menus drift again.
+- Synced tiles show a small cloud chip (`asset-chip-cloud`); localblob resolution falls back to
+  `cloudUrl` when on-device bytes are missing. Web + api typecheck green.
+- **/storage CORS fix (render-blocking)**: `/storage` is now mounted BEFORE the strict /api CORS
+  gate with `Access-Control-Allow-Origin: *` (non-credentialed capability-URL media). The strict
+  gate THROWS for unknown origins (500, no ACAO) and was killing every media fetch from the export
+  worker's headless browser (Remotion bundle origin, e.g. localhost:3000) → render timeouts.
+  Verified live: worker-origin fetch of a real upload returns 200 + ACAO *.
+- **/storage read-through fallback**: with STORAGE_DRIVER=r2, a bucket miss now falls through
+  (next()) to the on-disk express.static — media uploaded BEFORE the R2 flip exists only on local
+  disk and was 404ing (black clips in older projects). Verified: pre-R2 file 200, missing file 404.
+  Bin thumbnails also stopped passing empty-string srcs (`||` not `??`, guarded renders).
+- **BACKGROUND SYNC NO LONGER UPLOADS MEDIA BYTES** (verified root cause via DB inspection, not
+  the UI): sync.ts `doSyncProject` step 1 uploaded EVERY graph-referenced local asset's bytes on
+  every background save/reconnect — merely editing while online shipped footage to the server
+  (doctrine violation; the "it's in the cloud but I never opted in" report). Now gated behind
+  `{ uploadAssets: true }`, passed ONLY by `ensureExportReady` (export = consent); matte blob
+  resolution gated the same way. Background sync ships the project JSON only; un-uploaded local
+  ids stay in the saved graph and the export gate's verify/retry closes the inflight-coalescing race.
+- **"Missing video asset" fix**: listAssets must return paired server assets (graphs saved by the
+  old remap flow / export promotion reference SERVER ids); hiding them at the data layer broke
+  clip resolution. Dedupe moved to the DISPLAY layer (AssetBin filters via getAssetPromotionMap).
+  "Remove from cloud" also heals legacy graphs (remaps serverId→localId) before deleting the copy.
+
+### 2026-07-13 — Claude (Fable): Frozen ~1s clip tails — Float asset durations + proxy decodable-end clamp + duration heal
+
+Root cause + 3-layer fix for "last one sec is frozen in all clips" (full analysis:
+project-tracker/playback-preview.md v13). The ceil-to-Int `SourceAsset.durationSeconds` column made
+every reloaded asset overshoot its decodable media by up to ~1s; clips authored to that length froze
+on the final frame (getFrame clamps past the last sample — never null — so no existing guard fired),
+and proxy builds baked the repeats in.
+
+- **Root**: Prisma `SourceAsset.durationSeconds` Int → Float (migration
+  `20260713180524_source_asset_duration_float`, applied); de-ceiled assets route, stock route, web
+  `createAsset`, sync `serverCreateAsset`. ⚠ Prisma client regen still PENDING — `prisma generate`
+  EPERM-locks against the running dev API; run `pnpm --filter @kimera-by-aelivion/api prisma:generate`
+  with `pnpm dev` stopped, or float writes will be rejected by the stale client at runtime.
+- **Defense**: `FrameProvider.decodableEndSeconds` (demuxed sample-table end) + both proxy build
+  loops (sourceProxy.worker.ts / sourceProxyEngine.ts) clamp their frame loop to it.
+  `SOURCE_PROXY_VERSION` 4 → 5 (rebuild v4 proxies encoded without the clamp).
+- **Heal**: proxy transcode reports the demuxed end; `healAssetDurationSeconds` (lib/api) PATCHes
+  the asset downward-only (`PATCH /assets/:id` now accepts `durationSeconds`, server rejects
+  growth) + updates the local record. Legacy Int rows heal progressively as proxies build.
+- **Residual**: already-placed clips keep their ceiled length (auto-shortening placed clips would
+  silently change timeline layout) — retrim or delete+re-add after the asset heals.
+- **Verify**: typecheck 5/5; editor:test all pass; DB migration applied against the live Postgres.
+- Note for the R2 round (Opus, below): local-first `localOnly` imports keep the REAL fractional
+  duration in the local record — the heal's local-record update and the de-ceiled promotion path
+  keep that exactness through later cloud promotion.
+
+### 2026-07-13 — Claude (Opus): Local-first media + opt-in cloud (R2) — imports no longer auto-upload
+
+Cloud-storage productionization. STORAGE_DRIVER=r2 (Cloudflare R2, S3-compatible) already wired; this
+round makes upload local-first + opt-in and adds the direct-to-R2 fast path.
+
+- **Imports are local-first**: `createAsset` (apps/web/src/lib/api.ts) gained `localOnly` →
+  on-device persist only (OPFS, `asset_local_*`, `localblob:` marker), NO server round-trip.
+  `handleUploadAsset` + package-import pass it. The old behavior auto-uploaded bytes to the server on
+  every import when the API was reachable — that was the silent auto-sync (2–3GB footage included).
+- **CRITICAL fix**: `listAssets` now MERGES local-only records into the online server list — without
+  it, every un-pushed clip vanished from the bin on reload and its timeline layer lost media.
+- **Opt-in upload**: per-asset "Upload to cloud" + Media-Pool-header "Sync N" chip (Pro-gated).
+  Presigned direct-to-R2 via `upload.worker.ts` + `cloud-upload.ts` (browser→bucket, off main thread,
+  no API RAM buffering). `POST /assets/presign` (assets.routes) mints the URL + creates the row.
+  After upload: `finalizePromotedLocalAsset` marks promotion (sync.ts `markLocalAssetPromoted`) and,
+  for project-owned assets, drops the local record+blob (`removeLocalAssetRecord`) — no bin dup.
+- **Remove from cloud** (inverse): pulls bytes back local (localOnly re-import) → remaps graph →
+  deletes server row + R2 object. Never deletes before the pull-back succeeds.
+- **Per-user storage keys**: `uploads/u_<userId>/<ts>-<rand>-<name>` (storage.service `uploadKeyFor`);
+  presign/saveUpload/saveBuffer thread userId. R2 needs a CORS PUT policy for the direct path
+  (documented in .env.example).
+- **Verify**: web + api typecheck green. R2 round-trip smoke test (`scripts/r2-smoke.ts`) passing.
+
+### 2026-07-13 — Claude (Fable): Coherence follow-up — durable editor masks + resolver artifact threading
+
+Completes the two remainders deferred from the coherence round below (tracker: ai-tools.md v2).
+
+- **Editor one-click masks are now durable**: `useLayerToolEffectRunner` passes the graph's
+  `editableFields` into `handler.run` (reuse lookup) and returns the handler's
+  `describeEditableFields` patch through `onApplied`; EditorPage's new `applyToolEffectResult`
+  merges patch + composition in ONE `updateGraph` (atomic, same pattern as
+  `applySmartFollowTextResult`). EditorPage touch limited to the tool-modal callsite + this helper.
+- **Dependency resolver threads artifacts**: `resolveModuleInsertions(existing, type,
+  {editableFields})` — a durable existing mask/tracking path makes the auto-inserted PREREQUISITE
+  land as `status: "ready"` with the artifact ref in config (`artifactSatisfiesModule`); the
+  requested module always inserts idle; blob:/opfs: URIs never satisfy. Both `addEffect` call
+  sites updated (web local fallback + API route). `mockProcessing` verified status-agnostic.
+- **Verify**: 8 new editor:test checks; full 5-package typecheck green.
+
+### 2026-07-13 — Claude (Fable): AI tools coherence round (mask reuse + matte export + ToolDetailPage migration)
+
+Closed the three "AI tools coherence" tracker items. Zero EditorPage.tsx edits (transitions-round
+agent active there); zero renderer/shader/manifest-schema changes (parity risk nil by construction).
+Full detail: project-tracker/ai-tools.md v1; architecture.md "Tool surface unification" updated.
+
+- **Cross-tool mask reuse** (`apps/web/src/tools/mask-resolver.ts`, new): producers
+  (`local-segmentation`/`local-sam`/`local-tracking` + matte-store metadata) now stamp
+  `sourceAssetId`; consumers (`runSegmentationMatte` = remove-background + text-behind-person,
+  extract-person fast tier, smart-follow tracking) reuse a prior real mask/track via session index →
+  `editableFields` → composition scan (durable http URIs only, AI-roto `_sam_` mattes excluded)
+  before segmenting fresh. New "Subject mask: Reuse/Re-analyze" + "Tracking data" optionFields;
+  reuse always announced in progress text. Dependency-resolver artifact threading deferred.
+- **Matte export path closed**: the 5 silent `catch{keep blob:}` upload fallbacks route through one
+  `uploadMatteForExport` helper (never throws, warns visibly). New pre-submit choke point
+  `apps/web/src/export/matte-resolve.ts`: `doSyncProject` best-effort resolves blob:/opfs: matte
+  URIs (bytes from live blob URL or OPFS — `artifact-store.get()` now has a `${id}.bin` filename
+  fallback so OPFS survives reload despite its in-memory metadata Map) and `ensureExportReady`
+  hard-gates with `MatteResolveError` naming the layer — the worker can no longer receive an
+  unfetchable matte and hang silently. `renderPreview` deliberately ungated (API mock never fetches
+  mattes). Stale "resolution step is not built yet" doc in `render-templates/src/index.ts` corrected.
+- **ToolDetailPage → handler contract**: transcribe/extract run paths now call the registered
+  handlers (option overrides model the fast→quality two-stage flow; shared `assertToolRunnable`
+  executor gate; page `bakeMatte` deleted), and the extract/tbp/rbg apply switch collapsed into
+  `handler.applyResult({context:"standalone"})` + `describeEditableFields`. Contract extensions all
+  additive: `composition`/`editableFields`/optional `layer` in run args, `context` in apply args,
+  `describeEditableFields`, hook `run(optionOverrides)`. Still bespoke: auto-captions apply, cloud
+  transcribe, the `runToolAdapter` prompt-bridge shell (by design), the three standalone panels.
+- **Verify**: full `pnpm typecheck`; `editor:test` incl. 21 new checks (resolver tiers,
+  collect/rewrite, apply modes); matte end-to-end through the REAL Remotion renderer with an
+  http-served matte (inverted-matte differential flips the frame 60%-light → 100%-dark — proves the
+  worker fetched + multiplied the matte texture). Manual browser QA (reuse second-run instant path,
+  offline warning, /tools flows) not run this session — listed for the next manual pass.
+
 ### 2026-07-13 — Claude: Monetization Phase 0 — Instrument & Shadow-Bill
 
 Additive telemetry only, per MONETIZATION_STRATEGY.md §4 (editor free forever; charge only real

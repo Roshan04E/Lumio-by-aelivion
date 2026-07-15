@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "SourceAsset" ALTER COLUMN "durationSeconds" SET DATA TYPE DOUBLE PRECISION;

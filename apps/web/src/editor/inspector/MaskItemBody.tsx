@@ -16,8 +16,8 @@ import {
   attachTrackToMask,
   clearMaskScalarKeyframes,
   detachTrackFromMask,
-  findMaskPathKeyframeTime,
-  findMaskScalarKeyframeTime,
+  findMaskPathKeyframe,
+  findMaskScalarKeyframe,
   getActiveMaskScalarKeyframe,
   getMaskPathKeyframes,
   getMaskScalarKeyframes,
@@ -109,22 +109,22 @@ export function MaskItemBody({
 
   function scalarKeyframe(property: MaskScalarProperty, resolvedValue: number) {
     const active = getActiveMaskScalarKeyframe(layer, mask.id, property, layerTime);
-    const nextTime = findMaskScalarKeyframeTime(layer, mask.id, property, layerTime, 1);
-    const previousTime = findMaskScalarKeyframeTime(layer, mask.id, property, layerTime, -1);
+    const nextKeyframe = findMaskScalarKeyframe(layer, mask.id, property, layerTime, 1);
+    const previousKeyframe = findMaskScalarKeyframe(layer, mask.id, property, layerTime, -1);
     return {
       active: Boolean(active),
       hasAny: getMaskScalarKeyframes(layer, mask.id, property).length > 0,
-      hasNext: nextTime !== undefined,
-      hasPrevious: previousTime !== undefined,
+      hasNext: Boolean(nextKeyframe),
+      hasPrevious: Boolean(previousKeyframe),
       interpolation: active?.interpolation,
       onChangeInterpolation: (interpolation: Parameters<typeof setMaskScalarInterpolation>[4]) =>
         onChange((item) => setMaskScalarInterpolation(item, mask.id, property, layerTime, interpolation)),
       onClearAll: () => onChange((item) => clearMaskScalarKeyframes(item, mask.id, property)),
       onNext: () => {
-        if (nextTime !== undefined) seek(nextTime);
+        if (nextKeyframe) seek(nextKeyframe.timeSeconds);
       },
       onPrevious: () => {
-        if (previousTime !== undefined) seek(previousTime);
+        if (previousKeyframe) seek(previousKeyframe.timeSeconds);
       },
       onToggle: () => onChange((item) => toggleMaskScalarKeyframe(item, mask.id, property, layerTime, resolvedValue))
     };
@@ -181,10 +181,10 @@ export function MaskItemBody({
           <button
             type="button"
             title="Previous shape keyframe"
-            disabled={findMaskPathKeyframeTime(mask, layerTime, -1) === undefined}
+            disabled={!findMaskPathKeyframe(mask, layerTime, -1)}
             onClick={() => {
-              const t = findMaskPathKeyframeTime(mask, layerTime, -1);
-              if (t !== undefined) seek(t);
+              const previous = findMaskPathKeyframe(mask, layerTime, -1);
+              if (previous) seek(previous.timeSeconds);
             }}
           >
             <ChevronLeft size={12} />
@@ -200,10 +200,10 @@ export function MaskItemBody({
           <button
             type="button"
             title="Next shape keyframe"
-            disabled={findMaskPathKeyframeTime(mask, layerTime, 1) === undefined}
+            disabled={!findMaskPathKeyframe(mask, layerTime, 1)}
             onClick={() => {
-              const t = findMaskPathKeyframeTime(mask, layerTime, 1);
-              if (t !== undefined) seek(t);
+              const next = findMaskPathKeyframe(mask, layerTime, 1);
+              if (next) seek(next.timeSeconds);
             }}
           >
             <ChevronRight size={12} />
@@ -219,6 +219,16 @@ export function MaskItemBody({
         {scalarSlider("feather", "Feather", resolved.feather, 0, 500, 1)}
         {scalarSlider("expansion", "Expansion", resolved.expansion, -200, 200, 1)}
         {scalarSlider("opacity", "Opacity", resolved.opacity, 0, 100, 1)}
+        {mask.shape === "rectangle" ? (
+          <EffectSliderControl
+            label="Corner Radius"
+            value={mask.cornerRadius ?? 0}
+            min={0}
+            max={500}
+            step={1}
+            onChange={(value) => onChange((item) => updateMaskById(item, mask.id, { cornerRadius: value }))}
+          />
+        ) : null}
       </div>
 
       <div className="mask-subhead">Transform</div>

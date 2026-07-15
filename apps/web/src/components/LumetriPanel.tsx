@@ -30,7 +30,7 @@ import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import {
   clamp,
   clearEffectParamKeyframes,
-  findEffectParamKeyframeTime,
+  findEffectParamKeyframe,
   getActiveEffectParamKeyframe,
   getEffectParamKeyframes,
   setEffectParamInterpolation,
@@ -199,8 +199,8 @@ export function LumetriPanel({ layer, currentTime, onChange, onSeek }: Props) {
       : baseValue;
     const activeKeyframe = eff ? getActiveEffectParamKeyframe(layer, eff.id, paramKey, layerTime) : undefined;
     const hasAny = eff ? getEffectParamKeyframes(layer, eff.id, paramKey).length > 0 : false;
-    const nextTime = eff ? findEffectParamKeyframeTime(layer, eff.id, paramKey, layerTime, 1) : undefined;
-    const previousTime = eff ? findEffectParamKeyframeTime(layer, eff.id, paramKey, layerTime, -1) : undefined;
+    const nextKeyframe = eff ? findEffectParamKeyframe(layer, eff.id, paramKey, layerTime, 1) : undefined;
+    const previousKeyframe = eff ? findEffectParamKeyframe(layer, eff.id, paramKey, layerTime, -1) : undefined;
     const applyAtTime = (value: number) =>
       onChange((l) => {
         const next = ensureEffect(l, effectType);
@@ -218,8 +218,8 @@ export function LumetriPanel({ layer, currentTime, onChange, onSeek }: Props) {
         keyframe={{
           active: Boolean(activeKeyframe),
           hasAny,
-          hasNext: nextTime !== undefined,
-          hasPrevious: previousTime !== undefined,
+          hasNext: Boolean(nextKeyframe),
+          hasPrevious: Boolean(previousKeyframe),
           interpolation: activeKeyframe?.interpolation,
           onChangeInterpolation: (interp) =>
             onChange((l) => {
@@ -232,10 +232,10 @@ export function LumetriPanel({ layer, currentTime, onChange, onSeek }: Props) {
               return id ? clearEffectParamKeyframes(l, id, paramKey) : l;
             }),
           onNext: () => {
-            if (nextTime !== undefined) onSeek(layer.startSeconds + nextTime);
+            if (nextKeyframe) onSeek(layer.startSeconds + nextKeyframe.timeSeconds);
           },
           onPrevious: () => {
-            if (previousTime !== undefined) onSeek(layer.startSeconds + previousTime);
+            if (previousKeyframe) onSeek(layer.startSeconds + previousKeyframe.timeSeconds);
           },
           onToggle: () =>
             onChange((l) => {

@@ -163,6 +163,107 @@ const registry = createTimelineActionRegistry();
   check("rejections did not mutate the composition", equal(base, fixture()));
 }
 
+// --- Trim suite actions: roll / slide / ripple-trim / slip ------------------
+{
+  const base = fixture();
+  const mediaLayerId = base.tracks.flatMap((t) => t.layers).find((l) => l.type === "video")!.id;
+
+  // Two touching clips via a split (the left half keeps the original id).
+  const split1 = registry.execute("splitClip", { layerId: mediaLayerId, atSeconds: 4 }, ctxFor(base));
+  check("trim-suite: seed split ok", split1.ok);
+  const twoClips = split1.ok ? split1.result.after : base;
+  const trackLayers = twoClips.tracks.find((t) => t.layers.some((l) => l.id === mediaLayerId))!.layers;
+  const leftId = mediaLayerId;
+  const rightId = trackLayers.find((l) => l.id !== mediaLayerId)!.id;
+
+  const roll = registry.execute("rollEdit", { leftLayerId: leftId, rightLayerId: rightId, deltaSeconds: 1 }, ctxFor(twoClips));
+  check("rollEdit succeeds on a touching cut", roll.ok);
+  if (roll.ok) {
+    const left = roll.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === leftId)!;
+    check("rollEdit extends the left tail by ~1s", Math.abs(left.durationSeconds - 5) < 1e-6);
+    check("rollEdit undo round-trips", equal(applyPatch(roll.result.after, roll.result.undoPatch), twoClips));
+  }
+  const rollBad = registry.execute("rollEdit", { leftLayerId: leftId, rightLayerId: "not_a_layer", deltaSeconds: 1 }, ctxFor(twoClips));
+  check("rollEdit rejects a missing / non-touching pair", !rollBad.ok);
+
+  // Three touching clips so the middle has neighbours on both sides.
+  const split2 = registry.execute("splitClip", { layerId: rightId, atSeconds: 8 }, ctxFor(twoClips));
+  const threeClips = split2.ok ? split2.result.after : twoClips;
+  const slide = registry.execute("slideClip", { layerId: rightId, deltaSeconds: -1 }, ctxFor(threeClips));
+  check("slideClip succeeds with neighbours on both sides", slide.ok);
+  if (slide.ok) check("slideClip undo round-trips", equal(applyPatch(slide.result.after, slide.result.undoPatch), threeClips));
+  const slideFree = registry.execute("slideClip", { layerId: leftId, deltaSeconds: 1 }, ctxFor(threeClips));
+  check("slideClip rejects a clip with a free edge", !slideFree.ok);
+
+  const ripple = registry.execute("rippleTrimClip", { layerId: leftId, atSeconds: 1, side: "head" }, ctxFor(twoClips));
+  check("rippleTrimClip head succeeds", ripple.ok);
+  if (ripple.ok) {
+    const left = ripple.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === leftId)!;
+    check("rippleTrimClip shortens the head by ~1s", Math.abs(left.durationSeconds - 3) < 1e-6);
+    check("rippleTrimClip undo round-trips", equal(applyPatch(ripple.result.after, ripple.result.undoPatch), twoClips));
+  }
+  const rippleOob = registry.execute("rippleTrimClip", { layerId: leftId, atSeconds: 99, side: "tail" }, ctxFor(twoClips));
+  check("rippleTrimClip rejects an out-of-bounds time", !rippleOob.ok);
+
+  const slip = registry.execute("slipClip", { layerId: mediaLayerId, deltaSeconds: 0.5 }, ctxFor(base));
+  check("slipClip succeeds", slip.ok);
+  if (slip.ok) {
+    const before = base.tracks.flatMap((t) => t.layers).find((l) => l.id === mediaLayerId)!;
+    const after = slip.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === mediaLayerId)!;
+    check("slipClip advances sourceInSeconds", (after.sourceInSeconds ?? 0) === 0.5);
+    check("slipClip leaves the clip in place", after.startSeconds === before.startSeconds && after.durationSeconds === before.durationSeconds);
+  }
+}
+
+// --- moveLayers editing policy: overlap allow / overwrite / reject ----------
+{
+  const base = fixture();
+  const mediaLayerId = base.tracks.flatMap((t) => t.layers).find((l) => l.type === "video")!.id;
+  // Two touching clips [0,4) + [4,12); moving the left one +2s makes it overlap the right at [4,6).
+  const seed = registry.execute("splitClip", { layerId: mediaLayerId, atSeconds: 4 }, ctxFor(base));
+  const two = seed.ok ? seed.result.after : base;
+
+  const reject = registry.execute("moveLayers", { layerIds: [mediaLayerId], deltaSeconds: 2, overlap: "reject" }, ctxFor(two));
+  check("moveLayers overlap=reject refuses with a summary", reject.ok && reject.result.summary.includes("refused"));
+  if (reject.ok) {
+    const left = reject.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === mediaLayerId)!;
+    check("moveLayers reject leaves the clip in place", left.startSeconds === 0);
+  }
+
+  const overwrite = registry.execute("moveLayers", { layerIds: [mediaLayerId], deltaSeconds: 2, overlap: "overwrite" }, ctxFor(two));
+  check("moveLayers overlap=overwrite succeeds", overwrite.ok);
+  if (overwrite.ok) {
+    const clips = overwrite.result.after.tracks.flatMap((t) => t.layers);
+    const left = clips.find((l) => l.id === mediaLayerId)!;
+    // The carved neighbour survives with a NEW id (split keeps the original id on the deleted left half),
+    // so identify it by position: the non-moved clip now starting at 6s.
+    const neighbour = clips.find((l) => l.id !== mediaLayerId);
+    check("moveLayers overwrite: moved clip lands at 2s", Math.abs(left.startSeconds - 2) < 1e-6);
+    check("moveLayers overwrite: neighbour head carved to 6s", Boolean(neighbour) && Math.abs(neighbour!.startSeconds - 6) < 1e-6);
+  }
+}
+
+// --- moveLayers magnetic mode: touched track compacts gapless ---------------
+{
+  const base = fixture();
+  const mediaLayerId = base.tracks.flatMap((t) => t.layers).find((l) => l.type === "video")!.id;
+  // Split into [0,4) + [4,12); trim nothing — then move the right clip far right WITH magnetic on: the
+  // track must compact back to gapless.
+  const seed = registry.execute("splitClip", { layerId: mediaLayerId, atSeconds: 4 }, ctxFor(base));
+  const two = seed.ok ? seed.result.after : base;
+  const rightId = two.tracks.find((t) => t.layers.some((l) => l.id === mediaLayerId))!.layers.find((l) => l.id !== mediaLayerId)!.id;
+
+  const magnetic = registry.execute("moveLayers", { layerIds: [rightId], deltaSeconds: 10, magnetic: true }, ctxFor(two));
+  check("moveLayers magnetic: succeeds", magnetic.ok);
+  if (magnetic.ok) {
+    const track = magnetic.result.after.tracks.find((t) => t.layers.some((l) => l.id === mediaLayerId))!;
+    const ends = [...track.layers].sort((a, b) => a.startSeconds - b.startSeconds);
+    const gapless = ends.every((l, i) => i === 0 || Math.abs(l.startSeconds - (ends[i - 1]!.startSeconds + ends[i - 1]!.durationSeconds)) < 1e-6);
+    check("moveLayers magnetic: track is gapless after the move", gapless);
+    check("moveLayers magnetic: right clip butts the left at 4s", Math.abs((ends[1]?.startSeconds ?? -1) - 4) < 1e-6);
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

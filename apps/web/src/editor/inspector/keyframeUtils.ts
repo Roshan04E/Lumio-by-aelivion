@@ -5,6 +5,9 @@ import {
   getLayerAnimations,
   getTimelineEffectDefinition,
   normalizeTimelineEffect,
+  resolveGraphicAnimation,
+  GRAPHIC_DURATION_PROPERTY,
+  GRAPHIC_PROGRESS_PROPERTY,
   type KeyframeInterpolation,
   type SourceTextKeyframe,
   type TextRun,
@@ -210,6 +213,28 @@ export function isKeyframeAt(timeSeconds: number, targetTimeSeconds: number) {
   return Math.abs(timeSeconds - targetTimeSeconds) <= keyframeTimeTolerance;
 }
 
+/**
+ * The nearest keyframe strictly before (`direction: -1`) or after (`direction: 1`) `layerTime` — the
+ * single implementation behind every `find*Keyframe` prev/next lookup (transform, effect param,
+ * content, layer property, style, mask).
+ *
+ * Returns the KEYFRAME, never its `timeSeconds`. A keyframe at layer-local time 0 — the clip's first
+ * frame, where the first key of most ramps lives — is a perfectly valid hit, but `0` is falsy, so a
+ * time-returning API silently reports "no keyframe" under `Boolean(...)`/`if (t)` and disables the
+ * nav button that should jump to it. An object is truthy whenever it exists, so the check callers
+ * reach for first is the correct one. Callers wanting the time take `?.timeSeconds`.
+ */
+export function findKeyframeIn<T extends { timeSeconds: number }>(
+  keyframes: T[],
+  layerTime: number,
+  direction: -1 | 1
+): T | undefined {
+  if (direction < 0) {
+    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance);
+  }
+  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance);
+}
+
 export function hasTransformKeyframeAt(
   layer: TimelineLayer,
   property: TransformAnimationProperty,
@@ -235,32 +260,24 @@ export function getActiveEffectParamKeyframe(
   return getEffectParamKeyframes(layer, effectId, paramKey).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
 }
 
-export function findTransformKeyframeTime(
+export function findTransformKeyframe(
   layer: TimelineLayer,
   property: TransformAnimationProperty,
   layerTime: number,
   direction: -1 | 1
 ) {
-  const keyframes = getTransformKeyframes(layer, property);
-  if (direction < 0) {
-    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
-  }
-  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+  return findKeyframeIn(getTransformKeyframes(layer, property), layerTime, direction);
 }
 
-/** Effect-param counterpart of findTransformKeyframeTime — same prev/next lookup, keyed by effect+param instead of a transform property. */
-export function findEffectParamKeyframeTime(
+/** Effect-param counterpart of findTransformKeyframe — same prev/next lookup, keyed by effect+param instead of a transform property. */
+export function findEffectParamKeyframe(
   layer: TimelineLayer,
   effectId: string,
   paramKey: string,
   layerTime: number,
   direction: -1 | 1
 ) {
-  const keyframes = getEffectParamKeyframes(layer, effectId, paramKey);
-  if (direction < 0) {
-    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
-  }
-  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+  return findKeyframeIn(getEffectParamKeyframes(layer, effectId, paramKey), layerTime, direction);
 }
 
 /** Effect-param counterpart of clearTransformKeyframes. */
@@ -765,17 +782,13 @@ export function getActiveContentKeyframe(layer: TimelineLayer, property: Content
   return getContentKeyframes(layer, property).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
 }
 
-export function findContentKeyframeTime(
+export function findContentKeyframe(
   layer: TimelineLayer,
   property: ContentAnimationProperty,
   layerTime: number,
   direction: -1 | 1
 ) {
-  const keyframes = getContentKeyframes(layer, property);
-  if (direction < 0) {
-    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
-  }
-  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+  return findKeyframeIn(getContentKeyframes(layer, property), layerTime, direction);
 }
 
 export function clearContentKeyframes(layer: TimelineLayer, property: ContentAnimationProperty): TimelineLayer {
@@ -842,6 +855,104 @@ export function applyContentValueAtTime(
 }
 
 // ---------------------------------------------------------------------------
+// Generic layer-scope NUMERIC keyframes (V2 only, no legacy equivalent) — same shape as the
+// `content.*` helpers above, but the base value lives wherever the caller keeps it (so a property
+// whose base isn't on `layer.content` can still be keyframed). Used by the animated-graphic
+// `graphicProgress` / `graphicDuration` rows. Times are LAYER-LOCAL, like every other V2 keyframe.
+// ---------------------------------------------------------------------------
+
+export function getLayerPropertyKeyframes(layer: TimelineLayer, property: string) {
+  return (layer.animations ?? [])
+    .filter((kf) => kf.target.scope === "layer" && kf.target.property === property)
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+}
+
+export function getActiveLayerPropertyKeyframe(layer: TimelineLayer, property: string, layerTime: number) {
+  return getLayerPropertyKeyframes(layer, property).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
+}
+
+export function findLayerPropertyKeyframe(layer: TimelineLayer, property: string, layerTime: number, direction: -1 | 1) {
+  return findKeyframeIn(getLayerPropertyKeyframes(layer, property), layerTime, direction);
+}
+
+export function clearLayerPropertyKeyframes(layer: TimelineLayer, property: string): TimelineLayer {
+  return {
+    ...layer,
+    animations: (layer.animations ?? []).filter((kf) => !(kf.target.scope === "layer" && kf.target.property === property))
+  };
+}
+
+export function toggleLayerPropertyKeyframe(layer: TimelineLayer, property: string, layerTime: number, value: number): TimelineLayer {
+  if (getActiveLayerPropertyKeyframe(layer, property, layerTime)) {
+    return {
+      ...layer,
+      animations: (layer.animations ?? []).filter(
+        (kf) => !(kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime))
+      )
+    };
+  }
+  const keyframe: TimelineKeyframeV2 = {
+    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    target: { scope: "layer", property },
+    timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
+    value,
+    interpolation: "linear",
+    temporal: {}
+  };
+  return {
+    ...layer,
+    animations: [...(layer.animations ?? []), keyframe].sort((a, b) => a.timeSeconds - b.timeSeconds)
+  };
+}
+
+/** Set the interpolation of the layer-property keyframe at the playhead (the diamond menu's action). */
+export function setLayerPropertyKeyframeInterpolation(
+  layer: TimelineLayer,
+  property: string,
+  layerTime: number,
+  interpolation: KeyframeInterpolation
+): TimelineLayer {
+  return {
+    ...layer,
+    animations: (layer.animations ?? []).map((kf) =>
+      kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime)
+        ? { ...kf, interpolation }
+        : kf
+    )
+  };
+}
+
+/**
+ * Four-way layer-property write — same auto-keyframe rule as {@link applyTransformValueAtTime}. When the
+ * property is un-keyframed the value goes to the caller's own base storage via `setBase`.
+ */
+export function applyLayerPropertyValueAtTime(
+  layer: TimelineLayer,
+  property: string,
+  layerTime: number,
+  value: number,
+  setBase: (layer: TimelineLayer, value: number) => TimelineLayer,
+  options: AutoKeyframeOptions = {}
+): TimelineLayer {
+  const hasKeyframeAtPlayhead = Boolean(getActiveLayerPropertyKeyframe(layer, property, layerTime));
+  const isAnimated = getLayerPropertyKeyframes(layer, property).length > 0;
+  if (!hasKeyframeAtPlayhead && (isAnimated || options.autoKeyframe)) {
+    return toggleLayerPropertyKeyframe(layer, property, layerTime, value);
+  }
+  if (hasKeyframeAtPlayhead) {
+    return {
+      ...layer,
+      animations: (layer.animations ?? []).map((kf) =>
+        kf.target.scope === "layer" && kf.target.property === property && isKeyframeAt(kf.timeSeconds, layerTime)
+          ? { ...kf, value }
+          : kf
+      )
+    };
+  }
+  return setBase(layer, value);
+}
+
+// ---------------------------------------------------------------------------
 // Graph target helpers (unified transform + effect param)
 // ---------------------------------------------------------------------------
 
@@ -861,6 +972,25 @@ export function graphTargetKey(target: GraphTarget) {
   if (target.kind === "sourceText") return "sourceText";
   if (target.kind === "layer") return `layer:${target.property}`;
   return `effect:${target.effectId}:${target.property}`;
+}
+
+/**
+ * Animated-graphic lanes — only for a layer whose graphic actually carries SMIL (a static SVG has no
+ * phase to curve). Progress is in CYCLES (1 = one full loop) and Duration is the cycle length the
+ * phase integrates over; keying Progress supersedes Duration, exactly as in the Graphic inspector.
+ *
+ * Ranges/steps MIRROR the Graphic panel's rows on purpose: the graph clamps drags with `min`/`max`,
+ * so a lane that clamped differently from its inspector row would let one surface author a value the
+ * other refuses to show.
+ */
+export function buildGraphicGraphTargets(layer: TimelineLayer): GraphTarget[] {
+  if (!resolveGraphicAnimation(layer.graphic, { animations: layer.animations })) {
+    return [];
+  }
+  return [
+    { kind: "layer", label: "Progress", min: -100, max: 100, property: GRAPHIC_PROGRESS_PROPERTY, step: 0.01 },
+    { kind: "layer", label: "Duration", min: 0.05, max: 60, property: GRAPHIC_DURATION_PROPERTY, step: 0.05 }
+  ];
 }
 
 /** Typewriter reveal lane (`textRevealProgress` 0..1) — shows when the preset wrote keys. */
@@ -931,6 +1061,8 @@ export function shortKeyframeProperty(property: string) {
   if (property === "transform.rotation") return "Rotate";
   if (property === "transform.opacity") return "Opacity";
   if (property === "textRevealProgress") return "Reveal";
+  if (property === GRAPHIC_PROGRESS_PROPERTY) return "Progress";
+  if (property === GRAPHIC_DURATION_PROPERTY) return "Duration";
   return property;
 }
 
@@ -1099,12 +1231,8 @@ export function getActiveStyleKeyframe(layer: TimelineLayer, property: string, l
   return getStyleKeyframes(layer, property).find((kf) => isKeyframeAt(kf.timeSeconds, layerTime));
 }
 
-export function findStyleKeyframeTime(layer: TimelineLayer, property: string, layerTime: number, direction: -1 | 1) {
-  const keyframes = getStyleKeyframes(layer, property);
-  if (direction < 0) {
-    return [...keyframes].reverse().find((kf) => kf.timeSeconds < layerTime - keyframeTimeTolerance)?.timeSeconds;
-  }
-  return keyframes.find((kf) => kf.timeSeconds > layerTime + keyframeTimeTolerance)?.timeSeconds;
+export function findStyleKeyframe(layer: TimelineLayer, property: string, layerTime: number, direction: -1 | 1) {
+  return findKeyframeIn(getStyleKeyframes(layer, property), layerTime, direction);
 }
 
 export function toggleStyleKeyframe(layer: TimelineLayer, property: string, layerTime: number, value: number): TimelineLayer {

@@ -28,7 +28,7 @@ projectsRouter.post(
   asyncHandler<AuthRequest>(async (req, res) => {
     const input = validateBody(createProjectSchema, req.body);
     const projectId = `project_${crypto.randomUUID()}`;
-    const promptPlan = input.prompt ? planProjectFromPrompt(input.prompt) : undefined;
+    const promptPlan = input.prompt ? await planProjectFromPrompt(input.prompt) : undefined;
     const templateSelector = input.templateId ?? promptPlan?.templateSlug;
     const resolvedTemplate = templateSelector ? await resolveTemplate(templateSelector) : { template: undefined, dbId: undefined };
     const template = resolvedTemplate.template;
@@ -45,7 +45,8 @@ projectsRouter.post(
         }
       : {
           projectId,
-          effects: promptPlan?.effects.map((type) => createProjectEffect(type)) ?? [],
+          // AI path seeds from the plan; the create-only goal presets seed from `input.effects`.
+          effects: (promptPlan?.effects ?? input.effects ?? []).map((type) => createProjectEffect(type)),
           editableFields: promptPlan?.editableFields ?? {},
           version: 1
         };
@@ -59,7 +60,9 @@ projectsRouter.post(
     // attached, the timeline is sized to that asset's real length plus a 1-second
     // buffer (never less than the clip itself). Only a template-less, asset-less
     // project (e.g. a blank/prompt-only draft) falls back to a short placeholder.
-    let timelineDurationSeconds = template?.durationSeconds ?? 12;
+    // Priority: a template's own length → the real footage length (never truncated) → a goal
+    // preset's target duration (footage-less drafts) → a short default.
+    let timelineDurationSeconds = template?.durationSeconds ?? input.durationSeconds ?? 12;
     if (!template && input.sourceAssetId) {
       const sourceAsset = await prisma.sourceAsset.findFirst({
         where: { id: input.sourceAssetId, userId: req.user.id }
@@ -86,6 +89,7 @@ projectsRouter.post(
         durationSeconds: timelineDurationSeconds,
         assetId: input.sourceAssetId,
         orientation: input.orientation,
+        fps: input.fps,
         // No template AND no prompt = "Continue without a template" → an empty timeline
         // (no placeholder media layer when there's no real footage).
         blank: !template && !promptPlan
@@ -242,9 +246,9 @@ projectsRouter.post(
     }
 
     const graph = fromJson<ProjectGraph>(project.projectGraph);
-    const insertions = resolveModuleInsertions(graph.effects, input.type).map((effect) =>
-      effect.type === input.type ? { ...effect, config: { ...effect.config, ...input.config } } : effect
-    );
+    const insertions = resolveModuleInsertions(graph.effects, input.type, {
+      editableFields: graph.editableFields
+    }).map((effect) => (effect.type === input.type ? { ...effect, config: { ...effect.config, ...input.config } } : effect));
 
     const updatedGraph: ProjectGraph = {
       ...graph,

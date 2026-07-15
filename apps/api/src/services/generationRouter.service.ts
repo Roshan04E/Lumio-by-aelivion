@@ -290,7 +290,7 @@ export async function processGenerationJob(jobId: string): Promise<void> {
     const buffer = await downloadToBuffer(media.url);
     const ext = isVideo ? "mp4" : media.contentType?.includes("png") ? "png" : "jpg";
     const fileName = `ai-${job.taskKind}-${jobId}.${ext}`;
-    const fileUrl = await saveBuffer(buffer, fileName);
+    const fileUrl = await saveBuffer(buffer, fileName, job.userId);
 
     const longEdge = isVideo ? Math.min(model.constraints.maxResolution ?? 1080, 1080) : model.constraints.maxResolution ?? 1024;
     const aspect = typeof params.aspectRatio === "string" ? params.aspectRatio : undefined;

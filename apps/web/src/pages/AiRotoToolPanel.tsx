@@ -12,7 +12,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { CreditBadge } from "../components/CreditBadge";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
-import { addEffect, createAsset, createProject, patchProject } from "../lib/api";
+import { addEffect, createProject, patchProject } from "../lib/api";
 import { createToolArtifactStore } from "../tools/artifact-store";
 import { detectBrowserToolCapabilities } from "../tools/capabilities";
 import { detectInitialSubjectBox } from "../tools/local-segmentation";
@@ -24,7 +24,7 @@ import {
   type EncodedFrame,
   type SamPoint
 } from "../tools/local-sam";
-import { storeMatteArtifact } from "../tools/matte-store";
+import { storeMatteArtifact, uploadMatteForExport } from "../tools/matte-store";
 
 interface AiRotoToolPanelProps {
   tool: ToolCapabilityDefinition;
@@ -247,6 +247,7 @@ export function AiRotoToolPanel({ tool, assets, selectedAssetId, onSelectAsset, 
     try {
       const result = await segmentVideoPrompted({
         videoUrl: selectedAsset.fileUrl,
+        sourceAssetId: selectedAsset.id,
         durationSeconds: selectedAsset.durationSeconds,
         width: selectedAsset.width || 720,
         height: selectedAsset.height || 1280,
@@ -264,21 +265,21 @@ export function AiRotoToolPanel({ tool, assets, selectedAssetId, onSelectAsset, 
       }
       setStatus("Encoding matte…");
       const store = await createToolArtifactStore();
-      const { maskSequence, blob } = await storeMatteArtifact(result, store, `airoto_${Date.now()}`);
-      try {
-        const matteAsset = await createAsset({
-          file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" }),
-          source: "timeline-generated",
-          folder: "generated/ai-roto",
-          originalName: "AI roto matte"
-        });
-        bakedMaskRef.current = { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
-      } catch {
-        bakedMaskRef.current = maskSequence;
-      }
-      setMatteUri(URL.createObjectURL(blob));
+      const baked = await storeMatteArtifact(result, store, `airoto_${Date.now()}`);
+      const outcome = await uploadMatteForExport({
+        maskSequence: baked.maskSequence,
+        blob: baked.blob,
+        folder: "generated/ai-roto",
+        originalName: "AI roto matte"
+      });
+      bakedMaskRef.current = outcome.maskSequence;
+      setMatteUri(URL.createObjectURL(baked.blob));
       setActiveTab("preview");
-      setStatus("Matte ready. Preview it, then apply to the timeline.");
+      setStatus(
+        outcome.uploaded
+          ? "Matte ready. Preview it, then apply to the timeline."
+          : `Matte ready. ${outcome.warning ?? ""}`.trim()
+      );
     } catch (error) {
       if (!cancelledRef.current) setStatus(error instanceof Error ? error.message : "AI roto failed.");
     } finally {

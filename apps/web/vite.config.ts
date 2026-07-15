@@ -111,6 +111,12 @@ export default defineConfig({
     format: "es"
   },
   server: {
-    port: 5173
+    port: 5173,
+    // Enables the JS self-profiling API (`new Profiler(...)`) for the dev stall watchdog
+    // (lib/perf-watchdog.ts): when the main thread freezes, it captures REAL sampled stacks and
+    // prints the blocking functions to the console — evidence, not guesswork.
+    headers: {
+      "Document-Policy": "js-profiling"
+    }
   }
 });

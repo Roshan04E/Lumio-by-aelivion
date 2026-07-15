@@ -77,7 +77,9 @@ export function addVolumePoint(layer: TimelineLayer, t: number, gain: number): {
     target: { scope: "effect", effectId, property: "gain" },
     timeSeconds: time,
     value: clampGain(gain),
-    interpolation: "linear",
+    // Smooth (auto-Bézier) by default so the envelope reads as a curve, not pointed linear segments —
+    // matches how pro NLEs default volume automation. Cycle to Linear/Hold via the point's interp toggle.
+    interpolation: "autoBezier",
     temporal: {}
   };
   return {
@@ -126,9 +128,12 @@ export function cycleVolumePointInterpolation(layer: TimelineLayer, id: string):
 }
 
 /**
- * Set a Bézier tangent handle on an envelope point. The `out` handle shapes the segment leaving this point
- * (so this point becomes `bezier`); the `in` handle shapes the segment arriving at it (so the *previous* gain
- * keyframe becomes `bezier`, since the evaluator reads prev.out + this.in for that segment).
+ * Set a Bézier tangent handle on an envelope point. The evaluator (animation.ts) is TWO-SIDED: for a
+ * segment it reads the LEFT keyframe's `temporal.out` and the RIGHT keyframe's `temporal.in`, each
+ * gated on THAT keyframe's own `interpolation === "bezier"`. So BOTH the in- and out-handle live on
+ * (and must make `bezier`) the point they belong to — `out` shapes the segment leaving it, `in` shapes
+ * the segment arriving at it. (Previously `in` set the *previous* keyframe to bezier, which the
+ * two-sided evaluator ignores — so the left handle did nothing.)
  */
 export function setVolumePointHandle(
   layer: TimelineLayer,
@@ -137,18 +142,12 @@ export function setVolumePointHandle(
   dx: number,
   dy: number
 ): TimelineLayer {
-  const gainKfs = getVolumeEffectId(layer) ? getVolumePoints(layer) : [];
-  const index = gainKfs.findIndex((p) => p.id === id);
-  const prevId = which === "in" && index > 0 ? gainKfs[index - 1]!.id : undefined;
   return {
     ...layer,
     animations: (layer.animations ?? []).map((kf) => {
-      if (kf.id === id) {
-        const temporal = { ...kf.temporal, [which]: { dx, dy } };
-        return { ...kf, temporal, interpolation: which === "out" ? "bezier" : kf.interpolation };
-      }
-      if (kf.id === prevId) return { ...kf, interpolation: "bezier" };
-      return kf;
+      if (kf.id !== id) return kf;
+      const temporal = { ...kf.temporal, [which]: { dx, dy } };
+      return { ...kf, temporal, interpolation: "bezier" };
     })
   };
 }

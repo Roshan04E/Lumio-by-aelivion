@@ -17,6 +17,7 @@ import { MediaWebGLRenderer } from "../color/media-renderer";
 import { colorPipelineCacheKey } from "../color/pipeline";
 import type { ColorPipeline } from "../color/types";
 import { getFragmentEffect } from "../color/fragment-effects/registry";
+import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass, SceneTextureSource } from "../color/scene-compositor";
 import {
   getActiveTransition,
@@ -121,6 +122,9 @@ export interface BuildSceneDrawsInputs {
    */
   nestMatteCaches?: Map<string, SceneMaskMatteCache> | undefined;
 }
+
+/** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below). */
+const BUILTIN_FRAGMENT_EFFECT_TYPES = new Set(["radialBlur", "directionalBlur", "sharpen", "pixelate", "chromaticAberration"]);
 
 /** Parse `#rgb`/`#rrggbb`/`rgb()`/`rgba()` into straight-alpha rgb 0..1 (alpha ignored — glow tint). */
 function parseCssColor(input: string): [number, number, number] {
@@ -484,8 +488,13 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     const passes: SceneFragmentPass[] = [];
     const layerTimeSeconds = Math.max(0, t - layer.startSeconds);
     for (const effect of layer.effects) {
-      if (effect.type !== "pluginShader" || effect.enabled === false) continue;
-      const manifestId = effect.params?.[SHADER_MANIFEST_ID_PARAM_KEY];
+      if (effect.enabled === false) continue;
+      // "pluginShader" resolves its fragment definition through a user-registered manifest id;
+      // the builtin fragment effects (radial/directional blur, sharpen, pixelate, chromatic
+      // aberration — see `color/fragment-effects/builtins.ts`) map straight from the effect TYPE.
+      const isBuiltinFragmentEffect = BUILTIN_FRAGMENT_EFFECT_TYPES.has(effect.type);
+      if (effect.type !== "pluginShader" && !isBuiltinFragmentEffect) continue;
+      const manifestId = isBuiltinFragmentEffect ? builtinFragmentEffectId(effect.type) : effect.params?.[SHADER_MANIFEST_ID_PARAM_KEY];
       const def = typeof manifestId === "string" ? getFragmentEffect(manifestId) : undefined;
       if (!def) {
         if (typeof window !== "undefined") {

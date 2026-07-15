@@ -35,9 +35,6 @@ import {
 } from "lucide-react";
 import {
   applyCaptionTrackToComposition,
-  applyExtractPersonComposition,
-  applyRemoveBackgroundComposition,
-  applyTextBehindPersonComposition,
   captionStylePresets,
   createAutoCaptionPrompt,
   createAutoCaptionAssistantPlan,
@@ -87,18 +84,11 @@ import { ShadowCostBadge } from "../components/ShadowCostBadge";
 import { addEffect, createAsset, createProject, listAssets, patchProject, suggestAutoCaptionHighlights, transformAutoCaptions } from "../lib/api";
 import { buildBackgroundColor, parseBackgroundColor } from "../lib/colorBackground";
 import { defaultColorPalette, extractPaletteFromAsset } from "../lib/colorPalette";
-import { createToolArtifactStore } from "../tools/artifact-store";
 import { transcribeAssetWithCloudAdapter } from "../tools/cloud-transcription";
-import {
-  chooseSegmentationDeviceProfile,
-  segmentVideoFast,
-  segmentVideoQuality,
-  type SegmentationDeviceProfile,
-  type SegmentVideoResult
-} from "../tools/local-segmentation";
-import { transcribeAssetLocally } from "../tools/local-transcription";
-import { storeMatteArtifact } from "../tools/matte-store";
+import { getLayerToolEffectHandler } from "../tools/layer-effect-handlers";
+import { chooseSegmentationDeviceProfile, type SegmentationDeviceProfile } from "../tools/local-segmentation";
 import { createToolRuntimeState, runToolAdapter, type ToolRunController, type ToolRuntimeState } from "../tools/tool-runner";
+import { assertToolRunnable } from "../tools/useLayerToolEffectRunner";
 import { isCompatibleToolAsset, resolveToolMediaUrl } from "../tools/tool-media";
 
 const TOOL_ICONS: Record<ToolIconKey, LucideIcon> = {
@@ -356,6 +346,11 @@ export function ToolDetailPage() {
       setLocalTranscriptionStatus("Upload or select media first.");
       return;
     }
+    const blocker = assertToolRunnable("auto-captions", "Auto Captions");
+    if (blocker) {
+      setLocalTranscriptionStatus(blocker);
+      return;
+    }
 
     setBusy(true);
     cancelledTranscriptionRef.current = false;
@@ -364,11 +359,20 @@ export function ToolDetailPage() {
     setTranscriptionRunId(runId);
     setLocalTranscriptionStatus("Starting local transcription...");
     try {
-      const nextTranscript = await transcribeAssetLocally(selectedAsset, (message) => {
-        if (!cancelledTranscriptionRef.current && activeTranscriptionRunIdRef.current === runId) {
-          setLocalTranscriptionStatus(message);
-        }
-      }, () => cancelledTranscriptionRef.current);
+      // Same registered handler the editor's one-click flow drives — the ML entry
+      // point is wired exactly once (layer-effect-handlers.ts).
+      const nextTranscript = (await getLayerToolEffectHandler("auto-captions")!.run({
+        asset: selectedAsset,
+        layer: undefined,
+        fps: 30,
+        options: {},
+        onProgress: (message) => {
+          if (!cancelledTranscriptionRef.current && activeTranscriptionRunIdRef.current === runId) {
+            setLocalTranscriptionStatus(message);
+          }
+        },
+        isCancelled: () => cancelledTranscriptionRef.current
+      })) as TranscriptArtifactData;
       if (cancelledTranscriptionRef.current || activeTranscriptionRunIdRef.current !== runId) {
         setLocalTranscriptionStatus("Local transcription cancelled.");
         return;
@@ -442,6 +446,12 @@ export function ToolDetailPage() {
       return;
     }
 
+    const blocker = assertToolRunnable("extract-person", "Extract Person");
+    if (blocker) {
+      setSegmentationStatus(blocker);
+      return;
+    }
+
     setBusy(true);
     cancelledSegmentationRef.current = false;
     const runId = Date.now();
@@ -450,34 +460,30 @@ export function ToolDetailPage() {
     setSegmentationStage("fast");
     setSegmentationStatus("Starting fast preview segmentation...");
     try {
-      const result = await segmentVideoFast({
-        videoUrl: selectedAsset.fileUrl,
-        durationSeconds: selectedAsset.durationSeconds,
-        width: selectedAsset.width || 720,
-        height: selectedAsset.height || 1280,
-        tier: "fast",
+      // The registered extract-person handler owns segmentation + matte bake +
+      // upload (fail-loud via progress). The page's Extract buttons are the
+      // PRODUCER surface, so they always re-analyze rather than reusing.
+      const result = (await getLayerToolEffectHandler("extract-person")!.run({
+        asset: selectedAsset,
+        layer: undefined,
+        fps: 30,
+        options: { quality: "fast", maskSource: "reanalyze" },
         onProgress: (message) => {
           if (!cancelledSegmentationRef.current && activeSegmentationRunIdRef.current === runId) {
             setSegmentationStatus(message);
           }
         },
         isCancelled: () => cancelledSegmentationRef.current
-      });
+      })) as SubjectAnalysisArtifacts;
       if (cancelledSegmentationRef.current || activeSegmentationRunIdRef.current !== runId) {
         setSegmentationStatus("Extraction cancelled.");
         return;
       }
 
-      setSegmentationStatus("Saving preview matte...");
-      const bakedMask = await bakeMatte(result, `extract_${runId}`);
-      if (cancelledSegmentationRef.current || activeSegmentationRunIdRef.current !== runId) {
-        return;
-      }
-
-      setRealSubjectAnalysis({ maskSequence: bakedMask, trackingPath: result.trackingPath, subjectBounds: result.subjectBounds });
+      setRealSubjectAnalysis(result);
       setMaskFrameIndex(0);
       setSegmentationStatus(
-        `Fast preview ready: ${bakedMask.frames.length} frames extracted. Bake high quality before final export for cleaner edges.`
+        `Fast preview ready: ${result.maskSequence.frames.length} frames extracted. Bake high quality before final export for cleaner edges.`
       );
     } catch (error) {
       if (cancelledSegmentationRef.current || activeSegmentationRunIdRef.current !== runId) {
@@ -512,37 +518,28 @@ export function ToolDetailPage() {
         : "Baking high-quality matte (CPU - this device has no WebGPU, so this will take longer)..."
     );
     try {
-      const result = await segmentVideoQuality(
-        {
-          videoUrl: selectedAsset.fileUrl,
-          durationSeconds: selectedAsset.durationSeconds,
-          width: selectedAsset.width || 720,
-          height: selectedAsset.height || 1280,
-          tier: "quality",
-          targetFps: 30,
-          onProgress: (message) => {
-            if (!cancelledSegmentationRef.current && activeSegmentationRunIdRef.current === runId) {
-              setSegmentationStatus(message);
-            }
-          },
-          isCancelled: () => cancelledSegmentationRef.current
+      // Same registered handler as the fast tier; `quality` selects the RVM bake
+      // and always re-analyzes (a quality bake is an explicit fresh run).
+      const result = (await getLayerToolEffectHandler("extract-person")!.run({
+        asset: selectedAsset,
+        layer: undefined,
+        fps: 30,
+        options: { quality: "quality", maskSource: "reanalyze" },
+        onProgress: (message) => {
+          if (!cancelledSegmentationRef.current && activeSegmentationRunIdRef.current === runId) {
+            setSegmentationStatus(message);
+          }
         },
-        segmentationDeviceProfile
-      );
+        isCancelled: () => cancelledSegmentationRef.current
+      })) as SubjectAnalysisArtifacts;
       if (cancelledSegmentationRef.current || activeSegmentationRunIdRef.current !== runId) {
         setSegmentationStatus("High-quality bake cancelled.");
         return;
       }
 
-      setSegmentationStatus("Saving high-quality matte...");
-      const bakedMask = await bakeMatte(result, `extract_quality_${runId}`);
-      if (cancelledSegmentationRef.current || activeSegmentationRunIdRef.current !== runId) {
-        return;
-      }
-
-      setRealSubjectAnalysis({ maskSequence: bakedMask, trackingPath: result.trackingPath, subjectBounds: result.subjectBounds });
+      setRealSubjectAnalysis(result);
       setMaskFrameIndex(0);
-      setSegmentationStatus(`High-quality matte ready: ${bakedMask.frames.length} frames, temporally stable edges.`);
+      setSegmentationStatus(`High-quality matte ready: ${result.maskSequence.frames.length} frames, temporally stable edges.`);
     } catch (error) {
       if (cancelledSegmentationRef.current || activeSegmentationRunIdRef.current !== runId) {
         return;
@@ -555,24 +552,6 @@ export function ToolDetailPage() {
         setSegmentationStage("idle");
         setBusy(false);
       }
-    }
-  }
-
-  async function bakeMatte(result: SegmentVideoResult, runId: string) {
-    const store = await createToolArtifactStore();
-    const { maskSequence, blob } = await storeMatteArtifact(result, store, runId);
-    // maskSequence.matteVideoUri is a blob: URL right now - only valid in this
-    // tab. Upload the same bytes so the matte gets a real http(s) URL: needed
-    // for the Remotion worker to fetch it on export, and so it survives a
-    // page reload (blob: URLs don't).
-    try {
-      const matteAsset = await createAsset({
-        file: new File([blob], `${maskSequence.id}.webm`, { type: blob.type || "video/webm" })
-      });
-      return { ...maskSequence, matteVideoUri: matteAsset.fileUrl };
-    } catch {
-      setSegmentationStatus("Matte saved locally, but uploading it for export failed - export will need a retry once the API is reachable.");
-      return maskSequence;
     }
   }
 
@@ -984,68 +963,43 @@ export function ToolDetailPage() {
           return;
         }
       }
-      if (isExtractPerson) {
-        const composition = project.projectGraph.composition;
-        const nextComposition = composition
-          ? applyExtractPersonComposition(composition, {
-              mask: subjectAnalysis.maskSequence,
-              sourceAssetId: asset.id
-            })
-          : composition;
-        const projectWithArtifacts = await patchProject(project.id, {
-          projectGraph: {
-            ...project.projectGraph,
-            editableFields: {
-              ...project.projectGraph.editableFields,
-              maskSequence: subjectAnalysis.maskSequence,
-              trackingPath: subjectAnalysis.trackingPath,
-              subjectBounds: subjectAnalysis.subjectBounds,
-              maskFeather,
-              trackingSmoothing
-            },
-            composition: nextComposition,
-            version: project.projectGraph.version + 1
-          }
-        });
-        navigate(`/editor/${projectWithArtifacts.id}`);
-        return;
-      }
-      if (isTextBehindPerson || isRemoveBackground) {
+      if (isExtractPerson || isTextBehindPerson || isRemoveBackground) {
         const composition = project.projectGraph.composition;
         if (composition) {
-          const maskId = subjectAnalysis.maskSequence.id;
-          const nextComposition = isTextBehindPerson
-            ? applyTextBehindPersonComposition(composition, {
-                text: behindText,
-                textColor: behindTextColor,
-                maskId,
-                mask: subjectAnalysis.maskSequence,
-                sourceAssetId: asset.id
-              })
-            : applyRemoveBackgroundComposition(composition, {
-                mode: removeBackgroundMode,
-                maskId,
-                mask: subjectAnalysis.maskSequence,
-                sourceAssetId: asset.id
-              });
-          const projectWithComposite = await patchProject(project.id, {
+          // One thin standalone apply over the same registered handler the editor
+          // drives: `context: "standalone"` selects the builders' "replace" mode
+          // (fresh draft project), and describeEditableFields supplies the durable
+          // artifact patch. The page only adds its own page-state extras on top.
+          const handler = getLayerToolEffectHandler(tool.slug)!;
+          const applyArgs = {
+            composition,
+            layer: undefined,
+            asset,
+            result: isExtractPerson ? subjectAnalysis : subjectAnalysis.maskSequence,
+            options: isTextBehindPerson
+              ? { text: behindText, textColor: behindTextColor }
+              : isRemoveBackground
+                ? { mode: removeBackgroundMode }
+                : {},
+            context: "standalone" as const
+          };
+          const nextComposition = handler.applyResult(applyArgs);
+          const pageExtras = isExtractPerson
+            ? { maskFeather, trackingSmoothing }
+            : { trackingPath: subjectAnalysis.trackingPath, subjectBounds: subjectAnalysis.subjectBounds };
+          const projectWithArtifacts = await patchProject(project.id, {
             projectGraph: {
               ...project.projectGraph,
               editableFields: {
                 ...project.projectGraph.editableFields,
-                maskSequence: subjectAnalysis.maskSequence,
-                trackingPath: subjectAnalysis.trackingPath,
-                subjectBounds: subjectAnalysis.subjectBounds,
-                compositingTool: tool.slug,
-                compositingMode: isTextBehindPerson ? "textBehindPerson" : removeBackgroundMode,
-                behindText,
-                behindTextColor
+                ...(handler.describeEditableFields?.(applyArgs) ?? {}),
+                ...pageExtras
               },
               composition: nextComposition,
               version: project.projectGraph.version + 1
             }
           });
-          navigate(`/editor/${projectWithComposite.id}`);
+          navigate(`/editor/${projectWithArtifacts.id}`);
           return;
         }
       }

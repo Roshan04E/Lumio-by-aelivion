@@ -98,6 +98,19 @@
 .mkt-nav-ghost { color: var(--mkt-text-muted); font-size: 14px; }
 .mkt-nav-ghost:hover { color: var(--mkt-text); }
 
+/* AI (Pro) dev toggle — glitter icon + switch. Gates COGS features like AI planning; editor stays free. */
+.mkt-pro-toggle {
+  display: inline-flex; align-items: center; gap: 8px; margin-left: 4px; padding: 5px 9px;
+  color: var(--mkt-text-muted); background: transparent; border: 1px solid var(--mkt-border); border-radius: 999px;
+  cursor: pointer; transition: color .15s ease, border-color .15s ease;
+}
+.mkt-pro-toggle:hover { color: var(--mkt-text); }
+.mkt-pro-toggle.is-on { color: var(--mkt-accent); border-color: color-mix(in srgb, var(--mkt-accent) 55%, transparent); }
+.mkt-pro-track { position: relative; width: 26px; height: 15px; border-radius: 999px; background: var(--mkt-border); transition: background .15s ease; flex: none; }
+.mkt-pro-toggle.is-on .mkt-pro-track { background: var(--mkt-accent); }
+.mkt-pro-thumb { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--mkt-text); transition: transform .15s ease; }
+.mkt-pro-toggle.is-on .mkt-pro-thumb { transform: translateX(11px); background: var(--mkt-bg); }
+
 /* ---- headings / sections ---- */
 .mkt-section { padding: 90px 0; }
 .mkt-sec-head { max-width: 60ch; }
@@ -409,6 +422,21 @@
 .mkt-textarea { resize: vertical; line-height: 1.5; }
 .mkt-input:focus, .mkt-textarea:focus, .mkt-select-trigger:focus-visible { outline: none; border-color: var(--mkt-accent); }
 
+/* Glassmorphic upload dropzone on the marketing/create page — matches the mkt glass surfaces
+   (translucent --mkt-panel + backdrop blur) instead of the editor's flat global .dropzone.
+   Scoped to .mkt-page so the editor's own upload zones stay untouched. */
+.mkt-page .dropzone {
+  background: color-mix(in srgb, var(--mkt-panel) 42%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--mkt-border);
+  border-radius: var(--mkt-r-md);
+  transition: border-color .15s ease, background .15s ease;
+}
+.mkt-page .dropzone:hover { border-color: var(--mkt-accent); background: color-mix(in srgb, var(--mkt-panel) 55%, transparent); }
+.mkt-page .dropzone strong { color: var(--mkt-text); }
+.mkt-page .dropzone span { color: var(--mkt-text-muted); }
+
 .mkt-select { position: relative; display: flex; flex-direction: column; gap: 6px; }
 .mkt-select-trigger { display: flex; align-items: center; justify-content: space-between; cursor: pointer; text-align: left; }
 .mkt-select-trigger:hover { border-color: var(--mkt-accent); }
@@ -447,6 +475,81 @@
 .mkt-start-featured .mkt-start-info h3 { color: var(--mkt-text); }
 .mkt-linkbtn { align-self: flex-start; background: transparent; border: 0; color: var(--mkt-accent); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; padding: 4px 0; display: inline-flex; align-items: center; gap: 6px; }
 .mkt-linkbtn:hover { color: var(--mkt-accent-2); }
+
+/* --------------------------------------------------------------------------
+   /create onboarding flow — a centered, one-decision-per-screen wizard
+   (upload + intent → goal → optional AI prompt). Scoped to .create-page; mkt
+   tokens only, so no other marketing page is affected.
+   -------------------------------------------------------------------------- */
+.create-shell { min-height: calc(100vh - 62px); display: grid; place-items: center; padding: 36px 24px 56px; }
+.create-stage { width: 100%; max-width: 640px; text-align: center; }
+.create-stage-narrow { max-width: 560px; }
+.create-page .create-stage h1 { font-size: clamp(25px, 3vw, 38px); letter-spacing: -0.02em; margin: 10px 0 0; font-weight: 700; }
+.create-page .create-stage .mkt-eyebrow { justify-content: center; }
+.create-page .create-stage .mkt-sub { margin: 10px auto 0; font-size: 15px; }
+
+.create-detected { margin: 12px 0 0; font-family: var(--mkt-mono); font-size: 11px; letter-spacing: .06em; color: var(--mkt-text-dim); }
+
+.create-section { margin-top: 26px; }
+.create-section > h2 { font-size: 14px; font-weight: 600; color: var(--mkt-text-muted); margin: 0 0 12px; }
+
+.create-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.create-choice-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left; padding: 16px; cursor: pointer;
+  color: var(--mkt-text);
+  background: color-mix(in srgb, var(--mkt-panel) 42%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--mkt-border); border-radius: var(--mkt-r-md);
+  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.create-choice-card svg { color: var(--mkt-accent); margin-bottom: 5px; }
+.create-choice-card strong { font-size: 15px; }
+.create-choice-card span { font-size: 12.5px; color: var(--mkt-text-muted); }
+.create-choice-card:hover { border-color: color-mix(in srgb, var(--mkt-accent) 55%, var(--mkt-border)); }
+.create-choice-card.is-active { border-color: var(--mkt-accent); box-shadow: inset 0 0 0 1px var(--mkt-accent), 0 0 0 3px color-mix(in srgb, var(--mkt-accent) 18%, transparent); }
+.create-choice-card { position: relative; }
+.create-choice-card.is-locked { opacity: .6; cursor: not-allowed; }
+.create-choice-card.is-locked:hover { border-color: var(--mkt-border); }
+.create-pro-pill {
+  position: absolute; top: 10px; right: 10px; font-family: var(--mkt-mono); font-size: 9px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--mkt-accent); padding: 2px 7px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--mkt-accent) 45%, transparent); background: color-mix(in srgb, var(--mkt-accent) 12%, transparent);
+}
+
+.create-settings { margin-top: 20px; text-align: left; border: 1px solid var(--mkt-border-soft); border-radius: var(--mkt-r-md); background: color-mix(in srgb, var(--mkt-panel) 30%, transparent); }
+.create-settings > summary { list-style: none; cursor: pointer; padding: 12px 16px; font-size: 13px; font-weight: 550; color: var(--mkt-text-muted); user-select: none; }
+.create-settings > summary::-webkit-details-marker { display: none; }
+.create-settings[open] > summary { color: var(--mkt-text); border-bottom: 1px solid var(--mkt-border-soft); }
+.create-settings-body { display: flex; flex-wrap: wrap; gap: 20px; padding: 16px; }
+.create-settings-body .mkt-field { flex: 1 1 220px; }
+
+.create-nav { margin-top: 26px; display: flex; justify-content: center; }
+.create-primary { padding: 11px 26px; font-size: 15px; border-radius: var(--mkt-r-md); }
+
+.create-back { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 14px; background: transparent; border: 0; color: var(--mkt-text-muted); font-family: inherit; font-size: 13px; cursor: pointer; }
+.create-back:hover { color: var(--mkt-text); }
+
+.create-styles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 26px; }
+.create-style-card {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 22px 14px; cursor: pointer;
+  color: var(--mkt-text);
+  background: color-mix(in srgb, var(--mkt-panel) 42%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--mkt-border); border-radius: var(--mkt-r-md);
+  transition: border-color .15s ease, background .15s ease, transform .06s ease;
+}
+.create-style-card:hover { border-color: var(--mkt-accent); background: color-mix(in srgb, var(--mkt-panel) 55%, transparent); }
+.create-style-card:active { transform: translateY(1px); }
+.create-style-card:disabled { opacity: .55; cursor: default; }
+.create-style-ic { font-size: 26px; line-height: 1; }
+.create-style-card strong { font-size: 14px; font-weight: 600; }
+
+.create-prompt { margin-top: 18px; text-align: left; }
+
+@media (max-width: 560px) {
+  .create-choice { grid-template-columns: 1fr; }
+  .create-styles { grid-template-columns: repeat(2, 1fr); }
+}
 @media (max-width: 720px) { .mkt-start-row { grid-template-columns: 1fr; gap: 16px; } }
 
 /* ---- segmented control (orientation, etc.) ---- */

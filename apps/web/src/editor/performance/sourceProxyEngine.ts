@@ -328,6 +328,18 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     encoded.blob
   );
   if (!url) throw new Error("proxy persist failed");
+
+  // DURATION HEAL (2026-07-13): the transcode just demuxed the source's TRUE decodable end. When
+  // the stored asset duration overshoots it (legacy ceil-to-Int rows, stock provider metadata),
+  // clips authored to that length freeze on their last frame for the overshoot — shrink the stored
+  // duration (downward-only, server-enforced) so future adds/reloads use the real end. Fire and
+  // forget: a failure just means the next build retries.
+  const decodableEnd = encoded.decodableEndSeconds;
+  if (decodableEnd !== undefined && decodableEnd > 0.2 && asset.durationSeconds - decodableEnd > 0.05) {
+    void import("../../lib/api").then(({ healAssetDurationSeconds }) =>
+      healAssetDurationSeconds(asset.id, decodableEnd).catch(() => undefined)
+    );
+  }
   return url;
 }
 
@@ -335,6 +347,8 @@ interface TranscodeResult {
   blob: Blob;
   encodedFrames: number;
   fps: number;
+  /** True decodable end from the source's sample table; undefined on the <video> fallback provider. */
+  decodableEndSeconds?: number | undefined;
 }
 
 /** Run the transcode body in the dedicated worker; suspension changes are forwarded live. */
@@ -368,6 +382,7 @@ function transcodeInWorker(
           blob: new Blob([message.buffer], { type: message.mime || "video/mp4" }),
           encodedFrames: message.encodedFrames,
           fps: message.fps,
+          decodableEndSeconds: message.decodableEndSeconds,
         });
       } else {
         reject(new Error(message.message || "source-proxy worker failed"));
@@ -447,7 +462,15 @@ async function transcodeOnMainThread(
     const maxNullRun = Math.max(2, Math.ceil(fps * 0.5));
     let nullRun = 0;
     let decodedAny = false;
-    const frameCount = Math.max(1, Math.ceil(durationSeconds * fps));
+    // DECODABLE-END CLAMP (2026-07-13, keep in sync with sourceProxy.worker.ts): asset duration
+    // metadata can OVERSHOOT the sample table (historically up to ~1s via the ceil-to-Int asset
+    // column). Past the last sample getFrame CLAMPS to the final frame — never null — so the
+    // null-based frozen-tail guard below can't see it and the repeats bake into the proxy.
+    // Clamp the frame loop to the demuxed truth instead of trusting the metadata.
+    const decodableEnd = provider.decodableEndSeconds;
+    const effectiveDuration =
+      decodableEnd !== undefined && decodableEnd > 0.2 && decodableEnd < durationSeconds ? decodableEnd : durationSeconds;
+    const frameCount = Math.max(1, Math.ceil(effectiveDuration * fps));
     let encodedFrames = 0;
     for (let i = 0; i < frameCount; i += 1) {
       // Parks an in-flight transcode within one frame when playback starts (see
@@ -462,7 +485,7 @@ async function transcodeOnMainThread(
         ctx.drawImage(frame as CanvasImageSource, 0, 0, width, height);
       } else {
         nullRun += 1;
-        if (decodedAny && i / fps > durationSeconds - 0.25) {
+        if (decodedAny && i / fps > effectiveDuration - 0.25) {
           // FROZEN-TAIL PROBE (debug only): the metadata duration overshoots the decodable sample
           // table — confirm the gap that leaves the timeline clip's tail with no real frames to serve.
           if (typeof window !== "undefined" && window.localStorage?.getItem("kimera.exportDecodeDebug") === "1") {
@@ -495,7 +518,7 @@ async function transcodeOnMainThread(
       await feedAudio(encoder, audio);
     }
     const proxyBlob = await encoder.finalize();
-    return { blob: proxyBlob, encodedFrames, fps };
+    return { blob: proxyBlob, encodedFrames, fps, decodableEndSeconds: decodableEnd };
   } catch (error) {
     encoder.dispose();
     throw error;

@@ -13,12 +13,16 @@ export function createDefaultComposition(input: {
   durationSeconds: number;
   assetId?: string | undefined;
   orientation?: CompositionOrientation | undefined;
+  /** Frame-rate override (create-only goal presets, e.g. Cinematic → 24). Defaults to the
+   *  orientation preset's 30fps when omitted. */
+  fps?: number | undefined;
   /** "Continue without a template": start with an empty timeline. Only the uploaded footage (if any)
    *  lands on the video track — no placeholder "Main clip" and no empty "Music bed" audio layer. */
   blank?: boolean | undefined;
 }): TimelineComposition {
   const duration = clamp(input.durationSeconds, 6, 7200);
-  const frame = orientationPresets[input.orientation ?? "portrait"];
+  const orientationFrame = orientationPresets[input.orientation ?? "portrait"];
+  const frame = { ...orientationFrame, fps: input.fps ?? orientationFrame.fps };
   // Deliberately raw: the main clip carries no auto color-grade/grain and no fade-in
   // (see layer() below) - what the user uploaded is exactly what renders, frame 0
   // onward, full opacity, unaltered. No placeholder "Hook caption"/"CTA caption" text
@@ -311,6 +315,56 @@ export function shiftSpeedKeyframes(
   return [{ timeSeconds: 0, value: atCut }, ...kept];
 }
 
+const KEYFRAME_TRIM_EPSILON = 0.0001;
+
+/** Move a layer's ABSOLUTE (V1/legacy) keyframes with the clip when the whole timeline shifts left by
+ *  `bySeconds`. V2 `animations` are layer-local and must NOT be touched by a pure move. */
+function shiftAbsoluteKeyframes(layer: TimelineLayer, bySeconds: number): TimelineLayer["keyframes"] {
+  if (!layer.keyframes.length || bySeconds === 0) return layer.keyframes;
+  return layer.keyframes.map((keyframe) => ({ ...keyframe, timeSeconds: keyframe.timeSeconds - bySeconds }));
+}
+
+/**
+ * THE rule for what a head trim does to a layer's keyframe tracks — the keyframe counterpart of
+ * {@link shiftSpeedKeyframes}, and the single implementation behind both `trimLayerKeyframesTo`
+ * (interactive edge trim / ripple / split) and `clipCompositionToWorkArea` (work-area export).
+ *
+ * Cutting `headDeltaSeconds` off the head moves the CONTENT, so anything pinned to that content must
+ * move with it or it silently drifts by exactly the trim amount. The three tracks are pinned in
+ * different time domains, which is the whole trap:
+ *  - `animations` (V2) are LAYER-LOCAL → drop keys inside the removed window, then shift survivors by
+ *    −delta. (A head EXTEND is delta < 0: nothing is dropped and keys shift right.)
+ *  - `keyframes` (V1) are ABSOLUTE composition time → they don't rebase, they just re-filter against
+ *    the new span. A caller that also moves the clip on the TIMELINE must shift these itself.
+ *  - `speedKeyframes` rebase via `shiftSpeedKeyframes` (the value at the cut becomes the new point 0).
+ *
+ * Duplicating this rule is what broke the work-area export: it rebased `sourceInSeconds` and the ramp
+ * but not the keyframes, so exporting with an in-point that cut into a keyframed clip rendered every
+ * key `trimmedFromHead` seconds late (project-tracker/timeline.md v1).
+ */
+export function trimLayerKeyframeTracks(
+  layer: TimelineLayer,
+  headDeltaSeconds: number,
+  nextDurationSeconds: number
+): Pick<TimelineLayer, "keyframes" | "animations"> & { speedKeyframes?: TimelineLayer["speedKeyframes"] } {
+  const headMoved = Math.abs(headDeltaSeconds) > KEYFRAME_TRIM_EPSILON;
+  const nextStartSeconds = layer.startSeconds + headDeltaSeconds;
+  const nextEndSeconds = nextStartSeconds + nextDurationSeconds;
+  const animations = (layer.animations ?? [])
+    .filter((animation) => animation.timeSeconds >= headDeltaSeconds - KEYFRAME_TRIM_EPSILON)
+    .map((animation) =>
+      headMoved ? { ...animation, timeSeconds: animation.timeSeconds - headDeltaSeconds } : animation
+    )
+    .filter((animation) => animation.timeSeconds <= nextDurationSeconds + KEYFRAME_TRIM_EPSILON);
+  const keyframes = layer.keyframes.filter(
+    (keyframe) =>
+      keyframe.timeSeconds >= nextStartSeconds - KEYFRAME_TRIM_EPSILON &&
+      keyframe.timeSeconds <= nextEndSeconds + KEYFRAME_TRIM_EPSILON
+  );
+  const ramp = headMoved ? shiftSpeedKeyframes(layer, headDeltaSeconds) : layer.speedKeyframes;
+  return { keyframes, animations, ...(ramp ? { speedKeyframes: ramp } : {}) };
+}
+
 /**
  * Premiere-style work area: when in/out points are set on the timeline, clip the composition to that
  * sub-range. Layers fully outside the range are dropped; layers straddling an edge are trimmed (with
@@ -362,21 +416,27 @@ export function clipCompositionToWorkArea(composition: TimelineComposition): Tim
       const visualEnd = Math.max(layerEnd, visualEndSecondsByLayerId.get(layer.id) ?? layerEnd);
       if (visualEnd <= inPoint || layerStart >= outPoint) return [];
       if (preserveTimingLayerIds.has(layer.id) && layerStart < inPoint) {
-        return [{ ...layer, startSeconds: layerStart - inPoint }];
+        // Timing preserved (the clip feeds a transition): no head trim, so LAYER-LOCAL keys stay put.
+        // The clip still MOVES on the timeline, so absolute (V1) keys must follow it.
+        return [{ ...layer, startSeconds: layerStart - inPoint, keyframes: shiftAbsoluteKeyframes(layer, inPoint) }];
       }
       const clippedStart = Math.max(layerStart, inPoint);
       const clippedEnd = Math.min(layerEnd, outPoint);
       const trimmedFromHeadSeconds = clippedStart - layerStart;
+      // Rebase every keyframe track onto the trimmed head, then shift the surviving ABSOLUTE (V1) keys
+      // by the in-point like the clip itself. V2 keys are layer-local and already handled by the trim.
+      const trimmed = trimLayerKeyframeTracks(layer, trimmedFromHeadSeconds, clippedEnd - clippedStart);
       const next: TimelineLayer = {
         ...layer,
         startSeconds: clippedStart - inPoint,
-        durationSeconds: clippedEnd - clippedStart
+        durationSeconds: clippedEnd - clippedStart,
+        animations: trimmed.animations,
+        keyframes: trimmed.keyframes.map((keyframe) => ({ ...keyframe, timeSeconds: keyframe.timeSeconds - inPoint }))
       };
+      if (trimmed.speedKeyframes) next.speedKeyframes = trimmed.speedKeyframes;
       if (layer.type === "video" || layer.type === "audio" || layer.sourceInSeconds !== undefined) {
         // Head trim consumes source media at the clip's playback rate (rate stretch / ramp integral).
         next.sourceInSeconds = layerSourceTimeSeconds(layer, trimmedFromHeadSeconds);
-        const shiftedRamp = shiftSpeedKeyframes(layer, trimmedFromHeadSeconds);
-        if (shiftedRamp) next.speedKeyframes = shiftedRamp;
       }
       return [next];
     })
@@ -402,6 +462,27 @@ export function updateTimelineLayer(
     tracks: composition.tracks.map((trackItem) => ({
       ...trackItem,
       layers: trackItem.layers.map((item) => (item.id === layerId ? updater(item) : item))
+    }))
+  };
+}
+
+/**
+ * Same as {@link updateTimelineLayer} but applies the SAME updater to every layer in `layerIds`
+ * (multiselect property editing) — each layer runs the updater against its OWN current value, so a
+ * shared "set opacity to 80" broadcast is correct even when the selected clips started at different
+ * values; a per-layer keyframe toggle likewise keyframes each clip's own value at the playhead.
+ */
+export function updateTimelineLayers(
+  composition: TimelineComposition,
+  layerIds: readonly string[],
+  updater: (layer: TimelineLayer) => TimelineLayer
+): TimelineComposition {
+  const targets = new Set(layerIds);
+  return {
+    ...composition,
+    tracks: composition.tracks.map((trackItem) => ({
+      ...trackItem,
+      layers: trackItem.layers.map((item) => (targets.has(item.id) ? updater(item) : item))
     }))
   };
 }

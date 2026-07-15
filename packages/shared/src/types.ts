@@ -191,11 +191,46 @@ export interface ProjectEffect {
   status: "idle" | "queued" | "processing" | "ready" | "failed";
 }
 
+/**
+ * The text-appearance subset of a {@link TimelineLayer} — the fields a saved Text Style captures and
+ * bakes. Deliberately excludes text CONTENT, transform/geometry, width, warp, effects and keyframes:
+ * a style is *how text looks*, not what it says or where it sits. See `captureTextStyle`/`applyTextStyle`.
+ */
+export interface TextStyleFields {
+  fontFamily?: string | undefined;
+  fontSize?: number | undefined;
+  fontWeight?: number | undefined;
+  italic?: boolean | undefined;
+  letterSpacing?: number | undefined;
+  lineHeight?: number | undefined;
+  color?: string | undefined;
+  strokeColor?: string | undefined;
+  strokeWidth?: number | undefined;
+  backgroundColor?: string | undefined;
+  backgroundPaddingEm?: number | undefined;
+  backgroundRadiusEm?: number | undefined;
+  shadowColor?: string | undefined;
+  shadowBlur?: number | undefined;
+  shadowOffsetX?: number | undefined;
+  shadowOffsetY?: number | undefined;
+  textAlign?: "left" | "center" | "right" | undefined;
+}
+
+/** A named, reusable text look saved in the project (§2 Text Styles). Applied by BAKING its fields
+ *  onto a text layer (one-shot — no live link). Project-local; lives in {@link ProjectGraph.textStyles}. */
+export interface TextStyle {
+  id: string;
+  name: string;
+  style: TextStyleFields;
+}
+
 export interface ProjectGraph {
   projectId: string;
   sourceAssetId?: string | undefined;
   effects: ProjectEffect[];
   editableFields: Record<string, unknown>;
+  /** Saved reusable text looks (§2). Project-local, one-shot apply. Absent on projects with none. */
+  textStyles?: TextStyle[] | undefined;
   plugins?: {
     effects?: PluginEffectManifest[] | undefined;
     looks?: PluginLookManifest[] | undefined;
@@ -205,6 +240,23 @@ export interface ProjectGraph {
   /** Auxiliary compositions, used by imported nested timelines/templates. `composition` remains the active/root timeline. */
   compositions?: Record<string, TimelineComposition> | undefined;
   version: number;
+}
+
+/** Responsive Pin (§1) axes. "center" (or unset) = hold the box CENTER at a constant percent (today's
+ *  behavior); an edge value holds THAT edge of the painted box at a constant percent on reframe. */
+export type PinX = "left" | "center" | "right";
+export type PinY = "top" | "center" | "bottom";
+export interface LayerResponsivePin {
+  x?: PinX | undefined;
+  y?: PinY | undefined;
+}
+
+/** Responsive Time (§5) — protected head/tail durations (layer-local seconds). When the clip's
+ *  DURATION changes, keyframes inside these zones keep their crafted timing (head held to the start,
+ *  tail re-anchored to the new end) and only the middle stretches. Absent = uniform proportional squeeze. */
+export interface LayerResponsiveTime {
+  introSeconds: number;
+  outroSeconds: number;
 }
 
 export type TimelineLayerType = "video" | "image" | "text" | "audio" | "shape" | "adjustment";
@@ -291,7 +343,25 @@ export interface LayerGraphic {
    * `fill` + `currentColor` instead and carry no palette.
    */
   palette?: Array<{ from: string; to: string }> | undefined;
+  /**
+   * Playback overrides for a SMIL-animated graphic (line-md-style packs). Both fields are optional and
+   * absent by default — the SVG's OWN intent wins (its `dur` cycle; `repeatCount="indefinite"` → loop,
+   * `fill="freeze"` one-shot → play once and hold). Set per layer from the Graphic inspector panel.
+   * Resolved for every renderer by `resolveGraphicAnimation`; ignored on non-animated graphics.
+   */
+  animation?:
+    | {
+        /** `"once"` = play through then hold the final frame; `"infinite"` = repeat for the clip. */
+        loop?: GraphicLoopMode | undefined;
+        /** Seconds for ONE cycle on the timeline. Differing from the SVG's natural cycle time-scales
+         *  playback (slower/faster) without re-authoring the SVG. */
+        durationSeconds?: number | undefined;
+      }
+    | undefined;
 }
+
+/** How a SMIL-animated graphic repeats over its clip. See {@link LayerGraphic.animation}. */
+export type GraphicLoopMode = "once" | "infinite";
 
 /**
  * Unified vector-mask model (Premiere/AE-style), reused by clip-level masks, effect-level masks, and
@@ -338,6 +408,8 @@ export interface Mask {
   expansion: number;
   /** 0–100 multiplier on this mask's alpha. */
   opacity: number;
+  /** Rounds the mask outline's corners, in px (rectangle masks only). Absent/0 = sharp corners. */
+  cornerRadius?: number | undefined;
   inverted: boolean;
   transform: { x: number; y: number; scaleX: number; scaleY: number; rotation: number };
   /** Phase 5: per-property keyframes use the layer `animations` array; path uses this dedicated list. */
@@ -367,7 +439,12 @@ export const timelineEffectTypes = [
   "audioCompressor",
   "audioGate",
   "audioLimiter",
-  "pluginShader"
+  "pluginShader",
+  "radialBlur",
+  "directionalBlur",
+  "sharpen",
+  "pixelate",
+  "chromaticAberration"
 ] as const;
 
 export type TimelineEffectType = (typeof timelineEffectTypes)[number];
@@ -666,6 +743,31 @@ export interface TimelineLayer {
   linkedGroupId?: string | undefined;
   locked?: boolean | undefined;
   muted?: boolean | undefined;
+  /**
+   * Responsive Pin (§1) — how this layer re-anchors when the CANVAS is reframed
+   * (16:9 ↔ 9:16, size change). Absent or all-"center" = today's behavior (the box
+   * center is held at a constant percent). A non-center axis holds that EDGE of the
+   * painted box at a constant percent instead, so e.g. a right-pinned lower-third keeps
+   * its right margin on reframe. Resolved by BAKING new `transform.position` values at
+   * reframe time (editor-side) — both renderers keep consuming plain percent positions,
+   * so this never crosses the render-manifest line. Uniform scale is untouched (no
+   * stretch — Pin+scale is deferred). See `responsive-pin.ts`.
+   */
+  responsive?: LayerResponsivePin | undefined;
+  /**
+   * Responsive Time (§5) — protected intro/outro when this clip's DURATION changes (trim/resize).
+   * With this set, `squeezeLayerKeyframesTo` holds the first `introSeconds` and last `outroSeconds`
+   * of animation and stretches only the middle, instead of rescaling everything proportionally.
+   * Absent = today's uniform squeeze. Non-source layers only (text/shape/image). See `remapResponsiveTime`.
+   */
+  responsiveTime?: LayerResponsiveTime | undefined;
+  /**
+   * Frames (see FRAMES.md) — a parametric shape this layer's media clips to. Data-only:
+   * `{ generatorId, params }` chosen from a `FrameDefinition`. When set with NO asset the layer is an
+   * empty frame placeholder; with media it clips to the generated outline (via the existing clip-mask).
+   * Its params are edited in the Effects subpanel. `LayerFrame` lives in `frames.ts`.
+   */
+  frame?: import("./frames").LayerFrame | undefined;
   /**
    * Template authoring marker. When a project is saved as a template, layers
    * flagged as slots become the user-fillable parts: `media` slots accept a

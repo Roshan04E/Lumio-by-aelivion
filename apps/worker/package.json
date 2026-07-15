@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "animation:test": "tsx src/animation-evaluator-test.ts",
+    "graphic:test": "tsx src/graphic-animation-test.ts",
+    "graphic:render": "tsx src/graphic-animation-render-test.ts",
     "skills:test": "tsx src/skills-resolver-test.ts",
     "executor:test": "tsx src/executor-resolver-test.ts",
     "clipref:test": "tsx src/clip-reference-test.ts",

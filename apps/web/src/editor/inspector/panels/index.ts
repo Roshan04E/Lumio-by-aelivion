@@ -62,7 +62,7 @@ export function registerBuiltinInspectorPanels(): void {
     id: "mask",
     title: "Masks",
     tier: "advanced",
-    appliesTo: ["video", "image", "text", "shape"],
+    appliesTo: ["video", "image", "text", "shape", "adjustment"],
     order: 30,
     load: () => import("./MaskPanel")
   });

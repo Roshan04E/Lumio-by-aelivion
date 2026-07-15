@@ -91,7 +91,12 @@ export const createProjectSchema = z.object({
   templateId: z.string().optional(),
   sourceAssetId: z.string().optional(),
   prompt: z.string().max(600).optional(),
-  orientation: z.enum(["portrait", "landscape"]).optional()
+  orientation: z.enum(["portrait", "landscape"]).optional(),
+  // Create-only goal presets (the /create style tiles) carry deterministic project properties:
+  // a frame rate, a starting module stack, and a target duration for footage-less drafts.
+  fps: z.number().int().min(12).max(120).optional(),
+  effects: z.array(moduleTypeSchema).optional(),
+  durationSeconds: z.coerce.number().min(1).max(7200).optional()
 });
 
 export const patchProjectSchema = z.object({

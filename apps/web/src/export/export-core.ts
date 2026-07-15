@@ -12,8 +12,12 @@ import {
   expandEffectRegionMasks,
   expandNestedCompositions,
   getCompositionFontsUsed,
+  graphicAnimationBakeTime,
+  graphicToAnimatedDataUrl,
   graphicToDataUrl,
+  resolveGraphicAnimation,
   normalizeProjectColorSettings,
+  type GraphicAnimationPlan,
   registerLookManifests,
   registerTransitionManifests,
   type PluginLookManifest,
@@ -24,13 +28,26 @@ import {
 import { EncoderStallRecoveredError, MediaEncoder, REC709_SDR_LIMITED, type ExportFormat } from "./video-encoder";
 import { getRegionPassesEnabled } from "../color/render-engine";
 import { SceneFrameCompositor } from "./scene-frame-compositor";
-import { clipSourceKey, createFrameProvider, graphicSourceKey, type FrameProvider } from "./source-decoder";
+import { clipSourceKey, createAnimatedGraphicSource, createFrameProvider, graphicSourceKey, type FrameProvider } from "./source-decoder";
 import { audioConfig, encodeMixedChannels, type MixedAudioChannels } from "./audio-mixer";
 
 type StageProbe = { stage: "decode" | "rtt" | "final" | "draws" | "gl"; timeSeconds: number; meanLuma?: number; layerId?: string; assetId?: string; detail?: string };
 
 /** A resolved visual source: `assetId` (or `matte:<layerId>`) → playable URL + kind. */
-export type SourceUrlMap = Record<string, { url: string; kind: "video" | "image" }>;
+export type SourceUrlMap = Record<
+  string,
+  {
+    url: string;
+    kind: "video" | "image";
+    /**
+     * ANIMATED vector graphic (`graphic:<layerId>` keys only): the resolved playback plan plus one
+     * deep-linked frame URL per frame index. `buildSourceUrlMap` emits SVG data URLs; `local-export`
+     * rasterizes them to PNG on the main thread so the DOM-less Worker can decode them. Present ⇒ the
+     * source loads as an animated provider whose frames advance with CLIP-LOCAL time.
+     */
+    animation?: { frameUrls: string[]; plan: GraphicAnimationPlan } | undefined;
+  }
+>;
 
 export interface ExportCoreInput {
   composition: TimelineComposition;
@@ -273,7 +290,10 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
         sources.set(
           key,
           await withTimeout(
-            createFrameProvider(sourceDef.url, sourceDef.kind),
+            // Animated vector graphic → frame sequence provider (advances with clip-local time).
+            sourceDef.animation
+              ? createAnimatedGraphicSource(sourceDef.animation.frameUrls, sourceDef.animation.plan)
+              : createFrameProvider(sourceDef.url, sourceDef.kind),
             SOURCE_LOAD_TIMEOUT_MS,
             `loadSource ${key}`
           )
@@ -454,7 +474,18 @@ export function buildSourceUrlMap(
     for (const layer of track.layers) {
       if (layer.type === "image" && layer.graphic) {
         // Self-contained vector graphic: bake the recolored SVG data URL (same bake as preview/Remotion).
-        map[graphicSourceKey(layer.id)] = { url: graphicToDataUrl(layer.graphic), kind: "image" };
+        // SMIL-animated ones additionally emit one deep-linked frame per cycle index, so the export can
+        // play the animation instead of freezing it at the settled final frame.
+        const plan = resolveGraphicAnimation(layer.graphic, { animations: layer.animations });
+        const animation = plan
+          ? {
+              plan,
+              frameUrls: Array.from({ length: plan.frameCount }, (_unused, index) =>
+                graphicToAnimatedDataUrl(layer.graphic!, graphicAnimationBakeTime(plan, index))
+              ),
+            }
+          : undefined;
+        map[graphicSourceKey(layer.id)] = { url: graphicToDataUrl(layer.graphic), kind: "image", animation };
         if (layer.matte?.uri) map[`matte:${layer.id}`] = { url: layer.matte.uri, kind: layer.type };
         continue;
       }

@@ -1,4 +1,4 @@
-import { useRef, type InputHTMLAttributes, type PointerEvent as ReactPointerEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FocusEvent, type InputHTMLAttributes, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 
 /**
  * Drag-scrub number input (After Effects / DaVinci style) — the editor-wide replacement for
@@ -6,10 +6,14 @@ import { useRef, type InputHTMLAttributes, type PointerEvent as ReactPointerEven
  *
  * - Press + drag horizontally on the value to scrub it: 1px = 1 step (hold Shift for 0.1× fine).
  * - A plain click (no drag) focuses the input and selects the text, so typing still works.
- * - While focused it behaves as a normal number input (caret/selection untouched).
+ * - While focused, keystrokes only edit a local draft string — the caller's `onChange` (which
+ *   typically clamps/commits into app state and re-renders this component with the new, possibly
+ *   clamped, controlled `value`) only fires on blur/Enter. Without this, every keystroke round-trips
+ *   through the caller's clamp and stomps the in-progress digits (e.g. typing "104" against a
+ *   max of 100 would clamp to "100" mid-keystroke, corrupting what the user is typing).
  *
- * Typing flows through the native `onChange`/`onBlur` the caller already wires; only scrubbing
- * fires `onScrubChange` with the stepped + clamped numeric value.
+ * Scrubbing still fires `onScrubChange` continuously (unaffected by the draft — scrubbing never
+ * focuses the input).
  */
 export interface ScrubNumberInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
   onScrubChange: (value: number) => void;
@@ -31,9 +35,10 @@ function stepDecimals(step: number): number {
   return dot === -1 ? 0 : Math.min(6, text.length - dot - 1);
 }
 
-export function ScrubNumberInput({ onScrubChange, className, ...rest }: ScrubNumberInputProps) {
+export function ScrubNumberInput({ onScrubChange, className, value, onChange, onFocus, onBlur, onKeyDown, ...rest }: ScrubNumberInputProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startValue: number; scrubbed: boolean } | null>(null);
+  const [draft, setDraft] = useState<string | null>(null);
 
   const min = toNumber(rest.min, -Infinity);
   const max = toNumber(rest.max, Infinity);
@@ -50,7 +55,7 @@ export function ScrubNumberInput({ onScrubChange, className, ...rest }: ScrubNum
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
-      startValue: toNumber(event.currentTarget.value, toNumber(rest.value, 0)),
+      startValue: toNumber(event.currentTarget.value, toNumber(value, 0)),
       scrubbed: false
     };
   };
@@ -65,7 +70,7 @@ export function ScrubNumberInput({ onScrubChange, className, ...rest }: ScrubNum
     const stepped = Math.round(raw / step) * step;
     const clamped = Math.min(max, Math.max(min, Number(stepped.toFixed(stepDecimals(step)))));
     // Uncontrolled usage (defaultValue): React won't render the new value, so show it directly.
-    if (rest.value === undefined && inputRef.current) {
+    if (value === undefined && inputRef.current) {
       inputRef.current.value = String(clamped);
     }
     onScrubChange(clamped);
@@ -82,16 +87,57 @@ export function ScrubNumberInput({ onScrubChange, className, ...rest }: ScrubNum
     }
   };
 
+  const handleFocus = (event: FocusEvent<HTMLInputElement>) => {
+    setDraft(event.currentTarget.value);
+    onFocus?.(event);
+  };
+
+  const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
+    // Typing: only update the local draft. Forwarding to the caller here would let its clamp/commit
+    // re-render this input with a different controlled value mid-keystroke.
+    setDraft(event.target.value);
+  };
+
+  const commitDraft = () => {
+    if (draft !== null && inputRef.current) {
+      const synthetic = { ...({} as ChangeEvent<HTMLInputElement>), target: inputRef.current, currentTarget: inputRef.current };
+      onChange?.(synthetic as ChangeEvent<HTMLInputElement>);
+    }
+    setDraft(null);
+  };
+
+  const handleBlur = (event: FocusEvent<HTMLInputElement>) => {
+    commitDraft();
+    onBlur?.(event);
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      commitDraft();
+      inputRef.current?.blur();
+    } else if (event.key === "Escape") {
+      setDraft(null);
+      event.currentTarget.value = String(value ?? "");
+      inputRef.current?.blur();
+    }
+    onKeyDown?.(event);
+  };
+
   return (
     <input
       {...rest}
       ref={inputRef}
       type="number"
       className={`scrub-number${className ? ` ${className}` : ""}`}
+      value={draft ?? value}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onFocus={handleFocus}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
     />
   );
 }

@@ -16,6 +16,7 @@ import {
   type PluginLookManifest,
   type PluginEffectManifest,
   type PluginTransitionManifest,
+  type TimelineEffectCategory,
   type TimelineEffectDefinition,
   type TimelineEffectType,
   type TimelineLayerType,
@@ -91,7 +92,16 @@ export const lookGalleryCategories: { id: LookGroup; label: string }[] = [
 
 /** A single addable catalog entry; `kind` selects which EditorPage handler runs on add. */
 export type CatalogItem =
-  | { kind: "effect"; id: string; label: string; description: string; effectType: TimelineEffectType; draggable: true }
+  | {
+      kind: "effect";
+      id: string;
+      label: string;
+      description: string;
+      effectType: TimelineEffectType;
+      draggable: true;
+      /** The registry's Blur/Adjust/Stylize/Keying/Texture/Audio bucket — powers the panel's subcategory headers. */
+      category?: TimelineEffectCategory | undefined;
+    }
   | {
       kind: "effectManifest";
       id: string;
@@ -223,8 +233,8 @@ const AUDIO_ITEMS: CatalogItem[] = [
   { kind: "audio", id: "audio-fadeOut", label: "Fade Out (audio)", description: "Ramp the audio down to silence at the clip end.", effectType: "volume", fade: "out" }
 ];
 
-function effectItem(type: TimelineEffectType, name: string, description: string): CatalogItem {
-  return { kind: "effect", id: `fx-${type}`, label: name, description, effectType: type, draggable: true };
+function effectItem(type: TimelineEffectType, name: string, description: string, category?: TimelineEffectCategory): CatalogItem {
+  return { kind: "effect", id: `fx-${type}`, label: name, description, effectType: type, draggable: true, category };
 }
 
 function presetItem(id: string, label: string): CatalogItem {
@@ -312,7 +322,7 @@ export function buildEffectCatalog(
   const uploaded: CatalogItem[] = [];
   for (const effect of effects) {
     if (effect.type === "volume") continue; // curated under Audio
-    const item = effectItem(effect.type, effect.name, effect.description);
+    const item = effectItem(effect.type, effect.name, effect.description, effect.category);
     // Audio-category clip FX (EQ/compressor/gate/limiter) live under the Audio bin, after the
     // curated volume/fade items — they'd otherwise be dropped by the video/text bucketing below.
     if (effect.category === "Audio") {
