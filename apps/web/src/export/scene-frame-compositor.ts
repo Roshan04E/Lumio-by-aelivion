@@ -308,8 +308,9 @@ export class SceneFrameCompositor {
   }
 
   /**
-   * How long this clip keeps rendering past its out-point: the duration of the next same-track clip's
-   * `transitionIn` (the window the outgoing clip is composited under). 0 if none. Matches the editor preview.
+   * How long this clip keeps rendering past its out-point: HALF (R3, centered-on-cut) of the next
+   * same-track clip's `transitionIn` window — the window's other half falls before the cut, inside this
+   * clip's own normal span. 0 if none. Matches the editor preview (`isOutgoingInPostroll`).
    */
   private postrollSeconds(item: FlatLayer): number {
     const track = this.composition.tracks[item.trackIndex];
@@ -319,9 +320,28 @@ export class SceneFrameCompositor {
     for (const other of track.layers) {
       if (other.id === item.layer.id || !other.transitionIn) continue;
       // Clamp to the incoming clip's length — matches the clamped transition window (getActiveTransition).
-      if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds));
+      if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2);
     }
     return best;
+  }
+
+  /**
+   * R3: the symmetric counterpart of `postrollSeconds` — how long BEFORE its own start this clip must
+   * start rendering because it's the incoming side of a centered-on-cut transition. Matches the editor
+   * preview (`isIncomingInPreroll`) and the worker (`incomingPrerollSeconds`).
+   */
+  private prerollSeconds(item: FlatLayer): number {
+    const track = this.composition.tracks[item.trackIndex];
+    if (!track || !item.layer.transitionIn) return 0;
+    const start = item.layer.startSeconds;
+    for (const other of track.layers) {
+      if (other.id === item.layer.id) continue;
+      const end = other.startSeconds + other.durationSeconds;
+      if (Math.abs(end - start) < 0.05) {
+        return Math.min(item.layer.transitionIn.durationSeconds, item.layer.durationSeconds) / 2;
+      }
+    }
+    return 0;
   }
 
   private mediaRendererFor(id: string): MediaWebGLRenderer {
@@ -568,7 +588,8 @@ export class SceneFrameCompositor {
         return false;
       }
       const postroll = this.postrollSeconds(item);
-      return t >= layer.startSeconds && t < layer.startSeconds + layer.durationSeconds + postroll;
+      const preroll = this.prerollSeconds(item);
+      return t >= layer.startSeconds - preroll && t < layer.startSeconds + layer.durationSeconds + postroll;
     });
 
     // Budget (rule 4): release media renderers whose clip is no longer active BEFORE grading this frame, so

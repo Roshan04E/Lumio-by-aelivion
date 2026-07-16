@@ -316,12 +316,13 @@ export function findTransitionCutForClip(
 /**
  * Apply (or replace) a junction transition between two touching same-track clips — the professional,
  * handle-based model: a transition is **pure metadata** on the cut. NOTHING on the timeline moves or
- * changes length. The transition spans `[cut, cut+D]` (cut = incoming start): the incoming clip reveals
- * in (opacity for dissolve, transform keyframes for slide/zoom, or the shader spec for wipe/iris/dip),
- * while the renderers render the OUTGOING clip into that same window from its source handle (clamped to
- * the asset → real handle frames, or a held/repeated frame when the clip has no spare media — exactly
- * like Premiere). The `transitionIn` spec on the incoming clip is the single source of truth; resizing
- * only rewrites its `durationSeconds`, so clip lengths/positions never change.
+ * changes length. R3: the transition spans `[cut - D/2, cut + D/2]` (cut = incoming start, centered on
+ * it — see `getActiveTransition`'s doc): the incoming clip reveals in (opacity for dissolve, transform
+ * keyframes for slide/zoom, or the shader spec for wipe/iris/dip) while playing its own head handle for
+ * the first half, and the renderers render the OUTGOING clip into the second half from its tail handle
+ * (clamped to the asset → real handle frames, or a held/repeated frame when the clip has no spare media —
+ * exactly like Premiere). The `transitionIn` spec on the incoming clip is the single source of truth;
+ * resizing only rewrites its `durationSeconds`, so clip lengths/positions never change.
  */
 export function applyJunctionTransition(
   composition: TimelineComposition,

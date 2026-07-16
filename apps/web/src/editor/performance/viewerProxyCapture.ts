@@ -40,7 +40,7 @@ import {
 } from "@kimera-by-aelivion/shared";
 import { MediaEncoder } from "../../export/video-encoder";
 import { acquireVideo, type VideoLease } from "../../lib/video-element-pool";
-import { applyActiveAdjustmentEffects, isLayerActive, isOutgoingInPostroll } from "../../components/VideoPreview";
+import { applyActiveAdjustmentEffects, isLayerActive, isIncomingInPreroll, isOutgoingInPostroll } from "../../components/VideoPreview";
 import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 
 /** Capture cannot run right now (no GL, source won't load, …) — caller falls back to the Worker path. */
@@ -237,7 +237,7 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
     throwIfAborted(signal);
     // Active entries at t — the viewer's exact activity + z-order + adjustment-merge rules.
     const activeEntries = spanEntries
-      .filter(({ layer, track }) => isLayerActive(layer, t) || isOutgoingInPostroll(layer, track, t))
+      .filter(({ layer, track }) => isLayerActive(layer, t) || isOutgoingInPostroll(layer, track, t) || isIncomingInPreroll(layer, track, t))
       .sort((a, b) => (a.trackIndex !== b.trackIndex ? b.trackIndex - a.trackIndex : a.layerIndex - b.layerIndex));
     const mergedLayers = activeEntries
       .map((entry) => applyActiveAdjustmentEffects(entry.layer, entry.trackIndex, activeEntries))

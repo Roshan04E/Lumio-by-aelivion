@@ -33,7 +33,8 @@ import {
  */
 interface TransitionOverlayProps {
   spec: TransitionSpec;
-  /** Incoming clip start = the cut. The transition window is [startSeconds, startSeconds+duration]. */
+  /** Incoming clip start = the cut. R3: the transition window is centered on it, [cut - D/2, cut + D/2]
+   *  (see `getActiveTransition`'s doc) — `startSeconds` here is the CUT, not the window start. */
   startSeconds: number;
   /** Incoming clip length — clamps the window so the reveal never runs past the clip. */
   clipDurationSeconds: number;

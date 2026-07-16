@@ -210,8 +210,11 @@ export function getCompositionTransition(
   if (typeof t !== "number") {
     return null;
   }
-  const start = layer?.startSeconds ?? 0;
+  const cut = layer?.startSeconds ?? 0;
   const duration = effectiveTransitionDuration(spec.durationSeconds, layer?.durationSeconds);
+  // R3: Premiere-style centered-on-cut window [cut - D/2, cut + D/2] (was start-aligned [cut, cut+D] —
+  // see `getActiveTransition`'s doc for the full rationale; this keyed-fade path shares the same model).
+  const start = cut - duration / 2;
   const progress = (t - start) / duration;
   if (progress >= 1) {
     return null;
@@ -308,14 +311,20 @@ export function resolveSpecParams(
 
 /**
  * The active junction transition for the INCOMING clip at `currentTimeSeconds`, or null. Window is
- * `[start, start + duration]` (start-aligned on the cut, matching the shipped handle model). Returns
- * null outside the window, for edge fades (no registry entry), or when no spec. Progress is eased here
- * so every renderer feeds the shader the identical value.
+ * `[cut - D/2, cut + D/2]` — the Premiere "centered on cut" model (R3, 2026-07-16; was start-aligned
+ * `[cut, cut+D]`, which played the whole transition inside clip B and made a back-loaded easing curve
+ * read as "clip A shows again after the cut"). `startSeconds` is the CUT (the incoming clip's own
+ * start) — every caller already passes exactly that, so no caller needed to change for this window
+ * shift; what DOES need to change per-caller is which layers get rendered/decoded during the pre-roll
+ * half, and holding the edge frame when a side lacks handle material (see the R3 plan doc, steps 2-3).
+ * Returns null outside the window, for edge fades (no registry entry), or when no spec. Progress is
+ * eased here so every renderer feeds the shader the identical value.
  */
 export function getActiveTransition(
   spec: TransitionSpec | undefined,
   options: {
     currentTimeSeconds?: number | undefined;
+    /** The CUT point (the incoming clip's own start) — NOT the window start. See doc above. */
     startSeconds?: number | undefined;
     /** Incoming clip length — clamps the window so the transition never runs past the clip it reveals. */
     clipDurationSeconds?: number | undefined;
@@ -326,8 +335,9 @@ export function getActiveTransition(
   if (!def) return null;
   const t = options.currentTimeSeconds;
   if (typeof t !== "number") return null;
-  const start = options.startSeconds ?? 0;
+  const cut = options.startSeconds ?? 0;
   const duration = effectiveTransitionDuration(spec.durationSeconds, options.clipDurationSeconds);
+  const start = cut - duration / 2;
   const linear = (t - start) / duration;
   if (linear < 0 || linear >= 1) return null;
   const eased = applyTransitionEasing(linear, def.easing);

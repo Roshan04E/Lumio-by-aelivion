@@ -742,8 +742,13 @@ function VideoPreviewImpl({
             return false;
           }
           // Active in its own span, OR rendering into the post-roll of the next clip's transition (so
-          // the outgoing clip shows under the incoming's reveal — held at its out-point frame).
-          return isLayerActive(layer, currentTime) || (track ? isOutgoingInPostroll(layer, track, currentTime) : false);
+          // the outgoing clip shows under the incoming's reveal — held at its out-point frame), OR (R3,
+          // centered-on-cut) rendering into the PRE-roll of its OWN transition ahead of its own start.
+          return (
+            isLayerActive(layer, currentTime) ||
+            (track ? isOutgoingInPostroll(layer, track, currentTime) : false) ||
+            (track ? isIncomingInPreroll(layer, track, currentTime) : false)
+          );
         })
         .sort((a, b) => {
           if (a.trackIndex !== b.trackIndex) {
@@ -2625,18 +2630,36 @@ const PreviewLayer = memo(function PreviewLayer({
     return { speed, sourceIn: layerSourceTimeSeconds(layer, local) - local * speed };
   })();
 
+  /**
+   * R3 (centered-on-cut transitions): the clip's source time at `localSeconds` (seconds since
+   * `layer.startSeconds` — may now be NEGATIVE during a transition's pre-roll half, or beyond
+   * `layer.durationSeconds` during its post-roll half), clamped to the asset's actual available media.
+   * `clamped` is true when the ideal (unclamped) source time fell outside that range — i.e. this side
+   * has run out of handle material and must HOLD its edge frame rather than free-run past it.
+   * Speed-aware (rate stretch + ramps) via the shared mapper. Ramped clips keep the pre-R3 approximation
+   * (`layerSourceTimeSeconds` clamps negative local time to 0 internally) — extending the exact-integral
+   * pre-roll reveal to ramps is a further refinement, not required for the common constant-speed case.
+   */
+  function resolveSourceSeconds(localSeconds: number): { time: number; clamped: boolean } {
+    const sourceIn = layer.sourceInSeconds ?? 0;
+    const raw = hasSpeedRamp(layer)
+      ? layerSourceTimeSeconds(layer, Math.max(0, localSeconds)) - sourceIn
+      : localSeconds * getLayerSpeedAt(layer, Math.max(0, localSeconds));
+    const desired = sourceIn + raw;
+    const upperBound = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - 0.05) : Infinity;
+    const time = Math.max(0, Math.min(upperBound, desired));
+    return { time, clamped: Number.isFinite(desired) ? Math.abs(time - desired) > 1e-3 : false };
+  }
+
   function syncVideoTime(video: HTMLVideoElement, driftToleranceSeconds = 0.08) {
     // Source-aware: offset into the source media so trimmed/split clips play the correct source frame.
     // The clamp is the asset's available media (not just the clip's visible span) so that during a
-    // transition post-roll the outgoing clip can play a little past its out-point into its tail handle
-    // (held at the last real frame when there's no spare media) — exactly like a pro editor's handles.
-    // Speed-aware (rate stretch + ramps): timeline→source through the shared mapper — for ramped
-    // clips the exact closed-form integral, for constant speed the same product as before.
+    // transition post-roll the outgoing clip can play a little past its out-point into its tail handle,
+    // and during a transition pre-roll the incoming clip can play a little before its in-point into its
+    // head handle (held at the edge frame when there's no spare media) — exactly like a pro editor's
+    // handles (see `resolveSourceSeconds` above).
     const speed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
-    const sourceIn = layer.sourceInSeconds ?? 0;
-    const rawSource = layerSourceTimeSeconds(layer, Math.max(0, currentTime - layer.startSeconds)) - sourceIn;
-    const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
-    const nextTime = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
+    const { time: nextTime } = resolveSourceSeconds(currentTime - layer.startSeconds);
     if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > driftToleranceSeconds * Math.max(1, speed)) {
       video.currentTime = nextTime;
       return true;
@@ -2710,12 +2733,32 @@ const PreviewLayer = memo(function PreviewLayer({
       return;
     }
     const speed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
-    const sourceIn = layer.sourceInSeconds ?? 0;
-    const rawSource = layerSourceTimeSeconds(layer, Math.max(0, currentTime - layer.startSeconds)) - sourceIn;
-    const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
-    const expected = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
+    const { time: expected } = resolveSourceSeconds(currentTime - layer.startSeconds);
     if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 1 * Math.max(1, speed)) {
       video.currentTime = expected;
+    }
+  }, [currentTime, effectivePlaying, isVideo, layer, mediaUrl, asset?.durationSeconds]);
+
+  // R3 true edge-hold: while playing, a side that has run out of handle material (post-roll past the
+  // asset's tail, or pre-roll before the asset's own start) must PAUSE at that edge frame instead of
+  // free-running past/before it and later getting yanked back by a drift corrector — that yank was the
+  // "freeze-then-replay" bug (growing a transition's duration made the outgoing clip visibly freeze then
+  // jump backward). Runs every tick (cheap: pause()/play() don't flush the decoder like a seek does) so
+  // the hold engages the moment the clamp starts, and releases the moment real material is available again.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isVideo || !effectivePlaying) {
+      return;
+    }
+    const { time, clamped } = resolveSourceSeconds(currentTime - layer.startSeconds);
+    if (clamped) {
+      if (!video.paused) video.pause();
+      if (Number.isFinite(time) && Math.abs(video.currentTime - time) > 0.03) {
+        video.currentTime = time;
+      }
+    } else if (video.paused) {
+      video.currentTime = time;
+      void video.play().catch(() => undefined);
     }
   }, [currentTime, effectivePlaying, isVideo, layer, mediaUrl, asset?.durationSeconds]);
 
@@ -2733,12 +2776,14 @@ const PreviewLayer = memo(function PreviewLayer({
     }
     const interval = window.setInterval(() => {
       if (video.paused || video.seeking || video.readyState < 2) return;
-      const local = Math.max(0, Math.min(layer.durationSeconds, getPlaybackClock() - layer.startSeconds));
-      const speed = getLayerSpeedAt(layer, local);
-      const sourceIn = layer.sourceInSeconds ?? 0;
-      const rawSource = layerSourceTimeSeconds(layer, local) - sourceIn;
-      const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
-      const expected = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
+      // R3: no longer clamps `local` to [0, duration] — that artificial clamp fought post/pre-roll
+      // (it kept trying to snap the video BACK to the out-point during a transition's post-roll, which
+      // is part of what caused the "freeze-then-replay" bug). `resolveSourceSeconds` handles the real
+      // clamp (asset availability); the edge-hold effect above already pauses the clamped case, so this
+      // corrector only ever fires in the non-clamped (normal-playback or in-handle) region.
+      const local = getPlaybackClock() - layer.startSeconds;
+      const speed = getLayerSpeedAt(layer, Math.max(0, local));
+      const { time: expected } = resolveSourceSeconds(local);
       if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 0.15 * Math.max(1, speed)) {
         video.currentTime = expected;
       }
@@ -5009,9 +5054,11 @@ export function isLayerActive(layer: TimelineLayer, currentTime: number) {
 /**
  * True when `layer` is the OUTGOING side of a junction transition that is currently playing — i.e. the
  * next same-track clip starts at this clip's end and carries a `transitionIn`, and the playhead is in
- * that transition's window `[cut, cut+D]`. The clip then keeps rendering (held at its out-point frame —
- * the "repeated frames" a pro editor shows when a clip has no spare handle) under the incoming reveal,
- * without its timeline length ever changing.
+ * that transition's window. R3: the window is now CENTERED on the cut `[cut - D/2, cut + D/2]` (was
+ * start-aligned `[cut, cut+D]`), so this clip's post-roll is only the D/2 half PAST the cut — the D/2
+ * half BEFORE the cut is already inside its own normal active span. The clip then keeps rendering (held
+ * at its out-point frame — the "repeated frames" a pro editor shows when a clip has no spare handle)
+ * under the incoming reveal, without its timeline length ever changing.
  */
 export function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack, currentTime: number): boolean {
   if (layer.type === "audio") {
@@ -5025,9 +5072,34 @@ export function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack,
     if (other.id === layer.id || !other.transitionIn) {
       continue;
     }
-    // Post-roll matches the clamped transition window (never past the incoming clip it reveals).
-    const window = Math.min(other.transitionIn.durationSeconds, other.durationSeconds);
-    if (Math.abs(other.startSeconds - end) < 0.05 && currentTime <= end + window) {
+    // Post-roll is the HALF of the clamped transition window that falls past the cut.
+    const halfWindow = Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2;
+    if (Math.abs(other.startSeconds - end) < 0.05 && currentTime <= end + halfWindow) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * R3: the symmetric counterpart of `isOutgoingInPostroll` — true when `layer` is the INCOMING side of a
+ * junction transition whose centered window has already started (the D/2 half BEFORE the cut), so it
+ * must render/decode ahead of its own `startSeconds`. Mirrors `isOutgoingInPostroll`'s clamped-window
+ * logic exactly, just looking at the PREVIOUS same-track clip instead of the next one.
+ */
+export function isIncomingInPreroll(layer: TimelineLayer, track: TimelineTrack, currentTime: number): boolean {
+  if (layer.type === "audio" || !layer.transitionIn) {
+    return false;
+  }
+  const start = layer.startSeconds;
+  if (currentTime >= start) {
+    return false;
+  }
+  const halfWindow = Math.min(layer.transitionIn.durationSeconds, layer.durationSeconds) / 2;
+  for (const other of track.layers) {
+    if (other.id === layer.id) continue;
+    const end = other.startSeconds + other.durationSeconds;
+    if (Math.abs(end - start) < 0.05 && currentTime >= start - halfWindow) {
       return true;
     }
   }

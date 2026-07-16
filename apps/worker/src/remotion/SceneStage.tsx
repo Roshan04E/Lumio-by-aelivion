@@ -102,19 +102,42 @@ function loadImageOnce(src: string): Promise<HTMLImageElement> {
   });
 }
 
-/** A clip's post-roll: how long it keeps rendering past its out-point to sit under the next clip's transition. */
+/**
+ * A clip's post-roll: how long it keeps rendering past its out-point to sit under the next clip's
+ * transition. R3 (centered-on-cut): the transition window is now `[cut - D/2, cut + D/2]`, so only the
+ * D/2 HALF past the cut is post-roll — the D/2 half before the cut is inside this clip's own normal span.
+ */
 function outgoingPostrollSeconds(layer: RenderManifestLayer, layers: RenderManifestLayer[]): number {
   const end = layer.startSeconds + layer.durationSeconds;
   let best = 0;
   for (const other of layers) {
     if (other.id === layer.id || other.trackId !== layer.trackId || !other.transitionIn) continue;
-    // Clamp to the incoming clip's length: the transition window is start-aligned and never runs past the
-    // clip it reveals (getActiveTransition), so the outgoing clip only needs to sit under it for that long.
+    // Clamp to the incoming clip's length: the transition window never runs past the clip it reveals
+    // (getActiveTransition/effectiveTransitionDuration), so the outgoing clip only needs to sit under
+    // half of that for its post-roll.
     if (Math.abs(other.startSeconds - end) < 0.05) {
-      best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds));
+      best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2);
     }
   }
   return best;
+}
+
+/**
+ * R3: the symmetric counterpart of `outgoingPostrollSeconds` — how long BEFORE its own start `layer`
+ * must start rendering/decoding because it's the incoming side of a junction transition whose centered
+ * window already began (the D/2 half before the cut).
+ */
+function incomingPrerollSeconds(layer: RenderManifestLayer, layers: RenderManifestLayer[]): number {
+  if (!layer.transitionIn) return 0;
+  const start = layer.startSeconds;
+  for (const other of layers) {
+    if (other.id === layer.id || other.trackId !== layer.trackId) continue;
+    const end = other.startSeconds + other.durationSeconds;
+    if (Math.abs(end - start) < 0.05) {
+      return Math.min(layer.transitionIn.durationSeconds, layer.durationSeconds) / 2;
+    }
+  }
+  return 0;
 }
 
 /** Merge active adjustment-clip effects into a layer (same rule as the legacy path: higher zIndex affects lower). */
@@ -313,18 +336,30 @@ class SceneController {
 /** Hidden video decoder: hands each decoded frame to `onFrame` (mirrors the legacy OffthreadVideo grabbers). */
 function VideoGrabber({
   layer,
-  onFrame
+  onFrame,
+  leadSeconds = Math.max(0, -layer.startSeconds)
 }: {
   layer: RenderManifestLayer;
   onFrame: (id: string, raw: RawFrame) => void;
+  /**
+   * CLIP-LOCAL seconds at this Sequence's frame 0 (0 = the clip's own nominal start). Positive when the
+   * mount was clamped at the global frame-0 floor (this clip starts before the composition begins);
+   * NEGATIVE during a centered-on-cut transition's pre-roll (R3) — reading source time from BEFORE the
+   * clip's normal in-point. Defaults to the pre-R3 formula (no transition pre-roll) for any caller that
+   * doesn't pass it.
+   */
+  leadSeconds?: number;
 }) {
   const { fps } = useVideoConfig();
   const frame = useCurrentFrame();
   // Rate stretch: playbackRate scales Remotion's media-time mapping (mediaTime =
   // (trimBefore + frame*playbackRate)/fps), so trimBefore stays the raw source in-point.
-  // The hidden pre-roll lead is in TIMELINE seconds, so it consumes lead*speed of source.
+  // The hidden lead is in TIMELINE seconds, so it consumes lead*speed of source.
   const speed = layerSpeed(layer);
-  const hiddenLeadSeconds = Math.max(0, -layer.startSeconds);
+  const hiddenLeadSeconds = leadSeconds;
+  // R3 step 4/edge-hold: a negative lead (pre-roll) can push source time below the clip's own
+  // sourceInSeconds — clamp at that in-point (holds frame 0 of the clip's material, never negative
+  // trimBefore) instead of reading before the asset's start.
   const trimBeforeFrames = Math.max(0, Math.round(((layer.sourceInSeconds ?? 0) + hiddenLeadSeconds * speed) * fps)) || undefined;
   const onVideoFrame: OnVideoFrame = useCallback(
     (frame) => {
@@ -381,10 +416,13 @@ function layerSpeed(layer: Pick<RenderManifestLayer, "speed">): number {
 /** Hidden image decoder: blocks the frame (delayRender) until the image is decoded, then hands it to `onFrame`. */
 function ImageGrabber({
   layer,
-  onFrame
+  onFrame,
+  leadSeconds = Math.max(0, -layer.startSeconds)
 }: {
   layer: RenderManifestLayer;
   onFrame: (id: string, raw: RawFrame) => void;
+  /** See `VideoGrabber`'s doc — same CLIP-LOCAL lead, can be negative during R3 transition pre-roll. */
+  leadSeconds?: number;
 }) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -394,13 +432,16 @@ function ImageGrabber({
   // Sequence starts at its start), and hiddenLead covers a clip starting before 0 — together that's the
   // same CLIP-LOCAL time the preview and local export feed the shared frame math, so all three align.
   // src changes per frame ⇒ the effect re-decodes it, with delayRender already blocking until ready.
-  const hiddenLeadSeconds = Math.max(0, -layer.startSeconds);
+  // R3 edge-hold: clamped on the TOTAL local time (not just the lead) so a negative `leadSeconds`
+  // (transition pre-roll) holds the animation at its own frame 0 until the clip's real start arrives,
+  // instead of jumping straight to `frame/fps` seconds in.
+  const localSeconds = Math.max(0, leadSeconds + frame / fps);
   const plan = resolveGraphicAnimation(layer.graphic, { animations: layer.animations });
   // Go through the SAME frame-index quantization the pre-baked renderers use (frameAt → bakeTime), not
   // the raw continuous time — otherwise Remotion would render between their frames and drift off parity.
   const src =
     layer.graphic && plan
-      ? graphicToAnimatedDataUrl(layer.graphic, graphicAnimationBakeTime(plan, graphicAnimationFrameAt(plan, hiddenLeadSeconds + frame / fps)))
+      ? graphicToAnimatedDataUrl(layer.graphic, graphicAnimationBakeTime(plan, graphicAnimationFrameAt(plan, localSeconds)))
       : layer.assetUrl;
   useEffect(() => {
     if (!src) return undefined;
@@ -516,7 +557,8 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
         return false;
       }
       const postroll = outgoingPostrollSeconds(layer, sorted);
-      return t >= layer.startSeconds && t < layer.startSeconds + layer.durationSeconds + postroll;
+      const preroll = incomingPrerollSeconds(layer, sorted);
+      return t >= layer.startSeconds - preroll && t < layer.startSeconds + layer.durationSeconds + postroll;
     });
     const merged = active.map((layer) => mergedLayer(layer, adjustments, t));
 
@@ -585,22 +627,34 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       {/* Hidden media decoders — one Sequence per clip (with post-roll) so OffthreadVideo gets the right source time. */}
       <div aria-hidden="true" style={{ position: "absolute", width: 0, height: 0, overflow: "hidden" }}>
         {mediaLayers.map((layer) => {
-          const from = Math.max(0, Math.round(layer.startSeconds * fps));
+          // R3: mount the Sequence `preroll` seconds early for the incoming side of a centered-on-cut
+          // transition (clamped at global frame 0, same as the pre-existing negative-startSeconds clamp
+          // below) — `leadSeconds` tells the grabbers how much CLIP-LOCAL time that mount point actually
+          // represents (negative during pre-roll — reading source before the clip's normal in-point).
+          const preroll = incomingPrerollSeconds(layer, sorted);
+          const desiredMountSeconds = layer.startSeconds - preroll;
+          const mountSeconds = Math.max(0, desiredMountSeconds);
+          const leadSeconds = mountSeconds - layer.startSeconds;
+          const from = Math.round(mountSeconds * fps);
           const durationInFrames = Math.max(
             1,
-            Math.round((layer.durationSeconds + outgoingPostrollSeconds(layer, sorted)) * fps)
+            Math.round((layer.startSeconds + layer.durationSeconds + outgoingPostrollSeconds(layer, sorted) - mountSeconds) * fps)
           );
           // The matte reuses the layer's shape but MUST decode `matte.uri` — drop the graphic fields or
           // ImageGrabber would render the animated graphic as this layer's matte instead.
           const matteLayer = layer.matte?.uri ? { ...layer, assetUrl: layer.matte.uri, graphic: undefined } : null;
           return (
             <Sequence key={layer.id} from={from} durationInFrames={durationInFrames}>
-              {layer.type === "video" ? <VideoGrabber layer={layer} onFrame={onFrame} /> : <ImageGrabber layer={layer} onFrame={onFrame} />}
+              {layer.type === "video" ? (
+                <VideoGrabber layer={layer} onFrame={onFrame} leadSeconds={leadSeconds} />
+              ) : (
+                <ImageGrabber layer={layer} onFrame={onFrame} leadSeconds={leadSeconds} />
+              )}
               {matteLayer ? (
                 layer.type === "video" ? (
-                  <VideoGrabber layer={matteLayer} onFrame={onMatteFrame} />
+                  <VideoGrabber layer={matteLayer} onFrame={onMatteFrame} leadSeconds={leadSeconds} />
                 ) : (
-                  <ImageGrabber layer={matteLayer} onFrame={onMatteFrame} />
+                  <ImageGrabber layer={matteLayer} onFrame={onMatteFrame} leadSeconds={leadSeconds} />
                 )
               ) : null}
             </Sequence>
