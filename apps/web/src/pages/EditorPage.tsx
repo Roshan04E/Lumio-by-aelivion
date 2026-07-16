@@ -128,6 +128,9 @@ import {
   getLayerSpeed,
   getLayerSpeedAt,
   getSpeedRamp,
+  layerSourceSecondsConsumed,
+  upsertSpeedRampPoint,
+  removeSpeedRampPoint,
   getToolCapability,
   getTrackAudioGainAt,
   getTrackPanAt,
@@ -12064,18 +12067,16 @@ function ClipSpeedControl({
   };
   // Ramp points write straight onto layer.speedKeyframes (clip duration is NOT re-derived — a
   // ramp reads more/less source into the same timeline span, Premiere time-remap semantics).
+  // R5: the dedupe-by-time + resort write rule lives in the shared upsertSpeedRampPoint/
+  // removeSpeedRampPoint helpers so this stays in lockstep with any other surface that edits a ramp.
   const upsertRampPoint = (timeSeconds: number, value: number) => {
-    onChange((current) => {
-      const points = (current.speedKeyframes ?? []).filter((kf) => Math.abs(kf.timeSeconds - timeSeconds) > 0.02);
-      return { ...current, speedKeyframes: [...points, { timeSeconds, value }].sort((a, b) => a.timeSeconds - b.timeSeconds) };
-    });
+    onChange((current) => ({ ...current, speedKeyframes: upsertSpeedRampPoint(current, timeSeconds, value) }));
   };
   const removeRampPoint = (timeSeconds: number) => {
-    onChange((current) => {
-      const points = (current.speedKeyframes ?? []).filter((kf) => Math.abs(kf.timeSeconds - timeSeconds) > 1e-4);
-      return { ...current, speedKeyframes: points.length ? points : undefined };
-    });
+    onChange((current) => ({ ...current, speedKeyframes: removeSpeedRampPoint(current, timeSeconds) }));
   };
+  // R5 duration readout: how much source media this clip's speed/ramp consumes over its own span.
+  const sourceSecondsConsumed = layerSourceSecondsConsumed(layer);
   return (
     <div className="clip-speed-control">
       <div className="clip-speed-presets">
@@ -12111,6 +12112,9 @@ function ClipSpeedControl({
         %
       </label>
       <small className="clip-speed-note">Duration follows speed; audio pitch shifts (varispeed).</small>
+      <small className="clip-speed-note">
+        Plays {sourceSecondsConsumed.toFixed(2)}s of source over {layer.durationSeconds.toFixed(2)}s.
+      </small>
       <div className="clip-speed-ramp">
         <div className="clip-speed-ramp-head">
           <span>Speed ramp</span>

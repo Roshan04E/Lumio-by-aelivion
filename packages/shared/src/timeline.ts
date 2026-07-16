@@ -231,6 +231,40 @@ export function hasSpeedRamp(layer: Pick<TimelineLayer, "speedKeyframes">): bool
 }
 
 /**
+ * Add (or replace-at-time) a ramp point — the single write rule for `speedKeyframes`, extracted so
+ * every surface that edits a ramp (the inspector's `ClipSpeedControl` today, a future graph lane) writes
+ * through the SAME dedupe-by-time + resort logic instead of drifting apart. Points within 0.02s of
+ * `timeSeconds` are replaced (matches the inspector's existing tolerance for "drag near an existing
+ * point" vs. "new point").
+ */
+export function upsertSpeedRampPoint(
+  layer: Pick<TimelineLayer, "speedKeyframes">,
+  timeSeconds: number,
+  value: number
+): SpeedKeyframe[] {
+  const points = (layer.speedKeyframes ?? []).filter((kf) => Math.abs(kf.timeSeconds - timeSeconds) > 0.02);
+  return [...points, { timeSeconds, value }].sort((a, b) => a.timeSeconds - b.timeSeconds);
+}
+
+/** Remove the ramp point at `timeSeconds` (exact match), or `undefined` when none remain. */
+export function removeSpeedRampPoint(
+  layer: Pick<TimelineLayer, "speedKeyframes">,
+  timeSeconds: number
+): SpeedKeyframe[] | undefined {
+  const points = (layer.speedKeyframes ?? []).filter((kf) => Math.abs(kf.timeSeconds - timeSeconds) > 1e-4);
+  return points.length ? points : undefined;
+}
+
+/**
+ * How many seconds of SOURCE media a ramp/constant-speed clip consumes over its own
+ * `durationSeconds` — the R5 "duration readout" (`integrateRamp` under the hood, but exposed through
+ * the already-public `layerSourceTimeSeconds` so callers don't need the private integrator).
+ */
+export function layerSourceSecondsConsumed(layer: Pick<TimelineLayer, "speed" | "sourceInSeconds" | "speedKeyframes" | "durationSeconds">): number {
+  return layerSourceTimeSeconds(layer, layer.durationSeconds) - layerSourceTimeSeconds(layer, 0);
+}
+
+/**
  * Instantaneous playback rate at `localSeconds` (time since clip start). Ramp overrides constant
  * speed; before the first / after the last point the edge value holds (Premiere semantics).
  */
