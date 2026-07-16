@@ -139,8 +139,14 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
   const fallbackSeek = (_: number) => {};
   const seek = onSeek ?? fallbackSeek;
 
+  // BROADCAST SAFETY: `onChange` may fan the updater out to EVERY selected clip (multiselect
+  // broadcast in EditorPage). Anything derived from the layer — its local playhead time, its
+  // evaluated value — must therefore be computed INSIDE the updater against `item`, never captured
+  // from the primary above. Capturing the primary's value/time keyframed other clips to the
+  // primary's value at the primary's time (2026-07-16 report).
+  const itemLayerTime = (item: InspectorPanelProps["layer"]) => clamp(currentTime - item.startSeconds, 0, item.durationSeconds);
+
   function transformKeyframe(property: TransformAnimationProperty) {
-    const currentValue = getTransformPropertyValue(animatedTransform, property);
     const activeKeyframe = getActiveTransformKeyframe(layer, property, layerTime);
     return {
       active: Boolean(activeKeyframe),
@@ -150,8 +156,18 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
       interpolation: activeKeyframe?.interpolation,
       onClearAll: () => onChange((item) => clearTransformKeyframes(item, property)),
       onChangeInterpolation: (interpolation: KeyframeInterpolation) =>
-        onChange((item) => setTransformKeyframeInterpolation(item, property, layerTime, interpolation)),
-      onToggle: () => onChange((item) => toggleTransformKeyframe(item, property, layerTime, currentValue)),
+        onChange((item) => setTransformKeyframeInterpolation(item, property, itemLayerTime(item), interpolation)),
+      onToggle: () =>
+        onChange((item) => {
+          const itemTransform = evaluateTimelineTransform({
+            transform: item.transform,
+            startSeconds: item.startSeconds,
+            keyframes: item.keyframes,
+            animations: item.animations,
+            timeSeconds: currentTime
+          });
+          return toggleTransformKeyframe(item, property, itemLayerTime(item), getTransformPropertyValue(itemTransform, property));
+        }),
       onNext: () => {
         const next = findTransformKeyframe(layer, property, layerTime, 1);
         if (next) seek(layer.startSeconds + next.timeSeconds);
@@ -164,7 +180,7 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
   }
 
   function changeTransformProperty(property: TransformAnimationProperty, value: number) {
-    onChange((item) => applyTransformValueAtTime(item, property, layerTime, value, { autoKeyframe }));
+    onChange((item) => applyTransformValueAtTime(item, property, itemLayerTime(item), value, { autoKeyframe }));
   }
 
   // "Fit"/"Fill" canvas: resets scale/position to canonical (matching the object-fit box the renderer
@@ -172,9 +188,10 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
   // in one click instead of the user hand-tuning scale + position to approximate it.
   function fitToCanvas(fit: "contain" | "cover") {
     onChange((item) => {
-      let next = applyTransformValueAtTime(item, "transform.position.x", layerTime, 50, { autoKeyframe });
-      next = applyTransformValueAtTime(next, "transform.position.y", layerTime, defaultPositionY(next.type), { autoKeyframe });
-      next = applyTransformValueAtTime(next, "transform.scale", layerTime, 1, { autoKeyframe });
+      const time = itemLayerTime(item);
+      let next = applyTransformValueAtTime(item, "transform.position.x", time, 50, { autoKeyframe });
+      next = applyTransformValueAtTime(next, "transform.position.y", time, defaultPositionY(next.type), { autoKeyframe });
+      next = applyTransformValueAtTime(next, "transform.scale", time, 1, { autoKeyframe });
       return { ...next, fit };
     });
   }

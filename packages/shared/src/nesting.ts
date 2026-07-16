@@ -192,10 +192,16 @@ export function expandNestedCompositions(
         speedKeyframes: mapSpeedKeyframes(child, headTrim, clipSpeed),
         keyframes: [],
         animations: mapAnimations(child, headTrim, clipSpeed),
-        transitionIn:
-          child.transitionIn && headTrim === 0 // a head-trimmed child lost its junction — no transition
+        // R2 fix: a head-trimmed child used to lose its junction transition outright even when the trim
+        // only ate part of its pre-roll — shrink the transition to what handle remains instead of
+        // dropping it; only a trim that eats the WHOLE transition window removes it.
+        transitionIn: child.transitionIn
+          ? headTrim === 0
             ? mapTransitionSpec(child.transitionIn, clipSpeed)
-            : undefined,
+            : child.transitionIn.durationSeconds - headTrim > 0
+              ? mapTransitionSpec({ ...child.transitionIn, durationSeconds: child.transitionIn.durationSeconds - headTrim }, clipSpeed)
+              : undefined
+          : undefined,
       };
     };
 

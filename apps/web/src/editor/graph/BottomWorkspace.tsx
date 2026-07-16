@@ -36,9 +36,11 @@ export interface BottomWorkspaceProps {
   onClose: () => void;
   /** Property key to focus in the Graph tab (set when opened from a keyframe double-click). */
   focusTargetKey?: string | undefined;
+  /** Other SELECTED clips — the graph draws their matching curves faded (read-only ghosts). */
+  ghostLayers?: TimelineLayer[] | undefined;
 }
 
-export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey }: BottomWorkspaceProps) {
+export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers }: BottomWorkspaceProps) {
   const [tab, setTab] = useState<BottomWorkspaceTab>("graph");
   const [height, setHeight] = useState<number>(() => loadHeight());
   const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
@@ -126,6 +128,7 @@ export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onC
               onSeek={onSeek}
               fps={fps}
               focusTargetKey={focusTargetKey}
+              ghostLayers={ghostLayers}
             />
           ) : (
             <div className="bottom-workspace-empty">Select a clip to edit its animation curves.</div>

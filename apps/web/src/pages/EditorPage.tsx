@@ -110,6 +110,7 @@ import {
   splitLayerAtTime,
   commitGroupMove,
   DEFAULT_EDITING_POLICY,
+  ensureVacantEdgeTracks,
   rippleDeleteLayer,
   rippleTrimLayer,
   rollEditAtCut,
@@ -262,6 +263,7 @@ import {
   findEffectParamKeyframe,
   getActiveEffectParamKeyframe,
   getEffectParamKeyframes,
+  mintKeyframeId,
   setEffectParamInterpolation,
   toggleEffectParamKeyframe,
   updateEffectParamAtTime,
@@ -351,6 +353,7 @@ import {
   builtInFrames,
   makeLayerFrame,
   setFrameBoxFromResize,
+  frameGroupScaleFactor,
   frameOutlinePathD,
   type FrameDefinition,
   instantiateTemplateComposition,
@@ -545,6 +548,109 @@ function ColdTime({ children }: { children: (currentTime: number) => ReactNode }
 function PlayheadTimeReadout({ fallback }: { fallback: number }) {
   const time = usePlaybackClock(fallback, true);
   return <span className="viewer-time-readout">{time.toFixed(2)}s</span>;
+}
+
+/**
+ * Slip two-up (Premiere-style): while a slip drag is live in the timeline, show the slipped range's
+ * first + last frame over the viewer. Fed by a window event (`lumio:slip-preview`) instead of
+ * EditorPage state so per-pointermove updates re-render ONLY this overlay, never the page tree
+ * (selection-render-diet doctrine). `resolve` maps a layerId to its playable URL + source-domain
+ * span at event time (refs inside, so it never goes stale mid-drag).
+ */
+function SlipTwoUpOverlay({
+  resolve
+}: {
+  resolve: (layerId: string) => { url: string; durationSourceSeconds: number } | null;
+}) {
+  const [slip, setSlip] = useState<{ layerId: string; sourceInSeconds: number } | null>(null);
+  const inVideoRef = useRef<HTMLVideoElement | null>(null);
+  const outVideoRef = useRef<HTMLVideoElement | null>(null);
+  // LATEST-WINS SEEK SCHEDULER: a <video> can only run one seek at a time, and issuing a new
+  // `currentTime` while `seeking` is true queues behind the in-flight one — a fast drag stacked
+  // dozens of seeks and the frames arrived seconds late ("not real time"). Instead each side keeps
+  // ONE pending target: while a seek is in flight new targets just overwrite it, and the `seeked`
+  // handler chases the latest. During the drag we use `fastSeek` when available (nearest keyframe —
+  // cheap); a short settle timer lands one precise seek when the pointer pauses.
+  const seekStateRef = useRef<{ in: { target: number; settle: number | null }; out: { target: number; settle: number | null } }>({
+    in: { target: -1, settle: null },
+    out: { target: -1, settle: null }
+  });
+  useEffect(() => {
+    const onSlip = (event: Event) => {
+      setSlip((event as CustomEvent<{ layerId: string; sourceInSeconds: number } | null>).detail ?? null);
+    };
+    window.addEventListener("lumio:slip-preview", onSlip);
+    return () => window.removeEventListener("lumio:slip-preview", onSlip);
+  }, []);
+  const media = slip ? resolve(slip.layerId) : null;
+  const inSeconds = slip?.sourceInSeconds ?? 0;
+  const outSeconds = inSeconds + (media?.durationSourceSeconds ?? 0);
+  useEffect(() => {
+    const frame = 1 / 30;
+    const issueFast = (video: HTMLVideoElement, target: number) => {
+      const fastSeek = (video as HTMLVideoElement & { fastSeek?: (time: number) => void }).fastSeek;
+      if (typeof fastSeek === "function") fastSeek.call(video, target);
+      else video.currentTime = target;
+    };
+    const requestSeek = (video: HTMLVideoElement | null, side: "in" | "out", target: number) => {
+      if (!video || !Number.isFinite(target)) return;
+      const state = seekStateRef.current[side];
+      state.target = target;
+      // Precise settle once the drag pauses — fastSeek only guarantees a nearby keyframe.
+      if (state.settle !== null) window.clearTimeout(state.settle);
+      state.settle = window.setTimeout(() => {
+        state.settle = null;
+        if (!video.seeking && Math.abs(video.currentTime - state.target) > frame / 2) {
+          video.currentTime = state.target;
+        }
+      }, 180);
+      if (video.seeking) return; // in flight — the seeked handler chases state.target
+      if (Math.abs(video.currentTime - target) < frame / 2) return;
+      issueFast(video, target);
+    };
+    const chase = (video: HTMLVideoElement, side: "in" | "out") => () => {
+      const state = seekStateRef.current[side];
+      if (Math.abs(video.currentTime - state.target) > frame) {
+        issueFast(video, state.target);
+      }
+    };
+    const inVideo = inVideoRef.current;
+    const outVideo = outVideoRef.current;
+    const inChase = inVideo ? chase(inVideo, "in") : null;
+    const outChase = outVideo ? chase(outVideo, "out") : null;
+    if (inVideo && inChase) inVideo.addEventListener("seeked", inChase);
+    if (outVideo && outChase) outVideo.addEventListener("seeked", outChase);
+    if (media) {
+      requestSeek(inVideo, "in", inSeconds);
+      requestSeek(outVideo, "out", outSeconds);
+    }
+    return () => {
+      if (inVideo && inChase) inVideo.removeEventListener("seeked", inChase);
+      if (outVideo && outChase) outVideo.removeEventListener("seeked", outChase);
+      for (const side of ["in", "out"] as const) {
+        const state = seekStateRef.current[side];
+        if (state.settle !== null) {
+          window.clearTimeout(state.settle);
+          state.settle = null;
+        }
+      }
+    };
+  }, [media, inSeconds, outSeconds]);
+  if (!slip || !media) {
+    return null;
+  }
+  return (
+    <div className="viewer-slip-two-up" aria-label="Slip preview: first and last frame">
+      <figure>
+        <video ref={inVideoRef} src={media.url} muted playsInline preload="auto" />
+        <figcaption>IN {inSeconds.toFixed(2)}s</figcaption>
+      </figure>
+      <figure>
+        <video ref={outVideoRef} src={media.url} muted playsInline preload="auto" />
+        <figcaption>OUT {outSeconds.toFixed(2)}s</figcaption>
+      </figure>
+    </div>
+  );
 }
 
 function downloadJsonFile(contents: string, fileName: string) {
@@ -1200,6 +1306,14 @@ export function EditorPage() {
   // stay put after deselecting). Falls back to empty if that layer is gone.
   const inspectorLayer =
     selectedLayer ?? multiSelectPrimaryLayer ?? (selectedLayerIds.length === 0 ? layers.find((layer) => layer.id === lastInspectedLayerId) : undefined);
+  // Graph editor ghost curves: the OTHER selected clips (read-only, drawn faded under the primary).
+  const graphGhostLayers = useMemo(
+    () =>
+      inspectorLayer && selectedLayerIds.length > 1
+        ? layers.filter((item) => selectedLayerIds.includes(item.id) && item.id !== inspectorLayer.id)
+        : undefined,
+    [layers, selectedLayerIds, inspectorLayer]
+  );
   const selectedPaletteAsset = useMemo(() => {
     const selectedAsset = selectedLayer?.assetId ? resolvedAssets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
     return selectedAsset ?? project?.sourceAsset ?? resolvedAssets.find((asset) => asset.fileType.startsWith("image/") || asset.fileType.startsWith("video/"));
@@ -2643,7 +2757,9 @@ export function EditorPage() {
       return;
     }
 
-    const normalizedComposition = normalizeCompositionDuration(nextComposition);
+    // Auto-vacant edge tracks (CapCut/Resolve behavior) — normalized at this single write choke
+    // point so it never runs mid-gesture and lands inside the same undo entry as the edit itself.
+    const normalizedComposition = normalizeCompositionDuration(ensureVacantEdgeTracks(nextComposition));
     await updateGraph({
       ...graph,
       composition: normalizedComposition,
@@ -3199,16 +3315,22 @@ export function EditorPage() {
     const activeComposition = compositionRef.current;
     if (!activeComposition) return;
     const comp = { width: activeComposition.width, height: activeComposition.height };
-    const updater = (layer: TimelineLayer): TimelineLayer =>
-      layer.frame
-        ? {
-            ...layer,
-            frame: {
-              ...layer.frame,
-              params: setFrameBoxFromResize(layer.frame, { width: size.widthPercent, height: size.heightPercent }, axis, comp)
-            }
-          }
-        : layer;
+    const updater = (layer: TimelineLayer): TimelineLayer => {
+      if (!layer.frame) return layer;
+      const nextParams = setFrameBoxFromResize(layer.frame, { width: size.widthPercent, height: size.heightPercent }, axis, comp);
+      const withFrame: TimelineLayer = { ...layer, frame: { ...layer.frame, params: nextParams } };
+      // D6 (founder call): a CORNER frame handle scales the inner media WITH the box (group scale), so the
+      // media keeps its coverage instead of the frame just masking more/less of it. Edges only reveal/hide
+      // (uniform `content.scale` can't stretch one axis). The per-drag factor telescopes across a live drag
+      // because each fire's box is absolute → cumulative = startBox→finalBox. Written as a BASE content edit
+      // (the frame box isn't keyframeable), in the SAME updater as the box so a drag commits as one entry.
+      if (axis !== "both") return withFrame;
+      const factor = frameGroupScaleFactor(layer.frame, nextParams, comp);
+      if (factor === 1) return withFrame;
+      const baseScale = layer.content?.scale ?? 1;
+      const nextScale = roundEditorNumber(clamp(baseScale * factor, 0.05, 20));
+      return { ...withFrame, content: { ...layer.content, scale: nextScale } };
+    };
 
     if (commit) {
       void updateLayer(layerId, updater);
@@ -3327,7 +3449,7 @@ export function EditorPage() {
     // Drag path: apply the resolver's exact placements verbatim (start + track per affected layer).
     // The clamping/track-family/linked-companion logic already ran in `resolveGroupMove` during the
     // preview, so commit just writes what was shown — preview and commit can't diverge.
-    if (targetStartByLayerId) {
+    if (targetStartByLayerId && Object.keys(targetStartByLayerId).length > 0) {
       const layerById = new Map(layers.map((item) => [item.id, item]));
       const placements = Object.entries(targetStartByLayerId)
         .map(([id, start]) => {
@@ -3337,6 +3459,30 @@ export function EditorPage() {
         .filter((placement): placement is NonNullable<typeof placement> => placement !== null);
       // Commit through the editing-policy seam. Magnetic mode (opt-in toggle) compacts the touched
       // tracks gapless + overlap-free; otherwise overlap stays "allow" (free positioning, today's default).
+      const committed = commitGroupMove(composition, placements, placements.map((p) => p.layerId), {
+        ...DEFAULT_EDITING_POLICY,
+        magnetic: magneticEnabled
+      });
+      await updateComposition(committed.composition);
+      return;
+    }
+
+    // Legacy path with a MULTI-selection (per-layer placement map missing or empty): never funnel
+    // into the single-primary+targetTrack branch below — it moves only the primary to `trackId` and
+    // time-shifts nothing else's track, which collapses the group onto one lane. Pure time-shift on
+    // each layer's OWN track instead.
+    if (movedLayerIds && movedLayerIds.length > 1) {
+      const layerById = new Map(layers.map((item) => [item.id, item]));
+      const primary = layerById.get(layerId);
+      const groupDeltaSeconds = primary ? startSeconds - primary.startSeconds : 0;
+      const placements = movedLayerIds
+        .map((id) => {
+          const item = layerById.get(id);
+          return item
+            ? { layerId: id, startSeconds: Math.max(0, item.startSeconds + groupDeltaSeconds), trackId: item.trackId, member: true }
+            : null;
+        })
+        .filter((placement): placement is NonNullable<typeof placement> => placement !== null);
       const committed = commitGroupMove(composition, placements, placements.map((p) => p.layerId), {
         ...DEFAULT_EDITING_POLICY,
         magnetic: magneticEnabled
@@ -3400,6 +3546,34 @@ export function EditorPage() {
       }))
     });
     setNotice("Media unlinked");
+    return;
+  }
+
+  /**
+   * "d" toggle (Premiere's Enable): flip `disabled` on every selected clip + linked companions in ONE
+   * composition write (one undo step). Mixed groups converge — if ANY targeted clip is still enabled,
+   * everything disables; only a fully-disabled group re-enables.
+   */
+  async function handleToggleLayersDisabled() {
+    if (!composition) {
+      return;
+    }
+    // Ref, not state: invoked from keydown, and selection state can lag the imperative highlight.
+    const selected = selectedLayerIdsRef.current.length > 0 ? selectedLayerIdsRef.current : selectedLayerIds;
+    const targetIds = new Set(expandLayerSelection(selected));
+    if (targetIds.size === 0) {
+      return;
+    }
+    const targets = layers.filter((layer) => targetIds.has(layer.id));
+    const nextDisabled = targets.some((layer) => !layer.disabled);
+    await updateComposition({
+      ...composition,
+      tracks: composition.tracks.map((track) => ({
+        ...track,
+        layers: track.layers.map((item) => (targetIds.has(item.id) ? { ...item, disabled: nextDisabled ? true : undefined } : item))
+      }))
+    });
+    setNotice(nextDisabled ? (targets.length > 1 ? `${targets.length} clips disabled` : "Clip disabled") : targets.length > 1 ? `${targets.length} clips enabled` : "Clip enabled");
   }
 
   async function handleLinkSelectedLayers() {
@@ -4037,6 +4211,24 @@ export function EditorPage() {
       return;
     }
     const time = Number(currentTimeRef.current.toFixed(3));
+    // CLIP marker first (Premiere behavior): when a SELECTED clip spans the playhead, the marker
+    // belongs to that clip (clip-local time, travels with it). No selected clip under the playhead
+    // → timeline ruler marker as before. Ref, not state — 'M' fires from keydown.
+    const selectedUnderPlayhead = selectedLayerIdsRef.current
+      .map((id) => layers.find((item) => item.id === id))
+      .find((item) => item && time >= item.startSeconds && time <= item.startSeconds + item.durationSeconds);
+    if (selectedUnderPlayhead) {
+      const localTime = Number((time - selectedUnderPlayhead.startSeconds).toFixed(3));
+      void updateLayer(selectedUnderPlayhead.id, (layer) => {
+        const existing = layer.markers ?? [];
+        const nearby = existing.find((marker) => Math.abs(marker.timeSeconds - localTime) < 0.05);
+        const nextMarkers = nearby
+          ? existing.filter((marker) => marker.timeSeconds !== nearby.timeSeconds)
+          : [...existing, { timeSeconds: localTime }].sort((a, b) => a.timeSeconds - b.timeSeconds);
+        return { ...layer, markers: nextMarkers.length > 0 ? nextMarkers : undefined };
+      });
+      return;
+    }
     updateCompositionSettings((settings) => {
       const existing = normalizeTimelineMarkers(settings.timeline.markers);
       const nearby = existing.find((marker) => Math.abs(marker.timeSeconds - time) < 0.05);
@@ -4067,6 +4259,22 @@ export function EditorPage() {
           marker.timeSeconds === markerTime ? { ...marker, ...patch } : marker
         )
       }
+    }));
+  }
+
+  /** Remove a clip marker (identified by clip-local time — markers have no ids). */
+  function handleRemoveClipMarker(layerId: string, markerTime: number) {
+    void updateLayer(layerId, (layer) => {
+      const nextMarkers = (layer.markers ?? []).filter((marker) => marker.timeSeconds !== markerTime);
+      return { ...layer, markers: nextMarkers.length > 0 ? nextMarkers : undefined };
+    });
+  }
+
+  /** Rename/recolor a clip marker (identified by clip-local time). */
+  function handleUpdateClipMarker(layerId: string, markerTime: number, patch: { name?: string | undefined; color?: string | undefined }) {
+    void updateLayer(layerId, (layer) => ({
+      ...layer,
+      markers: (layer.markers ?? []).map((marker) => (marker.timeSeconds === markerTime ? { ...marker, ...patch } : marker))
     }));
   }
 
@@ -4647,16 +4855,40 @@ export function EditorPage() {
     await updateComposition(nextComposition);
   }
 
-  /** Frames (Phase 1): apply a picked frame to the selected image/video clip (media clips to its shape). */
+  /**
+   * Frames (Phase 1): apply a picked frame. With an image/video clip selected the media clips to the
+   * frame's shape. With NOTHING applicable selected, drop an EMPTY placeholder frame (Step 4 — the Canva
+   * "drop into the frame" gesture): a media layer with `frame` set and no asset → renders a dashed
+   * placeholder (never exported, since a no-asset layer resolves to no source) that the user fills by
+   * dropping/picking media.
+   */
   async function handleApplyFrame(def: FrameDefinition) {
+    if (!composition) return;
     const target = selectedLayer;
-    if (!composition || !target || (target.type !== "image" && target.type !== "video")) {
-      setNotice("Select an image or video clip, then pick a frame");
+    if (target && (target.type === "image" || target.type === "video")) {
+      await updateLayer(target.id, (item) => ({ ...item, frame: makeLayerFrame(def) }));
+      focusInspector();
+      setNotice(`Framed with ${def.name}`);
       return;
     }
-    await updateLayer(target.id, (item) => ({ ...item, frame: makeLayerFrame(def) }));
+    // No clip to frame → create an empty placeholder to fill.
+    const selectedTrack = target ? composition.tracks.find((item) => item.id === target.trackId) : undefined;
+    const track =
+      selectedTrack && selectedTrack.type !== "audio" ? selectedTrack : composition.tracks.find((item) => item.type !== "audio");
+    if (!track) {
+      setNotice("Add a video track first");
+      return;
+    }
+    const base = createEditorLayer("image", track, composition, layers.length + 1, currentTimeRef.current);
+    const layer: TimelineLayer = { ...base, name: `${def.name} frame`, assetId: undefined, frame: makeLayerFrame(def), fit: "cover" };
+    const nextComposition: TimelineComposition = {
+      ...composition,
+      tracks: composition.tracks.map((item) => (item.id === track.id ? { ...item, layers: [...item.layers, layer] } : item))
+    };
+    setSelectedLayerIds([layer.id]);
+    await updateComposition(nextComposition);
     focusInspector();
-    setNotice(`Framed with ${def.name}`);
+    setNotice(`Empty ${def.name} — drop media to fill`);
   }
 
   async function handleUploadAsset(file: File | null, options?: { source?: AssetSource; folder?: string }) {
@@ -5135,7 +5367,16 @@ export function EditorPage() {
                 // A swapped-in asset must not inherit the previous clip's source in-point —
                 // reset to play from its start, unless a source-monitor drag marked a range.
                 sourceInSeconds: dragSourceIn,
-                fit: assetLayerType === "image" || assetLayerType === "video" ? (layer.fit ?? defaultMediaFit(assetLayerType)) : undefined
+                // Filling a FRAME auto-fits to `cover` so the media fills the whole shape with no gaps
+                // (Step 4). `cover` fills the comp, and the frame box ⊆ comp, so the shape is fully
+                // covered; the user then pans/zooms inside via content mode. Non-framed clips keep their
+                // existing fit (or the media default).
+                fit:
+                  assetLayerType === "image" || assetLayerType === "video"
+                    ? layer.frame
+                      ? "cover"
+                      : (layer.fit ?? defaultMediaFit(assetLayerType))
+                    : undefined
               }
             : layer
         )
@@ -5419,6 +5660,23 @@ export function EditorPage() {
     setNotice("Animation added");
   }
 
+  // Slip two-up media resolver (see SlipTwoUpOverlay): reads through refs so it can't go stale
+  // mid-drag; only video clips with a playable asset URL get the overlay.
+  const resolveSlipPreviewMedia = useCallback(
+    (layerId: string): { url: string; durationSourceSeconds: number } | null => {
+      const comp = compositionRef.current;
+      const layer = comp ? flattenTimelineLayers(comp).find((item) => item.id === layerId) : undefined;
+      if (!layer || layer.type !== "video" || !layer.assetId) return null;
+      const asset = assets.find((item) => item.id === layer.assetId);
+      // Proxy first: the ingest proxy is small with dense keyframes, so its seeks land in tens of
+      // ms — seeking the full-res original is what made the two-up feel seconds behind the drag.
+      const url = asset?.proxyUrl ?? asset?.previewUrl ?? asset?.fileUrl;
+      if (!url) return null;
+      return { url, durationSourceSeconds: layer.durationSeconds * getLayerSpeed(layer) };
+    },
+    [assets]
+  );
+
   /** Visual clips (video/image/text/shape) the playhead is currently over — transition targets. */
   function clipsUnderPlayhead(): TimelineLayer[] {
     if (!composition) {
@@ -5431,6 +5689,7 @@ export function EditorPage() {
       (layer) =>
         (layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape") &&
         !layer.muted &&
+        !layer.disabled &&
         playheadSeconds >= layer.startSeconds &&
         playheadSeconds <= layer.startSeconds + layer.durationSeconds
     );
@@ -5524,7 +5783,19 @@ export function EditorPage() {
       const existing = layer.effects.find((effect) => effect.type === "volume");
       const effect = existing ?? createTimelineEffect("volume");
       const base = Math.max(0, Number((effect.params?.gain as number | undefined) ?? 100));
-      const fade = Math.min(durationSeconds, layer.durationSeconds / 2);
+      // A fade may span up to the whole clip minus the opposing fade (fadeIn + fadeOut ≤ duration),
+      // matching the visual-clip rule in buildTransitionKeyframes — no half-duration cap.
+      const existingAnimations = layer.animations ?? [];
+      const opposingKey =
+        side === "in"
+          ? existingAnimations.find((kf) => kf.id.includes(`${TRANSITION_MARKER}out_0`))
+          : existingAnimations.find((kf) => kf.id.includes(`${TRANSITION_MARKER}in_1`));
+      const opposingFade = opposingKey
+        ? side === "in"
+          ? Math.max(0, layer.durationSeconds - opposingKey.timeSeconds)
+          : Math.max(0, opposingKey.timeSeconds)
+        : 0;
+      const fade = Math.min(durationSeconds, Math.max(0, layer.durationSeconds - opposingFade));
       const end = layer.durationSeconds;
       const gainKey = (suffix: string, timeSeconds: number, value: number): TimelineKeyframeV2 => ({
         id: `${layer.id}${TRANSITION_MARKER}${suffix}`,
@@ -5611,7 +5882,7 @@ export function EditorPage() {
     const end = selectedLayer.durationSeconds;
     const fadeDur = Math.min(0.6, Math.max(0.1, end / 2));
     const gainKey = (timeSeconds: number, value: number): TimelineKeyframeV2 => ({
-      id: `kf_${Date.now()}_${effectId}_gain_${Math.round(timeSeconds * 1000)}`,
+      id: mintKeyframeId(`${effectId}_gain_${Math.round(timeSeconds * 1000)}`),
       target: { scope: "effect", effectId, property: "gain" },
       timeSeconds: Math.max(0, timeSeconds),
       value,
@@ -6303,6 +6574,7 @@ export function EditorPage() {
   const stablePreviewResizeShapeLayer = useStableHandler(handlePreviewResizeShapeLayer);
   const stablePreviewResizeFrameLayer = useStableHandler(handlePreviewResizeFrameLayer);
   const stablePreviewContentTransformLayer = useStableHandler(handlePreviewContentTransformLayer);
+  const stableReplaceLayerAsset = useStableHandler(handleReplaceLayerAsset);
   const stablePreviewRotateLayer = useStableHandler(handlePreviewRotateLayer);
   const stablePreviewScaleLayer = useStableHandler(handlePreviewScaleLayer);
   const stablePreviewCropLayer = useStableHandler(handlePreviewCropLayer);
@@ -6412,6 +6684,8 @@ export function EditorPage() {
     onToggleMarkerAtPlayhead: handleToggleMarkerAtPlayhead,
     onRemoveMarker: handleRemoveMarker,
     onUpdateMarker: handleUpdateMarker,
+    onRemoveClipMarker: handleRemoveClipMarker,
+    onUpdateClipMarker: handleUpdateClipMarker,
     onSetInPoint: handleSetInPoint,
     onSetOutPoint: handleSetOutPoint,
     onClearInPoint: handleClearInPoint,
@@ -6421,6 +6695,14 @@ export function EditorPage() {
     onToggleLivePlayback: setLivePlaybackMode,
     onReplaceLayerAsset: handleReplaceLayerAsset,
     onSlipLayer: handleSlipLayer,
+    // Event bus, NOT state: per-pointermove slip updates must re-render only the viewer overlay
+    // (SlipTwoUpOverlay subscribes), never the EditorPage tree.
+    onSlipPreview: (preview: { layerId: string; sourceInSeconds: number } | null) => {
+      window.dispatchEvent(new CustomEvent("lumio:slip-preview", { detail: preview }));
+    },
+    onToggleLayersDisabled: () => {
+      void handleToggleLayersDisabled();
+    },
     onRollEdit: (leftLayerId: string, rightLayerId: string, deltaSeconds: number) => void handleRollEdit(leftLayerId, rightLayerId, deltaSeconds),
     onSlideLayer: (layerId: string, deltaSeconds: number) => void handleSlideLayer(layerId, deltaSeconds),
     onPreviewVolume: handlePreviewLayer,
@@ -6451,6 +6733,16 @@ export function EditorPage() {
         void updateLayers(editable, updater);
         return;
       }
+      if (!isLayerEditable(inspectorLayer.id)) return;
+      void updateLayer(inspectorLayer.id, updater);
+    },
+    // GRAPH EDITOR writes are SINGLE-LAYER by design — never the multiselect broadcast above.
+    // The graph editor's draft commit (`useDraftLayer.commitDraft`) applies `onChange(() => next)`
+    // where `next` is the drafted PRIMARY layer object; broadcasting that clones the primary
+    // (assetId, source, effects — everything) onto every selected clip. 2026-07-16 data-loss report:
+    // "all selected clips got identical sources".
+    onGraphChange: (updater: (layer: TimelineLayer) => TimelineLayer) => {
+      if (!inspectorLayer) return;
       if (!isLayerEditable(inspectorLayer.id)) return;
       void updateLayer(inspectorLayer.id, updater);
     },
@@ -7334,6 +7626,7 @@ export function EditorPage() {
               onResizeShapeLayer={stablePreviewResizeShapeLayer}
               onResizeFrameLayer={stablePreviewResizeFrameLayer}
               onContentTransformLayer={stablePreviewContentTransformLayer}
+              onRequestFillFrame={stableReplaceLayerAsset}
               onRotateLayer={stablePreviewRotateLayer}
               onScaleLayer={stablePreviewScaleLayer}
               onCropLayer={stablePreviewCropLayer}
@@ -7358,6 +7651,7 @@ export function EditorPage() {
                 {shuttleRate < 0 ? "◀◀" : "▶▶"} {Math.abs(shuttleRate)}×
               </div>
             )}
+            <SlipTwoUpOverlay resolve={resolveSlipPreviewMedia} />
             {/* One CENTERED cluster (user request 2026-07-03 — the old left/center/right islands read
                 as disconnected): readout · quality · transport · zoom, grouped around the transport. */}
             <div className="viewer-controls" aria-label="Viewer controls">
@@ -7651,11 +7945,12 @@ export function EditorPage() {
             {(currentTime) => (
               <BottomWorkspace
                 layer={inspectorLayer ?? null}
-                onChange={inspectorHandlers.onChange}
+                onChange={inspectorHandlers.onGraphChange}
                 currentTime={currentTime}
                 onSeek={setEditorCurrentTime}
                 fps={composition.fps}
                 focusTargetKey={graphFocusTargetKey}
+                ghostLayers={graphGhostLayers}
                 onClose={() => setBottomWorkspaceOpen(false)}
               />
             )}
@@ -8669,7 +8964,18 @@ function addCompanionAudioLayer(
     };
   }
 
-  const audioTrack = composition.tracks.find((track) => track.type === "audio");
+  // Smart placement: the BOTTOM-most audio track that is vacant over the companion's time span
+  // (audio stacks downward, mirroring video stacking up) — not blindly the first audio track,
+  // which overlapped existing audio. All occupied → fabricate a fresh track; the auto-vacancy
+  // normalizer in updateComposition then re-pads the bottom edge.
+  const companionDurationSeconds = Math.max(0.2, Math.min(asset.durationSeconds, visualLayer.durationSeconds));
+  const companionEndSeconds = visualLayer.startSeconds + companionDurationSeconds;
+  const isVacantOverSpan = (track: TimelineTrack) =>
+    track.layers.every(
+      (layer) =>
+        layer.startSeconds + layer.durationSeconds <= visualLayer.startSeconds + 0.001 || layer.startSeconds >= companionEndSeconds - 0.001
+    );
+  const audioTrack = [...composition.tracks.filter((track) => track.type === "audio")].reverse().find(isVacantOverSpan);
   const resolvedAudioTrack =
     audioTrack ??
     ({
@@ -11644,7 +11950,21 @@ function LayerInspectorImpl({
                 onChangeLayer={onChange}
                 onSeek={onSeek}
                 trackLibrary={tracks}
-                onDelete={() => onChange((item) => ({ ...item, effects: item.effects.filter((candidate) => candidate.id !== effect.id) }))}
+                onDelete={() =>
+                  onChange((item) => {
+                    // Per-item effect resolution (broadcast safety) + strip the effect's keyframes in
+                    // the same write: leftovers with a dead effectId are invisible to the evaluator
+                    // and the inspector — the "keyframes stopped responding" report.
+                    const target =
+                      item.effects.find((candidate) => candidate.id === effect.id) ?? item.effects.find((candidate) => candidate.type === effect.type);
+                    if (!target) return item;
+                    return {
+                      ...item,
+                      effects: item.effects.filter((candidate) => candidate.id !== target.id),
+                      animations: (item.animations ?? []).filter((kf) => !(kf.target.scope === "effect" && kf.target.effectId === target.id))
+                    };
+                  })
+                }
                 onUpdate={(nextEffect) =>
                   onChange((item) => ({
                     ...item,
@@ -12523,6 +12843,19 @@ function EffectParamControl({
   const value = effect.params?.[param.key] ?? param.defaultValue;
   const autoKeyframe = useAutoKeyframe();
 
+  // BROADCAST SAFETY: `onChangeLayer` may fan the updater out to every selected clip. Other clips
+  // can carry a DIFFERENT effect instance id and sit at a different timeline position, so the
+  // effect id, local time, and evaluated value must all be resolved per `item` INSIDE the updater.
+  // Capturing this component's `effect.id`/`layerTime`/`animatedValue` wrote the primary's value
+  // under the primary's effect id onto every clip — wrong values and orphaned keyframes
+  // (2026-07-16 report).
+  const absoluteTimeSeconds = layer.startSeconds + layerTime;
+  const resolveItemEffect = (item: TimelineLayer): { effectId: string; timeSeconds: number } | null => {
+    const itemEffect = item.effects.find((candidate) => candidate.id === effect.id) ?? item.effects.find((candidate) => candidate.type === effect.type);
+    if (!itemEffect) return null;
+    return { effectId: itemEffect.id, timeSeconds: clamp(absoluteTimeSeconds - item.startSeconds, 0, item.durationSeconds) };
+  };
+
   if (param.type === "number") {
     const baseValue = typeof value === "number" ? value : Number(param.defaultValue);
     const animatedValue = evaluateTimelineEffectParam({
@@ -12546,15 +12879,37 @@ function EffectParamControl({
                 hasPrevious: Boolean(previousKeyframe),
                 interpolation: activeKeyframe?.interpolation,
                 onChangeInterpolation: (interpolation) =>
-                  onChangeLayer((item) => setEffectParamInterpolation(item, effect.id, param.key, layerTime, interpolation)),
-                onClearAll: () => onChangeLayer((item) => clearEffectParamKeyframes(item, effect.id, param.key)),
+                  onChangeLayer((item) => {
+                    const resolved = resolveItemEffect(item);
+                    return resolved ? setEffectParamInterpolation(item, resolved.effectId, param.key, resolved.timeSeconds, interpolation) : item;
+                  }),
+                onClearAll: () =>
+                  onChangeLayer((item) => {
+                    const resolved = resolveItemEffect(item);
+                    return resolved ? clearEffectParamKeyframes(item, resolved.effectId, param.key) : item;
+                  }),
                 onNext: () => {
                   if (nextKeyframe) onSeek?.(layer.startSeconds + nextKeyframe.timeSeconds);
                 },
                 onPrevious: () => {
                   if (previousKeyframe) onSeek?.(layer.startSeconds + previousKeyframe.timeSeconds);
                 },
-                onToggle: () => onChangeLayer((item) => toggleEffectParamKeyframe(item, effect.id, param.key, layerTime, animatedValue))
+                onToggle: () =>
+                  onChangeLayer((item) => {
+                    const resolved = resolveItemEffect(item);
+                    if (!resolved) return item;
+                    const itemEffect = item.effects.find((candidate) => candidate.id === resolved.effectId);
+                    const itemRaw = itemEffect?.params?.[param.key];
+                    const itemBase = typeof itemRaw === "number" ? itemRaw : Number(param.defaultValue);
+                    const itemValue = evaluateTimelineEffectParam({
+                      animations: item.animations,
+                      baseValue: itemBase,
+                      effectId: resolved.effectId,
+                      paramKey: param.key,
+                      timeSeconds: resolved.timeSeconds
+                    });
+                    return toggleEffectParamKeyframe(item, resolved.effectId, param.key, resolved.timeSeconds, itemValue);
+                  })
               }
             : undefined
         }
@@ -12564,8 +12919,18 @@ function EffectParamControl({
         tone={effectSliderTone(param.key)}
         step={param.step}
         value={animatedValue}
-        onReset={() => onChangeLayer((item) => updateEffectParamAtTime(item, effect.id, param.key, layerTime, param.defaultValue))}
-        onChange={(nextValue) => onChangeLayer((item) => applyEffectParamValueAtTime(item, effect.id, param.key, layerTime, nextValue, { autoKeyframe }))}
+        onReset={() =>
+          onChangeLayer((item) => {
+            const resolved = resolveItemEffect(item);
+            return resolved ? updateEffectParamAtTime(item, resolved.effectId, param.key, resolved.timeSeconds, param.defaultValue) : item;
+          })
+        }
+        onChange={(nextValue) =>
+          onChangeLayer((item) => {
+            const resolved = resolveItemEffect(item);
+            return resolved ? applyEffectParamValueAtTime(item, resolved.effectId, param.key, resolved.timeSeconds, nextValue, { autoKeyframe }) : item;
+          })
+        }
       />
     );
   }

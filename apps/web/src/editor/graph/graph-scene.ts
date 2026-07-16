@@ -35,18 +35,23 @@ export interface GraphCurveScene {
   /** Value normalization range for this curve (data-driven, padded). */
   vMin: number;
   vMax: number;
+  /** Inverted Y band (position.y — canvas percent grows downward). Draw, drag and hit-test all
+   *  route through curveNorm/curveValue, so the flip stays consistent everywhere. */
+  invertY?: boolean | undefined;
   /** Sorted keyframes of this curve. */
   keyframes: TimelineKeyframeV2[];
   /** Sampled [timeSeconds, norm] pairs across the visible window. */
   samples: Array<[number, number]>;
 }
 
-export function curveNorm(curve: Pick<GraphCurveScene, "vMin" | "vMax">, value: number): number {
-  return (value - curve.vMin) / Math.max(1e-6, curve.vMax - curve.vMin);
+export function curveNorm(curve: Pick<GraphCurveScene, "vMin" | "vMax"> & { invertY?: boolean | undefined }, value: number): number {
+  const norm = (value - curve.vMin) / Math.max(1e-6, curve.vMax - curve.vMin);
+  return curve.invertY ? 1 - norm : norm;
 }
 
-export function curveValue(curve: Pick<GraphCurveScene, "vMin" | "vMax">, norm: number): number {
-  return curve.vMin + norm * (curve.vMax - curve.vMin);
+export function curveValue(curve: Pick<GraphCurveScene, "vMin" | "vMax"> & { invertY?: boolean | undefined }, norm: number): number {
+  const effective = curve.invertY ? 1 - norm : norm;
+  return curve.vMin + effective * (curve.vMax - curve.vMin);
 }
 
 function evaluateTargetValue(layer: TimelineLayer, target: GraphTarget, layerTime: number): number {
@@ -151,13 +156,14 @@ export function buildCurveScene(
     vMax = fixedRange.vMax;
   }
 
-  const curve = { vMin, vMax };
+  const invertY = "invertY" in target && target.invertY === true;
+  const curve = { vMin, vMax, invertY };
   for (let index = 0; index <= sampleCount; index += 1) {
     const t = start + ((end - start) * index) / sampleCount;
     samples.push([t, curveNorm(curve, rawSamples[index]!)]);
   }
 
-  return { key: graphTargetKey(target), target, color, vMin, vMax, keyframes, samples };
+  return { key: graphTargetKey(target), target, color, vMin, vMax, invertY, keyframes, samples };
 }
 
 export interface GraphHandlePoint {

@@ -70,6 +70,11 @@ const removeEffect: TimelineActionDefinition<z.infer<typeof removeEffectSchema>>
       const layer = locateLayer(draft, params.layerId)?.layer;
       if (layer) {
         layer.effects = layer.effects.filter((effect) => effect.id !== params.effectId);
+        // Strip the removed effect's keyframes in the same write — orphans with a dead effectId
+        // are invisible to the evaluator and the inspector (inert "broken" keyframes).
+        if (layer.animations?.length) {
+          layer.animations = layer.animations.filter((kf) => !(kf.target.scope === "effect" && kf.target.effectId === params.effectId));
+        }
       }
     });
     return actionResult(ctx.composition, mutation, `Remove effect`);

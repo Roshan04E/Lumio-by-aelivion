@@ -12,7 +12,10 @@
  */
 
 import type { TimelineEffectParamDefinition } from "./effects";
-import type { Mask, MaskPoint } from "./types";
+import type { Mask, MaskPoint, ShapeKind, TimelineLayer } from "./types";
+
+/** Object-fit modes, matching the compositor's `ObjectFit` (kept local so this pure module has no deps). */
+export type FrameObjectFit = "cover" | "contain" | "fill";
 
 /** Trusted shape generators. Packs may reference these by id; they never ship executable code. */
 export type FrameGeneratorId = "rounded-rect" | "ellipse" | "polygon" | "blob" | "torn-paper" | "svg-path";
@@ -249,9 +252,15 @@ export function findFrameDefinition(id: string): FrameDefinition | undefined {
 
 /**
  * Params after an on-canvas handle drag resized the box (Step C / decision D2: handles resize the FRAME,
- * not the media box). `axis` is what the grabbed handle controls — E/W → "x", N/S → "y", corners → "both" —
- * so an edge handle only moves its own axis instead of shearing the shape, and `aspectLock` keeps the box
- * square by driving the partner from whichever axis the user actually dragged (corners take the larger).
+ * not the media box). `axis` is what the grabbed handle controls — E/W → "x", N/S → "y", corners → "both".
+ *
+ * The gesture model (standard design-tool convention; QA 2026-07-16):
+ *  - **Corner ("both") = PROPORTIONAL** — a uniform scale that preserves the box's current PIXEL aspect, so
+ *    corners never distort the frame. This also makes D6's group scale EXACT (both axes take one factor, so
+ *    the media scales unambiguously with the box). Edges are the deliberate way to change proportions.
+ *  - **Edge ("x"/"y") = single axis** — moves only its own dimension, so the shape isn't sheared from an edge.
+ *  - **aspectLock (circle/hexagon)** overrides: the box must stay SQUARE, so every handle drives the square
+ *    (an edge can't make an oval "circle") — corners and edges both keep it regular.
  */
 export function setFrameBoxFromResize(
   frame: Pick<LayerFrame, "params"> & { definitionId?: string | undefined },
@@ -270,10 +279,22 @@ export function setFrameBoxFromResize(
     const side = Math.max(widthPx, heightPx);
     return setFrameBoxAxis(frame, "width", (side / Math.max(1, comp.width)) * 100, comp);
   }
+  if (axis === "both") {
+    // Proportional corner: scale BOTH percentages by one factor → the pixel aspect is preserved (both px =
+    // %·compDim scale by the same factor). Drive it from whichever axis the pointer favors so the corner
+    // tracks the drag, and clamp the FACTOR (not each axis) so both stay in [1,100] with the aspect intact.
+    const w0 = clampPct(numberParam(params, "width", 100));
+    const h0 = clampPct(numberParam(params, "height", 100));
+    const dominant = Math.max(requested.width / w0, requested.height / h0);
+    const fMin = Math.max(1 / w0, 1 / h0);
+    const fMax = Math.min(100 / w0, 100 / h0);
+    const factor = Math.min(fMax, Math.max(fMin, dominant));
+    return { ...params, width: w0 * factor, height: h0 * factor };
+  }
   return {
     ...params,
-    ...(axis === "x" || axis === "both" ? { width: clampPct(requested.width) } : {}),
-    ...(axis === "y" || axis === "both" ? { height: clampPct(requested.height) } : {})
+    ...(axis === "x" ? { width: clampPct(requested.width) } : {}),
+    ...(axis === "y" ? { height: clampPct(requested.height) } : {})
   };
 }
 
@@ -431,4 +452,204 @@ export function frameClipMask(
       // svg-path / blob / torn-paper — not a native mask shape yet (Phase 2). No clip.
       return null;
   }
+}
+
+// --- Content mode: where the SOURCE media actually sits inside the frame (QA round 5) -----------
+//
+// In content mode (double-click a framed clip) the selection box must hug the SOURCE clip, not the
+// frame box — so the handles describe the media (they shrink on zoom, follow a pan) instead of lying.
+// This is the single source of truth for that rect; both the hug outline and the edge-snap read it, so
+// they can never disagree. The math is INVERTED from the compositor, not guessed (see scene-compositor):
+//
+//   baseFit = fitScale(sw, sh, cw, ch, fit)              // comp/draw scale per axis (object-fit)
+//   fitVec  = baseFit / content.scale                     // content zoom folds in
+//   mediaUv = (v_uv - 0.5 - pan) * fitVec + 0.5,  pan = offset * 0.5
+//
+// The media is visible where mediaUv ∈ [0,1] → in comp (= media layer-box) fractions it spans
+// size `1/fitVec` centred at `0.5 + pan`. NOTE the media fits the COMP, not the frame box (the frame is
+// only a clip mask), so the frame box does NOT enter this rect — it's the reference the snap compares to.
+// `fitScale` depends only on the two ASPECTS (it's a ratio of ratios), so aspects are all we need here.
+
+/** Per-axis object-fit scale expressed from aspects alone (the aspect form of the compositor's `fitScale`). */
+function fitScaleFromAspects(sourceAspect: number, compAspect: number, fit: FrameObjectFit): [number, number] {
+  if (fit === "fill" || sourceAspect <= 0 || compAspect <= 0) return [1, 1];
+  const ratio = compAspect / sourceAspect; // = (cw/ch)/(sw/sh) = (cw/sw)/(ch/sh)
+  if (fit === "contain") return ratio >= 1 ? [ratio, 1] : [1, 1 / ratio];
+  // cover
+  return ratio >= 1 ? [1, 1 / ratio] : [ratio, 1];
+}
+
+/**
+ * The rect the SOURCE media occupies, in comp (media layer-box) fractions, SCREEN space (y-down). Ignores
+ * the frame's clip — this is the full media rect, which content mode's handles hug. `x`/`y` are the
+ * top-left; `width`/`height` the size (both can exceed 1 for `cover` or zoom-in). Derived by inverting the
+ * compositor mapping (see block comment above).
+ */
+export function mediaRectInFrame(args: {
+  sourceAspect: number;
+  compAspect: number;
+  fit: FrameObjectFit;
+  contentScale: number;
+  contentOffset: { x: number; y: number }; // content offsetX/offsetY, -1..1
+}): { x: number; y: number; width: number; height: number } {
+  const scale = args.contentScale > 0 ? args.contentScale : 1;
+  const baseFit = fitScaleFromAspects(args.sourceAspect, args.compAspect, args.fit);
+  const fitVec: [number, number] = [baseFit[0] / scale, baseFit[1] / scale];
+  const width = fitVec[0] > 0 ? 1 / fitVec[0] : 1;
+  const height = fitVec[1] > 0 ? 1 / fitVec[1] : 1;
+  // pan = offset * 0.5; centre = 0.5 + pan. Compositor v_uv.y is Y-UP, so a POSITIVE offsetY moves the
+  // media UP → its screen-space centre is 0.5 - offsetY*0.5.
+  const cx = 0.5 + args.contentOffset.x * 0.5;
+  const cy = 0.5 - args.contentOffset.y * 0.5;
+  return { x: cx - width / 2, y: cy - height / 2, width, height };
+}
+
+/**
+ * Snap a media rect's edges/centre to a frame box while panning in content mode. Returns the comp-fraction
+ * shift `{ dx, dy }` to apply to the rect so a near edge (or centre) clicks onto the frame, plus whether each
+ * axis snapped (for a HUD). Engages only within `thresholdX`/`thresholdY` (comp fractions — the caller
+ * derives these from a fixed SCREEN-px threshold, so it feels identical at any viewer zoom); a deliberate
+ * drag past the threshold still wins. This is pure geometry so the same rule pins in a unit test.
+ */
+export function snapMediaRectToBox(
+  rect: { x: number; y: number; width: number; height: number },
+  box: { x: number; y: number; width: number; height: number },
+  thresholdX: number,
+  thresholdY: number
+): { dx: number; dy: number; snappedX: boolean; snappedY: boolean } {
+  const best = (
+    rectLo: number,
+    rectSize: number,
+    boxLo: number,
+    boxSize: number,
+    threshold: number
+  ): { d: number; snapped: boolean } => {
+    // Candidate alignments: left→left, right→right, centre→centre. Pick the smallest shift within range.
+    const candidates = [boxLo - rectLo, boxLo + boxSize - (rectLo + rectSize), boxLo + boxSize / 2 - (rectLo + rectSize / 2)];
+    let chosen = 0;
+    let chosenAbs = Infinity;
+    for (const d of candidates) {
+      const abs = Math.abs(d);
+      if (abs <= threshold && abs < chosenAbs) {
+        chosen = d;
+        chosenAbs = abs;
+      }
+    }
+    return chosenAbs === Infinity ? { d: 0, snapped: false } : { d: chosen, snapped: true };
+  };
+  const x = best(rect.x, rect.width, box.x, box.width, thresholdX);
+  const y = best(rect.y, rect.height, box.y, box.height, thresholdY);
+  return { dx: x.d, dy: y.d, snappedX: x.snapped, snappedY: y.snapped };
+}
+
+/**
+ * D6 group scale: when a CORNER frame handle resizes the box, the inner media scales WITH it so it keeps
+ * its relative coverage of the frame. Returns the factor to multiply `content.scale` by, given the box
+ * BEFORE and AFTER the resize (as param bags). Uniform under `aspectLock` (both axes share one factor);
+ * for a non-uniform unlocked corner the media zoom is a single uniform scalar, so we take the geometric
+ * mean of the two axis factors — the balanced choice that preserves AREA coverage. `1` when degenerate.
+ */
+export function frameGroupScaleFactor(
+  prev: Pick<LayerFrame, "params"> & { definitionId?: string | undefined },
+  nextParams: Record<string, FrameParamValue>,
+  comp: { width: number; height: number }
+): number {
+  const before = frameBoxRect(prev, comp);
+  const after = frameBoxRect({ ...prev, params: nextParams }, comp);
+  if (before.width <= 0 || before.height <= 0 || after.width <= 0 || after.height <= 0) return 1;
+  const fx = after.width / before.width;
+  const fy = after.height / before.height;
+  const factor = Math.sqrt(fx * fy);
+  return Number.isFinite(factor) && factor > 0 ? factor : 1;
+}
+
+// --- Convert to graphic (D4) — the ONE place frame fields translate to shape fields (D1) --------
+//
+// Founder decision D4: "Convert to graphic" is a TRUE, one-way conversion — the layer BECOMES a `shape`
+// (frame + media dropped, undoable) and fully inherits shape behaviour (graphics panel, colour settings,
+// shape keyframes, the shape renderer). D1's containment rule: this frame↔shape translation lives in
+// EXACTLY this function and nowhere else, so the two vocabularies' drift stays in one reviewable table.
+//
+// Native `shapeKind` wherever one exists so simple frames stay parametric AS shapes:
+//   rounded-rect → `rounded-rectangle` + `borderRadius`   ellipse → `ellipse`
+// otherwise `pen` + `shapePath` (the outline as points in the shape box; exotic curves would carry via
+// MaskPoint tangents). `svg-path`/`blob`/`torn-paper` don't clip yet (frameClipMask → null → media shows
+// unclipped), so their honest current visual is the full box → `rectangle`.
+
+/** Shape-layer defaults a converted frame adopts (the media is gone, so the shape needs its own paint).
+ *  Kept here, not imported from the editor, so this pure module has no app dependency. */
+const CONVERT_SHAPE_FILL = "#4D9FFF";
+const CONVERT_SHAPE_STROKE = "#ffffff";
+
+/** Regular-polygon vertices as `MaskPoint`s in shape-box coords (0..100), matching `polygonPathD`'s
+ *  orientation (0° → a vertex at the top). Used for the `pen` fallback so a polygon frame stays its shape. */
+function polygonShapePath(id: string, sides: number, rotationDeg: number): MaskPoint[] {
+  const n = Math.max(3, Math.round(sides));
+  const rot = ((rotationDeg - 90) * Math.PI) / 180;
+  const points: MaskPoint[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const a = rot + (i / n) * Math.PI * 2;
+    points.push({ id: `${id}_${i}`, x: 50 + Math.cos(a) * 50, y: 50 + Math.sin(a) * 50 });
+  }
+  return points;
+}
+
+/**
+ * Turn a framed media layer into a native `shape` layer (D4). Returns a NEW layer: `type: "shape"`, the
+ * frame's outline expressed as shape fields, the frame box carried over as `widthPercent`/`heightPercent`,
+ * and the frame + media-only fields dropped. Pure — the caller decides how to commit it (undoable).
+ */
+export function frameToShapeLayer(layer: TimelineLayer, comp: { width: number; height: number }): TimelineLayer {
+  const frame = layer.frame;
+  if (!frame) return layer;
+  const params = frameEffectiveParams(frame);
+  const box = frameBoxRect(frame, comp); // px — for the border radius
+  const boxPct = frameBoxPercent(frame, comp); // the shape box as % of the comp
+
+  // Outline → shape fields (the D1 table).
+  let shapeKind: ShapeKind;
+  let borderRadius = 0;
+  let shapePath: MaskPoint[] | undefined;
+  switch (frame.generatorId) {
+    case "rounded-rect": {
+      shapeKind = "rounded-rectangle";
+      const roundness = Math.max(0, Math.min(100, numberParam(params, "roundness", 0)));
+      // Same rule frameClipMask uses: roundness% of the half-min side (so the shape looks identical).
+      borderRadius = ((Math.min(box.width, box.height) / 2) * roundness) / 100;
+      break;
+    }
+    case "ellipse":
+      shapeKind = "ellipse";
+      break;
+    case "polygon":
+      shapeKind = "pen";
+      shapePath = polygonShapePath(`${layer.id}__shape`, numberParam(params, "sides", 6), numberParam(params, "rotation", 0));
+      break;
+    default:
+      // svg-path / blob / torn-paper — not clipped today, so the honest visual is the full box.
+      shapeKind = "rectangle";
+      break;
+  }
+
+  const next: TimelineLayer = {
+    ...layer,
+    type: "shape",
+    shapeKind,
+    borderRadius,
+    widthPercent: boxPct.width,
+    heightPercent: boxPct.height,
+    // The frame carried no paint (the media was the fill); the shape needs its own, then the colour panel
+    // owns it from here (D4 "inherits shape colour settings for free").
+    color: layer.color ?? CONVERT_SHAPE_FILL,
+    strokeColor: layer.strokeColor ?? CONVERT_SHAPE_STROKE,
+    strokeWidth: layer.strokeWidth ?? 0,
+    // Drop the frame and every media-only field — this is a one-way conversion, the media is gone.
+    frame: undefined,
+    assetId: undefined,
+    content: undefined,
+    fit: undefined,
+    matte: undefined,
+    ...(shapePath ? { shapePath } : {})
+  };
+  return next;
 }

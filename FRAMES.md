@@ -164,15 +164,14 @@ to end (media clips + live param edits), visible in-app:
   image/video clip (toast prompts to select a clip first). Orientation/quality filters hidden for it.
 
 **Remaining Phase 1:**
-- Step 4 — **empty-frame placeholder + drop-to-fill**: pick a frame with NO clip selected → creates an
-  empty placeholder layer (dashed outline + icon, NOT exported); dropping media assigns the asset +
-  auto-fits. (Today a frame applies to an EXISTING media clip; the empty-placeholder flow is the
-  Canva "drop into the frame" experience.)
+- Step 4 — **empty-frame placeholder + drop-to-fill ✅ (2026-07-16)**: see the detailed note in the
+  QA-round-5 "remaining Frames work" list below.
 - Fuller Graphics-panel **sub-sectioning** (Used · Shapes · Vectors · GIFs · Frames) is its own task
   (the founder's broader vision); Phase 1 added the Frames chip.
 
-Status: 🟢 Phase 1 Steps 1–3 + 5 done (apply-to-selected + editable params, pixel-safe). Step 4
-(empty placeholder + drop-to-fill) next. Ready for in-app QA of the apply/edit flow.
+Status: 🟢 Phase 1 COMPLETE (Steps 1–5, apply-to-selected + editable params + empty-placeholder/drop-to-fill,
+pixel-safe). Also done: v1.5 QA rounds 1–5 + Convert-to-graphic (D4 / Step F). Remaining Frames work: Step E
+(border — renderer, blocked on the pixel gate), Phase 2 (blob/torn-paper generators), Phase 3 (marketplace).
 
 ---
 
@@ -285,12 +284,10 @@ Then resume Phase 1 **Step 4** (empty placeholder + drop-to-fill), which lands n
   later pack version resolves for frames already on a timeline) and keeps uninstalled-pack frames rendering.
 - Verified: `pnpm -r typecheck` 5/5 clean (at 10:26, against frames.ts + FrameEffectCard changes);
   `frames:test` **50/50**.
-- ⚠️ **Pixel gate NOT run for A/B — blocked, not passed.** The gate fails to build on an unrelated
-  duplicate `graphicIsAnimated` in `packages/shared/src/graphics/layer-graphic.ts` (declared at BOTH
-  L292 and L353 — TS2393/TS2323), which breaks the esbuild bundle → the fixture page never reaches
-  `[data-render-fixture='ready']` → Playwright times out. Uncommitted, in-flight graphics work; NOT
-  touched, NOT caused by Frames. Steps A/B are pure mask geometry with no renderer change, so the gate
-  is expected-green — but that is **unverified** until the duplicate is resolved. Re-run before Step E.
+- ✅ **Pixel gate GREEN (2026-07-16): 27/27, 0.000%.** The blocking `graphicIsAnimated` duplicate was
+  resolved by the other agent; `pnpm -r typecheck` now passes all 5 packages and the gate runs clean. All
+  Frames work through QA round 4 (pure mask geometry + inspector UI + preview interaction, no renderer
+  change) is confirmed to have broken nothing. The gate is unblocked for Step E (border).
 
 ## QA round 2 (2026-07-15) — the fields lied
 
@@ -379,9 +376,9 @@ Editor-only, no export impact — but it is real compositor plumbing, so it gets
 - **Pan was 2× too slow** — FIXED. `build-scene-draws` maps `offsetX/Y (-1..1 frame fractions) → pan ±0.5
   frame` (`pan: [ct.offsetX * 0.5, …]`) before it reaches `uContentPan`, so an offset of 1 shifts only HALF
   a frame. `contentOffsetFromPan` now doubles the frame-fraction delta → the media tracks the pointer 1:1.
-- **Handles don't hug the source clip inside the frame** — OPEN. In content mode the box falls back to the
-  clip's `contain` rect, which ignores `content.scale`/`offset`, so it neither shrinks on zoom nor follows a
-  pan.
+- **Handles don't hug the source clip inside the frame** — FIXED (see "what shipped" below). In content mode
+  the box falls back to the clip's `contain` rect, which ignores `content.scale`/`offset`, so it neither
+  shrinks on zoom nor follows a pan.
   **Spec (derived from the compositor, not guessed):** `fitVec = baseFit / content.scale` and
   `mediaUv = (v_uv - 0.5 - pan) * fitVec + 0.5`. Inverting → the media occupies, in LAYER-BOX fractions:
   - size: `width = 1 / fitVec.x`, `height = 1 / fitVec.y`
@@ -392,10 +389,9 @@ Editor-only, no export impact — but it is real compositor plumbing, so it gets
   can't follow a pan. It needs a third field (a centre offset applied as a translate AFTER the layer's own
   transform, so it lands in the clip's rotated/scaled local space, which is where content pan lives).
   Worth doing properly — it's the difference between handles that describe the media and handles that lie.
-- **Snap the source to the frame's edges** — OPEN, same change. Today you can't tell whether the media is
-  actually covering the frame or leaving a sliver of a gap. Snap while panning/zooming when a media edge
-  meets a frame edge (and at centre), with the classic escape: snapping only engages within a small screen-px
-  threshold, so a deliberate drag past it still wins.
+- **Snap the source to the frame's edges** — FIXED for panning (see "what shipped"); the corner content-zoom
+  snap is deferred. Snap while panning when a media edge meets a frame edge (and at centre), with the classic
+  escape: snapping only engages within a small screen-px threshold, so a deliberate drag past it still wins.
 
 ### D5 — the faded-outside overlay is DROPPED (founder call 2026-07-15)
 
@@ -460,23 +456,98 @@ Unlocked corners: use the same factor the box itself took, so the media tracks t
    old and new box: it must write `frame.params` AND `content.scale` in ONE updater, or a live drag would
    commit them as two separate history entries and could tear mid-drag.
 
+### QA round 5 — what shipped (2026-07-16)
+
+Steps 1, 2, 4 done + pan-snap (step 3); the corner-content-zoom snap is the one deferred sub-item.
+
+- **Step 1 — `mediaRectInFrame` (shared, pure).** Inverts the compositor mapping to the rect the SOURCE
+  media occupies, in comp (= media layer-box) fractions, SCREEN space (y-down): size `contentScale/baseFit`,
+  centre `(0.5 + offsetX·0.5, 0.5 − offsetY·0.5)` (the Y flip is the compositor's Y-UP `v_uv`). **Correction
+  vs the locked spec:** the media fits the COMP, not the frame box (the frame is only a clip mask, and
+  `fitScale` uses the comp draw dims), so the frame box does NOT enter the rect — it's the reference the snap
+  compares to, not an input. `fitScale` reduces to a ratio of the two ASPECTS, so
+  `mediaRectInFrame` needs `sourceAspect` + `compAspect` (both already measured), not pixel dims. Also added
+  `snapMediaRectToBox` (edges + centre, pure) and `frameGroupScaleFactor` (D6, geometric-mean of the two
+  axis factors — preserves AREA coverage under a non-uniform corner). All unit-tested.
+- **Step 2 — hug.** `boxOverride` gained a `translate` channel. In content mode `contentBoxSizeOverride`
+  now returns the media rect's size (can exceed 100% for cover/zoom — correct: the handles describe media
+  bigger than the frame) + a `translate` APPENDED to the layer transform (innermost = the clip's
+  pre-rotation local space; the media layer's transform is always `translate3d(-50%,-50%) rotate scale`, so
+  scale/rotation carry the pan for free). The pan fraction is divided by the box size → box-own-size units,
+  per the CSS-% gotcha. Applied via the `transform` string (NOT the `translate` CSS prop, which resolves
+  OUTSIDE `transform`).
+- **Step 3 — pan snap.** `snapContentOffset` in the content-pan handler converts a fixed ~6 **screen-px**
+  threshold → comp fractions (`6 / (surface·layerScale)`), runs `snapMediaRectToBox`, and maps the rect
+  shift back to an offset delta (`Δoffset = 2·Δcentre`, y screen-flipped). Deferred: snapping the corner
+  content-ZOOM (adjusting `content.scale` so an edge clicks onto the frame) — genuinely harder (offset-
+  dependent solve) and not visually verifiable here, so it wasn't shipped blind. The hug outline + pan snap
+  already answer "is the source covering the frame"; revisit if QA shows the zoom needs it too.
+- **Step 4 — D6 group scale.** A CORNER frame-handle drag now also multiplies `content.scale` by
+  `frameGroupScaleFactor` in the SAME updater as the box params (one history entry). The per-drag factor
+  telescopes across a live drag because each fire's box is absolute (`gm(a→b)·gm(b→c) = gm(a→c)`). Edges are
+  excluded (uniform `content.scale` can't stretch one axis — the flagged D6 limitation). Written as a BASE
+  content edit (the frame box isn't keyframeable).
+- Verified: `pnpm -r typecheck` all 5 clean; `frames:test` **88/88** (+14: media-rect fit/zoom/pan/Y-flip,
+  snap edges+centre+threshold, D6 uniform/non-uniform/degenerate). Editor-only, no renderer touched → still
+  pixel-safe. **On-canvas visual QA (drag/zoom/snap feel) is the user's to run** — pure geometry is unit-
+  pinned but the interaction can't be driven headlessly here.
+
 ### Then — remaining Frames work, in order
 
-- **Step F — Convert to graphic** (D4): the last of the founder's original five QA items. Editor-only.
-  One `frameToShapeLayer()` table (D1's containment rule); native `shapeKind` where one exists
-  (rounded-rect → `rounded-rectangle`+`borderRadius`, circle → `ellipse`), `pen`+`shapePath` otherwise.
+- **Step F — Convert to graphic (D4) ✅ (2026-07-16).** A framed media layer converts to a native `shape`
+  through the ONE `frameToShapeLayer()` table in `frames.ts` (D1 containment — no other module maps
+  frame↔shape fields). Native `shapeKind` where one exists so simple frames stay parametric: rounded-rect →
+  `rounded-rectangle` + `borderRadius` (roundness → the same half-min-side px `frameClipMask` uses, so it
+  looks identical), circle → `ellipse`; polygon → `pen` + `shapePath` (vertices in 0..100 shape-box coords,
+  same orientation as `polygonPathD`); `svg-path`/`blob`/`torn-paper` → `rectangle` (their honest current
+  visual — they don't clip yet). One-way + undoable: `frame` and every media-only field (`assetId`,
+  `content`, `fit`, `matte`) are dropped and the shape adopts its own fill/stroke, after which the colour
+  panel / shape keyframes / shape renderer own it. Box carries over as `widthPercent`/`heightPercent` (the
+  EFFECTIVE box %, so an aspectLock circle stays round). UI: a "Convert to graphic" button (Shapes icon)
+  beside Remove in the Effects-subpanel frame card — it's just an `onChange` updater, so no new plumbing.
+  Verified: `pnpm -r typecheck` all 5 clean; `frames:test` **100/100** (+12: each generator's mapping,
+  one-way drop, identity preserved, aspectLock box %). Editor-only → pixel-safe.
 - **Step E — Border** (`border` / `borderWidth` / `borderColor`): the ONLY renderer work. Needs a stroke pass
   in BOTH the DOM preview and the SceneCompositor + a NEW framed-media pixel fixture. **BLOCKED** until the
   gate can run (see the `graphicIsAnimated` duplicate above) — do not land it on an unverifiable gate.
-- **Phase 1 Step 4** — empty-frame placeholder + drop-to-fill (the actual Canva gesture; today a frame only
-  applies to an existing selected clip).
+- **Phase 1 Step 4 — empty-frame placeholder + drop-to-fill ✅ (2026-07-16).** Picking a frame with no
+  image/video selected now drops an EMPTY placeholder (an `image` layer with `frame` set and no `assetId`,
+  `fit: "cover"`) instead of erroring. `VideoPreview` renders it as a dashed outline in the frame's actual
+  SHAPE (`frameOutlinePathD` scaled into the `frameBoxPercent` box) + an "Add media" affordance; a
+  double-click or the hint opens the asset picker bound to that layer (new `onRequestFillFrame` →
+  `handleReplaceLayerAsset`). Filling reuses the existing replace flow, which already preserves `layer.frame`
+  and now force-fits `cover` for framed clips (so the media fills the shape with no gaps — the "auto-fit").
+  **Not exported, for free:** a no-asset layer resolves to no source, so BOTH renderers already draw nothing
+  (web scene compositor returns null at the `providerKey` guard; the Remotion `ImageGrabber`/`VideoGrabber`
+  bail on missing `assetUrl`) — verified by reading both guards, no exclusion code needed. Verified: `pnpm -r
+  typecheck` all 5 clean; `frames:test` 100/100 (unchanged — Step 4 is editor wiring, not shared geometry).
+  **On-canvas QA (placeholder look, drop-to-fill) is the user's to run.**
+  - **Fix (2026-07-16, QA): the placeholder painted a black "asset-not-found" frame-shaped box.** TWO roots,
+    both cured (not the symptom): (1) my container reused the `.preview-empty-frame` CLASS, which already
+    exists as the empty-COMPOSITION backdrop (`background: #161618; inset: 0`) — later in the cascade, so it
+    overrode my transparent, and since the container style came from `getCompositionMediaStyle` (which carries
+    the frame `mask-image`) that dark fill got clipped to the frame → the black shape. Renamed my classes to
+    `.preview-frame-slot*` and now strip the mask/background off the container via `selectionOverlayStyle`
+    (geometry only — the SVG draws the shape). (2) `sceneMediaIds` added EVERY image/video to the scene
+    compositor, so the sourceless slot was also composited as black; empty-frame placeholders
+    (`isEmptyFramePlaceholder`) are now excluded from the scene, matching the export (both already draw
+    nothing for a no-source layer). Also enlarged the "Add media" hint (was tiny) + counter-scaled it so it
+    stays readable at any frame scale. Outline + selection box both read `frameBoxPercent`, so they hug.
+- **Handle gesture model (founder call, 2026-07-16): corner = PROPORTIONAL, edge = single-axis.** Previously
+  an aspect-unlocked CORNER moved both axes independently (distorting the frame). Now a corner is a uniform
+  scale that preserves the box's pixel aspect (`setFrameBoxFromResize` axis `"both"` scales both percentages
+  by one factor, driven by the pointer-dominant axis, clamping the FACTOR so both stay in [1,100] with the
+  ratio intact); edges (already single-axis) are the deliberate way to change proportions. `aspectLock`
+  shapes (circle/hexagon) still keep every handle square (an edge can't make an oval circle). Bonus: this
+  makes D6's group scale EXACT — corners are now truly uniform, so `frameGroupScaleFactor`'s geometric-mean
+  is only a safety fallback, never hit in practice. `frames:test` 102/102.
 - **Phase 2** — shape library: real `blob` / `torn-paper` generators (they currently return null from
   `frameClipMask` → media shows unclipped). This is the "advanced shapes" half of the end goal.
 - **Phase 3** — `frame-pack` marketplace manifest + import.
 - **Graphics panel sub-sectioning** — Used · Shapes · Vectors · GIFs · Frames.
 - **Animated GIFs** — explicitly after Frames.
 
-Still open from QA round 1 → **Step E** (border — the only renderer work), **Step F** (convert to graphic).
+Still open from QA round 1 → **Step E** (border — the only renderer work). Step F (convert to graphic) ✅ 2026-07-16.
 
 ## Inspector default height (founder call 2026-07-15)
 

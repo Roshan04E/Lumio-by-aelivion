@@ -336,16 +336,35 @@ export function getActiveTransition(
 }
 
 /** Find every same-track clip pair joined by a registry junction transition (incoming carries the spec). */
+// Kept in sync with `nesting.ts`'s `NEST_ID_SEPARATOR` (same literal) — duplicated locally rather than
+// imported because `nesting.ts` imports FROM this module (`isTrackEnabled`), and importing it back here
+// would create a cycle.
+const NEST_ID_SEPARATOR = "__nest_";
+
+/**
+ * R2 fix: the nest a layer id directly belongs to, or `null` for a non-nested (top-level) id. Expansion
+ * (`nesting.ts`) collapses every nested child onto the compound clip's PARENT track, so two unrelated
+ * clips — one inside a nest, one on the parent track right after it — can land on the same `trackId`
+ * with adjacent start/end times. Without this scoping, `findTransitionPairs` could false-match a nested
+ * child against that outside neighbour and steal its frame across the nest boundary.
+ */
+function nestPrefixOf(id: string): string | null {
+  const marker = id.lastIndexOf(NEST_ID_SEPARATOR);
+  return marker > 0 ? id.slice(0, marker) : null;
+}
+
 export function findTransitionPairs(layers: readonly TransitionLayerLike[]): TransitionPair[] {
   const pairs: TransitionPair[] = [];
   for (const incoming of layers) {
     const spec = incoming.transitionIn;
     if (!spec || !getTransition(spec.kind)) continue;
     const incomingStart = incoming.startSeconds ?? 0;
+    const incomingNest = nestPrefixOf(incoming.id);
     const outgoing = layers.find(
       (l) =>
         l.id !== incoming.id &&
         l.trackId === incoming.trackId &&
+        nestPrefixOf(l.id) === incomingNest &&
         Math.abs((l.startSeconds ?? 0) + (l.durationSeconds ?? 0) - incomingStart) < 1e-3
     );
     if (outgoing) pairs.push({ outgoingId: outgoing.id, incomingId: incoming.id, spec });

@@ -5,11 +5,12 @@
  * renders whatever knobs a frame (built-in OR a marketplace pack) declares — nothing is hardcoded here.
  */
 
-import { Frame as FrameIcon, Trash2 } from "lucide-react";
+import { Frame as FrameIcon, Shapes, Trash2 } from "lucide-react";
 import {
   findFrameDefinition,
   frameBoxPercent,
   frameParamSections,
+  frameToShapeLayer,
   setFrameBoxAxis,
   type FrameParamValue,
   type TimelineLayer
@@ -66,15 +67,26 @@ export function FrameEffectCard({
           <FrameIcon size={13} />
           {def?.name ?? "Frame"}
         </span>
-        <button
-          type="button"
-          className="frame-effect-card-remove"
-          title="Remove frame (media un-clips)"
-          aria-label="Remove frame"
-          onClick={() => onChange((item) => ({ ...item, frame: undefined }))}
-        >
-          <Trash2 size={13} />
-        </button>
+        <span className="frame-effect-card-actions">
+          <button
+            type="button"
+            className="frame-effect-card-action"
+            title="Convert to graphic — becomes an editable shape (media is dropped; undoable)"
+            aria-label="Convert to graphic"
+            onClick={() => onChange((item) => frameToShapeLayer(item, comp))}
+          >
+            <Shapes size={13} />
+          </button>
+          <button
+            type="button"
+            className="frame-effect-card-remove"
+            title="Remove frame (media un-clips)"
+            aria-label="Remove frame"
+            onClick={() => onChange((item) => ({ ...item, frame: undefined }))}
+          >
+            <Trash2 size={13} />
+          </button>
+        </span>
       </div>
       {sections.map((section) => (
         <div className="frame-effect-card-section" key={section.title}>

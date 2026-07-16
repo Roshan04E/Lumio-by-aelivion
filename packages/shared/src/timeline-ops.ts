@@ -371,10 +371,16 @@ function adjustLayerHead(layer: TimelineLayer, delta: number): TimelineLayer {
     delta >= 0
       ? layerSourceTimeSeconds(layer, delta)
       : (layer.sourceInSeconds ?? 0) + delta * getLayerSpeedAt(layer, 0);
+  // Clip markers are content-glued (clip-local seconds): a head trim shifts them left by the
+  // trimmed span so each flag stays on its frame; markers trimmed past either edge drop.
+  const nextMarkers = layer.markers
+    ?.map((marker) => ({ ...marker, timeSeconds: marker.timeSeconds - delta }))
+    .filter((marker) => marker.timeSeconds >= 0 && marker.timeSeconds <= nextDuration);
   return {
     ...layer,
     startSeconds: nextStart,
     durationSeconds: nextDuration,
+    ...(layer.markers ? { markers: nextMarkers && nextMarkers.length > 0 ? nextMarkers : undefined } : {}),
     ...(sourceBound ? { sourceInSeconds: Math.max(0, nextSourceIn) } : {}),
     // Non-source layers (text/shape/image) have no content window to keep keyframes pinned to, so a
     // ripple/roll trim SQUEEZES their animated timeline onto the new duration instead of cutting it.
@@ -385,9 +391,12 @@ function adjustLayerHead(layer: TimelineLayer, delta: number): TimelineLayer {
 /** Trim/extend a layer's TAIL by `delta` (positive = extend, negative = trim). */
 function adjustLayerTail(layer: TimelineLayer, delta: number): TimelineLayer {
   const nextDuration = layer.durationSeconds + delta;
+  // Tail trims drop clip markers past the new end (they're content-glued; extending restores nothing).
+  const nextMarkers = layer.markers?.filter((marker) => marker.timeSeconds <= nextDuration);
   return {
     ...layer,
     durationSeconds: nextDuration,
+    ...(layer.markers ? { markers: nextMarkers && nextMarkers.length > 0 ? nextMarkers : undefined } : {}),
     ...(isSourceMedia(layer)
       ? trimLayerKeyframesTo(layer, layer.startSeconds, nextDuration)
       : squeezeLayerKeyframesTo(layer, layer.startSeconds, nextDuration))
@@ -405,24 +414,32 @@ export function rollEditLimits(
   leftLayerId: string,
   rightLayerId: string,
   options: TrimLimitOptions = {}
-): { minDelta: number; maxDelta: number } | null {
+): { minDelta: number; maxDelta: number; minReason?: string; maxReason?: string } | null {
   const minDuration = options.minDurationSeconds ?? EPSILON;
   for (const trackItem of composition.tracks) {
     const left = trackItem.layers.find((item) => item.id === leftLayerId);
     const right = trackItem.layers.find((item) => item.id === rightLayerId);
     if (!left || !right) continue;
     if (Math.abs(right.startSeconds - (left.startSeconds + left.durationSeconds)) > CUT_TOUCH_EPSILON) return null;
-    const maxDelta = Math.min(maxDurationFor(left, composition, options) - left.durationSeconds, right.durationSeconds - minDuration);
+    const leftTailRoom = maxDurationFor(left, composition, options) - left.durationSeconds;
+    const rightMinRoom = right.durationSeconds - minDuration;
+    const maxDelta = Math.min(leftTailRoom, rightMinRoom);
+    const maxReason = leftTailRoom <= rightMinRoom ? "no tail material on left clip" : "right clip at minimum length";
     // Extending the RIGHT clip's head: media is bounded by its head material (`sourceInSeconds`
     // decreases with the edge — the max-duration map is "max playable from the CURRENT sourceIn",
     // which grows in step, so it is NOT the constraint); non-media by the max-duration cap.
-    const minDelta = -Math.min(
-      left.durationSeconds - minDuration,
-      isSourceMedia(right)
-        ? (right.sourceInSeconds ?? 0) / getLayerSpeedAt(right, 0) // head material in TIMELINE seconds (edge rate under a ramp)
-        : maxDurationFor(right, composition, options) - right.durationSeconds
-    );
-    return { minDelta: Math.min(0, minDelta), maxDelta: Math.max(0, maxDelta) };
+    const leftMinRoom = left.durationSeconds - minDuration;
+    const rightHeadRoom = isSourceMedia(right)
+      ? (right.sourceInSeconds ?? 0) / getLayerSpeedAt(right, 0) // head material in TIMELINE seconds (edge rate under a ramp)
+      : maxDurationFor(right, composition, options) - right.durationSeconds;
+    const minDelta = -Math.min(leftMinRoom, rightHeadRoom);
+    const minReason =
+      rightHeadRoom <= leftMinRoom
+        ? isSourceMedia(right)
+          ? "no head material on right clip"
+          : "right clip at maximum length"
+        : "left clip at minimum length";
+    return { minDelta: Math.min(0, minDelta), maxDelta: Math.max(0, maxDelta), minReason, maxReason };
   }
   return null;
 }
@@ -469,7 +486,7 @@ export function slideLayerLimits(
   composition: TimelineComposition,
   layerId: string,
   options: TrimLimitOptions = {}
-): { minDelta: number; maxDelta: number; previousLayerId: string; nextLayerId: string } | null {
+): { minDelta: number; maxDelta: number; minReason?: string; maxReason?: string; previousLayerId: string; nextLayerId: string } | null {
   const minDuration = options.minDurationSeconds ?? EPSILON;
   for (const trackItem of composition.tracks) {
     const layer = trackItem.layers.find((item) => item.id === layerId);
@@ -481,15 +498,30 @@ export function slideLayerLimits(
     if (!previous || !next) return null;
     if (Math.abs(layer.startSeconds - (previous.startSeconds + previous.durationSeconds)) > CUT_TOUCH_EPSILON) return null;
     if (Math.abs(next.startSeconds - (layer.startSeconds + layer.durationSeconds)) > CUT_TOUCH_EPSILON) return null;
-    const maxDelta = Math.min(maxDurationFor(previous, composition, options) - previous.durationSeconds, next.durationSeconds - minDuration);
+    const previousTailRoom = maxDurationFor(previous, composition, options) - previous.durationSeconds;
+    const nextMinRoom = next.durationSeconds - minDuration;
+    const maxDelta = Math.min(previousTailRoom, nextMinRoom);
+    const maxReason = previousTailRoom <= nextMinRoom ? "no tail material on previous clip" : "next clip at minimum length";
     // Same head-extension bound as rollEditLimits: media = its head material, non-media = the cap.
-    const minDelta = -Math.min(
-      previous.durationSeconds - minDuration,
-      isSourceMedia(next)
-        ? (next.sourceInSeconds ?? 0) / getLayerSpeedAt(next, 0)
-        : maxDurationFor(next, composition, options) - next.durationSeconds
-    );
-    return { minDelta: Math.min(0, minDelta), maxDelta: Math.max(0, maxDelta), previousLayerId: previous.id, nextLayerId: next.id };
+    const previousMinRoom = previous.durationSeconds - minDuration;
+    const nextHeadRoom = isSourceMedia(next)
+      ? (next.sourceInSeconds ?? 0) / getLayerSpeedAt(next, 0)
+      : maxDurationFor(next, composition, options) - next.durationSeconds;
+    const minDelta = -Math.min(previousMinRoom, nextHeadRoom);
+    const minReason =
+      nextHeadRoom <= previousMinRoom
+        ? isSourceMedia(next)
+          ? "no head material on next clip"
+          : "next clip at maximum length"
+        : "previous clip at minimum length";
+    return {
+      minDelta: Math.min(0, minDelta),
+      maxDelta: Math.max(0, maxDelta),
+      minReason,
+      maxReason,
+      previousLayerId: previous.id,
+      nextLayerId: next.id
+    };
   }
   return null;
 }
@@ -1134,6 +1166,60 @@ export function commitGroupMove(
   const resolved = applyOverlapPolicy(placed, movedLayerIds, policy.overlap);
   if (!resolved.accepted) return { composition, accepted: false, reason: resolved.reason }; // refuse → pre-move state
   return resolved;
+}
+
+// --- Track auto-vacancy -------------------------------------------------------
+
+/**
+ * Keep exactly ONE empty visual track on top and ONE empty audio track at the bottom (CapCut/Resolve
+ * behavior): dropping a clip on the outer empty track immediately grows a fresh one beyond it, and
+ * surplus empty EDGE tracks collapse back to one. Only the consecutive run at each edge is touched —
+ * user-created empty tracks in the middle are never removed. Applies only when at least one track of
+ * that type exists (a fresh video-only comp doesn't sprout an audio track). Returns the SAME
+ * reference when nothing changes, so composition-keyed memos don't invalidate for a no-op.
+ *
+ * Runs at the single write choke point (EditorPage's `updateComposition`), never mid-gesture, so
+ * track ids stay stable during drags and the normalized state lands inside the same undo entry.
+ */
+export function ensureVacantEdgeTracks(composition: TimelineComposition): TimelineComposition {
+  const tracks = composition.tracks;
+  const isVisual = (track: TimelineTrack) => track.type !== "audio";
+  if (tracks.length === 0) return composition;
+
+  // Leading consecutive empty visual tracks / trailing consecutive empty audio tracks.
+  let leadingEmptyVisuals = 0;
+  while (leadingEmptyVisuals < tracks.length && isVisual(tracks[leadingEmptyVisuals]!) && tracks[leadingEmptyVisuals]!.layers.length === 0) {
+    leadingEmptyVisuals += 1;
+  }
+  let trailingEmptyAudio = 0;
+  while (
+    trailingEmptyAudio < tracks.length &&
+    tracks[tracks.length - 1 - trailingEmptyAudio]!.type === "audio" &&
+    tracks[tracks.length - 1 - trailingEmptyAudio]!.layers.length === 0
+  ) {
+    trailingEmptyAudio += 1;
+  }
+  const hasVisual = tracks.some(isVisual);
+  const hasAudio = tracks.some((track) => track.type === "audio");
+  const wantVisualPad = hasVisual && leadingEmptyVisuals === 0;
+  const wantAudioPad = hasAudio && trailingEmptyAudio === 0;
+  const surplusVisuals = Math.max(0, leadingEmptyVisuals - 1);
+  const surplusAudio = Math.max(0, trailingEmptyAudio - 1);
+  if (!wantVisualPad && !wantAudioPad && surplusVisuals === 0 && surplusAudio === 0) {
+    return composition;
+  }
+
+  let next = tracks.slice(surplusVisuals, tracks.length - surplusAudio);
+  const stamp = Date.now().toString(36);
+  if (wantVisualPad) {
+    const count = tracks.filter(isVisual).length + 1;
+    next = [{ id: `track_auto_${stamp}_video`, type: "video", name: `Video ${count}`, layers: [] }, ...next];
+  }
+  if (wantAudioPad) {
+    const count = tracks.filter((track) => track.type === "audio").length + 1;
+    next = [...next, { id: `track_auto_${stamp}_audio`, type: "audio", name: `Audio ${count}`, layers: [] }];
+  }
+  return { ...composition, tracks: next };
 }
 
 // --- Markers ------------------------------------------------------------------

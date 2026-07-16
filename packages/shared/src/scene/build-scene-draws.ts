@@ -121,6 +121,16 @@ export interface BuildSceneDrawsInputs {
    * masks (soft degrade, not a crash) — see the `// NEST-REVIEW:` note near its use.
    */
   nestMatteCaches?: Map<string, SceneMaskMatteCache> | undefined;
+  /**
+   * R1 fix: called with a layer's id whenever `buildLayerDraw` returns null because its source isn't
+   * ready yet (text raster not landed, media graded canvas not landed) — the ONLY two `return null`
+   * sites below. The worker renderer already gates the frame on this exact condition
+   * (`SceneStage.tsx`'s `delayRender`/`composite()` contract); the web preview has no equivalent, so
+   * without this hook a stacked-layer frame briefly shows the layer BELOW an unready top layer. Omit
+   * (export/worker callers) for byte-identical behavior — this is purely an observability out-channel,
+   * it never changes what `buildSceneDraws` returns.
+   */
+  onLayerNotReady?: (layerId: string) => void;
 }
 
 /** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below). */
@@ -151,7 +161,7 @@ function parseCssColor(input: string): [number, number, number] {
  */
 export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   const {
-    layers: ls,
+    layers: inputLayers,
     width: w,
     height: h,
     currentTime: t,
@@ -166,10 +176,56 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     regionPassModel = false,
     nestedGroups,
     nestMatteCaches,
+    onLayerNotReady,
   } = inputs;
+
+  // DISABLED clips draw nowhere — the single choke point shared by the editor preview, local export
+  // and worker renderer (render parity by construction). Region-expansion clones and nested children
+  // carry their base/shell clip's id as a prefix, so they drop with it even if the expansion didn't
+  // copy the flag.
+  const disabledIds = new Set(inputLayers.filter((layer) => layer.disabled).map((layer) => layer.id));
+  const isFromDisabledClip = (layer: TimelineLayer): boolean => {
+    if (layer.disabled) return true;
+    if (disabledIds.size === 0) return false;
+    const rfx = layer.id.indexOf("__rfx_");
+    if (rfx > 0 && disabledIds.has(layer.id.slice(0, rfx))) return true;
+    const nest = layer.id.indexOf(NEST_ID_SEPARATOR);
+    if (nest > 0 && disabledIds.has(layer.id.slice(0, nest))) return true;
+    return false;
+  };
+  const ls = inputLayers.filter((layer) => !isFromDisabledClip(layer));
 
   // Layer lookup so a transition can build each side as a FULL layer draw (effects included).
   const layerById = new Map(ls.map((layer) => [layer.id, layer]));
+
+  // ─── Nesting: group ownership (moved ahead of the transition fold loop below — R2 fix) ──────────────
+  // `ls` is the FULLY EXPANDED layer list (nested children already ordinary layers with `__nest_`-
+  // namespaced ids, per `expandNestedCompositions`); `nestedGroups` carries each compound-clip instance's
+  // shell + nested-comp geometry, keyed by that SAME namespacing. Every block below is a no-op when
+  // `nestedGroups` is undefined/empty — non-nested compositions never touch this code (byte-identical).
+  const groupKeys = nestedGroups ? [...nestedGroups.keys()] : [];
+  // Longest-prefix-match: an id's DIRECT (innermost) owning group is the LONGEST key K such that
+  // `id.startsWith(K + NEST_ID_SEPARATOR)` — e.g. for keys ["a", "a__nest_b"], id "a__nest_b__nest_c"
+  // matches both, but "a__nest_b" is more specific → correct owner. Sorting once by length descending and
+  // taking the FIRST match gives the longest by construction.
+  const groupKeysByLengthDesc = [...groupKeys].sort((a, b) => b.length - a.length);
+  const resolveOwnerGroupKey = (id: string): string | null => {
+    for (const key of groupKeysByLengthDesc) {
+      if (id.startsWith(key + NEST_ID_SEPARATOR)) return key;
+    }
+    return null;
+  };
+  // DIRECT (innermost) owner of every LEAF layer id, and of every GROUP key itself (a group key
+  // containing `__nest_` is an INNER group — the SAME resolution applied to the key string).
+  const layerOwnerGroup = new Map<string, string>();
+  const groupOwnerGroup = new Map<string, string | null>();
+  if (groupKeys.length > 0) {
+    for (const layer of ls) {
+      const owner = resolveOwnerGroupKey(layer.id);
+      if (owner) layerOwnerGroup.set(layer.id, owner);
+    }
+    for (const key of groupKeys) groupOwnerGroup.set(key, resolveOwnerGroupKey(key));
+  }
 
   // Junction transitions fold TWO clip GROUPS into one mix draw. A "clip" is not one layer: a region-mask
   // effect expands it into a base + render-only `${baseId}__rfx_${effectId}` layers (region blur today, region
@@ -196,6 +252,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       clipDurationSeconds: layerById.get(pair.incomingId)?.durationSeconds,
     });
     if (!active || !layerById.has(pair.outgoingId) || !layerById.has(pair.incomingId)) {
+      continue;
+    }
+    // R2 fix: a nested clip must never enter the TOP-LEVEL fold — `membersByGroup` (built below) excludes
+    // any id in `foldedIds`/`transitionOutgoingIds`, so a group-owned side used to vanish from its group
+    // entirely once folded here (it has no top-level draw either, since nothing at this level owns it).
+    // Skipping group-owned pairs makes nested clips render as a hard cut instead of disappearing; the
+    // in-nest mix (step 3, `buildGroupDraw`) is the follow-up that makes the transition itself play.
+    if (layerOwnerGroup.has(pair.outgoingId) || layerOwnerGroup.has(pair.incomingId)) {
       continue;
     }
     activeByIncomingId.set(pair.incomingId, active);
@@ -346,7 +410,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         : null;
       const boxMode = !(fx.blurPx > 0 || glow);
       const raster = rasterizer?.get(layer, t, dims.w, dims.h, boxMode);
-      if (!raster) return null; // not ready / empty — rAF re-draws once it lands
+      if (!raster) {
+        onLayerNotReady?.(layer.id); // not ready / empty — rAF re-draws once it lands
+        return null;
+      }
       const hasBox = raster.boxHalfW != null && raster.boxHalfH != null;
       const tr = getCompositionTransform(layer, { currentTimeSeconds: t });
 
@@ -404,7 +471,10 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     // media layer — a small, pure, per-frame CPU recompute (not a GPU/alloc cost) traded for keeping
     // buildShellPresentation fully self-contained; flag if this ever shows up in a perf trace.
     const mediaSource = getMediaGraded(layer.id);
-    if (!mediaSource || mediaSource.width === 0 || mediaSource.height === 0) return null;
+    if (!mediaSource || mediaSource.width === 0 || mediaSource.height === 0) {
+      onLayerNotReady?.(layer.id);
+      return null;
+    }
     const presentation = buildShellPresentation(layer, dims.matteCache);
     return {
       ...presentation,
@@ -579,33 +649,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   }
 
   // ─── Nesting: fold __nest_ children into compound-clip GROUP draws (NESTING.md Phase C) ─────────────
-  // `ls` is the FULLY EXPANDED layer list (nested children already ordinary layers with `__nest_`-
-  // namespaced ids, per `expandNestedCompositions`); `nestedGroups` carries each compound-clip instance's
-  // shell + nested-comp geometry, keyed by that SAME namespacing. Every block below is a no-op when
-  // `nestedGroups` is undefined/empty — non-nested compositions never touch this code (byte-identical).
-  const groupKeys = nestedGroups ? [...nestedGroups.keys()] : [];
-  // Longest-prefix-match: an id's DIRECT (innermost) owning group is the LONGEST key K such that
-  // `id.startsWith(K + NEST_ID_SEPARATOR)` — e.g. for keys ["a", "a__nest_b"], id "a__nest_b__nest_c"
-  // matches both, but "a__nest_b" is more specific → correct owner. Sorting once by length descending and
-  // taking the FIRST match gives the longest by construction.
-  const groupKeysByLengthDesc = [...groupKeys].sort((a, b) => b.length - a.length);
-  const resolveOwnerGroupKey = (id: string): string | null => {
-    for (const key of groupKeysByLengthDesc) {
-      if (id.startsWith(key + NEST_ID_SEPARATOR)) return key;
-    }
-    return null;
-  };
-  // DIRECT (innermost) owner of every LEAF layer id, and of every GROUP key itself (a group key
-  // containing `__nest_` is an INNER group — the SAME resolution applied to the key string).
-  const layerOwnerGroup = new Map<string, string>();
-  const groupOwnerGroup = new Map<string, string | null>();
-  if (groupKeys.length > 0) {
-    for (const layer of ls) {
-      const owner = resolveOwnerGroupKey(layer.id);
-      if (owner) layerOwnerGroup.set(layer.id, owner);
-    }
-    for (const key of groupKeys) groupOwnerGroup.set(key, resolveOwnerGroupKey(key));
-  }
+  // Group ownership (`groupKeys`/`layerOwnerGroup`/`groupOwnerGroup`) is computed earlier, ahead of the
+  // transition fold loop above (R2 fix), so it's already in scope here.
   // DIRECT leaf members per group, in `ls` (z) order. Transition-fold participants and pass-model region
   // clones are excluded here exactly like the top-level loop excludes them below.
   // NEST-REVIEW: a nested child that is itself mid-transition (child-to-child WITHIN a nest) is DROPPED

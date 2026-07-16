@@ -105,7 +105,7 @@ export function collectAudioLayers(
         durationSeconds: layer.durationSeconds,
         sourceInSeconds: layer.sourceInSeconds ?? 0,
         speed: getLayerSpeed(layer),
-        muted: Boolean(layer.muted) || !isTrackEnabled(track, composition.tracks),
+        muted: Boolean(layer.muted) || Boolean(layer.disabled) || !isTrackEnabled(track, composition.tracks),
         gain,
         trackPan: getTrackPan(track),
         fxChain: resolveAudioFxChain(layer),

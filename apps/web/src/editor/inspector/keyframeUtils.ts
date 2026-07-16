@@ -39,6 +39,9 @@ export type GraphTarget =
       min: number;
       property: TransformAnimationProperty;
       step: number;
+      /** Draw/edit this curve with an inverted Y axis (position.y: canvas percent grows DOWNWARD,
+       *  so "drag the curve up = clip moves up" needs the graph band flipped). */
+      invertY?: boolean;
     }
   | {
       effectId: string;
@@ -91,9 +94,15 @@ export const transformPropertyConfigs: Array<{
   min: number;
   property: TransformAnimationProperty;
   step: number;
+  invertY?: boolean;
 }> = [
-  { label: "X", property: "transform.position.x", min: 0, max: 100, step: 1 },
-  { label: "Y", property: "transform.position.y", min: 0, max: 100, step: 1 },
+  // Position range matches the inspector's scrub fields (-200..300): off-canvas positions are
+  // legitimate (slide-in/out animations) — the old 0..100 clamp blocked graph drags below 0.
+  { label: "X", property: "transform.position.x", min: -200, max: 300, step: 1 },
+  // invertY: position.y percent grows DOWNWARD on the canvas, so without the flip "dragging the
+  // curve up" moved the clip DOWN — the reported inverted Y feel. The flag flips draw + drag + hit
+  // consistently (see curveNorm/curveValue in graph-scene.ts).
+  { label: "Y", property: "transform.position.y", min: -200, max: 300, step: 1, invertY: true },
   { label: "Scale", property: "transform.scale", min: 0.01, max: 100, step: 0.05 },
   { label: "Rotate", property: "transform.rotation", min: -180, max: 180, step: 1 },
   { label: "Opacity", property: "transform.opacity", min: 0, max: 100, step: 1 },
@@ -122,6 +131,16 @@ export type AnimationPresetId = (typeof animationPresets)[number]["id"];
 // ---------------------------------------------------------------------------
 // Micro-utils (private to this module, re-exported for graph editor)
 // ---------------------------------------------------------------------------
+
+/**
+ * Mint a collision-free keyframe id. `Date.now()` alone collides when several keyframes are
+ * created in the same millisecond — which is exactly what a multiselect broadcast does (one
+ * toggle → one mint per selected layer in the same tick). The graph editor selects/scrubs purely
+ * by keyframe id, so cross-layer duplicates made selection ambiguous.
+ */
+export function mintKeyframeId(suffix: string): string {
+  return `kf_${Date.now()}_${suffix}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
 export function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -349,7 +368,7 @@ export function toggleTransformKeyframe(
   }
 
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    id: mintKeyframeId(property.replaceAll(".", "_")),
     target: { scope: "layer", property },
     timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
     value,
@@ -642,7 +661,7 @@ export function toggleEffectParamKeyframe(
   }
 
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_${effectId}_${paramKey}`,
+    id: mintKeyframeId(`${effectId}_${paramKey}`),
     target: { scope: "effect", effectId, property: paramKey },
     timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
     value,
@@ -815,7 +834,7 @@ export function toggleContentKeyframe(
     };
   }
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    id: mintKeyframeId(property.replaceAll(".", "_")),
     target: { scope: "layer", property },
     timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
     value,
@@ -892,7 +911,7 @@ export function toggleLayerPropertyKeyframe(layer: TimelineLayer, property: stri
     };
   }
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    id: mintKeyframeId(property.replaceAll(".", "_")),
     target: { scope: "layer", property },
     timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
     value,
@@ -1245,7 +1264,7 @@ export function toggleStyleKeyframe(layer: TimelineLayer, property: string, laye
     };
   }
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_${property.replaceAll(".", "_")}`,
+    id: mintKeyframeId(property.replaceAll(".", "_")),
     target: { scope: "layer", property },
     timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
     value,
@@ -1328,7 +1347,7 @@ function makeKeyframe(
   interpolation: KeyframeInterpolation = "easeOut"
 ): TimelineKeyframeV2 {
   return {
-    id: `kf_${Date.now()}_${presetId}_${property.replaceAll(".", "_")}_${Math.round(timeSeconds * 1000)}`,
+    id: mintKeyframeId(`${presetId}_${property.replaceAll(".", "_")}_${Math.round(timeSeconds * 1000)}`),
     target: { scope: "layer", property },
     timeSeconds: clamp(timeSeconds, 0, duration),
     value,

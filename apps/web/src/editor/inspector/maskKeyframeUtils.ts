@@ -8,7 +8,7 @@ import {
   type TimelineKeyframeV2,
   type TimelineLayer
 } from "@kimera-by-aelivion/shared";
-import { clamp, findKeyframeIn, isKeyframeAt } from "./keyframeUtils";
+import { clamp, findKeyframeIn, isKeyframeAt, mintKeyframeId } from "./keyframeUtils";
 
 /**
  * Mask keyframe mutations — the mask analogue of the transform/effect helpers in `keyframeUtils.ts`.
@@ -151,7 +151,7 @@ export function toggleMaskScalarKeyframe(
   }
 
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_mask_${maskId}_${property.replaceAll(".", "_")}`,
+    id: mintKeyframeId(`mask_${maskId}_${property.replaceAll(".", "_")}`),
     target: { scope: "mask", maskId, property },
     timeSeconds: clamp(layerTime, 0, layer.durationSeconds),
     value,

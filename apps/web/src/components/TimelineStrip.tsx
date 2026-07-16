@@ -257,6 +257,7 @@ const shortcutCheatSheet: Array<{ keys: string; label: string }> = [
   { keys: "U", label: "Slide tool — drag a clip between neighbours" },
   { keys: "E", label: "Extend nearest edit of selected clip to playhead" },
   { keys: "S", label: "Split selected clips at playhead" },
+  { keys: "D", label: "Disable/enable selected clips (render toggle)" },
   { keys: "⌘D", label: "Duplicate selected clip" },
   { keys: "⌃⌥C", label: "Copy clip attributes (effects/transform)" },
   { keys: "⌃⌥V", label: "Paste attributes onto selected clips" },
@@ -423,6 +424,8 @@ function TimelineStripImpl({
   onToggleMarkerAtPlayhead,
   onRemoveMarker,
   onUpdateMarker,
+  onRemoveClipMarker,
+  onUpdateClipMarker,
   inPointSeconds,
   outPointSeconds,
   onSetInPoint,
@@ -437,6 +440,8 @@ function TimelineStripImpl({
   onToggleLivePlayback,
   onReplaceLayerAsset,
   onSlipLayer,
+  onToggleLayersDisabled,
+  onSlipPreview,
   onRollEdit,
   onSlideLayer,
   onPreviewVolume,
@@ -516,6 +521,9 @@ function TimelineStripImpl({
   onDuplicateLayer?: ((layerId: string) => void) | undefined;
   markers?: TimelineMarker[] | undefined;
   onToggleMarkerAtPlayhead?: (() => void) | undefined;
+  /** Clip markers (layer-local seconds) — remove / rename-recolor, mirroring the ruler pair below. */
+  onRemoveClipMarker?: ((layerId: string, timeSeconds: number) => void) | undefined;
+  onUpdateClipMarker?: ((layerId: string, timeSeconds: number, patch: { name?: string | undefined; color?: string | undefined }) => void) | undefined;
   onRemoveMarker?: ((markerTime: number) => void) | undefined;
   onUpdateMarker?: ((markerTime: number, patch: { name?: string | undefined; color?: string | undefined }) => void) | undefined;
   inPointSeconds?: number | undefined;
@@ -532,6 +540,10 @@ function TimelineStripImpl({
   onToggleLivePlayback?: ((next: boolean) => void) | undefined;
   onReplaceLayerAsset?: ((layerId: string) => void) | undefined;
   onSlipLayer?: ((layerId: string, sourceInSeconds: number) => void) | undefined;
+  /** "d" / context menu: flip `disabled` on all selected clips (+ linked companions). */
+  onToggleLayersDisabled?: (() => void) | undefined;
+  /** Live slip feedback for the viewer two-up (IN/OUT frames) — null when the slip drag ends. */
+  onSlipPreview?: ((preview: { layerId: string; sourceInSeconds: number } | null) => void) | undefined;
   /** Transient/commit layer edit for the audio volume envelope (drag = transient, release = commit). */
   onPreviewVolume?: ((layerId: string, updater: (layer: TimelineLayer) => TimelineLayer, commit: boolean) => void) | undefined;
   /** Premiere-style color label for a clip (null clears the override → inherits the asset's label). */
@@ -601,7 +613,15 @@ function TimelineStripImpl({
     // Snap to the LIVE playhead from the clock store, not the `currentTime` prop: EditorPage no
     // longer holds playhead state (it dropped `currentTime` useState), so the prop is only a stale
     // fallback now. The clock is the frame-accurate truth at drag time.
-    const targets = computeSnapTargets(composition, { excludeLayerId, playheadSeconds: getPlaybackClock(), markers: markers.map((m) => m.timeSeconds) });
+    // Clip markers snap too, translated from clip-local to absolute time so they follow their clip.
+    const clipMarkerTimes = composition.tracks.flatMap((track) =>
+      track.layers.flatMap((layer) => (layer.markers ?? []).map((m) => layer.startSeconds + m.timeSeconds))
+    );
+    const targets = computeSnapTargets(composition, {
+      excludeLayerId,
+      playheadSeconds: getPlaybackClock(),
+      markers: [...markers.map((m) => m.timeSeconds), ...clipMarkerTimes]
+    });
     const tolerance = 8 / pixelsPerSecond;
     return snapValue(value, targets, tolerance);
   }
@@ -617,8 +637,13 @@ function TimelineStripImpl({
   const followGeomRef = useRef<{ laneOffset: number; laneWidth: number; clientWidth: number; maxScroll: number } | null>(null);
   const [drag, setDragState] = useState<DragState>(null);
   const dragRef = useRef<DragState>(null);
-  // Marker rename/recolor popover (right-click a ruler marker). Identified by time — markers have no ids.
-  const [markerEditor, setMarkerEditor] = useState<{ timeSeconds: number; name: string } | null>(null);
+  // Marker rename/recolor popover (right-click a ruler OR clip marker). Identified by time (clip
+  // markers: clip-LOCAL time + layerId) — markers have no ids.
+  const [markerEditor, setMarkerEditor] = useState<{ scope: "ruler" | "clip"; layerId?: string | undefined; timeSeconds: number; name: string } | null>(null);
+  // Stable identity so the memoized TimelineClip doesn't re-render for it.
+  const openClipMarkerEditor = useCallback((layerId: string, timeSeconds: number, name: string) => {
+    setMarkerEditor({ scope: "clip", layerId, timeSeconds, name });
+  }, []);
   const setDrag = useCallback((value: DragState | ((current: DragState) => DragState)) => {
     setDragState((current) => {
       const next = typeof value === "function" ? (value as (current: DragState) => DragState)(current) : value;
@@ -685,7 +710,10 @@ function TimelineStripImpl({
     }
     const denominator = Math.max(0.001, timelineDurationSeconds);
     const cache = dragPreviewElsRef.current;
-    for (const layerId of current.movedLayerIds) {
+    // Iterate the placement map, not movedLayerIds: resolveGroupMove also places linked FOLLOWERS
+    // (companion audio) in previewStartByLayerId, and they must slide live with the drag instead of
+    // snapping into place at commit.
+    for (const layerId of Object.keys(current.previewStartByLayerId)) {
       let entry = cache.get(layerId);
       if (!entry) {
         const el = document.querySelector<HTMLElement>(`.timeline-clip[data-layer-id="${CSS.escape(layerId)}"]`);
@@ -927,7 +955,7 @@ function TimelineStripImpl({
   const currentShapeTool = SHAPE_TOOL_OPTIONS.find((option) => option.value === lastShapeTool) ?? SHAPE_TOOL_OPTIONS[0]!;
   const shapeSelectOptions = SHAPE_SELECT_OPTIONS;
   const [trackDrag, setTrackDrag] = useState<{ trackId: string; targetTrackId: string | null; placement: "before" | "after" } | null>(null);
-  const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean; nested: boolean; selectionCount: number } | null>(null);
+  const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean; nested: boolean; disabled: boolean; selectionCount: number } | null>(null);
   // The menu is measured after mount and clamped inside the viewport so it never spills off the
   // bottom/right edge (which was hiding its lower options). Hidden until positioned to avoid a jump.
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -957,10 +985,13 @@ function TimelineStripImpl({
     baseSourceInSeconds: number;
     maxSourceInSeconds: number;
     previewSourceInSeconds: number;
+    // Pointer position for the floating heads-up badge (see flushTrimPreview — shared with roll/slide).
+    lastClientX: number;
+    lastClientY: number;
   } | null>(null);
   // Live source-offset preview shown on the slipping clip while dragging (commit
   // happens on pointer-up to avoid a composition write per frame).
-  const [slipPreview, setSlipPreview] = useState<{ layerId: string; sourceInSeconds: number } | null>(null);
+  const [slipPreview, setSlipPreview] = useState<{ layerId: string; sourceInSeconds: number; limitReason?: string | undefined } | null>(null);
   // Roll/slide trim drags (tool modes "roll"/"slide"): like slip, the drag only accumulates a
   // clamped delta shown as a badge on the clip — the composition mutates ONCE on pointer-up
   // through the pure shared ops (rollEditAtCut / slideLayer) via onRollEdit / onSlideLayer.
@@ -973,9 +1004,89 @@ function TimelineStripImpl({
     rightLayerId: string;
     minDelta: number;
     maxDelta: number;
+    minReason?: string | undefined; // which constraint pins the leftward limit (shown when the drag hits it)
+    maxReason?: string | undefined;
+    // Clip geometry captured at gesture start for the live imperative preview: "left" = tail
+    // absorbs the delta (width grows), "right" = head absorbs it (left+width shift), "mid" = the
+    // slid clip (left shifts, width unchanged).
+    affected: Array<{ layerId: string; baseStartSeconds: number; baseDurationSeconds: number; role: "left" | "right" | "mid" }>;
     previewDelta: number;
+    // Live pointer position for the floating heads-up badge — positioned imperatively in the same
+    // rAF as the clip edges, so following the cursor costs zero React renders.
+    lastClientX: number;
+    lastClientY: number;
   } | null>(null);
-  const [trimPreview, setTrimPreview] = useState<{ mode: "roll" | "slide"; layerId: string; deltaSeconds: number } | null>(null);
+  const [trimPreview, setTrimPreview] = useState<{
+    mode: "roll" | "slide";
+    layerId: string;
+    deltaSeconds: number;
+    limitReason?: string | undefined;
+  } | null>(null);
+  // LIVE TRIM PREVIEW (roll/slide): same imperative doctrine as move/resize — one rAF writes the
+  // affected clips' left/width straight to the DOM from the accumulated delta; React re-enters only
+  // at commit. Cache holds the React-written inline styles so cancel can restore them.
+  const trimRafRef = useRef<number | null>(null);
+  const trimDragLimitReasonRef = useRef<string | undefined>(undefined); // last reason shown, to avoid redundant state writes
+  const trimPreviewElsRef = useRef<Map<string, { el: HTMLElement; originalLeft: string; originalWidth: string }>>(new Map());
+  // Floating heads-up badge for roll/slide: position: fixed at the strip level so NO clip/track
+  // overflow can clip it (the old in-clip badge was unreadable — cut off by the clip bounds).
+  const trimBadgeRef = useRef<HTMLDivElement | null>(null);
+  const flushTrimPreview = useCallback(() => {
+    trimRafRef.current = null;
+    const trim = trimDragRef.current;
+    // The HUD badge is shared by roll/slide AND slip — whichever drag is live positions it.
+    const hudSource = trim ?? slipDragRef.current;
+    const badge = trimBadgeRef.current;
+    if (badge && hudSource) {
+      badge.style.left = `${hudSource.lastClientX}px`;
+      badge.style.top = `${hudSource.lastClientY - 16}px`;
+      badge.style.visibility = "visible";
+    }
+    if (!trim) {
+      return; // slip moves no clip edges — badge only
+    }
+    const denominator = Math.max(0.001, timelineDurationSeconds);
+    const cache = trimPreviewElsRef.current;
+    for (const affected of trim.affected) {
+      let entry = cache.get(affected.layerId);
+      if (!entry) {
+        const el = document.querySelector<HTMLElement>(`.timeline-clip[data-layer-id="${CSS.escape(affected.layerId)}"]`);
+        if (!el) continue;
+        entry = { el, originalLeft: el.style.left, originalWidth: el.style.width };
+        cache.set(affected.layerId, entry);
+      }
+      const delta = trim.previewDelta;
+      const start = affected.role === "left" ? affected.baseStartSeconds : affected.baseStartSeconds + delta;
+      const duration =
+        affected.role === "left"
+          ? affected.baseDurationSeconds + delta
+          : affected.role === "right"
+            ? affected.baseDurationSeconds - delta
+            : affected.baseDurationSeconds;
+      entry.el.style.left = `${(start / denominator) * 100}%`;
+      entry.el.style.width = `${Math.max(0, (duration / denominator) * 100)}%`;
+    }
+  }, [timelineDurationSeconds]);
+  const cancelTrimFlush = useCallback(() => {
+    if (trimRafRef.current !== null) {
+      cancelAnimationFrame(trimRafRef.current);
+      trimRafRef.current = null;
+    }
+  }, []);
+  /** Cancel path: clips snap back to where React last drew them. */
+  const restoreTrimPreviewDom = useCallback(() => {
+    for (const entry of trimPreviewElsRef.current.values()) {
+      entry.el.style.left = entry.originalLeft;
+      entry.el.style.width = entry.originalWidth;
+    }
+    trimPreviewElsRef.current = new Map();
+  }, []);
+  /** Commit path: paint the final delta now and keep it — React's commit render writes the exact values. */
+  const settleTrimPreviewForCommit = useCallback(() => {
+    cancelTrimFlush();
+    flushTrimPreview();
+    trimPreviewElsRef.current = new Map();
+  }, [cancelTrimFlush, flushTrimPreview]);
   const timebarRef = useRef<HTMLDivElement | null>(null);
   // The side "add tool" rail sits to the left of the whole timeline-editor column,
   // which also contains the timebar/toolbar + ruler above the tracks. Without this,
@@ -992,12 +1103,17 @@ function TimelineStripImpl({
     cancelDragFlush();
     // Undo the imperative move preview — React's diff won't restore styles it never saw change.
     restoreDragPreviewDom();
+    dragRef.current = null; // synchronous, so same-dispatch listeners see a dead drag
     setDrag(null);
     slipDragRef.current = null;
     setSlipPreview(null);
+    onSlipPreview?.(null);
+    cancelTrimFlush();
+    restoreTrimPreviewDom();
     trimDragRef.current = null;
+    trimDragLimitReasonRef.current = undefined;
     setTrimPreview(null);
-  }, [cancelTimelinePan, cancelDragFlush, restoreDragPreviewDom, setDrag]);
+  }, [cancelTimelinePan, cancelDragFlush, restoreDragPreviewDom, setDrag, cancelTrimFlush, restoreTrimPreviewDom, onSlipPreview]);
   const cancelResize = useCallback(() => {
     cancelTimelinePan();
     cancelResizeFlush();
@@ -1342,9 +1458,15 @@ function TimelineStripImpl({
           startClientX: event.clientX,
           baseSourceInSeconds: layer.sourceInSeconds ?? 0,
           maxSourceInSeconds,
-          previewSourceInSeconds: layer.sourceInSeconds ?? 0
+          previewSourceInSeconds: layer.sourceInSeconds ?? 0,
+          lastClientX: event.clientX,
+          lastClientY: event.clientY
         };
         setSlipPreview({ layerId: layer.id, sourceInSeconds: layer.sourceInSeconds ?? 0 });
+        onSlipPreview?.({ layerId: layer.id, sourceInSeconds: layer.sourceInSeconds ?? 0 });
+        if (trimRafRef.current === null) {
+          trimRafRef.current = requestAnimationFrame(flushTrimPreview); // position the HUD before the first move
+        }
         return;
       }
 
@@ -1386,9 +1508,20 @@ function TimelineStripImpl({
             rightLayerId: nearest.right.id,
             minDelta: limits.minDelta,
             maxDelta: limits.maxDelta,
-            previewDelta: 0
+            minReason: limits.minReason,
+            maxReason: limits.maxReason,
+            affected: [
+              { layerId: nearest.left.id, baseStartSeconds: nearest.left.startSeconds, baseDurationSeconds: nearest.left.durationSeconds, role: "left" },
+              { layerId: nearest.right.id, baseStartSeconds: nearest.right.startSeconds, baseDurationSeconds: nearest.right.durationSeconds, role: "right" }
+            ],
+            previewDelta: 0,
+            lastClientX: event.clientX,
+            lastClientY: event.clientY
           };
           setTrimPreview({ mode: "roll", layerId: layer.id, deltaSeconds: 0 });
+          if (trimRafRef.current === null) {
+            trimRafRef.current = requestAnimationFrame(flushTrimPreview); // positions the badge before the first move
+          }
           return;
         }
         const limits = slideLayerLimits(composition, layer.id, limitOptions);
@@ -1396,6 +1529,8 @@ function TimelineStripImpl({
           onNotice?.("Slide needs touching clips on both sides — this clip has a free edge");
           return;
         }
+        const slidePrevious = track?.layers.find((item) => item.id === limits.previousLayerId);
+        const slideNext = track?.layers.find((item) => item.id === limits.nextLayerId);
         event.currentTarget.setPointerCapture(event.pointerId);
         trimDragRef.current = {
           mode: "slide",
@@ -1406,9 +1541,25 @@ function TimelineStripImpl({
           rightLayerId: "",
           minDelta: limits.minDelta,
           maxDelta: limits.maxDelta,
-          previewDelta: 0
+          minReason: limits.minReason,
+          maxReason: limits.maxReason,
+          affected: [
+            ...(slidePrevious
+              ? [{ layerId: slidePrevious.id, baseStartSeconds: slidePrevious.startSeconds, baseDurationSeconds: slidePrevious.durationSeconds, role: "left" as const }]
+              : []),
+            { layerId: layer.id, baseStartSeconds: layer.startSeconds, baseDurationSeconds: layer.durationSeconds, role: "mid" },
+            ...(slideNext
+              ? [{ layerId: slideNext.id, baseStartSeconds: slideNext.startSeconds, baseDurationSeconds: slideNext.durationSeconds, role: "right" as const }]
+              : [])
+          ],
+          previewDelta: 0,
+          lastClientX: event.clientX,
+          lastClientY: event.clientY
         };
         setTrimPreview({ mode: "slide", layerId: layer.id, deltaSeconds: 0 });
+        if (trimRafRef.current === null) {
+          trimRafRef.current = requestAnimationFrame(flushTrimPreview);
+        }
         return;
       }
 
@@ -1471,7 +1622,7 @@ function TimelineStripImpl({
         snappedTo: null
       });
     },
-    [composition, toolMode, slipLayerId, layerMaxDurations, frameStepSeconds, selectedLayerSet, selectedLayerIds, applyInstantSelectionHighlight, onSelectLayer, onSplitLayerAt, onNotice, timelineDurationSeconds, interactionDurationSeconds, setDrag, startTimelinePan]
+    [composition, toolMode, slipLayerId, layerMaxDurations, frameStepSeconds, selectedLayerSet, selectedLayerIds, applyInstantSelectionHighlight, onSelectLayer, onSplitLayerAt, onNotice, timelineDurationSeconds, interactionDurationSeconds, setDrag, startTimelinePan, onSlipPreview, flushTrimPreview]
   );
 
   const moveDrag = useCallback(
@@ -1485,11 +1636,25 @@ function TimelineStripImpl({
 
       const slip = slipDragRef.current;
       if (slip && slip.pointerId === event.pointerId) {
+        slip.lastClientX = event.clientX;
+        slip.lastClientY = event.clientY;
         // Drag right reveals earlier source (negative offset), matching Premiere's slip.
         const deltaSeconds = -((event.clientX - slip.startClientX) / pixelsPerSecond);
-        const nextSourceIn = clamp(snap(slip.baseSourceInSeconds + deltaSeconds, frameStepSeconds), 0, slip.maxSourceInSeconds);
+        const desired = slip.baseSourceInSeconds + deltaSeconds;
+        const nextSourceIn = clamp(snap(desired, frameStepSeconds), 0, slip.maxSourceInSeconds);
+        const overshootEpsilon = frameStepSeconds / 2;
+        const limitReason =
+          desired < -overshootEpsilon
+            ? "at start of source material"
+            : desired > slip.maxSourceInSeconds + overshootEpsilon
+              ? "at end of source material"
+              : undefined;
         slip.previewSourceInSeconds = nextSourceIn;
-        setSlipPreview({ layerId: slip.layerId, sourceInSeconds: nextSourceIn });
+        setSlipPreview({ layerId: slip.layerId, sourceInSeconds: nextSourceIn, limitReason });
+        onSlipPreview?.({ layerId: slip.layerId, sourceInSeconds: nextSourceIn });
+        if (trimRafRef.current === null) {
+          trimRafRef.current = requestAnimationFrame(flushTrimPreview);
+        }
         return;
       }
 
@@ -1563,7 +1728,7 @@ function TimelineStripImpl({
         dragRafRef.current = requestAnimationFrame(flushDragPreview);
       }
     },
-    [composition, layerMaxDurations, timelineDurationSeconds, interactionDurationSeconds, frameStepSeconds, snapEnabled, currentTime, pixelsPerSecond, markers, trackHeight, flushDragPreview]
+    [composition, layerMaxDurations, timelineDurationSeconds, interactionDurationSeconds, frameStepSeconds, snapEnabled, currentTime, pixelsPerSecond, markers, trackHeight, flushDragPreview, flushTrimPreview, onSlipPreview]
   );
 
   // Roll/slide drags listen on WINDOW while active (not the clip element): the gesture starts on
@@ -1576,17 +1741,38 @@ function TimelineStripImpl({
     function handleTrimMove(event: globalThis.PointerEvent) {
       const trim = trimDragRef.current;
       if (!trim || trim.pointerId !== event.pointerId) return;
+      trim.lastClientX = event.clientX;
+      trim.lastClientY = event.clientY;
       const raw = (event.clientX - trim.startClientX) / pixelsPerSecond;
       const nextDelta = clamp(snap(raw, frameStepSeconds), trim.minDelta, trim.maxDelta);
-      if (nextDelta !== trim.previewDelta) {
+      // When the pointer pushes past a pinned limit, surface WHY the edit refuses to go further
+      // (e.g. rolling left with no head material on the right clip looks simply "broken" otherwise).
+      const overshootEpsilon = frameStepSeconds / 2;
+      const limitReason =
+        raw < trim.minDelta - overshootEpsilon ? trim.minReason : raw > trim.maxDelta + overshootEpsilon ? trim.maxReason : undefined;
+      if (nextDelta !== trim.previewDelta || limitReason !== trimDragLimitReasonRef.current) {
         trim.previewDelta = nextDelta;
-        setTrimPreview({ mode: trim.mode, layerId: trim.layerId, deltaSeconds: nextDelta });
+        trimDragLimitReasonRef.current = limitReason;
+        setTrimPreview({ mode: trim.mode, layerId: trim.layerId, deltaSeconds: nextDelta, limitReason });
+      }
+      // Always flush: the badge follows the pointer even when the frame-quantized delta hasn't changed.
+      if (trimRafRef.current === null) {
+        trimRafRef.current = requestAnimationFrame(flushTrimPreview);
       }
     }
     function handleTrimUp(event: globalThis.PointerEvent) {
       const trim = trimDragRef.current;
       if (!trim || trim.pointerId !== event.pointerId) return;
+      if (Math.abs(trim.previewDelta) > 0.0001) {
+        // Keep the previewed pixels on screen (settle reads the ref, so it runs before the ref is
+        // cleared); the commit render writes the exact values.
+        settleTrimPreviewForCommit();
+      } else {
+        cancelTrimFlush();
+        restoreTrimPreviewDom();
+      }
       trimDragRef.current = null;
+      trimDragLimitReasonRef.current = undefined;
       setTrimPreview(null);
       if (Math.abs(trim.previewDelta) > 0.0001) {
         if (trim.mode === "roll") {
@@ -1604,7 +1790,7 @@ function TimelineStripImpl({
       window.removeEventListener("pointerup", handleTrimUp);
       window.removeEventListener("pointercancel", handleTrimUp);
     };
-  }, [trimPreview, pixelsPerSecond, frameStepSeconds, onRollEdit, onSlideLayer]);
+  }, [trimPreview, pixelsPerSecond, frameStepSeconds, onRollEdit, onSlideLayer, flushTrimPreview, cancelTrimFlush, restoreTrimPreviewDom, settleTrimPreviewForCommit]);
 
   const finishDrag = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -1618,6 +1804,7 @@ function TimelineStripImpl({
       if (slip && slip.pointerId === event.pointerId) {
         slipDragRef.current = null;
         setSlipPreview(null);
+        onSlipPreview?.(null);
         if (slip.previewSourceInSeconds !== slip.baseSourceInSeconds) {
           onSlipLayer?.(slip.layerId, slip.previewSourceInSeconds);
         }
@@ -1651,9 +1838,14 @@ function TimelineStripImpl({
         onSelectLayer(drag.layerId, "replace");
       }
       settleDragPreviewForCommit();
+      // Null the ref SYNCHRONOUSLY: setDrag's updater (which mirrors into dragRef) runs only when
+      // React processes the state update, but the same native pointerup keeps propagating to the
+      // window safety net in this very dispatch — it must see a dead drag or it commits the move a
+      // second time (stale-composition double commit, the multi-drag track-collapse report).
+      dragRef.current = null;
       setDrag(null);
     },
-    [onMoveLayer, onSlipLayer, onRollEdit, onSlideLayer, settleDragPreviewForCommit, dragChangedAnything, setDrag, applyInstantSelectionHighlight, onSelectLayer]
+    [onMoveLayer, onSlipLayer, onSlipPreview, onRollEdit, onSlideLayer, settleDragPreviewForCommit, dragChangedAnything, setDrag, applyInstantSelectionHighlight, onSelectLayer]
   );
 
   // STUCK-DRAG SAFETY NET (2026-07-03 user report: a clip chased the mouse and could not be
@@ -1682,6 +1874,9 @@ function TimelineStripImpl({
         );
       }
       settleDragPreviewForCommit();
+      // Synchronous ref clear on every terminal path (see finishDrag) so no other listener in the
+      // same event dispatch can act on the finished drag.
+      dragRef.current = null;
       setDrag(null);
     };
     const cancelFromWindow = (event: globalThis.PointerEvent) => {
@@ -1689,6 +1884,7 @@ function TimelineStripImpl({
       if (!active || active.pointerId !== event.pointerId) return;
       cancelDragFlush();
       restoreDragPreviewDom();
+      dragRef.current = null;
       setDrag(null);
     };
     const cancelOnEscape = (event: KeyboardEvent) => {
@@ -1696,6 +1892,7 @@ function TimelineStripImpl({
       event.stopPropagation();
       cancelDragFlush();
       restoreDragPreviewDom();
+      dragRef.current = null;
       setDrag(null);
     };
     window.addEventListener("pointerup", commitFromWindow);
@@ -1988,7 +2185,8 @@ function TimelineStripImpl({
       setSelectedKeyframeId(keyframe.id);
       applyInstantSelectionHighlight([layer.id]);
       onSelectLayer(layer.id);
-      onChangeCurrentTime(layer.startSeconds + keyframe.timeSeconds);
+      // No playhead seek here (2026-07-16 user request): clicking/grabbing a keyframe selects it
+      // and must NOT move the playhead.
       setKeyframeDrag({
         clip,
         keyframeId: keyframe.id,
@@ -2090,7 +2288,12 @@ function TimelineStripImpl({
       }
       const localTime = getClipLocalTime(event.clientX, drag.clip, layer.durationSeconds, frameStepSeconds);
       const raw = drag.side === "fadeIn" ? localTime : layer.durationSeconds - localTime;
-      const next = clamp(raw, frameStepSeconds, layer.durationSeconds / 2);
+      // A fade may span up to the WHOLE clip, limited only by the opposing fade so the two never
+      // cross (fadeIn + fadeOut ≤ duration) — the old half-duration cap was needlessly restrictive.
+      const fades = getClipFades(layer);
+      const opposing = drag.side === "fadeIn" ? fades.fadeOut : fades.fadeIn;
+      const maxFade = Math.max(frameStepSeconds, layer.durationSeconds - opposing);
+      const next = clamp(raw, frameStepSeconds, maxFade);
       setTransitionDrag({ ...drag, previewDurationSeconds: next });
     },
     [composition, frameStepSeconds, setTransitionDrag]
@@ -2472,6 +2675,13 @@ function TimelineStripImpl({
           event.preventDefault();
           onSplitAtPlayhead?.();
           return;
+        case "d":
+          // Plain D = disable/enable the selected clip(s) (⌘D duplicate handled above).
+          if (selectedLayerId || selectedLayerIds.length > 0) {
+            event.preventDefault();
+            onToggleLayersDisabled?.();
+          }
+          return;
         case "n":
           event.preventDefault();
           onToggleSnap?.();
@@ -2518,6 +2728,8 @@ function TimelineStripImpl({
     onSplitAtPlayhead,
     onToggleSnap,
     onToggleMarkerAtPlayhead,
+    onToggleLayersDisabled,
+    selectedLayerIds,
     fitZoom,
     showShortcuts,
     inPointSeconds,
@@ -2701,8 +2913,18 @@ function TimelineStripImpl({
       // Right-clicking a clip that's already part of a multi-selection keeps the whole group selected
       // (so group actions like Nest operate on all of them); right-clicking a clip OUTSIDE the current
       // selection focuses just that clip first, matching Premiere/Resolve.
-      const withinSelection = selectedLayerSet.has(layer.id);
-      const selectionCount = withinSelection ? selectedLayerIds.length : 1;
+      // Selection commits through a React TRANSITION (see commitLayerSelection), so `selectedLayerSet`
+      // can lag the user by hundreds of ms after a marquee/shift-click. Consult the imperative
+      // ground truth too (the `is-selected` DOM classes + the pending instant-selection buffer) or a
+      // fast right-click inside a fresh multi-selection collapses it.
+      const withinSelection =
+        selectedLayerSet.has(layer.id) ||
+        event.currentTarget.classList.contains("is-selected") ||
+        (pendingInstantSelectionRef.current?.includes(layer.id) ?? false);
+      const committedCount = withinSelection && !selectedLayerSet.has(layer.id)
+        ? document.querySelectorAll(".timeline-clip.is-selected").length
+        : selectedLayerIds.length;
+      const selectionCount = withinSelection ? Math.max(1, committedCount) : 1;
       if (!withinSelection) {
         applyInstantSelectionHighlight([layer.id]);
         onSelectLayer(layer.id, "replace");
@@ -2718,6 +2940,7 @@ function TimelineStripImpl({
         crossPair: junction ? { leftLayerId: junction.leftLayerId, rightLayerId: junction.rightLayerId } : null,
         hasTransition: junction?.hasTransition ?? false,
         nested: Boolean(layer.nestedCompositionId),
+        disabled: Boolean(layer.disabled),
         selectionCount
       });
     },
@@ -3104,7 +3327,7 @@ function TimelineStripImpl({
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                setMarkerEditor({ timeSeconds: marker.timeSeconds, name: marker.name ?? "" });
+                setMarkerEditor({ scope: "ruler", timeSeconds: marker.timeSeconds, name: marker.name ?? "" });
               }}
             >
               <Flag size={10} />
@@ -3113,12 +3336,37 @@ function TimelineStripImpl({
           ))}
           {markerEditor
             ? (() => {
-                const editing = markers.find((m) => m.timeSeconds === markerEditor.timeSeconds);
-                if (!editing) return null;
+                // One popover serves BOTH scopes: ruler markers live in composition settings
+                // (absolute time); clip markers live on the layer (clip-local time), positioned
+                // here at their absolute time so the popover appears where the flag is.
+                const editorLayer =
+                  markerEditor.scope === "clip" && markerEditor.layerId
+                    ? composition.tracks.flatMap((track) => track.layers).find((item) => item.id === markerEditor.layerId)
+                    : undefined;
+                const editing =
+                  markerEditor.scope === "clip"
+                    ? editorLayer?.markers?.find((m) => m.timeSeconds === markerEditor.timeSeconds)
+                    : markers.find((m) => m.timeSeconds === markerEditor.timeSeconds);
+                if (!editing || (markerEditor.scope === "clip" && !editorLayer)) return null;
+                const anchorSeconds = markerEditor.scope === "clip" ? (editorLayer?.startSeconds ?? 0) + editing.timeSeconds : editing.timeSeconds;
+                const commitUpdate = (patch: { name?: string | undefined; color?: string | undefined }) => {
+                  if (markerEditor.scope === "clip" && markerEditor.layerId) {
+                    onUpdateClipMarker?.(markerEditor.layerId, editing.timeSeconds, patch);
+                  } else {
+                    onUpdateMarker?.(editing.timeSeconds, patch);
+                  }
+                };
+                const commitRemove = () => {
+                  if (markerEditor.scope === "clip" && markerEditor.layerId) {
+                    onRemoveClipMarker?.(markerEditor.layerId, editing.timeSeconds);
+                  } else {
+                    onRemoveMarker?.(editing.timeSeconds);
+                  }
+                };
                 return (
                   <div
                     className="timeline-marker-editor"
-                    style={{ "--ruler-mark-percent": playheadOffsetPercent(editing.timeSeconds, composition.durationSeconds) } as CSSProperties & Record<"--ruler-mark-percent", string>}
+                    style={{ "--ruler-mark-percent": playheadOffsetPercent(anchorSeconds, composition.durationSeconds) } as CSSProperties & Record<"--ruler-mark-percent", string>}
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={(event) => event.stopPropagation()}
                   >
@@ -3130,7 +3378,7 @@ function TimelineStripImpl({
                       onKeyDown={(event) => {
                         event.stopPropagation();
                         if (event.key === "Enter") {
-                          onUpdateMarker?.(editing.timeSeconds, { name: markerEditor.name.trim() || undefined });
+                          commitUpdate({ name: markerEditor.name.trim() || undefined });
                           setMarkerEditor(null);
                         }
                         if (event.key === "Escape") setMarkerEditor(null);
@@ -3144,7 +3392,7 @@ function TimelineStripImpl({
                           className={`timeline-marker-swatch${(editing.color ?? TIMELINE_MARKER_COLORS[0]) === color ? " is-active" : ""}`}
                           style={{ background: color }}
                           title={color}
-                          onClick={() => onUpdateMarker?.(editing.timeSeconds, { color })}
+                          onClick={() => commitUpdate({ color })}
                         />
                       ))}
                     </div>
@@ -3153,7 +3401,7 @@ function TimelineStripImpl({
                         type="button"
                         className="button button-ghost"
                         onClick={() => {
-                          onUpdateMarker?.(editing.timeSeconds, { name: markerEditor.name.trim() || undefined });
+                          commitUpdate({ name: markerEditor.name.trim() || undefined });
                           setMarkerEditor(null);
                         }}
                       >
@@ -3163,7 +3411,7 @@ function TimelineStripImpl({
                         type="button"
                         className="button button-ghost"
                         onClick={() => {
-                          onRemoveMarker?.(editing.timeSeconds);
+                          commitRemove();
                           setMarkerEditor(null);
                         }}
                       >
@@ -3399,7 +3647,6 @@ function TimelineStripImpl({
                       isSelectedForKeyframes={isLayerSelectedForKeyframes}
                       isSlipping={slipLayerId === layer.id}
                       slipPreviewSourceInSeconds={slipPreview?.layerId === layer.id ? slipPreview.sourceInSeconds : null}
-                      trimPreview={trimPreview?.layerId === layer.id ? { mode: trimPreview.mode, deltaSeconds: trimPreview.deltaSeconds } : null}
                       key={layer.id}
                       layer={layer}
                       onCancelDrag={cancelDrag}
@@ -3435,6 +3682,8 @@ function TimelineStripImpl({
                       hideFadeOut={junctionLeftIds.has(layer.id)}
                       onUnlinkLayer={onUnlinkLayer}
                       onOpenNestedClip={onOpenNestedClip}
+                      onRemoveClipMarker={onRemoveClipMarker}
+                      onOpenClipMarkerEditor={openClipMarkerEditor}
                       selectedClipKeyframeId={isLayerSelectedForKeyframes ? selectedKeyframeId : null}
                       startSeconds={preview?.startSeconds ?? layer.startSeconds}
                       timelineDurationSeconds={timelineDurationSeconds}
@@ -3927,6 +4176,21 @@ function TimelineStripImpl({
             <button
               type="button"
               onClick={() => {
+                onToggleLayersDisabled?.();
+                setClipContextMenu(null);
+              }}
+            >
+              {clipContextMenu.disabled
+                ? clipContextMenu.selectionCount >= 2
+                  ? `Enable ${clipContextMenu.selectionCount} clips`
+                  : "Enable clip"
+                : clipContextMenu.selectionCount >= 2
+                  ? `Disable ${clipContextMenu.selectionCount} clips`
+                  : "Disable clip (D)"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
                 if (clipContextMenu.selectionCount >= 2 && onDeleteSelectedLayers) onDeleteSelectedLayers();
                 else onDeleteLayer(clipContextMenu.layerId);
                 setClipContextMenu(null);
@@ -3937,6 +4201,36 @@ function TimelineStripImpl({
           </div>
         </div>
       ) : null}
+      {/* Roll/slide/slip heads-up badge: fixed-positioned above the pointer (rAF-driven via
+          trimBadgeRef — see flushTrimPreview) so no clip/track overflow can ever clip it.
+          Starts hidden; the first flush positions and reveals it. */}
+      {(() => {
+        const hud = trimPreview
+          ? { mode: trimPreview.mode, deltaSeconds: trimPreview.deltaSeconds, limitReason: trimPreview.limitReason }
+          : slipPreview
+            ? {
+                mode: "slip",
+                deltaSeconds: slipPreview.sourceInSeconds - (slipDragRef.current?.baseSourceInSeconds ?? slipPreview.sourceInSeconds),
+                limitReason: slipPreview.limitReason
+              }
+            : null;
+        if (!hud) return null;
+        return (
+          <div
+            ref={trimBadgeRef}
+            className={`timeline-trim-hud${hud.limitReason ? " is-limited" : ""}`}
+            style={{ visibility: "hidden" }}
+            aria-live="polite"
+          >
+            <span className="timeline-trim-hud-delta">
+              <span className="timeline-trim-hud-mode">{hud.mode}</span>
+              {hud.deltaSeconds >= 0 ? "+" : "−"}
+              {Math.abs(hud.deltaSeconds).toFixed(2)}s
+            </span>
+            {hud.limitReason ? <span className="timeline-trim-hud-reason">{hud.limitReason}</span> : null}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -4533,7 +4827,6 @@ interface TimelineClipProps {
   isSelectedForKeyframes: boolean;
   isSlipping: boolean;
   slipPreviewSourceInSeconds: number | null;
-  trimPreview: { mode: "roll" | "slide"; deltaSeconds: number } | null;
   selectedClipKeyframeId: string | null;
   draggingKeyframeId: string | null;
   draggingKeyframePreviewTime: number | null;
@@ -4576,6 +4869,8 @@ interface TimelineClipProps {
   onSelectKeyframe: (keyframeId: string | null) => void;
   onSetEffectDropTarget: (layerId: string | null) => void;
   onOpenNestedClip?: ((layerId: string) => void) | undefined;
+  onRemoveClipMarker?: ((layerId: string, timeSeconds: number) => void) | undefined;
+  onOpenClipMarkerEditor?: ((layerId: string, timeSeconds: number, name: string) => void) | undefined;
 }
 
 // Memoized so dragging/resizing/scrubbing one clip doesn't re-render every other
@@ -4595,7 +4890,6 @@ const TimelineClip = memo(function TimelineClip({
   isSelectedForKeyframes,
   isSlipping,
   slipPreviewSourceInSeconds,
-  trimPreview,
   selectedClipKeyframeId,
   draggingKeyframeId,
   draggingKeyframePreviewTime,
@@ -4633,7 +4927,9 @@ const TimelineClip = memo(function TimelineClip({
   hideFadeOut,
   onSelectKeyframe,
   onSetEffectDropTarget,
-  onOpenNestedClip
+  onOpenNestedClip,
+  onRemoveClipMarker,
+  onOpenClipMarkerEditor
 }: TimelineClipProps) {
   const left = (startSeconds / timelineDurationSeconds) * 100;
   const width = (durationSeconds / timelineDurationSeconds) * 100;
@@ -4653,7 +4949,6 @@ const TimelineClip = memo(function TimelineClip({
   const outroSeconds = responsivePreview?.side === "outro" ? responsivePreview.seconds : layer.responsiveTime?.outroSeconds ?? 0;
   const introPercent = Math.min(100, (introSeconds / Math.max(0.0001, layer.durationSeconds)) * 100);
   const outroPercent = Math.min(100, (outroSeconds / Math.max(0.0001, layer.durationSeconds)) * 100);
-  const slipReadout = isSlipping ? (slipPreviewSourceInSeconds ?? layer.sourceInSeconds ?? 0) : null;
   const canSlip = (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId);
   const asset = layer.assetId ? assets.find((item) => item.id === layer.assetId) : undefined;
   const audioUrl = layer.type === "audio" ? asset?.fileUrl : undefined;
@@ -4669,7 +4964,7 @@ const TimelineClip = memo(function TimelineClip({
       aria-label={`${layer.name}, ${layer.type}, starts at ${startSeconds.toFixed(1)} seconds`}
       className={`timeline-clip timeline-clip-${layer.type} ${isSelected ? "is-selected" : ""} ${isDragging ? "is-dragging" : ""} ${
         isEffectDropTarget ? "is-effect-drop-target" : ""
-      } ${isSlipping ? "is-slipping" : ""} ${labelColor ? "has-label" : ""}`}
+      } ${isSlipping ? "is-slipping" : ""} ${labelColor ? "has-label" : ""} ${layer.disabled ? "is-disabled" : ""}`}
       data-layer-id={layer.id}
       role="button"
       tabIndex={0}
@@ -4872,12 +5167,33 @@ const TimelineClip = memo(function TimelineClip({
         <AudioVolumeEnvelope layer={layer} onPreviewVolume={onPreviewVolume} />
       ) : null}
       {layer.type === "video" ? <Filmstrip url={asset?.fileUrl} /> : null}
-      {isSlipping ? <span className="clip-slip-badge">slip {slipReadout!.toFixed(2)}s</span> : null}
-      {trimPreview ? (
-        <span className="clip-slip-badge">
-          {trimPreview.mode} {trimPreview.deltaSeconds >= 0 ? "+" : ""}{trimPreview.deltaSeconds.toFixed(2)}s
+      {/* Clip markers: clip-local flags that travel with the clip. Double-click removes,
+          right-click opens the shared rename/recolor popover (rendered on the ruler layer). */}
+      {(layer.markers ?? []).map((marker) => (
+        <span
+          key={marker.timeSeconds}
+          className="timeline-clip-marker"
+          title={`${marker.name ? `"${marker.name}" ` : "Marker "}at +${marker.timeSeconds.toFixed(2)}s — double-click to remove, right-click to rename/recolor`}
+          style={
+            {
+              left: `${(marker.timeSeconds / Math.max(0.0001, layer.durationSeconds)) * 100}%`,
+              ...(marker.color ? { "--marker-color": marker.color } : {})
+            } as CSSProperties
+          }
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => {
+            event.stopPropagation();
+            onRemoveClipMarker?.(layer.id, marker.timeSeconds);
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenClipMarkerEditor?.(layer.id, marker.timeSeconds, marker.name ?? "");
+          }}
+        >
+          <Flag size={8} />
         </span>
-      ) : null}
+      ))}
       {clipNumber !== undefined ? (
         <span className="clip-number" aria-hidden="true">{clipNumber}</span>
       ) : null}
@@ -4906,7 +5222,7 @@ const TimelineClip = memo(function TimelineClip({
                   event.stopPropagation();
                   onSelectKeyframe(keyframe.id);
                   onSelectLayer(layer.id, "replace");
-                  onChangeCurrentTime(layer.startSeconds + keyframe.timeSeconds);
+                  // No playhead seek (2026-07-16 user request): keyframe click = select only.
                 }}
                 onDoubleClick={(event) => {
                   // Double-click OPENS THE GRAPH EDITOR focused on this property (2026-07-12,

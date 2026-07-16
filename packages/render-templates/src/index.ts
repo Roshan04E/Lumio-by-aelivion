@@ -297,7 +297,7 @@ export function buildRenderManifest(input: {
 
   const layers = composition.tracks.flatMap((track, trackIndex) =>
     track.layers
-      .filter((layer) => isTrackEnabled(track, composition.tracks) && !layer.muted)
+      .filter((layer) => isTrackEnabled(track, composition.tracks) && !layer.muted && !layer.disabled)
       .flatMap((layer, layerIndex) => {
         const layerStartSeconds = layer.startSeconds;
         const layerEndSeconds = layer.startSeconds + layer.durationSeconds;

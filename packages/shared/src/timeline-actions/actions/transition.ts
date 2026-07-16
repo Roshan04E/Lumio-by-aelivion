@@ -56,8 +56,22 @@ export function buildTransitionKeyframes(
   kind: "fadeIn" | "fadeOut" | "crossDissolve",
   durationSeconds?: number
 ): TimelineKeyframeV2[] {
-  const fade = Math.min(durationSeconds ?? 0.5, layer.durationSeconds / 2);
   const end = layer.durationSeconds;
+  // A single-direction fade may span up to the WHOLE clip minus any opposing fade (fadeIn +
+  // fadeOut ≤ duration) so the ramps never cross. crossDissolve writes both sides, so each keeps
+  // the half-duration cap.
+  const requested = durationSeconds ?? 0.5;
+  const opposingFade = (marker: string, atEnd: boolean): number => {
+    const key = (layer.animations ?? []).find((item) => item.id.includes(marker));
+    if (!key) return 0;
+    return Math.max(0, atEnd ? end - key.timeSeconds : key.timeSeconds);
+  };
+  const fade =
+    kind === "crossDissolve"
+      ? Math.min(requested, end / 2)
+      : kind === "fadeIn"
+        ? Math.min(requested, Math.max(0, end - opposingFade(`${TRANSITION_MARKER}out_0`, true)))
+        : Math.min(requested, Math.max(0, end - opposingFade(`${TRANSITION_MARKER}in_1`, false)));
   const fresh: TimelineKeyframeV2[] = [];
   if (kind === "fadeIn" || kind === "crossDissolve") {
     fresh.push(tKey(layer.id, "in_0", 0, 0), tKey(layer.id, "in_1", fade, 100));

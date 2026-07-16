@@ -16,7 +16,7 @@ import {
   type WheelEvent as ReactWheelEvent
 } from "react";
 import { createPortal } from "react-dom";
-import { Activity, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
+import { Activity, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, ImagePlus, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
 import {
   buildColorFilterDefs,
   buildMaskDefsSvg,
@@ -69,6 +69,9 @@ import {
   colorWarningsLabel,
   type NestedGroupSpec,
   frameBoxPercent,
+  frameOutlinePathD,
+  mediaRectInFrame,
+  snapMediaRectToBox,
   type ProjectGraph,
   type SourceAsset,
   type TimelineComposition,
@@ -442,6 +445,7 @@ function VideoPreviewImpl({
   onResizeShapeLayer,
   onResizeFrameLayer,
   onContentTransformLayer,
+  onRequestFillFrame,
   onRotateLayer,
   onScaleLayer,
   onCropLayer,
@@ -507,6 +511,8 @@ function VideoPreviewImpl({
   onContentTransformLayer?:
     | ((layerId: string, next: { offsetX?: number; offsetY?: number; scale?: number }, commit: boolean) => void)
     | undefined;
+  /** Fill an EMPTY frame placeholder (Step 4): opens the asset picker bound to this layer. */
+  onRequestFillFrame?: ((layerId: string) => void) | undefined;
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
   onCropLayer?: ((layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) => void) | undefined;
@@ -732,7 +738,7 @@ function VideoPreviewImpl({
         )
         .filter(({ layer, trackIndex }) => {
           const track = composition.tracks[trackIndex];
-          if (!track || !isTrackEnabled(track, composition.tracks) || layer.muted || layer.type === "audio") {
+          if (!track || !isTrackEnabled(track, composition.tracks) || layer.muted || layer.disabled || layer.type === "audio") {
             return false;
           }
           // Active in its own span, OR rendering into the post-roll of the next clip's transition (so
@@ -774,7 +780,7 @@ function VideoPreviewImpl({
         .flatMap((track, trackIndex) => track.layers.map((layer, layerIndex) => ({ layer, trackIndex, layerIndex })))
         .filter(({ layer, trackIndex }) => {
           const track = composition.tracks[trackIndex];
-          if (!track || !isTrackEnabled(track, composition.tracks) || layer.muted || layer.type !== "video" || isLayerActive(layer, currentTime)) {
+          if (!track || !isTrackEnabled(track, composition.tracks) || layer.muted || layer.disabled || layer.type !== "video" || isLayerActive(layer, currentTime)) {
             return false;
           }
           return currentTime + PRELOAD_LOOKAHEAD_SECONDS >= layer.startSeconds && currentTime < layer.startSeconds;
@@ -811,7 +817,7 @@ function VideoPreviewImpl({
     () =>
       composition.tracks
         .flatMap((track, trackIndex) => track.layers.map((layer) => ({ layer, trackIndex, track })))
-        .filter(({ layer, track }) => isTrackEnabled(track, composition.tracks) && !layer.muted && layer.type === "audio" && isLayerActive(layer, currentTime)),
+        .filter(({ layer, track }) => isTrackEnabled(track, composition.tracks) && !layer.muted && !layer.disabled && layer.type === "audio" && isLayerActive(layer, currentTime)),
     [composition, currentTime]
   );
   const activeAudioLayerEntries = useStableList(activeAudioLayerEntriesRaw, eqAudioEntry);
@@ -960,7 +966,10 @@ function VideoPreviewImpl({
   const sceneMediaIds = useMemo(() => {
     const ids = new Set<string>();
     for (const { layer } of renderedLayerEntries) {
-      if (layer.type === "video" || layer.type === "image") ids.add(layer.id);
+      // An EMPTY frame placeholder (frame set, no asset/graphic) has NO source to composite — keep it out
+      // of the scene, or the compositor draws it as an "asset not found" black shape clipped to the frame.
+      // It renders as the DOM placeholder (dashed outline + Add media) over the real backdrop instead.
+      if ((layer.type === "video" || layer.type === "image") && !isEmptyFramePlaceholder(layer)) ids.add(layer.id);
     }
     return ids;
   }, [renderedLayerEntries]);
@@ -1590,6 +1599,7 @@ function VideoPreviewImpl({
                     onResizeShapeLayer={onResizeShapeLayer}
                     onResizeFrameLayer={onResizeFrameLayer}
                     onContentTransformLayer={onContentTransformLayer}
+                    onRequestFillFrame={onRequestFillFrame}
                     contentMode={contentModeLayerId === layer.id}
                     onEnterContentMode={setContentModeLayerId}
                     onRotateLayer={onRotateLayer}
@@ -1777,6 +1787,8 @@ type PreviewLayerProps = {
   /** This layer is in content mode — gestures drive the media inside the frame. */
   contentMode?: boolean | undefined;
   onEnterContentMode?: ((layerId: string) => void) | undefined;
+  /** Fill an EMPTY frame placeholder (Step 4): opens the asset picker bound to this layer. */
+  onRequestFillFrame?: ((layerId: string) => void) | undefined;
   onRotateLayer?: ((layerId: string, rotation: number, commit: boolean) => void) | undefined;
   onScaleLayer?: ((layerId: string, scale: number, commit: boolean) => void) | undefined;
   onCropLayer?: ((layerId: string, edge: "top" | "right" | "bottom" | "left", value: number, commit: boolean) => void) | undefined;
@@ -1841,6 +1853,7 @@ const PreviewLayer = memo(function PreviewLayer({
   onResizeShapeLayer,
   onResizeFrameLayer,
   onContentTransformLayer,
+  onRequestFillFrame,
   onRotateLayer,
   onScaleLayer,
   onCropLayer,
@@ -1860,6 +1873,11 @@ const PreviewLayer = memo(function PreviewLayer({
   bumpRenderCount("PreviewLayer");
   const warpTextSvg = useWarpedTextSvg(layer, currentTime);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // R4 fix: last time (ms) the ramped-playback effect force-seeked the element. A ramped clip's rate
+  // is curved between currentTime commits, so the element free-runs at whatever rate it last got —
+  // correcting on every commit (the old behavior) trips the drift threshold almost every tick, which
+  // seeks a PLAYING <video> every frame → decoder flush/re-prime storm → hung tab. See below.
+  const lastRampSyncMsRef = useRef(0);
   // Unified WebGL render path (rendererMode=webgl). If the shared MediaWebGLRenderer
   // fails to init at runtime, flip this and fall back to the legacy SVG-filter DOM path.
   const [webglMediaFailed, setWebglMediaFailed] = useState(false);
@@ -1963,7 +1981,12 @@ const PreviewLayer = memo(function PreviewLayer({
   }, [mediaUrl, layer.type, graphicNaturalAspect]);
   const metadataAspect = asset && asset.width && asset.height ? asset.width / asset.height : undefined;
   const sourceAspect = measuredAspect ?? metadataAspect;
-  const contentBoxOverride = contentBoxSizeOverride(layer, sourceAspect, frameAspect, contentMode);
+  // In content mode the hug box needs the LIVE content transform (zoom/pan) so it tracks what the user
+  // is doing to the media; outside it, the frame-box path ignores this (it reads the frame chrome).
+  const contentXfForBox = contentMode
+    ? getCompositionContentTransform(layer, { currentTimeSeconds: currentTime })
+    : undefined;
+  const contentBoxOverride = contentBoxSizeOverride(layer, sourceAspect, frameAspect, contentMode, contentXfForBox);
   const isVideo = layer.type === "video" && Boolean(mediaUrl) && (asset?.fileType.startsWith("video/") ?? true);
   // First-frame still at the clip's in-point — held over the canvas/video until the real frame
   // decodes so the viewer never shows black (start, cut, or seek). Captured once, cached.
@@ -2489,9 +2512,45 @@ const PreviewLayer = memo(function PreviewLayer({
     // pointer at half speed.
     const frameFractionX = (2 * (event.clientX - pan.startClientX)) / (pan.surfaceWidth * pan.scale);
     const frameFractionY = (2 * (event.clientY - pan.startClientY)) / (pan.surfaceHeight * pan.scale);
-    return {
+    const candidate = {
       offsetX: clamp(pan.startOffsetX + frameFractionX, -1, 1),
       offsetY: clamp(pan.startOffsetY - frameFractionY, -1, 1)
+    };
+    return snapContentOffset(candidate, pan);
+  }
+
+  /**
+   * Snap the media's edges (and centre) to the frame box while panning in content mode (QA round 5): the
+   * user can then TELL whether the source actually covers the frame. Engages only within ~6 SCREEN px (so
+   * it feels identical at any viewer zoom) — a deliberate drag past that still wins. Pure geometry
+   * (`snapMediaRectToBox`) does the comparison; here we just convert screen px → comp fractions and the
+   * snap shift → an offset delta (offset = centre×2, y screen-flipped).
+   */
+  function snapContentOffset(
+    candidate: { offsetX: number; offsetY: number },
+    pan: NonNullable<typeof contentPanRef.current>
+  ): { offsetX: number; offsetY: number } {
+    if (!layer.frame || !sourceAspect || sourceAspect <= 0 || !frameAspect || frameAspect <= 0) return candidate;
+    const contentScale = getCompositionContentTransform(layer, { currentTimeSeconds: currentTime }).scale;
+    const rect = mediaRectInFrame({
+      sourceAspect,
+      compAspect: frameAspect,
+      fit: getCompositionObjectFit(layer),
+      contentScale,
+      contentOffset: { x: candidate.offsetX, y: candidate.offsetY }
+    });
+    const fb = frameBoxPercent(layer.frame, { width: frameAspect, height: 1 });
+    const wFrac = fb.width / 100;
+    const hFrac = fb.height / 100;
+    const frameBox = { x: (1 - wFrac) / 2, y: (1 - hFrac) / 2, width: wFrac, height: hFrac };
+    const thresholdX = 6 / Math.max(1, pan.surfaceWidth * pan.scale);
+    const thresholdY = 6 / Math.max(1, pan.surfaceHeight * pan.scale);
+    const snap = snapMediaRectToBox(rect, frameBox, thresholdX, thresholdY);
+    // rect shift (dx, dy) in comp fractions → offset delta: centre = 0.5 + offset*0.5 ⇒ Δoffset = 2·Δcentre;
+    // screen y is flipped (centreY = 0.5 − offsetY·0.5), so a +dy screen shift is a −2·dy offset change.
+    return {
+      offsetX: clamp(candidate.offsetX + 2 * snap.dx, -1, 1),
+      offsetY: clamp(candidate.offsetY - 2 * snap.dy, -1, 1)
     };
   }
 
@@ -2566,7 +2625,7 @@ const PreviewLayer = memo(function PreviewLayer({
     return { speed, sourceIn: layerSourceTimeSeconds(layer, local) - local * speed };
   })();
 
-  function syncVideoTime(video: HTMLVideoElement) {
+  function syncVideoTime(video: HTMLVideoElement, driftToleranceSeconds = 0.08) {
     // Source-aware: offset into the source media so trimmed/split clips play the correct source frame.
     // The clamp is the asset's available media (not just the clip's visible span) so that during a
     // transition post-roll the outgoing clip can play a little past its out-point into its tail handle
@@ -2578,9 +2637,11 @@ const PreviewLayer = memo(function PreviewLayer({
     const rawSource = layerSourceTimeSeconds(layer, Math.max(0, currentTime - layer.startSeconds)) - sourceIn;
     const maxSource = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - sourceIn - 0.05) : rawSource;
     const nextTime = sourceIn + Math.max(0, Math.min(maxSource, rawSource));
-    if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > 0.08 * Math.max(1, speed)) {
+    if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > driftToleranceSeconds * Math.max(1, speed)) {
       video.currentTime = nextTime;
+      return true;
     }
+    return false;
   }
 
   useEffect(() => {
@@ -2605,17 +2666,28 @@ const PreviewLayer = memo(function PreviewLayer({
     syncVideoTime(video);
   }, [effectivePlaying, isVideo, layer.id, layer.speed, mediaUrl]);
 
-  // Speed ramp: the element can't free-run a VARYING rate — follow the ramp per tick (instantaneous
-  // rate + the integral resync in syncVideoTime keeps it frame-honest within the 0.08s threshold).
+  // Speed ramp: the element can't free-run a VARYING rate — follow the ramp per tick via playbackRate
+  // (cheap, no decoder flush). The SEEK correction below is throttled: between commits the element
+  // free-runs at a constant rate while the ramp is curved, so a per-tick 0.08s-threshold correction
+  // trips almost every tick — a `currentTime` write per frame on a PLAYING <video> flushes/re-primes
+  // the decoder and hangs the tab (2026-07-16 report). While PAUSED (scrub/step) keep the exact 0.08s
+  // threshold every tick — that's what frame-accurate scrubbing needs, and it's not a playing element.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !isVideo || !hasSpeedRamp(layer)) {
       return;
     }
     video.playbackRate = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
-    if (effectivePlaying) {
+    if (!effectivePlaying) {
       syncVideoTime(video);
+      return;
     }
+    const now = performance.now();
+    // ~500ms cadence (mirrors the non-ramped drift corrector): at a checkpoint use the tight
+    // threshold; between checkpoints only a jump-scale drift forces a correction.
+    const dueForCheck = now - lastRampSyncMsRef.current >= 500;
+    if (dueForCheck) lastRampSyncMsRef.current = now;
+    syncVideoTime(video, dueForCheck ? 0.08 : 0.25);
   }, [currentTime, effectivePlaying, isVideo, layer, mediaUrl]);
 
   useEffect(() => {
@@ -3009,6 +3081,63 @@ const PreviewLayer = memo(function PreviewLayer({
             onSpatialHandlePointerDown={startSpatialHandleDrag}
             onSpatialHandlePointerMove={updateSpatialHandleDrag}
             onSpatialHandlePointerUp={finishSpatialHandleDrag}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  // Empty frame placeholder (Step 4): a framed media layer with no asset yet — the "drop into the frame"
+  // slot. Renders a dashed outline in the frame's SHAPE + a fill affordance; double-click (or the hint)
+  // opens the asset picker. It is kept out of the scene/export (isEmptyFramePlaceholder), so this DOM
+  // placeholder is the ONLY thing that paints for it — over the real backdrop.
+  if (isEmptyFramePlaceholder(layer) && layer.frame) {
+    // GEOMETRY ONLY: strip the frame's clip mask + any background off the media style, or the container
+    // would inherit the frame `mask-image` AND the empty-composition backdrop color and paint a black
+    // frame-shaped box (the reported "asset not found" fill). The outline below draws the shape instead.
+    const placeholderStyle = selectionOverlayStyle(getCompositionMediaStyle(layer, { currentTimeSeconds: currentTime }) as CSSProperties);
+    const boxPct = frameBoxPercent(layer.frame, { width: frameAspect ?? 16 / 9, height: 1 });
+    const bx = (100 - boxPct.width) / 2;
+    const by = (100 - boxPct.height) / 2;
+    const outline = frameOutlinePathD(layer.frame);
+    const fill = interactive && onRequestFillFrame ? () => onRequestFillFrame(layer.id) : undefined;
+    return (
+      <>
+        <div
+          className={`preview-frame-slot ${selected ? "is-selected" : ""}`}
+          style={{ ...placeholderStyle, pointerEvents: interactive ? "auto" : "none" }}
+          {...(interactive ? { ...dragHandlers, onDoubleClick: fill } : {})}
+        >
+          <svg className="preview-frame-slot-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+            <path d={outline} transform={`translate(${bx} ${by}) scale(${boxPct.width} ${boxPct.height})`} vectorEffect="non-scaling-stroke" />
+          </svg>
+          <button
+            type="button"
+            className="preview-frame-slot-hint"
+            style={{ left: `${bx + boxPct.width / 2}%`, top: `${by + boxPct.height / 2}%`, transform: `translate(-50%, -50%) scale(${1 / Math.max(0.1, getCompositionTransform(layer, { currentTimeSeconds: currentTime }).scale)})` }}
+            onClick={fill ? (event) => { event.stopPropagation(); fill(); } : undefined}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <ImagePlus size={26} />
+            <span>Add media</span>
+          </button>
+        </div>
+        {selected ? (
+          <PreviewSelectionOverlay
+            layer={layer}
+            style={placeholderStyle}
+            currentTime={currentTime}
+            transformHud={transformHud}
+            onResizePointerCancel={finishPreviewResize}
+            onResizePointerDown={startPreviewResize}
+            onResizePointerMove={updatePreviewResize}
+            onResizePointerUp={finishPreviewResize}
+            onRotatePointerCancel={finishPreviewRotate}
+            onRotatePointerDown={startPreviewRotate}
+            onRotatePointerMove={updatePreviewRotate}
+            onRotatePointerUp={finishPreviewRotate}
+            boxOverride={contentBoxOverride}
+            contentMode={contentMode}
           />
         ) : null}
       </>
@@ -3651,8 +3780,9 @@ function PreviewSelectionOverlay({
   onRotatePointerDown: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onRotatePointerMove: (event: ReactPointerEvent<HTMLSpanElement>) => void;
   onRotatePointerUp: (event: ReactPointerEvent<HTMLSpanElement>) => void;
-  /** Shrinks the box to a `contain` media layer's natural rect so handles hug the source (adaptive). */
-  boxOverride?: { width: string; height: string } | undefined;
+  /** Shrinks the box to a `contain` media layer's natural rect so handles hug the source (adaptive). In
+   *  content mode `translate` additionally follows the media's pan inside the frame (QA round 5). */
+  boxOverride?: { width: string; height: string; translate?: string | undefined } | undefined;
   /** Content mode (D3): the media inside the frame is being repositioned — mark the box so the user
    *  can see WHY dragging no longer moves the clip. */
   contentMode?: boolean | undefined;
@@ -3662,11 +3792,18 @@ function PreviewSelectionOverlay({
   // `layer.transform.scale` — otherwise a scale keyframe / entrance animation / scrubbed value makes the
   // counter miss and the handles scale with the clip.
   const evaluatedScale = getCompositionTransform(layer, { currentTimeSeconds: currentTime }).scale;
+  const baseOverlayStyle = selectionOverlayStyle(style);
   const overlayStyle = {
-    ...selectionOverlayStyle(style),
+    ...baseOverlayStyle,
     // Adaptive box: override the full-frame width/height with the contain source rect (centered by the same
     // translate(-50%,-50%) the media uses), so the selection box hugs the visible image.
-    ...(boxOverride ?? {}),
+    ...(boxOverride ? { width: boxOverride.width, height: boxOverride.height } : {}),
+    // Content-mode pan follow: APPEND the media's pan translate to the layer transform (not the `translate`
+    // CSS prop, which applies OUTSIDE `transform`). Appended = innermost, so it lands in the clip's
+    // pre-rotation local space and inherits the box's scale/rotation.
+    ...(boxOverride?.translate
+      ? { transform: `${baseOverlayStyle.transform ?? ""} ${boxOverride.translate}`.trim() }
+      : {}),
     "--handle-inverse-scale": 1 / Math.max(0.1, evaluatedScale)
   } as CSSProperties;
 
@@ -4682,22 +4819,49 @@ function sizeHud(widthPercent: number, heightPercent: number): PreviewTransformH
 /** Selection-box size override (as CSS width/height %) for a `contain` media layer, so its handles hug the
  *  source's natural rect inside the frame. Returns undefined when the box should stay full-frame (cover/fill,
  *  non-media, unknown aspect, or the source already fills the frame). */
+/** A framed media layer with no source yet (Step 4): the "drop into the frame" slot. It has no pixels to
+ *  composite, so it must be kept OUT of the scene/export path and shown as a DOM placeholder instead. */
+function isEmptyFramePlaceholder(layer: TimelineLayer): boolean {
+  return Boolean(layer.frame && !layer.assetId && !layer.graphic && (layer.type === "image" || layer.type === "video"));
+}
+
 function contentBoxSizeOverride(
   layer: TimelineLayer,
   sourceAspect: number | undefined,
   frameAspect: number | undefined,
-  contentMode: boolean
-): { width: string; height: string } | undefined {
+  contentMode: boolean,
+  content: { scale: number; offsetX: number; offsetY: number } | undefined
+): { width: string; height: string; translate?: string } | undefined {
   if (layer.type !== "image" && layer.type !== "video") return undefined;
+  // Content mode (QA round 5): the handles must hug the SOURCE clip inside the frame — shrinking on
+  // zoom, following a pan — so they describe the media instead of lying. `mediaRectInFrame` inverts the
+  // compositor mapping to that rect (comp fractions); we size the box to it and shift it by the pan via a
+  // `translate` APPENDED to the layer transform (innermost = the clip's pre-rotation local space, where
+  // content pan lives → rotation/scale come for free). CSS translate % resolves against the box's OWN
+  // size, so the comp-fraction offset is divided by the box size (also a comp fraction) → a pure ratio.
+  if (layer.frame && contentMode && frameAspect && frameAspect > 0 && sourceAspect && sourceAspect > 0) {
+    const rect = mediaRectInFrame({
+      sourceAspect,
+      compAspect: frameAspect,
+      fit: getCompositionObjectFit(layer),
+      contentScale: content?.scale ?? 1,
+      contentOffset: { x: content?.offsetX ?? 0, y: content?.offsetY ?? 0 }
+    });
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+    const tx = rect.width > 0 ? ((cx - 0.5) / rect.width) * 100 : 0;
+    const ty = rect.height > 0 ? ((cy - 0.5) / rect.height) * 100 : 0;
+    return {
+      width: `${(rect.width * 100).toFixed(4)}%`,
+      height: `${(rect.height * 100).toFixed(4)}%`,
+      translate: `translate(${tx.toFixed(4)}%, ${ty.toFixed(4)}%)`
+    };
+  }
   // A FRAMED layer's visible rect is the frame box, not the media box — so the handles hug the shape the
   // user can see (Step C: "they are consuming the handles"). This wins over the `contain` rect below,
   // because the frame clips the media: the frame IS the visible extent.
   // frameBoxPercent's result depends only on the comp's ASPECT (the percentages are scale-invariant),
   // so the aspect alone is enough here — the layer doesn't need the comp's pixel dimensions.
-  //
-  // EXCEPT in content mode: there the user is working on the CLIP inside the frame, so the box falls back
-  // to the clip's own rect and its handles scale/rotate the clip (not the frame box) — the frame stays
-  // put while the media is refitted within it.
   if (layer.frame && frameAspect && frameAspect > 0 && !contentMode) {
     const box = frameBoxPercent(layer.frame, { width: frameAspect, height: 1 });
     return { width: `${box.width.toFixed(4)}%`, height: `${box.height.toFixed(4)}%` };

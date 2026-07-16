@@ -744,6 +744,18 @@ export interface TimelineLayer {
   locked?: boolean | undefined;
   muted?: boolean | undefined;
   /**
+   * Clip enable toggle ("d" in the timeline, Premiere's Enable): a disabled clip renders nowhere
+   * (web preview, export, worker — all gate on this) and is silent, but stays fully editable,
+   * selectable and draggable in the timeline (drawn dimmed).
+   */
+  disabled?: boolean | undefined;
+  /**
+   * Clip markers (Premiere-style): `timeSeconds` is CLIP-LOCAL (0 = clip head), so markers travel
+   * with the clip on move and stay glued to content. Editor-only — no render effect. The `M` key
+   * writes here when a selected clip spans the playhead, otherwise to the timeline ruler markers.
+   */
+  markers?: TimelineMarker[] | undefined;
+  /**
    * Responsive Pin (§1) — how this layer re-anchors when the CANVAS is reframed
    * (16:9 ↔ 9:16, size change). Absent or all-"center" = today's behavior (the box
    * center is held at a constant percent). A non-center axis holds that EDGE of the

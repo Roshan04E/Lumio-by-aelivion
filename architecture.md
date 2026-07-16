@@ -1,6 +1,6 @@
 # Kimera Architecture And Progress Tracker
 
-Last updated: 2026-07-02
+Last updated: 2026-07-16
 
 This file is the working architecture and product tracker. Keep it crisp:
 
@@ -464,6 +464,29 @@ Target: a tool is declared once and runs identically wherever it's surfaced. `la
   - Verified: `graphic:test` (85 assertions incl. `ln(3)` integral exactness, "NOT the trapezoid approximation", monotonic/continuous ramp sweep, progress-outranks-duration); `graphic:render` (REAL Remotion: keyed progress renders the icon half-drawn at 4.70% ink and HOLDS there at t=3s — 1.8s past its natural cycle); `graph:graphic:test` (lanes track the resolver; un-keyed Duration shows the real cycle rather than the clamp floor; a Duration ramp still advances Progress monotonically — landing on `ln(2)` at t=1).
 
 [ ] Deferred: animated graphics aren't in the strict pixel gate — preview deliberately bakes at 512px vs Remotion's 1024px SVG raster, so antialiased edges differ sub-pixel (same allowance as still proxies; frame/timing parity is locked by the shared math instead). Cycle detection uses max active `dur` rather than a true LCM, so non-harmonic multi-animation icons (1s + 1.3s) can jump at the loop boundary. Frame count capped at `GRAPHIC_ANIM_MAX_FRAMES` (90). Duration-ramp segments integrate as LINEAR (ease/bezier handles on a `graphicDuration` key shape the displayed value but not the integral — same simplification speed ramps make); key progress instead for eased phase.  Graphics imported before 2026-07-15 carry a settled svg (the import-time settle destroyed the SMIL) and need a RE-IMPORT to animate.
+
+### Timeline & multi-select batch (2026-07-16)
+
+[x] **Drag/selection bug cluster**: linked companion clips (video↔audio) now slide LIVE during a drag (`flushDragPreview` iterates the resolver's placement map, not just the moved members); the stuck-drag window safety net can no longer double-commit a move (`dragRef` nulled synchronously on every terminal path — the second commit against a stale composition was the multi-drag "collapse onto one track" report, alongside a hardened `handleMoveLayer` legacy fallback that now pure-time-shifts multi-selections instead of funnelling them onto the primary's track); right-clicking a clip inside a fresh multi-selection keeps the selection (the contextmenu handler consults the imperative `is-selected` DOM ground truth, since selection state commits through a transition and can lag the click).
+[x] **Roll/slide live preview + limit reasons**: roll/slide trims move the affected clip edges imperatively during the drag (same rAF/DOM doctrine as edge-trim; badge preserved) and when a drag pins at a limit the badge says WHY ("no head material on right clip" — `rollEditLimits`/`slideLayerLimits` return `minReason`/`maxReason`). The "roll can't shorten the first clip" report is that clamp working correctly at source head — now it's visible.
+[x] **Clip enable/disable ("D")**: new `TimelineLayer.disabled` — toggled via plain `D` or the clip context menu, applies to the whole selection + linked companions in one undo step. Render gating at every consumer: `buildSceneDraws` single choke point (also drops `__rfx_`/`__nest_` children of a disabled base), VideoPreview media/preload/audio gates, export audio-mixer, and the render-manifest builder (worker parity). Disabled clips dim in the timeline but stay fully editable. Pixel gate 27/27 after.
+[x] **Fades beyond half**: fade handles now reach up to the WHOLE clip minus the opposing fade (fadeIn+fadeOut ≤ duration) — clamps relaxed in the drag, `buildTransitionKeyframes` (crossDissolve keeps half each), and the audio gain path.
+[x] **Slip two-up**: while slipping, the viewer shows the slipped range's IN/OUT frames (Premiere-style) — fed over a window event (`lumio:slip-preview`) so per-move updates re-render only the overlay, never EditorPage.
+[x] **Per-clip markers**: `TimelineLayer.markers` (clip-LOCAL seconds — they travel with the clip; head/tail trims shift/drop them in `adjustLayerHead/Tail`). `M` targets a selected clip under the playhead, else the ruler as before; clip flags render in the clip body, share the ruler marker rename/recolor popover, and join the snap targets at absolute time.
+[x] **Auto-vacant edge tracks + smart A/V audio placement**: `ensureVacantEdgeTracks` (shared) keeps exactly one empty visual track on top / audio track at bottom, collapsing surplus empty EDGE tracks (middle empties untouched), applied at the `updateComposition` choke point so it never runs mid-gesture; companion audio for A/V drops now picks the BOTTOM-most audio track vacant over the clip's span instead of blindly the first.
+
+### Keyframes & graph editor batch (2026-07-16, plan: `plans/keyframes-graph-editor-phase.md`)
+
+[x] **K1 — graph-editor multi-select data loss**: `useDraftLayer.commitDraft` commits `onChange(() => next)` (the drafted PRIMARY layer object); it was wired to the broadcasting `inspectorHandlers.onChange`, so any graph drag with 2+ clips selected cloned the primary (assetId, source, effects) onto every selected clip. New `onGraphChange` handler applies graph-editor writes to the inspector layer ONLY.
+[x] **K2 — broadcast-safe keyframe toggles**: TransformPanel diamond toggle/interpolation/value-scrub/fit and EffectParamControl toggle/clear/interpolation/reset/scrub now resolve the value, the clip-local time, AND the effect instance id per `item` INSIDE the updater (effect resolved by id, falling back to same-type; clips without the effect no-op). The broadcast-safety rule is documented at both sites.
+[x] **K3 — effect removal strips its keyframes** (inspector delete + the `removeEffect` timeline action) — orphaned `scope:"effect"` keyframes with a dead effectId were the "keyframes don't respond" vector.
+[x] **K4 — collision-free keyframe ids**: `mintKeyframeId` (random suffix) replaces bare `Date.now()` minting everywhere (transform/effect/style/mask/volume/preset) — same-tick broadcast minting produced identical ids across layers and the graph editor selects purely by id. Fade `_transition_` ids untouched (contract).
+[x] **K5 — graph detach + inverted Y**: the per-curve normalization freeze (`dragNormsRef`) now lands in the SAME render via a `dragNormEpoch` state bump in the `scenes` memo deps (diamonds no longer detach from curves at drag start/end); `position.y` curves carry `invertY` (drawn/dragged/hit-tested through `curveNorm`/`curveValue`, arrow-nudge sign-flipped) so dragging the Y curve up moves the clip UP.
+[x] **K6 — keyframe clicks don't move the playhead** (graph-editor point click, clip-lane diamond pointer-down + click); ruler scrub and drag-scrub unchanged.
+[x] **K7 — ghost curves**: `ghostLayers` prop (EditorPage → BottomWorkspace → GraphEditor) draws the OTHER selected clips' curves for the visible targets at ~0.22 alpha with tiny hollow diamonds — read-only, never hit-tested, capped at 8 layers.
+[ ] K8 (deferred): projects corrupted BEFORE K1–K4 may still hold orphaned keyframes; no auto-cleanup shipped by design — revisit if dead keyframes still reproduce.
+
+Also 2026-07-16: roll/slide/slip drag feedback moved to a fixed-position pointer-following HUD (`.timeline-trim-hud` — the in-clip badge was clipped unreadable), with limit reasons for slip ("at start/end of source material"); slip two-up seeks are now real-time (proxy-first URL + latest-wins seek scheduling + fastSeek/precise-settle).
 
 ## Kimera AI Operating System — Phased Roadmap
 

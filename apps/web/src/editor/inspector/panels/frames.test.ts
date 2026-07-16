@@ -14,14 +14,18 @@ import {
   frameChromeParams,
   frameClipMask,
   frameEffectiveParams,
+  frameGroupScaleFactor,
   frameMaskId,
   frameOutlinePathD,
   frameParamDefaults,
   frameParamSchema,
   frameParamSections,
+  frameToShapeLayer,
   makeLayerFrame,
+  mediaRectInFrame,
   setFrameBoxAxis,
   setFrameBoxFromResize,
+  snapMediaRectToBox,
   type FrameDefinition,
   type LayerFrame
 } from "@kimera-by-aelivion/shared";
@@ -197,8 +201,17 @@ function check(name: string, condition: boolean): void {
   check("unlocked E/W handle moves width only", east.width === 40 && east.height === 100);
   const south = setFrameBoxFromResize(free, { width: 77, height: 40 }, "y", comp);
   check("unlocked N/S handle moves height only", south.height === 40 && south.width === 100);
+
+  // Unlocked CORNER = PROPORTIONAL (uniform scale, preserves the box aspect; edges change proportions).
+  // From a square box (w0=h0=100 %) the dominant axis (60 > 40) drives BOTH to 60 → aspect preserved.
   const corner = setFrameBoxFromResize(free, { width: 40, height: 60 }, "both", comp);
-  check("unlocked corner moves both axes", corner.width === 40 && corner.height === 60);
+  check("unlocked corner scales proportionally (dominant axis)", corner.width === 60 && corner.height === 60);
+  // A non-square start box keeps its ratio: 80×20 → dominant fx=0.5 vs fy=2 → factor 2, but clamped so
+  // height 20·2=40 ≤100 and width 80·2=160 >100 → factor caps at 100/80=1.25 → (100, 25), ratio 80:20 kept.
+  const rect = { params: { width: 80, height: 20, aspectLock: false } };
+  const rectCorner = setFrameBoxFromResize(rect, { width: 999, height: 999 }, "both", comp);
+  check("proportional corner preserves a non-square ratio (clamped by factor)", Math.abs(rectCorner.width as number - 100) < 1e-9 && Math.abs(rectCorner.height as number - 25) < 1e-9);
+  check("→ ratio identical to the start box", Math.abs((rectCorner.width as number) / (rectCorner.height as number) - 80 / 20) < 1e-9);
 
   // Locked: the square follows the axis the user actually dragged.
   const lockedEast = setFrameBoxFromResize(locked, { width: 25, height: 99 }, "x", comp);
@@ -213,7 +226,8 @@ function check(name: string, condition: boolean): void {
   const cornerBox = frameBoxRect({ ...locked, params: lockedCorner }, comp);
   check("locked corner square = larger requested extent", Math.abs(cornerBox.width - 540) < 0.001 && Math.abs(cornerBox.height - 540) < 0.001);
 
-  check("resize percentages clamp to 1..100", setFrameBoxFromResize(free, { width: 0, height: 900 }, "both", comp).width === 1);
+  // Edge resize clamps its own axis to 1..100.
+  check("edge resize percentages clamp to 1..100", setFrameBoxFromResize(free, { width: 0, height: 900 }, "x", comp).width === 1);
 }
 
 // --- frameEffectiveParams: stored params are an OVERRIDE layer over the definition --------------
@@ -268,6 +282,120 @@ function check(name: string, condition: boolean): void {
 
   const svg = frameClipMask(layer({ definitionId: "acme.torn", generatorId: "svg-path", params: {}, staticPath: "M0 0H1V1H0Z" }), { width: 100, height: 100 });
   check("svg-path → null (Phase 2 render; no clip yet)", svg === null);
+}
+
+// --- QA round 5: mediaRectInFrame — where the SOURCE clip actually sits (content mode hug) ------
+{
+  const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
+
+  // Identity: same aspect, fit fills, no zoom/pan → the media exactly fills the layer box.
+  const id = mediaRectInFrame({ sourceAspect: 16 / 9, compAspect: 16 / 9, fit: "cover", contentScale: 1, contentOffset: { x: 0, y: 0 } });
+  check("no zoom/pan, matching aspect → fills the box", approx(id.x, 0) && approx(id.y, 0) && approx(id.width, 1) && approx(id.height, 1));
+
+  // Contain a SQUARE source in a 16:9 comp → 56.25% width, full height, centred (matches contentBoxSizeOverride).
+  const contain = mediaRectInFrame({ sourceAspect: 1, compAspect: 16 / 9, fit: "contain", contentScale: 1, contentOffset: { x: 0, y: 0 } });
+  check("contain square in 16:9 → 0.5625 wide, full height", approx(contain.width, 0.5625) && approx(contain.height, 1));
+  check("→ and centred", approx(contain.x, (1 - 0.5625) / 2) && approx(contain.y, 0));
+
+  // Cover a square source in 16:9 → full width, overflows height (taller than the box).
+  const cover = mediaRectInFrame({ sourceAspect: 1, compAspect: 16 / 9, fit: "cover", contentScale: 1, contentOffset: { x: 0, y: 0 } });
+  check("cover square in 16:9 → full width, overflow height", approx(cover.width, 1) && approx(cover.height, 1 / 0.5625));
+
+  // Content zoom shrinks the visible source window → the rect grows (media appears bigger).
+  const zoomed = mediaRectInFrame({ sourceAspect: 16 / 9, compAspect: 16 / 9, fit: "cover", contentScale: 2, contentOffset: { x: 0, y: 0 } });
+  check("content.scale 2 → the media rect doubles", approx(zoomed.width, 2) && approx(zoomed.height, 2));
+
+  // Pan: offsetX moves the rect RIGHT; offsetY is Y-UP in the compositor so +offsetY moves it UP (screen −y).
+  const panned = mediaRectInFrame({ sourceAspect: 16 / 9, compAspect: 16 / 9, fit: "cover", contentScale: 1, contentOffset: { x: 0.4, y: 0.4 } });
+  check("offsetX 0.4 → centre shifts +0.2 in x", approx(panned.x + panned.width / 2, 0.5 + 0.2));
+  check("offsetY 0.4 → centre shifts UP (−0.2 in screen y)", approx(panned.y + panned.height / 2, 0.5 - 0.2));
+}
+
+// --- QA round 5: snapMediaRectToBox — edges + centre snap while panning --------------------------
+{
+  const approx = (a: number, b: number, eps = 1e-9) => Math.abs(a - b) < eps;
+  const box = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
+
+  // Left edge 0.01 short of the box's left, within a 0.02 threshold → snaps to align exactly.
+  const nearLeft = snapMediaRectToBox({ x: 0.26, y: 0.25, width: 0.5, height: 0.5 }, box, 0.02, 0.02);
+  check("media left near frame left → snaps left edges together", nearLeft.snappedX && approx(nearLeft.dx, -0.01));
+  check("→ y already aligned snaps to 0 shift", nearLeft.snappedY && approx(nearLeft.dy, 0));
+
+  // Outside the threshold → no snap, no shift (a deliberate drag wins).
+  const far = snapMediaRectToBox({ x: 0.4, y: 0.25, width: 0.5, height: 0.5 }, box, 0.02, 0.02);
+  check("beyond the threshold → no snap", !far.snappedX && far.dx === 0);
+
+  // Centre alignment: a media rect wider than the box snaps its CENTRE to the box centre.
+  // rect centre x = 0.09 + 0.8/2 = 0.49, one edge each side is >0.03 away, so the CENTRE (0.01 off) wins.
+  const centred = snapMediaRectToBox({ x: 0.09, y: 0.25, width: 0.8, height: 0.5 }, box, 0.03, 0.03);
+  check("wide media near-centred → snaps centre to centre", centred.snappedX && approx(0.49 + centred.dx, 0.5));
+}
+
+// --- QA round 5: frameGroupScaleFactor (D6) — corner resize scales the inner media too ----------
+{
+  const approx = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
+  const comp = { width: 1920, height: 1080 };
+  const prev = { params: { width: 100, height: 100, aspectLock: false } };
+
+  // Uniform shrink to half on both axes → factor 0.5 (media keeps its coverage).
+  const half = frameGroupScaleFactor(prev, { width: 50, height: 50, aspectLock: false }, comp);
+  check("D6: box halved uniformly → content scale ×0.5", approx(half, 0.5));
+
+  // Non-uniform (0.5 × 0.8) → geometric mean preserves area coverage.
+  const nonUniform = frameGroupScaleFactor(prev, { width: 50, height: 80, aspectLock: false }, comp);
+  check("D6: non-uniform corner → geometric-mean factor", approx(nonUniform, Math.sqrt(0.5 * 0.8)));
+
+  // Degenerate box → safe identity.
+  check("D6: degenerate → factor 1", frameGroupScaleFactor({ params: { width: 0, height: 0 } }, { width: 0, height: 0 }, comp) === 1);
+}
+
+// --- Step F (D4): frameToShapeLayer — the ONE frame→shape translation table -------------------
+{
+  const comp = { width: 1920, height: 1080 };
+  const base = (frame: LayerFrame): TimelineLayer =>
+    ({
+      id: "L1",
+      trackId: "T1",
+      type: "image",
+      name: "clip",
+      startSeconds: 0,
+      durationSeconds: 5,
+      assetId: "asset_1",
+      fit: "cover",
+      content: { scale: 2, offsetX: 0.3 },
+      transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+      effects: [],
+      animations: [],
+      frame
+    }) as unknown as TimelineLayer;
+
+  // rounded-rect → native rounded-rectangle + borderRadius (roundness stays a live shape slider).
+  const rr = frameToShapeLayer(base({ definitionId: "kimera.rounded-rect", generatorId: "rounded-rect", params: { roundness: 50, width: 50, height: 50 } }), comp);
+  check("rounded-rect → shape rounded-rectangle", rr.type === "shape" && rr.shapeKind === "rounded-rectangle");
+  // box = 50% → 960×540 px; borderRadius = min/2 × 50% = 540/2 × 0.5 = 135.
+  check("rounded-rect → borderRadius from roundness", Math.abs((rr.borderRadius ?? 0) - 135) < 1e-6);
+  check("box carried over as width/height %", Math.abs((rr.widthPercent ?? 0) - 50) < 1e-6 && Math.abs((rr.heightPercent ?? 0) - 50) < 1e-6);
+
+  // The conversion is one-way: frame + media-only fields dropped, shape gets its own paint.
+  check("frame + media dropped", rr.frame === undefined && rr.assetId === undefined && rr.content === undefined && rr.fit === undefined);
+  check("shape gets a fill + stroke", typeof rr.color === "string" && typeof rr.strokeColor === "string" && rr.strokeWidth === 0);
+  check("identity preserved (id/track/timing/transform)", rr.id === "L1" && rr.trackId === "T1" && rr.durationSeconds === 5 && rr.transform.x === 50);
+
+  // circle → native ellipse.
+  const circle = frameToShapeLayer(base({ definitionId: "kimera.circle", generatorId: "ellipse", params: {} }), comp);
+  check("circle → shape ellipse", circle.shapeKind === "ellipse");
+  // aspectLock circle in 16:9 → square box, so width% (56.25) ≠ height% (100) but pixels are equal.
+  check("circle box % is the effective (squared) box", Math.abs((circle.widthPercent ?? 0) - 56.25) < 1e-6 && circle.heightPercent === 100);
+
+  // polygon → pen + shapePath (vertices in 0..100 shape-box coords, 0° → a vertex at the top).
+  const hex = frameToShapeLayer(base({ definitionId: "kimera.hexagon", generatorId: "polygon", params: { sides: 6, rotation: 0 } }), comp);
+  check("polygon → pen + shapePath", hex.shapeKind === "pen" && (hex.shapePath?.length ?? 0) === 6);
+  check("shapePath verts are in 0..100", (hex.shapePath ?? []).every((p) => p.x >= -0.01 && p.x <= 100.01 && p.y >= -0.01 && p.y <= 100.01));
+  check("first hex vertex sits at the top (x=50, y≈0)", Math.abs((hex.shapePath?.[0]?.x ?? 0) - 50) < 1e-6 && Math.abs(hex.shapePath?.[0]?.y ?? 99) < 1e-6);
+
+  // exotic (svg-path/blob/torn-paper) → honest full box (they don't clip today).
+  const svg = frameToShapeLayer(base({ definitionId: "acme.torn", generatorId: "svg-path", params: {}, staticPath: "M0 0H1V1H0Z" }), comp);
+  check("svg-path → rectangle fallback (matches its current unclipped visual)", svg.shapeKind === "rectangle" && svg.shapePath === undefined);
 }
 
 if (failures > 0) {

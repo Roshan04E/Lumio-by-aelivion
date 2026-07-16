@@ -223,9 +223,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 19,
+      "diffPixels": 0,
       "totalPixels": 2073600,
-      "diffRatio": 0.000009162808641975309
+      "diffRatio": 0
     },
     {
       "fixture": "scaled-text",
@@ -363,9 +363,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 16,
+      "diffPixels": 14,
       "totalPixels": 2073600,
-      "diffRatio": 0.00000771604938271605
+      "diffRatio": 0.000006751543209876544
     },
     {
       "fixture": "chroma-key",

@@ -114,9 +114,11 @@ export interface GraphEditorProps {
   fps: number;
   /** Open with this property focused (from a timeline diamond / inspector row double-click). */
   focusTargetKey?: string | undefined;
+  /** Other SELECTED clips: their matching curves draw faded (read-only, never hit-tested). */
+  ghostLayers?: TimelineLayer[] | undefined;
 }
 
-export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTargetKey }: GraphEditorProps) {
+export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTargetKey, ghostLayers }: GraphEditorProps) {
   const { displayLayer, isDrafting, beginDraft, updateDraft, commitDraft } = useDraftLayer(layer, onChange);
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
 
@@ -174,6 +176,10 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
   const lastAddRef = useRef<{ curveKey: string; timeSeconds: number; at: number } | null>(null);
   // Frozen per-curve normalization during a drag so curves don't re-fit mid-gesture.
   const dragNormsRef = useRef<Map<string, { vMin: number; vMax: number }> | null>(null);
+  // Bumped whenever dragNormsRef is (un)set: the ref alone isn't a dep of the `scenes` memo, so
+  // the freeze/unfreeze landed one render LATE — a one-frame window where diamonds were placed
+  // with the old range while the curve was drawn with the new one (the visible "detach").
+  const [dragNormEpoch, setDragNormEpoch] = useState(0);
 
   const plot: PlotRect = { x: 0, y: RULER_H, width: plotSize.width, height: Math.max(10, plotSize.height - RULER_H) };
 
@@ -197,7 +203,33 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
         );
       })
       .filter((scene) => scene.keyframes.length > 0 || effectiveVisible.length <= 3);
-  }, [allTargets, colorByKey, displayLayer, effectiveVisible, view.timeStart, view.timeDuration, plotSize.width]);
+    // dragNormEpoch: recompute the moment the normalization freeze is set/cleared (see dragNormsRef).
+  }, [allTargets, colorByKey, displayLayer, effectiveVisible, view.timeStart, view.timeDuration, plotSize.width, dragNormEpoch]);
+
+  // GHOST CURVES: the other selected clips' curves for the currently visible targets, drawn faded
+  // under the primary's. Read-only by construction — never passed to hitTestScene, never selectable.
+  // Layer-local time axis (curves compare by clip-relative animation, matching the keyframe model).
+  // Effect-scope targets are skipped when the ghost doesn't carry the same effect instance id.
+  const ghostScenes = useMemo<GraphCurveScene[]>(() => {
+    if (!ghostLayers?.length || ghostLayers.length > 8) return [];
+    const timeEnd = view.timeStart + view.timeDuration;
+    const sampleCount = Math.min(400, Math.max(120, Math.ceil(plotSize.width / 4)));
+    const visibleTargets = allTargets.filter((target) => effectiveVisible.includes(graphTargetKey(target)));
+    return ghostLayers.flatMap((ghost) =>
+      visibleTargets
+        .filter((target) => targetKeyframes(ghost, target).length > 0)
+        .map((target) =>
+          buildCurveScene(
+            ghost,
+            target,
+            colorByKey.get(graphTargetKey(target)) ?? "#4f9cff",
+            Math.max(0, view.timeStart),
+            Math.min(ghost.durationSeconds, timeEnd),
+            sampleCount
+          )
+        )
+    );
+  }, [ghostLayers, allTargets, effectiveVisible, colorByKey, view.timeStart, view.timeDuration, plotSize.width]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedEntries = useMemo(() => {
@@ -292,6 +324,35 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     if (startX > plot.x) ctx.fillRect(plot.x, plot.y, startX - plot.x, plot.height);
     if (endX < plot.x + plot.width) ctx.fillRect(endX, plot.y, plot.x + plot.width - endX, plot.height);
 
+    // Ghost curves first (under the primary's): faded stroke + tiny hollow diamonds, no handles.
+    for (const ghost of ghostScenes) {
+      ctx.globalAlpha = 0.22;
+      ctx.strokeStyle = ghost.color;
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ghost.samples.forEach(([t, norm], index) => {
+        const x = timeToPx(view, plot, t);
+        const y = normToPx(view, plot, norm);
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.globalAlpha = 0.35;
+      for (const kf of ghost.keyframes) {
+        const x = timeToPx(view, plot, kf.timeSeconds);
+        const y = normToPx(view, plot, curveNorm(ghost, Number(kf.value)));
+        if (x < plot.x - 8 || x > plot.x + plot.width + 8) continue;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(Math.PI / 4);
+        ctx.strokeStyle = ghost.color;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-2.5, -2.5, 5, 5);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+    }
+
     for (const curve of scenes) {
       // Curve stroke.
       ctx.strokeStyle = curve.color;
@@ -347,7 +408,7 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
         ctx.restore();
       }
     }
-  }, [scenes, view, plotSize, selectedSet, fps, displayLayer.durationSeconds]);
+  }, [scenes, ghostScenes, view, plotSize, selectedSet, fps, displayLayer.durationSeconds]);
 
   // ── Overlay paint: playhead + marquee (imperative; playback-clock sync tier) ─
   const overlayStateRef = useRef({ view, plot, layerStart: layer.startSeconds, layerDuration: layer.durationSeconds, marqueeRect });
@@ -472,7 +533,12 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       target: curve.target,
       keyframeId: keyframe.id,
       timeSeconds: clamp(keyframe.timeSeconds + deltaTime, 0, displayLayer.durationSeconds),
-      value: clamp(Number(keyframe.value) + valueSteps * curve.target.step, curve.target.min, curve.target.max)
+      // Arrow-up must move the diamond UP on screen; inverted-Y curves (position.y) flip the sign.
+      value: clamp(
+        Number(keyframe.value) + valueSteps * curve.target.step * (curve.invertY ? -1 : 1),
+        curve.target.min,
+        curve.target.max
+      )
     }));
     onChange((item) =>
       moves.reduce(
@@ -567,6 +633,7 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       selectOne(hit.keyframeId, false);
       beginDraft();
       dragNormsRef.current = new Map(scenes.map((scene) => [scene.key, { vMin: scene.vMin, vMax: scene.vMax }]));
+      setDragNormEpoch((epoch) => epoch + 1);
       // Grabbing a handle on a non-bezier keyframe converts it to bezier so the
       // handle actually shapes the curve. Seed BOTH handles with linear surrogates —
       // the evaluator's default for a missing out-handle is dy 0 (ease), which would
@@ -612,6 +679,7 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       }
       beginDraft();
       dragNormsRef.current = new Map(scenes.map((scene) => [scene.key, { vMin: scene.vMin, vMax: scene.vMax }]));
+      setDragNormEpoch((epoch) => epoch + 1);
       dragRef.current = { mode: "points", pointerId: event.pointerId, startX: x, startY: y, entries, moved: false };
       return;
     }
@@ -789,11 +857,9 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     }
     if (drag.mode === "points" || drag.mode === "handle") {
       dragNormsRef.current = null;
-      if (drag.mode === "points" && !drag.moved) {
-        // Pure click on a point — seek to it (AE behavior), no data change to commit.
-        const entry = drag.entries[0];
-        if (entry && drag.entries.length === 1) onSeek(layer.startSeconds + entry.timeSeconds);
-      }
+      setDragNormEpoch((epoch) => epoch + 1);
+      // NOTE: a pure click on a point used to seek the playhead to it ("AE behavior") — removed
+      // 2026-07-16 by user request: clicking a keyframe selects it and must NOT move the playhead.
       commitDraft();
     }
   }

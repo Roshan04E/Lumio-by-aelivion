@@ -98,6 +98,11 @@ export interface SceneViewerCaptureHandle {
 // frame, a text raster — lands on screen. While PLAYING we composite every frame regardless.
 const SCENE_SETTLE_MS = 600;
 
+// R1 fix: how long a stacked-layer's source may stay unready before we give up holding the previous
+// frame and composite anyway (escape hatch for a permanently-broken source — e.g. a renamed/missing
+// asset — so the preview never freezes forever waiting on it).
+const NOT_READY_HOLD_MS = 300;
+
 // Bounded GPU recovery. On a WebGL context loss the preview used to latch PERMANENTLY to the DOM path — which
 // is NOT pixel-identical to the scene compositor, so a transient GPU eviction meant a lasting fidelity + quality
 // regression. Instead we rebuild the compositor on a fresh context up to MAX_SCENE_REBUILDS times (backoff
@@ -200,6 +205,9 @@ export function ScenePreviewCanvas({
   // fixed to the PARENT comp's size); disposed alongside it on unmount/rebuild.
   const nestMatteCachesRef = useRef<Map<string, SceneMaskMatteCache>>(new Map());
   const rasterizerRef = useRef<SceneTextRasterizer | null>(null);
+  // R1 fix: first-blocked timestamp per currently-unready layer id (escape-hatch timer for the
+  // hold-previous-frame gate in `drawRef.current` — see `NOT_READY_HOLD_MS`).
+  const notReadySinceRef = useRef<Map<string, number>>(new Map());
   const rafRef = useRef<number>(0);
   const disposedRef = useRef(false);
   const contextLostRef = useRef(false);
@@ -623,6 +631,7 @@ export function ScenePreviewCanvas({
     // The draw-list build is shared with the local export (`SceneFrameCompositor`) — see build-scene-draws.
     // The only editor-specific input is the media graded canvas, read here from the hidden WebglMediaLayers.
     let draws: SceneFrameSpec["layers"];
+    const notReadyIds: string[] = [];
     try {
       draws = buildSceneDraws({
       layers: ls,
@@ -642,9 +651,27 @@ export function ScenePreviewCanvas({
       regionPassModel: getRegionPassesEnabled(),
       nestedGroups: nestGroups,
       nestMatteCaches: nestMatteCachesRef.current,
+      onLayerNotReady: (id) => notReadyIds.push(id),
       });
     } catch (error) {
       fail("build draw list", error);
+      return;
+    }
+
+    // R1 fix: mirror the worker's delayRender gate — while PLAYING, a stacked layer whose source hasn't
+    // landed yet must not composite a hole that lets the layer(s) below show through for a frame. Hold the
+    // previous canvas contents (skip presenting) until every active layer is ready, with an escape hatch so
+    // a permanently-broken source (renamed/missing asset) doesn't freeze the preview forever. Paused seeks
+    // are exempt — holding there made scrubbing feel laggy without the flash actually occurring at rest.
+    const blockedSince = notReadySinceRef.current;
+    const now = performance.now();
+    for (const id of notReadyIds) {
+      if (!blockedSince.has(id)) blockedSince.set(id, now);
+    }
+    for (const id of blockedSince.keys()) {
+      if (!notReadyIds.includes(id)) blockedSince.delete(id);
+    }
+    if (playing && notReadyIds.some((id) => now - (blockedSince.get(id) ?? now) < NOT_READY_HOLD_MS)) {
       return;
     }
 

@@ -5938,6 +5938,46 @@ input[type="checkbox"] {
   pointer-events: none;
 }
 
+/* Slip two-up (Premiere-style): while a slip drag is live, the slipped range's first + last
+   frame float over the viewer. Pointer-events none — it's feedback, never a target. */
+.viewer-slip-two-up {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 8px;
+  background: rgba(10, 12, 16, 0.88);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46);
+  pointer-events: none;
+}
+
+.viewer-slip-two-up figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.viewer-slip-two-up video {
+  width: min(220px, 24vw);
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #000;
+  border-radius: 4px;
+}
+
+.viewer-slip-two-up figcaption {
+  color: #e6a23c;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-align: center;
+}
+
 /* One centered cluster (readout · quality · transport · zoom) — the old layout pinned quality
    left and zoom right with the transport absolutely centered, which read as three disconnected
    islands (user report 2026-07-03). */
@@ -8765,7 +8805,14 @@ input[type="checkbox"] {
   color: var(--editor-text);
 }
 
-.frame-effect-card-remove {
+.frame-effect-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.frame-effect-card-remove,
+.frame-effect-card-action {
   display: inline-flex;
   padding: 3px;
   border: 0;
@@ -8775,7 +8822,8 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
-.frame-effect-card-remove:hover {
+.frame-effect-card-remove:hover,
+.frame-effect-card-action:hover {
   background: var(--editor-surface-2, rgba(255, 255, 255, 0.08));
   color: var(--editor-text);
 }
@@ -8784,6 +8832,58 @@ input[type="checkbox"] {
   margin: 0;
   color: var(--editor-text-dim);
   font-size: 0.7rem;
+}
+
+/* Empty frame placeholder (FRAMES.md Step 4): a framed media layer with no asset yet — the "drop into the
+   frame" slot. A dashed outline in the frame's SHAPE + an "Add media" affordance. Preview-only (a no-asset
+   layer is kept out of the scene/export, so nothing paints for it but this). NB: named `frame-slot`, NOT
+   `empty-frame` — `.preview-empty-frame` is the empty-COMPOSITION backdrop (a solid #161618 fill) and
+   sharing the class painted a black frame-shaped box here. */
+.preview-frame-slot {
+  position: absolute;
+  display: block;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: move;
+}
+
+.preview-frame-slot-outline {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.preview-frame-slot-outline path {
+  fill: color-mix(in srgb, var(--editor-accent, #6ea8fe) 9%, transparent);
+  stroke: var(--editor-accent, #6ea8fe);
+  stroke-width: 2;
+  stroke-dasharray: 7 6;
+}
+
+.preview-frame-slot-hint {
+  position: absolute;
+  transform-origin: center;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 26px;
+  border: 0;
+  border-radius: var(--editor-radius, 10px);
+  background: color-mix(in srgb, var(--editor-surface, #1b1b1f) 82%, transparent);
+  color: var(--editor-text, #f4f4f6);
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.preview-frame-slot-hint:hover {
+  background: var(--editor-surface, #1b1b1f);
 }
 
 /* Content mode (FRAMES.md D3): double-clicked into a frame — drag/wheel now move the MEDIA inside it,
@@ -10513,6 +10613,27 @@ input.scrub-number:focus {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
 
+/* Clip markers: layer-local flags pinned inside the clip body — they travel with the clip.
+   Same color token as ruler markers so both marker kinds read as one system. */
+.timeline-clip-marker {
+  position: absolute;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 0 0 3px 3px;
+  background: var(--marker-color, var(--warning, #e6a23c));
+  color: #1a1a1a;
+  transform: translateX(-6px);
+  cursor: pointer;
+  z-index: 4;
+}
+
+.timeline-clip-marker:hover {
+  filter: brightness(1.15);
+}
+
 .timeline-marker-editor {
   position: absolute;
   top: 18px;
@@ -11813,6 +11934,13 @@ input.scrub-number:focus {
   cursor: ew-resize;
 }
 
+/* Disabled clip ("d" toggle): renders nowhere but stays fully editable in the timeline —
+   dimmed + desaturated so its state reads at a glance without hiding it. */
+.timeline-editor .timeline-clip.is-disabled {
+  opacity: 0.45;
+  filter: saturate(0.3);
+}
+
 .timeline-editor.is-hand-tool,
 .timeline-editor.is-hand-tool .timeline-lane,
 .timeline-editor.is-hand-tool .timeline-clip,
@@ -11901,6 +12029,68 @@ input.scrub-number:focus {
   font-weight: 900;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+/* Roll/slide heads-up badge: FIXED-positioned at the strip root and moved with the pointer by
+   flushTrimPreview's rAF, so no clip/track overflow can clip it (the old in-clip badge was
+   unreadable — cut off by the clip bounds). Two lines: a big tabular delta, and — only when the
+   drag pins at a limit — an amber reason line explaining why the edit refuses to go further. */
+.timeline-trim-hud {
+  position: fixed;
+  z-index: 80;
+  transform: translate(-50%, -100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(10, 12, 16, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.timeline-trim-hud::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(10, 12, 16, 0.94);
+}
+
+.timeline-trim-hud-delta {
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.timeline-trim-hud-mode {
+  margin-right: 6px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.timeline-trim-hud-reason {
+  color: var(--warning, #e6a23c);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.timeline-trim-hud.is-limited {
+  border-color: rgba(230, 162, 60, 0.65);
+}
+
+.timeline-trim-hud.is-limited .timeline-trim-hud-delta {
+  color: var(--warning, #e6a23c);
 }
 
 /* Generous, always-interactive hit area (transparent) so grabbing the edge to resize is

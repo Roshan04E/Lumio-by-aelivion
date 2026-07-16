@@ -1,5 +1,5 @@
 import { createTimelineEffect, type KeyframeHandle, type KeyframeInterpolation, type TimelineKeyframeV2, type TimelineLayer } from "@kimera-by-aelivion/shared";
-import { getEffectParamBaseValue, getEffectParamKeyframes } from "./inspector/keyframeUtils";
+import { getEffectParamBaseValue, getEffectParamKeyframes, mintKeyframeId } from "./inspector/keyframeUtils";
 
 /**
  * Audio volume envelope helpers — the timeline rubber-band reads/writes the clip's `volume` effect `gain`
@@ -73,7 +73,7 @@ export function addVolumePoint(layer: TimelineLayer, t: number, gain: number): {
   const { layer: withEffect, effectId } = ensureVolumeEffect(layer);
   const time = clampTime(t, withEffect.durationSeconds);
   const keyframe: TimelineKeyframeV2 = {
-    id: `kf_${Date.now()}_${effectId}_gain_${Math.round(time * 1000)}`,
+    id: mintKeyframeId(`${effectId}_gain_${Math.round(time * 1000)}`),
     target: { scope: "effect", effectId, property: "gain" },
     timeSeconds: time,
     value: clampGain(gain),
