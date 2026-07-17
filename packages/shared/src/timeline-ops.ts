@@ -25,15 +25,36 @@ function freshId(prefix: string): string {
 }
 
 /** Deep-clones a layer with brand-new ids (layer + its keyframes/animations/effects). */
+/** Old→new effect id map for a layer clone whose effects are reminted as `<newLayerId>_fx_<index>`. */
+function clonedEffectIdMap(layer: TimelineLayer, newLayerId: string): Map<string, string> {
+  return new Map(layer.effects.map((effect, index) => [effect.id, `${newLayerId}_fx_${index}`]));
+}
+
+/** V2 keyframes address effects BY ID (`target.effectId`) — reminting effect ids without remapping
+ *  the targets orphans every effect/mask keyframe on the copy (the animation evaluator and the
+ *  inspector both look keyframes up by the effect's CURRENT id, so the copy plays static). */
+function remapAnimationTarget(
+  target: TimelineKeyframeV2["target"],
+  effectIdMap: Map<string, string>
+): TimelineKeyframeV2["target"] {
+  const remapped = target.effectId ? effectIdMap.get(target.effectId) : undefined;
+  return remapped ? { ...target, effectId: remapped } : target;
+}
+
 function cloneLayerWithNewIds(layer: TimelineLayer, idPrefix: string): TimelineLayer {
   const id = freshId(idPrefix);
+  const effectIdMap = clonedEffectIdMap(layer, id);
   return {
     ...layer,
     id,
     linkedGroupId: undefined,
-    effects: layer.effects.map((effect, index) => ({ ...effect, id: `${id}_fx_${index}` })),
+    effects: layer.effects.map((effect) => ({ ...effect, id: effectIdMap.get(effect.id)! })),
     keyframes: layer.keyframes.map((keyframe, index) => ({ ...keyframe, id: `${id}_kf_${index}` })),
-    animations: (layer.animations ?? []).map((animation, index) => ({ ...animation, id: `${id}_anim_${index}` }))
+    animations: (layer.animations ?? []).map((animation, index) => ({
+      ...animation,
+      id: `${id}_anim_${index}`,
+      target: remapAnimationTarget(animation.target, effectIdMap)
+    }))
   };
 }
 
@@ -79,9 +100,17 @@ export function splitLayerAtTime(
       right.keyframes = layer.keyframes
         .filter((keyframe) => keyframe.timeSeconds > atSeconds + EPSILON)
         .map((keyframe, kfIndex) => ({ ...keyframe, id: `${right.id}_kf_${kfIndex}` }));
+      // Re-derived from the ORIGINAL layer's animations, so the right half's targets need the same
+      // effect-id remap the clone's own animations got (right.effects carry the reminted ids).
+      const rightEffectIds = clonedEffectIdMap(layer, right.id);
       right.animations = (layer.animations ?? [])
         .filter((animation) => animation.timeSeconds > localSplit + EPSILON)
-        .map((animation, animIndex) => ({ ...animation, id: `${right.id}_anim_${animIndex}`, timeSeconds: animation.timeSeconds - localSplit }));
+        .map((animation, animIndex) => ({
+          ...animation,
+          id: `${right.id}_anim_${animIndex}`,
+          timeSeconds: animation.timeSeconds - localSplit,
+          target: remapAnimationTarget(animation.target, rightEffectIds)
+        }));
 
       const nextLayers = [...trackItem.layers];
       nextLayers.splice(index, 1, left, right);

@@ -283,3 +283,27 @@ now a thin delegate, so both callers share one implementation and the public API
 - The editor evaluates the UNCLIPPED composition, so work-area bugs never show in preview. Anything that
   only runs on the export path (`clipCompositionToWorkArea`, `expandNestedCompositions`) needs its own
   assertion — `editor:test` now pins this one.
+
+## v2 — Clone/split reminted effect ids but left keyframe targets pointing at the old ones (2026-07-17)
+
+**Symptom.** Duplicate, split (blade), or paste a clip whose effect params are keyframed → the copy plays
+the effect STATIC. The keyframes are still on the layer but dead: V2 `animations` address effects BY ID
+(`target.effectId`), and `cloneLayerWithNewIds` reminted every effect id (`<newId>_fx_<i>`) without
+remapping the targets. Orphans are invisible to the evaluator and (mostly) to the inspector — one of the
+"keyframes stopped responding" reports. `splitLayerAtTime` had the bug TWICE: it clones the right half
+(orphaning once), then REBUILDS `right.animations` from the original layer's list (orphaning again).
+
+**Fix (timeline-ops.ts).** `clonedEffectIdMap(layer, newLayerId)` + `remapAnimationTarget(target, map)`
+— applied in `cloneLayerWithNewIds` (covers duplicate/paste) and in split's right-half rebuild. Remaps
+both `scope:"effect"` and `scope:"mask"` targets (mask keyframes also carry `effectId`; mask ids
+themselves are not reminted, so they need no map). Contract test: scratchpad `clone-remap-test.ts`
+(duplicate + split, positional integrity blur-vs-pixelate, layer-scope targets untouched, left half
+keeps original ids).
+
+**Deliberately NOT healed:** orphans already saved in old projects. They are inert (evaluator ignores
+them; effect-delete strips its own since 2026-07-16), and any heuristic remap risks animating the WRONG
+effect — worse than a static param the user can re-key.
+
+**Invariant.** Reminting an id is only half an operation — every reference to it must move in the same
+write. When adding a new id-bearing field to `TimelineLayer`, grep `cloneLayerWithNewIds` AND split's
+right-half rebuild: split does NOT inherit the clone's handling for keyframe tracks.
