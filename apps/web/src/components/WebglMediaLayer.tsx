@@ -230,6 +230,7 @@ interface ImageProps extends BaseProps {
   layerStartSeconds?: never;
   sourceInSeconds?: never;
   speedFactor?: never;
+  prerollSeconds?: never;
   onLoadedMetadata?: never;
 }
 
@@ -261,6 +262,14 @@ interface VideoProps extends BaseProps {
   sourceInSeconds?: number | undefined;
   /** Clip playback rate (rate stretch). Default 1. Applied to matte sync + matte playbackRate. */
   speedFactor?: number | undefined;
+  /**
+   * R3.2: this clip's resolved transition PRE-ROLL (seconds of timeline before `layerStartSeconds`
+   * during which it must already play its head-handle material — see `resolveTransitionWindowSides`).
+   * Every internal source-time mapping here allows local time down to −preroll instead of clamping at
+   * 0; without it the watchdog/WC/reprime paths pin the incoming clip to its in-point frame for the
+   * whole pre-roll ("frozen initial frames", 2026-07-17 report). 0/absent → exact legacy behavior.
+   */
+  prerollSeconds?: number | undefined;
   onLoadedMetadata?: ((event: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
 }
 
@@ -413,16 +422,28 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const hiddenAtMountRef = useRef(hidden);
     hiddenAtMountRef.current = hidden;
     // Live time mapping inputs for the async frame requests (props close over stale values).
-    const wcTimeRef = useRef({ currentTime: 0, start: 0, sourceIn: 0, speed: 1, isPlaying: false });
+    const wcTimeRef = useRef({ currentTime: 0, start: 0, sourceIn: 0, speed: 1, preroll: 0, isPlaying: false });
     if (mediaType === "video") {
       wcTimeRef.current = {
         currentTime: props.currentTime,
         start: props.layerStartSeconds,
         sourceIn: props.sourceInSeconds ?? 0,
         speed: props.speedFactor ?? 1,
+        preroll: props.prerollSeconds ?? 0,
         isPlaying: props.isPlaying,
       };
     }
+
+    // R3.2: the ONE source-time mapping every internal consumer (WC frame requests, watchdog,
+    // reprime, settle, matte sync, late fallback) must use — timeline time → source-media seconds,
+    // pre-roll-aware. Local time may go down to −preroll (the clip plays its head-handle material
+    // ahead of its own start during a transition pre-roll); the outer floor at 0 is the ASSET's real
+    // start (repeated frames only when material is truly absent). With preroll 0 this is exactly the
+    // legacy `sourceIn + max(0, t − start) · speed`. MUST stay equivalent to the parent PreviewLayer's
+    // `resolveSourceSeconds`, which drives the element's play/seek — a divergent mapping here makes
+    // the watchdog fight the parent and yank the picture back to the in-point.
+    const mapSourceTime = (tp: { currentTime: number; start: number; sourceIn: number; speed: number; preroll: number }, timelineTime = tp.currentTime) =>
+      Math.max(0, tp.sourceIn + Math.max(-tp.preroll, timelineTime - tp.start) * tp.speed);
 
     // ── DECODER POOL (P0, stage 1) ───────────────────────────────────────────
     // The hidden source/matte <video> elements come from the shared element pool instead of being
@@ -451,7 +472,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           const tp = wcTimeRef.current;
           try {
             lease.video.playbackRate = tp.speed;
-            lease.video.currentTime = tp.sourceIn + Math.max(0, tp.currentTime - tp.start) * tp.speed;
+            lease.video.currentTime = mapSourceTime(tp);
             if (tp.isPlaying) void lease.video.play().catch(() => undefined);
           } catch {
             /* transport catch-up is best-effort; the next play/seek re-syncs */
@@ -918,6 +939,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const layerStartSeconds = mediaType === "video" ? props.layerStartSeconds : 0;
     const sourceInSeconds = mediaType === "video" ? (props.sourceInSeconds ?? 0) : 0;
     const speedFactor = mediaType === "video" ? (props.speedFactor ?? 1) : 1;
+    const prerollSeconds = mediaType === "video" ? (props.prerollSeconds ?? 0) : 0;
 
     // Sync matte video time to source video (speed-aware, same mapping as the source element).
     useEffect(() => {
@@ -925,11 +947,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       const matteVideo = matteVideoRef.current;
       if (!matteVideo) return;
       matteVideo.playbackRate = speedFactor;
-      const nextTime = sourceInSeconds + Math.max(0, currentTime - layerStartSeconds) * speedFactor;
+      const nextTime = Math.max(0, sourceInSeconds + Math.max(-prerollSeconds, currentTime - layerStartSeconds) * speedFactor);
       if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08 * Math.max(1, speedFactor)) {
         matteVideo.currentTime = nextTime;
       }
-    }, [currentTime, layerStartSeconds, mediaType, matte?.uri, sourceInSeconds, speedFactor]);
+    }, [currentTime, layerStartSeconds, mediaType, matte?.uri, sourceInSeconds, speedFactor, prerollSeconds]);
 
     // Play/pause the matte video in sync with the source.
     useEffect(() => {
@@ -985,7 +1007,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         }
         const video = lease.video;
         const tp = wcTimeRef.current;
-        const target = tp.sourceIn + Math.max(0, tp.currentTime - tp.start) * tp.speed;
+        const target = mapSourceTime(tp);
         if (!Number.isFinite(target)) return;
         const present = () => {
           if (settleTokenRef.current !== token || settleLeaseRef.current !== lease) return;
@@ -1147,7 +1169,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       const interval = window.setInterval(() => {
         const tp = wcTimeRef.current;
         const nowMs = performance.now();
-        const expected = tp.sourceIn + Math.max(0, tp.currentTime - tp.start) * tp.speed;
+        const expected = mapSourceTime(tp);
         const video = sourceVideoRef.current;
         const provider = wcProviderRef.current;
 
@@ -1264,7 +1286,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         }
         const video = sourceVideoRef.current;
         if (!video) return;
-        const expected = tp.sourceIn + Math.max(0, tp.currentTime - tp.start) * tp.speed;
+        const expected = mapSourceTime(tp);
         if (video.readyState >= 1 && Math.abs(video.currentTime - expected) > 0.3) {
           try {
             video.currentTime = expected;
@@ -1402,7 +1424,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         const live = getLivePlaybackTime();
         if (Math.abs(live - tp.currentTime) < WC_LIVE_CLOCK_MAX_DIVERGENCE_S) timelineTime = live;
       }
-      const sourceTime = tp.sourceIn + Math.max(0, timelineTime - tp.start) * tp.speed;
+      const sourceTime = mapSourceTime(tp, timelineTime);
       void provider
         .getFrame(sourceTime)
         .then((frame) => {

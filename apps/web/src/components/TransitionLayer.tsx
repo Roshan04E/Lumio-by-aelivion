@@ -38,6 +38,9 @@ interface TransitionOverlayProps {
   startSeconds: number;
   /** Incoming clip length — clamps the window so the reveal never runs past the clip. */
   clipDurationSeconds: number;
+  /** R3.1 handle-aware window: seconds of the window BEFORE the cut (see `resolveTransitionWindowSides`).
+   *  Must be the pair's resolved value or this overlay and the scene mix disagree about the window. */
+  prerollSeconds?: number | undefined;
   currentTime: number;
   isPlaying: boolean;
   /** Composition pixel size (the compositor renders at this resolution). */
@@ -68,6 +71,7 @@ export function TransitionOverlay({
   spec,
   startSeconds,
   clipDurationSeconds,
+  prerollSeconds,
   currentTime,
   isPlaying,
   width,
@@ -173,7 +177,7 @@ export function TransitionOverlay({
   function drawMix() {
     const compositor = compositorRef.current;
     if (!compositor || !def) return;
-    const active = getActiveTransition(spec, { currentTimeSeconds: timeRef.current, startSeconds, clipDurationSeconds });
+    const active = getActiveTransition(spec, { currentTimeSeconds: timeRef.current, startSeconds, clipDurationSeconds, prerollSeconds });
     if (!active) return;
     const from = gradedRef.current[fromId];
     const to = gradedRef.current[toId];

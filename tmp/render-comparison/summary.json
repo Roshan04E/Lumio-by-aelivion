@@ -326,6 +326,20 @@
       "diffRatio": 0
     },
     {
+      "fixture": "advanced-transition",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-advanced-transition.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-advanced-transition.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-advanced-transition.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 64926,
+      "totalPixels": 2073600,
+      "diffRatio": 0.03131076388888889
+    },
+    {
       "fixture": "plugin-shader",
       "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-plugin-shader.png",
       "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-plugin-shader.png",
@@ -380,6 +394,20 @@
       "diffPixels": 14,
       "totalPixels": 2073600,
       "diffRatio": 0.000006751543209876544
+    },
+    {
+      "fixture": "framed-media",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-framed-media.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-framed-media.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-framed-media.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
     }
   ]
 }

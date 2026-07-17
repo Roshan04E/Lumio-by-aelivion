@@ -58,8 +58,11 @@ import {
   getTrackPanAt,
   getVisibleTextRuns,
   evaluateTimelineTransform,
+  effectiveTransitionDuration,
   findTransitionPairs,
   getActiveTransition,
+  resolveTransitionWindowSides,
+  type TransitionWindowSides,
   getLayerAnimations,
   hasTextWarp,
   normalizeTextWarp,
@@ -68,6 +71,7 @@ import {
   COLOR_EFFECT_TYPES,
   colorWarningsLabel,
   type NestedGroupSpec,
+  expandFrameBorders,
   frameBoxPercent,
   frameOutlinePathD,
   mediaRectInFrame,
@@ -162,6 +166,7 @@ type TransitionPairEntry = {
   incomingId: string;
   spec: TransitionSpec;
   startSeconds: number;
+  prerollSeconds: number;
   incomingDurationSeconds: number;
   fromFit: "cover" | "contain" | "fill";
   toFit: "cover" | "contain" | "fill";
@@ -171,6 +176,7 @@ const eqTransitionPair = (a: TransitionPairEntry, b: TransitionPairEntry): boole
   a.incomingId === b.incomingId &&
   a.spec === b.spec &&
   a.startSeconds === b.startSeconds &&
+  a.prerollSeconds === b.prerollSeconds &&
   a.incomingDurationSeconds === b.incomingDurationSeconds &&
   a.fromFit === b.fromFit &&
   a.toFit === b.toFit;
@@ -459,6 +465,7 @@ function VideoPreviewImpl({
   onUpdateLayerMasks,
   onCommitMaskPoints,
   onPreviewMaskScalar,
+  onCommitShapePath,
   maskEffectId,
   onPreviewFrameRendered,
   resolveProxyPlayback,
@@ -532,6 +539,8 @@ function VideoPreviewImpl({
   onCommitMaskPoints?: ((layerId: string, maskId: string, points: MaskPoint[]) => void) | undefined;
   /** Live feather/opacity from the on-canvas widget; commit=false while dragging, true on release. */
   onPreviewMaskScalar?: ((layerId: string, maskId: string, patch: { feather?: number; opacity?: number }, commit: boolean) => void) | undefined;
+  /** Pen tool on a PEN SHAPE layer: commit the drawn outline as the layer's own geometry. */
+  onCommitShapePath?: ((layerId: string, patch: { shapePath: MaskPoint[]; widthPercent: number; heightPercent: number; xPercent: number; yPercent: number }) => void) | undefined;
   /** When set, the overlay edits this effect's region masks instead of the layer's clip masks (Phase 3). */
   maskEffectId?: string | null | undefined;
   /** Called after the GPU scene preview successfully renders a playback frame. */
@@ -717,7 +726,12 @@ function VideoPreviewImpl({
   const nestExpansion = useMemo(() => expandNestedCompositions(composition, graph.compositions), [composition, graph.compositions]);
   // Region color/glow masks expand into base + duplicate layers at render time (duplicate = the masked effect
   // applied globally, clipped to the region). Render-only; the editor state keeps the original single layer.
-  const expandedTracks = useMemo(() => expandEffectRegionMasks(nestExpansion.composition).tracks, [nestExpansion]);
+  // Frame borders expand FIRST (a framed layer gains a derived stroke-only shape clone above it — Step E),
+  // then region masks — same order as the local export and the render manifest.
+  const expandedTracks = useMemo(
+    () => expandEffectRegionMasks(expandFrameBorders(nestExpansion.composition)).tracks,
+    [nestExpansion]
+  );
   // The REAL (un-expanded) layer ids. expandEffectRegionMasks adds render-only `__rfx_` clone layers for
   // region color/blur masks; those clones must be pixels-only — NOT selectable/draggable — or clicking the
   // clip in the preview selects a phantom id (deselecting the real clip) and the drag drives a render-only
@@ -725,6 +739,25 @@ function VideoPreviewImpl({
   const realLayerIds = useMemo(
     () => new Set(composition.tracks.flatMap((track) => track.layers.map((layer) => layer.id))),
     [composition]
+  );
+  // R3.1: handle-aware transition window sides — the single resolver every transition consumer in the
+  // preview shares (pair collection, activation windows), so the mix window and the layers rendered
+  // for it can never disagree. See `resolveTransitionWindowSides` in shared composition-style.
+  const resolveTransitionSides = useCallback(
+    (incoming: TimelineLayer, outgoing: TimelineLayer): TransitionWindowSides =>
+      resolveTransitionWindowSides({
+        durationSeconds: effectiveTransitionDuration(incoming.transitionIn?.durationSeconds ?? 0, incoming.durationSeconds),
+        incoming: { type: incoming.type, sourceInSeconds: incoming.sourceInSeconds, speed: incoming.speed },
+        outgoing: {
+          type: outgoing.type,
+          sourceInSeconds: outgoing.sourceInSeconds,
+          speed: outgoing.speed,
+          durationSeconds: outgoing.durationSeconds
+        },
+        outgoingAssetDurationSeconds: resolveLayerAsset(outgoing, assets, sourceAsset)?.durationSeconds,
+        alignment: incoming.transitionIn?.alignment
+      }),
+    [assets, sourceAsset]
   );
   const activeVisualLayerEntriesRaw = useMemo(
     () =>
@@ -746,8 +779,8 @@ function VideoPreviewImpl({
           // centered-on-cut) rendering into the PRE-roll of its OWN transition ahead of its own start.
           return (
             isLayerActive(layer, currentTime) ||
-            (track ? isOutgoingInPostroll(layer, track, currentTime) : false) ||
-            (track ? isIncomingInPreroll(layer, track, currentTime) : false)
+            (track ? isOutgoingInPostroll(layer, track, currentTime, resolveTransitionSides) : false) ||
+            (track ? isIncomingInPreroll(layer, track, currentTime, resolveTransitionSides) : false)
           );
         })
         .sort((a, b) => {
@@ -757,7 +790,7 @@ function VideoPreviewImpl({
 
           return a.layerIndex - b.layerIndex;
         }),
-    [expandedTracks, composition, currentTime]
+    [expandedTracks, composition, currentTime, resolveTransitionSides]
   );
   // Stabilize identity between clip boundaries so the downstream memo cascade + layer subtrees don't
   // rebuild every playback tick. renderVisualLayerEntries/renderedLayerEntries/sceneLayers/etc. are all
@@ -903,6 +936,7 @@ function VideoPreviewImpl({
       incomingId: string;
       spec: TransitionSpec;
       startSeconds: number;
+      prerollSeconds: number;
       incomingDurationSeconds: number;
       fromFit: "cover" | "contain" | "fill";
       toFit: "cover" | "contain" | "fill";
@@ -911,21 +945,49 @@ function VideoPreviewImpl({
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;
-      const active = getActiveTransition(pair.spec, { currentTimeSeconds: currentTime, startSeconds: incoming.startSeconds, clipDurationSeconds: incoming.durationSeconds });
+      // R3.1: handle-aware window placement (no head handle → start-at-cut, never a frozen incoming).
+      const sides = resolveTransitionSides(incoming, outgoing);
+      const active = getActiveTransition(pair.spec, {
+        currentTimeSeconds: currentTime,
+        startSeconds: incoming.startSeconds,
+        clipDurationSeconds: incoming.durationSeconds,
+        prerollSeconds: sides.prerollSeconds
+      });
       if (!active) continue;
       out.push({
         outgoingId: pair.outgoingId,
         incomingId: pair.incomingId,
         spec: pair.spec,
         startSeconds: incoming.startSeconds,
+        prerollSeconds: sides.prerollSeconds,
         incomingDurationSeconds: incoming.durationSeconds,
         fromFit: getCompositionObjectFit(outgoing) as "cover" | "contain" | "fill",
         toFit: getCompositionObjectFit(incoming) as "cover" | "contain" | "fill",
       });
     }
     return out;
-  }, [renderedLayerEntries, currentTime]);
+  }, [renderedLayerEntries, currentTime, resolveTransitionSides]);
   const transitionPairs = useStableList(transitionPairsRaw, eqTransitionPair);
+  // R3.2: incoming clip id → its junction transition's resolved PRE-ROLL seconds (absent → 0). Built
+  // over all rendered pairs WITHOUT the active-window gate (unlike transitionPairsRaw) so a pending/
+  // pre-rolled incoming primes its decoder at the window-entry frame, and independent of currentTime
+  // so it stays referentially stable through playback ticks. Passed down to the media layer, whose
+  // internal time mappings (watchdog/WC/reprime/settle) must agree with the parent's
+  // `resolveSourceSeconds` during the pre-roll — a 0-preroll mapping there pins the incoming clip to
+  // its in-point frame for the whole pre-roll (2026-07-17 "frozen initial frames" report).
+  const incomingPrerollById = useMemo(() => {
+    const layers = renderedLayerEntries.map((entry) => entry.layer);
+    const byId = new Map(layers.map((layer) => [layer.id, layer]));
+    const map = new Map<string, number>();
+    for (const pair of findTransitionPairs(layers)) {
+      const incoming = byId.get(pair.incomingId);
+      const outgoing = byId.get(pair.outgoingId);
+      if (!incoming || !outgoing) continue;
+      const preroll = resolveTransitionSides(incoming, outgoing).prerollSeconds;
+      if (preroll > 0) map.set(pair.incomingId, preroll);
+    }
+    return map;
+  }, [renderedLayerEntries, resolveTransitionSides]);
   // Source clips (report graded frames) and the incoming clip (hidden — the overlay shows the mix on top;
   // the outgoing stays visible as a fallback until both graded canvases are ready).
   const transitionSourceIds = useMemo(() => {
@@ -1598,6 +1660,7 @@ function VideoPreviewImpl({
                     isPlaying={isPlaying}
                     layer={layer}
                     pending={pending}
+                    prerollSeconds={incomingPrerollById.get(layer.id) ?? 0}
                     onMoveLayer={onMoveLayer}
                     onMovePositionKeyframe={onMovePositionKeyframe}
                     onMoveSpatialHandle={onMoveSpatialHandle}
@@ -1663,6 +1726,7 @@ function VideoPreviewImpl({
                         spec={pair.spec}
                         startSeconds={pair.startSeconds}
                         clipDurationSeconds={pair.incomingDurationSeconds}
+                        prerollSeconds={pair.prerollSeconds}
                         currentTime={currentTime}
                         isPlaying={isPlaying}
                         width={composition.width}
@@ -1704,6 +1768,7 @@ function VideoPreviewImpl({
                   onUpdateLayerMasks={onUpdateLayerMasks}
                   onCommitMaskPoints={onCommitMaskPoints}
                   onPreviewMaskScalar={onPreviewMaskScalar}
+                  onCommitShapePath={onCommitShapePath}
                 />
               ) : null}
               {/* Portal target for selection/motion overlays — sibling of the clip, so it isn't cropped. */}
@@ -1771,6 +1836,10 @@ type PreviewLayerProps = {
   // <video> seek to the right source frame in the background, so the cut to it
   // doesn't show a black/stale frame. Invisible and non-interactive until active.
   pending?: boolean;
+  /** R3.2: this clip's resolved transition PRE-ROLL seconds (0 = no junction transition). Bounds how
+   *  far before `startSeconds` its source mapping reaches into head-handle material, and is threaded
+   *  into the media layer so its internal time mappings agree with `resolveSourceSeconds`. */
+  prerollSeconds?: number | undefined;
   assets: SourceAsset[];
   sourceAsset?: SourceAsset | null | undefined;
   onMoveLayer?: ((layerId: string, position: { x: number; y: number }, commit: boolean) => void) | undefined;
@@ -1850,6 +1919,7 @@ const PreviewLayer = memo(function PreviewLayer({
   selected,
   interactive = true,
   pending = false,
+  prerollSeconds = 0,
   assets,
   sourceAsset,
   onMoveLayer,
@@ -2642,9 +2712,13 @@ const PreviewLayer = memo(function PreviewLayer({
    */
   function resolveSourceSeconds(localSeconds: number): { time: number; clamped: boolean } {
     const sourceIn = layer.sourceInSeconds ?? 0;
+    // R3.2: negative local time is bounded by the RESOLVED pre-roll (not unbounded) so a pending
+    // (preload) mount before the window parks exactly on the window-entry frame instead of chasing a
+    // moving earlier target. preroll 0 (no transition) → Math.max(0, local): legacy hard-cut priming.
+    const boundedLocal = Math.max(-prerollSeconds, localSeconds);
     const raw = hasSpeedRamp(layer)
       ? layerSourceTimeSeconds(layer, Math.max(0, localSeconds)) - sourceIn
-      : localSeconds * getLayerSpeedAt(layer, Math.max(0, localSeconds));
+      : boundedLocal * getLayerSpeedAt(layer, Math.max(0, localSeconds));
     const desired = sourceIn + raw;
     const upperBound = asset?.durationSeconds != null ? Math.max(0, asset.durationSeconds - 0.05) : Infinity;
     const time = Math.max(0, Math.min(upperBound, desired));
@@ -2942,7 +3016,9 @@ const PreviewLayer = memo(function PreviewLayer({
     const isSelectedVisible = selected && !pending;
     const videoColorPipeline = bypassColor ? null : getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
     const videoMediaEffects = getCompositionMediaEffects(layer, { currentTimeSeconds: currentTime });
-    const videoTransition = getCompositionTransition(layer, { currentTimeSeconds: currentTime });
+    // R3.2: handle-aware window — same placement the scene pair mix uses (transitionPrerollSeconds),
+    // or the DOM/wipe reveal disagrees with the compositor about when the transition starts.
+    const videoTransition = getCompositionTransition(layer, { currentTimeSeconds: currentTime, transitionPrerollSeconds: prerollSeconds });
 
     // Unified WebGL path (rendererMode=webgl): one shader does color grade + matte + opacity,
     // identical to the Remotion export. Replaces both <MaskedVideoLayer> and the
@@ -2982,6 +3058,7 @@ const PreviewLayer = memo(function PreviewLayer({
             layerStartSeconds={layer.startSeconds}
             sourceInSeconds={rampTangent ? rampTangent.sourceIn : layer.sourceInSeconds}
             speedFactor={rampTangent ? rampTangent.speed : getLayerSpeed(layer)}
+            prerollSeconds={prerollSeconds}
             onLoadedMetadata={(event) => syncVideoTime(event.currentTarget)}
             dragHandlers={effectiveDragHandlers}
             onWebglFailed={() => setWebglMediaFailed(true)}
@@ -3242,7 +3319,8 @@ const PreviewLayer = memo(function PreviewLayer({
   const imageStyle: CSSProperties = interactive ? imageStyleBase : { ...imageStyleBase, pointerEvents: "none" };
   const imageColorPipeline = bypassColor ? null : getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
   const imageMediaEffects = getCompositionMediaEffects(layer, { currentTimeSeconds: currentTime });
-  const imageTransition = getCompositionTransition(layer, { currentTimeSeconds: currentTime });
+  // R3.2: same handle-aware window placement as the scene pair mix (see videoTransition above).
+  const imageTransition = getCompositionTransition(layer, { currentTimeSeconds: currentTime, transitionPrerollSeconds: prerollSeconds });
 
   // Unified WebGL path (rendererMode=webgl): the canvas is the visible output and carries the
   // grade in-shader — identical to the Remotion export. The hidden <img> is only a decode source.
@@ -4025,7 +4103,8 @@ function MaskEditorOverlay({
   onChangeMaskTool,
   onUpdateLayerMasks,
   onCommitMaskPoints,
-  onPreviewMaskScalar
+  onPreviewMaskScalar,
+  onCommitShapePath
 }: {
   layer: TimelineLayer;
   masks: Mask[];
@@ -4040,6 +4119,8 @@ function MaskEditorOverlay({
   onUpdateLayerMasks?: ((layerId: string, updater: (masks: Mask[]) => Mask[]) => void) | undefined;
   onCommitMaskPoints?: ((layerId: string, maskId: string, points: MaskPoint[]) => void) | undefined;
   onPreviewMaskScalar?: ((layerId: string, maskId: string, patch: { feather?: number; opacity?: number }, commit: boolean) => void) | undefined;
+  /** Pen-drawn outline on a PEN SHAPE layer → the layer's own geometry (shapePath + box + position). */
+  onCommitShapePath?: ((layerId: string, patch: { shapePath: MaskPoint[]; widthPercent: number; heightPercent: number; xPercent: number; yPercent: number }) => void) | undefined;
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [draft, setDraft] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -4167,6 +4248,29 @@ function MaskEditorOverlay({
 
   function finalizePen(pts: MaskPoint[]) {
     if (pts.length >= 3) {
+      // PEN SHAPE authoring (2026-07-17 fix — "pen tool not working for drawing shapes"): when the
+      // selected layer IS a pen shape, the drawn outline becomes the layer's OWN geometry
+      // (`shapePath`, 0..100 inside a box sized/positioned to the drawn bounds) instead of a clip
+      // mask. Before this, a pen shape layer only ever showed its canned default polygon. Shape
+      // layers are overlay-type here (toComp is identity), so local == comp coordinates.
+      if (layer.type === "shape" && layer.shapeKind === "pen" && onCommitShapePath) {
+        const xs = pts.map((pt) => pt.x);
+        const ys = pts.map((pt) => pt.y);
+        const x0 = Math.min(...xs);
+        const y0 = Math.min(...ys);
+        const boxW = Math.max(1, Math.max(...xs) - x0);
+        const boxH = Math.max(1, Math.max(...ys) - y0);
+        onCommitShapePath(layer.id, {
+          shapePath: pts.map((pt) => ({ ...pt, x: ((pt.x - x0) / boxW) * 100, y: ((pt.y - y0) / boxH) * 100 })),
+          widthPercent: (boxW / width) * 100,
+          heightPercent: (boxH / height) * 100,
+          xPercent: ((x0 + boxW / 2) / width) * 100,
+          yPercent: ((y0 + boxH / 2) / height) * 100
+        });
+        onChangeMaskTool?.("select");
+        setPenDraft(null);
+        return;
+      }
       const shape = tool === "pen" ? "bezier" : "polygon";
       const mask = createMask(shape, pts.map((pt) => ({ ...pt })), `${tool === "pen" ? "Pen" : "Polygon"} ${masks.length + 1}`);
       onUpdateLayerMasks?.(layer.id, (currentMasks) => [...currentMasks, mask]);
@@ -5060,7 +5164,15 @@ export function isLayerActive(layer: TimelineLayer, currentTime: number) {
  * at its out-point frame — the "repeated frames" a pro editor shows when a clip has no spare handle)
  * under the incoming reveal, without its timeline length ever changing.
  */
-export function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack, currentTime: number): boolean {
+export function isOutgoingInPostroll(
+  layer: TimelineLayer,
+  track: TimelineTrack,
+  currentTime: number,
+  // R3.1: handle-aware sides — MUST be the same resolver the pair collection uses, or the activation
+  // window and the mix window disagree (the outgoing either vanishes mid-mix or shows standalone after
+  // it). Absent → centered halves (pure-math default, kept for callers without asset data).
+  resolveSides?: (incoming: TimelineLayer, outgoing: TimelineLayer) => TransitionWindowSides
+): boolean {
   if (layer.type === "audio") {
     return false;
   }
@@ -5072,9 +5184,11 @@ export function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack,
     if (other.id === layer.id || !other.transitionIn) {
       continue;
     }
-    // Post-roll is the HALF of the clamped transition window that falls past the cut.
-    const halfWindow = Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2;
-    if (Math.abs(other.startSeconds - end) < 0.05 && currentTime <= end + halfWindow) {
+    // Post-roll is the slice of the clamped transition window that falls past the cut.
+    const postroll = resolveSides
+      ? resolveSides(other, layer).postrollSeconds
+      : Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2;
+    if (Math.abs(other.startSeconds - end) < 0.05 && currentTime <= end + postroll) {
       return true;
     }
   }
@@ -5087,7 +5201,13 @@ export function isOutgoingInPostroll(layer: TimelineLayer, track: TimelineTrack,
  * must render/decode ahead of its own `startSeconds`. Mirrors `isOutgoingInPostroll`'s clamped-window
  * logic exactly, just looking at the PREVIOUS same-track clip instead of the next one.
  */
-export function isIncomingInPreroll(layer: TimelineLayer, track: TimelineTrack, currentTime: number): boolean {
+export function isIncomingInPreroll(
+  layer: TimelineLayer,
+  track: TimelineTrack,
+  currentTime: number,
+  /** R3.1 handle-aware sides — see `isOutgoingInPostroll`'s doc. Absent → centered halves. */
+  resolveSides?: (incoming: TimelineLayer, outgoing: TimelineLayer) => TransitionWindowSides
+): boolean {
   if (layer.type === "audio" || !layer.transitionIn) {
     return false;
   }
@@ -5095,11 +5215,14 @@ export function isIncomingInPreroll(layer: TimelineLayer, track: TimelineTrack, 
   if (currentTime >= start) {
     return false;
   }
-  const halfWindow = Math.min(layer.transitionIn.durationSeconds, layer.durationSeconds) / 2;
   for (const other of track.layers) {
     if (other.id === layer.id) continue;
     const end = other.startSeconds + other.durationSeconds;
-    if (Math.abs(end - start) < 0.05 && currentTime >= start - halfWindow) {
+    if (Math.abs(end - start) >= 0.05) continue;
+    const preroll = resolveSides
+      ? resolveSides(layer, other).prerollSeconds
+      : Math.min(layer.transitionIn.durationSeconds, layer.durationSeconds) / 2;
+    if (currentTime >= start - preroll) {
       return true;
     }
   }

@@ -56,6 +56,11 @@ export interface CompositionLayerStyleInput {
 export interface CompositionStyleOptions {
   currentTimeSeconds?: number | undefined;
   /**
+   * R3.1 handle-aware window: how much of a junction transition's window falls BEFORE the cut (see
+   * `resolveTransitionWindowSides`). Consumed by `getCompositionTransition` only; absent → centered.
+   */
+  transitionPrerollSeconds?: number | undefined;
+  /**
    * When true, omit the SVG color filter reference from the returned style object.
    * Use this for layers rendered through `MediaWebGLRenderer` so the WebGL canvas
    * is the sole grading path and the underlying element is a clean source (no double-grade).
@@ -214,7 +219,8 @@ export function getCompositionTransition(
   const duration = effectiveTransitionDuration(spec.durationSeconds, layer?.durationSeconds);
   // R3: Premiere-style centered-on-cut window [cut - D/2, cut + D/2] (was start-aligned [cut, cut+D] —
   // see `getActiveTransition`'s doc for the full rationale; this keyed-fade path shares the same model).
-  const start = cut - duration / 2;
+  // R3.1: handle-aware placement when the caller resolved the window sides (`transitionPrerollSeconds`).
+  const start = cut - Math.max(0, Math.min(duration, options.transitionPrerollSeconds ?? duration / 2));
   const progress = (t - start) / duration;
   if (progress >= 1) {
     return null;
@@ -328,6 +334,13 @@ export function getActiveTransition(
     startSeconds?: number | undefined;
     /** Incoming clip length — clamps the window so the transition never runs past the clip it reveals. */
     clipDurationSeconds?: number | undefined;
+    /**
+     * HANDLE-AWARE placement (R3.1): how much of the window falls BEFORE the cut. Callers compute it
+     * via `resolveTransitionWindowSides` so the window only consumes material each side actually has
+     * (an untrimmed incoming clip has NO head handle — a centered window froze its first frame for
+     * the whole pre-roll half, the 2026-07-16 report). Absent → centered (D/2), the pure-math default.
+     */
+    prerollSeconds?: number | undefined;
   }
 ): ActiveTransition | null {
   if (!spec) return null;
@@ -337,12 +350,85 @@ export function getActiveTransition(
   if (typeof t !== "number") return null;
   const cut = options.startSeconds ?? 0;
   const duration = effectiveTransitionDuration(spec.durationSeconds, options.clipDurationSeconds);
-  const start = cut - duration / 2;
+  const preroll = Math.max(0, Math.min(duration, options.prerollSeconds ?? duration / 2));
+  const start = cut - preroll;
   const linear = (t - start) / duration;
   if (linear < 0 || linear >= 1) return null;
   const eased = applyTransitionEasing(linear, def.easing);
   const params = resolveTransitionParams(def, transitionOverrides(def, spec));
   return { def, transitionId: def.id, progress: eased, params };
+}
+
+/** How a junction transition window splits around its cut: `prerollSeconds` before + `postrollSeconds` after. */
+export interface TransitionWindowSides {
+  prerollSeconds: number;
+  postrollSeconds: number;
+  /**
+   * Seconds of the window that CANNOT be covered by real material even after the handle-aware shift —
+   * the edge-hold ("repeated frames") span, on the outgoing side's tail (the incoming never freezes:
+   * its pre-roll is capped by its head handle). 0 = clean transition. Drives the Premiere-style zebra
+   * warning on the timeline junction pill.
+   */
+  repeatedFramesSeconds: number;
+}
+
+/**
+ * HANDLE-AWARE window placement (R3.1, the professional model): a junction transition is IDEALLY
+ * centered on the cut, but each side can only play material it actually has —
+ *  - the INCOMING side's pre-roll consumes its HEAD handle (`sourceInSeconds` worth of source before
+ *    its in-point; an untrimmed clip has none),
+ *  - the OUTGOING side's post-roll consumes its TAIL handle (asset media past its out-point).
+ * The window shifts toward whichever side has material: no head handle → "start at cut" (incoming
+ * plays normally from frame one — never frozen); no tail handle → "end at cut". Only when BOTH sides
+ * lack material does an edge hold remain (Premiere's "insufficient media — repeated frames").
+ * Still/generated layers (image/text/shape/graphic) have unlimited material on both sides.
+ * Speed ramps use the base-rate approximation (documented in the R3 plan); the renderers' edge-hold
+ * covers any residual shortfall. Every renderer resolves sides through THIS function so the window
+ * placement stays pixel-aligned by construction.
+ */
+export function resolveTransitionWindowSides(input: {
+  /** The EFFECTIVE window duration (already clamped via `effectiveTransitionDuration`). */
+  durationSeconds: number;
+  incoming: { type: string; sourceInSeconds?: number | undefined; speed?: number | undefined };
+  outgoing: { type: string; sourceInSeconds?: number | undefined; speed?: number | undefined; durationSeconds: number };
+  /** Outgoing asset's total media length; undefined = unknown → assume tail material exists. */
+  outgoingAssetDurationSeconds?: number | undefined;
+  /** Manual placement override (from `TransitionSpec.alignment`). "auto"/absent = handle-aware (unchanged). */
+  alignment?: "auto" | "center" | "start" | "end" | undefined;
+}): TransitionWindowSides {
+  const duration = Math.max(1e-4, input.durationSeconds);
+  const rate = (value: number | undefined) =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(16, Math.max(0.05, value)) : 1;
+  const isTimedMedia = (type: string) => type === "video" || type === "audio";
+  const headHandleSeconds = isTimedMedia(input.incoming.type)
+    ? Math.max(0, input.incoming.sourceInSeconds ?? 0) / rate(input.incoming.speed)
+    : Number.POSITIVE_INFINITY;
+  const outgoingRate = rate(input.outgoing.speed);
+  const tailHandleSeconds = !isTimedMedia(input.outgoing.type)
+    ? Number.POSITIVE_INFINITY
+    : input.outgoingAssetDurationSeconds == null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(
+          0,
+          (input.outgoingAssetDurationSeconds - ((input.outgoing.sourceInSeconds ?? 0) + input.outgoing.durationSeconds * outgoingRate)) /
+            outgoingRate
+        );
+  // Ideal = centered; shift toward the side that has material. `duration - tailHandle` is the minimum
+  // pre-roll forced by a short tail; the head handle caps it from above; [0, D] bounds everything.
+  const prerollSeconds =
+    input.alignment === "center"
+      ? duration / 2
+      : input.alignment === "start"
+        ? 0
+        : input.alignment === "end"
+          ? duration
+          : Math.max(0, Math.min(duration, Math.min(headHandleSeconds, Math.max(duration / 2, duration - tailHandleSeconds))));
+  const postrollSeconds = duration - prerollSeconds;
+  // Auto: pre-roll is capped by the head handle by construction, so the head term is always 0 (unchanged
+  // from before manual alignment existed). Manual alignment can exceed EITHER side's material.
+  const repeatedFramesSeconds =
+    Math.max(0, prerollSeconds - headHandleSeconds) + Math.max(0, postrollSeconds - tailHandleSeconds);
+  return { prerollSeconds, postrollSeconds, repeatedFramesSeconds };
 }
 
 /** Find every same-track clip pair joined by a registry junction transition (incoming carries the spec). */

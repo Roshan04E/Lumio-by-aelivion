@@ -79,10 +79,13 @@ export type RenderComparisonFixtureKey =
   | "region-text"
   | "tilted-text"
   | "transition"
+  | "advanced-transition"
   | "plugin-shader"
   | "vignette"
+
   | "grain"
-  | "chroma-key";
+  | "chroma-key"
+  | "framed-media";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -108,10 +111,13 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "region-text",
   "tilted-text",
   "transition",
+  "advanced-transition",
   "plugin-shader",
   "vignette",
+
   "grain",
-  "chroma-key"
+  "chroma-key",
+  "framed-media"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -418,6 +424,8 @@ interface FixtureVariant {
   transition?: boolean;
   /** Phase 6.3c: luma person-extraction matte on a media layer. */
   matte?: TimelineLayer["matte"];
+  /** Frames Step E: parametric frame (clip mask + border chrome) on the media layer. */
+  frame?: TimelineLayer["frame"];
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -497,6 +505,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", textScale: 3, textTilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
     case "transition":
       return { effects: [], fit: "cover", transition: true };
+    case "advanced-transition":
+      return { effects: [], fit: "cover", transition: true };
     case "plugin-shader":
       return { effects: pluginShaderEffects, fit: "cover" };
     case "vignette":
@@ -505,6 +515,29 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: grainEffects, fit: "cover" };
     case "chroma-key":
       return { effects: chromaKeyEffects, fit: "cover" };
+    case "framed-media":
+      // Frames Step E: a rounded-rect frame with a non-trivial box (unlocked 78×60%) + a thick border.
+      // Exercises the WHOLE frame surface at once: the clip mask (media clipped to the inset rounded box —
+      // pins the manifest carrying `layer.frame`, without which the cloud render is UN-clipped) and the
+      // border (the derived stroke-only shape clone from `expandFrameBorders`, riding the shape raster —
+      // pins the manifest carrying `shapeKind`/`shapePath`). A wide bright stroke trips the bar loudly.
+      return {
+        effects: [],
+        fit: "cover",
+        frame: {
+          definitionId: "kimera.rounded-rect",
+          generatorId: "rounded-rect",
+          params: {
+            roundness: 40,
+            width: 78,
+            height: 60,
+            aspectLock: false,
+            border: true,
+            borderWidth: 16,
+            borderColor: "#ffd24a"
+          }
+        }
+      };
     case "default":
     default:
       return { effects: fullColorEffects, fit: "cover" };
@@ -556,6 +589,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     ...(variant.content ? { content: variant.content } : {}),
     ...(variant.matte ? { matte: variant.matte } : {}),
     ...(variant.masks ? { masks: variant.masks } : {}),
+    ...(variant.frame ? { frame: variant.frame } : {}),
     keyframes: []
   };
 
@@ -651,7 +685,10 @@ Save this style now`);
     fit: "cover",
     transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
     effects: colorCurvesEffects,
-    transitionIn: { kind: "crossDissolve", durationSeconds: 0.4 },
+    transitionIn: {
+      kind: key === "advanced-transition" ? "rgbDisplace" : "crossDissolve",
+      durationSeconds: 0.4
+    },
     keyframes: []
   };
 

@@ -48,6 +48,13 @@ const MODE_OPTIONS: ThemedSelectOption<"in" | "out">[] = [
   { value: "out", label: "Out" },
 ];
 
+const ALIGNMENT_OPTIONS: ThemedSelectOption<NonNullable<TransitionSpec["alignment"]>>[] = [
+  { value: "auto", label: "Auto (recommended)" },
+  { value: "center", label: "Center at cut" },
+  { value: "start", label: "Start at cut" },
+  { value: "end", label: "End at cut" },
+];
+
 /** Color params covered by the top-level `spec.color` legacy field (transitionOverrides fold). */
 const LEGACY_COLOR_PARAMS = new Set(["dipColor", "flashColor", "leakColor"]);
 
@@ -335,6 +342,15 @@ export function JunctionTransitionPopover({
             onBlur={() => commit()}
           />
           <span className="junction-popover-unit">s</span>
+        </div>
+        <div className="junction-popover-row">
+          <span className="junction-popover-label">Alignment</span>
+          <ThemedSelect
+            value={draft.alignment ?? "auto"}
+            options={ALIGNMENT_OPTIONS}
+            ariaLabel="Transition alignment"
+            onChange={(alignment) => commit({ ...draftRef.current, alignment })}
+          />
         </div>
         {def.params.map(renderParamRow)}
         <div className="junction-popover-foot">

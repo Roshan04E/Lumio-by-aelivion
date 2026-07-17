@@ -1,7 +1,7 @@
 import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@kimera-by-aelivion/shared";
+import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, effectiveTransitionDuration, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, resolveTransitionWindowSides, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@kimera-by-aelivion/shared";
 import { getAudioPeaks, getCachedPyramid, sampleWaveformWindow, type Pyramid } from "../lib/audioPeaks";
 import { isWaveformGLEnabled } from "./waveform/waveformGLFlag";
 import { registerWaveformClip, unregisterWaveformClip } from "./waveform/waveformGLStore";
@@ -404,6 +404,7 @@ function TimelineStripImpl({
   onAddCrossDissolve,
   onSetCrossDissolve,
   onRemoveCrossDissolve,
+  onTrimForTransition,
   onChangeTrackHeight,
   canUndo = false,
   canRedo = false,
@@ -500,6 +501,8 @@ function TimelineStripImpl({
   onAddCrossDissolve: (leftLayerId: string, rightLayerId: string, spec?: TransitionSpec, manifest?: PluginTransitionManifest) => void;
   onSetCrossDissolve: (leftLayerId: string, rightLayerId: string, durationSeconds: number) => void;
   onRemoveCrossDissolve: (leftLayerId: string, rightLayerId: string) => void;
+  /** Resolve-style "Trim clips to create overlap" for a zebra-striped (repeated-frames) transition. */
+  onTrimForTransition?: ((leftLayerId: string, rightLayerId: string) => void) | undefined;
   onChangeTrackHeight: (height: number) => void;
   canUndo?: boolean | undefined;
   canRedo?: boolean | undefined;
@@ -955,7 +958,7 @@ function TimelineStripImpl({
   const currentShapeTool = SHAPE_TOOL_OPTIONS.find((option) => option.value === lastShapeTool) ?? SHAPE_TOOL_OPTIONS[0]!;
   const shapeSelectOptions = SHAPE_SELECT_OPTIONS;
   const [trackDrag, setTrackDrag] = useState<{ trackId: string; targetTrackId: string | null; placement: "before" | "after" } | null>(null);
-  const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean; nested: boolean; disabled: boolean; selectionCount: number } | null>(null);
+  const [clipContextMenu, setClipContextMenu] = useState<{ x: number; y: number; layerId: string; layerType: TimelineLayerType; linked: boolean; replaceable: boolean; slippable: boolean; crossPair: { leftLayerId: string; rightLayerId: string } | null; hasTransition: boolean; insufficientOverlapSeconds: number; nested: boolean; disabled: boolean; selectionCount: number } | null>(null);
   // The menu is measured after mount and clamped inside the viewport so it never spills off the
   // bottom/right edge (which was hiding its lower options). Hidden until positioned to avoid a jump.
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -2908,6 +2911,22 @@ function TimelineStripImpl({
       const slippable = (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId);
       const track = composition.tracks.find((item) => item.id === layer.trackId);
       const junction = track ? findClipTransitionContext(track, layer) : null;
+      // Premiere-style insufficient-media state for the "Trim clips to create overlap" menu action:
+      // resolve the junction's window sides against real handles (same shared math as the zebra pill).
+      let insufficientOverlapSeconds = 0;
+      if (junction?.hasTransition && track) {
+        const incoming = track.layers.find((item) => item.id === junction.rightLayerId);
+        const outgoing = track.layers.find((item) => item.id === junction.leftLayerId);
+        if (incoming?.transitionIn && outgoing) {
+          insufficientOverlapSeconds = resolveTransitionWindowSides({
+            durationSeconds: effectiveTransitionDuration(incoming.transitionIn.durationSeconds, incoming.durationSeconds),
+            incoming: { type: incoming.type, sourceInSeconds: incoming.sourceInSeconds, speed: incoming.speed },
+            outgoing: { type: outgoing.type, sourceInSeconds: outgoing.sourceInSeconds, speed: outgoing.speed, durationSeconds: outgoing.durationSeconds },
+            outgoingAssetDurationSeconds: outgoing.assetId ? assets.find((asset) => asset.id === outgoing.assetId)?.durationSeconds : undefined,
+            alignment: incoming.transitionIn.alignment
+          }).repeatedFramesSeconds;
+        }
+      }
       setTrackContextMenu(null);
       setMobileTrackMenu(null);
       // Right-clicking a clip that's already part of a multi-selection keeps the whole group selected
@@ -2939,12 +2958,13 @@ function TimelineStripImpl({
         slippable,
         crossPair: junction ? { leftLayerId: junction.leftLayerId, rightLayerId: junction.rightLayerId } : null,
         hasTransition: junction?.hasTransition ?? false,
+        insufficientOverlapSeconds,
         nested: Boolean(layer.nestedCompositionId),
         disabled: Boolean(layer.disabled),
         selectionCount
       });
     },
-    [composition, selectedLayerIds, selectedLayerSet, applyInstantSelectionHighlight, onSelectLayer]
+    [composition, assets, selectedLayerIds, selectedLayerSet, applyInstantSelectionHighlight, onSelectLayer]
   );
 
   const enterSlipMode = useCallback(
@@ -3697,15 +3717,44 @@ function TimelineStripImpl({
                   const isDragging =
                     crossDrag?.leftLayerId === junction.leftLayerId && crossDrag?.rightLayerId === junction.rightLayerId;
                   const durationSeconds = isDragging ? crossDrag!.previewDurationSeconds : junction.durationSeconds;
-                  // Centre the element on the cut so it straddles both clips (Premiere-style), not inside one.
-                  const startSeconds = Math.max(0, junction.cutSeconds - durationSeconds / 2);
+                  // R3.1: draw the element over the transition's TRUE handle-aware window (ideally
+                  // centred on the cut; shifted toward the side that actually has handle material —
+                  // same shared math as every renderer, so the pill never lies about the window).
+                  const incoming = track.layers.find((item) => item.id === junction.rightLayerId);
+                  const outgoing = track.layers.find((item) => item.id === junction.leftLayerId);
+                  const sides =
+                    incoming && outgoing
+                      ? resolveTransitionWindowSides({
+                          durationSeconds: effectiveTransitionDuration(durationSeconds, incoming.durationSeconds),
+                          incoming: { type: incoming.type, sourceInSeconds: incoming.sourceInSeconds, speed: incoming.speed },
+                          outgoing: {
+                            type: outgoing.type,
+                            sourceInSeconds: outgoing.sourceInSeconds,
+                            speed: outgoing.speed,
+                            durationSeconds: outgoing.durationSeconds
+                          },
+                          outgoingAssetDurationSeconds: outgoing.assetId
+                            ? assets.find((asset) => asset.id === outgoing.assetId)?.durationSeconds
+                            : undefined,
+                          alignment: incoming.transitionIn?.alignment
+                        })
+                      : null;
+                  const startSeconds = Math.max(0, junction.cutSeconds - (sides?.prerollSeconds ?? durationSeconds / 2));
                   const denominator = Math.max(0.001, timelineDurationSeconds);
+                  // Premiere's "insufficient media" zebra: part of the window has no real material and
+                  // will show repeated (held) frames. Warn, don't block — right-click offers a trim fix.
+                  const repeatedSeconds = sides?.repeatedFramesSeconds ?? 0;
+                  const hasRepeatedFrames = repeatedSeconds > 0.017;
                   return (
                     <button
                       key={`xfade_${junction.leftLayerId}_${junction.rightLayerId}`}
                       type="button"
-                      className={`timeline-transition transition-kind-${junction.kind} ${isDragging ? "is-dragging" : ""}`}
-                      title={`${transitionLabel(junction.kind)} ${durationSeconds.toFixed(2)}s — drag to adjust, double-click to remove`}
+                      className={`timeline-transition transition-kind-${junction.kind} ${isDragging ? "is-dragging" : ""} ${hasRepeatedFrames ? "has-repeated-frames" : ""}`}
+                      title={
+                        hasRepeatedFrames
+                          ? `${transitionLabel(junction.kind)} ${durationSeconds.toFixed(2)}s — insufficient media: ~${repeatedSeconds.toFixed(2)}s will repeat frames (right-click to trim clips for real overlap)`
+                          : `${transitionLabel(junction.kind)} ${durationSeconds.toFixed(2)}s — drag to adjust, double-click to remove`
+                      }
                       style={{ left: `${(startSeconds / denominator) * 100}%`, width: `${(durationSeconds / denominator) * 100}%` }}
                       onPointerDown={(event) => startCrossDrag(event, junction)}
                       onPointerMove={moveCrossDrag}
@@ -3715,6 +3764,13 @@ function TimelineStripImpl({
                         event.preventDefault();
                         event.stopPropagation();
                         onRemoveCrossDissolve(junction.leftLayerId, junction.rightLayerId);
+                      }}
+                      // Zebra pill: right-click applies the Resolve-style fix (trim clips → real overlap).
+                      onContextMenu={(event) => {
+                        if (!hasRepeatedFrames || !onTrimForTransition) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onTrimForTransition(junction.leftLayerId, junction.rightLayerId);
                       }}
                     >
                       <span className="timeline-transition-glyph" aria-hidden="true">
@@ -4107,6 +4163,19 @@ function TimelineStripImpl({
                     {entry.label}
                   </button>
                 ))}
+                {clipContextMenu.hasTransition && clipContextMenu.insufficientOverlapSeconds > 0.017 && onTrimForTransition ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (clipContextMenu.crossPair) {
+                        onTrimForTransition(clipContextMenu.crossPair.leftLayerId, clipContextMenu.crossPair.rightLayerId);
+                      }
+                      setClipContextMenu(null);
+                    }}
+                  >
+                    Trim clips to create overlap ({clipContextMenu.insufficientOverlapSeconds.toFixed(2)}s repeats)
+                  </button>
+                ) : null}
                 {clipContextMenu.hasTransition ? (
                   <button
                     type="button"

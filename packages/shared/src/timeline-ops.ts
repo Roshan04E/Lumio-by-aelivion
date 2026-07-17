@@ -705,6 +705,72 @@ export function applyEdgeTrim(layer: TimelineLayer, resolution: EdgeTrimResoluti
  * Sorted unique edit points for playhead navigation (the up/down-arrow "go to previous/next
  * edit" op): every clip start/end across all tracks, plus 0 and the composition end.
  */
+/**
+ * Resolve-style "Trim Clips" for a junction transition with insufficient tail material: shorten the
+ * OUTGOING clip's out-point by `trimSeconds` (turning that span into real tail-handle media for the
+ * transition window) and ripple the cut — the incoming clip and everything after it on the same
+ * track shifts left so the clips stay butted (the timeline gets shorter, exactly like Resolve's
+ * "Trim clips" dialog). Linked A/V companions stay in sync: a companion ending at the same cut is
+ * trimmed with the outgoing clip, and companions of shifted clips shift with them (or the audio
+ * track would collide/desync). The caller computes `trimSeconds` from
+ * `resolveTransitionWindowSides().repeatedFramesSeconds` (kept out of here to avoid a module cycle).
+ * Returns null when there's nothing to do (no junction, nothing to trim, or the outgoing clip is
+ * too short to give up the material).
+ */
+export function trimOutgoingForTransition(
+  composition: TimelineComposition,
+  leftLayerId: string,
+  rightLayerId: string,
+  trimSeconds: number
+): TimelineComposition | null {
+  const track = composition.tracks.find(
+    (item) => item.layers.some((layer) => layer.id === leftLayerId) && item.layers.some((layer) => layer.id === rightLayerId)
+  );
+  if (!track) return null;
+  const left = track.layers.find((layer) => layer.id === leftLayerId)!;
+  const right = track.layers.find((layer) => layer.id === rightLayerId)!;
+  const leftEnd = left.startSeconds + left.durationSeconds;
+  if (Math.abs(leftEnd - right.startSeconds) > 0.05) return null; // not a junction anymore
+  const delta = Math.min(trimSeconds, Math.max(0, left.durationSeconds - 0.1));
+  if (delta <= 1 / 240) return null;
+  const cut = right.startSeconds;
+  const movedIds = new Set(track.layers.filter((layer) => layer.startSeconds >= cut - EPSILON).map((layer) => layer.id));
+  const movedGroupIds = new Set(
+    track.layers
+      .filter((layer) => movedIds.has(layer.id) && layer.linkedGroupId)
+      .map((layer) => layer.linkedGroupId as string)
+  );
+  return {
+    ...composition,
+    tracks: composition.tracks.map((trackItem) => ({
+      ...trackItem,
+      layers: trackItem.layers.map((layer) => {
+        if (layer.id === leftLayerId) {
+          return { ...layer, durationSeconds: layer.durationSeconds - delta };
+        }
+        // The outgoing clip's linked companion (its audio half) ending at the same cut trims with it —
+        // otherwise the shifted incoming side lands on top of it on the companion's track.
+        if (
+          left.linkedGroupId &&
+          layer.linkedGroupId === left.linkedGroupId &&
+          Math.abs(layer.startSeconds + layer.durationSeconds - leftEnd) <= 0.05 &&
+          layer.durationSeconds - delta > 0.05
+        ) {
+          return { ...layer, durationSeconds: layer.durationSeconds - delta };
+        }
+        const isMoved =
+          trackItem.id === track.id
+            ? movedIds.has(layer.id)
+            : Boolean(layer.linkedGroupId && movedGroupIds.has(layer.linkedGroupId) && layer.startSeconds >= cut - 0.05);
+        if (isMoved) {
+          return { ...layer, startSeconds: Math.max(0, layer.startSeconds - delta) };
+        }
+        return layer;
+      })
+    }))
+  };
+}
+
 export function collectEditPoints(composition: TimelineComposition): number[] {
   const points = new Set<number>([0, Number(composition.durationSeconds.toFixed(4))]);
   for (const trackItem of composition.tracks) {
