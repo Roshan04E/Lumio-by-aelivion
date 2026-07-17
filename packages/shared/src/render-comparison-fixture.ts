@@ -88,7 +88,8 @@ export type RenderComparisonFixtureKey =
   | "framed-media"
   | "track-matte"
   | "anchored-media"
-  | "nested-transition";
+  | "nested-transition"
+  | "texture-fill";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -123,7 +124,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "framed-media",
   "track-matte",
   "anchored-media",
-  "nested-transition"
+  "nested-transition",
+  "texture-fill"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -438,6 +440,8 @@ interface FixtureVariant {
   anchorTransform?: { anchor: { x: number; y: number }; rotation: number; scale: number };
   /** D4 (R2 step 3): the transition pair lives INSIDE a nested composition referenced by a compound clip. */
   nestedTransition?: boolean;
+  /** Texture fill (D2): image paint on the TEXT fixture's glyphs. */
+  textFillTexture?: TimelineLayer["fillTexture"];
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -548,6 +552,21 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
             borderWidth: 16,
             borderColor: "#ffd24a"
           }
+        }
+      };
+    case "texture-fill":
+      // Texture fill (D2): the big scaled "HI" glyphs paint with a 2×2 checkerboard PNG (data URL —
+      // decodable via fetch+createImageBitmap in every renderer), tiled at 40× so the squares are
+      // huge and unambiguous. Trips if any renderer's rasterizer skips the decode await (solid white
+      // glyphs), mis-anchors the pattern, or the manifest drops `fillTexture`.
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 5,
+        textFillTexture: {
+          url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42mO4ZCPy/9cJjf8MIALEAQBa+AoViENR1AAAAABJRU5ErkJggg==",
+          fit: "tile",
+          scale: 40
         }
       };
     case "nested-transition":
@@ -683,6 +702,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     },
     effects: variant.textEffects ?? [],
     ...(variant.textMasks ? { masks: variant.textMasks } : {}),
+    ...(variant.textFillTexture ? { fillTexture: variant.textFillTexture } : {}),
     keyframes: []
   };
 

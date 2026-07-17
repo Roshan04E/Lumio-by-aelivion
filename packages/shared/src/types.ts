@@ -782,6 +782,14 @@ export interface TimelineLayer {
    */
   trackMatte?: { mode: "alpha" | "luma"; invert?: boolean | undefined } | undefined;
   /**
+   * Texture fill (D2, text + shape layers): the glyphs / shape body paint with an IMAGE instead of the
+   * solid color. `url` must be fetch-decodable in every renderer (durable http(s)/data: for cloud
+   * renders — same caveat as matte uris); `assetId` records provenance for the editor. `cover` scales
+   * the image to fill the element box (`scale` zooms it further); `tile` repeats it at natural size ×
+   * `scale`. Applied as a canvas pattern inside the shared rasterizer, so all renderers agree.
+   */
+  fillTexture?: { assetId?: string | undefined; url: string; fit: "cover" | "tile"; scale?: number | undefined } | undefined;
+  /**
    * Clip markers (Premiere-style): `timeSeconds` is CLIP-LOCAL (0 = clip head), so markers travel
    * with the clip on move and stay glued to content. Editor-only — no render effect. The `M` key
    * writes here when a selected clip spans the playhead, otherwise to the timeline ruler markers.

@@ -22,6 +22,7 @@
 import {
   drawShapeLayer,
   drawTextLayer,
+  ensureFillTexture,
   measureOverlayBox,
   overlayOverhangMargin,
 } from "./text-shape";
@@ -137,10 +138,12 @@ export class SceneTextRasterizer {
       // textWarp is NOT part of getCompositionTextStyle (it's a vector overlay, not a CSS style), so it
       // MUST be in the key explicitly — otherwise applying/changing warp doesn't invalidate the cached
       // raster and the stale plain text persists (drawTextLayer renders warp, returns early — no double).
-      return JSON.stringify(["text", width, height, bucket, boxMode, this.fontsVersion, runs, style, layer.textWarp ?? null]);
+      // fillTexture (D2) is a top-level layer field (not in the style bag) — key it explicitly, like
+      // textWarp, or changing/removing the texture would keep serving the stale raster.
+      return JSON.stringify(["text", width, height, bucket, boxMode, this.fontsVersion, runs, style, layer.textWarp ?? null, layer.fillTexture ?? null]);
     }
     const style = contentStyleForKey(getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>);
-    return JSON.stringify(["shape", width, height, bucket, boxMode, this.fontsVersion, style]);
+    return JSON.stringify(["shape", width, height, bucket, boxMode, this.fontsVersion, style, layer.fillTexture ?? null]);
   }
 
   /** Power-of-two bucket of the layer's displayed scale at `t` (the resolution-aware re-raster step). */
@@ -247,6 +250,11 @@ export class SceneTextRasterizer {
     bucket: number,
     boxMode: boolean,
   ): Promise<SceneRaster | null> {
+    // Texture fill (D2): the draw functions read only ALREADY-decoded textures (they're sync), so the
+    // decode is awaited here — same pattern as fonts. The await resolves only after the decode ATTEMPT
+    // finishes, so the raster always reflects the final state: decoded image, or the solid-color
+    // fallback for an undecodable url (never a transient "not decoded yet" raster stuck in the cache).
+    if (layer.fillTexture?.url) await ensureFillTexture(layer.fillTexture.url);
     if (!boxMode) {
       // Comp mode (blur/glow path): comp-sized canvas, content-centered, transform-independent (4.1b).
       // The composite quad uses the comp box, so no box half-extents are returned.

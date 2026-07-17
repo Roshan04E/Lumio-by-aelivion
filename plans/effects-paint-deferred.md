@@ -32,7 +32,18 @@ Correct design (GPU, single shared implementation):
    dim the source clip in the timeline (like `is-disabled`) so it reads as consumed.
 5. Gates: a new pixel fixture (shape-above-video luma matte) + `render:compare:pixels`.
 
-## D2 — Texture paint / texture fill on text & shapes
+## D2 — Texture paint / texture fill on text & shapes — CORE SHIPPED 2026-07-17
+
+> Renderer core implemented, simpler than designed: instead of a caller-injected decoded-image pool,
+> `text-shape.ts` owns a shared async decode cache (`ensureFillTexture`: fetch + createImageBitmap,
+> works in all three environments; SVG falls back to <img> decode where a DOM exists, so SVG fills
+> are unsupported only in the DOM-less export Worker) and both draw paths just swap `fillStyle` to a
+> canvas PATTERN (cover/tile × scale, anchored to the element box) — no source-in compositing needed.
+> The rasterizer awaits the decode (like fonts) and keys the cache on the fill spec. Manifest carries
+> `fillTexture` verbatim. `texture-fill` fixture (checkerboard-tiled glyphs) pixel-gated.
+> NOT done (Sonnet-safe follow-ups): the editor UI picker (a select of image assets writing
+> `layer.fillTexture` + fit/scale controls — pure UI, no parity risk), and warp-text fills (the warp
+> vector path keeps its own solid fills).
 
 Why deferred: fills are canvas-2D solid colors at `text-shape.ts:455` (glyphs) and `:524` (shapes);
 adding an IMAGE fill needs the image decoded synchronously inside the shared rasterizer, which runs

@@ -23,6 +23,89 @@ import type { MaskPoint, TextRun, TextWarp, TimelineLayer } from "../types";
 // Works against both the main-thread 2D context and the Worker's OffscreenCanvas 2D context.
 type Ctx = (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) & { letterSpacing?: string };
 
+// ─── Texture fill (D2) ───────────────────────────────────────────────────────────────────────────
+// Decoded-image cache for `layer.fillTexture`. The decode is ASYNC (fetch + createImageBitmap); the
+// draw functions below stay sync by reading only ALREADY-decoded entries — callers that must not
+// miss a frame (the raster cache, the export) `await ensureFillTexture(url)` first, exactly like
+// fonts. `fetch` + `createImageBitmap` exist in all three environments (editor main thread, export
+// Worker, worker Chromium); SVG sources additionally fall back to an <img> decode where `document`
+// exists (Chrome can't `createImageBitmap` an SVG blob — the same limitation the warp path hit),
+// so an SVG fill is unsupported ONLY in the DOM-less export Worker (raster formats work everywhere).
+type DecodedFill = ImageBitmap | HTMLImageElement;
+const fillTextureCache = new Map<string, { image: DecodedFill | null; promise: Promise<void> | null }>();
+const FILL_TEXTURE_CACHE_MAX = 16;
+
+/** Await the fill texture's decode (idempotent; failures cache as null → solid-color fallback). */
+export function ensureFillTexture(url: string): Promise<void> {
+  const existing = fillTextureCache.get(url);
+  if (existing) return existing.promise ?? Promise.resolve();
+  const entry: { image: DecodedFill | null; promise: Promise<void> | null } = { image: null, promise: null };
+  // Simple FIFO bound — texture fills are few; this only guards a runaway asset list.
+  if (fillTextureCache.size >= FILL_TEXTURE_CACHE_MAX) {
+    const oldest = fillTextureCache.keys().next().value;
+    if (oldest !== undefined) fillTextureCache.delete(oldest);
+  }
+  fillTextureCache.set(url, entry);
+  entry.promise = (async () => {
+    try {
+      const blob = await (await fetch(url)).blob();
+      try {
+        entry.image = await createImageBitmap(blob);
+        return;
+      } catch {
+        // SVG (or exotic) blob: <img> decode fallback where a DOM exists.
+        if (typeof document === "undefined" || typeof Image === "undefined") return;
+        const objectUrl = URL.createObjectURL(blob);
+        try {
+          const img = new Image();
+          img.src = objectUrl;
+          await img.decode();
+          entry.image = img;
+        } finally {
+          // The Image keeps its decoded bitmap; the object URL itself can be released.
+          URL.revokeObjectURL(objectUrl);
+        }
+      }
+    } catch {
+      entry.image = null; // unreachable/undecodable → callers fall back to the solid color
+    } finally {
+      entry.promise = null;
+    }
+  })();
+  return entry.promise;
+}
+
+/**
+ * The canvas pattern painting `layer.fillTexture` over an element box of `boxW×boxH` centered at the
+ * CURRENT origin (both draw paths below place geometry about the origin, so the pattern anchors to
+ * the box regardless of the outer position/rotation/anchor transforms). Null = not set / not decoded
+ * yet / failed — caller keeps the solid color. `cover` scales the image to fill the box (× `scale`);
+ * `tile` repeats it at natural size × `scale`, anchored at the box's top-left.
+ */
+function fillTexturePaint(ctx: Ctx, layer: TimelineLayer, boxW: number, boxH: number): CanvasPattern | null {
+  const ft = layer.fillTexture;
+  if (!ft?.url || boxW <= 0 || boxH <= 0) return null;
+  const image = fillTextureCache.get(ft.url)?.image;
+  if (!image || image.width <= 0 || image.height <= 0) return null;
+  const pattern = ctx.createPattern(image as CanvasImageSource, "repeat");
+  if (!pattern) return null;
+  const zoom = typeof ft.scale === "number" && ft.scale > 0 ? ft.scale : 1;
+  if (ft.fit === "tile") {
+    pattern.setTransform?.({ a: zoom, b: 0, c: 0, d: zoom, e: -boxW / 2, f: -boxH / 2 });
+  } else {
+    const s = Math.max(boxW / image.width, boxH / image.height) * zoom;
+    pattern.setTransform?.({
+      a: s,
+      b: 0,
+      c: 0,
+      d: s,
+      e: -boxW / 2 + (boxW - image.width * s) / 2,
+      f: -boxH / 2 + (boxH - image.height * s) / 2,
+    });
+  }
+  return pattern;
+}
+
 function num(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : parseFloat(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -386,6 +469,9 @@ export async function drawTextLayer(
 
   // Text shadow.
   const shadow = style.textShadow ? String(style.textShadow) : "";
+  // Texture fill (D2): resolved once per raster against the text box (null → solid run colors).
+  // Warp text keeps its own vector fills for now (the warp path returned above).
+  const glyphPaint = fillTexturePaint(ctx, layer, boxW, boxH);
 
   // Stroke (WebkitTextStroke: "Wpx color").
   const strokeStr = style.WebkitTextStroke ? String(style.WebkitTextStroke) : "";
@@ -456,8 +542,9 @@ export async function drawTextLayer(
 
       // #3c: fill first (with shadow), then stroke on top — matches CSS -webkit-text-stroke
       // which paints the stroke centered on the glyph outline OVER the fill.
+      // Texture fill (D2): the pattern overrides every run's solid color (whole-layer paint, v1).
       if (shadow) applyShadow(ctx, shadow);
-      ctx.fillStyle = word.color;
+      ctx.fillStyle = glyphPaint ?? word.color;
       ctx.fillText(word.text, x, y);
 
       if (strokeWidth > 0) {
@@ -529,7 +616,8 @@ export function drawShapeLayer(
   const boxShadow = style.boxShadow ? String(style.boxShadow) : "";
   if (boxShadow) applyShadow(ctx, boxShadow);
 
-  ctx.fillStyle = background;
+  // Texture fill (D2): the pattern paints the shape body instead of the solid color when decoded.
+  ctx.fillStyle = fillTexturePaint(ctx, layer, w, h) ?? background;
   buildShapePath(ctx, shapeKind, -w / 2, -h / 2, w, h, radius, shapePath);
   ctx.fill();
   ctx.shadowColor = "transparent";

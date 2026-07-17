@@ -174,6 +174,11 @@ export interface RenderManifestLayer {
    * its consumed source pops back in) in the cloud path. Pinned by the track-matte fixture.
    */
   trackMatte?: { mode: "alpha" | "luma"; invert?: boolean | undefined } | undefined;
+  /**
+   * Texture fill on text/shape (D2), carried verbatim — the shared rasterizer decodes `url` per
+   * renderer. Like matte uris, `url` must be durable http(s)/data: for the cloud path.
+   */
+  fillTexture?: { assetId?: string | undefined; url: string; fit: "cover" | "tile"; scale?: number | undefined } | undefined;
   /** Junction transition on the incoming side, carried verbatim; the renderer reads wipe/iris from it. */
   transitionIn?: TransitionSpec | undefined;
   /** Layer blend mode, carried verbatim; the renderer applies it as CSS mix-blend-mode. */
@@ -350,6 +355,7 @@ export function buildRenderManifest(input: {
             masks: layer.masks,
             frame: layer.frame,
             trackMatte: layer.trackMatte,
+            fillTexture: layer.fillTexture,
             transitionIn: layer.transitionIn,
             blendMode: layer.blendMode,
             content: layer.content,
@@ -428,6 +434,7 @@ export function buildRenderManifest(input: {
           masks: layer.masks,
           frame: layer.frame,
           trackMatte: layer.trackMatte,
+          fillTexture: layer.fillTexture,
           transitionIn: layer.transitionIn,
           blendMode: layer.blendMode,
           content: layer.content,
