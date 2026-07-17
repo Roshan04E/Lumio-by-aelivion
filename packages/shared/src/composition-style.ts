@@ -271,6 +271,8 @@ interface TransitionLayerLike {
   startSeconds?: number | undefined;
   durationSeconds?: number | undefined;
   transitionIn?: TransitionSpec | undefined;
+  /** Compound clip marker (nesting) — consulted by `findTransitionPairsWithGroupJunctions` only. */
+  nestedCompositionId?: string | undefined;
 }
 
 /** Map a legacy direction keyword to a unit vec2 in the engine's UV space (y up). */
@@ -483,6 +485,31 @@ export function findTransitionPairs(layers: readonly TransitionLayerLike[]): Tra
         Math.abs((l.startSeconds ?? 0) + (l.durationSeconds ?? 0) - incomingStart) < 1e-3
     );
     if (outgoing) pairs.push({ outgoingId: outgoing.id, incomingId: incoming.id, spec });
+  }
+  return pairs;
+}
+
+/**
+ * Junction pairs for a nest-EXPANDED layer list (nesting Block 4c). Pairs found on the expanded
+ * layers, PLUS junctions involving a COMPOUND clip — nest expansion removes the compound clip from
+ * the tracks, so its junctions are only discoverable on the RAW (unexpanded) composition's layers.
+ * The extra pairs keep the compound clip's ID as their side (`build-scene-draws` resolves it against
+ * `nestedGroups` and mixes the finished group). `rawLayers` empty/omitted → exactly
+ * `findTransitionPairs(layers)`, so non-nested paths are unchanged.
+ */
+export function findTransitionPairsWithGroupJunctions(
+  layers: readonly TransitionLayerLike[],
+  rawLayers: readonly TransitionLayerLike[] | undefined
+): TransitionPair[] {
+  const pairs = findTransitionPairs(layers);
+  if (!rawLayers || rawLayers.length === 0) return pairs;
+  const rawById = new Map(rawLayers.map((layer) => [layer.id, layer]));
+  const seenIncoming = new Set(pairs.map((pair) => pair.incomingId));
+  for (const pair of findTransitionPairs(rawLayers)) {
+    // Only junctions the expanded scan could NOT see: at least one side is a compound clip.
+    if (!rawById.get(pair.incomingId)?.nestedCompositionId && !rawById.get(pair.outgoingId)?.nestedCompositionId) continue;
+    if (seenIncoming.has(pair.incomingId)) continue;
+    pairs.push(pair);
   }
   return pairs;
 }

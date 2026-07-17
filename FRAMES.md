@@ -557,8 +557,31 @@ Steps 1, 2, 4 done + pan-snap (step 3); the corner-content-zoom snap is the one 
   shapes (circle/hexagon) still keep every handle square (an edge can't make an oval circle). Bonus: this
   makes D6's group scale EXACT — corners are now truly uniform, so `frameGroupScaleFactor`'s geometric-mean
   is only a safety fallback, never hit in practice. `frames:test` 102/102.
-- **Phase 2** — shape library: real `blob` / `torn-paper` generators (they currently return null from
-  `frameClipMask` → media shows unclipped). This is the "advanced shapes" half of the end goal.
+- **Phase 2 — shape library ✅ (2026-07-17).** Real `blob` + `torn-paper` generators — the "advanced
+  shapes" half of the end goal. Both are **seeded + deterministic** (mulberry32, pure integer math): the
+  same params emit a byte-identical outline in every renderer and across reloads, which is what lets a
+  procedural frame ride the pixel gate; `seed` is a first-class param that re-rolls the variation.
+  - **Blob** (`points`/`wobble`/`seed`, aspectLock default): N points with seeded radius+angular jitter,
+    Catmull-Rom tangents (`(P[i+1]−P[i−1])/6`), rescaled to fill the unit box → rides the **bezier**
+    mask shape (smooth cubics in `maskShapeToPathD` + the matte).
+  - **Torn Paper** (`roughness`/`detail`/`seed`/`edges` select): the unit rectangle with torn edges
+    subdivided into `detail` teeth, each displaced INWARD by a seeded amount (paper tears in from the
+    sheet edge — also keeps the outline inside the frame box); corners stay exact. `edges` picks which
+    sides tear (all / top-bottom = the classic ripped strip / left-right) → rides the **polygon** mask.
+  - One shared `proceduralOutlinePoints` feeds the path builder (panel tile + placeholder outline), the
+    clip mask, AND the D4 bake — the three can never disagree. Convert-to-graphic now BAKES blob/torn to
+    `pen` + tangent `shapePath` (per D4: roughness/seed freeze into an editable path); `svg-path` remains
+    the only rectangle fallback. Card gains the shared `SelectControl` (the `select` param variant's first
+    inspector control, PropertyRow shell) for `edges`. Two new built-ins (kimera.blob, kimera.torn-paper);
+    panel tiles + empty-placeholder outlines come free via `frameOutlinePathD`.
+  - **Verified:** shared/render-templates/worker typecheck clean (web blocked by an UNRELATED in-flight
+    speed-ramp graph error in `keyframeUtils.ts:1021`, not Frames); `frames:test` **133/133** (+18:
+    determinism, seed re-roll, box-fill, tooth counts, inward-only, corner exactness, bezier/polygon mask
+    synthesis, pen bake); NEW `framed-blob` pixel fixture (blob + border — the first pixel-gated
+    bezier-with-tangents matte AND pen-tangent border stroke) → **0.000%**, framed-media still 0.000%,
+    blob visually confirmed; full regression sweep **30/30 fixtures green** (framed-media + framed-blob
+    0.000%; grain/chroma-key at their usual 0.001% floor; `advanced-transition` — not Frames work — passes
+    at 3.131% of its 3.5% threshold, flagged to its owner).
 - **Phase 3** — `frame-pack` marketplace manifest + import.
 - **Graphics panel sub-sectioning** — Used · Shapes · Vectors · GIFs · Frames.
 - **Animated GIFs** — explicitly after Frames.

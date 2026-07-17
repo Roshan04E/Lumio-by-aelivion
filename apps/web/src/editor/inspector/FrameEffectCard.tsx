@@ -18,6 +18,7 @@ import {
 import { BooleanControl } from "./controls/BooleanControl";
 import { ColorControl } from "./controls/ColorControl";
 import { NumberControl } from "./controls/NumberControl";
+import { SelectControl } from "./controls/SelectControl";
 
 function numberOf(value: FrameParamValue | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -155,6 +156,18 @@ export function FrameEffectCard({
                     key={param.key}
                     label={param.label}
                     value={stringOf(frame.params[param.key], param.defaultValue)}
+                    onReset={() => setParam(param.key, param.defaultValue)}
+                    onChange={(value) => setParam(param.key, value)}
+                  />
+                );
+              }
+              if (param.type === "select") {
+                return (
+                  <SelectControl
+                    key={param.key}
+                    label={param.label}
+                    value={stringOf(frame.params[param.key], param.defaultValue)}
+                    options={param.options}
                     onReset={() => setParam(param.key, param.defaultValue)}
                     onChange={(value) => setParam(param.key, value)}
                   />

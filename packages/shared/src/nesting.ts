@@ -22,7 +22,7 @@
  */
 
 import { isTrackEnabled } from "./composition-style";
-import { getLayerSpeed, getSpeedRamp, layerSourceTimeSeconds, shiftSpeedKeyframes } from "./timeline";
+import { getLayerSpeed, getSpeedRamp, getTrackAudioGain, layerSourceTimeSeconds, shiftSpeedKeyframes } from "./timeline";
 import { migrateTimelineKeyframes } from "./animation";
 import type {
   ProjectGraph,
@@ -205,21 +205,81 @@ export function expandNestedCompositions(
       };
     };
 
-    // NEST-REVIEW (Block 1, audio volume folding — plan Task 3.5): NOT implemented. "Fold the compound
-    // clip's own volume and the nested track's static gain into each derived child" turned out to be
-    // more than a scalar multiply: clip volume in this codebase is a KEYFRAMABLE EFFECT
-    // (`getCompositionVolume` reads a "volume" entry in `layer.effects`, evaluated at the layer's OWN
-    // local time via `evaluateTimelineEffectParam` — there is no plain `TimelineLayer.volume` field).
-    // Correctly folding the compound clip's own volume effect into every descendant would mean
-    // SYNTHESIZING a time/speed-remapped "volume" effect object per derived child (mirroring the
-    // `mapAnimations`/`mapSpeedKeyframes` substitution above, but for effect param keyframes) — a
-    // properly-scoped follow-up, not a safe quick addition, and untested by any Task 6 gate. The nested
-    // TRACK's static `volume` (fader gain, a real scalar) is ALSO not folded here for the same reason:
-    // the runtime only ever reads gain through the PARENT-level track (derived children keep
-    // `trackId: clip.trackId`), so the nested track's own fader is currently silently ignored. Until
-    // this lands, an imported/nested sequence's own track fader and clip volume automation do not
-    // affect nested playback volume — a real but narrow gap, not a crash or wrong-in-the-common-case bug
-    // (unity gain — the default — is unaffected).
+    // AUDIO FOLDING (Block 5, NESTING_MATURITY.md — closes Block 1's NEST-REVIEW gap): the compound
+    // clip's own volume automation and the nested track's STATIC fader gain fold into each derived
+    // audio-capable child as a synthesized time-remapped "volume" effect. Clip volume is a keyframable
+    // EFFECT (`getCompositionVolume` reads a "volume" entry in `layer.effects`, gain keyframes in
+    // `layer.animations` at layer-LOCAL time), so the fold mirrors the `mapAnimations` substitution:
+    // a clip-local keyframe time becomes child-local via `tChild = tClip − (childStart − clipStart)`
+    // (both are parent-timeline-anchored local clocks, so no speed term applies to the clip's own
+    // automation). The nested track's fader multiplies in as a scalar. One documented approximation:
+    // a child that carries its OWN volume effect keeps it, scaled by the clip's STATIC gain × the
+    // fader — two independently-keyframed gain curves can't merge into one keyframed param, so the
+    // clip's AUTOMATION is dropped for (only) such children. Nested-track automation stays deferred.
+    const clipVolumeEffect = clip.effects.find(
+      (effect) => effect.type === "volume" && effect.enabled !== false
+    );
+    const clipVolumeBaseGain = (() => {
+      const raw = clipVolumeEffect?.params?.["gain"];
+      return typeof raw === "number" && Number.isFinite(raw) ? raw : 100;
+    })();
+    const clipVolumeKeyframes = clipVolumeEffect
+      ? (clip.animations ?? []).filter(
+          (k) => k.target.scope === "effect" && k.target.effectId === clipVolumeEffect.id && k.target.property === "gain"
+        )
+      : [];
+    const foldNestedAudioGain = (derived: TimelineLayer, nestedTrack: TimelineTrack): TimelineLayer => {
+      if (derived.type !== "audio" && derived.type !== "video") return derived;
+      const trackGain = getTrackAudioGain(nestedTrack);
+      if (!clipVolumeEffect && trackGain === 1) return derived;
+      const hasOwnVolume = derived.effects.some((effect) => effect.type === "volume" && effect.enabled !== false);
+      if (hasOwnVolume) {
+        // Scale the child's own volume through (clip static gain × fader) — see doc above.
+        const factor = (clipVolumeBaseGain / 100) * trackGain;
+        if (factor === 1) return derived;
+        return {
+          ...derived,
+          effects: derived.effects.map((effect) =>
+            effect.type === "volume" && effect.enabled !== false
+              ? {
+                  ...effect,
+                  params: {
+                    ...(effect.params ?? {}),
+                    gain: (typeof effect.params?.["gain"] === "number" ? (effect.params["gain"] as number) : 100) * factor,
+                  },
+                }
+              : effect
+          ),
+          animations: (derived.animations ?? []).map((k) =>
+            k.target.scope === "effect" &&
+            k.target.property === "gain" &&
+            derived.effects.some((effect) => effect.type === "volume" && effect.id === k.target.effectId) &&
+            typeof k.value === "number"
+              ? { ...k, value: k.value * factor }
+              : k
+          ),
+        };
+      }
+      // Synthesize one folded volume effect: clip gain curve (remapped to child-local time) × fader.
+      const effectId = `__nestvol_${clip.id}`;
+      const localShift = derived.startSeconds - clip.startSeconds;
+      const foldedKeyframes: TimelineKeyframeV2[] = clipVolumeKeyframes
+        .filter((k) => typeof k.value === "number")
+        .map((k) => ({
+          ...k,
+          target: { ...k.target, effectId },
+          timeSeconds: k.timeSeconds - localShift,
+          value: (k.value as number) * trackGain,
+        }));
+      return {
+        ...derived,
+        effects: [
+          ...derived.effects,
+          { id: effectId, type: "volume", name: "Volume", enabled: true, intensity: 100, params: { gain: clipVolumeBaseGain * trackGain } },
+        ],
+        animations: [...(derived.animations ?? []), ...foldedKeyframes],
+      };
+    };
     // Z-ORDER: the active-composition render paints tracks[0] on TOP (VideoPreview sorts by
     // `b.trackIndex - a.trackIndex`), and within a track higher layerIndex on top. The derived children
     // all collapse onto the compound clip's single parent track, so their PARENT layerIndex (== push
@@ -233,7 +293,7 @@ export function expandNestedCompositions(
       for (const child of track.layers) {
         if (child.muted) continue;
         const derived = mapChild(child);
-        if (derived) children.push(derived);
+        if (derived) children.push(foldNestedAudioGain(derived, track));
       }
     }
     // Inner groups of nests-in-nests: re-key and re-map their group-shell clips through this instance,
@@ -290,9 +350,9 @@ export interface NestSelectionResult {
  * Collapses 2+ selected layers (any tracks) into a NEW nested sequence, replacing them in `composition`
  * with one compound clip spanning their combined time range, on the topmost affected track. Layer
  * relative positions/durations and their track grouping are preserved inside the nest (times normalized
- * to nest-local t=0). Already-compound clips in the selection are left alone — nesting a nest is
- * rejected (v1, matches NESTING.md "Self-nesting forbidden" spirit: no nests-in-nests from this action).
- * Returns null when fewer than 2 nestable layers are selected.
+ * to nest-local t=0). Compound clips in the selection nest too (Block 2): moving existing clips INTO a
+ * brand-new sequence can never create a reference cycle, and the renderer handles recursive nests.
+ * Returns null when fewer than 2 layers are selected.
  */
 export function nestLayersIntoComposition(
   composition: TimelineComposition,
@@ -303,7 +363,7 @@ export function nestLayersIntoComposition(
   const found: Array<{ track: TimelineTrack; trackIndex: number; layer: TimelineLayer }> = [];
   composition.tracks.forEach((track, trackIndex) => {
     for (const layer of track.layers) {
-      if (selected.has(layer.id) && !layer.nestedCompositionId) {
+      if (selected.has(layer.id)) {
         found.push({ track, trackIndex, layer });
       }
     }
@@ -357,8 +417,7 @@ export function nestLayersIntoComposition(
   };
 
   const tracks = composition.tracks.map((track, index) => {
-    // Keep unselected layers, and any already-compound clip in the selection (nesting a nest is a no-op skip).
-    const remaining = track.layers.filter((layer) => !selected.has(layer.id) || Boolean(layer.nestedCompositionId));
+    const remaining = track.layers.filter((layer) => !selected.has(layer.id));
     if (index === topTrackIndex) {
       return { ...track, layers: [...remaining, replacementClip].sort((a, b) => a.startSeconds - b.startSeconds) };
     }
@@ -420,6 +479,100 @@ export function unnestClip(
   });
 
   return { composition: { ...composition, tracks } };
+}
+
+// ---------------------------------------------------------------------------
+// Block 2 (NESTING_MATURITY.md) — composition registry + persistent navigation.
+// Invariant: `graph.compositions` holds EVERY composition INCLUDING the root/main one;
+// `graph.composition` stays the ACTIVE comp (the editor's existing read/write contract).
+// `stampCompositionRegistry` is the single write-through seam; `healCompositionRegistry` migrates
+// legacy graphs and RECOVERS projects stranded by the old refresh-inside-a-group bug (the nest was
+// persisted as `composition` while the root sat unreachable in `compositions`).
+// ---------------------------------------------------------------------------
+
+export interface NestBreadcrumbEntry {
+  id: string;
+  name: string;
+}
+
+/** The comp that references `id` as a nested sequence, or undefined. First match wins (a comp
+ *  referenced from two places is reachable both ways; any parent gives a valid breadcrumb). */
+function findParentCompositionId(compositions: Record<string, TimelineComposition>, id: string): string | undefined {
+  for (const comp of Object.values(compositions)) {
+    if (comp.id === id) continue;
+    if (comp.tracks.some((track) => track.layers.some((layer) => layer.nestedCompositionId === id))) {
+      return comp.id;
+    }
+  }
+  return undefined;
+}
+
+/** Walk `nestedCompositionId` references UP from `activeId` to the topmost unreferenced comp.
+ *  Cycle-safe (a corrupt graph terminates at the first repeat). */
+export function findRootCompositionId(compositions: Record<string, TimelineComposition>, activeId: string): string {
+  let current = activeId;
+  const seen = new Set([activeId]);
+  for (;;) {
+    const parent = findParentCompositionId(compositions, current);
+    if (!parent || seen.has(parent)) return current;
+    seen.add(parent);
+    current = parent;
+  }
+}
+
+/** Ancestor chain root→…→direct parent of `activeId` (EXCLUDING the active comp itself);
+ *  `[]` when the active comp IS the root. Feeds the editor's breadcrumb stack. */
+export function deriveNestBreadcrumb(
+  compositions: Record<string, TimelineComposition>,
+  rootId: string,
+  activeId: string
+): NestBreadcrumbEntry[] {
+  if (rootId === activeId) return [];
+  const chain: NestBreadcrumbEntry[] = [];
+  let current = activeId;
+  const seen = new Set([activeId]);
+  while (current !== rootId) {
+    const parent = findParentCompositionId(compositions, current);
+    if (!parent || seen.has(parent)) break;
+    const comp = compositions[parent];
+    if (!comp) break;
+    chain.unshift({ id: comp.id, name: comp.name });
+    seen.add(parent);
+    current = parent;
+  }
+  return chain;
+}
+
+/**
+ * Write-through seam (call on EVERY graph write): mirrors the active `composition` into
+ * `compositions[id]` and stamps `activeCompositionId` (+ `rootCompositionId` when missing or
+ * dangling). Root detection walks up nest references, so a legacy graph saved while INSIDE a nest
+ * still resolves its true root. Returns the same graph shape — never touches `composition` itself.
+ */
+export function stampCompositionRegistry(graph: ProjectGraph): ProjectGraph {
+  const active = graph.composition;
+  if (!active) return graph;
+  const compositions = { ...(graph.compositions ?? {}), [active.id]: active };
+  const rootCompositionId =
+    graph.rootCompositionId && compositions[graph.rootCompositionId]
+      ? graph.rootCompositionId
+      : findRootCompositionId(compositions, active.id);
+  return { ...graph, compositions, rootCompositionId, activeCompositionId: active.id };
+}
+
+/**
+ * Load-time migration + healer. Stamps the registry invariant onto a loaded graph and derives the
+ * breadcrumb from the persisted pointers — so refreshing while inside a (possibly multi-level) nest
+ * reopens exactly where the user was, with the path back to Main intact. Projects stranded by the
+ * pre-Block-2 bug (active comp = a nest, no pointers, breadcrumb lost) are healed by the same walk.
+ */
+export function healCompositionRegistry(graph: ProjectGraph): { graph: ProjectGraph; breadcrumb: NestBreadcrumbEntry[] } {
+  const stamped = stampCompositionRegistry(graph);
+  const breadcrumb =
+    stamped.compositions && stamped.rootCompositionId && stamped.activeCompositionId
+      ? deriveNestBreadcrumb(stamped.compositions, stamped.rootCompositionId, stamped.activeCompositionId)
+      : [];
+  return { graph: stamped, breadcrumb };
 }
 
 // Canvas Frames (createFrame) were removed 2026-07-14: a "frame" was just a nest + a full-bleed

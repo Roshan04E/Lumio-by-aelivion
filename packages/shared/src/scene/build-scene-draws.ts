@@ -263,14 +263,22 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // compositor's child loop already renders transition draws inside a nest). Cross-nest and
   // half-nested pairs still degrade to a hard cut (the outgoing side simply drops, per R2).
   const groupPairsByOwner = new Map<string, { incomingId: string; outgoingId: string; active: ActiveTransition }[]>();
+  // Block 4c: a junction side may be a COMPOUND clip — absent from the expanded `ls`, but present as a
+  // group key (`findTransitionPairsWithGroupJunctions` keys such pairs off the RAW comp's junctions).
+  // The side then pre-composes as the finished group (shell included) instead of a clip group.
+  const isGroupSide = (id: string): boolean => Boolean(nestedGroups?.has(id)) && !layerById.has(id);
   for (const pair of tPairs) {
     const active = getActiveTransition(pair.spec, {
       currentTimeSeconds: t,
       startSeconds: pair.startSeconds,
-      clipDurationSeconds: layerById.get(pair.incomingId)?.durationSeconds,
+      clipDurationSeconds: layerById.get(pair.incomingId)?.durationSeconds ?? nestedGroups?.get(pair.incomingId)?.clip.durationSeconds,
       prerollSeconds: pair.prerollSeconds,
     });
-    if (!active || !layerById.has(pair.outgoingId) || !layerById.has(pair.incomingId)) {
+    if (
+      !active ||
+      !(layerById.has(pair.outgoingId) || isGroupSide(pair.outgoingId)) ||
+      !(layerById.has(pair.incomingId) || isGroupSide(pair.incomingId))
+    ) {
       continue;
     }
     // R2 fix: a nested clip must never enter the TOP-LEVEL fold — `membersByGroup` (built below) excludes
@@ -873,13 +881,35 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       }
     }
     if (children.length === 0) return null;
+    // Block 4a/4b (NESTING_MATURITY.md): the group clip's OWN color pipeline + region/fragment passes.
+    // A compound clip mounts no WebglMediaLayer (nothing pre-grades its "media"), so its pipeline rides
+    // the group draw and grades the finished nest RTT in-compositor; region effects never got upstream
+    // `__rfx_` clones either (the compound clip is removed before `expandEffectRegionMasks` runs), so
+    // derive them here with the same shared expansion `buildLayerDrawWithPasses` uses for unexpanded
+    // layers — passes attach to the SHELL, which renders through the ordinary layer-draw path against
+    // the PARENT matte cache. Clone model (regionPassModel off): group region effects stay a documented
+    // degrade — the clone stack needs real upstream layers, which don't exist for a compound clip.
+    let shellClip = spec.clip;
+    let shellRegionPasses: SceneRegionPass[] = [];
+    if (regionPassModel && hasRegionColorEffect(spec.clip)) {
+      const expanded = expandLayerEffectRegions(spec.clip);
+      shellClip = expanded[0] ?? spec.clip;
+      shellRegionPasses = buildRegionPasses(shellClip, expanded.slice(1));
+    }
+    const shell = buildShellPresentation(shellClip);
+    if (shellRegionPasses.length > 0) shell.regionPasses = shellRegionPasses;
+    const shellFragmentPasses = buildFragmentPasses(shellClip);
+    if (shellFragmentPasses.length > 0) shell.fragmentPasses = shellFragmentPasses;
+    const pipeline = getCompositionColorPipeline(shellClip, { currentTimeSeconds: t });
     return {
       kind: "group",
       debugGroupId: key,
       children,
       nestWidth: Math.max(1, Math.round(nestW * rScale)),
       nestHeight: Math.max(1, Math.round(nestH * rScale)),
-      shell: buildShellPresentation(spec.clip),
+      shell,
+      pipeline: pipeline && !pipeline.identity ? pipeline : null,
+      groupKey: key,
     };
   };
 
@@ -905,6 +935,17 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     draw.matteFrom = { draw: sourceDraw, mode: tm.mode, invert: Boolean(tm.invert) };
   };
 
+  /** One junction-transition side as draws (Block 4c): a compound clip pre-composes as its finished
+   *  GROUP (children + shell + pipeline — every group feature renders THROUGH the mix); a normal clip
+   *  stays the base + `__rfx_` clip group it always was. */
+  const buildTransitionSide = (baseId: string): SceneDraw[] => {
+    if (isGroupSide(baseId)) {
+      const g = buildGroupDraw(baseId);
+      return g ? [g] : [];
+    }
+    return buildClipGroup(baseId);
+  };
+
   for (let i = 0; i < ls.length; i++) {
     const layer = ls[i]!;
     // Outgoing base + everything folded into an active transition's side groups is drawn INSIDE the mix, not
@@ -925,6 +966,32 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     if (topGroupKey) {
       // Track matte (D1): a compound clip consumed as a matte source never draws independently.
       if (!matteSourceGroupKeys.has(topGroupKey)) {
+        // Block 4c: a compound clip consumed as an active junction's OUTGOING side draws inside the
+        // mix (emitted at the incoming side's z-slot), never independently — the group analog of the
+        // `transitionOutgoingIds` skip at the top of this loop.
+        if (transitionOutgoingIds.has(topGroupKey)) continue;
+        // Block 4c: the compound clip is the INCOMING side — emit the mix at the group's z-slot,
+        // exactly like the layer branch below. Either side falling through un-ready degrades to
+        // drawing the group normally (same degrade as the layer branch).
+        const groupActive = activeByIncomingId.get(topGroupKey);
+        if (groupActive) {
+          const pair = transitionByIncomingId.get(topGroupKey)!;
+          const from = buildTransitionSide(pair.outgoingId);
+          const to = buildTransitionSide(pair.incomingId);
+          if (from.length > 0 && to.length > 0) {
+            draws.push({
+              kind: "transition",
+              debugFromId: pair.outgoingId,
+              debugToId: pair.incomingId,
+              from,
+              to,
+              def: groupActive.def,
+              progress: groupActive.progress,
+              params: groupActive.params,
+            });
+            continue;
+          }
+        }
         const g = buildGroupDraw(topGroupKey);
         if (g) draws.push(g);
       }
@@ -939,8 +1006,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // every per-clip effect renders THROUGH the transition. If a side has no ready draw, fall through to
       // drawing the incoming clip normally.
       const pair = transitionByIncomingId.get(layer.id)!;
-      const from = buildClipGroup(pair.outgoingId);
-      const to = buildClipGroup(pair.incomingId);
+      const from = buildTransitionSide(pair.outgoingId);
+      const to = buildTransitionSide(pair.incomingId);
       if (from.length > 0 && to.length > 0) {
         draws.push({ kind: "transition", debugFromId: pair.outgoingId, debugToId: pair.incomingId, from, to, def: active.def, progress: active.progress, params: active.params });
         continue;

@@ -226,9 +226,11 @@ export interface SceneTransitionDraw {
   debugToId?: string | undefined;
   /** Outgoing/incoming clip GROUPS: each is the clip's base + its region-expansion (`__rfx_`) layers in
    *  back-to-front order. The compositor composites each group into its side RTT (so every per-clip effect —
-   *  region blur/colour, future plugin region effects — renders THROUGH the transition), then mixes the two. */
-  from: SceneLayerDraw[];
-  to: SceneLayerDraw[];
+   *  region blur/colour, future plugin region effects — renders THROUGH the transition), then mixes the two.
+   *  A side may be a single `SceneGroupDraw` (a compound clip at a junction — nesting Block 4c): the side
+   *  pre-compose recurses through the ordinary group render, so the finished nest (shell included) mixes. */
+  from: SceneDraw[];
+  to: SceneDraw[];
   def: TransitionDefinition;
   /** EASED progress 0..1 (caller applies the definition's easing). */
   progress: number;
@@ -263,6 +265,16 @@ export interface SceneGroupDraw {
   /** The compound clip's own presentation, applied to the composited RTT as if it were a media source:
    *  everything a SceneLayerDraw has EXCEPT source/sourceWidth/sourceHeight/sourceVersion. */
   shell: Omit<SceneLayerDraw, "source" | "sourceWidth" | "sourceHeight" | "sourceVersion">;
+  /**
+   * The compound clip's own COLOR pipeline (nesting Block 4a). Media layers arrive pre-graded
+   * (`getMediaGraded`), but a compound clip has no media layer — so the compositor grades the finished
+   * nest RTT in-context (the `regionGradeEntry` machinery) before the shell composite. null/identity =
+   * skip, byte-identical to before this field existed.
+   */
+  pipeline?: ColorPipeline | null | undefined;
+  /** Stable per-instance key for the grade renderer/LUT cache (the compound clip id). Required when
+   *  `pipeline` is set; falls back to `debugGroupId`. */
+  groupKey?: string | undefined;
 }
 
 /** A compositor draw entry: a normal layer, a folded transition between two full layer draws, or a
@@ -2008,7 +2020,7 @@ export class SceneCompositor {
    * "pre-compose / nest": the transition then mixes two finished clip images, so any effect (or future plugin)
    * on a clip renders THROUGH the transition with no transition-side knowledge of what the effect is.
    */
-  private precomposeGroup(group: SceneLayerDraw[], target: RenderTarget, scratch: RenderTarget): RenderTarget {
+  private precomposeGroup(group: SceneDraw[], target: RenderTarget, scratch: RenderTarget): RenderTarget {
     const gl = this.gl;
     const savedA = this.accumA;
     const savedB = this.accumB;
@@ -2022,7 +2034,14 @@ export class SceneCompositor {
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
     }
-    for (const draw of group) this.renderLayerInto(draw, null);
+    // A side entry may be a compound-clip GROUP draw (nesting Block 4c) — recurse through the ordinary
+    // group render (dest null → composites into this side's accumulator), at the free RTT depth so the
+    // group's own pre-compose never clobbers a pair still being read.
+    for (const draw of group) {
+      if (isGroupDraw(draw)) this.renderGroupInto(draw, null, this.freeGroupDepth);
+      else if (isTransitionDraw(draw)) this.renderTransition(draw);
+      else this.renderLayerInto(draw, null);
+    }
     const result = this.accumA; // the accumulator leaves the latest result in accumA after each layer's swap
     this.accumA = savedA;
     this.accumB = savedB;
@@ -2135,7 +2154,35 @@ export class SceneCompositor {
       else if (isGroupDraw(child)) this.renderGroupInto(child, null, depth + 1);
       else this.renderLayerInto(child, null);
     }
-    const resultTex = this.accumA.tex; // ping-pong leaves the latest result in accumA after each child's swap
+    let resultTex = this.accumA.tex; // ping-pong leaves the latest result in accumA after each child's swap
+
+    // Nesting Block 4a: the compound clip's own color pipeline grades the finished nest RTT here,
+    // in-context (same `regionGradeEntry` machinery as region color passes — no new GL contexts).
+    // Media layers arrive pre-graded, but a compound clip mounts no media layer, so this is THE
+    // grade point for "brightness/curves/LUT on a group". Runs at nest dims, BEFORE the ambient
+    // size is restored (the grade is a 1:1 image op — coordinate space is irrelevant, only size).
+    if (draw.pipeline && !draw.pipeline.identity) {
+      const entry = this.regionGradeEntry(`group:${draw.groupKey ?? draw.debugGroupId ?? "group"}`);
+      const key = JSON.stringify(draw.pipeline);
+      if (entry.pipelineKey !== key) {
+        entry.renderer.setPipeline(draw.pipeline);
+        entry.pipelineKey = key;
+      }
+      entry.lastFrame = this.frameCounter;
+      entry.target.resize(nestW, nestH);
+      entry.renderer.draw({
+        sourceTexture: resultTex,
+        sourceWidth: nestW,
+        sourceHeight: nestH,
+        matte: null,
+        pipeline: draw.pipeline,
+        amount: 1,
+        opacity: 1,
+        mediaEffects: null,
+        target: entry.target,
+      });
+      resultTex = entry.target.tex;
+    }
 
     this.width = savedWidth;
     this.height = savedHeight;

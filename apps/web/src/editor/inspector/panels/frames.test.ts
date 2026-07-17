@@ -8,10 +8,12 @@
  */
 import {
   FRAME_BORDER_LAYER_SUFFIX,
+  blobOutlinePoints,
   builtInFrames,
   expandFrameBorders,
   findFrameDefinition,
   frameBorderShapeLayer,
+  tornPaperOutlinePoints,
   frameBoxPercent,
   frameBoxRect,
   frameChromeParams,
@@ -79,10 +81,38 @@ function check(name: string, condition: boolean): void {
   check("svg-path blank → safe full box", empty === "M0 0H1V1H0Z");
 }
 
-// --- unknown / not-yet-implemented generators degrade safely ---------------------------
+// --- Phase 2 procedural generators: blob + torn-paper (seeded, deterministic) -----------
 {
-  check("blob (Phase 2) → full box fallback", frameOutlinePathD({ generatorId: "blob", params: {} }) === "M0 0H1V1H0Z");
-  check("torn-paper (Phase 2) → full box fallback", frameOutlinePathD({ generatorId: "torn-paper", params: {} }) === "M0 0H1V1H0Z");
+  // Determinism: identical params → byte-identical path, in every renderer, across reloads.
+  const blobA = frameOutlinePathD({ generatorId: "blob", params: { points: 8, seed: 7, wobble: 40 } });
+  const blobB = frameOutlinePathD({ generatorId: "blob", params: { points: 8, seed: 7, wobble: 40 } });
+  check("blob is deterministic (same seed → same path)", blobA === blobB && blobA.length > 20);
+  const blobC = frameOutlinePathD({ generatorId: "blob", params: { points: 8, seed: 8, wobble: 40 } });
+  check("blob seed re-rolls the outline", blobC !== blobA);
+  check("blob path is smooth cubics", blobA.includes("C") && blobA.trim().endsWith("Z"));
+
+  const tornA = frameOutlinePathD({ generatorId: "torn-paper", params: { roughness: 50, seed: 3, detail: 14 } });
+  const tornB = frameOutlinePathD({ generatorId: "torn-paper", params: { roughness: 50, seed: 3, detail: 14 } });
+  check("torn-paper is deterministic", tornA === tornB && tornA.length > 20);
+  check("torn-paper is a jagged polyline (no curves)", tornA.includes("L") && !tornA.includes("C"));
+  check("torn-paper seed re-rolls the tear", frameOutlinePathD({ generatorId: "torn-paper", params: { roughness: 50, seed: 4, detail: 14 } }) !== tornA);
+
+  // Geometry contracts.
+  const blobPts = blobOutlinePoints(8, 7, 40);
+  check("blob emits the requested point count with tangents", blobPts.length === 8 && blobPts.every((p) => p.inTangent && p.outTangent));
+  check("blob outline fills the unit box", (() => {
+    const xs = blobPts.map((p) => p.x);
+    const ys = blobPts.map((p) => p.y);
+    return Math.min(...xs) < 0.01 && Math.max(...xs) > 0.99 && Math.min(...ys) < 0.01 && Math.max(...ys) > 0.99;
+  })());
+  const tornPts = tornPaperOutlinePoints(50, 3, 10, "all");
+  check("torn-paper: 4 corners + (detail−1) teeth per edge", tornPts.length === 4 + 4 * 9);
+  check("torn-paper stays inside the unit box (tears inward)", tornPts.every((p) => p.x >= -1e-9 && p.x <= 1 + 1e-9 && p.y >= -1e-9 && p.y <= 1 + 1e-9));
+  check("torn-paper corners stay exact", tornPts.some((p) => p.x === 0 && p.y === 0) && tornPts.some((p) => p.x === 1 && p.y === 1));
+  const strip = tornPaperOutlinePoints(50, 3, 10, "top-bottom");
+  check("edges top-bottom → left/right stay straight (corners only)", strip.length === 4 + 2 * 9);
+  const zeroRough = tornPaperOutlinePoints(0, 3, 10, "all");
+  check("roughness 0 → a plain rectangle outline (teeth on the edge line)", zeroRough.every((p) => p.x === 0 || p.x === 1 || p.y === 0 || p.y === 1));
 }
 
 // --- param defaults + makeLayerFrame ---------------------------------------------------
@@ -290,7 +320,39 @@ function check(name: string, condition: boolean): void {
   check("polygon verts stay inside the frame box", insetPoly.points.every((p) => p.x >= 249.9 && p.x <= 750.1 && p.y >= 249.9 && p.y <= 750.1));
 
   const svg = frameClipMask(layer({ definitionId: "acme.torn", generatorId: "svg-path", params: {}, staticPath: "M0 0H1V1H0Z" }), { width: 100, height: 100 });
-  check("svg-path → null (Phase 2 render; no clip yet)", svg === null);
+  check("svg-path → null (no clip yet)", svg === null);
+
+  // Phase 2: blob → bezier mask (smooth tangents), torn-paper → polygon mask (jagged), both in the box.
+  const blob = frameClipMask(layer({ definitionId: "kimera.blob", generatorId: "blob", params: { points: 8, seed: 7, wobble: 40, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
+  check("blob → bezier mask with tangents", blob.shape === "bezier" && blob.points.length === 8 && blob.points.every((p) => p.inTangent && p.outTangent));
+  check("blob mask points stay inside the frame box", blob.points.every((p) => p.x >= 249.9 && p.x <= 750.1 && p.y >= 249.9 && p.y <= 750.1));
+  const blobAgain = frameClipMask(layer({ definitionId: "kimera.blob", generatorId: "blob", params: { points: 8, seed: 7, wobble: 40, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
+  check("blob mask is deterministic", JSON.stringify(blob.points) === JSON.stringify(blobAgain.points));
+
+  const torn = frameClipMask(layer({ definitionId: "kimera.torn-paper", generatorId: "torn-paper", params: { roughness: 50, seed: 3, detail: 10 } }), { width: 1000, height: 800 })!;
+  check("torn-paper → polygon mask, 4 + 4×(detail−1) points", torn.shape === "polygon" && torn.points.length === 4 + 4 * 9);
+  check("torn-paper mask spans the comp box (tears inward)", torn.points.every((p) => p.x >= -1e-6 && p.x <= 1000 + 1e-6 && p.y >= -1e-6 && p.y <= 800 + 1e-6));
+}
+
+// --- Phase 2: blob/torn-paper BAKE to a pen shape on convert (D4) ------------------------------
+{
+  const comp = { width: 1000, height: 1000 };
+  const layer = {
+    id: "L1",
+    trackId: "T1",
+    type: "image",
+    name: "clip",
+    startSeconds: 0,
+    durationSeconds: 5,
+    assetId: "a1",
+    transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    animations: [],
+    frame: { definitionId: "kimera.blob", generatorId: "blob" as const, params: { points: 8, seed: 7, wobble: 40 } }
+  } as unknown as TimelineLayer;
+  const baked = frameToShapeLayer(layer, comp);
+  check("blob converts to pen + tangent shapePath", baked.shapeKind === "pen" && (baked.shapePath?.length ?? 0) === 8 && (baked.shapePath ?? []).every((p) => p.inTangent && p.outTangent));
+  check("baked path is in 0..100 shape-box coords", (baked.shapePath ?? []).every((p) => p.x >= -0.01 && p.x <= 100.01 && p.y >= -0.01 && p.y <= 100.01));
 }
 
 // --- QA round 5: mediaRectInFrame — where the SOURCE clip actually sits (content mode hug) ------

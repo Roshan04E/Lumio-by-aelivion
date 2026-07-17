@@ -1,6 +1,8 @@
 # Nesting / Compound Clips — Design (Premiere-architecture-aligned)
 
 Status: **design approved-pending, Phase A starting** (2026-07-03). Owner: Claude. Tracker: NLE_ANALYSIS §4/§6.3.
+Update 2026-07-17: Block 1 (renderer wiring) shipped; maturity audit + Blocks 2–6 plan in [NESTING_MATURITY.md](NESTING_MATURITY.md).
+Update 2026-07-17 (later): Blocks 2–5 IMPLEMENTED (registry+refresh fix, Timelines media-pool section, group grade/region/junction transitions, audio folding) — see NESTING_MATURITY.md "Shipped".
 
 ## Why this shape
 

@@ -86,9 +86,12 @@ export type RenderComparisonFixtureKey =
   | "grain"
   | "chroma-key"
   | "framed-media"
+  | "framed-blob"
   | "track-matte"
   | "anchored-media"
   | "nested-transition"
+  | "nested-grade"
+  | "nested-junction-transition"
   | "texture-fill";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
@@ -122,9 +125,12 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "grain",
   "chroma-key",
   "framed-media",
+  "framed-blob",
   "track-matte",
   "anchored-media",
   "nested-transition",
+  "nested-grade",
+  "nested-junction-transition",
   "texture-fill"
 ];
 
@@ -440,6 +446,10 @@ interface FixtureVariant {
   anchorTransform?: { anchor: { x: number; y: number }; rotation: number; scale: number };
   /** D4 (R2 step 3): the transition pair lives INSIDE a nested composition referenced by a compound clip. */
   nestedTransition?: boolean;
+  /** Block 4a/4b (NESTING_MATURITY.md): color grade + region blur applied to the COMPOUND clip itself. */
+  nestedGrade?: boolean;
+  /** Block 4c: junction transition where the INCOMING side is a compound clip (clip → group mix). */
+  nestedJunctionTransition?: boolean;
   /** Texture fill (D2): image paint on the TEXT fixture's glyphs. */
   textFillTexture?: TimelineLayer["fillTexture"];
 }
@@ -531,6 +541,30 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: grainEffects, fit: "cover" };
     case "chroma-key":
       return { effects: chromaKeyEffects, fit: "cover" };
+    case "framed-blob":
+      // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
+      // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
+      // bakes to a pen shapePath) — the two code paths the simple-shape fixtures never touch. Seeded, so
+      // the outline is byte-identical in every renderer.
+      return {
+        effects: [],
+        fit: "cover",
+        frame: {
+          definitionId: "kimera.blob",
+          generatorId: "blob",
+          params: {
+            points: 9,
+            seed: 11,
+            wobble: 55,
+            width: 82,
+            height: 62,
+            aspectLock: false,
+            border: true,
+            borderWidth: 14,
+            borderColor: "#7fd4ff"
+          }
+        }
+      };
     case "framed-media":
       // Frames Step E: a rounded-rect frame with a non-trivial box (unlocked 78×60%) + a thick border.
       // Exercises the WHOLE frame surface at once: the clip mask (media clipped to the inset rounded box —
@@ -575,6 +609,17 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       // in-nest mix doesn't play (hard cut = only the graded incoming shows), if the outgoing child
       // double-draws, or if the mix targets aren't sized to the nest.
       return { effects: [], fit: "cover", nestedTransition: true };
+    case "nested-grade":
+      // Block 4a/4b: a plain single-image nest whose COMPOUND clip carries a LUT-engine grade
+      // (curves) AND a region blur. Trips if the group's own color pipeline is a no-op (the old
+      // silent failure: media pre-grades per-layer, a compound clip mounts no media layer), or if
+      // the shell drops its region passes (the compound was removed before region expansion runs).
+      return { effects: [], fit: "cover", nestedGrade: true };
+    case "nested-junction-transition":
+      // Block 4c (old Block 1 Task 7): a junction crossDissolve whose INCOMING side is a compound
+      // clip, sampled mid-window. Trips if the pair scan misses compound junctions (they only exist
+      // on the RAW comp — hard cut), or if the group side doesn't pre-compose into the mix.
+      return { effects: [], fit: "cover", nestedJunctionTransition: true };
     case "anchored-media":
       // Anchor points (D3): the media rotates/scales about an OFF-CENTER pivot (20%,20%), with an
       // ellipse clip mask riding along. Trips if any pivot site disagrees — the GPU quad
@@ -787,6 +832,70 @@ Save this style now`);
     keyframes: []
   };
 
+  // Block 4a/4b (nested-grade): a single-image nest; the COMPOUND clip carries the curves grade + a
+  // region blur — both must render on the composited group RTT (shell pipeline + shell region pass).
+  const gradedNestComposition = {
+    id: "fixture_graded_nest",
+    name: "Graded nest comp",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 12,
+    backgroundColor: "#000000",
+    tracks: [
+      {
+        id: "gnest_track",
+        type: "video" as const,
+        name: "Nest video",
+        layers: [{ ...imageLayer, id: "gnest_img", trackId: "gnest_track", effects: [], fit: "cover" as const }]
+      }
+    ]
+  };
+  const gradedNestClip: TimelineLayer = {
+    ...compoundClip,
+    id: "fixture_graded_nest_clip",
+    nestedCompositionId: gradedNestComposition.id,
+    effects: [...colorCurvesEffects, ...regionBlurEffects]
+  };
+
+  // Block 4c (nested-junction-transition): plain image (0–0.4s) → COMPOUND clip carrying the
+  // crossDissolve `transitionIn`; the nest holds the graded image, so a missing mix (hard cut) or a
+  // missing group side is loud. Same 0.4–0.8s window/sample as the flat `transition` fixture.
+  const junctionNestComposition = {
+    id: "fixture_junction_nest",
+    name: "Junction nest comp",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 11.6,
+    backgroundColor: "#000000",
+    tracks: [
+      {
+        id: "jnest_track",
+        type: "video" as const,
+        name: "Nest video",
+        layers: [
+          {
+            ...transitionIncoming,
+            id: "jnest_media",
+            trackId: "jnest_track",
+            startSeconds: 0,
+            durationSeconds: 11.6,
+            transitionIn: undefined
+          }
+        ]
+      }
+    ]
+  };
+  const junctionNestClip: TimelineLayer = {
+    ...compoundClip,
+    id: "fixture_junction_nest_clip",
+    nestedCompositionId: junctionNestComposition.id,
+    startSeconds: 0.4,
+    durationSeconds: 11.6,
+    transitionIn: { kind: "crossDissolve", durationSeconds: 0.4 }
+  };
+
   const graph: ProjectGraph = {
     projectId: "project_render_pixel_fixture",
     effects: [],
@@ -809,8 +918,12 @@ Save this style now`);
           id: "overlay_track",
           type: "overlay",
           name: "Overlay",
-          // Transition fixtures keep the overlay empty so the diff isolates the junction mix.
-          layers: useTextFixture ? [textFixtureLayer] : variant.transition || variant.nestedTransition ? [] : [shapeLayer]
+          // Transition/nesting fixtures keep the overlay empty so the diff isolates the concern.
+          layers: useTextFixture
+            ? [textFixtureLayer]
+            : variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition
+              ? []
+              : [shapeLayer]
         },
         {
           id: "video_track",
@@ -818,18 +931,25 @@ Save this style now`);
           name: "Video",
           layers: variant.nestedTransition
             ? [compoundClip]
-            : variant.transition
-              ? [transitionOutgoing, transitionIncoming]
-              : [imageLayer]
+            : variant.nestedGrade
+              ? [gradedNestClip]
+              : variant.nestedJunctionTransition
+                ? [transitionOutgoing, junctionNestClip]
+                : variant.transition
+                  ? [transitionOutgoing, transitionIncoming]
+                  : [imageLayer]
         }
       ]
     },
-    ...(variant.nestedTransition ? { compositions: { [nestedComposition.id]: nestedComposition } } : {})
+    ...(variant.nestedTransition ? { compositions: { [nestedComposition.id]: nestedComposition } } : {}),
+    ...(variant.nestedGrade ? { compositions: { [gradedNestComposition.id]: gradedNestComposition } } : {}),
+    ...(variant.nestedJunctionTransition ? { compositions: { [junctionNestComposition.id]: junctionNestComposition } } : {})
   };
-  // Text-only + transition fixtures isolate their concern — skip captions so the diff is just that.
-  const compositionWithCaptions = useTextFixture || variant.transition || variant.nestedTransition
-    ? graph.composition!
-    : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
+  // Text-only + transition/nesting fixtures isolate their concern — skip captions so the diff is just that.
+  const compositionWithCaptions =
+    useTextFixture || variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition
+      ? graph.composition!
+      : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
 
   return {
     graph: {

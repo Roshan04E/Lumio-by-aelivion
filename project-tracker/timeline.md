@@ -307,3 +307,27 @@ effect — worse than a static param the user can re-key.
 **Invariant.** Reminting an id is only half an operation — every reference to it must move in the same
 write. When adding a new id-bearing field to `TimelineLayer`, grep `cloneLayerWithNewIds` AND split's
 right-half rebuild: split does NOT inherit the clone's handling for keyframe tracks.
+
+## v1 — "Click-keyframe moves playhead" — audited 2026-07-17, already fixed
+
+**Problem (roadmap item, unverified).** Report claimed clicking/grabbing a keyframe diamond on the
+timeline track or in the graph editor seeks the playhead to that keyframe's time, when it should only
+select it.
+
+**Audit.** Traced every click/pointerdown path that touches a keyframe diamond:
+`TimelineStrip.tsx` `startKeyframeDrag` (pointerdown) and the diamond `<button onClick>` (~L2173,
+~L5289) both call `onSelectLayer`/`onSelectKeyframe` only, with explicit "No playhead seek (2026-07-16
+user request)" comments — no `onSeek` call. `GraphEditor.tsx`'s canvas point-hit path
+(`handlePointerDown`, `hit?.type === "point"`) and the lanes-view diamond (`laneKeyPointerDown`) both
+call `selectOne`/`setSelectedIds` + `beginDraft` only. `onSelectLayer` → `selectLayer` →
+`commitLayerSelection` touches only `selectedLayerIds` state, no `currentTime` write. The only `onSeek`
+calls in these files are the ruler drag/click (intentional scrub) and explicit Prev/Next
+keyframe-navigation buttons (`KeyframeButtons.onNext`/`onPrevious`, intentional step affordance) — both
+expected to seek.
+
+**Conclusion.** Already fixed (commit dated 2026-07-16, predates this audit). No code change made.
+Roadmap entry in `plans/timeline-multiselect-phase.md` "click-keyframe shouldn't move playhead" is stale
+and can be dropped next time that file is touched.
+
+**Verify.** Static audit only (all call sites read, no `onSeek` reachable from a keyframe click); no
+runtime repro attempted since the fix predates this session.

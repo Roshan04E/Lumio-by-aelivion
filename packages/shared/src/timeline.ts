@@ -220,7 +220,7 @@ export function getSpeedRamp(layer: Pick<TimelineLayer, "speedKeyframes">): Spee
   if (!raw?.length) return null;
   const points = raw
     .filter((kf) => typeof kf?.timeSeconds === "number" && Number.isFinite(kf.timeSeconds))
-    .map((kf) => ({ timeSeconds: Math.max(0, kf.timeSeconds), value: clampSpeed(kf.value) }))
+    .map((kf) => ({ id: kf.id, timeSeconds: Math.max(0, kf.timeSeconds), value: clampSpeed(kf.value) }))
     .sort((a, b) => a.timeSeconds - b.timeSeconds);
   return points.length ? points : null;
 }
@@ -242,8 +242,11 @@ export function upsertSpeedRampPoint(
   timeSeconds: number,
   value: number
 ): SpeedKeyframe[] {
+  const existing = (layer.speedKeyframes ?? []).find((kf) => Math.abs(kf.timeSeconds - timeSeconds) <= 0.02);
   const points = (layer.speedKeyframes ?? []).filter((kf) => Math.abs(kf.timeSeconds - timeSeconds) > 0.02);
-  return [...points, { timeSeconds, value }].sort((a, b) => a.timeSeconds - b.timeSeconds);
+  // Preserve the replaced point's id (graph-lane drag continuity) rather than minting a new one.
+  const id = existing?.id ?? (globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10));
+  return [...points, { id, timeSeconds, value }].sort((a, b) => a.timeSeconds - b.timeSeconds);
 }
 
 /** Remove the ramp point at `timeSeconds` (exact match), or `undefined` when none remain. */
@@ -342,10 +345,12 @@ export function shiftSpeedKeyframes(
   if (headSeconds < 0) {
     // Head EXTENSION: points shift right; the edge-hold before the first point plays the new
     // material at the first value — matching the sourceIn math in adjustLayerHead.
-    return ramp.map((kf) => ({ timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
+    return ramp.map((kf) => ({ id: kf.id, timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
   }
   const atCut = getLayerSpeedAt(layer, headSeconds);
-  const kept = ramp.filter((kf) => kf.timeSeconds > headSeconds).map((kf) => ({ timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
+  const kept = ramp
+    .filter((kf) => kf.timeSeconds > headSeconds)
+    .map((kf) => ({ id: kf.id, timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
   return [{ timeSeconds: 0, value: atCut }, ...kept];
 }
 

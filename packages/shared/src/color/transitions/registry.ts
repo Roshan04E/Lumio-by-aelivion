@@ -127,7 +127,7 @@ uniform vec2 uFromFit;     // object-fit uv scale for the outgoing texture (cove
 uniform vec2 uToFit;       // object-fit uv scale for the incoming texture
 ${paramUniformLines(def.params)}
 ${HARNESS_PRELUDE}
-${def.glsl}
+${def.glsl ?? `vec4 transition(vec2 uv){ return mix(getFromColor(uv), getToColor(uv), progress); }`}
 
 void main(){ fragColor = transition(v_uv); }
 `;
@@ -649,6 +649,81 @@ const DEFS: TransitionDefinition[] = [
       vec4 b = getToColor(warpUV);
       return mix(a, b, smoothstep(0.0, 1.0, progress));
     }`
+  },
+  // ---- Professional multi-pass pipeline transitions (see transitions/pipeline.ts) ----
+  {
+    id: "liquidMorph",
+    name: "Liquid Morph",
+    category: "cinematic",
+    defaultDurationSeconds: 0.8,
+    easing: "easeInOut",
+    params: [
+      { name: "uCurlScale", type: "float", default: 4.0, min: 1, max: 12, label: "Flow scale" },
+      { name: "uCurlStrength", type: "float", default: 1.0, min: 0, max: 3, label: "Flow strength" }
+    ],
+    pipeline: {
+      passes: [
+        { moduleId: "curl-noise", inputs: ["uFrom"], params: { uCurlSpeed: 1.5 } },
+        { moduleId: "gaussian-blur", inputs: ["uSrc"], params: { uBlurDir: [1, 0], uBlurAmount: 0.6 } },
+        { moduleId: "gaussian-blur", inputs: ["uSrc"], params: { uBlurDir: [0, 1], uBlurAmount: 0.6 } },
+        { moduleId: "linear-mix", inputs: ["uSrc", "uTo"] }
+      ]
+    }
+  },
+  {
+    id: "focusPull",
+    name: "Focus Pull",
+    category: "cinematic",
+    defaultDurationSeconds: 0.7,
+    easing: "easeInOut",
+    params: [
+      { name: "uBokehRadius", type: "float", default: 1.0, min: 0.2, max: 2.5, label: "Defocus" },
+      { name: "uBokehHighlight", type: "float", default: 0.6, min: 0, max: 1, label: "Highlight bloom" }
+    ],
+    pipeline: {
+      passes: [
+        { moduleId: "bokeh-blur", inputs: ["uFrom"] },
+        { moduleId: "linear-mix", inputs: ["uSrc", "uTo"] },
+        { moduleId: "bokeh-blur", inputs: ["uSrc"] }
+      ]
+    }
+  },
+  {
+    id: "portal",
+    name: "Portal",
+    category: "cinematic",
+    defaultDurationSeconds: 0.8,
+    easing: "easeInOut",
+    params: [
+      { name: "uWarpStrength", type: "float", default: -2.2, min: -4, max: 0, label: "Pull" },
+      { name: "uAddStrength", type: "float", default: 0.5, min: 0, max: 1.5, label: "Glow" }
+    ],
+    pipeline: {
+      passes: [
+        { moduleId: "radial-warp", inputs: ["uFrom"], params: { uWarpCenter: [0.5, 0.5] } },
+        { moduleId: "chromatic-split", inputs: ["uSrc"], params: { uSplitAmount: 0.6, uSplitDir: [1, 0] } },
+        { moduleId: "additive-mix", inputs: ["uSrc"], params: { uAddColor: [0.8, 0.85, 1.0] } },
+        { moduleId: "linear-mix", inputs: ["uSrc", "uTo"] }
+      ]
+    }
+  },
+  {
+    id: "motionSmear",
+    name: "Motion Smear",
+    category: "creator",
+    defaultDurationSeconds: 0.4,
+    easing: "easeInOut",
+    params: [
+      { name: "uSmearDir", type: "vec2", default: [1, 0], label: "Direction" },
+      { name: "uSmearAmount", type: "float", default: 1.0, min: 0.2, max: 2, label: "Smear" }
+    ],
+    pipeline: {
+      passes: [
+        { moduleId: "directional-blur", inputs: ["uFrom"] },
+        { moduleId: "linear-mix", inputs: ["uSrc", "uTo"] },
+        { moduleId: "directional-blur", inputs: ["uSrc"] }
+      ]
+    }
   },
   {
     id: "kineticSwoosh",

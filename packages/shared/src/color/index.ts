@@ -17,6 +17,8 @@ export * from "./webgl-applicator";
 export * from "./media-shader";
 export * from "./media-renderer";
 export * from "./transitions/registry";
+export * from "./transitions/pipeline";
+export * from "./transitions/pipeline-assembler";
 export * from "./transition-compositor";
 export * from "./fragment-effects/registry";
 export * from "./fragment-effects/builtins";

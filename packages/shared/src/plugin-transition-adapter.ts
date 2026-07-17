@@ -88,7 +88,7 @@ export function registerTransitionManifest(
   const definition = transitionManifestToDefinition(manifest);
   const existing = getTransition(definition.id);
   const registered = registerTransition(definition, options);
-  const warnings = validateTransitionManifestGlsl(definition.glsl).warnings;
+  const warnings = validateTransitionManifestGlsl(definition.glsl ?? "").warnings;
   if (existing && !options.override && !registered) {
     warnings.push(`Transition id "${definition.id}" already exists; manifest was not registered.`);
   }

@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @kimera-by-aelivion/web editor:test
  */
-import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -1232,7 +1232,16 @@ function check(name: string, condition: boolean): void {
   check("nest: nested comp preserves relative offsets", nestResult!.nestedComposition.tracks[0]!.layers.find((l) => l.id === "b1")!.startSeconds === 3);
   check("nest: nested comp duration = selection span", nestResult!.nestedComposition.durationSeconds === 5);
   check("nest: fewer than 2 layers is rejected", nestLayersIntoComposition(nestSourceComp, ["a1"]) === null);
-  check("nest: nesting an already-compound clip is excluded from a new nest", nestLayersIntoComposition(nestResult!.composition, [compound.id, "c1"]) === null);
+  // Block 2 (NESTING_MATURITY.md) reversed the v1 exclusion: a compound clip in the selection nests
+  // into the NEW sequence too — moving existing clips into a brand-new comp can never create a
+  // reference cycle, and the renderer handles recursive nests.
+  const renest = nestLayersIntoComposition(nestResult!.composition, [compound.id, "c1"]);
+  check(
+    "nest: a compound clip in the selection nests into the new sequence (Block 2)",
+    renest !== null &&
+      renest!.nestedComposition.tracks.some((t) => t.layers.some((l) => l.nestedCompositionId === nestResult!.nestedComposition.id)) &&
+      renest!.nestedComposition.tracks.some((t) => t.layers.some((l) => l.id === "c1"))
+  );
 
   const nestCompositions = { [nestResult!.nestedComposition.id]: nestResult!.nestedComposition };
   const unnested = unnestClip(nestResult!.composition, nestCompositions, compound.id);
@@ -1247,6 +1256,87 @@ function check(name: string, condition: boolean): void {
   const trimmedCompound = { ...compound, sourceInSeconds: 1 };
   const trimmedComp = { ...nestResult!.composition, tracks: [{ ...nestResult!.composition.tracks[0]!, layers: [trimmedCompound, ...nestResult!.composition.tracks[0]!.layers.filter((l) => l.id !== compound.id)] }] };
   check("un-nest: a trimmed compound clip is rejected (v1)", unnestClip(trimmedComp, nestCompositions, compound.id) === null);
+
+  // --- Block 2 (NESTING_MATURITY.md): composition registry + healer ----------------------------
+  {
+    const graph: ProjectGraph = { projectId: "p1", effects: [], editableFields: {}, version: 1, composition: rootComp, compositions: { nestA: nestComp } };
+    const stamped = stampCompositionRegistry(graph);
+    check("registry: write-through mirrors the active comp into compositions", stamped.compositions?.["root"] === rootComp);
+    check("registry: pointers stamped (root=active for a top-level comp)", stamped.rootCompositionId === "root" && stamped.activeCompositionId === "root");
+
+    // Stranded graph (the pre-Block-2 refresh bug): the NEST persisted as `composition`, the real
+    // root stashed in `compositions`, no pointers, breadcrumb lost.
+    const stranded: ProjectGraph = { projectId: "p1", effects: [], editableFields: {}, version: 1, composition: nestComp, compositions: { root: rootComp } };
+    const healed = healCompositionRegistry(stranded);
+    check("healer: stranded project resolves its true root by walking nest references", healed.graph.rootCompositionId === "root");
+    check("healer: active comp stays the nest (reopen where the user was)", healed.graph.activeCompositionId === "nestA");
+    check("healer: breadcrumb restored (root → nest)", healed.breadcrumb.length === 1 && healed.breadcrumb[0]?.id === "root");
+
+    // Multi-level: outer → midc → nestA.
+    const midClip2 = mkLayer({ id: "mid2", trackId: "midc2_t1", nestedCompositionId: "nestA" });
+    const midComp2 = mkComp("midc2", 10, [midClip2]);
+    const outerClip2 = mkLayer({ id: "outer2", trackId: "o2_t1", nestedCompositionId: "midc2" });
+    const outerComp2 = mkComp("o2", 10, [outerClip2]);
+    const registry = { o2: outerComp2, midc2: midComp2, nestA: nestComp };
+    check("registry: findRootCompositionId walks two levels up", findRootCompositionId(registry, "nestA") === "o2");
+    const crumbs = deriveNestBreadcrumb(registry, "o2", "nestA");
+    check("registry: multi-level breadcrumb is root→…→parent", crumbs.length === 2 && crumbs[0]?.id === "o2" && crumbs[1]?.id === "midc2");
+    check("registry: breadcrumb of the root itself is empty", deriveNestBreadcrumb(registry, "o2", "o2").length === 0);
+  }
+
+  // --- Block 5 (NESTING_MATURITY.md): compound volume + nested-track fader folding ------------
+  {
+    const volEffect = { id: "vol1", type: "volume" as const, name: "Volume", enabled: true, intensity: 100, params: { gain: 80 } };
+    const gainKey = (id: string, timeSeconds: number, value: number) => ({
+      id,
+      target: { scope: "effect" as const, property: "gain", effectId: "vol1" },
+      timeSeconds,
+      value,
+      interpolation: "linear" as const,
+      temporal: {}
+    });
+    const audioChild = mkLayer({ id: "au", trackId: "vnest_t1", type: "audio", startSeconds: 0, durationSeconds: 8 });
+    const volNest = {
+      ...mkComp("vnest", 8, [audioChild]),
+      tracks: [{ id: "vnest_t1", type: "audio" as const, name: "A1", layers: [audioChild], volume: 0.5 }]
+    };
+    // Compound at t=2 with a keyframed volume effect (100% at local 0 → 50% at local 4).
+    const volClip = mkLayer({
+      id: "vc",
+      trackId: "vroot_t1",
+      nestedCompositionId: "vnest",
+      startSeconds: 2,
+      durationSeconds: 8,
+      effects: [volEffect],
+      animations: [gainKey("gk0", 0, 100), gainKey("gk1", 4, 50)]
+    });
+    const volRoot = mkComp("vroot", 12, [volClip]);
+    const volExp = expandNestedCompositions(volRoot, { vnest: volNest, vroot: volRoot });
+    const foldedChild = volExp.composition.tracks[0]!.layers.find((l) => l.id === "vc__nest_au")!;
+    check("audio fold: derived child gains a synthesized volume effect", foldedChild.effects.some((e) => e.type === "volume"));
+    // At parent t=2 (child local 0 == clip local 0): clip gain 100% × fader 0.5 → 0.5.
+    check("audio fold: clip automation × static fader at the head", Math.abs(getCompositionVolume(foldedChild, { currentTimeSeconds: 2 }) - 0.5) < 1e-6);
+    // At parent t=6 (clip local 4): clip gain 50% × fader 0.5 → 0.25.
+    check("audio fold: keyframed clip gain remapped to child-local time", Math.abs(getCompositionVolume(foldedChild, { currentTimeSeconds: 6 }) - 0.25) < 1e-6);
+
+    // A child with its OWN volume effect keeps it, scaled by clip STATIC gain × fader.
+    const ownVol = { id: "ovol", type: "volume" as const, name: "Volume", enabled: true, intensity: 100, params: { gain: 200 } };
+    const ownChild = mkLayer({ id: "ow", trackId: "onest_t1", type: "audio", startSeconds: 0, durationSeconds: 8, effects: [ownVol] });
+    const ownNest = {
+      ...mkComp("onest", 8, [ownChild]),
+      tracks: [{ id: "onest_t1", type: "audio" as const, name: "A1", layers: [ownChild], volume: 0.5 }]
+    };
+    const ownClip = mkLayer({ id: "oc", trackId: "oroot_t1", nestedCompositionId: "onest", startSeconds: 0, durationSeconds: 8, effects: [{ ...volEffect, params: { gain: 80 } }] });
+    const ownRoot = mkComp("oroot", 12, [ownClip]);
+    const ownExp = expandNestedCompositions(ownRoot, { onest: ownNest, oroot: ownRoot });
+    const ownFolded = ownExp.composition.tracks[0]!.layers.find((l) => l.id === "oc__nest_ow")!;
+    // 200% (child) × 80% (clip static) × 0.5 (fader) = 0.8.
+    check("audio fold: child's own volume scaled by clip static gain × fader", Math.abs(getCompositionVolume(ownFolded, { currentTimeSeconds: 1 }) - 0.8) < 1e-6);
+    // Unity everything stays untouched (no synthesized effect on a plain nest).
+    const plainExp = expandNestedCompositions(rootComp, compositions);
+    const plainChild = plainExp.composition.tracks[0]!.layers.find((l) => l.id === "nc1__nest_cv")!;
+    check("audio fold: unity gain adds no effect", !plainChild.effects.some((e) => e.type === "volume"));
+  }
 }
 
 // --- buildSceneDraws: compound-clip GROUP folding (NESTING.md Phase C, Block 1) -----------------

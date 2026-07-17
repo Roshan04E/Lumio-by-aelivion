@@ -198,6 +198,155 @@ function polygonPathD(sides: number, rotationDeg: number): string {
   return `M${pts[0]} L${pts.slice(1).join(" L")} Z`;
 }
 
+// --- Phase 2 procedural generators: blob + torn-paper --------------------------------------------
+//
+// Both are SEEDED — the same params always emit the exact same outline, in every renderer, forever.
+// That determinism is what lets a procedural frame ride the pixel gate and survive a project reload
+// without the shape shifting under the user. `seed` is a first-class param: scrubbing it re-rolls the
+// variation while roughness/wobble stay put.
+
+/** A unit-box outline vertex; tangents (when present) are ABSOLUTE offsets in unit-box units, matching
+ *  the `MaskPoint` tangent convention so scaling into a box is a pure multiply. */
+export interface FrameOutlinePoint {
+  x: number;
+  y: number;
+  inTangent?: { x: number; y: number } | undefined;
+  outTangent?: { x: number; y: number } | undefined;
+}
+
+/** Deterministic PRNG (mulberry32). Same seed → same sequence on every platform (pure integer math). */
+function mulberry32(seed: number): () => number {
+  let s = (Math.floor(seed) || 1) >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Organic blob: N points around the centre with seeded radius + angular jitter, smoothed by
+ * Catmull-Rom tangents (`(P[i+1] − P[i−1]) / 6`, the standard Catmull-Rom → cubic-Bezier conversion),
+ * then rescaled to FILL the unit box (like every other generator, the shape touches its frame box).
+ */
+export function blobOutlinePoints(points: number, seed: number, wobble: number): FrameOutlinePoint[] {
+  const n = Math.max(3, Math.min(24, Math.round(points)));
+  const w = clamp01(wobble / 100);
+  const rand = mulberry32(seed);
+  const step = (Math.PI * 2) / n;
+  const raw: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i < n; i += 1) {
+    // Angular jitter stays under half a step so the ring never self-intersects.
+    const angle = -Math.PI / 2 + i * step + (rand() - 0.5) * step * 0.6 * w;
+    const radius = 0.5 * (1 - w * 0.55 * rand());
+    raw.push({ x: 0.5 + Math.cos(angle) * radius, y: 0.5 + Math.sin(angle) * radius });
+  }
+  // Rescale to unit bounds so the blob fills its frame box regardless of how the radii rolled.
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of raw) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  const sx = maxX - minX > 1e-6 ? 1 / (maxX - minX) : 1;
+  const sy = maxY - minY > 1e-6 ? 1 / (maxY - minY) : 1;
+  const pts = raw.map((p) => ({ x: (p.x - minX) * sx, y: (p.y - minY) * sy }));
+  return pts.map((p, i) => {
+    const prev = pts[(i - 1 + n) % n]!;
+    const next = pts[(i + 1) % n]!;
+    const tx = (next.x - prev.x) / 6;
+    const ty = (next.y - prev.y) / 6;
+    return { ...p, inTangent: { x: -tx, y: -ty }, outTangent: { x: tx, y: ty } };
+  });
+}
+
+/** Which edges of a torn-paper frame actually tear; the others stay ruler-straight. */
+export type TornEdges = "all" | "top-bottom" | "left-right";
+
+/**
+ * Torn paper: the unit rectangle with torn edges subdivided into `detail` segments, each interior
+ * vertex displaced INWARD by a seeded amount (paper tears in from the sheet edge, and inward-only
+ * keeps the outline inside the frame box). Corners stay exact so the sheet still reads as a rectangle.
+ * No tangents — the jagged polyline IS the torn look.
+ */
+export function tornPaperOutlinePoints(roughness: number, seed: number, detail: number, edges: TornEdges = "all"): FrameOutlinePoint[] {
+  const amp = clamp01(roughness / 100) * 0.06; // max 6% of the box — a tear, not a bite
+  const teeth = Math.max(3, Math.min(40, Math.round(detail)));
+  const rand = mulberry32(seed);
+  const tearHorizontal = edges !== "left-right"; // top + bottom edges
+  const tearVertical = edges !== "top-bottom"; // left + right edges
+  const out: FrameOutlinePoint[] = [];
+  const corners = [
+    { x: 0, y: 0 },
+    { x: 1, y: 0 },
+    { x: 1, y: 1 },
+    { x: 0, y: 1 }
+  ];
+  for (let e = 0; e < 4; e += 1) {
+    const from = corners[e]!;
+    const to = corners[(e + 1) % 4]!;
+    const horizontal = e % 2 === 0; // edges 0 (top) and 2 (bottom) run in x
+    const torn = horizontal ? tearHorizontal : tearVertical;
+    // Inward is +y on the top edge, −y on the bottom, +x on the left, −x on the right.
+    const inward = e === 0 ? { x: 0, y: 1 } : e === 1 ? { x: -1, y: 0 } : e === 2 ? { x: 0, y: -1 } : { x: 1, y: 0 };
+    out.push({ x: from.x, y: from.y });
+    if (!torn) continue; // straight edge: the two corners are enough
+    for (let k = 1; k < teeth; k += 1) {
+      const t = k / teeth;
+      const d = rand() * amp;
+      out.push({ x: from.x + (to.x - from.x) * t + inward.x * d, y: from.y + (to.y - from.y) * t + inward.y * d });
+    }
+  }
+  return out;
+}
+
+/** Cubic-Bezier path `d` through outline points with tangents (same math as `maskShapeToPathD`). */
+function outlinePointsToPathD(pts: FrameOutlinePoint[]): string {
+  if (pts.length < 2) return "M0 0H1V1H0Z";
+  const hasTangents = pts.some((p) => p.inTangent || p.outTangent);
+  if (!hasTangents) {
+    return `M${fmt(pts[0]!.x)} ${fmt(pts[0]!.y)} L${pts.slice(1).map((p) => `${fmt(p.x)} ${fmt(p.y)}`).join(" L")} Z`;
+  }
+  let d = `M${fmt(pts[0]!.x)} ${fmt(pts[0]!.y)}`;
+  for (let i = 0; i < pts.length; i += 1) {
+    const cur = pts[i]!;
+    const next = pts[(i + 1) % pts.length]!;
+    const c1x = cur.x + (cur.outTangent?.x ?? 0);
+    const c1y = cur.y + (cur.outTangent?.y ?? 0);
+    const c2x = next.x + (next.inTangent?.x ?? 0);
+    const c2y = next.y + (next.inTangent?.y ?? 0);
+    d += ` C${fmt(c1x)} ${fmt(c1y)} ${fmt(c2x)} ${fmt(c2y)} ${fmt(next.x)} ${fmt(next.y)}`;
+  }
+  return `${d} Z`;
+}
+
+/** The blob/torn outline for a frame's CURRENT params, unit-box. Shared by the path + mask builders so
+ *  the panel tile, the placeholder outline, and the clip mask can never disagree about the shape. */
+function proceduralOutlinePoints(frame: Pick<LayerFrame, "generatorId" | "params">): FrameOutlinePoint[] | null {
+  if (frame.generatorId === "blob") {
+    return blobOutlinePoints(
+      numberParam(frame.params, "points", 8),
+      numberParam(frame.params, "seed", 7),
+      numberParam(frame.params, "wobble", 40)
+    );
+  }
+  if (frame.generatorId === "torn-paper") {
+    const edges = frame.params.edges;
+    return tornPaperOutlinePoints(
+      numberParam(frame.params, "roughness", 50),
+      numberParam(frame.params, "seed", 3),
+      numberParam(frame.params, "detail", 14),
+      edges === "top-bottom" || edges === "left-right" ? edges : "all"
+    );
+  }
+  return null;
+}
+
 /**
  * The unit-box clip outline for a frame, as an SVG path `d`. Unknown generators fall back to the full box
  * (media just fills the layer, no clip) so an unrecognised pack frame degrades safely instead of vanishing.
@@ -214,9 +363,10 @@ export function frameOutlinePathD(frame: Pick<LayerFrame, "generatorId" | "param
     case "svg-path":
       return frame.staticPath && frame.staticPath.trim() ? frame.staticPath : "M0 0H1V1H0Z";
     case "blob":
-    case "torn-paper":
-      // Phase 2 procedural generators; degrade to a plain box until implemented.
-      return "M0 0H1V1H0Z";
+    case "torn-paper": {
+      const pts = proceduralOutlinePoints(frame);
+      return pts ? outlinePointsToPathD(pts) : "M0 0H1V1H0Z";
+    }
     default:
       return "M0 0H1V1H0Z";
   }
@@ -250,6 +400,43 @@ export const builtInFrames: FrameDefinition[] = [
     ],
     // A regular N-gon is only regular in a square box — otherwise it shears with the comp aspect.
     chromeDefaults: { aspectLock: true }
+  },
+  {
+    // Phase 2 — organic blob. Seeded + deterministic: `seed` re-rolls the variation, `wobble` sets how
+    // far radii/angles stray from a circle, `points` how many lobes the outline can have.
+    id: "kimera.blob",
+    name: "Blob",
+    generatorId: "blob",
+    params: [
+      { key: "points", label: "Points", type: "number", min: 3, max: 16, step: 1, defaultValue: 8 },
+      { key: "wobble", label: "Wobble", type: "number", min: 0, max: 100, step: 1, defaultValue: 40, unit: "%" },
+      { key: "seed", label: "Seed", type: "number", min: 1, max: 100, step: 1, defaultValue: 7 }
+    ],
+    // A blob reads organic in a square-ish box; unlocked it stretches with the comp like an oval.
+    chromeDefaults: { aspectLock: true }
+  },
+  {
+    // Phase 2 — torn paper. Seeded jagged edges tearing INWARD from the sheet edge; `edges` picks which
+    // sides tear (top-bottom = the classic ripped strip), `detail` the tooth count, `roughness` the depth.
+    id: "kimera.torn-paper",
+    name: "Torn Paper",
+    generatorId: "torn-paper",
+    params: [
+      { key: "roughness", label: "Roughness", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%" },
+      { key: "detail", label: "Detail", type: "number", min: 4, max: 40, step: 1, defaultValue: 14 },
+      { key: "seed", label: "Seed", type: "number", min: 1, max: 100, step: 1, defaultValue: 3 },
+      {
+        key: "edges",
+        label: "Torn Edges",
+        type: "select",
+        defaultValue: "all",
+        options: [
+          { label: "All", value: "all" },
+          { label: "Top & Bottom", value: "top-bottom" },
+          { label: "Left & Right", value: "left-right" }
+        ]
+      }
+    ]
   }
 ];
 
@@ -464,8 +651,24 @@ export function frameClipMask(
       }
       return { ...base, shape: "polygon", points };
     }
+    case "blob":
+    case "torn-paper": {
+      // Phase 2 procedural shapes ride the existing bezier/polygon mask shapes: unit-box outline points
+      // scale into the frame box (tangents are unit-box offsets → same multiply). Blob keeps its smooth
+      // tangents (→ cubic segments in maskShapeToPathD); torn-paper is a jagged polyline by design.
+      const outline = proceduralOutlinePoints({ generatorId: frame.generatorId, params });
+      if (!outline) return null;
+      const points: MaskPoint[] = outline.map((p, i) => ({
+        id: `${id}_${i}`,
+        x: left + p.x * w,
+        y: top + p.y * h,
+        ...(p.inTangent ? { inTangent: { x: p.inTangent.x * w, y: p.inTangent.y * h } } : {}),
+        ...(p.outTangent ? { outTangent: { x: p.outTangent.x * w, y: p.outTangent.y * h } } : {})
+      }));
+      return { ...base, shape: frame.generatorId === "blob" ? "bezier" : "polygon", points };
+    }
     default:
-      // svg-path / blob / torn-paper — not a native mask shape yet (Phase 2). No clip.
+      // svg-path — not a native mask shape yet (Phase 3 authoring). No clip.
       return null;
   }
 }
@@ -588,9 +791,9 @@ export function frameGroupScaleFactor(
 //
 // Native `shapeKind` wherever one exists so simple frames stay parametric AS shapes:
 //   rounded-rect → `rounded-rectangle` + `borderRadius`   ellipse → `ellipse`
-// otherwise `pen` + `shapePath` (the outline as points in the shape box; exotic curves would carry via
-// MaskPoint tangents). `svg-path`/`blob`/`torn-paper` don't clip yet (frameClipMask → null → media shows
-// unclipped), so their honest current visual is the full box → `rectangle`.
+// otherwise `pen` + `shapePath` (the outline as points in the shape box; curves carry via MaskPoint
+// tangents). `blob`/`torn-paper` BAKE into a pen path (D4 — their roughness/seed freeze); `svg-path`
+// doesn't clip yet, so its honest current visual is the full box → `rectangle`.
 
 /** Shape-layer defaults a converted frame adopts (the media is gone, so the shape needs its own paint).
  *  Kept here, not imported from the editor, so this pure module has no app dependency. */
@@ -641,8 +844,23 @@ export function frameToShapeLayer(layer: TimelineLayer, comp: { width: number; h
       shapeKind = "pen";
       shapePath = polygonShapePath(`${layer.id}__shape`, numberParam(params, "sides", 6), numberParam(params, "rotation", 0));
       break;
+    case "blob":
+    case "torn-paper": {
+      // Procedural shapes BAKE (D4): roughness/seed freeze into a pen-editable path. Unit-box outline
+      // → shape-box 0..100 coords, tangents carried (customShapePath resolves them in the same space).
+      shapeKind = "pen";
+      const outline = proceduralOutlinePoints({ generatorId: frame.generatorId, params }) ?? [];
+      shapePath = outline.map((p, i) => ({
+        id: `${layer.id}__shape_${i}`,
+        x: p.x * 100,
+        y: p.y * 100,
+        ...(p.inTangent ? { inTangent: { x: p.inTangent.x * 100, y: p.inTangent.y * 100 } } : {}),
+        ...(p.outTangent ? { outTangent: { x: p.outTangent.x * 100, y: p.outTangent.y * 100 } } : {})
+      }));
+      break;
+    }
     default:
-      // svg-path / blob / torn-paper — not clipped today, so the honest visual is the full box.
+      // svg-path — not clipped today, so the honest visual is the full box.
       shapeKind = "rectangle";
       break;
   }
