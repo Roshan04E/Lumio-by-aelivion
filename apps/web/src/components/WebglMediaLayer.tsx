@@ -1434,6 +1434,14 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           if (wcProviderRef.current !== provider) return; // released/fell back mid-decode
           if (frame) {
             wcNullCountRef.current = 0;
+            // S2 REVERSE (Premiere-style smooth reverse): sustained reverse playback is EXPECTED
+            // backward motion, not a scrub-back transient. mapSourceTime with a signed (negative)
+            // speed already walks the source target DOWNWARD, and the decoder's reverse-shuttle cache
+            // serves those decreasing targets — so present each returned frame DIRECTLY and skip the
+            // forward-only rewind hold below (which would freeze/fast-forward-pan every reverse tick).
+            // Degrades by dropping frames when decode can't keep up, never by freezing — like Premiere.
+            const reversedPlayback = tp.isPlaying && tp.speed < 0;
+            if (reversedPlayback) wcHoldStartRef.current = null;
             // REWIND CATCH-UP HOLD (2026-07-03 soak): after a backward jump on a sparse-keyframe
             // source the provider time-slices the re-decode and serves progressively ADVANCING
             // stale frames (its frameBudgetMs contract). Presenting them plays the skipped span
@@ -1469,7 +1477,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               setWcHeldFrame({ source: held, width: provider.width, height: provider.height });
               drawVideoFrameRef.current();
             };
-            if (lag > WC_HOLD_LAG_S) {
+            if (lag > WC_HOLD_LAG_S && !reversedPlayback) {
               // The hold STREAK ends only when lag actually recovers (below), never on a present:
               // the old logic reset the streak after the window expired and one frame presented, so
               // sustained divergence re-armed a fresh 5s freeze per frame — "picture pauses in live
