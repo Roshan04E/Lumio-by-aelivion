@@ -302,6 +302,38 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
             onChange={(blendMode) => onChange((item) => ({ ...item, blendMode }))}
           />
         </div>
+        <div className="number-row-select">
+          <span className="effect-slider-label">
+            <span className="effect-slider-label-text" title="Use the clip directly above as this clip's matte (its alpha or brightness cuts this clip out). The matte clip stops drawing on its own while consumed.">
+              Matte
+            </span>
+          </span>
+          <ThemedSelect
+            ariaLabel="Track matte"
+            value={
+              layer.trackMatte
+                ? `${layer.trackMatte.mode}${layer.trackMatte.invert ? "-invert" : ""}`
+                : "off"
+            }
+            options={[
+              { value: "off", label: "Off" },
+              { value: "alpha", label: "Alpha (clip above)" },
+              { value: "alpha-invert", label: "Alpha Inverted" },
+              { value: "luma", label: "Luma (clip above)" },
+              { value: "luma-invert", label: "Luma Inverted" }
+            ]}
+            onChange={(value) =>
+              onChange((item) => {
+                if (value === "off") {
+                  const { trackMatte: _off, ...rest } = item;
+                  return rest as typeof item;
+                }
+                const [mode, invert] = value.split("-") as ["alpha" | "luma", string | undefined];
+                return { ...item, trackMatte: { mode, ...(invert ? { invert: true } : {}) } };
+              })
+            }
+          />
+        </div>
         {layer.type === "video" || layer.type === "image" ? (
           <>
             <div className="number-row-select">

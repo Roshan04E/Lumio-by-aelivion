@@ -593,6 +593,48 @@ function TimelineStripImpl({
   // per structural edit (keyed on tracks), never on playhead/scrub, so the perf-critical strip is
   // untouched by a moving playhead.
   const clipOrdinals = useMemo(() => computeLayerOrdinals(composition), [composition.tracks]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Track matte (D1): clips CONSUMED as a matte source render nowhere on their own — dim them (like
+  // `is-disabled`) so the timeline reads "this clip feeds the matte below". Mirrors the renderer's
+  // "nearest overlapping clip above" resolution (lower trackIndex = on top, per VideoPreview's z sort)
+  // with an interval sweep: scanning upward from the consumer, a clip is a source wherever it overlaps
+  // a part of the consumer's span no nearer track already covered. Editor affordance only — the
+  // authoritative per-frame resolution lives in build-scene-draws.
+  const matteSourceLayerIds = useMemo(() => {
+    const sources = new Set<string>();
+    const tracks = composition.tracks;
+    for (let ti = 0; ti < tracks.length; ti++) {
+      const track = tracks[ti]!;
+      if (track.type === "audio") continue;
+      for (const consumer of track.layers) {
+        if (!consumer.trackMatte || consumer.disabled) continue;
+        let uncovered: [number, number][] = [[consumer.startSeconds, consumer.startSeconds + consumer.durationSeconds]];
+        for (let tj = ti - 1; tj >= 0 && uncovered.length > 0; tj--) {
+          const above = tracks[tj]!;
+          if (above.type === "audio") continue;
+          for (const candidate of above.layers) {
+            if (candidate.disabled) continue;
+            const cStart = candidate.startSeconds;
+            const cEnd = candidate.startSeconds + candidate.durationSeconds;
+            const next: [number, number][] = [];
+            let hit = false;
+            for (const [start, end] of uncovered) {
+              if (cEnd <= start || cStart >= end) {
+                next.push([start, end]);
+                continue;
+              }
+              hit = true;
+              if (cStart > start) next.push([start, cStart]);
+              if (cEnd < end) next.push([cEnd, end]);
+            }
+            if (hit) sources.add(candidate.id);
+            uncovered = next;
+            if (uncovered.length === 0) break;
+          }
+        }
+      }
+    }
+    return sources;
+  }, [composition.tracks]);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(56);
   const pixelsPerSecondRef = useRef(pixelsPerSecond);
   const laneWidthPx = Math.max(560, Math.ceil(timelineDurationSeconds * pixelsPerSecond));
@@ -3666,6 +3708,7 @@ function TimelineStripImpl({
                       isSelected={isSelected}
                       isSelectedForKeyframes={isLayerSelectedForKeyframes}
                       isSlipping={slipLayerId === layer.id}
+                      isMatteSource={matteSourceLayerIds.has(layer.id)}
                       slipPreviewSourceInSeconds={slipPreview?.layerId === layer.id ? slipPreview.sourceInSeconds : null}
                       key={layer.id}
                       layer={layer}
@@ -4895,6 +4938,8 @@ interface TimelineClipProps {
   isEffectDropTarget: boolean;
   isSelectedForKeyframes: boolean;
   isSlipping: boolean;
+  /** Consumed as a sibling's track matte (D1) — drawn dimmed, like `disabled`, but still editable. */
+  isMatteSource: boolean;
   slipPreviewSourceInSeconds: number | null;
   selectedClipKeyframeId: string | null;
   draggingKeyframeId: string | null;
@@ -4958,6 +5003,7 @@ const TimelineClip = memo(function TimelineClip({
   isEffectDropTarget,
   isSelectedForKeyframes,
   isSlipping,
+  isMatteSource,
   slipPreviewSourceInSeconds,
   selectedClipKeyframeId,
   draggingKeyframeId,
@@ -5033,7 +5079,7 @@ const TimelineClip = memo(function TimelineClip({
       aria-label={`${layer.name}, ${layer.type}, starts at ${startSeconds.toFixed(1)} seconds`}
       className={`timeline-clip timeline-clip-${layer.type} ${isSelected ? "is-selected" : ""} ${isDragging ? "is-dragging" : ""} ${
         isEffectDropTarget ? "is-effect-drop-target" : ""
-      } ${isSlipping ? "is-slipping" : ""} ${labelColor ? "has-label" : ""} ${layer.disabled ? "is-disabled" : ""}`}
+      } ${isSlipping ? "is-slipping" : ""} ${labelColor ? "has-label" : ""} ${layer.disabled ? "is-disabled" : ""} ${isMatteSource ? "is-matte-source" : ""}`}
       data-layer-id={layer.id}
       role="button"
       tabIndex={0}

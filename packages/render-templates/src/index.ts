@@ -168,6 +168,12 @@ export interface RenderManifestLayer {
    * Without this a framed clip renders UN-clipped in the cloud path — pinned by the framed-media fixture.
    */
   frame?: LayerFrame | undefined;
+  /**
+   * Track matte key (D1), carried verbatim. The renderer's shared `buildSceneDraws` re-resolves the
+   * SOURCE clip (nearest above in z) per frame — without this a matted clip renders UN-matted (and
+   * its consumed source pops back in) in the cloud path. Pinned by the track-matte fixture.
+   */
+  trackMatte?: { mode: "alpha" | "luma"; invert?: boolean | undefined } | undefined;
   /** Junction transition on the incoming side, carried verbatim; the renderer reads wipe/iris from it. */
   transitionIn?: TransitionSpec | undefined;
   /** Layer blend mode, carried verbatim; the renderer applies it as CSS mix-blend-mode. */
@@ -343,6 +349,7 @@ export function buildRenderManifest(input: {
             matte: layer.matte,
             masks: layer.masks,
             frame: layer.frame,
+            trackMatte: layer.trackMatte,
             transitionIn: layer.transitionIn,
             blendMode: layer.blendMode,
             content: layer.content,
@@ -420,6 +427,7 @@ export function buildRenderManifest(input: {
           matte: layer.matte,
           masks: layer.masks,
           frame: layer.frame,
+          trackMatte: layer.trackMatte,
           transitionIn: layer.transitionIn,
           blendMode: layer.blendMode,
           content: layer.content,

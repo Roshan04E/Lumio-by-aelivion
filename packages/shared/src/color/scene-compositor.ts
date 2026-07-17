@@ -177,6 +177,16 @@ export interface SceneLayerDraw {
    * for ordering). A pass with no `mask` covers the whole layer.
    */
   fragmentPasses?: SceneFragmentPass[] | undefined;
+  /**
+   * Track matte key (D1): `draw` is the matte SOURCE's own full draw (a layer, or a compound-clip
+   * group), pre-composed into a comp-sized RTT whose alpha (`mode: "alpha"`) or luminance×alpha
+   * (`mode: "luma"`) multiplies this layer's coverage — applied at the FINAL composite (after
+   * blur/glow/region/fragment passes, the AE order), in comp space alongside the clip mask.
+   * `draw: null` means the layer asked for a matte but no source exists at this time: an EMPTY matte
+   * (layer invisible; fully visible when `invert`). The source never also draws normally —
+   * `build-scene-draws` excludes it. Chained mattes work (depth-indexed RTT pool).
+   */
+  matteFrom?: { draw: SceneLayerDraw | SceneGroupDraw | null; mode: "alpha" | "luma"; invert?: boolean | undefined } | null | undefined;
 }
 
 /**
@@ -354,7 +364,11 @@ in vec2 v_uv;
 uniform sampler2D uSrc;
 uniform sampler2D uMask;
 uniform sampler2D uDest;
+uniform sampler2D uTrackMatte;
 uniform bool uHasMask;
+uniform bool uHasTrackMatte;
+uniform bool uTrackMatteLuma;
+uniform bool uTrackMatteInvert;
 uniform vec2 uResolution;
 uniform float uOpacity;
 uniform int uBlend;
@@ -380,6 +394,14 @@ void main(){
     // comp-filling quad the two coincide, but for an element-box (text/shape) or tilted quad v_uv is
     // box-local, so v_uv would mis-place the matte. gl_FragCoord/uResolution is always comp space.
     src.a *= texture(uMask, gl_FragCoord.xy / uResolution).a;
+  }
+  if (uHasTrackMatte) {
+    // Track matte (D1) is comp-space like the clip mask. Luma mode uses Rec.709 weights on the
+    // straight rgb, gated by the matte's own alpha — transparent areas read as BLACK (the
+    // Premiere/AE convention), so an alpha-less luma source and a cutout both behave.
+    vec4 tm = texture(uTrackMatte, gl_FragCoord.xy / uResolution);
+    float cov = uTrackMatteLuma ? dot(tm.rgb, vec3(0.2126, 0.7152, 0.0722)) * tm.a : tm.a;
+    src.a *= uTrackMatteInvert ? 1.0 - cov : cov;
   }
   src.a *= uOpacity;
   vec4 dst = texture(uDest, gl_FragCoord.xy / uResolution);
@@ -712,6 +734,18 @@ export class SceneCompositor {
   // the next starts), so reuse across siblings at one depth is safe — this mirrors `sideA/sideB` being a
   // single reusable pair rather than a map. Bounded by `NEST_MAX_DEPTH` (8), so at most 8 pairs ever exist.
   private readonly groupTargets: { target: RenderTarget; scratch: RenderTarget }[] = [];
+  // Depth-indexed RTT pairs for TRACK MATTE source pre-composes (D1) — depth-indexed for the same
+  // reason as `groupTargets`: a matte source render can itself hit a matted layer (chained mattes, or
+  // a matted child inside a compound clip used as a matte), and the OUTER matte texture must survive
+  // until its consumer's composite draw has sampled it. Sized/resized per use to the CURRENT ambient
+  // comp size (a nested consumer's matte renders at the nest's size).
+  private readonly matteTargets: { target: RenderTarget; scratch: RenderTarget }[] = [];
+  private matteDepth = 0;
+  // The `groupTargets` depth the NEXT group render may safely use: `renderGroupInto(depth)` holds it
+  // at `depth + 1` for its ENTIRE body (children render AND shell composite — the shell composite
+  // still reads this depth's pair as its source). `buildTrackMatte` renders a compound-clip matte
+  // SOURCE at this depth so it never clobbers a still-in-flight outer group's pair.
+  private freeGroupDepth = 0;
   // Per-region-effect grade renderers ON THIS shared context (zero extra GL contexts) — each caches its own
   // baked LUT, keyed by the pass's effectKey so two alternating passes never rebake per frame. Pruned when a
   // pass hasn't drawn for a while (grade toggled off / clip left the window).
@@ -750,6 +784,10 @@ export class SceneCompositor {
   private readonly uMask: WebGLUniformLocation | null;
   private readonly uDest: WebGLUniformLocation | null;
   private readonly uHasMask: WebGLUniformLocation | null;
+  private readonly uTrackMatte: WebGLUniformLocation | null;
+  private readonly uHasTrackMatte: WebGLUniformLocation | null;
+  private readonly uTrackMatteLuma: WebGLUniformLocation | null;
+  private readonly uTrackMatteInvert: WebGLUniformLocation | null;
   private readonly uResolution: WebGLUniformLocation | null;
   private readonly uOpacity: WebGLUniformLocation | null;
   private readonly uBlend: WebGLUniformLocation | null;
@@ -957,6 +995,10 @@ export class SceneCompositor {
     this.uMask = gl.getUniformLocation(program, "uMask");
     this.uDest = gl.getUniformLocation(program, "uDest");
     this.uHasMask = gl.getUniformLocation(program, "uHasMask");
+    this.uTrackMatte = gl.getUniformLocation(program, "uTrackMatte");
+    this.uHasTrackMatte = gl.getUniformLocation(program, "uHasTrackMatte");
+    this.uTrackMatteLuma = gl.getUniformLocation(program, "uTrackMatteLuma");
+    this.uTrackMatteInvert = gl.getUniformLocation(program, "uTrackMatteInvert");
     this.uResolution = gl.getUniformLocation(program, "uResolution");
     this.uOpacity = gl.getUniformLocation(program, "uOpacity");
     this.uBlend = gl.getUniformLocation(program, "uBlend");
@@ -1595,6 +1637,7 @@ export class SceneCompositor {
     contentPan: [number, number] = [0, 0],
     crop: [number, number, number, number] = [0, 0, 0, 0],
     dest: RenderTarget | null = null,
+    trackMatte: { tex: WebGLTexture; luma: boolean; invert: boolean } | null = null,
   ): void {
     const gl = this.gl;
     const w = this.width;
@@ -1621,6 +1664,12 @@ export class SceneCompositor {
     gl.bindTexture(gl.TEXTURE_2D, hasMask && maskTex ? maskTex : this.emptyTex);
     gl.uniform1i(this.uMask, 1);
     gl.uniform1i(this.uHasMask, hasMask ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, trackMatte ? trackMatte.tex : this.emptyTex);
+    gl.uniform1i(this.uTrackMatte, 3);
+    gl.uniform1i(this.uHasTrackMatte, trackMatte ? 1 : 0);
+    gl.uniform1i(this.uTrackMatteLuma, trackMatte?.luma ? 1 : 0);
+    gl.uniform1i(this.uTrackMatteInvert, trackMatte?.invert ? 1 : 0);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, dest ? this.emptyTex : this.accumA.tex);
     gl.uniform1i(this.uDest, 2);
@@ -1649,8 +1698,12 @@ export class SceneCompositor {
    * normal blend) — used to build a transition side so every per-clip effect is present during the transition.
    */
   private renderLayerInto(layer: SceneLayerDraw, dest: RenderTarget | null): void {
+    // Track matte (D1) resolves FIRST — into its own depth-indexed RTT, so it survives whatever the
+    // layer's own render uses (plate/scratch/nest pairs) — and applies ONCE at the final composite
+    // (after blur/glow/region/fragment passes, the AE order), alongside the clip mask.
+    const trackMatte = layer.matteFrom ? this.buildTrackMatte(layer.matteFrom) : null;
     if ((layer.regionPasses && layer.regionPasses.length > 0) || (layer.fragmentPasses && layer.fragmentPasses.length > 0)) {
-      this.renderLayerWithRegionPasses(layer, dest);
+      this.renderLayerWithRegionPasses(layer, dest, trackMatte);
       return;
     }
     const gl = this.gl;
@@ -1698,7 +1751,7 @@ export class SceneCompositor {
 
     if (blurPx <= 0 && !glow) {
       // Fast path (Phase 1): object-fit + content pan/zoom/crop + mask + transform + blend in one draw.
-      this.compositeTexture(srcTex, maskTex, fitVec, hasMask, opacity, blend, layer.transform, geom, contentPan, crop, dest);
+      this.compositeTexture(srcTex, maskTex, fitVec, hasMask, opacity, blend, layer.transform, geom, contentPan, crop, dest, trackMatte);
       return;
     }
 
@@ -1776,6 +1829,7 @@ export class SceneCompositor {
       [0, 0],
       [0, 0, 0, 0],
       dest,
+      trackMatte,
     );
   }
 
@@ -1788,7 +1842,11 @@ export class SceneCompositor {
    * region-graded image masked (today's clone draw, isolated to this layer's nest). The nest uses a DEDICATED
    * ping-pong pair because a regioned layer can render inside a transition side, whose pair is busy.
    */
-  private renderLayerWithRegionPasses(layer: SceneLayerDraw, dest: RenderTarget | null): void {
+  private renderLayerWithRegionPasses(
+    layer: SceneLayerDraw,
+    dest: RenderTarget | null,
+    trackMatte: { tex: WebGLTexture; luma: boolean; invert: boolean } | null = null,
+  ): void {
     const gl = this.gl;
     const passes = layer.regionPasses ?? [];
     const fragmentPasses = layer.fragmentPasses ?? [];
@@ -1809,7 +1867,10 @@ export class SceneCompositor {
     // Base image: the layer without its passes. Opacity/blend are deferred to the final nest composite —
     // inside the nest everything is NORMAL at full opacity (nestMode), the precompose model.
     this.renderLayerInto(
-      { ...layer, regionPasses: undefined, fragmentPasses: undefined, transform: { ...layer.transform, opacity: 100 } },
+      // `matteFrom` is stripped too — the caller (renderLayerInto) already resolved it into
+      // `trackMatte`, applied ONCE at the final nest composite below; leaving it here would render
+      // and apply the matte twice.
+      { ...layer, regionPasses: undefined, fragmentPasses: undefined, matteFrom: undefined, transform: { ...layer.transform, opacity: 100 } },
       null,
     );
     for (const pass of passes) {
@@ -1891,7 +1952,7 @@ export class SceneCompositor {
     this.accumB = savedB;
     this.nestMode = savedNest;
     // Composite the finished nest once, at the layer's opacity/blend (forced NORMAL inside an outer nest —
-    // same rule as every draw).
+    // same rule as every draw). The track matte (if any) applies here — after every pass, the AE order.
     this.compositeTexture(
       nestResult.tex,
       null,
@@ -1904,6 +1965,7 @@ export class SceneCompositor {
       [0, 0],
       [0, 0, 0, 0],
       dest,
+      trackMatte,
     );
   }
 
@@ -1938,6 +2000,49 @@ export class SceneCompositor {
     this.accumB = savedB;
     this.nestMode = savedNest;
     return result;
+  }
+
+  /**
+   * Pre-compose a track-matte SOURCE draw (D1) into a pooled comp-sized RTT and hand back its texture
+   * + sampling mode for the consumer's composite. Renders at the CURRENT ambient size — inside a nest
+   * that's the nest's size, matching the dims the source draw was built against (same scope as its
+   * consumer). A null source draw returns the 1×1 transparent `emptyTex`: coverage 0 everywhere (the
+   * "matte clip absent at this time" semantics — consumer invisible, or fully visible when inverted).
+   * Depth-indexed pool: a chained matte (the source is itself matted) recurses through
+   * `renderLayerInto` → here, and the outer matte must survive until its consumer samples it.
+   */
+  private buildTrackMatte(spec: NonNullable<SceneLayerDraw["matteFrom"]>): { tex: WebGLTexture; luma: boolean; invert: boolean } {
+    const luma = spec.mode === "luma";
+    const invert = Boolean(spec.invert);
+    if (!spec.draw) return { tex: this.emptyTex, luma, invert };
+    const gl = this.gl;
+    const depth = this.matteDepth;
+    this.matteDepth = depth + 1;
+    try {
+      while (this.matteTargets.length <= depth) {
+        this.matteTargets.push({
+          target: new RenderTarget(gl, Math.max(1, this.width), Math.max(1, this.height)),
+          scratch: new RenderTarget(gl, Math.max(1, this.width), Math.max(1, this.height)),
+        });
+      }
+      const pair = this.matteTargets[depth]!;
+      pair.target.resize(this.width, this.height);
+      pair.scratch.resize(this.width, this.height);
+      if (isGroupDraw(spec.draw)) {
+        // A compound clip as the matte source: clear the destination ourselves (the group's shell
+        // composite only covers its own quad — everything else keeps the cleared transparent), then
+        // render the whole group into it, one depth past any group currently accumulating.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, pair.target.fbo);
+        gl.viewport(0, 0, this.width, this.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        this.renderGroupInto(spec.draw, pair.target, this.freeGroupDepth);
+        return { tex: pair.target.tex, luma, invert };
+      }
+      return { tex: this.precomposeGroup([spec.draw], pair.target, pair.scratch).tex, luma, invert };
+    } finally {
+      this.matteDepth = depth;
+    }
   }
 
   /** Lazily allocate (and resize-to-fit) the dedicated RTT pair for compound-group nesting depth `depth`. */
@@ -1981,6 +2086,11 @@ export class SceneCompositor {
     const savedA = this.accumA;
     const savedB = this.accumB;
     const savedNest = this.nestMode;
+    // Held past the children loop THROUGH the shell composite below — the shell's own draw still
+    // reads this depth's pair as its source, so a track-matte group render triggered by the shell
+    // must go one deeper (see `freeGroupDepth` field doc).
+    const savedFreeGroupDepth = this.freeGroupDepth;
+    this.freeGroupDepth = depth + 1;
     this.width = nestW;
     this.height = nestH;
     this.accumA = target;
@@ -2012,6 +2122,8 @@ export class SceneCompositor {
       { ...draw.shell, source: { texture: resultTex, width: nestW, height: nestH }, sourceWidth: nestW, sourceHeight: nestH },
       dest,
     );
+    // Only now is this depth's pair free to reuse — `resultTex` was read by the shell composite above.
+    this.freeGroupDepth = savedFreeGroupDepth;
   }
 
   /**
@@ -2367,6 +2479,11 @@ export class SceneCompositor {
       pair.scratch.dispose();
     }
     this.groupTargets.length = 0;
+    for (const pair of this.matteTargets) {
+      pair.target.dispose();
+      pair.scratch.dispose();
+    }
+    this.matteTargets.length = 0;
     for (const entry of this.regionGradeRenderers.values()) {
       entry.renderer.dispose();
       entry.target.dispose();

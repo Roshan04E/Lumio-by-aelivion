@@ -765,6 +765,15 @@ export interface TimelineLayer {
    */
   disabled?: boolean | undefined;
   /**
+   * Track matte key (Premiere's "use clip above as matte"): the NEAREST visual clip above this one
+   * in z order (same scope — top level, or siblings inside the same nested comp; a compound clip
+   * counts as one slot) becomes this clip's matte and stops drawing on its own while consumed.
+   * `alpha` multiplies by the source's alpha; `luma` by its luminance (transparent reads as black).
+   * Resolved per frame in `buildSceneDraws` — when no source clip is present at a time the matte is
+   * EMPTY (clip invisible; fully visible when `invert`). Static (not keyframable) for now.
+   */
+  trackMatte?: { mode: "alpha" | "luma"; invert?: boolean | undefined } | undefined;
+  /**
    * Clip markers (Premiere-style): `timeSeconds` is CLIP-LOCAL (0 = clip head), so markers travel
    * with the clip on move and stay glued to content. Editor-only — no render effect. The `M` key
    * writes here when a selected clip spans the playhead, otherwise to the timeline ruler markers.

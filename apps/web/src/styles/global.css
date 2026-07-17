@@ -12062,6 +12062,26 @@ input.scrub-number:focus {
   filter: saturate(0.3);
 }
 
+/* Track-matte SOURCE (D1): consumed as the matte of the clip below — never draws on its own, so it
+   dims like a disabled clip, with a hatch overlay to distinguish "feeding a matte" from "off". */
+.timeline-editor .timeline-clip.is-matte-source {
+  opacity: 0.55;
+  filter: saturate(0.35);
+}
+
+.timeline-editor .timeline-clip.is-matte-source::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 6px,
+    rgba(255, 255, 255, 0.10) 6px 8px
+  );
+}
+
 .timeline-editor.is-hand-tool,
 .timeline-editor.is-hand-tool .timeline-lane,
 .timeline-editor.is-hand-tool .timeline-clip,

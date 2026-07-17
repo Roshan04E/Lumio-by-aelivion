@@ -284,6 +284,54 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       }
     }
   }
+  // ─── Track matte (D1): resolve each consumer's SOURCE clip ──────────────────────────────────────
+  // The source is the NEAREST slot above the consumer in z order (next non-clone entry in `ls`, which
+  // is back-to-front), within the SAME scope: a top-level consumer sees top-level layers — and a whole
+  // compound-clip group as ONE slot; a nested consumer sees siblings inside its own nest. A consumed
+  // source never draws independently (suppressed below, like `foldedIds`) — UNLESS it's part of an
+  // active transition fold, where suppressing it would eat the mix; then it stays visible and the
+  // matte just reads its standalone image. A consumer with `trackMatte` but NO source at `t` renders
+  // with an EMPTY matte (`draw: null` → invisible, or fully visible when inverted), so a matte clip
+  // ending doesn't flash the consumer back to full.
+  type MatteSourceRef = { kind: "layer"; layer: TimelineLayer } | { kind: "group"; key: string };
+  const matteSourceIds = new Set<string>();
+  const matteSourceGroupKeys = new Set<string>();
+  const matteSourceByConsumer = new Map<string, MatteSourceRef | null>();
+  for (let i = 0; i < ls.length; i++) {
+    const consumer = ls[i]!;
+    if (!consumer.trackMatte) continue;
+    if (regionCloneBaseId(consumer.id)) continue; // region clones follow their base clip
+    const owner = layerOwnerGroup.get(consumer.id) ?? null;
+    let resolved: MatteSourceRef | null = null;
+    for (let j = i + 1; j < ls.length; j++) {
+      const candidate = ls[j]!;
+      if (regionCloneBaseId(candidate.id)) continue; // a clone is part of the slot below it, not a slot
+      const candidateOwner = layerOwnerGroup.get(candidate.id) ?? null;
+      if (candidateOwner === owner) {
+        resolved = { kind: "layer", layer: candidate };
+      } else if (owner === null && candidateOwner !== null) {
+        // The slot above a top-level consumer is a compound clip: its TOP-LEVEL group is the matte.
+        let key = candidateOwner;
+        for (let up = groupOwnerGroup.get(key); up; up = groupOwnerGroup.get(key) ?? null) key = up;
+        resolved = { kind: "group", key };
+      }
+      // First non-clone candidate decides: same-scope hit, group hit, or out of scope (no matte —
+      // a nested consumer's "above" left its nest, so there is nothing above it IN scope).
+      break;
+    }
+    matteSourceByConsumer.set(consumer.id, resolved);
+    if (!resolved) continue;
+    if (resolved.kind === "group") {
+      matteSourceGroupKeys.add(resolved.key);
+    } else if (
+      !transitionOutgoingIds.has(resolved.layer.id) &&
+      !foldedIds.has(resolved.layer.id) &&
+      !activeByIncomingId.has(resolved.layer.id)
+    ) {
+      matteSourceIds.add(resolved.layer.id);
+    }
+  }
+
   // A clip's group as ordered (back-to-front) layer draws: base + its region-expansion layers, dropping any
   // whose source/raster isn't ready. The compositor renders these into the side RTT in order, then mixes.
   // Pass model: the clones ARE the base draw's `regionPasses`, so the group collapses to the single base draw.
@@ -633,6 +681,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       if (draw) {
         const fragmentPasses = buildFragmentPasses(layer, dims.matteCache);
         if (fragmentPasses.length > 0) draw.fragmentPasses = fragmentPasses;
+        attachTrackMatte(layer, draw, dims);
       }
       return draw;
     }
@@ -651,6 +700,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     if (passes.length > 0) draw.regionPasses = passes;
     const fragmentPasses = buildFragmentPasses(baseLayer, dims.matteCache);
     if (fragmentPasses.length > 0) draw.fragmentPasses = fragmentPasses;
+    attachTrackMatte(layer, draw, dims);
     // Debug telemetry (window.__rf* convention): what the pass folding decided for this layer this frame.
     if (typeof window !== "undefined") {
       const dbg = ((window as { __rfRegionPasses?: Record<string, unknown> }).__rfRegionPasses ??= {});
@@ -776,6 +826,9 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         const child = buildGroupDraw(ref.key);
         if (child) children.push(child);
       } else {
+        // A nested member consumed as a sibling's track matte never draws on its own (D1) — same
+        // rule as the top-level loop's `matteSourceIds` skip.
+        if (matteSourceIds.has(ref.layer.id)) continue;
         const draw = buildLayerDrawWithPasses(ref.layer, nestDims);
         if (draw) children.push(draw);
       }
@@ -791,22 +844,51 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     };
   };
 
+  /**
+   * Attach the consumer's resolved track-matte SOURCE draw (D1) to its finished layer draw. The
+   * source is built against the SAME dims as the consumer (a nested consumer's source is a sibling in
+   * the same nest); a compound-clip source pre-composes exactly like a top-level group draw. An
+   * unresolved source stays `draw: null` — the compositor's EMPTY matte. Chained mattes recurse here
+   * naturally (the source's own draw goes through `buildLayerDrawWithPasses` → its own attach);
+   * termination is structural — a source is always strictly LATER in `ls` than its consumer.
+   */
+  const attachTrackMatte = (
+    layer: TimelineLayer,
+    draw: SceneLayerDraw,
+    dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null }
+  ): void => {
+    const tm = layer.trackMatte;
+    if (!tm) return;
+    const resolved = matteSourceByConsumer.get(layer.id) ?? null;
+    let sourceDraw: SceneLayerDraw | SceneGroupDraw | null = null;
+    if (resolved?.kind === "layer") sourceDraw = buildLayerDrawWithPasses(resolved.layer, dims);
+    else if (resolved?.kind === "group") sourceDraw = buildGroupDraw(resolved.key);
+    draw.matteFrom = { draw: sourceDraw, mode: tm.mode, invert: Boolean(tm.invert) };
+  };
+
   for (let i = 0; i < ls.length; i++) {
     const layer = ls[i]!;
     // Outgoing base + everything folded into an active transition's side groups is drawn INSIDE the mix, not
     // independently. The incoming BASE is not folded — it reaches the emit below.
     if (transitionOutgoingIds.has(layer.id)) continue;
     if (foldedIds.has(layer.id)) continue;
+    // Track matte (D1): a consumed SOURCE clip (and its region-expansion clones) never draws
+    // independently — its image lives on as the consumer's matte.
+    const cloneBase = regionCloneBaseId(layer.id);
+    if (matteSourceIds.has(layer.id) || (cloneBase !== null && matteSourceIds.has(cloneBase))) continue;
     // Pass model: clone layers never draw independently — they became passes on their base draw.
-    if (regionPassModel && regionCloneBaseId(layer.id)) continue;
+    if (regionPassModel && cloneBase) continue;
     // A TOP-LEVEL group is emitted once, at the `ls` index of its first (transitive) member — checked
     // BEFORE the "nested layer, never independent" skip below, because that index IS the position of one
     // of the group's own owned members (a member's z-slot IS the group's z-slot, by construction of
     // `groupFirstIndex`); checking the skip first would eat the group's only emission point.
     const topGroupKey = topGroupKeyAtIndex.get(i);
     if (topGroupKey) {
-      const g = buildGroupDraw(topGroupKey);
-      if (g) draws.push(g);
+      // Track matte (D1): a compound clip consumed as a matte source never draws independently.
+      if (!matteSourceGroupKeys.has(topGroupKey)) {
+        const g = buildGroupDraw(topGroupKey);
+        if (g) draws.push(g);
+      }
       continue;
     }
     // Nesting: a layer belonging to ANY compound-clip nest never emits independently — it was folded into

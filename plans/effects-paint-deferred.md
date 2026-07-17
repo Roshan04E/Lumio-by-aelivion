@@ -5,7 +5,12 @@ parity-locked render paths, where a half-right implementation is worse than none
 grounded in source. **All four are Fable-tier tasks** (per user directive: deep engineering goes to
 Fable, not Sonnet).
 
-## D1 — Track matte key (Premiere "use clip above as luma/alpha matte")
+## D1 — Track matte key (Premiere "use clip above as luma/alpha matte") — SHIPPED 2026-07-17
+
+> Implemented per the design below (with two deviations: the matte RTT pool is DEPTH-INDEXED so
+> chained mattes work, and the inspector control lives in the Transform section next to Blend, not a
+> separate Video-tab section). See architecture.md "Phase C" for the shipped summary; `track-matte`
+> pixel fixture at 0.000%.
 
 Why deferred: the obvious CPU approach (bake the matte-source layer into a comp-space canvas and
 feed `SceneLayerDraw.mask`) BREAKS the single-context export path, where media sources are

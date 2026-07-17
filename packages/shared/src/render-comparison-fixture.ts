@@ -85,7 +85,8 @@ export type RenderComparisonFixtureKey =
 
   | "grain"
   | "chroma-key"
-  | "framed-media";
+  | "framed-media"
+  | "track-matte";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -117,7 +118,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
 
   "grain",
   "chroma-key",
-  "framed-media"
+  "framed-media",
+  "track-matte"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -426,6 +428,8 @@ interface FixtureVariant {
   matte?: TimelineLayer["matte"];
   /** Frames Step E: parametric frame (clip mask + border chrome) on the media layer. */
   frame?: TimelineLayer["frame"];
+  /** Track matte (D1): the media layer consumes the layer above it (the text fixture) as its matte. */
+  trackMatte?: TimelineLayer["trackMatte"];
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -538,6 +542,13 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
           }
         }
       };
+    case "track-matte":
+      // Track matte (D1): the big scaled "HI" text ABOVE the media layer becomes the media's ALPHA
+      // matte — the classic text-cutout. The text stops drawing on its own (it's consumed), so the
+      // frame is the landscape visible ONLY through the glyphs over the background. Trips if the
+      // matte source still draws normally, if the consumer ignores the matte, or if the source
+      // resolution disagrees between renderers.
+      return { effects: [], fit: "cover", textScale: 5, trackMatte: { mode: "alpha" } };
     case "default":
     default:
       return { effects: fullColorEffects, fit: "cover" };
@@ -590,6 +601,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     ...(variant.matte ? { matte: variant.matte } : {}),
     ...(variant.masks ? { masks: variant.masks } : {}),
     ...(variant.frame ? { frame: variant.frame } : {}),
+    ...(variant.trackMatte ? { trackMatte: variant.trackMatte } : {}),
     keyframes: []
   };
 
