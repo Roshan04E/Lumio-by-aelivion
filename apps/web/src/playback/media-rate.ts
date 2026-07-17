@@ -16,7 +16,10 @@ const BROWSER_MIN_PLAYBACK_RATE = 0.0625;
 const BROWSER_MAX_PLAYBACK_RATE = 16;
 
 export function setMediaPlaybackRate(media: HTMLMediaElement, rate: number): void {
-  const sane = Number.isFinite(rate) && rate > 0 ? rate : 1;
+  // S2 reverse: a NEGATIVE rate is direction, not an element rate (elements can't play backward —
+  // reversed spans pause the element and step it by seeks). Magnitude keeps the rate sane for the
+  // moment the span turns forward again.
+  const sane = Number.isFinite(rate) && rate !== 0 ? Math.abs(rate) : 1;
   const clamped = Math.min(BROWSER_MAX_PLAYBACK_RATE, Math.max(BROWSER_MIN_PLAYBACK_RATE, sane));
   if (media.playbackRate === clamped) return; // skip no-op writes — some engines treat every set as a state poke
   try {

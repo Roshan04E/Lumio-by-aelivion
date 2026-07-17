@@ -821,7 +821,11 @@ function VideoPreviewImpl({
         .flatMap((track, trackIndex) => track.layers.map((layer, layerIndex) => ({ layer, trackIndex, layerIndex })))
         .filter(({ layer, trackIndex }) => {
           const track = composition.tracks[trackIndex];
-          if (!track || !isTrackEnabled(track, composition.tracks) || layer.muted || layer.disabled || layer.type !== "video" || isLayerActive(layer, currentTime)) {
+          // Compound clips (nestedCompositionId) carry NO media of their own — preloading one
+          // mounted a dead "Missing video asset" placeholder over the frame for the whole lookahead
+          // window before every group cut (surfaced by the nested-junction-preroll pixel fixture).
+          // Their CHILDREN are ordinary layers in the expanded list and preload through it.
+          if (!track || !isTrackEnabled(track, composition.tracks) || layer.muted || layer.disabled || layer.type !== "video" || layer.nestedCompositionId || isLayerActive(layer, currentTime)) {
             return false;
           }
           return currentTime + PRELOAD_LOOKAHEAD_SECONDS >= layer.startSeconds && currentTime < layer.startSeconds;
@@ -2751,7 +2755,7 @@ const PreviewLayer = memo(function PreviewLayer({
     // handles (see `resolveSourceSeconds` above).
     const speed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
     const { time: nextTime } = resolveSourceSeconds(currentTime - layer.startSeconds);
-    if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > driftToleranceSeconds * Math.max(1, speed)) {
+    if (Number.isFinite(nextTime) && Math.abs(video.currentTime - nextTime) > driftToleranceSeconds * Math.max(1, Math.abs(speed))) {
       video.currentTime = nextTime;
       return true;
     }
@@ -2772,7 +2776,11 @@ const PreviewLayer = memo(function PreviewLayer({
     }
     if (effectivePlaying) {
       syncVideoTime(video);
-      void video.play().catch(() => undefined);
+      // S2: a reversed clip never free-runs — the edge-hold/reverse effect below drives it with
+      // per-tick paused seeks. Starting play() here would free-run FORWARD for a tick first.
+      if (getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds)) > 0) {
+        void video.play().catch(() => undefined);
+      }
       return;
     }
 
@@ -2825,7 +2833,7 @@ const PreviewLayer = memo(function PreviewLayer({
     }
     const speed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
     const { time: expected } = resolveSourceSeconds(currentTime - layer.startSeconds);
-    if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 1 * Math.max(1, speed)) {
+    if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 1 * Math.max(1, Math.abs(speed))) {
       video.currentTime = expected;
     }
   }, [currentTime, effectivePlaying, isVideo, layer, mediaUrl, asset?.durationSeconds]);
@@ -2836,13 +2844,20 @@ const PreviewLayer = memo(function PreviewLayer({
   // "freeze-then-replay" bug (growing a transition's duration made the outgoing clip visibly freeze then
   // jump backward). Runs every tick (cheap: pause()/play() don't flush the decoder like a seek does) so
   // the hold engages the moment the clamp starts, and releases the moment real material is available again.
+  //
+  // S2 REVERSE (2026-07-17): a reversed span (instantaneous rate < 0 — constant reverse or a ramp
+  // dipping negative) rides the SAME state: elements cannot play backward, so the element stays
+  // PAUSED and each tick steps `currentTime` backward through the exact shared mapping (paused
+  // seeks are the scrub path — cheap, latest-wins). v1 is truthful-but-choppy per the S2 plan;
+  // the smooth path is a reversed span proxy (v2). Forward rate resumes free-running playback.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !isVideo || !effectivePlaying) {
       return;
     }
     const { time, clamped } = resolveSourceSeconds(currentTime - layer.startSeconds);
-    if (clamped) {
+    const reversed = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds)) < 0;
+    if (clamped || reversed) {
       if (!video.paused) video.pause();
       if (Number.isFinite(time) && Math.abs(video.currentTime - time) > 0.03) {
         video.currentTime = time;
@@ -2875,7 +2890,7 @@ const PreviewLayer = memo(function PreviewLayer({
       const local = getPlaybackClock() - layer.startSeconds;
       const speed = getLayerSpeedAt(layer, Math.max(0, local));
       const { time: expected } = resolveSourceSeconds(local);
-      if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 0.15 * Math.max(1, speed)) {
+      if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 0.15 * Math.max(1, Math.abs(speed))) {
         video.currentTime = expected;
       }
     }, 500);
@@ -3517,7 +3532,7 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     const local = Math.max(0, Math.min(layer.durationSeconds, currentTime - layer.startSeconds));
     // Ramp-aware: the shared mapper is the exact integral for ramped clips, sourceIn + local×speed otherwise.
     const nextTime = layerSourceTimeSeconds(layer, local);
-    if (Number.isFinite(nextTime) && Math.abs(audio.currentTime - nextTime) > 0.08 * Math.max(1, getLayerSpeedAt(layer, local))) {
+    if (Number.isFinite(nextTime) && Math.abs(audio.currentTime - nextTime) > 0.08 * Math.max(1, Math.abs(getLayerSpeedAt(layer, local)))) {
       audio.currentTime = nextTime;
     }
   }
@@ -3611,7 +3626,10 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     if (isPlaying) {
       void getPreviewAudioContext()?.resume();
       syncAudioTime(audio);
-      void audio.play().catch(() => undefined);
+      // S2: reversed clips play SILENT (v1 policy, like Premiere's default for reversed ramps) —
+      // the element just stays paused; true reversed audio (offline PCM reverse) is deferred.
+      if (speed > 0) void audio.play().catch(() => undefined);
+      else audio.pause();
       return;
     }
 
@@ -3638,8 +3656,19 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     if (!audio || !mediaUrl || !hasSpeedRamp(layer)) {
       return;
     }
-    setMediaPlaybackRate(audio, getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds)));
+    const rate = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
+    setMediaPlaybackRate(audio, rate);
     if (isPlaying) {
+      // S2: reversed ramp spans are silent (v1) — pause through the span, resume when the rate
+      // turns forward again (with a resync so playback picks up at the right source instant).
+      if (rate < 0) {
+        if (!audio.paused) audio.pause();
+        return;
+      }
+      if (audio.paused) {
+        syncAudioTime(audio);
+        void audio.play().catch(() => undefined);
+      }
       const now = performance.now();
       if (now - lastAudioRampSyncMsRef.current >= 500) {
         lastAudioRampSyncMsRef.current = now;
@@ -3707,7 +3736,7 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
       if (isAudioClockMaster(layer.id) || audio.paused || audio.seeking || audio.readyState < 2) return;
       const local = Math.max(0, Math.min(layer.durationSeconds, getPlaybackClock() - layer.startSeconds));
       const expected = layerSourceTimeSeconds(layer, local);
-      if (Number.isFinite(expected) && Math.abs(audio.currentTime - expected) > 0.15 * Math.max(1, getLayerSpeedAt(layer, local))) {
+      if (Number.isFinite(expected) && Math.abs(audio.currentTime - expected) > 0.15 * Math.max(1, Math.abs(getLayerSpeedAt(layer, local)))) {
         audio.currentTime = expected;
       }
     }, 500);

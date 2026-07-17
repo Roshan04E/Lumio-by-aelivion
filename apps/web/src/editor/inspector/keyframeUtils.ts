@@ -13,7 +13,6 @@ import {
   GRAPHIC_DURATION_PROPERTY,
   GRAPHIC_PROGRESS_PROPERTY,
   MAX_LAYER_SPEED,
-  MIN_LAYER_SPEED,
   type KeyframeInterpolation,
   type SourceTextKeyframe,
   type TextRun,
@@ -1138,7 +1137,8 @@ export function toggleSourceTextKeyframe(layer: TimelineLayer, layerTime: number
 export const speedGraphTarget: GraphTarget = {
   kind: "speed",
   label: "Speed",
-  min: MIN_LAYER_SPEED * 100,
+  // S2: negative = reverse; the lane spans the full signed range (0 inside a segment = freeze).
+  min: -MAX_LAYER_SPEED * 100,
   max: MAX_LAYER_SPEED * 100,
   property: "speed",
   step: 5
@@ -1243,7 +1243,7 @@ export function updateGraphTargetKeyframe(
             ? {
                 ...point, // keep id AND easing handles across a graph drag
                 timeSeconds: patch.timeSeconds !== undefined ? clamp(patch.timeSeconds, 0, layer.durationSeconds) : point.timeSeconds,
-                value: patch.value !== undefined ? clamp(patch.value / 100, MIN_LAYER_SPEED, MAX_LAYER_SPEED) : point.value
+                value: patch.value !== undefined ? clamp(patch.value / 100, -MAX_LAYER_SPEED, MAX_LAYER_SPEED) : point.value
               }
             : point
         )

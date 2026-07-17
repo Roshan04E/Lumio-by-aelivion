@@ -190,7 +190,10 @@ export async function mixTimelineAudio(
     // Clip FX and/or speed RAMPS: swap in the pre-processed timeline-domain buffer (FX → gain →
     // pan, pre-fader inserts). Varispeed/ramp/trim are baked into it, so the node plays it plainly
     // from 0 at rate 1 — AudioBufferSourceNode can't follow a rate curve deterministically.
-    const hasFx = layer.fxChain.length > 0 || (layer.speedKeyframes?.length ?? 0) > 0;
+    // S2: REVERSED constant speed also takes the pre-render path — the per-sample shared mapper
+    // walks source PCM backward (true reversed audio), while AudioBufferSourceNode.playbackRate
+    // can't go negative. (Reversed RAMPS were already here via speedKeyframes.)
+    const hasFx = layer.fxChain.length > 0 || (layer.speedKeyframes?.length ?? 0) > 0 || layer.speed < 0;
     if (hasFx) {
       const channels = renderFxClipChannels(buffer, layer);
       const fxBuffer = offline.createBuffer(CHANNELS, channels[0]!.length, SAMPLE_RATE);

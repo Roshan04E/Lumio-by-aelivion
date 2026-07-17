@@ -199,11 +199,15 @@ export const MAX_LAYER_SPEED = 16;
 /**
  * The clip's constant playback rate (rate stretch). 1 = normal. ALWAYS read speed through this —
  * it normalizes absent/zero/garbage values so `sourceTime = sourceIn + local * speed` stays finite.
+ * S2 (2026-07-17): NEGATIVE rates are legal — the clip plays in reverse (source time decreases);
+ * magnitude clamps to the same [MIN, MAX] band. Callers that need a magnitude (durations, element
+ * playbackRate, headroom divisions) must take Math.abs — the sign is DIRECTION, not a scalar.
  */
 export function getLayerSpeed(layer: Pick<TimelineLayer, "speed">): number {
   const raw = layer.speed;
-  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 1;
-  return Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, raw));
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw === 0) return 1;
+  const magnitude = Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, Math.abs(raw)));
+  return raw < 0 ? -magnitude : magnitude;
 }
 
 // ── Speed ramps / time remap ─────────────────────────────────────────────────
@@ -215,8 +219,11 @@ export function getLayerSpeed(layer: Pick<TimelineLayer, "speed">): number {
 // No numerical stepping anywhere; the only iteration is inverting the MONOTONIC time cubic x(s)=t
 // (Newton with bisection bracketing — deterministic fixed loop, same doubles in every runtime).
 
+// S2: ramp point values are SIGNED — negative = reverse, and a ramp may cross 0 (the crossing
+// itself is a momentary freeze; a point AT 0 holds the frame). Only the magnitude extreme clamps;
+// sub-MIN magnitudes are legal inside ramps (near-freeze) — the closed-form integral handles them.
 const clampSpeed = (v: number) =>
-  typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, v)) : 1;
+  typeof v === "number" && Number.isFinite(v) ? Math.min(MAX_LAYER_SPEED, Math.max(-MAX_LAYER_SPEED, v)) : 1;
 
 const sanitizeSpeedHandle = (
   raw: SpeedKeyframe["inHandle"],
@@ -274,7 +281,7 @@ function segmentControls(
     dt0 *= k;
     dt1 *= k;
   }
-  const clampV = (v: number) => Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, v));
+  const clampV = (v: number) => Math.min(MAX_LAYER_SPEED, Math.max(-MAX_LAYER_SPEED, v)); // signed (S2)
   const y1 = clampV(a.value + (a.outHandle ? a.outHandle.dy * delta : delta / 3));
   const y2 = clampV(b.value + (b.inHandle ? b.inHandle.dy * delta : -delta / 3));
   return {

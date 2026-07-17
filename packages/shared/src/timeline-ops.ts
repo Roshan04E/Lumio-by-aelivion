@@ -290,6 +290,13 @@ function isSourceMedia(layer: TimelineLayer): boolean {
   return (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId);
 }
 
+/** |rate| at the clip's head, floored at the MIN speed. Headroom divisions use this (S2): the SIGN
+ *  of a reversed rate is direction, not a scalar — dividing by it flipped bounds negative — and a
+ *  near-zero ramp edge (freeze) must not produce an infinite bound. */
+function edgeRateMagnitude(layer: TimelineLayer): number {
+  return Math.max(0.05, Math.abs(getLayerSpeedAt(layer, 0)));
+}
+
 function maxDurationFor(layer: TimelineLayer, composition: TimelineComposition, options: TrimLimitOptions): number {
   return options.maxDurationsSeconds?.[layer.id] ?? composition.durationSeconds;
 }
@@ -462,7 +469,7 @@ export function rollEditLimits(
     // which grows in step, so it is NOT the constraint); non-media by the max-duration cap.
     const leftMinRoom = left.durationSeconds - minDuration;
     const rightHeadRoom = isSourceMedia(right)
-      ? (right.sourceInSeconds ?? 0) / getLayerSpeedAt(right, 0) // head material in TIMELINE seconds (edge rate under a ramp)
+      ? (right.sourceInSeconds ?? 0) / edgeRateMagnitude(right) // head material in TIMELINE seconds (edge |rate| under a ramp)
       : maxDurationFor(right, composition, options) - right.durationSeconds;
     const minDelta = -Math.min(leftMinRoom, rightHeadRoom);
     const minReason =
@@ -537,7 +544,7 @@ export function slideLayerLimits(
     // Same head-extension bound as rollEditLimits: media = its head material, non-media = the cap.
     const previousMinRoom = previous.durationSeconds - minDuration;
     const nextHeadRoom = isSourceMedia(next)
-      ? (next.sourceInSeconds ?? 0) / getLayerSpeedAt(next, 0)
+      ? (next.sourceInSeconds ?? 0) / edgeRateMagnitude(next)
       : maxDurationFor(next, composition, options) - next.durationSeconds;
     const minDelta = -Math.min(previousMinRoom, nextHeadRoom);
     const minReason =
@@ -620,7 +627,7 @@ export function trimLayerEdgeTo(
       let delta: number;
       if (side === "head") {
         delta = timeSeconds - layer.startSeconds; // positive = trim
-        const headroom = isSourceMedia(layer) ? (layer.sourceInSeconds ?? 0) / getLayerSpeedAt(layer, 0) : layer.startSeconds;
+        const headroom = isSourceMedia(layer) ? (layer.sourceInSeconds ?? 0) / edgeRateMagnitude(layer) : layer.startSeconds;
         delta = Math.max(-Math.min(headroom, maxDuration - layer.durationSeconds), Math.min(layer.durationSeconds - minDuration, delta));
       } else {
         delta = timeSeconds - (layer.startSeconds + layer.durationSeconds); // positive = extend
@@ -830,6 +837,9 @@ export function advanceIncomingSourceForTransition(
   if (!((right.type === "video" || right.type === "audio") && right.assetId)) return null;
   if ((right.speedKeyframes?.length ?? 0) > 0) return null;
   const speed = getLayerSpeedAt(right, 0);
+  // S2: reversed clips are rejected like ramped ones (v1) — "manufacture head material" advances
+  // the in-point forward through the source, which is meaningless when the clip plays backward.
+  if (speed <= 0) return null;
   let sourceDelta = Math.max(0, headSeconds) * speed;
   if (options?.assetDurationSeconds !== undefined) {
     const consumedEnd = (right.sourceInSeconds ?? 0) + right.durationSeconds * speed;
