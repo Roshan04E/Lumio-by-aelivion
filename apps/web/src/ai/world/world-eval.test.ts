@@ -1,0 +1,261 @@
+/**
+ * Kimera OS — World Model acceptance suite (K1). Run: `pnpm --filter @kimera-by-aelivion/web world:eval`
+ *
+ * Covers the K1 laws (KIMERA_OS.md → Layer 2):
+ *  - memoization: a signature-stable fact is served from cache, the observer runs ONCE;
+ *  - truth maintenance: signature change invalidates + re-observes; invalidation cascades
+ *    through `dependencies` (derived facts die with their inputs);
+ *  - access-path planning: cheapest sufficient path wins; (budget, minConfidence) that no
+ *    path satisfies → DECLINE (null), never a fact the model can't stand behind;
+ *  - the built-in metadata + text-summary observers measure correctly on synthetic fixtures;
+ *  - the DOM-only look observer declines cleanly under node;
+ *  - the world route is precision-first: non-matching / ambiguous prompts escalate.
+ *
+ * Standalone tsx assert script (no test framework), same convention as brain:eval.
+ */
+
+import type { SourceAsset, TimelineComposition, TimelineLayer, TimelineTrackType } from "@kimera-by-aelivion/shared";
+import { clearFactStore, getStoredFact, invalidateFact, listFacts, storeObservation } from "./fact-store";
+import { queryFact } from "./knowledge";
+import { registerObserver } from "./observers";
+import { metadataObserver, MEDIA_METADATA_FACT, type MediaMetadataFact } from "./observers/metadata";
+import { lookObserver, MEDIA_LOOK_FACT } from "./observers/look";
+import { textSummaryObserver, COMPOSITION_TEXT_FACT, type CompositionTextFact } from "./observers/text-summary";
+import { routePromptWorld } from "./route";
+import type { BrainContext } from "../brain/router";
+import type { WorldContext, WorldObserver } from "./types";
+
+let failures = 0;
+
+function check(label: string, ok: boolean, detail?: string): void {
+  if (ok) {
+    console.log(`  ✓ ${label}`);
+  } else {
+    failures += 1;
+    console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ""}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+function layer(
+  partial: Partial<TimelineLayer> & Pick<TimelineLayer, "id" | "type" | "startSeconds" | "durationSeconds">
+): TimelineLayer {
+  return { trackId: "t", name: partial.id, ...partial } as TimelineLayer;
+}
+
+function comp(tracks: { type: TimelineTrackType; layers: TimelineLayer[] }[]): TimelineComposition {
+  return {
+    id: "c",
+    name: "c",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 30,
+    backgroundColor: "#000000",
+    tracks: tracks.map((track, index) => ({ id: `track_${index}`, type: track.type, name: `track_${index}`, layers: track.layers }))
+  };
+}
+
+const asset: SourceAsset = {
+  id: "a1",
+  userId: "u",
+  fileName: "shot.mp4",
+  fileType: "video/mp4",
+  fileUrl: "",
+  durationSeconds: 12.5,
+  width: 1920,
+  height: 1080,
+  status: "ready",
+  createdAt: "2026-07-18",
+  fps: 25,
+  sizeBytes: 42 * 1024 * 1024
+};
+
+const textComp = comp([
+  {
+    type: "video",
+    layers: [layer({ id: "vid_a", type: "video", startSeconds: 0, durationSeconds: 10, assetId: "a1" })]
+  },
+  {
+    type: "text",
+    layers: [
+      layer({ id: "t1", type: "text", startSeconds: 0, durationSeconds: 4, text: "hello brave new world" }),
+      // Overlaps t1 → interval union must count 0–6s once, not 4+4.
+      layer({ id: "t2", type: "text", startSeconds: 2, durationSeconds: 4, text: "of measured facts" })
+    ]
+  }
+]);
+
+const ctx: WorldContext = { composition: textComp, assets: [asset] };
+
+// ---------------------------------------------------------------------------
+// Synthetic observers for planner mechanics
+// ---------------------------------------------------------------------------
+
+let syntheticSignature = "sig-1";
+let syntheticRuns = 0;
+
+const syntheticObserver: WorldObserver = {
+  id: "synthetic@test",
+  version: 1,
+  factTypes: ["test.value"],
+  fidelity: 0,
+  estCostMs: 5,
+  estConfidence: 0.95,
+  signature: (target) => (target.kind === "asset" ? syntheticSignature : null),
+  observe: async () => {
+    syntheticRuns += 1;
+    return [{ type: "test.value", value: syntheticRuns, confidence: 0.95 }];
+  }
+};
+
+let cheapRuns = 0;
+let heavyRuns = 0;
+const cheapObserver: WorldObserver = {
+  id: "cheap@test",
+  version: 1,
+  factTypes: ["test.tiered"],
+  fidelity: 1,
+  estCostMs: 1,
+  estConfidence: 0.5,
+  signature: () => "cheap",
+  observe: async () => {
+    cheapRuns += 1;
+    return [{ type: "test.tiered", value: "cheap", confidence: 0.5 }];
+  }
+};
+const heavyObserver: WorldObserver = {
+  id: "heavy@test",
+  version: 1,
+  factTypes: ["test.tiered"],
+  fidelity: 3,
+  estCostMs: 100,
+  estConfidence: 0.99,
+  signature: () => "heavy",
+  observe: async () => {
+    heavyRuns += 1;
+    return [{ type: "test.tiered", value: "heavy", confidence: 0.99 }];
+  }
+};
+
+registerObserver(syntheticObserver);
+registerObserver(cheapObserver);
+registerObserver(heavyObserver);
+registerObserver(metadataObserver);
+registerObserver(lookObserver);
+registerObserver(textSummaryObserver);
+
+const assetTarget = { kind: "asset" as const, id: "a1" };
+const compTarget = { kind: "composition" as const, id: "c" };
+
+async function run(): Promise<void> {
+  // ---- Memoization + truth maintenance ----
+  console.log("memoization + truth maintenance:");
+  clearFactStore();
+  const first = await queryFact<number>({ type: "test.value", target: assetTarget }, ctx);
+  check("first query observes", first?.path === "synthetic@test" && first.fact.value === 1);
+  const second = await queryFact<number>({ type: "test.value", target: assetTarget }, ctx);
+  check("second query is cached (observer ran once)", second?.path === "cached" && syntheticRuns === 1);
+  syntheticSignature = "sig-2";
+  const third = await queryFact<number>({ type: "test.value", target: assetTarget }, ctx);
+  check("signature change invalidates + re-observes", third?.path === "synthetic@test" && syntheticRuns === 2);
+  check(
+    "provenance records the new signature",
+    getStoredFact("test.value", "asset:a1")?.provenance.inputSignature === "sig-2"
+  );
+
+  // ---- Dependency cascade ----
+  console.log("dependency cascade:");
+  const parent = getStoredFact("test.value", "asset:a1")!;
+  storeObservation(
+    syntheticObserver,
+    compTarget,
+    "derived-sig",
+    [{ type: "test.derived", value: "meaning", confidence: 0.8 }],
+    [parent.id]
+  );
+  check("derived fact stored", getStoredFact("test.derived", "composition:c") !== undefined);
+  invalidateFact(parent.id);
+  check("invalidation cascades to derived fact", getStoredFact("test.derived", "composition:c") === undefined);
+
+  // ---- Access-path planning ----
+  console.log("access-path planning:");
+  clearFactStore();
+  const cheapest = await queryFact({ type: "test.tiered", target: assetTarget }, ctx);
+  check("no constraints → cheapest path wins", cheapest?.path === "cheap@test" && heavyRuns === 0);
+  clearFactStore();
+  const confident = await queryFact({ type: "test.tiered", target: assetTarget, minConfidence: 0.9 }, ctx);
+  check("minConfidence 0.9 → heavy path chosen", confident?.path === "heavy@test" && confident.fact.value === "heavy");
+  clearFactStore();
+  const impossible = await queryFact({ type: "test.tiered", target: assetTarget, minConfidence: 0.9, budgetMs: 50 }, ctx);
+  check("no path satisfies (budget, minConfidence) → DECLINE (null)", impossible === null);
+  check("declined query ran no observer", heavyRuns === 1 && cheapRuns === 1);
+
+  // ---- Built-in observers ----
+  console.log("built-in observers:");
+  clearFactStore();
+  const metadata = await queryFact<MediaMetadataFact>({ type: MEDIA_METADATA_FACT, target: assetTarget }, ctx);
+  check(
+    "metadata observer reads the import record",
+    metadata?.fact.value.width === 1920 && metadata.fact.value.fps === 25 && metadata.fact.value.durationSeconds === 12.5
+  );
+  const metadataMissing = await queryFact<MediaMetadataFact>(
+    { type: MEDIA_METADATA_FACT, target: { kind: "asset", id: "ghost" } },
+    ctx
+  );
+  check("unknown asset → decline", metadataMissing === null);
+
+  const text = await queryFact<CompositionTextFact>({ type: COMPOSITION_TEXT_FACT, target: compTarget }, ctx);
+  check("text summary counts words", text?.fact.value.wordCount === 7, `got ${text?.fact.value.wordCount}`);
+  check("text summary unions overlapping coverage (0–6s = 6s)", text?.fact.value.coveredSeconds === 6);
+  check("text summary sees timeline length", text?.fact.value.timelineSeconds === 10);
+  const textCached = await queryFact<CompositionTextFact>({ type: COMPOSITION_TEXT_FACT, target: compTarget }, ctx);
+  check("text summary memoizes on content signature", textCached?.path === "cached");
+  const editedComp: TimelineComposition = {
+    ...textComp,
+    tracks: textComp.tracks.map((track) =>
+      track.type === "text"
+        ? { ...track, layers: track.layers.map((l) => (l.id === "t1" ? { ...l, text: "hello" } : l)) }
+        : track
+    )
+  };
+  const textEdited = await queryFact<CompositionTextFact>(
+    { type: COMPOSITION_TEXT_FACT, target: compTarget },
+    { ...ctx, composition: editedComp }
+  );
+  check("editing text invalidates + re-measures", textEdited?.path === "text-summary@builtin" && textEdited.fact.value.wordCount === 4);
+
+  check("DOM-only look observer declines under node", (await queryFact({ type: MEDIA_LOOK_FACT, target: assetTarget }, ctx)) === null);
+
+  // ---- World route precision (must-escalate corpus) ----
+  console.log("world route precision:");
+  const brainContext: BrainContext = { composition: textComp, selection: [], nowSeconds: 3 };
+  for (const prompt of [
+    "analyze the pacing",
+    "analyze my footage style",
+    "make it pop",
+    "what does the intro look like",
+    "analyze clip",
+    "blur clip 2"
+  ]) {
+    const routed = await routePromptWorld(prompt, brainContext);
+    check(`escalates: "${prompt}"`, routed.kind === "escalate");
+  }
+  const noMedia = await routePromptWorld("analyze clip 2", brainContext);
+  check(
+    "clip without media source → honest answer, no measurement",
+    noMedia.kind === "answer" && noMedia.text.includes("text layer"),
+    noMedia.kind
+  );
+  // Media clip under node: world context can't load (no Vite env) → must escalate, never throw.
+  const mediaUnderNode = await routePromptWorld("analyze clip 1", brainContext);
+  check("media clip with no world context → clean escalate", mediaUnderNode.kind === "escalate");
+
+  console.log(failures === 0 ? `\nworld:eval PASS (${listFacts().length} facts live)` : `\nworld:eval FAIL — ${failures} failure(s)`);
+  process.exit(failures === 0 ? 0 : 1);
+}
+
+void run();

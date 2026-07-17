@@ -5,7 +5,7 @@
  * module with no DOM assumptions so the eval harness can import it under node/tsx.
  */
 
-export type BrainRoute = "reflex" | "rules" | "semantic" | "llm-fast" | "loop" | "talk";
+export type BrainRoute = "reflex" | "rules" | "semantic" | "world" | "llm-fast" | "loop" | "talk";
 
 export type RouteOutcome = "answered" | "applied" | "failed" | "cancelled" | "escalated";
 
@@ -38,7 +38,7 @@ const DEFAULT_LLM_REQUEST_TOKENS = 2_200;
 const STORAGE_KEY = "kimera.brain.ledger.v1";
 const MAX_RECORDS = 200;
 
-const LOCAL_ROUTES: ReadonlySet<BrainRoute> = new Set(["reflex", "rules", "semantic"]);
+const LOCAL_ROUTES: ReadonlySet<BrainRoute> = new Set(["reflex", "rules", "semantic", "world"]);
 
 let memoryRecords: RouteRecord[] | null = null;
 

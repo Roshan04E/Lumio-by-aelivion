@@ -254,6 +254,7 @@ import { createProxyBlobStore, isProxyMediaSupported, type ProxyBlobStore } from
 import { generateSpanProxy, ProxyGenerationAborted, type ProxyGenerationDiagnostic } from "../editor/performance/proxyWorkerClient";
 import { SpanVerificationAborted, verifySpanBlobIntegrity } from "../editor/performance/spanVerification";
 import { ensureSourceProxy, setSourceProxyBuildSuspended, setSourceProxyFirstBuildListener } from "../editor/performance/sourceProxyEngine";
+import { setWorldAssetProvider } from "../ai/world";
 import { isBackgroundWorkAllowed, setBackgroundGate, subscribeBackgroundGate } from "../editor/performance/backgroundScheduler";
 import { ensureDegradationControllerStarted } from "../editor/performance/degradation";
 import { captureSpanProxyFromViewer, verifySpanProxyAgainstViewer, ViewerCaptureAborted } from "../editor/performance/viewerProxyCapture";
@@ -1651,6 +1652,12 @@ export function EditorPage() {
       setBackgroundGate("playing", false);
     };
   }, []);
+  // Kimera OS (K1): hand the World Model the LIVE asset list (server/stock assets included)
+  // so "analyze clip N" can resolve any clip's source, not just local-first imports.
+  useEffect(() => {
+    setWorldAssetProvider(() => assets);
+    return () => setWorldAssetProvider(null);
+  }, [assets]);
 
   useEffect(() => {
     previewCacheControllerRef.current?.clear();
@@ -4721,16 +4728,35 @@ export function EditorPage() {
         }
       }
     }
+    // S2 reverse (Premiere in/out swap): when the sign flips, move each member's sourceIn to its
+    // current source OUT-point so the clip plays its VISIBLE span BACKWARD (not pre-in-point footage).
+    // `newIn = sourceIn + duration·oldSignedSpeed` is symmetric — reversing twice restores the origin
+    // (signed speed makes the second flip subtract exactly what the first added). Media clips only.
     void updateComposition({
       ...composition,
       tracks: composition.tracks.map((track) => ({
         ...track,
-        layers: track.layers.map((item) =>
-          groupIds.has(item.id) ? { ...item, speed: newSpeed, durationSeconds: Number(newDuration.toFixed(3)) } : item
-        )
+        layers: track.layers.map((item) => {
+          if (!groupIds.has(item.id)) return item;
+          const memberOldSpeed = getLayerSpeed(item);
+          const signFlipped =
+            Math.sign(memberOldSpeed) !== Math.sign(newSpeed) &&
+            (item.type === "video" || item.type === "audio") &&
+            Boolean(item.assetId) &&
+            (item.speedKeyframes?.length ?? 0) === 0; // ramps carry their own signed authoring
+          const nextSourceIn = signFlipped
+            ? Math.max(0, (item.sourceInSeconds ?? 0) + item.durationSeconds * memberOldSpeed)
+            : item.sourceInSeconds;
+          return {
+            ...item,
+            speed: newSpeed,
+            durationSeconds: Number(newDuration.toFixed(3)),
+            ...(signFlipped ? { sourceInSeconds: Number((nextSourceIn ?? 0).toFixed(3)) } : {})
+          };
+        })
       }))
     });
-    setNotice(`Speed ${Math.round(newSpeed * 100)}%`);
+    setNotice(newSpeed < 0 ? `Reversed ${Math.round(Math.abs(newSpeed) * 100)}%` : `Speed ${Math.round(newSpeed * 100)}%`);
   }
 
   // Replace asset: open the asset bin in "pick one" mode bound to this layer; the

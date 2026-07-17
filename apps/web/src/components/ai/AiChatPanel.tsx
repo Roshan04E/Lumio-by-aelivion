@@ -52,6 +52,7 @@ import {
 } from "../../ai/transcript";
 import { AGENT_ITERATION_CAPS, runAgentLoop } from "../../ai/agent/AgentLoop";
 import { routePrompt, type BrainRouteResult } from "../../ai/brain/router";
+import { routePromptWorld } from "../../ai/world/route";
 import type { EditorCommandDispatcher } from "../../editor/editor-commands";
 import { forgetLearnedPlan, maybeLearnPhrase, routePromptSemantic, storeCachedPlan } from "../../ai/brain/semantic";
 
@@ -1340,6 +1341,12 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         // immediately while the embedding model is cold (the load continues in the background).
         routed = await routePromptSemantic(prompt, getContext());
       }
+      if (routed.kind === "escalate") {
+        // World Model (Kimera OS K1): "analyze clip 3"-class questions answered from MEASURED
+        // facts (metadata / sampled-frame look / text coverage) — local, zero tokens, read-only.
+        // Precision-first: non-matching prompts return escalate in ~0ms.
+        routed = await routePromptWorld(prompt, getContext());
+      }
       // Editor commands need the host dispatcher; without it (shouldn't happen in the editor)
       // the prompt takes the normal model path instead of silently doing nothing.
       if (routed.kind === "command" && !runEditorCommand) {
@@ -1364,7 +1371,11 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         setInput("");
         pushMessage("user", prompt);
         if (routed.kind === "answer") {
-          pushItem({ kind: "notice", tone: "info", text: "⚡ Instant · answered locally — 0 tokens" });
+          pushItem({
+            kind: "notice",
+            tone: "info",
+            text: routed.tier === "world" ? "🌐 World Model · measured on-device — 0 tokens" : "⚡ Instant · answered locally — 0 tokens"
+          });
           pushMessage("ai", routed.text);
           speakIfVoice(routed.text);
           recordRuleFired(routed.ruleId);

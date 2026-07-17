@@ -42,7 +42,7 @@ export interface BrainContext {
 }
 
 /** Which local tier resolved the prompt — the ledger's route label. */
-export type BrainTier = "reflex" | "rules" | "semantic";
+export type BrainTier = "reflex" | "rules" | "semantic" | "world";
 
 export type BrainRouteResult =
   | { kind: "plan"; plan: AiPlan; tier: BrainTier; ruleId: string }
@@ -89,7 +89,7 @@ const ORDINAL_WORDS: Record<string, number> = {
  * "my third clip"). Stricter than shared `parseClipReference` (which finds a reference anywhere
  * in free text) — tier 0 must know the whole command was understood, not just a fragment.
  */
-function parseExactClipPhrase(phrase: string): number | undefined {
+export function parseExactClipPhrase(phrase: string): number | undefined {
   const rest = phrase.replace(/^(?:the|my)\s+/, "").trim();
   const numeric = /^(?:clip|layer)\s*(?:#|number\s*)?(\d{1,3})$/.exec(rest);
   if (numeric) {

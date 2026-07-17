@@ -14,6 +14,8 @@
 > **Sibling docs (don't duplicate):** [`AI_FEATURE_MAP.md`](AI_FEATURE_MAP.md) is the
 > *where-things-live* file index. [`architecture.md`](architecture.md) is the shipped/deferred
 > product log. [`AGENTS.md`](AGENTS.md) is the live multi-agent handoff log.
+> [`KIMERA_OS.md`](KIMERA_OS.md) is the decade-scale north star (World Model, Blueprint IR,
+> perception runtime) — this doc is *how today's routing works*; that one is where it's headed.
 
 ---
 
