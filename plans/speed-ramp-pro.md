@@ -46,7 +46,22 @@ Newton with bisection fallback — deterministic) then evaluates the antiderivat
    sum of segment closed forms; eased ramp with zero-length handles == linear ramp exactly);
    `render:compare:pixels` fixture with an eased ramp (frame-exact preview/export mapping).
 
-## Phase S2 — reverse (negative speed)
+## Phase S2 — reverse (negative speed) — CORE SHIPPED 2026-07-18 (0459975)
+
+> Implemented per the design. Deviations/notes: (1) audio EXPORT does TRUE reverse (per-sample
+> pre-render walks source PCM backward) rather than muting — only PREVIEW audio mutes reversed
+> spans (v1). (2) Export VIDEO needed nothing: the WebCodecs decoder's reverse-shuttle cache
+> (built for backward scrubbing) already serves backward frame targets. (3) Preview reversed video
+> rides the existing R3 edge-hold state (element pauses, per-tick backward seeks) — the seek-per-
+> frame shuttle path the design called for. (4) `getLayerSpeed` now returns SIGNED; every magnitude
+> consumer (durations, element playbackRate, headroom divisions via new `edgeRateMagnitude`) takes
+> `Math.abs`. (5) T4 head-manufacture and nest-level expansion reject/ignore reverse (v1) — a
+> reversed COMPOUND needs per-frame nest-time eval (deferred to a would-be S3). 7 new editor.test
+> reverse checks (sign, backward source time, signed integral netting through a zero crossing,
+> freeze spans, head-trim continuity). STILL RIDING with the parallel nesting batch (inseparable
+> shared-file hunks): ClipSpeedControl Reverse button + readout (EditorPage), the reverse tests
+> (editor.test), the nesting `|clipSpeed|` guard (nesting.ts). Deferred: reversed span PROXY for
+> smooth preview (v2), true reversed preview audio (v2), the clamp-to-asset trim badge.
 
 Math is free: `value < 0` just makes the integral decrease — mapping, readouts, and S1 all hold.
 The engineering is the MEDIA path:
