@@ -518,6 +518,83 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
       { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 30, unit: "%", keyframeable: true },
       { key: "angle", label: "Angle", type: "number", min: -180, max: 180, step: 1, defaultValue: 0, unit: "°", keyframeable: true }
     ]
+  },
+  // 2026-07-17 stylize pack (user request: sketch / old TV / glitch as adjustment-clip effects).
+  // Same builtin fragment harness — real GLSL, all three renderers, zero per-renderer code.
+  {
+    type: "sketch",
+    name: "Pencil Sketch",
+    description: "Sobel-edge pencil sketch on paper with grain (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "detail", label: "Detail", type: "number", min: 0, max: 100, step: 1, defaultValue: 55, unit: "%", keyframeable: true },
+      { key: "contrast", label: "Contrast", type: "number", min: 0, max: 100, step: 1, defaultValue: 40, unit: "%", keyframeable: true }
+    ]
+  },
+  {
+    type: "oldTv",
+    name: "Old TV",
+    description: "CRT look: scanlines, static, sync jitter, aged-phosphor tint, vignette (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "scanlines", label: "Scanlines", type: "number", min: 0, max: 100, step: 1, defaultValue: 60, unit: "%", keyframeable: true },
+      { key: "noise", label: "Noise", type: "number", min: 0, max: 100, step: 1, defaultValue: 35, unit: "%", keyframeable: true },
+      { key: "jitter", label: "Jitter", type: "number", min: 0, max: 100, step: 1, defaultValue: 30, unit: "%", keyframeable: true },
+      { key: "vignette", label: "Vignette", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%", keyframeable: true }
+    ]
+  },
+  {
+    type: "glitchFx",
+    name: "Glitch",
+    description: "Digital glitch: row tearing + RGB split, tick-animated (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "amount", label: "Amount", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%", keyframeable: true },
+      { key: "blockiness", label: "Blockiness", type: "number", min: 0, max: 100, step: 1, defaultValue: 40, unit: "%", keyframeable: true },
+      { key: "speed", label: "Speed", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%", keyframeable: true }
+    ]
+  },
+  {
+    type: "halftone",
+    name: "Halftone",
+    description: "Print-style halftone dot screen with screen angle (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "dotSize", label: "Dot Size", type: "number", min: 2, max: 40, step: 1, defaultValue: 8, unit: "px", keyframeable: true },
+      { key: "angle", label: "Angle", type: "number", min: -90, max: 90, step: 1, defaultValue: 25, unit: "°", keyframeable: true }
+    ]
+  },
+  {
+    type: "posterize",
+    name: "Posterize",
+    description: "Quantize colors to a fixed number of levels (real GLSL shader).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [{ key: "levels", label: "Levels", type: "number", min: 2, max: 16, step: 1, defaultValue: 5, keyframeable: true }]
   }
 ];
 

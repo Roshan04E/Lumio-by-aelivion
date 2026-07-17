@@ -123,6 +123,8 @@ export const animationPresets = [
   { id: "zoomPulse", label: "Zoom Pulse" },
   { id: "bounce", label: "Bounce" },
   { id: "fadeInOut", label: "Fade In/Out" },
+  { id: "roll", label: "Roll (credits)", textOnly: true },
+  { id: "crawl", label: "Crawl (ticker)", textOnly: true },
   { id: "typewriter", label: "Typewriter", textOnly: true }
 ] as const;
 
@@ -1413,6 +1415,20 @@ export function applyAnimationPreset(layer: TimelineLayer, presetId: AnimationPr
       add("transform.opacity", Math.min(0.45, duration * 0.2), base.opacity, "linear"),
       add("transform.opacity", Math.max(0.5, duration - Math.min(0.45, duration * 0.2)), base.opacity, "linear"),
       add("transform.opacity", duration, 0, "linear")
+    ];
+  } else if (presetId === "roll") {
+    // Premiere-style credits ROLL: enters from below the frame, exits above, linear speed across
+    // the WHOLE clip. Off-canvas positions are legal (graph/inspector allow -200..300), and no
+    // renderer clamps position — the text simply travels through the frame.
+    keyframes = [
+      add("transform.position.y", 0, 130, "linear"),
+      add("transform.position.y", duration, -30, "linear")
+    ];
+  } else if (presetId === "crawl") {
+    // News-ticker CRAWL: enters from the right edge, exits left, linear across the whole clip.
+    keyframes = [
+      add("transform.position.x", 0, 130, "linear"),
+      add("transform.position.x", duration, -30, "linear")
     ];
   } else if (presetId === "typewriter") {
     // Reveals text characters left-to-right over the first 80% of the layer,

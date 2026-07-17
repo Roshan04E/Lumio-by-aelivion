@@ -15,9 +15,16 @@
  * Adding a section's effect if missing happens automatically on first expand.
  */
 
-import { ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { createTimelineEffect, evaluateTimelineEffectParam, type TimelineEffect, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import {
+  createTimelineEffect,
+  evaluateTimelineEffectParam,
+  getCompositionColorPipeline,
+  pipelineToCubeFile,
+  type TimelineEffect,
+  type TimelineLayer
+} from "@kimera-by-aelivion/shared";
 import { CurveEditor } from "./CurveEditor";
 import { ColorWheels } from "./ColorWheels";
 import { HueSatCurves } from "./HueSatCurves";
@@ -249,8 +256,36 @@ export function LumetriPanel({ layer, currentTime, onChange, onSeek }: Props) {
     );
   };
 
+  // Export the layer's WHOLE grade as an industry-standard .cube 3D LUT. The baker samples the
+  // exact CPU pipeline the renderers grade with (`bakePipelineToLut3d` ← `applyPipelineToRgb`),
+  // so the file IS the live look — loadable back here (Creative → LUT) or in Resolve/Premiere.
+  // Keyframed color params bake at the CURRENT playhead value (a LUT is a static look).
+  function exportGradeAsCube() {
+    const pipeline = getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
+    if (!pipeline) return;
+    const title = layer.name || "Kimera Grade";
+    const text = pipelineToCubeFile(pipeline, title);
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${title.replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "") || "grade"}.cube`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+  const hasGrade = getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime }) != null;
+
   return (
     <div className="lumetri-panel">
+      <button
+        className="lumetri-export-lut"
+        type="button"
+        disabled={!hasGrade}
+        title={hasGrade ? "Export this grade as a .cube 3D LUT (33³)" : "Apply a color adjustment first"}
+        onClick={exportGradeAsCube}
+      >
+        <Download size={12} /> Export .cube LUT
+      </button>
       {SECTIONS.map(({ id, label, effectType }) => {
         const isOpen = openSections.has(id);
         const hasEffect = Boolean(findEffect(layer, effectType));

@@ -22,6 +22,7 @@
 
 import {
   colorPipelineCacheKey,
+  effectiveTransitionDuration,
   findTransitionPairs,
   getActiveTransition,
   graphicToDataUrl,
@@ -32,11 +33,13 @@ import {
   MediaWebGLRenderer,
   RenderTarget,
   layerSourceTimeSeconds,
+  resolveTransitionWindowSides,
   type ScenePreviewTransition,
   type SceneTextureSource,
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
+  type TransitionWindowSides,
 } from "@kimera-by-aelivion/shared";
 import { MediaEncoder } from "../../export/video-encoder";
 import { acquireVideo, type VideoLease } from "../../lib/video-element-pool";
@@ -233,11 +236,27 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
     throw error;
   }
 
+  // R3.1: the same handle-aware window sides as the live viewer — the outgoing asset duration comes
+  // from the already-metadata'd video lease (a still/graphic has unlimited material anyway).
+  const resolveSides = (incoming: TimelineLayer, outgoing: TimelineLayer): TransitionWindowSides => {
+    const leaseDuration = media.get(outgoing.id)?.lease?.video.duration;
+    return resolveTransitionWindowSides({
+      durationSeconds: effectiveTransitionDuration(incoming.transitionIn?.durationSeconds ?? 0, incoming.durationSeconds),
+      incoming: { type: incoming.type, sourceInSeconds: incoming.sourceInSeconds, speed: incoming.speed },
+      outgoing: { type: outgoing.type, sourceInSeconds: outgoing.sourceInSeconds, speed: outgoing.speed, durationSeconds: outgoing.durationSeconds },
+      outgoingAssetDurationSeconds: typeof leaseDuration === "number" && Number.isFinite(leaseDuration) ? leaseDuration : undefined,
+      alignment: incoming.transitionIn?.alignment,
+    });
+  };
+
   const renderFrame = async (t: number, buffer?: Uint8Array) => {
     throwIfAborted(signal);
     // Active entries at t — the viewer's exact activity + z-order + adjustment-merge rules.
     const activeEntries = spanEntries
-      .filter(({ layer, track }) => isLayerActive(layer, t) || isOutgoingInPostroll(layer, track, t) || isIncomingInPreroll(layer, track, t))
+      .filter(
+        ({ layer, track }) =>
+          isLayerActive(layer, t) || isOutgoingInPostroll(layer, track, t, resolveSides) || isIncomingInPreroll(layer, track, t, resolveSides)
+      )
       .sort((a, b) => (a.trackIndex !== b.trackIndex ? b.trackIndex - a.trackIndex : a.layerIndex - b.layerIndex));
     const mergedLayers = activeEntries
       .map((entry) => applyActiveAdjustmentEffects(entry.layer, entry.trackIndex, activeEntries))
@@ -250,10 +269,12 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;
+      const sides = resolveSides(incoming, outgoing);
       const active = getActiveTransition(pair.spec as TransitionSpec, {
         currentTimeSeconds: t,
         startSeconds: incoming.startSeconds,
         clipDurationSeconds: incoming.durationSeconds,
+        prerollSeconds: sides.prerollSeconds,
       });
       if (!active) continue;
       transitions.push({
@@ -261,6 +282,7 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
         incomingId: pair.incomingId,
         spec: pair.spec as TransitionSpec,
         startSeconds: incoming.startSeconds,
+        prerollSeconds: sides.prerollSeconds,
         fromFit: getCompositionObjectFit(outgoing) as "cover" | "contain" | "fill",
         toFit: getCompositionObjectFit(incoming) as "cover" | "contain" | "fill",
       });

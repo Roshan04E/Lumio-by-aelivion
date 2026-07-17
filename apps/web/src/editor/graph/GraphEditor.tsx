@@ -26,7 +26,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent
 } from "react";
-import { Diamond, Magnet, Maximize, RotateCcw, Trash2 } from "lucide-react";
+import { Diamond, List, Magnet, Maximize, RotateCcw, Spline, Trash2 } from "lucide-react";
 import {
   computeAutoTangents,
   easyEaseHandles,
@@ -161,6 +161,33 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     setView(fitGraphView(layer.durationSeconds));
   }, [layer.id]);
 
+  // TWO-VIEW (user request 2026-07-16, DaVinci model): "curves" = the editable bezier plot;
+  // "lanes" = a keyframe editor — EVERY visible parameter as a row of retimeable diamonds on a
+  // shared time axis, no value dimension. Same selection set and toolbar (Time/Value/easing/
+  // delete) drive both, so switching views never loses context. Choice persists per session.
+  const [graphView, setGraphView] = useState<"curves" | "lanes">(() => {
+    try {
+      return window.localStorage.getItem("kimera.graph.view") === "lanes" ? "lanes" : "curves";
+    } catch {
+      return "curves";
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("kimera.graph.view", graphView);
+    } catch {
+      /* private mode */
+    }
+  }, [graphView]);
+  const laneDragRef = useRef<{
+    pointerId: number;
+    keyframeId: string;
+    curveKey: string;
+    startClientX: number;
+    trackWidthPx: number;
+    baseTimeSeconds: number;
+  } | null>(null);
+
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [plotSize, setPlotSize] = useState({ width: 0, height: 0 });
@@ -254,6 +281,9 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
   }, [scenes]);
 
   // ── Canvas sizing (DPR-aware) ────────────────────────────────────────────────
+  // Re-runs on view switch: wrapRef points at the CURVES wrap or the LANES container depending on
+  // `graphView`, and the observer must follow the live element (lanes reuse plotSize for snap
+  // tolerance; curves need fresh sizes after switching back).
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
@@ -263,7 +293,7 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     });
     observer.observe(wrap);
     return () => observer.disconnect();
-  }, []);
+  }, [graphView]);
 
   function prepareCanvas(canvas: HTMLCanvasElement | null): CanvasRenderingContext2D | null {
     if (!canvas || plotSize.width < 2 || plotSize.height < 2) return null;
@@ -525,6 +555,59 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       };
     });
     setSelectedIds([]);
+  }
+
+  // ── Lanes view: diamond retiming ─────────────────────────────────────────────
+  // Drafted like the curve-point drag (no store write per move, one undo on release). The draft is
+  // established lazily on the first MOVE so a plain click never commits a phantom edit.
+  function laneKeyPointerDown(event: ReactPointerEvent<HTMLButtonElement>, curve: GraphCurveScene, kf: TimelineKeyframeV2) {
+    event.preventDefault();
+    event.stopPropagation();
+    (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+    if (event.shiftKey) {
+      setSelectedIds((current) => (current.includes(kf.id) ? current.filter((id) => id !== kf.id) : [...current, kf.id]));
+    } else if (!selectedSet.has(kf.id)) {
+      setSelectedIds([kf.id]);
+    }
+    const track = (event.currentTarget as HTMLElement).parentElement;
+    laneDragRef.current = {
+      pointerId: event.pointerId,
+      keyframeId: kf.id,
+      curveKey: curve.key,
+      startClientX: event.clientX,
+      trackWidthPx: Math.max(1, track?.clientWidth ?? 1),
+      baseTimeSeconds: kf.timeSeconds
+    };
+  }
+  function laneKeyPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = laneDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const curve = scenes.find((scene) => scene.key === drag.curveKey);
+    if (!curve) return;
+    const dt = ((event.clientX - drag.startClientX) / drag.trackWidthPx) * view.timeDuration;
+    // No draft until real movement — a plain click must never commit a phantom edit.
+    if (!isDrafting && Math.abs(event.clientX - drag.startClientX) < 2) return;
+    const nextTime = snapTime(drag.baseTimeSeconds + dt, new Set([drag.keyframeId]));
+    updateDraft((item) => updateGraphTargetKeyframe(item, curve.target, drag.keyframeId, { timeSeconds: nextTime }));
+  }
+  function laneKeyPointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = laneDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    laneDragRef.current = null;
+    commitDraft();
+  }
+  /** Double-click a lane diamond deletes just that key (mirrors deleteSelected's per-track filters). */
+  function laneDeleteKeyframe(keyframeId: string) {
+    onChange((item) => {
+      const sourceKeys = (item.sourceTextKeyframes ?? []).filter((key) => key.id !== keyframeId);
+      return {
+        ...item,
+        keyframes: item.keyframes.filter((kf) => kf.id !== keyframeId),
+        animations: (item.animations ?? []).filter((kf) => kf.id !== keyframeId),
+        sourceTextKeyframes: sourceKeys.length ? sourceKeys : undefined
+      };
+    });
+    setSelectedIds((current) => current.filter((id) => id !== keyframeId));
   }
 
   function nudgeSelected(deltaTime: number, valueSteps: number) {
@@ -1055,6 +1138,29 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
 
       <div className="graph-workspace-main">
         <div className="graph-toolbar">
+          <div className="graph-toolbar-views" role="tablist" aria-label="Graph view">
+            <button
+              className={graphView === "curves" ? "is-active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={graphView === "curves"}
+              title="Curve view — editable bezier graph with value axis"
+              onClick={() => setGraphView("curves")}
+            >
+              <Spline size={12} />
+            </button>
+            <button
+              className={graphView === "lanes" ? "is-active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={graphView === "lanes"}
+              title="Keyframe view — all parameters as retimeable diamond lanes (drag = retime, double-click = delete)"
+              onClick={() => setGraphView("lanes")}
+            >
+              <List size={12} />
+            </button>
+          </div>
+          <span className="graph-toolbar-divider" />
           <button
             className={snapEnabled ? "is-active" : ""}
             type="button"
@@ -1187,26 +1293,92 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
           ) : null}
         </div>
 
-        <div className="graph-canvas-wrap" ref={wrapRef}>
-          <canvas className="graph-canvas-base" ref={baseCanvasRef} />
-          <canvas
-            className={`graph-canvas-overlay${isDrafting ? " is-drafting" : ""}`}
-            ref={overlayCanvasRef}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-            onDoubleClick={handleDoubleClick}
-            onWheel={handleWheel}
-          />
-          {scenes.length === 0 ? (
-            <div className="graph-canvas-empty">
-              <Diamond size={15} />
-              No animated properties yet — toggle a diamond in the inspector, or pick a property on the left and
-              double-click the plot to add a key.
+        {graphView === "curves" ? (
+          <div className="graph-canvas-wrap" ref={wrapRef}>
+            <canvas className="graph-canvas-base" ref={baseCanvasRef} />
+            <canvas
+              className={`graph-canvas-overlay${isDrafting ? " is-drafting" : ""}`}
+              ref={overlayCanvasRef}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onDoubleClick={handleDoubleClick}
+              onWheel={handleWheel}
+            />
+            {scenes.length === 0 ? (
+              <div className="graph-canvas-empty">
+                <Diamond size={15} />
+                No animated properties yet — toggle a diamond in the inspector, or pick a property on the left and
+                double-click the plot to add a key.
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          // LANES: percent-positioned diamonds inside each row (no canvas, no value axis) over the
+          // SAME view window as the curves, so zoom/fit carries across the view switch.
+          <div className="graph-lanes" ref={wrapRef} aria-label="Keyframe lanes">
+            <div className="graph-lanes-ruler">
+              {[0, 1, 2, 3, 4].map((index) => {
+                const t = view.timeStart + (view.timeDuration * index) / 4;
+                return (
+                  <span key={index} className="graph-lanes-tick" style={{ left: `${index * 25}%` }}>
+                    {t.toFixed(1)}s
+                  </span>
+                );
+              })}
             </div>
-          ) : null}
-        </div>
+            <div className="graph-lanes-body">
+              <div
+                className="graph-lanes-playhead"
+                style={{ left: `${clamp(((layerTime - view.timeStart) / view.timeDuration) * 100, 0, 100)}%` }}
+              />
+              {scenes.map((curve) => {
+                const shortLabel =
+                  curve.target.kind === "effect" ? curve.target.label.split(" · ")[1] ?? curve.target.label : curve.target.label;
+                return (
+                  <div className="graph-lane-row" key={curve.key}>
+                    <span className="graph-lane-label" title={curve.target.label}>
+                      <i style={{ background: curve.color }} />
+                      {shortLabel}
+                    </span>
+                    <div className="graph-lane-track">
+                      {curve.keyframes.map((kf) => {
+                        const leftPercent = ((kf.timeSeconds - view.timeStart) / Math.max(1e-4, view.timeDuration)) * 100;
+                        if (leftPercent < -2 || leftPercent > 102) return null;
+                        const selected = selectedSet.has(kf.id);
+                        return (
+                          <button
+                            key={kf.id}
+                            type="button"
+                            className={`graph-lane-key${selected ? " is-selected" : ""}`}
+                            style={{ left: `${leftPercent}%`, borderColor: curve.color, background: selected ? curve.color : undefined }}
+                            title={`${curve.target.label} @ ${kf.timeSeconds.toFixed(2)}s = ${Number(kf.value).toFixed(2)} — drag to retime, double-click to delete`}
+                            onPointerDown={(event) => laneKeyPointerDown(event, curve, kf)}
+                            onPointerMove={laneKeyPointerMove}
+                            onPointerUp={laneKeyPointerUp}
+                            onPointerCancel={laneKeyPointerUp}
+                            onDoubleClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              laneDeleteKeyframe(kf.id);
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {scenes.length === 0 ? (
+                <div className="graph-canvas-empty">
+                  <Diamond size={15} />
+                  No animated properties yet — toggle a diamond in the inspector to start.
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

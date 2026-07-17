@@ -24,5 +24,6 @@ export * from "./gl-context";
 export * from "./blend";
 export * from "./scene-compositor";
 export * from "./cube-parser";
+export * from "./cube-writer";
 export * from "./looks";
 export * from "./grade-intent";

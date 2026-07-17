@@ -507,9 +507,25 @@ Steps 1, 2, 4 done + pan-snap (step 3); the corner-content-zoom snap is the one 
   beside Remove in the Effects-subpanel frame card — it's just an `onChange` updater, so no new plumbing.
   Verified: `pnpm -r typecheck` all 5 clean; `frames:test` **100/100** (+12: each generator's mapping,
   one-way drop, identity preserved, aspectLock box %). Editor-only → pixel-safe.
-- **Step E — Border** (`border` / `borderWidth` / `borderColor`): the ONLY renderer work. Needs a stroke pass
-  in BOTH the DOM preview and the SceneCompositor + a NEW framed-media pixel fixture. **BLOCKED** until the
-  gate can run (see the `graphicIsAnimated` duplicate above) — do not land it on an unverifiable gate.
+- **Step E — Border ✅ (2026-07-16)** (`border` / `borderWidth` / `borderColor`). The gate unblocked (the
+  `graphicIsAnimated` duplicate was resolved upstream) and the plan CHANGED for the better: instead of a new
+  stroke pass in each renderer, **the border is a DERIVED stroke-only SHAPE layer** — `expandFrameBorders`
+  synthesizes a transparent-fill/stroked shape clone (`${id}__frameborder`) directly above each framed layer,
+  reusing `frameToShapeLayer` for the outline (D1's one table) and the ALREADY-pixel-gated shape renderer in
+  every path. Same derived-render-layer pattern as `expandEffectRegionMasks`; wired at the same 3 seams
+  (VideoPreview, export-core, buildRenderManifest), border-first then regions, so the clone rides every
+  existing pipeline (raster, z-order, manifest) with zero new render surface. Chrome: `border` (off),
+  `borderWidth` (px), `borderColor` — merged into every definition; card shows a Border section via the new
+  shared `ColorControl` (the `color` param variant's first inspector control, PropertyRow shell).
+  **Two latent CLOUD-RENDER bugs found + fixed while wiring it:** `RenderManifestLayer` never carried
+  (1) `layer.frame` — a framed clip rendered UN-clipped in the cloud/Remotion path (uncaught: the framed
+  fixture was deferred at Step 2) — and (2) `shapeKind`/`shapePath` in the style bag — a non-default shape
+  (pen path, ellipse, hexagon) rendered as the default rounded-rectangle in the cloud path. Both now carried.
+  **Verified:** `pnpm -r typecheck` 5/5; `frames:test` 115/115 (+13: border chrome tier, sections
+  Shape·Box·Border, stroke-only clone mapping, strips, expansion order + same-ref); NEW `framed-media` pixel
+  fixture (rounded-rect 40, box 78×60, 16px #ffd24a border) → **diff 0.000%** Remotion vs web preview, frame
+  visually confirmed (clipped + gold border); full regression sweep **28/28 fixtures green** (26 at 0.000%,
+  grain/chroma-key at 0.001% — their usual noise floor) — the expansion + manifest changes broke nothing.
 - **Phase 1 Step 4 — empty-frame placeholder + drop-to-fill ✅ (2026-07-16).** Picking a frame with no
   image/video selected now drops an EMPTY placeholder (an `image` layer with `frame` set and no `assetId`,
   `fit: "cover"`) instead of erroring. `VideoPreview` renders it as a dashed outline in the frame's actual
@@ -547,7 +563,7 @@ Steps 1, 2, 4 done + pan-snap (step 3); the corner-content-zoom snap is the one 
 - **Graphics panel sub-sectioning** — Used · Shapes · Vectors · GIFs · Frames.
 - **Animated GIFs** — explicitly after Frames.
 
-Still open from QA round 1 → **Step E** (border — the only renderer work). Step F (convert to graphic) ✅ 2026-07-16.
+All five original QA-round-1 items are now closed: Step E (border) ✅ and Step F (convert to graphic) ✅ 2026-07-16.
 
 ## Inspector default height (founder call 2026-07-15)
 

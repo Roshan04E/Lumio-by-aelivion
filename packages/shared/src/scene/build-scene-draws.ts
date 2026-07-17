@@ -63,6 +63,8 @@ export interface ScenePreviewTransition {
   incomingId: string;
   spec: TransitionSpec;
   startSeconds: number;
+  /** R3.1 handle-aware window: seconds of the window BEFORE the cut (`resolveTransitionWindowSides`). Absent → centered. */
+  prerollSeconds?: number | undefined;
   fromFit: "cover" | "contain" | "fill";
   toFit: "cover" | "contain" | "fill";
 }
@@ -134,7 +136,18 @@ export interface BuildSceneDrawsInputs {
 }
 
 /** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below). */
-const BUILTIN_FRAGMENT_EFFECT_TYPES = new Set(["radialBlur", "directionalBlur", "sharpen", "pixelate", "chromaticAberration"]);
+const BUILTIN_FRAGMENT_EFFECT_TYPES = new Set([
+  "radialBlur",
+  "directionalBlur",
+  "sharpen",
+  "pixelate",
+  "chromaticAberration",
+  "sketch",
+  "oldTv",
+  "glitchFx",
+  "halftone",
+  "posterize"
+]);
 
 /** Parse `#rgb`/`#rrggbb`/`rgb()`/`rgba()` into straight-alpha rgb 0..1 (alpha ignored — glow tint). */
 function parseCssColor(input: string): [number, number, number] {
@@ -250,6 +263,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       currentTimeSeconds: t,
       startSeconds: pair.startSeconds,
       clipDurationSeconds: layerById.get(pair.incomingId)?.durationSeconds,
+      prerollSeconds: pair.prerollSeconds,
     });
     if (!active || !layerById.has(pair.outgoingId) || !layerById.has(pair.incomingId)) {
       continue;

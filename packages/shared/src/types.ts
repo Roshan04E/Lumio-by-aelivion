@@ -239,6 +239,12 @@ export interface ProjectGraph {
   composition?: TimelineComposition | undefined;
   /** Auxiliary compositions, used by imported nested timelines/templates. `composition` remains the active/root timeline. */
   compositions?: Record<string, TimelineComposition> | undefined;
+  /**
+   * Per-project media-library organization (folder tree etc. — see shared/media-manifest.ts).
+   * Living inside the graph means it syncs to the cloud with the project through the existing
+   * save path, so local and cloud keep the same folder structure. Renderers ignore it.
+   */
+  mediaManifest?: { version: 1; customFolders: string[] } | undefined;
   version: number;
 }
 
@@ -444,7 +450,12 @@ export const timelineEffectTypes = [
   "directionalBlur",
   "sharpen",
   "pixelate",
-  "chromaticAberration"
+  "chromaticAberration",
+  "sketch",
+  "oldTv",
+  "glitchFx",
+  "halftone",
+  "posterize"
 ] as const;
 
 export type TimelineEffectType = (typeof timelineEffectTypes)[number];
@@ -637,6 +648,10 @@ export interface TransitionSpec {
    * `softness`/`color` are mapped into params by the renderers for back-compat.
    */
   params?: Record<string, number | number[] | boolean> | undefined;
+  /** Window placement relative to the cut. "auto" (default/absent) = handle-aware (R3.1): centered when
+   *  both sides have media, shifted toward the side that does. Manual values force placement and may
+   *  produce repeated frames (zebra warning) where material is missing — exactly Premiere's model. */
+  alignment?: "auto" | "center" | "start" | "end" | undefined;
 }
 
 export interface TimelineLayer {

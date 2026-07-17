@@ -128,7 +128,164 @@ vec4 effect(vec2 uv) {
 `
 };
 
-const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [RADIAL_BLUR, DIRECTIONAL_BLUR, SHARPEN, PIXELATE, CHROMATIC_ABERRATION];
+// 2026-07-17 "graphics effects" batch (user request: sketch / old TV / glitch — adjustment-clip
+// friendly stylize pack). `uTime` is set from the pass's frame time in EVERY renderer
+// (scene-compositor `pass.timeSeconds`), so the animated ones (old TV, glitch) are frame-
+// deterministic — preview and export produce identical pixels for the same frame.
+
+const SKETCH: FragmentEffectDefinition = {
+  id: builtinFragmentEffectId("sketch"),
+  name: "Pencil Sketch",
+  category: "Stylize",
+  params: [
+    { name: "detail", type: "float", default: 55, min: 0, max: 100, step: 1, label: "Detail" },
+    { name: "contrast", type: "float", default: 40, min: 0, max: 100, step: 1, label: "Contrast" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  vec2 px = 1.0 / uResolution;
+  // Sobel edge magnitude on luma.
+  float tl = _luma(getSrcColor(uv + vec2(-px.x,  px.y)).rgb);
+  float  t = _luma(getSrcColor(uv + vec2( 0.0,   px.y)).rgb);
+  float tr = _luma(getSrcColor(uv + vec2( px.x,  px.y)).rgb);
+  float  l = _luma(getSrcColor(uv + vec2(-px.x,  0.0 )).rgb);
+  float  r = _luma(getSrcColor(uv + vec2( px.x,  0.0 )).rgb);
+  float bl = _luma(getSrcColor(uv + vec2(-px.x, -px.y)).rgb);
+  float  b = _luma(getSrcColor(uv + vec2( 0.0,  -px.y)).rgb);
+  float br = _luma(getSrcColor(uv + vec2( px.x, -px.y)).rgb);
+  float gx = (tr + 2.0 * r + br) - (tl + 2.0 * l + bl);
+  float gy = (tl + 2.0 * t + tr) - (bl + 2.0 * b + br);
+  float edge = length(vec2(gx, gy)) * mix(0.5, 4.0, detail / 100.0);
+  // Ink on paper: edges dark, flats light, with a faint paper grain.
+  float ink = 1.0 - clamp(edge, 0.0, 1.0);
+  ink = pow(ink, 1.0 + (contrast / 100.0) * 3.0);
+  float grain = 0.94 + 0.06 * _rand(floor(uv * uResolution * 0.5));
+  vec4 src = getSrcColor(uv);
+  return vec4(vec3(ink * grain), src.a);
+}
+`
+};
+
+const OLD_TV: FragmentEffectDefinition = {
+  id: builtinFragmentEffectId("oldTv"),
+  name: "Old TV",
+  category: "Stylize",
+  params: [
+    { name: "scanlines", type: "float", default: 60, min: 0, max: 100, step: 1, label: "Scanlines" },
+    { name: "noise", type: "float", default: 35, min: 0, max: 100, step: 1, label: "Noise" },
+    { name: "jitter", type: "float", default: 30, min: 0, max: 100, step: 1, label: "Jitter" },
+    { name: "vignette", type: "float", default: 50, min: 0, max: 100, step: 1, label: "Vignette" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  // Per-scanline horizontal jitter, stepped at ~24Hz so it flickers like a bad sync, not per-frame soup.
+  float tick = floor(uTime * 24.0);
+  float lineJitter = (_rand(vec2(floor(uv.y * uResolution.y), tick)) - 0.5) * 0.02 * (jitter / 100.0);
+  // Occasional full-frame vertical roll tear.
+  float tear = step(0.96, _rand(vec2(tick, 7.0))) * (jitter / 100.0) * 0.05;
+  vec2 suv = uv + vec2(lineJitter, tear);
+  vec4 c = getSrcColor(suv);
+  // Slight warm cast + mild desaturation (aged phosphor).
+  float lum = _luma(c.rgb);
+  c.rgb = mix(c.rgb, vec3(lum) * vec3(1.05, 1.0, 0.9), 0.25);
+  // Scanlines.
+  float sl = sin(uv.y * uResolution.y * 3.14159) * 0.5 + 0.5;
+  c.rgb *= mix(1.0, 0.72 + 0.28 * sl, scanlines / 100.0);
+  // Animated static.
+  float n = _rand(uv * uResolution + vec2(uTime * 61.0, uTime * 83.0));
+  c.rgb = mix(c.rgb, vec3(n), (noise / 100.0) * 0.22);
+  // Vignette.
+  float d = distance(uv, vec2(0.5));
+  c.rgb *= mix(1.0, smoothstep(0.85, 0.35, d), vignette / 100.0);
+  return c;
+}
+`
+};
+
+const GLITCH_FX: FragmentEffectDefinition = {
+  id: builtinFragmentEffectId("glitchFx"),
+  name: "Glitch",
+  category: "Stylize",
+  params: [
+    { name: "amount", type: "float", default: 50, min: 0, max: 100, step: 1, label: "Amount" },
+    { name: "blockiness", type: "float", default: 40, min: 0, max: 100, step: 1, label: "Blockiness" },
+    { name: "speed", type: "float", default: 50, min: 0, max: 100, step: 1, label: "Speed" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  float t = floor(uTime * mix(4.0, 24.0, speed / 100.0));
+  float strength = amount / 100.0;
+  float rows = mix(6.0, 40.0, blockiness / 100.0);
+  float row = floor(uv.y * rows);
+  float r1 = _rand(vec2(row, t));
+  // Only some rows tear each tick — constant full-frame shifting reads as noise, not a glitch.
+  float tearing = step(0.62, _rand(vec2(row, t + 13.0)));
+  float shift = (r1 - 0.5) * 0.14 * strength * tearing;
+  vec2 suv = uv + vec2(shift, 0.0);
+  float split = 0.008 * strength * (0.5 + r1);
+  vec4 base = getSrcColor(suv);
+  float rr = getSrcColor(suv + vec2(split, 0.0)).r;
+  float bb = getSrcColor(suv - vec2(split, 0.0)).b;
+  return vec4(rr, base.g, bb, base.a);
+}
+`
+};
+
+const HALFTONE: FragmentEffectDefinition = {
+  id: builtinFragmentEffectId("halftone"),
+  name: "Halftone",
+  category: "Stylize",
+  params: [
+    { name: "dotSize", type: "float", default: 8, min: 2, max: 40, step: 1, label: "Dot Size" },
+    { name: "angle", type: "float", default: 25, min: -90, max: 90, step: 1, label: "Angle" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  float rad = radians(angle);
+  mat2 rot = mat2(cos(rad), -sin(rad), sin(rad), cos(rad));
+  mat2 inv = mat2(cos(rad), sin(rad), -sin(rad), cos(rad));
+  float cell = max(2.0, dotSize);
+  vec2 p = rot * (uv * uResolution);
+  vec2 grid = (floor(p / cell) + 0.5) * cell;
+  vec2 srcUv = (inv * grid) / uResolution;
+  float l = _luma(getSrcColor(clamp(srcUv, 0.0, 1.0)).rgb);
+  // Dot radius grows with darkness (print-style ink coverage).
+  float radius = (1.0 - l) * cell * 0.62;
+  float d = distance(p, grid);
+  float ink = smoothstep(radius, radius - 1.2, d);
+  vec4 src = getSrcColor(uv);
+  return vec4(mix(vec3(0.97), vec3(0.05), ink), src.a);
+}
+`
+};
+
+const POSTERIZE: FragmentEffectDefinition = {
+  id: builtinFragmentEffectId("posterize"),
+  name: "Posterize",
+  category: "Stylize",
+  params: [{ name: "levels", type: "float", default: 5, min: 2, max: 16, step: 1, label: "Levels" }],
+  glsl: `
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  float n = max(2.0, floor(levels));
+  vec3 q = floor(c.rgb * (n - 1.0) + 0.5) / (n - 1.0);
+  return vec4(q, c.a);
+}
+`
+};
+
+const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [
+  RADIAL_BLUR,
+  DIRECTIONAL_BLUR,
+  SHARPEN,
+  PIXELATE,
+  CHROMATIC_ABERRATION,
+  SKETCH,
+  OLD_TV,
+  GLITCH_FX,
+  HALFTONE,
+  POSTERIZE
+];
 
 let registered = false;
 

@@ -1,15 +1,16 @@
 import type { TimelineLayerType } from "@kimera-by-aelivion/shared";
 
 /**
- * Resolve-style top-level inspector tabs (Video/Text/Shape | Audio | Effects).
+ * Resolve-style top-level inspector tabs (Video/Text/Shape | Audio | Effects | Graphics | Color).
  * Replaces the single long accordion scroll: each tab shows only its sections, which
- * kills the stacked-headers problem. Color grading deliberately stays OUT of these
- * tabs — the left panel's Color tab (Lumetri + scopes) is the one color surface
- * (user call 2026-07-12: three color entry points was two too many).
+ * kills the stacked-headers problem. Color originally stayed OUT of these tabs (2026-07-12 call:
+ * left panel owned the one color surface) — REVERSED by user request 2026-07-16 ("color tab inside
+ * the inspector sub tab"): the Color tab reuses the SAME LumetriPanel component the left panel
+ * renders, so there's still exactly one color implementation, just two entry points.
  * The active tab is remembered per layer type across selections (module map, not
  * state — survives unmounts without a store).
  */
-export type InspectorTabId = "video" | "audio" | "effects" | "graphics";
+export type InspectorTabId = "video" | "audio" | "effects" | "graphics" | "color";
 
 const lastTabByLayerType = new Map<TimelineLayerType, InspectorTabId>();
 
@@ -17,7 +18,7 @@ export function availableInspectorTabs(type: TimelineLayerType): InspectorTabId[
   if (type === "audio") return ["audio", "effects"];
   // Graphics = the Essential Graphics surface (layer stack, align, vector properties) for every
   // visual layer type — mirrors Premiere v25's contextual Properties panel split.
-  return ["video", "effects", "graphics"];
+  return ["video", "effects", "graphics", "color"];
 }
 
 /** First tab label adapts to the layer ("Video" reads wrong on a text layer). */
@@ -29,6 +30,7 @@ export function inspectorTabLabel(tab: InspectorTabId, type: TimelineLayerType):
   }
   if (tab === "audio") return "Audio";
   if (tab === "graphics") return "Graphics";
+  if (tab === "color") return "Color";
   return "Effects";
 }
 

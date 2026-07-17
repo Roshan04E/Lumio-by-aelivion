@@ -12,7 +12,7 @@
  */
 
 import type { TimelineEffectParamDefinition } from "./effects";
-import type { Mask, MaskPoint, ShapeKind, TimelineLayer } from "./types";
+import type { Mask, MaskPoint, ShapeKind, TimelineComposition, TimelineLayer } from "./types";
 
 /** Object-fit modes, matching the compositor's `ObjectFit` (kept local so this pure module has no deps). */
 export type FrameObjectFit = "cover" | "contain" | "fill";
@@ -61,19 +61,29 @@ export interface FrameDefinition {
   chromeDefaults?: Record<string, FrameParamValue> | undefined;
 }
 
-// --- Tier 2: chrome params (universal box; see FRAMES.md "v1.5 model") -------------------------
+// --- Tier 2: chrome params (universal box + border; see FRAMES.md "v1.5 model") -----------------
 //
 // Frame-NATIVE names (founder decision D1: frames own their full vocabulary — no coupling to the
 // shape-layer field names). Every frame gets these merged in, so even the most exotic pack generator
-// has a box for free and never redeclares it. Border chrome (border/borderWidth/borderColor) joins
-// this list in Step E, when there is actually a renderer to draw it — knobs ship WITH their pixels.
+// has a box + border for free and never redeclares them.
 
 /** The universal box params merged into every frame definition. */
-export const frameChromeParams: TimelineEffectParamDefinition[] = [
+export const frameBoxParams: TimelineEffectParamDefinition[] = [
   { key: "width", label: "Width", type: "number", min: 1, max: 100, step: 1, defaultValue: 100, unit: "%" },
   { key: "height", label: "Height", type: "number", min: 1, max: 100, step: 1, defaultValue: 100, unit: "%" },
   { key: "aspectLock", label: "Lock Aspect", type: "boolean", defaultValue: false }
 ];
+
+/** The universal border params (Step E — shipped WITH their pixels: the stroke renders as a derived
+ *  shape layer, see {@link frameBorderShapeLayer}). Width is comp pixels, like every stroke in the app. */
+export const frameBorderParams: TimelineEffectParamDefinition[] = [
+  { key: "border", label: "Border", type: "boolean", defaultValue: false },
+  { key: "borderWidth", label: "Border Width", type: "number", min: 1, max: 120, step: 1, defaultValue: 8, unit: "px" },
+  { key: "borderColor", label: "Border Color", type: "color", defaultValue: "#ffffff" }
+];
+
+/** All chrome merged into every frame definition (box + border). */
+export const frameChromeParams: TimelineEffectParamDefinition[] = [...frameBoxParams, ...frameBorderParams];
 
 const chromeParamKeys = new Set(frameChromeParams.map((param) => param.key));
 
@@ -85,14 +95,15 @@ export function frameParamSchema(def: FrameDefinition): TimelineEffectParamDefin
 }
 
 /**
- * The card's grouping: generator knobs first ("Shape"), then the universal box. Returned as data so the
- * inspector renders sections without knowing which params belong to which tier.
+ * The card's grouping: generator knobs first ("Shape"), then the universal box, then the border. Returned
+ * as data so the inspector renders sections without knowing which params belong to which tier.
  */
 export function frameParamSections(def: FrameDefinition): Array<{ title: string; params: TimelineEffectParamDefinition[] }> {
   const own = def.params.filter((param) => !chromeParamKeys.has(param.key));
   return [
     ...(own.length ? [{ title: "Shape", params: own }] : []),
-    { title: "Box", params: frameChromeParams }
+    { title: "Box", params: frameBoxParams },
+    { title: "Border", params: frameBorderParams }
   ];
 }
 
@@ -106,6 +117,11 @@ function numberParam(params: Record<string, FrameParamValue>, key: string, fallb
 function booleanParam(params: Record<string, FrameParamValue>, key: string, fallback: boolean): boolean {
   const value = params[key];
   return typeof value === "boolean" ? value : fallback;
+}
+
+function stringParam(params: Record<string, FrameParamValue>, key: string, fallback: string): string {
+  const value = params[key];
+  return typeof value === "string" && value ? value : fallback;
 }
 
 /**
@@ -652,4 +668,72 @@ export function frameToShapeLayer(layer: TimelineLayer, comp: { width: number; h
     ...(shapePath ? { shapePath } : {})
   };
   return next;
+}
+
+// --- Step E: border = a DERIVED stroke-only shape layer (render-time expansion) ------------------
+//
+// The frame's border chrome (border/borderWidth/borderColor) renders by synthesizing a shape layer —
+// transparent fill, stroke from the chrome — directly ABOVE the framed media, riding the SAME transform.
+// This reuses the pixel-gated shape renderer in EVERY path (DOM preview, scene compositor, Remotion
+// export) instead of adding a new stroke surface to each: the border is just a shape, and shapes already
+// render identically everywhere. Same derived-render-layer pattern as `expandEffectRegionMasks` — the
+// editor state keeps the single framed layer; the clone exists only in the expanded render list. The
+// frame→shape outline mapping comes from `frameToShapeLayer` (D1: the ONE frame↔shape table).
+
+/** Suffix marking a derived border clone (render-only; never selectable — not in the real composition). */
+export const FRAME_BORDER_LAYER_SUFFIX = "__frameborder";
+
+/**
+ * The derived stroke-only shape layer for `layer.frame`'s border, or null when the frame has no border
+ * (chrome `border` off / zero width). Strips everything that isn't the stroke: effects/masks stay on the
+ * media (they'd otherwise re-expand or re-grade the chrome), transitions/speed are media concerns.
+ */
+export function frameBorderShapeLayer(layer: TimelineLayer, comp: { width: number; height: number }): TimelineLayer | null {
+  const frame = layer.frame;
+  if (!frame) return null;
+  const params = frameEffectiveParams(frame);
+  const borderWidth = numberParam(params, "borderWidth", 0);
+  if (!booleanParam(params, "border", false) || borderWidth <= 0) return null;
+  const shape = frameToShapeLayer(layer, comp);
+  return {
+    ...shape,
+    id: `${layer.id}${FRAME_BORDER_LAYER_SUFFIX}`,
+    name: `${layer.name} border`,
+    color: "transparent",
+    strokeColor: stringParam(params, "borderColor", "#ffffff"),
+    strokeWidth: borderWidth,
+    graphic: undefined,
+    effects: [],
+    masks: undefined,
+    transitionIn: undefined,
+    speed: undefined,
+    speedKeyframes: undefined,
+    shadowBlur: 0,
+    shadowOffsetX: 0,
+    shadowOffsetY: 0
+  };
+}
+
+/**
+ * Composition-wide border expansion: inserts each framed layer's border clone right after it (so the
+ * stroke draws directly above its media). Runs BEFORE `expandEffectRegionMasks` at every consumer seam
+ * (web preview, local export, render manifest) — the clone carries no region effects, so region expansion
+ * passes it through, and it lands ABOVE the media's region clones (flatMap preserves relative order).
+ * Returns the same object when nothing has a border, so memoized consumers see a stable reference.
+ */
+export function expandFrameBorders(composition: TimelineComposition): TimelineComposition {
+  const comp = { width: composition.width, height: composition.height };
+  let changed = false;
+  const tracks = composition.tracks.map((track) => {
+    if (!track.layers.some((layer) => frameBorderShapeLayer(layer, comp))) return track;
+    changed = true;
+    return {
+      ...track,
+      layers: track.layers.flatMap((layer) => {
+        const border = frameBorderShapeLayer(layer, comp);
+        return border ? [layer, border] : [layer];
+      })
+    };
+  });
+  return changed ? { ...composition, tracks } : composition;
 }

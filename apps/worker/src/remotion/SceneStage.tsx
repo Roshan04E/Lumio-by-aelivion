@@ -18,6 +18,7 @@ import {
   SceneTextRasterizer,
   buildSceneDraws,
   colorPipelineCacheKey,
+  effectiveTransitionDuration,
   effectsWithLayerRegionMask,
   findTransitionPairs,
   getActiveTransition,
@@ -31,6 +32,7 @@ import {
   graphicAnimationFrameAt,
   graphicToAnimatedDataUrl,
   resolveGraphicAnimation,
+  resolveTransitionWindowSides,
   layerSourceTimeSeconds,
   registerEffectManifests,
   registerLookManifests,
@@ -41,7 +43,8 @@ import {
   type SceneFrameSpec,
   type ScenePreviewTransition,
   type TimelineLayer,
-  type TransitionSpec
+  type TransitionSpec,
+  type TransitionWindowSides
 } from "@kimera-by-aelivion/shared";
 
 /**
@@ -103,20 +106,43 @@ function loadImageOnce(src: string): Promise<HTMLImageElement> {
 }
 
 /**
- * A clip's post-roll: how long it keeps rendering past its out-point to sit under the next clip's
- * transition. R3 (centered-on-cut): the transition window is now `[cut - D/2, cut + D/2]`, so only the
- * D/2 HALF past the cut is post-roll — the D/2 half before the cut is inside this clip's own normal span.
+ * R3.1: the handle-aware window sides for a junction pair, from the manifest's own data (layer
+ * `sourceInSeconds`/`speed` + asset durations). Same shared math as the web preview
+ * (`resolveTransitionWindowSides`), so the worker's window placement — and therefore its Sequence
+ * mounts and `trimBefore` — stays pixel-aligned with the preview. Crucially the pre-roll never
+ * exceeds the incoming's head handle, so `trimBefore = sourceIn - preroll*speed` can never clamp
+ * at 0 and silently misalign the clip after the cut.
  */
-function outgoingPostrollSeconds(layer: RenderManifestLayer, layers: RenderManifestLayer[]): number {
+function manifestTransitionSides(
+  incoming: RenderManifestLayer,
+  outgoing: RenderManifestLayer,
+  getAssetDurationSeconds: (assetId: string | undefined) => number | undefined
+): TransitionWindowSides {
+  return resolveTransitionWindowSides({
+    durationSeconds: effectiveTransitionDuration(incoming.transitionIn?.durationSeconds ?? 0, incoming.durationSeconds),
+    incoming: { type: incoming.type, sourceInSeconds: incoming.sourceInSeconds, speed: incoming.speed },
+    outgoing: { type: outgoing.type, sourceInSeconds: outgoing.sourceInSeconds, speed: outgoing.speed, durationSeconds: outgoing.durationSeconds },
+    outgoingAssetDurationSeconds: getAssetDurationSeconds(outgoing.assetId),
+    alignment: incoming.transitionIn?.alignment,
+  });
+}
+
+/**
+ * A clip's post-roll: how long it keeps rendering past its out-point to sit under the next clip's
+ * transition. R3 (centered-on-cut) / R3.1 (handle-aware): the slice of the window past the cut —
+ * up to the whole window when the incoming clip has no head handle ("start at cut").
+ */
+function outgoingPostrollSeconds(
+  layer: RenderManifestLayer,
+  layers: RenderManifestLayer[],
+  getAssetDurationSeconds: (assetId: string | undefined) => number | undefined
+): number {
   const end = layer.startSeconds + layer.durationSeconds;
   let best = 0;
   for (const other of layers) {
     if (other.id === layer.id || other.trackId !== layer.trackId || !other.transitionIn) continue;
-    // Clamp to the incoming clip's length: the transition window never runs past the clip it reveals
-    // (getActiveTransition/effectiveTransitionDuration), so the outgoing clip only needs to sit under
-    // half of that for its post-roll.
     if (Math.abs(other.startSeconds - end) < 0.05) {
-      best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2);
+      best = Math.max(best, manifestTransitionSides(other, layer, getAssetDurationSeconds).postrollSeconds);
     }
   }
   return best;
@@ -124,17 +150,21 @@ function outgoingPostrollSeconds(layer: RenderManifestLayer, layers: RenderManif
 
 /**
  * R3: the symmetric counterpart of `outgoingPostrollSeconds` — how long BEFORE its own start `layer`
- * must start rendering/decoding because it's the incoming side of a junction transition whose centered
- * window already began (the D/2 half before the cut).
+ * must start rendering/decoding because it's the incoming side of a junction transition whose window
+ * (R3.1: handle-aware, never more than the clip's own head handle) began before the cut.
  */
-function incomingPrerollSeconds(layer: RenderManifestLayer, layers: RenderManifestLayer[]): number {
+function incomingPrerollSeconds(
+  layer: RenderManifestLayer,
+  layers: RenderManifestLayer[],
+  getAssetDurationSeconds: (assetId: string | undefined) => number | undefined
+): number {
   if (!layer.transitionIn) return 0;
   const start = layer.startSeconds;
   for (const other of layers) {
     if (other.id === layer.id || other.trackId !== layer.trackId) continue;
     const end = other.startSeconds + other.durationSeconds;
     if (Math.abs(end - start) < 0.05) {
-      return Math.min(layer.transitionIn.durationSeconds, layer.durationSeconds) / 2;
+      return manifestTransitionSides(layer, other, getAssetDurationSeconds).prerollSeconds;
     }
   }
   return 0;
@@ -483,6 +513,12 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
 
   // Back-to-front (z ascending = drawn first/bottom). Matches the legacy DOM order + the editor's z-order.
   const sorted = useMemo(() => [...manifest.layers].sort((a, b) => a.zIndex - b.zIndex), [manifest.layers]);
+  // R3.1: asset durations for the handle-aware transition window (how much tail material the outgoing
+  // clip really has). Unknown asset → undefined → the sides resolver assumes material exists.
+  const assetDurationById = useMemo(() => {
+    const byId = new Map(manifest.assets.map((asset) => [asset.id, asset.durationSeconds]));
+    return (assetId: string | undefined) => (assetId != null ? byId.get(assetId) : undefined);
+  }, [manifest.assets]);
   const adjustments = useMemo(() => sorted.filter((l) => l.type === "adjustment"), [sorted]);
   const audioLayers = useMemo(() => sorted.filter((l) => l.type === "audio" && l.assetUrl), [sorted]);
   // Media layers carry their own Sequence (with post-roll) so OffthreadVideo gets the correct source time and
@@ -556,8 +592,8 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       if (layer.type !== "video" && layer.type !== "image" && layer.type !== "text" && layer.type !== "shape") {
         return false;
       }
-      const postroll = outgoingPostrollSeconds(layer, sorted);
-      const preroll = incomingPrerollSeconds(layer, sorted);
+      const postroll = outgoingPostrollSeconds(layer, sorted, assetDurationById);
+      const preroll = incomingPrerollSeconds(layer, sorted, assetDurationById);
       return t >= layer.startSeconds - preroll && t < layer.startSeconds + layer.durationSeconds + postroll;
     });
     const merged = active.map((layer) => mergedLayer(layer, adjustments, t));
@@ -569,10 +605,14 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;
+      // R3.1: handle-aware window placement — same sides math as the activation filter above and the
+      // Sequence mounts below, so window/decoders/activation can never disagree.
+      const sides = manifestTransitionSides(incoming, outgoing, assetDurationById);
       const activeTransition = getActiveTransition(pair.spec as TransitionSpec, {
         currentTimeSeconds: t,
         startSeconds: incoming.startSeconds,
-        clipDurationSeconds: incoming.durationSeconds
+        clipDurationSeconds: incoming.durationSeconds,
+        prerollSeconds: sides.prerollSeconds
       });
       if (!activeTransition) continue;
       transitions.push({
@@ -580,6 +620,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
         incomingId: pair.incomingId,
         spec: pair.spec as TransitionSpec,
         startSeconds: incoming.startSeconds,
+        prerollSeconds: sides.prerollSeconds,
         fromFit: getCompositionObjectFit(outgoing as unknown as TimelineLayer) as "cover" | "contain" | "fill",
         toFit: getCompositionObjectFit(incoming as unknown as TimelineLayer) as "cover" | "contain" | "fill"
       });
@@ -605,7 +646,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       }
     })();
     // `mediaTick` re-runs this when a media frame arrives; `t`/`frame` cover the timeline advancing.
-  }, [frame, t, sorted, adjustments, mediaTick]);
+  }, [frame, t, sorted, adjustments, mediaTick, assetDurationById]);
 
   // Continue any outstanding handle on unmount so a teardown mid-frame can't hang the render.
   useEffect(() => {
@@ -631,14 +672,14 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
           // transition (clamped at global frame 0, same as the pre-existing negative-startSeconds clamp
           // below) — `leadSeconds` tells the grabbers how much CLIP-LOCAL time that mount point actually
           // represents (negative during pre-roll — reading source before the clip's normal in-point).
-          const preroll = incomingPrerollSeconds(layer, sorted);
+          const preroll = incomingPrerollSeconds(layer, sorted, assetDurationById);
           const desiredMountSeconds = layer.startSeconds - preroll;
           const mountSeconds = Math.max(0, desiredMountSeconds);
           const leadSeconds = mountSeconds - layer.startSeconds;
           const from = Math.round(mountSeconds * fps);
           const durationInFrames = Math.max(
             1,
-            Math.round((layer.startSeconds + layer.durationSeconds + outgoingPostrollSeconds(layer, sorted) - mountSeconds) * fps)
+            Math.round((layer.startSeconds + layer.durationSeconds + outgoingPostrollSeconds(layer, sorted, assetDurationById) - mountSeconds) * fps)
           );
           // The matte reuses the layer's shape but MUST decode `matte.uri` — drop the graphic fields or
           // ImageGrabber would render the animated graphic as this layer's matte instead.

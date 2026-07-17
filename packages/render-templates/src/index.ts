@@ -1,4 +1,4 @@
-import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerGraphic } from "@kimera-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@kimera-by-aelivion/shared";
 
 /** Manifest field that lets the renderer PLAY a SMIL-animated graphic (see `RenderManifestLayer.graphic`).
  *  Static/absent graphics contribute nothing, so the settled `assetUrl` stays the source. */
@@ -162,6 +162,12 @@ export interface RenderManifestLayer {
   matte?: MatteRef | undefined;
   /** Vector masks carried verbatim from the timeline layer; both renderers build the same SVG from them. */
   masks?: Mask[] | undefined;
+  /**
+   * Parametric frame (FRAMES.md), carried verbatim. The renderer synthesizes its clip mask via the shared
+   * `frameClipMask` (SceneMaskMatteCache reads `layer.frame`), exactly like the preview/local export.
+   * Without this a framed clip renders UN-clipped in the cloud path — pinned by the framed-media fixture.
+   */
+  frame?: LayerFrame | undefined;
   /** Junction transition on the incoming side, carried verbatim; the renderer reads wipe/iris from it. */
   transitionIn?: TransitionSpec | undefined;
   /** Layer blend mode, carried verbatim; the renderer applies it as CSS mix-blend-mode. */
@@ -242,9 +248,11 @@ export function buildRenderManifest(input: {
   // `layer.type`); `nestExpansion.groups` is carried separately (see `nestedGroups` on `RenderManifest`) so
   // SceneStage can fold them back into a group + build the compound clip's shell.
   const nestExpansion = expandNestedCompositions(input.graph.composition ?? fallbackComposition(input.projectId), input.graph.compositions);
-  // Expand color/glow region masks into base + duplicate layers so the Remotion renderer gets them via the
-  // normal clip-mask path (duplicate's higher layerIndex → higher zIndex → drawn above its base).
-  const composition = expandEffectRegionMasks(nestExpansion.composition);
+  // Frame borders expand FIRST (a framed layer gains a derived stroke-only shape clone above it — Step E),
+  // then color/glow region masks into base + duplicate layers, so the Remotion renderer gets both via the
+  // normal shape/clip-mask paths (duplicate's higher layerIndex → higher zIndex → drawn above its base).
+  // Same order as the web preview (VideoPreview.tsx) and local export (export-core.ts).
+  const composition = expandEffectRegionMasks(expandFrameBorders(nestExpansion.composition));
   const assetMap = new Map(input.assets.map((asset) => [asset.id, asset]));
   const visualTracks = composition.tracks.filter((track) => track.type !== "audio");
 
@@ -334,6 +342,7 @@ export function buildRenderManifest(input: {
             trackPanKeyframes: track.panKeyframes,
             matte: layer.matte,
             masks: layer.masks,
+            frame: layer.frame,
             transitionIn: layer.transitionIn,
             blendMode: layer.blendMode,
             content: layer.content,
@@ -352,6 +361,10 @@ export function buildRenderManifest(input: {
               fit: layer.fit,
               widthPercent: layer.widthPercent,
               heightPercent: layer.heightPercent,
+              // Shape geometry — without these a non-default shape (pen path, ellipse, frame-border clone)
+              // rendered as the default rounded-rectangle in the cloud path (styleOf reads this bag).
+              shapeKind: layer.shapeKind,
+              shapePath: layer.shapePath,
               borderRadius: layer.borderRadius,
               strokeColor: layer.strokeColor,
               strokeWidth: layer.strokeWidth,
@@ -406,6 +419,7 @@ export function buildRenderManifest(input: {
           trackPanKeyframes: track.panKeyframes,
           matte: layer.matte,
           masks: layer.masks,
+          frame: layer.frame,
           transitionIn: layer.transitionIn,
           blendMode: layer.blendMode,
           content: layer.content,
@@ -424,6 +438,10 @@ export function buildRenderManifest(input: {
             fit: layer.fit,
             widthPercent: layer.widthPercent,
             heightPercent: layer.heightPercent,
+            // Shape geometry — without these a non-default shape (pen path, ellipse, frame-border clone)
+            // rendered as the default rounded-rectangle in the cloud path (styleOf reads this bag).
+            shapeKind: layer.shapeKind,
+            shapePath: layer.shapePath,
             borderRadius: layer.borderRadius,
             strokeColor: layer.strokeColor,
             strokeWidth: layer.strokeWidth,

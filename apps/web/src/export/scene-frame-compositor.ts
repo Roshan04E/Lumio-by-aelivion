@@ -30,6 +30,7 @@ import {
   RenderTarget,
   SceneCompositor,
   colorPipelineCacheKey,
+  effectiveTransitionDuration,
   findTransitionPairs,
   getActiveGlContextCount,
   getActiveTransition,
@@ -44,6 +45,7 @@ import {
   SceneMaskMatteCache,
   SceneTextRasterizer,
   layerSourceTimeSeconds,
+  resolveTransitionWindowSides,
   type ColorPipeline,
   type NestedGroupSpec,
   type SceneCompositorDebugSnapshot,
@@ -55,6 +57,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TransitionSpec,
+  type TransitionWindowSides,
 } from "@kimera-by-aelivion/shared";
 import { getExportSingleContext, getRegionPassesEnabled } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
@@ -308,9 +311,28 @@ export class SceneFrameCompositor {
   }
 
   /**
-   * How long this clip keeps rendering past its out-point: HALF (R3, centered-on-cut) of the next
-   * same-track clip's `transitionIn` window — the window's other half falls before the cut, inside this
-   * clip's own normal span. 0 if none. Matches the editor preview (`isOutgoingInPostroll`).
+   * R3.1: the handle-aware window sides for a junction pair (`resolveTransitionWindowSides`) — the same
+   * shared math as the preview and the worker, so all three place the window identically. The outgoing
+   * asset's media end comes from its frame provider's `decodableEndSeconds` (the TRUE decodable tail,
+   * even better than metadata duration); unknown → the resolver assumes tail material exists.
+   */
+  private transitionSides(incoming: TimelineLayer, outgoing: TimelineLayer): TransitionWindowSides {
+    const providerKey =
+      outgoing.graphic ? graphicSourceKey(outgoing.id) : outgoing.type === "video" && outgoing.assetId ? clipSourceKey(outgoing.id, outgoing.assetId) : outgoing.assetId;
+    const decodableEnd = providerKey ? this.getSource(providerKey)?.decodableEndSeconds : undefined;
+    return resolveTransitionWindowSides({
+      durationSeconds: effectiveTransitionDuration(incoming.transitionIn?.durationSeconds ?? 0, incoming.durationSeconds),
+      incoming: { type: incoming.type, sourceInSeconds: incoming.sourceInSeconds, speed: incoming.speed },
+      outgoing: { type: outgoing.type, sourceInSeconds: outgoing.sourceInSeconds, speed: outgoing.speed, durationSeconds: outgoing.durationSeconds },
+      outgoingAssetDurationSeconds: typeof decodableEnd === "number" && Number.isFinite(decodableEnd) ? decodableEnd : undefined,
+      alignment: incoming.transitionIn?.alignment,
+    });
+  }
+
+  /**
+   * How long this clip keeps rendering past its out-point: the slice of the next same-track clip's
+   * `transitionIn` window past the cut (R3 centered / R3.1 handle-aware — up to the whole window when
+   * the incoming has no head handle). 0 if none. Matches the editor preview (`isOutgoingInPostroll`).
    */
   private postrollSeconds(item: FlatLayer): number {
     const track = this.composition.tracks[item.trackIndex];
@@ -319,16 +341,16 @@ export class SceneFrameCompositor {
     let best = 0;
     for (const other of track.layers) {
       if (other.id === item.layer.id || !other.transitionIn) continue;
-      // Clamp to the incoming clip's length — matches the clamped transition window (getActiveTransition).
-      if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, Math.min(other.transitionIn.durationSeconds, other.durationSeconds) / 2);
+      if (Math.abs(other.startSeconds - end) < 0.05) best = Math.max(best, this.transitionSides(other, item.layer).postrollSeconds);
     }
     return best;
   }
 
   /**
    * R3: the symmetric counterpart of `postrollSeconds` — how long BEFORE its own start this clip must
-   * start rendering because it's the incoming side of a centered-on-cut transition. Matches the editor
-   * preview (`isIncomingInPreroll`) and the worker (`incomingPrerollSeconds`).
+   * start rendering because it's the incoming side of a transition whose window (R3.1: handle-aware,
+   * never more than its own head handle) began before the cut. Matches the editor preview
+   * (`isIncomingInPreroll`) and the worker (`incomingPrerollSeconds`).
    */
   private prerollSeconds(item: FlatLayer): number {
     const track = this.composition.tracks[item.trackIndex];
@@ -338,7 +360,7 @@ export class SceneFrameCompositor {
       if (other.id === item.layer.id) continue;
       const end = other.startSeconds + other.durationSeconds;
       if (Math.abs(end - start) < 0.05) {
-        return Math.min(item.layer.transitionIn.durationSeconds, item.layer.durationSeconds) / 2;
+        return this.transitionSides(item.layer, other).prerollSeconds;
       }
     }
     return 0;
@@ -623,10 +645,13 @@ export class SceneFrameCompositor {
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;
+      // R3.1: handle-aware window placement — same sides math as postrollSeconds/prerollSeconds above.
+      const sides = this.transitionSides(incoming, outgoing);
       const active = getActiveTransition(pair.spec as TransitionSpec, {
         currentTimeSeconds: t,
         startSeconds: incoming.startSeconds,
         clipDurationSeconds: incoming.durationSeconds,
+        prerollSeconds: sides.prerollSeconds,
       });
       if (!active) continue;
       transitions.push({
@@ -634,6 +659,7 @@ export class SceneFrameCompositor {
         incomingId: pair.incomingId,
         spec: pair.spec as TransitionSpec,
         startSeconds: incoming.startSeconds,
+        prerollSeconds: sides.prerollSeconds,
         fromFit: getCompositionObjectFit(outgoing) as "cover" | "contain" | "fill",
         toFit: getCompositionObjectFit(incoming) as "cover" | "contain" | "fill",
       });

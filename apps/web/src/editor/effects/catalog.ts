@@ -169,6 +169,7 @@ const TRANSITION_ITEMS: CatalogItem[] = [
   { kind: "transition", id: "tr-punchZoom", label: "Punch Zoom", description: "Fast blurred zoom punch through the cut.", transition: "punchZoom", junction: true, group: "zoom-spin" },
   { kind: "transition", id: "tr-zoomBlur", label: "Smooth Zoom Blur", description: "Cinematic zoom with directional blur.", transition: "zoomBlur", junction: true, group: "zoom-spin" },
   { kind: "transition", id: "tr-spin", label: "Spin", description: "Spin and zoom between the clips.", transition: "spin", junction: true, group: "zoom-spin" },
+  { kind: "transition", id: "tr-kineticSwoosh", label: "Kinetic Swoosh", description: "High-energy radial zoom with motion blur arc.", transition: "kineticSwoosh", junction: true, group: "zoom-spin" },
 
   // ── Whip & Blur ── (fast, energetic swipes)
   { kind: "transition", id: "tr-whipLeft", label: "Whip Pan Left", description: "Motion-blurred whip to the left.", transition: "whipPan", junction: true, direction: "left", group: "whip-blur" },
@@ -192,11 +193,13 @@ const TRANSITION_ITEMS: CatalogItem[] = [
   // ── Glitch ── (digital / hype)
   { kind: "transition", id: "tr-glitch", label: "Glitch", description: "RGB-split digital glitch through the cut.", transition: "glitch", junction: true, group: "glitch" },
   { kind: "transition", id: "tr-pixelate", label: "Pixelate", description: "Mosaic pixel dissolve between clips.", transition: "pixelate", junction: true, group: "glitch" },
+  { kind: "transition", id: "tr-rgbDisplace", label: "Blocky RGB Displacement", description: "Horizontal blocky shift with RGB splitting.", transition: "rgbDisplace", junction: true, group: "glitch" },
 
   // ── Cinematic ── (film / organic looks)
   { kind: "transition", id: "tr-lumaFade", label: "Luma Fade", description: "Reveal through the image's bright areas.", transition: "lumaFade", junction: true, group: "cinematic" },
   { kind: "transition", id: "tr-lightLeak", label: "Light Leak", description: "Warm light leak sweeps across the cut.", transition: "lightLeak", junction: true, group: "cinematic" },
   { kind: "transition", id: "tr-filmBurn", label: "Film Burn", description: "Film burns through to the next clip.", transition: "filmBurn", junction: true, group: "cinematic" },
+  { kind: "transition", id: "tr-organicReveal", label: "Organic Ink Reveal", description: "Non-linear reveal simulating spreading ink.", transition: "organicReveal", junction: true, group: "cinematic" },
 
   // ── Impact ── (beat hits)
   { kind: "transition", id: "tr-flashWhite", label: "Flash", description: "Bright flash through the cut.", transition: "flash", junction: true, color: "#FFFFFF", group: "impact" },

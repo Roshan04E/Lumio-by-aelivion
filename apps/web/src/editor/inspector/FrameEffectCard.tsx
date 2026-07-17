@@ -16,6 +16,7 @@ import {
   type TimelineLayer
 } from "@kimera-by-aelivion/shared";
 import { BooleanControl } from "./controls/BooleanControl";
+import { ColorControl } from "./controls/ColorControl";
 import { NumberControl } from "./controls/NumberControl";
 
 function numberOf(value: FrameParamValue | undefined, fallback: number): number {
@@ -24,6 +25,10 @@ function numberOf(value: FrameParamValue | undefined, fallback: number): number 
 
 function booleanOf(value: FrameParamValue | undefined, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function stringOf(value: FrameParamValue | undefined, fallback: string): string {
+  return typeof value === "string" && value ? value : fallback;
 }
 
 export function FrameEffectCard({
@@ -139,6 +144,17 @@ export function FrameEffectCard({
                     key={param.key}
                     label={param.label}
                     value={booleanOf(frame.params[param.key], param.defaultValue)}
+                    onReset={() => setParam(param.key, param.defaultValue)}
+                    onChange={(value) => setParam(param.key, value)}
+                  />
+                );
+              }
+              if (param.type === "color") {
+                return (
+                  <ColorControl
+                    key={param.key}
+                    label={param.label}
+                    value={stringOf(frame.params[param.key], param.defaultValue)}
                     onReset={() => setParam(param.key, param.defaultValue)}
                     onChange={(value) => setParam(param.key, value)}
                   />

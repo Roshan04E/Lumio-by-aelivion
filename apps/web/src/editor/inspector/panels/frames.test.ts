@@ -7,8 +7,11 @@
  * Covers the pure generators (unit-box path `d`), param defaults, and the built-in catalogue.
  */
 import {
+  FRAME_BORDER_LAYER_SUFFIX,
   builtInFrames,
+  expandFrameBorders,
   findFrameDefinition,
+  frameBorderShapeLayer,
   frameBoxPercent,
   frameBoxRect,
   frameChromeParams,
@@ -27,7 +30,9 @@ import {
   setFrameBoxFromResize,
   snapMediaRectToBox,
   type FrameDefinition,
-  type LayerFrame
+  type LayerFrame,
+  type TimelineComposition,
+  type TimelineLayer
 } from "@kimera-by-aelivion/shared";
 
 let failures = 0;
@@ -107,10 +112,14 @@ function check(name: string, condition: boolean): void {
   check("box defaults to the full comp", defaults.width === 100 && defaults.height === 100);
 
   const sections = frameParamSections(findFrameDefinition("kimera.rounded-rect")!);
-  check("sections group Shape then Box", sections.length === 2 && sections[0]!.title === "Shape" && sections[1]!.title === "Box");
+  check("sections group Shape then Box then Border", sections.length === 3 && sections[0]!.title === "Shape" && sections[1]!.title === "Box" && sections[2]!.title === "Border");
   check("Shape section holds only the generator's own params", sections[0]!.params.every((p) => p.key === "roundness"));
   const circleSections = frameParamSections(circle);
-  check("a frame with no generator params shows only Box", circleSections.length === 1 && circleSections[0]!.title === "Box");
+  check("a frame with no generator params shows Box + Border", circleSections.length === 2 && circleSections[0]!.title === "Box" && circleSections[1]!.title === "Border");
+
+  // Border chrome (Step E): every frame gets border/borderWidth/borderColor, default OFF.
+  check("chrome exposes the border tier", ["border", "borderWidth", "borderColor"].every((key) => frameChromeParams.some((p) => p.key === key)));
+  check("border defaults off", defaults.border === false && defaults.borderWidth === 8 && defaults.borderColor === "#ffffff");
 
   // A definition may not shadow a chrome key — chrome semantics stay identical across all frames.
   const rogue: FrameDefinition = { id: "acme.rogue", name: "Rogue", generatorId: "rounded-rect", params: [{ key: "width", label: "Nope", type: "number", min: 0, max: 5, step: 1, defaultValue: 3 }] };
@@ -396,6 +405,63 @@ function check(name: string, condition: boolean): void {
   // exotic (svg-path/blob/torn-paper) → honest full box (they don't clip today).
   const svg = frameToShapeLayer(base({ definitionId: "acme.torn", generatorId: "svg-path", params: {}, staticPath: "M0 0H1V1H0Z" }), comp);
   check("svg-path → rectangle fallback (matches its current unclipped visual)", svg.shapeKind === "rectangle" && svg.shapePath === undefined);
+}
+
+// --- Step E: frameBorderShapeLayer + expandFrameBorders (border = derived stroke-only shape) ----
+{
+  const comp = { width: 1080, height: 1920 };
+  const framed = (params: Record<string, LayerFrame["params"][string]>): LayerFrame => ({
+    definitionId: "kimera.rounded-rect",
+    generatorId: "rounded-rect",
+    params
+  });
+  const mediaLayer = (frame?: LayerFrame): TimelineLayer =>
+    ({
+      id: "L1",
+      trackId: "T1",
+      type: "image",
+      name: "clip",
+      startSeconds: 0,
+      durationSeconds: 5,
+      assetId: "asset_1",
+      fit: "cover",
+      transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+      effects: [{ id: "fx1", type: "blur", name: "Blur", enabled: true, intensity: 100, params: { amount: 5 } }],
+      animations: [],
+      masks: [],
+      frame
+    }) as unknown as TimelineLayer;
+
+  // Off by default → no clone.
+  check("no frame → no border clone", frameBorderShapeLayer(mediaLayer(undefined), comp) === null);
+  check("border off → no border clone", frameBorderShapeLayer(mediaLayer(framed({ roundness: 40 })), comp) === null);
+  check("border on but zero width → no clone", frameBorderShapeLayer(mediaLayer(framed({ border: true, borderWidth: 0 })), comp) === null);
+
+  // On → a stroke-only shape clone.
+  const on = mediaLayer(framed({ roundness: 40, width: 78, height: 60, border: true, borderWidth: 16, borderColor: "#ffd24a" }));
+  const clone = frameBorderShapeLayer(on, comp)!;
+  check("border clone is a shape with the derived suffix", clone !== null && clone.type === "shape" && clone.id === `L1${FRAME_BORDER_LAYER_SUFFIX}`);
+  check("border clone is stroke-only (transparent fill)", clone.color === "transparent" && clone.strokeColor === "#ffd24a" && clone.strokeWidth === 16);
+  check("border clone reuses the D1 outline mapping", clone.shapeKind === "rounded-rectangle" && (clone.borderRadius ?? 0) > 0);
+  check("border clone box = the frame box %", Math.abs((clone.widthPercent ?? 0) - 78) < 1e-9 && Math.abs((clone.heightPercent ?? 0) - 60) < 1e-9);
+  check("media-only + effect fields are stripped", clone.assetId === undefined && clone.effects.length === 0 && clone.masks === undefined && clone.frame === undefined && clone.transitionIn === undefined);
+  check("transform rides (same position/scale)", clone.transform.x === 50 && clone.transform.scale === 1);
+
+  // Composition expansion: clone directly after its layer; unchanged composition returns the SAME object.
+  const compo = {
+    id: "c1",
+    name: "c",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 5,
+    backgroundColor: "#000",
+    tracks: [{ id: "T1", type: "video", name: "V", layers: [on] }]
+  } as unknown as TimelineComposition;
+  const expanded = expandFrameBorders(compo);
+  check("expandFrameBorders inserts the clone after its layer", expanded.tracks[0]!.layers.length === 2 && expanded.tracks[0]!.layers[1]!.id === `L1${FRAME_BORDER_LAYER_SUFFIX}`);
+  const noBorder = { ...compo, tracks: [{ ...compo.tracks[0]!, layers: [mediaLayer(framed({ roundness: 40 }))] }] } as TimelineComposition;
+  check("nothing to expand → SAME composition reference", expandFrameBorders(noBorder) === noBorder);
 }
 
 if (failures > 0) {

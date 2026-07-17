@@ -10,6 +10,7 @@
 
 import {
   expandEffectRegionMasks,
+  expandFrameBorders,
   expandNestedCompositions,
   getCompositionFontsUsed,
   graphicAnimationBakeTime,
@@ -218,10 +219,15 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   // preview — the repo's #1 parity bug class. `expandNestedCompositions` returns the SAME `composition`
   // reference when there's nothing to expand, so a non-nested export is byte-identical to before.
   const nestExpansion = expandNestedCompositions(composition, input.compositions);
+  // Frame borders expand between nest and region expansion (Step E) — same order as the web preview and
+  // the render manifest. Runs AFTER the even-dimension adjustment so the border geometry (comp-px stroke,
+  // box %) derives from the composition actually being rendered.
   const renderComposition = expandEffectRegionMasks(
-    width === nestExpansion.composition.width && height === nestExpansion.composition.height
-      ? nestExpansion.composition
-      : { ...nestExpansion.composition, width, height }
+    expandFrameBorders(
+      width === nestExpansion.composition.width && height === nestExpansion.composition.height
+        ? nestExpansion.composition
+        : { ...nestExpansion.composition, width, height }
+    )
   );
   const providerUrlMap = buildProviderUrlMap(renderComposition, urlMap);
 

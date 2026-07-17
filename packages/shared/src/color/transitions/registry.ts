@@ -1,3 +1,5 @@
+import type { TransitionPipeline } from "./pipeline";
+
 /**
  * Unified GPU transition engine — registry + shader assembler.
  *
@@ -42,7 +44,9 @@ export interface TransitionDefinition {
   easing: TransitionEasing;
   params: TransitionParam[];
   /** The body: must define `vec4 transition(vec2 uv) { ... }`. */
-  glsl: string;
+  glsl?: string;
+  /** Optional multi-pass pipeline for professional transitions. */
+  pipeline?: TransitionPipeline;
 }
 
 /** Apply a definition's easing curve to a linear 0..1 progress. Shared by all renderers. */
@@ -71,8 +75,10 @@ const GLSL_TYPE: Record<TransitionParamType, string> = {
 /**
  * Shared GLSL prelude available to every transition body: aspect-correct scale/rotate helpers,
  * a cheap hash, and a luma helper. Keeping these here means bodies stay tiny and consistent.
+ * Exported so the pipeline assembler wraps multi-pass modules in the SAME helpers (getFromColor/
+ * getToColor/_fitUv/...) — one prelude, all renderers, pixel-identical.
  */
-const HARNESS_PRELUDE = `
+export const HARNESS_PRELUDE = `
 // Object-fit UV remap: scales uv about the centre so each clip is sampled exactly as it renders normally
 // (cover/contain/fill). uFromFit/uToFit = [1,1] is a no-op (fill). Keeps the transition geometry identical to
 // the clip's own object-fit so there is no squeeze/jump at the window boundary.
@@ -585,7 +591,90 @@ const DEFS: TransitionDefinition[] = [
       float mt = 1.0 - smoothstep(r - soft, r + soft, dist);
       return mix(getFromColor(uv), getToColor(uv), mt);
     }`
+  },
+  {
+    id: "organicReveal",
+    name: "Organic Ink Reveal",
+    category: "cinematic",
+    defaultDurationSeconds: 0.8,
+    easing: "easeInOut",
+    params: [
+      { name: "softness", type: "float", default: 0.1, min: 0, max: 0.5, label: "Softness" },
+      { name: "scale", type: "float", default: 1.0, min: 0.5, max: 2.0, label: "Scale" }
+    ],
+    glsl: `vec4 transition(vec2 uv){
+      vec2 c = (uv - 0.5) * scale; c.x *= ratio;
+      float dist = length(c);
+      float noise = _rand(uv + progress * 0.05);
+      float mask = smoothstep(progress * 1.5 + noise * softness, progress * 1.5 + noise * softness - 0.2, dist);
+      return mix(getFromColor(uv), getToColor(uv), mask);
+    }`
+  },
+  {
+    id: "rgbDisplace",
+    name: "Blocky RGB Displacement",
+    category: "glitch",
+    defaultDurationSeconds: 0.4,
+    easing: "linear",
+    params: [
+      { name: "blockDensity", type: "float", default: 0.5, min: 0.1, max: 1.0, label: "Block Density" },
+      { name: "jitterStrength", type: "float", default: 0.6, min: 0, max: 1.0, label: "Jitter Strength" }
+    ],
+    glsl: `vec4 transition(vec2 uv){
+      float env = (1.0 - abs(progress - 0.5) * 2.0);
+      float blocks = floor(uv.y * blockDensity * 100.0);
+      float shift = (_rand(vec2(blocks, progress)) - 0.5) * jitterStrength * env * 0.1;
+      float mid = smoothstep(0.4, 0.6, progress);
+      float r = mix(getFromColor(uv + vec2(shift, 0.0)).r, getToColor(uv + vec2(shift, 0.0)).r, mid);
+      float g = mix(getFromColor(uv).g, getToColor(uv).g, mid);
+      float b = mix(getFromColor(uv - vec2(shift, 0.0)).b, getToColor(uv - vec2(shift, 0.0)).b, mid);
+      return vec4(r, g, b, 1.0);
+    }`
+  },
+  {
+    id: "lumaWarp",
+    name: "Luma Warp",
+    category: "creator",
+    defaultDurationSeconds: 0.6,
+    easing: "easeInOut",
+    params: [
+      { name: "warpIntensity", type: "float", default: 0.3, min: 0, max: 1.0, label: "Warp Intensity" },
+      { name: "softness", type: "float", default: 0.1, min: 0, max: 0.5, label: "Softness" }
+    ],
+    glsl: `vec4 transition(vec2 uv){
+      vec4 a = getFromColor(uv);
+      float l = _luma(a.rgb);
+      float offset = (l - 0.5) * warpIntensity * progress;
+      vec2 warpUV = uv + vec2(0.0, offset);
+      vec4 b = getToColor(warpUV);
+      return mix(a, b, smoothstep(0.0, 1.0, progress));
+    }`
+  },
+  {
+    id: "kineticSwoosh",
+    name: "Kinetic Swoosh",
+    category: "creator",
+    defaultDurationSeconds: 0.5,
+    easing: "easeInOut",
+    params: [
+      { name: "rotationAmount", type: "float", default: 0.5, min: 0, max: 2.0, label: "Rotation" },
+      { name: "zoomStrength", type: "float", default: 0.4, min: 0, max: 1.0, label: "Zoom" }
+    ],
+    glsl: `vec4 transition(vec2 uv){
+      float t = progress;
+      float ang = rotationAmount * 6.283185 * t;
+      float z = 1.0 + zoomStrength * t;
+      const int N = 8;
+      vec4 a = vec4(0.0);
+      for(int i=0; i<N; i++){
+        float k = float(i)/float(N-1);
+        a += getFromColor(_rotUV(_scaleUV(uv, z * (1.0 + k*0.1)), ang * (1.0 + k*0.1)));
+      }
+      vec4 b = getToColor(_rotUV(_scaleUV(uv, 1.0 / z), -ang * (1.0 - t)));
+      return mix(a/float(N), b, smoothstep(0.4, 0.6, t));
+    }`
   }
+
 ];
 
 for (const def of DEFS) registerTransition(def);
