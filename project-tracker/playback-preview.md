@@ -258,3 +258,104 @@ Prisma client regenerated with the dev server STOPPED (`prisma generate` EPERM-l
 API's engine DLL) — flagged to the user.
 **Why v2/v4 weren't enough:** both guards keyed on the decoder (null runs, missing fragments); this
 overshoot produces perfectly valid clamped frames. The new clamp keys on the sample table itself.
+
+## v14 — "Stacked identical layers flash visible for a frame" — diagnosis only, unverified (2026-07-17)
+
+**Problem (roadmap item, unreproduced).** Report: two visually-identical stacked clips (same asset,
+same on-screen position, on different tracks or via duplicate) each flash briefly visible for one
+frame. No repro steps existed; this session did static analysis only — no browser repro was run, so
+treat the mechanism below as a STRONG SUSPECT, not confirmed.
+
+**Suspected root cause.** `isLayerActive` (`apps/web/src/components/VideoPreview.tsx:5254-5256`):
+```ts
+export function isLayerActive(layer: TimelineLayer, currentTime: number) {
+  return currentTime >= layer.startSeconds && currentTime <= layer.startSeconds + layer.durationSeconds;
+}
+```
+Both ends are INCLUSIVE (`>=` ... `<=`). This is the base eligibility filter feeding the actual
+editor visual pipeline: `activeVisualLayerEntriesRaw` (~L772-782) → `activeVisualLayerEntries` →
+`renderVisualLayerEntries` → `renderedLayerEntries` → `sceneLayers` (~L1082-1101) → what
+`ScenePreviewCanvas`/`buildSceneDraws` actually composites. At the exact instant
+`t = clipA.startSeconds + clipA.durationSeconds`, clipA is STILL active (closed upper bound) — and if
+another clip clipB starts exactly there (the common back-to-back-cut case, or two stacked clips on
+different tracks sharing a boundary), clipB is ALSO active at that same instant. For that one frame
+both are eligible and both draw; if they don't fully occlude each other (different track z-order
+gap, transparency, or simply two SEPARATE layers rather than one continuous clip) the extra frame
+reads as a flash.
+
+By contrast, the export-side scene filters (`apps/web/src/export/scene-frame-compositor.ts:614` and
+`apps/worker/src/remotion/SceneStage.tsx:597`) use a HALF-OPEN window (`t >= start - preroll && t <
+start + duration + postroll` — note the strict `<`), so exports likely do NOT reproduce this; it may
+be editor-preview-only, which would match "unreproduced" reports being inconsistent.
+
+**Why not fixed this session.** `isLayerActive` is a widely shared eligibility gate (also drives
+`activeAudioLayerEntriesRaw`, the mask overlay's mount gate, and transition pre/post-roll math via
+`isOutgoingInPostroll`). Flipping the upper bound to strict `<` risks the OPPOSITE regression — a
+clip's true last frame (the one currently rendered exactly AT `start + duration`) disappearing one
+frame early — unless something else already guarantees the last sampled frame time never lands
+exactly on that boundary (frame-quantization elsewhere might already prevent it, but this needs a
+live repro to verify either the bug or the fix, not more static reading). Needs an actual two-
+identical-clips repro (record playhead scrub across the shared boundary, screenshot-hash every
+frame — see the Playwright repro pattern in this file's README) before touching a function this
+widely depended on.
+
+**Next step:** build the repro harness first; only then decide whether the fix is a boundary-
+exclusivity change to `isLayerActive`, or a dedupe pass in `sceneLayers`/`buildSceneDraws` that
+collapses genuinely-identical simultaneous draws instead (safer — leaves `isLayerActive`'s other
+callers untouched).
+
+## v15 — "Speed ramp hangs the browser" — diagnosis only, likely already mitigated (2026-07-17)
+
+**Problem (roadmap item).** Report: an aggressive speed ramp hangs the tab. No repro steps or date on
+the original report; this session did static analysis only — no browser repro was run.
+
+**What's already fixed (dated 2026-07-16, same file).** `apps/web/src/components/VideoPreview.tsx`
+~L2766-2788, the ramp-follow effect, carries an explicit incident comment: a per-tick `video.currentTime`
+write on a PLAYING element "flushes/re-primes the decoder and hangs the tab." The fix throttles the
+drift-correction seek to a ~500ms cadence (tight 0.08s threshold only at the checkpoint, loose 0.25s
+between checkpoints) instead of correcting every tick — this specific "seek-storm" mechanism reads as
+already closed.
+
+**Unverified remaining theory (from the roadmap wording).** "Ramp compresses many source seconds into
+few timeline seconds" suggests a DIFFERENT mechanism: not seek FREQUENCY but seek MAGNITUDE — a high
+ramp value (e.g. 8-16x, `MAX_LAYER_SPEED` in `packages/shared/src/timeline.ts:197`) means even one
+500ms-cadence correction can jump `video.currentTime` by many seconds of source. Single large seeks are
+normally cheap for browsers (not a "loop"), so this theory is weaker than it reads, but wasn't ruled
+out — `syncVideoTime` (~L2728-2742) has no `video.seeking` guard, so an in-flight seek could in theory
+overlap with a following one if a resync fires before the previous seek settles.
+
+**Why not fixed this session.** The known/confirmed mechanism already has a shipped fix; the
+"compresses many seconds" theory is speculative and unconfirmed. Without a live repro (aggressive ramp,
+e.g. 1→16x over 0.5s, played back with devtools performance/hang recording) there's nothing concrete to
+patch, and guessing at a fix for an already-mitigated bug risks papering over a report that predates
+the 2026-07-16 fix and no longer reproduces.
+
+**Next step:** repro with an extreme ramp on current `main`/this branch first. If it still hangs, check
+for overlapping seeks (`video.seeking` before writing `currentTime`) and consider `requestVideoFrameCallback`-
+gated correction instead of the wall-clock 500ms timer. If it no longer hangs, close the roadmap item.
+
+## v16 — Speed-ramp hang: root cause found by code audit, fixed (2026-07-17)
+
+**Follow-up to v15's "next step".** Two concrete mechanisms found and closed, no live repro needed —
+both are provable from the code + browser spec:
+
+1. **`playbackRate` below Chrome's floor THROWS.** Chrome's supported HTMLMediaElement.playbackRate
+   range is [0.0625, 16]; assigning outside it throws NotSupportedError (it does not clamp). Our
+   `MIN_LAYER_SPEED` is **0.05** — below the floor — and the ramp-follow effects write the rate on
+   EVERY clock tick. One ramp point at 5–6% speed ⇒ an uncaught exception per tick on a playing
+   element ⇒ the reported "hang". Fix: all 7 element-rate writes (VideoPreview video+audio ×2 each,
+   WebglMediaLayer source catch-up + matte, MaskedVideoLayer matte) now go through
+   `playback/media-rate.ts # setMediaPlaybackRate` — clamps to [0.0625, 16], skips no-op writes,
+   try/catches for narrower engines. Display-only: at 5% the element free-runs a hair fast and the
+   throttled seek corrector (exact shared mapping) pulls it back each checkpoint.
+2. **The audio ramp path never got the 2026-07-16 seek-storm fix.** The video ramp-follow throttles
+   drift-correction seeks to a ~500ms cadence; the AUDIO ramp effect still called `syncAudioTime`
+   (fixed 0.08s threshold) on every tick while playing — on a curved ramp that trips virtually every
+   tick ⇒ per-frame `currentTime` writes on a playing element, the same decoder-flush storm. Fix:
+   same 500ms checkpoint cadence (`lastAudioRampSyncMsRef`).
+
+Also hardened per v15's theory: `syncVideoTime`/`syncAudioTime` now skip issuing a new seek while
+`element.seeking && !element.paused` (overlap guard) — paused scrubbing keeps latest-wins writes.
+
+**Verify:** ramp 1x→5% and 1x→16x over ~0.5s on a video+audio pair, play through, devtools console
+must stay clean (no NotSupportedError) and the tab responsive. Roadmap item can close on that pass.

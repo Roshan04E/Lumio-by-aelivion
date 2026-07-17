@@ -15,6 +15,7 @@ import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
 import { acquirePreviewFrameProvider } from "../playback/preview-frame-pool";
 import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
+import { setMediaPlaybackRate } from "../playback/media-rate";
 import type { FrameProvider } from "../export/source-decoder";
 import type { SceneMediaSink, ScenePreviewMediaFrame, ScenePreviewMediaSource } from "./scene-media-source";
 
@@ -471,7 +472,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           // here (same mapping as VideoPreview.syncVideoTime) and re-arm the element-bound effects.
           const tp = wcTimeRef.current;
           try {
-            lease.video.playbackRate = tp.speed;
+            setMediaPlaybackRate(lease.video, tp.speed);
             lease.video.currentTime = mapSourceTime(tp);
             if (tp.isPlaying) void lease.video.play().catch(() => undefined);
           } catch {
@@ -946,7 +947,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       if (mediaType !== "video" || !matte?.uri) return;
       const matteVideo = matteVideoRef.current;
       if (!matteVideo) return;
-      matteVideo.playbackRate = speedFactor;
+      setMediaPlaybackRate(matteVideo, speedFactor);
       const nextTime = Math.max(0, sourceInSeconds + Math.max(-prerollSeconds, currentTime - layerStartSeconds) * speedFactor);
       if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08 * Math.max(1, speedFactor)) {
         matteVideo.currentTime = nextTime;

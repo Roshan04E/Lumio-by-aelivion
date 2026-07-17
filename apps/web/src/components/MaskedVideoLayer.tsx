@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type CSSProperties, type HTMLAttributes } from "react";
 import { compositeMatteToImageData, type MatteRef } from "@kimera-by-aelivion/shared";
+import { setMediaPlaybackRate } from "../playback/media-rate";
 
 /**
  * Renders a video layer through its person-extraction matte. This is the web
@@ -51,7 +52,7 @@ export const MaskedVideoLayer = forwardRef<HTMLVideoElement, {
     }
     // The matte video is sampled across the source media, so it must use the
     // same source-aware offset as the source video itself.
-    matteVideo.playbackRate = speedFactor;
+    setMediaPlaybackRate(matteVideo, speedFactor);
     const nextTime = sourceInSeconds + Math.max(0, currentTime - layerStartSeconds) * speedFactor;
     if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08 * Math.max(1, speedFactor)) {
       matteVideo.currentTime = nextTime;
