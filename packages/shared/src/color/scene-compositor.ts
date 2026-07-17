@@ -39,6 +39,7 @@ import {
   type TransitionDefinition,
   type TransitionParam,
 } from "./transitions/registry";
+import { PipelineAssembler } from "./transitions/pipeline-assembler";
 import {
   buildFragmentEffectShader,
   resolveFragmentEffectParams,
@@ -289,9 +290,30 @@ export interface SceneCompositorDebugSnapshot {
   targets: Record<string, { width: number; height: number; framebufferStatus: string; framebufferComplete: boolean }>;
 }
 
-/** A compiled per-transition program + its uniform locations (mirrors TransitionCompositor's cache). */
-interface CompiledTransition {
+/**
+ * One compiled pass of a multi-pass transition pipeline (assembled by `PipelineAssembler`). `uSrc` is
+ * the ping-pong input (previous pass output; the outgoing side on pass 0); `extra` holds locations for
+ * BOTH the definition's params and the pass's own static param overrides, looked up by name.
+ */
+interface CompiledPipelinePass {
   program: WebGLProgram;
+  uSrc: WebGLUniformLocation | null;
+  uFrom: WebGLUniformLocation | null;
+  uTo: WebGLUniformLocation | null;
+  uProgress: WebGLUniformLocation | null;
+  uResolution: WebGLUniformLocation | null;
+  uRatio: WebGLUniformLocation | null;
+  uFromFit: WebGLUniformLocation | null;
+  uToFit: WebGLUniformLocation | null;
+  extra: { name: string; location: WebGLUniformLocation | null }[];
+  /** Pass-level static param values (override resolved def params for this pass only). */
+  passParams: Record<string, number | number[] | boolean>;
+}
+
+/** A compiled per-transition program + its uniform locations (mirrors TransitionCompositor's cache).
+ *  Either a single monolith program (`program` set) or a multi-pass pipeline (`pipelinePasses` set). */
+interface CompiledTransition {
+  program: WebGLProgram | null;
   uFrom: WebGLUniformLocation | null;
   uTo: WebGLUniformLocation | null;
   uProgress: WebGLUniformLocation | null;
@@ -300,6 +322,7 @@ interface CompiledTransition {
   uFromFit: WebGLUniformLocation | null;
   uToFit: WebGLUniformLocation | null;
   params: { param: TransitionParam; location: WebGLUniformLocation | null }[];
+  pipelinePasses: CompiledPipelinePass[] | null;
 }
 
 /** A compiled per-fragment-effect program + its uniform locations (mirrors CompiledTransition). */
@@ -486,6 +509,29 @@ void main(){
 
 const DEG = Math.PI / 180;
 const MAX_BLUR_RADIUS = 96;
+
+/** GLSL declaration types for transition params (mirrors registry.ts's private GLSL_TYPE). */
+const GLSL_PARAM_TYPE: Record<TransitionParam["type"], string> = {
+  float: "float",
+  vec2: "vec2",
+  vec3: "vec3",
+  bool: "bool",
+};
+
+/** Set a uniform whose GLSL type is inferred from the JS value shape (pipeline pass params). */
+function setUniformByValue(
+  gl: WebGL2RenderingContext,
+  location: WebGLUniformLocation,
+  value: number | number[] | boolean,
+): void {
+  if (typeof value === "number") gl.uniform1f(location, value);
+  else if (typeof value === "boolean") gl.uniform1i(location, value ? 1 : 0);
+  else if (Array.isArray(value)) {
+    if (value.length === 2) gl.uniform2f(location, value[0] ?? 0, value[1] ?? 0);
+    else if (value.length === 3) gl.uniform3f(location, value[0] ?? 0, value[1] ?? 0, value[2] ?? 0);
+    else if (value.length === 4) gl.uniform4f(location, value[0] ?? 0, value[1] ?? 0, value[2] ?? 0, value[3] ?? 0);
+  }
+}
 
 /** Parse `#rgb` / `#rrggbb` (or fall back to black) into 0..1 rgb. */
 function parseColor(hex: string): [number, number, number] {
@@ -1060,11 +1106,48 @@ export class SceneCompositor {
     }
   }
 
-  /** Compile + cache the program for a transition definition (the same shaders TransitionCompositor uses). */
+  /** Compile + cache the program(s) for a transition definition (the same shaders TransitionCompositor uses).
+   *  A definition with a `pipeline` compiles one program PER PASS (assembled by `PipelineAssembler` — the
+   *  same assembled GLSL every renderer compiles, so multi-pass transitions keep pixel parity). */
   private prepareTransition(def: TransitionDefinition): CompiledTransition {
     const existing = this.transitionPrograms.get(def.id);
     if (existing) return existing;
     const gl = this.gl;
+    if (def.pipeline && def.pipeline.passes.length > 0) {
+      // Every pass declares the def's params as uniforms too, so a pass can read them by name.
+      const paramDecls = def.params.map((p) => `${GLSL_PARAM_TYPE[p.type]} ${p.name}`);
+      const pipelinePasses: CompiledPipelinePass[] = def.pipeline.passes.map((pass) => {
+        const program = linkProgram(gl, FULLSCREEN_TRI_VS, PipelineAssembler.assemblePassShader(pass.moduleId, paramDecls));
+        const extraNames = new Set<string>([...def.params.map((p) => p.name), ...Object.keys(pass.params ?? {})]);
+        return {
+          program,
+          uSrc: gl.getUniformLocation(program, "uSrc"),
+          uFrom: gl.getUniformLocation(program, "uFrom"),
+          uTo: gl.getUniformLocation(program, "uTo"),
+          uProgress: gl.getUniformLocation(program, "progress"),
+          uResolution: gl.getUniformLocation(program, "resolution"),
+          uRatio: gl.getUniformLocation(program, "ratio"),
+          uFromFit: gl.getUniformLocation(program, "uFromFit"),
+          uToFit: gl.getUniformLocation(program, "uToFit"),
+          extra: [...extraNames].map((name) => ({ name, location: gl.getUniformLocation(program, name) })),
+          passParams: pass.params ?? {},
+        };
+      });
+      const compiled: CompiledTransition = {
+        program: null,
+        uFrom: null,
+        uTo: null,
+        uProgress: null,
+        uResolution: null,
+        uRatio: null,
+        uFromFit: null,
+        uToFit: null,
+        params: [],
+        pipelinePasses,
+      };
+      this.transitionPrograms.set(def.id, compiled);
+      return compiled;
+    }
     // FULLSCREEN_TRI_VS produces the same `v_uv` (a_position*0.5+0.5) the transition FS expects, and
     // linkProgram binds a_position→0 (matching presentVao) — so the mix reuses the present triangle.
     const program = linkProgram(gl, FULLSCREEN_TRI_VS, buildTransitionFragmentShader(def));
@@ -1078,6 +1161,7 @@ export class SceneCompositor {
       uFromFit: gl.getUniformLocation(program, "uFromFit"),
       uToFit: gl.getUniformLocation(program, "uToFit"),
       params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
+      pipelinePasses: null,
     };
     this.transitionPrograms.set(def.id, compiled);
     return compiled;
@@ -1173,6 +1257,11 @@ export class SceneCompositor {
     const h = this.height;
     const compiled = this.prepareTransition(def);
     const resolved = resolveTransitionParams(def, params);
+    if (compiled.pipelinePasses) {
+      this.drawTransitionPipeline(compiled.pipelinePasses, fromTex, toTex, progress, resolved, target);
+      return;
+    }
+    if (!compiled.program) return; // defensive: a def with neither glsl nor pipeline
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 0);
@@ -1213,6 +1302,63 @@ export class SceneCompositor {
       }
     }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * Execute a multi-pass transition pipeline: passes chain through a ping-pong pair (`scratch1`/`scratch2`
+   * from the pooled effect targets), each reading the previous pass's output as `uSrc` (pass 0 reads the
+   * outgoing side) plus the raw `uFrom`/`uTo` sides, and the LAST pass renders directly into `target`.
+   * Uniforms per pass: the standard transition set + the def's resolved params + the pass's own static
+   * `params` overrides (pass params win). Sides are comp-pre-fitted, so uFromFit/uToFit = (1,1).
+   */
+  private drawTransitionPipeline(
+    passes: CompiledPipelinePass[],
+    fromTex: WebGLTexture,
+    toTex: WebGLTexture,
+    progress: number,
+    resolved: Record<string, number | number[] | boolean>,
+    target: RenderTarget,
+  ): void {
+    const gl = this.gl;
+    const w = this.width;
+    const h = this.height;
+    // Ping-pong intermediates. plate is NOT used — renderTransition mixes INTO plate, so it's the target.
+    const { s1, s2 } = this.effectTargets();
+    let srcTex = fromTex; // pass 0's "previous output" is the outgoing side
+    for (let i = 0; i < passes.length; i++) {
+      const pass = passes[i]!;
+      const isLast = i === passes.length - 1;
+      const dst = isLast ? target : i % 2 === 0 ? s1 : s2;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+      gl.viewport(0, 0, w, h);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(pass.program);
+      gl.bindVertexArray(this.presentVao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.uniform1i(pass.uSrc, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, fromTex);
+      gl.uniform1i(pass.uFrom, 1);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, toTex);
+      gl.uniform1i(pass.uTo, 2);
+      gl.uniform1f(pass.uProgress, Math.max(0, Math.min(1, progress)));
+      gl.uniform2f(pass.uResolution, w, h);
+      gl.uniform1f(pass.uRatio, h > 0 ? w / h : 1);
+      gl.uniform2f(pass.uFromFit, 1, 1);
+      gl.uniform2f(pass.uToFit, 1, 1);
+      for (const { name, location } of pass.extra) {
+        if (!location) continue;
+        const value = pass.passParams[name] !== undefined ? pass.passParams[name] : resolved[name];
+        if (value === undefined) continue;
+        setUniformByValue(gl, location, value as number | number[] | boolean);
+      }
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      srcTex = dst.tex;
+    }
     gl.bindVertexArray(null);
   }
 
@@ -2226,7 +2372,10 @@ export class SceneCompositor {
       entry.target.dispose();
     }
     this.regionGradeRenderers.clear();
-    for (const compiled of this.transitionPrograms.values()) gl.deleteProgram(compiled.program);
+    for (const compiled of this.transitionPrograms.values()) {
+      if (compiled.program) gl.deleteProgram(compiled.program);
+      if (compiled.pipelinePasses) for (const pass of compiled.pipelinePasses) gl.deleteProgram(pass.program);
+    }
     this.transitionPrograms.clear();
     for (const compiled of this.fragmentPrograms.values()) gl.deleteProgram(compiled.program);
     this.fragmentPrograms.clear();
