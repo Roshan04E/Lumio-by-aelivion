@@ -32,6 +32,7 @@ import {
   colorPipelineCacheKey,
   effectiveTransitionDuration,
   findTransitionPairs,
+  findTransitionPairsWithGroupJunctions,
   getActiveGlContextCount,
   getActiveTransition,
   getCompositionColorPipeline,
@@ -126,6 +127,7 @@ export class SceneFrameCompositor {
   private readonly flat: FlatLayer[];
   private readonly adjustments: FlatLayer[];
   private readonly flatById = new Map<string, FlatLayer>();
+  private readonly rawJunctionLayers: readonly TimelineLayer[];
 
   constructor(
     private readonly composition: TimelineComposition,
@@ -135,6 +137,9 @@ export class SceneFrameCompositor {
       singleContext?: boolean;
       stageProbe?: SceneFrameStageProbeOptions;
       nestedGroups?: ReadonlyMap<string, NestedGroupSpec>;
+      /** RAW (unexpanded) comp layers — junctions where a side is a compound clip only exist there
+       *  (nesting Block 4c). Omitted/empty = no group junctions, scan unchanged. */
+      rawJunctionLayers?: readonly TimelineLayer[];
     }
   ) {
     this.width = composition.width;
@@ -150,6 +155,7 @@ export class SceneFrameCompositor {
     // re-arm (unlike the editor's fire-and-forget `get()`).
     this.rasterizer = new SceneTextRasterizer();
     this.nestedGroups = options?.nestedGroups;
+    this.rawJunctionLayers = options?.rawJunctionLayers ?? [];
 
     const flat: FlatLayer[] = [];
     this.composition.tracks.forEach((track, trackIndex) => {
@@ -259,10 +265,24 @@ export class SceneFrameCompositor {
     draws.forEach((draw, index) => {
       if ((draw as { kind?: string }).kind === "transition") {
         const transition = draw as Extract<SceneDraw, { kind: "transition" }>;
-        const describeGroup = (group: SceneLayerDraw[], side: string): string =>
-          group.map((layer, i) => this.describeLayerDraw(layer, `${side}[${i}]`)).join(" ");
+        // A transition side may be a compound-clip GROUP draw (nesting Block 4c) — describe it by id.
+        const describeSideDraw = (entry: SceneDraw, label: string): string => {
+          const kind = (entry as { kind?: string }).kind;
+          if (kind === "group") return `${label}:group(${(entry as Extract<SceneDraw, { kind: "group" }>).debugGroupId ?? "?"})`;
+          if (kind === "transition") return `${label}:transition`;
+          return this.describeLayerDraw(entry as SceneLayerDraw, label);
+        };
+        const describeGroup = (group: SceneDraw[], side: string): string =>
+          group.map((entry, i) => describeSideDraw(entry, `${side}[${i}]`)).join(" ");
+        const sideId = (list: SceneDraw[]): string | undefined => {
+          const first = list[0];
+          if (!first) return undefined;
+          return (first as { kind?: string }).kind === "group"
+            ? (first as Extract<SceneDraw, { kind: "group" }>).debugGroupId
+            : (first as SceneLayerDraw).debugLayerId;
+        };
         parts.push(
-          `#${index}:transition from=${transition.debugFromId ?? transition.from[0]?.debugLayerId ?? "unknown"} to=${transition.debugToId ?? transition.to[0]?.debugLayerId ?? "unknown"} ` +
+          `#${index}:transition from=${transition.debugFromId ?? sideId(transition.from) ?? "unknown"} to=${transition.debugToId ?? sideId(transition.to) ?? "unknown"} ` +
             `progress=${transition.progress.toFixed(3)} from{${describeGroup(transition.from, "from")}} to{${describeGroup(transition.to, "to")}}`
         );
       } else {
@@ -639,9 +659,11 @@ export class SceneFrameCompositor {
 
     // Active junction transitions ONLY (an inactive pair would make buildSceneDraws wrongly skip the outgoing
     // clip, which it unconditionally treats as folded-into-the-mix). Mirrors VideoPreview.transitionPairs.
-    const byId = new Map(layers.map((layer) => [layer.id, layer]));
+    // Block 4c: compound-clip junctions only exist on the RAW comp layers (nest expansion removed the
+    // compound from its track) — union them in; raw layers are lookup-fallback only (merged wins).
+    const byId = new Map([...this.rawJunctionLayers, ...layers].map((layer) => [layer.id, layer]));
     const transitions: ScenePreviewTransition[] = [];
-    for (const pair of findTransitionPairs(layers)) {
+    for (const pair of findTransitionPairsWithGroupJunctions(layers, this.rawJunctionLayers)) {
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;

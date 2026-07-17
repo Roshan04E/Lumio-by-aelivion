@@ -21,6 +21,7 @@ import {
   effectiveTransitionDuration,
   effectsWithLayerRegionMask,
   findTransitionPairs,
+  findTransitionPairsWithGroupJunctions,
   getActiveTransition,
   getCompositionColorPipeline,
   getCompositionFilterEffects,
@@ -599,9 +600,12 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     const merged = active.map((layer) => mergedLayer(layer, adjustments, t));
 
     // Active junction transitions only — the shared builder folds both sides (graded) into the GPU mix.
-    const byId = new Map(merged.map((layer) => [layer.id, layer]));
+    // Block 4c: compound-clip junctions only exist on the manifest's RAW junction layers (nest
+    // expansion removed the compound from its track) — union them in; raw is lookup-fallback only.
+    const rawJunctionLayers = (manifest.rawJunctionLayers ?? []) as unknown as typeof merged;
+    const byId = new Map([...rawJunctionLayers, ...merged].map((layer) => [layer.id, layer]));
     const transitions: ScenePreviewTransition[] = [];
-    for (const pair of findTransitionPairs(merged as unknown as TimelineLayer[])) {
+    for (const pair of findTransitionPairsWithGroupJunctions(merged as unknown as TimelineLayer[], rawJunctionLayers as unknown as TimelineLayer[])) {
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;

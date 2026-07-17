@@ -343,7 +343,13 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
           },
         }
       : {}),
-    ...(nestExpansion.groups.size > 0 ? { nestedGroups: nestExpansion.groups } : {}),
+    ...(nestExpansion.groups.size > 0
+      ? {
+          nestedGroups: nestExpansion.groups,
+          // Block 4c: junctions where a side is a compound clip are only discoverable on the RAW comp.
+          rawJunctionLayers: composition.tracks.flatMap((track) => track.layers),
+        }
+      : {}),
   };
   const activeCanvas = new OffscreenCanvas(width, height);
   let consecutiveBlackExpectedMediaFrames = 0;

@@ -24,6 +24,7 @@ import type {
   TextRun,
   TimelineComposition,
   TimelineKeyframeV2,
+  TimelineLayer,
   TrackAudioKeyframe,
   TransitionSpec
 } from "@kimera-by-aelivion/shared";
@@ -237,6 +238,13 @@ export interface RenderManifest {
    * shell, exactly like the web preview/local export. Absent/empty = no nesting in this manifest.
    */
   nestedGroups?: Record<string, NestedGroupSpec> | undefined;
+  /**
+   * RAW (unexpanded) layers of every track containing a compound clip (nesting Block 4c): junctions
+   * where a side IS a compound clip only exist on the raw composition — nest expansion removes the
+   * compound from its track, so the renderer's pair scan needs these to fold group↔clip transitions.
+   * Absent = no compound junctions possible.
+   */
+  rawJunctionLayers?: TimelineLayer[] | undefined;
   createdAt: string;
   renderer: {
     engine: "kimera-manifest";
@@ -258,7 +266,13 @@ export function buildRenderManifest(input: {
   // unaffected. Nested children flatten into `layers` below like any other layer (generic over `layer.id`/
   // `layer.type`); `nestExpansion.groups` is carried separately (see `nestedGroups` on `RenderManifest`) so
   // SceneStage can fold them back into a group + build the compound clip's shell.
-  const nestExpansion = expandNestedCompositions(input.graph.composition ?? fallbackComposition(input.projectId), input.graph.compositions);
+  const rawComposition = input.graph.composition ?? fallbackComposition(input.projectId);
+  const nestExpansion = expandNestedCompositions(rawComposition, input.graph.compositions);
+  // Block 4c: raw layers of every track containing a compound clip — junctions where a side is a
+  // compound clip are only discoverable there (the expansion removes the compound from its track).
+  const rawJunctionLayers = rawComposition.tracks
+    .filter((track) => track.layers.some((layer) => layer.nestedCompositionId))
+    .flatMap((track) => track.layers);
   // Frame borders expand FIRST (a framed layer gains a derived stroke-only shape clone above it — Step E),
   // then color/glow region masks into base + duplicate layers, so the Remotion renderer gets both via the
   // normal shape/clip-mask paths (duplicate's higher layerIndex → higher zIndex → drawn above its base).
@@ -520,6 +534,7 @@ export function buildRenderManifest(input: {
     // start/duration correction here, or switching this function to the whole-composition clip utility.
     // Deferred as a narrow, documented gap rather than a rushed fix to shared work-area logic.
     ...(nestExpansion.groups.size > 0 ? { nestedGroups: Object.fromEntries(nestExpansion.groups) } : {}),
+    ...(nestExpansion.groups.size > 0 && rawJunctionLayers.length > 0 ? { rawJunctionLayers } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
     renderer: {
       engine: "kimera-manifest",
