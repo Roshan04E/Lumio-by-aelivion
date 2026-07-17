@@ -14,7 +14,16 @@ the export pipeline, and all trim/split ramp-glue ops depend on.
   `mapSourceTime` media clamps, export frame mapping.
 - The graph speed lane therefore suppresses bezier handles (`hasBezierHandles`, graph-scene.ts).
 
-## Phase S1 — bezier-eased ramps (exact math, no approximation)
+## Phase S1 — bezier-eased ramps (exact math, no approximation) — SHIPPED 2026-07-17 (0477f86)
+
+> Implemented per the design below with ONE deviation: handles are stored in the graph's
+> FRACTIONAL convention (dx = fraction of segment span, dy = fraction of value delta) rather than
+> absolute (dt, dv) — it plugs straight into the existing handle UI/mirroring and keeps the ease
+> shape stable under neighbor retiming (AE behavior). Plus a step the design missed:
+> `shiftSpeedKeyframes` does an exact de Casteljau subdivision when a head trim lands inside an
+> eased segment. Gated by 7 new editor.test checks (linear-equivalence at 1e-9, split preservation
+> at 1e-6). Known convention limit: a dy bulge over EQUAL endpoint values is inexpressible (dy
+> scales the value delta) — same as every other graph lane.
 
 Key insight: our graph handles are (time, value) cubic bezier control points. A segment's source
 consumption is ∫ y(s)·x′(s) ds over the bezier parameter s — a polynomial of degree ≤5 in s, so it
