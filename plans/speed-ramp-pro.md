@@ -85,3 +85,35 @@ suspect: unbounded seek/decode loop under aggressive compression) lives exactly 
 preview work goes — fix it FIRST with a repro, or S2 debugging compounds it.
 
 S1 is independent of the hang and can ship alone (eased forward ramps).
+
+---
+
+## Status + DEFERRED work (2026-07-18)
+
+**Shipped:** S1 eased ramps (0477f86), the ramp-hang root-cause fix (7a6cc79 — so the "fix the hang
+first" prerequisite above is DONE), S2 reverse core (0459975), smooth reverse preview (WC path
+present-directly). Reverse in/out swap + ClipSpeedControl Reverse UI are done but ride with the
+parallel nesting batch (shared EditorPage.tsx) — commit them when that batch lands.
+
+**Deferred — not yet built (pick up here):**
+
+1. **Reversed span PROXY (smooth-preview v2).** Today reverse presents the WebCodecs reverse-shuttle
+   cache directly (smooth within a GOP, may drop frames at GOP boundaries on sparse-keyframe
+   sources). The Premiere-grade next step: the sourceProxy worker pre-transcodes a REVERSED segment
+   for a reversed span and plays it FORWARD, so no playback code sees backward motion at all. Big:
+   worker transcode + proxy store record + playback source-swap/time-remap. See
+   `editor/performance/sourceProxy.worker.ts` + `proxyMediaStore.ts`.
+2. **True reversed PREVIEW audio.** Export already plays true reversed audio (per-sample PCM walk in
+   `audio-mixer.ts`). Preview MUTES reversed spans (v1). v2: offline-reverse the decoded PCM span
+   (Web Audio) and play that buffer forward during the reversed span — mirrors the export mixer.
+3. **Clamp-to-asset trim BADGE for reverse.** The mapping clamps `sourceIn + ∫` to [0, assetDuration]
+   silently; surface a badge (like T4's "no head material") when a reversed clip runs past either
+   media edge so the user sees why it holds a frame.
+4. **Reversed / ramped COMPOUND clip (would-be S3).** `expandNestedCompositions` ignores a compound
+   clip's reverse (uses `|clipSpeed|`) and rejects ramps ON the compound — the static child-time
+   derivation assumes forward, constant parent time. A reversed/ramped compound needs per-frame
+   nest-time evaluation (evaluate each child at the parent's instantaneous mapped nest time), a
+   materially bigger change than the affine substitution used today.
+5. **Eased-ramp dy-over-equal-endpoints.** The fractional handle convention can't express a value
+   bulge between two points of EQUAL speed (dy scales the endpoint delta → 0). Same limit as every
+   other graph lane; only matters for an ease that overshoots between equal-rate points.
