@@ -72,11 +72,14 @@ to write `alignment` into the spec; do NOT invent a parallel setter. One `update
 undo step. The pill (already sides-driven) repositions automatically; zebra appears when the manual
 choice forces repeats; the existing right-click trim still fixes the tail side.
 
-## T4 — deferred (Fable-tier, do NOT attempt)
+## T4 — SHIPPED 2026-07-17 (Fable)
 
-Extending "Trim clips to create overlap" to manufacture HEAD material (incoming `sourceInSeconds`
-shift) — it moves content under existing local-time keyframes/markers and needs the head-trim op's
-keyframe glue. Recorded in plans/effects-paint-deferred.md territory; leave the trim tail-only.
+"Trim clips to create overlap" now fixes BOTH sides: tail via the existing outgoing trim, head via
+`advanceIncomingSourceForTransition` (shared timeline-ops) — incoming `sourceInSeconds` advances by
+the uncovered pre-roll with head-trim keyframe glue (v1+v2 keys shift with content, negatives kept;
+markers shift and drop <0; linked companions advance in sync; ramped clips rejected v1).
+`resolveTransitionWindowSides` gained the per-side `headRepeatedSeconds`/`tailRepeatedSeconds` split.
+See architecture.md "Phase C".
 
 ## Gates
 

@@ -378,6 +378,11 @@ export interface TransitionWindowSides {
    * warning on the timeline junction pill.
    */
   repeatedFramesSeconds: number;
+  /** Per-side split of `repeatedFramesSeconds` (T4): the head term is the incoming clip's uncovered
+   *  pre-roll (only reachable with a MANUAL alignment — auto caps pre-roll by the head handle), the
+   *  tail term the outgoing clip's uncovered post-roll. `head + tail === repeatedFramesSeconds`. */
+  headRepeatedSeconds: number;
+  tailRepeatedSeconds: number;
 }
 
 /**
@@ -434,9 +439,15 @@ export function resolveTransitionWindowSides(input: {
   const postrollSeconds = duration - prerollSeconds;
   // Auto: pre-roll is capped by the head handle by construction, so the head term is always 0 (unchanged
   // from before manual alignment existed). Manual alignment can exceed EITHER side's material.
-  const repeatedFramesSeconds =
-    Math.max(0, prerollSeconds - headHandleSeconds) + Math.max(0, postrollSeconds - tailHandleSeconds);
-  return { prerollSeconds, postrollSeconds, repeatedFramesSeconds };
+  const headRepeatedSeconds = Math.max(0, prerollSeconds - headHandleSeconds);
+  const tailRepeatedSeconds = Math.max(0, postrollSeconds - tailHandleSeconds);
+  return {
+    prerollSeconds,
+    postrollSeconds,
+    repeatedFramesSeconds: headRepeatedSeconds + tailRepeatedSeconds,
+    headRepeatedSeconds,
+    tailRepeatedSeconds,
+  };
 }
 
 /** Find every same-track clip pair joined by a registry junction transition (incoming carries the spec). */

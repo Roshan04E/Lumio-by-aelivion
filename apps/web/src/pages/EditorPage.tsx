@@ -90,6 +90,7 @@ import {
   resolveTransitionWindowSides,
   effectiveTransitionDuration,
   trimOutgoingForTransition,
+  advanceIncomingSourceForTransition,
   DEFAULT_CROSS_DISSOLVE_SECONDS,
   canApplyEffectManifestToLayer,
   createTimelineEffect,
@@ -6032,13 +6033,33 @@ export function EditorPage() {
       outgoingAssetDurationSeconds: left.assetId ? assets.find((asset) => asset.id === left.assetId)?.durationSeconds : undefined,
       alignment: right.transitionIn.alignment
     });
-    const next = trimOutgoingForTransition(composition, leftId, rightId, sides.repeatedFramesSeconds);
-    if (!next) {
+    // T4: fix BOTH sides in one undo step. Tail shortfall → shorten the outgoing out-point + ripple
+    // (unchanged). Head shortfall (only reachable with a MANUAL alignment — auto caps pre-roll by the
+    // head handle) → advance the incoming clip's source in-point so real media exists before the cut.
+    let next = composition;
+    const doneParts: string[] = [];
+    if (sides.tailRepeatedSeconds > 1 / 240) {
+      const trimmed = trimOutgoingForTransition(next, leftId, rightId, sides.tailRepeatedSeconds);
+      if (trimmed) {
+        next = trimmed;
+        doneParts.push(`trimmed ${sides.tailRepeatedSeconds.toFixed(2)}s from the outgoing clip`);
+      }
+    }
+    if (sides.headRepeatedSeconds > 1 / 240) {
+      const advanced = advanceIncomingSourceForTransition(next, rightId, sides.headRepeatedSeconds, {
+        assetDurationSeconds: right.assetId ? assets.find((asset) => asset.id === right.assetId)?.durationSeconds : undefined
+      });
+      if (advanced) {
+        next = advanced;
+        doneParts.push(`advanced the incoming clip's in-point ${sides.headRepeatedSeconds.toFixed(2)}s`);
+      }
+    }
+    if (next === composition) {
       setNotice("Transition already has enough media");
       return;
     }
     void updateComposition(next);
-    setNotice(`Trimmed ${sides.repeatedFramesSeconds.toFixed(2)}s from the outgoing clip — transition now plays real media`);
+    setNotice(`${doneParts.join(" + ").replace(/^./, (c) => c.toUpperCase())} — transition now plays real media`);
   }
 
   /**

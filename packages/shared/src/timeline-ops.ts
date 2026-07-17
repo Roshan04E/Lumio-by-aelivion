@@ -803,6 +803,84 @@ export function trimOutgoingForTransition(
   };
 }
 
+/**
+ * T4 — manufacture HEAD material for a junction transition: advance the INCOMING clip's source
+ * in-point by `headSeconds` of timeline pre-roll (skipping the first `headSeconds` of its visible
+ * content), so the transition window has real media BEFORE the cut. The clip's timeline placement is
+ * untouched — its CONTENT shifts earlier under it, exactly Premiere's "trim clip" answer to
+ * "insufficient media". The keyframe glue mirrors the head-trim conventions:
+ *  - v2 animations shift with the content (`-headSeconds` local). Keys landing at NEGATIVE local
+ *    times are KEPT (the nesting precedent: the evaluator interpolates by time, so values inside the
+ *    visible span stay exact; negative keys are simply unreachable outside the pre-roll).
+ *  - v1 keyframes shift the same way (the clip's start is unchanged, so absolute == local shift).
+ *  - clip markers shift with the content and DROP below 0 (UI pins have no negative address).
+ * Linked A/V companions cutting at the same point advance in sync (or the pair desyncs).
+ * Returns null when there is nothing to do: not source media, a speed-ramped clip (v1 unsupported —
+ * the ramp integral makes "pre-roll seconds" nonlinear), or no material left to give
+ * (`assetDurationSeconds` known and the clip already ends at the asset's tail).
+ */
+export function advanceIncomingSourceForTransition(
+  composition: TimelineComposition,
+  rightLayerId: string,
+  headSeconds: number,
+  options?: { assetDurationSeconds?: number | undefined }
+): TimelineComposition | null {
+  const right = composition.tracks.flatMap((track) => track.layers).find((layer) => layer.id === rightLayerId);
+  if (!right) return null;
+  if (!((right.type === "video" || right.type === "audio") && right.assetId)) return null;
+  if ((right.speedKeyframes?.length ?? 0) > 0) return null;
+  const speed = getLayerSpeedAt(right, 0);
+  let sourceDelta = Math.max(0, headSeconds) * speed;
+  if (options?.assetDurationSeconds !== undefined) {
+    const consumedEnd = (right.sourceInSeconds ?? 0) + right.durationSeconds * speed;
+    sourceDelta = Math.min(sourceDelta, Math.max(0, options.assetDurationSeconds - consumedEnd));
+  }
+  if (sourceDelta <= speed / 240) return null;
+  const cut = right.startSeconds;
+
+  const advance = (layer: TimelineLayer): TimelineLayer => {
+    const layerSpeed = getLayerSpeedAt(layer, 0);
+    const localShift = sourceDelta / speed; // timeline seconds of content shift (same for companions)
+    return {
+      ...layer,
+      sourceInSeconds: (layer.sourceInSeconds ?? 0) + localShift * layerSpeed,
+      keyframes: layer.keyframes.map((keyframe) => ({ ...keyframe, timeSeconds: keyframe.timeSeconds - localShift })),
+      animations: (layer.animations ?? []).map((animation) => ({ ...animation, timeSeconds: animation.timeSeconds - localShift })),
+      ...(layer.markers?.length
+        ? {
+            markers: layer.markers
+              .map((marker) => ({ ...marker, timeSeconds: marker.timeSeconds - localShift }))
+              .filter((marker) => marker.timeSeconds >= -EPSILON)
+          }
+        : {})
+    };
+  };
+
+  return {
+    ...composition,
+    tracks: composition.tracks.map((trackItem) => ({
+      ...trackItem,
+      layers: trackItem.layers.map((layer) => {
+        if (layer.id === rightLayerId) return advance(layer);
+        // Linked companion (the audio half) starting at the same cut advances in sync — content-wise
+        // the pair must keep pointing at the same source instant. Ramped companions are left alone
+        // (same v1 limitation as the main clip; a desync there is the user's explicit ramp choice).
+        if (
+          right.linkedGroupId &&
+          layer.linkedGroupId === right.linkedGroupId &&
+          (layer.type === "video" || layer.type === "audio") &&
+          Boolean(layer.assetId) &&
+          (layer.speedKeyframes?.length ?? 0) === 0 &&
+          Math.abs(layer.startSeconds - cut) <= 0.05
+        ) {
+          return advance(layer);
+        }
+        return layer;
+      })
+    }))
+  };
+}
+
 export function collectEditPoints(composition: TimelineComposition): number[] {
   const points = new Set<number>([0, Number(composition.durationSeconds.toFixed(4))]);
   for (const trackItem of composition.tracks) {
