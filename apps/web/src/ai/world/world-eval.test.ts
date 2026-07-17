@@ -15,15 +15,33 @@
  */
 
 import type { SourceAsset, TimelineComposition, TimelineLayer, TimelineTrackType } from "@kimera-by-aelivion/shared";
-import { clearFactStore, getStoredFact, invalidateFact, listFacts, storeObservation } from "./fact-store";
+
+// K2 persistence tests need storage BEFORE any store access — a Map-backed localStorage fake
+// (node has none). Set first so every lazily-loading module (fact store, feedback, ledger)
+// sees the same fake.
+const fakeStorage = new Map<string, string>();
+(globalThis as { localStorage?: unknown }).localStorage = {
+  getItem: (key: string) => fakeStorage.get(key) ?? null,
+  setItem: (key: string, value: string) => void fakeStorage.set(key, value),
+  removeItem: (key: string) => void fakeStorage.delete(key),
+  clear: () => fakeStorage.clear()
+};
+
+import { __resetFactStoreMemoryForTests, clearFactStore, getStoredFact, invalidateFact, listFacts, storeObservation } from "./fact-store";
 import { queryFact } from "./knowledge";
 import { registerObserver } from "./observers";
 import { metadataObserver, MEDIA_METADATA_FACT, type MediaMetadataFact } from "./observers/metadata";
 import { lookObserver, MEDIA_LOOK_FACT } from "./observers/look";
 import { textSummaryObserver, COMPOSITION_TEXT_FACT, type CompositionTextFact } from "./observers/text-summary";
+import { systemObserver, SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID, type SystemCapabilitiesFact } from "./observers/system";
+import { userProfileObserver, USER_AI_PROFILE_FACT, USER_TARGET_ID, type UserAiProfileFact } from "./observers/user-profile";
+import { projectMediaObserver, PROJECT_MEDIA_FACT, PROJECT_TARGET_ID, type ProjectMediaFact } from "./observers/project-media";
+import { recordRuleFired, recordRuleRejected, clearRuleStats } from "../brain/feedback";
 import { routePromptWorld } from "./route";
 import type { BrainContext } from "../brain/router";
 import type { WorldContext, WorldObserver } from "./types";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let failures = 0;
 
@@ -147,6 +165,9 @@ registerObserver(heavyObserver);
 registerObserver(metadataObserver);
 registerObserver(lookObserver);
 registerObserver(textSummaryObserver);
+registerObserver(systemObserver);
+registerObserver(userProfileObserver);
+registerObserver(projectMediaObserver);
 
 const assetTarget = { kind: "asset" as const, id: "a1" };
 const compTarget = { kind: "composition" as const, id: "c" };
@@ -230,6 +251,78 @@ async function run(): Promise<void> {
 
   check("DOM-only look observer declines under node", (await queryFact({ type: MEDIA_LOOK_FACT, target: assetTarget }, ctx)) === null);
 
+  // ---- K2: state-branch observers ----
+  console.log("K2 state branches:");
+  const hasNavigator = typeof navigator !== "undefined";
+  const system = await queryFact<SystemCapabilitiesFact>(
+    { type: SYSTEM_CAPABILITIES_FACT, target: { kind: "system", id: SYSTEM_TARGET_ID } },
+    ctx
+  );
+  if (hasNavigator) {
+    check("system observer detects capabilities", system !== null && system.fact.value.hardwareConcurrency >= 1);
+  } else {
+    check("system observer declines without navigator", system === null);
+  }
+
+  clearRuleStats();
+  recordRuleFired("t0.test-rule");
+  recordRuleFired("t0.test-rule");
+  recordRuleRejected("t0.test-rule");
+  const profile = await queryFact<UserAiProfileFact>(
+    { type: USER_AI_PROFILE_FACT, target: { kind: "user", id: USER_TARGET_ID } },
+    ctx
+  );
+  check(
+    "user profile summarizes feedback stats",
+    profile?.fact.value.rulesTracked === 1 && profile.fact.value.totalFired === 2 && profile.fact.value.totalRejected === 1
+  );
+  recordRuleRejected("t0.test-rule");
+  const profileAfter = await queryFact<UserAiProfileFact>(
+    { type: USER_AI_PROFILE_FACT, target: { kind: "user", id: USER_TARGET_ID } },
+    ctx
+  );
+  check(
+    "new feedback auto-invalidates the profile fact (signature change)",
+    profileAfter?.path === "user-profile@builtin" && profileAfter.fact.value.totalRejected === 2
+  );
+
+  const secondAsset: SourceAsset = { ...asset, id: "a2", fileType: "image/png", durationSeconds: 0, sizeBytes: 1024 * 1024, source: "stock" };
+  const projectCtx: WorldContext = { composition: textComp, assets: [asset, secondAsset] };
+  const media = await queryFact<ProjectMediaFact>(
+    { type: PROJECT_MEDIA_FACT, target: { kind: "project", id: PROJECT_TARGET_ID } },
+    projectCtx
+  );
+  check(
+    "project media summary counts kinds/footage/sources",
+    media?.fact.value.assetCount === 2 &&
+      media.fact.value.videoCount === 1 &&
+      media.fact.value.imageCount === 1 &&
+      media.fact.value.totalFootageSeconds === 12.5 &&
+      media.fact.value.bySource["stock"] === 1 &&
+      media.fact.value.bySource["local"] === 1
+  );
+  const mediaChanged = await queryFact<ProjectMediaFact>(
+    { type: PROJECT_MEDIA_FACT, target: { kind: "project", id: PROJECT_TARGET_ID } },
+    { ...projectCtx, assets: [asset] }
+  );
+  check("bin change invalidates the project summary", mediaChanged?.path === "project-media@builtin" && mediaChanged.fact.value.assetCount === 1);
+
+  // ---- K2: persistence (survives a simulated reload; clear really clears) ----
+  console.log("K2 persistence:");
+  clearFactStore();
+  syntheticSignature = "sig-persist";
+  await queryFact<number>({ type: "test.value", target: assetTarget }, ctx);
+  await sleep(650); // let the debounced persist flush
+  __resetFactStoreMemoryForTests(); // simulate a page reload
+  const revived = getStoredFact("test.value", "asset:a1");
+  check("facts survive a reload via storage", revived?.provenance.inputSignature === "sig-persist");
+  const cachedAfterReload = await queryFact<number>({ type: "test.value", target: assetTarget }, ctx);
+  const runsBeforeReloadQuery = syntheticRuns;
+  check("reloaded fact serves from cache (signature still valid)", cachedAfterReload?.path === "cached" && syntheticRuns === runsBeforeReloadQuery);
+  clearFactStore();
+  __resetFactStoreMemoryForTests();
+  check("clear removes persisted facts too", getStoredFact("test.value", "asset:a1") === undefined);
+
   // ---- World route precision (must-escalate corpus) ----
   console.log("world route precision:");
   const brainContext: BrainContext = { composition: textComp, selection: [], nowSeconds: 3 };
@@ -239,7 +332,10 @@ async function run(): Promise<void> {
     "make it pop",
     "what does the intro look like",
     "analyze clip",
-    "blur clip 2"
+    "blur clip 2",
+    "analyze my system settings",
+    "analyze my career",
+    "show my feelings"
   ]) {
     const routed = await routePromptWorld(prompt, brainContext);
     check(`escalates: "${prompt}"`, routed.kind === "escalate");
@@ -250,9 +346,11 @@ async function run(): Promise<void> {
     noMedia.kind === "answer" && noMedia.text.includes("text layer"),
     noMedia.kind
   );
-  // Media clip under node: world context can't load (no Vite env) → must escalate, never throw.
-  const mediaUnderNode = await routePromptWorld("analyze clip 1", brainContext);
-  check("media clip with no world context → clean escalate", mediaUnderNode.kind === "escalate");
+  // Under node the world context can't load (no Vite env) → these must escalate, never throw.
+  for (const prompt of ["analyze clip 1", "analyze my system", "analyze the project", "show my ai usage"]) {
+    const routed = await routePromptWorld(prompt, brainContext);
+    check(`no world context → clean escalate: "${prompt}"`, routed.kind === "escalate");
+  }
 
   console.log(failures === 0 ? `\nworld:eval PASS (${listFacts().length} facts live)` : `\nworld:eval FAIL — ${failures} failure(s)`);
   process.exit(failures === 0 ? 0 : 1);

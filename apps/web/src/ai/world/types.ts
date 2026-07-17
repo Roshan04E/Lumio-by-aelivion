@@ -26,7 +26,13 @@ import type { SourceAsset, TimelineComposition } from "@kimera-by-aelivion/share
 // Targets
 // ---------------------------------------------------------------------------
 
-export type WorldTargetKind = "asset" | "composition";
+/**
+ * K2 note: "system" / "user" / "project" are the World Model's non-media state branches
+ * (KIMERA_OS.md → Layer 2). Editor state (selection/playhead/mode) deliberately stays in
+ * BrainContext instead of becoming facts: it is ephemeral and free to read, so there is no
+ * acquisition cost to amortize — caching it would only create staleness.
+ */
+export type WorldTargetKind = "asset" | "composition" | "system" | "user" | "project";
 
 export interface WorldTarget {
   kind: WorldTargetKind;

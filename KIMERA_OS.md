@@ -483,6 +483,17 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    `brain:eval` unchanged-green. Face-presence observer + K2 persistence still open.
 2. **K2 — World Model query facade** over existing stores + the fact store; typed
    `FactQuery` interface; access-path registry.
+   **✅ first slice shipped 2026-07-18** (typed query interface + access-path registry
+   already landed with K1): fact-store **persistence** (localStorage, debounced, bounded —
+   correctness-free because every read stays signature-verified; OPFS deliberately skipped
+   per invariant 6), and the remaining **state branches** behind the same `FactQuery`
+   interface — `system:browser` (capabilities/hardware via tools/capabilities.ts),
+   `user:local` (B6 rule-trust + routing-ledger introspection via new
+   `listRuleStats()`), `project:current` (media-bin summary). Route consumers:
+   "analyze my system" / "analyze the project" / "show my ai usage". Editor state
+   deliberately stays in BrainContext (ephemeral + free to read — nothing to amortize).
+   Acceptance: `world:eval` grown to 40 checks (state branches, feedback-driven
+   auto-invalidation, persistence reload round-trip, widened must-escalate corpus).
 3. **K3 — Blueprint IR** (infrastructure + first dialect: color) + capability-closure
    validation. Formalizes what GradeIntent proved; MotionIntent/TextLookIntent become the
    second and third dialect payloads.

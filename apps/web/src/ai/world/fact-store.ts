@@ -15,14 +15,60 @@ import type { Fact, ObservedFact, WorldObserver, WorldTarget } from "./types";
 import { targetKey } from "./types";
 
 const MAX_FACTS = 500;
+// K2 persistence: facts survive a refresh via localStorage (bounded JSON, same convention as
+// the routing ledger). This is CORRECTNESS-FREE caching — every read is signature-verified by
+// knowledge.ts, so a stale persisted fact simply invalidates on first touch. Deliberately not
+// OPFS: <500 small JSON facts is localStorage territory (tables-first, KIMERA_OS invariant 6).
+const STORAGE_KEY = "kimera.world.facts.v1";
+const PERSIST_DEBOUNCE_MS = 500;
 
 const facts = new Map<string, Fact>();
+let hydrated = false;
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+
+function ensureHydrated(): void {
+  if (hydrated) {
+    return;
+  }
+  hydrated = true;
+  try {
+    if (typeof localStorage !== "undefined") {
+      const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+      if (Array.isArray(parsed)) {
+        for (const fact of parsed as Fact[]) {
+          if (fact && typeof fact.id === "string" && fact.provenance) {
+            facts.set(fact.id, fact);
+          }
+        }
+      }
+    }
+  } catch {
+    // Corrupt/unavailable storage → start empty; observers simply re-measure.
+  }
+}
+
+function schedulePersist(): void {
+  if (persistTimer !== undefined) {
+    return;
+  }
+  persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(Array.from(facts.values())));
+      }
+    } catch {
+      // Quota/private mode — the in-memory store still works this session.
+    }
+  }, PERSIST_DEBOUNCE_MS);
+}
 
 export function factId(type: string, target: string): string {
   return `${type}|${target}`;
 }
 
 export function getStoredFact<V = unknown>(type: string, target: string): Fact<V> | undefined {
+  ensureHydrated();
   return facts.get(factId(type, target)) as Fact<V> | undefined;
 }
 
@@ -34,6 +80,7 @@ export function storeObservation(
   observed: ObservedFact[],
   dependencies: string[] = []
 ): Fact[] {
+  ensureHydrated();
   const key = targetKey(target);
   const stored: Fact[] = [];
   for (const item of observed) {
@@ -60,19 +107,23 @@ export function storeObservation(
     stored.push(fact);
   }
   evictIfOverflowing();
+  schedulePersist();
   return stored;
 }
 
 /** Remove a fact and cascade through everything derived from it (recursively). */
 export function invalidateFact(id: string): void {
+  ensureHydrated();
   if (!facts.delete(id)) {
     return;
   }
   cascadeDependents(id);
+  schedulePersist();
 }
 
 /** Drop every fact about a target (e.g. asset bytes replaced). Cascades like invalidateFact. */
 export function invalidateTarget(target: WorldTarget): void {
+  ensureHydrated();
   const key = targetKey(target);
   for (const fact of Array.from(facts.values())) {
     if (fact.target === key) {
@@ -100,9 +151,24 @@ function evictIfOverflowing(): void {
 }
 
 export function listFacts(): Fact[] {
+  ensureHydrated();
   return Array.from(facts.values());
 }
 
 export function clearFactStore(): void {
   facts.clear();
+  hydrated = true; // an explicit clear must not resurrect persisted facts
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/** TEST-ONLY: drop the in-memory map + hydration flag so eval can simulate a page reload. */
+export function __resetFactStoreMemoryForTests(): void {
+  facts.clear();
+  hydrated = false;
 }

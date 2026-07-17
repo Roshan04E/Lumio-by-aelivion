@@ -87,6 +87,11 @@ export function isRuleTrusted(ruleId: string): boolean {
   return score >= 0.5;
 }
 
+/** All per-rule stats (copy) — consumed by the World Model's user-profile observer (K2). */
+export function listRuleStats(): Record<string, RuleStats> {
+  return { ...loadStats() };
+}
+
 export function getRuleStats(ruleId: string): RuleStats | undefined {
   return loadStats()[ruleId];
 }

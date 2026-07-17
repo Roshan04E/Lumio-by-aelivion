@@ -12,12 +12,19 @@ import { registerObserver, listObservers } from "./observers";
 import { metadataObserver } from "./observers/metadata";
 import { lookObserver } from "./observers/look";
 import { textSummaryObserver } from "./observers/text-summary";
+import { systemObserver } from "./observers/system";
+import { userProfileObserver } from "./observers/user-profile";
+import { projectMediaObserver } from "./observers/project-media";
 import { perceptionQueueDepth } from "./scheduler";
 import type { WorldContext } from "./types";
 
 registerObserver(metadataObserver);
 registerObserver(lookObserver);
 registerObserver(textSummaryObserver);
+// K2 state branches — System / User / Project behind the same FactQuery interface.
+registerObserver(systemObserver);
+registerObserver(userProfileObserver);
+registerObserver(projectMediaObserver);
 
 // Host-registered live asset list (EditorPage state — includes server/stock assets the
 // local-first records don't). Absent → local records alone still serve local imports.

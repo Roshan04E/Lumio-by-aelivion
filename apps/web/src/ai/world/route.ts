@@ -20,6 +20,12 @@ import type { MediaMetadataFact } from "./observers/metadata";
 import { MEDIA_METADATA_FACT } from "./observers/metadata";
 import type { CompositionTextFact } from "./observers/text-summary";
 import { COMPOSITION_TEXT_FACT } from "./observers/text-summary";
+import type { SystemCapabilitiesFact } from "./observers/system";
+import { SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID } from "./observers/system";
+import type { UserAiProfileFact } from "./observers/user-profile";
+import { USER_AI_PROFILE_FACT, USER_TARGET_ID } from "./observers/user-profile";
+import type { ProjectMediaFact } from "./observers/project-media";
+import { PROJECT_MEDIA_FACT, PROJECT_TARGET_ID } from "./observers/project-media";
 
 const ESCALATE: BrainRouteResult = { kind: "escalate" };
 
@@ -39,6 +45,11 @@ async function worldContext(composition: TimelineComposition): Promise<WorldCont
 const ANALYZE_CLIP_RE = /^(?:analy[sz]e|inspect|measure) (.+)$/;
 const LOOK_RE = /^what does (.+?) look like\??$/;
 const ANALYZE_COMP_RE = /^(?:analy[sz]e|inspect|measure) (?:the |this |my )?(?:timeline|composition|comp|sequence|edit)$/;
+// K2 state branches — whole-string anchored like everything else in this tier.
+const ANALYZE_SYSTEM_RE =
+  /^(?:analy[sz]e|inspect|check) (?:my |the |this )?(?:system|browser|machine|device|hardware)$|^what can (?:my|this) (?:browser|machine|device|system) (?:do|handle)$/;
+const ANALYZE_PROJECT_RE = /^(?:analy[sz]e|inspect|measure) (?:my |the |this )?(?:project|media|footage|bin|assets|media pool)$/;
+const ANALYZE_USAGE_RE = /^(?:analy[sz]e|show|inspect) my (?:ai )?(?:usage|stats|profile|learning)$/;
 
 export async function routePromptWorld(prompt: string, context: BrainContext): Promise<BrainRouteResult> {
   const text = normalizePrompt(prompt);
@@ -48,6 +59,15 @@ export async function routePromptWorld(prompt: string, context: BrainContext): P
 
   if (ANALYZE_COMP_RE.test(text)) {
     return analyzeComposition(context.composition);
+  }
+  if (ANALYZE_SYSTEM_RE.test(text)) {
+    return analyzeSystem(context.composition);
+  }
+  if (ANALYZE_PROJECT_RE.test(text)) {
+    return analyzeProject(context.composition);
+  }
+  if (ANALYZE_USAGE_RE.test(text)) {
+    return analyzeUsage(context.composition);
   }
 
   const match = ANALYZE_CLIP_RE.exec(text) ?? LOOK_RE.exec(text);
@@ -129,6 +149,88 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
     lines.push(`\n_From the import record · 0 tokens (frame sampling unavailable for this source)_`);
   }
   return answer(lines.join("\n"), "world.analyze-clip");
+}
+
+async function analyzeSystem(composition: TimelineComposition): Promise<BrainRouteResult> {
+  const ctx = await worldContext(composition);
+  if (!ctx) {
+    return ESCALATE;
+  }
+  const result = await queryFact<SystemCapabilitiesFact>(
+    { type: SYSTEM_CAPABILITIES_FACT, target: { kind: "system", id: SYSTEM_TARGET_ID }, budgetMs: 250 },
+    ctx
+  );
+  if (!result) {
+    return ESCALATE;
+  }
+  const v = result.fact.value;
+  const flag = (ok: boolean) => (ok ? "✓" : "✗");
+  const lines = [
+    `**This machine — measured capabilities**`,
+    `- Compute: ${v.hardwareConcurrency} logical core(s)${v.deviceMemoryGb ? ` · ~${v.deviceMemoryGb} GB RAM (coarse)` : ""}`,
+    `- Video: ${flag(v.webCodecs)} WebCodecs · ${flag(v.webGpu)} WebGPU · ${flag(v.offscreenCanvas)} OffscreenCanvas`,
+    `- Runtime: ${flag(v.webWorkers)} Workers · ${flag(v.sharedArrayBuffer)} SharedArrayBuffer · ${flag(v.crossOriginIsolated)} cross-origin isolated · ${flag(v.opfs)} OPFS`,
+    `- Voice: ${flag(v.speechRecognition)} speech recognition · ${flag(v.microphone)} microphone · ${flag(v.audioContext)} AudioContext`,
+    `\n_Detected on-device · ${result.path === "cached" ? "cached fact" : "fresh detection"} · 0 tokens_`
+  ];
+  return answer(lines.join("\n"), "world.analyze-system");
+}
+
+async function analyzeProject(composition: TimelineComposition): Promise<BrainRouteResult> {
+  const ctx = await worldContext(composition);
+  if (!ctx) {
+    return ESCALATE;
+  }
+  const result = await queryFact<ProjectMediaFact>(
+    { type: PROJECT_MEDIA_FACT, target: { kind: "project", id: PROJECT_TARGET_ID }, budgetMs: 250 },
+    ctx
+  );
+  if (!result) {
+    return ESCALATE;
+  }
+  const v = result.fact.value;
+  if (v.assetCount === 0) {
+    return answer(`The media bin is empty — nothing to measure yet.`, "world.analyze-project");
+  }
+  const minutes = Math.floor(v.totalFootageSeconds / 60);
+  const seconds = Math.round(v.totalFootageSeconds % 60);
+  const sources = Object.entries(v.bySource)
+    .map(([source, count]) => `${count} ${source}`)
+    .join(", ");
+  const lines = [
+    `**Project media — measured summary**`,
+    `- ${v.assetCount} asset(s): ${v.videoCount} video, ${v.imageCount} image, ${v.audioCount} audio${v.otherCount > 0 ? `, ${v.otherCount} other` : ""}`,
+    `- Footage: ${minutes > 0 ? `${minutes}m ` : ""}${seconds}s total${v.totalSizeBytes > 0 ? ` · ${(v.totalSizeBytes / (1024 * 1024)).toFixed(0)} MB on disk` : ""}`,
+    `- Resolution ceiling: ${v.maxWidth}×${v.maxHeight}`,
+    `- Sources: ${sources}`,
+    `\n_Measured on-device · ${result.path === "cached" ? "cached fact" : "fresh observation"} · 0 tokens_`
+  ];
+  return answer(lines.join("\n"), "world.analyze-project");
+}
+
+async function analyzeUsage(composition: TimelineComposition): Promise<BrainRouteResult> {
+  const ctx = await worldContext(composition);
+  if (!ctx) {
+    return ESCALATE;
+  }
+  const result = await queryFact<UserAiProfileFact>(
+    { type: USER_AI_PROFILE_FACT, target: { kind: "user", id: USER_TARGET_ID }, budgetMs: 250 },
+    ctx
+  );
+  if (!result) {
+    return ESCALATE;
+  }
+  const v = result.fact.value;
+  const lines = [
+    `**Your AI profile — from on-device learning data**`,
+    `- Local tiers resolved **${Math.round(v.instantShare * 100)}%** of recent requests (~${v.estTokensSaved.toLocaleString()} tokens saved)`,
+    `- ${v.rulesTracked} rule(s) tracked: ${v.totalFired} fired · ${v.totalConfirmed} 👍 · ${v.totalRejected} 👎`,
+    v.distrustedRuleIds.length > 0
+      ? `- Rules you've turned off by feedback: ${v.distrustedRuleIds.join(", ")}`
+      : `- No rules distrusted — every fast path is holding up`,
+    `\n_All data stays on this device · ${result.path === "cached" ? "cached fact" : "fresh summary"} · 0 tokens_`
+  ];
+  return answer(lines.join("\n"), "world.analyze-usage");
 }
 
 async function analyzeComposition(composition: TimelineComposition): Promise<BrainRouteResult> {
