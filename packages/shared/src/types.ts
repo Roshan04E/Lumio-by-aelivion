@@ -237,8 +237,18 @@ export interface ProjectGraph {
     transitions?: PluginTransitionManifest[] | undefined;
   } | undefined;
   composition?: TimelineComposition | undefined;
-  /** Auxiliary compositions, used by imported nested timelines/templates. `composition` remains the active/root timeline. */
+  /**
+   * Composition registry. Invariant (since the Block 2 nesting maturity work): holds EVERY
+   * composition of the project INCLUDING the root/main one, keyed by id. `composition` remains
+   * the ACTIVE composition (the one being edited/rendered) and is mirrored into this record by
+   * the editor's single write-through seam. Legacy graphs (registry missing the root, or no
+   * pointer fields) are migrated/healed at load time.
+   */
   compositions?: Record<string, TimelineComposition> | undefined;
+  /** Id of the project's main/root composition inside `compositions`. Absent on legacy graphs. */
+  rootCompositionId?: string | undefined;
+  /** Id of the composition currently open in the editor (`composition.id`). Absent on legacy graphs. */
+  activeCompositionId?: string | undefined;
   /**
    * Per-project media-library organization (folder tree etc. — see shared/media-manifest.ts).
    * Living inside the graph means it syncs to the cloud with the project through the existing
@@ -871,6 +881,10 @@ export interface TimelineTrack {
 export interface SpeedKeyframe {
   timeSeconds: number;
   value: number;
+  /** Stable identity for UI selection/dragging (graph editor speed lane). Optional: older saved
+   *  ramps and points minted before this field existed have none — callers fall back to a
+   *  position-derived key rather than treat it as required. */
+  id?: string | undefined;
 }
 
 /** One point of track-level audio automation (mixer fader/pan), in absolute composition seconds. */

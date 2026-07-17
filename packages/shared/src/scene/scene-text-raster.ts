@@ -272,7 +272,7 @@ export class SceneTextRasterizer {
     // quad's element box = the padded canvas back in comp px (the content is centered within it).
     const content = measureOverlayBox(this.measureCtx(), layer, t, width, height);
     if (content.boxW <= 0 || content.boxH <= 0) return null;
-    const m = overlayOverhangMargin(layer, t); // headroom so shadow/stroke/border don't clip the tight box
+    const m = overlayOverhangMargin(layer, t, width, height); // headroom so shadow/stroke/border/pen-bulge don't clip the tight box
     const paddedW = content.boxW + 2 * m;
     const paddedH = content.boxH + 2 * m;
     // Cap so the canvas can't exceed MAX_RASTER_DIM (VRAM + GPU max-texture bound); extreme zoom is then

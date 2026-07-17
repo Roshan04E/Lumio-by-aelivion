@@ -1,5 +1,6 @@
 ﻿import {
   Box,
+  Crosshair,
   Diamond,
   Eye,
   Maximize2,
@@ -258,6 +259,54 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
             }
           ]}
         />
+        <PropertyRowGroup
+          icon={<Crosshair size={14} />}
+          label="Anchor"
+          fields={[
+            {
+              tag: "X",
+              keyframe: transformKeyframe("transform.anchor.x"),
+              onReset: () => changeTransformProperty("transform.anchor.x", 50),
+              value: (
+                <ScrubNumberInput
+                  aria-label="Anchor X"
+                  className="effect-slider-number"
+                  inputMode="decimal"
+                  min={-100}
+                  max={200}
+                  step={1}
+                  value={(animatedTransform.anchor?.x ?? 50).toFixed(0)}
+                  onScrubChange={(value) => changeTransformProperty("transform.anchor.x", clamp(value, -100, 200))}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (Number.isFinite(next)) changeTransformProperty("transform.anchor.x", clamp(next, -100, 200));
+                  }}
+                />
+              )
+            },
+            {
+              tag: "Y",
+              keyframe: transformKeyframe("transform.anchor.y"),
+              onReset: () => changeTransformProperty("transform.anchor.y", 50),
+              value: (
+                <ScrubNumberInput
+                  aria-label="Anchor Y"
+                  className="effect-slider-number"
+                  inputMode="decimal"
+                  min={-100}
+                  max={200}
+                  step={1}
+                  value={(animatedTransform.anchor?.y ?? 50).toFixed(0)}
+                  onScrubChange={(value) => changeTransformProperty("transform.anchor.y", clamp(value, -100, 200))}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (Number.isFinite(next)) changeTransformProperty("transform.anchor.y", clamp(next, -100, 200));
+                  }}
+                />
+              )
+            }
+          ]}
+        />
         <NumberControl
           icon={<Maximize2 size={14} />}
           keyframe={transformKeyframe("transform.scale")}
@@ -274,8 +323,8 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
           keyframe={transformKeyframe("transform.rotation")}
           label="Rotate"
           value={animatedTransform.rotation}
-          min={-180}
-          max={180}
+          min={-3600}
+          max={3600}
           step={1}
           onReset={() => changeTransformProperty("transform.rotation", 0)}
           onChange={(value) => changeTransformProperty("transform.rotation", value)}

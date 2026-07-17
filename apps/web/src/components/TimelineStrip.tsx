@@ -393,6 +393,7 @@ function TimelineStripImpl({
   onNestSelection,
   onUnnestClip,
   onOpenNestedClip,
+  onDropComposition,
   onAddLayer,
   onAddTrack,
   onDropAsset,
@@ -489,6 +490,8 @@ function TimelineStripImpl({
   onUnnestClip?: ((layerId: string) => void) | undefined;
   /** Switch the active timeline to a compound clip's nested sequence (double-click / context menu). */
   onOpenNestedClip?: ((layerId: string) => void) | undefined;
+  /** Drop from the media pool's Timelines section: insert a compound clip referencing the sequence. */
+  onDropComposition?: ((compositionId: string, trackId: string, startSeconds: number) => void) | undefined;
   onAddLayer: (type: TimelineLayerType, options?: ShapeAddOptions) => void;
   onAddTrack: (type: TimelineTrack["type"]) => void;
   onDropAsset: DropAssetHandler;
@@ -3649,6 +3652,12 @@ function TimelineStripImpl({
                     event.dataTransfer.dropEffect = "copy";
                     return;
                   }
+                  // Timelines-section drag (nesting Block 3): sequences land on visual tracks only.
+                  if (!track.locked && track.type !== "audio" && event.dataTransfer.types.includes("application/x-kimera-composition")) {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "copy";
+                    return;
+                  }
                   // Transition tile drag → highlight the nearest cut. Fires continuously; the ref-guarded
                   // updater only touches React state when the TARGET cut changes.
                   if (!track.locked && track.type !== "audio" && event.dataTransfer.types.includes(TRANSITION_DRAG_MIME)) {
@@ -3673,6 +3682,12 @@ function TimelineStripImpl({
                       event.preventDefault();
                       dropTransitionOnLane(event, track.id);
                     }
+                    return;
+                  }
+                  const droppedCompositionId = event.dataTransfer.getData("application/x-kimera-composition");
+                  if (droppedCompositionId && !track.locked && track.type !== "audio" && onDropComposition) {
+                    event.preventDefault();
+                    onDropComposition(droppedCompositionId, track.id, getDropTime(event));
                     return;
                   }
                   const assetId = event.dataTransfer.getData("application/x-kimera-asset");

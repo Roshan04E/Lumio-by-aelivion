@@ -148,9 +148,14 @@ import {
   timelineTemplatePackageToJson,
   updateTimelineLayer,
   updateTimelineLayers,
+  deriveNestBreadcrumb,
   getNestedSourceDurationSeconds,
+  healCompositionRegistry,
   nestLayersIntoComposition,
+  stampCompositionRegistry,
   unnestClip,
+  wouldCreateCompositionCycle,
+  type NestBreadcrumbEntry,
   applyTextStyle,
   captureTextStyle,
   createTextStyleFromLayer,
@@ -736,11 +741,12 @@ export function EditorPage() {
   // Which saved track (if any) the Track modal is currently editing/retracking - undefined id means "new track".
   const [trackModalState, setTrackModalState] = useState<{ editingTrackId?: string | undefined } | undefined>(undefined);
   const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
-  // Nesting (compound clips, NESTING.md Phase B): when set, `composition`/`graph.composition` is
-  // currently a NESTED sequence being edited in place (swap trick — see `handleOpenNestedClip`), and
-  // this remembers the root composition's id/name so the breadcrumb can restore it. One level only
-  // (v1): opening a nest while already inside one is rejected.
-  const [nestBreadcrumb, setNestBreadcrumb] = useState<{ rootCompositionId: string; rootCompositionName: string } | null>(null);
+  // Nesting (NESTING_MATURITY.md Block 2): when non-empty, `composition`/`graph.composition` is a
+  // NESTED sequence being edited in place (swap trick — see `handleOpenNestedClip`) and this is the
+  // ancestor chain root→…→direct parent. Multi-level (nests-in-nests open fine). Restored on load
+  // from the persisted root/active pointers via `healCompositionRegistry`, so a refresh inside a
+  // group no longer strands the project.
+  const [nestPath, setNestPath] = useState<NestBreadcrumbEntry[]>([]);
   // The playhead lives in `currentTimeRef` + the clock store ONLY — no React `currentTime` state.
   // Hot leaves (preview, timeline playhead, timecode) ride the clock store; cold panels (inspector,
   // scopes, mixer) subscribe to the throttled cold clock via <ColdTime>. A playhead move therefore
@@ -1070,9 +1076,17 @@ export function EditorPage() {
     // after that do we surface an error — we never replace the user's project with an empty one.
     const loadProject = async (attempt: number): Promise<void> => {
       try {
-        const loaded = await getProject(resolvedId);
+        const fetched = await getProject(resolvedId);
         if (cancelled) return;
+        // Block 2 migration/healer: stamp the composition-registry invariant (main comp lives in
+        // `compositions` too, root/active pointers set) and derive the nest breadcrumb from the
+        // PERSISTED pointers — this both restores "refresh while inside a group" navigation and
+        // heals projects stranded by the old swap bug (nest saved as the root, Main unreachable).
+        // Not saved here — the healed shape persists with the first edit through updateGraph.
+        const healed = healCompositionRegistry(fetched.projectGraph);
+        const loaded = healed.graph === fetched.projectGraph ? fetched : { ...fetched, projectGraph: healed.graph };
         setProject(loaded);
+        setNestPath(healed.breadcrumb);
         if (!loaded.id.startsWith("project_local_")) {
           markServerProjectSynced(loaded.id);
         }
@@ -1284,6 +1298,14 @@ export function EditorPage() {
   );
   const compositionRef = useRef(composition);
   compositionRef.current = composition;
+  // Timelines media-pool section (nesting Block 3): every registry comp, Main first. The active
+  // comp is unioned in because updateGraph's write-through mirrors it only on the NEXT write.
+  const timelineCompositionEntries = useMemo(() => {
+    if (!graph || !composition) return [];
+    const registry = { ...(graph.compositions ?? {}), [composition.id]: composition };
+    const rootId = graph.rootCompositionId ?? composition.id;
+    return Object.values(registry).sort((a, b) => (a.id === rootId ? -1 : b.id === rootId ? 1 : a.name.localeCompare(b.name)));
+  }, [graph, composition]);
   const resolvedAssets = useMemo(() => {
     if (!project?.sourceAsset || assets.some((asset) => asset.id === project.sourceAsset?.id)) {
       return assets;
@@ -2750,11 +2772,17 @@ export function EditorPage() {
       }
     }
 
+    // Composition-registry write-through (Block 2, NESTING_MATURITY.md): every persisted graph
+    // mirrors the active comp into `compositions[id]` and keeps root/active pointers stamped, so a
+    // refresh while inside a nest can always find its way back to Main. Single seam — no other
+    // write site needs to know the invariant exists.
+    const stampedGraph = stampCompositionRegistry(nextGraph);
+
     // Local-first: update in-memory + on-device immediately, then sync to the server in
     // the background (debounced). The SyncBadge surfaces Saved locally → Syncing → Synced.
     // Functional update so a stale closure can't overwrite a newer edit committed in between.
-    setProject((current) => (current ? { ...current, projectGraph: nextGraph, durationSeconds: nextDuration } : current));
-    scheduleGraphSave(project.id, nextGraph, nextDuration);
+    setProject((current) => (current ? { ...current, projectGraph: stampedGraph, durationSeconds: nextDuration } : current));
+    scheduleGraphSave(project.id, stampedGraph, nextDuration);
   }
 
   async function undo() {
@@ -3327,8 +3355,8 @@ export function EditorPage() {
   function handlePreviewResizeShapeLayer(layerId: string, size: { widthPercent: number; heightPercent: number }, commit: boolean) {
     const updater = (layer: TimelineLayer): TimelineLayer => ({
       ...layer,
-      widthPercent: roundEditorNumber(clamp(size.widthPercent, 2, 200)),
-      heightPercent: roundEditorNumber(clamp(size.heightPercent, 2, 200))
+      widthPercent: roundEditorNumber(clamp(size.widthPercent, 2, 400)),
+      heightPercent: roundEditorNumber(clamp(size.heightPercent, 2, 400))
     });
 
     if (commit) {
@@ -3690,7 +3718,17 @@ export function EditorPage() {
     if (!composition || !graph) {
       return;
     }
-    const result = nestLayersIntoComposition(composition, selectedLayerIds, { name: "Group" });
+    // Unique sequence names ("Group 01", "Group 02", …) so the Timelines panel stays legible.
+    const takenNames = new Set(
+      [composition.name, ...Object.values(graph.compositions ?? {}).map((comp) => comp.name)].filter(Boolean)
+    );
+    let groupNumber = Object.keys(graph.compositions ?? {}).length + 1;
+    let groupName = `Group ${String(groupNumber).padStart(2, "0")}`;
+    while (takenNames.has(groupName)) {
+      groupNumber += 1;
+      groupName = `Group ${String(groupNumber).padStart(2, "0")}`;
+    }
+    const result = nestLayersIntoComposition(composition, selectedLayerIds, { name: groupName });
     if (!result) {
       setNotice("Select 2+ clips to group");
       return;
@@ -3788,17 +3826,33 @@ export function EditorPage() {
     });
   }
 
-  // "Open" a compound clip: swap the currently-edited composition to its nested sequence (the SAME
-  // `graph.composition` slot every existing read/write site already targets, so nothing else in this
-  // file needs to change) and stash the current one under its own id in `graph.compositions` so the
-  // breadcrumb can restore it. Kept OUT of undo history — it's navigation, not an edit; edits made
-  // while inside the nest still record normally through the usual updateComposition/updateGraph calls.
-  function handleOpenNestedClip(layerId: string) {
+  // Navigate to ANY composition in the registry (breadcrumb jumps, Timelines tiles, opening a
+  // nested clip): swap the target into the `graph.composition` slot every existing read/write site
+  // already targets — the write-through seam in updateGraph mirrors the outgoing comp into
+  // `compositions` and keeps the pointers stamped. Kept OUT of undo history — it's navigation, not
+  // an edit; edits made while inside still record normally. `path` is the new ancestor chain
+  // (root→…→parent) shown in the breadcrumb.
+  function navigateToComposition(target: TimelineComposition, path: NestBreadcrumbEntry[]) {
     if (!composition || !graph) {
       return;
     }
-    if (nestBreadcrumb) {
-      setNotice("Already editing a nested sequence — nests-in-nests aren't supported yet");
+    void updateGraph(
+      {
+        ...graph,
+        composition: target,
+        compositions: { ...(graph.compositions ?? {}), [composition.id]: composition },
+        version: graph.version + 1
+      },
+      target.durationSeconds,
+      { recordHistory: false }
+    );
+    setNestPath(path);
+    setSelectedLayerIds([]);
+  }
+
+  // "Open" a compound clip: descend one level — the current comp joins the breadcrumb chain.
+  function handleOpenNestedClip(layerId: string) {
+    if (!composition || !graph) {
       return;
     }
     const clip = layers.find((item) => item.id === layerId);
@@ -3807,44 +3861,245 @@ export function EditorPage() {
       setNotice("Group not found");
       return;
     }
-    void updateGraph(
-      {
-        ...graph,
-        composition: nested,
-        compositions: { ...(graph.compositions ?? {}), [composition.id]: composition },
-        version: graph.version + 1
-      },
-      nested.durationSeconds,
-      { recordHistory: false }
-    );
-    setNestBreadcrumb({ rootCompositionId: composition.id, rootCompositionName: composition.name });
-    setSelectedLayerIds([]);
+    navigateToComposition(nested, [...nestPath, { id: composition.id, name: composition.name }]);
     setNotice(`Editing "${nested.name}"`);
   }
 
-  function handleReturnToRootComposition() {
-    if (!composition || !graph || !nestBreadcrumb) {
+  /** Breadcrumb jump: return to `entry` (an ancestor), truncating the chain there. */
+  function handleReturnToBreadcrumb(entry: NestBreadcrumbEntry) {
+    if (!composition || !graph) {
       return;
     }
-    const root = graph.compositions?.[nestBreadcrumb.rootCompositionId];
-    if (!root) {
-      setNotice("Root sequence not found");
-      setNestBreadcrumb(null);
+    const index = nestPath.findIndex((item) => item.id === entry.id);
+    const target = graph.compositions?.[entry.id];
+    if (index < 0 || !target) {
+      setNotice("Sequence not found");
       return;
     }
+    navigateToComposition(target, nestPath.slice(0, index));
+    setNotice(`Back to "${target.name}"`);
+  }
+
+  /** Open any registry composition by id (Timelines tiles) — breadcrumb derived from nest links. */
+  function handleOpenCompositionById(compositionId: string) {
+    if (!composition || !graph) {
+      return;
+    }
+    if (compositionId === composition.id) {
+      return;
+    }
+    const registry = { ...(graph.compositions ?? {}), [composition.id]: composition };
+    const target = registry[compositionId];
+    if (!target) {
+      setNotice("Sequence not found");
+      return;
+    }
+    const rootId = graph.rootCompositionId ?? composition.id;
+    const breadcrumb = deriveNestBreadcrumb(registry, rootId, compositionId);
+    navigateToComposition(target, breadcrumb);
+    setNotice(`Editing "${target.name}"`);
+  }
+
+  // --- Timelines media-pool section (NESTING_MATURITY.md Block 3) -----------------------------
+  /** The full registry INCLUDING the (possibly not-yet-mirrored) active comp. */
+  function compositionRegistry(): Record<string, TimelineComposition> {
+    if (!graph || !composition) return {};
+    return { ...(graph.compositions ?? {}), [composition.id]: composition };
+  }
+
+  /** Drag a Timelines tile onto a timeline track → insert a compound clip referencing it. */
+  async function handleInsertCompositionClip(compositionId: string, trackId: string, startSeconds: number) {
+    if (!composition || !graph) {
+      return;
+    }
+    const registry = compositionRegistry();
+    const nested = registry[compositionId];
+    const track = composition.tracks.find((item) => item.id === trackId);
+    if (!nested || !track || track.type === "audio" || track.locked) {
+      return;
+    }
+    if (wouldCreateCompositionCycle(registry, composition.id, compositionId)) {
+      setNotice("Can't place a sequence inside itself");
+      return;
+    }
+    const base = createEditorLayer("video", track, composition, layers.length + 1);
+    const clip: TimelineLayer = {
+      ...base,
+      name: nested.name,
+      startSeconds: Math.max(0, startSeconds),
+      durationSeconds: nested.durationSeconds,
+      sourceInSeconds: 0,
+      nestedCompositionId: nested.id,
+      fit: "cover"
+    };
+    await updateComposition({
+      ...composition,
+      tracks: composition.tracks.map((item) => (item.id === track.id ? { ...item, layers: [...item.layers, clip] } : item))
+    });
+    setSelectedLayerIds([clip.id]);
+    setNotice(`Placed "${nested.name}"`);
+  }
+
+  /** Rename a sequence everywhere: the comp itself + every compound clip referencing it. */
+  async function handleRenameComposition(compositionId: string, rawName: string) {
+    if (!composition || !graph) {
+      return;
+    }
+    const name = rawName.trim();
+    if (!name) {
+      return;
+    }
+    const apply = (comp: TimelineComposition): TimelineComposition => {
+      const withInstanceNames: TimelineComposition = {
+        ...comp,
+        tracks: comp.tracks.map((track) => ({
+          ...track,
+          layers: track.layers.map((layer) => (layer.nestedCompositionId === compositionId ? { ...layer, name } : layer))
+        }))
+      };
+      return comp.id === compositionId ? { ...withInstanceNames, name } : withInstanceNames;
+    };
+    await updateGraph({
+      ...graph,
+      composition: apply(composition),
+      compositions: Object.fromEntries(Object.entries(graph.compositions ?? {}).map(([id, comp]) => [id, apply(comp)])),
+      version: graph.version + 1
+    });
+    setNestPath((path) => path.map((entry) => (entry.id === compositionId ? { ...entry, name } : entry)));
+  }
+
+  /** Deep-clone a sequence under a fresh id (instances inside it keep referencing their nests). */
+  async function handleDuplicateComposition(compositionId: string) {
+    if (!composition || !graph) {
+      return;
+    }
+    const source = compositionRegistry()[compositionId];
+    if (!source) {
+      return;
+    }
+    const freshId = (prefix: string) =>
+      `${prefix}_${globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10)}`;
+    const cloned: TimelineComposition = structuredClone(source);
+    const clone: TimelineComposition = {
+      ...cloned,
+      id: freshId("nest"),
+      name: `${source.name} copy`,
+      tracks: cloned.tracks.map((track) => {
+        const nextTrackId = freshId("ntrack");
+        return { ...track, id: nextTrackId, layers: track.layers.map((layer) => ({ ...layer, id: freshId("clip"), trackId: nextTrackId })) };
+      })
+    };
+    await updateGraph({
+      ...graph,
+      compositions: { ...(graph.compositions ?? {}), [clone.id]: clone },
+      version: graph.version + 1
+    });
+    setNotice(`Duplicated as "${clone.name}"`);
+  }
+
+  /** Delete a sequence from the project. Referenced → confirm and remove its instance clips too. */
+  async function handleDeleteComposition(compositionId: string) {
+    if (!composition || !graph) {
+      return;
+    }
+    const rootId = graph.rootCompositionId ?? composition.id;
+    if (compositionId === rootId) {
+      setNotice("Can't delete the main timeline");
+      return;
+    }
+    if (compositionId === composition.id || nestPath.some((entry) => entry.id === compositionId)) {
+      setNotice("Can't delete a sequence that's open — go back to Main first");
+      return;
+    }
+    const registry = compositionRegistry();
+    const target = registry[compositionId];
+    if (!target) {
+      return;
+    }
+    const instanceCount = Object.values(registry).reduce(
+      (count, comp) =>
+        count + comp.tracks.reduce((c, track) => c + track.layers.filter((layer) => layer.nestedCompositionId === compositionId).length, 0),
+      0
+    );
+    if (instanceCount > 0) {
+      const ok = window.confirm(`Delete "${target.name}" and remove ${instanceCount} clip${instanceCount === 1 ? "" : "s"} using it?`);
+      if (!ok) {
+        return;
+      }
+    }
+    const strip = (comp: TimelineComposition): TimelineComposition => ({
+      ...comp,
+      tracks: comp.tracks.map((track) => ({
+        ...track,
+        layers: track.layers.filter((layer) => layer.nestedCompositionId !== compositionId)
+      }))
+    });
+    const nextCompositions = Object.fromEntries(
+      Object.entries(graph.compositions ?? {})
+        .filter(([id]) => id !== compositionId)
+        .map(([id, comp]) => [id, strip(comp)])
+    );
+    await updateGraph({ ...graph, composition: strip(composition), compositions: nextCompositions, version: graph.version + 1 });
+    setNotice(`Deleted "${target.name}"`);
+  }
+
+  /** "Place at playhead" (context menu): first unlocked video track, at the current time. */
+  function handleInsertCompositionAtPlayhead(compositionId: string) {
+    if (!composition) {
+      return;
+    }
+    const track = composition.tracks.find((item) => item.type !== "audio" && !item.locked);
+    if (!track) {
+      setNotice("No unlocked video track to place on");
+      return;
+    }
+    void handleInsertCompositionClip(compositionId, track.id, currentTimeRef.current);
+  }
+
+  /** New empty sequence at project dims/fps; opens immediately. */
+  async function handleCreateTimelineComposition() {
+    if (!composition || !graph) {
+      return;
+    }
+    const freshId = (prefix: string) =>
+      `${prefix}_${globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10)}`;
+    const taken = new Set(Object.values(compositionRegistry()).map((comp) => comp.name));
+    let n = Object.keys(graph.compositions ?? {}).length + 1;
+    let name = `Timeline ${String(n).padStart(2, "0")}`;
+    while (taken.has(name)) {
+      n += 1;
+      name = `Timeline ${String(n).padStart(2, "0")}`;
+    }
+    const trackId = freshId("ntrack");
+    const audioTrackId = freshId("ntrack");
+    const created: TimelineComposition = {
+      id: freshId("nest"),
+      name,
+      width: composition.width,
+      height: composition.height,
+      fps: composition.fps,
+      durationSeconds: 10,
+      tracks: [
+        { id: trackId, type: "video", name: "V1", layers: [] },
+        { id: audioTrackId, type: "audio", name: "A1", layers: [] }
+      ],
+      backgroundColor: composition.backgroundColor
+    };
+    // One write: stash the current comp, register + open the new one (navigation, not an edit).
     void updateGraph(
       {
         ...graph,
-        composition: root,
-        compositions: { ...(graph.compositions ?? {}), [composition.id]: composition },
+        composition: created,
+        compositions: { ...(graph.compositions ?? {}), [composition.id]: composition, [created.id]: created },
         version: graph.version + 1
       },
-      root.durationSeconds,
+      created.durationSeconds,
       { recordHistory: false }
     );
-    setNestBreadcrumb(null);
+    const rootId = graph.rootCompositionId ?? composition.id;
+    setNestPath(rootId === composition.id ? [{ id: composition.id, name: composition.name }] : [...nestPath, { id: composition.id, name: composition.name }]);
     setSelectedLayerIds([]);
-    setNotice(`Back to "${root.name}"`);
+    setNotice(`Created "${name}"`);
   }
 
 
@@ -4881,6 +5136,9 @@ export function EditorPage() {
       )
     };
     setSelectedLayerIds([layer.id]);
+    // Draw-first pen flow: the new pen layer has no geometry yet — arm the viewer pen tool so the
+    // next canvas clicks draw the outline (committed via stablePreviewCommitShapePath).
+    if (options?.shapeKind === "pen") changeMaskTool("pen");
     await updateComposition(nextComposition);
   }
 
@@ -6863,6 +7121,9 @@ export function EditorPage() {
       void handleUnnestClip(layerId);
     },
     onOpenNestedClip: handleOpenNestedClip,
+    onDropComposition: (compositionId: string, trackId: string, startSeconds: number) => {
+      void handleInsertCompositionClip(compositionId, trackId, startSeconds);
+    },
     onChangeToolMode: setTimelineTool,
     onToggleSnap: () => setSnapEnabled((value) => !value),
     onToggleMagnetic: () => setMagneticEnabled((value) => !value),
@@ -7615,6 +7876,19 @@ export function EditorPage() {
                   visible tab's grid rows are unaffected; the :has(.asset-bin) footer-pin rules in
                   global.css are scoped to the VISIBLE case via .panel-tab-hidden. */}
               <div className={`panel-tab-content${panelTab === "assets" ? "" : " panel-tab-hidden"}`}>
+                {composition ? (
+                  <TimelinesPanel
+                    compositions={timelineCompositionEntries}
+                    rootId={graph.rootCompositionId ?? composition.id}
+                    activeId={composition.id}
+                    onOpen={handleOpenCompositionById}
+                    onInsertAtPlayhead={handleInsertCompositionAtPlayhead}
+                    onRename={handleRenameComposition}
+                    onDuplicate={handleDuplicateComposition}
+                    onDelete={handleDeleteComposition}
+                    onCreate={handleCreateTimelineComposition}
+                  />
+                ) : null}
                 <AssetBin
                   assets={assets}
                   currentProjectId={project?.id}
@@ -8106,12 +8380,16 @@ export function EditorPage() {
         <div className="timeline-stack">
         <div className="timeline-dock-row">
         <section className="editor-timeline-dock">
-          {nestBreadcrumb ? (
+          {nestPath.length > 0 ? (
             <div className="timeline-nest-breadcrumb">
-              <button type="button" onClick={handleReturnToRootComposition}>
-                <ChevronLeft size={13} /> {nestBreadcrumb.rootCompositionName}
-              </button>
-              <span>/</span>
+              {nestPath.map((entry, index) => (
+                <Fragment key={entry.id}>
+                  <button type="button" onClick={() => handleReturnToBreadcrumb(entry)}>
+                    {index === 0 ? <ChevronLeft size={13} /> : null} {entry.name}
+                  </button>
+                  <span>/</span>
+                </Fragment>
+              ))}
               <span className="timeline-nest-breadcrumb-current">{composition.name}</span>
             </div>
           ) : null}
@@ -8898,8 +9176,10 @@ function createEditorLayer(
             shapeKind: shapeOptions.shapeKind,
             widthPercent: shapeOptions.widthPercent,
             heightPercent: shapeOptions.heightPercent,
-            borderRadius: shapeOptions.borderRadius,
-            ...(shapeOptions.shapeKind === "pen" ? { shapePath: defaultShapePathPoints(id) } : {})
+            borderRadius: shapeOptions.borderRadius
+            // Pen shapes start with NO shapePath (renders nothing): handleAddLayer arms the viewer
+            // pen tool so the user draws the outline, which commits the real geometry. Seeding the
+            // old default blob here made "add pen" look like it inserted an ellipse.
           }
         : { shapeKind: defaultShapeStyle.shapeKind }),
       durationSeconds: Math.min(2, composition.durationSeconds),
@@ -10111,6 +10391,156 @@ function StockCardMedia({ result }: { result: StockResult }) {
     <div className="asset-card-media" style={style}>
       {/* Some stock providers return an empty thumbnail URL — an <img src=""> re-requests the page. */}
       {result.thumbnailUrl ? <img src={result.thumbnailUrl} alt="" loading="lazy" /> : null}
+    </div>
+  );
+}
+
+/**
+ * Timelines section of the media pool (NESTING_MATURITY.md Block 3): every composition in the
+ * project — Main included — as an openable/placeable project item, Premiere project-panel style.
+ * Double-click opens; drag onto a video track inserts a compound clip (cycle-guarded at the drop
+ * handler); context menu covers rename/duplicate/delete/insert. Lives OUTSIDE the memo'd AssetBin
+ * on purpose: its data (names/durations/count) changes with composition edits, while the bin's
+ * identity-stable props stay untouched.
+ */
+function TimelinesPanel({
+  compositions,
+  rootId,
+  activeId,
+  onOpen,
+  onInsertAtPlayhead,
+  onRename,
+  onDuplicate,
+  onDelete,
+  onCreate
+}: {
+  compositions: TimelineComposition[];
+  rootId: string;
+  activeId: string;
+  onOpen: (compositionId: string) => void;
+  onInsertAtPlayhead: (compositionId: string) => void;
+  onRename: (compositionId: string, name: string) => void;
+  onDuplicate: (compositionId: string) => void;
+  onDelete: (compositionId: string) => void;
+  onCreate: () => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const menuComp = menu ? compositions.find((comp) => comp.id === menu.id) : undefined;
+  const formatLength = (seconds: number) => {
+    const total = Math.max(0, Math.round(seconds));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  };
+  const commitRename = () => {
+    if (renamingId && renameValue.trim()) {
+      onRename(renamingId, renameValue);
+    }
+    setRenamingId(null);
+  };
+  return (
+    <div className="timelines-panel">
+      <div className="timelines-panel-header">
+        <button type="button" className="timelines-panel-toggle" onClick={() => setCollapsed((value) => !value)}>
+          {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} />}
+          <Layers size={13} />
+          <span>Timelines</span>
+          <span className="timelines-panel-count">{compositions.length}</span>
+        </button>
+        <button type="button" className="timelines-panel-add" title="New timeline" onClick={onCreate}>
+          <Plus size={13} />
+        </button>
+      </div>
+      {!collapsed
+        ? compositions.map((comp) => {
+            const isRoot = comp.id === rootId;
+            const isActive = comp.id === activeId;
+            return (
+              <div
+                key={comp.id}
+                className={`timelines-row${isActive ? " is-active" : ""}`}
+                draggable={renamingId !== comp.id}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData("application/x-kimera-composition", comp.id);
+                  event.dataTransfer.setData("text/plain", comp.name);
+                  event.dataTransfer.effectAllowed = "copy";
+                }}
+                onDoubleClick={() => {
+                  if (renamingId !== comp.id) onOpen(comp.id);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMenu({
+                    id: comp.id,
+                    left: Math.max(8, Math.min(event.clientX, window.innerWidth - 200)),
+                    top: Math.max(8, Math.min(event.clientY, window.innerHeight - 180))
+                  });
+                }}
+                title="Double-click to open · drag to the timeline to place"
+              >
+                <Film size={13} />
+                {renamingId === comp.id ? (
+                  <input
+                    className="timelines-row-rename"
+                    value={renameValue}
+                    autoFocus
+                    onFocus={(event) => event.currentTarget.select()}
+                    onChange={(event) => setRenameValue(event.target.value)}
+                    onKeyDown={(event) => {
+                      event.stopPropagation();
+                      if (event.key === "Enter") commitRename();
+                      if (event.key === "Escape") setRenamingId(null);
+                    }}
+                    onBlur={commitRename}
+                  />
+                ) : (
+                  <span className="timelines-row-name">{comp.name}</span>
+                )}
+                {isRoot ? <span className="timelines-row-badge">Main</span> : null}
+                <span className="timelines-row-length">{formatLength(comp.durationSeconds)}</span>
+                <button
+                  type="button"
+                  className="timelines-row-menu"
+                  onClick={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setMenu({ id: comp.id, left: Math.max(8, rect.right - 176), top: rect.bottom + 4 });
+                  }}
+                >
+                  <MoreVertical size={12} />
+                </button>
+              </div>
+            );
+          })
+        : null}
+      {menu && menuComp
+        ? createPortal(
+            <>
+              <div className="timelines-menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(event) => { event.preventDefault(); setMenu(null); }} />
+              <div className="timelines-menu" style={{ top: menu.top, left: menu.left }}>
+                <button type="button" onClick={() => { setMenu(null); onOpen(menuComp.id); }}>Open</button>
+                <button type="button" disabled={menuComp.id === activeId} onClick={() => { setMenu(null); onInsertAtPlayhead(menuComp.id); }}>
+                  Place at playhead
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenu(null);
+                    setRenamingId(menuComp.id);
+                    setRenameValue(menuComp.name);
+                  }}
+                >
+                  Rename
+                </button>
+                <button type="button" onClick={() => { setMenu(null); onDuplicate(menuComp.id); }}>Duplicate</button>
+                <button type="button" className="is-danger" disabled={menuComp.id === rootId || menuComp.id === activeId} onClick={() => { setMenu(null); onDelete(menuComp.id); }}>
+                  Delete
+                </button>
+              </div>
+            </>,
+            document.body
+          )
+        : null}
     </div>
   );
 }
@@ -12606,11 +13036,20 @@ function LayerInspectorImpl({
                     };
                   })
                 }
-                onUpdate={(nextEffect) =>
-                  onChange((item) => ({
-                    ...item,
-                    effects: item.effects.map((candidate) => (candidate.id === effect.id ? nextEffect : candidate))
-                  }))
+                onUpdate={(update) =>
+                  onChange((item) => {
+                    // Per-item effect resolution (broadcast safety, matches onDelete above): apply the
+                    // change to EACH selected clip's OWN effect instance, not the primary's object,
+                    // otherwise every other selected clip silently gets the primary's id/params (Mix
+                    // slider, enable toggle, reset, non-numeric params multi-select gap).
+                    const target =
+                      item.effects.find((candidate) => candidate.id === effect.id) ?? item.effects.find((candidate) => candidate.type === effect.type);
+                    if (!target) return item;
+                    return {
+                      ...item,
+                      effects: item.effects.map((candidate) => (candidate.id === target.id ? update(target) : candidate))
+                    };
+                  })
                 }
               />
             </div>
@@ -13064,7 +13503,7 @@ function TextGraphicControls({
         <div className="graphic-controls">
           <div className="icon-control-row">
             <FontControl value={layer.fontFamily ?? renderSafeFonts[0].family} onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily }))} onChange={(value) => onChange((item) => ({ ...item, fontFamily: value }))} />
-            <NumberControl icon={<CaseSensitive size={14} />} label="Font size" keyframe={styleKf?.keyframe("style.fontSize", styleKf.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize))} value={styleKf?.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize) ?? layer.fontSize ?? defaultTextStyle.fontSize} min={10} max={260} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => (styleKf ? styleKf.change("style.fontSize", value) : onChange((item) => ({ ...item, fontSize: value })))} />
+            <NumberControl icon={<CaseSensitive size={14} />} label="Font size" keyframe={styleKf?.keyframe("style.fontSize", styleKf.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize))} value={styleKf?.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize) ?? layer.fontSize ?? defaultTextStyle.fontSize} min={1} max={1000} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => (styleKf ? styleKf.change("style.fontSize", value) : onChange((item) => ({ ...item, fontSize: value })))} />
           </div>
           <div className="icon-control-row">
             <ToggleControl icon={<Bold size={15} />} label="Bold" active={(layer.fontWeight ?? defaultTextStyle.fontWeight) >= 700} onChange={(active) => onChange((item) => ({ ...item, fontWeight: active ? 900 : 400 }))} />
@@ -13072,8 +13511,8 @@ function TextGraphicControls({
             <AlignmentControl value={layer.textAlign ?? "center"} onChange={(value) => onChange((item) => ({ ...item, textAlign: value }))} />
           </div>
           <div className="icon-control-row">
-            <NumberControl icon={<MoveHorizontal size={14} />} label="Letter spacing" keyframe={styleKf?.keyframe("style.letterSpacing", styleKf.value("style.letterSpacing", layer.letterSpacing ?? 0))} value={styleKf?.value("style.letterSpacing", layer.letterSpacing ?? 0) ?? layer.letterSpacing ?? 0} min={-10} max={40} step={0.5} onReset={() => onChange((item) => ({ ...item, letterSpacing: defaultTextStyle.letterSpacing }))} onChange={(value) => (styleKf ? styleKf.change("style.letterSpacing", value) : onChange((item) => ({ ...item, letterSpacing: value })))} />
-            <NumberControl icon={<MoveVertical size={14} />} label="Line height" keyframe={styleKf?.keyframe("style.lineHeight", styleKf.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight))} value={styleKf?.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight) ?? layer.lineHeight ?? defaultTextStyle.lineHeight} min={0.6} max={2.4} step={0.05} onReset={() => onChange((item) => ({ ...item, lineHeight: defaultTextStyle.lineHeight }))} onChange={(value) => (styleKf ? styleKf.change("style.lineHeight", value) : onChange((item) => ({ ...item, lineHeight: value })))} />
+            <NumberControl icon={<MoveHorizontal size={14} />} label="Letter spacing" keyframe={styleKf?.keyframe("style.letterSpacing", styleKf.value("style.letterSpacing", layer.letterSpacing ?? 0))} value={styleKf?.value("style.letterSpacing", layer.letterSpacing ?? 0) ?? layer.letterSpacing ?? 0} min={-50} max={200} step={0.5} onReset={() => onChange((item) => ({ ...item, letterSpacing: defaultTextStyle.letterSpacing }))} onChange={(value) => (styleKf ? styleKf.change("style.letterSpacing", value) : onChange((item) => ({ ...item, letterSpacing: value })))} />
+            <NumberControl icon={<MoveVertical size={14} />} label="Line height" keyframe={styleKf?.keyframe("style.lineHeight", styleKf.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight))} value={styleKf?.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight) ?? layer.lineHeight ?? defaultTextStyle.lineHeight} min={0} max={5} step={0.05} onReset={() => onChange((item) => ({ ...item, lineHeight: defaultTextStyle.lineHeight }))} onChange={(value) => (styleKf ? styleKf.change("style.lineHeight", value) : onChange((item) => ({ ...item, lineHeight: value })))} />
             <NumberControl icon={<MoveHorizontal size={14} />} label="Text box width" keyframe={styleKf?.keyframe("style.textWidthPercent", styleKf.value("style.textWidthPercent", layer.textWidthPercent ?? 0))} value={styleKf?.value("style.textWidthPercent", layer.textWidthPercent ?? 0) ?? layer.textWidthPercent ?? 0} min={0} max={100} step={1} onReset={() => onChange((item) => ({ ...item, textWidthPercent: defaultTextStyle.textWidthPercent }))} onChange={(value) => (styleKf ? styleKf.change("style.textWidthPercent", value) : onChange((item) => ({ ...item, textWidthPercent: value })))} />
           </div>
         </div>
@@ -13084,7 +13523,7 @@ function TextGraphicControls({
           <div className="icon-control-row">
             <ColorControl icon={<PaintBucket size={14} />} label="Fill color" palette={palette} value={layer.color ?? "#ffffff"} onReset={() => onChange((item) => ({ ...item, color: defaultTextStyle.color }))} onChange={(value) => onChange((item) => ({ ...item, color: value }))} />
             <ColorControl icon={<PenLine size={14} />} label="Stroke color" palette={palette} value={layer.strokeColor ?? "#161618"} onReset={() => onChange((item) => ({ ...item, strokeColor: defaultTextStyle.strokeColor }))} onChange={(value) => onChange((item) => ({ ...item, strokeColor: value }))} />
-            <NumberControl icon={<PenLine size={14} />} label="Stroke width" keyframe={styleKf?.keyframe("style.strokeWidth", styleKf.value("style.strokeWidth", layer.strokeWidth ?? 0))} value={styleKf?.value("style.strokeWidth", layer.strokeWidth ?? 0) ?? layer.strokeWidth ?? 0} min={0} max={24} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultTextStyle.strokeWidth }))} onChange={(value) => (styleKf ? styleKf.change("style.strokeWidth", value) : onChange((item) => ({ ...item, strokeWidth: value })))} />
+            <NumberControl icon={<PenLine size={14} />} label="Stroke width" keyframe={styleKf?.keyframe("style.strokeWidth", styleKf.value("style.strokeWidth", layer.strokeWidth ?? 0))} value={styleKf?.value("style.strokeWidth", layer.strokeWidth ?? 0) ?? layer.strokeWidth ?? 0} min={0} max={200} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultTextStyle.strokeWidth }))} onChange={(value) => (styleKf ? styleKf.change("style.strokeWidth", value) : onChange((item) => ({ ...item, strokeWidth: value })))} />
           </div>
         </div>
       </InspectorSection>
@@ -13136,9 +13575,9 @@ function ShapeGraphicControls({
             />
           </label>
           <div className="icon-control-row">
-            <NumberControl icon={<MoveHorizontal size={14} />} label="Width" value={layer.widthPercent ?? 44} min={2} max={200} step={1} onReset={() => onChange((item) => ({ ...item, widthPercent: defaultShapeStyle.widthPercent }))} onChange={(value) => onChange((item) => ({ ...item, widthPercent: value }))} />
-            <NumberControl icon={<MoveVertical size={14} />} label="Height" value={layer.heightPercent ?? 18} min={2} max={200} step={1} onReset={() => onChange((item) => ({ ...item, heightPercent: defaultShapeStyle.heightPercent }))} onChange={(value) => onChange((item) => ({ ...item, heightPercent: value }))} />
-            <NumberControl icon={<Radius size={14} />} label="Radius" value={layer.borderRadius ?? 22} min={0} max={160} step={1} onReset={() => onChange((item) => ({ ...item, borderRadius: defaultShapeStyle.borderRadius }))} onChange={(value) => onChange((item) => ({ ...item, borderRadius: value }))} />
+            <NumberControl icon={<MoveHorizontal size={14} />} label="Width" value={layer.widthPercent ?? 44} min={2} max={400} step={1} onReset={() => onChange((item) => ({ ...item, widthPercent: defaultShapeStyle.widthPercent }))} onChange={(value) => onChange((item) => ({ ...item, widthPercent: value }))} />
+            <NumberControl icon={<MoveVertical size={14} />} label="Height" value={layer.heightPercent ?? 18} min={2} max={400} step={1} onReset={() => onChange((item) => ({ ...item, heightPercent: defaultShapeStyle.heightPercent }))} onChange={(value) => onChange((item) => ({ ...item, heightPercent: value }))} />
+            <NumberControl icon={<Radius size={14} />} label="Radius" value={layer.borderRadius ?? 22} min={0} max={500} step={1} onReset={() => onChange((item) => ({ ...item, borderRadius: defaultShapeStyle.borderRadius }))} onChange={(value) => onChange((item) => ({ ...item, borderRadius: value }))} />
           </div>
         </div>
       </InspectorSection>
@@ -13148,7 +13587,7 @@ function ShapeGraphicControls({
           <div className="icon-control-row">
             <ColorControl icon={<PaintBucket size={14} />} label="Fill color" palette={palette} value={layer.color ?? "#4D9FFF"} onReset={() => onChange((item) => ({ ...item, color: defaultShapeStyle.color }))} onChange={(value) => onChange((item) => ({ ...item, color: value }))} />
             <ColorControl icon={<PenLine size={14} />} label="Stroke color" palette={palette} value={layer.strokeColor ?? "#ffffff"} onReset={() => onChange((item) => ({ ...item, strokeColor: defaultShapeStyle.strokeColor }))} onChange={(value) => onChange((item) => ({ ...item, strokeColor: value }))} />
-            <NumberControl icon={<PenLine size={14} />} label="Stroke width" value={layer.strokeWidth ?? 0} min={0} max={32} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultShapeStyle.strokeWidth }))} onChange={(value) => onChange((item) => ({ ...item, strokeWidth: value }))} />
+            <NumberControl icon={<PenLine size={14} />} label="Stroke width" value={layer.strokeWidth ?? 0} min={0} max={250} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultShapeStyle.strokeWidth }))} onChange={(value) => onChange((item) => ({ ...item, strokeWidth: value }))} />
           </div>
         </div>
       </InspectorSection>
@@ -13368,7 +13807,7 @@ function TimelineEffectControl({
   composition?: { width: number; height: number } | undefined;
   activeMaskId?: string | undefined;
   onChangeLayer: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
-  onUpdate: (effect: TimelineEffect) => void;
+  onUpdate: (update: (target: TimelineEffect) => TimelineEffect) => void;
   onDelete: () => void;
   onSelectEffectMask?: ((effectId: string, maskId: string | null) => void) | undefined;
   onChangeMaskTool?: ((tool: MaskTool) => void) | undefined;
@@ -13383,8 +13822,7 @@ function TimelineEffectControl({
     normalizedEffect.type === "pluginShader" ? buildPluginShaderParamDefinitions(normalizedEffect) : [];
   const inspectorParams = normalizedEffect.type === "pluginShader" ? pluginShaderParams : definition?.params ?? [];
   const resetEffect = () => {
-    const fresh = createTimelineEffect(normalizedEffect.type);
-    onUpdate({ ...fresh, id: normalizedEffect.id });
+    onUpdate((target) => ({ ...createTimelineEffect(normalizedEffect.type), id: target.id }));
   };
 
   const updateParam = (
@@ -13392,14 +13830,14 @@ function TimelineEffectControl({
     value: string | number | boolean,
     extraParams?: Record<string, string | number | boolean>
   ) => {
-    onUpdate({
-      ...normalizedEffect,
+    onUpdate((target) => ({
+      ...target,
       params: {
-        ...(normalizedEffect.params ?? {}),
+        ...(target.params ?? {}),
         [param.key]: value,
         ...(extraParams ?? {})
       }
-    });
+    }));
   };
 
   return (
@@ -13409,7 +13847,10 @@ function TimelineEffectControl({
           aria-label={normalizedEffect.enabled ? "Disable effect" : "Enable effect"}
           className={normalizedEffect.enabled ? "is-active" : ""}
           type="button"
-          onClick={() => onUpdate({ ...normalizedEffect, enabled: !normalizedEffect.enabled })}
+          onClick={() => {
+            const nextEnabled = !normalizedEffect.enabled;
+            onUpdate((target) => ({ ...target, enabled: nextEnabled }));
+          }}
         >
           <Eye size={14} />
         </button>
@@ -13428,7 +13869,7 @@ function TimelineEffectControl({
         step={1}
         value={normalizedEffect.intensity}
         onReset={() => resetEffect()}
-        onChange={(value) => onUpdate({ ...normalizedEffect, intensity: value })}
+        onChange={(value) => onUpdate((target) => ({ ...target, intensity: value }))}
       />
       {normalizedEffect.params && Object.keys(normalizedEffect.params).length ? (
         <div className="effect-param-grid">
@@ -13459,7 +13900,7 @@ function TimelineEffectControl({
           activeMaskId={activeMaskId}
           layerTime={layerTime}
           trackLibrary={trackLibrary}
-          onChangeMasks={(updater) => onUpdate({ ...normalizedEffect, masks: updater(normalizedEffect.masks ?? []) })}
+          onChangeMasks={(updater) => onUpdate((target) => ({ ...target, masks: updater(target.masks ?? []) }))}
           onChangeLayer={onChangeLayer}
           onEditInPreview={(maskId) => onSelectEffectMask(normalizedEffect.id, maskId)}
           onChangeMaskTool={onChangeMaskTool}
@@ -13727,7 +14168,7 @@ function ShadowControls({
   return (
     <div className="icon-control-row">
       <ColorControl icon={<Sparkles size={14} />} label="Shadow color" palette={palette} value={layer.shadowColor ?? "#000000"} onReset={() => onChange((item) => ({ ...item, shadowColor: defaults.shadowColor }))} onChange={(value) => onChange((item) => ({ ...item, shadowColor: value }))} />
-      <NumberControl icon={<Sparkles size={14} />} label="Shadow blur" keyframe={styleKf?.keyframe("style.shadowBlur", styleKf.value("style.shadowBlur", layer.shadowBlur ?? 0))} value={styleKf?.value("style.shadowBlur", layer.shadowBlur ?? 0) ?? layer.shadowBlur ?? 0} min={0} max={80} step={1} onReset={() => onChange((item) => setShadowEnabled({ ...item, shadowBlur: defaults.shadowBlur }, defaults.shadowBlur > 0))} onChange={(value) => {
+      <NumberControl icon={<Sparkles size={14} />} label="Shadow blur" keyframe={styleKf?.keyframe("style.shadowBlur", styleKf.value("style.shadowBlur", layer.shadowBlur ?? 0))} value={styleKf?.value("style.shadowBlur", layer.shadowBlur ?? 0) ?? layer.shadowBlur ?? 0} min={0} max={500} step={1} onReset={() => onChange((item) => setShadowEnabled({ ...item, shadowBlur: defaults.shadowBlur }, defaults.shadowBlur > 0))} onChange={(value) => {
         if (styleKf) {
           styleKf.change("style.shadowBlur", value);
           if (value > 0) onChange((item) => setShadowEnabled(item, true));
@@ -13735,8 +14176,8 @@ function ShadowControls({
           onChange((item) => setShadowEnabled({ ...item, shadowBlur: value }, value > 0));
         }
       }} />
-      <NumberControl icon={<MoveHorizontal size={14} />} label="Shadow X" keyframe={styleKf?.keyframe("style.shadowOffsetX", styleKf.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0))} value={styleKf?.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0) ?? layer.shadowOffsetX ?? 0} min={-80} max={80} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetX: defaults.shadowOffsetX }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetX", value) : onChange((item) => ({ ...item, shadowOffsetX: value })))} />
-      <NumberControl icon={<MoveVertical size={14} />} label="Shadow Y" keyframe={styleKf?.keyframe("style.shadowOffsetY", styleKf.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0))} value={styleKf?.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0) ?? layer.shadowOffsetY ?? 0} min={-80} max={80} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetY: defaults.shadowOffsetY }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetY", value) : onChange((item) => ({ ...item, shadowOffsetY: value })))} />
+      <NumberControl icon={<MoveHorizontal size={14} />} label="Shadow X" keyframe={styleKf?.keyframe("style.shadowOffsetX", styleKf.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0))} value={styleKf?.value("style.shadowOffsetX", layer.shadowOffsetX ?? 0) ?? layer.shadowOffsetX ?? 0} min={-500} max={500} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetX: defaults.shadowOffsetX }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetX", value) : onChange((item) => ({ ...item, shadowOffsetX: value })))} />
+      <NumberControl icon={<MoveVertical size={14} />} label="Shadow Y" keyframe={styleKf?.keyframe("style.shadowOffsetY", styleKf.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0))} value={styleKf?.value("style.shadowOffsetY", layer.shadowOffsetY ?? 0) ?? layer.shadowOffsetY ?? 0} min={-500} max={500} step={1} onReset={() => onChange((item) => ({ ...item, shadowOffsetY: defaults.shadowOffsetY }))} onChange={(value) => (styleKf ? styleKf.change("style.shadowOffsetY", value) : onChange((item) => ({ ...item, shadowOffsetY: value })))} />
     </div>
   );
 }

@@ -45,14 +45,17 @@ import {
   clamp,
   clearEffectParamKeyframes,
   clearTransformKeyframes,
+  contentGraphTargets,
   graphTargetKey,
   interpolationOptions,
   setGraphTargetInterpolation,
   setGraphTargetLinked,
   clearStyleKeyframes,
   sourceTextGraphTarget,
+  speedGraphTarget,
   toggleEffectParamKeyframe,
   toggleSourceTextKeyframe,
+  toggleSpeedKeyframe,
   toggleStyleKeyframe,
   toggleTransformKeyframe,
   transformGraphTargets,
@@ -68,6 +71,7 @@ import {
   curveNorm,
   curveValue,
   evaluateGraphTargetValue,
+  hasBezierHandles,
   hitTestScene,
   targetKeyframes,
   type GraphCurveScene
@@ -128,6 +132,10 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       // Text layers: SOURCE TEXT hold lane + Typewriter reveal curve (both user-visible only
       // once they carry keys — the default visible set filters to animated targets).
       ...(layer.type === "text" ? [sourceTextGraphTarget, typewriterGraphTarget] : []),
+      // Video/audio clips with a source asset: the speed-ramp lane (mirrors ClipSpeedControl's gate).
+      ...(((layer.type === "video" || layer.type === "audio") && layer.assetId) ? [speedGraphTarget] : []),
+      // Media clips: content pan/zoom/crop lanes (mirrors ContentPanel's video/image-only gate).
+      ...((layer.type === "video" || layer.type === "image") ? contentGraphTargets : []),
       // Animated (SMIL) graphics: Progress (cycles) + Duration lanes. Empty for static graphics.
       ...buildGraphicGraphTargets(layer),
       ...buildEffectGraphTargets(layer)
@@ -187,11 +195,16 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     trackWidthPx: number;
     baseTimeSeconds: number;
   } | null>(null);
+  const laneMarqueeRef = useRef<{ pointerId: number; startX: number; startY: number; additive: boolean; baseSelection: string[] } | null>(
+    null
+  );
+  const lanesBodyRef = useRef<HTMLDivElement | null>(null);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [plotSize, setPlotSize] = useState({ width: 0, height: 0 });
   const [marqueeRect, setMarqueeRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [laneMarqueeRect, setLaneMarqueeRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const baseCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -397,26 +410,28 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
       ctx.stroke();
 
       // Handles of every selected keyframe (drawn under the points) — dragging one
-      // on a non-bezier key converts it to bezier.
-      for (const kf of curve.keyframes) {
-        if (!selectedSet.has(kf.id)) continue;
-        const kx = timeToPx(view, plot, kf.timeSeconds);
-        const ky = normToPx(view, plot, curveNorm(curve, Number(kf.value)));
-        for (const handle of ["in", "out"] as const) {
-          const point = bezierHandlePoint(curve, kf, handle);
-          if (!point) continue;
-          const hx = timeToPx(view, plot, point.timeSeconds);
-          const hy = normToPx(view, plot, curveNorm(curve, point.value));
-          ctx.strokeStyle = "rgba(255,255,255,0.4)";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(kx, ky);
-          ctx.lineTo(hx, hy);
-          ctx.stroke();
-          ctx.fillStyle = "#e7e9ee";
-          ctx.beginPath();
-          ctx.arc(hx, hy, 3.2, 0, Math.PI * 2);
-          ctx.fill();
+      // on a non-bezier key converts it to bezier. Skipped for hold/linear-only lanes.
+      if (hasBezierHandles(curve.target)) {
+        for (const kf of curve.keyframes) {
+          if (!selectedSet.has(kf.id)) continue;
+          const kx = timeToPx(view, plot, kf.timeSeconds);
+          const ky = normToPx(view, plot, curveNorm(curve, Number(kf.value)));
+          for (const handle of ["in", "out"] as const) {
+            const point = bezierHandlePoint(curve, kf, handle);
+            if (!point) continue;
+            const hx = timeToPx(view, plot, point.timeSeconds);
+            const hy = normToPx(view, plot, curveNorm(curve, point.value));
+            ctx.strokeStyle = "rgba(255,255,255,0.4)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(kx, ky);
+            ctx.lineTo(hx, hy);
+            ctx.stroke();
+            ctx.fillStyle = "#e7e9ee";
+            ctx.beginPath();
+            ctx.arc(hx, hy, 3.2, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
 
@@ -535,6 +550,8 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     } else if (target.kind === "sourceText") {
       // Hold lane: adding captures the text governing that time (see toggleSourceTextKeyframe).
       onChange((item) => toggleSourceTextKeyframe(item, timeSeconds));
+    } else if (target.kind === "speed") {
+      onChange((item) => toggleSpeedKeyframe(item, timeSeconds));
     } else if (target.kind === "layer") {
       onChange((item) => toggleStyleKeyframe(item, target.property, timeSeconds, value));
     } else {
@@ -547,11 +564,13 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     const doomed = new Set(selectedIds);
     onChange((item) => {
       const sourceKeys = (item.sourceTextKeyframes ?? []).filter((key) => !doomed.has(key.id));
+      const speedKeys = (item.speedKeyframes ?? []).filter((point, index) => !doomed.has(point.id ?? `speed_${index}`));
       return {
         ...item,
         keyframes: item.keyframes.filter((kf) => !doomed.has(kf.id)),
         animations: (item.animations ?? []).filter((kf) => !doomed.has(kf.id)),
-        sourceTextKeyframes: sourceKeys.length ? sourceKeys : undefined
+        sourceTextKeyframes: sourceKeys.length ? sourceKeys : undefined,
+        speedKeyframes: speedKeys.length ? speedKeys : undefined
       };
     });
     setSelectedIds([]);
@@ -596,15 +615,70 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     laneDragRef.current = null;
     commitDraft();
   }
+
+  // ── Lanes view: marquee selection (mirrors the curves-view canvas marquee, DOM-positioned) ──────
+  // Row height (26px) and the label column width (132px) are CSS constants (.graph-lane-row /
+  // .graph-lane-label in global.css) — duplicated here because lane rows are plain DOM, not canvas,
+  // so there's no plot/view rect to hit-test against.
+  const LANE_ROW_HEIGHT_PX = 26;
+  const LANE_LABEL_WIDTH_PX = 132;
+  function keyframeIdsInLaneRect(x0: number, y0: number, x1: number, y1: number): string[] {
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+    const trackWidth = Math.max(1, (lanesBodyRef.current?.clientWidth ?? 0) - LANE_LABEL_WIDTH_PX);
+    const ids: string[] = [];
+    scenes.forEach((curve, index) => {
+      const rowTop = index * LANE_ROW_HEIGHT_PX;
+      const rowBottom = rowTop + LANE_ROW_HEIGHT_PX;
+      if (rowBottom < minY || rowTop > maxY) return;
+      for (const kf of curve.keyframes) {
+        const leftPercent = ((kf.timeSeconds - view.timeStart) / Math.max(1e-4, view.timeDuration)) * 100;
+        const px = LANE_LABEL_WIDTH_PX + (leftPercent / 100) * trackWidth;
+        if (px >= minX && px <= maxX) ids.push(kf.id);
+      }
+    });
+    return ids;
+  }
+  function laneBodyPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    // Diamonds/rows that own the pointerdown already stopPropagation, so this only fires on
+    // genuinely empty lane space.
+    (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    laneMarqueeRef.current = { pointerId: event.pointerId, startX: x, startY: y, additive: event.shiftKey, baseSelection: event.shiftKey ? selectedIds : [] };
+    setLaneMarqueeRect({ x0: x, y0: y, x1: x, y1: y });
+  }
+  function laneBodyPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = laneMarqueeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    setLaneMarqueeRect({ x0: drag.startX, y0: drag.startY, x1: x, y1: y });
+    const inside = keyframeIdsInLaneRect(drag.startX, drag.startY, x, y);
+    setSelectedIds(drag.additive ? Array.from(new Set([...drag.baseSelection, ...inside])) : inside);
+  }
+  function laneBodyPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = laneMarqueeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    laneMarqueeRef.current = null;
+    setLaneMarqueeRect(null);
+  }
+
   /** Double-click a lane diamond deletes just that key (mirrors deleteSelected's per-track filters). */
   function laneDeleteKeyframe(keyframeId: string) {
     onChange((item) => {
       const sourceKeys = (item.sourceTextKeyframes ?? []).filter((key) => key.id !== keyframeId);
+      const speedKeys = (item.speedKeyframes ?? []).filter((point, index) => (point.id ?? `speed_${index}`) !== keyframeId);
       return {
         ...item,
         keyframes: item.keyframes.filter((kf) => kf.id !== keyframeId),
         animations: (item.animations ?? []).filter((kf) => kf.id !== keyframeId),
-        sourceTextKeyframes: sourceKeys.length ? sourceKeys : undefined
+        sourceTextKeyframes: sourceKeys.length ? sourceKeys : undefined,
+        speedKeyframes: speedKeys.length ? speedKeys : undefined
       };
     });
     setSelectedIds((current) => current.filter((id) => id !== keyframeId));
@@ -1049,8 +1123,14 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
   }
 
   // ── Property tree ────────────────────────────────────────────────────────────
+  // EVERY target in `allTargets` must land in some group here — a target with no tree row is
+  // unreachable (the default visible set only auto-shows ANIMATED curves, so an unkeyed lane with
+  // no row can never be toggled on; this is exactly how the speed lane shipped invisible).
   const treeGroups = useMemo(() => {
     const transform = { label: "Transform", targets: transformGraphTargets };
+    const contentTargets = allTargets.filter((target) => target.kind === "layer" && target.property.startsWith("content."));
+    const speedTargets = allTargets.filter((target) => target.kind === "speed");
+    const textTargets = allTargets.filter((target) => target.kind === "sourceText" || (target.kind === "layer" && target.property === "textRevealProgress"));
     // Animated-graphic lanes get their own group so they can be toggled visible even before they
     // carry keys (the default visible set only auto-shows ANIMATED curves).
     const graphicTargets = allTargets.filter(
@@ -1068,6 +1148,9 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
     }
     return [
       transform,
+      ...(contentTargets.length ? [{ label: "Content", targets: contentTargets }] : []),
+      ...(speedTargets.length ? [{ label: "Speed", targets: speedTargets }] : []),
+      ...(textTargets.length ? [{ label: "Text", targets: textTargets }] : []),
       ...(graphicTargets.length ? [{ label: "Graphic", targets: graphicTargets }] : []),
       ...byEffect.values()
     ];
@@ -1120,6 +1203,7 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
                         onChange((item) => {
                           if (target.kind === "transform") return clearTransformKeyframes(item, target.property);
                           if (target.kind === "sourceText") return { ...item, sourceTextKeyframes: undefined };
+                          if (target.kind === "speed") return { ...item, speedKeyframes: undefined };
                           if (target.kind === "layer") return clearStyleKeyframes(item, target.property);
                           return clearEffectParamKeyframes(item, target.effectId, target.property);
                         });
@@ -1328,11 +1412,29 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
                 );
               })}
             </div>
-            <div className="graph-lanes-body">
+            <div
+              className="graph-lanes-body"
+              ref={lanesBodyRef}
+              onPointerDown={laneBodyPointerDown}
+              onPointerMove={laneBodyPointerMove}
+              onPointerUp={laneBodyPointerUp}
+              onPointerCancel={laneBodyPointerUp}
+            >
               <div
                 className="graph-lanes-playhead"
                 style={{ left: `${clamp(((layerTime - view.timeStart) / view.timeDuration) * 100, 0, 100)}%` }}
               />
+              {laneMarqueeRect ? (
+                <div
+                  className="graph-lanes-marquee"
+                  style={{
+                    left: Math.min(laneMarqueeRect.x0, laneMarqueeRect.x1),
+                    top: Math.min(laneMarqueeRect.y0, laneMarqueeRect.y1),
+                    width: Math.abs(laneMarqueeRect.x1 - laneMarqueeRect.x0),
+                    height: Math.abs(laneMarqueeRect.y1 - laneMarqueeRect.y0)
+                  }}
+                />
+              ) : null}
               {scenes.map((curve) => {
                 const shortLabel =
                   curve.target.kind === "effect" ? curve.target.label.split(" · ")[1] ?? curve.target.label : curve.target.label;

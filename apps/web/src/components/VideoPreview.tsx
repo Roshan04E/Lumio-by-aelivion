@@ -27,6 +27,7 @@ import {
   getCompositionContentTransform,
   graphicToDataUrl,
   maskShapeToPathD,
+  penPathBounds,
   resolveMaskAtTime,
   withAutoTangents,
   type Mask,
@@ -60,6 +61,7 @@ import {
   evaluateTimelineTransform,
   effectiveTransitionDuration,
   findTransitionPairs,
+  findTransitionPairsWithGroupJunctions,
   getActiveTransition,
   resolveTransitionWindowSides,
   type TransitionWindowSides,
@@ -108,6 +110,7 @@ setGlGovernorEnabled(getGlGovernorEnabled());
 // they're touched every frame.
 setGlContextBudget(8, 12);
 import { getLivePlaybackTime, getPlaybackClock, usePlaybackClock } from "../playback/playback-clock";
+import { setMediaPlaybackRate } from "../playback/media-rate";
 import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_MASTER_GATE_S, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";
 import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
@@ -930,7 +933,11 @@ function VideoPreviewImpl({
   }, []);
   const transitionPairsRaw = useMemo(() => {
     const layers = renderedLayerEntries.map((entry) => entry.layer);
-    const byId = new Map(layers.map((layer) => [layer.id, layer]));
+    // Block 4c (NESTING_MATURITY.md): junctions where a side is a COMPOUND clip only exist on the RAW
+    // comp (expansion removes the compound from its track) — scan those too; the compound id resolves
+    // to its group draw inside buildSceneDraws. Raw layers are lookup-fallback only (expanded wins).
+    const rawLayers = composition.tracks.flatMap((track) => track.layers);
+    const byId = new Map([...rawLayers, ...layers].map((layer) => [layer.id, layer]));
     const out: {
       outgoingId: string;
       incomingId: string;
@@ -941,7 +948,7 @@ function VideoPreviewImpl({
       fromFit: "cover" | "contain" | "fill";
       toFit: "cover" | "contain" | "fill";
     }[] = [];
-    for (const pair of findTransitionPairs(layers)) {
+    for (const pair of findTransitionPairsWithGroupJunctions(layers, rawLayers)) {
       const incoming = byId.get(pair.incomingId);
       const outgoing = byId.get(pair.outgoingId);
       if (!incoming || !outgoing) continue;
@@ -1981,6 +1988,9 @@ const PreviewLayer = memo(function PreviewLayer({
     surfaceHeight: number;
     /** Set only for a FRAME-box resize — which axis the grabbed handle controls (null = not a frame). */
     frameAxis: "x" | "y" | "both" | null;
+    /** Which axis the grabbed handle drives, for ANY box resize (shapes): edges stretch one axis,
+     *  corners resize PROPORTIONALLY — a corner freely reshaping both axes distorts drawn graphics. */
+    handleAxis: "x" | "y" | "both" | null;
     /** Content mode: the drag scales the MEDIA inside the frame (content.scale), not the layer. */
     contentScale: boolean;
     moved: boolean;
@@ -2173,7 +2183,8 @@ const PreviewLayer = memo(function PreviewLayer({
     // repositioning the media within it is the double-click content mode (D3) instead of edge-crop.
     // In content mode the handles belong to the CLIP (scale/rotate it inside the frame), so they must
     // NOT take the frame-box path — that is what makes double-click a true drill-in on the media.
-    const frameAxis = layer.frame && !contentMode ? frameResizeAxisFromHandle(event.currentTarget) : null;
+    const handleAxis = frameResizeAxisFromHandle(event.currentTarget);
+    const frameAxis = layer.frame && !contentMode ? handleAxis : null;
     // Edge handles (N/E/S/W) crop media; corner handles (NW/NE/SW/SE) scale. Shapes/text have no source to
     // crop, so all of their handles keep scaling/resizing. The edge is encoded in the handle's className.
     const cropEdge = frameAxis ? null : mediaCropEdgeFromHandle(event.currentTarget);
@@ -2219,6 +2230,7 @@ const PreviewLayer = memo(function PreviewLayer({
       surfaceWidth: bounds.width,
       surfaceHeight: bounds.height,
       frameAxis,
+      handleAxis,
       contentScale: contentScaleMode,
       moved: false
     };
@@ -2251,7 +2263,7 @@ const PreviewLayer = memo(function PreviewLayer({
       return;
     }
     if (layer.type === "shape" && onResizeShapeLayer) {
-      const nextSize = shapeSizeFromResize(event, resize);
+      const nextSize = shapeSizeFromResize(event, resize, resize.handleAxis ?? "both");
       resize.moved = resize.moved || Math.abs(nextSize.widthPercent - resize.startWidthPercent) > 0.2 || Math.abs(nextSize.heightPercent - resize.startHeightPercent) > 0.2;
       showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent));
       onResizeShapeLayer(resize.layerId, nextSize, false);
@@ -2292,7 +2304,7 @@ const PreviewLayer = memo(function PreviewLayer({
       return;
     }
     if (layer.type === "shape" && onResizeShapeLayer) {
-      const nextSize = shapeSizeFromResize(event, resize);
+      const nextSize = shapeSizeFromResize(event, resize, resize.handleAxis ?? "both");
       showTransformHud(sizeHud(nextSize.widthPercent, nextSize.heightPercent), true);
       onResizeShapeLayer(resize.layerId, nextSize, true);
       return;
@@ -2726,6 +2738,11 @@ const PreviewLayer = memo(function PreviewLayer({
   }
 
   function syncVideoTime(video: HTMLVideoElement, driftToleranceSeconds = 0.08) {
+    // Overlap guard (tracker v15 → v16): while PLAYING, never issue a new seek before the previous
+    // one lands — each large `currentTime` write on a playing element flushes/re-primes the decoder,
+    // and stacking them was the remaining plausible ramp-hang mechanism. Paused scrubbing keeps
+    // latest-wins writes (frame-accurate stepping needs them; paused seeks are cheap/coalesced).
+    if (video.seeking && !video.paused) return false;
     // Source-aware: offset into the source media so trimmed/split clips play the correct source frame.
     // The clamp is the asset's available media (not just the clip's visible span) so that during a
     // transition post-roll the outgoing clip can play a little past its out-point into its tail handle,
@@ -2749,7 +2766,7 @@ const PreviewLayer = memo(function PreviewLayer({
 
     // Rate stretch: the element free-runs at the clip speed while playing. preservesPitch=false
     // (varispeed) matches the export mixer's AudioBufferSourceNode behavior.
-    video.playbackRate = getLayerSpeed(layer);
+    setMediaPlaybackRate(video, getLayerSpeed(layer));
     if ("preservesPitch" in video) {
       (video as HTMLVideoElement & { preservesPitch: boolean }).preservesPitch = false;
     }
@@ -2774,7 +2791,7 @@ const PreviewLayer = memo(function PreviewLayer({
     if (!video || !isVideo || !hasSpeedRamp(layer)) {
       return;
     }
-    video.playbackRate = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
+    setMediaPlaybackRate(video, getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds)));
     if (!effectivePlaying) {
       syncVideoTime(video);
       return;
@@ -3476,6 +3493,8 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
   const gainNodeRef = useRef<GainNode | null>(null);
   const panNodeRef = useRef<StereoPannerNode | null>(null);
   const fxNodeRef = useRef<AudioWorkletNode | null>(null);
+  // Ramp resync checkpoint clock (mirrors the video layer's lastRampSyncMsRef) — see the ramp effect.
+  const lastAudioRampSyncMsRef = useRef(0);
   const asset = resolveLayerAsset(layer, assets, sourceAsset);
   const mediaUrl = resolvePlaybackUrl(asset);
 
@@ -3492,6 +3511,9 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
   const sourceIn = layer.sourceInSeconds ?? 0;
 
   function syncAudioTime(audio: HTMLAudioElement) {
+    // Same overlap guard as syncVideoTime (tracker v16): no new seek on a PLAYING element while one
+    // is still in flight.
+    if (audio.seeking && !audio.paused) return;
     const local = Math.max(0, Math.min(layer.durationSeconds, currentTime - layer.startSeconds));
     // Ramp-aware: the shared mapper is the exact integral for ramped clips, sourceIn + local×speed otherwise.
     const nextTime = layerSourceTimeSeconds(layer, local);
@@ -3582,7 +3604,7 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     // Rate stretch: element playbackRate follows the clip speed. preservesPitch stays
     // false for parity with the export mixer (AudioBufferSourceNode.playbackRate is
     // varispeed — pitch shifts with speed), like Premiere with "Maintain Audio Pitch" off.
-    audio.playbackRate = speed;
+    setMediaPlaybackRate(audio, speed);
     if ("preservesPitch" in audio) {
       (audio as HTMLAudioElement & { preservesPitch: boolean }).preservesPitch = false;
     }
@@ -3606,15 +3628,23 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
   }, [currentTime, isPlaying, layer.startSeconds, mediaUrl]);
 
   // Speed ramp: follow the varying rate per tick (elements can't free-run a curve); syncAudioTime's
-  // integral resync bounds the drift.
+  // integral resync bounds the drift. The resync is THROTTLED to the same ~500ms cadence as the
+  // video ramp-follow (tracker v16): between checkpoints the element free-runs at a stale constant
+  // rate, so an every-tick 0.08s threshold trips on virtually every tick — a per-frame currentTime
+  // write on a PLAYING element is the decoder-flush storm from the 2026-07-16 incident, which was
+  // fixed for video but had been left per-tick here on the audio path.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !mediaUrl || !hasSpeedRamp(layer)) {
       return;
     }
-    audio.playbackRate = getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds));
+    setMediaPlaybackRate(audio, getLayerSpeedAt(layer, Math.max(0, currentTime - layer.startSeconds)));
     if (isPlaying) {
-      syncAudioTime(audio);
+      const now = performance.now();
+      if (now - lastAudioRampSyncMsRef.current >= 500) {
+        lastAudioRampSyncMsRef.current = now;
+        syncAudioTime(audio);
+      }
     }
   }, [currentTime, isPlaying, layer, mediaUrl]);
 
@@ -3914,7 +3944,15 @@ function PreviewSelectionOverlay({
   // scale (the exact value compositionTransformCss bakes into the box transform), not the raw base
   // `layer.transform.scale` — otherwise a scale keyframe / entrance animation / scrubbed value makes the
   // counter miss and the handles scale with the clip.
-  const evaluatedScale = getCompositionTransform(layer, { currentTimeSeconds: currentTime }).scale;
+  const evaluatedTransform = getCompositionTransform(layer, { currentTimeSeconds: currentTime });
+  const evaluatedScale = evaluatedTransform.scale;
+  // Anchor (D3): show the pivot as a crosshair inside the box whenever it's off-center, so the user
+  // can see WHAT the clip rotates/scales about. Display-only for now (edited via the inspector's
+  // Anchor fields); Alt-drag editing is a listed follow-up.
+  const anchorCross =
+    (evaluatedTransform.anchorX ?? 50) !== 50 || (evaluatedTransform.anchorY ?? 50) !== 50
+      ? { x: evaluatedTransform.anchorX ?? 50, y: evaluatedTransform.anchorY ?? 50 }
+      : null;
   const baseOverlayStyle = selectionOverlayStyle(style);
   const overlayStyle = {
     ...baseOverlayStyle,
@@ -3933,6 +3971,13 @@ function PreviewSelectionOverlay({
   const portalTarget = useContext(OverlayPortalContext);
   const node = (
     <div className={`preview-selection-box preview-selection-box-${layer.type}${contentMode ? " is-content-mode" : ""}`} style={overlayStyle}>
+      {anchorCross ? (
+        <span
+          aria-hidden="true"
+          className="preview-anchor-crosshair"
+          style={{ left: `${anchorCross.x}%`, top: `${anchorCross.y}%` }}
+        />
+      ) : null}
       {text ? <span className="preview-selection-measure">{text}</span> : null}
       {transformHud ? (
         <span className={`preview-transform-hud preview-transform-hud-${transformHud.mode} ${transformHud.snapped ? "is-snapped" : ""}`}>
@@ -4089,7 +4134,13 @@ function pointsCenter(points: { x: number; y: number }[]): { x: number; y: numbe
  * Enter / click first point to close, Esc cancel, Backspace removes the last point); Select drags points,
  * Bezier tangent handles, or the whole mask, double-click a point to delete or an edge to insert, Alt-click
  * a point to toggle smooth. Geometry edits commit through `onCommitMaskPoints` (path-keyframe-aware).
+ *
+ * A PEN SHAPE layer's own outline (`layer.shapePath`) is edited through this SAME select-tool point/
+ * tangent machinery via a synthetic mask (id `SHAPE_SELF_MASK_ID`) that isn't a real clip mask — see
+ * `shapeSelfMask`/`commitPointsFor` below.
  */
+const SHAPE_SELF_MASK_ID = "__shape_self__";
+
 function MaskEditorOverlay({
   layer,
   masks: propMasks,
@@ -4162,20 +4213,55 @@ function MaskEditorOverlay({
   const rad = overlayType ? 0 : ((transform.rotation || 0) * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
+  // Anchor (D3): the layer pivots about its anchor point, not the element center — the overlay's
+  // forward/inverse maps must use the SAME pivot or handles drift off the rendered mask on anchored
+  // clips. Default 50/50 reduces to the historical width/2, height/2.
+  const anchorPx = overlayType ? width / 2 : (((transform.anchorX ?? 50) / 100) * width);
+  const anchorPy = overlayType ? height / 2 : (((transform.anchorY ?? 50) / 100) * height);
 
-  // layer-local (0..W,0..H) → comp space (layer transform only)
-  function toComp(p: { x: number; y: number }) {
-    const lx = (p.x - width / 2) * s;
-    const ly = (p.y - height / 2) * s;
+  // PEN SHAPE self-outline editing: unlike clip masks (comp-fixed per the note above), the shape's OWN
+  // `shapePath` lives inside its OWN box — driven by the layer's REAL transform (position/rotation/scale)
+  // and `widthPercent`/`heightPercent`, matching exactly how `drawShapeLayer` (text-shape.ts) places it.
+  // Defaults mirror `compositionShapeDefaults` (composition-style.ts).
+  const isPenShapeLayer = layer.type === "shape" && layer.shapeKind === "pen";
+  const shapeBoxW = (Number(layer.widthPercent ?? 44) / 100) * width;
+  const shapeBoxH = (Number(layer.heightPercent ?? 18) / 100) * height;
+  const shapeCx = (transform.x / 100) * width;
+  const shapeCy = (transform.y / 100) * height;
+  const shapeScale = transform.scale || 1;
+  const shapeRad = ((transform.rotation || 0) * Math.PI) / 180;
+  const shapeCos = Math.cos(shapeRad);
+  const shapeSin = Math.sin(shapeRad);
+  // Anchor (D3) for the shape's own box (same pivot rule as above, in box px).
+  const shapeAnchorPx = ((transform.anchorX ?? 50) / 100) * shapeBoxW;
+  const shapeAnchorPy = ((transform.anchorY ?? 50) / 100) * shapeBoxH;
+
+  // layer-local (0..W,0..H) → comp space (layer transform only). `useShapeBox` routes through the
+  // shape's own box/transform instead (see above) — used only for the SHAPE_SELF synthetic mask.
+  function toComp(p: { x: number; y: number }, useShapeBox = false) {
+    if (useShapeBox) {
+      const lx = (p.x - shapeAnchorPx) * shapeScale;
+      const ly = (p.y - shapeAnchorPy) * shapeScale;
+      return { x: shapeCx + (lx * shapeCos - ly * shapeSin), y: shapeCy + (lx * shapeSin + ly * shapeCos) };
+    }
+    const lx = (p.x - anchorPx) * s;
+    const ly = (p.y - anchorPy) * s;
     return { x: cx + (lx * cos - ly * sin), y: cy + (lx * sin + ly * cos) };
   }
   // comp space → layer-local
-  function toLocal(p: { x: number; y: number }) {
+  function toLocal(p: { x: number; y: number }, useShapeBox = false) {
+    if (useShapeBox) {
+      const vx = p.x - shapeCx;
+      const vy = p.y - shapeCy;
+      const ux = (vx * shapeCos + vy * shapeSin) / shapeScale;
+      const uy = (-vx * shapeSin + vy * shapeCos) / shapeScale;
+      return { x: ux + shapeAnchorPx, y: uy + shapeAnchorPy };
+    }
     const vx = p.x - cx;
     const vy = p.y - cy;
     const ux = (vx * cos + vy * sin) / s;
     const uy = (-vx * sin + vy * cos) / s;
-    return { x: ux + width / 2, y: uy + height / 2 };
+    return { x: ux + anchorPx, y: uy + anchorPy };
   }
   function clientToComp(event: { clientX: number; clientY: number }): { x: number; y: number } {
     const svg = svgRef.current;
@@ -4186,11 +4272,80 @@ function MaskEditorOverlay({
       y: ((event.clientY - rect.top) / rect.height) * height
     };
   }
-  function clientToLocal(event: { clientX: number; clientY: number }) {
-    return toLocal(clientToComp(event));
+  function clientToLocal(event: { clientX: number; clientY: number }, useShapeBox = false) {
+    return toLocal(clientToComp(event), useShapeBox);
   }
 
   const masks = propMasks;
+  // Synthetic "mask" wrapping the pen shape's OWN outline so the existing point/tangent-drag,
+  // delete-point, and toggle-smooth machinery can edit `layer.shapePath` for free — its writes are
+  // intercepted (by id) in `commitPointsFor`/`updateShapeSelfPoints` and redirected to `onCommitShapePath`
+  // instead of the clip-mask paths. Tangents are stored as PERCENT-of-box deltas (matches `customShapePath`
+  // in text-shape.ts), so they scale by box dimensions like the point coordinates, not offset by them.
+  const shapeSelfMask: Mask | null =
+    isPenShapeLayer && layer.shapePath && layer.shapePath.length >= 2
+      ? {
+          id: SHAPE_SELF_MASK_ID,
+          name: "Shape Outline",
+          enabled: true,
+          shape: "bezier",
+          mode: "add",
+          points: layer.shapePath.map((pt) => ({
+            id: pt.id,
+            x: (pt.x / 100) * shapeBoxW,
+            y: (pt.y / 100) * shapeBoxH,
+            inTangent: pt.inTangent ? { x: (pt.inTangent.x / 100) * shapeBoxW, y: (pt.inTangent.y / 100) * shapeBoxH } : undefined,
+            outTangent: pt.outTangent ? { x: (pt.outTangent.x / 100) * shapeBoxW, y: (pt.outTangent.y / 100) * shapeBoxH } : undefined,
+            lockedTangents: pt.lockedTangents
+          })),
+          feather: 0,
+          expansion: 0,
+          opacity: 100,
+          inverted: false,
+          transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }
+        }
+      : null;
+  const editableMasks = shapeSelfMask ? [...masks, shapeSelfMask] : masks;
+
+  /** Box-local (px) points/tangents → the layer's `shapePath` convention (0..100 of box), RENORMALIZED:
+   *  the box is refit to the EXACT curve bounds (`penPathBounds` — bezier extrema) so the selection
+   *  handles always track the visible ink; point/tangent edits can push the curve outside the old box
+   *  (or shrink well inside it, leaving phantom handles). Rendered geometry is preserved exactly: the
+   *  committed position is the comp position of the NEW box's anchor point (mapped through the OLD
+   *  transform), which makes the old and new placements algebraically identical for every path point,
+   *  including rotated/scaled/custom-anchor shapes. */
+  function updateShapeSelfPoints(points: MaskPoint[]) {
+    const b = penPathBounds(points);
+    if (!b) return;
+    const bw = Math.max(1, b.maxX - b.minX);
+    const bh = Math.max(1, b.maxY - b.minY);
+    const ax = transform.anchorX ?? 50;
+    const ay = transform.anchorY ?? 50;
+    const anchorComp = toComp({ x: b.minX + (ax / 100) * bw, y: b.minY + (ay / 100) * bh }, true);
+    onCommitShapePath?.(layer.id, {
+      shapePath: points.map((pt) => ({
+        id: pt.id,
+        x: ((pt.x - b.minX) / bw) * 100,
+        y: ((pt.y - b.minY) / bh) * 100,
+        inTangent: pt.inTangent ? { x: (pt.inTangent.x / bw) * 100, y: (pt.inTangent.y / bh) * 100 } : undefined,
+        outTangent: pt.outTangent ? { x: (pt.outTangent.x / bw) * 100, y: (pt.outTangent.y / bh) * 100 } : undefined,
+        lockedTangents: pt.lockedTangents
+      })),
+      widthPercent: (bw / width) * 100,
+      heightPercent: (bh / height) * 100,
+      xPercent: (anchorComp.x / width) * 100,
+      yPercent: (anchorComp.y / height) * 100
+    });
+  }
+  /** Single choke point for point-array commits — real masks go through `onCommitMaskPoints`
+   *  (path-keyframe-aware); the SHAPE_SELF synthetic mask redirects to the layer's own `shapePath`. */
+  function commitPointsFor(maskId: string, points: MaskPoint[]) {
+    if (maskId === SHAPE_SELF_MASK_ID) {
+      updateShapeSelfPoints(points);
+      return;
+    }
+    onCommitMaskPoints?.(layer.id, maskId, points);
+  }
   const handleR = 5 / Math.max(0.05, scale);
   const strokeW = 1.5 / Math.max(0.05, scale);
   // on-screen px ≈ comp px * scale; comp px ≈ local px * s — used for the pen close threshold.
@@ -4198,7 +4353,7 @@ function MaskEditorOverlay({
 
   function commitLive() {
     if (live) {
-      onCommitMaskPoints?.(layer.id, live.id, live.points);
+      commitPointsFor(live.id, live.points);
     }
     setLive(null);
   }
@@ -4254,14 +4409,23 @@ function MaskEditorOverlay({
       // mask. Before this, a pen shape layer only ever showed its canned default polygon. Shape
       // layers are overlay-type here (toComp is identity), so local == comp coordinates.
       if (layer.type === "shape" && layer.shapeKind === "pen" && onCommitShapePath) {
-        const xs = pts.map((pt) => pt.x);
-        const ys = pts.map((pt) => pt.y);
-        const x0 = Math.min(...xs);
-        const y0 = Math.min(...ys);
-        const boxW = Math.max(1, Math.max(...xs) - x0);
-        const boxH = Math.max(1, Math.max(...ys) - y0);
+        // Box = the EXACT curve bounds (bezier extrema, penPathBounds), so the selection handles sit
+        // on the visible ink. Tangents were drawn in comp px and MUST be converted to percent-of-box
+        // like the anchors (they used to be committed raw — a px value re-read as percent inflated
+        // every curve bulge by ~the box size).
+        const b = penPathBounds(pts)!;
+        const x0 = b.minX;
+        const y0 = b.minY;
+        const boxW = Math.max(1, b.maxX - b.minX);
+        const boxH = Math.max(1, b.maxY - b.minY);
         onCommitShapePath(layer.id, {
-          shapePath: pts.map((pt) => ({ ...pt, x: ((pt.x - x0) / boxW) * 100, y: ((pt.y - y0) / boxH) * 100 })),
+          shapePath: pts.map((pt) => ({
+            ...pt,
+            x: ((pt.x - x0) / boxW) * 100,
+            y: ((pt.y - y0) / boxH) * 100,
+            inTangent: pt.inTangent ? { x: (pt.inTangent.x / boxW) * 100, y: (pt.inTangent.y / boxH) * 100 } : undefined,
+            outTangent: pt.outTangent ? { x: (pt.outTangent.x / boxW) * 100, y: (pt.outTangent.y / boxH) * 100 } : undefined
+          })),
           widthPercent: (boxW / width) * 100,
           heightPercent: (boxH / height) * 100,
           xPercent: ((x0 + boxW / 2) / width) * 100,
@@ -4286,7 +4450,8 @@ function MaskEditorOverlay({
     if (tool !== "select") return;
     event.preventDefault();
     event.stopPropagation();
-    onSelectMask?.(mask.id);
+    // SHAPE_SELF isn't a real clip mask — don't push it into the mask panel's selection state.
+    if (mask.id !== SHAPE_SELF_MASK_ID) onSelectMask?.(mask.id);
     setActivePointId(pointId);
     const info = displayPointsFor(mask);
 
@@ -4320,7 +4485,7 @@ function MaskEditorOverlay({
     const point = info.points.find((pt) => pt.id === pointId);
     const currentlyLinked = point?.lockedTangents !== false;
     const nextLinked = event.altKey ? !currentlyLinked : currentlyLinked;
-    onSelectMask?.(mask.id);
+    if (mask.id !== SHAPE_SELF_MASK_ID) onSelectMask?.(mask.id);
     setActivePointId(pointId);
     setLive({
       id: mask.id,
@@ -4403,6 +4568,10 @@ function MaskEditorOverlay({
       const dy = (next.y - prev.y) * 0.33;
       nextPoints[index] = { ...point, inTangent: { x: -dx, y: -dy }, outTangent: { x: dx, y: dy }, lockedTangents: true };
     }
+    if (mask.id === SHAPE_SELF_MASK_ID) {
+      updateShapeSelfPoints(nextPoints);
+      return;
+    }
     onUpdateLayerMasks?.(layer.id, (currentMasks) =>
       currentMasks.map((m) => (m.id === mask.id ? { ...m, shape: "bezier", points: nextPoints } : m))
     );
@@ -4411,13 +4580,13 @@ function MaskEditorOverlay({
   function deletePoint(mask: Mask, pointId: string, info: { points: MaskPoint[] }) {
     if (info.points.length <= 3) return;
     const nextPoints = info.points.filter((pt) => pt.id !== pointId);
-    onCommitMaskPoints?.(layer.id, mask.id, nextPoints);
+    commitPointsFor(mask.id, nextPoints);
     setActivePointId(null);
   }
 
   function insertPointOnEdge(mask: Mask, compClick: { x: number; y: number }) {
     const info = displayPointsFor(mask);
-    const screenPts = info.points.map((pt) => toComp(applyMaskTransform(pt, info.t, info.center)));
+    const screenPts = info.points.map((pt) => toComp(applyMaskTransform(pt, info.t, info.center), mask.id === SHAPE_SELF_MASK_ID));
     const n = screenPts.length;
     let best = { index: -1, dist: Infinity, t: 0 };
     for (let i = 0; i < n; i += 1) {
@@ -4438,7 +4607,7 @@ function MaskEditorOverlay({
     const inserted: MaskPoint = { id: `mp_${Date.now()}_ins`, x: a.x + (b.x - a.x) * best.t, y: a.y + (b.y - a.y) * best.t };
     const nextPoints = [...info.points];
     nextPoints.splice(best.index + 1, 0, inserted);
-    onCommitMaskPoints?.(layer.id, mask.id, nextPoints);
+    commitPointsFor(mask.id, nextPoints);
   }
 
   // --- shared pointer move/up --------------------------------------------------------------------
@@ -4478,7 +4647,7 @@ function MaskEditorOverlay({
       return;
     }
     if (drag.kind !== "point" && drag.kind !== "move" && drag.kind !== "tangent") return;
-    const editable = unapplyMaskTransform(clientToLocal(event), drag.t, drag.center);
+    const editable = unapplyMaskTransform(clientToLocal(event, drag.maskId === SHAPE_SELF_MASK_ID), drag.t, drag.center);
     if (drag.kind === "point") {
       // Shift → constrain the point to a horizontal/vertical move from where it started.
       let px = editable.x;
@@ -4555,12 +4724,12 @@ function MaskEditorOverlay({
       const mag = livePoint?.outTangent ? Math.hypot(livePoint.outTangent.x, livePoint.outTangent.y) : 0;
       if (mag < 2) {
         setLive(null);
-        const mask = masks.find((m) => m.id === drag.maskId);
+        const mask = editableMasks.find((m) => m.id === drag.maskId);
         if (mask) togglePointSmooth(mask, drag.pointId, displayPointsFor(mask));
         return;
       }
       // Real pull-out: ensure a curvable shape so the handles render, then commit the tangents.
-      const mask = masks.find((m) => m.id === drag.maskId);
+      const mask = editableMasks.find((m) => m.id === drag.maskId);
       if (mask && mask.shape !== "bezier" && mask.shape !== "polygon") {
         onUpdateLayerMasks?.(layer.id, (currentMasks) =>
           currentMasks.map((m) => (m.id === drag.maskId ? { ...m, shape: "bezier" } : m))
@@ -4664,40 +4833,45 @@ function MaskEditorOverlay({
         />
       ) : null}
 
-      {masks.map((mask) => {
+      {editableMasks.map((mask) => {
+        const isShapeSelf = mask.id === SHAPE_SELF_MASK_ID;
         const info = displayPointsFor(mask);
         if (info.points.length < 2) return null;
-        const screenPts = info.points.map((pt) => toComp(applyMaskTransform(pt, info.t, info.center)));
+        const screenPts = info.points.map((pt) => toComp(applyMaskTransform(pt, info.t, info.center), isShapeSelf));
         const compMask: Mask = { ...mask, points: info.points.map((pt, i) => ({ ...pt, x: screenPts[i]!.x, y: screenPts[i]!.y })) };
         // tangents are relative; forward them through both transforms by mapping point+tangent then subtracting.
         const compPoints: MaskPoint[] = info.points.map((pt, i) => {
           const base = screenPts[i]!;
           const next: MaskPoint = { id: pt.id, x: base.x, y: base.y };
           if (pt.inTangent) {
-            const h = toComp(applyMaskTransform({ x: pt.x + pt.inTangent.x, y: pt.y + pt.inTangent.y }, info.t, info.center));
+            const h = toComp(applyMaskTransform({ x: pt.x + pt.inTangent.x, y: pt.y + pt.inTangent.y }, info.t, info.center), isShapeSelf);
             next.inTangent = { x: h.x - base.x, y: h.y - base.y };
           }
           if (pt.outTangent) {
-            const h = toComp(applyMaskTransform({ x: pt.x + pt.outTangent.x, y: pt.y + pt.outTangent.y }, info.t, info.center));
+            const h = toComp(applyMaskTransform({ x: pt.x + pt.outTangent.x, y: pt.y + pt.outTangent.y }, info.t, info.center), isShapeSelf);
             next.outTangent = { x: h.x - base.x, y: h.y - base.y };
           }
           return next;
         });
         const d = maskShapeToPathD({ ...compMask, points: compPoints });
-        const isActive = mask.id === activeMaskId;
+        // SHAPE_SELF has no selection state of its own (it isn't in the mask panel's list) — always
+        // shown active whenever this overlay is open for a pen-shape layer.
+        const isActive = isShapeSelf || mask.id === activeMaskId;
         // Select tool: the ACTIVE mask is draggable by its whole interior (transparent fill hit area) to move
         // it; inactive masks hit-test the stroke (click to select). So when a mask is NOT being edited, clicks
         // inside it fall through to the layer (drag the text/clip); selecting the mask makes its interior drag
         // the mask. While a draw tool is active, masks don't capture pointers so drawing over them still works.
+        // SHAPE_SELF's body stays non-interactive — dragging the shape's outline body is the layer's own
+        // move/resize gizmo's job (elsewhere in this file); this overlay only owns points/tangent handles.
         const interactive = tool === "select";
         return (
           <g key={mask.id} className={isActive ? "mask-outline is-active" : "mask-outline"}>
             <path
               d={d}
-              fill={isActive && interactive ? "transparent" : "none"}
+              fill={!isShapeSelf && isActive && interactive ? "transparent" : "none"}
               strokeWidth={strokeW}
-              style={{ pointerEvents: interactive ? (isActive ? "all" : "stroke") : "none", cursor: isActive ? "move" : "pointer" }}
-              onPointerDown={(event) => startMaskMove(event, mask)}
+              style={{ pointerEvents: isShapeSelf ? "none" : interactive ? (isActive ? "all" : "stroke") : "none", cursor: isActive ? "move" : "pointer" }}
+              onPointerDown={isShapeSelf ? undefined : (event) => startMaskMove(event, mask)}
             />
             {isActive ? (
               <>
@@ -4739,7 +4913,8 @@ function MaskEditorOverlay({
                     />
                   </g>
                 ))}
-                {(() => {
+                {/* Feather/opacity are clip-mask-only concepts — the shape's own outline has neither. */}
+                {!isShapeSelf && (() => {
                   // Feather (square) + opacity (circle) widget on a guide off the mask's top edge. Values are
                   // live from the mask (the widget commits transiently while dragging) so nub + clip update together.
                   const r = resolveMaskAtTime(mask, layer.animations, localTime);
@@ -4852,6 +5027,10 @@ function selectionOverlayStyle(style: CSSProperties): CSSProperties {
   const {
     background: _background,
     backgroundColor: _backgroundColor,
+    // A shape's stroke is emitted as CSS `border` — copied onto the selection box it painted the
+    // box (and visually its handles) with the clip's stroke width/color. Same for the rounding.
+    border: _border,
+    borderRadius: _borderRadius,
     boxShadow: _boxShadow,
     color: _color,
     filter: _filter,
@@ -5086,6 +5265,12 @@ function rotationHud(rotation: number, snapped: boolean): PreviewTransformHud {
   };
 }
 
+/** Shape-box size from a handle drag. Edge handles stretch ONE axis (the other keeps its start
+ *  value); corner handles resize PROPORTIONALLY (aspect-locked — the dominant axis ratio drives
+ *  both, so a diagonal drag scales the graphic instead of freely distorting it) unless ALT is held,
+ *  which restores the free width×height resize (deliberate distortion). At pointer-down the raw
+ *  pointer-derived size equals the start size (the handle sits on the box edge), so every mode
+ *  engages without a jump — including toggling Alt mid-drag. */
 function shapeSizeFromResize(
   event: ReactPointerEvent<HTMLElement>,
   resize: {
@@ -5095,11 +5280,20 @@ function shapeSizeFromResize(
     startHeightPercent: number;
     surfaceWidth: number;
     surfaceHeight: number;
-  }
+  },
+  axis: "x" | "y" | "both"
 ) {
+  // 400 matches the inspector Width/Height max (2026-07-17 cap audit) — a tighter gesture clamp
+  // would snap an inspector-set oversize back on the first handle drag.
+  const rawW = clamp((Math.abs(event.clientX - resize.centerClientX) / resize.surfaceWidth) * 200, 2, 400);
+  const rawH = clamp((Math.abs(event.clientY - resize.centerClientY) / resize.surfaceHeight) * 200, 2, 400);
+  if (axis === "x") return { widthPercent: rawW, heightPercent: resize.startHeightPercent };
+  if (axis === "y") return { widthPercent: resize.startWidthPercent, heightPercent: rawH };
+  if (event.altKey) return { widthPercent: rawW, heightPercent: rawH };
+  const factor = Math.max(rawW / Math.max(0.01, resize.startWidthPercent), rawH / Math.max(0.01, resize.startHeightPercent));
   return {
-    widthPercent: clamp((Math.abs(event.clientX - resize.centerClientX) / resize.surfaceWidth) * 200, 2, 200),
-    heightPercent: clamp((Math.abs(event.clientY - resize.centerClientY) / resize.surfaceHeight) * 200, 2, 200)
+    widthPercent: clamp(resize.startWidthPercent * factor, 2, 400),
+    heightPercent: clamp(resize.startHeightPercent * factor, 2, 400)
   };
 }
 

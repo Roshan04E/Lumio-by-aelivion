@@ -365,10 +365,11 @@ export function measureOverlayBox(ctx: Ctx, layer: TimelineLayer, t: number, W: 
   return { boxW: Math.max(0, (num(style.width) / 100) * W), boxH: Math.max(0, (num(style.height) / 100) * H) };
 }
 
-/** Extra comp-px padding a "box"-mode raster needs so text-shadow / stroke / shape border+shadow don't
- *  clip against the tight element box (the comp-sized raster never clipped; a tight box would). Parsed
- *  from the same resolved style the draw uses, so it tracks the actual overhang. */
-export function overlayOverhangMargin(layer: TimelineLayer, t: number): number {
+/** Extra comp-px padding a "box"-mode raster needs so text-shadow / stroke / shape border+shadow —
+ *  and a pen path's curve bulges — don't clip against the tight element box (the comp-sized raster
+ *  never clipped; a tight box would). Parsed from the same resolved style the draw uses, so it
+ *  tracks the actual overhang. `W`/`H` (comp px) size percent-of-box overhangs (pen paths). */
+export function overlayOverhangMargin(layer: TimelineLayer, t: number, W: number, H: number): number {
   let m = 2; // base anti-aliasing pad
   const shadowExtent = (css: string): number => {
     const sm = css.match(/(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px/);
@@ -382,6 +383,28 @@ export function overlayOverhangMargin(layer: TimelineLayer, t: number): number {
     const style = getCompositionShapeStyle(layer, { currentTimeSeconds: t }) as Record<string, unknown>;
     if (style.boxShadow) m = Math.max(m, shadowExtent(String(style.boxShadow)));
     if (style.border) m = Math.max(m, num(String(style.border)) / 2 + 2); // border straddles the edge
+    // Pen paths: anchors are normalized to the box at commit, but bezier TANGENT control points —
+    // and point edits dragged past the box edge — push the curve outside 0..100. The control-point
+    // hull bounds the curve (bezier convex-hull property), so its overhang past the box is a safe
+    // pad; without it the tight raster clips the bulge (while the comp-canvas export path doesn't).
+    const shapeKind = String(style.shapeKind ?? layer.shapeKind ?? "");
+    const pts = Array.isArray(style.shapePath) ? (style.shapePath as MaskPoint[]) : layer.shapePath;
+    if (shapeKind === "pen" && pts && pts.length >= 2) {
+      let ox = 0;
+      let oy = 0;
+      const consider = (x: number, y: number) => {
+        ox = Math.max(ox, -x, x - 100);
+        oy = Math.max(oy, -y, y - 100);
+      };
+      for (const pt of pts) {
+        consider(pt.x, pt.y);
+        if (pt.inTangent) consider(pt.x + pt.inTangent.x, pt.y + pt.inTangent.y);
+        if (pt.outTangent) consider(pt.x + pt.outTangent.x, pt.y + pt.outTangent.y);
+      }
+      const boxW = (num(style.width) / 100) * W;
+      const boxH = (num(style.height) / 100) * H;
+      m = Math.max(m, (ox / 100) * boxW + 2, (oy / 100) * boxH + 2);
+    }
   }
   return m;
 }
@@ -664,8 +687,76 @@ function buildShapePath(ctx: Ctx, kind: string, x: number, y: number, w: number,
   }
 }
 
+/** One axis of a cubic bezier's interior extrema: B(t) at the real roots of B'(t) in (0,1). */
+function cubicAxisExtrema(p0: number, p1: number, p2: number, p3: number): number[] {
+  const a = 3 * (-p0 + 3 * p1 - 3 * p2 + p3);
+  const b = 6 * (p0 - 2 * p1 + p2);
+  const c = 3 * (p1 - p0);
+  const roots: number[] = [];
+  if (Math.abs(a) < 1e-9) {
+    if (Math.abs(b) > 1e-9) roots.push(-c / b);
+  } else {
+    const disc = b * b - 4 * a * c;
+    if (disc >= 0) {
+      const sq = Math.sqrt(disc);
+      roots.push((-b + sq) / (2 * a), (-b - sq) / (2 * a));
+    }
+  }
+  const out: number[] = [];
+  for (const t of roots) {
+    if (t <= 0 || t >= 1) continue;
+    const mt = 1 - t;
+    out.push(mt * mt * mt * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t * p3);
+  }
+  return out;
+}
+
+/** EXACT bounds of a closed pen path — true curve extrema per cubic segment, not the (looser)
+ *  control-point hull. Unit-agnostic: anchors and their RELATIVE in/out tangent deltas just have to
+ *  share units (box px in the editor overlay, percent-of-box in `shapePath`). Null for <2 points.
+ *  This is what the editor uses to renormalize a pen shape's box to its visual bounds on commit. */
+export function penPathBounds(points: MaskPoint[] | undefined): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  if (!points || points.length < 2) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const take = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  };
+  for (const pt of points) take(pt.x, pt.y);
+  const hasTangents = points.some((pt) => pt.inTangent || pt.outTangent);
+  if (hasTangents) {
+    for (let i = 0; i < points.length; i += 1) {
+      const cur = points[i]!;
+      const next = points[(i + 1) % points.length]!;
+      const xs = cubicAxisExtrema(cur.x, cur.x + (cur.outTangent?.x ?? 0), next.x + (next.inTangent?.x ?? 0), next.x);
+      const ys = cubicAxisExtrema(cur.y, cur.y + (cur.outTangent?.y ?? 0), next.y + (next.inTangent?.y ?? 0), next.y);
+      for (const x of xs) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+      }
+      for (const y of ys) {
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return { minX, minY, maxX, maxY };
+}
+
 function customShapePath(ctx: Ctx, points: MaskPoint[] | undefined, x: number, y: number, w: number, h: number): void {
-  const pts = points && points.length >= 2 ? points : defaultPenShapePath();
+  // A pen shape with no drawn geometry renders NOTHING (draw-first flow, 2026-07-17): the editor
+  // creates the layer empty and arms the viewer pen tool; the old ellipse-ish fallback here made
+  // "add pen shape" look like it inserted a circle.
+  if (!points || points.length < 2) {
+    ctx.beginPath();
+    return;
+  }
+  const pts = points;
   const toX = (value: number) => x + (value / 100) * w;
   const toY = (value: number) => y + (value / 100) * h;
   const toDx = (value: number) => (value / 100) * w;
@@ -690,15 +781,6 @@ function customShapePath(ctx: Ctx, points: MaskPoint[] | undefined, x: number, y
     }
   }
   ctx.closePath();
-}
-
-function defaultPenShapePath(): MaskPoint[] {
-  return [
-    { id: "pen_top", x: 50, y: 4, inTangent: { x: -30.36, y: 0 }, outTangent: { x: 30.36, y: 0 }, lockedTangents: true },
-    { id: "pen_right", x: 96, y: 50, inTangent: { x: 0, y: -30.36 }, outTangent: { x: 0, y: 30.36 }, lockedTangents: true },
-    { id: "pen_bottom", x: 50, y: 96, inTangent: { x: 30.36, y: 0 }, outTangent: { x: -30.36, y: 0 }, lockedTangents: true },
-    { id: "pen_left", x: 4, y: 50, inTangent: { x: 0, y: 30.36 }, outTangent: { x: 0, y: -30.36 }, lockedTangents: true }
-  ];
 }
 
 function regularPolygon(ctx: Ctx, x: number, y: number, w: number, h: number, sides: number, startAngle: number): void {

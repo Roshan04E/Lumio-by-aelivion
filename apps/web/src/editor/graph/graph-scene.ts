@@ -8,6 +8,7 @@
 import {
   evaluateTimelineEffectParam,
   evaluateTimelineTransform,
+  getLayerSpeedAt,
   graphicAnimationPhase,
   resolveGraphicAnimation,
   GRAPHIC_DURATION_PROPERTY,
@@ -16,6 +17,7 @@ import {
   type TimelineLayer
 } from "@kimera-by-aelivion/shared";
 import {
+  getContentBaseValue,
   getEffectParamBaseValue,
   getEffectParamKeyframes,
   getStyleKeyframes,
@@ -23,6 +25,7 @@ import {
   getTransformPropertyValue,
   graphTargetKey,
   sourceTextTargetKeyframes,
+  speedTargetKeyframes,
   styleValueAt,
   type GraphTarget
 } from "../inspector/keyframeUtils";
@@ -67,6 +70,7 @@ function evaluateTargetValue(layer: TimelineLayer, target: GraphTarget, layerTim
   }
   // Source text is a HOLD lane, not a value curve — draw it flat mid-band.
   if (target.kind === "sourceText") return 0;
+  if (target.kind === "speed") return getLayerSpeedAt(layer, layerTime) * 100;
   if (target.kind === "layer") {
     // Animated graphics: read the SHARED resolver rather than the raw keyframe track, so the lane
     // draws the phase the renderers actually run. It matters when Progress ISN'T keyed — the phase
@@ -78,6 +82,9 @@ function evaluateTargetValue(layer: TimelineLayer, target: GraphTarget, layerTim
         ? graphicAnimationPhase(plan, layerTime)
         : styleValueAt(layer, target.property, layerTime, plan.playDurationSeconds);
     }
+    // Content pan/zoom/crop lanes: the unkeyed base lives on `layer.content`, not in a keyframe track.
+    if (target.property.startsWith("content."))
+      return styleValueAt(layer, target.property, layerTime, getContentBaseValue(layer, target.property as Parameters<typeof getContentBaseValue>[1]));
     return styleValueAt(layer, target.property, layerTime, target.property === "textRevealProgress" ? 1 : target.min);
   }
   return evaluateTimelineEffectParam({
@@ -92,6 +99,7 @@ function evaluateTargetValue(layer: TimelineLayer, target: GraphTarget, layerTim
 export function targetKeyframes(layer: TimelineLayer, target: GraphTarget): TimelineKeyframeV2[] {
   if (target.kind === "transform") return getTransformKeyframes(layer, target.property);
   if (target.kind === "sourceText") return sourceTextTargetKeyframes(layer);
+  if (target.kind === "speed") return speedTargetKeyframes(layer);
   if (target.kind === "layer") return getStyleKeyframes(layer, target.property);
   return getEffectParamKeyframes(layer, target.effectId, target.property);
 }
@@ -205,6 +213,13 @@ export type GraphHit =
   | { type: "handle"; curveKey: string; keyframeId: string; handle: "in" | "out" }
   | { type: "curve"; curveKey: string; timeSeconds: number };
 
+/** Lanes with no bezier semantics: sourceText is hold-only, speed is linear-only (the closed-form
+ *  `integrateRamp` contract depends on straight segments) — both write-paths already no-op handle
+ *  edits, so skip drawing/hit-testing handles for them entirely rather than offer a dead affordance. */
+export function hasBezierHandles(target: GraphTarget): boolean {
+  return target.kind !== "sourceText" && target.kind !== "speed";
+}
+
 /**
  * Hit-test priority: handles of selected keyframes > points > curve strokes.
  * Coordinates in canvas px.
@@ -221,6 +236,7 @@ export function hitTestScene(
   const handleRadius = 6;
 
   for (const curve of scenes) {
+    if (!hasBezierHandles(curve.target)) continue;
     for (const kf of curve.keyframes) {
       // Handles show for EVERY selected keyframe (AE behavior) — grabbing one on a
       // non-bezier key converts it to bezier at drag start.

@@ -3,11 +3,17 @@ import {
   evaluateTimelineTransform,
   evaluateTimelineEffectParam,
   getLayerAnimations,
+  getLayerSpeedAt,
+  getSpeedRamp,
   getTimelineEffectDefinition,
   normalizeTimelineEffect,
   resolveGraphicAnimation,
+  removeSpeedRampPoint,
+  upsertSpeedRampPoint,
   GRAPHIC_DURATION_PROPERTY,
   GRAPHIC_PROGRESS_PROPERTY,
+  MAX_LAYER_SPEED,
+  MIN_LAYER_SPEED,
   type KeyframeInterpolation,
   type SourceTextKeyframe,
   type TextRun,
@@ -29,7 +35,9 @@ export type TransformAnimationProperty =
   | "transform.opacity"
   | "transform.rotateX"
   | "transform.rotateY"
-  | "transform.perspective";
+  | "transform.perspective"
+  | "transform.anchor.x"
+  | "transform.anchor.y";
 
 export type GraphTarget =
   | {
@@ -71,6 +79,19 @@ export type GraphTarget =
       min: number;
       property: string;
       step: number;
+      /** Same inverted-Y semantics as the transform variant (content.offsetY grows downward). */
+      invertY?: boolean;
+    }
+  | {
+      /** Speed ramp (`layer.speedKeyframes`) — a real value curve, but LINEAR-only: the closed-form
+       *  `integrateRamp` contract the source-time mapping depends on assumes straight segments, so
+       *  this lane suppresses bezier handles entirely (drag = time/value only, no easing choice). */
+      kind: "speed";
+      label: string;
+      max: number;
+      min: number;
+      property: "speed";
+      step: number;
     };
 
 // ---------------------------------------------------------------------------
@@ -104,11 +125,16 @@ export const transformPropertyConfigs: Array<{
   // consistently (see curveNorm/curveValue in graph-scene.ts).
   { label: "Y", property: "transform.position.y", min: -200, max: 300, step: 1, invertY: true },
   { label: "Scale", property: "transform.scale", min: 0.01, max: 100, step: 0.05 },
-  { label: "Rotate", property: "transform.rotation", min: -180, max: 180, step: 1 },
+  // AE-style multi-turn rotation: ±10 full turns so spin animations can be keyframed (0 → 720°…);
+  // renderers apply raw degrees, and viewer gestures still normalize their own writes to ±180.
+  { label: "Rotate", property: "transform.rotation", min: -3600, max: 3600, step: 1 },
   { label: "Opacity", property: "transform.opacity", min: 0, max: 100, step: 1 },
   { label: "Tilt X", property: "transform.rotateX", min: -180, max: 180, step: 1 },
   { label: "Tilt Y", property: "transform.rotateY", min: -180, max: 180, step: 1 },
-  { label: "Persp", property: "transform.perspective", min: 0, max: 4000, step: 20 }
+  { label: "Persp", property: "transform.perspective", min: 0, max: 4000, step: 20 },
+  // Anchor (D3): pivot percent of the element box; same invertY rationale as position.y.
+  { label: "Anchor X", property: "transform.anchor.x", min: -100, max: 200, step: 1 },
+  { label: "Anchor Y", property: "transform.anchor.y", min: -100, max: 200, step: 1, invertY: true }
 ];
 
 export const transformGraphTargets: GraphTarget[] = transformPropertyConfigs.map((item) => ({
@@ -144,6 +170,15 @@ export function mintKeyframeId(suffix: string): string {
   return `kf_${Date.now()}_${suffix}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Resolve a graph-lane keyframeId back to a ramp point's timeSeconds — by real id first, falling
+ *  back to the index-derived id `speedTargetKeyframes` mints for points saved without one. */
+function findSpeedPointTime(ramp: ReturnType<typeof getSpeedRamp>, keyframeId: string): number | undefined {
+  const byId = ramp?.find((point) => point.id === keyframeId);
+  if (byId) return byId.timeSeconds;
+  const match = /^speed_(\d+)$/.exec(keyframeId);
+  return match ? ramp?.[Number(match[1])]?.timeSeconds : undefined;
+}
+
 export function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
@@ -167,6 +202,8 @@ export function getTransformPropertyValue(
   if (property === "transform.rotateX") return transform.rotateX ?? 0;
   if (property === "transform.rotateY") return transform.rotateY ?? 0;
   if (property === "transform.perspective") return transform.perspective ?? 0;
+  if (property === "transform.anchor.x") return transform.anchor?.x ?? 50;
+  if (property === "transform.anchor.y") return transform.anchor?.y ?? 50;
   return transform.opacity;
 }
 
@@ -195,6 +232,12 @@ export function setTransformPropertyValue(
   }
   if (property === "transform.perspective") {
     return { ...layer, transform: { ...layer.transform, perspective: value } };
+  }
+  if (property === "transform.anchor.x") {
+    return { ...layer, transform: { ...layer.transform, anchor: { x: value, y: layer.transform.anchor?.y ?? 50 } } };
+  }
+  if (property === "transform.anchor.y") {
+    return { ...layer, transform: { ...layer.transform, anchor: { x: layer.transform.anchor?.x ?? 50, y: value } } };
   }
   return { ...layer, transform: { ...layer.transform, opacity: value } };
 }
@@ -875,6 +918,20 @@ export function applyContentValueAtTime(
   return setContentBaseValue(layer, property, value);
 }
 
+/** Content pan/zoom/crop as graph lanes. Kind "layer" (content keyframes ARE layer-scope V2 tracks —
+ *  same storage the style helpers filter on), so the graph's generic layer machinery edits them; only
+ *  the unkeyed base value needs `getContentBaseValue` (special-cased in graph-scene). Raw units, not
+ *  the inspector's ×100 display: scale 1 = fit, offsets ±1 = full frame, crop 0..0.95. */
+export const contentGraphTargets: GraphTarget[] = [
+  { kind: "layer", label: "Zoom", property: "content.scale", min: 0.1, max: 8, step: 0.01 },
+  { kind: "layer", label: "Pan X", property: "content.offsetX", min: -1, max: 1, step: 0.01 },
+  { kind: "layer", label: "Pan Y", property: "content.offsetY", min: -1, max: 1, step: 0.01, invertY: true },
+  { kind: "layer", label: "Crop Top", property: "content.crop.top", min: 0, max: 0.95, step: 0.01 },
+  { kind: "layer", label: "Crop Right", property: "content.crop.right", min: 0, max: 0.95, step: 0.01 },
+  { kind: "layer", label: "Crop Bottom", property: "content.crop.bottom", min: 0, max: 0.95, step: 0.01 },
+  { kind: "layer", label: "Crop Left", property: "content.crop.left", min: 0, max: 0.95, step: 0.01 }
+];
+
 // ---------------------------------------------------------------------------
 // Generic layer-scope NUMERIC keyframes (V2 only, no legacy equivalent) — same shape as the
 // `content.*` helpers above, but the base value lives wherever the caller keeps it (so a property
@@ -991,6 +1048,7 @@ export function getEffectParamBaseValue(
 export function graphTargetKey(target: GraphTarget) {
   if (target.kind === "transform") return `transform:${target.property}`;
   if (target.kind === "sourceText") return "sourceText";
+  if (target.kind === "speed") return "speed";
   if (target.kind === "layer") return `layer:${target.property}`;
   return `effect:${target.effectId}:${target.property}`;
 }
@@ -1075,6 +1133,42 @@ export function toggleSourceTextKeyframe(layer: TimelineLayer, layerTime: number
   return { ...layer, sourceTextKeyframes: [...keys, captured].sort((a, b) => a.timeSeconds - b.timeSeconds) };
 }
 
+/** The single speed-ramp graph lane (video/audio clips). Values are PERCENT (mirrors
+ *  `ClipSpeedControl`'s inspector fields), converted to/from the underlying rate multiplier. */
+export const speedGraphTarget: GraphTarget = {
+  kind: "speed",
+  label: "Speed",
+  min: MIN_LAYER_SPEED * 100,
+  max: MAX_LAYER_SPEED * 100,
+  property: "speed",
+  step: 5
+};
+
+/** Ramp points as pseudo keyframes (linear, no bezier handles — see the "speed" GraphTarget doc).
+ *  Falls back to an index-derived id for points saved before `SpeedKeyframe.id` existed. */
+export function speedTargetKeyframes(layer: TimelineLayer): TimelineKeyframeV2[] {
+  return (getSpeedRamp(layer) ?? []).map((point, index) => ({
+    id: point.id ?? `speed_${index}`,
+    target: { scope: "layer", property: "speed" },
+    timeSeconds: point.timeSeconds,
+    value: point.value * 100,
+    interpolation: "linear" as const,
+    temporal: {}
+  }));
+}
+
+/** Add/remove a ramp point at `layerTime` — same dedupe-by-time write rule as `ClipSpeedControl`,
+ *  through the shared `upsertSpeedRampPoint`/`removeSpeedRampPoint` helpers. */
+export function toggleSpeedKeyframe(layer: TimelineLayer, layerTime: number): TimelineLayer {
+  const ramp = getSpeedRamp(layer);
+  const existing = ramp?.find((point) => isKeyframeAt(point.timeSeconds, layerTime));
+  if (existing) {
+    return { ...layer, speedKeyframes: removeSpeedRampPoint(layer, existing.timeSeconds) };
+  }
+  const time = clamp(layerTime, 0, layer.durationSeconds);
+  return { ...layer, speedKeyframes: upsertSpeedRampPoint(layer, time, getLayerSpeedAt(layer, time)) };
+}
+
 export function shortKeyframeProperty(property: string) {
   if (property === "transform.position.x") return "X";
   if (property === "transform.position.y") return "Y";
@@ -1131,6 +1225,25 @@ export function updateGraphTargetKeyframe(
         .sort((a, b) => a.timeSeconds - b.timeSeconds)
     };
   }
+  if (target.kind === "speed") {
+    const ramp = getSpeedRamp(layer) ?? [];
+    const timeSeconds = findSpeedPointTime(ramp, keyframeId);
+    if (timeSeconds === undefined) return layer;
+    return {
+      ...layer,
+      speedKeyframes: ramp
+        .map((point) =>
+          point.timeSeconds === timeSeconds
+            ? {
+                id: point.id,
+                timeSeconds: patch.timeSeconds !== undefined ? clamp(patch.timeSeconds, 0, layer.durationSeconds) : point.timeSeconds,
+                value: patch.value !== undefined ? clamp(patch.value / 100, MIN_LAYER_SPEED, MAX_LAYER_SPEED) : point.value
+              }
+            : point
+        )
+        .sort((a, b) => a.timeSeconds - b.timeSeconds)
+    };
+  }
 
   return {
     ...layer,
@@ -1154,7 +1267,7 @@ export function setGraphTargetInterpolation(
   keyframeId: string,
   interpolation: KeyframeInterpolation
 ): TimelineLayer {
-  if (target.kind === "sourceText") return layer; // hold-only lane
+  if (target.kind === "sourceText" || target.kind === "speed") return layer; // hold/linear-only lanes
   if (target.kind === "transform") {
     const layerWithAnimation = (layer.animations ?? []).some((item) => item.id === keyframeId)
       ? layer
@@ -1184,7 +1297,7 @@ export function updateGraphTargetHandle(
   nextHandle: { dx: number; dy: number },
   linked: boolean
 ): TimelineLayer {
-  if (target.kind === "sourceText") return layer; // hold-only lane
+  if (target.kind === "sourceText" || target.kind === "speed") return layer; // hold/linear-only lanes
   if (target.kind === "transform") {
     return updateTransformKeyframeHandle(layer, target.property, keyframeId, handle, nextHandle, linked);
   }
@@ -1215,7 +1328,7 @@ export function setGraphTargetLinked(
   keyframeId: string,
   linked: boolean
 ): TimelineLayer {
-  if (target.kind === "sourceText") return layer; // hold-only lane
+  if (target.kind === "sourceText" || target.kind === "speed") return layer; // hold/linear-only lanes
   if (target.kind === "transform") {
     return setTransformKeyframeLinked(layer, target.property, keyframeId, linked);
   }
