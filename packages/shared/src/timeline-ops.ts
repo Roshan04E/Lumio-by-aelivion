@@ -34,9 +34,12 @@ function clonedEffectIdMap(layer: TimelineLayer, newLayerId: string): Map<string
  *  the targets orphans every effect/mask keyframe on the copy (the animation evaluator and the
  *  inspector both look keyframes up by the effect's CURRENT id, so the copy plays static). */
 function remapAnimationTarget(
-  target: TimelineKeyframeV2["target"],
+  target: TimelineKeyframeV2["target"] | undefined,
   effectIdMap: Map<string, string>
 ): TimelineKeyframeV2["target"] {
+  // Runtime data can carry a missing target (legacy/malformed V2 entries the old spread-clone
+  // tolerated) — pass it through untouched instead of crashing the whole split/duplicate.
+  if (!target) return target as unknown as TimelineKeyframeV2["target"];
   const remapped = target.effectId ? effectIdMap.get(target.effectId) : undefined;
   return remapped ? { ...target, effectId: remapped } : target;
 }

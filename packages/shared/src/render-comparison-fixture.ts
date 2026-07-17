@@ -87,7 +87,8 @@ export type RenderComparisonFixtureKey =
   | "chroma-key"
   | "framed-media"
   | "track-matte"
-  | "anchored-media";
+  | "anchored-media"
+  | "nested-transition";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -121,7 +122,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "chroma-key",
   "framed-media",
   "track-matte",
-  "anchored-media"
+  "anchored-media",
+  "nested-transition"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -434,6 +436,8 @@ interface FixtureVariant {
   trackMatte?: TimelineLayer["trackMatte"];
   /** Anchor points (D3): off-center pivot + rotation/scale on the media layer. */
   anchorTransform?: { anchor: { x: number; y: number }; rotation: number; scale: number };
+  /** D4 (R2 step 3): the transition pair lives INSIDE a nested composition referenced by a compound clip. */
+  nestedTransition?: boolean;
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -546,6 +550,12 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
           }
         }
       };
+    case "nested-transition":
+      // D4 (R2 step 3): the SAME two-clip crossDissolve as the `transition` fixture, but inside a
+      // nested composition referenced by a compound clip — sampled MID-transition. Trips if the
+      // in-nest mix doesn't play (hard cut = only the graded incoming shows), if the outgoing child
+      // double-draws, or if the mix targets aren't sized to the nest.
+      return { effects: [], fit: "cover", nestedTransition: true };
     case "anchored-media":
       // Anchor points (D3): the media rotates/scales about an OFF-CENTER pivot (20%,20%), with an
       // ellipse clip mask riding along. Trips if any pivot site disagrees — the GPU quad
@@ -720,6 +730,43 @@ Save this style now`);
     keyframes: []
   };
 
+  // D4: the transition pair re-homed INSIDE a nested composition, referenced by ONE compound clip on
+  // the main timeline. The compound clip spans the whole comp; nested time == parent time, so the
+  // 0.45s sample lands mid-window exactly like the flat `transition` fixture.
+  const nestedComposition = {
+    id: "fixture_nested_comp",
+    name: "Nested transition comp",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 12,
+    backgroundColor: "#000000",
+    tracks: [
+      {
+        id: "nest_video_track",
+        type: "video" as const,
+        name: "Nest video",
+        layers: [
+          { ...transitionOutgoing, id: "nest_out", trackId: "nest_video_track" },
+          { ...transitionIncoming, id: "nest_in", trackId: "nest_video_track" }
+        ]
+      }
+    ]
+  };
+  const compoundClip: TimelineLayer = {
+    id: "fixture_nest_clip",
+    trackId: "video_track",
+    type: "video",
+    name: "Nested sequence",
+    nestedCompositionId: nestedComposition.id,
+    startSeconds: 0,
+    durationSeconds: 12,
+    fit: "cover",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+
   const graph: ProjectGraph = {
     projectId: "project_render_pixel_fixture",
     effects: [],
@@ -742,20 +789,25 @@ Save this style now`);
           id: "overlay_track",
           type: "overlay",
           name: "Overlay",
-          // Transition fixture keeps the overlay empty so the diff isolates the junction mix.
-          layers: useTextFixture ? [textFixtureLayer] : variant.transition ? [] : [shapeLayer]
+          // Transition fixtures keep the overlay empty so the diff isolates the junction mix.
+          layers: useTextFixture ? [textFixtureLayer] : variant.transition || variant.nestedTransition ? [] : [shapeLayer]
         },
         {
           id: "video_track",
           type: "video",
           name: "Video",
-          layers: variant.transition ? [transitionOutgoing, transitionIncoming] : [imageLayer]
+          layers: variant.nestedTransition
+            ? [compoundClip]
+            : variant.transition
+              ? [transitionOutgoing, transitionIncoming]
+              : [imageLayer]
         }
       ]
-    }
+    },
+    ...(variant.nestedTransition ? { compositions: { [nestedComposition.id]: nestedComposition } } : {})
   };
   // Text-only + transition fixtures isolate their concern — skip captions so the diff is just that.
-  const compositionWithCaptions = useTextFixture || variant.transition
+  const compositionWithCaptions = useTextFixture || variant.transition || variant.nestedTransition
     ? graph.composition!
     : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
 

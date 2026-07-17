@@ -66,7 +66,12 @@ site becomes `center + (anchor - 50%) rotated/scaled`; keep `position` meaning t
 position (Premiere semantics) so moving the anchor shifts the pivot, not the image. Gizmos draw the
 anchor as a crosshair, draggable with Alt. Pixel-gate a rotated+anchored fixture in all renderers.
 
-## D4 — Transitions playing INSIDE nested clips (R2 step 3)
+## D4 — Transitions playing INSIDE nested clips (R2 step 3) — SHIPPED 2026-07-17
+
+> Implemented per the design below (per-group pair map + mix draw at the incoming child's z-slot),
+> plus an ambient-size resize on the pooled effect/side RTTs (latent bug: in-nest blur/mix rendered
+> into a corner of comp-sized textures). `nested-transition` fixture 0.000%; `editor:test` green.
+> See architecture.md "Phase C".
 
 Already-shipped steps 1-2 mean nested clips render correct HARD CUTS (nothing vanishes, no
 cross-nest false pairs). Step 3 (the mix actually playing inside the nest): in `buildGroupDraw`

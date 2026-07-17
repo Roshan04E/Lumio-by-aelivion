@@ -258,6 +258,11 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // z-slot). A layer in `foldedIds` is drawn inside a side group, never independently.
   const activeByIncomingId = new Map<string, ActiveTransition>();
   const foldedIds = new Set<string>();
+  // R2 step 3 (D4): active transitions whose BOTH sides live in the SAME nest, keyed by the owning
+  // group. `buildGroupDraw` emits these as an in-group mix draw at the incoming child's z-slot (the
+  // compositor's child loop already renders transition draws inside a nest). Cross-nest and
+  // half-nested pairs still degrade to a hard cut (the outgoing side simply drops, per R2).
+  const groupPairsByOwner = new Map<string, { incomingId: string; outgoingId: string; active: ActiveTransition }[]>();
   for (const pair of tPairs) {
     const active = getActiveTransition(pair.spec, {
       currentTimeSeconds: t,
@@ -271,9 +276,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     // R2 fix: a nested clip must never enter the TOP-LEVEL fold — `membersByGroup` (built below) excludes
     // any id in `foldedIds`/`transitionOutgoingIds`, so a group-owned side used to vanish from its group
     // entirely once folded here (it has no top-level draw either, since nothing at this level owns it).
-    // Skipping group-owned pairs makes nested clips render as a hard cut instead of disappearing; the
-    // in-nest mix (step 3, `buildGroupDraw`) is the follow-up that makes the transition itself play.
     if (layerOwnerGroup.has(pair.outgoingId) || layerOwnerGroup.has(pair.incomingId)) {
+      const owner = layerOwnerGroup.get(pair.incomingId);
+      if (owner && owner === layerOwnerGroup.get(pair.outgoingId)) {
+        const list = groupPairsByOwner.get(owner);
+        const entry = { incomingId: pair.incomingId, outgoingId: pair.outgoingId, active };
+        if (list) list.push(entry);
+        else groupPairsByOwner.set(owner, [entry]);
+      }
       continue;
     }
     activeByIncomingId.set(pair.incomingId, active);
@@ -823,6 +833,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     const nestH = spec.composition.height;
     const nestDims = { w: nestW, h: nestH, matteCache: matteCacheForNest(spec.composition.id, nestW, nestH) };
     const children: SceneDraw[] = [];
+    const groupPairs = groupPairsByOwner.get(key);
     for (const ref of orderedGroupChildRefs(key)) {
       if (ref.kind === "group") {
         const child = buildGroupDraw(ref.key);
@@ -831,6 +842,32 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         // A nested member consumed as a sibling's track matte never draws on its own (D1) — same
         // rule as the top-level loop's `matteSourceIds` skip.
         if (matteSourceIds.has(ref.layer.id)) continue;
+        // R2 step 3 (D4): a child-to-child transition WITHIN this nest emits the mix at the incoming
+        // child's z-slot — both sides built against the NEST's dims, exactly like the top-level fold.
+        // The outgoing side never reaches this loop (it's in `transitionOutgoingIds`, excluded from
+        // `membersByGroup`), so nothing double-draws. If a side isn't ready, fall through to drawing
+        // the incoming child normally (the same degrade as the top-level branch).
+        const pairEntry = groupPairs?.find((entry) => entry.incomingId === ref.layer.id);
+        if (pairEntry) {
+          const outgoingLayer = layerById.get(pairEntry.outgoingId);
+          const from = outgoingLayer ? buildLayerDrawWithPasses(outgoingLayer, nestDims) : null;
+          const to = buildLayerDrawWithPasses(ref.layer, nestDims);
+          if (from && to) {
+            children.push({
+              kind: "transition",
+              debugFromId: pairEntry.outgoingId,
+              debugToId: pairEntry.incomingId,
+              from: [from],
+              to: [to],
+              def: pairEntry.active.def,
+              progress: pairEntry.active.progress,
+              params: pairEntry.active.params,
+            });
+            continue;
+          }
+          if (to) children.push(to);
+          continue;
+        }
         const draw = buildLayerDrawWithPasses(ref.layer, nestDims);
         if (draw) children.push(draw);
       }

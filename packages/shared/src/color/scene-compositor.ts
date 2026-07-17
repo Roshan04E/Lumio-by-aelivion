@@ -1086,13 +1086,23 @@ export class SceneCompositor {
     this.effectProgramsBuilt = true;
   }
 
-  /** Lazily allocate the comp-sized RTTs the blur/glow passes need (pooled across layers/frames). */
+  /**
+   * Lazily allocate the RTTs the blur/glow/transition-mix passes need (pooled across layers/frames),
+   * sized to the CURRENT ambient comp — inside a compound-group render that's the NEST's size (D4):
+   * every consumer draws with the ambient viewport and then samples the FULL texture 0..1, so a
+   * comp-sized plate under a nest-sized viewport would leave the content in a corner. `resize` is a
+   * no-op when unchanged; a frame that alternates nest/comp effect passes pays a realloc per switch
+   * (acceptable — only comps that nest blur/transitions hit it; flag if it shows in a trace).
+   */
   private effectTargets(): { plate: RenderTarget; s1: RenderTarget; s2: RenderTarget } {
     const gl = this.gl;
     this.ensureEffectPrograms(); // programs + targets are always needed together — one choke point
     this.plateRT ??= new RenderTarget(gl, this.width, this.height);
     this.scratch1 ??= new RenderTarget(gl, this.width, this.height);
     this.scratch2 ??= new RenderTarget(gl, this.width, this.height);
+    this.plateRT.resize(this.width, this.height);
+    this.scratch1.resize(this.width, this.height);
+    this.scratch2.resize(this.width, this.height);
     return { plate: this.plateRT, s1: this.scratch1, s2: this.scratch2 };
   }
 
@@ -1128,13 +1138,19 @@ export class SceneCompositor {
     }
   }
 
-  /** Lazily allocate the two per-side ping-pong PAIRS a folded transition pre-composes each clip nest into. */
+  /** Lazily allocate the two per-side ping-pong PAIRS a folded transition pre-composes each clip nest
+   *  into — resized to the CURRENT ambient size like `effectTargets` (D4: an in-nest mix pre-composes
+   *  its sides at the NEST's dims). */
   private transitionTargets(): { sideA: RenderTarget; sideAScratch: RenderTarget; sideB: RenderTarget; sideBScratch: RenderTarget } {
     const gl = this.gl;
     this.sideAScratch ??= new RenderTarget(gl, this.width, this.height);
     this.sideBScratch ??= new RenderTarget(gl, this.width, this.height);
     this.sideA ??= new RenderTarget(gl, this.width, this.height);
     this.sideB ??= new RenderTarget(gl, this.width, this.height);
+    this.sideAScratch.resize(this.width, this.height);
+    this.sideBScratch.resize(this.width, this.height);
+    this.sideA.resize(this.width, this.height);
+    this.sideB.resize(this.width, this.height);
     return { sideA: this.sideA, sideAScratch: this.sideAScratch, sideB: this.sideB, sideBScratch: this.sideBScratch };
   }
 
