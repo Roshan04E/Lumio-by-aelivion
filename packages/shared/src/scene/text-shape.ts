@@ -340,6 +340,11 @@ export async function drawTextLayer(
       ctx.rotate((transform.rotation * Math.PI) / 180);
       ctx.scale(transform.scale, transform.scale);
     }
+    // Anchor (D3): geometry below is centered about the origin; shift it so the ANCHOR point of the
+    // element box sits at the origin instead — position places the anchor, rotate/scale pivot there
+    // (the translate is inside the rotate/scale in "full" mode, matching writeQuad's p−anchor model).
+    // Default 50/50 → no-op.
+    ctx.translate((-((transform.anchorX ?? 50) - 50) / 100) * boxW, (-((transform.anchorY ?? 50) - 50) / 100) * boxH);
   }
 
   // Background box.
@@ -516,6 +521,9 @@ export function drawShapeLayer(
       ctx.rotate((transform.rotation * Math.PI) / 180);
       ctx.scale(transform.scale, transform.scale);
     }
+    // Anchor (D3): same pivot shift as drawTextLayer — position places the anchor point of the
+    // shape box, rotate/scale pivot there. Default 50/50 → no-op.
+    ctx.translate((-((transform.anchorX ?? 50) - 50) / 100) * w, (-((transform.anchorY ?? 50) - 50) / 100) * h);
   }
 
   const boxShadow = style.boxShadow ? String(style.boxShadow) : "";

@@ -47,7 +47,13 @@ the glyph/path alpha (`globalCompositeOperation = "source-in"` inside a save/res
 (`contentStyleForKey`, scene-text-raster.ts:64). Remotion needs the image URL in the manifest
 (carry `fillTexture` verbatim like `graphic`). Add a pixel fixture.
 
-## D3 — Anchor points
+## D3 — Anchor points — SHIPPED 2026-07-17
+
+> Implemented per the design below, plus a FIFTH pivot site the design missed: the clip-mask matte
+> bake (`scene-mask-matte` rides the layer transform — an anchored clip's mask would land off the
+> clip without it). Anchor is keyframable (`transform.anchor.x/.y`). Alt-drag of the viewer
+> crosshair is NOT in yet (crosshair is display-only; edit via inspector) — Sonnet-safe follow-up.
+> `anchored-media` fixture 0.000%. See architecture.md "Phase C".
 
 Why deferred: the rotate/scale pivot is hardcoded to layer center in FOUR parity-locked paths —
 GPU quad transform (scene-compositor.ts ~1222-1264, incl. 3D tilt), canvas-2D text/shape

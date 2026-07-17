@@ -187,6 +187,12 @@ export function evaluateTimelineTransform(input: {
   const position = evaluateSpatialPosition(input.transform.position, animations, layerTimeSeconds);
   const evalProp = <T extends AnimatedValue>(property: string, baseValue: T): T =>
     evaluateSortedKeyframes(sortedKeyframesFor(animations, "layer", property), baseValue, layerTimeSeconds);
+  // Anchor (D3): evaluated only when the layer HAS one (or keyframes one) — absent stays absent, so
+  // every "no anchor = center pivot" fast path downstream remains byte-identical.
+  const baseAnchor = input.transform.anchor;
+  const hasAnchorKeyframes =
+    sortedKeyframesFor(animations, "layer", "transform.anchor.x").length > 0 ||
+    sortedKeyframesFor(animations, "layer", "transform.anchor.y").length > 0;
   return {
     position,
     scale: evalProp("transform.scale", input.transform.scale),
@@ -195,7 +201,15 @@ export function evaluateTimelineTransform(input: {
     rotateX: evalProp("transform.rotateX", input.transform.rotateX ?? 0),
     rotateY: evalProp("transform.rotateY", input.transform.rotateY ?? 0),
     perspective: evalProp("transform.perspective", input.transform.perspective ?? 0),
-    z: evalProp("transform.z", input.transform.z ?? 0)
+    z: evalProp("transform.z", input.transform.z ?? 0),
+    ...(baseAnchor || hasAnchorKeyframes
+      ? {
+          anchor: {
+            x: evalProp("transform.anchor.x", baseAnchor?.x ?? 50),
+            y: evalProp("transform.anchor.y", baseAnchor?.y ?? 50)
+          }
+        }
+      : {})
   };
 }
 

@@ -76,7 +76,8 @@ export function isSceneTextureSource(s: TexImageSource | SceneTextureSource): s 
 }
 
 export interface SceneLayerTransform {
-  /** Layer center, percent of comp (0..100). */
+  /** The ANCHOR's comp position, percent of comp (0..100). Default anchor = center, so absent
+   *  `anchorX/anchorY` keeps the historical "layer center" meaning. */
   x: number;
   y: number;
   scale: number;
@@ -84,6 +85,10 @@ export interface SceneLayerTransform {
   rotation: number;
   /** 0..100. */
   opacity: number;
+  /** Anchor point (D3): rotate/scale/tilt pivot, percent of the ELEMENT box (the comp for media,
+   *  the tight box for text/shape). Absent = 50/50 = center — `writeQuad` reduces byte-identically. */
+  anchorX?: number | undefined;
+  anchorY?: number | undefined;
 }
 
 /**
@@ -1426,6 +1431,12 @@ export class SceneCompositor {
     const cx = (t.x / 100) * w;
     const cy = (t.y / 100) * h;
     const s = t.scale;
+    // Anchor (D3): pivot offset from the element center, unscaled element-local px. Default 50/50 →
+    // aox=aoy=0 and every line below reduces EXACTLY to the historical center-pivot math. Mirrors the
+    // CSS formulation `translate3d(-ax%,-ay%,z)` + `transform-origin: ax% ay%` (compositionTransformCss
+    // / compositionTransformOriginCss), so DOM and GPU stay pixel-aligned for anchored layers too.
+    const aox = (((t.anchorX ?? 50) - 50) / 50) * halfW;
+    const aoy = (((t.anchorY ?? 50) - 50) / 50) * halfH;
     const cyR = Math.cos(rotateY * DEG);
     const syR = Math.sin(rotateY * DEG);
     const cxR = Math.cos(rotateX * DEG);
@@ -1436,8 +1447,9 @@ export class SceneCompositor {
     let n = 0;
     // Emit one corner: element-local offset (lx,ly) → 3D rotate → perspective divide → NDC, with uv.
     const put = (lx: number, ly: number, u: number, v: number) => {
-      let x = lx * s;
-      let y = ly * s;
+      // Rotate/scale about the ANCHOR: corner offsets are taken relative to it.
+      let x = (lx - aox) * s;
+      let y = (ly - aoy) * s;
       let zz = 0;
       // rotateY (about Y), then rotateX (about X), then rotateZ (in-plane) — CSS Rz·Rx·Ry·S order.
       let nx = cyR * x + syR * zz;
@@ -1449,13 +1461,13 @@ export class SceneCompositor {
       nx = czR * x - szR * y;
       const ny3 = szR * x + czR * y;
       x = nx; y = ny3;
-      // CSS translate3d(-50%,-50%,z) inside perspective(), origin (box center) added back after divide.
-      const tx = x - halfW;
-      const ty = y - halfH;
+      // CSS translate3d(-ax%,-ay%,z) inside perspective(), origin (the anchor) added back after divide.
+      const tx = x - (halfW + aox);
+      const ty = y - (halfH + aoy);
       const tz = zz + z;
       const pw = perspective > 0 ? Math.max(1 - tz / perspective, 0.01) : 1;
-      const screenX = cx + halfW + tx / pw;
-      const screenY = cy + halfH + ty / pw;
+      const screenX = cx + halfW + aox + tx / pw;
+      const screenY = cy + halfH + aoy + ty / pw;
       q[n] = (screenX / w) * 2 - 1;
       q[n + 1] = 1 - (screenY / h) * 2;
       q[n + 2] = pw;

@@ -14,6 +14,10 @@ export interface CompositionTransform {
   rotateY: number;
   perspective: number;
   z: number;
+  /** Anchor point (D3): rotate/scale/tilt pivot, percent of the element box. Absent = 50/50 center
+   *  (today's behavior — every consumer's no-anchor path stays byte-identical). */
+  anchorX?: number | undefined;
+  anchorY?: number | undefined;
 }
 
 export interface CompositionLayerStyleInput {
@@ -127,6 +131,8 @@ export function getCompositionTransform(
   const transform = asRecord(layer?.transform);
   const position = asRecord(transform.position);
 
+  const anchor = asRecord(transform.anchor);
+  const hasAnchor = transform.anchor !== undefined && transform.anchor !== null;
   const baseTransform = {
     position: {
       x: numberOr(position.x, 50),
@@ -138,7 +144,8 @@ export function getCompositionTransform(
     rotateX: numberOr(transform.rotateX, 0),
     rotateY: numberOr(transform.rotateY, 0),
     perspective: numberOr(transform.perspective, 0),
-    z: numberOr(transform.z, 0)
+    z: numberOr(transform.z, 0),
+    ...(hasAnchor ? { anchor: { x: numberOr(anchor.x, 50), y: numberOr(anchor.y, 50) } } : {})
   };
   const evaluated = evaluateTimelineTransform({
     transform: baseTransform,
@@ -157,7 +164,8 @@ export function getCompositionTransform(
     rotateX: evaluated.rotateX ?? 0,
     rotateY: evaluated.rotateY ?? 0,
     perspective: evaluated.perspective ?? 0,
-    z: evaluated.z ?? 0
+    z: evaluated.z ?? 0,
+    ...(evaluated.anchor ? { anchorX: evaluated.anchor.x, anchorY: evaluated.anchor.y } : {})
   };
 }
 
@@ -686,6 +694,7 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     textShadow: shadowCss,
     filter,
     transform: compositionTransformCss(transform),
+    transformOrigin: compositionTransformOriginCss(transform),
     width: textWidth > 0 ? `${textWidth}%` : "max-content",
     WebkitTextStroke: strokeWidth > 0 ? `${strokeWidth}px ${strokeColor}` : undefined,
     whiteSpace: "pre-wrap" as const
@@ -822,7 +831,8 @@ export function getCompositionShapeStyle(layer: CompositionLayerStyleInput | Tim
     filter: combineFilter(effectCss.filter, getCompositionColorFilter(layer, options)),
     opacity: transform.opacity / 100,
     mixBlendMode: cssBlendMode(getCompositionBlendMode(layer)),
-    transform: compositionTransformCss(transform)
+    transform: compositionTransformCss(transform),
+    transformOrigin: compositionTransformOriginCss(transform)
   };
 }
 
@@ -844,6 +854,7 @@ export function getCompositionMediaStyle(layer: CompositionLayerStyleInput | Tim
     opacity: transform.opacity / 100,
     mixBlendMode: cssBlendMode(getCompositionBlendMode(layer)),
     transform: compositionTransformCss(transform),
+    transformOrigin: compositionTransformOriginCss(transform),
     // Vector masks (Phase 1): applied to the full-bleed (comp-sized) media element so layer-local
     // comp-px mask coords align, and the mask follows the clip's transform. No-op when mask-free.
     // `frame` is forwarded so a Frame's clip mask ref is emitted too (see getCompositionMaskCss).
@@ -873,7 +884,23 @@ export function compositionTransformCss(transform: CompositionTransform, extraSc
   const rotateY = transform.rotateY || 0;
   const perspective = transform.perspective ? `perspective(${transform.perspective}px) ` : "";
   const tilt = rotateX || rotateY ? ` rotateX(${rotateX}deg) rotateY(${rotateY}deg)` : "";
-  return `${perspective}translate3d(-50%, -50%, ${z}px) rotate(${transform.rotation}deg)${tilt} scale(${transform.scale * extraScale})`;
+  // Anchor (D3): the translate percentages place the ANCHOR at the layer's position; pair with
+  // `compositionTransformOriginCss` (transform-origin at the same point) so rotate/scale/tilt pivot
+  // there. Default 50/50 emits the exact historical string.
+  const ax = transform.anchorX ?? 50;
+  const ay = transform.anchorY ?? 50;
+  return `${perspective}translate3d(${-ax}%, ${-ay}%, ${z}px) rotate(${transform.rotation}deg)${tilt} scale(${transform.scale * extraScale})`;
+}
+
+/**
+ * The `transform-origin` that pairs with {@link compositionTransformCss} (D3 anchor). Undefined for
+ * the default center anchor — callers that spread this into a style object leave `transformOrigin`
+ * untouched, keeping the no-anchor path byte-identical.
+ */
+export function compositionTransformOriginCss(transform: CompositionTransform): string | undefined {
+  const ax = transform.anchorX ?? 50;
+  const ay = transform.anchorY ?? 50;
+  return ax === 50 && ay === 50 ? undefined : `${ax}% ${ay}%`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

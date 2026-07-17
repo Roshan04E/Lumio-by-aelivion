@@ -86,7 +86,8 @@ export type RenderComparisonFixtureKey =
   | "grain"
   | "chroma-key"
   | "framed-media"
-  | "track-matte";
+  | "track-matte"
+  | "anchored-media";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -119,7 +120,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "grain",
   "chroma-key",
   "framed-media",
-  "track-matte"
+  "track-matte",
+  "anchored-media"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -430,6 +432,8 @@ interface FixtureVariant {
   frame?: TimelineLayer["frame"];
   /** Track matte (D1): the media layer consumes the layer above it (the text fixture) as its matte. */
   trackMatte?: TimelineLayer["trackMatte"];
+  /** Anchor points (D3): off-center pivot + rotation/scale on the media layer. */
+  anchorTransform?: { anchor: { x: number; y: number }; rotation: number; scale: number };
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -542,6 +546,17 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
           }
         }
       };
+    case "anchored-media":
+      // Anchor points (D3): the media rotates/scales about an OFF-CENTER pivot (20%,20%), with an
+      // ellipse clip mask riding along. Trips if any pivot site disagrees — the GPU quad
+      // (writeQuad), the mask matte bake (scene-mask-matte layer transform), or the manifest not
+      // carrying `transform.anchor`. Center-pivot renderers put the image somewhere else entirely.
+      return {
+        effects: [],
+        fit: "cover",
+        masks: [createBoxMask("ellipse", 220, 520, 860, 1400, 0)],
+        anchorTransform: { anchor: { x: 20, y: 20 }, rotation: 25, scale: 0.85 }
+      };
     case "track-matte":
       // Track matte (D1): the big scaled "HI" text ABOVE the media layer becomes the media's ALPHA
       // matte — the classic text-cutout. The text stops drawing on its own (it's consumed), so the
@@ -581,9 +596,10 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     fit: variant.fit,
     transform: {
       position: { x: 50, y: 50 },
-      scale: 1,
-      rotation: 0,
+      scale: variant.anchorTransform?.scale ?? 1,
+      rotation: variant.anchorTransform?.rotation ?? 0,
       opacity: variant.mediaOpacity ?? 100,
+      ...(variant.anchorTransform ? { anchor: variant.anchorTransform.anchor } : {}),
       ...(variant.tilt
         ? {
             rotateX: variant.tilt.rotateX ?? 0,

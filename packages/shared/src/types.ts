@@ -303,6 +303,14 @@ export interface TimelineTransform {
   scale: number;
   rotation: number;
   opacity: number;
+  /**
+   * Anchor point (D3): the rotate/scale/tilt PIVOT, in percent of the layer's element box
+   * (0..100 each; absent = 50/50 = center — today's behavior, byte-identical). Premiere semantics:
+   * `position` is the ANCHOR's comp position, so moving the anchor moves the pivot, not the image.
+   * Every renderer pivots through this in lockstep (GPU quad, DOM CSS transform-origin, canvas-2D
+   * text/shape, clip-mask matte bake) — see plans/effects-paint-deferred.md D3.
+   */
+  anchor?: TimelineVector2 | undefined;
   /** Perspective tilt around the horizontal axis, degrees. Default 0 (no 3D tilt). */
   rotateX?: number | undefined;
   /** Perspective tilt around the vertical axis, degrees. Default 0 (no 3D tilt). */

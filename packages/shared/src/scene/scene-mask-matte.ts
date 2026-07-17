@@ -46,6 +46,11 @@ export interface MatteLayerTransform {
   y: number;
   scale: number;
   rotation: number;
+  /** Anchor point (D3): rotate/scale pivot, percent of the element box. Absent = 50/50 = center —
+   *  the historical math, byte-identical. Must match the composite quad's pivot or a mask on an
+   *  anchored clip lands somewhere other than where it was drawn. */
+  anchorX?: number | undefined;
+  anchorY?: number | undefined;
 }
 
 function renderMaskAlpha(
@@ -70,7 +75,9 @@ function renderMaskAlpha(
     ctx.translate((layerT.x / 100) * w, (layerT.y / 100) * h);
     if (layerT.rotation) ctx.rotate((layerT.rotation * Math.PI) / 180);
     ctx.scale(layerScale, layerScale);
-    ctx.translate(-w / 2, -h / 2);
+    // Anchor (D3): the pivot is the anchor point of the element box (default 50/50 = -w/2,-h/2 —
+    // the historical center pivot), matching writeQuad/compositionTransformCss.
+    ctx.translate(-((layerT.anchorX ?? 50) / 100) * w, -((layerT.anchorY ?? 50) / 100) * h);
   }
   const c = maskCenter(mask.points);
   const t = mask.transform;

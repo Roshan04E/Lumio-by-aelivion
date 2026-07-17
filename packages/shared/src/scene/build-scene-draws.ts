@@ -415,6 +415,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
           y: transform.y,
           scale: transform.scale,
           rotation: transform.rotation,
+          anchorX: transform.anchorX,
+          anchorY: transform.anchorY,
         })
       : null;
     // Content transform (source-within-frame pan/zoom/crop). offsetX/Y (-1..1 frame fractions) → pan
@@ -428,7 +430,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // Opacity is applied LIVE here (the quad's uOpacity), NOT baked into the grade — so it's reactive
       // on a seek/pause (which recomposite but don't re-grade), exactly like position/scale and
       // text/shape. WebglMediaLayer grades this layer at opacity 1 (`bakeOpacity={false}` in VideoPreview).
-      transform: { x: transform.x, y: transform.y, scale: transform.scale, rotation: transform.rotation, opacity: transform.opacity },
+      transform: { x: transform.x, y: transform.y, scale: transform.scale, rotation: transform.rotation, opacity: transform.opacity, anchorX: transform.anchorX, anchorY: transform.anchorY },
       // 3D tilt (Phase 4.1): the composite quad projects the comp box. Default 0 = flat (unchanged).
       // perspective/z scaled by renderScale so foreshortening is resolution-invariant (writeQuad works in
       // BACKING px); rScale=1 (paused + export) = identity. See the text branch for the full rationale.
@@ -508,7 +510,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         sourceHeight: sourceH,
         fit: "fill",
         blendMode: getCompositionBlendMode(layer),
-        transform: { x: tr.x, y: tr.y, scale: tr.scale, rotation: tr.rotation, opacity: tr.opacity },
+        transform: { x: tr.x, y: tr.y, scale: tr.scale, rotation: tr.rotation, opacity: tr.opacity, anchorX: tr.anchorX, anchorY: tr.anchorY },
         // 4.1c 3D tilt: only in BOX mode, where the element box makes the perspective translate(-50%,-50%)
         // term correct. (blur/glow comp-mode keeps flat — tilt+blur on text is an uncommon combo.)
         // perspective/z are scaled by renderScale like the box half-extents: writeQuad projects in BACKING
