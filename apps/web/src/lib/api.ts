@@ -112,6 +112,24 @@ async function resolveLocalAssetUrls(assets: SourceAsset[]): Promise<SourceAsset
   );
 }
 
+/**
+ * LOCAL CACHE OVERLAY (media pull, M2): a SERVER/stock asset whose bytes were pulled on-device
+ * (media-pull.ts caches them under the asset's own id) plays from the local copy instead of
+ * streaming — same behavior a local upload gets. Records are untouched (the http URL stays the
+ * durable location); only the resolved, session-facing fileUrl is swapped. Never touches local-
+ * marker assets (resolveLocalAssetUrls owns those) or non-http URLs.
+ */
+async function overlayPulledAssetUrls(assets: SourceAsset[]): Promise<SourceAsset[]> {
+  const store = await getAssetBlobStore();
+  return Promise.all(
+    assets.map(async (asset) => {
+      if (!asset.fileUrl || !/^https?:\/\//i.test(asset.fileUrl)) return asset;
+      const url = (await store.has(asset.id)) ? await store.getObjectUrl(asset.id) : null;
+      return url ? { ...asset, cloudUrl: asset.cloudUrl ?? asset.fileUrl, fileUrl: url } : asset;
+    })
+  );
+}
+
 export interface ApiEnvelope<T> {
   success: boolean;
   message: string;
@@ -376,7 +394,10 @@ export async function createAsset(input: CreateAssetInput) {
     if (file) {
       try {
         const store = await getAssetBlobStore();
-        await store.put(id, file);
+        // Local taxonomy mirror (plans/media-cloud-architecture.md): project-owned bytes live under
+        // the project's OPFS home, library assets under library/. Purely organizational — reads
+        // stay id-keyed with a legacy-flat fallback.
+        await store.put(id, file, { projectId: input.projectId ?? null });
         void requestPersistentAssetStorage();
         liveUrl = (await store.getObjectUrl(id)) ?? URL.createObjectURL(file);
       } catch {
@@ -603,11 +624,43 @@ export async function listAssets(
     // here broke their clip resolution ("Missing video asset"). The bin hides paired server assets
     // at the DISPLAY layer instead (AssetBin filters via getAssetPromotionMap), so there is still
     // exactly one visible tile per logical asset.
-    return [...(await resolveLocalAssetUrls(locals)), ...data.assets];
+    return [...(await resolveLocalAssetUrls(locals)), ...(await overlayPulledAssetUrls(data.assets))];
   } catch {
     const local = filterLocalAssetsByScope(readLocal<SourceAsset[]>(localAssetsKey, []), projectId, scope);
     return resolveLocalAssetUrls(local);
   }
+}
+
+/**
+ * Project-scoped bin load (perf fix, 2026-07-17: a new project must NOT enumerate the whole
+ * account): the project's owned+linked assets plus the user-level library pool (Brand/AI/stock —
+ * browsable so they can be linked in), deduped. Graph-referenced ids that fall outside both scopes
+ * (legacy remap-era graphs, cross-project duplicates) are healed by `fetchAssetById` on demand.
+ */
+export async function listProjectAssets(projectId: string): Promise<SourceAsset[]> {
+  const [project, library] = await Promise.all([listAssets(projectId, "project"), listAssets(undefined, "library")]);
+  const seen = new Set<string>();
+  const merged: SourceAsset[] = [];
+  for (const asset of [...project, ...library]) {
+    if (seen.has(asset.id)) continue;
+    seen.add(asset.id);
+    merged.push(asset);
+  }
+  return merged;
+}
+
+/** Fetch one asset by id (server first, local records fallback). Null when unknown everywhere. */
+export async function fetchAssetById(assetId: string): Promise<SourceAsset | null> {
+  if (!assetId.startsWith(LOCAL_ASSET_ID_PREFIX)) {
+    try {
+      const data = await apiRequest<{ asset: SourceAsset }>(`/assets/${assetId}`);
+      return (await overlayPulledAssetUrls([data.asset]))[0] ?? data.asset;
+    } catch {
+      /* fall through to local records */
+    }
+  }
+  const local = readLocal<SourceAsset[]>(localAssetsKey, []).find((asset) => asset.id === assetId);
+  return local ? ((await resolveLocalAssetUrls([local]))[0] ?? local) : null;
 }
 
 /** Prefix of ids minted by the local-first `createAsset` persist path (asset_local_<ts>). */
@@ -826,7 +879,19 @@ export async function searchStock(
   return apiRequest<{ configured: boolean; results: StockResult[] }>(`/stock/search?${params.toString()}`);
 }
 
-export async function importStock(result: StockResult, variant?: StockVariant, projectId?: string): Promise<SourceAsset> {
+/**
+ * Import a stock result. URL-FIRST by default (2026-07-17 directive): the created asset stores a
+ * REFERENCE to the provider's CDN URL — no bytes are copied into our storage ("what's the point of
+ * uploading stock the provider already serves"). Pass `{ referenceOnly: false }` for the legacy
+ * copy-into-storage behavior (used when the user explicitly wants the bytes hosted by us).
+ * On-device availability is separate: "Pin offline" (media-pull cache) works for both modes.
+ */
+export async function importStock(
+  result: StockResult,
+  variant?: StockVariant,
+  projectId?: string,
+  options: { referenceOnly?: boolean } = {}
+): Promise<SourceAsset> {
   await ensureDemoSession();
   const data = await apiRequest<{ asset: SourceAsset }>("/stock/import", {
     method: "POST",
@@ -840,10 +905,19 @@ export async function importStock(result: StockResult, variant?: StockVariant, p
       fileType: variant?.fileType ?? result.fileType,
       author: result.author,
       sourceUrl: result.sourceUrl,
+      referenceOnly: options.referenceOnly ?? true,
       ...(projectId ? { projectId } : {})
     })
   });
+  // Mirror the server's ProjectAsset link locally, so the bin's per-project stock scoping works
+  // offline and immediately (the server link isn't serialized back on asset rows).
+  if (projectId) addLocalProjectLink(projectId, data.asset.id);
   return data.asset;
+}
+
+/** Asset ids linked into a project (local-first mirror of the server ProjectAsset join). */
+export function getLinkedAssetIdsForProject(projectId: string): string[] {
+  return readLocalProjectLinks()[projectId] ?? [];
 }
 
 export async function transcribeAutoCaptions(input: {

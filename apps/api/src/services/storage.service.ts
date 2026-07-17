@@ -109,37 +109,45 @@ async function persistBytes(relativeKey: string, bytes: Buffer, contentType: str
 // Public API (identical signatures to before)
 // ---------------------------------------------------------------------------
 
-export async function saveUpload(file: Express.Multer.File | undefined, fallbackName: string, userId?: string) {
+export async function saveUpload(file: Express.Multer.File | undefined, fallbackName: string, userId?: string, projectId?: string | null) {
   const safeName = sanitizeFileName(file?.originalname ?? fallbackName);
-  const key = uploadKeyFor(safeName, userId);
+  const key = uploadKeyFor(safeName, userId, projectId);
   const bytes = file?.buffer ?? Buffer.from("Mock upload placeholder for Kimera.\n");
   const contentType = file?.mimetype || contentTypeFor(safeName);
   return persistBytes(key, bytes, contentType);
 }
 
 /** Save raw bytes (e.g. a downloaded stock file) into uploads and return its public URL. */
-export async function saveBuffer(buffer: Buffer, fileName: string, userId?: string) {
+export async function saveBuffer(buffer: Buffer, fileName: string, userId?: string, projectId?: string | null) {
   const safeName = sanitizeFileName(fileName);
-  return persistBytes(uploadKeyFor(safeName, userId), buffer, contentTypeFor(safeName));
+  return persistBytes(uploadKeyFor(safeName, userId, projectId), buffer, contentTypeFor(safeName));
 }
 
 /**
- * Storage key for an uploaded object, NAMESPACED PER USER: `uploads/u_<userId>/<ts>-<rand>-<name>`.
- * Per-tenant prefixes are the standard multi-tenant object-store layout (S3/GCS/R2) — they give
- * clean per-user isolation, enable per-user lifecycle/quse rules, make keys unguessable across
- * tenants, and keep one user's media out of another's prefix. Without a userId (e.g. the smoke-test
- * script) it falls back to the flat `uploads/` prefix. Ownership is still enforced by the DB
- * (SourceAsset.userId) + the API — the prefix is defense-in-depth, not the only gate.
+ * Storage key for an uploaded object — the cloud media taxonomy (plans/media-cloud-architecture.md):
+ *
+ *   u_<userId>/video/projects/<projectId>/assets/<ts>-<rand>-<name>   (project-owned uploads)
+ *   u_<userId>/video/library/<ts>-<rand>-<name>                       (user-level reusable: brand/AI/stock)
+ *
+ * `video` is the product namespace (photo editing / cloud VFS become siblings later, never a
+ * migration). Keys are IMMUTABLE — the user-visible folder tree is metadata (asset.folder + the
+ * project media manifest), never encoded here, so folder renames are free. Per-tenant prefixes are
+ * the standard multi-tenant object-store layout; ownership is still enforced by the DB
+ * (SourceAsset.userId) + the API — the prefix is defense-in-depth, not the only gate. Without a
+ * userId (e.g. the smoke-test script) it falls back to the legacy flat `uploads/` prefix. Old
+ * `uploads/u_<id>/…` keys remain valid forever (keys are opaque; URLs round-trip by string).
  */
-function uploadKeyFor(safeName: string, userId?: string) {
+function uploadKeyFor(safeName: string, userId?: string, projectId?: string | null) {
   const rand = randomUUID().slice(0, 8);
-  const scope = userId ? `u_${sanitizeFileName(userId)}/` : "";
-  return `uploads/${scope}${Date.now()}-${rand}-${safeName}`;
+  const stamp = `${Date.now()}-${rand}-${safeName}`;
+  if (!userId) return `uploads/${stamp}`;
+  const base = `u_${sanitizeFileName(userId)}/video`;
+  return projectId ? `${base}/projects/${sanitizeFileName(projectId)}/assets/${stamp}` : `${base}/library/${stamp}`;
 }
 
 /** Build the storage-relative key an uploaded file will live at (same scheme as saveUpload). */
-export function buildUploadKey(fileName: string, userId?: string) {
-  return uploadKeyFor(sanitizeFileName(fileName), userId);
+export function buildUploadKey(fileName: string, userId?: string, projectId?: string | null) {
+  return uploadKeyFor(sanitizeFileName(fileName), userId, projectId);
 }
 
 /**

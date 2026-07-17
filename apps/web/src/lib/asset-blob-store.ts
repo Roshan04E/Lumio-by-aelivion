@@ -13,9 +13,23 @@
  * metadata (see api.ts); the bytes live here, keyed by asset id.
  */
 
+/**
+ * Optional storage scope for NEW writes — the local mirror of the cloud taxonomy
+ * (plans/media-cloud-architecture.md M1): `u_<userId>/video/projects/<projectId>` for
+ * project-owned bytes, `u_<userId>/video/library` for user-level reusables. Purely an
+ * organizational layout inside OPFS: the public API stays id-keyed, a path index maps id → home,
+ * and reads always fall back to the legacy flat dir, so pre-taxonomy blobs keep working untouched
+ * (no bulk migration of user footage — deliberately; a mass move risks the data it organizes).
+ */
+export interface AssetScope {
+  userId?: string | undefined;
+  /** Owning project, or null/absent for the user-level library. */
+  projectId?: string | null | undefined;
+}
+
 export interface AssetBlobStore {
   kind: "opfs" | "indexeddb" | "memory";
-  put: (id: string, blob: Blob) => Promise<void>;
+  put: (id: string, blob: Blob, scope?: AssetScope) => Promise<void>;
   getObjectUrl: (id: string) => Promise<string | null>;
   /** Raw bytes for re-upload (FormData) during local→server promotion. Null if absent. */
   getBlob: (id: string) => Promise<Blob | null>;
@@ -27,6 +41,42 @@ export interface AssetBlobStore {
 const OPFS_DIR = "kimera-assets";
 const IDB_NAME = "kimera-assets";
 const IDB_STORE = "blobs";
+// id → scoped path segments (relative to the OPFS root dir). Only ids written with a scope appear
+// here; anything else resolves from the legacy flat dir. Corruption-tolerant: a miss falls back to
+// the flat dir, and remove() clears the entry.
+const PATH_INDEX_KEY = "kimera_blob_paths";
+
+function sanitizeSegment(value: string): string {
+  return value.replace(/[^a-z0-9._-]/gi, "-").toLowerCase();
+}
+
+function scopeSegments(scope: AssetScope | undefined): string[] | null {
+  if (!scope) return null;
+  const user = `u_${sanitizeSegment(scope.userId || "local")}`;
+  return scope.projectId
+    ? [user, "video", "projects", sanitizeSegment(scope.projectId), "assets"]
+    : [user, "video", "library"];
+}
+
+function readPathIndex(): Record<string, string[]> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PATH_INDEX_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string[]>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePathIndexEntry(id: string, segments: string[] | null): void {
+  try {
+    const index = readPathIndex();
+    if (segments) index[id] = segments;
+    else delete index[id];
+    localStorage.setItem(PATH_INDEX_KEY, JSON.stringify(index));
+  } catch {
+    /* index is an optimization — resolution still falls back to the flat dir */
+  }
+}
 
 // Per-session cache so repeated resolves return one stable object URL (and we can revoke).
 const urlCache = new Map<string, string>();
@@ -74,44 +124,85 @@ async function tryOpfs(): Promise<AssetBlobStore | null> {
   try {
     const root = await storage.getDirectory();
     const dir = await root.getDirectoryHandle(OPFS_DIR, { create: true });
+
+    /** Resolve nested segments to a directory handle under the store root. */
+    async function dirFor(segments: string[], create: boolean): Promise<FileSystemDirectoryHandle | null> {
+      let current = dir;
+      for (const segment of segments) {
+        try {
+          current = await current.getDirectoryHandle(segment, { create });
+        } catch {
+          return null;
+        }
+      }
+      return current;
+    }
+
+    /** Find the file handle for `id`: index path → legacy flat dir. Heals a stale index entry. */
+    async function fileFor(id: string): Promise<FileSystemFileHandle | null> {
+      const segments = readPathIndex()[id];
+      if (segments) {
+        const home = await dirFor(segments, false);
+        if (home) {
+          try {
+            return await home.getFileHandle(id);
+          } catch {
+            /* fall through to flat */
+          }
+        }
+      }
+      try {
+        const handle = await dir.getFileHandle(id);
+        if (segments) writePathIndexEntry(id, null); // index lied — the blob lives flat; heal it
+        return handle;
+      } catch {
+        return null;
+      }
+    }
+
     return {
       kind: "opfs",
-      async put(id, blob) {
-        const handle = await dir.getFileHandle(id, { create: true });
+      async put(id, blob, scope) {
+        const segments = scopeSegments(scope);
+        const home = segments ? ((await dirFor(segments, true)) ?? dir) : dir;
+        const handle = await home.getFileHandle(id, { create: true });
         const writable = await handle.createWritable();
         await writable.write(blob);
         await writable.close();
+        writePathIndexEntry(id, home === dir ? null : segments);
         dropUrl(id); // a new blob → invalidate any stale cached url
       },
       async getObjectUrl(id) {
         const cached = urlCache.get(id);
         if (cached) return cached;
+        const handle = await fileFor(id);
+        if (!handle) return null;
         try {
-          const handle = await dir.getFileHandle(id);
-          const file = await handle.getFile();
-          return cacheUrl(id, file);
+          return cacheUrl(id, await handle.getFile());
         } catch {
           return null;
         }
       },
       async getBlob(id) {
+        const handle = await fileFor(id);
+        if (!handle) return null;
         try {
-          const handle = await dir.getFileHandle(id);
           return await handle.getFile();
         } catch {
           return null;
         }
       },
       async has(id) {
-        try {
-          await dir.getFileHandle(id);
-          return true;
-        } catch {
-          return false;
-        }
+        return (await fileFor(id)) !== null;
       },
       async remove(id) {
         dropUrl(id);
+        const segments = readPathIndex()[id];
+        if (segments) {
+          const home = await dirFor(segments, false);
+          await home?.removeEntry(id).catch(() => undefined);
+          writePathIndexEntry(id, null);
+        }
         await dir.removeEntry(id).catch(() => undefined);
       }
     };

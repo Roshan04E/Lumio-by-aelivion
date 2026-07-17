@@ -50,7 +50,9 @@ import {
   PenLine,
   Pipette,
   Play,
+  FileText,
   Radius,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Save,
@@ -85,6 +87,9 @@ import {
   applyJunctionTransition,
   removeJunctionTransition,
   findTransitionCutForClip,
+  resolveTransitionWindowSides,
+  effectiveTransitionDuration,
+  trimOutgoingForTransition,
   DEFAULT_CROSS_DISSOLVE_SECONDS,
   canApplyEffectManifestToLayer,
   createTimelineEffect,
@@ -315,8 +320,11 @@ import {
   getRenderManifest,
   getStockStatus,
   importStock,
+  fetchAssetById,
+  getLinkedAssetIdsForProject,
   linkAssetToProject,
   listAssets,
+  listProjectAssets,
   listMyTemplates,
   presignAssetUpload,
   updateLocalAssetRecord,
@@ -329,6 +337,7 @@ import {
   type ProjectRecord
 } from "../lib/api";
 import { usePro } from "../lib/proMode";
+import { collectGraphAssetIds, ensureProjectMediaLocal, refreshAssetFromCloud } from "../lib/media-pull";
 import { putBlobToCloud } from "../lib/cloud-upload";
 import { searchIconifyGraphics, fetchIconifySvg, type IconifyGraphicResult } from "../lib/graphics-search";
 
@@ -1067,6 +1076,7 @@ export function EditorPage() {
           markServerProjectSynced(loaded.id);
         }
         void offerCrashRecovery(loaded);
+        void syncProjectMedia(loaded).catch(() => undefined);
       } catch (error) {
         if (cancelled) return;
         // Auth failure (guest / expired session) on a server-only project: retrying without a token can't
@@ -1100,12 +1110,49 @@ export function EditorPage() {
       setRecoveryOffer(checkpoint);
     };
     setRecoveryOffer(null);
-    void loadProject(0);
+    // PROJECT-SCOPED bin load (2026-07-17 perf fix): owned+linked assets + the user-level library
+    // pool — NOT the whole account (a new project used to enumerate and resolve every asset the
+    // user ever imported anywhere). Graph-referenced ids outside both scopes are healed below.
     // Strip any persisted session-scoped proxy object URL (defensive — proxyUrl should never be
     // saved, but a stale `blob:` here would black out every clip using that asset).
-    listAssets().then((list) =>
-      setAssets(list.map((asset) => (asset.proxyUrl?.startsWith("blob:") ? { ...asset, proxyUrl: undefined } : asset)))
-    );
+    const stripProxyBlobs = (list: SourceAsset[]) =>
+      list.map((asset) => (asset.proxyUrl?.startsWith("blob:") ? { ...asset, proxyUrl: undefined } : asset));
+    const assetsPromise: Promise<SourceAsset[]> = listProjectAssets(resolvedId)
+      .then((list) => {
+        const stripped = stripProxyBlobs(list);
+        if (!cancelled) setAssets(stripped);
+        return stripped;
+      })
+      .catch(() => []);
+    // Per-project media sync (plans/media-cloud-architecture.md M2, download-only): once BOTH the
+    // project and its scoped assets are in, (a) heal graph-referenced ids the scoped load missed
+    // (legacy remap-era graphs), (b) pull missing bytes from the cloud into the on-device store —
+    // skipping anything already local — then refresh the bin so playback reads local bytes.
+    const syncProjectMedia = async (loaded: ProjectRecord) => {
+      const list = await assetsPromise;
+      if (cancelled) return;
+      const known = new Set(list.map((asset) => asset.id));
+      const missingIds = [...collectGraphAssetIds(loaded.projectGraph)].filter((id) => !known.has(id));
+      const healed = (await Promise.all(missingIds.map((id) => fetchAssetById(id)))).filter(
+        (asset): asset is SourceAsset => asset !== null
+      );
+      if (cancelled) return;
+      if (healed.length) {
+        setAssets((current) => {
+          const have = new Set(current.map((asset) => asset.id));
+          return [...current, ...stripProxyBlobs(healed.filter((asset) => !have.has(asset.id)))];
+        });
+      }
+      const report = await ensureProjectMediaLocal(loaded.projectGraph, [...list, ...healed], { userId: loaded.userId });
+      if (cancelled) return;
+      if (report.pulled.length > 0) {
+        // Re-resolve so the freshly-cached assets play from on-device bytes this session.
+        const refreshed = await listProjectAssets(resolvedId).catch(() => null);
+        if (!cancelled && refreshed) setAssets(stripProxyBlobs(refreshed));
+        setNotice(`Pulled ${report.pulled.length} project asset${report.pulled.length === 1 ? "" : "s"} from cloud`);
+      }
+    };
+    void loadProject(0);
     // Kick connectivity: promotes any pending local draft (incl. this one) when online.
     void checkNow();
     undoStackRef.current = [];
@@ -1272,6 +1319,9 @@ export function EditorPage() {
   const stableUploadToCloud = useStableHandler(handleUploadAssetToCloud);
   const stableSyncAllToCloud = useStableHandler(handleSyncAllToCloud);
   const stableRemoveFromCloud = useStableHandler(handleRemoveAssetFromCloud);
+  const stableRefreshFromCloud = useStableHandler(handleRefreshAssetFromCloud);
+  const stablePinOffline = useStableHandler(handlePinAssetOffline);
+  const stableChangeCustomFolders = useStableHandler(handleChangeCustomFolders);
   const stableOpenSourceMonitor = useStableHandler(handleOpenInSourceMonitor);
   // Browser-local assets awaiting cloud upload — drives the Media Pool header "sync all" chip.
   const cloudPendingLocalCount = useMemo(() => assets.filter(isAssetLocalOnly).length, [assets]);
@@ -4900,11 +4950,19 @@ export function EditorPage() {
     }
 
     setBusy("asset-upload");
-    const metadata = await readMediaMetadata(file);
-    const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("audio/") ? "audio" : "video";
+    // File-explorer bin (2026-07-17): ANY file imports. Media gets metadata-probed as before;
+    // non-media (.cube, .json, docs…) skips the probe and lands as a generic "file" asset. Files
+    // whose browser-reported MIME is empty (e.g. .cube) get an extension-derived one so the bin
+    // can tell them apart from legacy video records.
+    const isMediaFile = /^(video|image|audio)\//.test(file.type);
+    const uploadFile = file.type
+      ? file
+      : new File([file], file.name, { type: genericMimeFor(file.name) });
+    const metadata = isMediaFile ? await readMediaMetadata(file) : {};
+    const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("audio/") ? "audio" : isMediaFile ? "video" : "files";
     const source = options?.source ?? "local";
     const asset = await createAsset({
-      file,
+      file: uploadFile,
       ...metadata,
       source,
       // Local-first: keep the bytes on-device. Nothing is auto-uploaded on import — the user pushes
@@ -4920,6 +4978,19 @@ export function EditorPage() {
     });
     setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
     setBusy(null);
+  }
+
+  /** Extension-derived MIME for files the browser reports with an empty type (.cube, .kimera…). */
+  function genericMimeFor(fileName: string): string {
+    const ext = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+    const map: Record<string, string> = {
+      cube: "application/x-cube-lut",
+      json: "application/json",
+      txt: "text/plain",
+      srt: "application/x-subrip",
+      vtt: "text/vtt"
+    };
+    return map[ext] ?? "application/octet-stream";
   }
 
   /** Add a library asset that was created elsewhere (stock import, generated, AI). */
@@ -5145,6 +5216,63 @@ export function EditorPage() {
   }
 
   /**
+   * "Refresh from cloud" (plans/media-cloud-architecture.md M2, corruption repair): re-download the
+   * asset's bytes from its cloud/provider copy and replace the on-device blob under the SAME id.
+   * Fetch-verify-then-write — a failed/mismatched download leaves existing local bytes untouched.
+   */
+  async function handleRefreshAssetFromCloud(asset: SourceAsset) {
+    setBusy(`asset-cloud-refresh-${asset.id}`);
+    try {
+      await refreshAssetFromCloud(asset, project?.userId);
+      // Re-resolve so this session reads the fresh bytes (the store invalidated the object URL).
+      if (project?.id) {
+        const refreshed = await listProjectAssets(project.id).catch(() => null);
+        if (refreshed) setAssets(refreshed.map((item) => (item.proxyUrl?.startsWith("blob:") ? { ...item, proxyUrl: undefined } : item)));
+      }
+      setNotice("Refreshed from cloud — local copy replaced");
+    } catch (error) {
+      setNotice(error instanceof Error ? `Refresh failed: ${error.message} — local copy untouched` : "Refresh failed — local copy untouched");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * "Pin offline" (stock URL-first, M3): a provider-referenced stock asset streams from the
+   * provider's CDN — pinning downloads those bytes into the on-device cache (media-pull overlay)
+   * so the asset keeps working offline / if the provider URL dies. No server upload involved.
+   */
+  async function handlePinAssetOffline(asset: SourceAsset) {
+    setBusy(`asset-pin-${asset.id}`);
+    try {
+      await refreshAssetFromCloud(asset, project?.userId);
+      // Re-resolve so THIS session already plays the on-device copy (overlayPulledAssetUrls).
+      if (project?.id) {
+        const refreshed = await listProjectAssets(project.id).catch(() => null);
+        if (refreshed) setAssets(refreshed.map((item) => (item.proxyUrl?.startsWith("blob:") ? { ...item, proxyUrl: undefined } : item)));
+      }
+      setNotice("Saved on this device — plays locally from now on");
+    } catch (error) {
+      setNotice(error instanceof Error ? `Couldn't save locally: ${error.message} — still streams from the provider` : "Couldn't save locally — still streams from the provider");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Persist the bin's user-created folder list into the project media manifest (M0) — travels
+   *  with the project through the normal graph save/sync path, never a global key. */
+  function handleChangeCustomFolders(next: string[]) {
+    if (!graph) return;
+    const current = graph.mediaManifest?.customFolders ?? [];
+    if (next.length === current.length && next.every((item, i) => current[i] === item)) return;
+    void updateGraph(
+      { ...graph, mediaManifest: { version: 1 as const, customFolders: next }, version: graph.version + 1 },
+      undefined,
+      { recordHistory: false }
+    );
+  }
+
+  /**
    * Capture the selected video clip's current frame as a reusable image asset
    * (timeline-generated → appears in the AI/Generated tab and is draggable like any clip).
    */
@@ -5290,6 +5418,11 @@ export function EditorPage() {
     if (!composition) {
       return;
     }
+    // Generic (non-media) file assets live in the bin only — nothing sensible to place on a track.
+    if (asset.fileType && !/^(video|image|audio)\//.test(asset.fileType)) {
+      setNotice("This file type can't be placed on the timeline");
+      return;
+    }
     if (mode === "audio" && asset.fileType.startsWith("video/") && assetHasAudioStream(asset) === false) {
       setNotice("No audio stream found in this asset");
       return;
@@ -5328,6 +5461,11 @@ export function EditorPage() {
     const asset = assetOverride ?? resolvedAssets.find((item) => item.id === assetId);
     const track = composition.tracks.find((item) => item.id === trackId);
     if (!asset || !track) {
+      return;
+    }
+    // Generic (non-media) file assets live in the bin only (file-explorer bin, 2026-07-17).
+    if (asset.fileType && !/^(video|image|audio)\//.test(asset.fileType)) {
+      setNotice("This file type can't be placed on the timeline");
       return;
     }
 
@@ -5866,6 +6004,41 @@ export function EditorPage() {
     }
     void updateComposition(removeJunctionTransition(composition, leftId, rightId));
     setNotice("Transition removed");
+  }
+
+  /**
+   * Resolve-style "Trim clips to create overlap": when a junction transition would repeat frames
+   * (insufficient tail material — the zebra-striped pill), shorten the outgoing clip's out-point by
+   * exactly the uncovered span and ripple the cut left, so the whole window plays real media. One
+   * `updateComposition` = one undo step; linked A/V companions trim/shift in sync (see
+   * `trimOutgoingForTransition`).
+   */
+  function handleTrimForTransition(leftId: string, rightId: string) {
+    if (!composition) {
+      return;
+    }
+    const track = composition.tracks.find(
+      (item) => item.layers.some((layer) => layer.id === leftId) && item.layers.some((layer) => layer.id === rightId)
+    );
+    const left = track?.layers.find((layer) => layer.id === leftId);
+    const right = track?.layers.find((layer) => layer.id === rightId);
+    if (!left || !right || !right.transitionIn) {
+      return;
+    }
+    const sides = resolveTransitionWindowSides({
+      durationSeconds: effectiveTransitionDuration(right.transitionIn.durationSeconds, right.durationSeconds),
+      incoming: { type: right.type, sourceInSeconds: right.sourceInSeconds, speed: right.speed },
+      outgoing: { type: left.type, sourceInSeconds: left.sourceInSeconds, speed: left.speed, durationSeconds: left.durationSeconds },
+      outgoingAssetDurationSeconds: left.assetId ? assets.find((asset) => asset.id === left.assetId)?.durationSeconds : undefined,
+      alignment: right.transitionIn.alignment
+    });
+    const next = trimOutgoingForTransition(composition, leftId, rightId, sides.repeatedFramesSeconds);
+    if (!next) {
+      setNotice("Transition already has enough media");
+      return;
+    }
+    void updateComposition(next);
+    setNotice(`Trimmed ${sides.repeatedFramesSeconds.toFixed(2)}s from the outgoing clip — transition now plays real media`);
   }
 
   /**
@@ -6655,6 +6828,7 @@ export function EditorPage() {
     onAddCrossDissolve: handleAddCrossDissolve,
     onSetCrossDissolve: handleSetCrossDissolve,
     onRemoveCrossDissolve: handleRemoveCrossDissolve,
+    onTrimForTransition: handleTrimForTransition,
     onResizeLayer: handleResizeLayer,
     onSelectLayer: selectLayer,
     onSelectLayers: selectLayers,
@@ -6811,6 +6985,25 @@ export function EditorPage() {
           }
         : recordMaskPoints(current, maskId, Math.max(0, currentTimeRef.current - current.startSeconds), points)
     )
+  );
+
+  // Pen tool on a PEN SHAPE layer (2026-07-17): the drawn outline becomes the layer's OWN geometry —
+  // shapePath (0..100 in the drawn bounding box), box size (style.width/height % of comp) and
+  // position, all in one write/undo step. Before this a pen shape only ever showed its canned
+  // default polygon ("pen tool not working for drawing shapes").
+  const stablePreviewCommitShapePath = useStableHandler(
+    (layerId: string, patch: { shapePath: MaskPoint[]; widthPercent: number; heightPercent: number; xPercent: number; yPercent: number }) =>
+      void updateLayer(layerId, (current) => ({
+        ...current,
+        shapeKind: "pen",
+        shapePath: patch.shapePath,
+        widthPercent: Number(patch.widthPercent.toFixed(2)),
+        heightPercent: Number(patch.heightPercent.toFixed(2)),
+        transform: {
+          ...current.transform,
+          position: { x: Number(patch.xPercent.toFixed(2)), y: Number(patch.yPercent.toFixed(2)) }
+        }
+      }))
   );
 
   // AI dock props doctrine: AiChatPanel is memo'd, so every callback prop must be identity-stable
@@ -7424,6 +7617,10 @@ export function EditorPage() {
                   onSetAssetLabel={stableSetAssetLabel}
                   onUploadToCloud={pro ? stableUploadToCloud : undefined}
                   onRemoveFromCloud={stableRemoveFromCloud}
+                  onRefreshFromCloud={stableRefreshFromCloud}
+                  onPinOffline={stablePinOffline}
+                  customFolders={graph.mediaManifest?.customFolders}
+                  onChangeCustomFolders={stableChangeCustomFolders}
                   onOpenSourceMonitor={responsiveLayout.usesOverlayPanels ? undefined : stableOpenSourceMonitor}
                 />
               </div>
@@ -7648,6 +7845,7 @@ export function EditorPage() {
               onPreviewMaskScalar={stablePreviewMaskScalar}
               onUpdateLayerMasks={stablePreviewUpdateLayerMasks}
               onCommitMaskPoints={stablePreviewCommitMaskPoints}
+              onCommitShapePath={stablePreviewCommitShapePath}
             />
             {shuttleRate !== null && (
               <div className="viewer-shuttle-badge" aria-live="polite">
@@ -9466,7 +9664,7 @@ function SettingsNumberField({
 
 type AssetSourceTab = "local" | "ai" | "search" | "brand" | "templates" | "used";
 type AssetTypeFilter = "all" | "video" | "image" | "audio" | "graphics";
-type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand" | "ai">;
+type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand" | "ai" | "search">;
 type AssetBinFolder = {
   path: string;
   label: string;
@@ -9483,12 +9681,16 @@ function isTimelineOrTemplateImportFile(file: File): boolean {
   return isExternalTimelineFile(file.name) || lower.endsWith(".json") || lower.endsWith(".kimera-template");
 }
 
-function assetKind(asset: SourceAsset): "video" | "image" | "audio" | "graphic" {
+function assetKind(asset: SourceAsset): "video" | "image" | "audio" | "graphic" | "file" {
   if (asset.fileType.startsWith("image/")) {
     return asset.fileType.includes("svg") ? "graphic" : "image";
   }
   if (asset.fileType.startsWith("audio/")) return "audio";
-  return "video";
+  if (asset.fileType.startsWith("video/")) return "video";
+  // File-explorer bin (2026-07-17): non-media imports (.cube LUTs, JSON, docs…) are generic files —
+  // browsable/downloadable/organizable, never placeable on the timeline. Empty fileType (legacy
+  // records default) stays "video" for compatibility.
+  return asset.fileType ? "file" : "video";
 }
 
 function assetSourceOf(asset: SourceAsset): AssetSource {
@@ -9510,7 +9712,10 @@ function matchesAssetTab(asset: SourceAsset, tab: AssetSourceTab, used: boolean)
   switch (tab) {
     case "local":
       // Graphics are project-scoped rasterized image media (like uploads), so they live in Local for reuse.
-      return source === "local" || source === "graphic";
+      // Imported stock ALSO lives here (2026-07-17): Local is the project's MEDIA POOL, with stock
+      // mounted under its own "stock" bin at the root — the same folder tree the Search subpanel
+      // browses, so both surfaces show one consistent structure.
+      return source === "local" || source === "graphic" || source === "pexels" || source === "unsplash";
     case "ai":
       return source === "ai" || source === "timeline-generated";
     case "brand":
@@ -9538,11 +9743,13 @@ function matchesTypeFilter(asset: SourceAsset, typeFilter: AssetTypeFilter): boo
 }
 
 function isFolderAssetTab(tab: AssetSourceTab): tab is FolderAssetTab {
-  return tab === "local" || tab === "brand" || tab === "ai";
+  return tab === "local" || tab === "brand" || tab === "ai" || tab === "search";
 }
 
 function defaultAssetFolder(tab: FolderAssetTab): string {
-  return tab;
+  // Imported stock refs already persist under "stock/…" paths (stock.routes writes
+  // `stock/pexels/<type>`), so the Search tab's folder tree roots there.
+  return tab === "search" ? "stock" : tab;
 }
 
 function assetFolderLabel(folder: string): string {
@@ -9581,15 +9788,6 @@ function sanitizeAssetFolderName(value: string): string {
     .replace(/[\\/:*?"<>|]+/g, " ")
     .replace(/\s+/g, " ")
     .slice(0, 48);
-}
-
-function readStoredAssetFolders(): string[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem("kimera_asset_custom_folders") ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
 }
 
 function formatAssetMeta(asset: SourceAsset): string {
@@ -9647,6 +9845,8 @@ function assetTypeIcon(kind: AssetKind): ReactNode {
       return <Music size={11} />;
     case "graphic":
       return <Palette size={11} />;
+    case "file":
+      return <FileText size={11} />;
     default:
       return <Image size={11} />;
   }
@@ -9698,18 +9898,74 @@ function pickStockVariant(result: StockResult, quality: StockQuality): StockVari
  * (from known dims, else measured on load) so the masonry grid keeps each clip's real shape.
  * Video tiles play muted/looped on hover (Pexels-style); only the hovered card's video plays.
  */
+/**
+ * Inline bin rename (file-explorer gesture, replaces the window.prompt dialog): autofocus +
+ * select-all, Enter/blur commits, Escape cancels. All pointer/key events stop at the input so the
+ * host tile's open/drag handlers never fire mid-rename.
+ */
+function FolderRenameInput({ path, onCommit, onCancel }: { path: string; onCommit: (name: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState(assetFolderLabel(path));
+  const committed = useRef(false);
+  const commit = (name: string) => {
+    if (committed.current) return;
+    committed.current = true;
+    onCommit(name);
+  };
+  return (
+    <input
+      className="asset-folder-rename"
+      value={value}
+      autoFocus
+      onFocus={(event) => event.currentTarget.select()}
+      onChange={(event) => setValue(event.target.value)}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onDragStart={(event) => event.preventDefault()}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") commit(value);
+        if (event.key === "Escape") {
+          committed.current = true;
+          onCancel();
+        }
+      }}
+      onBlur={() => commit(value)}
+    />
+  );
+}
+
 function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const measured = useRef(Boolean(asset.width && asset.height));
   const [ratio, setRatio] = useState<number>(
     asset.width && asset.height ? asset.width / asset.height : kind === "video" ? 16 / 9 : 1
   );
+  // Dead-source surface (URL-first stock, M3): a provider/cloud URL that no longer serves bytes
+  // shows an explicit badge instead of a silently-empty tile ("Pin offline"/refresh can then fix it).
+  const [sourceBroken, setSourceBroken] = useState(false);
+  const brokenBadge = sourceBroken ? (
+    <span className="asset-chip-offline" title="The source URL didn't respond — try Refresh from cloud / re-import">
+      Source offline
+    </span>
+  ) : null;
   const style = { "--asset-ar": ratio } as CSSProperties;
 
   if (kind === "audio") {
     return (
       <div className="asset-card-media asset-card-media-audio">
         <Music size={20} />
+      </div>
+    );
+  }
+
+  if (kind === "file") {
+    // Generic (non-media) file tile — file-explorer bin. Extension chip stands in for a preview.
+    const ext = ((asset.originalName ?? asset.fileName).split(".").pop() ?? "file").toUpperCase().slice(0, 6);
+    return (
+      <div className="asset-card-media asset-card-media-file">
+        <FileText size={20} />
+        <span className="asset-file-ext">{ext}</span>
       </div>
     );
   }
@@ -9726,7 +9982,9 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
             alt=""
             loading="lazy"
             decoding="async"
+            onError={() => setSourceBroken(true)}
             onLoad={(event) => {
+              setSourceBroken(false);
               if (measured.current) return;
               const el = event.currentTarget;
               if (el.naturalWidth && el.naturalHeight) {
@@ -9736,6 +9994,7 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
             }}
           />
         ) : null}
+        {brokenBadge}
       </div>
     );
   }
@@ -9796,7 +10055,7 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
           }}
         />
       ) : posterSrc ? (
-        <img src={posterSrc} alt="" loading="lazy" decoding="async" />
+        <img src={posterSrc} alt="" loading="lazy" decoding="async" onError={() => setSourceBroken(true)} onLoad={() => setSourceBroken(false)} />
       ) : (
         <div className="asset-card-media-video-fallback">
           <Film size={20} />
@@ -9805,6 +10064,7 @@ function AssetCardMedia({ asset, kind }: { asset: SourceAsset; kind: AssetKind }
       {hovering && scrubFrac !== null ? (
         <span className="asset-scrub-line" style={{ left: `${scrubFrac * 100}%` }} aria-hidden="true" />
       ) : null}
+      {brokenBadge}
     </div>
   );
 }
@@ -9866,6 +10126,10 @@ function AssetBinImpl({
   onSetAssetLabel,
   onUploadToCloud,
   onRemoveFromCloud,
+  onRefreshFromCloud,
+  onPinOffline,
+  customFolders,
+  onChangeCustomFolders,
   onOpenSourceMonitor
 }: {
   assets: SourceAsset[];
@@ -9898,6 +10162,16 @@ function AssetBinImpl({
   onUploadToCloud?: ((asset: SourceAsset) => void) | undefined;
   /** Remove an asset's cloud copy (pulls bytes back to device first, then deletes the server/R2 copy). */
   onRemoveFromCloud?: ((asset: SourceAsset) => void) | undefined;
+  /** Re-download this asset's bytes from its cloud/provider copy, replacing the on-device blob
+   *  (corruption repair — plans/media-cloud-architecture.md M2). Shown when a cloud copy exists. */
+  onRefreshFromCloud?: ((asset: SourceAsset) => void) | undefined;
+  /** Stock URL-first (M3): download a provider-referenced asset's bytes into the on-device cache so
+   *  it keeps working offline / if the provider URL dies. */
+  onPinOffline?: ((asset: SourceAsset) => void) | undefined;
+  /** Per-project user-created folder paths (from the project media manifest — M0). Replaces the
+   *  legacy GLOBAL localStorage list that leaked one project's folders into every other project. */
+  customFolders?: string[] | undefined;
+  onChangeCustomFolders?: ((next: string[]) => void) | undefined;
   /** Video/audio double-click target when the dual-monitor source viewer is available (desktop
       widths only — see showSourceMonitor in EditorPage). Undefined on tablet/phone, where
       double-click keeps opening the AssetViewerModal below. */
@@ -9911,12 +10185,22 @@ function AssetBinImpl({
   // records from the DATA (listAssets) broke clip resolution for graphs saved with server ids
   // ("Missing video asset", 2026-07-14).
   const assets = useMemo(() => {
+    // Stock refs are user-level library rows — scope them to THIS project via the link mirror
+    // (imported here) or actual timeline use, or every project's Stock bin would show the whole
+    // account's stock history (the same "pile" bug the ownerProjectId filter fixed for uploads).
+    const linkedIds = currentProjectId ? new Set(getLinkedAssetIdsForProject(currentProjectId)) : null;
     const scoped = currentProjectId
-      ? rawAssets.filter((a) => !a.ownerProjectId || a.ownerProjectId === currentProjectId)
+      ? rawAssets.filter((a) => {
+          if (a.ownerProjectId && a.ownerProjectId !== currentProjectId) return false;
+          if (linkedIds && (a.source === "pexels" || a.source === "unsplash")) {
+            return linkedIds.has(a.id) || Boolean(usedCounts[a.id]);
+          }
+          return true;
+        })
       : rawAssets;
     const paired = new Set(Object.values(getAssetPromotionMap()));
     return paired.size ? scoped.filter((a) => !paired.has(a.id)) : scoped;
-  }, [rawAssets, currentProjectId]);
+  }, [rawAssets, currentProjectId, usedCounts]);
   const handleTileActivate = (asset: SourceAsset) => {
     if (replaceActive) {
       onPickReplacement?.(asset);
@@ -9940,12 +10224,35 @@ function AssetBinImpl({
   const [size, setSize] = useState<"small" | "medium" | "large">(() =>
     readStoredChoice("kimera_asset_size", "medium", ["small", "medium", "large"] as const)
   );
-  const [activeAssetFolders, setActiveAssetFolders] = useState<Record<FolderAssetTab, string>>(() => ({
-    local: localStorage.getItem("kimera_asset_folder_local") || defaultAssetFolder("local"),
-    brand: localStorage.getItem("kimera_asset_folder_brand") || defaultAssetFolder("brand"),
-    ai: localStorage.getItem("kimera_asset_folder_ai") || defaultAssetFolder("ai")
-  }));
-  const [customAssetFolders, setCustomAssetFolders] = useState<string[]>(readStoredAssetFolders);
+  // Active folder per tab, remembered PER PROJECT (the old global keys carried one project's
+  // navigation — and worse, its custom folder list — into every other project, 2026-07-17 report).
+  const folderKeySuffix = currentProjectId ? `:${currentProjectId}` : "";
+  const readActiveFolders = useCallback(
+    (): Record<FolderAssetTab, string> => ({
+      local: localStorage.getItem(`kimera_asset_folder_local${folderKeySuffix}`) || defaultAssetFolder("local"),
+      brand: localStorage.getItem(`kimera_asset_folder_brand${folderKeySuffix}`) || defaultAssetFolder("brand"),
+      ai: localStorage.getItem(`kimera_asset_folder_ai${folderKeySuffix}`) || defaultAssetFolder("ai"),
+      search: localStorage.getItem(`kimera_asset_folder_search${folderKeySuffix}`) || defaultAssetFolder("search")
+    }),
+    [folderKeySuffix]
+  );
+  const [activeAssetFolders, setActiveAssetFolders] = useState<Record<FolderAssetTab, string>>(readActiveFolders);
+  // The project loads async — re-read the per-project navigation once its id is known/changes.
+  useEffect(() => {
+    setActiveAssetFolders(readActiveFolders());
+  }, [readActiveFolders]);
+  // User-created folder paths now live in the PROJECT MEDIA MANIFEST (graph.mediaManifest — synced
+  // with the project, so cloud keeps the same folder structure). This component only proposes the
+  // next list; the parent persists it through the graph save path.
+  const customAssetFolders = useMemo(() => customFolders ?? [], [customFolders]);
+  const setCustomAssetFolders = useCallback(
+    (updater: string[] | ((current: string[]) => string[])) => {
+      const next = typeof updater === "function" ? updater(customAssetFolders) : updater;
+      if (next.length === customAssetFolders.length && next.every((item, i) => customAssetFolders[i] === item)) return;
+      onChangeCustomFolders?.(next);
+    },
+    [customAssetFolders, onChangeCustomFolders]
+  );
   // Per-asset context menu. Anchored at FIXED viewport coordinates (cursor / ⋮ button), NOT inside
   // the tile: the grid is a CSS multi-column layout, where an absolutely-positioned menu inside a
   // tile paints across neighbouring tiles/columns and gets clipped by the scroll container — the
@@ -9954,6 +10261,9 @@ function AssetBinImpl({
   // anchors the menu's RIGHT edge to the button (the menu is content-sized, so left-edge math from
   // an assumed width visibly drifts — right-edge alignment is exact regardless of menu width).
   const [assetMenu, setAssetMenu] = useState<{ id: string; top: number; left?: number; right?: number } | null>(null);
+  // Folder (bin) context menu + inline rename — the file-explorer folder UX (2026-07-17).
+  const [folderMenu, setFolderMenu] = useState<{ path: string; top: number; left: number } | null>(null);
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null);
   const clampMenuTop = (y: number) => Math.max(8, Math.min(y, window.innerHeight - 324));
   const openAssetMenuAtCursor = (assetId: string, clientX: number, clientY: number) => {
     setAssetMenu({ id: assetId, left: Math.max(8, Math.min(clientX, window.innerWidth - 252)), top: clampMenuTop(clientY) });
@@ -10006,50 +10316,85 @@ function AssetBinImpl({
   const folderTab = isFolderAssetTab(sourceTab) ? sourceTab : null;
   const folderRoot = folderTab ? defaultAssetFolder(folderTab) : "";
   const activeFolder = folderTab ? activeAssetFolders[folderTab] || folderRoot : "";
-  const folderTabLabel = sourceTab === "brand" ? "Brand" : sourceTab === "ai" ? "AI" : "Local";
+  const folderTabLabel = sourceTab === "brand" ? "Brand" : sourceTab === "ai" ? "AI" : sourceTab === "search" ? "Stock" : "Local";
   const currentFolderLabel = folderTab ? (activeFolder === folderRoot ? `${folderTabLabel} project` : assetFolderLabel(activeFolder)) : "";
   const folderCrumbs = useMemo(() => {
     if (!folderTab) return [];
-    const rootCrumb = { path: folderRoot, label: folderTabLabel };
-    const parts = activeFolder.slice(folderRoot.length).split("/").filter(Boolean);
-    let path = folderRoot;
-    return [
-      rootCrumb,
-      ...parts.map((part) => {
-        path = `${path}/${part}`;
-        return { path, label: part };
-      })
-    ];
-  }, [activeFolder, folderRoot, folderTab, sourceTab]);
+    // Root-aware: inside Local, the shared stock tree is a MOUNT — its crumbs read
+    // Local › Stock › pexels › …, and the primary root crumb always leads home.
+    const inStockMount = folderTab === "local" && (activeFolder === "stock" || activeFolder.startsWith("stock/"));
+    const activeRoot = inStockMount ? "stock" : folderRoot;
+    const crumbs = [{ path: folderRoot, label: folderTabLabel }];
+    if (inStockMount) crumbs.push({ path: "stock", label: "Stock" });
+    const parts = activeFolder.slice(activeRoot.length).split("/").filter(Boolean);
+    let path = activeRoot;
+    for (const part of parts) {
+      path = `${path}/${part}`;
+      crumbs.push({ path, label: part });
+    }
+    return crumbs;
+  }, [activeFolder, folderRoot, folderTab, folderTabLabel]);
+  // Folder-tree roots this tab browses. Local mounts the shared `stock/` tree beside its own root
+  // (one tree, two surfaces — the Search subpanel roots at `stock` directly), so downloaded stock
+  // is reachable from the project's media pool without duplicating any state.
+  const folderRootsForTab = useMemo<string[]>(
+    () => (folderTab === "local" ? [folderRoot, "stock"] : folderTab ? [folderRoot] : []),
+    [folderTab, folderRoot]
+  );
   const folderOptions = useMemo<AssetBinFolder[]>(() => {
     if (!folderTab) return [];
-    const prefix = `${folderRoot}/`;
     const folders = new Set<string>();
+    const underARoot = (folder: string) => folderRootsForTab.some((root) => folder === root || folder.startsWith(`${root}/`));
+    // Materialize the folder AND every ancestor up to (excluding) its root — derived asset folders
+    // like "stock/pexels/video" need their intermediate bins to exist as navigable tiles (they were
+    // invisible before: only exact paths were added, so parent-match filtering skipped them).
+    const addWithAncestors = (folder: string) => {
+      if (!folder || !underARoot(folder) || folderRootsForTab.includes(folder)) return;
+      let path = folder;
+      while (path && !folderRootsForTab.includes(path)) {
+        folders.add(path);
+        path = parentAssetFolder(path) || "";
+      }
+    };
     for (const asset of assets) {
       if (!matchesAssetTab(asset, folderTab, Boolean(usedCounts[asset.id]))) continue;
-      const folder = normalizeAssetFolder(asset.folder);
-      if (folder && folder !== folderRoot && folder.startsWith(prefix)) folders.add(folder);
+      addWithAncestors(normalizeAssetFolder(asset.folder));
     }
     for (const folder of customAssetFolders) {
-      const normalizedFolder = normalizeAssetFolder(folder);
-      if (normalizedFolder !== folderRoot && normalizedFolder.startsWith(prefix)) folders.add(normalizedFolder);
+      addWithAncestors(normalizeAssetFolder(folder));
+    }
+    // The Stock MOUNT itself: shows in Local's root only when the project actually has stock
+    // content (any stock asset or a user-created stock bin).
+    if (folderTab === "local" && [...folders].some((folder) => folder === "stock" || folder.startsWith("stock/"))) {
+      folders.add("stock");
     }
     return Array.from(folders)
       .sort((a, b) => a.localeCompare(b))
       .map((folder) => ({
         path: folder,
-        label: assetFolderLabel(folder),
+        label: folder === "stock" ? "Stock" : assetFolderLabel(folder),
         depth: Math.max(0, folder.split("/").length - folderRoot.split("/").length),
         assetCount: assets.filter((asset) => normalizeAssetFolder(asset.folder) === folder && matchesAssetTab(asset, folderTab, Boolean(usedCounts[asset.id]))).length,
         childCount: Array.from(folders).filter((candidate) => parentAssetFolder(candidate) === folder).length
       }));
-  }, [assets, customAssetFolders, folderRoot, folderTab, usedCounts]);
+  }, [assets, customAssetFolders, folderRoot, folderRootsForTab, folderTab, usedCounts]);
 
   const queryText = query.trim().toLowerCase();
+  // Children of a folder, including the Stock MOUNT at Local's root (its literal parent is "" —
+  // the mount grafts the shared stock tree into the local root).
+  const childFoldersOf = useCallback(
+    (parent: string) =>
+      folderOptions.filter(
+        (entry) =>
+          (parentAssetFolder(entry.path) === parent && !folderRootsForTab.includes(entry.path)) ||
+          (folderTab === "local" && parent === folderRoot && entry.path === "stock")
+      ),
+    [folderOptions, folderRoot, folderRootsForTab, folderTab]
+  );
   const visibleFolders = useMemo(() => {
     if (!folderTab || queryText) return [];
-    return folderOptions.filter((folder) => parentAssetFolder(folder.path) === activeFolder);
-  }, [activeFolder, folderOptions, folderTab, queryText]);
+    return childFoldersOf(activeFolder);
+  }, [activeFolder, childFoldersOf, folderTab, queryText]);
   const filteredAssets = assets.filter((asset) => {
     const assetFolder = normalizeAssetFolder(asset.folder) || (folderTab ? folderRoot : "");
     const inActiveFolder = !folderTab || (queryText ? isAssetFolderDescendant(assetFolder, activeFolder) || assetFolder === activeFolder : assetFolder === activeFolder);
@@ -10205,14 +10550,11 @@ function AssetBinImpl({
   }, [sourceTab]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_asset_folder_local", activeAssetFolders.local);
-    localStorage.setItem("kimera_asset_folder_brand", activeAssetFolders.brand);
-    localStorage.setItem("kimera_asset_folder_ai", activeAssetFolders.ai);
-  }, [activeAssetFolders]);
-
-  useEffect(() => {
-    localStorage.setItem("kimera_asset_custom_folders", JSON.stringify(customAssetFolders));
-  }, [customAssetFolders]);
+    localStorage.setItem(`kimera_asset_folder_local${folderKeySuffix}`, activeAssetFolders.local);
+    localStorage.setItem(`kimera_asset_folder_brand${folderKeySuffix}`, activeAssetFolders.brand);
+    localStorage.setItem(`kimera_asset_folder_ai${folderKeySuffix}`, activeAssetFolders.ai);
+    localStorage.setItem(`kimera_asset_folder_search${folderKeySuffix}`, activeAssetFolders.search);
+  }, [activeAssetFolders, folderKeySuffix]);
 
   useEffect(() => {
     localStorage.setItem("kimera_asset_filter", filter);
@@ -10233,6 +10575,25 @@ function AssetBinImpl({
   useEffect(() => {
     localStorage.setItem("kimera_stock_quality", stockQuality);
   }, [stockQuality]);
+
+  // Close the folder context menu when clicking elsewhere or pressing Escape.
+  useEffect(() => {
+    if (!folderMenu) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".asset-tile-menu")) return;
+      setFolderMenu(null);
+    }
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setFolderMenu(null);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [folderMenu]);
 
   // Close the per-card "More" menu when clicking elsewhere or pressing Escape.
   useEffect(() => {
@@ -10353,6 +10714,10 @@ function AssetBinImpl({
     try {
       const asset = await importStock(result, variant ?? pickStockVariant(result, stockQuality), currentProjectId);
       onImportedAsset?.(asset);
+      // Import = provider reference (URL-first) + AN ON-DEVICE COPY: kick the local download in the
+      // background so "downloaded" stock genuinely lives on this machine (local-first, no server
+      // bytes). If the fetch fails (offline/CORS), the reference still streams — nothing breaks.
+      void onPinOffline?.(asset);
       // If the viewer was importing this result, close it once it lands in the library.
       setViewerTarget((current) => (current?.kind === "stock" && current.result.externalId === result.externalId ? null : current));
     } catch (error) {
@@ -10432,10 +10797,15 @@ function AssetBinImpl({
   }
 
   const stockConfigured = stockStatus ? stockStatus.configured : true;
-  const uploadSource: AssetUploadOptions | undefined = folderTab ? { source: folderTab, folder: activeFolder || folderRoot } : undefined;
+  // Search-tab folders organize imported stock refs, but uploads never target that tab (showUpload
+  // gates to Local/Brand) — so it maps to no upload source.
+  const uploadSource: AssetUploadOptions | undefined =
+    folderTab && folderTab !== "search" ? { source: folderTab, folder: activeFolder || folderRoot } : undefined;
   const showUpload = sourceTab === "local" || sourceTab === "brand";
   const canDropFiles = showUpload;
-  const uploadAccept = onImportFile ? "video/*,image/*,audio/*,.json,.kimera-template,.edl,.fcpxml,.xml,.prproj" : "video/*,image/*,audio/*";
+  // File-explorer bin: no accept restriction — media plays, timeline/template files import, and
+  // anything else (.cube, docs…) becomes a generic file asset. Undefined = the OS picker shows all.
+  const uploadAccept = undefined;
   const showDropPrompt = showUpload && filteredAssets.length === 0;
 
   function selectAssetFolder(folder: string) {
@@ -10443,15 +10813,83 @@ function AssetBinImpl({
     setActiveAssetFolders((current) => ({ ...current, [folderTab]: folder }));
   }
 
-  function createAssetFolder() {
+  /**
+   * File-explorer folder UX (2026-07-17, replaces the window.prompt dialog): "New bin" creates a
+   * uniquely-named folder immediately and drops it straight into INLINE RENAME (the OS-explorer
+   * gesture). Rename/move/delete live on the folder context menu.
+   */
+  function createAssetFolder(parentPath?: string) {
     if (!folderTab) return;
-    const rawName = window.prompt("Folder name");
-    if (rawName == null) return;
-    const name = sanitizeAssetFolderName(rawName);
-    if (!name) return;
-    const folder = `${activeFolder || folderRoot}/${name}`;
+    const parent = normalizeAssetFolder(parentPath ?? (activeFolder || folderRoot)) || folderRoot;
+    const existing = new Set(folderOptions.map((entry) => entry.path));
+    let name = "New bin";
+    for (let i = 2; existing.has(`${parent}/${name}`); i += 1) name = `New bin ${i}`;
+    const folder = `${parent}/${name}`;
     setCustomAssetFolders((current) => (current.includes(folder) ? current : [...current, folder]));
-    setActiveAssetFolders((current) => ({ ...current, [folderTab]: folder }));
+    // Make the new bin visible where it landed (tiles view shows the ACTIVE folder's children).
+    if (parent !== activeFolder) selectAssetFolder(parent);
+    setExpandedBins((current) => (parent !== folderRoot && !current.includes(parent) ? [...current, parent] : current));
+    setRenamingFolder(folder);
+  }
+
+  /** Rename a bin: remaps the subtree (assets' folder paths, custom entries, navigation, expansion). */
+  function applyRenameFolder(sourcePath: string, rawName: string) {
+    setRenamingFolder(null);
+    if (!folderTab) return;
+    const source = normalizeAssetFolder(sourcePath);
+    const name = sanitizeAssetFolderName(rawName);
+    if (!source || source === folderRoot || !name || name === assetFolderLabel(source)) return;
+    const parent = parentAssetFolder(source) || folderRoot;
+    const nextPath = `${parent}/${name}`;
+    if (nextPath === source) return;
+    if (folderOptions.some((entry) => entry.path === nextPath)) return; // name taken — keep the old one
+    for (const asset of assets) {
+      const assetFolder = normalizeAssetFolder(asset.folder);
+      if (assetFolder === source || isAssetFolderDescendant(assetFolder, source)) {
+        void onMoveAssetFolder?.(asset, nextPath + assetFolder.slice(source.length));
+      }
+    }
+    setCustomAssetFolders((current) => {
+      const moved = current.map((entry) => {
+        const normalized = normalizeAssetFolder(entry);
+        return normalized === source || isAssetFolderDescendant(normalized, source) ? nextPath + normalized.slice(source.length) : entry;
+      });
+      return moved.includes(nextPath) ? moved : [...moved, nextPath];
+    });
+    setActiveAssetFolders((current) => {
+      const active = current[folderTab] || folderRoot;
+      return active === source || isAssetFolderDescendant(active, source)
+        ? { ...current, [folderTab]: nextPath + active.slice(source.length) }
+        : current;
+    });
+    setExpandedBins((current) =>
+      current.map((path) => (path === source || isAssetFolderDescendant(path, source) ? nextPath + path.slice(source.length) : path))
+    );
+  }
+
+  /** Delete a bin. NON-destructive to media: contained assets move to the parent bin. */
+  function deleteAssetFolder(path: string) {
+    if (!folderTab) return;
+    const source = normalizeAssetFolder(path);
+    if (!source || source === folderRoot) return;
+    const parent = parentAssetFolder(source) || folderRoot;
+    for (const asset of assets) {
+      const assetFolder = normalizeAssetFolder(asset.folder);
+      if (assetFolder === source || isAssetFolderDescendant(assetFolder, source)) {
+        void onMoveAssetFolder?.(asset, parent);
+      }
+    }
+    setCustomAssetFolders((current) =>
+      current.filter((entry) => {
+        const normalized = normalizeAssetFolder(entry);
+        return normalized !== source && !isAssetFolderDescendant(normalized, source);
+      })
+    );
+    setActiveAssetFolders((current) => {
+      const active = current[folderTab] || folderRoot;
+      return active === source || isAssetFolderDescendant(active, source) ? { ...current, [folderTab]: parent } : current;
+    });
+    setExpandedBins((current) => current.filter((entry) => entry !== source && !isAssetFolderDescendant(entry, source)));
   }
 
   function assetByDragEvent(event: ReactDragEvent<HTMLElement>): SourceAsset | null {
@@ -10524,18 +10962,67 @@ function AssetBinImpl({
     setExpandedBins((current) => (target !== folderRoot && !current.includes(target) ? [...current, target] : current));
   }
 
-  async function processUploadFiles(files: FileList | File[]) {
-    const fileList = Array.from(files);
-    if (!fileList.length) return;
-    for (const file of fileList) {
+  async function processUploadFiles(files: FileList | File[] | { file: File; folder?: string }[]) {
+    const raw: (File | { file: File; folder?: string })[] = Array.isArray(files) ? files : Array.from(files);
+    const entries: { file: File; folder?: string }[] = raw.map((item) => (item instanceof File ? { file: item } : item));
+    if (!entries.length) return;
+    for (const { file, folder } of entries) {
       if (isTimelineOrTemplateImportFile(file) && onImportFile) {
         await onImportFile(file);
       } else if (isTimelineOrTemplateImportFile(file)) {
         continue;
       } else {
-        await onUploadAsset(file, uploadSource);
+        // File-explorer bin (2026-07-17): ANY file type imports — media becomes playable assets,
+        // everything else (.cube LUTs, JSON, docs…) a generic "file" asset that lives in the bin.
+        await onUploadAsset(file, folder ? { ...uploadSource, folder } : uploadSource);
       }
     }
+  }
+
+  /**
+   * Folder drop (file-explorer bin): a dropped DIRECTORY imports recursively, recreating its
+   * subfolder structure as bin folders under the current location. Uses the webkitGetAsEntry
+   * traversal API (the only cross-browser way to read dropped directories).
+   */
+  async function collectDroppedEntries(items: DataTransferItemList): Promise<{ file: File; folder?: string }[] | null> {
+    type FsEntry = {
+      isFile: boolean;
+      isDirectory: boolean;
+      name: string;
+      file: (ok: (file: File) => void, err: (e: unknown) => void) => void;
+      createReader: () => { readEntries: (ok: (entries: FsEntry[]) => void, err: (e: unknown) => void) => void };
+    };
+    const roots: FsEntry[] = [];
+    for (const item of Array.from(items)) {
+      const entry = (item as unknown as { webkitGetAsEntry?: () => FsEntry | null }).webkitGetAsEntry?.();
+      if (entry) roots.push(entry);
+    }
+    if (!roots.length || !roots.some((entry) => entry.isDirectory)) return null; // plain files → default path
+    const base = activeFolder || folderRoot;
+    const out: { file: File; folder?: string }[] = [];
+    const newFolders = new Set<string>();
+    const walk = async (entry: FsEntry, dir: string): Promise<void> => {
+      if (entry.isFile) {
+        const file = await new Promise<File | null>((resolve) => entry.file(resolve, () => resolve(null)));
+        if (file) out.push({ file, ...(dir ? { folder: dir } : {}) });
+        return;
+      }
+      if (!entry.isDirectory) return;
+      const next = `${dir || base}/${sanitizeAssetFolderName(entry.name) || entry.name}`;
+      newFolders.add(next);
+      const reader = entry.createReader();
+      // readEntries returns results in batches; loop until an empty batch.
+      for (;;) {
+        const batch = await new Promise<FsEntry[]>((resolve) => reader.readEntries(resolve, () => resolve([])));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, next);
+      }
+    };
+    for (const entry of roots) await walk(entry, "");
+    if (newFolders.size) {
+      setCustomAssetFolders((current) => [...new Set([...current, ...newFolders])]);
+    }
+    return out;
   }
 
   function handleAssetBinDragEnter(event: ReactDragEvent<HTMLDivElement>) {
@@ -10565,7 +11052,14 @@ function AssetBinImpl({
     event.preventDefault();
     dragDepthRef.current = 0;
     setDropActive(false);
-    void processUploadFiles(event.dataTransfer.files);
+    // Directory drops import recursively (folder structure → bin folders); plain files keep the
+    // fast path. The traversal must read items BEFORE any await (the DataTransfer goes stale).
+    const items = event.dataTransfer.items;
+    const files = event.dataTransfer.files;
+    void (async () => {
+      const traversed = items?.length ? await collectDroppedEntries(items) : null;
+      await processUploadFiles(traversed ?? files);
+    })();
   }
 
   // List view rows, flattened from the bin tree (expanded bins inline their children, Premiere
@@ -10586,7 +11080,7 @@ function AssetBinImpl({
           })
           .sort(compareAssets);
       const walk = (folderPath: string, depth: number) => {
-        for (const bin of folderOptions.filter((entry) => parentAssetFolder(entry.path) === folderPath)) {
+        for (const bin of childFoldersOf(folderPath)) {
           listNodes.push({ kind: "bin", folder: bin, depth });
           if (expandedBins.includes(bin.path)) walk(bin.path, depth + 1);
         }
@@ -10654,7 +11148,7 @@ function AssetBinImpl({
         </div>
         <div className="asset-control-actions">
           {folderTab ? (
-            <button type="button" className="asset-toolbar-button" title="New bin" onClick={createAssetFolder}>
+            <button type="button" className="asset-toolbar-button" title="New bin" onClick={() => createAssetFolder()}>
               <FolderPlus size={14} />
             </button>
           ) : null}
@@ -10737,6 +11231,26 @@ function AssetBinImpl({
               <div className="asset-stock-filter">
                 <ThemedSelect ariaLabel="Import quality" value={stockQuality} groups={STOCK_QUALITY_GROUPS} onChange={setStockQuality} />
               </div>
+            </div>
+          ) : null}
+          {/* Browsing imported stock (no provider query): folder navigation, same as the library tabs (M0). */}
+          {!query.trim() && folderTab === "search" ? (
+            <div className="asset-folder-path" aria-label="Stock bin path">
+              {folderCrumbs.map((crumb, index) => (
+                <Fragment key={crumb.path}>
+                  {index > 0 ? <ChevronRight size={12} aria-hidden="true" /> : null}
+                  <button
+                    type="button"
+                    className={crumb.path === activeFolder ? "is-active" : ""}
+                    onClick={() => selectAssetFolder(crumb.path)}
+                    onDragOver={(event) => handleAssetFolderDragOver(event, crumb.path)}
+                    onDrop={(event) => handleAssetFolderDrop(event, crumb.path)}
+                  >
+                    {index === 0 ? <FolderOpen size={13} /> : null}
+                    <span>{crumb.label}</span>
+                  </button>
+                </Fragment>
+              ))}
             </div>
           ) : null}
         </div>
@@ -11117,7 +11631,15 @@ function AssetBinImpl({
                         onClick={() => toggleBinExpanded(folder.path)}
                         onDoubleClick={() => selectAssetFolder(folder.path)}
                         onKeyDown={(event) => {
+                          if (renamingFolder === folder.path) return;
                           if (event.key === "Enter") toggleBinExpanded(folder.path);
+                          if (event.key === "F2") setRenamingFolder(folder.path);
+                          if (event.key === "Delete") deleteAssetFolder(folder.path);
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setFolderMenu({ path: folder.path, left: Math.max(8, Math.min(event.clientX, window.innerWidth - 252)), top: clampMenuTop(event.clientY) });
                         }}
                         onDragStart={(event) => {
                           event.dataTransfer.setData("application/x-kimera-asset-folder", folder.path);
@@ -11133,7 +11655,15 @@ function AssetBinImpl({
                           <span className={`asset-list-twisty ${expanded ? "is-open" : ""}`} aria-hidden="true">
                             <ChevronRight size={12} />
                           </span>
-                          <strong>{folder.label}</strong>
+                          {renamingFolder === folder.path ? (
+                            <FolderRenameInput
+                              path={folder.path}
+                              onCommit={(name) => applyRenameFolder(folder.path, name)}
+                              onCancel={() => setRenamingFolder(null)}
+                            />
+                          ) : (
+                            <strong>{folder.label}</strong>
+                          )}
                         </span>
                         <span className="asset-list-cell">Bin</span>
                         <span className="asset-list-cell">—</span>
@@ -11322,13 +11852,27 @@ function AssetBinImpl({
           {visibleFolders.length || filteredAssets.length ? (
             <>
               {visibleFolders.map((folder) => (
-                <button
+                <div
                   key={folder.path}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   className="asset-tile asset-bin-folder"
-                  title={`${folder.path} — drag onto a bin to nest`}
-                  draggable
-                  onClick={() => selectAssetFolder(folder.path)}
+                  title={`${folder.path} — open, right-click for actions, drag onto a bin to nest`}
+                  draggable={renamingFolder !== folder.path}
+                  onClick={() => {
+                    if (renamingFolder !== folder.path) selectAssetFolder(folder.path);
+                  }}
+                  onKeyDown={(event) => {
+                    if (renamingFolder === folder.path) return;
+                    if (event.key === "Enter") selectAssetFolder(folder.path);
+                    if (event.key === "F2") setRenamingFolder(folder.path);
+                    if (event.key === "Delete") deleteAssetFolder(folder.path);
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setFolderMenu({ path: folder.path, left: Math.max(8, Math.min(event.clientX, window.innerWidth - 252)), top: clampMenuTop(event.clientY) });
+                  }}
                   onDragStart={(event) => {
                     event.dataTransfer.setData("application/x-kimera-asset-folder", folder.path);
                     event.dataTransfer.effectAllowed = "move";
@@ -11340,14 +11884,22 @@ function AssetBinImpl({
                     <Folder size={22} />
                   </span>
                   <span className="asset-folder-row-main">
-                    <strong>{folder.label}</strong>
+                    {renamingFolder === folder.path ? (
+                      <FolderRenameInput
+                        path={folder.path}
+                        onCommit={(name) => applyRenameFolder(folder.path, name)}
+                        onCancel={() => setRenamingFolder(null)}
+                      />
+                    ) : (
+                      <strong>{folder.label}</strong>
+                    )}
                     <small>
                       {folder.assetCount + folder.childCount
                         ? `${folder.assetCount} asset${folder.assetCount === 1 ? "" : "s"} · ${folder.childCount} bin${folder.childCount === 1 ? "" : "s"}`
                         : "Empty bin"}
                     </small>
                   </span>
-                </button>
+                </div>
               ))}
               {filteredAssets.map((asset) => {
               const source = assetSourceOf(asset);
@@ -11450,7 +12002,7 @@ function AssetBinImpl({
                             <Layers size={14} />
                           </button>
                         </>
-                      ) : (
+                      ) : kind === "file" ? null : (
                         <button type="button" title={replaceActive ? "Replace clip asset" : "Add to timeline"} onClick={(event) => { event.stopPropagation(); replaceActive ? onPickReplacement?.(asset) : onAddAssetToTimeline?.(asset, "auto"); }}>
                           <Plus size={15} />
                         </button>
@@ -11514,6 +12066,18 @@ function AssetBinImpl({
                             </button>
                           ) : null}
                         </>
+                      ) : null}
+                      {/* Corruption repair: replace the on-device bytes from the recorded cloud/provider copy. */}
+                      {onRefreshFromCloud && (asset.cloudUrl || (!isLocalOnly && /^https?:/.test(asset.fileUrl))) ? (
+                        <button type="button" onClick={() => { setAssetMenu(null); onRefreshFromCloud(asset); }}>
+                          <RefreshCw size={13} /> Refresh from cloud
+                        </button>
+                      ) : null}
+                      {/* URL-first stock (M3): the record streams from the provider — pin the bytes on-device. */}
+                      {onPinOffline && (source === "pexels" || source === "unsplash") ? (
+                        <button type="button" onClick={() => { setAssetMenu(null); onPinOffline(asset); }}>
+                          <Download size={13} /> Pin offline
+                        </button>
                       ) : null}
                       <button type="button" onClick={() => { setAssetMenu(null); void downloadAssetFile(asset); }}>
                         <Download size={13} /> Download
@@ -11629,6 +12193,59 @@ function AssetBinImpl({
         </div>
       ) : null}
       {assetPanelFooter}
+      {/* Folder (bin) context menu — file-explorer actions. Fixed-position portal, same pattern as
+          the asset menu (a menu inside the multi-column grid paints across columns and clips). */}
+      {folderMenu
+        ? createPortal(
+            (() => {
+              const menuPath = folderMenu.path;
+              const menuParent = parentAssetFolder(menuPath) || folderRoot;
+              const folderMoveTargets = [
+                { path: folderRoot, label: `${folderTabLabel} root` },
+                ...folderOptions.map((entry) => ({ path: entry.path, label: entry.path.slice(folderRoot.length + 1) || entry.label }))
+              ].filter(
+                (target) =>
+                  target.path !== menuPath &&
+                  target.path !== menuParent &&
+                  !isAssetFolderDescendant(target.path, menuPath)
+              );
+              return (
+                <div className="asset-tile-menu asset-folder-menu" style={{ position: "fixed", left: folderMenu.left, top: folderMenu.top }}>
+                  <button type="button" onClick={() => { setFolderMenu(null); selectAssetFolder(menuPath); }}>
+                    <FolderOpen size={13} /> Open
+                  </button>
+                  <button type="button" onClick={() => { setFolderMenu(null); createAssetFolder(menuPath); }}>
+                    <FolderPlus size={13} /> New bin inside
+                  </button>
+                  <button type="button" onClick={() => { setFolderMenu(null); setRenamingFolder(menuPath); }}>
+                    <PenLine size={13} /> Rename
+                  </button>
+                  {folderMoveTargets.length ? (
+                    <>
+                      <span className="asset-tile-menu-label">Move to</span>
+                      {folderMoveTargets.map((target) => (
+                        <button
+                          key={target.path}
+                          type="button"
+                          onClick={() => {
+                            setFolderMenu(null);
+                            moveFolderIntoFolder(menuPath, target.path);
+                          }}
+                        >
+                          <Move size={13} /> {target.label}
+                        </button>
+                      ))}
+                    </>
+                  ) : null}
+                  <button type="button" className="is-danger" onClick={() => { setFolderMenu(null); deleteAssetFolder(menuPath); }}>
+                    <Trash2 size={13} /> Delete bin (assets move up)
+                  </button>
+                </div>
+              );
+            })(),
+            document.querySelector(".editor-page") ?? document.body
+          )
+        : null}
       <AssetViewerModal
         target={viewerTarget}
         importing={Boolean(importingId)}
@@ -12024,6 +12641,13 @@ function LayerInspectorImpl({
             <InspectorHost layer={layer} onChange={onChange} panelIds={GRAPHIC_PANEL_IDS} currentTime={currentTime} onSeek={onSeek} autoKeyframe={autoKeyframe} />
           ) : null}
         </>
+      ) : null}
+
+      {inspectorTab === "color" ? (
+        // Color sub-tab (user request 2026-07-16, reversing the 2026-07-12 "left panel only" call):
+        // the SAME LumetriPanel component the left panel renders — one color implementation, two
+        // entry points, so edits from either surface land on the identical effect stack.
+        <LumetriPanel layer={layer} currentTime={currentTime} onChange={onChange} onSeek={onSeek} />
       ) : null}
     </div>
   );

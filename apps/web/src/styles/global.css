@@ -4741,6 +4741,110 @@ input[type="checkbox"] {
   background: var(--nle-bg-2);
 }
 
+/* Two-view toggle (Curves | Lanes) at the head of the graph toolbar. */
+.graph-toolbar-views {
+  display: inline-flex;
+  gap: 2px;
+}
+
+/* LANES view: DaVinci-style keyframe editor — one row of retimeable diamonds per parameter. */
+.graph-lanes {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--nle-bg-2);
+}
+
+.graph-lanes-ruler {
+  position: relative;
+  flex: 0 0 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.graph-lanes-tick {
+  position: absolute;
+  top: 2px;
+  transform: translateX(2px);
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 0.62rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.graph-lanes-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.graph-lanes-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #4f9cff;
+  opacity: 0.8;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.graph-lane-row {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.graph-lane-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 132px;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 0.68rem;
+}
+
+.graph-lane-label i {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+.graph-lane-track {
+  position: relative;
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.graph-lane-key {
+  position: absolute;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border: 1.4px solid currentColor;
+  border-radius: 1px;
+  background: #12151c;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+.graph-lane-key.is-selected {
+  outline: 1.4px solid #fff;
+  outline-offset: 0;
+}
+
 .graph-canvas-base,
 .graph-canvas-overlay {
   position: absolute;
@@ -8950,6 +9054,23 @@ input[type="checkbox"] {
   font-size: 0.68rem;
 }
 
+/* Shared color row (ColorControl — PropertyRow shell): a compact swatch + its hex readout. */
+.color-row-input {
+  justify-self: start;
+  width: 34px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--editor-border);
+  border-radius: var(--editor-radius-sm, 4px);
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-row-hex {
+  color: var(--editor-text-dim);
+  font-size: 0.65rem;
+}
+
 /* Frames section in the Graphics search panel — tiles preview the shape (unit-box SVG path). */
 .frames-grid-hint {
   grid-column: 1 / -1;
@@ -12430,8 +12551,10 @@ input.scrub-number:focus {
   padding: 0;
   border: 1px solid transparent;
   border-radius: 5px;
+  /* Patola-weave diamond lattice (45° checker) — the transition element's texture. Minimal,
+     directionless (a mix belongs to both sides), and distinct from every clip surface. */
   background:
-    repeating-linear-gradient(135deg, rgba(168, 120, 255, 0.55) 0 5px, rgba(140, 96, 240, 0.42) 5px 10px);
+    repeating-conic-gradient(from 45deg, rgba(168, 120, 255, 0.55) 0% 25%, rgba(126, 88, 226, 0.4) 25% 50%) 0 0 / 10px 10px;
   color: #fff;
   cursor: ew-resize;
   touch-action: none;
@@ -12443,6 +12566,17 @@ input.scrub-number:focus {
 .timeline-editor .timeline-transition.is-dragging {
   filter: brightness(1.12);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* "Insufficient media" warning (Premiere's zebra, restyled as a TORAN fringe — the amber triangle
+   bunting hung over doorways): triangle rows along both edges + an amber-tinted diamond weave.
+   Still unmistakably a warning; right-click applies the Resolve-style trim fix. */
+.timeline-editor .timeline-transition.has-repeated-frames {
+  border-color: rgba(255, 176, 32, 0.9);
+  background:
+    conic-gradient(from 135deg at 50% 0%, rgba(255, 176, 32, 0.9) 90deg, transparent 90deg) top left / 10px 5px repeat-x,
+    conic-gradient(from -45deg at 50% 100%, rgba(255, 176, 32, 0.9) 90deg, transparent 90deg) bottom left / 10px 5px repeat-x,
+    repeating-conic-gradient(from 45deg, rgba(214, 148, 40, 0.5) 0% 25%, rgba(130, 90, 26, 0.45) 25% 50%) 0 0 / 10px 10px;
 }
 
 .timeline-editor .timeline-transition-glyph {
@@ -12808,8 +12942,13 @@ input.scrub-number:focus {
   background-position: center;
 }
 
+/* Loading placeholder — a subtle pulli-kolam dot lattice (diagonal dot grid) instead of the old
+   barcode stripes: quieter, reads as "texture forming", and stays legible under the name band. */
 .clip-filmstrip.is-loading {
-  background: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0 14px, rgba(0, 0, 0, 0.12) 14px 28px);
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.11) 1px, transparent 1.6px) 0 0 / 12px 12px,
+    radial-gradient(circle, rgba(255, 255, 255, 0.055) 1px, transparent 1.6px) 6px 6px / 12px 12px,
+    rgba(0, 0, 0, 0.14);
 }
 
 /* Name bar pinned to the bottom of the clip, filled with the clip's accent color so
@@ -14219,6 +14358,52 @@ input.scrub-number:focus {
   place-items: center;
   color: var(--primary);
   background: linear-gradient(135deg, color-mix(in srgb, var(--nle-accent) 16%, transparent), rgba(147, 102, 255, 0.16));
+}
+
+/* Generic (non-media) file tile — the file-explorer bin (.cube/.json/docs). */
+.asset-card-media-file {
+  aspect-ratio: 5 / 2;
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  color: var(--muted, #9aa3b2);
+  background: linear-gradient(135deg, rgba(148, 163, 184, 0.14), rgba(100, 116, 139, 0.1));
+}
+
+.asset-card-media-file .asset-file-ext {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  opacity: 0.8;
+}
+
+/* Inline bin rename (file-explorer gesture) — sits where the folder label was. */
+.asset-folder-rename {
+  width: 100%;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--nle-accent, #7c5cff);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+}
+
+/* Dead-source badge (URL-first stock): the provider/cloud URL stopped serving bytes. */
+.asset-chip-offline {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  z-index: 2;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(190, 60, 60, 0.92);
+  pointer-events: none;
 }
 
 /* Transient placeholder for a video card whose poster (server thumbnail or throttled first-frame
@@ -19933,6 +20118,33 @@ input.scrub-number:focus {
   background: transparent;
   color: rgba(255, 255, 255, 0.42);
   cursor: pointer;
+}
+
+/* Export the whole grade as an industry .cube LUT (baker = the live pipeline, so the file IS the look). */
+.lumetri-export-lut {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin: 2px 0 6px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lumetri-export-lut:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+
+.lumetri-export-lut:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .lumetri-section-reset:hover {

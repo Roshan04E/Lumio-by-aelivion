@@ -72,9 +72,9 @@ assetsRouter.post(
     });
     const fileName = input.fileName ?? "demo-clip.mp4";
     const fileType = input.fileType ?? "video/mp4";
-    const fileUrl = await saveUpload(req.file, fileName, req.user.id);
-
     const ownerProjectId = input.projectId ?? null;
+    // Project-owned uploads land under the project's storage prefix; library assets under library/.
+    const fileUrl = await saveUpload(req.file, fileName, req.user.id, ownerProjectId);
     const asset = await prisma.sourceAsset.create({
       data: {
         userId: req.user.id,
@@ -130,10 +130,9 @@ assetsRouter.post(
     const input = validateBody(createAssetSchema, req.body);
     const fileName = input.fileName ?? "demo-clip.mp4";
     const fileType = input.fileType ?? "video/mp4";
-    const key = buildUploadKey(fileName, req.user.id);
-    const { uploadUrl, publicUrl } = await createPresignedUpload(key, fileType);
-
     const ownerProjectId = input.projectId ?? null;
+    const key = buildUploadKey(fileName, req.user.id, ownerProjectId);
+    const { uploadUrl, publicUrl } = await createPresignedUpload(key, fileType);
     const asset = await prisma.sourceAsset.create({
       data: {
         userId: req.user.id,

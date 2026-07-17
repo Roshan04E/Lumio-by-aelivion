@@ -49,7 +49,12 @@ const importSchema = z.object({
   author: z.string().optional(),
   sourceUrl: z.string().optional(),
   // Project-scoped import (Phase 1 rule): imported stock lands in the requesting project's bin.
-  projectId: z.string().trim().min(1).optional()
+  projectId: z.string().trim().min(1).optional(),
+  // URL-FIRST (2026-07-17 founder directive, plans/media-cloud-architecture.md M3): by default an
+  // import stores a REFERENCE to the provider's CDN URL — no bytes are downloaded or re-hosted
+  // ("what's the point of uploading stock footage the provider already serves"). Pass false to get
+  // the legacy copy-into-our-storage behavior (used by "pin offline" style flows that need bytes).
+  referenceOnly: z.boolean().default(true)
 });
 
 stockRouter.post(
@@ -60,8 +65,21 @@ stockRouter.post(
       throw new HttpError(501, "Stock search is not configured");
     }
     const input = validateBody(importSchema, req.body);
-    const { buffer, fileName } = await downloadStockMedia(input.downloadUrl, input.externalId, input.type);
-    const fileUrl = await saveBuffer(buffer, fileName, req.user.id);
+    let fileUrl: string;
+    let fileName: string;
+    let sizeBytes: number | null = null;
+    if (input.referenceOnly) {
+      // Reference mode: the provider CDN serves the media (playback streams it; the render worker
+      // fetches HTTP URLs just the same). Nothing lands in our storage.
+      fileUrl = input.downloadUrl;
+      const ext = input.type === "image" ? "jpg" : "mp4";
+      fileName = `pexels-${input.externalId}.${ext}`;
+    } else {
+      const downloaded = await downloadStockMedia(input.downloadUrl, input.externalId, input.type);
+      fileName = downloaded.fileName;
+      sizeBytes = downloaded.buffer.byteLength;
+      fileUrl = await saveBuffer(downloaded.buffer, fileName, req.user.id);
+    }
 
     const asset = await prisma.sourceAsset.create({
       data: {
@@ -80,7 +98,7 @@ stockRouter.post(
         source: "pexels",
         folder: `stock/pexels/${input.type}`,
         originalName: `pexels ${input.externalId}`,
-        sizeBytes: buffer.byteLength,
+        ...(sizeBytes != null ? { sizeBytes } : {}),
         // Stock is a reusable library asset (ownerProjectId stays null); link it into the requesting
         // project so it shows in that project's bin without being bound to it.
         ...(input.projectId ? { projectLinks: { create: { projectId: input.projectId } } } : {}),

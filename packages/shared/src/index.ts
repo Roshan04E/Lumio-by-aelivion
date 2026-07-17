@@ -43,6 +43,7 @@ export * from "./text-styles";
 export * from "./text-warp";
 export * from "./text-warp-mesh";
 export * from "./font-outlines";
+export * from "./media-manifest";
 export * from "./timeline";
 export * from "./timeline-actions";
 export * from "./track-fusion";
