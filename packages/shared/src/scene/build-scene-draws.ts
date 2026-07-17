@@ -992,6 +992,16 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
             continue;
           }
         }
+        // Span gate (junction pre/post-roll extension in nesting.ts): derived children may exist
+        // slightly OUTSIDE the compound clip's span to feed a transition mix with real material.
+        // Outside the span AND outside a mix (the branches above), the group must not draw — a
+        // pre-rolled incoming group would otherwise flash before its cut.
+        const groupSpec = nestedGroups?.get(topGroupKey);
+        if (groupSpec) {
+          const clipStart = groupSpec.clip.startSeconds;
+          const clipEnd = clipStart + groupSpec.clip.durationSeconds;
+          if (t < clipStart - 1e-6 || t >= clipEnd + 1e-6) continue;
+        }
         const g = buildGroupDraw(topGroupKey);
         if (g) draws.push(g);
       }

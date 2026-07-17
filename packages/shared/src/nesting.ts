@@ -157,16 +157,28 @@ export function expandNestedCompositions(
   visited.add(composition.id);
   const groups = new Map<string, NestedGroupSpec>();
 
-  const expandClip = (clip: TimelineLayer): TimelineLayer[] => {
+  const expandClip = (clip: TimelineLayer, junction?: { prerollSeconds: number; postrollSeconds: number }): TimelineLayer[] => {
     const nested = clip.nestedCompositionId ? compositions[clip.nestedCompositionId] : undefined;
     // Missing/cyclic/too-deep reference: leave the clip unexpanded (renders as an empty media layer)
     // rather than dropping content or recursing forever.
     if (!nested || visited.has(nested.id)) return [clip];
 
     const inner = expandNestedCompositions(nested, compositions, { visited, depth: depth + 1 });
-    const clipSpeed = getLayerSpeed(clip); // v1: ramps on the compound are unsupported → scalar speed
-    const winStart = clip.sourceInSeconds ?? 0;
-    const winEnd = winStart + clip.durationSeconds * clipSpeed;
+    // v1: ramps on the compound are unsupported → scalar speed. |speed| (S2): the static child
+    // derivation's time algebra assumes forward parent time — a REVERSED compound needs per-frame
+    // nest-time evaluation (S3, with compound ramps), so reverse is ignored at the nest level.
+    const clipSpeed = Math.abs(getLayerSpeed(clip));
+    // Junction pre/post-roll extension (nesting Block 6 tail, 2026-07-17): when this compound clip
+    // sits at a junction transition (it carries `transitionIn`, or the abutting next clip does), the
+    // child window widens to cover the transition window with REAL nest material — capped by what
+    // head/tail material the trim actually left (`max(0, …)` / `min(nestDuration, …)`), the same
+    // handle physics as a real asset. Children then exist (slightly) OUTSIDE the clip's span; the
+    // scene builder only lets them render inside an active mix (span gate on the group emission), so
+    // nothing flashes early/late. An untrimmed clip extends by zero — output unchanged.
+    const winStartBase = clip.sourceInSeconds ?? 0;
+    const winEndBase = winStartBase + clip.durationSeconds * clipSpeed;
+    const winStart = Math.max(0, winStartBase - (junction?.prerollSeconds ?? 0) * clipSpeed);
+    const winEnd = Math.min(nested.durationSeconds, winEndBase + (junction?.postrollSeconds ?? 0) * clipSpeed);
 
     // Map one nested-comp layer into parent-timeline coordinates through the clip's trim window +
     // speed, or null when it doesn't overlap the window. Used for the visible children AND for the
@@ -183,7 +195,10 @@ export function expandNestedCompositions(
         ...child,
         id: `${clip.id}${NEST_ID_SEPARATOR}${child.id}`,
         trackId: clip.trackId,
-        startSeconds: clip.startSeconds + (overlapStart - winStart) / clipSpeed,
+        // Anchored on the BASE window (winStartBase ↔ clip.startSeconds): with a junction extension
+        // active, overlapStart can sit BEFORE winStartBase → the child starts before the clip (the
+        // pre-roll material), by exactly (winStartBase − overlapStart)/speed parent-seconds.
+        startSeconds: clip.startSeconds + (overlapStart - winStartBase) / clipSpeed,
         durationSeconds: (overlapEnd - overlapStart) / clipSpeed,
         // Child source time at the trimmed head — exact even when the CHILD has a speed ramp
         // (closed-form integral via the shared evaluator).
@@ -312,9 +327,20 @@ export function expandNestedCompositions(
 
   const tracks: TimelineTrack[] = composition.tracks.map((track) => {
     if (!track.layers.some((layer) => layer.nestedCompositionId && !layer.muted)) return track;
+    // Junction context for the pre/post-roll extension above: preroll when the compound clip itself
+    // carries the junction transition (it's the INCOMING side); postroll when the abutting NEXT clip
+    // does (this compound is the OUTGOING side). Full transition duration is used — it upper-bounds
+    // every alignment's actual pre/post-roll, and the window is material-capped inside expandClip.
+    const junctionFor = (clip: TimelineLayer): { prerollSeconds: number; postrollSeconds: number } | undefined => {
+      const clipEnd = clip.startSeconds + clip.durationSeconds;
+      const next = track.layers.find((l) => l.id !== clip.id && l.transitionIn && Math.abs(l.startSeconds - clipEnd) < 1e-3);
+      const prerollSeconds = clip.transitionIn?.durationSeconds ?? 0;
+      const postrollSeconds = next?.transitionIn?.durationSeconds ?? 0;
+      return prerollSeconds > 0 || postrollSeconds > 0 ? { prerollSeconds, postrollSeconds } : undefined;
+    };
     return {
       ...track,
-      layers: track.layers.flatMap((layer) => (layer.nestedCompositionId && !layer.muted ? expandClip(layer) : [layer])),
+      layers: track.layers.flatMap((layer) => (layer.nestedCompositionId && !layer.muted ? expandClip(layer, junctionFor(layer)) : [layer])),
     };
   });
 

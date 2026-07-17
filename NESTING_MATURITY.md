@@ -185,6 +185,26 @@ biggest perceived-quality jump ("effects/transitions on groups work now"). 2→3
   time-remapped `volume` effect per audio/video child, `__nestvol_<clipId>`) and the nested track's
   static fader; a child with its OWN volume effect is scaled by the clip's STATIC gain × fader
   (documented approximation — two keyframed curves can't merge). Gates: editor.test `audio fold:`.
-- Known degrade kept: group junction transitions with a TRIMMED compound incoming (head handle →
-  preroll) may hard-cut during the pre-cut window segment (children only exist inside the clip
-  span); untrimmed groups use start-at-cut alignment and mix over the full window.
+- **Preview nested-audio silence: FIXED.** The preview's audio path read the RAW composition, so a
+  compound clip (`type:"video"`, filtered out) played SILENT even though both export paths already
+  expand nests and mix nested audio (`collectAudioLayers` on the expanded comp / manifest-flattened
+  audio layers). `VideoPreview` now flattens audio from `nestExpansion.composition.tracks` — the same
+  expansion the video path uses — restoring preview↔export parity. Block 5's volume fold already
+  baked the nested track fader + compound gain into each child, so parent-track gain stays unity (no
+  double-count). Two junction fixes below also landed:
+- **Trimmed-group junction pre/post-roll: FIXED (same day).** `expandNestedCompositions` widens a
+  junction-adjacent compound clip's child window by the transition duration (material-capped by the
+  trim's real head/tail handles — asset physics), so the mix reads REAL nest material before/after
+  the cut; the derived children anchor on the BASE window (`winStartBase ↔ clip.startSeconds`), and
+  `buildSceneDraws` span-gates the group's standalone emission so extended children never render
+  outside a mix. Gates: editor.test `junction extension:` (5 checks incl. no-junction no-op) +
+  pixel fixture `nested-junction-preroll` (trimmed incoming sampled pre-cut).
+- **Follow-ups (same day, user feedback):** Timelines moved from a stacked section to a first-class
+  media-pool TAB (Search/Local/AI/Brand/Used/**Timelines**) — zero vertical cost, full-height
+  scrollable list, "Unused"/"N×" instance badges (orphaned sequences are now legible + one-click
+  deletable). **Trim-handles fix:** TimelineStrip's `getLayerMaxDuration` no longer clamps a clip's
+  max duration to the comp's CURRENT length (a grouped sequence is exactly content-sized, so every
+  clip inside a nest — any depth — was untrimmable); unbounded layers (text/shape/image) get
+  +300s headroom past the comp end in EditorPage's builder; the timeline auto-grows on commit via
+  `normalizeCompositionDuration`, and the parent's compound clip picks up the longer nest as new
+  tail handle immediately (live registry read).

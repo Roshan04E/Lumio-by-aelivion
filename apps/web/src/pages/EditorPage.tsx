@@ -13,6 +13,7 @@ import {
   Diamond,
   Droplet,
   FileCode,
+  Clapperboard,
   Film,
   Folder,
   FolderOpen,
@@ -1298,13 +1299,26 @@ export function EditorPage() {
   );
   const compositionRef = useRef(composition);
   compositionRef.current = composition;
-  // Timelines media-pool section (nesting Block 3): every registry comp, Main first. The active
-  // comp is unioned in because updateGraph's write-through mirrors it only on the NEXT write.
-  const timelineCompositionEntries = useMemo(() => {
-    if (!graph || !composition) return [];
+  // Timelines media-pool TAB (nesting Block 3): every registry comp, Main first, with per-comp
+  // instance counts (how many compound clips reference it anywhere — 0 shows an "Unused" badge).
+  // The active comp is unioned in because updateGraph's write-through mirrors it on the NEXT write.
+  // Memoized as ONE object so the memo'd AssetBin's `timelines` prop stays identity-stable.
+  const timelinesTabData = useMemo(() => {
+    if (!graph || !composition) return undefined;
     const registry = { ...(graph.compositions ?? {}), [composition.id]: composition };
     const rootId = graph.rootCompositionId ?? composition.id;
-    return Object.values(registry).sort((a, b) => (a.id === rootId ? -1 : b.id === rootId ? 1 : a.name.localeCompare(b.name)));
+    const counts = new Map<string, number>();
+    for (const comp of Object.values(registry)) {
+      for (const track of comp.tracks) {
+        for (const layer of track.layers) {
+          if (layer.nestedCompositionId) counts.set(layer.nestedCompositionId, (counts.get(layer.nestedCompositionId) ?? 0) + 1);
+        }
+      }
+    }
+    const entries = Object.values(registry)
+      .sort((a, b) => (a.id === rootId ? -1 : b.id === rootId ? 1 : a.name.localeCompare(b.name)))
+      .map((comp) => ({ comp, instances: counts.get(comp.id) ?? 0 }));
+    return { entries, rootId, activeId: composition.id };
   }, [graph, composition]);
   const resolvedAssets = useMemo(() => {
     if (!project?.sourceAsset || assets.some((asset) => asset.id === project.sourceAsset?.id)) {
@@ -1346,6 +1360,13 @@ export function EditorPage() {
   const stablePinOffline = useStableHandler(handlePinAssetOffline);
   const stableChangeCustomFolders = useStableHandler(handleChangeCustomFolders);
   const stableOpenSourceMonitor = useStableHandler(handleOpenInSourceMonitor);
+  // Timelines tab handlers (nesting Block 3) — same identity-stability contract as above.
+  const stableOpenTimeline = useStableHandler(handleOpenCompositionById);
+  const stableInsertTimelineAtPlayhead = useStableHandler(handleInsertCompositionAtPlayhead);
+  const stableRenameTimeline = useStableHandler((compositionId: string, name: string) => void handleRenameComposition(compositionId, name));
+  const stableDuplicateTimeline = useStableHandler((compositionId: string) => void handleDuplicateComposition(compositionId));
+  const stableDeleteTimeline = useStableHandler((compositionId: string) => void handleDeleteComposition(compositionId));
+  const stableCreateTimeline = useStableHandler(() => void handleCreateTimelineComposition());
   // Browser-local assets awaiting cloud upload — drives the Media Pool header "sync all" chip.
   const cloudPendingLocalCount = useMemo(() => assets.filter(isAssetLocalOnly).length, [assets]);
   const layerMaxDurations = useMemo(
@@ -4644,7 +4665,7 @@ export function EditorPage() {
     // Slip bounds live in SOURCE seconds: the clip consumes durationSeconds * speed of media.
     const speed = getLayerSpeed(layer);
     const maxDuration = getLayerMaxDuration(layer, resolvedAssets, composition.durationSeconds, graph?.compositions);
-    const clamped = clamp(Number(sourceInSeconds.toFixed(3)), 0, Math.max(0, (maxDuration - layer.durationSeconds) * speed));
+    const clamped = clamp(Number(sourceInSeconds.toFixed(3)), 0, Math.max(0, (maxDuration - layer.durationSeconds) * Math.abs(speed)));
     if (clamped === (layer.sourceInSeconds ?? 0)) {
       return;
     }
@@ -4672,7 +4693,8 @@ export function EditorPage() {
     if (!layer || !isLayerEditable(layerId)) {
       return;
     }
-    const newSpeed = clamp(Number(requestedSpeed.toFixed(3)), 0.05, 16);
+    const newSpeedMagnitude = clamp(Math.abs(Number(requestedSpeed.toFixed(3))), 0.05, 16);
+    const newSpeed = requestedSpeed < 0 ? -newSpeedMagnitude : newSpeedMagnitude; // S2: negative = reverse
     const oldSpeed = getLayerSpeed(layer);
     if (Math.abs(newSpeed - oldSpeed) < 0.0005) {
       return;
@@ -4685,8 +4707,8 @@ export function EditorPage() {
             .map((item) => item.id)
         : [layerId]
     );
-    const sourceSpan = layer.durationSeconds * oldSpeed;
-    let newDuration = Math.max(frameSeconds, sourceSpan / newSpeed);
+    const sourceSpan = layer.durationSeconds * Math.abs(oldSpeed);
+    let newDuration = Math.max(frameSeconds, sourceSpan / newSpeedMagnitude);
     // Clamp tail growth at the earliest next clip across every track a group member sits on.
     for (const track of composition.tracks) {
       for (const member of track.layers) {
@@ -6072,7 +6094,7 @@ export function EditorPage() {
       // ms — seeking the full-res original is what made the two-up feel seconds behind the drag.
       const url = asset?.proxyUrl ?? asset?.previewUrl ?? asset?.fileUrl;
       if (!url) return null;
-      return { url, durationSourceSeconds: layer.durationSeconds * getLayerSpeed(layer) };
+      return { url, durationSourceSeconds: layer.durationSeconds * Math.abs(getLayerSpeed(layer)) };
     },
     [assets]
   );
@@ -7876,19 +7898,6 @@ export function EditorPage() {
                   visible tab's grid rows are unaffected; the :has(.asset-bin) footer-pin rules in
                   global.css are scoped to the VISIBLE case via .panel-tab-hidden. */}
               <div className={`panel-tab-content${panelTab === "assets" ? "" : " panel-tab-hidden"}`}>
-                {composition ? (
-                  <TimelinesPanel
-                    compositions={timelineCompositionEntries}
-                    rootId={graph.rootCompositionId ?? composition.id}
-                    activeId={composition.id}
-                    onOpen={handleOpenCompositionById}
-                    onInsertAtPlayhead={handleInsertCompositionAtPlayhead}
-                    onRename={handleRenameComposition}
-                    onDuplicate={handleDuplicateComposition}
-                    onDelete={handleDeleteComposition}
-                    onCreate={handleCreateTimelineComposition}
-                  />
-                ) : null}
                 <AssetBin
                   assets={assets}
                   currentProjectId={project?.id}
@@ -7917,6 +7926,13 @@ export function EditorPage() {
                   customFolders={graph.mediaManifest?.customFolders}
                   onChangeCustomFolders={stableChangeCustomFolders}
                   onOpenSourceMonitor={responsiveLayout.usesOverlayPanels ? undefined : stableOpenSourceMonitor}
+                  timelines={timelinesTabData}
+                  onOpenTimeline={stableOpenTimeline}
+                  onInsertTimelineAtPlayhead={stableInsertTimelineAtPlayhead}
+                  onRenameTimeline={stableRenameTimeline}
+                  onDuplicateTimeline={stableDuplicateTimeline}
+                  onDeleteTimeline={stableDeleteTimeline}
+                  onCreateTimeline={stableCreateTimeline}
                 />
               </div>
               {panelTab === "effects" ? (
@@ -9400,7 +9416,7 @@ function getLayerMaxDuration(
     if (asset?.durationSeconds) {
       // Rate stretch: a clip playing at 2x consumes media twice as fast, so its max
       // TIMELINE duration is the asset duration divided by speed.
-      return Math.max(0.05, Math.max(0.2, asset.durationSeconds) / getLayerSpeed(layer));
+      return Math.max(0.05, Math.max(0.2, asset.durationSeconds) / Math.abs(getLayerSpeed(layer)));
     }
   }
 
@@ -9410,11 +9426,16 @@ function getLayerMaxDuration(
   if (layer.nestedCompositionId) {
     const nestedDuration = getNestedSourceDurationSeconds(layer, compositions);
     if (nestedDuration) {
-      return Math.max(0.05, nestedDuration / getLayerSpeed(layer));
+      return Math.max(0.05, nestedDuration / Math.abs(getLayerSpeed(layer)));
     }
   }
 
-  return compositionDuration;
+  // Unbounded layers (text/shape/image/graphic/adjustment — no intrinsic media length): generous
+  // headroom past the comp's CURRENT end instead of pinning to it (nesting handles fix,
+  // 2026-07-17). Pinning to `compositionDuration` froze these clips inside a group — a grouped
+  // sequence is exactly content-sized, so "max = comp length" meant "max = what you already have".
+  // Finite (not Infinity) because TimelineStrip folds this into its interaction extent.
+  return compositionDuration + 300;
 }
 
 function addCompanionAudioLayer(
@@ -9963,7 +9984,7 @@ function SettingsNumberField({
   );
 }
 
-type AssetSourceTab = "local" | "ai" | "search" | "brand" | "templates" | "used";
+type AssetSourceTab = "local" | "ai" | "search" | "brand" | "templates" | "used" | "timelines";
 type AssetTypeFilter = "all" | "video" | "image" | "audio" | "graphics";
 type FolderAssetTab = Extract<AssetSourceTab, "local" | "brand" | "ai" | "search">;
 type AssetBinFolder = {
@@ -10103,7 +10124,10 @@ const ASSET_TABS: { id: AssetSourceTab; label: string; icon: ReactNode }[] = [
   { id: "local", label: "Local", icon: <FolderClosedIcon /> },
   { id: "ai", label: "AI", icon: <Sparkles size={13} /> },
   { id: "brand", label: "Brand", icon: <Palette size={13} /> },
-  { id: "used", label: "Used", icon: <Layers size={13} /> }
+  { id: "used", label: "Used", icon: <Layers size={13} /> },
+  // Timelines tab (nesting Block 3, restructured): shown only when the host passes timeline data
+  // (the inspector's replacement picker doesn't — a timeline can't replace a clip's asset).
+  { id: "timelines", label: "Timelines", icon: <Clapperboard size={13} /> }
 ];
 
 function FolderClosedIcon() {
@@ -10395,13 +10419,23 @@ function StockCardMedia({ result }: { result: StockResult }) {
   );
 }
 
+/** Data bundle for the media pool's Timelines TAB (memoized at the call site — AssetBin is memo'd).
+ *  `instances` = how many compound clips across the WHOLE project reference the comp; 0 on a
+ *  non-root comp renders an "Unused" badge (a sequence survives its last clip by design — Premiere
+ *  project-panel semantics — but it must be LEGIBLE that it's not on any timeline). */
+type TimelinesTabData = {
+  entries: { comp: TimelineComposition; instances: number }[];
+  rootId: string;
+  activeId: string;
+};
+
 /**
- * Timelines section of the media pool (NESTING_MATURITY.md Block 3): every composition in the
- * project — Main included — as an openable/placeable project item, Premiere project-panel style.
- * Double-click opens; drag onto a video track inserts a compound clip (cycle-guarded at the drop
- * handler); context menu covers rename/duplicate/delete/insert. Lives OUTSIDE the memo'd AssetBin
- * on purpose: its data (names/durations/count) changes with composition edits, while the bin's
- * identity-stable props stay untouched.
+ * Timelines TAB of the media pool (NESTING_MATURITY.md Block 3; restructured 2026-07-17 from a
+ * stacked section — it was eating vertical space above the bin). Now a first-class source tab in
+ * the Local/AI/Brand/Used row, Premiere project-panel style: zero cost when another tab is active,
+ * full panel height (scrollable) when open. Double-click opens; drag onto a video track inserts a
+ * compound clip (cycle-guarded at the drop handler); context menu covers open/place/rename/
+ * duplicate/delete.
  */
 function TimelinesPanel({
   compositions,
@@ -10414,7 +10448,7 @@ function TimelinesPanel({
   onDelete,
   onCreate
 }: {
-  compositions: TimelineComposition[];
+  compositions: TimelinesTabData["entries"];
   rootId: string;
   activeId: string;
   onOpen: (compositionId: string) => void;
@@ -10424,11 +10458,10 @@ function TimelinesPanel({
   onDelete: (compositionId: string) => void;
   onCreate: () => void;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
   const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const menuComp = menu ? compositions.find((comp) => comp.id === menu.id) : undefined;
+  const menuComp = menu ? compositions.find((entry) => entry.comp.id === menu.id)?.comp : undefined;
   const formatLength = (seconds: number) => {
     const total = Math.max(0, Math.round(seconds));
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
@@ -10440,20 +10473,20 @@ function TimelinesPanel({
     setRenamingId(null);
   };
   return (
-    <div className="timelines-panel">
+    <div className="timelines-panel timelines-tab">
       <div className="timelines-panel-header">
-        <button type="button" className="timelines-panel-toggle" onClick={() => setCollapsed((value) => !value)}>
-          {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} />}
+        <span className="timelines-panel-title">
           <Layers size={13} />
           <span>Timelines</span>
           <span className="timelines-panel-count">{compositions.length}</span>
-        </button>
+        </span>
         <button type="button" className="timelines-panel-add" title="New timeline" onClick={onCreate}>
           <Plus size={13} />
+          <span>New</span>
         </button>
       </div>
-      {!collapsed
-        ? compositions.map((comp) => {
+      <div className="timelines-list">
+        {compositions.map(({ comp, instances }) => {
             const isRoot = comp.id === rootId;
             const isActive = comp.id === activeId;
             return (
@@ -10498,6 +10531,12 @@ function TimelinesPanel({
                   <span className="timelines-row-name">{comp.name}</span>
                 )}
                 {isRoot ? <span className="timelines-row-badge">Main</span> : null}
+                {!isRoot && instances === 0 ? (
+                  <span className="timelines-row-badge is-unused" title="Not placed on any timeline — drag it in, or Delete it from the ⋮ menu">
+                    Unused
+                  </span>
+                ) : null}
+                {!isRoot && instances > 1 ? <span className="timelines-row-badge is-count">{instances}×</span> : null}
                 <span className="timelines-row-length">{formatLength(comp.durationSeconds)}</span>
                 <button
                   type="button"
@@ -10511,8 +10550,8 @@ function TimelinesPanel({
                 </button>
               </div>
             );
-          })
-        : null}
+          })}
+      </div>
       {menu && menuComp
         ? createPortal(
             <>
@@ -10581,7 +10620,14 @@ function AssetBinImpl({
   onPinOffline,
   customFolders,
   onChangeCustomFolders,
-  onOpenSourceMonitor
+  onOpenSourceMonitor,
+  timelines,
+  onOpenTimeline,
+  onInsertTimelineAtPlayhead,
+  onRenameTimeline,
+  onDuplicateTimeline,
+  onDeleteTimeline,
+  onCreateTimeline
 }: {
   assets: SourceAsset[];
   /** Scopes the Local bin to this project: assets owned by a DIFFERENT project are hidden; user-level library
@@ -10627,6 +10673,14 @@ function AssetBinImpl({
       widths only — see showSourceMonitor in EditorPage). Undefined on tablet/phone, where
       double-click keeps opening the AssetViewerModal below. */
   onOpenSourceMonitor?: ((asset: SourceAsset) => void) | undefined;
+  /** Timelines tab data (nesting Block 3). Absent → the tab is hidden (e.g. the inspector picker). */
+  timelines?: TimelinesTabData | undefined;
+  onOpenTimeline?: ((compositionId: string) => void) | undefined;
+  onInsertTimelineAtPlayhead?: ((compositionId: string) => void) | undefined;
+  onRenameTimeline?: ((compositionId: string, name: string) => void) | undefined;
+  onDuplicateTimeline?: ((compositionId: string) => void) | undefined;
+  onDeleteTimeline?: ((compositionId: string) => void) | undefined;
+  onCreateTimeline?: (() => void) | undefined;
 }) {
   useRenderCost("AssetBin");
   // Project-scoped bin: drop uploads owned by another project (the "pile" fix). Library assets (ownerProjectId
@@ -10666,7 +10720,7 @@ function AssetBinImpl({
   };
   const [query, setQuery] = useState("");
   const [sourceTab, setSourceTab] = useState<AssetSourceTab>(() =>
-    readStoredChoice("kimera_asset_tab", "local", ["local", "ai", "search", "brand", "used"] as const)
+    readStoredChoice("kimera_asset_tab", "local", ["local", "ai", "search", "brand", "used", "timelines"] as const)
   );
   const [filter, setFilter] = useState<AssetTypeFilter>(() =>
     readStoredChoice("kimera_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
@@ -11621,6 +11675,49 @@ function AssetBinImpl({
       </div>
     );
 
+  const binTabs = (
+    <div className="asset-bin-tabs" role="tablist" aria-label="Asset library">
+      {ASSET_TABS.filter((tab) => !(clickAssigns && tab.id === "templates") && !(tab.id === "timelines" && !timelines)).map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          aria-selected={sourceTab === tab.id}
+          className={sourceTab === tab.id ? "is-active" : ""}
+          onClick={() => {
+            setSourceTab(tab.id);
+            setQuery("");
+          }}
+        >
+          {tab.icon}
+          <span>{tab.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+
+  // Timelines TAB (nesting Block 3, restructured 2026-07-17): a first-class source tab — zero
+  // vertical cost when inactive, the whole panel (scrollable) when active. A persisted "timelines"
+  // tab in a host with no timeline data (inspector picker) falls through to the normal bin.
+  if (sourceTab === "timelines" && timelines) {
+    return (
+      <div className="asset-bin asset-bin-timelines-tab">
+        {binTabs}
+        <TimelinesPanel
+          compositions={timelines.entries}
+          rootId={timelines.rootId}
+          activeId={timelines.activeId}
+          onOpen={onOpenTimeline ?? (() => {})}
+          onInsertAtPlayhead={onInsertTimelineAtPlayhead ?? (() => {})}
+          onRename={onRenameTimeline ?? (() => {})}
+          onDuplicate={onDuplicateTimeline ?? (() => {})}
+          onDelete={onDeleteTimeline ?? (() => {})}
+          onCreate={onCreateTimeline ?? (() => {})}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       className={`asset-bin asset-bin-${view} asset-bin-${size} ${replaceActive ? "is-replace-mode" : ""} ${dropActive ? "is-drop-active" : ""}`}
@@ -11629,24 +11726,7 @@ function AssetBinImpl({
       onDragLeave={handleAssetBinDragLeave}
       onDrop={handleAssetBinDrop}
     >
-      <div className="asset-bin-tabs" role="tablist" aria-label="Asset library">
-        {ASSET_TABS.filter((tab) => !(clickAssigns && tab.id === "templates")).map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={sourceTab === tab.id}
-            className={sourceTab === tab.id ? "is-active" : ""}
-            onClick={() => {
-              setSourceTab(tab.id);
-              setQuery("");
-            }}
-          >
-            {tab.icon}
-            <span>{tab.label}</span>
-          </button>
-        ))}
-      </div>
+      {binTabs}
       {replaceActive ? (
         <div className="asset-replace-banner">
           <span>Pick an asset to replace the selected clip</span>
@@ -13147,8 +13227,10 @@ function ClipSpeedControl({
     setDraft(String(Math.round(speed * 100)));
   }, [speed, layer.id]);
   const commit = (value: number) => {
-    if (Number.isFinite(value) && value > 0) onChangeSpeed(layer.id, value);
+    // S2: negative = reverse (clip plays backward); only 0 is rejected.
+    if (Number.isFinite(value) && value !== 0) onChangeSpeed(layer.id, value);
   };
+  const reversed = speed < 0;
   // Ramp points write straight onto layer.speedKeyframes (clip duration is NOT re-derived — a
   // ramp reads more/less source into the same timeline span, Premiere time-remap semantics).
   // R5: the dedupe-by-time + resort write rule lives in the shared upsertSpeedRampPoint/
@@ -13174,11 +13256,20 @@ function ClipSpeedControl({
             {preset * 100}%
           </button>
         ))}
+        {/* S2: Reverse toggle — flips the sign, keeps the magnitude (Premiere's "Reverse Speed"). */}
+        <button
+          type="button"
+          className={`button button-ghost${reversed ? " is-active" : ""}`}
+          title="Play the clip backward at the same speed"
+          onClick={() => commit(-speed)}
+        >
+          ⇤ Reverse
+        </button>
       </div>
       <label className="clip-speed-field">
         Speed
         <ScrubNumberInput
-          min={5}
+          min={-1600}
           max={1600}
           step={5}
           value={draft}
@@ -13197,8 +13288,12 @@ function ClipSpeedControl({
       </label>
       <small className="clip-speed-note">Duration follows speed; audio pitch shifts (varispeed).</small>
       <small className="clip-speed-note">
-        Plays {sourceSecondsConsumed.toFixed(2)}s of source over {layer.durationSeconds.toFixed(2)}s.
+        Plays {Math.abs(sourceSecondsConsumed).toFixed(2)}s of source over {layer.durationSeconds.toFixed(2)}s
+        {reversed || sourceSecondsConsumed < 0 ? " (backward)" : ""}.
       </small>
+      {reversed || sourceSecondsConsumed < 0 ? (
+        <small className="clip-speed-note">Reversed: preview steps frame-by-frame and is silent; export plays true reversed video + audio.</small>
+      ) : null}
       <div className="clip-speed-ramp">
         <div className="clip-speed-ramp-head">
           <span>Speed ramp</span>

@@ -5565,7 +5565,13 @@ function clipTitle(layer: TimelineLayer, assets: SourceAsset[]) {
 }
 
 function getLayerMaxDuration(layer: TimelineLayer, layerMaxDurations: Record<string, number>, compositionDuration: number) {
-  return Math.max(0.2, Math.min(layerMaxDurations[layer.id] ?? compositionDuration, compositionDuration));
+  // No comp-duration clamp (nesting handles fix, 2026-07-17): a clip's max duration is its MEDIA
+  // length (asset / nested-sequence bound from `layerMaxDurations`), not the timeline's CURRENT
+  // length. A grouped sequence is created exactly content-sized, so the old
+  // `Math.min(…, compositionDuration)` made every clip inside a nest (at any depth) untrimmable —
+  // zero handles. Extending past the comp end is safe: the timeline auto-grows on commit
+  // (normalizeCompositionDuration), exactly like dropping a clip near the end already does.
+  return Math.max(0.2, layerMaxDurations[layer.id] ?? compositionDuration);
 }
 
 function playheadOffsetPercent(timeSeconds: number, durationSeconds: number) {

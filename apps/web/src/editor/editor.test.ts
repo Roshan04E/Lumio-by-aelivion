@@ -1064,6 +1064,29 @@ function check(name: string, condition: boolean): void {
     if (Math.abs(a - b) > 1e-6) splitPreserved = false;
   }
   check("eased ramp: head trim splits the curve exactly (de Casteljau)", splitPreserved);
+
+  // --- S2: reverse (negative rates) — signed math through the same exact integral ----------------
+  const reversedConst = { speed: -2, sourceInSeconds: 10, speedKeyframes: undefined };
+  check("reverse: constant negative speed preserves sign through getLayerSpeed", getLayerSpeed(reversedConst) === -2);
+  check("reverse: source time runs backward from sourceIn", Math.abs(layerSourceTimeSeconds(reversedConst, 3) - 4) < 1e-9);
+  // Ramp from forward into reverse: +2 → −2 over 2s crosses zero at t=1 (momentary freeze); the
+  // signed trapezoid nets to zero over the full span (equal forward and backward consumption).
+  const reverseRamp = { speed: 1, sourceInSeconds: 5, speedKeyframes: [{ timeSeconds: 0, value: 2 }, { timeSeconds: 2, value: -2 }] };
+  check("reverse ramp: signed rate interpolates through zero", Math.abs(getLayerSpeedAt(reverseRamp, 1)) < 1e-9 && getLayerSpeedAt(reverseRamp, 2) === -2);
+  check("reverse ramp: signed integral nets forward and backward spans", Math.abs(layerSourceTimeSeconds(reverseRamp, 2) - 5) < 1e-9);
+  check("reverse ramp: peak source position at the zero crossing", Math.abs(layerSourceTimeSeconds(reverseRamp, 1) - 6) < 1e-9);
+  // A point AT zero holds the frame (freeze segment contributes nothing).
+  const freezeRamp = { speed: 1, sourceInSeconds: 0, speedKeyframes: [{ timeSeconds: 0, value: 0 }, { timeSeconds: 2, value: 0 }, { timeSeconds: 3, value: 1 }] };
+  check("reverse/freeze: zero-rate span consumes no source", Math.abs(layerSourceTimeSeconds(freezeRamp, 2)) < 1e-9 && Math.abs(layerSourceTimeSeconds(freezeRamp, 3) - 0.5) < 1e-9);
+  // Head-trim continuity holds for signed ramps too (same shiftSpeedKeyframes glue).
+  const revShifted = { speed: 1, sourceInSeconds: 0, speedKeyframes: shiftSpeedKeyframes(reverseRamp, 0.5)! };
+  check(
+    "reverse ramp: head trim stays source-continuous",
+    Math.abs(
+      layerSourceTimeSeconds(revShifted, 1) - layerSourceTimeSeconds(revShifted, 0) -
+        (layerSourceTimeSeconds(reverseRamp, 1.5) - layerSourceTimeSeconds(reverseRamp, 0.5))
+    ) < 1e-9
+  );
 }
 
 // --- Trim keyframe conventions: shared helper (drag-resize parity) -------------
@@ -1312,6 +1335,41 @@ function check(name: string, condition: boolean): void {
   const trimmedCompound = { ...compound, sourceInSeconds: 1 };
   const trimmedComp = { ...nestResult!.composition, tracks: [{ ...nestResult!.composition.tracks[0]!, layers: [trimmedCompound, ...nestResult!.composition.tracks[0]!.layers.filter((l) => l.id !== compound.id)] }] };
   check("un-nest: a trimmed compound clip is rejected (v1)", unnestClip(trimmedComp, nestCompositions, compound.id) === null);
+
+  // --- Block 6 tail: junction pre/post-roll window extension ----------------------------------
+  {
+    // Trimmed compound INCOMING (sourceIn 1) with a 0.6s junction transition: children extend BACK
+    // by min(D, head material) = 0.6s of real nest material, so the mix's pre-cut segment renders.
+    const prerollClip = mkLayer({
+      id: "pc",
+      trackId: "rootpre_t1",
+      nestedCompositionId: "nestA",
+      startSeconds: 5,
+      durationSeconds: 4,
+      sourceInSeconds: 1,
+      transitionIn: { kind: "crossDissolve", durationSeconds: 0.6 }
+    });
+    const preExp = expandNestedCompositions(mkComp("rootpre", 12, [prerollClip]), compositions);
+    const preChild = preExp.composition.tracks[0]!.layers.find((l) => l.id === "pc__nest_cv")!;
+    check("junction extension: pre-roll child starts D before the clip", Math.abs(preChild.startSeconds - 4.4) < 1e-9);
+    check("junction extension: pre-roll adds real duration", Math.abs(preChild.durationSeconds - 4.6) < 1e-9);
+    check(
+      "junction extension: pre-roll reads EARLIER source material",
+      layerSourceTimeSeconds(preChild, 0) < layerSourceTimeSeconds(childVideo, 1) - 1e-9
+    );
+    // Compound OUTGOING with tail material (winEnd 4 < nest 10) and an abutting incoming that
+    // carries a 1s transition: children extend FORWARD by 1s (post-roll plays on, not a freeze).
+    const outClip2 = mkLayer({ id: "oc2", trackId: "rootpost_t1", nestedCompositionId: "nestA", startSeconds: 0, durationSeconds: 4 });
+    const inClip2 = mkLayer({ id: "in2", trackId: "rootpost_t1", startSeconds: 4, durationSeconds: 3, transitionIn: { kind: "crossDissolve", durationSeconds: 1 } });
+    const postExp = expandNestedCompositions(mkComp("rootpost", 12, [outClip2, inClip2]), compositions);
+    const postChild = postExp.composition.tracks[0]!.layers.find((l) => l.id === "oc2__nest_cv")!;
+    check("junction extension: post-roll child extends past the cut", Math.abs(postChild.durationSeconds - 5) < 1e-9);
+    // No junction → window untouched (the existing nc1 checks above are the regression guard, but
+    // assert the head explicitly: a trimmed compound WITHOUT a transition must not extend).
+    const plainTrimmed = expandNestedCompositions(mkComp("rootplain", 12, [{ ...prerollClip, id: "pt", transitionIn: undefined }]), compositions);
+    const plainChild = plainTrimmed.composition.tracks[0]!.layers.find((l) => l.id === "pt__nest_cv")!;
+    check("junction extension: no junction → no extension", Math.abs(plainChild.startSeconds - 5) < 1e-9 && Math.abs(plainChild.durationSeconds - 4) < 1e-9);
+  }
 
   // --- Block 2 (NESTING_MATURITY.md): composition registry + healer ----------------------------
   {

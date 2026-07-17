@@ -92,6 +92,7 @@ export type RenderComparisonFixtureKey =
   | "nested-transition"
   | "nested-grade"
   | "nested-junction-transition"
+  | "nested-junction-preroll"
   | "texture-fill";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
@@ -131,6 +132,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "nested-transition",
   "nested-grade",
   "nested-junction-transition",
+  "nested-junction-preroll",
   "texture-fill"
 ];
 
@@ -450,6 +452,9 @@ interface FixtureVariant {
   nestedGrade?: boolean;
   /** Block 4c: junction transition where the INCOMING side is a compound clip (clip → group mix). */
   nestedJunctionTransition?: boolean;
+  /** Block 6 tail: TRIMMED compound incoming, sampled in the PRE-cut window segment — the group side
+   *  must mix real pre-roll nest material (head handle), not hard-cut until its start. */
+  nestedJunctionPreroll?: boolean;
   /** Texture fill (D2): image paint on the TEXT fixture's glyphs. */
   textFillTexture?: TimelineLayer["fillTexture"];
 }
@@ -620,6 +625,12 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       // clip, sampled mid-window. Trips if the pair scan misses compound junctions (they only exist
       // on the RAW comp — hard cut), or if the group side doesn't pre-compose into the mix.
       return { effects: [], fit: "cover", nestedJunctionTransition: true };
+    case "nested-junction-preroll":
+      // Block 6 tail: the compound INCOMING is TRIMMED (sourceIn 0.6 → real head handle), cut at
+      // 0.6s, crossDissolve 0.4s → R3.1 window [0.4, 0.8]; the 0.45s sample lands BEFORE the cut,
+      // where the mix must read pre-roll nest material from the junction-extended children. Trips if
+      // the extension is missing (group side empty → hard cut) or if the span gate double-draws.
+      return { effects: [], fit: "cover", nestedJunctionPreroll: true };
     case "anchored-media":
       // Anchor points (D3): the media rotates/scales about an OFF-CENTER pivot (20%,20%), with an
       // ellipse clip mask riding along. Trips if any pivot site disagrees — the GPU quad
@@ -896,6 +907,47 @@ Save this style now`);
     transitionIn: { kind: "crossDissolve", durationSeconds: 0.4 }
   };
 
+  // Block 6 tail (nested-junction-preroll): 12s single-media nest (graded), TRIMMED compound
+  // incoming (sourceIn 0.6) cut at 0.6s against a 0.6s plain outgoing. Head handle 0.6s → R3.1
+  // resolves preroll 0.2s (outgoing tail is huge → auto = D/2 floor) → window [0.4, 0.8]; the
+  // 0.45s sample sits BEFORE the cut, exercising the junction-extended pre-roll children.
+  const prerollNestComposition = {
+    id: "fixture_preroll_nest",
+    name: "Preroll nest comp",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSeconds: 12,
+    backgroundColor: "#000000",
+    tracks: [
+      {
+        id: "pnest_track",
+        type: "video" as const,
+        name: "Nest video",
+        layers: [
+          {
+            ...transitionIncoming,
+            id: "pnest_media",
+            trackId: "pnest_track",
+            startSeconds: 0,
+            durationSeconds: 12,
+            transitionIn: undefined
+          }
+        ]
+      }
+    ]
+  };
+  const prerollOutgoing: TimelineLayer = { ...transitionOutgoing, durationSeconds: 0.6 };
+  const prerollNestClip: TimelineLayer = {
+    ...compoundClip,
+    id: "fixture_preroll_nest_clip",
+    nestedCompositionId: prerollNestComposition.id,
+    startSeconds: 0.6,
+    durationSeconds: 11.4,
+    sourceInSeconds: 0.6,
+    transitionIn: { kind: "crossDissolve", durationSeconds: 0.4 }
+  };
+
   const graph: ProjectGraph = {
     projectId: "project_render_pixel_fixture",
     effects: [],
@@ -921,7 +973,7 @@ Save this style now`);
           // Transition/nesting fixtures keep the overlay empty so the diff isolates the concern.
           layers: useTextFixture
             ? [textFixtureLayer]
-            : variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition
+            : variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition || variant.nestedJunctionPreroll
               ? []
               : [shapeLayer]
         },
@@ -935,19 +987,24 @@ Save this style now`);
               ? [gradedNestClip]
               : variant.nestedJunctionTransition
                 ? [transitionOutgoing, junctionNestClip]
-                : variant.transition
-                  ? [transitionOutgoing, transitionIncoming]
-                  : [imageLayer]
+                : variant.nestedJunctionPreroll
+                  ? [prerollOutgoing, prerollNestClip]
+                  : variant.transition
+                    ? [transitionOutgoing, transitionIncoming]
+                    : [imageLayer]
         }
       ]
     },
     ...(variant.nestedTransition ? { compositions: { [nestedComposition.id]: nestedComposition } } : {}),
     ...(variant.nestedGrade ? { compositions: { [gradedNestComposition.id]: gradedNestComposition } } : {}),
-    ...(variant.nestedJunctionTransition ? { compositions: { [junctionNestComposition.id]: junctionNestComposition } } : {})
+    ...(variant.nestedJunctionTransition ? { compositions: { [junctionNestComposition.id]: junctionNestComposition } } : {}),
+    ...(variant.nestedJunctionPreroll ? { compositions: { [prerollNestComposition.id]: prerollNestComposition } } : {})
   };
   // Text-only + transition/nesting fixtures isolate their concern — skip captions so the diff is just that.
+  const nestedFixture =
+    variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition || variant.nestedJunctionPreroll;
   const compositionWithCaptions =
-    useTextFixture || variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition
+    useTextFixture || variant.transition || nestedFixture
       ? graph.composition!
       : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
 

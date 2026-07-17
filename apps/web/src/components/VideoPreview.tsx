@@ -858,12 +858,20 @@ function VideoPreviewImpl({
     }
     return combined.sort((a, b) => (a.trackIndex !== b.trackIndex ? b.trackIndex - a.trackIndex : a.layerIndex - b.layerIndex));
   }, [renderVisualLayerEntries, pendingVideoLayerEntries, activeVisualLayerEntries]);
+  // Audio reads the NEST-EXPANDED composition (parity with the video path + both export paths, which
+  // already expand — local-export's `collectAudioLayers` and the render manifest both flatten nested
+  // audio children as ordinary audio layers). Without this the preview was SILENT for any audio
+  // inside a compound clip: the compound clip is `type:"video"` (filtered out here) and its audio
+  // children only existed in the expansion the audio path never consumed. Block 5's volume fold
+  // already baked the nested track fader + compound clip gain into each child, so track gain read
+  // from the parent (video) track stays unity — no double-count.
+  const audioTracks = nestExpansion.composition.tracks;
   const activeAudioLayerEntriesRaw = useMemo(
     () =>
-      composition.tracks
+      audioTracks
         .flatMap((track, trackIndex) => track.layers.map((layer) => ({ layer, trackIndex, track })))
-        .filter(({ layer, track }) => isTrackEnabled(track, composition.tracks) && !layer.muted && !layer.disabled && layer.type === "audio" && isLayerActive(layer, currentTime)),
-    [composition, currentTime]
+        .filter(({ layer, track }) => isTrackEnabled(track, audioTracks) && !layer.muted && !layer.disabled && layer.type === "audio" && isLayerActive(layer, currentTime)),
+    [audioTracks, currentTime]
   );
   const activeAudioLayerEntries = useStableList(activeAudioLayerEntriesRaw, eqAudioEntry);
 
