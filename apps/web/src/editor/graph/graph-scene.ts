@@ -213,11 +213,11 @@ export type GraphHit =
   | { type: "handle"; curveKey: string; keyframeId: string; handle: "in" | "out" }
   | { type: "curve"; curveKey: string; timeSeconds: number };
 
-/** Lanes with no bezier semantics: sourceText is hold-only, speed is linear-only (the closed-form
- *  `integrateRamp` contract depends on straight segments) — both write-paths already no-op handle
- *  edits, so skip drawing/hit-testing handles for them entirely rather than offer a dead affordance. */
+/** Lanes with no bezier semantics: sourceText is hold-only. Speed joined the bezier lanes in S1
+ *  (2026-07-17) — eased segments still integrate in closed form (∫y·x′ds is polynomial), so the
+ *  timeline→source mapping stays exact; see `integrateRamp` in shared timeline.ts. */
 export function hasBezierHandles(target: GraphTarget): boolean {
-  return target.kind !== "sourceText" && target.kind !== "speed";
+  return target.kind !== "sourceText";
 }
 
 /**

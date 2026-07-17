@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @kimera-by-aelivion/web editor:test
  */
-import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, shiftSpeedKeyframes, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -1008,6 +1008,62 @@ function check(name: string, condition: boolean): void {
     "ramped split is source-continuous across the cut",
     Math.abs(layerSourceTimeSeconds(rampLeft, 2) - layerSourceTimeSeconds(rampRight!, 0)) < 1e-9
   );
+
+  // --- S1: bezier-EASED ramps — the mapping stays a closed-form exact integral -----------------
+  // Handles use the graph's fractional convention: dx = fraction of segment span, dy = fraction of
+  // the segment's value delta.
+  // Identity: controls at ⅓ along the chord ARE the straight line, so "both handles linear-default"
+  // must integrate byte-identically to the linear trapezoid.
+  const easedIdentity = {
+    speed: 1,
+    sourceInSeconds: 0,
+    speedKeyframes: [
+      { timeSeconds: 0, value: 1, outHandle: { dx: 1 / 3, dy: 1 / 3 } },
+      { timeSeconds: 2, value: 2, inHandle: { dx: -1 / 3, dy: -1 / 3 } }
+    ]
+  };
+  check(
+    "eased ramp: linear-equivalent handles reproduce the trapezoid exactly",
+    Math.abs(layerSourceTimeSeconds(easedIdentity, 2) - 3) < 1e-9 &&
+      Math.abs(layerSourceTimeSeconds(easedIdentity, 1) - layerSourceTimeSeconds(rampLayer, 1) + 1) < 1e-9
+  );
+  // A real ease (slow-out of the first point): rate at the segment start must flatten toward the
+  // start value, the mapping must stay monotonic, and endpoints must hit the point values exactly.
+  const eased = {
+    speed: 1,
+    sourceInSeconds: 0,
+    speedKeyframes: [
+      { timeSeconds: 0, value: 1, outHandle: { dx: 0.8, dy: 0 } },
+      { timeSeconds: 2, value: 4, inHandle: { dx: -0.2, dy: 0 } }
+    ]
+  };
+  check("eased ramp: endpoint rates are the point values", Math.abs(getLayerSpeedAt(eased, 0) - 1) < 1e-9 && Math.abs(getLayerSpeedAt(eased, 2) - 4) < 1e-9);
+  check("eased ramp: slow-out flattens the early rate below linear", getLayerSpeedAt(eased, 0.5) < 1.75);
+  let monotone = true;
+  let prevSrc = layerSourceTimeSeconds(eased, 0);
+  for (let i = 1; i <= 40; i += 1) {
+    const src = layerSourceTimeSeconds(eased, (2 * i) / 40);
+    if (src < prevSrc - 1e-12) monotone = false;
+    prevSrc = src;
+  }
+  check("eased ramp: timeline→source mapping is monotonic", monotone);
+  // Integral consistency: total consumption is bounded by min/max rate × duration, and the eased
+  // total differs from linear (the ease genuinely reshapes consumption).
+  const easedTotal = layerSourceTimeSeconds(eased, 2);
+  check("eased ramp: total consumption within rate bounds", easedTotal > 1 * 2 && easedTotal < 4 * 2);
+  check("eased ramp: ease reshapes consumption vs linear", Math.abs(easedTotal - 5) > 0.05);
+  // Split preservation (de Casteljau): trimming the head INSIDE an eased segment must keep the
+  // surviving playback identical — source consumed from the cut onward matches the original.
+  const headCut = 0.7;
+  const shifted = { speed: 1, sourceInSeconds: 0, speedKeyframes: shiftSpeedKeyframes(eased, headCut)! };
+  let splitPreserved = true;
+  for (let i = 0; i <= 20; i += 1) {
+    const local = ((2 - headCut) * i) / 20;
+    const a = layerSourceTimeSeconds(shifted, local) - layerSourceTimeSeconds(shifted, 0);
+    const b = layerSourceTimeSeconds(eased, headCut + local) - layerSourceTimeSeconds(eased, headCut);
+    if (Math.abs(a - b) > 1e-6) splitPreserved = false;
+  }
+  check("eased ramp: head trim splits the curve exactly (de Casteljau)", splitPreserved);
 }
 
 // --- Trim keyframe conventions: shared helper (drag-resize parity) -------------

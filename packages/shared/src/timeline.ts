@@ -207,12 +207,29 @@ export function getLayerSpeed(layer: Pick<TimelineLayer, "speed">): number {
 }
 
 // ── Speed ramps / time remap ─────────────────────────────────────────────────
-// `speedKeyframes` (layer-local seconds → rate, LINEAR segments) override constant `speed`.
-// Linear segments integrate in closed form (trapezoid), so the timeline→source mapping is exact
-// and identical in preview, local export, and the cloud worker — no numerical stepping.
+// `speedKeyframes` (layer-local seconds → rate) override constant `speed`. Segments are LINEAR by
+// default; S1 (2026-07-17) adds optional bezier easing per point (`inHandle`/`outHandle`). BOTH
+// integrate in closed form — linear as trapezoids, eased segments as the exact polynomial
+// ∫ y(s)·x′(s) ds over the bezier parameter (degree ≤5 integrand → exact antiderivative) — so the
+// timeline→source mapping stays exact and identical in preview, local export, and the cloud worker.
+// No numerical stepping anywhere; the only iteration is inverting the MONOTONIC time cubic x(s)=t
+// (Newton with bisection bracketing — deterministic fixed loop, same doubles in every runtime).
 
 const clampSpeed = (v: number) =>
   typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, v)) : 1;
+
+const sanitizeSpeedHandle = (
+  raw: SpeedKeyframe["inHandle"],
+  direction: -1 | 1
+): SpeedKeyframe["inHandle"] => {
+  if (!raw || typeof raw.dx !== "number" || typeof raw.dy !== "number" || !Number.isFinite(raw.dx) || !Number.isFinite(raw.dy)) {
+    return undefined;
+  }
+  // Fractional convention (see SpeedHandle): out-handles reach forward (dx ∈ [0,1]), in-handles
+  // backward (dx ∈ [−1,0]); dy loosely bounded like the graph's own clamp.
+  const dx = direction > 0 ? Math.min(1, Math.max(0, raw.dx)) : Math.max(-1, Math.min(0, raw.dx));
+  return { dx, dy: Math.max(-10, Math.min(10, raw.dy)) };
+};
 
 /** Sanitized, time-sorted ramp points, or null when the layer has no usable ramp. */
 export function getSpeedRamp(layer: Pick<TimelineLayer, "speedKeyframes">): SpeedKeyframe[] | null {
@@ -220,9 +237,106 @@ export function getSpeedRamp(layer: Pick<TimelineLayer, "speedKeyframes">): Spee
   if (!raw?.length) return null;
   const points = raw
     .filter((kf) => typeof kf?.timeSeconds === "number" && Number.isFinite(kf.timeSeconds))
-    .map((kf) => ({ id: kf.id, timeSeconds: Math.max(0, kf.timeSeconds), value: clampSpeed(kf.value) }))
+    .map((kf) => ({
+      id: kf.id,
+      timeSeconds: Math.max(0, kf.timeSeconds),
+      value: clampSpeed(kf.value),
+      ...(sanitizeSpeedHandle(kf.inHandle, -1) ? { inHandle: sanitizeSpeedHandle(kf.inHandle, -1) } : {}),
+      ...(sanitizeSpeedHandle(kf.outHandle, 1) ? { outHandle: sanitizeSpeedHandle(kf.outHandle, 1) } : {}),
+      ...(kf.handlesLinked ? { handlesLinked: true } : {})
+    }))
     .sort((a, b) => a.timeSeconds - b.timeSeconds);
   return points.length ? points : null;
+}
+
+// ── S1 eased-segment machinery (private) ─────────────────────────────────────
+
+/** The four (time, value) bezier control points of an eased segment, or null when both sides are
+ *  linear (the trapezoid fast path). Guarantees: x-controls are ordered (monotonic time — each
+ *  handle's |dt| is clamped to the span and the COMBINED influence rescaled to ≤ span, AE-style),
+ *  and y-controls are clamped to the legal speed range (bezier hull ⇒ y(s) stays in range too).
+ *  A missing handle on one side defaults to the LINEAR control (⅓ along the chord), so a cubic
+ *  with both defaults reproduces the straight segment exactly. */
+function segmentControls(
+  a: SpeedKeyframe,
+  b: SpeedKeyframe
+): { x: [number, number, number, number]; y: [number, number, number, number] } | null {
+  if (!a.outHandle && !b.inHandle) return null;
+  const span = b.timeSeconds - a.timeSeconds;
+  if (span <= 0) return null;
+  const delta = b.value - a.value;
+  // Fractions → absolute control offsets (handles are fractions of THIS segment's span/delta).
+  let dt0 = a.outHandle ? Math.min(Math.max(0, a.outHandle.dx), 1) * span : span / 3;
+  let dt1 = b.inHandle ? Math.min(Math.max(0, -b.inHandle.dx), 1) * span : span / 3;
+  const combined = dt0 + dt1;
+  if (combined > span && combined > 0) {
+    const k = span / combined;
+    dt0 *= k;
+    dt1 *= k;
+  }
+  const clampV = (v: number) => Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, v));
+  const y1 = clampV(a.value + (a.outHandle ? a.outHandle.dy * delta : delta / 3));
+  const y2 = clampV(b.value + (b.inHandle ? b.inHandle.dy * delta : -delta / 3));
+  return {
+    x: [a.timeSeconds, a.timeSeconds + dt0, b.timeSeconds - dt1, b.timeSeconds],
+    y: [a.value, y1, y2, b.value]
+  };
+}
+
+/** Cubic bezier → power-basis coefficients [c0..c3]: B(s) = c0 + c1·s + c2·s² + c3·s³. */
+function powerBasis(p: [number, number, number, number]): [number, number, number, number] {
+  return [
+    p[0],
+    3 * (p[1] - p[0]),
+    3 * (p[2] - 2 * p[1] + p[0]),
+    p[3] - 3 * p[2] + 3 * p[1] - p[0]
+  ];
+}
+
+function evalPoly(c: readonly number[], s: number): number {
+  let acc = 0;
+  for (let i = c.length - 1; i >= 0; i -= 1) acc = acc * s + c[i]!;
+  return acc;
+}
+
+/** Invert the MONOTONIC time cubic: the s ∈ [0,1] with x(s) = t. Deterministic fixed-iteration
+ *  Newton, bracketed by bisection so it can never diverge (x′ ≥ 0 by the control ordering, but it
+ *  may touch 0 at the ends). */
+function solveSegmentParam(xc: [number, number, number, number], t: number): number {
+  const x0 = evalPoly(xc, 0);
+  const x1 = evalPoly(xc, 1);
+  if (t <= x0) return 0;
+  if (t >= x1) return 1;
+  const dxc = [xc[1], 2 * xc[2], 3 * xc[3]];
+  let lo = 0;
+  let hi = 1;
+  let s = (t - x0) / Math.max(1e-12, x1 - x0);
+  for (let i = 0; i < 24; i += 1) {
+    const err = evalPoly(xc, s) - t;
+    if (Math.abs(err) < 1e-10) break;
+    if (err > 0) hi = s;
+    else lo = s;
+    const slope = evalPoly(dxc, s);
+    let next = slope > 1e-9 ? s - err / slope : (lo + hi) / 2;
+    if (!(next > lo && next < hi)) next = (lo + hi) / 2;
+    s = next;
+  }
+  return s;
+}
+
+/** EXACT ∫₀^s y(σ)·x′(σ) dσ for one eased segment — y·x′ is a degree-5 polynomial (closed form). */
+function segmentIntegralAt(xc: [number, number, number, number], yc: [number, number, number, number], s: number): number {
+  // x′ coefficients: [xc1, 2·xc2, 3·xc3]; product with y (degree 3) → degree 5.
+  const d = [xc[1], 2 * xc[2], 3 * xc[3]];
+  const p = new Array<number>(6).fill(0);
+  for (let i = 0; i < 4; i += 1) {
+    for (let j = 0; j < 3; j += 1) {
+      p[i + j]! += yc[i]! * d[j]!;
+    }
+  }
+  let acc = 0;
+  for (let k = 5; k >= 0; k -= 1) acc = acc * s + p[k]! / (k + 1);
+  return acc * s;
 }
 
 /** True when the clip's rate varies over time (≥2 ramp points at different values or times). */
@@ -244,9 +358,9 @@ export function upsertSpeedRampPoint(
 ): SpeedKeyframe[] {
   const existing = (layer.speedKeyframes ?? []).find((kf) => Math.abs(kf.timeSeconds - timeSeconds) <= 0.02);
   const points = (layer.speedKeyframes ?? []).filter((kf) => Math.abs(kf.timeSeconds - timeSeconds) > 0.02);
-  // Preserve the replaced point's id (graph-lane drag continuity) rather than minting a new one.
+  // Preserve the replaced point's id (graph-lane drag continuity) AND its easing handles.
   const id = existing?.id ?? (globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10));
-  return [...points, { id, timeSeconds, value }].sort((a, b) => a.timeSeconds - b.timeSeconds);
+  return [...points, { ...(existing ?? {}), id, timeSeconds, value }].sort((a, b) => a.timeSeconds - b.timeSeconds);
 }
 
 /** Remove the ramp point at `timeSeconds` (exact match), or `undefined` when none remain. */
@@ -282,6 +396,11 @@ export function getLayerSpeedAt(layer: Pick<TimelineLayer, "speed" | "speedKeyfr
     if (t <= next.timeSeconds) {
       const span = next.timeSeconds - prev.timeSeconds;
       if (span <= 0) return next.value;
+      const controls = segmentControls(prev, next);
+      if (controls) {
+        const s = solveSegmentParam(powerBasis(controls.x), t);
+        return clampSpeed(evalPoly(powerBasis(controls.y), s));
+      }
       const f = (t - prev.timeSeconds) / span;
       return prev.value + (next.value - prev.value) * f;
     }
@@ -302,6 +421,19 @@ function integrateRamp(ramp: SpeedKeyframe[], localSeconds: number): number {
     const b = ramp[i]!;
     const span = b.timeSeconds - a.timeSeconds;
     if (span <= 0) continue;
+    const controls = segmentControls(a, b);
+    if (controls) {
+      // Eased segment: exact polynomial integral of y·x′ over the bezier parameter.
+      const xc = powerBasis(controls.x);
+      const yc = powerBasis(controls.y);
+      if (t >= b.timeSeconds) {
+        integral += segmentIntegralAt(xc, yc, 1);
+      } else {
+        integral += segmentIntegralAt(xc, yc, solveSegmentParam(xc, t));
+        return integral;
+      }
+      continue;
+    }
     if (t >= b.timeSeconds) {
       integral += (span * (a.value + b.value)) / 2;
     } else {
@@ -344,14 +476,55 @@ export function shiftSpeedKeyframes(
   if (headSeconds === 0) return ramp;
   if (headSeconds < 0) {
     // Head EXTENSION: points shift right; the edge-hold before the first point plays the new
-    // material at the first value — matching the sourceIn math in adjustLayerHead.
-    return ramp.map((kf) => ({ id: kf.id, timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
+    // material at the first value — matching the sourceIn math in adjustLayerHead. Handles are
+    // RELATIVE offsets, so they ride along unchanged.
+    return ramp.map((kf) => ({ ...kf, timeSeconds: kf.timeSeconds - headSeconds }));
+  }
+  const kept = ramp.filter((kf) => kf.timeSeconds > headSeconds).map((kf) => ({ ...kf, timeSeconds: kf.timeSeconds - headSeconds }));
+  // If the cut lands INSIDE an eased segment, a plain "value at cut" point would flatten the
+  // remaining half — de Casteljau subdivision at the cut parameter keeps the surviving curve
+  // byte-identical to what it played before the trim (same guarantee the V2 keyframe glue gives).
+  const after = ramp.find((kf) => kf.timeSeconds > headSeconds);
+  const before = [...ramp].reverse().find((kf) => kf.timeSeconds <= headSeconds);
+  if (before && after) {
+    const controls = segmentControls(before, after);
+    if (controls) {
+      const s = solveSegmentParam(powerBasis(controls.x), headSeconds);
+      const lerp = (p: number, q: number, f: number) => p + (q - p) * f;
+      const sub = (pts: [number, number, number, number]) => {
+        const q0 = lerp(pts[0], pts[1], s);
+        const q1 = lerp(pts[1], pts[2], s);
+        const q2 = lerp(pts[2], pts[3], s);
+        const r0 = lerp(q0, q1, s);
+        const r1 = lerp(q1, q2, s);
+        return { at: lerp(r0, r1, s), r1, q2 };
+      };
+      const sx = sub(controls.x);
+      const sy = sub(controls.y);
+      const first = kept[0]!; // === `after`, shifted
+      // Absolute subdivision offsets → the fractional handle convention, relative to the NEW
+      // (cut → after) segment. Equal-value new segments can't carry a dy bulge in this convention
+      // (same limitation as every other graph lane) — they fall back to flat.
+      const newSpan = Math.max(1e-9, controls.x[3] - headSeconds);
+      const newDelta = controls.y[3] - sy.at;
+      const fracDy = (dv: number) => (Math.abs(newDelta) < 1e-6 ? 0 : dv / newDelta);
+      const cutPoint: SpeedKeyframe = {
+        timeSeconds: 0,
+        value: clampSpeed(sy.at),
+        outHandle: { dx: Math.min(1, Math.max(0, (sx.r1 - sx.at) / newSpan)), dy: fracDy(sy.r1 - sy.at) }
+      };
+      const firstWithSplitIn: SpeedKeyframe = {
+        ...first,
+        inHandle: { dx: Math.max(-1, Math.min(0, (sx.q2 - controls.x[3]) / newSpan)), dy: fracDy(sy.q2 - controls.y[3]) }
+      };
+      return [cutPoint, firstWithSplitIn, ...kept.slice(1)];
+    }
   }
   const atCut = getLayerSpeedAt(layer, headSeconds);
-  const kept = ramp
-    .filter((kf) => kf.timeSeconds > headSeconds)
-    .map((kf) => ({ id: kf.id, timeSeconds: kf.timeSeconds - headSeconds, value: kf.value }));
-  return [{ timeSeconds: 0, value: atCut }, ...kept];
+  // Cut in the edge-hold region (before the first point): the synthesized point makes a flat lead-in
+  // segment — drop the first kept point's in-handle so it can't bend a segment it never governed.
+  const flatKept = !before && kept.length ? [{ ...kept[0]!, inHandle: undefined }, ...kept.slice(1)] : kept;
+  return [{ timeSeconds: 0, value: atCut }, ...flatKept];
 }
 
 const KEYFRAME_TRIM_EPSILON = 0.0001;

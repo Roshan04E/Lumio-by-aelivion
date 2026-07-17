@@ -1144,7 +1144,9 @@ export const speedGraphTarget: GraphTarget = {
   step: 5
 };
 
-/** Ramp points as pseudo keyframes (linear, no bezier handles — see the "speed" GraphTarget doc).
+/** Ramp points as pseudo keyframes. S1 (2026-07-17): bezier handles supported — `SpeedHandle`
+ *  already uses the graph's fractional temporal convention (dx = fraction of neighbor-segment
+ *  duration, dy = fraction of value delta), so handles pass straight through.
  *  Falls back to an index-derived id for points saved before `SpeedKeyframe.id` existed. */
 export function speedTargetKeyframes(layer: TimelineLayer): TimelineKeyframeV2[] {
   return (getSpeedRamp(layer) ?? []).map((point, index) => ({
@@ -1152,8 +1154,12 @@ export function speedTargetKeyframes(layer: TimelineLayer): TimelineKeyframeV2[]
     target: { scope: "layer", property: "speed" },
     timeSeconds: point.timeSeconds,
     value: point.value * 100,
-    interpolation: "linear" as const,
-    temporal: {}
+    interpolation: (point.inHandle || point.outHandle ? "bezier" : "linear") as KeyframeInterpolation,
+    temporal: {
+      ...(point.inHandle ? { in: { dx: point.inHandle.dx, dy: point.inHandle.dy } } : {}),
+      ...(point.outHandle ? { out: { dx: point.outHandle.dx, dy: point.outHandle.dy } } : {}),
+      linked: point.handlesLinked !== false
+    }
   }));
 }
 
@@ -1235,7 +1241,7 @@ export function updateGraphTargetKeyframe(
         .map((point) =>
           point.timeSeconds === timeSeconds
             ? {
-                id: point.id,
+                ...point, // keep id AND easing handles across a graph drag
                 timeSeconds: patch.timeSeconds !== undefined ? clamp(patch.timeSeconds, 0, layer.durationSeconds) : point.timeSeconds,
                 value: patch.value !== undefined ? clamp(patch.value / 100, MIN_LAYER_SPEED, MAX_LAYER_SPEED) : point.value
               }
@@ -1267,7 +1273,20 @@ export function setGraphTargetInterpolation(
   keyframeId: string,
   interpolation: KeyframeInterpolation
 ): TimelineLayer {
-  if (target.kind === "sourceText" || target.kind === "speed") return layer; // hold/linear-only lanes
+  if (target.kind === "sourceText") return layer; // hold-only lane
+  if (target.kind === "speed") {
+    // Speed points don't use the easing-preset vocabulary (the mapping must stay an exact
+    // integral) — but "Linear" works as the reset that strips bezier handles.
+    if (interpolation !== "linear") return layer;
+    return {
+      ...layer,
+      speedKeyframes: (getSpeedRamp(layer) ?? []).map((point, index) =>
+        (point.id ?? `speed_${index}`) === keyframeId
+          ? { ...point, inHandle: undefined, outHandle: undefined, handlesLinked: undefined }
+          : point
+      )
+    };
+  }
   if (target.kind === "transform") {
     const layerWithAnimation = (layer.animations ?? []).some((item) => item.id === keyframeId)
       ? layer
@@ -1297,7 +1316,30 @@ export function updateGraphTargetHandle(
   nextHandle: { dx: number; dy: number },
   linked: boolean
 ): TimelineLayer {
-  if (target.kind === "sourceText" || target.kind === "speed") return layer; // hold/linear-only lanes
+  if (target.kind === "sourceText") return layer; // hold-only lane
+  if (target.kind === "speed") {
+    // S1: same fractional {dx, dy} convention as temporal handles — store as-is (sign-clamped per
+    // side); the mirrored write matches the generic branch below.
+    const ramp = getSpeedRamp(layer) ?? [];
+    const signClamp = (which: "in" | "out", h: { dx: number; dy: number }) => ({
+      dx: which === "in" ? Math.max(-1, Math.min(0, h.dx)) : Math.min(1, Math.max(0, h.dx)),
+      dy: Math.max(-3, Math.min(3, h.dy))
+    });
+    const opposite: "in" | "out" = handle === "in" ? "out" : "in";
+    return {
+      ...layer,
+      speedKeyframes: ramp.map((point, index) =>
+        (point.id ?? `speed_${index}`) === keyframeId
+          ? {
+              ...point,
+              [handle === "in" ? "inHandle" : "outHandle"]: signClamp(handle, nextHandle),
+              ...(linked ? { [opposite === "in" ? "inHandle" : "outHandle"]: signClamp(opposite, { dx: -nextHandle.dx, dy: -nextHandle.dy }) } : {}),
+              handlesLinked: linked
+            }
+          : point
+      )
+    };
+  }
   if (target.kind === "transform") {
     return updateTransformKeyframeHandle(layer, target.property, keyframeId, handle, nextHandle, linked);
   }
@@ -1328,7 +1370,15 @@ export function setGraphTargetLinked(
   keyframeId: string,
   linked: boolean
 ): TimelineLayer {
-  if (target.kind === "sourceText" || target.kind === "speed") return layer; // hold/linear-only lanes
+  if (target.kind === "sourceText") return layer; // hold-only lane
+  if (target.kind === "speed") {
+    return {
+      ...layer,
+      speedKeyframes: (getSpeedRamp(layer) ?? []).map((point, index) =>
+        (point.id ?? `speed_${index}`) === keyframeId ? { ...point, handlesLinked: linked } : point
+      )
+    };
+  }
   if (target.kind === "transform") {
     return setTransformKeyframeLinked(layer, target.property, keyframeId, linked);
   }

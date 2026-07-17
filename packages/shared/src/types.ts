@@ -878,6 +878,15 @@ export interface TimelineTrack {
 }
 
 /** One speed-ramp point: layer-local seconds → playback rate (linear segments; see TimelineLayer.speedKeyframes). */
+/** Bezier easing handle on a speed-ramp point — the graph's `temporal` handle convention:
+ *  `dx` = SIGNED fraction of the neighbor segment's duration (out ≥ 0 forward, in ≤ 0 backward),
+ *  `dy` = fraction of the segment's value delta. Fractions keep the ease shape stable when a
+ *  neighbor point is retimed (AE behavior) and plug straight into the graph editor's handle UI. */
+export interface SpeedHandle {
+  dx: number;
+  dy: number;
+}
+
 export interface SpeedKeyframe {
   timeSeconds: number;
   value: number;
@@ -885,6 +894,13 @@ export interface SpeedKeyframe {
    *  ramps and points minted before this field existed have none — callers fall back to a
    *  position-derived key rather than treat it as required. */
   id?: string | undefined;
+  /** S1 bezier easing (2026-07-17): absent = linear on that side, so pre-S1 ramps are untouched.
+   *  The timeline→source mapping stays EXACT — an eased segment integrates in closed form
+   *  (∫y·x′ ds is polynomial); see `integrateRamp` in timeline.ts. */
+  inHandle?: SpeedHandle | undefined;
+  outHandle?: SpeedHandle | undefined;
+  /** Graph-lane "linked handles" affordance state (mirror-drag), persisted like temporal.linked. */
+  handlesLinked?: boolean | undefined;
 }
 
 /** One point of track-level audio automation (mixer fader/pan), in absolute composition seconds. */
