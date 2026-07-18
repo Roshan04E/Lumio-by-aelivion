@@ -605,6 +605,19 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    language ("Edit style: mostly raw footage, long unhurried shots · my read of the
    timeline · N% sure") after user feedback that "Character" read as a person. Open:
    face-presence observer, more inference rules, SDK formalization.
+   **Face-presence observer shipped 2026-07-18 (fourth slice — the FIRST browser-ML
+   observer, L3 on the fidelity ladder)** — `world/observers/faces.ts`: `media.faces`
+   (presenceShare / maxFaces / avgFaceAreaShare / dominantRegion) measured by MediaPipe
+   BlazeFace (~200KB float16) over 7 sampled frames at 256px. The ML-observer pattern it
+   sets: lazy cached loader in `ai/vision/face-detection.ts` (dynamic import, GPU→CPU
+   delegate fallback, null on failure → observer DECLINES, failed init retries next ask);
+   frames from the shared L1 sampler (now parameterized width/points, look path
+   unchanged); aggregation as a PURE exported function so world:eval covers the math
+   under node while the wasm path declines there; facts on the ASSET (write-once pixels →
+   memoized until the asset changes); honest L3 price (estCostMs 4s, first run pays the
+   model download). Surfaced in "analyze clip N" as a plain-language People line
+   ("a face on screen 86% of the time — medium shot, centered"). world:eval +6.
+   Open: more inference rules (talking-head from faces × text), SDK formalization.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

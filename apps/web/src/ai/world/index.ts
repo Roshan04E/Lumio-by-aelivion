@@ -16,6 +16,7 @@ import { systemObserver } from "./observers/system";
 import { userProfileObserver } from "./observers/user-profile";
 import { projectMediaObserver } from "./observers/project-media";
 import { characterObserver } from "./observers/character";
+import { facesObserver } from "./observers/faces";
 import { perceptionQueueDepth } from "./scheduler";
 import type { WorldContext } from "./types";
 
@@ -28,6 +29,8 @@ registerObserver(userProfileObserver);
 registerObserver(projectMediaObserver);
 // K5 inference rules — L4 derived facts (confidence-propagated, dependency-cascaded).
 registerObserver(characterObserver);
+// K5 browser-ML — L3 expensive perception (lazy BlazeFace; declines when the model can't load).
+registerObserver(facesObserver);
 
 // Host-registered live asset list (EditorPage state — includes server/stock assets the
 // local-first records don't). Absent → local records alone still serve local imports.

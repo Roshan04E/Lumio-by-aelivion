@@ -32,6 +32,7 @@ import { queryFact } from "./knowledge";
 import { registerObserver } from "./observers";
 import { metadataObserver, MEDIA_METADATA_FACT, type MediaMetadataFact } from "./observers/metadata";
 import { lookObserver, MEDIA_LOOK_FACT } from "./observers/look";
+import { aggregateFaceSamples, facesObserver, MEDIA_FACES_FACT } from "./observers/faces";
 import { textSummaryObserver, COMPOSITION_TEXT_FACT, type CompositionTextFact } from "./observers/text-summary";
 import { characterObserver, COMPOSITION_CHARACTER_FACT, type CompositionCharacterFact } from "./observers/character";
 import { systemObserver, SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID, type SystemCapabilitiesFact } from "./observers/system";
@@ -170,6 +171,7 @@ registerObserver(systemObserver);
 registerObserver(userProfileObserver);
 registerObserver(projectMediaObserver);
 registerObserver(characterObserver);
+registerObserver(facesObserver);
 
 const assetTarget = { kind: "asset" as const, id: "a1" };
 const compTarget = { kind: "composition" as const, id: "c" };
@@ -252,6 +254,39 @@ async function run(): Promise<void> {
   check("editing text invalidates + re-measures", textEdited?.path === "text-summary@builtin" && textEdited.fact.value.wordCount === 4);
 
   check("DOM-only look observer declines under node", (await queryFact({ type: MEDIA_LOOK_FACT, target: assetTarget }, ctx)) === null);
+
+  // ---- K5: face-presence observer (first browser-ML; the WASM path declines under node,
+  // ---- so eval covers the PURE aggregation math + the decline discipline) ----
+  console.log("K5 face presence (media.faces):");
+  check(
+    "ML observer declines under node (no DOM/model — no guessing)",
+    (await queryFact({ type: MEDIA_FACES_FACT, target: assetTarget }, ctx)) === null
+  );
+  check("aggregate: zero samples → null (decline upstream)", aggregateFaceSamples([]) === null);
+  const talkingHead = aggregateFaceSamples([
+    { faces: [{ centerX: 0.5, areaShare: 0.2 }] },
+    { faces: [{ centerX: 0.52, areaShare: 0.24 }] },
+    { faces: [{ centerX: 0.48, areaShare: 0.22 }] },
+    { faces: [] }
+  ]);
+  check(
+    "aggregate: talking head → 75% presence, centered",
+    talkingHead?.presenceShare === 0.75 && talkingHead.dominantRegion === "center" && talkingHead.maxFaces === 1
+  );
+  check(
+    "aggregate: area averaged over face-bearing frames only",
+    talkingHead !== null && Math.abs(talkingHead.avgFaceAreaShare - 0.22) < 1e-9
+  );
+  const crowd = aggregateFaceSamples([
+    { faces: [{ centerX: 0.2, areaShare: 0.01 }, { centerX: 0.3, areaShare: 0.02 }, { centerX: 0.25, areaShare: 0.015 }] },
+    { faces: [{ centerX: 0.22, areaShare: 0.01 }] }
+  ]);
+  check("aggregate: crowd on the left → maxFaces 3, left region", crowd?.maxFaces === 3 && crowd.dominantRegion === "left");
+  const empty = aggregateFaceSamples([{ faces: [] }, { faces: [] }]);
+  check(
+    "aggregate: faceless footage is a REAL fact (0 presence, region none)",
+    empty?.presenceShare === 0 && empty.dominantRegion === "none" && empty.avgFaceAreaShare === 0
+  );
 
   // ---- K5: inference rules (L4 — derived facts, confidence-propagated, cascade-invalidated) ----
   console.log("K5 inference (composition.character):");

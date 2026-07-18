@@ -22,6 +22,8 @@ import type { CompositionTextFact } from "./observers/text-summary";
 import { COMPOSITION_TEXT_FACT } from "./observers/text-summary";
 import type { CompositionCharacterFact } from "./observers/character";
 import { COMPOSITION_CHARACTER_FACT } from "./observers/character";
+import type { MediaFacesFact } from "./observers/faces";
+import { MEDIA_FACES_FACT } from "./observers/faces";
 import type { SystemCapabilitiesFact } from "./observers/system";
 import { SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID } from "./observers/system";
 import type { UserAiProfileFact } from "./observers/user-profile";
@@ -115,9 +117,11 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
     return ESCALATE;
   }
   const target = { kind: "asset" as const, id: layer.assetId };
-  const [metadata, look] = await Promise.all([
+  const [metadata, look, faces] = await Promise.all([
     queryFact<MediaMetadataFact>({ type: MEDIA_METADATA_FACT, target, budgetMs: 250 }, ctx),
-    queryFact<MediaLookFact>({ type: MEDIA_LOOK_FACT, target, budgetMs: 12_000 }, ctx)
+    queryFact<MediaLookFact>({ type: MEDIA_LOOK_FACT, target, budgetMs: 12_000 }, ctx),
+    // L3 browser-ML purchase — first run pays the model download; cached per asset after.
+    queryFact<MediaFacesFact>({ type: MEDIA_FACES_FACT, target, budgetMs: 12_000 }, ctx)
   ]);
 
   if (!metadata && !look) {
@@ -143,6 +147,18 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
     lines.push(
       `- Look: **${v.exposure}** exposure (mean luma ${(v.avgLuma * 100).toFixed(0)}%), contrast spread ${(v.contrast * 100).toFixed(0)}%, ${temperatureLabel} balance, ${saturationLabel} saturation`
     );
+    if (faces) {
+      const f = faces.fact.value;
+      if (f.presenceShare > 0) {
+        const size = f.avgFaceAreaShare >= 0.12 ? "close-up" : f.avgFaceAreaShare >= 0.03 ? "medium shot" : "in the distance";
+        const region = f.dominantRegion === "center" ? "centered" : `on the ${f.dominantRegion}`;
+        lines.push(
+          `- People: ${f.maxFaces > 1 ? `up to ${f.maxFaces} faces` : "a face"} on screen ${(f.presenceShare * 100).toFixed(0)}% of the time — ${size}, ${region} (measured on-device)`
+        );
+      } else {
+        lines.push(`- People: no faces detected in the sampled frames`);
+      }
+    }
     const sampled = look.fact.provenance.sampledRanges?.length ?? 0;
     lines.push(
       `\n_Measured on-device from ${sampled > 0 ? `${sampled} sampled frame${sampled === 1 ? "" : "s"}` : "the import record"} · ${look.path === "cached" ? "cached fact" : "fresh observation"} · 0 tokens_`

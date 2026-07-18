@@ -34,6 +34,12 @@ const SAMPLE_WIDTH = 96;
 const SAMPLE_POINTS = [0.1, 0.5, 0.9];
 const LOAD_TIMEOUT_MS = 8_000;
 
+/** Sampler options for OTHER observers reusing this machinery (faces samples wider frames). */
+export interface FrameSampleOptions {
+  width?: number;
+  points?: number[];
+}
+
 function assetFor(target: WorldTarget, ctx: WorldContext) {
   if (target.kind !== "asset") {
     return undefined;
@@ -93,13 +99,13 @@ export const lookObserver: WorldObserver = {
   }
 };
 
-interface SampleSet {
+export interface SampleSet {
   frames: ImageData[];
   ranges: Array<[number, number]>;
 }
 
-function drawToImageData(source: CanvasImageSource, width: number, height: number): ImageData | null {
-  const scale = SAMPLE_WIDTH / Math.max(1, width);
+function drawToImageData(source: CanvasImageSource, width: number, height: number, sampleWidth: number): ImageData | null {
+  const scale = sampleWidth / Math.max(1, width);
   const w = Math.max(1, Math.round(width * scale));
   const h = Math.max(1, Math.round(height * scale));
   const canvas = document.createElement("canvas");
@@ -117,7 +123,9 @@ function drawToImageData(source: CanvasImageSource, width: number, height: numbe
   }
 }
 
-async function sampleVideo(url: string, durationSeconds: number): Promise<SampleSet> {
+export async function sampleVideo(url: string, durationSeconds: number, options?: FrameSampleOptions): Promise<SampleSet> {
+  const sampleWidth = options?.width ?? SAMPLE_WIDTH;
+  const samplePoints = options?.points ?? SAMPLE_POINTS;
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
@@ -135,7 +143,7 @@ async function sampleVideo(url: string, durationSeconds: number): Promise<Sample
       LOAD_TIMEOUT_MS
     );
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : durationSeconds;
-    for (const point of SAMPLE_POINTS) {
+    for (const point of samplePoints) {
       const t = Math.min(Math.max(duration * point, 0), Math.max(duration - 0.05, 0));
       await withTimeout(
         new Promise<void>((resolve, reject) => {
@@ -145,7 +153,7 @@ async function sampleVideo(url: string, durationSeconds: number): Promise<Sample
         }),
         LOAD_TIMEOUT_MS
       );
-      const frame = drawToImageData(video, video.videoWidth, video.videoHeight);
+      const frame = drawToImageData(video, video.videoWidth, video.videoHeight, sampleWidth);
       if (frame) {
         frames.push(frame);
         ranges.push([t, t]);
@@ -160,7 +168,8 @@ async function sampleVideo(url: string, durationSeconds: number): Promise<Sample
   return { frames, ranges };
 }
 
-async function sampleImage(url: string): Promise<SampleSet> {
+export async function sampleImage(url: string, options?: FrameSampleOptions): Promise<SampleSet> {
+  const sampleWidth = options?.width ?? SAMPLE_WIDTH;
   const image = new Image();
   image.crossOrigin = "anonymous";
   image.src = url;
@@ -175,7 +184,7 @@ async function sampleImage(url: string): Promise<SampleSet> {
   } catch {
     return { frames: [], ranges: [] };
   }
-  const frame = drawToImageData(image, image.naturalWidth, image.naturalHeight);
+  const frame = drawToImageData(image, image.naturalWidth, image.naturalHeight, sampleWidth);
   return frame ? { frames: [frame], ranges: [[0, 0]] } : { frames: [], ranges: [] };
 }
 
