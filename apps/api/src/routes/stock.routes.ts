@@ -65,6 +65,34 @@ stockRouter.post(
       throw new HttpError(501, "Stock search is not configured");
     }
     const input = validateBody(importSchema, req.body);
+
+    // IDEMPOTENT by (user, provider, externalId): re-importing the same stock item — a later
+    // session, a second project, a double click — must reuse the ONE library asset, not mint a
+    // duplicate row each time (user report 2026-07-18: "stock is recreated after every refresh").
+    // The project link is ensured either way (upsert on the (projectId, sourceAssetId) unique).
+    const existing = await prisma.sourceAsset.findFirst({
+      where: {
+        userId: req.user.id,
+        source: "pexels",
+        externalJson: { path: ["externalId"], equals: input.externalId }
+      }
+    });
+    if (existing) {
+      if (input.projectId) {
+        await prisma.projectAsset.upsert({
+          where: { projectId_sourceAssetId: { projectId: input.projectId, sourceAssetId: existing.id } },
+          create: { projectId: input.projectId, sourceAssetId: existing.id },
+          update: {}
+        });
+      }
+      // Provider CDN URLs rotate; a reference-mode re-import carries the freshest one.
+      const refreshed =
+        input.referenceOnly && existing.fileUrl !== input.downloadUrl && /^https?:\/\//i.test(input.downloadUrl)
+          ? await prisma.sourceAsset.update({ where: { id: existing.id }, data: { fileUrl: input.downloadUrl, cloudUrl: input.downloadUrl } })
+          : existing;
+      return ok(res, "Stock asset already in your library", { asset: serializeAsset(refreshed) });
+    }
+
     let fileUrl: string;
     let fileName: string;
     let sizeBytes: number | null = null;

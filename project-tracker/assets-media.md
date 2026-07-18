@@ -106,3 +106,24 @@ no confirmation needed) and reports empty media slots honestly in the notice. Re
 `.play()` calls from both asset-tile media components; the general library grid keeps hover-scrub (paused
 until the pointer moves), stock results just show a still.
 **Verify:** `pnpm -r typecheck` (5/5), `editor:test`, both green.
+
+## v9 — Stock re-import minted a duplicate asset row every time (2026-07-18)
+
+**Problem:** User report: the stock folder looked "recreated after every refresh — the old
+one retired/delinked". Bin showed both a lowercase "stock" tile and the "Stock" mount,
+each 0 assets · 1 bin.
+
+**Root cause (confirmed half):** `POST /stock/import` (stock.routes.ts) called
+`prisma.sourceAsset.create` unconditionally — no lookup by (userId, provider, externalId).
+Re-importing the same Pexels clip (new session, second project, double click) created a
+brand-new library asset row each time; old rows lingered with dead project links.
+
+**Fix:** import is now idempotent — `findFirst` on `externalJson.externalId` (+ userId +
+source) returns the existing asset, upserts the ProjectAsset link on the
+`(projectId, sourceAssetId)` unique, and (reference mode) refreshes rotated CDN URLs.
+Only truly-new items create rows.
+
+**Unconfirmed half (needs user data):** the LOWERCASE "stock" tile beside the "Stock"
+mount. No code path writes `Stock/` or `local/stock` — likely a user-dropped disk folder
+named "stock" or a manually created bin. Waiting on what's inside the two tiles before
+touching folder normalization.
