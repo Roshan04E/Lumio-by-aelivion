@@ -41,7 +41,7 @@ import { systemObserver, SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID, type System
 import { userProfileObserver, USER_AI_PROFILE_FACT, USER_TARGET_ID, type UserAiProfileFact } from "./observers/user-profile";
 import { projectMediaObserver, PROJECT_MEDIA_FACT, PROJECT_TARGET_ID, type ProjectMediaFact } from "./observers/project-media";
 import { recordRuleFired, recordRuleRejected, clearRuleStats } from "../brain/feedback";
-import { routePromptWorld } from "./route";
+import { describeAppliedTreatment, routePromptWorld } from "./route";
 import type { BrainContext } from "../brain/router";
 import type { WorldContext, WorldObserver } from "./types";
 
@@ -413,6 +413,27 @@ async function run(): Promise<void> {
     "scene observer declines under node (its look input path doesn't exist here)",
     (await queryFact({ type: MEDIA_SCENE_FACT, target: assetTarget, budgetMs: 12_000 }, ctx)) === null
   );
+
+  // ---- Source-vs-applied honesty (user question 2026-07-18: "will it detect MY
+  // ---- saturation boost?" — measurement is source pixels; treatment is data) ----
+  console.log("source-vs-applied honesty (describeAppliedTreatment):");
+  const bareLayer = { effects: [] } as unknown as Parameters<typeof describeAppliedTreatment>[0];
+  check("untreated clip → no Applied line", describeAppliedTreatment(bareLayer) === null);
+  const treatedLayer = {
+    effects: [
+      { id: "fx1", type: "creativeLook", name: "Creative Look", enabled: true, intensity: 80, params: { look: "Noir" } },
+      { id: "fx2", type: "blur", name: "Gaussian Blur", enabled: false, intensity: 45, params: {} },
+      { id: "fx3", type: "brightnessContrast", name: "Basic Color Correction", enabled: true, intensity: 50, params: { saturation: 220 } }
+    ],
+    speed: -2
+  } as unknown as Parameters<typeof describeAppliedTreatment>[0];
+  check(
+    "look name, intensities, reverse speed described; DISABLED effects skipped",
+    describeAppliedTreatment(treatedLayer) === "Noir look @ 80, Basic Color Correction @ 50, reversed at 200%",
+    describeAppliedTreatment(treatedLayer) ?? "null"
+  );
+  const rampedLayer = { effects: [], speedKeyframes: [{ timeSeconds: 0, rate: 1 }] } as unknown as Parameters<typeof describeAppliedTreatment>[0];
+  check("speed ramp named as such", describeAppliedTreatment(rampedLayer) === "speed ramp");
 
   // ---- SDK v1 registration contract (ORRERIS_SDK.md) ----
   console.log("SDK v1 registration contract:");

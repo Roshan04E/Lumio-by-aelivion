@@ -171,6 +171,30 @@ function findLayer(composition: TimelineComposition, layerId: string): TimelineL
   return undefined;
 }
 
+/**
+ * The user's timeline treatment of a clip, read from the effect stack + speed AS DATA
+ * (pure — eval-covered). This is the honest counterpart to the source-pixel measurement:
+ * "Look" says what the camera shot; this says what the user did to it.
+ */
+export function describeAppliedTreatment(layer: TimelineLayer): string | null {
+  const parts: string[] = [];
+  for (const effect of layer.effects ?? []) {
+    if (effect.enabled === false) {
+      continue;
+    }
+    const lookName = typeof effect.params?.["look"] === "string" ? String(effect.params["look"]) : null;
+    const intensity = typeof effect.intensity === "number" ? ` @ ${Math.round(effect.intensity)}` : "";
+    parts.push(lookName ? `${lookName} look${intensity}` : `${effect.name}${intensity}`);
+  }
+  const speed = typeof layer.speed === "number" && Number.isFinite(layer.speed) && layer.speed !== 0 ? layer.speed : 1;
+  if (layer.speedKeyframes?.length) {
+    parts.push("speed ramp");
+  } else if (Math.abs(Math.abs(speed) - 1) > 0.0005 || speed < 0) {
+    parts.push(speed < 0 ? `reversed at ${Math.round(Math.abs(speed) * 100)}%` : `speed ${Math.round(speed * 100)}%`);
+  }
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
 function answer(text: string, ruleId: string): BrainRouteResult {
   return { kind: "answer", text, tier: "world", ruleId };
 }
@@ -221,9 +245,16 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
     const v = look.fact.value;
     const temperatureLabel = v.temperature > 0.06 ? "warm" : v.temperature < -0.06 ? "cool" : "neutral";
     const saturationLabel = v.saturation < 0.18 ? "muted" : v.saturation > 0.45 ? "vivid" : "moderate";
+    // Two labeled truths (user question 2026-07-18: "will it detect MY saturation boost?"):
+    // the measurement is of the SOURCE pixels; the user's treatment is read from the effect
+    // stack as data. Neither pretends to be the other.
     lines.push(
-      `- Look: **${v.exposure}** exposure (mean luma ${(v.avgLuma * 100).toFixed(0)}%), contrast spread ${(v.contrast * 100).toFixed(0)}%, ${temperatureLabel} balance, ${saturationLabel} saturation`
+      `- Look (source footage): **${v.exposure}** exposure (mean luma ${(v.avgLuma * 100).toFixed(0)}%), contrast spread ${(v.contrast * 100).toFixed(0)}%, ${temperatureLabel} balance, ${saturationLabel} saturation`
     );
+    const applied = describeAppliedTreatment(layer);
+    if (applied) {
+      lines.push(`- Applied on the timeline: ${applied} — the source measurement above is BEFORE these`);
+    }
     // Scene ambience (inferred) — shown only when it says something a grade should care
     // about; "standard/neutral/moderate" footage adds no line (zero noise rule).
     if (scene && (scene.fact.value.lighting !== "standard" || scene.fact.value.palette !== "neutral")) {
