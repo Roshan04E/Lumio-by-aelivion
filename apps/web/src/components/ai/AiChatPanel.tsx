@@ -26,7 +26,7 @@ import { runGeneration } from "../../generate/generateClient";
 import type { GenerateStudioPrefill } from "../generate/GenerateStudio";
 import { classifyContinuity, type ContinuityResult } from "../../ai/planner/intent-continuity";
 import { arbitrateFinal, normalizeTranscript } from "../../ai/transcript-normalizer";
-import { recordDecisionTrace } from "../../ai/decision-trace";
+import { recordDecisionTrace, type DecisionTrace } from "../../ai/decision-trace";
 import { requestSpokenAck } from "../../ai/ack";
 import {
   localEarsEnabled,
@@ -1492,8 +1492,9 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
             note: "everything stays editable (undo any time)"
           });
           // K5 explainability: the full decision — route, provenance notes (K4 facts,
-          // repairs), operations — becomes the WHY reflex's answer.
-          recordDecisionTrace({
+          // repairs), operations — becomes the WHY reflex's answer AND a collapsed
+          // "Why?" row under the result (each row keeps ITS decision, not just the last).
+          const brainTrace: DecisionTrace = {
             prompt,
             route: fastMeta
               ? `🤖 fast-lane model (${fastMeta.provider ?? "cloud"}) — actions registry-validated`
@@ -1506,7 +1507,9 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
             applied: outcome.applied,
             failed: outcome.failed,
             at: Date.now()
-          });
+          };
+          recordDecisionTrace(brainTrace);
+          pushItem({ kind: "trace", trace: brainTrace });
           if (runTargetsRef.current.length > 0) {
             lastActionRef.current = { targetLayerIds: runTargetsRef.current, prompt };
           }
@@ -1776,8 +1779,9 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           note: "everything stays editable (undo any time)"
         });
         // K5 explainability: model-planned turns get a trace too — honest about the model,
-        // clear that execution still went through the registry.
-        recordDecisionTrace({
+        // clear that execution still went through the registry. Recorded for the WHY
+        // reflex and shown as a collapsed "Why?" row under the summary.
+        const modelTrace: DecisionTrace = {
           prompt,
           route: `🤖 model (${live.provider ?? "cloud"}) planned WHAT; deterministic registry actions did HOW`,
           zeroTokens: false,
@@ -1786,7 +1790,9 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           applied: report.applied,
           failed: report.failed,
           at: Date.now()
-        });
+        };
+        recordDecisionTrace(modelTrace);
+        pushItem({ kind: "trace", trace: modelTrace });
       }
       if (runTargetsRef.current.length > 0) {
         lastActionRef.current = { targetLayerIds: runTargetsRef.current, prompt };

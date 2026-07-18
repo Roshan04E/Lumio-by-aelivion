@@ -8,6 +8,8 @@
  * events, executor onProgress, registry summaries) — nothing here is scripted or timer-driven.
  */
 
+import type { DecisionTrace } from "./decision-trace";
+
 export type TranscriptItem =
   | { kind: "user"; id: string; text: string }
   | {
@@ -32,6 +34,9 @@ export type TranscriptItem =
   | { kind: "text"; id: string; markdown: string; streaming?: boolean | undefined }
   | { kind: "question"; id: string; text: string; answered?: string | undefined }
   | { kind: "summary"; id: string; applied: number; failed: number; skipped: number; note?: string | undefined }
+  /** K5 trace chrome: a collapsed "Why?" row under a result — the DecisionTrace snapshot for
+   * THAT result (the WHY reflex answers about the latest; this row keeps every past one). */
+  | { kind: "trace"; id: string; trace: DecisionTrace }
   | { kind: "notice"; id: string; tone: "info" | "warn" | "error"; text: string }
   /** Wake-word near-miss: a greeting-led phrase standby heard but didn't match — the user can
    * confirm it to TRAIN the wake word ("hello mia" → wakes from now on). */

@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { CONFIDENCE_INFO, confidenceClass } from "../../ai/confidence";
+import type { DecisionTrace } from "../../ai/decision-trace";
 import { thoughtTail, type TranscriptItem } from "../../ai/transcript";
 import type { AiPlan } from "../../ai/types";
 import { Markdown } from "./Markdown";
@@ -108,6 +109,8 @@ function TranscriptRow({
           </span>
         </div>
       );
+    case "trace":
+      return <TraceRow trace={item.trace} />;
     case "notice":
       return (
         <div className={`ai-tr-row ai-tr-notice is-${item.tone}`}>
@@ -182,6 +185,32 @@ function TranscriptRow({
     default:
       return null;
   }
+}
+
+/**
+ * K5 trace chrome: a dim, collapsed "Why?" toggle under a result. Expanding shows THAT
+ * result's DecisionTrace — route, provenance notes, operations — no typing "why did you do
+ * that?" needed, and unlike the WHY reflex (latest-only) every past row keeps its own trace.
+ */
+function TraceRow({ trace }: { trace: DecisionTrace }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="ai-tr-row ai-tr-thought ai-tr-trace">
+      <button type="button" className="ai-tr-thought-toggle" onClick={() => setOpen((value) => !value)}>
+        <span aria-hidden>{open ? "▾" : "▸"}</span> Why?{trace.zeroTokens ? " · 0 tokens" : ""}
+      </button>
+      {open ? (
+        <div className="ai-tr-trace-body">
+          <div>Route: {trace.route}</div>
+          {trace.notes.map((note, index) => (
+            <div key={index}>{note}</div>
+          ))}
+          <div>{trace.steps.length > 0 ? `Did: ${trace.steps.join(" · ")}` : "Did: answered only — no edit was made"}</div>
+          {trace.failed > 0 ? <div>Outcome: {trace.applied} applied, {trace.failed} failed</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 /** Dim reasoning block: live = last ~6 lines streaming; finished = one-line collapsible toggle. */

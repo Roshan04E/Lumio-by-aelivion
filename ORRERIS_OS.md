@@ -594,6 +594,17 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    (per-kind style resolution; "pop out" and deictic targets escalate; "fade in" stays a
    transition). Open (unchanged otherwise): trace UI chrome, face-presence observer, more
    inference rules, SDK formalization.
+   **Trace UI chrome shipped 2026-07-18 (third slice)** — the decision trace became panel
+   chrome: a new `trace` transcript item (a serializable DecisionTrace snapshot) is pushed
+   at both apply seams (brain-plan and model-plan) alongside `recordDecisionTrace`, and
+   renders as a dim collapsed "Why? · 0 tokens" toggle row under the run summary
+   (`AgentTranscript.tsx` TraceRow). Unlike the WHY reflex (latest-only), every past
+   result keeps ITS OWN trace, and rows persist/reload with the transcript. Pure answers
+   deliberately get no row (their route notice already says everything; zero noise).
+   The inferred edit-style line in "analyze the timeline" was also relabeled to plain
+   language ("Edit style: mostly raw footage, long unhurried shots · my read of the
+   timeline · N% sure") after user feedback that "Character" read as a person. Open:
+   face-presence observer, more inference rules, SDK formalization.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

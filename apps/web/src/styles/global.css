@@ -19042,6 +19042,19 @@ input.scrub-number:focus {
   color: var(--text, rgba(255, 255, 255, 0.85));
 }
 
+/* K5 trace chrome — the collapsed "Why?" row tucks tight under its result. */
+.ai-tr-trace {
+  margin-top: -4px;
+}
+
+.ai-tr-trace-body {
+  padding: 2px 0 0 21px;
+  font-size: 11px;
+  line-height: 1.55;
+  word-break: break-word;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+}
+
 .ai-tr-question .ai-tr-glyph {
   color: var(--nle-accent);
   font-weight: 700;
