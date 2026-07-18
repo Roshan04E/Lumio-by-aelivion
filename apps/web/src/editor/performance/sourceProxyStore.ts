@@ -46,7 +46,10 @@ export interface SourceProxyRecord {
 // sample getFrame CLAMPS to the final frame (never null) — so v4 proxies bake a frozen last-second
 // repeat the null-based frozen-tail guard cannot see. Builds now clamp their frame loop to the
 // provider's demuxed `decodableEndSeconds`; rebuild everything encoded without that clamp.
-export const SOURCE_PROXY_VERSION = 5;
+// v6 (2026-07-18): quality recipe upgrade — long edge 854 → 1280, 0.1 → 0.18 bits/pixel/frame
+// (user report: crowd/street proxies unusably soft while skipped clips played the sharp original).
+// Rebuild everything encoded with the 480p recipe.
+export const SOURCE_PROXY_VERSION = 6;
 
 const OPFS_DIR = "orreris-source-proxies";
 const INDEX_FILE = "index.json";

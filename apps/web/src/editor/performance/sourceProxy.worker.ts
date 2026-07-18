@@ -144,6 +144,11 @@ async function build(
       }
       await encoder.addVideoFrame(canvas, i);
       encodedFrames += 1;
+      // Live feedback (2026-07-18, user report: silent builds read as a hang): a throttled progress
+      // ping the engine forwards to the editor's notice line. Every 30 frames ≈ once a second.
+      if (encodedFrames % 30 === 0) {
+        scope.postMessage({ type: "progress", encodedFrames, totalFrames: frameCount });
+      }
     }
     if (!decodedAny) {
       throw new Error("decoder produced no frames — aborted");

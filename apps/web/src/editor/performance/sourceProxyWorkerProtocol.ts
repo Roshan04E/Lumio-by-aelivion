@@ -32,6 +32,12 @@ export type SourceProxyWorkerRequest =
 
 export type SourceProxyWorkerResponse =
   | {
+      /** Build progress (throttled ~every 30 frames) — feeds the editor's live "optimizing media" UI. */
+      type: "progress";
+      encodedFrames: number;
+      totalFrames: number;
+    }
+  | {
       type: "done";
       buffer: ArrayBuffer;
       mime: string;

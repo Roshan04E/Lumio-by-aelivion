@@ -359,3 +359,36 @@ Also hardened per v15's theory: `syncVideoTime`/`syncAudioTime` now skip issuing
 
 **Verify:** ramp 1x→5% and 1x→16x over ~0.5s on a video+audio pair, play through, devtools console
 must stay clean (no NotSupportedError) and the tab responsive. Roadmap item can close on that pass.
+
+## v17 — Ingest-proxy quality "not workable" + silent builds read as a timeline hang (2026-07-18)
+
+**Report:** busy street footage (Tokyo crosswalk) unusably soft on proxy playback while "some clips
+get really good quality" — those clips had SKIPPED proxying (<12MB or ≤854px long edge) and were
+playing the sharp original. Separately: during a cold origin's initial build burst there was no
+user feedback, and ingest jank made the timeline read as frozen/hung.
+
+**Root causes:**
+1. Quality: the v1 recipe (854px long edge, 0.1 bits/pixel/frame ≈ 1.2 Mbps H.264 @ 480p30) is
+   below usable for detail/motion-dense content. The variance the user saw was proxied-vs-skipped,
+   not per-clip luck.
+2. Feedback: the only signal was the ONE-SHOT cold-origin notice (v1 era, `firstBuildListener`) —
+   nothing during the minutes of building; combined with main-thread costs at ingest
+   (`blob.arrayBuffer()` full-file copy + `decodeAudioData` + PCM plane copies before the worker
+   handoff), silence + jank = "it froze".
+
+**Fix (recipe v6):**
+- `PROXY_LONG_EDGE` 854 → 1280, `PROXY_BITS_PER_PIXEL_FRAME` 0.1 → 0.18 (≈5 Mbps @ 720p30 —
+  Premiere's proxy tier). `SOURCE_PROXY_VERSION` 5 → 6 forces rebuild of all 480p proxies.
+  Storage ~4× (~37 MB/min) — fine for OPFS.
+- Live progress: worker posts `{type:"progress"}` every 30 frames (protocol + main-thread fallback
+  loop both); engine steps it to 5% increments (`setSourceProxyProgressListener`, null = queue
+  drained) with queue depth; EditorPage mirrors into the notice line ("Optimizing media — 45%
+  (+2 more queued)…" → "finished" close-out). CRITICAL detail: the engine's worker `onmessage` used
+  to `cleanup()` (terminate!) on ANY message — progress is now handled non-terminally.
+- Ingest jank: audio pre-decode parks behind the suspension gate + yields after; big copies never
+  land mid-interaction.
+
+**Verify (user):** reload → proxies rebuild with visible % notice; after rebuild, ½-quality playback
+on the crosswalk clip should be judgeably sharp at fit zoom; no frozen-timeline feel during the
+rebuild burst. If 720p proxies still feel soft on 4K sources at 100% zoom, the next lever is a
+per-source ladder (proxy = min(1280, half the source long edge)) — NOT more bitrate.

@@ -26,10 +26,15 @@ import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable } from "./so
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 import type { SourceAsset } from "@orreris/shared";
 
-const PROXY_LONG_EDGE = 854; // ≈480p — Premiere-ballpark ingest proxy size for phone-vertical media
+// QUALITY RECIPE v6 (2026-07-18, user report: busy street footage "not workable" on proxy while
+// small/skipped clips looked sharp — the 854/0.1bpp recipe was the whole gap). 720p-class long edge
+// + 0.18 bits/pixel/frame ≈ 5 Mbps at 1280×720@30 — Premiere's proxy tier, sharp enough to judge
+// focus/motion at fit zoom. Storage ~4× the old recipe (~37 MB/min) — fine for OPFS; decode stays
+// cheap vs the original. Bump SOURCE_PROXY_VERSION when touching EITHER constant.
+const PROXY_LONG_EDGE = 1280;
 const PROXY_FPS = 30;
 const PROXY_KEYFRAME_S = 1;
-const PROXY_BITS_PER_PIXEL_FRAME = 0.1;
+const PROXY_BITS_PER_PIXEL_FRAME = 0.18;
 /** Below this the original is already cheap to decode — don't spend a transcode on it. */
 const MIN_SOURCE_BYTES = 12 * 1024 * 1024;
 /** Safety cap: don't background-transcode an hour-long screen recording in v1. */
@@ -115,6 +120,31 @@ function notifyFirstBuild(): void {
   firstBuildListener?.();
 }
 
+// LIVE PROGRESS (2026-07-18, user report: the one-shot cold-origin notice wasn't enough — silent
+// builds + ingest jank read as "the timeline froze"). The engine emits STEPPED progress (every 5%,
+// plus asset changes and the final null = queue drained) so the UI can mirror it into the notice
+// line without being spammed. `queued` counts builds still waiting behind the active one.
+export interface SourceProxyProgress {
+  assetId: string;
+  /** 0..100, stepped to 5s. */
+  percent: number;
+  queued: number;
+}
+let progressListener: ((progress: SourceProxyProgress | null) => void) | null = null;
+let progressAssetId: string | null = null;
+let progressLastStep = -1;
+export function setSourceProxyProgressListener(listener: ((progress: SourceProxyProgress | null) => void) | null): void {
+  progressListener = listener;
+}
+function reportProgress(encodedFrames: number, totalFrames: number): void {
+  if (!progressListener || !progressAssetId || totalFrames <= 0) return;
+  const percent = Math.max(0, Math.min(100, Math.round((encodedFrames / totalFrames) * 100)));
+  const step = Math.floor(percent / 5);
+  if (step === progressLastStep) return;
+  progressLastStep = step;
+  progressListener({ assetId: progressAssetId, percent, queued: queue.length });
+}
+
 // SUSPEND (2026-07-06, supersedes the full-quality-only rule): builds park during ANY playback —
 // on a cold origin the build started the moment play did and starved the live decode path (the
 // build-only "plays ~4s then freezes" report). EditorPage suspends the engine whenever isPlaying;
@@ -190,6 +220,8 @@ async function drainQueue(): Promise<void> {
       await new Promise<void>((resolve) => whenIdle(resolve));
       await waitWhileSuspended();
       stats().active = item.asset.id;
+      progressAssetId = item.asset.id;
+      progressLastStep = -1;
       const started = performance.now();
       try {
         const url = await buildOne(item.asset);
@@ -203,6 +235,10 @@ async function drainQueue(): Promise<void> {
         settled.add(item.asset.id);
         inQueue.delete(item.asset.id);
         stats().active = null;
+        progressAssetId = null;
+        if (queue.length === 0) {
+          progressListener?.(null); // drained — the UI clears/summarizes its notice
+        }
       }
     }
   } finally {
@@ -287,10 +323,14 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   // Past every skip/fast path — a real transcode is about to start (cold-origin UX signal).
   notifyFirstBuild();
 
-  // Audio first (cheap — decodeAudioData is internally off-thread — and tells the muxer whether to
-  // open an audio track at all). Decoded HERE because AudioContext can't run in a Worker; the PCM
-  // planes are copied and transferred to the worker.
+  // Audio first (decodeAudioData is internally off-thread, and tells the muxer whether to open an
+  // audio track at all). Decoded HERE because AudioContext can't run in a Worker; the PCM planes are
+  // copied and transferred to the worker. The `arrayBuffer()` inside is a full-file copy — park it
+  // behind the suspension gate and yield after, so an ingest burst never eats the copy cost while
+  // the user is interacting (2026-07-18 "timeline froze during initial builds" report).
+  await waitWhileSuspended();
   const audio = await decodeAudioTrack(blob);
+  await yieldToMain();
 
   // WORKER-FIRST (2026-07-06): the decode→scale→encode body runs in sourceProxy.worker.ts so a build
   // can never hold the editor's main thread (root of the build-only playback freeze). Fall back to
@@ -376,6 +416,10 @@ function transcodeInWorker(
     };
     worker.onmessage = (event: MessageEvent<SourceProxyWorkerResponse>) => {
       const message = event.data;
+      if (message.type === "progress") {
+        reportProgress(message.encodedFrames, message.totalFrames);
+        return; // NOT terminal — cleanup() here would terminate the worker mid-build
+      }
       cleanup();
       if (message.type === "done") {
         resolve({
@@ -503,6 +547,9 @@ async function transcodeOnMainThread(
       }
       await encoder.addVideoFrame(canvas, i);
       encodedFrames += 1;
+      if (encodedFrames % 30 === 0) {
+        reportProgress(encodedFrames, frameCount); // same feedback contract as the worker path
+      }
       // Yield after EVERY frame so the transcode never holds the main thread longer than one frame's
       // work — the user's clicks/scrubs interleave instead of waiting behind a batch. A longer
       // setTimeout breather every N frames additionally lets the browser do paint/GC.

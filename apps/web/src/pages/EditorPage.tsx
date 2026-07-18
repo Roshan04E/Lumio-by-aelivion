@@ -254,7 +254,7 @@ import {
 import { createProxyBlobStore, isProxyMediaSupported, type ProxyBlobStore } from "../editor/performance/proxyMediaStore";
 import { generateSpanProxy, ProxyGenerationAborted, type ProxyGenerationDiagnostic } from "../editor/performance/proxyWorkerClient";
 import { SpanVerificationAborted, verifySpanBlobIntegrity } from "../editor/performance/spanVerification";
-import { ensureSourceProxy, setSourceProxyBuildSuspended, setSourceProxyFirstBuildListener } from "../editor/performance/sourceProxyEngine";
+import { ensureSourceProxy, setSourceProxyBuildSuspended, setSourceProxyProgressListener } from "../editor/performance/sourceProxyEngine";
 import { setWorldAssetProvider } from "../ai/world";
 import { isBackgroundWorkAllowed, setBackgroundGate, subscribeBackgroundGate } from "../editor/performance/backgroundScheduler";
 import { ensureDegradationControllerStarted } from "../editor/performance/degradation";
@@ -1214,14 +1214,25 @@ export function EditorPage() {
       applySourceProxyPatches();
     }
   }, [isPlaying, applySourceProxyPatches]);
-  // Cold-origin UX (1e): the first REAL transcode of the session means this browser origin had no
-  // proxies for this media yet (typical on the production build's separate storage) — one passive
-  // notice; playback is never blocked on it.
+  // Cold-origin UX (1e → live progress 2026-07-18): builds used to announce themselves ONCE and then
+  // run silently — with ingest jank on top, users read the silence as "the timeline froze". The
+  // engine now emits stepped progress (every 5%, throttled at the source); mirror it into the notice
+  // line, and close with a done note only when at least one real build ran. Playback is never
+  // blocked on any of this.
   useEffect(() => {
-    setSourceProxyFirstBuildListener(() => {
-      setNotice("Optimizing media in the background — playback may be softer until it finishes");
+    let sawBuild = false;
+    setSourceProxyProgressListener((progress) => {
+      if (!progress) {
+        if (sawBuild) {
+          setNotice("Media optimization finished — proxies rebuilt at full quality");
+        }
+        return;
+      }
+      sawBuild = true;
+      const queueSuffix = progress.queued > 0 ? ` (+${progress.queued} more queued)` : "";
+      setNotice(`Optimizing media in the background — ${progress.percent}%${queueSuffix}. Playback may be softer until it finishes`);
     });
-    return () => setSourceProxyFirstBuildListener(null);
+    return () => setSourceProxyProgressListener(null);
   }, []);
 
   useEffect(() => {
