@@ -562,6 +562,21 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    planner proper, clarify answers resuming conversationally, more moods/observers (K5).
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,
    explainability trace UI, SDK surface for plugins.
+   **✅ first slice shipped 2026-07-18** — (a) **The decision trace as a product surface**:
+   `ai/decision-trace.ts` records one serializable DecisionTrace at every apply/answer seam
+   (intent → route/rule/provider → provenance notes carrying K4 facts-consulted + repairs →
+   operations → outcome), and the tier-0 **WHY reflex** ("why did you do that?" / "what did
+   you just do" / "explain the last edit") answers from it instantly — the doc's
+   "no LLM-first competitor can produce this honestly" claim made tangible: model-planned
+   turns get an honest "🤖 model planned WHAT; deterministic registry actions did HOW"
+   trace, local turns show the exact rule + measured facts, and a WHY answer never clobbers
+   the trace it explains. (b) **Moods as registered data**: vintage (→ Faded Film,
+   Caption Pill titles) and gritty (→ Bleach Bypass @ 75, shake accent, Outline titles)
+   added as pure `registerMoodRecipe` rows — zero runtime changes, proving the rule of
+   engagement. Acceptance: brain:eval +6 (WHY corpus incl. must-escalate guards),
+   blueprint:eval +6 (data rows close end to end). Open: trace UI chrome (collapsible
+   "Why?" row instead of an ask), face-presence observer, inference rules, SDK surface
+   formalization.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

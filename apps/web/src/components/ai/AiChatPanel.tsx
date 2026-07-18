@@ -26,6 +26,7 @@ import { runGeneration } from "../../generate/generateClient";
 import type { GenerateStudioPrefill } from "../generate/GenerateStudio";
 import { classifyContinuity, type ContinuityResult } from "../../ai/planner/intent-continuity";
 import { arbitrateFinal, normalizeTranscript } from "../../ai/transcript-normalizer";
+import { recordDecisionTrace } from "../../ai/decision-trace";
 import { requestSpokenAck } from "../../ai/ack";
 import {
   localEarsEnabled,
@@ -1407,6 +1408,20 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           pushMessage("ai", routed.text);
           speakIfVoice(routed.text);
           recordRuleFired(routed.ruleId);
+          // K5 explainability: answers are decisions too — but a WHY answer must never
+          // clobber the trace it just explained.
+          if (routed.ruleId !== "t0.why") {
+            recordDecisionTrace({
+              prompt,
+              route: `${routed.tier === "world" ? "🌐 World Model" : "⚡ Instant local tier"} (${routed.ruleId})`,
+              zeroTokens: true,
+              notes: [],
+              steps: [],
+              applied: 0,
+              failed: 0,
+              at: Date.now()
+            });
+          }
           commitBrainTurn({ prompt, ruleId: routed.ruleId, hadEdits: false, at: Date.now(), source: "brain" });
           recordRoute({ route: ledgerRoute ?? "reflex", ms: performance.now() - reflexStartedAt, estTokens: ledgerTokens, outcome: "answered" });
           return;
@@ -1475,6 +1490,22 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
             failed: outcome.failed,
             skipped: outcome.skipped,
             note: "everything stays editable (undo any time)"
+          });
+          // K5 explainability: the full decision — route, provenance notes (K4 facts,
+          // repairs), operations — becomes the WHY reflex's answer.
+          recordDecisionTrace({
+            prompt,
+            route: fastMeta
+              ? `🤖 fast-lane model (${fastMeta.provider ?? "cloud"}) — actions registry-validated`
+              : routed.tier === "world"
+                ? `🌐 World Model hypothesis planner (${routed.ruleId})`
+                : `⚡ Instant local tier (${routed.ruleId})`,
+            zeroTokens: !fastMeta,
+            notes: routed.plan.notes ?? [],
+            steps: approvedPlan.steps.map((step) => step.summary),
+            applied: outcome.applied,
+            failed: outcome.failed,
+            at: Date.now()
           });
           if (runTargetsRef.current.length > 0) {
             lastActionRef.current = { targetLayerIds: runTargetsRef.current, prompt };
@@ -1743,6 +1774,18 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           failed: report.failed,
           skipped: report.skipped,
           note: "everything stays editable (undo any time)"
+        });
+        // K5 explainability: model-planned turns get a trace too — honest about the model,
+        // clear that execution still went through the registry.
+        recordDecisionTrace({
+          prompt,
+          route: `🤖 model (${live.provider ?? "cloud"}) planned WHAT; deterministic registry actions did HOW`,
+          zeroTokens: false,
+          notes: [],
+          steps: executedSteps.map((step) => step.summary ?? step.actionId),
+          applied: report.applied,
+          failed: report.failed,
+          at: Date.now()
         });
       }
       if (runTargetsRef.current.length > 0) {

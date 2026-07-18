@@ -31,6 +31,7 @@ import {
   TEXT_LOOK_NAMES
 } from "@orreris/shared";
 import type { AiPlan, PlanStep } from "../types";
+import { formatDecisionTrace, getLastDecisionTrace } from "../decision-trace";
 import type { EditorCommandId } from "../../editor/editor-commands";
 import { compileEditorCommand } from "./commands";
 import { answerFaq } from "./faq";
@@ -171,6 +172,11 @@ function reflexAnswer(text: string, ruleId: string): BrainRouteResult {
 // ---------------------------------------------------------------------------
 
 const UNDO_RE = /^(?:undo(?: (?:that|this|it))?|undo (?:the )?last (?:edit|change|action)|revert (?:that|the last (?:edit|change|action)))$/;
+
+// K5 explainability: "why did you do that?" answers from the recorded decision trace —
+// intent → route → facts consulted → operations — instantly and honestly (0 tokens).
+const WHY_RE =
+  /^(?:why|why did you (?:do|apply|choose|pick) (?:that|this|it)|why (?:that|this)|explain (?:that|this|it|yourself|the last (?:edit|change|result))|what did you (?:just )?do|what just happened)\??$/;
 
 const DESCRIBE_CLIP_RE = /^(?:what(?:'s| is)|describe|tell me about) (?:my |the |in |on )*(.+?)\s*\??$/;
 
@@ -486,6 +492,16 @@ export function routePrompt(prompt: string, context: BrainContext): BrainRouteRe
   // ---- Tier 0: reflex ----
   if (UNDO_RE.test(text)) {
     return { kind: "undo" };
+  }
+
+  if (WHY_RE.test(text)) {
+    const trace = getLastDecisionTrace();
+    return reflexAnswer(
+      trace
+        ? formatDecisionTrace(trace)
+        : "No AI decision recorded yet this session — ask me to edit or analyze something first, then ask why.",
+      "t0.why"
+    );
   }
 
   // Editor command plane ("pan mode", "pause", "select clip 3") — checked BEFORE the FAQ so

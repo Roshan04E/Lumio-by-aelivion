@@ -24,6 +24,7 @@ import {
 import { clearWakePhrases, learnWakePhrase, loadWakePhrases, looksLikeWakeAttempt, matchWakeWord } from "../wake-word";
 import { speakable, splitSpeakable } from "../tts";
 import { arbitrateFinal, normalizeTranscript } from "../transcript-normalizer";
+import { clearDecisionTrace, recordDecisionTrace } from "../decision-trace";
 import { looksLikeSelfEcho } from "../echo-guard";
 
 function layer(
@@ -117,6 +118,33 @@ check("'what can i do' (about the USER, not the AI) → escalates", route("what 
   check("'enter pan mode' → EXECUTES (setTool hand, not a tip)", result.kind === "command" && result.commandId === "setTool" && (result.params as { tool?: string }).tool === "hand");
 }
 check("'undo' → panel undo", route("undo").kind === "undo" && route("undo that").kind === "undo");
+
+console.log("\nWHY reflex (K5 explainability — the decision trace as an instant answer):");
+{
+  clearDecisionTrace();
+  const empty = route("why did you do that?");
+  check("no trace yet → honest empty answer", empty.kind === "answer" && /No AI decision recorded/i.test(answerText(empty)));
+  recordDecisionTrace({
+    prompt: "make it moody",
+    route: "🌐 World Model hypothesis planner (k4.mood-blueprint)",
+    zeroTokens: true,
+    notes: ["World Model consulted: composition-text (measured) · 0 tokens", `look "moody" → Noir @ 55%`],
+    steps: ["Base grade (Noir)"],
+    applied: 1,
+    failed: 0,
+    at: Date.now()
+  });
+  const why = route("why did you do that?");
+  check(
+    "'why did you do that?' → trace answer with route + provenance + operations",
+    why.kind === "answer" && /hypothesis planner/.test(answerText(why)) && /composition-text/.test(answerText(why)) && /Base grade/.test(answerText(why))
+  );
+  check("'what did you just do' → same trace answer", route("what did you just do").kind === "answer");
+  check("'explain the last edit' → same trace answer", /Noir/.test(answerText(route("explain the last edit"))));
+  check("MUST NOT: 'why is clip 2 dark' escalates (a real question, not a why-ask)", route("why is clip 2 dark").kind === "escalate");
+  check("MUST NOT: 'explain color grading' escalates", route("explain color grading").kind === "escalate");
+  clearDecisionTrace();
+}
 {
   const result = route("what is clip 2");
   check("'what is clip 2' → local description of the text layer", result.kind === "answer" && /text/.test(answerText(result)));

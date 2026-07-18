@@ -134,6 +134,21 @@ registerMoodRecipe({
   motion: { kind: "entrance", style: "scale", durationSeconds: 1.2, intensity: 0.35 },
   textLook: "Lower Third"
 });
+// K5: adding a mood is registering data, not modifying the runtime (ORRERIS_OS.md rule of
+// engagement) — these two rows are the proof.
+registerMoodRecipe({
+  mood: "vintage",
+  aliases: ["retro", "nostalgic"],
+  gradeLook: "vintage", // color alias table → Faded Film
+  textLook: "Caption Pill"
+});
+registerMoodRecipe({
+  mood: "gritty",
+  aliases: ["raw", "edgy"],
+  gradeLook: "gritty", // color alias table → Bleach Bypass @ 75%
+  motion: { kind: "emphasis", style: "shake", intensity: 0.3 },
+  textLook: "Outline"
+});
 
 // ---------------------------------------------------------------------------
 // The staged pipeline

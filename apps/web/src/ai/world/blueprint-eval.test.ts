@@ -288,6 +288,29 @@ async function runK4(): Promise<void> {
   check("mood registry: 'moody' resolves, aliases too", resolveMoodRecipe("brooding")?.mood === "moody");
   check("mood registry: 'faster' is NOT a mood (precision-first)", resolveMoodRecipe("faster") === null);
 
+  // K5: moods registered as pure data rows must close end to end with zero runtime changes.
+  for (const word of ["vintage", "retro", "gritty", "edgy"]) {
+    const recipe = resolveMoodRecipe(word);
+    check(`K5 data row: '${word}' resolves to a recipe`, recipe !== null);
+  }
+  const vintage = await planMoodBlueprint(
+    "make it vintage",
+    resolveMoodRecipe("vintage")!,
+    { hasVisualMedia: true, hasText: true },
+    textFacts({ coveredSeconds: 2, wordCount: 3 })
+  );
+  check(
+    "K5: 'vintage' closes (Faded Film grade + Caption Pill titles) with NO runtime change",
+    vintage.kind === "blueprint" &&
+      vintage.closed.some((g) => g.repairs.some((r) => r.includes("Faded Film"))) &&
+      vintage.blueprint.goals.some((goal) => goal.dialect === "text")
+  );
+  const gritty = await planMoodBlueprint("make it gritty", resolveMoodRecipe("gritty")!, { hasVisualMedia: true, hasText: false }, declineSource);
+  check(
+    "K5: 'gritty' closes with the shake emphasis accent",
+    gritty.kind === "blueprint" && gritty.closed.some((g) => g.actions[0]?.actionId === "applyMotion")
+  );
+
   // Visual-only timeline → dominant without buying anything (structural elimination).
   const visualOnly = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: true, hasText: false }, declineSource);
   check("visual-only: blueprint, no facts bought (elimination was free)", visualOnly.kind === "blueprint" && visualOnly.trace.factsConsulted.length === 0);
