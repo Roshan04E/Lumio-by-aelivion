@@ -60,6 +60,32 @@ const addEffect: TimelineActionDefinition<z.infer<typeof addEffectSchema>> = {
   ],
   canUndo: true,
   execute: (params, ctx) => {
+    // Update-not-duplicate at the ONE write seam: if the layer already carries this effect
+    // type, "add" means TWEAK the existing instance (re-enable + merge intensity/params),
+    // never stack a twin on top. Effect-agnostic — the same rule for blur, creativeLook,
+    // and every future type; its keyframes survive because the instance does. (The tier-0
+    // look reflex had this rule privately; every other producer — tier-1 compiler, semantic
+    // tier, fast lane, LLM plans — went through raw addEffect and stacked duplicates.)
+    const existing = ctx.composition.tracks
+      .flatMap((track) => track.layers)
+      .find((layer) => layer.id === params.layerId)
+      ?.effects.find((effect) => effect.type === params.effectType);
+    if (existing) {
+      const mutation = runMutation(ctx.composition, (draft) => {
+        const effect = locateLayer(draft, params.layerId)?.layer.effects.find((item) => item.id === existing.id);
+        if (!effect) {
+          return;
+        }
+        effect.enabled = true;
+        if (params.intensity !== undefined) {
+          effect.intensity = params.intensity;
+        }
+        if (params.params) {
+          effect.params = { ...effect.params, ...canonicalizeLookParams(effect.type, params.params) };
+        }
+      });
+      return actionResult(ctx.composition, mutation, `Update ${existing.name} effect (already on the clip)`);
+    }
     const effect = createTimelineEffect(params.effectType as TimelineEffectType);
     effect.id = freshId(`effect_${params.effectType}`);
     if (params.intensity !== undefined) {

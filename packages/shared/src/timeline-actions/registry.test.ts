@@ -59,6 +59,53 @@ const registry = createTimelineActionRegistry();
   check("analytics counts ai-generated", analytics.aiGeneratedCount === 1);
 }
 
+// --- addEffect update-not-duplicate (real report 2026-07-18: the AI stacked a second
+// --- effect of the same type instead of tweaking the one already applied) ----
+{
+  const base = fixture();
+  const layerId = base.tracks.flatMap((track) => track.layers).find((layer) => layer.type === "video")!.id;
+  const first = registry.execute("addEffect", { layerId, effectType: "blur", params: { amount: 8 } }, ctxFor(base));
+  check("first addEffect adds", first.ok);
+  const afterFirst = first.ok ? first.result.after : base;
+  const second = registry.execute(
+    "addEffect",
+    { layerId, effectType: "blur", intensity: 70, params: { amount: 20 } },
+    ctxFor(afterFirst)
+  );
+  check("second addEffect of the same type succeeds", second.ok);
+  if (second.ok) {
+    const effects = second.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === layerId)!.effects;
+    check("same-type addEffect does NOT stack a duplicate", effects.filter((e) => e.type === "blur").length === 1);
+    check("existing effect got the new params", effects[0]?.params?.["amount"] === 20);
+    check("existing effect got the new intensity", effects[0]?.intensity === 70);
+    check("summary is honest about updating", second.result.summary.includes("already on the clip"));
+    check("update round-trips through undo", equal(applyPatch(second.result.after, second.result.undoPatch), afterFirst));
+    // A disabled effect counts as "already there" — asking again re-enables it.
+    const disabled = registry.execute(
+      "updateEffect",
+      { layerId, effectId: effects[0]!.id, enabled: false },
+      ctxFor(second.result.after)
+    );
+    if (disabled.ok) {
+      const third = registry.execute("addEffect", { layerId, effectType: "blur" }, ctxFor(disabled.result.after));
+      const reEnabled = third.ok
+        ? third.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === layerId)!.effects[0]
+        : undefined;
+      check("re-adding a disabled effect re-enables it (still one instance)", reEnabled?.enabled === true);
+    } else {
+      check("disable step for the re-enable case", false);
+    }
+  }
+  // A DIFFERENT effect type still stacks alongside — merging is per-type only.
+  const other = registry.execute("addEffect", { layerId, effectType: "brightnessContrast" }, ctxFor(afterFirst));
+  if (other.ok) {
+    const effects = other.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === layerId)!.effects;
+    check("different effect types still coexist", effects.length === 2);
+  } else {
+    check("different-type addEffect succeeds", false);
+  }
+}
+
 // --- Undo round-trips across a representative spread of actions -------------
 {
   const base = fixture();

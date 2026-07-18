@@ -73,3 +73,29 @@ maskSequenceId|trackingPathId}` in config; the requested module always inserts i
 
 **Verify:** 8 new editor:test checks (satisfaction rules incl. blob:-never-satisfies, ready-vs-idle
 insertion, requested-stays-idle, follow-text threads both prerequisites); full 5-package typecheck.
+
+## v3 — addEffect stacked duplicates instead of tweaking the existing effect (2026-07-18)
+
+**Problem:** User report: asking the AI for an effect a clip already had (e.g. blurring an
+already-blurred clip) stacked a SECOND instance of the same effect type on top instead of
+tweaking the one that was there — compounding the visual result and leaving a confusing
+double entry in the inspector.
+
+**Root cause:** update-not-duplicate existed only as a private rule inside the tier-0
+APPLY-LOOK reflex (it checked for an existing `creativeLook` and emitted `updateEffect`).
+Every other producer — tier-1 command compiler ("blur clip 1"), semantic tier, fast lane,
+full LLM plans, cached-plan replays — went through the raw `addEffect` registry action,
+which unconditionally pushed a new effect onto the layer's stack.
+
+**Fix:** the rule moved to the ONE write seam (per the effect-agnostic convention): the
+`addEffect` action itself (`packages/shared/src/timeline-actions/actions/effect.ts`) now
+checks the target layer for an existing effect of the same type and, if found, re-enables
+it and merges intensity/params into it (keyframes survive because the instance does),
+returning the honest summary `Update <name> effect (already on the clip)`. New instances
+only when the type genuinely isn't on the layer; different types still coexist. Every
+producer inherits the behavior — no per-tier patches.
+
+**Verify:** `pnpm --filter @orreris/shared actions:test` — 9 new checks (no duplicate on
+same-type re-add, params/intensity merged, honest summary, undo round-trip, disabled
+effect re-enabled as the same instance, different types still stack). blueprint:eval,
+brain:eval, full-repo typecheck green.
