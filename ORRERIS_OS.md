@@ -524,6 +524,18 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    with the vocabulary; aliases repair at the write seam) + `blueprint/motion.ts` dialect.
    Multi-domain blueprints (color + motion) now close end to end — the K4 planner has two
    domains to compose. `blueprint:eval` → 41 checks. Open: text dialect, K4.
+   **Text dialect shipped 2026-07-18 — all three K3 dialects closed.** `text/text-look.ts`
+   (7 built-in text looks — Headline, Subtitle, Caption Pill, Lower Third, Neon, Outline,
+   Minimal — as plain TextStyleFields data; `resolveTextLookName` is the ONE shared
+   resolution: exact → case/format-insensitive → alias table title→Headline, glow→Neon,
+   nameplate→Lower Third…) + `applyTextLook` registry action (bakes a look via
+   `applyTextStyle` in one undoable step; text layers only; unknown names fail validation
+   carrying the library; aliases repair at the write seam) + `blueprint/text.ts` dialect
+   (closure canonicalizes, lowers to one applyTextLook template). The tier-0 APPLY-LOOK
+   reflex falls through color → text: "apply the neon look" on a text clip compiles
+   instantly at tier 0; on a video clip it answers honestly ("Neon is a text look —
+   select a text clip"); unknown looks answer with BOTH libraries. brain:eval +3 corpus
+   rows. Open: target binding contract formalization → K4.
 4. **K4 — Hypothesis stage in the planner** with budgeted expansion and the
    entropy-clarify rule; planner refactored into registered stages.
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,
