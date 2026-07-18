@@ -127,3 +127,21 @@ Only truly-new items create rows.
 mount. No code path writes `Stock/` or `local/stock` — likely a user-dropped disk folder
 named "stock" or a manually created bin. Waiting on what's inside the two tiles before
 touching folder normalization.
+
+## v10 — The duplicate stock tree, confirmed: renaming the system-owned mount forks it (2026-07-18)
+
+**Diagnosis (user's expanded-tree screenshot closed v9's open half):** two parallel trees —
+`local/stock/pexels/video` (old, unused clips) and the real mount `stock/pexels/video`
+(new, used clips). Renaming the stock mount bin was allowed: `applyRenameFolder` computed
+`parent = "" || folderRoot` → relocated every stock asset to `local/<typed name>/pexels/…`
+and left a custom-folder entry behind; the next `/stock/import` regenerated the canonical
+mount beside it. "Recreated each time, old one retired/delinked" — exactly.
+
+**Fix:** (a) `RESERVED_STOCK_BIN_RE` — rename AND delete refuse the server-owned paths
+(`stock`, `stock/pexels`, `stock/pexels/<type>`); user-created bins under `stock/` stay
+renamable. (b) One-time self-heal in the bin: stock-PROVIDER assets stranded under
+`local/stock/…` (any case) move back to the canonical `stock/…` path and the leftover
+custom-folder entries are pruned. Gated to provider sources — user media never moves.
+
+**Lesson:** any system-generated folder tree needs an ownership guard at every user
+mutation seam (rename/delete/move), or the generator and the user fork it forever.

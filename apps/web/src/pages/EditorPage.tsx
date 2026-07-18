@@ -10109,6 +10109,20 @@ function normalizeAssetFolder(folder: string | null | undefined): string {
   return (folder ?? "").split("/").map((part) => part.trim()).filter(Boolean).join("/");
 }
 
+/** Server-owned stock mount paths (`stock`, `stock/pexels`, `stock/pexels/<type>`) — every
+ * import regenerates them, so renaming/deleting them can only fork the folder tree. */
+const RESERVED_STOCK_BIN_RE = /^stock(?:\/pexels(?:\/(?:video|image))?)?$/;
+
+/** A stock-sourced asset stranded outside the mount by an old mount rename
+ * (`local/stock/pexels/video`, any case) — healed back to the canonical server path. */
+function strayStockFolderOf(asset: SourceAsset): string | null {
+  const source = assetSourceOf(asset);
+  if (source !== "pexels" && source !== "unsplash") return null;
+  const folder = normalizeAssetFolder(asset.folder);
+  const match = /^local\/stock(\/.*)?$/i.exec(folder);
+  return match ? `stock${match[1] ?? ""}`.toLowerCase() : null;
+}
+
 function parentAssetFolder(folder: string): string {
   const parts = normalizeAssetFolder(folder).split("/").filter(Boolean);
   parts.pop();
@@ -10784,6 +10798,27 @@ function AssetBinImpl({
     },
     [customAssetFolders, onChangeCustomFolders]
   );
+  // One-time heal (tracker assets-media v9, real report 2026-07-18): stock-sourced assets
+  // stranded under `local/stock/…` by an old mount rename move back to the canonical
+  // `stock/…` server path, and the leftover custom-folder entries are pruned — the mount
+  // is system-owned and regenerates on every import, so the fork can never re-form now
+  // that renaming it is refused. Gated to stock PROVIDERS only; user media never moves.
+  const healedStrayStockRef = useRef(false);
+  useEffect(() => {
+    if (healedStrayStockRef.current || !onMoveAssetFolder || assets.length === 0) return;
+    const strays = assets
+      .map((asset) => ({ asset, healed: strayStockFolderOf(asset) }))
+      .filter((entry): entry is { asset: SourceAsset; healed: string } => entry.healed !== null);
+    const strayEntries = customAssetFolders.filter((entry) => /^local\/stock(\/|$)/i.test(normalizeAssetFolder(entry)));
+    if (strays.length === 0 && strayEntries.length === 0) return;
+    healedStrayStockRef.current = true;
+    for (const { asset, healed } of strays) {
+      void onMoveAssetFolder(asset, healed);
+    }
+    if (strayEntries.length > 0) {
+      setCustomAssetFolders((current) => current.filter((entry) => !/^local\/stock(\/|$)/i.test(normalizeAssetFolder(entry))));
+    }
+  }, [assets, customAssetFolders, onMoveAssetFolder, setCustomAssetFolders]);
   // Per-asset context menu. Anchored at FIXED viewport coordinates (cursor / ⋮ button), NOT inside
   // the tile: the grid is a CSS multi-column layout, where an absolutely-positioned menu inside a
   // tile paints across neighbouring tiles/columns and gets clipped by the scroll container — the
@@ -11370,6 +11405,12 @@ function AssetBinImpl({
     const source = normalizeAssetFolder(sourcePath);
     const name = sanitizeAssetFolderName(rawName);
     if (!source || source === folderRoot || !name || name === assetFolderLabel(source)) return;
+    // The stock mount + its server-generated bins are SYSTEM-OWNED: /stock/import writes
+    // `stock/pexels/<type>` forever, so a rename can only fork the tree — it relocated the
+    // existing assets to `local/<name>/…` and the very next import regenerated the mount
+    // beside it (real report 2026-07-18: duplicate "stock"/"Stock" trees). Refuse, like
+    // the other invalid-rename cases.
+    if (RESERVED_STOCK_BIN_RE.test(source)) return;
     const parent = parentAssetFolder(source) || folderRoot;
     const nextPath = `${parent}/${name}`;
     if (nextPath === source) return;
@@ -11403,6 +11444,9 @@ function AssetBinImpl({
     if (!folderTab) return;
     const source = normalizeAssetFolder(path);
     if (!source || source === folderRoot) return;
+    // Same system-owned guard as rename: deleting the mount would dump stock assets into
+    // Local's root and the next import would regenerate the mount anyway.
+    if (RESERVED_STOCK_BIN_RE.test(source)) return;
     const parent = parentAssetFolder(source) || folderRoot;
     for (const asset of assets) {
       const assetFolder = normalizeAssetFolder(asset.folder);
