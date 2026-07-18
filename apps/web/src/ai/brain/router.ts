@@ -24,6 +24,8 @@ import {
   buildCapabilityIndex,
   computeLayerOrdinals,
   layerIdForOrdinal,
+  listCreativeLooks,
+  resolveLookName,
   resolveTargetLayer
 } from "@kimera-by-aelivion/shared";
 import type { AiPlan, PlanStep } from "../types";
@@ -176,6 +178,14 @@ const DELETE_CLIP_RE = /^(?:delete|remove) (.+)$/;
 /** Ripple variants: "ripple delete clip 2", "delete clip 2 and close the gap". */
 const RIPPLE_DELETE_RE = /^ripple[- ]?(?:delete|remove) (.+)$|^(?:delete|remove) (.+?) and (?:close|fill) the gap$/;
 
+/**
+ * "apply the noir look [to/on/in clip 1]" — a preset-shaped ask the look registry can settle
+ * WITHOUT a model (K3 follow-up: this shape used to buy a 15–20s LLM round, and an unknown
+ * name bought a failed step + clarify loop on top). Known/alias names compile to a plan;
+ * unknown names get an instant capability-gap answer (the B5 pre-check pattern).
+ */
+const APPLY_LOOK_RE = /^(?:apply|add|use|give (?:it|this)?) ?(?:a |the )?(.{1,40}?) look(?: (?:to|on|in) (.+))?$/;
+
 const SPLIT_TARGETED_RE = /^(?:split|cut) (.+?) (?:at|on) (?:the )?playhead$/;
 const SPLIT_HERE_RE = /^(?:split|cut)(?: (?:the |my )?(?:selected |this )?clip)? (?:at|on) (?:the )?playhead$/;
 
@@ -228,6 +238,71 @@ function deleteClip(context: BrainContext, prompt: string, phrase: string, rippl
     }
   ]);
   return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.delete-clip" }, "t0.delete-clip") : ESCALATE;
+}
+
+function applyLook(context: BrainContext, prompt: string, rawName: string, targetPhrase: string | undefined): BrainRouteResult {
+  const name = rawName.trim();
+  const resolved = resolveLookName(name);
+  if (!resolved) {
+    // Capability-gap pre-check (B5 pattern): an honest instant answer instead of a model
+    // round that fails validation and clarifies. The "describe the style" path keeps the
+    // creative (custom GradeIntent) route one utterance away.
+    return reflexAnswer(
+      `I don't have a "${name}" look. Available looks: ${listCreativeLooks()
+        .map((look) => look.name)
+        .join(", ")} — or describe the style you're after ("make it dreamy and warm") and I'll build a custom grade.`,
+      "t0.apply-look-gap"
+    );
+  }
+
+  let layerId: string | undefined;
+  let label: string;
+  if (targetPhrase !== undefined) {
+    const ordinal = parseExactClipPhrase(targetPhrase);
+    if (!ordinal) {
+      return ESCALATE; // "…to the intro" — not structurally certain, the planners take it
+    }
+    layerId = layerIdForOrdinal(context.composition, ordinal);
+    if (!layerId) {
+      return reflexAnswer(
+        `There's no clip ${ordinal} on the timeline — I count ${clipCount(context.composition)} clip(s).`,
+        "t0.apply-look"
+      );
+    }
+    label = `clip ${ordinal}`;
+  } else {
+    const target = resolveTargetLayer(context.composition, { selection: context.selection, nowSeconds: context.nowSeconds });
+    if (!target.layerId || (target.reason !== "selection" && target.reason !== "playhead")) {
+      return ESCALATE;
+    }
+    layerId = target.layerId;
+    label = target.reason === "selection" ? "the selected clip" : "the clip under the playhead";
+  }
+
+  const layer = findLayer(context.composition, layerId);
+  if (!layer || layer.type === "audio") {
+    return ESCALATE;
+  }
+  const params: Record<string, string | number> = {
+    look: resolved.look,
+    ...(resolved.intensity !== undefined ? { intensity: resolved.intensity } : {})
+  };
+  const repairNote = resolved.repair ? ` (${resolved.repair})` : "";
+  const existing = (layer.effects ?? []).find((effect) => effect.type === "creativeLook");
+  const plan = brainPlan(prompt, [
+    existing
+      ? {
+          actionId: "updateEffect",
+          params: { layerId, effectId: existing.id, params },
+          summary: `Set ${label}'s Creative Look to ${resolved.look}${repairNote}`
+        }
+      : {
+          actionId: "addEffect",
+          params: { layerId, effectType: "creativeLook", params },
+          summary: `Apply the ${resolved.look} look to ${label}${repairNote}`
+        }
+  ]);
+  return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.apply-look" }, "t0.apply-look") : ESCALATE;
 }
 
 function splitAtPlayhead(context: BrainContext, prompt: string, phrase: string | undefined): BrainRouteResult {
@@ -330,6 +405,14 @@ export function routePrompt(prompt: string, context: BrainContext): BrainRouteRe
   const describe = DESCRIBE_CLIP_RE.exec(text);
   if (describe) {
     const result = describeClip(context, describe[1]!);
+    if (result.kind !== "escalate") {
+      return result;
+    }
+  }
+
+  const lookMatch = APPLY_LOOK_RE.exec(text);
+  if (lookMatch) {
+    const result = applyLook(context, prompt, lookMatch[1]!, lookMatch[2]);
     if (result.kind !== "escalate") {
       return result;
     }

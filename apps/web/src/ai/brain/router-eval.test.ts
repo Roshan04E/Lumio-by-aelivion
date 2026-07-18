@@ -133,6 +133,37 @@ check("'undo' → panel undo", route("undo").kind === "undo" && route("undo that
   const result = route("delete clip 9");
   check("'delete clip 9' (doesn't exist) → honest local answer, no plan", result.kind === "answer" && /no clip 9/i.test(answerText(result)));
 }
+console.log("\nAPPLY-LOOK reflex (K3 follow-up — preset asks used to buy a 15–20s LLM round):");
+{
+  const step = firstAction(route("apply the noir look to clip 1"));
+  const params = step.params as { effectType?: string; params?: { look?: string } };
+  check(
+    "'apply the noir look to clip 1' → addEffect(creativeLook, Noir) plan, 0 tokens",
+    step.actionId === "addEffect" && params.effectType === "creativeLook" && params.params?.look === "Noir"
+  );
+}
+{
+  const step = firstAction(route("apply a moody look", { selection: ["vid_a"] }));
+  const params = step.params as { params?: { look?: string; intensity?: number } };
+  check(
+    "'apply a moody look' (selection) → alias-repaired Noir @ 55",
+    step.actionId === "addEffect" && params.params?.look === "Noir" && params.params?.intensity === 55
+  );
+}
+{
+  const result = route("apply the vaporwave look to clip 1");
+  check(
+    "'apply the vaporwave look' → instant capability-gap answer listing the library (no model loop)",
+    result.kind === "answer" && /Available looks/.test(answerText(result)) && /Noir/.test(answerText(result))
+  );
+}
+check("'apply the noir look to the intro' (vague target) → escalates", route("apply the noir look to the intro").kind === "escalate");
+check("'apply the noir look' with no unique target → escalates", route("apply the noir look", { nowSeconds: 20 }).kind === "escalate");
+{
+  const result = route("apply the noir look to clip 9");
+  check("'apply the noir look to clip 9' (doesn't exist) → honest bounds answer", result.kind === "answer" && /no clip 9/i.test(answerText(result)));
+}
+
 {
   const step = firstAction(route("split clip 1 at playhead"));
   const params = step.params as { layerId?: string; atSeconds?: number };
