@@ -83,8 +83,22 @@ export interface BlueprintDialect<P = unknown> {
 
 const dialects = new Map<string, BlueprintDialect<never>>();
 
-export function registerBlueprintDialect<P>(dialect: BlueprintDialect<P>): void {
+/**
+ * Register a Blueprint dialect (SDK v1 surface — ORRERIS_SDK.md). Validated on entry —
+ * a dialect without a schema or close() cannot honor the closure-computes-the-lowering
+ * law. Duplicate ids overwrite (last write wins — HMR + deliberate overrides).
+ */
+export function registerBlueprintDialect<P>(dialect: BlueprintDialect<P>): boolean {
+  if (!dialect?.id || typeof dialect.id !== "string" || !/^[a-z][a-z-]*$/.test(dialect.id)) {
+    console.warn(`[orreris-sdk] dialect rejected: id must be a lowercase word (got ${JSON.stringify(dialect?.id)})`);
+    return false;
+  }
+  if (!dialect.schema || typeof dialect.close !== "function") {
+    console.warn(`[orreris-sdk] dialect "${dialect.id}" rejected: schema and close() are required`);
+    return false;
+  }
   dialects.set(dialect.id, dialect as BlueprintDialect<never>);
+  return true;
 }
 
 export function getBlueprintDialect(id: string): BlueprintDialect | undefined {

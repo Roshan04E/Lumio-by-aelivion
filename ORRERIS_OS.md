@@ -632,6 +632,18 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    talking-head / b-roll / mixed with the weakest-link law (prior × min(inputs)), both
    input ids recorded as dependencies; "analyze the timeline" gains the Format line.
    brain:eval +14, world:eval +11. Open: SDK formalization, analyze-clip ASR frame.
+   **SDK v1 shipped 2026-07-18 (sixth slice)** — the extension surface is FROZEN:
+   `apps/web/src/ai/sdk.ts` (SDK_VERSION 1, the one import path) + `ORRERIS_SDK.md`
+   (extension-point table, the eight laws — decline-never-guess, honest pricing,
+   confidence ≤ evidence, dependencies on derived facts, inline nested queries, data over
+   code, eval-gated, honest labels — reference implementations named per point, v1
+   non-public list, versioning policy). Registration now VALIDATES the contract:
+   `registerObserver` (id name@namespace, fidelity 0–4, cost > 0, confidence (0,1],
+   version ≥ 1), `registerMoodRecipe` (single lowercase mood word, both looks required),
+   `registerBlueprintDialect` (schema + close required) — violations warn `[orreris-sdk]`
+   and return false, never corrupt the planner tables; duplicate ids stay last-write-wins
+   (HMR + deliberate overrides). world:eval +7, blueprint:eval +5. K5 core complete;
+   remaining intelligence work is rows and rules, not runtime.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

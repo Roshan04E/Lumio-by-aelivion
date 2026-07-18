@@ -95,8 +95,28 @@ export interface MoodRecipe {
 
 const moodRecipes = new Map<string, MoodRecipe>();
 
-export function registerMoodRecipe(recipe: MoodRecipe): void {
-  moodRecipes.set(recipe.mood, recipe);
+/**
+ * Register a mood recipe (SDK v1 surface — ORRERIS_SDK.md). Validated on entry: a recipe
+ * with an empty mood word or missing look names would silently break the hypothesis
+ * planner's resolution, so it's rejected loudly instead. Duplicate mood words overwrite
+ * (last write wins — HMR + deliberate overrides).
+ */
+export function registerMoodRecipe(recipe: MoodRecipe): boolean {
+  const mood = recipe?.mood?.trim().toLowerCase();
+  if (!mood || !/^[a-z][a-z-]*$/.test(mood)) {
+    console.warn(`[orreris-sdk] mood recipe rejected: mood must be a single lowercase word (got ${JSON.stringify(recipe?.mood)})`);
+    return false;
+  }
+  if (!recipe.gradeLook?.trim() || !recipe.textLook?.trim()) {
+    console.warn(`[orreris-sdk] mood recipe "${mood}" rejected: gradeLook and textLook are required`);
+    return false;
+  }
+  if (!Array.isArray(recipe.aliases)) {
+    console.warn(`[orreris-sdk] mood recipe "${mood}" rejected: aliases must be an array (may be empty)`);
+    return false;
+  }
+  moodRecipes.set(mood, { ...recipe, mood });
+  return true;
 }
 
 /** Canonical word or alias, case-insensitive. Null = not a mood this planner owns. */

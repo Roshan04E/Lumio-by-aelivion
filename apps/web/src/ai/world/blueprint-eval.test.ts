@@ -18,6 +18,8 @@ import {
   listBlueprintDialects,
   matchLookInText,
   planMoodBlueprint,
+  registerBlueprintDialect,
+  registerMoodRecipe,
   resolveLookName,
   resolveMoodRecipe,
   timelineActionRegistry,
@@ -424,6 +426,27 @@ async function runK4(): Promise<void> {
   check("route: 'make it faster' escalates silently (not a mood)", escalated.kind === "escalate");
   const notAnchored = await routePromptHypothesis("please make it moody thanks", brainContext);
   check("route: unanchored phrasing escalates (whole-string discipline)", notAnchored.kind === "escalate");
+
+  // ---- SDK v1 registration contract (ORRERIS_SDK.md) ----
+  console.log("SDK v1 registration contract:");
+  check(
+    "mood recipe with an empty gradeLook rejected",
+    registerMoodRecipe({ mood: "gloomy", aliases: [], gradeLook: "", textLook: "Subtitle" }) === false
+  );
+  check(
+    "mood word must be a single word",
+    registerMoodRecipe({ mood: "very moody", aliases: [], gradeLook: "Noir", textLook: "Subtitle" }) === false
+  );
+  check(
+    "valid recipe registers, mood canonicalized to lowercase",
+    registerMoodRecipe({ mood: "Gloomy", aliases: ["sombre"], gradeLook: "Noir", textLook: "Minimal" }) === true &&
+      resolveMoodRecipe("gloomy") !== null
+  );
+  check(
+    "dialect without close() rejected",
+    registerBlueprintDialect({ id: "bogus", schema: undefined as never, close: undefined as never }) === false
+  );
+  check("rejected dialect never joined the registry", !listBlueprintDialects().includes("bogus"));
 }
 
 runK4()

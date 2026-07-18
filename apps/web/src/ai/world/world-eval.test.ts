@@ -399,6 +399,28 @@ async function run(): Promise<void> {
   __resetFactStoreMemoryForTests();
   check("clear removes persisted facts too", getStoredFact("test.value", "asset:a1") === undefined);
 
+  // ---- SDK v1 registration contract (ORRERIS_SDK.md) ----
+  console.log("SDK v1 registration contract:");
+  const sdkProbe = (patch: Partial<WorldObserver>): WorldObserver =>
+    ({
+      id: "sdk-probe@eval",
+      version: 1,
+      factTypes: ["sdk.probe"],
+      fidelity: 0,
+      estCostMs: 1,
+      estConfidence: 0.5,
+      signature: () => null,
+      observe: async () => [],
+      ...patch
+    }) as WorldObserver;
+  check("valid observer registers (true)", registerObserver(sdkProbe({})) === true);
+  check("id without @namespace rejected", registerObserver(sdkProbe({ id: "no-namespace" })) === false);
+  check("empty factTypes rejected", registerObserver(sdkProbe({ factTypes: [] })) === false);
+  check("fidelity outside 0–4 rejected", registerObserver(sdkProbe({ fidelity: 7 as never })) === false);
+  check("free lunch rejected (estCostMs 0)", registerObserver(sdkProbe({ estCostMs: 0 })) === false);
+  check("overconfidence rejected (estConfidence 1.2)", registerObserver(sdkProbe({ estConfidence: 1.2 })) === false);
+  check("version 0 rejected (memo key needs ≥ 1)", registerObserver(sdkProbe({ version: 0 })) === false);
+
   // ---- World route precision (must-escalate corpus) ----
   console.log("world route precision:");
   const brainContext: BrainContext = { composition: textComp, selection: [], nowSeconds: 3 };
