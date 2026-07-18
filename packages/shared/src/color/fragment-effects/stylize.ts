@@ -164,12 +164,29 @@ vec2 _flowDir(vec2 uv) {
   vec2 ev = vec2(lambda1 - E, -F);
   return (dot(ev, ev) > 1e-8) ? normalize(ev) : vec2(0.0, 1.0);
 }
+
+// Anisotropy of the smoothed tensor in [0,1]: real contours are strongly directional, noise is
+// orientation-random — this is the despeckle signal the ink passes gate on.
+float _flowAniso(vec2 uv) {
+  vec3 t = texture(uPass0, uv).rgb;
+  float E = t.r;
+  float G = t.g;
+  float F = t.b * 2.0 - 1.0;
+  float D = sqrt(max((E - G) * (E - G) + 4.0 * F * F, 0.0));
+  float trace = E + G;
+  return (trace > 1e-6) ? D / trace : 0.0;
+}
 `;
 
 // FDoG stage 1 (Kang NPAR'07): a 1-D difference-of-Gaussians PERPENDICULAR to the local edge flow.
 // The response is packed bias-scaled (±0.0625 → ±0.5) into an RGBA8 target for stage 2.
+// Line-quality rev (2026-07-18, "edges have lots of noise" report): the DoG reads the PAINT buffer
+// (uPass1) instead of the raw source — the Kuwahara pass has already erased sensor noise,
+// compression blocks and micro-texture, so only shape edges survive to become ink. The response is
+// additionally gated by tensor anisotropy: coherent contours keep full strength, orientation-random
+// speckle regions are attenuated toward zero.
 const INK_DOG_GLSL = `
-${"" /* uPass0 = tensorBlur */}
+${"" /* uPass0 = tensorBlur, uPass1 = paint */}
 vec4 effect(vec2 uv) {
   vec2 flow = _flowDir(uv);
   vec2 grad = vec2(-flow.y, flow.x);
@@ -185,7 +202,7 @@ vec4 effect(vec2 uv) {
   for (int i = -10; i <= 10; i++) {
     if (i < -n || i > n) continue;
     float x = float(i);
-    float l = _luma(getSrcColor(uv + grad * px * x).rgb);
+    float l = _luma(texture(uPass1, clamp(uv + grad * px * x, 0.0, 1.0)).rgb);
     float we = exp(-x * x / (2.0 * sigmaE * sigmaE));
     float wr = exp(-x * x / (2.0 * sigmaR * sigmaR));
     sumE += l * we;
@@ -194,6 +211,9 @@ vec4 effect(vec2 uv) {
     wR += wr;
   }
   float d = sumE / max(wE, 1e-5) - 0.98 * (sumR / max(wR, 1e-5));
+  // Despeckle gate: keep ~1/4 response in isotropic regions, full on coherent contours.
+  float gate = 0.25 + 0.75 * smoothstep(0.08, 0.35, _flowAniso(uv));
+  d *= gate;
   return vec4(vec3(clamp(d * 8.0 + 0.5, 0.0, 1.0)), 1.0);
 }
 `;
@@ -206,18 +226,21 @@ ${"" /* uPass0 = tensorBlur, uPass1 = dog */}
 vec4 effect(vec2 uv) {
   vec2 flow = _flowDir(uv);
   vec2 px = 1.0 / uResolution;
+  // Longer flow-aligned smoothing (±7, wider kernel): strokes consolidate into continuous lines
+  // and isolated one-off responses (speckle) are averaged away before the threshold sees them.
   float sum = 0.0;
   float wsum = 0.0;
-  for (int i = -4; i <= 4; i++) {
+  for (int i = -7; i <= 7; i++) {
     float x = float(i);
     float v = texture(uPass1, uv + flow * px * x).r - 0.5;
-    float w = exp(-x * x / 8.0);
+    float w = exp(-x * x / 18.0);
     sum += v * w;
     wsum += w;
   }
   float d = (sum / max(wsum, 1e-5)) / 8.0;
-  // XDoG: negative response = edge. Fixed eps/phi tuned for video (soft enough not to shimmer).
-  float e = (d >= -0.002) ? 1.0 : 1.0 + tanh(60.0 * (d + 0.002));
+  // XDoG: negative response = edge. eps raised (weak/noisy responses never become ink) and phi
+  // steepened (surviving lines snap to solid black) — the "hard clean lines" tuning.
+  float e = (d >= -0.0035) ? 1.0 : 1.0 + tanh(140.0 * (d + 0.0035));
   return vec4(vec3(clamp(e, 0.0, 1.0)), 1.0);
 }
 `;
@@ -288,7 +311,7 @@ export const STYLIZE_PAINTERLY: FragmentEffectDefinition = {
     // pays zero for lines it doesn't draw).
     {
       id: "dog",
-      inputs: ["tensorBlur"],
+      inputs: ["tensorBlur", "paint"],
       skipWhen: (params) => !(typeof params.inkStrength === "number" && params.inkStrength > 0),
       glsl: FLOW_DECODE_GLSL + INK_DOG_GLSL
     },
