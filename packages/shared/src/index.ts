@@ -1,4 +1,5 @@
 export * from "./blueprint";
+export * from "./motion/motion-intent";
 export * from "./catalog";
 export * from "./ai-prompts";
 export * from "./animation";

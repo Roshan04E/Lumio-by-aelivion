@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { compileMotionIntent, motionIntentSchema, MOTION_STYLES, resolveMotionStyle } from "../../motion/motion-intent";
 import { actionResult, runMutation } from "../patches";
 import { assertLayerExists, assertKeyframeTarget, findLayer } from "../validation";
 import type { TimelineActionDefinition } from "../types";
@@ -126,4 +127,57 @@ const deleteKeyframe: TimelineActionDefinition<z.infer<typeof deleteKeyframeSche
   }
 };
 
-export const keyframeActions = [addKeyframe, updateKeyframe, deleteKeyframe];
+const applyMotionSchema = motionIntentSchema.extend({ layerId: z.string() });
+
+/**
+ * K3 motion dialect's execution primitive: expand a compact MotionIntent into ORDINARY layer
+ * keyframes via the deterministic compiler (motion-intent.ts) in ONE undoable action. The AI
+ * says "entrance, pop"; the compiler does the craft against the layer's real base transform
+ * and duration. Style canonicalization mirrors the look-param pattern: aliases repair at the
+ * write seam, unknown styles fail validation with the vocabulary in the message.
+ */
+const applyMotion: TimelineActionDefinition<z.infer<typeof applyMotionSchema>> = {
+  id: "applyMotion",
+  name: "Apply motion",
+  description: "Animate a clip with an entrance/exit/emphasis motion preset (fade, slide, pop, pulse…) as editable keyframes.",
+  category: "keyframe",
+  inputSchema: applyMotionSchema,
+  validationRules: (params, ctx) => {
+    const issues = assertLayerExists(ctx, params.layerId);
+    if (issues.length) {
+      return issues;
+    }
+    return resolveMotionStyle(params.kind, params.style)
+      ? []
+      : [
+          {
+            code: "invalid_motion_style",
+            message: `"${params.style}" isn't a ${params.kind} style — available: ${MOTION_STYLES[params.kind].join(", ")}`,
+            path: "style"
+          }
+        ];
+  },
+  canUndo: true,
+  execute: (params, ctx) => {
+    const resolved = resolveMotionStyle(params.kind, params.style)!;
+    const located = findLayer(ctx.composition, params.layerId)!;
+    const compiled = compileMotionIntent({ ...params, style: resolved.style }, located.layer);
+    const mutation = runMutation(ctx.composition, (draft) => {
+      const layer = locateLayer(draft, params.layerId)?.layer;
+      if (!layer) {
+        return;
+      }
+      const keyframes = compiled.map((frame) =>
+        createLayerKeyframe(frame.property, frame.timeSeconds, frame.value, frame.interpolation, `${params.layerId}_motion`)
+      );
+      layer.animations = [...(layer.animations ?? []), ...keyframes];
+    });
+    return actionResult(
+      ctx.composition,
+      mutation,
+      `${resolved.style} ${params.kind} (${compiled.length} keyframes)${resolved.repair ? ` — ${resolved.repair}` : ""}`
+    );
+  }
+};
+
+export const keyframeActions = [addKeyframe, updateKeyframe, deleteKeyframe, applyMotion];

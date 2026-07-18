@@ -90,39 +90,6 @@ check(
 const primaryOnly = closeColorGrade({ primary: { contrast: 20, temperature: -10 } });
 check("primary-only intent closes without a look", primaryOnly.ok && primaryOnly.closed.actions.length === 1);
 
-console.log("blueprint driver:");
-const blueprint: Blueprint = {
-  id: "bp_test",
-  intent: "make it moody",
-  goals: [
-    { id: "g1", dialect: "color", summary: "Moody grade", payload: { look: "moody" } },
-    { id: "g2", dialect: "motion", summary: "Slow push-in", payload: {} }
-  ]
-};
-const driven = closeBlueprint(blueprint);
-check("blueprint with an unknown dialect fails ATOMICALLY (no partial execution)", !driven.ok);
-if (!driven.ok) {
-  check("unknown-dialect issue names registered dialects", driven.issues[0]?.code === "unknown-dialect" && (driven.issues[0]?.suggestions ?? []).includes("color"));
-}
-const colorOnly = closeBlueprint({ ...blueprint, goals: [blueprint.goals[0]!] });
-check("all-color blueprint closes end to end", colorOnly.ok && colorOnly.ok === true && colorOnly.closed[0]!.actions.length > 0);
-
-console.log("free-text look matching + look-data sanity (Teal & Orange @100 regression):");
-{
-  const moody = matchLookInText("apply a moody look to clip 1");
-  check("'apply a moody look…' → Noir @ 55 via the shared resolver", moody?.look === "Noir" && moody.intensity === 55);
-  check("'give it the faded film look' → Faded Film", matchLookInText("give it the faded film look")?.look === "Faded Film");
-  check("'make it warm' (no 'look' phrase) → null (primary-correction vocabulary, not looks)", matchLookInText("make it warm") === null);
-  check("'apply a vaporwave look' → null (unknown stays unknown)", matchLookInText("apply a vaporwave look") === null);
-}
-for (const look of CREATIVE_LOOKS) {
-  if (!look.wheelsJson) continue;
-  const wheels = JSON.parse(look.wheelsJson) as Record<string, { x: number; y: number; master: number }>;
-  const sane = Object.values(wheels).every((wheel) => Math.abs(wheel.master) <= 1 && Math.abs(wheel.x) <= 1 && Math.abs(wheel.y) <= 1);
-  check(`look "${look.name}" wheel values within unit range (master is -1..1, not percent)`, sane);
-}
-
-console.log("addEffect look-param closure (the 'Noir applied but nothing changed' regression):");
 const fixtureComposition: TimelineComposition = {
   id: "c",
   name: "c",
@@ -151,6 +118,112 @@ const fixtureComposition: TimelineComposition = {
     }
   ]
 };
+
+function closeMotion(payload: unknown) {
+  const result = closeBlueprint({ id: "bp_m", intent: "", goals: [{ id: "m", dialect: "motion", summary: "motion", payload }] });
+  return result.ok ? ({ ok: true, closed: result.closed[0]! } as const) : ({ ok: false, issues: result.issues } as const);
+}
+
+const motionFixture = (): TimelineComposition => fixtureComposition;
+
+console.log("motion dialect:");
+const bounce = closeMotion({ kind: "entrance", style: "bounce" });
+check("alias style closes with repair ('bounce' → pop)", bounce.ok && bounce.ok === true && bounce.closed.goal.payload.style === "pop" && bounce.closed.repairs.length === 1);
+const unknownMotion = closeMotion({ kind: "exit", style: "explode" });
+check(
+  "unknown style → compile error with the per-kind vocabulary",
+  !unknownMotion.ok && unknownMotion.issues[0]?.code === "unknown-capability" && (unknownMotion.issues[0]?.suggestions ?? []).includes("fade")
+);
+check("pop is entrance-only (exit vocabulary rejects it)", !closeMotion({ kind: "exit", style: "pop" }).ok);
+
+console.log("blueprint driver:");
+const blueprint: Blueprint = {
+  id: "bp_test",
+  intent: "make it moody with a gentle entrance",
+  goals: [
+    { id: "g1", dialect: "color", summary: "Moody grade", payload: { look: "moody" } },
+    { id: "g2", dialect: "motion", summary: "Gentle entrance", payload: { kind: "entrance", style: "fade" } }
+  ]
+};
+const driven = closeBlueprint(blueprint);
+check(
+  "MULTI-DOMAIN blueprint (color + motion) closes end to end",
+  driven.ok && driven.ok === true && driven.closed.length === 2 && driven.closed[1]!.actions[0]!.actionId === "applyMotion"
+);
+const withBogus = closeBlueprint({
+  ...blueprint,
+  goals: [...blueprint.goals, { id: "g3", dialect: "audio", summary: "Duck music", payload: {} }]
+});
+check("blueprint with an unknown dialect fails ATOMICALLY (no partial execution)", !withBogus.ok);
+if (!withBogus.ok) {
+  check(
+    "unknown-dialect issue names registered dialects",
+    withBogus.issues[0]?.code === "unknown-dialect" && (withBogus.issues[0]?.suggestions ?? []).includes("color") && (withBogus.issues[0]?.suggestions ?? []).includes("motion")
+  );
+}
+const colorOnly = closeBlueprint({ ...blueprint, goals: [blueprint.goals[0]!] });
+check("all-color blueprint closes end to end", colorOnly.ok && colorOnly.ok === true && colorOnly.closed[0]!.actions.length > 0);
+
+console.log("applyMotion action (compiler through the registry):");
+{
+  const result = timelineActionRegistry.execute(
+    "applyMotion",
+    { layerId: "vid_a", kind: "entrance", style: "bounce", durationSeconds: 0.6 },
+    { composition: motionFixture(), selection: [], nowSeconds: 0 },
+    { ai: true }
+  );
+  check("entrance 'bounce' applies via alias", result.ok);
+  if (result.ok) {
+    const animations = result.result.after.tracks[0]!.layers[0]!.animations ?? [];
+    check(
+      "emits scale + opacity keyframes",
+      animations.some((kf) => kf.target.property === "transform.scale") && animations.some((kf) => kf.target.property === "transform.opacity")
+    );
+    check("all keyframes inside the entrance window", animations.length > 0 && animations.every((kf) => kf.timeSeconds <= 0.6 + 1e-9));
+    check("settles at the layer's own base scale", animations.filter((kf) => kf.target.property === "transform.scale").some((kf) => kf.value === 1));
+  }
+}
+{
+  const result = timelineActionRegistry.execute(
+    "applyMotion",
+    { layerId: "vid_a", kind: "exit", style: "fade" },
+    { composition: motionFixture(), selection: [], nowSeconds: 0 },
+    { ai: true }
+  );
+  check("exit fade lands at the clip tail", result.ok);
+  if (result.ok) {
+    const animations = result.result.after.tracks[0]!.layers[0]!.animations ?? [];
+    const times = animations.map((kf) => kf.timeSeconds).sort((a, b) => a - b);
+    const values = [...animations].sort((a, b) => a.timeSeconds - b.timeSeconds).map((kf) => kf.value);
+    check("exit keyframes sit in the last window and END transparent", times[0]! >= 10 - 0.6 - 1e-9 && values.at(-1) === 0);
+  }
+}
+{
+  const result = timelineActionRegistry.execute(
+    "applyMotion",
+    { layerId: "vid_a", kind: "entrance", style: "explode" },
+    { composition: motionFixture(), selection: [], nowSeconds: 0 },
+    { ai: true }
+  );
+  check("unknown style rejected with the vocabulary", !result.ok && /fade/.test(result.ok ? "" : (result.message ?? "")));
+}
+
+console.log("free-text look matching + look-data sanity (Teal & Orange @100 regression):");
+{
+  const moody = matchLookInText("apply a moody look to clip 1");
+  check("'apply a moody look…' → Noir @ 55 via the shared resolver", moody?.look === "Noir" && moody.intensity === 55);
+  check("'give it the faded film look' → Faded Film", matchLookInText("give it the faded film look")?.look === "Faded Film");
+  check("'make it warm' (no 'look' phrase) → null (primary-correction vocabulary, not looks)", matchLookInText("make it warm") === null);
+  check("'apply a vaporwave look' → null (unknown stays unknown)", matchLookInText("apply a vaporwave look") === null);
+}
+for (const look of CREATIVE_LOOKS) {
+  if (!look.wheelsJson) continue;
+  const wheels = JSON.parse(look.wheelsJson) as Record<string, { x: number; y: number; master: number }>;
+  const sane = Object.values(wheels).every((wheel) => Math.abs(wheel.master) <= 1 && Math.abs(wheel.x) <= 1 && Math.abs(wheel.y) <= 1);
+  check(`look "${look.name}" wheel values within unit range (master is -1..1, not percent)`, sane);
+}
+
+console.log("addEffect look-param closure (the 'Noir applied but nothing changed' regression):");
 const actionContext = { composition: fixtureComposition, selection: [], nowSeconds: 0 };
 const lowercase = timelineActionRegistry.execute(
   "addEffect",

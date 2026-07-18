@@ -516,6 +516,14 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    creativeLook steps with lowercased names stored verbatim → renderer no-op).
    Acceptance: `blueprint:eval` (24 checks). Open: motion/text dialects, target
    binding contract formalization, K4 planner emitting multi-goal blueprints.
+   **Motion dialect shipped 2026-07-18** — `motion/motion-intent.ts` (MotionIntent schema,
+   per-kind style vocabulary + aliases, deterministic keyframe compiler that settles on the
+   layer's OWN base transform; exits via time-axis mirroring, no value bookkeeping) +
+   `applyMotion` registry action (ONE undoable step expanding to ordinary layer keyframes —
+   renderer parity free via the shared animation evaluator; unknown styles fail validation
+   with the vocabulary; aliases repair at the write seam) + `blueprint/motion.ts` dialect.
+   Multi-domain blueprints (color + motion) now close end to end — the K4 planner has two
+   domains to compose. `blueprint:eval` → 41 checks. Open: text dialect, K4.
 4. **K4 — Hypothesis stage in the planner** with budgeted expansion and the
    entropy-clarify rule; planner refactored into registered stages.
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,
