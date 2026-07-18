@@ -30,6 +30,7 @@ it stops us re-walking them.
 | [infrastructure.md](infrastructure.md) | Build, service worker, dev/preview origins, tooling |
 | [nle-import-export.md](nle-import-export.md) | EDL/FCPXML/prproj import fidelity, transition/keyframe mapping, FCPXML export |
 | [ai-tools.md](ai-tools.md) | AI tool plumbing: handler contract, cross-tool artifact reuse, matte/tracking lifecycle, tool surfaces |
+| [voice-dictation.md](voice-dictation.md) | Web Speech dictation, transcript normalizer/arbitration, local-ASR refine, wake-word/voice sessions |
 
 Related (don't duplicate): `AGENTS.md` = live agent handoff log; `architecture.md` = product/feature
 tracker. This folder is the PROBLEM history.
