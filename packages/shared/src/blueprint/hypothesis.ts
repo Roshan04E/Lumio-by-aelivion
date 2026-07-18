@@ -219,7 +219,14 @@ export async function planMoodBlueprint(
   intent: string,
   recipe: MoodRecipe,
   structural: MoodStructuralEvidence,
-  source: MoodFactSource
+  source: MoodFactSource,
+  /**
+   * A clarify ANSWER ("the picture" / "the titles") — the user resolved the hypothesis
+   * themselves, so expansion and the clarify rule are skipped and the chosen reading wins
+   * outright (structural gates still apply: choosing a reading with nothing to land on is
+   * an honest decline, never a silent no-op).
+   */
+  forced?: "visual" | "text"
 ): Promise<MoodPlanOutcome> {
   // ---- Stage: hypothesize (structural gates are free elimination) ----
   // Priors are a deliberate near-tie: when BOTH readings are structurally possible, the
@@ -241,6 +248,23 @@ export async function planMoodBlueprint(
 
   if (!visual.alive && !text.alive) {
     return { kind: "decline", reason: "Nothing on the timeline a mood could land on (no visual media, no text)." };
+  }
+
+  // ---- Clarify answer short-circuit: the user IS the discriminating fact ----
+  if (forced) {
+    const chosen = forced === "visual" ? visual : text;
+    if (!chosen.alive) {
+      return {
+        kind: "decline",
+        reason:
+          forced === "visual"
+            ? "You chose the picture, but there's no video or image on the timeline to grade."
+            : "You chose the titles, but there's no text on the timeline to restyle."
+      };
+    }
+    chosen.score = 1; // user-resolved — certainty, honestly labeled in the trace
+    trace.notes.push(`you answered the clarify — ${chosen.summary}`);
+    return finishWithWinner(chosen);
   }
 
   // ---- Stage: budgeted expansion over `discriminate` facts ----
@@ -285,89 +309,94 @@ export async function planMoodBlueprint(
   }
 
   const ranked = surviving().sort((a, b) => b.score - a.score);
-  const winner = ranked[0]!;
+  const leader = ranked[0]!;
   const runnerUp = ranked[1];
 
   // ---- The economic clarify rule ----
-  if (runnerUp && winner.score - runnerUp.score < DOMINANCE_MARGIN) {
+  if (runnerUp && leader.score - runnerUp.score < DOMINANCE_MARGIN) {
     trace.hypotheses = [visual, text].map((h) => ({ ...h }));
-    // The follow-up phrasings are deliberately the tier-0 APPLY-LOOK forms — either answer
-    // resolves instantly and locally, so the clarify costs the user one utterance, not a
-    // model round.
+    // A plain answer resumes THIS pipeline with the chosen reading (the conversational
+    // resume); the tier-0 APPLY-LOOK phrasings stay as the explicit escape hatch — every
+    // listed answer resolves instantly and locally, one utterance, no model round.
     return {
       kind: "clarify",
       question:
         `${recipe.mood[0]!.toUpperCase()}${recipe.mood.slice(1)} how — the picture or the titles? ` +
-        `Say **"apply the ${recipe.gradeLook} look"** (with a video clip selected) to grade the picture, ` +
-        `or **"apply the ${recipe.textLook} look"** (with a title selected) to restyle the text.`,
+        `Just answer **"the picture"** or **"the titles"**. ` +
+        `(Or be exact: "apply the ${recipe.gradeLook} look" with a video clip selected, ` +
+        `"apply the ${recipe.textLook} look" with a title selected.)`,
       trace
     };
   }
+  return finishWithWinner(leader);
 
-  // ---- Stage: `shape` facts — bought only for the winning hypothesis ----
-  let gradeIntensity: number | undefined;
-  if (winner.id === HYPOTHESIS_VISUAL) {
-    const bought = await source.fetchMediaLook();
-    if (bought) {
-      trace.factsConsulted.push({ id: "media-look", path: bought.path });
-      if (bought.value.exposure === "dark") {
-        const base = resolveLookName(recipe.gradeLook);
-        gradeIntensity = Math.max(30, (base?.intensity ?? 70) - 15);
-        trace.notes.push(`footage already measured dark (mean luma ${Math.round(bought.value.avgLuma * 100)}%) — gentler grade @ ${gradeIntensity}%`);
+  // ---- Stages shared by both paths: `shape` facts → goals → emit + close ----
+  async function finishWithWinner(winner: { id: string }): Promise<MoodPlanOutcome> {
+    // `shape` facts are bought only for the winning hypothesis.
+    let gradeIntensity: number | undefined;
+    if (winner.id === HYPOTHESIS_VISUAL) {
+      const bought = await source.fetchMediaLook();
+      if (bought) {
+        trace.factsConsulted.push({ id: "media-look", path: bought.path });
+        if (bought.value.exposure === "dark") {
+          const base = resolveLookName(recipe.gradeLook);
+          gradeIntensity = Math.max(30, (base?.intensity ?? 70) - 15);
+          trace.notes.push(`footage already measured dark (mean luma ${Math.round(bought.value.avgLuma * 100)}%) — gentler grade @ ${gradeIntensity}%`);
+        }
       }
     }
-  }
 
-  // ---- Stage: resolve the recipe into goals ----
-  const goals: BlueprintGoal[] = [];
-  if (winner.id === HYPOTHESIS_VISUAL) {
-    goals.push({
-      id: "goal_color",
-      dialect: COLOR_DIALECT_ID,
-      summary: `Grade the picture ${recipe.mood}`,
-      payload: { look: recipe.gradeLook, ...(gradeIntensity !== undefined ? { lookIntensity: gradeIntensity } : {}) }
-    });
-    if (recipe.motion) {
+    // Resolve the recipe into goals.
+    const goals: BlueprintGoal[] = [];
+    if (winner.id === HYPOTHESIS_VISUAL) {
       goals.push({
-        id: "goal_motion",
-        dialect: MOTION_DIALECT_ID,
-        summary: `${recipe.mood} motion accent`,
-        payload: recipe.motion
+        id: "goal_color",
+        dialect: COLOR_DIALECT_ID,
+        summary: `Grade the picture ${recipe.mood}`,
+        payload: { look: recipe.gradeLook, ...(gradeIntensity !== undefined ? { lookIntensity: gradeIntensity } : {}) }
       });
-    }
-    // Titles ride along as an accent when they exist — the winner is "make the WHOLE thing
-    // feel <mood>", and closure keeps the ensemble atomic.
-    if (structural.hasText) {
+      if (recipe.motion) {
+        goals.push({
+          id: "goal_motion",
+          dialect: MOTION_DIALECT_ID,
+          summary: `${recipe.mood} motion accent`,
+          payload: recipe.motion
+        });
+      }
+      // Titles ride along as an accent when they exist — the winner is "make the WHOLE thing
+      // feel <mood>", and closure keeps the ensemble atomic.
+      if (structural.hasText) {
+        goals.push({
+          id: "goal_text",
+          dialect: TEXT_DIALECT_ID,
+          summary: `Match the titles to the ${recipe.mood} treatment`,
+          payload: { look: recipe.textLook }
+        });
+      }
+    } else {
       goals.push({
         id: "goal_text",
         dialect: TEXT_DIALECT_ID,
-        summary: `Match the titles to the ${recipe.mood} treatment`,
+        summary: `Restyle the titles ${recipe.mood}`,
         payload: { look: recipe.textLook }
       });
     }
-  } else {
-    goals.push({
-      id: "goal_text",
-      dialect: TEXT_DIALECT_ID,
-      summary: `Restyle the titles ${recipe.mood}`,
-      payload: { look: recipe.textLook }
-    });
-  }
 
-  // ---- Stage: emit + close (all-or-nothing; nothing abstract escapes) ----
-  const blueprint: Blueprint = { id: `bp_mood_${recipe.mood}`, intent, goals };
-  const result = closeBlueprint(blueprint);
-  if (!result.ok) {
-    // A recipe referencing a capability the registries don't carry is a data bug — decline
-    // honestly with the closure's own reasons rather than executing a partial plan.
-    return {
-      kind: "decline",
-      reason: result.issues.map((issue) => issue.message).join(" ")
-    };
+    // Emit + close (all-or-nothing; nothing abstract escapes).
+    const blueprint: Blueprint = { id: `bp_mood_${recipe.mood}`, intent, goals };
+    const result = closeBlueprint(blueprint);
+    if (!result.ok) {
+      // A recipe referencing a capability the registries don't carry is a data bug — decline
+      // honestly with the closure's own reasons rather than executing a partial plan.
+      return {
+        kind: "decline",
+        reason: result.issues.map((issue) => issue.message).join(" ")
+      };
+    }
+    trace.hypotheses = [visual, text].map((h) => ({ ...h }));
+    for (const closed of result.closed) {
+      trace.notes.push(...closed.repairs);
+    }
+    return { kind: "blueprint", blueprint, closed: result.closed, trace };
   }
-  trace.hypotheses = [visual, text].map((h) => ({ ...h }));
-  for (const closed of result.closed) {
-    trace.notes.push(...closed.repairs);
-  }
-  return { kind: "blueprint", blueprint, closed: result.closed, trace };
 }

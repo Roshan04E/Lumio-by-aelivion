@@ -559,7 +559,8 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    Acceptance: `blueprint:eval` grown by 20 checks (dominance short-circuit, economic
    clarify never buying the shape fact, dark-footage shaping, atomic 3-dialect close,
    route binding, whole-string discipline). Open: registered-stage refactor of the
-   planner proper, clarify answers resuming conversationally, more moods/observers (K5).
+   planner proper (clarify answers now resume conversationally — see the K4-tail entry
+   after the K5 slices).
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,
    explainability trace UI, SDK surface for plugins.
    **✅ first slice shipped 2026-07-18** — (a) **The decision trace as a product surface**:
@@ -644,6 +645,22 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    and return false, never corrupt the planner tables; duplicate ids stay last-write-wins
    (HMR + deliberate overrides). world:eval +7, blueprint:eval +5. K5 core complete;
    remaining intelligence work is rows and rules, not runtime.
+   **K4 tail: conversational clarify resume shipped 2026-07-18** — the economic clarify
+   is now a real conversation turn, not a dead end. When "Moody how — the picture or the
+   titles?" fires, the mood + ORIGINAL ask are parked in a single pending slot
+   (`hypothesis-route.ts`, 2-minute TTL, overwritten by a newer clarify, cleared by any
+   resolved mood plan), and the user's next utterance can answer in plain words: "the
+   picture" / "titles" / "the text" / "both" (→ visual, which already carries the title
+   accent). The answer grammar is whole-string anchored — "the picture is too dark"
+   routes normally, an ignored question just ages out, nobody gets hijacked. A parsed
+   answer re-runs `planMoodBlueprint` with a `forced` winner (the user IS the
+   discriminating fact: score 1, honest "you answered the clarify" trace note), skipping
+   expansion and re-clarify but keeping structural gates — "the titles" with no text on
+   the timeline is an honest decline sentence, never a silent no-op or a bare "titles"
+   escalated to the model. The resumed plan is named after the original vibe ask and
+   flows through the ordinary pipeline (shape facts, closure, binding, approval, trace).
+   blueprint:eval +17 (answer grammar, TTL, forced-winner planner rows, full
+   clarify→park→resume route loop). Open: registered-stage refactor of the planner.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

@@ -32,7 +32,14 @@ import {
 import { clearFactStore } from "./fact-store";
 import { registerObserver } from "./observers";
 import { textSummaryObserver } from "./observers/text-summary";
-import { routeMoodAskWithContext, routePromptHypothesis } from "./hypothesis-route";
+import {
+  clearPendingMoodClarify,
+  parseMoodClarifyAnswer,
+  peekPendingMoodClarify,
+  routeMoodAskWithContext,
+  routePromptHypothesis,
+  setPendingMoodClarify
+} from "./hypothesis-route";
 
 let failures = 0;
 
@@ -426,6 +433,69 @@ async function runK4(): Promise<void> {
   check("route: 'make it faster' escalates silently (not a mood)", escalated.kind === "escalate");
   const notAnchored = await routePromptHypothesis("please make it moody thanks", brainContext);
   check("route: unanchored phrasing escalates (whole-string discipline)", notAnchored.kind === "escalate");
+
+  // ---- Conversational clarify resume (K4 tail) ----
+  console.log("K4 conversational clarify resume:");
+
+  // The answer grammar — whole-string, precision-first.
+  check("answer parse: 'the picture' → visual", parseMoodClarifyAnswer("the picture") === "visual");
+  check("answer parse: 'titles' → text", parseMoodClarifyAnswer("titles") === "text");
+  check("answer parse: 'the text' → text", parseMoodClarifyAnswer("the text") === "text");
+  check("answer parse: 'both' → visual (grade carries the title accent)", parseMoodClarifyAnswer("both") === "visual");
+  check("answer parse: an unrelated ask is NOT an answer", parseMoodClarifyAnswer("cut clip 2") === null);
+  check("answer parse: 'the picture is too dark' is NOT an answer (whole-string)", parseMoodClarifyAnswer("the picture is too dark") === null);
+
+  // Pending slot: single, TTL-bounded.
+  const t0 = 1_000_000;
+  setPendingMoodClarify("moody", "make it moody", t0);
+  check("pending: alive inside the window", peekPendingMoodClarify(t0 + 60_000)?.mood === "moody");
+  check("pending: expires after the TTL", peekPendingMoodClarify(t0 + 3 * 60_000) === null);
+  clearPendingMoodClarify();
+
+  // Forced winner in the pure planner: the user's answer replaces expansion AND clarify.
+  const tiedEvidence = textFacts({ coveredSeconds: 6, wordCount: 20 });
+  const forcedVisual = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: true, hasText: true }, tiedEvidence, "visual");
+  check(
+    "forced 'visual': blueprint (no re-clarify), color goal, honest 'you answered' note",
+    forcedVisual.kind === "blueprint" &&
+      forcedVisual.blueprint.goals.some((goal) => goal.dialect === "color") &&
+      forcedVisual.trace.notes.some((note) => note.includes("you answered"))
+  );
+  const forcedText = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: true, hasText: true }, tiedEvidence, "text");
+  check("forced 'text': text-only goals", forcedText.kind === "blueprint" && forcedText.blueprint.goals.every((goal) => goal.dialect === "text"));
+  const forcedImpossible = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: false, hasText: true }, tiedEvidence, "visual");
+  check("forced 'visual' with no visual media: honest decline", forcedImpossible.kind === "decline" && forcedImpossible.reason.includes("no video"));
+
+  // Route seam end to end: clarify parks the pending ask; the answer resumes into a plan.
+  const wordyTitle = {
+    ...textLayerA,
+    id: "txt_wordy",
+    durationSeconds: 6,
+    text: "one two three four five six seven eight nine"
+  } as unknown as TimelineLayer;
+  const tiedComposition: TimelineComposition = {
+    ...fixtureComposition,
+    id: "c_tied",
+    tracks: [...fixtureComposition.tracks, { id: "t1", type: "text", name: "t1", layers: [wordyTitle] }]
+  };
+  const tiedBrainContext = { composition: tiedComposition, selection: [], nowSeconds: 0 };
+  const tiedWorldCtx = { composition: tiedComposition, assets: [] };
+  const clarified = await routeMoodAskWithContext("make it moody", tiedBrainContext, tiedWorldCtx, "moody");
+  check("route: middle-band timeline → clarify answer surfaced", clarified.kind === "answer" && clarified.ruleId === "k4.mood-clarify");
+  check("route: clarify offers plain answers", clarified.kind === "answer" && clarified.text.includes('"the picture"'));
+  const parked = peekPendingMoodClarify();
+  check("route: clarify parked the pending ask (mood + original prompt)", parked?.mood === "moody" && parked?.prompt === "make it moody");
+  if (parked) {
+    const resumed = await routeMoodAskWithContext(parked.prompt, tiedBrainContext, tiedWorldCtx, parked.mood, parseMoodClarifyAnswer("the titles")!);
+    check(
+      "route: 'the titles' resumes into a text-only plan named after the ORIGINAL ask",
+      resumed.kind === "plan" &&
+        resumed.plan.steps.every((step) => step.actionId === "applyTextLook") &&
+        resumed.plan.steps.length > 0
+    );
+    check("route: a resolved plan clears the pending slot", peekPendingMoodClarify() === null);
+  }
+  clearPendingMoodClarify();
 
   // ---- SDK v1 registration contract (ORRERIS_SDK.md) ----
   console.log("SDK v1 registration contract:");

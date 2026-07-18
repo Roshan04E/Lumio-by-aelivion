@@ -54,6 +54,61 @@ const MAX_TEXT_TARGETS = 6;
 const MOOD_ASK_RE =
   /^make (?:it|this|everything|the (?:video|edit|timeline|whole thing)) (?:feel |look )?(?:a bit |a little |more |really |super )?([a-z][a-z -]{2,24}?)$/;
 
+// ---------------------------------------------------------------------------
+// Conversational clarify resume (K4 tail)
+//
+// When the economic clarify fires ("Moody how — the picture or the titles?"), the mood +
+// original ask are parked here so the user's NEXT utterance can answer in plain words
+// ("the picture", "titles", "both") instead of the exact tier-0 phrasing. The window is
+// deliberately narrow: single pending slot (a new clarify overwrites), short TTL, and the
+// answer grammar is whole-string anchored — anything else routes normally, so a user who
+// ignores the question and asks for something different is never hijacked.
+// ---------------------------------------------------------------------------
+
+const CLARIFY_RESUME_TTL_MS = 2 * 60_000;
+
+interface PendingMoodClarify {
+  /** Canonical mood word the clarify was about — re-resolved against the registry on resume. */
+  mood: string;
+  /** The ORIGINAL vibe ask — the resumed plan is named after it, not after "the picture". */
+  prompt: string;
+  expiresAt: number;
+}
+
+let pendingMoodClarify: PendingMoodClarify | null = null;
+
+export function setPendingMoodClarify(mood: string, prompt: string, now: number = Date.now()): void {
+  pendingMoodClarify = { mood, prompt, expiresAt: now + CLARIFY_RESUME_TTL_MS };
+}
+
+export function peekPendingMoodClarify(now: number = Date.now()): { mood: string; prompt: string } | null {
+  if (pendingMoodClarify && pendingMoodClarify.expiresAt <= now) {
+    pendingMoodClarify = null; // a stale answer out of nowhere must not resurrect an old ask
+  }
+  return pendingMoodClarify;
+}
+
+export function clearPendingMoodClarify(): void {
+  pendingMoodClarify = null;
+}
+
+// Whole-string anchored answer grammar. "both"/"everything" map to visual because the
+// visual winner already carries the title accent when text exists (the multi-goal path).
+const CLARIFY_VISUAL_ANSWER_RE =
+  /^(?:(?:the|my) )?(?:picture|video|clips?|footage|visuals?|image|colou?rs?)$|^grade the picture$|^both$|^everything$/;
+const CLARIFY_TEXT_ANSWER_RE = /^(?:(?:the|my) )?(?:titles?|text|captions?)$|^restyle the (?:text|titles)$/;
+
+/** Pure + exported for eval. Null = not a clarify answer (route the prompt normally). */
+export function parseMoodClarifyAnswer(text: string): "visual" | "text" | null {
+  if (CLARIFY_VISUAL_ANSWER_RE.test(text)) {
+    return "visual";
+  }
+  if (CLARIFY_TEXT_ANSWER_RE.test(text)) {
+    return "text";
+  }
+  return null;
+}
+
 /** Lazy for the same reason route.ts is: world/index pulls Vite-only modules. */
 async function worldContext(composition: TimelineComposition): Promise<WorldContext | null> {
   try {
@@ -87,6 +142,22 @@ export async function routePromptHypothesis(prompt: string, context: BrainContex
   if (!text || text.length > 80) {
     return ESCALATE;
   }
+
+  // Conversational clarify resume: a pending question + a plain answer → re-run the
+  // pipeline with the user's reading as the (certain) winner. Consumed only on a match —
+  // any other prompt routes normally and the pending slot just ages out.
+  const pending = peekPendingMoodClarify();
+  if (pending) {
+    const choice = parseMoodClarifyAnswer(text);
+    if (choice) {
+      const ctx = await worldContext(context.composition);
+      if (ctx) {
+        clearPendingMoodClarify();
+        return routeMoodAskWithContext(pending.prompt, context, ctx, pending.mood, choice);
+      }
+    }
+  }
+
   const match = MOOD_ASK_RE.exec(text);
   if (!match) {
     return ESCALATE;
@@ -111,7 +182,9 @@ export async function routeMoodAskWithContext(
   prompt: string,
   context: BrainContext,
   ctx: WorldContext,
-  moodWord: string
+  moodWord: string,
+  /** A parsed clarify answer — forces that hypothesis instead of re-asking. */
+  forced?: "visual" | "text"
 ): Promise<BrainRouteResult> {
   const recipe = resolveMoodRecipe(moodWord);
   if (!recipe) {
@@ -145,14 +218,19 @@ export async function routeMoodAskWithContext(
     }
   };
 
-  const outcome = await planMoodBlueprint(prompt, recipe, structural, source);
+  const outcome = await planMoodBlueprint(prompt, recipe, structural, source, forced);
   if (outcome.kind === "decline") {
-    return ESCALATE; // the model tiers can still try; we never block, only fast-path
+    // A forced choice that can't land ("the titles" with no text) deserves the honest
+    // reason, not a silent model escalation of the bare answer word.
+    return forced ? { kind: "answer", text: outcome.reason, tier: "world", ruleId: CLARIFY_RULE_ID } : ESCALATE;
   }
   if (outcome.kind === "clarify") {
-    return isRuleTrusted(CLARIFY_RULE_ID)
-      ? { kind: "answer", text: outcome.question, tier: "world", ruleId: CLARIFY_RULE_ID }
-      : ESCALATE;
+    if (!isRuleTrusted(CLARIFY_RULE_ID)) {
+      return ESCALATE;
+    }
+    // Park the ask so the user's next utterance can answer in plain words ("the picture").
+    setPendingMoodClarify(recipe.mood, prompt);
+    return { kind: "answer", text: outcome.question, tier: "world", ruleId: CLARIFY_RULE_ID };
   }
 
   const plan = bindClosedGoals(prompt, outcome.closed, visualTarget, textTargets);
@@ -160,6 +238,7 @@ export async function routeMoodAskWithContext(
     return ESCALATE;
   }
   plan.notes = traceNotes(outcome.trace);
+  clearPendingMoodClarify(); // a resolved mood plan supersedes any open question
   return isRuleTrusted(MOOD_RULE_ID) ? { kind: "plan", plan, tier: "world", ruleId: MOOD_RULE_ID } : ESCALATE;
 }
 
