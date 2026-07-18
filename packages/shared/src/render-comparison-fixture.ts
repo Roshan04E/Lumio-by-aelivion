@@ -83,6 +83,7 @@ export type RenderComparisonFixtureKey =
   | "plugin-shader"
   | "stylize"
   | "stylize-ink"
+  | "stylize-print"
   | "vignette"
 
   | "grain"
@@ -125,6 +126,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "plugin-shader",
   "stylize",
   "stylize-ink",
+  "stylize-print",
   "vignette",
 
   "grain",
@@ -294,6 +296,32 @@ const stylizeInkEffects: TimelineLayer["effects"] = [
     enabled: true,
     intensity: 100,
     params: { styleMode: "1", paintRadius: 4, paintSharpness: 8, palettePunch: 35, inkStrength: 70, inkThickness: 2, celBands: 5 }
+  }
+];
+
+// P3: the Comic Print flagship — CMY halftone screens + plate misregistration + shadow hatching +
+// paper grain, on top of ink + cel bands. All the print-craft branches in the tone pass sit under
+// this one fixture.
+const stylizePrintEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_stylize_print",
+    type: "stylize",
+    name: "Stylize",
+    enabled: true,
+    intensity: 100,
+    params: {
+      styleMode: "4",
+      paintRadius: 4,
+      paintSharpness: 8,
+      palettePunch: 45,
+      inkStrength: 70,
+      inkThickness: 2,
+      celBands: 6,
+      printDots: 65,
+      printScale: 6,
+      misprintPx: 2,
+      paperAmount: 40
+    }
   }
 ];
 
@@ -578,6 +606,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: stylizeEffects, fit: "cover" };
     case "stylize-ink":
       return { effects: stylizeInkEffects, fit: "cover" };
+    case "stylize-print":
+      return { effects: stylizePrintEffects, fit: "cover" };
     case "vignette":
       return { effects: vignetteEffects, fit: "cover" };
     case "grain":

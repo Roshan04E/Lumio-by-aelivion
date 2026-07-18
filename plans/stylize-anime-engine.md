@@ -8,9 +8,15 @@ full graph. P4 (pulled forward on user request): frame hold "on twos" — `layer
 `layerSourceTimeSeconds` mapping in EVERY renderer (export compositor, Remotion per-frame
 Sequence remap, span-proxy capture, live preview via hold-bucket draw skip in
 WebglMediaLayer); audio stays continuous; UI = "Frame hold" select in ClipSpeedControl.
-Pixel gate 39/39. REMAINING: P3 Comic Print (halftone, CMYK misprint, paper, hatching),
-P5 segmentation-aware styling, P6 generative tier. Reference brief: Spider-Verse-class
-stylization no mainstream browser editor ships. "Best effects, no hurry."
+P3 SHIPPED 2026-07-19: Comic Print — rotated CMY halftone screens (15°/75°/0°, area-linear
+sqrt dot growth), CMY plate misregistration with the K/ink plate kept registered, 45° shadow
+hatching (line weight grows with darkness), paper tint + luma-scaled hash grain; Manga mode
+gained its 45° midtone screen-tone. All procedural in the tone pass (no new render targets);
+new params printDots/printScale/misprintPx/paperAmount (frame-relative vs 1080 short edge);
+`stylize-print` fixture gates it. Line-quality rev same day: DoG reads the PAINT buffer (not
+raw video), anisotropy despeckle gate, ±7 flow smoothing, steeper XDoG.
+REMAINING: P5 segmentation-aware styling, P6 generative tier. Reference brief:
+Spider-Verse-class stylization no mainstream browser editor ships. "Best effects, no hurry."
 
 ---
 

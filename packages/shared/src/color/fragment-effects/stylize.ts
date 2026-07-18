@@ -245,14 +245,55 @@ vec4 effect(vec2 uv) {
 }
 `;
 
-// Final pass: cel posterize + palette punch + style flavor + ink composite, mixed by uIntensity.
-// styleMode: 0 Painterly · 1 Anime Cel · 2 Manga (mono, hard contrast) · 3 Sketch (paper + ink).
+// Final pass: cel posterize + palette punch + style flavor + comic print craft + ink composite,
+// mixed by uIntensity.
+// styleMode: 0 Painterly · 1 Anime Cel · 2 Manga (mono + screen-tone dots) · 3 Sketch (paper +
+// ink) · 4 Comic Print (halftone CMY screens, plate misregistration, shadow hatching — P3).
+//
+// P3 print craft is all procedural screen-space math (plan §1.2.4: "single-pass friendly") — no
+// new render targets, and everything is frame-deterministic (fixed grids, hash grain keyed on
+// pixel coords) so it cannot boil on video. Classic press angles: C 15° · M 75° · Y 0°, ink (K
+// plate) stays REGISTERED while CMY plates misalign — that's how real presses misprint, and it
+// keeps the lines crisp under heavy fringe.
 const TONE_GLSL = `
 ${"" /* uPass0 = paint, uPass1 = ink */}
+vec2 _rotP(vec2 p, float ang) {
+  float s = sin(ang);
+  float co = cos(ang);
+  return mat2(co, -s, s, co) * p;
+}
+
+// Rotated-grid halftone coverage: dot radius grows with sqrt(amount) (area-linear, so gradients
+// ramp like real print), 1.45 overshoot lets solids close fully, ~0.75px smoothstep AA.
+float _dotCov(vec2 p, float ang, float pitch, float amount) {
+  vec2 f = (fract(_rotP(p, ang) / pitch) - 0.5) * pitch;
+  float r = pitch * 0.5 * sqrt(clamp(amount, 0.0, 1.0)) * 1.45;
+  float cov = 1.0 - smoothstep(r - 0.75, r + 0.75, length(f));
+  return cov * smoothstep(0.0, 0.05, amount);
+}
+
 vec4 effect(vec2 uv) {
   vec4 src = getSrcColor(uv);
-  vec3 c = texture(uPass0, uv).rgb;
   float mode = floor(styleMode + 0.5);
+  vec2 px = 1.0 / uResolution;
+  float shortEdge = min(uResolution.x, uResolution.y);
+  vec2 p = uv * uResolution;
+  float dots = clamp(printDots, 0.0, 100.0) / 100.0;
+  // Frame-relative like every other stylize size: pitch/offsets defined against a 1080 short edge.
+  float pitch = max(2.0, printScale * (shortEdge / 1080.0));
+  float mis = clamp(misprintPx, 0.0, 10.0) * (shortEdge / 1080.0);
+
+  vec3 c;
+  if (mode == 4.0 && mis > 0.0) {
+    // CMY plate misregistration: each plate reads the paint buffer at its own offset direction.
+    c = vec3(
+      texture(uPass0, clamp(uv + px * vec2(-mis, mis * 0.35), 0.0, 1.0)).r,
+      texture(uPass0, clamp(uv + px * vec2(mis, -mis * 0.25), 0.0, 1.0)).g,
+      texture(uPass0, clamp(uv + px * vec2(mis * 0.2, mis), 0.0, 1.0)).b
+    );
+  } else {
+    c = texture(uPass0, uv).rgb;
+  }
 
   // Cel bands (0/1 = off): quantize LUMA and rescale color, with a hair of hash dither on the
   // threshold so gradients don't band-crawl in motion. Deterministic — same everywhere.
@@ -273,12 +314,49 @@ vec4 effect(vec2 uv) {
   c = (c - 0.5) * (1.0 + punch * 0.18) + 0.5;
 
   if (mode == 2.0) {
-    // Manga: mono + hard contrast (screen-tones arrive with the print pass, P3).
-    float m = _luma(c);
-    c = vec3(clamp((m - 0.5) * 1.35 + 0.55, 0.0, 1.0));
+    // Manga: mono + hard contrast, then a single 45° screen-tone on MIDTONES only (P3) —
+    // highlights stay clean white, deep blacks stay solid ink, the grays become dot fields.
+    float m = clamp((_luma(c) - 0.5) * 1.35 + 0.55, 0.0, 1.0);
+    if (dots > 0.0) {
+      float cov = _dotCov(p, 0.7853981634, pitch, 1.0 - m);
+      float mid = smoothstep(0.04, 0.22, m) * (1.0 - smoothstep(0.72, 0.94, m));
+      m = mix(m, 1.0 - cov, dots * mid);
+    }
+    c = vec3(m);
   } else if (mode == 3.0) {
     // Sketch: warm paper faintly tinted by the paint — the ink below carries the drawing.
     c = mix(vec3(0.96, 0.945, 0.915), c, 0.18);
+  } else if (mode == 4.0 && dots > 0.0) {
+    // Comic Print: three rotated CMY dot screens (C 15° / M 75° / Y 0°). Channel value is
+    // 1 - coverage: more pigment = bigger dot = darker channel — exactly screen printing.
+    vec3 cmy = 1.0 - c;
+    vec3 halftoned = 1.0 - vec3(
+      _dotCov(p, 0.2617993878, pitch, cmy.r),
+      _dotCov(p, 1.3089969390, pitch, cmy.g),
+      _dotCov(p, 0.0, pitch, cmy.b)
+    );
+    c = mix(c, halftoned, dots);
+    // Shadow hatching: dark regions get 45° ink strokes (line weight grows with darkness)
+    // instead of drowning in giant dots — the comic shadow language.
+    float l3 = _luma(c);
+    float dark = 1.0 - smoothstep(0.1, 0.38, l3);
+    if (dark > 0.001) {
+      float hp = max(3.0, pitch * 1.2);
+      float hy = (p.x + p.y) * 0.7071067812;
+      float dl = abs(fract(hy / hp) - 0.5) * hp;
+      float wLine = dark * hp * 0.38;
+      float line = 1.0 - smoothstep(wLine - 0.75, wLine + 0.75, dl);
+      c = mix(c, c * 0.2, line * dark * dots * 0.85);
+    }
+  }
+
+  // Paper (any style, default 0): warm stock tint + static hash grain, grain scaled by luma so
+  // blacks stay clean ink. Screen-space fixed => temporally still by construction.
+  float paper = clamp(paperAmount, 0.0, 100.0) / 100.0;
+  if (paper > 0.0) {
+    float l4 = _luma(c);
+    float g = (_rand(floor(p / 2.0)) - 0.5) * 0.09 * (0.25 + 0.75 * l4);
+    c = c * mix(vec3(1.0), vec3(0.965, 0.945, 0.905), paper) + g * paper;
   }
 
   float ink = texture(uPass1, uv).r;
@@ -299,7 +377,14 @@ export const STYLIZE_PAINTERLY: FragmentEffectDefinition = {
     { name: "inkStrength", type: "float", default: 0, min: 0, max: 100, step: 1, label: "Ink Lines" },
     { name: "inkThickness", type: "float", default: 2, min: 0.5, max: 4, step: 0.5, label: "Line Weight" },
     { name: "celBands", type: "float", default: 0, min: 0, max: 10, step: 1, label: "Cel Bands" },
-    { name: "styleMode", type: "float", default: 0, min: 0, max: 3, step: 1, label: "Style" }
+    { name: "styleMode", type: "float", default: 0, min: 0, max: 4, step: 1, label: "Style" },
+    // P3 print craft — only read by Manga (screen-tone) and Comic Print, so these defaults leave
+    // Painterly / Anime Cel / Sketch byte-stable. printDots > 0 by default = selecting Comic
+    // Print (or Manga) delivers the look immediately instead of a blank knob hunt.
+    { name: "printDots", type: "float", default: 50, min: 0, max: 100, step: 1, label: "Print Dots" },
+    { name: "printScale", type: "float", default: 6, min: 2, max: 16, step: 0.5, label: "Dot Size" },
+    { name: "misprintPx", type: "float", default: 1.5, min: 0, max: 10, step: 0.5, label: "Misprint" },
+    { name: "paperAmount", type: "float", default: 0, min: 0, max: 100, step: 1, label: "Paper" }
   ],
   glsl: "", // multi-pass definition — `passes` below is the whole effect
   passes: [
