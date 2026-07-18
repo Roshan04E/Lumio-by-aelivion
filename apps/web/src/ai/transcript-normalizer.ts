@@ -71,7 +71,13 @@ const JOIN_RULES: Array<[RegExp, string]> = [
   [/\bplay ?head\b/gi, "playhead"],
   [/\bkey ?frame(s?)\b/gi, "keyframe$1"],
   [/\btime ?line\b/gi, "timeline"],
-  [/\bplay ?back\b/gi, "playback"]
+  [/\bplay ?back\b/gi, "playback"],
+  // "analyze" verb mishearings, gated by the analyze TARGET that must follow ("clip N" /
+  // "the timeline"): real corpus 2026-07-18 — dictated "Analyze clip 5", final said
+  // "And a light clip 5." Without the target context nothing corrects ("and a light
+  // touch" stays; "add a light" never matches — 'add' is not in the alternation).
+  [/\b(?:and|an|in) a (?:light|lies|line|lize|lyse)\s+(?=(?:the\s+)?(?:clip\s+\d|timeline\b|composition\b))/gi, "analyze "],
+  [/\banaly[sz]ed\s+(?=(?:the\s+)?(?:clip\s+\d|timeline\b))/gi, "analyze "]
 ];
 
 /** Single-token fuzzy pass: distance ≤1 to a high-value editor term, token ≥5 chars, and the
@@ -154,6 +160,13 @@ const LOOK_FRAME_RE = /\b(?:apply|add|use|give)\s+(?:it\s+|this\s+)?(?:an?\s+|th
 const REMOVE_LOOK_FRAME_RE = /\b(?:remove|clear|delete|drop|take off)\s+(?:the\s+|a\s+)?(.{1,40}?)\s+(?:look|grade)\b/i;
 /** "make it/this (feel|look) X" — the K4 mood-ask frame. Tail-anchored (trailing punctuation ok). */
 const MOOD_FRAME_RE = /\bmake\s+(?:it|this|everything)\s+(?:feel\s+|look\s+)?([a-z][a-z -]{2,24}?)(?:[.!?]\s*)?$/i;
+/** "analyze X" — the world-tier frame (real corpus: final "pipeline" for a dictated
+ * "timeline"). Tail-anchored; the slot resolves only against the world tier's own targets. */
+const ANALYZE_FRAME_RE = /\banaly[sz]e\s+(?:the\s+|this\s+|my\s+)?([a-z0-9 ]{2,24}?)(?:[.!?]\s*)?$/i;
+
+function analyzeTargetResolves(candidate: string): boolean {
+  return /^(?:clip \d{1,3}|timeline|composition|comp|sequence|edit|project|system|browser|media|footage)$/.test(candidate.trim().toLowerCase());
+}
 
 function lookNameResolves(candidate: string): boolean {
   const name = candidate.trim();
@@ -173,7 +186,8 @@ interface CommandFrame {
 const COMMAND_FRAMES: readonly CommandFrame[] = [
   { re: LOOK_FRAME_RE, resolves: lookNameResolves },
   { re: REMOVE_LOOK_FRAME_RE, resolves: lookNameResolves },
-  { re: MOOD_FRAME_RE, resolves: moodResolves }
+  { re: MOOD_FRAME_RE, resolves: moodResolves },
+  { re: ANALYZE_FRAME_RE, resolves: analyzeTargetResolves }
 ];
 
 /** Replace ONLY the frame's captured slot (group 1) inside the matched span. */

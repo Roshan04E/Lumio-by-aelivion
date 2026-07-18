@@ -835,6 +835,14 @@ async function main(): Promise<void> {
   check("MUST NOT: 'be to the point' untouched (no track context)", normalizeTranscript("be to the point") === "be to the point");
   check("MUST NOT: 'we two should review this' untouched", normalizeTranscript("we two should review this") === "we two should review this");
   check("MUST NOT: 'payback'/'napping' never become editor terms", normalizeTranscript("payback while napping") === "payback while napping");
+  check(
+    "REAL corpus: 'And a light clip 5.' → 'analyze clip 5.' (verb repair, target-gated)",
+    normalizeTranscript("And a light clip 5.") === "analyze clip 5.",
+    normalizeTranscript("And a light clip 5.")
+  );
+  check("'and a light the timeline' → 'analyze the timeline'", normalizeTranscript("and a light the timeline") === "analyze the timeline");
+  check("MUST NOT: 'and a light touch here' untouched (no analyze target)", normalizeTranscript("and a light touch here") === "and a light touch here");
+  check("MUST NOT: 'add a light to clip 5' untouched ('add' is a real edit ask)", normalizeTranscript("add a light to clip 5") === "add a light to clip 5");
 
   console.log("\nFINAL-vs-INTERIM ARBITRATION — registry-anchored (real report 2026-07-18: interim 'neon' → final 'new'):");
   check(
@@ -872,6 +880,19 @@ async function main(): Promise<void> {
     "frame slot replacement is surgical (surrounding text intact)",
     arbitrateFinal("please apply the neon look to clip 2 now", "please apply the new look to clip 2 now") ===
       "please apply the neon look to clip 2 now"
+  );
+  check(
+    "analyze frame: interim 'timeline' beats final 'pipeline'",
+    arbitrateFinal("analyze the timeline", "analyze the pipeline") === "analyze the timeline",
+    arbitrateFinal("analyze the timeline", "analyze the pipeline")
+  );
+  check(
+    "analyze frame: interim 'clip 5' beats final 'flip 5'",
+    arbitrateFinal("analyze clip 5", "analyze flip 5") === "analyze clip 5"
+  );
+  check(
+    "MUST NOT: analyze frame with BOTH slots resolvable keeps the final (clip 2 stays clip 2)",
+    arbitrateFinal("analyze clip 5", "analyze clip 2") === "analyze clip 2"
   );
 
   console.log("\nLOOK-FRAME FUZZY BIAS — distance-1 only, frame-gated:");
