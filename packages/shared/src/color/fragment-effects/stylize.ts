@@ -74,16 +74,24 @@ vec4 effect(vec2 uv) {
   vec2 dir = (dot(ev, ev) > 1e-8) ? normalize(ev) : vec2(0.0, 1.0);
   float A = (lambda1 + lambda2 > 1e-6) ? (lambda1 - lambda2) / (lambda1 + lambda2) : 0.0;
 
+  // FRAME-RELATIVE radius (2026-07-18, span-proxy report): the radius is defined against a 540px
+  // short edge and scales with THIS pass's working resolution — so ½-scale preview, span-proxy
+  // renders, and full-res export all paint the SAME picture-space brush. A raw pixel radius made
+  // spans diverge from the viewer and the parity self-check (correctly) refused to seal them.
+  float shortEdge = min(uResolution.x, uResolution.y);
+  float radius = clamp(paintRadius, 1.0, 6.0) * (shortEdge / 540.0);
+  radius = clamp(radius, 1.0, 14.0);
   // Area-preserving oriented ellipse (sqrt shaping): tap cost stays ~π·r² regardless of anisotropy
   // and the long axis never exceeds ~1.42·radius — so the DYNAMIC loop bound below is honest (the
   // first cut clamped loops at ±6 while the ellipse could reach 12: silent truncation).
-  float radius = clamp(paintRadius, 1.0, 6.0);
   float stretch = sqrt(1.0 + A);
   float ea = radius * stretch;
   float eb = radius / stretch;
   // Row-major [[cos/a, sin/a], [-sin/b, cos/b]] — maps a pixel offset into the ellipse's unit disc.
   mat2 SR = mat2(dir.x / ea, -dir.y / eb, dir.y / ea, dir.x / eb);
-  int radI = int(min(ceil(ea), 9.0));
+  // Cap is generous (export-res working buffers legitimately need bigger pixel radii); preview cost
+  // self-limits because the preview's render scale shrinks shortEdge and the radius with it.
+  int radI = int(min(ceil(ea), 20.0));
 
   vec2 px = 1.0 / uResolution;
   vec4 m[8];
