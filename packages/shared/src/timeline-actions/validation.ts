@@ -1,5 +1,6 @@
 import type { TimelineComposition, TimelineEffect, TimelineLayer, TimelineTrack } from "../types";
 import { getTimelineEffectDefinition } from "../effects";
+import { listCreativeLooks, resolveLookName } from "../color/looks";
 import type { ActionContext, ValidationIssue } from "./types";
 
 /**
@@ -94,6 +95,21 @@ export function assertEffectParamsValid(
       const allowed = param.options.map((option) => option.value);
       if (typeof value !== "string" || !allowed.includes(value)) {
         issues.push({ code: "invalid_effect_param", message: `Param "${key}" must be one of ${allowed.join(", ")}`, path: `${path}.${key}` });
+      }
+    } else if (param.type === "look") {
+      // K3 closure gap fix: "look" previously fell through every branch, so an LLM-cased
+      // name ("noir") was stored verbatim, missed the exact-match registry in the renderer,
+      // and no-oped silently. Accept anything resolveLookName can canonicalize (exact /
+      // case-insensitive / alias — addEffect canonicalizes at the write seam); reject the
+      // rest with the live library as the message.
+      if (typeof value !== "string" || !resolveLookName(value)) {
+        issues.push({
+          code: "invalid_effect_param",
+          message: `"${typeof value === "string" ? value : String(value)}" isn't in the look library — available: ${listCreativeLooks()
+            .map((look) => look.name)
+            .join(", ")}`,
+          path: `${path}.${key}`
+        });
       }
     }
   }

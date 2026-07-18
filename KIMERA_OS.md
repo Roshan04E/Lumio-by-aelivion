@@ -509,7 +509,12 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    panel's grade skill executor now runs through `closeColorGrade` — killing the founding
    regression ("make it moody" → `look:"Moody"` → silent "Applied 0"; now it repairs to
    Noir @ 55% with the repair shown, and a truly unknown look answers with the library
-   list). Acceptance: `blueprint:eval` (19 checks). Open: motion/text dialects, target
+   list). Same-day follow-up: the same closure applied at the ACTION seam —
+   `resolveLookName` lives in color/looks.ts as the one shared resolution; `look`-type
+   effect params are validated (unknown → rejected with the library) and canonicalized at
+   `addEffect`/`updateEffect` write time, closing the second path (LLM-emitted raw
+   creativeLook steps with lowercased names stored verbatim → renderer no-op).
+   Acceptance: `blueprint:eval` (24 checks). Open: motion/text dialects, target
    binding contract formalization, K4 planner emitting multi-goal blueprints.
 4. **K4 — Hypothesis stage in the planner** with budgeted expansion and the
    entropy-clarify rule; planner refactored into registered stages.

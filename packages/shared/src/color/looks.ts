@@ -107,6 +107,87 @@ export function listCreativeLooks(): CreativeLook[] {
   return [...creativeLookRegistry.values()];
 }
 
+/* ------------------------------------------------------------------ name resolution (K3) */
+
+/**
+ * Colorist alias table — look names AIs/users plausibly say but the registry doesn't carry
+ * verbatim. Data, not code: adding a mood = one row. Intensity (0–100) lets an alias land a
+ * SOFTER variant of a strong base look (consumed by the blueprint color dialect; ignored by
+ * plain effect-param canonicalization, which only fixes the name).
+ */
+const LOOK_ALIASES: Record<string, { look: string; intensity?: number }> = {
+  moody: { look: "Noir", intensity: 55 },
+  dark: { look: "Noir", intensity: 50 },
+  dramatic: { look: "Bleach Bypass", intensity: 60 },
+  gritty: { look: "Bleach Bypass", intensity: 75 },
+  vintage: { look: "Faded Film" },
+  retro: { look: "Faded Film" },
+  analog: { look: "Faded Film" },
+  faded: { look: "Faded Film" },
+  film: { look: "Cinematic" },
+  filmic: { look: "Cinematic" },
+  movie: { look: "Cinematic" },
+  hollywood: { look: "Teal & Orange" },
+  blockbuster: { look: "Teal & Orange" },
+  warm: { look: "Warm Sunset" },
+  golden: { look: "Warm Sunset" },
+  sunset: { look: "Warm Sunset" },
+  cold: { look: "Cold Morning" },
+  cool: { look: "Cold Morning" },
+  winter: { look: "Cold Morning" },
+  monochrome: { look: "Noir" },
+  "black and white": { look: "Noir" },
+  noirish: { look: "Noir" }
+};
+
+/** Lowercase + collapse separators + spell out "&" so "Teal and Orange" ≡ "teal&orange". */
+function normalizeLookKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+export interface LookResolution {
+  /** Canonical registry name. */
+  look: string;
+  /** Intensity override carried by an alias (softer variant of a strong base). */
+  intensity?: number | undefined;
+  /** Human repair note when the input was rewritten; undefined for an exact match. */
+  repair?: string | undefined;
+}
+
+/**
+ * Resolve a requested look name against the LIVE registry (built-ins + plugin-registered):
+ * exact → case/format-insensitive → alias table. Null = genuinely unknown. This is the ONE
+ * resolution every consumer must share — the blueprint color dialect, the addEffect
+ * `look`-param canonicalization, and any future picker — so "noir"/"moody"/"Teal and Orange"
+ * mean the same thing everywhere (the 2026-07-18 "Noir applied but nothing changed" bug was
+ * an LLM-lowercased name stored verbatim past a validation gap, no-oping in the renderer).
+ */
+export function resolveLookName(requested: string): LookResolution | null {
+  const available = listCreativeLooks();
+  const exact = available.find((look) => look.name === requested);
+  if (exact) {
+    return { look: exact.name };
+  }
+  const key = normalizeLookKey(requested);
+  const relaxed = available.find((look) => normalizeLookKey(look.name) === key);
+  if (relaxed) {
+    return { look: relaxed.name, repair: `look "${requested}" → ${relaxed.name}` };
+  }
+  const alias = LOOK_ALIASES[key];
+  if (alias && available.some((look) => look.name === alias.look)) {
+    return {
+      look: alias.look,
+      intensity: alias.intensity,
+      repair: `look "${requested}" → ${alias.look}${alias.intensity !== undefined ? ` @ ${alias.intensity}%` : ""}`
+    };
+  }
+  return null;
+}
+
 /** Resolve a look name to a `ColorEffectInput[]` (pre-scaled, ready for compileColorPipeline). */
 export function resolveLookEffects(lookName: string, intensity: number): ColorEffectInput[] {
   const look = getCreativeLook(lookName);

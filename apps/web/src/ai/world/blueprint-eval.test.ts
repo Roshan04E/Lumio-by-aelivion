@@ -16,7 +16,10 @@ import {
   compileGradeIntent,
   listBlueprintDialects,
   resolveLookName,
-  type Blueprint
+  timelineActionRegistry,
+  type Blueprint,
+  type TimelineComposition,
+  type TimelineLayer
 } from "@kimera-by-aelivion/shared";
 
 let failures = 0;
@@ -101,6 +104,67 @@ if (!driven.ok) {
 }
 const colorOnly = closeBlueprint({ ...blueprint, goals: [blueprint.goals[0]!] });
 check("all-color blueprint closes end to end", colorOnly.ok && colorOnly.ok === true && colorOnly.closed[0]!.actions.length > 0);
+
+console.log("addEffect look-param closure (the 'Noir applied but nothing changed' regression):");
+const fixtureComposition: TimelineComposition = {
+  id: "c",
+  name: "c",
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  durationSeconds: 10,
+  backgroundColor: "#000000",
+  tracks: [
+    {
+      id: "t0",
+      type: "video",
+      name: "t0",
+      layers: [
+        {
+          id: "vid_a",
+          trackId: "t0",
+          type: "video",
+          name: "vid_a",
+          startSeconds: 0,
+          durationSeconds: 10,
+          effects: [],
+          transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 1 }
+        } as unknown as TimelineLayer
+      ]
+    }
+  ]
+};
+const actionContext = { composition: fixtureComposition, selection: [], nowSeconds: 0 };
+const lowercase = timelineActionRegistry.execute(
+  "addEffect",
+  { layerId: "vid_a", effectType: "creativeLook", params: { look: "noir", intensity: 80 } },
+  actionContext,
+  { ai: true }
+);
+check("lowercase look ACCEPTED and canonicalized at the write seam", lowercase.ok);
+if (lowercase.ok) {
+  const stored = lowercase.result.after.tracks[0]!.layers[0]!.effects.find((effect) => effect.type === "creativeLook");
+  check("stored param is the CANONICAL registry name (renderer + Color tab agree)", stored?.params["look"] === "Noir", String(stored?.params["look"]));
+}
+const aliasParam = timelineActionRegistry.execute(
+  "addEffect",
+  { layerId: "vid_a", effectType: "creativeLook", params: { look: "moody" } },
+  actionContext,
+  { ai: true }
+);
+check("alias look canonicalizes too ('moody' → Noir)", aliasParam.ok && (aliasParam.ok ? aliasParam.result.after.tracks[0]!.layers[0]!.effects.at(-1)?.params["look"] === "Noir" : false));
+const unknownParam = timelineActionRegistry.execute(
+  "addEffect",
+  { layerId: "vid_a", effectType: "creativeLook", params: { look: "XyzVibe", intensity: 80 } },
+  actionContext,
+  { ai: true }
+);
+check("unknown look REJECTED at validation (never stored, never a silent no-op)", !unknownParam.ok);
+check(
+  "rejection message carries the look library",
+  !unknownParam.ok && /Noir/.test(unknownParam.message ?? ""),
+  unknownParam.ok ? "unexpectedly ok" : unknownParam.message
+);
 
 console.log(failures === 0 ? "\nblueprint:eval PASS" : `\nblueprint:eval FAIL — ${failures} failure(s)`);
 process.exit(failures === 0 ? 0 : 1);

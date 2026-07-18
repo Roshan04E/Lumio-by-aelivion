@@ -1,12 +1,44 @@
 import { z } from "zod";
-import { createTimelineEffect } from "../../effects";
-import type { TimelineEffectType } from "../../types";
+import { createTimelineEffect, getTimelineEffectDefinition } from "../../effects";
+import { resolveLookName } from "../../color/looks";
+import type { TimelineEffect, TimelineEffectType } from "../../types";
 import { actionResult, runMutation } from "../patches";
 import { assertEffectParamsValid, assertEffectTypeKnown, assertLayerExists } from "../validation";
 import type { TimelineActionDefinition } from "../types";
 import { freshId, locateLayer } from "./shared";
 
 const paramValueSchema = z.union([z.string(), z.number(), z.boolean()]);
+
+/**
+ * Canonicalize registry-declared `look`-type params at the ONE write seam (K3): validation
+ * already guaranteed the value resolves (exact / case-insensitive / alias), so storing the
+ * CANONICAL registry name here means the renderer's exact-match lookup and the Color tab's
+ * option list always agree with what the AI/user said. Registry-driven — no effect types
+ * hardcoded; any future effect with a `look` param gets the same behavior.
+ */
+function canonicalizeLookParams(
+  effectType: string,
+  params: Record<string, string | number | boolean>
+): Record<string, string | number | boolean> {
+  const definition = getTimelineEffectDefinition(effectType as TimelineEffect["type"]);
+  if (!definition) {
+    return params;
+  }
+  let result = params;
+  for (const param of definition.params) {
+    if (param.type !== "look") {
+      continue;
+    }
+    const value = result[param.key];
+    if (typeof value === "string") {
+      const resolved = resolveLookName(value);
+      if (resolved && resolved.look !== value) {
+        result = { ...result, [param.key]: resolved.look };
+      }
+    }
+  }
+  return result;
+}
 
 const addEffectSchema = z.object({
   layerId: z.string(),
@@ -34,7 +66,7 @@ const addEffect: TimelineActionDefinition<z.infer<typeof addEffectSchema>> = {
       effect.intensity = params.intensity;
     }
     if (params.params) {
-      effect.params = { ...effect.params, ...params.params };
+      effect.params = { ...effect.params, ...canonicalizeLookParams(params.effectType, params.params) };
     }
     const mutation = runMutation(ctx.composition, (draft) => {
       locateLayer(draft, params.layerId)?.layer.effects.push(effect);
@@ -122,7 +154,7 @@ const updateEffect: TimelineActionDefinition<z.infer<typeof updateEffectSchema>>
       }
       if (params.enabled !== undefined) effect.enabled = params.enabled;
       if (params.intensity !== undefined) effect.intensity = params.intensity;
-      if (params.params) effect.params = { ...effect.params, ...params.params };
+      if (params.params) effect.params = { ...effect.params, ...canonicalizeLookParams(effect.type, params.params) };
     });
     return actionResult(ctx.composition, mutation, `Update effect`);
   }

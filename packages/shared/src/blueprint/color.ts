@@ -16,82 +16,15 @@
  */
 
 import { compileGradeIntent, gradeIntentSchema, type GradeIntent } from "../color/grade-intent";
-import { listCreativeLooks } from "../color/looks";
+import { listCreativeLooks, resolveLookName } from "../color/looks";
 import type { BlueprintDialect, BlueprintGoal, ClosureIssue, CloseResult, LoweredAction } from "./types";
 import { registerBlueprintDialect } from "./types";
 
 export const COLOR_DIALECT_ID = "color";
 
-/**
- * Colorist alias table — the recipe layer's vocabulary for look names the LLM plausibly
- * emits but the registry doesn't carry verbatim. Data, not code: adding a mood = one row.
- * Intensity (0–100) lets an alias land a SOFTER version of a strong base look.
- */
-const LOOK_ALIASES: Record<string, { look: string; intensity?: number }> = {
-  moody: { look: "Noir", intensity: 55 },
-  dark: { look: "Noir", intensity: 50 },
-  dramatic: { look: "Bleach Bypass", intensity: 60 },
-  gritty: { look: "Bleach Bypass", intensity: 75 },
-  vintage: { look: "Faded Film" },
-  retro: { look: "Faded Film" },
-  analog: { look: "Faded Film" },
-  faded: { look: "Faded Film" },
-  film: { look: "Cinematic" },
-  filmic: { look: "Cinematic" },
-  movie: { look: "Cinematic" },
-  hollywood: { look: "Teal & Orange" },
-  blockbuster: { look: "Teal & Orange" },
-  warm: { look: "Warm Sunset" },
-  golden: { look: "Warm Sunset" },
-  sunset: { look: "Warm Sunset" },
-  cold: { look: "Cold Morning" },
-  cool: { look: "Cold Morning" },
-  winter: { look: "Cold Morning" },
-  monochrome: { look: "Noir" },
-  "black and white": { look: "Noir" },
-  noirish: { look: "Noir" }
-};
-
-/** Lowercase + collapse separators + spell out "&" so "Teal and Orange" ≡ "teal&orange". */
-function normalizeLookKey(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-export interface LookResolution {
-  /** Canonical registry name. */
-  look: string;
-  /** Intensity override carried by an alias (softer variant of a strong base). */
-  intensity?: number | undefined;
-  /** Human repair note when the input was rewritten; undefined for an exact match. */
-  repair?: string | undefined;
-}
-
-/** Resolve a requested look against the LIVE registry: exact → case/format-insensitive → alias. */
-export function resolveLookName(requested: string): LookResolution | null {
-  const available = listCreativeLooks();
-  const exact = available.find((look) => look.name === requested);
-  if (exact) {
-    return { look: exact.name };
-  }
-  const key = normalizeLookKey(requested);
-  const relaxed = available.find((look) => normalizeLookKey(look.name) === key);
-  if (relaxed) {
-    return { look: relaxed.name, repair: `look "${requested}" → ${relaxed.name}` };
-  }
-  const alias = LOOK_ALIASES[key];
-  if (alias && available.some((look) => look.name === alias.look)) {
-    return {
-      look: alias.look,
-      intensity: alias.intensity,
-      repair: `look "${requested}" → ${alias.look}${alias.intensity !== undefined ? ` @ ${alias.intensity}%` : ""}`
-    };
-  }
-  return null;
-}
+// Look-name resolution (exact → case/format-insensitive → colorist alias table) lives in
+// color/looks.ts next to the registry — the ONE resolution shared by this dialect, the
+// addEffect `look`-param canonicalization, and any future picker.
 
 function close(goal: BlueprintGoal<GradeIntent>): CloseResult<GradeIntent> {
   const repairs: string[] = [];
