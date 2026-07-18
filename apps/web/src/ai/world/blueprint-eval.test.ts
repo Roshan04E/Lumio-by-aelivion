@@ -16,6 +16,7 @@ import {
   compileGradeIntent,
   CREATIVE_LOOKS,
   listBlueprintDialects,
+  listMoodPlannerStages,
   matchLookInText,
   planMoodBlueprint,
   registerBlueprintDialect,
@@ -465,6 +466,22 @@ async function runK4(): Promise<void> {
   check("forced 'text': text-only goals", forcedText.kind === "blueprint" && forcedText.blueprint.goals.every((goal) => goal.dialect === "text"));
   const forcedImpossible = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: false, hasText: true }, tiedEvidence, "visual");
   check("forced 'visual' with no visual media: honest decline", forcedImpossible.kind === "decline" && forcedImpossible.reason.includes("no video"));
+
+  // Registered stages: the planner is an ordered table, and the trace carries its own
+  // pipeline provenance (which stages ran, in order).
+  check(
+    "stage table: hypothesize → clarify-answer → expand → clarify → shape → resolve → close",
+    listMoodPlannerStages().join(",") === "hypothesize,clarify-answer,expand,clarify,shape,resolve,close"
+  );
+  check(
+    "stage provenance: a resolved plan ran ALL stages in order",
+    forcedVisual.kind === "blueprint" && (forcedVisual.trace.stagesRun ?? []).join(",") === listMoodPlannerStages().join(",")
+  );
+  const tiedAgain = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: true, hasText: true }, tiedEvidence);
+  check(
+    "stage provenance: a clarify stopped AT the clarify stage",
+    tiedAgain.kind === "clarify" && (tiedAgain.trace.stagesRun ?? []).slice(-1)[0] === "clarify"
+  );
 
   // Route seam end to end: clarify parks the pending ask; the answer resumes into a plan.
   const wordyTitle = {

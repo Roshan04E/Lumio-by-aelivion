@@ -558,9 +558,9 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    the plan notes. Precision-first: unknown mood words ("faster") escalate silently.
    Acceptance: `blueprint:eval` grown by 20 checks (dominance short-circuit, economic
    clarify never buying the shape fact, dark-footage shaping, atomic 3-dialect close,
-   route binding, whole-string discipline). Open: registered-stage refactor of the
-   planner proper (clarify answers now resume conversationally — see the K4-tail entry
-   after the K5 slices).
+   route binding, whole-string discipline). Both K4 tails have since shipped —
+   conversational clarify resume and the registered-stage refactor (see the K4-tail
+   entries after the K5 slices). K4 is complete as specced.
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,
    explainability trace UI, SDK surface for plugins.
    **✅ first slice shipped 2026-07-18** — (a) **The decision trace as a product surface**:
@@ -661,6 +661,18 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    flows through the ordinary pipeline (shape facts, closure, binding, approval, trace).
    blueprint:eval +17 (answer grammar, TTL, forced-winner planner rows, full
    clarify→park→resume route loop). Open: registered-stage refactor of the planner.
+   **K4 tail: registered-stage refactor shipped 2026-07-18 — K4 is COMPLETE as specced.**
+   `planMoodBlueprint` is no longer a monolith: the planner is an ordered table of seven
+   registered stage rows (hypothesize → clarify-answer → expand → clarify → shape →
+   resolve → close) over one mutable state; each stage either short-circuits with a final
+   outcome or passes the state on, and `close` is terminal by contract. Zero behavior
+   change (every prior eval row passes untouched) — the win is legibility and
+   composability: the trace now carries its own pipeline provenance (`stagesRun`,
+   additive field), stages are testable in isolation, and a future planner reuses the
+   runner instead of forking the control flow. The stage table stays INTERNAL (not SDK v1
+   surface — freezing it now would freeze the planner's shape prematurely);
+   `listMoodPlannerStages()` is the read-only view for eval/explainability.
+   blueprint:eval +3 (table order, full-run provenance, clarify-stops-at-clarify).
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

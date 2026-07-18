@@ -208,6 +208,8 @@ export interface MoodTrace {
   hypotheses: MoodHypothesisTraceRow[];
   factsConsulted: { id: MoodFactId; path: string }[];
   notes: string[];
+  /** Stage ids executed, in order — the pipeline's own provenance (additive, K4 refactor). */
+  stagesRun?: string[];
 }
 
 export type MoodPlanOutcome =
@@ -215,148 +217,221 @@ export type MoodPlanOutcome =
   | { kind: "clarify"; question: string; trace: MoodTrace }
   | { kind: "decline"; reason: string };
 
-export async function planMoodBlueprint(
-  intent: string,
-  recipe: MoodRecipe,
-  structural: MoodStructuralEvidence,
-  source: MoodFactSource,
-  /**
-   * A clarify ANSWER ("the picture" / "the titles") — the user resolved the hypothesis
-   * themselves, so expansion and the clarify rule are skipped and the chosen reading wins
-   * outright (structural gates still apply: choosing a reading with nothing to land on is
-   * an honest decline, never a silent no-op).
-   */
-  forced?: "visual" | "text"
-): Promise<MoodPlanOutcome> {
-  // ---- Stage: hypothesize (structural gates are free elimination) ----
-  // Priors are a deliberate near-tie: when BOTH readings are structurally possible, the
-  // planner must buy evidence (or ask) rather than assume — that's what makes the
-  // expansion stage real instead of decorative.
-  const visual = {
-    id: HYPOTHESIS_VISUAL,
-    summary: `grade the picture ${recipe.mood} (a ${recipe.gradeLook}-leaning look${recipe.motion ? " + a motion accent" : ""})`,
-    score: 0.55,
-    alive: structural.hasVisualMedia
-  };
-  const text = {
-    id: HYPOTHESIS_TEXT,
-    summary: `restyle the titles (the "${recipe.textLook}" text look)`,
-    score: 0.45,
-    alive: structural.hasText
-  };
-  const trace: MoodTrace = { mood: recipe.mood, hypotheses: [], factsConsulted: [], notes: [] };
+// ---------------------------------------------------------------------------
+// Registered stages (K4 refactor — ORRERIS_OS.md "planner refactored into registered
+// stages"). The planner is an ordered table of stage rows over one mutable state, not a
+// monolith: each stage either short-circuits with a final outcome or passes the state on.
+// The behavioral contract is UNCHANGED — this is the same pipeline, made legible: the
+// trace records which stages ran, and a future planner (or a test) can exercise stages
+// in isolation. The stage table is internal (not SDK v1 surface); `listMoodPlannerStages`
+// is exported read-only for eval + explainability.
+// ---------------------------------------------------------------------------
 
-  if (!visual.alive && !text.alive) {
-    return { kind: "decline", reason: "Nothing on the timeline a mood could land on (no visual media, no text)." };
+interface MoodHypothesis {
+  id: string;
+  summary: string;
+  score: number;
+  alive: boolean;
+}
+
+/** The one mutable state threaded through the stage table. */
+interface MoodStageState {
+  intent: string;
+  recipe: MoodRecipe;
+  structural: MoodStructuralEvidence;
+  source: MoodFactSource;
+  forced?: "visual" | "text" | undefined;
+  trace: MoodTrace;
+  /** Created by the hypothesize stage; later stages may assert non-null. */
+  hypotheses: { visual: MoodHypothesis; text: MoodHypothesis } | null;
+  /** Set by clarify-answer (forced) or the clarify stage (dominant leader). */
+  winner: MoodHypothesis | null;
+  /** Set by the shape stage when evidence says soften the grade. */
+  gradeIntensity: number | undefined;
+  /** Built by the resolve stage, consumed by close. */
+  goals: BlueprintGoal[];
+}
+
+interface MoodPlannerStage {
+  id: string;
+  /** Return a final outcome to short-circuit the pipeline, or null to continue. */
+  run(state: MoodStageState): Promise<MoodPlanOutcome | null> | MoodPlanOutcome | null;
+}
+
+// Stage: hypothesize (structural gates are free elimination).
+// Priors are a deliberate near-tie: when BOTH readings are structurally possible, the
+// planner must buy evidence (or ask) rather than assume — that's what makes the
+// expansion stage real instead of decorative.
+const hypothesizeStage: MoodPlannerStage = {
+  id: "hypothesize",
+  run(state) {
+    const { recipe, structural } = state;
+    const visual: MoodHypothesis = {
+      id: HYPOTHESIS_VISUAL,
+      summary: `grade the picture ${recipe.mood} (a ${recipe.gradeLook}-leaning look${recipe.motion ? " + a motion accent" : ""})`,
+      score: 0.55,
+      alive: structural.hasVisualMedia
+    };
+    const text: MoodHypothesis = {
+      id: HYPOTHESIS_TEXT,
+      summary: `restyle the titles (the "${recipe.textLook}" text look)`,
+      score: 0.45,
+      alive: structural.hasText
+    };
+    state.hypotheses = { visual, text };
+    if (!visual.alive && !text.alive) {
+      return { kind: "decline", reason: "Nothing on the timeline a mood could land on (no visual media, no text)." };
+    }
+    return null;
   }
+};
 
-  // ---- Clarify answer short-circuit: the user IS the discriminating fact ----
-  if (forced) {
-    const chosen = forced === "visual" ? visual : text;
+// Stage: clarify-answer — the user IS the discriminating fact ("the picture"/"the titles"
+// after a clarify). Sets the winner outright; expansion and re-clarify become no-ops.
+const clarifyAnswerStage: MoodPlannerStage = {
+  id: "clarify-answer",
+  run(state) {
+    if (!state.forced) {
+      return null;
+    }
+    const { visual, text } = state.hypotheses!;
+    const chosen = state.forced === "visual" ? visual : text;
     if (!chosen.alive) {
       return {
         kind: "decline",
         reason:
-          forced === "visual"
+          state.forced === "visual"
             ? "You chose the picture, but there's no video or image on the timeline to grade."
             : "You chose the titles, but there's no text on the timeline to restyle."
       };
     }
     chosen.score = 1; // user-resolved — certainty, honestly labeled in the trace
-    trace.notes.push(`you answered the clarify — ${chosen.summary}`);
-    return finishWithWinner(chosen);
+    state.trace.notes.push(`you answered the clarify — ${chosen.summary}`);
+    state.winner = chosen;
+    return null;
   }
+};
 
-  // ---- Stage: budgeted expansion over `discriminate` facts ----
-  let compositionText: CompositionTextEvidence | undefined;
-  const surviving = () => [visual, text].filter((h) => h.alive);
-  const gap = () => {
-    const alive = surviving().sort((a, b) => b.score - a.score);
-    return alive.length < 2 ? Number.POSITIVE_INFINITY : alive[0]!.score - alive[1]!.score;
-  };
-
-  for (const row of FACT_PLAN) {
-    if (row.role !== "discriminate") {
-      continue;
+// Stage: budgeted expansion over `discriminate` facts. A fact is bought only while it can
+// still change the outcome.
+const expandStage: MoodPlannerStage = {
+  id: "expand",
+  async run(state) {
+    if (state.winner) {
+      return null; // already resolved by the user's answer — evidence can't change it
     }
-    if (gap() >= DOMINANCE_MARGIN) {
-      break; // dominant — stop buying; every further fact is waste
-    }
-    if (row.estCostMs > EXPENSIVE_FACT_MS) {
-      break; // near-tie + expensive next fact → the economic clarify rule (below)
-    }
-    const bought = row.id === "composition-text" ? await source.fetchCompositionText() : null;
-    if (!bought) {
-      continue; // Knowledge Service declined — proceed on what we have, never guess harder
-    }
-    trace.factsConsulted.push({ id: row.id, path: bought.path });
-    compositionText = bought.value;
-    // Evidence bands: incidental captions concede to the grade; a text-dominant timeline
-    // wins outright for the title treatment; the middle band stays a genuine tie.
-    const coverage = compositionText.timelineSeconds > 0 ? compositionText.coveredSeconds / compositionText.timelineSeconds : 0;
-    if (text.alive && visual.alive) {
-      if (coverage > 0.75 && compositionText.wordCount >= 8) {
-        text.score += 0.25;
-        trace.notes.push(`text covers ${Math.round(coverage * 100)}% of the timeline (${compositionText.wordCount} words) — this is a title-driven edit`);
-      } else if (coverage > 0.5 && compositionText.wordCount >= 8) {
-        text.score += 0.18;
-        trace.notes.push(`text covers ${Math.round(coverage * 100)}% of the timeline (${compositionText.wordCount} words) — title treatment is a live rival reading`);
-      } else {
-        text.score -= 0.15;
-        trace.notes.push(`titles are incidental (${Math.round(coverage * 100)}% coverage) — the picture carries the mood`);
-      }
-    }
-  }
-
-  const ranked = surviving().sort((a, b) => b.score - a.score);
-  const leader = ranked[0]!;
-  const runnerUp = ranked[1];
-
-  // ---- The economic clarify rule ----
-  if (runnerUp && leader.score - runnerUp.score < DOMINANCE_MARGIN) {
-    trace.hypotheses = [visual, text].map((h) => ({ ...h }));
-    // A plain answer resumes THIS pipeline with the chosen reading (the conversational
-    // resume); the tier-0 APPLY-LOOK phrasings stay as the explicit escape hatch — every
-    // listed answer resolves instantly and locally, one utterance, no model round.
-    return {
-      kind: "clarify",
-      question:
-        `${recipe.mood[0]!.toUpperCase()}${recipe.mood.slice(1)} how — the picture or the titles? ` +
-        `Just answer **"the picture"** or **"the titles"**. ` +
-        `(Or be exact: "apply the ${recipe.gradeLook} look" with a video clip selected, ` +
-        `"apply the ${recipe.textLook} look" with a title selected.)`,
-      trace
+    const { visual, text } = state.hypotheses!;
+    const surviving = () => [visual, text].filter((h) => h.alive);
+    const gap = () => {
+      const alive = surviving().sort((a, b) => b.score - a.score);
+      return alive.length < 2 ? Number.POSITIVE_INFINITY : alive[0]!.score - alive[1]!.score;
     };
-  }
-  return finishWithWinner(leader);
 
-  // ---- Stages shared by both paths: `shape` facts → goals → emit + close ----
-  async function finishWithWinner(winner: { id: string }): Promise<MoodPlanOutcome> {
-    // `shape` facts are bought only for the winning hypothesis.
-    let gradeIntensity: number | undefined;
-    if (winner.id === HYPOTHESIS_VISUAL) {
-      const bought = await source.fetchMediaLook();
-      if (bought) {
-        trace.factsConsulted.push({ id: "media-look", path: bought.path });
-        if (bought.value.exposure === "dark") {
-          const base = resolveLookName(recipe.gradeLook);
-          gradeIntensity = Math.max(30, (base?.intensity ?? 70) - 15);
-          trace.notes.push(`footage already measured dark (mean luma ${Math.round(bought.value.avgLuma * 100)}%) — gentler grade @ ${gradeIntensity}%`);
+    for (const row of FACT_PLAN) {
+      if (row.role !== "discriminate") {
+        continue;
+      }
+      if (gap() >= DOMINANCE_MARGIN) {
+        break; // dominant — stop buying; every further fact is waste
+      }
+      if (row.estCostMs > EXPENSIVE_FACT_MS) {
+        break; // near-tie + expensive next fact → the economic clarify rule (next stage)
+      }
+      const bought = row.id === "composition-text" ? await state.source.fetchCompositionText() : null;
+      if (!bought) {
+        continue; // Knowledge Service declined — proceed on what we have, never guess harder
+      }
+      state.trace.factsConsulted.push({ id: row.id, path: bought.path });
+      const compositionText = bought.value;
+      // Evidence bands: incidental captions concede to the grade; a text-dominant timeline
+      // wins outright for the title treatment; the middle band stays a genuine tie.
+      const coverage = compositionText.timelineSeconds > 0 ? compositionText.coveredSeconds / compositionText.timelineSeconds : 0;
+      if (text.alive && visual.alive) {
+        if (coverage > 0.75 && compositionText.wordCount >= 8) {
+          text.score += 0.25;
+          state.trace.notes.push(`text covers ${Math.round(coverage * 100)}% of the timeline (${compositionText.wordCount} words) — this is a title-driven edit`);
+        } else if (coverage > 0.5 && compositionText.wordCount >= 8) {
+          text.score += 0.18;
+          state.trace.notes.push(`text covers ${Math.round(coverage * 100)}% of the timeline (${compositionText.wordCount} words) — title treatment is a live rival reading`);
+        } else {
+          text.score -= 0.15;
+          state.trace.notes.push(`titles are incidental (${Math.round(coverage * 100)}% coverage) — the picture carries the mood`);
         }
       }
     }
+    return null;
+  }
+};
 
-    // Resolve the recipe into goals.
-    const goals: BlueprintGoal[] = [];
-    if (winner.id === HYPOTHESIS_VISUAL) {
-      goals.push({
+// Stage: the economic clarify rule — a persisting near-tie with no affordable
+// discriminating fact left asks the user; otherwise the leader becomes the winner.
+const clarifyStage: MoodPlannerStage = {
+  id: "clarify",
+  run(state) {
+    if (state.winner) {
+      return null;
+    }
+    const { visual, text } = state.hypotheses!;
+    const ranked = [visual, text].filter((h) => h.alive).sort((a, b) => b.score - a.score);
+    const leader = ranked[0]!;
+    const runnerUp = ranked[1];
+    if (runnerUp && leader.score - runnerUp.score < DOMINANCE_MARGIN) {
+      state.trace.hypotheses = [visual, text].map((h) => ({ ...h }));
+      const { recipe } = state;
+      // A plain answer resumes THIS pipeline with the chosen reading (the conversational
+      // resume); the tier-0 APPLY-LOOK phrasings stay as the explicit escape hatch — every
+      // listed answer resolves instantly and locally, one utterance, no model round.
+      return {
+        kind: "clarify",
+        question:
+          `${recipe.mood[0]!.toUpperCase()}${recipe.mood.slice(1)} how — the picture or the titles? ` +
+          `Just answer **"the picture"** or **"the titles"**. ` +
+          `(Or be exact: "apply the ${recipe.gradeLook} look" with a video clip selected, ` +
+          `"apply the ${recipe.textLook} look" with a title selected.)`,
+        trace: state.trace
+      };
+    }
+    state.winner = leader;
+    return null;
+  }
+};
+
+// Stage: `shape` facts — bought only for the winning hypothesis.
+const shapeStage: MoodPlannerStage = {
+  id: "shape",
+  async run(state) {
+    if (state.winner!.id !== HYPOTHESIS_VISUAL) {
+      return null;
+    }
+    const bought = await state.source.fetchMediaLook();
+    if (bought) {
+      state.trace.factsConsulted.push({ id: "media-look", path: bought.path });
+      if (bought.value.exposure === "dark") {
+        const base = resolveLookName(state.recipe.gradeLook);
+        state.gradeIntensity = Math.max(30, (base?.intensity ?? 70) - 15);
+        state.trace.notes.push(
+          `footage already measured dark (mean luma ${Math.round(bought.value.avgLuma * 100)}%) — gentler grade @ ${state.gradeIntensity}%`
+        );
+      }
+    }
+    return null;
+  }
+};
+
+// Stage: resolve the recipe into goals for the winner.
+const resolveStage: MoodPlannerStage = {
+  id: "resolve",
+  run(state) {
+    const { recipe, structural, gradeIntensity } = state;
+    if (state.winner!.id === HYPOTHESIS_VISUAL) {
+      state.goals.push({
         id: "goal_color",
         dialect: COLOR_DIALECT_ID,
         summary: `Grade the picture ${recipe.mood}`,
         payload: { look: recipe.gradeLook, ...(gradeIntensity !== undefined ? { lookIntensity: gradeIntensity } : {}) }
       });
       if (recipe.motion) {
-        goals.push({
+        state.goals.push({
           id: "goal_motion",
           dialect: MOTION_DIALECT_ID,
           summary: `${recipe.mood} motion accent`,
@@ -366,7 +441,7 @@ export async function planMoodBlueprint(
       // Titles ride along as an accent when they exist — the winner is "make the WHOLE thing
       // feel <mood>", and closure keeps the ensemble atomic.
       if (structural.hasText) {
-        goals.push({
+        state.goals.push({
           id: "goal_text",
           dialect: TEXT_DIALECT_ID,
           summary: `Match the titles to the ${recipe.mood} treatment`,
@@ -374,16 +449,22 @@ export async function planMoodBlueprint(
         });
       }
     } else {
-      goals.push({
+      state.goals.push({
         id: "goal_text",
         dialect: TEXT_DIALECT_ID,
         summary: `Restyle the titles ${recipe.mood}`,
         payload: { look: recipe.textLook }
       });
     }
+    return null;
+  }
+};
 
-    // Emit + close (all-or-nothing; nothing abstract escapes).
-    const blueprint: Blueprint = { id: `bp_mood_${recipe.mood}`, intent, goals };
+// Stage: emit + close (all-or-nothing; nothing abstract escapes). Always terminal.
+const closeStage: MoodPlannerStage = {
+  id: "close",
+  run(state) {
+    const blueprint: Blueprint = { id: `bp_mood_${state.recipe.mood}`, intent: state.intent, goals: state.goals };
     const result = closeBlueprint(blueprint);
     if (!result.ok) {
       // A recipe referencing a capability the registries don't carry is a data bug — decline
@@ -393,10 +474,64 @@ export async function planMoodBlueprint(
         reason: result.issues.map((issue) => issue.message).join(" ")
       };
     }
-    trace.hypotheses = [visual, text].map((h) => ({ ...h }));
+    const { visual, text } = state.hypotheses!;
+    state.trace.hypotheses = [visual, text].map((h) => ({ ...h }));
     for (const closed of result.closed) {
-      trace.notes.push(...closed.repairs);
+      state.trace.notes.push(...closed.repairs);
     }
-    return { kind: "blueprint", blueprint, closed: result.closed, trace };
+    return { kind: "blueprint", blueprint, closed: result.closed, trace: state.trace };
   }
+};
+
+/** The ordered stage table — the planner IS this data. */
+const MOOD_PLANNER_STAGES: readonly MoodPlannerStage[] = [
+  hypothesizeStage,
+  clarifyAnswerStage,
+  expandStage,
+  clarifyStage,
+  shapeStage,
+  resolveStage,
+  closeStage
+];
+
+/** Read-only view of the stage table for eval + explainability surfaces. */
+export function listMoodPlannerStages(): string[] {
+  return MOOD_PLANNER_STAGES.map((stage) => stage.id);
+}
+
+export async function planMoodBlueprint(
+  intent: string,
+  recipe: MoodRecipe,
+  structural: MoodStructuralEvidence,
+  source: MoodFactSource,
+  /**
+   * A clarify ANSWER ("the picture" / "the titles") — the user resolved the hypothesis
+   * themselves, so expansion and the clarify rule become no-ops and the chosen reading
+   * wins outright (structural gates still apply: choosing a reading with nothing to land
+   * on is an honest decline, never a silent no-op).
+   */
+  forced?: "visual" | "text"
+): Promise<MoodPlanOutcome> {
+  const trace: MoodTrace = { mood: recipe.mood, hypotheses: [], factsConsulted: [], notes: [], stagesRun: [] };
+  const state: MoodStageState = {
+    intent,
+    recipe,
+    structural,
+    source,
+    forced,
+    trace,
+    hypotheses: null,
+    winner: null,
+    gradeIntensity: undefined,
+    goals: []
+  };
+  for (const stage of MOOD_PLANNER_STAGES) {
+    trace.stagesRun!.push(stage.id);
+    const outcome = await stage.run(state);
+    if (outcome) {
+      return outcome;
+    }
+  }
+  // closeStage is terminal by contract — reaching here is a stage-table wiring bug.
+  return { kind: "decline", reason: "Mood planner ended without an outcome (stage-table wiring bug)." };
 }
