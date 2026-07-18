@@ -41,7 +41,10 @@ async function createDetector(): Promise<FaceDetector | null> {
         return await Detector.createFromOptions(fileset, {
           baseOptions: { modelAssetPath: MODEL_URL, delegate },
           runningMode: "IMAGE",
-          minDetectionConfidence: 0.5
+          // 0.6 (was 0.5, 2026-07-18): night-city window/light patterns cleared 0.5 as
+          // "faces"; the aggregation's corroboration rule is the main guard, this floor
+          // just cuts the volume of junk reaching it.
+          minDetectionConfidence: 0.6
         });
       } catch {
         // GPU delegate unavailable (no WebGL2) — fall through to CPU.

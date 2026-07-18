@@ -49,10 +49,18 @@ const DETECT_SAMPLE_WIDTH = 256;
 /** 7 spread points: presence-SHARE needs more temporal evidence than a look average. */
 const DETECT_SAMPLE_POINTS = [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95];
 
-export function aggregateFaceSamples(samples: FrameFaceSample[]): MediaFacesFact | null {
-  if (samples.length === 0) {
+export function aggregateFaceSamples(rawSamples: FrameFaceSample[]): MediaFacesFact | null {
+  if (rawSamples.length === 0) {
     return null;
   }
+  // CORROBORATION rule (real report 2026-07-18: a night-city skyline "grew" a face —
+  // window/light patterns are classic single-frame false positives): with 3+ samples, a
+  // detection in exactly ONE frame is noise, not a person — a real face on screen long
+  // enough to matter hits 2+ of the spread sample points. Missing a one-frame cameo is
+  // the safe direction; claiming a person in empty footage is not (precision-first).
+  const detectedFrameCount = rawSamples.filter((sample) => sample.faces.length > 0).length;
+  const samples =
+    rawSamples.length >= 3 && detectedFrameCount === 1 ? rawSamples.map((sample) => ({ faces: [] as FrameFaceSample["faces"] })) : rawSamples;
   let framesWithFaces = 0;
   let maxFaces = 0;
   let areaSum = 0;
@@ -94,7 +102,9 @@ function assetFor(target: WorldTarget, ctx: WorldContext) {
 
 export const facesObserver: WorldObserver = {
   id: "face-presence@builtin",
-  version: 1,
+  // v2 (2026-07-18): corroboration rule + 0.6 detector floor — the bump invalidates every
+  // memoized v1 fact, so the skyline false positive can't survive from cache.
+  version: 2,
   factTypes: [MEDIA_FACES_FACT],
   fidelity: 3,
   // Honest L3 price: first run includes the wasm+model download; warm runs are ~1–2s.

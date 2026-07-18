@@ -291,6 +291,33 @@ async function run(): Promise<void> {
     "aggregate: faceless footage is a REAL fact (0 presence, region none)",
     empty?.presenceShare === 0 && empty.dominantRegion === "none" && empty.avgFaceAreaShare === 0
   );
+  // REAL report 2026-07-18: a night-city skyline "grew" a face — one detection across 7
+  // sampled frames is noise, not a person (corroboration rule).
+  const skylineBlip = aggregateFaceSamples([
+    { faces: [] },
+    { faces: [{ centerX: 0.2, areaShare: 0.05 }] },
+    { faces: [] },
+    { faces: [] },
+    { faces: [] },
+    { faces: [] },
+    { faces: [] }
+  ]);
+  check(
+    "aggregate: SINGLE-frame detection across 3+ samples is suppressed as noise",
+    skylineBlip?.presenceShare === 0 && skylineBlip.dominantRegion === "none" && skylineBlip.maxFaces === 0
+  );
+  const corroborated = aggregateFaceSamples([
+    { faces: [{ centerX: 0.5, areaShare: 0.05 }] },
+    { faces: [{ centerX: 0.52, areaShare: 0.05 }] },
+    { faces: [] },
+    { faces: [] },
+    { faces: [] },
+    { faces: [] },
+    { faces: [] }
+  ]);
+  check("aggregate: TWO corroborating frames keep the detection", corroborated !== null && corroborated.presenceShare > 0.2 && corroborated.maxFaces === 1);
+  const singleImage = aggregateFaceSamples([{ faces: [{ centerX: 0.5, areaShare: 0.2 }] }]);
+  check("aggregate: a single-frame IMAGE keeps its face (corroboration needs 3+ samples)", singleImage?.presenceShare === 1);
 
   // ---- K5: inference rules (L4 — derived facts, confidence-propagated, cascade-invalidated) ----
   console.log("K5 inference (composition.character):");
