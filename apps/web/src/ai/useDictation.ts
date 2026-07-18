@@ -165,6 +165,11 @@ export function useDictation(options: UseDictationOptions = {}): UseDictationApi
   const wantActiveRef = useRef(false); // still supposed to be listening (drives Chrome auto-restart)
   const manualStopRef = useRef(false); // user-initiated stop/cancel vs engine auto-end
   const cancelledRef = useRef(false); // discard results for this session
+  // Session generation: `cancelledRef` alone can't kill an in-flight refine — the NEXT start()
+  // resets it to false, so a slow local-ASR refine from session A could land after session B
+  // began and clobber the composer with stale text. Every start/cancel bumps the generation;
+  // a refine only delivers if the generation it captured is still current.
+  const sessionGenRef = useRef(0);
   const statusRef = useRef<DictationStatus>(status);
   statusRef.current = status;
 
@@ -395,10 +400,13 @@ export function useDictation(options: UseDictationOptions = {}): UseDictationApi
             return;
           }
           setStatus("transcribing");
+          const generation = sessionGenRef.current;
           const blob = new Blob(chunks, { type: speechRecorder.mimeType || "audio/webm" });
           refiner(blob)
             .then((text) => {
-              if (text && text.trim() && !cancelledRef.current) {
+              // Generation check: a submit/cancel or a NEW session while we transcribed makes
+              // this refine stale — dropping it can only lose a correction, never user text.
+              if (text && text.trim() && !cancelledRef.current && generation === sessionGenRef.current) {
                 onRefinedRef.current?.(text.trim());
               }
             })
@@ -581,6 +589,7 @@ export function useDictation(options: UseDictationOptions = {}): UseDictationApi
     manualStopRef.current = false;
     wantActiveRef.current = true;
     heardSpeechRef.current = false;
+    sessionGenRef.current += 1;
     setCapturing(false);
     setError(null);
     setInterimText("");
@@ -598,6 +607,7 @@ export function useDictation(options: UseDictationOptions = {}): UseDictationApi
     cancelledRef.current = true;
     manualStopRef.current = true;
     wantActiveRef.current = false;
+    sessionGenRef.current += 1; // invalidate any in-flight refine immediately
     teardown();
     setStatus("idle");
     setError(null);

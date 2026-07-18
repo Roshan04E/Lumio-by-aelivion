@@ -25,7 +25,7 @@ import {
 import { runGeneration } from "../../generate/generateClient";
 import type { GenerateStudioPrefill } from "../generate/GenerateStudio";
 import { classifyContinuity, type ContinuityResult } from "../../ai/planner/intent-continuity";
-import { normalizeTranscript } from "../../ai/transcript-normalizer";
+import { arbitrateFinal, normalizeTranscript } from "../../ai/transcript-normalizer";
 import { requestSpokenAck } from "../../ai/ack";
 import {
   localEarsEnabled,
@@ -300,6 +300,9 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
   inputStateRef.current = input;
   /** One interim fast-accept per dictation session (reset in startDictation). */
   const interimFastFiredRef = useRef(false);
+  /** The last interim the user READ before a final replaced it — the second engine
+   * hypothesis `arbitrateFinal` weighs against the final ("neon" vs "new"). */
+  const lastInterimRef = useRef("");
   const dictation = useDictation({
     // Hands-free timing, two-phase (real feedback: 1.6s "does not give me enough time to
     // talk"): ~7s of thinking time before the first word, then a 2.6s pause submits. Approvals
@@ -323,15 +326,20 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         handleSubmitVoiceRef.current(word.replace(/[.!,]$/, ""));
         return;
       }
+      lastInterimRef.current = text;
       const base = dictationBaseRef.current;
       const next = base && text ? `${base} ${text}` : base + text;
       lastDictationValueRef.current = next;
       setInput(next);
     },
     onFinal: (rawText) => {
-      // Vocabulary biasing: fix editor-lexicon mishearings ("lip one" → "clip 1", "be to layer"
-      // → "V2 layer") on the FINAL only, so the user sees the corrected command in the composer.
-      const text = normalizeTranscript(rawText);
+      // Registry-anchored arbitration first: the final only overrules the interim the user
+      // was reading where the final's word resolves in our vocabularies too ("neon" survives
+      // a "new" final). Then vocabulary biasing fixes editor-lexicon mishearings ("lip one"
+      // → "clip 1") on the result, so the user sees the corrected command in the composer.
+      const arbitrated = arbitrateFinal(lastInterimRef.current, rawText);
+      lastInterimRef.current = "";
+      const text = normalizeTranscript(arbitrated);
       const base = dictationBaseRef.current;
       const merged = base && text ? `${base} ${text}` : base + text;
       dictationBaseRef.current = merged;
@@ -343,9 +351,13 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
     refineFinal: earsOn && earsInfo.status === "ready" ? refineDictationFinal : undefined,
     onRefined: (text) => {
       // The local model heard the WHOLE utterance — its transcript replaces this session's Web
-      // Speech finals (everything after the composer content captured at session start).
+      // Speech finals (everything after the composer content captured at session start). The
+      // same arbitration applies: the visible session text is a hypothesis the user already
+      // read, and the refiner may not replace a registry-valid name with an invalid one.
       const base = dictationSessionBaseRef.current;
-      const merged = base && text ? `${base} ${text}` : base + text;
+      const visible = inputStateRef.current.startsWith(base) ? inputStateRef.current.slice(base.length).trim() : "";
+      const arbitrated = visible ? arbitrateFinal(visible, text) : text;
+      const merged = base && arbitrated ? `${base} ${arbitrated}` : base + arbitrated;
       dictationBaseRef.current = merged;
       lastDictationValueRef.current = merged;
       setInput(merged);
@@ -370,6 +382,7 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
     dictationSessionBaseRef.current = inputStateRef.current;
     lastDictationValueRef.current = inputStateRef.current;
     interimFastFiredRef.current = false;
+    lastInterimRef.current = "";
     startDictationEngine();
   }, [startDictationEngine]);
 

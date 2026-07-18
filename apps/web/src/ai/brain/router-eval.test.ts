@@ -23,7 +23,7 @@ import {
 } from "./semantic";
 import { clearWakePhrases, learnWakePhrase, loadWakePhrases, looksLikeWakeAttempt, matchWakeWord } from "../wake-word";
 import { speakable, splitSpeakable } from "../tts";
-import { normalizeTranscript } from "../transcript-normalizer";
+import { arbitrateFinal, normalizeTranscript } from "../transcript-normalizer";
 import { looksLikeSelfEcho } from "../echo-guard";
 
 function layer(
@@ -687,6 +687,49 @@ async function main(): Promise<void> {
   check("MUST NOT: 'be to the point' untouched (no track context)", normalizeTranscript("be to the point") === "be to the point");
   check("MUST NOT: 'we two should review this' untouched", normalizeTranscript("we two should review this") === "we two should review this");
   check("MUST NOT: 'payback'/'napping' never become editor terms", normalizeTranscript("payback while napping") === "payback while napping");
+
+  console.log("\nFINAL-vs-INTERIM ARBITRATION — registry-anchored (real report 2026-07-18: interim 'neon' → final 'new'):");
+  check(
+    "REAL corpus: final 'new' loses to readable interim 'neon' in the look frame",
+    arbitrateFinal("apply the neon look on clip 1", "apply the new look on clip 1") === "apply the neon look on clip 1",
+    arbitrateFinal("apply the neon look on clip 1", "apply the new look on clip 1")
+  );
+  check(
+    "multi-word look survives: 'lower third' beats final 'lower bird'",
+    arbitrateFinal("apply the lower third look", "apply the lower bird look") === "apply the lower third look"
+  );
+  check(
+    "mood frame: 'make it moody' beats final 'make it moving'",
+    arbitrateFinal("make it moody", "make it moving") === "make it moody"
+  );
+  check(
+    "MUST NOT: a RESOLVABLE final always wins (engine's second thoughts trusted)",
+    arbitrateFinal("apply the noir look", "apply the cinematic look") === "apply the cinematic look"
+  );
+  check(
+    "MUST NOT: unresolvable interim never overrides ('vaporwave' stays out)",
+    arbitrateFinal("apply the vaporwave look", "apply the new look") === "apply the new look"
+  );
+  check(
+    "MUST NOT: outside a known frame the final is untouched",
+    arbitrateFinal("blur clip one", "blur clip two") === "blur clip two"
+  );
+  check("empty interim → final unchanged", arbitrateFinal("", "apply the new look") === "apply the new look");
+  check(
+    "frame slot replacement is surgical (surrounding text intact)",
+    arbitrateFinal("please apply the neon look to clip 2 now", "please apply the new look to clip 2 now") ===
+      "please apply the neon look to clip 2 now"
+  );
+
+  console.log("\nLOOK-FRAME FUZZY BIAS — distance-1 only, frame-gated:");
+  check("'neyon' → 'Neon' inside the look frame", normalizeTranscript("apply the neyon look") === "apply the Neon look", normalizeTranscript("apply the neyon look"));
+  check("'noire' → 'Noir' inside the look frame", normalizeTranscript("apply the noire look") === "apply the Noir look");
+  check(
+    "MUST NOT: 'new' (distance 2) is never guessed at without interim evidence",
+    normalizeTranscript("apply the new look") === "apply the new look"
+  );
+  check("MUST NOT: resolvable names pass through byte-identical", normalizeTranscript("apply the moody look") === "apply the moody look");
+  check("MUST NOT: no look frame → no fuzzy ('neyon lights' untouched)", normalizeTranscript("add neyon lights") === "add neyon lights");
 
   console.log("\nSELF-ECHO GUARD — discard transcripts of our own TTS (voice round 9):");
   {
