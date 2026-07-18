@@ -74,36 +74,47 @@ vec4 effect(vec2 uv) {
   vec2 dir = (dot(ev, ev) > 1e-8) ? normalize(ev) : vec2(0.0, 1.0);
   float A = (lambda1 + lambda2 > 1e-6) ? (lambda1 - lambda2) / (lambda1 + lambda2) : 0.0;
 
-  // Oriented ellipse: stretched along the flow by anisotropy (GPU Pro shaping, alpha = 1).
+  // Area-preserving oriented ellipse (sqrt shaping): tap cost stays ~π·r² regardless of anisotropy
+  // and the long axis never exceeds ~1.42·radius — so the DYNAMIC loop bound below is honest (the
+  // first cut clamped loops at ±6 while the ellipse could reach 12: silent truncation).
   float radius = clamp(paintRadius, 1.0, 6.0);
-  float ea = radius * clamp(1.0 + A, 0.1, 2.0);
-  float eb = radius * clamp(1.0 / (1.0 + A), 0.1, 2.0);
+  float stretch = sqrt(1.0 + A);
+  float ea = radius * stretch;
+  float eb = radius / stretch;
   // Row-major [[cos/a, sin/a], [-sin/b, cos/b]] — maps a pixel offset into the ellipse's unit disc.
   mat2 SR = mat2(dir.x / ea, -dir.y / eb, dir.y / ea, dir.x / eb);
-  int radI = int(ceil(max(ea, eb)));
+  int radI = int(min(ceil(ea), 9.0));
 
   vec2 px = 1.0 / uResolution;
   vec4 m[8];
   vec3 s[8];
   for (int k = 0; k < 8; k++) { m[k] = vec4(0.0); s[k] = vec3(0.0); }
-  // Rotate the unit-disc sample through the 8 sector frames by repeated 45-degree rotation — the
-  // polynomial weight needs no trig per sector.
+  // Rotate the unit-disc sample through the sector frames by repeated 45° rotation — no per-sector
+  // trig. 4 rotations cover all 8 sectors: the polynomial is x-symmetric, so sector k+4's weight is
+  // the same expression with -q.x (halves the inner loop).
   const mat2 R45 = mat2(0.7071067812, 0.7071067812, -0.7071067812, 0.7071067812);
 
-  for (int j = -6; j <= 6; j++) {
-    for (int i = -6; i <= 6; i++) {
-      if (i < -radI || i > radI || j < -radI || j > radI) continue;
+  // DYNAMIC loop bounds — deliberate (ES 3.0 allows them): constant bounds made ANGLE/D3D fully
+  // unroll 169 taps × 8 sectors into a several-thousand-instruction shader — a seconds-long compile
+  // hitch + playback crawl (the "stylize freezes the video" report, 2026-07-18). A loop the
+  // compiler keeps as a loop compiles instantly and executes only the real taps.
+  for (int j = -radI; j <= radI; j++) {
+    for (int i = -radI; i <= radI; i++) {
       vec2 p = SR * vec2(float(i), float(j));
       if (dot(p, p) > 1.0) continue;
       vec4 srcPx = getSrcColor(uv + px * vec2(float(i), float(j)));
       vec3 c = srcPx.rgb;
       float aW = srcPx.a; // transparent samples contribute nothing — no edge halos
       vec2 q = p;
-      for (int k = 0; k < 8; k++) {
-        float w = max(0.0, (q.x + 0.33) - 3.77 * q.y * q.y);
-        w = w * w * aW;
-        m[k] += vec4(c * w, w);
-        s[k] += c * c * w;
+      for (int k = 0; k < 4; k++) {
+        float wPos = max(0.0, (q.x + 0.33) - 3.77 * q.y * q.y);
+        wPos = wPos * wPos * aW;
+        m[k] += vec4(c * wPos, wPos);
+        s[k] += c * c * wPos;
+        float wNeg = max(0.0, (0.33 - q.x) - 3.77 * q.y * q.y);
+        wNeg = wNeg * wNeg * aW;
+        m[k + 4] += vec4(c * wNeg, wNeg);
+        s[k + 4] += c * c * wNeg;
         q = R45 * q;
       }
     }
