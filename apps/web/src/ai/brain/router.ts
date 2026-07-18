@@ -26,6 +26,7 @@ import {
   layerIdForOrdinal,
   listCreativeLooks,
   resolveLookName,
+  resolveMotionStyle,
   resolveTargetLayer,
   resolveTextLookName,
   TEXT_LOOK_NAMES
@@ -199,6 +200,21 @@ const APPLY_LOOK_RE = /^(?:apply|add|use|give (?:it|this)?) ?(?:a |the )?(.{1,40
 // guessed applyTextLook("new look") and removeEffect("neonLook") for these — neither exists.
 const REMOVE_LOOK_NAMED_RE = /^(?:remove|clear|delete|drop|take off) (?:the |a )?(.{1,40}?) (?:look|grade)(?: (?:from|off|on) (.+))?$/;
 const REMOVE_LOOK_BARE_RE = /^(?:remove|clear|delete|drop|take off) (?:the )?(?:creative |color )?(?:look|grade)(?: (?:from|off|on) (.+))?$/;
+
+/**
+ * Tier-0 motion reflex (K5 follow-up): "pop in clip 2" / "make clip 3 slide in from the left"
+ * / "zoom out clip 1" compile straight to ONE applyMotion action (the K3 motion compiler runs
+ * inside the action against the layer's real timing/transform). "fade in/out" is deliberately
+ * EXCLUDED — fades are the shipped tier-1 transition family and must keep meaning transitions.
+ */
+const MOTION_STYLE_WORDS = "pop|bounce|slide|zoom|scale|spin|drift|fly|sweep";
+const MOTION_IN_OUT_RE = new RegExp(
+  `^(?:make )?(.+?) (${MOTION_STYLE_WORDS})s? (in|out)(?: from the (left|right|top|bottom))?$`
+);
+const MOTION_LEADING_RE = new RegExp(
+  `^(${MOTION_STYLE_WORDS})[- ](in|out) (.+?)(?: from the (left|right|top|bottom))?$`
+);
+const EMPHASIS_RE = /^(?:make )?(.+?) (pulse|shake|wiggle|jiggle|breathe)s?$/;
 
 const SPLIT_TARGETED_RE = /^(?:split|cut) (.+?) (?:at|on) (?:the )?playhead$/;
 const SPLIT_HERE_RE = /^(?:split|cut)(?: (?:the |my )?(?:selected |this )?clip)? (?:at|on) (?:the )?playhead$/;
@@ -425,6 +441,46 @@ function removeLook(context: BrainContext, prompt: string, rawName: string | und
   return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.remove-look" }, "t0.remove-look") : ESCALATE;
 }
 
+function applyMotionReflex(
+  context: BrainContext,
+  prompt: string,
+  phrase: string,
+  kind: "entrance" | "exit" | "emphasis",
+  styleWord: string,
+  directionWord: string | undefined
+): BrainRouteResult {
+  // Style must resolve for THIS kind ("pop out" doesn't exist — exits have no overshoot) —
+  // otherwise escalate silently and let the model interpret.
+  const style = resolveMotionStyle(kind, styleWord);
+  if (!style) {
+    return ESCALATE;
+  }
+  const ordinal = parseExactClipPhrase(phrase);
+  if (!ordinal) {
+    return ESCALATE; // "make it pop in" — deictic targets stay with the planners
+  }
+  const layerId = layerIdForOrdinal(context.composition, ordinal);
+  if (!layerId) {
+    return reflexAnswer(
+      `There's no clip ${ordinal} on the timeline — I count ${clipCount(context.composition)} clip(s).`,
+      "t0.apply-motion"
+    );
+  }
+  const layer = findLayer(context.composition, layerId);
+  if (!layer || layer.type === "audio") {
+    return ESCALATE;
+  }
+  const direction = directionWord === "top" ? "up" : directionWord === "bottom" ? "down" : directionWord;
+  const plan = brainPlan(prompt, [
+    {
+      actionId: "applyMotion",
+      params: { layerId, kind, style: style.style, ...(direction ? { direction } : {}) },
+      summary: `${style.style} ${kind} on clip ${ordinal}${style.repair ? ` (${style.repair})` : ""}${direction ? ` from the ${directionWord}` : ""}`
+    }
+  ]);
+  return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.apply-motion" }, "t0.apply-motion") : ESCALATE;
+}
+
 function splitAtPlayhead(context: BrainContext, prompt: string, phrase: string | undefined): BrainRouteResult {
   let layerId: string | undefined;
   let label: string;
@@ -545,6 +601,26 @@ export function routePrompt(prompt: string, context: BrainContext): BrainRouteRe
     const result = applyLook(context, prompt, lookMatch[1]!, lookMatch[2]);
     if (result.kind !== "escalate") {
       return result;
+    }
+  }
+
+  // Motion reflex: "pop in clip 2" / "make clip 3 slide in from the left" / "make clip 2 pulse".
+  {
+    const inOut = MOTION_IN_OUT_RE.exec(text);
+    const leading = inOut ? null : MOTION_LEADING_RE.exec(text);
+    const emphasis = inOut || leading ? null : EMPHASIS_RE.exec(text);
+    const parsed = inOut
+      ? { phrase: inOut[1]!, style: inOut[2]!, kind: inOut[3] === "in" ? ("entrance" as const) : ("exit" as const), dir: inOut[4] }
+      : leading
+        ? { phrase: leading[3]!, style: leading[1]!, kind: leading[2] === "in" ? ("entrance" as const) : ("exit" as const), dir: leading[4] }
+        : emphasis
+          ? { phrase: emphasis[1]!, style: emphasis[2]!, kind: "emphasis" as const, dir: undefined }
+          : null;
+    if (parsed) {
+      const result = applyMotionReflex(context, prompt, parsed.phrase, parsed.kind, parsed.style, parsed.dir);
+      if (result.kind !== "escalate") {
+        return result;
+      }
     }
   }
 

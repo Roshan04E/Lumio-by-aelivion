@@ -577,6 +577,23 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    blueprint:eval +6 (data rows close end to end). Open: trace UI chrome (collapsible
    "Why?" row instead of an ask), face-presence observer, inference rules, SDK surface
    formalization.
+   **Inference rules first slice + motion reflex shipped 2026-07-18 (second slice)** —
+   `world/observers/character.ts`: the first L4 DERIVED fact (`composition.character`:
+   caption-driven/mixed/footage-driven × fast-cut/moderate/long-take), consuming the L2
+   text-summary FACT through the Knowledge Service and demonstrating the three inference
+   laws: confidence propagates (rule prior × evidence, never ≥ it), dependencies cascade
+   (a text edit kills the derived fact via the store's dependency graph — verified in
+   world:eval), meaning stays honest (the value carries the raw shares; the world answer
+   labels it "inferred · N% confidence"). Infra: per-fact `dependencies` on ObservedFact,
+   and `"inline"` fact acquisition — a query issued from INSIDE a running observation runs
+   the input observer directly (a nested scheduled job deadlocks the single-concurrency
+   pump; world:eval caught the deadlock the day the rule was written, and now carries a
+   loud-exit guard so an event-loop drain can never silently pass). Plus the tier-0
+   APPLY-MOTION reflex: "pop in clip 2" / "make clip 3 slide in from the left" /
+   "zoom out clip 1" / "make clip 2 pulse" compile locally to one `applyMotion` step
+   (per-kind style resolution; "pop out" and deictic targets escalate; "fade in" stays a
+   transition). Open (unchanged otherwise): trace UI chrome, face-presence observer, more
+   inference rules, SDK formalization.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

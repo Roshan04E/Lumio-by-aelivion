@@ -15,6 +15,7 @@ import { textSummaryObserver } from "./observers/text-summary";
 import { systemObserver } from "./observers/system";
 import { userProfileObserver } from "./observers/user-profile";
 import { projectMediaObserver } from "./observers/project-media";
+import { characterObserver } from "./observers/character";
 import { perceptionQueueDepth } from "./scheduler";
 import type { WorldContext } from "./types";
 
@@ -25,6 +26,8 @@ registerObserver(textSummaryObserver);
 registerObserver(systemObserver);
 registerObserver(userProfileObserver);
 registerObserver(projectMediaObserver);
+// K5 inference rules — L4 derived facts (confidence-propagated, dependency-cascaded).
+registerObserver(characterObserver);
 
 // Host-registered live asset list (EditorPage state — includes server/stock assets the
 // local-first records don't). Absent → local records alone still serve local imports.

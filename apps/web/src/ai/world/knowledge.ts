@@ -28,10 +28,20 @@ export interface KnowledgeResult<V = unknown> {
 
 const DEFAULT_BUDGET_MS = 5_000;
 
+/**
+ * Acquisition mode. Scheduler priorities queue through the single-concurrency perception
+ * pump; `"inline"` runs the observer DIRECTLY — required when a query is issued from INSIDE
+ * a running observation (K5 inference rules buying their input facts): a nested scheduled
+ * job would deadlock the pump (it waits for the very job that's awaiting it). The nested
+ * acquisition is part of the same scheduled unit of work, so inline is also the honest cost
+ * accounting, not a bypass.
+ */
+export type FactAcquisition = PerceptionPriority | "inline";
+
 export async function queryFact<V = unknown>(
   query: FactQuery,
   ctx: WorldContext,
-  priority: PerceptionPriority = "user-blocking"
+  priority: FactAcquisition = "user-blocking"
 ): Promise<KnowledgeResult<V> | null> {
   const startedAt = Date.now();
   const key = targetKey(query.target);
@@ -68,7 +78,10 @@ export async function queryFact<V = unknown>(
       continue; // can't observe this target here (wrong kind / missing asset / no DOM)
     }
     try {
-      const observed = await schedulePerception(priority, () => observer.observe(query.target, ctx));
+      const observed =
+        priority === "inline"
+          ? await observer.observe(query.target, ctx)
+          : await schedulePerception(priority, () => observer.observe(query.target, ctx));
       const factsStored = storeObservation(observer, query.target, signature, observed);
       const match = factsStored.find((fact) => fact.type === query.type) as Fact<V> | undefined;
       if (match && match.confidence >= minConfidence) {

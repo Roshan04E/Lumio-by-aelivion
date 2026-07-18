@@ -33,6 +33,7 @@ import { registerObserver } from "./observers";
 import { metadataObserver, MEDIA_METADATA_FACT, type MediaMetadataFact } from "./observers/metadata";
 import { lookObserver, MEDIA_LOOK_FACT } from "./observers/look";
 import { textSummaryObserver, COMPOSITION_TEXT_FACT, type CompositionTextFact } from "./observers/text-summary";
+import { characterObserver, COMPOSITION_CHARACTER_FACT, type CompositionCharacterFact } from "./observers/character";
 import { systemObserver, SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID, type SystemCapabilitiesFact } from "./observers/system";
 import { userProfileObserver, USER_AI_PROFILE_FACT, USER_TARGET_ID, type UserAiProfileFact } from "./observers/user-profile";
 import { projectMediaObserver, PROJECT_MEDIA_FACT, PROJECT_TARGET_ID, type ProjectMediaFact } from "./observers/project-media";
@@ -168,6 +169,7 @@ registerObserver(textSummaryObserver);
 registerObserver(systemObserver);
 registerObserver(userProfileObserver);
 registerObserver(projectMediaObserver);
+registerObserver(characterObserver);
 
 const assetTarget = { kind: "asset" as const, id: "a1" };
 const compTarget = { kind: "composition" as const, id: "c" };
@@ -250,6 +252,43 @@ async function run(): Promise<void> {
   check("editing text invalidates + re-measures", textEdited?.path === "text-summary@builtin" && textEdited.fact.value.wordCount === 4);
 
   check("DOM-only look observer declines under node", (await queryFact({ type: MEDIA_LOOK_FACT, target: assetTarget }, ctx)) === null);
+
+  // ---- K5: inference rules (L4 — derived facts, confidence-propagated, cascade-invalidated) ----
+  console.log("K5 inference (composition.character):");
+  clearFactStore();
+  const character = await queryFact<CompositionCharacterFact>({ type: COMPOSITION_CHARACTER_FACT, target: compTarget }, ctx);
+  check(
+    "character derives from the text-summary fact (mixed / moderate on the fixture)",
+    character?.fact.value.profile === "mixed" && character.fact.value.pacing === "moderate",
+    `${character?.fact.value.profile}/${character?.fact.value.pacing}`
+  );
+  check(
+    "confidence propagates (rule prior × input confidence, never ≥ the evidence)",
+    character !== null && character.fact.confidence < 0.95 && Math.abs(character.fact.confidence - 0.8 * 0.95) < 1e-9
+  );
+  const textInput = getStoredFact(COMPOSITION_TEXT_FACT, "composition:c");
+  check("derived fact records its input's id as a dependency", character?.fact.dependencies[0] === textInput?.id);
+  const characterCached = await queryFact<CompositionCharacterFact>({ type: COMPOSITION_CHARACTER_FACT, target: compTarget }, ctx);
+  check("inference memoizes like any fact", characterCached?.path === "cached");
+  // Cascade: editing the text invalidates the text summary → the derived character DIES WITH IT.
+  const editedCharacterComp: TimelineComposition = {
+    ...textComp,
+    tracks: textComp.tracks.map((track) =>
+      track.type === "text"
+        ? { ...track, layers: track.layers.map((l) => (l.id === "t1" ? { ...l, text: "short" } : l)) }
+        : track
+    )
+  };
+  await queryFact<CompositionTextFact>({ type: COMPOSITION_TEXT_FACT, target: compTarget }, { ...ctx, composition: editedCharacterComp });
+  check(
+    "input invalidation CASCADES to the derived fact (store no longer holds character)",
+    getStoredFact(COMPOSITION_CHARACTER_FACT, "composition:c") === undefined
+  );
+  const characterAfter = await queryFact<CompositionCharacterFact>(
+    { type: COMPOSITION_CHARACTER_FACT, target: compTarget },
+    { ...ctx, composition: editedCharacterComp }
+  );
+  check("re-query re-derives fresh from the new evidence", characterAfter?.path === "character-inference@builtin");
 
   // ---- K2: state-branch observers ----
   console.log("K2 state branches:");
@@ -356,4 +395,8 @@ async function run(): Promise<void> {
   process.exit(failures === 0 ? 0 : 1);
 }
 
+// Loud-exit guard: if the event loop drains before run() completes (e.g. a scheduler
+// deadlock leaves promises forever-pending — real bug, 2026-07-18), node exits WITHOUT
+// reaching the explicit process.exit — this default turns that silent pass into a failure.
+process.exitCode = 1;
 void run();

@@ -209,6 +209,41 @@ check("'apply the noir look' with no unique target → escalates", route("apply 
   check("'apply the noir look to clip 9' (doesn't exist) → honest bounds answer", result.kind === "answer" && /no clip 9/i.test(answerText(result)));
 }
 
+console.log("\nAPPLY-MOTION reflex (K5 follow-up — 'pop in clip 2' used to buy an LLM round):");
+{
+  const step = firstAction(route("pop in clip 1"));
+  const params = step.params as { kind?: string; style?: string; layerId?: string };
+  check(
+    "'pop in clip 1' → applyMotion(entrance, pop, vid_a)",
+    step.actionId === "applyMotion" && params.kind === "entrance" && params.style === "pop" && params.layerId === "vid_a"
+  );
+}
+{
+  const step = firstAction(route("make clip 3 slide in from the left"));
+  const params = step.params as { kind?: string; style?: string; direction?: string; layerId?: string };
+  check(
+    "'make clip 3 slide in from the left' → applyMotion(entrance, slide, left, vid_b)",
+    step.actionId === "applyMotion" && params.style === "slide" && params.direction === "left" && params.layerId === "vid_b"
+  );
+}
+{
+  const step = firstAction(route("zoom out clip 1"));
+  const params = step.params as { kind?: string; style?: string };
+  check("'zoom out clip 1' → applyMotion(exit, scale via zoom alias)", step.actionId === "applyMotion" && params.kind === "exit" && params.style === "scale");
+}
+{
+  const step = firstAction(route("make clip 2 pulse"));
+  const params = step.params as { kind?: string; style?: string };
+  check("'make clip 2 pulse' → applyMotion(emphasis, pulse)", step.actionId === "applyMotion" && params.kind === "emphasis" && params.style === "pulse");
+}
+check("'make it pop in' (deictic) → escalates", route("make it pop in").kind === "escalate");
+check("'pop out clip 1' (pop is entrance-only) → escalates", route("pop out clip 1").kind === "escalate");
+{
+  const result = route("fade in clip 1");
+  const isMotion = result.kind === "plan" && result.plan.steps.some((step) => step.actionId === "applyMotion");
+  check("'fade in clip 1' still routes to the transition family, NOT applyMotion", !isMotion);
+}
+
 console.log("\nREMOVE-LOOK reflex (real transcript 2026-07-18 — the fast lane invented applyTextLook('new look') and removeEffect('neonLook')):");
 {
   // Same layout as the base fixture, but clip 3 carries a creative look to remove.

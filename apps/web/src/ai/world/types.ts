@@ -111,6 +111,11 @@ export interface ObservedFact<V = unknown> {
   value: V;
   confidence: number;
   sampledRanges?: Array<[number, number]> | undefined;
+  /**
+   * Fact ids this fact was DERIVED from (K5 inference rules — L4 of the fidelity ladder).
+   * The store cascades invalidation through these: derived meanings die with their inputs.
+   */
+  dependencies?: string[] | undefined;
 }
 
 /** Perception fidelity ladder (ORRERIS_OS.md): L0 metadata … L4 inferred meaning. */

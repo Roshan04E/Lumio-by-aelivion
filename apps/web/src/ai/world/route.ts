@@ -20,6 +20,8 @@ import type { MediaMetadataFact } from "./observers/metadata";
 import { MEDIA_METADATA_FACT } from "./observers/metadata";
 import type { CompositionTextFact } from "./observers/text-summary";
 import { COMPOSITION_TEXT_FACT } from "./observers/text-summary";
+import type { CompositionCharacterFact } from "./observers/character";
+import { COMPOSITION_CHARACTER_FACT } from "./observers/character";
 import type { SystemCapabilitiesFact } from "./observers/system";
 import { SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID } from "./observers/system";
 import type { UserAiProfileFact } from "./observers/user-profile";
@@ -248,12 +250,23 @@ async function analyzeComposition(composition: TimelineComposition): Promise<Bra
   const v = result.fact.value;
   const clipTotal = composition.tracks.reduce((sum, track) => sum + track.layers.length, 0);
   const coverage = v.timelineSeconds > 0 ? Math.round((v.coveredSeconds / v.timelineSeconds) * 100) : 0;
+  // K5 inference: the derived L4 character fact (confidence-propagated; labeled "inferred",
+  // never dressed up as a measurement — honest-labels invariant).
+  const character = await queryFact<CompositionCharacterFact>(
+    { type: COMPOSITION_CHARACTER_FACT, target: { kind: "composition", id: composition.id }, budgetMs: 500 },
+    ctx
+  );
   const lines = [
     `**Timeline — measured analysis**`,
     `- ${clipTotal} layer(s) across ${composition.tracks.length} track(s), ${v.timelineSeconds.toFixed(1)}s long`,
     v.textLayerCount > 0
       ? `- Text: ${v.textLayerCount} text layer(s), ${v.wordCount} words covering ${coverage}% of the timeline (${v.wordsPerMinute.toFixed(0)} wpm over covered spans)`
       : `- Text: none on the timeline`,
+    ...(character
+      ? [
+          `- Character: **${character.fact.value.profile}**, ${character.fact.value.pacing} (inferred · ${Math.round(character.fact.confidence * 100)}% confidence)`
+        ]
+      : []),
     `\n_Measured on-device · ${result.path === "cached" ? "cached fact" : "fresh observation"} · 0 tokens_`
   ];
   return answer(lines.join("\n"), "world.analyze-comp");

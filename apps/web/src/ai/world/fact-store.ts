@@ -97,7 +97,8 @@ export function storeObservation(
         inputSignature,
         sampledRanges: item.sampledRanges
       },
-      dependencies
+      // Per-fact dependencies (inference rules) win over the whole-run default.
+      dependencies: item.dependencies ?? dependencies
     };
     // Replacing a fact is a change of its value → anything derived FROM the old value is stale.
     if (facts.has(fact.id)) {
