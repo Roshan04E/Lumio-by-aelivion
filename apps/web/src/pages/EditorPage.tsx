@@ -10963,7 +10963,13 @@ function AssetBinImpl({
   }, [activeFolder, childFoldersOf, folderTab, queryText]);
   const filteredAssets = assets.filter((asset) => {
     const assetFolder = normalizeAssetFolder(asset.folder) || (folderTab ? folderRoot : "");
-    const inActiveFolder = !folderTab || (queryText ? isAssetFolderDescendant(assetFolder, activeFolder) || assetFolder === activeFolder : assetFolder === activeFolder);
+    // The Search tab's Stock library is SUBTREE-inclusive even without a query (user report
+    // 2026-07-18: imported stock lives in `stock/pexels/<type>`, so the tab's root looked
+    // empty — "No media yet" — until you drilled three bins down). Local/Brand/AI keep the
+    // strict per-bin listing; their bins are user-organized, not machine-generated depth.
+    const subtreeListing = Boolean(queryText) || sourceTab === "search";
+    const inActiveFolder =
+      !folderTab || (subtreeListing ? isAssetFolderDescendant(assetFolder, activeFolder) || assetFolder === activeFolder : assetFolder === activeFolder);
     return (
       inActiveFolder &&
       matchesAssetTab(asset, sourceTab, Boolean(usedCounts[asset.id])) &&
