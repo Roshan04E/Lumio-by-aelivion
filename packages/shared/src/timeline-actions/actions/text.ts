@@ -3,6 +3,8 @@ import { actionResult, runMutation } from "../patches";
 import { assertLayerExists, findLayer } from "../validation";
 import type { TimelineActionDefinition } from "../types";
 import { ABSOLUTE_MIN_CLIP_SECONDS, createShapeLayer, createTextLayer, locateLayer, pickTrackForLayer } from "./shared";
+import { applyTextStyle } from "../../text-styles";
+import { getTextLook, resolveTextLookName, TEXT_LOOK_NAMES } from "../../text-look";
 
 const colorSchema = z.string().regex(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/, "Expected a hex color like #ff0000");
 
@@ -98,6 +100,62 @@ const updateText: TimelineActionDefinition<z.infer<typeof updateTextSchema>> = {
   }
 };
 
+const applyTextLookSchema = z.object({
+  layerId: z.string(),
+  /** Text-look name — canonical or alias; canonicalized at the write seam. */
+  look: z.string().min(1)
+});
+
+/**
+ * K3 text dialect's execution primitive: bake a named text look (text-look.ts) onto a text
+ * layer via `applyTextStyle` — one undoable step, results are ordinary editable layer fields
+ * (both renderers already draw them). Same closure discipline as creativeLook params:
+ * unknown names fail validation with the library in the message; aliases repair here.
+ */
+const applyTextLookAction: TimelineActionDefinition<z.infer<typeof applyTextLookSchema>> = {
+  id: "applyTextLook",
+  name: "Apply text look",
+  description: "Style a text clip with a named look preset (Headline, Caption Pill, Lower Third, Neon…).",
+  category: "text",
+  inputSchema: applyTextLookSchema,
+  validationRules: (params, ctx) => {
+    const located = findLayer(ctx.composition, params.layerId);
+    if (!located) {
+      return assertLayerExists(ctx, params.layerId);
+    }
+    if (located.layer.type !== "text") {
+      return [{ code: "wrong_layer_type", message: `Layer "${params.layerId}" is not text`, path: "layerId" }];
+    }
+    return resolveTextLookName(params.look)
+      ? []
+      : [
+          {
+            code: "invalid_text_look",
+            message: `"${params.look}" isn't a text look — available: ${TEXT_LOOK_NAMES.join(", ")}`,
+            path: "look"
+          }
+        ];
+  },
+  canUndo: true,
+  execute: (params, ctx) => {
+    const resolved = resolveTextLookName(params.look)!;
+    const look = getTextLook(resolved.look)!;
+    const mutation = runMutation(ctx.composition, (draft) => {
+      const located = locateLayer(draft, params.layerId);
+      if (!located) {
+        return;
+      }
+      const styled = applyTextStyle(located.layer, look.style);
+      located.track.layers[located.layerIndex] = styled;
+    });
+    return actionResult(
+      ctx.composition,
+      mutation,
+      `Apply "${resolved.look}" text look${resolved.repair ? ` — ${resolved.repair}` : ""}`
+    );
+  }
+};
+
 const addShapeSchema = z.object({
   color: colorSchema.optional(),
   shapeKind: z.enum(["rectangle", "rounded-rectangle", "ellipse", "line", "triangle", "diamond", "pentagon", "pen"]).optional(),
@@ -137,4 +195,4 @@ const addShape: TimelineActionDefinition<z.infer<typeof addShapeSchema>> = {
   }
 };
 
-export const textActions = [addText, updateText, addShape];
+export const textActions = [addText, updateText, applyTextLookAction, addShape];

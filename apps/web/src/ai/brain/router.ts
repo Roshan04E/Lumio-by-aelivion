@@ -1,5 +1,5 @@
 /**
- * Kimera Brain — the local router (B1 tier-0 reflex + B2 tier-1 command compiler). The entry
+ * Orreris Brain — the local router (B1 tier-0 reflex + B2 tier-1 command compiler). The entry
  * point every non-Talk prompt hits BEFORE any model or network: exact commands and registry
  * questions resolve at tier 0 (<5ms), grammar-parseable commands compile at tier 1 (<50ms) —
  * both zero tokens.
@@ -18,7 +18,7 @@
  * SAME pipeline as an LLM plan (Professional still shows the approval bar; everything undoable).
  */
 
-import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@orreris/shared";
 import {
   actionCost,
   buildCapabilityIndex,
@@ -26,8 +26,10 @@ import {
   layerIdForOrdinal,
   listCreativeLooks,
   resolveLookName,
-  resolveTargetLayer
-} from "@kimera-by-aelivion/shared";
+  resolveTargetLayer,
+  resolveTextLookName,
+  TEXT_LOOK_NAMES
+} from "@orreris/shared";
 import type { AiPlan, PlanStep } from "../types";
 import type { EditorCommandId } from "../../editor/editor-commands";
 import { compileEditorCommand } from "./commands";
@@ -243,14 +245,16 @@ function deleteClip(context: BrainContext, prompt: string, phrase: string, rippl
 function applyLook(context: BrainContext, prompt: string, rawName: string, targetPhrase: string | undefined): BrainRouteResult {
   const name = rawName.trim();
   const resolved = resolveLookName(name);
-  if (!resolved) {
+  // Not a color look → maybe a TEXT look ("neon", "lower third") — same registry discipline.
+  const textResolved = resolved ? null : resolveTextLookName(name);
+  if (!resolved && !textResolved) {
     // Capability-gap pre-check (B5 pattern): an honest instant answer instead of a model
     // round that fails validation and clarifies. The "describe the style" path keeps the
     // creative (custom GradeIntent) route one utterance away.
     return reflexAnswer(
-      `I don't have a "${name}" look. Available looks: ${listCreativeLooks()
+      `I don't have a "${name}" look. Color looks: ${listCreativeLooks()
         .map((look) => look.name)
-        .join(", ")} — or describe the style you're after ("make it dreamy and warm") and I'll build a custom grade.`,
+        .join(", ")}. Text looks: ${TEXT_LOOK_NAMES.join(", ")} — or describe the style you're after ("make it dreamy and warm") and I'll build a custom grade.`,
       "t0.apply-look-gap"
     );
   }
@@ -283,23 +287,42 @@ function applyLook(context: BrainContext, prompt: string, rawName: string, targe
   if (!layer || layer.type === "audio") {
     return ESCALATE;
   }
+
+  // Text-look branch: bake the named treatment via applyTextLook (text layers only).
+  if (textResolved) {
+    if (layer.type !== "text") {
+      return reflexAnswer(
+        `"${textResolved.look}" is a text look, but ${label} is a ${layer.type} clip — select a text clip and try again.`,
+        "t0.apply-look"
+      );
+    }
+    const textPlan = brainPlan(prompt, [
+      {
+        actionId: "applyTextLook",
+        params: { layerId, look: textResolved.look },
+        summary: `Apply the "${textResolved.look}" text look to ${label}${textResolved.repair ? ` (${textResolved.repair})` : ""}`
+      }
+    ]);
+    return textPlan ? gated({ kind: "plan", plan: textPlan, tier: "reflex", ruleId: "t0.apply-look" }, "t0.apply-look") : ESCALATE;
+  }
+
   const params: Record<string, string | number> = {
-    look: resolved.look,
-    ...(resolved.intensity !== undefined ? { intensity: resolved.intensity } : {})
+    look: resolved!.look,
+    ...(resolved!.intensity !== undefined ? { intensity: resolved!.intensity } : {})
   };
-  const repairNote = resolved.repair ? ` (${resolved.repair})` : "";
+  const repairNote = resolved!.repair ? ` (${resolved!.repair})` : "";
   const existing = (layer.effects ?? []).find((effect) => effect.type === "creativeLook");
   const plan = brainPlan(prompt, [
     existing
       ? {
           actionId: "updateEffect",
           params: { layerId, effectId: existing.id, params },
-          summary: `Set ${label}'s Creative Look to ${resolved.look}${repairNote}`
+          summary: `Set ${label}'s Creative Look to ${resolved!.look}${repairNote}`
         }
       : {
           actionId: "addEffect",
           params: { layerId, effectType: "creativeLook", params },
-          summary: `Apply the ${resolved.look} look to ${label}${repairNote}`
+          summary: `Apply the ${resolved!.look} look to ${label}${repairNote}`
         }
   ]);
   return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.apply-look" }, "t0.apply-look") : ESCALATE;

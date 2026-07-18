@@ -1,5 +1,5 @@
 /**
- * Kimera Brain — router acceptance suite (B1). Run: `pnpm --filter @kimera-by-aelivion/web brain:eval`
+ * Orreris Brain — router acceptance suite (B1). Run: `pnpm --filter @orreris/web brain:eval`
  *
  * Two corpora, per AI_ARCHITECTURE.md → Instrumentation:
  *  - TRANSACTIONAL: prompts that MUST resolve locally at tier 0 (plan / answer / undo);
@@ -9,7 +9,7 @@
  * Standalone tsx assert script (no test framework), same convention as editor:test / memory:test.
  */
 
-import type { TimelineComposition, TimelineLayer, TimelineTrackType } from "@kimera-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer, TimelineTrackType } from "@orreris/shared";
 import { routePrompt, type BrainContext, type BrainRouteResult } from "./router";
 import { clearRuleStats, recordRuleRejected } from "./feedback";
 import {
@@ -153,9 +153,26 @@ console.log("\nAPPLY-LOOK reflex (K3 follow-up — preset asks used to buy a 15�
 {
   const result = route("apply the vaporwave look to clip 1");
   check(
-    "'apply the vaporwave look' → instant capability-gap answer listing the library (no model loop)",
-    result.kind === "answer" && /Available looks/.test(answerText(result)) && /Noir/.test(answerText(result))
+    "'apply the vaporwave look' → instant capability-gap answer listing BOTH libraries (no model loop)",
+    result.kind === "answer" && /Color looks/.test(answerText(result)) && /Noir/.test(answerText(result)) && /Text looks/.test(answerText(result))
   );
+}
+{
+  const step = firstAction(route("apply the neon look to clip 2"));
+  const params = step.params as { look?: string };
+  check("'apply the neon look to clip 2' (text clip) → applyTextLook(Neon) plan", step.actionId === "applyTextLook" && params.look === "Neon");
+}
+{
+  const result = route("apply the neon look to clip 1");
+  check(
+    "'apply the neon look' on a VIDEO clip → honest type answer, no plan",
+    result.kind === "answer" && /text look/.test(answerText(result))
+  );
+}
+{
+  const step = firstAction(route("apply the lower third look to clip 2"));
+  const params = step.params as { look?: string };
+  check("'apply the lower third look' → applyTextLook(Lower Third)", step.actionId === "applyTextLook" && params.look === "Lower Third");
 }
 check("'apply the noir look to the intro' (vague target) → escalates", route("apply the noir look to the intro").kind === "escalate");
 check("'apply the noir look' with no unique target → escalates", route("apply the noir look", { nowSeconds: 20 }).kind === "escalate");
@@ -604,37 +621,37 @@ async function main(): Promise<void> {
 
   console.log("\nWAKE WORD (voice — fuzzy matcher + user training, ai/wake-word.ts):");
   clearWakePhrases();
-  check("'Hey Kimera!' wakes", matchWakeWord("Hey Kimera!").matched);
-  check("'hello chimera' (homophone mishearing) wakes", matchWakeWord("hello chimera").matched);
-  check("'hello camera' (observed mishearing) wakes", matchWakeWord("hello camera").matched);
-  check("'hey kimira' wakes", matchWakeWord("hey kimira").matched);
-  check("'hay kimera' wakes", matchWakeWord("hay kimera").matched);
-  check("'hey kimana' (unseen, edit-distance 2) wakes", matchWakeWord("hey kimana").matched);
-  check("'heya kimera' wakes (user-requested greeting)", matchWakeWord("heya Kimera").matched);
+  check("'Hey Orreris!' wakes", matchWakeWord("Hey Orreris!").matched);
+  check("'hello orris' (short mishearing) wakes", matchWakeWord("hello orris").matched);
+  check("'hello orres' (observed mishearing) wakes", matchWakeWord("hello orres").matched);
+  check("'hey oris' wakes", matchWakeWord("hey oris").matched);
+  check("'hay orreris' wakes", matchWakeWord("hay orreris").matched);
+  check("'hey orreros' (unseen, edit-distance 1) wakes", matchWakeWord("hey orreros").matched);
+  check("'heya orreris' wakes (user-requested greeting)", matchWakeWord("heya Orreris").matched);
   {
-    const nameFirst = matchWakeWord("Kimera, pause the video");
-    check("'Kimera, pause the video' (name-first, no greeting) wakes with command", nameFirst.matched && nameFirst.command === "pause the video");
+    const nameFirst = matchWakeWord("Orreris, pause the video");
+    check("'Orreris, pause the video' (name-first, no greeting) wakes with command", nameFirst.matched && nameFirst.command === "pause the video");
   }
-  check("'camera pause' (homophone WITHOUT greeting) does NOT wake", !matchWakeWord("camera pause").matched);
-  check("'hey kim era' (split name) wakes", matchWakeWord("hey kim era").matched);
+  check("'orris pause' (weak mishearing WITHOUT greeting) does NOT wake", !matchWakeWord("orris pause").matched);
+  check("'hey or reris' (split name) wakes", matchWakeWord("hey or reris").matched);
   {
-    const carry = matchWakeWord("hey kimera blur clip 2");
-    check("carry-through: 'hey kimera blur clip 2' → command 'blur clip 2'", carry.matched && carry.command === "blur clip 2");
+    const carry = matchWakeWord("hey orreris blur clip 2");
+    check("carry-through: 'hey orreris blur clip 2' → command 'blur clip 2'", carry.matched && carry.command === "blur clip 2");
   }
   check("'hello there how are you' does NOT wake", !matchWakeWord("hello there how are you").matched);
   check("'hey can you help me' does NOT wake", !matchWakeWord("hey can you help me").matched);
-  check("'camera come here' (no greeting) does NOT wake", !matchWakeWord("camera come here").matched);
-  check("'gimera pause' (no greeting) does NOT wake", !matchWakeWord("gimera pause").matched);
-  check("'hello gimera' unmatched but flagged as a wake ATTEMPT (training card)", looksLikeWakeAttempt("hello gimera"));
+  check("'orris come here' (no greeting) does NOT wake", !matchWakeWord("orris come here").matched);
+  check("'gorris pause' (no greeting) does NOT wake", !matchWakeWord("gorris pause").matched);
+  check("'hello gorris' unmatched but flagged as a wake ATTEMPT (training card)", looksLikeWakeAttempt("hello gorris"));
   check("'blur clip 2 please' is NOT a wake attempt", !looksLikeWakeAttempt("blur clip 2 please"));
   {
-    learnWakePhrase("hello gimera");
-    const learned = matchWakeWord("hello gimera", loadWakePhrases());
-    const learnedCarry = matchWakeWord("hello gimera pause", loadWakePhrases());
+    learnWakePhrase("hello gorris");
+    const learned = matchWakeWord("hello gorris", loadWakePhrases());
+    const learnedCarry = matchWakeWord("hello gorris pause", loadWakePhrases());
     clearWakePhrases();
-    check("learned phrase: 'hello gimera' wakes after training", learned.matched);
+    check("learned phrase: 'hello gorris' wakes after training", learned.matched);
     check("learned phrase carries a command too ('… pause')", learnedCarry.matched && learnedCarry.command === "pause");
-    check("cleared training → 'hello gimera' no longer wakes", !matchWakeWord("hello gimera", loadWakePhrases()).matched);
+    check("cleared training → 'hello gorris' no longer wakes", !matchWakeWord("hello gorris", loadWakePhrases()).matched);
   }
 
   console.log("\nTTS read-back — speakable/splitSpeakable (pure; voice round 4):");
