@@ -10963,13 +10963,12 @@ function AssetBinImpl({
   }, [activeFolder, childFoldersOf, folderTab, queryText]);
   const filteredAssets = assets.filter((asset) => {
     const assetFolder = normalizeAssetFolder(asset.folder) || (folderTab ? folderRoot : "");
-    // The Search tab's Stock library is SUBTREE-inclusive even without a query (user report
-    // 2026-07-18: imported stock lives in `stock/pexels/<type>`, so the tab's root looked
-    // empty — "No media yet" — until you drilled three bins down). Local/Brand/AI keep the
-    // strict per-bin listing; their bins are user-organized, not machine-generated depth.
-    const subtreeListing = Boolean(queryText) || sourceTab === "search";
+    // Strict per-bin listing everywhere (query mode searches the subtree). A brief 2026-07-18
+    // experiment made the Search tab subtree-inclusive so imported stock showed at the root,
+    // but that read as assets "leaking" out of their bins — the REAL visibility bug was the
+    // stranded local/stock strays (assets-media v10 heal); the strict tree is correct.
     const inActiveFolder =
-      !folderTab || (subtreeListing ? isAssetFolderDescendant(assetFolder, activeFolder) || assetFolder === activeFolder : assetFolder === activeFolder);
+      !folderTab || (queryText ? isAssetFolderDescendant(assetFolder, activeFolder) || assetFolder === activeFolder : assetFolder === activeFolder);
     return (
       inActiveFolder &&
       matchesAssetTab(asset, sourceTab, Boolean(usedCounts[asset.id])) &&
@@ -11644,10 +11643,12 @@ function AssetBinImpl({
   }
 
   // List view rows, flattened from the bin tree (expanded bins inline their children, Premiere
-  // Project-panel style). Search flattens to plain results; non-folder tabs have no bins.
+  // Project-panel style). The Search tab's stock LIBRARY is a folder tab too (user report
+  // 2026-07-18: list view showed "No media yet" there — it was excluded here while the
+  // provider RESULTS grid only renders in query mode); non-folder tabs have no bins.
   type AssetListNode = { kind: "bin"; folder: AssetBinFolder; depth: number } | { kind: "asset"; asset: SourceAsset; depth: number };
   const listNodes: AssetListNode[] = [];
-  if (view === "list" && sourceTab !== "search") {
+  if (view === "list") {
     if (folderTab && !queryText) {
       const assetsOf = (folderPath: string) =>
         assets
