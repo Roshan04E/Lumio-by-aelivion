@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AudioLines, BarChart3, Brain, Cpu, Ear, ImagePlus, KeyRound, Mic, Plus, SendHorizontal, Settings2, Sparkles, Square, SquarePen, Undo2, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { buildCapabilityIndex, compileGradeIntent, getSkill, getSkillTaskKind, gradeIntentSchema, logUnsupported, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { buildCapabilityIndex, closeColorGrade, getSkill, getSkillTaskKind, logUnsupported, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type SourceAsset } from "@kimera-by-aelivion/shared";
 import { createPlanner } from "../../ai/planner/createPlanner";
 import { createSpeechRecognition, useDictation } from "../../ai/useDictation";
 import { looksLikeSelfEcho } from "../../ai/echo-guard";
@@ -961,19 +961,23 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         if (!target.layerId) {
           return { applied: false, detail: "Which clip? Select a clip or move the playhead over one, then retry." };
         }
-        const parsed = gradeIntentSchema.safeParse(params);
-        if (!parsed.success) {
-          return { applied: false, detail: "Couldn't read the color grade." };
+        // Kimera OS K3: the grade goes through the Blueprint color dialect's capability
+        // closure — unknown/misspelled looks become honest compile errors with the look
+        // library as suggestions (or get repaired via the alias table: "moody" → Noir),
+        // and an all-neutral grade can no longer reach execution as a silent "Applied 0".
+        const closure = closeColorGrade(params);
+        if (!closure.ok) {
+          const detail = closure.issues
+            .map((issue) => `${issue.message}${issue.suggestions?.length ? ` Available looks: ${issue.suggestions.join(", ")}.` : ""}`)
+            .join(" ");
+          return { applied: false, detail };
         }
-        const stack = compileGradeIntent(parsed.data);
-        if (stack.length === 0) {
-          return { applied: false, detail: "No color change to apply." };
-        }
+        const { actions, repairs } = closure.closed;
         let composition = ctx.composition;
-        for (const grade of stack) {
+        for (const action of actions) {
           const outcome = timelineActionRegistry.execute(
-            "addEffect",
-            { layerId: target.layerId, effectType: grade.effectType, params: grade.params },
+            action.actionId,
+            { layerId: target.layerId, ...(action.params as Record<string, unknown>) },
             { composition, selection: ctx.selection, nowSeconds: ctx.nowSeconds },
             { ai: true }
           );
@@ -982,8 +986,12 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           }
           composition = outcome.result.after;
         }
-        await commitComposition(composition, `Color grade (${stack.length} effect${stack.length > 1 ? "s" : ""})`);
-        return { applied: true, composition, detail: `Applied a ${stack.length}-effect grade` };
+        await commitComposition(composition, `Color grade (${actions.length} effect${actions.length > 1 ? "s" : ""})`);
+        return {
+          applied: true,
+          composition,
+          detail: `Applied a ${actions.length}-effect grade${repairs.length > 0 ? ` (${repairs.join("; ")})` : ""}`
+        };
       }
 
       // Local media analysis (beat detection) — real DSP in the browser, optionally applying

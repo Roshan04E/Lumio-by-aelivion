@@ -20,6 +20,7 @@
     "frames:test": "tsx src/editor/inspector/panels/frames.test.ts",
     "brain:eval": "tsx src/ai/brain/router-eval.test.ts",
     "world:eval": "tsx src/ai/world/world-eval.test.ts",
+    "blueprint:eval": "tsx src/ai/world/blueprint-eval.test.ts",
     "continuity:test": "tsx src/ai/planner/continuity.test.ts",
     "memory:test": "tsx src/ai/memory.test.ts"
   },

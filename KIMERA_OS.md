@@ -497,6 +497,20 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
 3. **K3 — Blueprint IR** (infrastructure + first dialect: color) + capability-closure
    validation. Formalizes what GradeIntent proved; MotionIntent/TextLookIntent become the
    second and third dialect payloads.
+   **✅ first slice shipped 2026-07-18** — `packages/shared/src/blueprint/`: dialect
+   registry + `Blueprint`/`BlueprintGoal` types + the `closeBlueprint` closure driver
+   (all-or-nothing: any unfulfillable goal fails compilation with the full issue list),
+   where **closure computes the lowering** — proving fulfillability IS producing the
+   actions, so emptiness is unrepresentable downstream. First dialect: **color**
+   (payload = the shipped GradeIntent schema/compiler) with look canonicalization against
+   the LIVE creative-look registry (exact → case/format-insensitive → colorist alias
+   table, every rewrite recorded as an honest repair note) and `empty-goal` /
+   `unknown-capability` compile errors carrying the look library as suggestions. The
+   panel's grade skill executor now runs through `closeColorGrade` — killing the founding
+   regression ("make it moody" → `look:"Moody"` → silent "Applied 0"; now it repairs to
+   Noir @ 55% with the repair shown, and a truly unknown look answers with the library
+   list). Acceptance: `blueprint:eval` (19 checks). Open: motion/text dialects, target
+   binding contract formalization, K4 planner emitting multi-goal blueprints.
 4. **K4 — Hypothesis stage in the planner** with budgeted expansion and the
    entropy-clarify rule; planner refactored into registered stages.
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,

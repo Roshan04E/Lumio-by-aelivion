@@ -1,3 +1,4 @@
+export * from "./blueprint";
 export * from "./catalog";
 export * from "./ai-prompts";
 export * from "./animation";
