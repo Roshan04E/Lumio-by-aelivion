@@ -538,6 +538,28 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    rows. Open: target binding contract formalization → K4.
 4. **K4 — Hypothesis stage in the planner** with budgeted expansion and the
    entropy-clarify rule; planner refactored into registered stages.
+   **✅ first slice shipped 2026-07-18** — `packages/shared/src/blueprint/hypothesis.ts`
+   (the staged pipeline: normalize → hypothesize → query the World Model → expand by
+   information-gain-per-cost → resolve the mood recipe → emit a multi-goal Blueprint →
+   `closeBlueprint`, all-or-nothing) + `apps/web/src/ai/world/hypothesis-route.ts` (the
+   brain-tier wiring after the K1 world tier). Mood recipes are DATA
+   (`registerMoodRecipe`: moody / dramatic / cinematic + tight aliases); two hypotheses per
+   vibe ask (grade-the-picture vs restyle-the-titles) start as a deliberate prior near-tie,
+   so evidence must be BOUGHT: the cheap composition-text fact discriminates (incidental
+   captions concede to the grade; a text-dominant timeline wins outright for the title
+   treatment; the middle band stays tied), and the expensive media-look fact is bought only
+   to SHAPE a winning grade (footage already measured dark → gentler intensity, honestly
+   noted). **The economic clarify rule is live**: a persisting near-tie with no affordable
+   discriminating fact left returns a clarify whose two suggested follow-ups are tier-0
+   APPLY-LOOK phrasings — either answer then resolves locally for free. "make it moody" /
+   "make this feel dramatic" now produce a color(+motion)(+text) blueprint closed
+   atomically, bound to real layers, executed through the ordinary plan pipeline with the
+   full explainability trace (hypotheses, facts consulted with access paths, repairs) in
+   the plan notes. Precision-first: unknown mood words ("faster") escalate silently.
+   Acceptance: `blueprint:eval` grown by 20 checks (dominance short-circuit, economic
+   clarify never buying the shape fact, dark-footage shaping, atomic 3-dialect close,
+   route binding, whole-string discipline). Open: registered-stage refactor of the
+   planner proper, clarify answers resuming conversationally, more moods/observers (K5).
 5. **K5 — Scale the data**: recipes, observers, inference rules, blueprint eval corpora,
    explainability trace UI, SDK surface for plugins.
 

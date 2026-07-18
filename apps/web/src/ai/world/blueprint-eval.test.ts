@@ -17,12 +17,20 @@ import {
   CREATIVE_LOOKS,
   listBlueprintDialects,
   matchLookInText,
+  planMoodBlueprint,
   resolveLookName,
+  resolveMoodRecipe,
   timelineActionRegistry,
   type Blueprint,
+  type CompositionTextEvidence,
+  type MoodFactSource,
   type TimelineComposition,
   type TimelineLayer
 } from "@orreris/shared";
+import { clearFactStore } from "./fact-store";
+import { registerObserver } from "./observers";
+import { textSummaryObserver } from "./observers/text-summary";
+import { routeMoodAskWithContext, routePromptHypothesis } from "./hypothesis-route";
 
 let failures = 0;
 
@@ -256,5 +264,151 @@ check(
   unknownParam.ok ? "unexpectedly ok" : unknownParam.message
 );
 
-console.log(failures === 0 ? "\nblueprint:eval PASS" : `\nblueprint:eval FAIL — ${failures} failure(s)`);
-process.exit(failures === 0 ? 0 : 1);
+// ---------------------------------------------------------------------------
+// K4 — hypothesis-stage planner (ORRERIS_OS.md → Layer 3)
+// ---------------------------------------------------------------------------
+
+async function runK4(): Promise<void> {
+  console.log("K4 hypothesis pipeline (pure, stub fact source):");
+
+  const declineSource: MoodFactSource = {
+    fetchCompositionText: async () => null,
+    fetchMediaLook: async () => null
+  };
+  const textFacts = (value: Partial<CompositionTextEvidence>): MoodFactSource => ({
+    fetchCompositionText: async () => ({
+      value: { textLayerCount: 2, wordCount: 12, coveredSeconds: 5, timelineSeconds: 10, ...value },
+      path: "text-summary@test"
+    }),
+    fetchMediaLook: async () => null
+  });
+  const moodyRecipe = resolveMoodRecipe("moody")!;
+  const dramaticRecipe = resolveMoodRecipe("dramatic")!;
+
+  check("mood registry: 'moody' resolves, aliases too", resolveMoodRecipe("brooding")?.mood === "moody");
+  check("mood registry: 'faster' is NOT a mood (precision-first)", resolveMoodRecipe("faster") === null);
+
+  // Visual-only timeline → dominant without buying anything (structural elimination).
+  const visualOnly = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: true, hasText: false }, declineSource);
+  check("visual-only: blueprint, no facts bought (elimination was free)", visualOnly.kind === "blueprint" && visualOnly.trace.factsConsulted.length === 0);
+  if (visualOnly.kind === "blueprint") {
+    check("visual-only: single color goal, closed with the moody→Noir repair", visualOnly.closed.length === 1 && visualOnly.closed[0]!.repairs.some((r) => r.includes("Noir")));
+  }
+
+  // Incidental captions → cheap fact bought, grade dominates, titles ride along as accent.
+  const incidental = await planMoodBlueprint(
+    "make it moody",
+    moodyRecipe,
+    { hasVisualMedia: true, hasText: true },
+    textFacts({ coveredSeconds: 2, wordCount: 3 })
+  );
+  check("incidental titles: composition-text bought, then dominant", incidental.kind === "blueprint" && incidental.trace.factsConsulted.some((f) => f.id === "composition-text"));
+  if (incidental.kind === "blueprint") {
+    const dialects = incidental.blueprint.goals.map((goal) => goal.dialect);
+    check("incidental titles: MULTI-GOAL blueprint (color + text accent)", dialects.includes("color") && dialects.includes("text"));
+  }
+
+  // Dramatic adds the motion accent — three dialects closed atomically.
+  const dramatic = await planMoodBlueprint(
+    "make this feel dramatic",
+    dramaticRecipe,
+    { hasVisualMedia: true, hasText: true },
+    textFacts({ coveredSeconds: 2, wordCount: 3 })
+  );
+  check(
+    "dramatic: color + motion + text goals close atomically",
+    dramatic.kind === "blueprint" && dramatic.blueprint.goals.length === 3 && dramatic.closed.some((g) => g.actions[0]?.actionId === "applyMotion")
+  );
+
+  // Text-dominant middle band → the ECONOMIC CLARIFY rule (never bought the expensive fact).
+  const tied = await planMoodBlueprint(
+    "make it moody",
+    moodyRecipe,
+    { hasVisualMedia: true, hasText: true },
+    textFacts({ coveredSeconds: 6, wordCount: 20 })
+  );
+  check("near-tie: clarify (economic rule), not a guess", tied.kind === "clarify");
+  if (tied.kind === "clarify") {
+    check("clarify never bought the expensive shape fact", !tied.trace.factsConsulted.some((f) => f.id === "media-look"));
+    check("clarify offers tier-0 phrasings for BOTH readings", /apply the moody look/.test(tied.question) && /apply the Minimal look/.test(tied.question));
+  }
+
+  // Title-driven timeline → the text hypothesis wins OUTRIGHT (no clarify).
+  const titleDriven = await planMoodBlueprint(
+    "make it moody",
+    moodyRecipe,
+    { hasVisualMedia: true, hasText: true },
+    textFacts({ coveredSeconds: 9, wordCount: 30 })
+  );
+  check("title-driven: text treatment wins outright", titleDriven.kind === "blueprint" && titleDriven.blueprint.goals.every((goal) => goal.dialect === "text"));
+
+  // Shaping: footage already measured dark → gentler grade, honestly noted.
+  const darkSource: MoodFactSource = {
+    fetchCompositionText: async () => null,
+    fetchMediaLook: async () => ({
+      value: { avgLuma: 0.12, contrast: 0.3, temperature: 0, saturation: 0.2, exposure: "dark" },
+      path: "cached"
+    })
+  };
+  const shaped = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: true, hasText: false }, darkSource);
+  check("shape fact bought only for the winning visual hypothesis", shaped.kind === "blueprint" && shaped.trace.factsConsulted.some((f) => f.id === "media-look"));
+  if (shaped.kind === "blueprint") {
+    const payload = shaped.blueprint.goals[0]!.payload as { lookIntensity?: number };
+    check("already-dark footage → gentler intensity + honest note", payload.lookIntensity === 40 && shaped.trace.notes.some((n) => n.includes("gentler grade")));
+  }
+
+  // Text-only / empty timelines.
+  const textOnly = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: false, hasText: true }, declineSource);
+  check("text-only timeline: text goal only", textOnly.kind === "blueprint" && textOnly.blueprint.goals.every((goal) => goal.dialect === "text"));
+  const nothing = await planMoodBlueprint("make it moody", moodyRecipe, { hasVisualMedia: false, hasText: false }, declineSource);
+  check("empty timeline: decline (nothing to land on)", nothing.kind === "decline");
+
+  console.log("K4 route (world-tier wiring):");
+  registerObserver(textSummaryObserver);
+  clearFactStore();
+
+  const textLayerA = {
+    id: "txt_a",
+    trackId: "t1",
+    type: "text",
+    name: "Title A",
+    startSeconds: 0,
+    durationSeconds: 2,
+    text: "hello there",
+    effects: [],
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 1 }
+  } as unknown as TimelineLayer;
+  const routeComposition: TimelineComposition = {
+    ...fixtureComposition,
+    tracks: [...fixtureComposition.tracks, { id: "t1", type: "text", name: "t1", layers: [textLayerA] }]
+  };
+  const brainContext = { composition: routeComposition, selection: [], nowSeconds: 0 };
+  const worldCtx = { composition: routeComposition, assets: [] };
+
+  const routed = await routeMoodAskWithContext("make it moody", brainContext, worldCtx, "moody");
+  check("route: 'make it moody' → a bound world-tier plan", routed.kind === "plan" && routed.tier === "world" && routed.ruleId === "k4.mood-blueprint");
+  if (routed.kind === "plan") {
+    const actionIds = routed.plan.steps.map((step) => step.actionId);
+    check("route: grade bound to the video, text look bound to the title", actionIds.includes("addEffect") && actionIds.includes("applyTextLook"));
+    check(
+      "route: every step names a real layer id",
+      routed.plan.steps.every((step) => step.params && typeof (step.params as { layerId?: unknown }).layerId === "string")
+    );
+    check("route: honest provenance note (facts + 0 tokens)", (routed.plan.notes ?? []).some((note) => note.includes("0 tokens")));
+  }
+
+  const escalated = await routePromptHypothesis("make it faster", brainContext);
+  check("route: 'make it faster' escalates silently (not a mood)", escalated.kind === "escalate");
+  const notAnchored = await routePromptHypothesis("please make it moody thanks", brainContext);
+  check("route: unanchored phrasing escalates (whole-string discipline)", notAnchored.kind === "escalate");
+}
+
+runK4()
+  .catch((error) => {
+    failures += 1;
+    console.error(`  ✗ K4 suite crashed — ${String(error)}`);
+  })
+  .finally(() => {
+    console.log(failures === 0 ? "\nblueprint:eval PASS" : `\nblueprint:eval FAIL — ${failures} failure(s)`);
+    process.exit(failures === 0 ? 0 : 1);
+  });

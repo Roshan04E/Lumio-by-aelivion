@@ -53,6 +53,7 @@ import {
 import { AGENT_ITERATION_CAPS, runAgentLoop } from "../../ai/agent/AgentLoop";
 import { routePrompt, type BrainRouteResult } from "../../ai/brain/router";
 import { routePromptWorld } from "../../ai/world/route";
+import { routePromptHypothesis } from "../../ai/world/hypothesis-route";
 import type { EditorCommandDispatcher } from "../../editor/editor-commands";
 import { forgetLearnedPlan, maybeLearnPhrase, routePromptSemantic, storeCachedPlan } from "../../ai/brain/semantic";
 
@@ -1355,6 +1356,12 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         // Precision-first: non-matching prompts return escalate in ~0ms.
         routed = await routePromptWorld(prompt, getContext());
       }
+      if (routed.kind === "escalate") {
+        // Orreris OS K4: vibe asks ("make it moody") run the hypothesis planner — World
+        // Model facts with budgets → mood recipe → multi-goal Blueprint closed atomically,
+        // emitted as an ordinary plan. Near-tied readings return the economic clarify.
+        routed = await routePromptHypothesis(prompt, getContext());
+      }
       // Editor commands need the host dispatcher; without it (shouldn't happen in the editor)
       // the prompt takes the normal model path instead of silently doing nothing.
       if (routed.kind === "command" && !runEditorCommand) {
@@ -1432,7 +1439,9 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
             ? "⚡ Fast lane · one small model call"
             : routed.tier === "semantic"
               ? "⚡ Instant · recognized phrasing — 0 tokens"
-              : "⚡ Instant · compiled locally — 0 tokens"
+              : routed.tier === "world"
+                ? "🌐 World Model · hypothesis blueprint — 0 tokens"
+                : "⚡ Instant · compiled locally — 0 tokens"
         });
         setSuggestions([]);
         setUndoableCommits(0);

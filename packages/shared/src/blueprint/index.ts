@@ -7,3 +7,4 @@ export * from "./types";
 export * from "./color";
 export * from "./motion";
 export * from "./text";
+export * from "./hypothesis";
