@@ -36,10 +36,13 @@ export const CREATIVE_LOOKS: CreativeLook[] = [
     name: "Teal & Orange",
     description: "Classic Hollywood split: warm highlights, cool shadows.",
     correction: { contrast: 15, saturation: 115, temperature: 5, tint: -3, shadows: -8, highlights: 5 },
+    // master is a -1..1 luma level (offset = master*0.5, slope = 2^master — see wheels.ts).
+    // These were mis-authored percent-style (-5/+3 → offset -2.5, slope ×8: crushed blacks +
+    // blown neon highlights at intensity 100, user repro 2026-07-18). Intended gentle values:
     wheelsJson: JSON.stringify({
-      shadows: { x: -0.14, y: 0.06, master: -5 },   // push teal
+      shadows: { x: -0.14, y: 0.06, master: -0.05 },   // push teal, slightly darker
       midtones: { x: 0, y: 0, master: 0 },
-      highlights: { x: 0.12, y: -0.06, master: 3 }   // push amber
+      highlights: { x: 0.12, y: -0.06, master: 0.03 }   // push amber, slightly brighter
     })
   },
   {
@@ -184,6 +187,27 @@ export function resolveLookName(requested: string): LookResolution | null {
       intensity: alias.intensity,
       repair: `look "${requested}" → ${alias.look}${alias.intensity !== undefined ? ` @ ${alias.intensity}%` : ""}`
     };
+  }
+  return null;
+}
+
+/**
+ * Find a look reference inside free text via the "<name> look" phrase shape ("apply a moody
+ * look to clip 1", "give it the faded film look"). Tries the longest suffix of the captured
+ * phrase so articles/fillers don't block resolution. Deliberately phrase-anchored — bare
+ * adjectives ("make it warm") stay with the primary-correction vocabulary, not looks.
+ */
+export function matchLookInText(text: string): LookResolution | null {
+  const phrase = /([a-z][a-z &-]{1,30}?)\s+look\b/.exec(text.toLowerCase());
+  if (!phrase) {
+    return null;
+  }
+  const words = phrase[1]!.trim().split(/\s+/);
+  for (let start = 0; start < words.length; start += 1) {
+    const resolved = resolveLookName(words.slice(start).join(" "));
+    if (resolved) {
+      return resolved;
+    }
   }
   return null;
 }

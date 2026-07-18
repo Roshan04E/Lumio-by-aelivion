@@ -14,7 +14,9 @@ import {
   closeBlueprint,
   closeColorGrade,
   compileGradeIntent,
+  CREATIVE_LOOKS,
   listBlueprintDialects,
+  matchLookInText,
   resolveLookName,
   timelineActionRegistry,
   type Blueprint,
@@ -104,6 +106,21 @@ if (!driven.ok) {
 }
 const colorOnly = closeBlueprint({ ...blueprint, goals: [blueprint.goals[0]!] });
 check("all-color blueprint closes end to end", colorOnly.ok && colorOnly.ok === true && colorOnly.closed[0]!.actions.length > 0);
+
+console.log("free-text look matching + look-data sanity (Teal & Orange @100 regression):");
+{
+  const moody = matchLookInText("apply a moody look to clip 1");
+  check("'apply a moody look…' → Noir @ 55 via the shared resolver", moody?.look === "Noir" && moody.intensity === 55);
+  check("'give it the faded film look' → Faded Film", matchLookInText("give it the faded film look")?.look === "Faded Film");
+  check("'make it warm' (no 'look' phrase) → null (primary-correction vocabulary, not looks)", matchLookInText("make it warm") === null);
+  check("'apply a vaporwave look' → null (unknown stays unknown)", matchLookInText("apply a vaporwave look") === null);
+}
+for (const look of CREATIVE_LOOKS) {
+  if (!look.wheelsJson) continue;
+  const wheels = JSON.parse(look.wheelsJson) as Record<string, { x: number; y: number; master: number }>;
+  const sane = Object.values(wheels).every((wheel) => Math.abs(wheel.master) <= 1 && Math.abs(wheel.x) <= 1 && Math.abs(wheel.y) <= 1);
+  check(`look "${look.name}" wheel values within unit range (master is -1..1, not percent)`, sane);
+}
 
 console.log("addEffect look-param closure (the 'Noir applied but nothing changed' regression):");
 const fixtureComposition: TimelineComposition = {

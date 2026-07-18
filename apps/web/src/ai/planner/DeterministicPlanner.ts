@@ -4,6 +4,7 @@ import {
   classifyToolCost,
   compileGradeIntent,
   logUnsupported,
+  matchLookInText,
   recordEffectDemand,
   recordToolDemand,
   resolveTargetLayer,
@@ -241,6 +242,19 @@ function extractGradeIntent(lower: string): GradeIntent {
     if (re.test(lower)) {
       intent.look = name;
       break;
+    }
+  }
+  // K3 follow-up: "<name> look" phrases resolve through the SHARED look resolver (registry +
+  // alias table), so "apply a moody look" lands Noir @ 55 offline instead of falling through
+  // to a bare creativeLook default-drop (which used to mean Teal & Orange @ 100 — user repro
+  // 2026-07-18). The regex table above stays first for phrasings without the word "look".
+  if (!intent.look) {
+    const matched = matchLookInText(lower);
+    if (matched) {
+      intent.look = matched.look;
+      if (matched.intensity !== undefined) {
+        intent.lookIntensity = matched.intensity;
+      }
     }
   }
 
