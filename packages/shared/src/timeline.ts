@@ -210,6 +210,82 @@ export function getLayerSpeed(layer: Pick<TimelineLayer, "speed">): number {
   return raw < 0 ? -magnitude : magnitude;
 }
 
+/**
+ * Rate stretch as a PURE op (Premiere's Clip Speed dialog, non-ripple) — extracted verbatim
+ * from EditorPage's `handleChangeLayerSpeed` (2026-07-18) so the editor dialog and the
+ * `setClipSpeed` registry action share ONE implementation instead of forking semantics:
+ * duration re-derives so the clip keeps playing the SAME source span (duration = span/speed),
+ * tail growth clamps at the next clip on each affected track, linked companions (video+audio
+ * pairs) move together, and a sign flip swaps the in-point to the current OUT so the visible
+ * span plays backward (symmetric — reversing twice restores the origin; media clips without
+ * ramps only, since ramps carry their own signed authoring).
+ *
+ * Returns null when the layer doesn't exist or the speed is already there (a no-op is the
+ * caller's decision to surface, not a mutation).
+ */
+export function changeLayerConstantSpeed(
+  composition: TimelineComposition,
+  layerId: string,
+  requestedSpeed: number
+): { composition: TimelineComposition; appliedSpeed: number } | null {
+  const layer = flattenTimelineLayers(composition).find((item) => item.id === layerId);
+  if (!layer || !Number.isFinite(requestedSpeed) || requestedSpeed === 0) {
+    return null;
+  }
+  const newSpeedMagnitude = Math.min(MAX_LAYER_SPEED, Math.max(MIN_LAYER_SPEED, Math.abs(Number(requestedSpeed.toFixed(3)))));
+  const newSpeed = requestedSpeed < 0 ? -newSpeedMagnitude : newSpeedMagnitude;
+  const oldSpeed = getLayerSpeed(layer);
+  if (Math.abs(newSpeed - oldSpeed) < 0.0005) {
+    return null;
+  }
+  const frameSeconds = 1 / Math.min(120, Math.max(1, Math.round(composition.fps) || 30));
+  const groupIds = new Set<string>(
+    layer.linkedGroupId
+      ? flattenTimelineLayers(composition)
+          .filter((item) => item.linkedGroupId === layer.linkedGroupId)
+          .map((item) => item.id)
+      : [layerId]
+  );
+  const sourceSpan = layer.durationSeconds * Math.abs(oldSpeed);
+  let newDuration = Math.max(frameSeconds, sourceSpan / newSpeedMagnitude);
+  for (const track of composition.tracks) {
+    for (const member of track.layers) {
+      if (!groupIds.has(member.id)) continue;
+      const nextStart = track.layers
+        .filter((other) => !groupIds.has(other.id) && other.startSeconds >= member.startSeconds + member.durationSeconds - 0.02)
+        .reduce<number | null>((best, other) => (best === null || other.startSeconds < best ? other.startSeconds : best), null);
+      if (nextStart !== null) {
+        newDuration = Math.min(newDuration, Math.max(frameSeconds, nextStart - member.startSeconds));
+      }
+    }
+  }
+  const next: TimelineComposition = {
+    ...composition,
+    tracks: composition.tracks.map((track) => ({
+      ...track,
+      layers: track.layers.map((item) => {
+        if (!groupIds.has(item.id)) return item;
+        const memberOldSpeed = getLayerSpeed(item);
+        const signFlipped =
+          Math.sign(memberOldSpeed) !== Math.sign(newSpeed) &&
+          (item.type === "video" || item.type === "audio") &&
+          Boolean(item.assetId) &&
+          (item.speedKeyframes?.length ?? 0) === 0;
+        const nextSourceIn = signFlipped
+          ? Math.max(0, (item.sourceInSeconds ?? 0) + item.durationSeconds * memberOldSpeed)
+          : item.sourceInSeconds;
+        return {
+          ...item,
+          speed: newSpeed,
+          durationSeconds: Number(newDuration.toFixed(3)),
+          ...(signFlipped ? { sourceInSeconds: Number((nextSourceIn ?? 0).toFixed(3)) } : {})
+        };
+      })
+    }))
+  };
+  return { composition: next, appliedSpeed: newSpeed };
+}
+
 // ── Speed ramps / time remap ─────────────────────────────────────────────────
 // `speedKeyframes` (layer-local seconds → rate) override constant `speed`. Segments are LINEAR by
 // default; S1 (2026-07-17) adds optional bezier easing per point (`inHandle`/`outHandle`). BOTH

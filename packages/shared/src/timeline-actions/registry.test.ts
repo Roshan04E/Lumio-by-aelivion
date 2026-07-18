@@ -106,6 +106,42 @@ const registry = createTimelineActionRegistry();
   }
 }
 
+// --- setClipSpeed (rate stretch through the registry; math shared with the editor dialog) ---
+{
+  // The S2 reverse in/out swap is MEDIA-only (needs an assetId) — stamp one on the fixture.
+  const base = fixture();
+  for (const track of base.tracks) {
+    for (const layer of track.layers) {
+      if (layer.type === "video" && !layer.assetId) layer.assetId = "asset_speed_test";
+    }
+  }
+  const video = base.tracks.flatMap((t) => t.layers).find((l) => l.type === "video")!;
+  const doubled = registry.execute("setClipSpeed", { layerId: video.id, speed: 2 }, ctxFor(base));
+  check("setClipSpeed 2x succeeds", doubled.ok);
+  if (doubled.ok) {
+    const after = doubled.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === video.id)!;
+    check("2x stores the speed", after.speed === 2);
+    check("2x re-derives a shorter duration (same source span)", after.durationSeconds < video.durationSeconds);
+    check("setClipSpeed summary is human", doubled.result.summary === "Set speed to 200%");
+    check("setClipSpeed undo round-trips", equal(applyPatch(doubled.result.after, doubled.result.undoPatch), base));
+  }
+  const reversed = registry.execute("setClipSpeed", { layerId: video.id, speed: -1 }, ctxFor(base));
+  check("negative speed reverses", reversed.ok);
+  if (reversed.ok) {
+    const after = reversed.result.after.tracks.flatMap((t) => t.layers).find((l) => l.id === video.id)!;
+    check("reverse stores a signed speed", after.speed === -1);
+    check(
+      "reverse swaps the in-point to the old OUT (plays the visible span backward)",
+      Math.abs((after.sourceInSeconds ?? 0) - ((video.sourceInSeconds ?? 0) + video.durationSeconds)) < 0.01,
+      String(after.sourceInSeconds)
+    );
+  }
+  const noop = registry.execute("setClipSpeed", { layerId: video.id, speed: 1 }, ctxFor(base));
+  check("same-speed ask is an honest no-op, not a failure", noop.ok && noop.result.summary.includes("already"));
+  const tooSlow = registry.execute("setClipSpeed", { layerId: video.id, speed: 0.01 }, ctxFor(base));
+  check("out-of-range speed rejected", !tooSlow.ok);
+}
+
 // --- Undo round-trips across a representative spread of actions -------------
 {
   const base = fixture();

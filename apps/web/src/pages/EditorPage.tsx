@@ -132,6 +132,7 @@ import {
   duplicateLayer,
   moveLayerWithinTrack,
   copyLayerToClipboard,
+  changeLayerConstantSpeed,
   getLayerSpeed,
   getLayerSpeedAt,
   getSpeedRamp,
@@ -4693,70 +4694,19 @@ export function EditorPage() {
    * same speed + duration so they never drift apart.
    */
   function handleChangeLayerSpeed(layerId: string, requestedSpeed: number) {
-    if (!composition) {
+    if (!composition || !isLayerEditable(layerId)) {
       return;
     }
-    const layer = flattenTimelineLayers(composition).find((item) => item.id === layerId);
-    if (!layer || !isLayerEditable(layerId)) {
+    // The math lives in shared `changeLayerConstantSpeed` (2026-07-18) so the AI's
+    // `setClipSpeed` registry action and this dialog share ONE implementation — duration
+    // re-derivation, next-clip tail clamp, linked-pair coupling, and the S2 reverse
+    // in/out swap all included. Null = missing layer or already at that speed.
+    const result = changeLayerConstantSpeed(composition, layerId, requestedSpeed);
+    if (!result) {
       return;
     }
-    const newSpeedMagnitude = clamp(Math.abs(Number(requestedSpeed.toFixed(3))), 0.05, 16);
-    const newSpeed = requestedSpeed < 0 ? -newSpeedMagnitude : newSpeedMagnitude; // S2: negative = reverse
-    const oldSpeed = getLayerSpeed(layer);
-    if (Math.abs(newSpeed - oldSpeed) < 0.0005) {
-      return;
-    }
-    const frameSeconds = 1 / clamp(Math.round(composition.fps) || 30, 1, 120);
-    const groupIds = new Set<string>(
-      layer.linkedGroupId
-        ? flattenTimelineLayers(composition)
-            .filter((item) => item.linkedGroupId === layer.linkedGroupId)
-            .map((item) => item.id)
-        : [layerId]
-    );
-    const sourceSpan = layer.durationSeconds * Math.abs(oldSpeed);
-    let newDuration = Math.max(frameSeconds, sourceSpan / newSpeedMagnitude);
-    // Clamp tail growth at the earliest next clip across every track a group member sits on.
-    for (const track of composition.tracks) {
-      for (const member of track.layers) {
-        if (!groupIds.has(member.id)) continue;
-        const nextStart = track.layers
-          .filter((other) => !groupIds.has(other.id) && other.startSeconds >= member.startSeconds + member.durationSeconds - 0.02)
-          .reduce<number | null>((best, other) => (best === null || other.startSeconds < best ? other.startSeconds : best), null);
-        if (nextStart !== null) {
-          newDuration = Math.min(newDuration, Math.max(frameSeconds, nextStart - member.startSeconds));
-        }
-      }
-    }
-    // S2 reverse (Premiere in/out swap): when the sign flips, move each member's sourceIn to its
-    // current source OUT-point so the clip plays its VISIBLE span BACKWARD (not pre-in-point footage).
-    // `newIn = sourceIn + duration·oldSignedSpeed` is symmetric — reversing twice restores the origin
-    // (signed speed makes the second flip subtract exactly what the first added). Media clips only.
-    void updateComposition({
-      ...composition,
-      tracks: composition.tracks.map((track) => ({
-        ...track,
-        layers: track.layers.map((item) => {
-          if (!groupIds.has(item.id)) return item;
-          const memberOldSpeed = getLayerSpeed(item);
-          const signFlipped =
-            Math.sign(memberOldSpeed) !== Math.sign(newSpeed) &&
-            (item.type === "video" || item.type === "audio") &&
-            Boolean(item.assetId) &&
-            (item.speedKeyframes?.length ?? 0) === 0; // ramps carry their own signed authoring
-          const nextSourceIn = signFlipped
-            ? Math.max(0, (item.sourceInSeconds ?? 0) + item.durationSeconds * memberOldSpeed)
-            : item.sourceInSeconds;
-          return {
-            ...item,
-            speed: newSpeed,
-            durationSeconds: Number(newDuration.toFixed(3)),
-            ...(signFlipped ? { sourceInSeconds: Number((nextSourceIn ?? 0).toFixed(3)) } : {})
-          };
-        })
-      }))
-    });
-    setNotice(newSpeed < 0 ? `Reversed ${Math.round(Math.abs(newSpeed) * 100)}%` : `Speed ${Math.round(newSpeed * 100)}%`);
+    void updateComposition(result.composition);
+    setNotice(result.appliedSpeed < 0 ? `Reversed ${Math.round(Math.abs(result.appliedSpeed) * 100)}%` : `Speed ${Math.round(result.appliedSpeed * 100)}%`);
   }
 
   // Replace asset: open the asset bin in "pick one" mode bound to this layer; the

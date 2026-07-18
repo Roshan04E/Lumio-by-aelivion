@@ -6,6 +6,7 @@ import { keyframeActions } from "./keyframe";
 import { layerActions } from "./layer";
 import { markerActions } from "./marker";
 import { maskActions } from "./mask";
+import { speedActions } from "./speed";
 import { textActions } from "./text";
 import { trackActions } from "./track";
 import { transitionActions } from "./transition";
@@ -30,6 +31,7 @@ export const allTimelineActions: TimelineActionDefinition<unknown>[] = [
   ...textActions,
   ...layerActions,
   ...clipActions,
+  ...speedActions,
   ...effectActions,
   ...keyframeActions,
   ...transitionActions,
