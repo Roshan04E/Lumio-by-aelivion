@@ -25,6 +25,7 @@ import { clearWakePhrases, learnWakePhrase, loadWakePhrases, looksLikeWakeAttemp
 import { speakable, splitSpeakable } from "../tts";
 import { arbitrateFinal, normalizeTranscript } from "../transcript-normalizer";
 import { clearDecisionTrace, recordDecisionTrace } from "../decision-trace";
+import { isQuestionNotEdit } from "../question-gate";
 import { looksLikeSelfEcho } from "../echo-guard";
 
 function layer(
@@ -930,6 +931,30 @@ async function main(): Promise<void> {
   }
   check("'animate the opacity' (keyframeable property) → escalates to the model", route("animate the opacity").kind === "escalate");
   check("'animate the text' (not an effect) → escalates", route("animate the text").kind === "escalate");
+
+  console.log("\nQUESTION GATE (P0, real transcript 2026-07-18 — questions must never enter the edit pipeline):");
+  for (const prompt of [
+    "can you analyze clip 4 and tell me how many persons are there?",
+    "analyze clip 5 and tell me how many persons you can see",
+    "how many persons you can see in clip 5 just give me the number",
+    "what is the best transition here",
+    "why does clip 2 look dark",
+    "is there any music on the timeline"
+  ]) {
+    check(`question: "${prompt}"`, isQuestionNotEdit(prompt));
+  }
+  for (const prompt of [
+    "can you make it brighter?",
+    "add captions to the video",
+    "blur clip 2",
+    "make it cinematic",
+    "delete clip 2?",
+    "pop in clip 1",
+    "can you remove the noir look",
+    "how about adding a title" // question-shaped but proposes an EDIT — the verb wins
+  ]) {
+    check(`MUST NOT swallow the edit: "${prompt}"`, !isQuestionNotEdit(prompt));
+  }
 
   console.log("\nTIER 3 — fast-lane gate (B4; economic gate only, output is Zod-gated live):");
   const { looksTransactional } = await import("./fast");

@@ -618,6 +618,20 @@ pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
    model download). Surfaced in "analyze clip N" as a plain-language People line
    ("a face on screen 86% of the time — medium shot, centered"). world:eval +6.
    Open: more inference rules (talking-head from faces × text), SDK formalization.
+   **Question gate + format inference shipped 2026-07-18 (fifth slice, from a real
+   frustration transcript)** — (a) P0 `ai/question-gate.ts`: question-shaped prompts
+   (interrogative lead/embedded ask/trailing "?" AND no edit verb, inflection-aware) ride
+   the consultant path in every mode — the edit planner had looped "I didn't catch an
+   edit in that" at pure questions and once invented a UI action for one; the verb list
+   wins every tie so edits are never swallowed. (b) World tier answers face-count
+   questions from the MEASURED fact ("how many persons in clip 5" → "at least N faces in
+   sampled frames", honest about not being a people census; detector unavailable → "I
+   won't guess", never a model hallucination) and accepts benign compound tails
+   ("analyze clip 5 and give me a summary in very short") while edit tails still
+   escalate. (c) `composition.format` — the first TWO-input inference (faces × text):
+   talking-head / b-roll / mixed with the weakest-link law (prior × min(inputs)), both
+   input ids recorded as dependencies; "analyze the timeline" gains the Format line.
+   brain:eval +14, world:eval +11. Open: SDK formalization, analyze-clip ASR frame.
 
 Rule of engagement: **build the runtime first, resist user-facing features until the
 pipeline is stable, treat observers/recipes/capabilities as plugins from day one.** After

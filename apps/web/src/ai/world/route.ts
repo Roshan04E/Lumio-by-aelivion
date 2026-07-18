@@ -24,6 +24,8 @@ import type { CompositionCharacterFact } from "./observers/character";
 import { COMPOSITION_CHARACTER_FACT } from "./observers/character";
 import type { MediaFacesFact } from "./observers/faces";
 import { MEDIA_FACES_FACT } from "./observers/faces";
+import type { CompositionFormatFact } from "./observers/format";
+import { COMPOSITION_FORMAT_FACT } from "./observers/format";
 import type { SystemCapabilitiesFact } from "./observers/system";
 import { SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID } from "./observers/system";
 import type { UserAiProfileFact } from "./observers/user-profile";
@@ -47,6 +49,15 @@ async function worldContext(composition: TimelineComposition): Promise<WorldCont
 }
 
 const ANALYZE_CLIP_RE = /^(?:analy[sz]e|inspect|measure) (.+)$/;
+// P1 (real transcript 2026-07-18): face-count QUESTIONS answer from the measured fact —
+// "how many persons can you see in clip 5", "analyze clip 4 and tell me how many people
+// are there". The model tier guessed here ("I detected a single face"); the world tier
+// answers from the measurement or says honestly that it can't.
+const FACES_QUESTION_RE = /\b(?:how many|number of) (?:persons?|people|faces|humans?)\b/;
+const CLIP_REF_RE = /\bclip (\d{1,3})\b/;
+// Compound analyze tails that still mean "just analyze": "…and give me a summary", "…in short".
+const SUMMARY_TAIL_RE =
+  /^(?:and |then |just )*(?:tell me about it|give me (?:a |the )?(?:very )?(?:short )?summary|summar(?:y|ize|ise)(?: it| this)?|in (?:very )?short|briefly)(?: in (?:very )?short| briefly| please)?[.?!]?$/;
 const LOOK_RE = /^what does (.+?) look like\??$/;
 const ANALYZE_COMP_RE = /^(?:analy[sz]e|inspect|measure) (?:the |this |my )?(?:timeline|composition|comp|sequence|edit)$/;
 // K2 state branches — whole-string anchored like everything else in this tier.
@@ -74,15 +85,78 @@ export async function routePromptWorld(prompt: string, context: BrainContext): P
     return analyzeUsage(context.composition);
   }
 
+  // Face-count question with an explicit clip reference — a QUESTION, answered from the
+  // measurement (or an honest "can't measure here"), never handed to a guessing model.
+  if (FACES_QUESTION_RE.test(text)) {
+    const clipRef = CLIP_REF_RE.exec(text);
+    if (clipRef) {
+      return answerFacesCount(context.composition, Number(clipRef[1]));
+    }
+    return ESCALATE; // no explicit clip → deictic; the model tiers own that resolution
+  }
+
   const match = ANALYZE_CLIP_RE.exec(text) ?? LOOK_RE.exec(text);
   if (!match) {
     return ESCALATE;
   }
   const ordinal = parseExactClipPhrase(match[1]!);
-  if (!ordinal) {
-    return ESCALATE; // "analyze the pacing" etc. — creative asks belong to the model tiers
+  if (ordinal) {
+    return analyzeClip(context.composition, ordinal);
   }
-  return analyzeClip(context.composition, ordinal);
+  // Compound: "analyze clip 5 and give me a summary in very short" — a benign question
+  // tail must not eject the ask to the model tiers (whole-string discipline stays for
+  // everything else: unknown/edit tails still escalate).
+  const compound = /^(clip \d{1,3})\s+(.+)$/.exec(match[1]!);
+  if (compound && SUMMARY_TAIL_RE.test(compound[2]!)) {
+    const compoundOrdinal = parseExactClipPhrase(compound[1]!);
+    if (compoundOrdinal) {
+      return analyzeClip(context.composition, compoundOrdinal);
+    }
+  }
+  return ESCALATE; // "analyze the pacing" etc. — creative asks belong to the model tiers
+}
+
+/**
+ * The face-count answer — measured, honest about its limits. Face detection on sampled
+ * frames is NOT a people census: small/turned-away faces are missed, so the wording is
+ * "at least N" and says so.
+ */
+async function answerFacesCount(composition: TimelineComposition, ordinal: number): Promise<BrainRouteResult> {
+  const layerId = layerIdForOrdinal(composition, ordinal);
+  const layer = layerId ? findLayer(composition, layerId) : undefined;
+  if (!layer) {
+    return answer(`There's no clip ${ordinal} on the timeline to check.`, "world.faces-count");
+  }
+  if (!layer.assetId) {
+    return answer(`**Clip ${ordinal}** (“${layer.name}”) is a ${layer.type} layer with no media — no faces to detect.`, "world.faces-count");
+  }
+  const ctx = await worldContext(composition);
+  if (!ctx) {
+    return ESCALATE;
+  }
+  const target = { kind: "asset" as const, id: layer.assetId };
+  const faces = await queryFact<MediaFacesFact>({ type: MEDIA_FACES_FACT, target, budgetMs: 12_000 }, ctx);
+  if (!faces) {
+    // Never let a model guess a measurement: if detection can't run here, say so.
+    return answer(
+      `I couldn't run face detection on clip ${ordinal} right now (the on-device detector isn't available). I won't guess a count.`,
+      "world.faces-count"
+    );
+  }
+  const f = faces.fact.value;
+  if (f.presenceShare === 0) {
+    return answer(
+      `I didn't detect any faces in the frames I sampled from clip ${ordinal}. Small or turned-away faces can escape detection — but on what I measured: none.`,
+      "world.faces-count"
+    );
+  }
+  return answer(
+    [
+      `I can see **at least ${f.maxFaces} face${f.maxFaces === 1 ? "" : "s"}** in the frames I sampled from clip ${ordinal} (a face is on screen ${(f.presenceShare * 100).toFixed(0)}% of the time).`,
+      `\n_I detect faces, not exact people counts — small or background faces may be missed. ${faces.path === "cached" ? "Cached measurement" : "Fresh measurement"} · 0 tokens_`
+    ].join("\n"),
+    "world.faces-count"
+  );
 }
 
 function findLayer(composition: TimelineComposition, layerId: string): TimelineLayer | undefined {
@@ -153,7 +227,7 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
         const size = f.avgFaceAreaShare >= 0.12 ? "close-up" : f.avgFaceAreaShare >= 0.03 ? "medium shot" : "in the distance";
         const region = f.dominantRegion === "center" ? "centered" : `on the ${f.dominantRegion}`;
         lines.push(
-          `- People: ${f.maxFaces > 1 ? `up to ${f.maxFaces} faces` : "a face"} on screen ${(f.presenceShare * 100).toFixed(0)}% of the time — ${size}, ${region} (measured on-device)`
+          `- People: ${f.maxFaces > 1 ? `at least ${f.maxFaces} faces` : "a face"} on screen ${(f.presenceShare * 100).toFixed(0)}% of the time — ${size}, ${region} (sampled frames; small faces may be missed)`
         );
       } else {
         lines.push(`- People: no faces detected in the sampled frames`);
@@ -263,6 +337,11 @@ const EDIT_PACING_LABELS: Record<CompositionCharacterFact["pacing"], string> = {
   moderate: "medium-paced cuts",
   "long-take": "long unhurried shots"
 };
+const FORMAT_LABELS: Record<CompositionFormatFact["format"], string> = {
+  "talking-head": "talking-head — someone is on camera most of the time",
+  "b-roll": "b-roll — footage without people on camera",
+  mixed: "mixed — people appear, but it's not a presenter video"
+};
 
 async function analyzeComposition(composition: TimelineComposition): Promise<BrainRouteResult> {
   const ctx = await worldContext(composition);
@@ -285,6 +364,12 @@ async function analyzeComposition(composition: TimelineComposition): Promise<Bra
     { type: COMPOSITION_CHARACTER_FACT, target: { kind: "composition", id: composition.id }, budgetMs: 500 },
     ctx
   );
+  // Two-input inference (faces × text) — its faces input may trigger a fresh on-device ML
+  // run on the dominant footage; the budget prices that honestly (cached after the first).
+  const format = await queryFact<CompositionFormatFact>(
+    { type: COMPOSITION_FORMAT_FACT, target: { kind: "composition", id: composition.id }, budgetMs: 12_000 },
+    ctx
+  );
   const lines = [
     `**Timeline — measured analysis**`,
     `- ${clipTotal} layer(s) across ${composition.tracks.length} track(s), ${v.timelineSeconds.toFixed(1)}s long`,
@@ -294,6 +379,11 @@ async function analyzeComposition(composition: TimelineComposition): Promise<Bra
     ...(character
       ? [
           `- Edit style: **${EDIT_PROFILE_LABELS[character.fact.value.profile]}**, ${EDIT_PACING_LABELS[character.fact.value.pacing]} (my read of the timeline · ${Math.round(character.fact.confidence * 100)}% sure)`
+        ]
+      : []),
+    ...(format
+      ? [
+          `- Format: **${FORMAT_LABELS[format.fact.value.format]}** (from face detection on the main footage · ${Math.round(format.fact.confidence * 100)}% sure)`
         ]
       : []),
     `\n_Measured on-device · ${result.path === "cached" ? "cached fact" : "fresh observation"} · 0 tokens_`

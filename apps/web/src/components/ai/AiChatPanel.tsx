@@ -39,6 +39,7 @@ import {
   type LocalEarsProgress
 } from "../../ai/asr";
 import { streamTalk } from "../../ai/talk";
+import { isQuestionNotEdit } from "../../ai/question-gate";
 import { loadOllamaConfig, onOllamaCorsBlocked, pingOllama, saveOllamaConfig, type OllamaConfig } from "../../ai/ollama";
 import { executePlan, type ToolStepResult } from "../../ai/executor/PlanExecutor";
 import {
@@ -1542,9 +1543,19 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
     }
     const useLocal = route === "local";
 
+    // P0 question gate (real transcript 2026-07-18): a question-shaped ask must get an
+    // ANSWER, never enter the edit-plan pipeline — the planner once looped "I didn't
+    // catch an edit in that" at a pure question and even invented a UI action for one.
+    // Tier-0/world answers already had their chance above; whatever question reaches
+    // here rides the consultant path, which structurally cannot mutate the timeline.
+    const questionTurn = mode !== "talk" && isQuestionNotEdit(prompt);
+    if (questionTurn) {
+      pushItem({ kind: "notice", tone: "info", text: "💬 Sounds like a question — answering without editing" });
+    }
+
     // Talk mode — converse for inspiration; never builds/applies a plan. Streams
     // prose, then offers runnable suggestions that hand off to Professional mode.
-    if (mode === "talk") {
+    if (mode === "talk" || questionTurn) {
       setInput("");
       const image = attachedImage;
       pushMessage("user", image ? `${prompt}  ·  📎 reference image` : prompt);

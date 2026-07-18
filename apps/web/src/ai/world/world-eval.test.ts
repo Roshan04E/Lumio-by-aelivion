@@ -33,6 +33,7 @@ import { registerObserver } from "./observers";
 import { metadataObserver, MEDIA_METADATA_FACT, type MediaMetadataFact } from "./observers/metadata";
 import { lookObserver, MEDIA_LOOK_FACT } from "./observers/look";
 import { aggregateFaceSamples, facesObserver, MEDIA_FACES_FACT } from "./observers/faces";
+import { classifyFormat, formatObserver, COMPOSITION_FORMAT_FACT } from "./observers/format";
 import { textSummaryObserver, COMPOSITION_TEXT_FACT, type CompositionTextFact } from "./observers/text-summary";
 import { characterObserver, COMPOSITION_CHARACTER_FACT, type CompositionCharacterFact } from "./observers/character";
 import { systemObserver, SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID, type SystemCapabilitiesFact } from "./observers/system";
@@ -172,6 +173,7 @@ registerObserver(userProfileObserver);
 registerObserver(projectMediaObserver);
 registerObserver(characterObserver);
 registerObserver(facesObserver);
+registerObserver(formatObserver);
 
 const assetTarget = { kind: "asset" as const, id: "a1" };
 const compTarget = { kind: "composition" as const, id: "c" };
@@ -419,6 +421,35 @@ async function run(): Promise<void> {
     "clip without media source → honest answer, no measurement",
     noMedia.kind === "answer" && noMedia.text.includes("text layer"),
     noMedia.kind
+  );
+
+  // ---- P1 (real transcript 2026-07-18): face-count questions + compound analyze asks ----
+  console.log("world route questions (faces + compound):");
+  const noSuchClip = await routePromptWorld("how many people can you see in clip 9", brainContext);
+  check("faces question on a missing clip → honest bounds answer", noSuchClip.kind === "answer" && noSuchClip.text.includes("no clip 9"));
+  const facesOnText = await routePromptWorld("how many persons are there in clip 2", brainContext);
+  check("faces question on a TEXT clip → honest 'no media' answer", facesOnText.kind === "answer" && facesOnText.text.includes("no faces to detect"));
+  const facesNoContext = await routePromptWorld("how many faces in clip 1", brainContext);
+  check("faces question, no world context (node) → clean escalate", facesNoContext.kind === "escalate");
+  const facesDeictic = await routePromptWorld("how many people can you see", brainContext);
+  check("faces question without a clip ref (deictic) → escalates", facesDeictic.kind === "escalate");
+  const compoundSummary = await routePromptWorld("analyze clip 2 and give me a summary in very short", brainContext);
+  check(
+    "compound 'analyze clip N + summary tail' still routes to the measured path",
+    compoundSummary.kind === "answer" && compoundSummary.text.includes("text layer")
+  );
+  const compoundEdit = await routePromptWorld("analyze clip 2 and make it red", brainContext);
+  check("compound with an EDIT tail escalates (never a silent partial answer)", compoundEdit.kind === "escalate");
+
+  // ---- K5 two-input inference (composition.format) — pure classifier under node ----
+  console.log("K5 format inference (composition.format):");
+  check("classify: steady medium face → talking-head", classifyFormat({ presenceShare: 0.9, avgFaceAreaShare: 0.12 }) === "talking-head");
+  check("classify: barely any faces → b-roll", classifyFormat({ presenceShare: 0.1, avgFaceAreaShare: 0.2 }) === "b-roll");
+  check("classify: people present but not presenting → mixed", classifyFormat({ presenceShare: 0.5, avgFaceAreaShare: 0.1 }) === "mixed");
+  check("classify: constant but TINY faces (crowd b-roll) → not talking-head", classifyFormat({ presenceShare: 0.9, avgFaceAreaShare: 0.01 }) === "mixed");
+  check(
+    "format observer declines under node (its ML input path doesn't exist here)",
+    (await queryFact({ type: COMPOSITION_FORMAT_FACT, target: compTarget, budgetMs: 12_000 }, ctx)) === null
   );
   // Under node the world context can't load (no Vite env) → these must escalate, never throw.
   for (const prompt of ["analyze clip 1", "analyze my system", "analyze the project", "show my ai usage"]) {
