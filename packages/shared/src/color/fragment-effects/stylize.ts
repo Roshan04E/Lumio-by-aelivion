@@ -149,14 +149,114 @@ vec4 effect(vec2 uv) {
 }
 `;
 
+/**
+ * Shared eigen-decode snippet for the ink passes: flow = minor eigenvector of the smoothed tensor
+ * (the direction ALONG edges), grad = its perpendicular. Kept as a GLSL string both passes embed.
+ */
+const FLOW_DECODE_GLSL = `
+vec2 _flowDir(vec2 uv) {
+  vec3 t = texture(uPass0, uv).rgb;
+  float E = t.r;
+  float G = t.g;
+  float F = t.b * 2.0 - 1.0;
+  float D = sqrt(max((E - G) * (E - G) + 4.0 * F * F, 0.0));
+  float lambda1 = 0.5 * (E + G + D);
+  vec2 ev = vec2(lambda1 - E, -F);
+  return (dot(ev, ev) > 1e-8) ? normalize(ev) : vec2(0.0, 1.0);
+}
+`;
+
+// FDoG stage 1 (Kang NPAR'07): a 1-D difference-of-Gaussians PERPENDICULAR to the local edge flow.
+// The response is packed bias-scaled (±0.0625 → ±0.5) into an RGBA8 target for stage 2.
+const INK_DOG_GLSL = `
+${"" /* uPass0 = tensorBlur */}
+vec4 effect(vec2 uv) {
+  vec2 flow = _flowDir(uv);
+  vec2 grad = vec2(-flow.y, flow.x);
+  vec2 px = 1.0 / uResolution;
+  // Frame-relative line width (same law as the paint radius): defined against a 1080px short edge.
+  float sigmaE = max(0.4, inkThickness * (min(uResolution.x, uResolution.y) / 1080.0));
+  float sigmaR = sigmaE * 1.6;
+  int n = int(min(ceil(sigmaR * 2.5), 10.0));
+  float sumE = 0.0;
+  float wE = 0.0;
+  float sumR = 0.0;
+  float wR = 0.0;
+  for (int i = -10; i <= 10; i++) {
+    if (i < -n || i > n) continue;
+    float x = float(i);
+    float l = _luma(getSrcColor(uv + grad * px * x).rgb);
+    float we = exp(-x * x / (2.0 * sigmaE * sigmaE));
+    float wr = exp(-x * x / (2.0 * sigmaR * sigmaR));
+    sumE += l * we;
+    wE += we;
+    sumR += l * wr;
+    wR += wr;
+  }
+  float d = sumE / max(wE, 1e-5) - 0.98 * (sumR / max(wR, 1e-5));
+  return vec4(vec3(clamp(d * 8.0 + 0.5, 0.0, 1.0)), 1.0);
+}
+`;
+
+// FDoG stage 2: smooth the DoG response ALONG the flow (coherent strokes, junk edges die), then the
+// XDoG soft threshold → an ink map in [0,1] (0 = full ink). Straight-line flow smoothing is the v1
+// approximation of curved LIC — stable and an order cheaper.
+const INK_GLSL = `
+${"" /* uPass0 = tensorBlur, uPass1 = dog */}
+vec4 effect(vec2 uv) {
+  vec2 flow = _flowDir(uv);
+  vec2 px = 1.0 / uResolution;
+  float sum = 0.0;
+  float wsum = 0.0;
+  for (int i = -4; i <= 4; i++) {
+    float x = float(i);
+    float v = texture(uPass1, uv + flow * px * x).r - 0.5;
+    float w = exp(-x * x / 8.0);
+    sum += v * w;
+    wsum += w;
+  }
+  float d = (sum / max(wsum, 1e-5)) / 8.0;
+  // XDoG: negative response = edge. Fixed eps/phi tuned for video (soft enough not to shimmer).
+  float e = (d >= -0.002) ? 1.0 : 1.0 + tanh(60.0 * (d + 0.002));
+  return vec4(vec3(clamp(e, 0.0, 1.0)), 1.0);
+}
+`;
+
+// Final pass: cel posterize + palette punch + style flavor + ink composite, mixed by uIntensity.
+// styleMode: 0 Painterly · 1 Anime Cel · 2 Manga (mono, hard contrast) · 3 Sketch (paper + ink).
 const TONE_GLSL = `
+${"" /* uPass0 = paint, uPass1 = ink */}
 vec4 effect(vec2 uv) {
   vec4 src = getSrcColor(uv);
   vec3 c = texture(uPass0, uv).rgb;
+  float mode = floor(styleMode + 0.5);
+
+  // Cel bands (0/1 = off): quantize LUMA and rescale color, with a hair of hash dither on the
+  // threshold so gradients don't band-crawl in motion. Deterministic — same everywhere.
+  float bands = floor(celBands);
+  if (bands >= 2.0) {
+    float l = max(_luma(c), 1e-4);
+    float dith = (_rand(floor(uv * uResolution)) - 0.5) / max(bands, 2.0) * 0.25;
+    float lq = (floor(clamp(l + dith, 0.0, 0.9999) * bands) + 0.5) / bands;
+    c *= lq / l;
+  }
+
   float punch = clamp(palettePunch, 0.0, 100.0) / 100.0;
-  float l = _luma(c);
-  c = mix(vec3(l), c, 1.0 + punch * 0.6);      // saturation push toward "flat illustrated color"
-  c = (c - 0.5) * (1.0 + punch * 0.18) + 0.5;  // gentle contrast
+  float l2 = _luma(c);
+  c = mix(vec3(l2), c, 1.0 + punch * 0.6);
+  c = (c - 0.5) * (1.0 + punch * 0.18) + 0.5;
+
+  if (mode == 2.0) {
+    // Manga: mono + hard contrast (screen-tones arrive with the print pass, P3).
+    float m = _luma(c);
+    c = vec3(clamp((m - 0.5) * 1.35 + 0.55, 0.0, 1.0));
+  } else if (mode == 3.0) {
+    // Sketch: warm paper faintly tinted by the paint — the ink below carries the drawing.
+    c = mix(vec3(0.96, 0.945, 0.915), c, 0.18);
+  }
+
+  float ink = texture(uPass1, uv).r;
+  c *= mix(1.0, ink, clamp(inkStrength, 0.0, 100.0) / 100.0);
   return vec4(clamp(c, 0.0, 1.0), src.a);
 }
 `;
@@ -168,13 +268,20 @@ export const STYLIZE_PAINTERLY: FragmentEffectDefinition = {
   params: [
     { name: "paintRadius", type: "float", default: 4, min: 1, max: 6, step: 1, label: "Brush Size" },
     { name: "paintSharpness", type: "float", default: 8, min: 1, max: 16, step: 1, label: "Edge Hardness" },
-    { name: "palettePunch", type: "float", default: 35, min: 0, max: 100, step: 1, label: "Color Punch" }
+    { name: "palettePunch", type: "float", default: 35, min: 0, max: 100, step: 1, label: "Color Punch" },
+    // P2 (defaults keep the P1 Painterly output byte-stable: no ink, no bands, mode 0).
+    { name: "inkStrength", type: "float", default: 0, min: 0, max: 100, step: 1, label: "Ink Lines" },
+    { name: "inkThickness", type: "float", default: 2, min: 0.5, max: 4, step: 0.5, label: "Line Weight" },
+    { name: "celBands", type: "float", default: 0, min: 0, max: 10, step: 1, label: "Cel Bands" },
+    { name: "styleMode", type: "float", default: 0, min: 0, max: 3, step: 1, label: "Style" }
   ],
   glsl: "", // multi-pass definition — `passes` below is the whole effect
   passes: [
     { id: "tensor", scale: 0.5, glsl: TENSOR_GLSL },
     { id: "tensorBlur", scale: 0.5, inputs: ["tensor"], glsl: TENSOR_BLUR_GLSL },
     { id: "paint", scale: 0.5, inputs: ["tensorBlur"], glsl: PAINT_GLSL },
-    { id: "tone", inputs: ["paint"], glsl: TONE_GLSL }
+    { id: "dog", inputs: ["tensorBlur"], glsl: FLOW_DECODE_GLSL + INK_DOG_GLSL },
+    { id: "ink", inputs: ["tensorBlur", "dog"], glsl: FLOW_DECODE_GLSL + INK_GLSL },
+    { id: "tone", inputs: ["paint", "ink"], glsl: TONE_GLSL }
   ]
 };

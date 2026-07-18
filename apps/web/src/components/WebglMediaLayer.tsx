@@ -264,6 +264,13 @@ interface VideoProps extends BaseProps {
   /** Clip playback rate (rate stretch). Default 1. Applied to matte sync + matte playbackRate. */
   speedFactor?: number | undefined;
   /**
+   * Frame hold ("on twos", 2026-07-18): while PLAYING, the layer publishes/redraws only when the
+   * hold bucket (floor(localSeconds·holdFps)) advances — the last drawn frame stays on screen, so
+   * the preview shows the same N-images-per-second feel the export bakes exactly. Paused repaints
+   * (grade edits, scrub, settle) bypass the skip so editing stays live.
+   */
+  holdFps?: number | undefined;
+  /**
    * R3.2: this clip's resolved transition PRE-ROLL (seconds of timeline before `layerStartSeconds`
    * during which it must already play its head-handle material — see `resolveTransitionWindowSides`).
    * Every internal source-time mapping here allows local time down to −preroll instead of clamping at
@@ -292,6 +299,9 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const singleCtx = Boolean(sceneMediaSink);
     // Monotonic content version for the compositor's re-grade skip (bumped per published frame).
     const frameVersionRef = useRef(0);
+    // Frame hold ("on twos"): last hold bucket drawn — draws within the same bucket are skipped
+    // while playing (see VideoProps.holdFps).
+    const holdBucketRef = useRef(-1);
     // Live grade inputs the compositor reads at composite time (single-ctx). Assigned every render (below,
     // after the memoized keys exist) so `snapshot()` always reflects current props — never a stale closure.
     const gradeInputsRef = useRef<{
@@ -1361,6 +1371,19 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
 
     function drawVideoFrame() {
       if (failedRef.current || mediaType !== "video") return;
+      // Frame hold ("on twos"): while playing, only the first frame of each hold bucket draws —
+      // the previous graded/published frame stays on screen (its version doesn't bump, so the
+      // compositor reuses the cached texture). Paused repaints bypass so edits stay live.
+      if (props.mediaType === "video" && props.holdFps && props.isPlaying) {
+        const video = sourceVideoRef.current;
+        if (video && video.readyState >= 2) {
+          const speed = Math.abs(props.speedFactor || 1) || 1;
+          const local = Math.max(0, (video.currentTime - (props.sourceInSeconds ?? 0)) / speed);
+          const bucket = Math.floor(local * props.holdFps);
+          if (bucket === holdBucketRef.current) return;
+          holdBucketRef.current = bucket;
+        }
+      }
       const picked = selectVideoDrawSource();
       // SINGLE-CTX PREVIEW: publish the raw frame + re-arm the scene recomposite instead of grading here.
       // The compositor reads the source LIVE via snapshot() at composite time, so we only bump the version.

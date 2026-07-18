@@ -193,6 +193,10 @@ export function fragmentEffectParamsFromStorage(
     if (raw === undefined) continue;
     if (p.type === "float" && typeof raw === "number") {
       overrides[p.name] = raw;
+    } else if (p.type === "float" && typeof raw === "string" && Number.isFinite(Number.parseFloat(raw))) {
+      // "select" effect params store their value as a string (e.g. styleMode "2") — a numeric
+      // string feeds the float uniform directly, so selects can drive shader modes.
+      overrides[p.name] = Number.parseFloat(raw);
     } else if (p.type === "bool" && typeof raw === "boolean") {
       overrides[p.name] = raw;
     } else if (p.type === "vec3" && typeof raw === "string") {

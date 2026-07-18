@@ -432,8 +432,8 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   check("stylize registered as a builtin fragment effect", getFragmentEffect("builtin.stylize") === STYLIZE_PAINTERLY);
   const passes = STYLIZE_PAINTERLY.passes!;
   check(
-    "stylize graph order: tensor → tensorBlur → paint → tone",
-    passes.map((p) => p.id).join(",") === "tensor,tensorBlur,paint,tone"
+    "stylize graph order: tensor → tensorBlur → paint → dog → ink → tone",
+    passes.map((p) => p.id).join(",") === "tensor,tensorBlur,paint,dog,ink,tone"
   );
   check(
     "every stylize pass input references an EARLIER pass",
@@ -441,7 +441,9 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   );
   const tensor = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[0]!);
   const paint = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[2]!);
-  const tone = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[3]!);
+  const ink = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[4]!);
+  const tone = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[5]!);
+  check("ink pass declares BOTH inputs (tensorBlur + dog)", ink.includes("uniform sampler2D uPass0;") && ink.includes("uniform sampler2D uPass1;"));
   check("intermediate pass writes raw output (no intensity mix)", !tensor.includes("mix(s, e,") && tensor.includes("fragColor = effect(v_uv);"));
   check("input-consuming pass declares uPass0", paint.includes("uniform sampler2D uPass0;"));
   check("final pass mixes against the source by uIntensity", tone.includes("mix(s, e, clamp(uIntensity, 0.0, 1.0))"));

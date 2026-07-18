@@ -82,6 +82,7 @@ export type RenderComparisonFixtureKey =
   | "advanced-transition"
   | "plugin-shader"
   | "stylize"
+  | "stylize-ink"
   | "vignette"
 
   | "grain"
@@ -123,6 +124,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "advanced-transition",
   "plugin-shader",
   "stylize",
+  "stylize-ink",
   "vignette",
 
   "grain",
@@ -278,6 +280,20 @@ const stylizeEffects: TimelineLayer["effects"] = [
     enabled: true,
     intensity: 100,
     params: { paintRadius: 4, paintSharpness: 8, palettePunch: 35 }
+  }
+];
+
+// P2: the FULL graph engaged — Anime Cel mode with ink lines + cel bands (the dog/ink passes and
+// the select→float styleMode plumbing all sit in this one fixture; the plain `stylize` fixture
+// keeps P1's Painterly defaults as its own regression baseline).
+const stylizeInkEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_stylize_ink",
+    type: "stylize",
+    name: "Stylize",
+    enabled: true,
+    intensity: 100,
+    params: { styleMode: "1", paintRadius: 4, paintSharpness: 8, palettePunch: 35, inkStrength: 70, inkThickness: 2, celBands: 5 }
   }
 ];
 
@@ -560,6 +576,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: pluginShaderEffects, fit: "cover" };
     case "stylize":
       return { effects: stylizeEffects, fit: "cover" };
+    case "stylize-ink":
+      return { effects: stylizeInkEffects, fit: "cover" };
     case "vignette":
       return { effects: vignetteEffects, fit: "cover" };
     case "grain":

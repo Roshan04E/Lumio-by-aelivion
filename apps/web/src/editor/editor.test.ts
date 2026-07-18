@@ -4,7 +4,7 @@
  *
  *   pnpm --filter @orreris/web editor:test
  */
-import { applyLayerAttributes, buildOrrerisPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isOrrerisPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseOrrerisPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, shiftSpeedKeyframes, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@orreris/shared";
+import { applyLayerAttributes, buildOrrerisPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerHoldFps, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isOrrerisPackageZipBytes, layerHeldLocalSeconds, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseOrrerisPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, shiftSpeedKeyframes, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@orreris/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -984,6 +984,22 @@ function check(name: string, condition: boolean): void {
   // ∫₀² (1→2) = trapezoid = 3, plus edge hold 2/s after → t=3 ⇒ sourceIn 1 + 3 + 2 = 6.
   check("ramp source time is the exact trapezoid integral", Math.abs(layerSourceTimeSeconds(rampLayer, 2) - 4) < 1e-9 && Math.abs(layerSourceTimeSeconds(rampLayer, 3) - 6) < 1e-9);
   check("ramp overrides constant speed", Math.abs(layerSourceTimeSeconds({ ...rampLayer, speed: 8 }, 2) - 4) < 1e-9);
+
+  // --- Frame hold ("on twos") — quantized LOCAL time, video-only sampling law -------------------
+  const heldLayer = { holdFps: 12 };
+  check(
+    "hold: 12fps quantizes local time to 1/12 buckets",
+    layerHeldLocalSeconds(heldLayer, 0.0) === 0 &&
+      Math.abs(layerHeldLocalSeconds(heldLayer, 0.09) - 1 / 12) < 1e-9 &&
+      Math.abs(layerHeldLocalSeconds(heldLayer, 0.999) - 11 / 12) < 1e-9
+  );
+  check("hold: absent/invalid holdFps is a passthrough", layerHeldLocalSeconds({}, 0.777) === 0.777 && layerHeldLocalSeconds({ holdFps: 1 }, 0.777) === 0.777 && layerHeldLocalSeconds({ holdFps: 99 }, 0.777) === 0.777);
+  check("hold: sanitizer accepts 2..30 only", getLayerHoldFps({ holdFps: 12 }) === 12 && getLayerHoldFps({ holdFps: 31 }) === null && getLayerHoldFps({}) === null);
+  // Hold + ramp compose: quantize LOCAL first, then the ramp integral (12 new images per TIMELINE second).
+  check(
+    "hold: composes with the ramp integral (held local through the mapper)",
+    Math.abs(layerSourceTimeSeconds(rampLayer, layerHeldLocalSeconds(heldLayer, 2.04)) - layerSourceTimeSeconds(rampLayer, 2)) < 1e-9
+  );
   // Split a ramped clip: right half's sourceIn = integral at the cut; ramp rebases with the cut value first.
   const rampComp = {
     ...comp,

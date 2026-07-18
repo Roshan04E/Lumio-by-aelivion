@@ -144,6 +144,11 @@ export interface RenderManifestLayer {
    * through the worker's audio post-mix (Remotion `<Audio>` can't ramp).
    */
   speedKeyframes?: SpeedKeyframe[] | undefined;
+  /**
+   * Frame hold ("on twos"): quantize VIDEO local time to N images/second, carried verbatim.
+   * Audio stays continuous. Renderers map via shared `layerHeldLocalSeconds`.
+   */
+  holdFps?: number | undefined;
   /** Track mixer fader gain (0..2, 1 = unity), resolved at manifest build. */
   trackGain?: number | undefined;
   /** Track stereo pan (−1..1). Remotion itself can't pan; non-zero pan routes the render through the worker's audio post-mix. */
@@ -361,6 +366,7 @@ export function buildRenderManifest(input: {
             sourceInSeconds: layer.sourceInSeconds,
             speed: layer.speed,
             speedKeyframes: layer.speedKeyframes,
+            holdFps: layer.holdFps,
             trackGain: getTrackAudioGain(track),
             trackPan: getTrackPan(track),
             trackVolumeKeyframes: track.volumeKeyframes,
@@ -440,6 +446,7 @@ export function buildRenderManifest(input: {
               : layer.sourceInSeconds,
           speed: layer.speed,
           speedKeyframes: shiftSpeedKeyframes(layer, trimmedFromHeadSeconds),
+          holdFps: layer.holdFps,
           trackGain: getTrackAudioGain(track),
           trackPan: getTrackPan(track),
           trackVolumeKeyframes: track.volumeKeyframes,

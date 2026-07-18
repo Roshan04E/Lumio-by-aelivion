@@ -133,6 +133,7 @@ import {
   moveLayerWithinTrack,
   copyLayerToClipboard,
   changeLayerConstantSpeed,
+  getLayerHoldFps,
   getLayerSpeed,
   getLayerSpeedAt,
   getSpeedRamp,
@@ -13332,6 +13333,23 @@ function ClipSpeedControl({
       {reversed || sourceSecondsConsumed < 0 ? (
         <small className="clip-speed-note">Reversed: preview steps frame-by-frame and is silent; export plays true reversed video + audio.</small>
       ) : null}
+      {/* Frame hold ("animating on twos", 2026-07-18): quantize VIDEO sampling to N images/second —
+          the stop-motion/anime cadence (pairs with the Stylize effect). Audio stays continuous. */}
+      <label className="clip-speed-field">
+        Frame hold
+        <select
+          value={String(getLayerHoldFps(layer) ?? 0)}
+          onChange={(event) => {
+            const fps = Number(event.target.value);
+            onChange((current) => ({ ...current, holdFps: fps > 0 ? fps : undefined }));
+          }}
+        >
+          <option value="0">Off (smooth)</option>
+          <option value="12">12 fps — on twos (Spider-Verse feel)</option>
+          <option value="8">8 fps — on threes</option>
+          <option value="6">6 fps — stop motion</option>
+        </select>
+      </label>
       <div className="clip-speed-ramp">
         <div className="clip-speed-ramp-head">
           <span>Speed ramp</span>

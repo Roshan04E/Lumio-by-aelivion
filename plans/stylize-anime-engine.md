@@ -1,9 +1,16 @@
 # Stylize Engine — photoreal footage → illustrated / anime / comic-print motion
 
-Status: **P1 SHIPPED 2026-07-18** (pass-graph infra + Painterly; pixel gate 38/38, stylize
-fixture 0.000%). P2 (ink/cel/manga) next. Reference brief: user wants a Spider-Verse-class
-stylization of real footage — an advanced effect no mainstream browser editor ships.
-"Best effects, no hurry."
+Status: **P1 + P2 + P4 SHIPPED 2026-07-18.** P1: pass-graph infra + Painterly. P2: ETF-flow
+DoG ink passes + XDoG threshold, cel posterize (dithered), Style select (Painterly / Anime
+Cel / Manga / Sketch) — defaults keep P1 output byte-stable; `stylize-ink` fixture gates the
+full graph. P4 (pulled forward on user request): frame hold "on twos" — `layer.holdFps`
+(12/8/6) quantizes VIDEO local time via shared `layerHeldLocalSeconds` before the
+`layerSourceTimeSeconds` mapping in EVERY renderer (export compositor, Remotion per-frame
+Sequence remap, span-proxy capture, live preview via hold-bucket draw skip in
+WebglMediaLayer); audio stays continuous; UI = "Frame hold" select in ClipSpeedControl.
+Pixel gate 39/39. REMAINING: P3 Comic Print (halftone, CMYK misprint, paper, hatching),
+P5 segmentation-aware styling, P6 generative tier. Reference brief: Spider-Verse-class
+stylization no mainstream browser editor ships. "Best effects, no hurry."
 
 ---
 

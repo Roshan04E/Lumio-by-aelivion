@@ -599,7 +599,8 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
   {
     type: "stylize",
     name: "Stylize",
-    description: "Painterly illustration engine: anisotropic Kuwahara paint + tone punch (multi-pass GPU graph, temporally stable on video).",
+    description:
+      "Illustration engine: anisotropic-Kuwahara paint, flow-guided ink lines, cel shading — Painterly / Anime Cel / Manga / Sketch (multi-pass GPU graph, temporally stable on video).",
     category: "Stylize",
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
@@ -607,9 +608,24 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     previewSupport: "native",
     renderSupport: "native",
     params: [
+      {
+        key: "styleMode",
+        label: "Style",
+        type: "select",
+        defaultValue: "0",
+        options: [
+          { label: "Painterly", value: "0" },
+          { label: "Anime Cel", value: "1" },
+          { label: "Manga", value: "2" },
+          { label: "Sketch", value: "3" }
+        ]
+      },
       { key: "paintRadius", label: "Brush Size", type: "number", min: 1, max: 6, step: 1, defaultValue: 4, unit: "px", keyframeable: true },
       { key: "paintSharpness", label: "Edge Hardness", type: "number", min: 1, max: 16, step: 1, defaultValue: 8, keyframeable: true },
-      { key: "palettePunch", label: "Color Punch", type: "number", min: 0, max: 100, step: 1, defaultValue: 35, unit: "%", keyframeable: true }
+      { key: "palettePunch", label: "Color Punch", type: "number", min: 0, max: 100, step: 1, defaultValue: 35, unit: "%", keyframeable: true },
+      { key: "inkStrength", label: "Ink Lines", type: "number", min: 0, max: 100, step: 1, defaultValue: 0, unit: "%", keyframeable: true },
+      { key: "inkThickness", label: "Line Weight", type: "number", min: 0.5, max: 4, step: 0.5, defaultValue: 2, keyframeable: true },
+      { key: "celBands", label: "Cel Bands", type: "number", min: 0, max: 10, step: 1, defaultValue: 0, keyframeable: true }
     ]
   }
 ];

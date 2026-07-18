@@ -767,6 +767,15 @@ export interface TimelineLayer {
    * Every consumer must map through `getLayerSpeedAt` / `layerSourceTimeSeconds` — never raw.
    */
   speedKeyframes?: SpeedKeyframe[] | undefined;
+  /**
+   * Frame hold ("animating on twos/threes", 2026-07-18 — the Spider-Verse 12fps feel): when set
+   * (e.g. 12), the layer's VIDEO sampling time quantizes to this many distinct images per timeline
+   * second. Audio stays continuous — the hold applies only to picture sampling. Every video
+   * consumer must quantize LOCAL time via `layerHeldLocalSeconds` BEFORE mapping through
+   * `layerSourceTimeSeconds`, so preview, span proxies, local export, and Remotion hold the
+   * IDENTICAL frames (render-manifest law).
+   */
+  holdFps?: number | undefined;
   /** How this layer composites over the layers below it. Default `normal`. */
   blendMode?: BlendMode | undefined;
   /** Vector masks that hide/reveal parts of this clip (Phase 1). Empty/absent = no masking. */

@@ -32,6 +32,7 @@ import {
   isTrackEnabled,
   MediaWebGLRenderer,
   RenderTarget,
+  layerHeldLocalSeconds,
   layerSourceTimeSeconds,
   resolveTransitionWindowSides,
   type ScenePreviewTransition,
@@ -299,7 +300,8 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
       // P1b parity self-check compares span frames from the wrong source time and fails the span
       // (user-visible as the red proxy bar on sped-up clips). Clamp to the decodable range so a
       // 400% clip near its media end seeks to the last real frame instead of stalling past EOF.
-      const rawSourceTime = layerSourceTimeSeconds(layer, Math.max(0, t - layer.startSeconds));
+      // Frame hold ("on twos") quantizes local time first — spans must bake the held frames.
+      const rawSourceTime = layerSourceTimeSeconds(layer, layerHeldLocalSeconds(layer, Math.max(0, t - layer.startSeconds)));
       const mediaEnd = entry.lease && Number.isFinite(entry.lease.video.duration) ? Math.max(0, entry.lease.video.duration - 0.05) : rawSourceTime;
       const sourceTime = Math.min(rawSourceTime, mediaEnd);
       let source: TexImageSource;

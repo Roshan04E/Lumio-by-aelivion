@@ -34,6 +34,8 @@ import {
   graphicToAnimatedDataUrl,
   resolveGraphicAnimation,
   resolveTransitionWindowSides,
+  getLayerHoldFps,
+  layerHeldLocalSeconds,
   layerSourceTimeSeconds,
   registerEffectManifests,
   registerLookManifests,
@@ -406,8 +408,11 @@ function VideoGrabber({
   // at the exact source frame from the shared closed-form ramp integral (identical to preview +
   // local export). Render-only path; each output frame is its own render pass, so the per-frame
   // Sequence is free.
-  if (layer.speedKeyframes?.length) {
-    const localSeconds = hiddenLeadSeconds + frame / fps;
+  if (layer.speedKeyframes?.length || getLayerHoldFps(layer) !== null) {
+    // Frame hold ("on twos") rides the SAME per-frame remap as ramps: quantize LOCAL time to the
+    // hold grid (shared floor math — identical frames to preview/local export), then map through
+    // the ramp integral. Audio is untouched (the post-mix reads raw time).
+    const localSeconds = layerHeldLocalSeconds(layer, hiddenLeadSeconds + frame / fps);
     const sourceSeconds = layerSourceTimeSeconds(
       { speed: layer.speed, sourceInSeconds: layer.sourceInSeconds, speedKeyframes: layer.speedKeyframes },
       localSeconds

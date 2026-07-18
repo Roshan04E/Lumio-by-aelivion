@@ -45,6 +45,7 @@ import {
   buildRegionBlurCloneAliases,
   SceneMaskMatteCache,
   SceneTextRasterizer,
+  layerHeldLocalSeconds,
   layerSourceTimeSeconds,
   resolveTransitionWindowSides,
   type ColorPipeline,
@@ -507,7 +508,9 @@ export class SceneFrameCompositor {
     // sequence with it (static graphics/stills ignore the argument, so this is a no-op for them).
     const sourceTime =
       layer.type === "video"
-        ? layerSourceTimeSeconds(layer, t - layer.startSeconds)
+        ? // Frame hold ("on twos"): quantize LOCAL time before the speed mapping — same law as
+          // preview/Remotion so held exports match held previews frame for frame.
+          layerSourceTimeSeconds(layer, layerHeldLocalSeconds(layer, t - layer.startSeconds))
         : layer.graphic
           ? t - layer.startSeconds
           : 0;

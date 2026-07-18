@@ -545,6 +545,27 @@ export function layerSourceTimeSeconds(
   return (layer.sourceInSeconds ?? 0) + integrateRamp(ramp, localSeconds);
 }
 
+/** Sanitized frame-hold fps (2..30), or null when the layer has no hold. */
+export function getLayerHoldFps(layer: Pick<TimelineLayer, "holdFps">): number | null {
+  const raw = layer.holdFps;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  if (raw < 2 || raw > 30) return null;
+  return raw;
+}
+
+/**
+ * Frame hold ("animating on twos"): quantize LOCAL time to the layer's hold grid — N distinct
+ * images per timeline second, held between grid points. VIDEO SAMPLING ONLY: audio consumers keep
+ * using raw local time. Quantizing local (not source) time means a speed-ramped clip still shows
+ * exactly `holdFps` new images per second of playback — the animation-camera model. Pure floor
+ * math ⇒ bit-identical across every renderer.
+ */
+export function layerHeldLocalSeconds(layer: Pick<TimelineLayer, "holdFps">, localSeconds: number): number {
+  const fps = getLayerHoldFps(layer);
+  if (!fps) return localSeconds;
+  return Math.floor(Math.max(0, localSeconds) * fps) / fps;
+}
+
 /**
  * Rebase a ramp after cutting `headSeconds` off the clip's head (split right half, head trim,
  * work-area clip): points shift left; the segment value AT the cut becomes a new first point so

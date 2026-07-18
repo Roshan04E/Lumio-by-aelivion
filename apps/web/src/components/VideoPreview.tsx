@@ -50,6 +50,7 @@ import {
   getCompositionTextStyle,
   getCompositionTransition,
   getCompositionVolume,
+  getLayerHoldFps,
   getLayerSpeed,
   getLayerSpeedAt,
   getTrackAudioGainAt,
@@ -3098,6 +3099,7 @@ const PreviewLayer = memo(function PreviewLayer({
             layerStartSeconds={layer.startSeconds}
             sourceInSeconds={rampTangent ? rampTangent.sourceIn : layer.sourceInSeconds}
             speedFactor={rampTangent ? rampTangent.speed : getLayerSpeed(layer)}
+            holdFps={getLayerHoldFps(layer) ?? undefined}
             prerollSeconds={prerollSeconds}
             onLoadedMetadata={(event) => syncVideoTime(event.currentTarget)}
             dragHandlers={effectiveDragHandlers}
