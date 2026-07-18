@@ -8,8 +8,8 @@ import { useSyncExternalStore } from "react";
  * gate, …) stays in sync.
  */
 
-const PRO_KEY = "kimera.pro.enabled.v1";
-const PRO_EVENT = "kimera:pro-changed";
+const PRO_KEY = "orreris.pro.enabled.v1";
+const PRO_EVENT = "orreris:pro-changed";
 
 export function isProEnabled(): boolean {
   try {

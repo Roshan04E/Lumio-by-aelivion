@@ -1,4 +1,4 @@
-import type { MaskSequenceArtifactData, ProjectGraph, TimelineComposition } from "@kimera-by-aelivion/shared";
+import type { MaskSequenceArtifactData, ProjectGraph, TimelineComposition } from "@orreris/shared";
 import { isDurableMatteUri } from "../tools/mask-resolver";
 
 /**

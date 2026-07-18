@@ -1,7 +1,7 @@
-import type { SourceAsset } from "@kimera-by-aelivion/shared";
+import type { SourceAsset } from "@orreris/shared";
 
-export const ASSET_AUDIO_TRUE_TAG = "kimera:audio=true";
-export const ASSET_AUDIO_FALSE_TAG = "kimera:audio=false";
+export const ASSET_AUDIO_TRUE_TAG = "orreris:audio=true";
+export const ASSET_AUDIO_FALSE_TAG = "orreris:audio=false";
 
 /** Whether an asset has a usable audio stream. `undefined` means unknown (not yet probed). */
 export function assetHasAudioStream(asset: SourceAsset): boolean | undefined {

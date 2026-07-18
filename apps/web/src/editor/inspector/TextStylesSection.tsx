@@ -12,7 +12,7 @@
 
 import { useEffect, useState } from "react";
 import { Check, Pencil, Plus, RefreshCw, Trash2, Type } from "lucide-react";
-import type { TextStyle } from "@kimera-by-aelivion/shared";
+import type { TextStyle } from "@orreris/shared";
 import { InspectorSection } from "./InspectorSection";
 
 export function TextStylesSection({

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NEUTRAL_SECONDARY, type HslSecondary as Secondary } from "@kimera-by-aelivion/shared";
+import { NEUTRAL_SECONDARY, type HslSecondary as Secondary } from "@orreris/shared";
 
 /**
  * Professional Color System (Phase 3, 13C.3) — HSL Secondary keyer + correction.

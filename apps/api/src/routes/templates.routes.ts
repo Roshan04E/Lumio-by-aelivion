@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createTemplateSchema, patchTemplateSchema, templateDefinitions } from "@kimera-by-aelivion/shared";
+import { createTemplateSchema, patchTemplateSchema, templateDefinitions } from "@orreris/shared";
 import type { Prisma } from "@prisma/client";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { asJson } from "../lib/json";

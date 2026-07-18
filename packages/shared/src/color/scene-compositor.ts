@@ -622,7 +622,7 @@ function sceneGlDebugEnabled(): boolean {
       localStorage?: { getItem: (key: string) => string | null };
     };
     const params = new URLSearchParams(global.location?.search ?? "");
-    return params.get("debugGl") === "1" || global.localStorage?.getItem("kimera_debug_gl") === "1";
+    return params.get("debugGl") === "1" || global.localStorage?.getItem("orreris_debug_gl") === "1";
   } catch {
     return false;
   }

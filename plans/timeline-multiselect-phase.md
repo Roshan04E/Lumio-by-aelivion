@@ -8,7 +8,7 @@ Scope: 5 bugs (right-click kills multi-selection, multi-drag collapses clips to 
 
 **Protected constraint** (user directive, memory): the timeline's non-idiomatic imperative patterns (zero React renders during gestures, DOM-written previews, startTransition selection, ref mirrors) are deliberate. All fixes must stay inside these patterns — never re-Reactify.
 
-**Render parity**: any change to what renders (disabled clips, fade keyframes) must land in both the web preview and the shared scene builder consumed by the Remotion worker, verified with `pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`.
+**Render parity**: any change to what renders (disabled clips, fade keyframes) must land in both the web preview and the shared scene builder consumed by the Remotion worker, verified with `pnpm --filter @orreris/worker render:compare:pixels`.
 
 ## Root causes (verified in source)
 
@@ -80,7 +80,7 @@ Scope: 5 bugs (right-click kills multi-selection, multi-drag collapses clips to 
 ## Cross-cutting verification
 
 - `pnpm -r typecheck` after each session (this repo's lint).
-- `pnpm --filter @kimera-by-aelivion/worker render:compare:pixels` after sessions 3 and 4.
+- `pnpm --filter @orreris/worker render:compare:pixels` after sessions 3 and 4.
 - Gesture smoke suite after every session: single drag, multi-drag cross-track, linked-pair drag, Escape-cancel, marquee→instant right-click, magnetic-mode drag, keyboard nudge with multi-selection.
 - `previewStartByLayerId` and `is-selected` are load-bearing imperative contracts — grep consumers before touching either.
 

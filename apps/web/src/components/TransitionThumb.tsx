@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Star, Trash2 } from "lucide-react";
-import type { TransitionKind } from "@kimera-by-aelivion/shared";
+import type { TransitionKind } from "@orreris/shared";
 import { transitionPreviewStyle, type TransitionPreviewParams } from "../editor/effects/transition-preview";
 
 /**
@@ -36,7 +36,7 @@ export function TransitionThumb({
   onApply: () => void;
   onToggleStar: () => void;
   onRemove?: (() => void) | undefined;
-  /** JSON payload for `application/x-kimera-transition` — set on junction kinds so the tile can be dragged onto a timeline cut. */
+  /** JSON payload for `application/x-orreris-transition` — set on junction kinds so the tile can be dragged onto a timeline cut. */
   dragPayload?: string | undefined;
 }) {
   const aRef = useRef<HTMLDivElement | null>(null);
@@ -104,7 +104,7 @@ export function TransitionThumb({
           dragPayload
             ? (event) => {
                 event.dataTransfer.effectAllowed = "copy";
-                event.dataTransfer.setData("application/x-kimera-transition", dragPayload);
+                event.dataTransfer.setData("application/x-orreris-transition", dragPayload);
                 event.dataTransfer.setData("text/plain", label);
               }
             : undefined

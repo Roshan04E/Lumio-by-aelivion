@@ -50,7 +50,7 @@ function webcodecsDebugEnabled(): boolean {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       if (params.get("exportDecodeDebug") === "1" || params.get("exportGlDebug") === "1") return true;
-      if (window.localStorage?.getItem("kimera.exportDecodeDebug") === "1" || window.localStorage?.getItem("kimera.exportGlDebug") === "1") {
+      if (window.localStorage?.getItem("orreris.exportDecodeDebug") === "1" || window.localStorage?.getItem("orreris.exportGlDebug") === "1") {
         return true;
       }
     }

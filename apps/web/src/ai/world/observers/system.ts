@@ -1,5 +1,5 @@
 /**
- * Kimera OS observer — System State (K2, L0, free). Wraps the browser capability detection
+ * Orreris OS observer — System State (K2, L0, free). Wraps the browser capability detection
  * the tool adapters already use (tools/capabilities.ts) plus basic hardware hints behind the
  * World Model's typed query interface — so a future planner can ask "can this machine run a
  * WebGPU observer?" the same way it asks about a clip's histogram. Target: `system:browser`.

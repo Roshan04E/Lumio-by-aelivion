@@ -5,7 +5,7 @@ import {
   type GenerationModel,
   type GenerationPref,
   type ResolveTask
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { env } from "../config/env";
 import { prisma } from "../lib/prisma";
 import { saveBuffer } from "./storage.service";

@@ -10,7 +10,7 @@
  * scaled layout box — matches how the layer stack + contentFractions already work).
  */
 
-import { containContentRect, getCompositionTransform, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { containContentRect, getCompositionTransform, type TimelineLayer } from "@orreris/shared";
 
 export type AlignTarget = "left" | "centerH" | "right" | "top" | "middle" | "bottom";
 export type AlignMode = "frame" | "selection";

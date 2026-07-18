@@ -29,12 +29,12 @@ Fix the keyframe/graph-editor bug cluster reported by the user:
   (`dont-touch-shipped-off-code` memory).
 - **Render parity:** the animation evaluator (`packages/shared/src/animation.ts`) is shared by web
   preview, local export, and the Remotion worker. If you change ANY evaluator behavior, run
-  `pnpm --filter @kimera-by-aelivion/worker animation:test` AND
-  `$env:PIXEL_BROWSER_CHANNEL='chrome'; pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`.
+  `pnpm --filter @orreris/worker animation:test` AND
+  `$env:PIXEL_BROWSER_CHANNEL='chrome'; pnpm --filter @orreris/worker render:compare:pixels`.
   Tasks K1–K7 as specified below do NOT change evaluator behavior.
 - After EVERY task: `pnpm -r typecheck` (this repo's lint). One task per commit.
-- The graph editor opens with Shift+G / window event `kimera:open-graph-editor` (prefix is
-  `kimera:`, not `lumio:`). Files: `apps/web/src/editor/graph/GraphEditor.tsx`, `graph-view.ts`,
+- The graph editor opens with Shift+G / window event `orreris:open-graph-editor` (prefix is
+  `orreris:`, not `lumio:`). Files: `apps/web/src/editor/graph/GraphEditor.tsx`, `graph-view.ts`,
   `graph-scene.ts`, `useDraftLayer.ts`, host `apps/web/src/editor/BottomWorkspace.tsx`.
 
 ## K1 — Graph editor commits clone the primary onto all selected clips (DATA LOSS — do first)
@@ -208,8 +208,8 @@ diagnostic (dev-only) that lists `animations` entries whose `target.effectId` ma
 ## Regression gates (run at the end of the phase, in this order)
 
 1. `pnpm -r typecheck`
-2. `pnpm --filter @kimera-by-aelivion/worker animation:test`
-3. `$env:PIXEL_BROWSER_CHANNEL='chrome'; pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`
+2. `pnpm --filter @orreris/worker animation:test`
+3. `$env:PIXEL_BROWSER_CHANNEL='chrome'; pnpm --filter @orreris/worker render:compare:pixels`
    (expected: 27/27 fixtures ≤ 0.001%)
 4. Manual smoke: single-clip keyframe toggle/drag/clear; multi-select toggle (values stay per-clip);
    graph-editor drag with 2 clips selected (no source cloning); fades add/remove; undo depth = one

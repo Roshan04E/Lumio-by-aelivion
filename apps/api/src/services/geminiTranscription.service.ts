@@ -8,7 +8,7 @@ import {
   type CaptionTrackData,
   type SourceAsset,
   type TranscriptArtifactData
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { env } from "../config/env";
 import { HttpError } from "../lib/http";
 import { resolvePublicStoragePath } from "./storage.service";

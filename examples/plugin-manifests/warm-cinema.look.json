@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0.0",
   "kind": "look",
-  "id": "aelivion.warm-cinema-look",
+  "id": "pesamee.warm-cinema-look",
   "name": "Warm Cinema",
   "version": "1.0.0",
-  "description": "A warm, slightly faded cinematic color style for the Kimera look plugin pipeline.",
+  "description": "A warm, slightly faded cinematic color style for the Orreris look plugin pipeline.",
   "author": {
-    "name": "Aelivion Studio"
+    "name": "Pesamee Studio"
   },
   "license": {
     "type": "free",

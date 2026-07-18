@@ -7,7 +7,7 @@ import {
   type CapabilityConstraints,
   type GenerationPref,
   type ResolveTask
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { serializeAsset } from "../lib/asset-serializer";

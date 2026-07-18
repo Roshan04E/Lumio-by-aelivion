@@ -36,7 +36,7 @@ function describeError(raw: string): { headline: string; detail: string } | null
   if (/QuotaExceededError|exceeded the quota/i.test(text)) {
     return {
       headline: "Browser storage is full",
-      detail: "Kimera's local cache hit the browser's storage limit. Free disk space or clear old projects, then retry."
+      detail: "Orreris's local cache hit the browser's storage limit. Free disk space or clear old projects, then retry."
     };
   }
   if (/WebGL|GPU|context lost/i.test(text)) {

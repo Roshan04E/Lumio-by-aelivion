@@ -2,7 +2,7 @@ import type { BuiltInTransitionKind, SourceAsset, TimelineComposition, TimelineL
 
 /**
  * FCPXML 1.10 export (Task 2.4) — the hand-off direction for `external-timeline-adapter.ts`'s import.
- * Writes clips, titles, and transitions so a Kimera timeline can round-trip through Premiere/Resolve/Final
+ * Writes clips, titles, and transitions so a Orreris timeline can round-trip through Premiere/Resolve/Final
  * Cut and back (verified by re-importing the output with `parseFcpxml` in `editor.test.ts`). Unsupported
  * constructs (masks, warps, plugin fragment effects, blend modes, keyframed motion) are listed in
  * `report.unsupported` rather than silently dropped — never a false "everything exported cleanly".
@@ -67,7 +67,7 @@ export function exportCompositionToFcpxml(composition: TimelineComposition, asse
 ${resourceAssetsXml}
   </resources>
   <library>
-    <event name="Kimera Export">
+    <event name="Orreris Export">
       <project name="${xmlAttr(composition.name)}">
         <sequence format="r_format" duration="${secondsToFcpxmlTime(composition.durationSeconds)}">
           <spine>
@@ -156,7 +156,7 @@ function reportUnsupportedLayerFeatures(layer: TimelineLayer, unsupported: Exter
   if (layer.effects.length > 0) {
     unsupported.push({
       code: "fcpxml.export.effects",
-      message: `${layer.effects.length} Kimera effect(s) on "${layer.name}" have no FCPXML equivalent and are lossy on export.`,
+      message: `${layer.effects.length} Orreris effect(s) on "${layer.name}" have no FCPXML equivalent and are lossy on export.`,
       layerId: layer.id
     });
   }

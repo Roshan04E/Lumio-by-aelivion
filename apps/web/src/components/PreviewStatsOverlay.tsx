@@ -3,7 +3,7 @@
  * FPS, dropped-frame ratio, frame/composite times, the effective render scale (incl. the adaptive
  * cap), and live WebGL context count (`__rfActiveGlContexts`). Subscribes to the throttled
  * frame-stats store (~2Hz), so it costs nothing per frame and only exists while toggled on from the
- * preview toolbar. Premiere's dropped-frame indicator / Resolve's GPU status, Kimera-style.
+ * preview toolbar. Premiere's dropped-frame indicator / Resolve's GPU status, Orreris-style.
  */
 
 import { useSyncExternalStore } from "react";

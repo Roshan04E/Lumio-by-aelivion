@@ -22,7 +22,7 @@
  * `WebglMediaLayer` / `VideoPreview` changes. React StrictMode's mount→cleanup→mount just round-trips
  * the element through the idle set and adopts it straight back.
  *
- * Kill switch (repo convention): `?videoPool=0` → localStorage `kimera.videoPool` → `VITE_VIDEO_POOL`
+ * Kill switch (repo convention): `?videoPool=0` → localStorage `orreris.videoPool` → `VITE_VIDEO_POOL`
  * → ON. Disabled means create-on-acquire / teardown-on-release — byte-for-byte today's lifecycle —
  * through the SAME code path, so there is no second implementation to drift.
  *
@@ -48,7 +48,7 @@ export interface VideoPoolStats {
   created: number;
 }
 
-/** Resolution order: `?videoPool=0|1` → localStorage `kimera.videoPool` → `VITE_VIDEO_POOL` → true. */
+/** Resolution order: `?videoPool=0|1` → localStorage `orreris.videoPool` → `VITE_VIDEO_POOL` → true. */
 export function getVideoPoolEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
   if (typeof window !== "undefined") {
@@ -56,7 +56,7 @@ export function getVideoPoolEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("videoPool")) {
         return truthy(new URLSearchParams(window.location.search).get("videoPool"));
       }
-      const stored = window.localStorage?.getItem("kimera.videoPool");
+      const stored = window.localStorage?.getItem("orreris.videoPool");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

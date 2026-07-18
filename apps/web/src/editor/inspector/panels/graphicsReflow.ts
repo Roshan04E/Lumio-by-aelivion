@@ -8,7 +8,7 @@
  * The pure re-anchor math is `reflowPinnedCenter` in shared; this just feeds it before/after boxes.
  */
 
-import { pinIsActive, reflowPinnedCenter, type TimelineComposition } from "@kimera-by-aelivion/shared";
+import { pinIsActive, reflowPinnedCenter, type TimelineComposition } from "@orreris/shared";
 import { getTransformKeyframes } from "../keyframeUtils";
 import { paintedBoxAt } from "./graphicsAlignGeometry";
 

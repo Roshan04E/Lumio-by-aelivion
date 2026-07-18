@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { templateDefinitions, type TemplateDefinition } from "@kimera-by-aelivion/shared";
+import { templateDefinitions, type TemplateDefinition } from "@orreris/shared";
 import { Badge } from "../components/Badge";
 import { Card } from "../components/Card";
 import { listTemplates } from "../lib/api";

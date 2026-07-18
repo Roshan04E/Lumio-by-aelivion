@@ -13,7 +13,7 @@
 
 import { useEffect, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronDown, ChevronRight, Copy, Eye, EyeOff, Frame, Group, Layers, Lock, Shapes, Square, Trash2, Type, Unlock, Ungroup } from "lucide-react";
-import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@orreris/shared";
 import { InspectorSection } from "../InspectorSection";
 import { resolveSelectMode, type LayerSelectMode } from "../../selectionMode";
 

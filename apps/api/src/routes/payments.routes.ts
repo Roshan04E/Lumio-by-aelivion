@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createOrderSchema, verifyPaymentSchema, walletPacks } from "@kimera-by-aelivion/shared";
+import { createOrderSchema, verifyPaymentSchema, walletPacks } from "@orreris/shared";
 import { asyncHandler, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { requireAuth, type AuthRequest } from "../middleware/auth";

@@ -10,7 +10,7 @@
  * project through the existing graph save path — the cloud keeps the same folder structure by
  * construction, with zero object-storage renames.
  *
- * This replaces the global `kimera_asset_custom_folders` / `kimera_asset_folder_*` localStorage
+ * This replaces the global `orreris_asset_custom_folders` / `orreris_asset_folder_*` localStorage
  * keys, which leaked one project's folders into every other project (2026-07-17 report).
  */
 

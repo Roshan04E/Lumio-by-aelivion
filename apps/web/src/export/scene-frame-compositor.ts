@@ -59,7 +59,7 @@ import {
   type TimelineLayer,
   type TransitionSpec,
   type TransitionWindowSides,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { getExportSingleContext, getRegionPassesEnabled } from "../color/render-engine";
 import { logExportGl, warnExportGlThresholdOnce } from "./export-gl-debug";
 import { clipSourceKey, graphicSourceKey, type FrameProvider } from "./source-decoder";

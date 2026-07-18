@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { moduleCatalog, mvpLimits, toPublicModule, toolDefinitions, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { moduleCatalog, mvpLimits, toPublicModule, toolDefinitions, type SourceAsset } from "@orreris/shared";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok } from "../lib/http";

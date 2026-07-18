@@ -6,7 +6,7 @@
     <asset id="r3" name="bus-closeup.mov" src="file:///Volumes/Media/bus-closeup.mov" duration="6s"/>
   </resources>
   <library>
-    <event name="Kimera Import Tests">
+    <event name="Orreris Import Tests">
       <project name="Simple FCPXML Import">
         <sequence format="r1" duration="10s">
           <spine>
@@ -19,7 +19,7 @@
             <transition name="Cross Dissolve" offset="4s" duration="1s"/>
             <asset-clip name="Bus Closeup" ref="r3" offset="5s" start="1s" duration="5s"/>
             <title name="Intro Title" offset="10s" duration="2s">
-              <text>Hello Kimera</text>
+              <text>Hello Orreris</text>
             </title>
           </spine>
         </sequence>

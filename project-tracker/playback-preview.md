@@ -108,7 +108,7 @@ tick (with `[]` deps it kept watching the discarded element).
 to watch: "controlled rebuild N/3" should now be followed by a successful rebuild, not the DOM
 fallback, unless the GPU is genuinely gone.
 
-## v8 — Phase 5 SHIPPED behind flag: GPU-first single-context preview (`kimera.singleCtxPreview`, default OFF) (2026-07-07)
+## v8 — Phase 5 SHIPPED behind flag: GPU-first single-context preview (`orreris.singleCtxPreview`, default OFF) (2026-07-07)
 **Problem:** In scene mode every media clip still ran its own `MediaWebGLRenderer` context/canvas:
 2 GPU uploads per layer per frame (raw→per-clip canvas, canvas→compositor texture), one WebGL
 context per clip (governor churn, context-loss storms at the browser's ~16 cap), extra VRAM. The
@@ -141,12 +141,12 @@ untouched flag-off.
 raced the scene compositor's first paint → randomly captured a BLACK canvas (~88% diff on
 arbitrary fixtures per run; failing web captures meanLuma≈0 vs remotion≈110). Added the same
 250ms settle its sibling `scene-compositor-compare.ts` always had. Capture-sync only.
-**Flip procedure:** soak with `localStorage.setItem("kimera.singleCtxPreview","1")` on :4173 →
+**Flip procedure:** soak with `localStorage.setItem("orreris.singleCtxPreview","1")` on :4173 →
 watch `__rfSingleCtxPreview`, `__rfGlContextBudget` (media contexts should drop to ~0),
 `__rfLiveFreeze` → then default ON in `getSingleCtxPreviewEnabled` (render-engine.ts).
 
 ## v9 — singleCtxPreview soak bug: black flicker on ruler clicks (2026-07-07)
-**Problem:** With `kimera.singleCtxPreview=1` on :4173, clicking the playhead around the ruler
+**Problem:** With `orreris.singleCtxPreview=1` on :4173, clicking the playhead around the ruler
 flickered the viewer black (~11 flickers over 19s of scrubbing). Playback itself was clean
 (377 grades / 596 skips, `__rfLiveFreeze` clean).
 **Root cause:** behavioral gap vs the own-canvas path. Mid-seek, a `<video>` element drops
@@ -163,7 +163,7 @@ the graded canvas provided. Never-drawn layers still return null (poster covers 
 flickers; soak signed off ("done happy"). Flag stays OFF by default; flip = one line in
 `getSingleCtxPreviewEnabled()` after a longer real-editing soak.
 
-## v10 — DEFAULT FLIPPED: `kimera.singleCtxPreview` ON (2026-07-07)
+## v10 — DEFAULT FLIPPED: `orreris.singleCtxPreview` ON (2026-07-07)
 **Decision:** user go ("we should flip.. we are ready") after the v8 gate ladder + v9 soak fix.
 **Change:** `getSingleCtxPreviewEnabled()` env fallback `false` → `true` (render-engine.ts) + doc.
 **Gate ladder re-run on the flipped default (plain runs now exercise the single-ctx path):**
@@ -171,7 +171,7 @@ typecheck 5/5 · editor:test · governor:test · `scene:compare` (chrome) 22/22 
 `render:compare:pixels` 23/23 — the in-context-graded preview is pixel-aligned with the Remotion
 export at 0.000%. Rebuilt: `index-CGNM5ptK.js` on :4173.
 **Escape hatches (permanent):** `?singleCtxPreview=0` per session, localStorage
-`kimera.singleCtxPreview="0"`, or `VITE_SINGLE_CTX_PREVIEW=0`. The per-clip-context path stays
+`orreris.singleCtxPreview="0"`, or `VITE_SINGLE_CTX_PREVIEW=0`. The per-clip-context path stays
 intact (DOM-compositor mode still uses it) — rollback is the same one line back to `false`.
 **Watch in the field:** `__rfSingleCtxPreview` {grades, skips}; `__rfGlContextBudget.owners`
 media-renderer count ~0; `__rfLiveFreeze` stays clean; no "Too many active WebGL contexts".

@@ -3347,38 +3347,38 @@ input[type="checkbox"] {
    fixed — every professional NLE keeps a neutral dark workstation shell — only the ACCENT triad
    (--nle-accent / -soft / -border) is swappable, which is enough to make the whole app feel
    re-colored since every selection/focus/active state reads from these three vars. "blue" is the
-   default (unscoped :root values above); each other option is its own [data-kimera-theme] block. */
-.editor-page[data-kimera-theme="warm"] {
+   default (unscoped :root values above); each other option is its own [data-orreris-theme] block. */
+.editor-page[data-orreris-theme="warm"] {
   --nle-accent: #e0a458;
   --nle-accent-soft: rgba(224, 164, 88, 0.16);
   --nle-accent-border: rgba(224, 164, 88, 0.42);
 }
 
-.editor-page[data-kimera-theme="grey"] {
+.editor-page[data-orreris-theme="grey"] {
   --nle-accent: #9aa4b2;
   --nle-accent-soft: rgba(154, 164, 178, 0.18);
   --nle-accent-border: rgba(154, 164, 178, 0.44);
 }
 
-.editor-page[data-kimera-theme="red"] {
+.editor-page[data-orreris-theme="red"] {
   --nle-accent: #e06672;
   --nle-accent-soft: rgba(224, 102, 114, 0.16);
   --nle-accent-border: rgba(224, 102, 114, 0.42);
 }
 
-.editor-page[data-kimera-theme="green"] {
+.editor-page[data-orreris-theme="green"] {
   --nle-accent: #6fbf8b;
   --nle-accent-soft: rgba(111, 191, 139, 0.17);
   --nle-accent-border: rgba(111, 191, 139, 0.42);
 }
 
-.editor-page[data-kimera-theme="orange"] {
+.editor-page[data-orreris-theme="orange"] {
   --nle-accent: #e0893c;
   --nle-accent-soft: rgba(224, 137, 60, 0.17);
   --nle-accent-border: rgba(224, 137, 60, 0.42);
 }
 
-.editor-page[data-kimera-theme="neon"] {
+.editor-page[data-orreris-theme="neon"] {
   --nle-accent: #4cf07a;
   --nle-accent-soft: rgba(76, 240, 122, 0.18);
   --nle-accent-border: rgba(76, 240, 122, 0.48);
@@ -17931,7 +17931,7 @@ input.scrub-number:focus {
   }
 }
 
-/* --- Kimera AI chat panel (P3) ------------------------------------------- */
+/* --- Orreris AI chat panel (P3) ------------------------------------------- */
 .ai-chat-panel {
   display: flex;
   flex-direction: column;
@@ -19867,7 +19867,7 @@ input.scrub-number:focus {
   font-size: 11px;
 }
 
-/* --- Kimera AI right-side dock (full-height, open/close) ----------------- */
+/* --- Orreris AI right-side dock (full-height, open/close) ----------------- */
 .editor-page.is-ai-open {
   /* Reserve room so the fixed dock never covers the timeline/inspector. 364, not 352+10+10 —
      .editor-layout already contributes its own 8px right padding, so the extra was double-
@@ -21679,7 +21679,7 @@ input.scrub-number:focus {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--nle-accent, #7c6cff) 55%, transparent) inset;
   border-radius: 6px;
 }
-/* Wake-word standby: the ear gently breathes while it's actually listening for "Hey Kimera". */
+/* Wake-word standby: the ear gently breathes while it's actually listening for "Hey Orreris". */
 .ai-icon-btn.is-wake-standby {
   animation: va-wake-breathe 2.6s ease-in-out infinite;
 }

@@ -1,4 +1,4 @@
-import { recordExecutionTime, timelineActionRegistry, type TimelineComposition } from "@kimera-by-aelivion/shared";
+import { recordExecutionTime, timelineActionRegistry, type TimelineComposition } from "@orreris/shared";
 import type { AiPlan, PlanStep, PlannerContext, StepProgress } from "../types";
 
 export interface ToolStepResult {

@@ -1,5 +1,5 @@
 /**
- * Kimera OS observer — composition text/speech summary (L2 transcript-derived, cheap +
+ * Orreris OS observer — composition text/speech summary (L2 transcript-derived, cheap +
  * deterministic). Derives spoken/on-screen-text facts from the text layers already on the
  * composition (captions land as text layers via applyCaptionTrackToComposition): how much
  * text, how many words, what share of the timeline it covers, effective words-per-minute.
@@ -7,7 +7,7 @@
  * the fidelity ladder; a real ASR observer can register later as a higher-cost access path.
  */
 
-import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@orreris/shared";
 import type { WorldContext, WorldObserver, WorldTarget } from "../types";
 import { fnv1a } from "../types";
 

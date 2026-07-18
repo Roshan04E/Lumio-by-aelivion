@@ -38,13 +38,13 @@ export interface AssetBlobStore {
   remove: (id: string) => Promise<void>;
 }
 
-const OPFS_DIR = "kimera-assets";
-const IDB_NAME = "kimera-assets";
+const OPFS_DIR = "orreris-assets";
+const IDB_NAME = "orreris-assets";
 const IDB_STORE = "blobs";
 // id → scoped path segments (relative to the OPFS root dir). Only ids written with a scope appear
 // here; anything else resolves from the legacy flat dir. Corruption-tolerant: a miss falls back to
 // the flat dir, and remove() clears the entry.
-const PATH_INDEX_KEY = "kimera_blob_paths";
+const PATH_INDEX_KEY = "orreris_blob_paths";
 
 function sanitizeSegment(value: string): string {
   return value.replace(/[^a-z0-9._-]/gi, "-").toLowerCase();

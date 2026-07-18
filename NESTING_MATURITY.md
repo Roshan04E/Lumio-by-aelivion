@@ -167,7 +167,7 @@ biggest perceived-quality jump ("effects/transitions on groups work now"). 2→3
   STACK (`nestPath`) — nests-in-nests open; the Group action nests compound clips too and names
   sequences uniquely ("Group 01"…). Gates: editor.test `registry:`/`healer:` checks.
 - **Block 3**: `TimelinesPanel` in the assets tab above the bin (EditorPage) — every comp listed
-  (Main badged, root-first), double-click opens, drag → `application/x-kimera-composition` drop on a
+  (Main badged, root-first), double-click opens, drag → `application/x-orreris-composition` drop on a
   video lane inserts a compound clip (cycle-guarded `handleInsertCompositionClip`), context menu:
   Open / Place at playhead / Rename (renames instance clips everywhere) / Duplicate / Delete
   (blocked for root/open; confirm removes N instances) / header "+" = New timeline (opens it).

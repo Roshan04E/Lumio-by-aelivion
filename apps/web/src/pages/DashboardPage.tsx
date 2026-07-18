@@ -1,7 +1,7 @@
 import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Archive, ArrowRight, ChevronLeft, ChevronRight, Copy, MoreVertical, Pencil, Plus, RotateCcw, Search, Trash2 } from "lucide-react";
-import type { RenderJob } from "@kimera-by-aelivion/shared";
+import type { RenderJob } from "@orreris/shared";
 import { deleteProject, duplicateProject, listJobs, listProjects, patchProject, type ProjectRecord } from "../lib/api";
 import { shortDate } from "../lib/format";
 

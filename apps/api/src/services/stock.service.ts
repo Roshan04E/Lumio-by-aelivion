@@ -1,4 +1,4 @@
-import type { StockOrientation, StockResult, StockVariant } from "@kimera-by-aelivion/shared";
+import type { StockOrientation, StockResult, StockVariant } from "@orreris/shared";
 import { env } from "../config/env";
 import { HttpError } from "../lib/http";
 

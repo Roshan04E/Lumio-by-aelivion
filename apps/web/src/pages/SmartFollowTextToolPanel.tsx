@@ -10,7 +10,7 @@ import {
   type TimelineComposition,
   type ToolCapabilityDefinition,
   type TrackingPathArtifactData
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { AiActivityIndicator } from "../components/AiActivityIndicator";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";

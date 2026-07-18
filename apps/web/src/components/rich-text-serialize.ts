@@ -4,7 +4,7 @@
  * spans and the tags Chromium's execCommand produces (B/I/FONT/style spans, DIV line breaks).
  */
 
-import type { TextRun } from "@kimera-by-aelivion/shared";
+import type { TextRun } from "@orreris/shared";
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

@@ -1,4 +1,4 @@
-import { timelineEffectRegistry, toolCapabilityDefinitions } from "@kimera-by-aelivion/shared";
+import { timelineEffectRegistry, toolCapabilityDefinitions } from "@orreris/shared";
 import { registerBuiltinInspectorPanels } from "../inspector/panels";
 import { commandRegistry } from "./commands";
 import { moduleRegistry } from "./modules";

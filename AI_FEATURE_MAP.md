@@ -1,14 +1,14 @@
-# Kimera AI — Feature Map (context primer for new chats)
+# Orreris AI — Feature Map (context primer for new chats)
 
-Paste this file (or point the assistant at it) before working on the AI chat feature, so it doesn't re-scan the codebase. It is the single source of truth for *where things live*; read the named files for detail. Vision/spec lives in `AI_ARCHITECTURE.md`; phased history in `architecture.md` → "Kimera AI Operating System"; live handoff log in `AGENTS.md`.
+Paste this file (or point the assistant at it) before working on the AI chat feature, so it doesn't re-scan the codebase. It is the single source of truth for *where things live*; read the named files for detail. Vision/spec lives in `AI_ARCHITECTURE.md`; phased history in `architecture.md` → "Orreris AI Operating System"; live handoff log in `AGENTS.md`.
 
 ## Golden rules (don't break these)
 - **Timeline Action Registry is the ONLY way AI mutates the timeline.** AI never edits `TimelineLayer`/`TimelineComposition`/effects/keyframes directly. Actions wrap existing pure ops; they're validated + reversible.
 - **AI only *selects* registered capabilities.** Every LLM-returned step is validated against the live registries client-side before it can run. Unknown tool/action → dropped.
-- **Never touch the renderer.** No changes to `apps/web/src/components/VideoPreview.tsx` or `apps/worker/src/remotion/Root.tsx`. Verify with `pnpm --filter @kimera-by-aelivion/worker render:compare:pixels` (must stay ~0.245%).
+- **Never touch the renderer.** No changes to `apps/web/src/components/VideoPreview.tsx` or `apps/worker/src/remotion/Root.tsx`. Verify with `pnpm --filter @orreris/worker render:compare:pixels` (must stay ~0.245%).
 - **Everything stays editable + undoable.** Each applied step commits through the editor's normal `updateComposition` snapshot-undo.
 - **Keys stay server-side** (except BYO, which is per-request and never persisted/logged).
-- TS strict; `pnpm -r typecheck` IS the lint. Tests: `pnpm --filter @kimera-by-aelivion/shared actions:test`, `pnpm --filter @kimera-by-aelivion/web editor:test`.
+- TS strict; `pnpm -r typecheck` IS the lint. Tests: `pnpm --filter @orreris/shared actions:test`, `pnpm --filter @orreris/web editor:test`.
 
 ## Data flow (one request)
 ```
@@ -38,7 +38,7 @@ AiChatPanel.handleSubmit(prompt)
 
 ### Web AI core (`apps/web/src/ai/`)
 - `types.ts` — `PlanStep` (`kind: timelineAction|tool|clarify`), `AiPlan`, `PlannerContext` (`composition,selection,nowSeconds,history?,lastAction?,memory?`), `PlannerProvider.plan(prompt,ctx,onEvent?)`, `PlanStreamEvent` (`phase|provider|reasoning`), `PermissionMode`, `AiMemoryPreferences`, `StepProgress`.
-- `planner/createPlanner.ts` — factory; `LlmPlanner` wrapping `DeterministicPlanner` fallback. `VITE_KIMERA_LLM_PLANNER=off` forces deterministic.
+- `planner/createPlanner.ts` — factory; `LlmPlanner` wrapping `DeterministicPlanner` fallback. `VITE_ORRERIS_LLM_PLANNER=off` forces deterministic.
 - `planner/DeterministicPlanner.ts` — keyword/regex planner (captions, background, follow/track, addText, colorGrade, blur, fades) + follow-up deltas ("make it bigger/smaller/more dramatic", recolor) via `updateText`. Records demand + unsupported. Always-free floor.
 - `planner/LlmPlanner.ts` — streams `/api/ai/plan/stream`, dispatches `PlanStreamEvent`s, `validateSteps()` against registries, `buildPlan()` (numeric confidence→percent+label), `summarizeContext()` = **the relevant-slice cost rule** (selected + on-playhead layers, cap 12, trimmed fields). Sends `byo` + `premium`.
 - `executor/PlanExecutor.ts` — `executePlan(plan, {getContext,commitComposition,openTool?,askClarify?,onProgress})`; returns `{applied,failed,skipped,targetLayerIds,durationMs}`; records exec time.
@@ -54,7 +54,7 @@ AiChatPanel.handleSubmit(prompt)
 - `AiProgressList.tsx` — per-step ✓/⏳/✕ during execution.
 - `AiThinkingLog.tsx` — live pipeline phases + streaming reasoning (event-driven; timer fallback).
 - `AiReasoningLog.tsx` — collapsible chain-of-thought in the plan card.
-- `PermissionModeSelector.tsx`, `AiInsightsDashboard.tsx` (P7), `ByoKeyPanel.tsx` (GP3), `MemoryPanel.tsx` (P15 — what Kimera remembers; Edit/Forget/"this project only" + low-confidence "save as default?" nudge; full-panel sibling via the `Brain` header icon, reads `loadFacts()`/`rememberFact`/`forgetFact`).
+- `PermissionModeSelector.tsx`, `AiInsightsDashboard.tsx` (P7), `ByoKeyPanel.tsx` (GP3), `MemoryPanel.tsx` (P15 — what Orreris remembers; Edit/Forget/"this project only" + low-confidence "save as default?" nudge; full-panel sibling via the `Brain` header icon, reads `loadFacts()`/`rememberFact`/`forgetFact`).
 - Mounted in `pages/EditorPage.tsx` (`.ai-dock` aside; `openToolForAi` bridges tool steps to `SmartFollowTextEffectModal`/`ToolEffectRunnerModal` with `toolStepResolverRef`). CSS in `styles/global.css` (search `.ai-chat-panel`, `.ai-composer`, `.ai-dock`).
 
 ### API gateway (`apps/api/src/`)
@@ -75,9 +75,9 @@ AiChatPanel.handleSubmit(prompt)
 
 **Talk mode + reference image (2026-06-24):** 4th permission mode `talk` → `apps/web/src/ai/talk.ts` `streamTalk()` hits `POST /ai/chat/stream` (consultant prompt, no plan) and renders runnable suggestion chips (tap → Professional + run). Reference image: composer 📎 attach (`encodeReferenceImage` downscale) → `PlannerContext.referenceImages` → gateway multimodal `image_url`, routed to a vision provider (`supportsVision`; Gemini/premium/BYO). `gatewayHasVisionProvider()` guards with a clear note when none. Both `/ai/plan/stream` and `/ai/chat/stream` accept `images`.
 
-**Phase 11 — Memory OS (2026-06-24, Creator+Project slice):** `MemoryFact` Prisma model + auth-gated `/api/memory` (`services/memory.service.ts`, `routes/memory.routes.ts`) with a confidence merge; client-first tiered store `apps/web/src/ai/memory.ts` (localStorage cache + sync via `lib/api.ts`), `memory-extractor.ts` (facts from applied plans), `memory-retriever.ts` `selectMemorySlice()` (bounded, project>creator) → `PlannerContext.memory`/`memoryNote`. `AiChatPanel` takes `projectId`, hydrates on mount, extracts after apply. **Run `pnpm db:migrate` (needs Postgres) before the server path works** — client works offline meanwhile. Test: `pnpm --filter @kimera-by-aelivion/web memory:test`.
+**Phase 11 — Memory OS (2026-06-24, Creator+Project slice):** `MemoryFact` Prisma model + auth-gated `/api/memory` (`services/memory.service.ts`, `routes/memory.routes.ts`) with a confidence merge; client-first tiered store `apps/web/src/ai/memory.ts` (localStorage cache + sync via `lib/api.ts`), `memory-extractor.ts` (facts from applied plans), `memory-retriever.ts` `selectMemorySlice()` (bounded, project>creator) → `PlannerContext.memory`/`memoryNote`. `AiChatPanel` takes `projectId`, hydrates on mount, extracts after apply. **Run `pnpm db:migrate` (needs Postgres) before the server path works** — client works offline meanwhile. Test: `pnpm --filter @orreris/web memory:test`.
 
-**Phase 10 — Intent Continuity (2026-06-24):** `apps/web/src/ai/planner/intent-continuity.ts` `classifyContinuity()` runs per message before planning → `PlannerContext.intentScope`. `AiChatPanel.buildContext(prompt)` gates `lastAction` (threaded only on `continue`) + shows "↪ continuing your last edit"; `LlmPlanner.summarizeContext` emits an `Intent: CONTINUES/NEW` steer; `DeterministicPlanner.followUpTextLayer` won't fall back to the most-recent text on `new`. Test: `pnpm --filter @kimera-by-aelivion/web continuity:test`.
+**Phase 10 — Intent Continuity (2026-06-24):** `apps/web/src/ai/planner/intent-continuity.ts` `classifyContinuity()` runs per message before planning → `PlannerContext.intentScope`. `AiChatPanel.buildContext(prompt)` gates `lastAction` (threaded only on `continue`) + shows "↪ continuing your last edit"; `LlmPlanner.summarizeContext` emits an `Intent: CONTINUES/NEW` steer; `DeterministicPlanner.followUpTextLayer` won't fall back to the most-recent text on `new`. Test: `pnpm --filter @orreris/web continuity:test`.
 
 **Phase 9 batch (2026-06-24):** additive fades (`addTransition` strips only the same direction); `addText`/`updateText` bold/italic (`extractTextStyle`) + spatial `x`/`y` reposition; `clampToSafeArea()` keeps new layers on-frame; REMOVE-family taxonomy — "remove the blur" → `removeEffect`, "remove the fade" → `removeTransition`, vague media-clip delete → clarify; `extractJson` `salvageClarify` for truncated replies + `max_tokens` 4096 (closes the destructive-fallback path); per-step apply checkboxes in `PlanReviewCard` (`onApply(stepIds)`).
 
@@ -86,8 +86,8 @@ Registry + capability index + cost; deterministic + LLM planners; plan review/ex
 **Intent overhaul (2026-06-24):**
 - `describeForPlanner()` emits **param grammar** (Zod-reflected `field:type(constraints)` via `describeZodShape()`) + an INTENT-NOTES disambiguation block; `capability-index.ts` exposes `validateActionParams()`.
 - `LlmPlanner.validateSteps` param-validates each step (not just `hasAction`); `SYSTEM_PROMPT` has few-shot examples; **one bounded agentic repair** re-sends `repair:{previous,errors}` once before deterministic fallback.
-- **Deterministic planner is now an NLU engine** (`planner/nlu.ts` wraps **wink-nlp**, lazy-loaded as a separate chunk): verb-first family classification (add/edit/remove/effect/tool) decides the action family before target resolution — `addShape` etc. now covered. `VITE_KIMERA_LLM_PLANNER=off` to exercise it.
-- **Server AI debug logs**: `apps/api/src/lib/logger.ts` (`aiLog`), gated by `KIMERA_AI_DEBUG=1`/`LOG_LEVEL=debug`; instruments gateway + routes failure paths (never logs keys/prompts).
+- **Deterministic planner is now an NLU engine** (`planner/nlu.ts` wraps **wink-nlp**, lazy-loaded as a separate chunk): verb-first family classification (add/edit/remove/effect/tool) decides the action family before target resolution — `addShape` etc. now covered. `VITE_ORRERIS_LLM_PLANNER=off` to exercise it.
+- **Server AI debug logs**: `apps/api/src/lib/logger.ts` (`aiLog`), gated by `ORRERIS_AI_DEBUG=1`/`LOG_LEVEL=debug`; instruments gateway + routes failure paths (never logs keys/prompts).
 - **Chat undo**: `AiChatPanel` `onUndo` prop + "Undo last edit (N)" button reverts the last applied plan's commits.
 
 ## Likely "advanced" directions for the next chat (not yet built)
@@ -101,4 +101,4 @@ Registry + capability index + cost; deterministic + LLM planners; plan review/ex
 
 ---
 ### Paste-to-start blurb for a new chat
-> Working on the Kimera AI chat feature in this repo. Read `AI_FEATURE_MAP.md` for the full layout (don't grep the codebase). Golden rules: AI mutates only via the Timeline Action Registry, every LLM step is registry-validated, never touch the renderer, everything stays undoable. I want to work on: <X>.
+> Working on the Orreris AI chat feature in this repo. Read `AI_FEATURE_MAP.md` for the full layout (don't grep the codebase). Golden rules: AI mutates only via the Timeline Action Registry, every LLM step is registry-validated, never touch the renderer, everything stays undoable. I want to work on: <X>.

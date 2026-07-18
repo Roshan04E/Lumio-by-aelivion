@@ -1,5 +1,5 @@
 import { Suspense, lazy, memo, useMemo, type ComponentType } from "react";
-import type { TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineLayer } from "@orreris/shared";
 import { inspectorRegistry, type InspectorPanelProps, type MaskTool } from "../registry/inspector";
 import type { SavedTrack } from "../../lib/trackLibrary";
 

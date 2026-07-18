@@ -14,23 +14,23 @@ pnpm lint                # same as typecheck (no eslint in this repo)
 pnpm build               # pnpm -r build
 ```
 
-Demo login: `demo@aelivion.studio` / `password123`
+Demo login: `demo@pesamee.studio` / `password123`
 
 Single-package commands (prefer these over the root `-r` scripts when iterating on one app):
 
 ```bash
-pnpm --filter @kimera-by-aelivion/web typecheck
-pnpm --filter @kimera-by-aelivion/worker typecheck
+pnpm --filter @orreris/web typecheck
+pnpm --filter @orreris/worker typecheck
 ```
 
 Worker-side test/QA scripts (no test framework - these are standalone tsx scripts that assert and exit non-zero on failure):
 
 ```bash
-pnpm --filter @kimera-by-aelivion/worker animation:test          # keyframe/animation evaluator
-pnpm --filter @kimera-by-aelivion/worker caption:qa               # caption pipeline QA
-pnpm --filter @kimera-by-aelivion/worker render:compare            # Remotion vs web preview comparison
-pnpm --filter @kimera-by-aelivion/worker render:compare:pixels     # pixel-diff version of the above
-pnpm --filter @kimera-by-aelivion/worker render:manifest <file>    # render a manifest JSON through the real Remotion renderer to an mp4, for manual verification
+pnpm --filter @orreris/worker animation:test          # keyframe/animation evaluator
+pnpm --filter @orreris/worker caption:qa               # caption pipeline QA
+pnpm --filter @orreris/worker render:compare            # Remotion vs web preview comparison
+pnpm --filter @orreris/worker render:compare:pixels     # pixel-diff version of the above
+pnpm --filter @orreris/worker render:manifest <file>    # render a manifest JSON through the real Remotion renderer to an mp4, for manual verification
 ```
 
 There is no per-test filtering - these scripts run a fixed scenario end to end. When verifying a renderer change, prefer `render:manifest` against a real manifest and inspect output frames over trusting typecheck alone.
@@ -48,7 +48,7 @@ There is no per-test filtering - these scripts run a fixed scenario end to end. 
 - `templates.ts` / `dependencies.ts` - templates are reusable module stacks, not fixed videos; the dependency resolver auto-inserts prerequisite modules (e.g. adding `SMART_3D_FOLLOW_TEXT` pulls in `PERSON_EXTRACTION`/tracking)
 - `animation.ts` - the keyframe interpolation evaluator shared by editor, web preview, and Remotion
 
-**Two usage paths every AI tool must support** (see `architecture.md` for full detail): a free "prompt bridge" path where Kimera generates a prompt the user pastes into their own chat AI and pastes the result back in, and an integrated path where Kimera calls the adapter directly. Both paths produce the same editable timeline data through the same tool capability registry - don't build a tool that only works one way.
+**Two usage paths every AI tool must support** (see `architecture.md` for full detail): a free "prompt bridge" path where Orreris generates a prompt the user pastes into their own chat AI and pastes the result back in, and an integrated path where Orreris calls the adapter directly. Both paths produce the same editable timeline data through the same tool capability registry - don't build a tool that only works one way.
 
 **Tool adapter system** (`apps/web/src/tools/`): each AI tool capability runs through one of four adapter types - `mock` (schema-compatible fake artifacts, fast, used for UI/product flows), `browser` (real local computation, gated by `apps/web/src/tools/capabilities.ts` feature detection: WebWorkers/OffscreenCanvas/WebCodecs/WebGPU/OPFS/SharedArrayBuffer), `cloud` (contract-only stub today, queues toward a future real service), `desktop` (planned, not implemented). `tool-runner.ts` picks/dispatches the adapter; `artifact-store.ts` persists generated artifacts to OPFS with an in-memory fallback. `local-transcription.ts` (lazy-loaded `@huggingface/transformers` pipeline, cached, cancellable, progress-reporting) is the reference pattern for any new browser-side ML tool.
 

@@ -18,10 +18,10 @@ function fmt(v: number): string {
 }
 
 /** Serialize a baked `Lut3d` to `.cube` text. `title` becomes the standard TITLE header line. */
-export function serializeCubeFile(lut: Lut3d, title = "Kimera Grade"): string {
+export function serializeCubeFile(lut: Lut3d, title = "Orreris Grade"): string {
   const lines: string[] = [
     `TITLE "${title.replaceAll('"', "'")}"`,
-    "# Exported by Kimera — the full color pipeline baked at every grid node.",
+    "# Exported by Orreris — the full color pipeline baked at every grid node.",
     `LUT_3D_SIZE ${lut.size}`,
     "DOMAIN_MIN 0.0 0.0 0.0",
     "DOMAIN_MAX 1.0 1.0 1.0"
@@ -35,6 +35,6 @@ export function serializeCubeFile(lut: Lut3d, title = "Kimera Grade"): string {
 }
 
 /** One-call export: bake `pipeline` and serialize it. 33³ matches the common .cube resolution. */
-export function pipelineToCubeFile(pipeline: ColorPipeline, title = "Kimera Grade", size = LUT3D_SIZE): string {
+export function pipelineToCubeFile(pipeline: ColorPipeline, title = "Orreris Grade", size = LUT3D_SIZE): string {
   return serializeCubeFile(bakePipelineToLut3d(pipeline, size), title);
 }

@@ -57,7 +57,7 @@ effect param, content, layer property, style, mask scalar, mask path) now delega
 never its time. An object is truthy whenever it exists, so `Boolean(...)` — the check callers actually
 reach for — is correct by construction; callers wanting the time take `?.timeSeconds`. The rename made
 TypeScript flag every site, so nothing converted silently.
-**Verify:** new `pnpm --filter @kimera-by-aelivion/web keyframe:nav:test` (12 checks, incl. an explicit
+**Verify:** new `pnpm --filter @orreris/web keyframe:nav:test` (12 checks, incl. an explicit
 "the old time-returning API would have been falsy here" assertion + strictly-before/after tolerance);
 `pnpm -r typecheck` clean; `editor:test` + worker `graphic:test` pass.
 **Lesson:** never return a nullable NUMBER whose valid value can be `0` when callers' natural question
@@ -80,7 +80,7 @@ NON-OPTIONAL on `InspectorHostProps` — declared `T | undefined` WITHOUT `?`, s
 undefined but the prop must be written out at every call site. Omitting one is a build error; it
 immediately caught the second offender (the Text/Warp host). Panel-specific props (composition,
 activeMaskId, trackLibrary, autoKeyframe) stay optional — they're meaningful to one panel each.
-**Verify:** `pnpm --filter @kimera-by-aelivion/web typecheck` (the required-prop guard fails the build
+**Verify:** `pnpm --filter @orreris/web typecheck` (the required-prop guard fails the build
 when a site omits either); `editor:test` + `keyframe:nav:test` pass.
 **Lesson:** an optional prop is a silent-failure contract. If a panel is USELESS without a prop, the
 prop is not optional — `T | undefined` without `?` is the tool: it forces the call site to think while

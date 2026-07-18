@@ -2,12 +2,12 @@
  * Standalone assert script for Responsive Pin (§1). Repo convention: no test framework — exits
  * non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web pin:test
+ *   pnpm --filter @orreris/web pin:test
  *
  * Covers the pure re-anchor math (reflowPinnedCenter) and the composition-level reflow driver
  * (reflowCompositionForResize) that bakes new positions on reframe.
  */
-import { pinIsActive, reflowPinnedCenter, type TimelineComposition, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { pinIsActive, reflowPinnedCenter, type TimelineComposition, type TimelineLayer } from "@orreris/shared";
 import { reflowCompositionForResize } from "./graphicsReflow";
 
 let failures = 0;

@@ -1,4 +1,4 @@
-import { walletPacks } from "@kimera-by-aelivion/shared";
+import { walletPacks } from "@orreris/shared";
 import { HttpError } from "../lib/http";
 import { prisma } from "../lib/prisma";
 

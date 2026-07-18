@@ -1,4 +1,4 @@
-# Kimera vs. Professional NLEs - Competitive Analysis
+# Orreris vs. Professional NLEs - Competitive Analysis
 
 **Generated:** 2026-07-06  
 **Focus:** Browser-first video editor positioning against desktop and web competitors
@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Kimera occupies a unique position in the video editing landscape: **a browser-first editor targeting short-form creators with professional-grade AI capabilities**. It's not trying to replace Premiere Pro for feature films, nor is it trying to be a CapCut clone. Instead, it targets creators who need:
+Orreris occupies a unique position in the video editing landscape: **a browser-first editor targeting short-form creators with professional-grade AI capabilities**. It's not trying to replace Premiere Pro for feature films, nor is it trying to be a CapCut clone. Instead, it targets creators who need:
 
 - Professional output quality
 - AI-assisted editing workflows
@@ -15,13 +15,13 @@ Kimera occupies a unique position in the video editing landscape: **a browser-fi
 - Cross-platform consistency
 - Cloud collaboration readiness
 
-This report compares Kimera against established desktop NLEs (Premiere Pro, DaVinci Resolve, Final Cut) and web-based competitors (CapCut, Canva, Runway) across key dimensions.
+This report compares Orreris against established desktop NLEs (Premiere Pro, DaVinci Resolve, Final Cut) and web-based competitors (CapCut, Canva, Runway) across key dimensions.
 
 ---
 
 ## Competitive Landscape Matrix
 
-| Dimension | Kimera | Premiere Pro | DaVinci Resolve | Final Cut Pro | CapCut | Runway |
+| Dimension | Orreris | Premiere Pro | DaVinci Resolve | Final Cut Pro | CapCut | Runway |
 |-----------|-------|--------------|-----------------|---------------|--------|--------|
 | **Platform** | Web (Chrome/Firefox/Safari) | Desktop (Win/macOS) | Desktop (Win/macOS/Linux) | Desktop (macOS only) | Web + Desktop | Web + Desktop |
 | **Install Required** | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes (optional web) | ✅ Yes (optional web) |
@@ -37,114 +37,114 @@ This report compares Kimera against established desktop NLEs (Premiere Pro, DaVi
 
 ---
 
-## Detailed Comparison: Kimera vs. Desktop NLEs
+## Detailed Comparison: Orreris vs. Desktop NLEs
 
-### 1. Kimera vs. Adobe Premiere Pro
+### 1. Orreris vs. Adobe Premiere Pro
 
-| Feature | Kimera | Premiere Pro | Verdict |
+| Feature | Orreris | Premiere Pro | Verdict |
 |---------|-------|--------------|---------|
 | **Timeline Editing** | ✅ Modern NLE (slip, roll, slide, ripple) | ✅ Industry standard | Tie - Premiere more refined |
 | **Effects & Transitions** | ✅ 40+ GPU transitions, 30+ effects | ✅ 100+ effects, 50+ transitions | Premiere - more variety |
 | **Color Grading** | ✅ Lumetri-class (curves, wheels, HSL) | ✅ Lumetri (same) | Tie - both professional |
 | **Keyframes** | ✅ Graph editor, spatial handles | ✅ Graph editor, spatial | Tie |
-| **AI Tools** | ✅ Auto-captions, person extraction, follow text | ❌ Limited (Firefly, auto-reframe) | Kimera - more integrated |
+| **AI Tools** | ✅ Auto-captions, person extraction, follow text | ❌ Limited (Firefly, auto-reframe) | Orreris - more integrated |
 | **Asset Management** | ✅ Local/AI/Stock/Brand bins | ✅ Project Manager, Bins | Tie |
-| **Collaboration** | ✅ Cloud projects, real-time sync | ✅ Cloud Projects | Kimera - cleaner implementation |
+| **Collaboration** | ✅ Cloud projects, real-time sync | ✅ Cloud Projects | Orreris - cleaner implementation |
 | **Offline Workflow** | ✅ Proxies, media offline | ✅ Proxy media, offline | Tie |
 | **Performance** | ⚡ WebGL (GPU-first) | ⚡ Mercury Transmit (GPU) | Tie - both modern |
-| **Learning Curve** | ✅ Premiere-inspired layout | ⚓ Steeper | Kimera easier |
-| **Cost** | 💰 Subscription | 💰💰 $21/mo (Creative Cloud) | Kimera competitive |
+| **Learning Curve** | ✅ Premiere-inspired layout | ⚓ Steeper | Orreris easier |
+| **Cost** | 💰 Subscription | 💰💰 $21/mo (Creative Cloud) | Orreris competitive |
 
-**Verdict:** Kimera matches Premiere on core editing and color, exceeds on AI integration, and beats on cost. Premiere has more effects and industry adoption.
+**Verdict:** Orreris matches Premiere on core editing and color, exceeds on AI integration, and beats on cost. Premiere has more effects and industry adoption.
 
 ---
 
-### 2. Kimera vs. DaVinci Resolve
+### 2. Orreris vs. DaVinci Resolve
 
-| Feature | Kimera | DaVinci Resolve | Verdict |
+| Feature | Orreris | DaVinci Resolve | Verdict |
 |---------|-------|-----------------|---------|
 | **Color Grading** | ✅ Lumetri-class | ✅ Professional (Fusion) | Tie - different strengths |
 | **Fusion VFX** | ❌ None | ✅ Node-based compositing | Resolve - superior |
 | **Fairlight Audio** | ⚠️ Basic mixer | ✅ Professional audio suite | Resolve - superior |
-| **Collaboration** | ✅ Cloud projects | ❌ Limited (Studio) | Kimera - better |
+| **Collaboration** | ✅ Cloud projects | ❌ Limited (Studio) | Orreris - better |
 | **Export Formats** | ✅ MP4, WebM | ✅ 40+ formats | Resolve - more options |
 | **Hardware Acceleration** | ✅ WebGPU/WebCodecs | ✅ Blackmagic GPU | Resolve - deeper optimization |
 | **AI Tools** | ✅ Captions, extraction, follow | ✅ Magic Mask, Sound Remover | Resolve - more mature |
 | **Price** | 💰 Subscription | 💰 Free / $295 | Resolve - free version |
 
-**Verdict:** DaVinci Resolve is the professional powerhouse with superior color/audio. Kimera wins on simplicity, cost (free tier potential), and web accessibility.
+**Verdict:** DaVinci Resolve is the professional powerhouse with superior color/audio. Orreris wins on simplicity, cost (free tier potential), and web accessibility.
 
 ---
 
-### 3. Kimera vs. Final Cut Pro
+### 3. Orreris vs. Final Cut Pro
 
-| Feature | Kimera | Final Cut Pro | Verdict |
+| Feature | Orreris | Final Cut Pro | Verdict |
 |---------|-------|---------------|---------|
 | **Magnetic Timeline** | ✅ Smart trimming | ✅ Magnetic Timeline | Tie |
 | **Performance** | ⚡ GPU-first | ⚡ Metal-optimized | Tie |
 | **Effects** | ✅ 30+ GPU effects | ✅ 100+ effects | FCP - more |
 | **Motion Graphics** | ❌ None (basic text) | ✅ Motion 5 templates | FCP - superior |
 | **Workflow Speed** | ✅ No install, instant start | ✅ Fast on Mac | Tie |
-| **AI Tools** | ✅ Integrated | ❌ Limited | Kimera - more |
-| **Platform** | ✅ Cross-platform | ❌ macOS only | Kimera - broader |
+| **AI Tools** | ✅ Integrated | ❌ Limited | Orreris - more |
+| **Platform** | ✅ Cross-platform | ❌ macOS only | Orreris - broader |
 
-**Verdict:** FCP is Mac-optimized and feature-complete. Kimera wins on cross-platform support and AI integration, loses on macOS-only optimization.
+**Verdict:** FCP is Mac-optimized and feature-complete. Orreris wins on cross-platform support and AI integration, loses on macOS-only optimization.
 
 ---
 
-## Detailed Comparison: Kimera vs. Web-Based NLEs
+## Detailed Comparison: Orreris vs. Web-Based NLEs
 
-### 4. Kimera vs. CapCut
+### 4. Orreris vs. CapCut
 
-| Feature | Kimera | CapCut | Verdict |
+| Feature | Orreris | CapCut | Verdict |
 |---------|-------|--------|---------|
 | **Target Audience** | Professional creators | TikTok/Short-form | CapCut - more casual |
 | **AI Capabilities** | ✅ Integrated (captions, extraction) | ✅ Extensive (auto-captions, effects) | Tie - both strong |
 | **Export Quality** | ✅ 4K browser export | ✅ 4K web export | Tie |
-| **Local Files** | ✅ Works offline | ⚠️ Limited offline | Kimera - better offline |
+| **Local Files** | ✅ Works offline | ⚠️ Limited offline | Orreris - better offline |
 | **Asset Library** | ✅ Stock, local, AI | ✅ Stock, templates | Tie |
 | **Collaboration** | ✅ Cloud projects | ✅ Real-time co-edit | CapCut - better |
 | **Learning Curve** | ✅ Professional interface | ✅ Simple, viral | CapCut - easier |
 | **Price** | 💰 Subscription | ✅ Free | CapCut - free |
 
-**Verdict:** CapCut dominates TikTok/short-form with ease of use and free access. Kimera targets creators who outgrow CapCut's limitations and need professional output.
+**Verdict:** CapCut dominates TikTok/short-form with ease of use and free access. Orreris targets creators who outgrow CapCut's limitations and need professional output.
 
 ---
 
-### 5. Kimera vs. RunwayML
+### 5. Orreris vs. RunwayML
 
-| Feature | Kimera | Runway | Verdict |
+| Feature | Orreris | Runway | Verdict |
 |---------|-------|--------|---------|
 | **AI Focus** | ✅ Editing AI (captions, extraction) | ✅ Generative AI (inpainting, motion) | Runway - more generative |
-| **Editing Tools** | ✅ Full NLE (timeline, effects) | ⚠️ Limited editing | Kimera - more complete |
+| **Editing Tools** | ✅ Full NLE (timeline, effects) | ⚠️ Limited editing | Orreris - more complete |
 | **Video Generation** | ❌ None | ✅ Text-to-video, inpainting | Runway - superior |
 | **Workflow** | ✅ Edit → Export | ✅ Edit + Generate | Runway - broader |
-| **Cost** | 💰 Subscription | 💰💰 $12/mo | Kimera - more competitive |
+| **Cost** | 💰 Subscription | 💰💰 $12/mo | Orreris - more competitive |
 
-**Verdict:** Runway is the generative AI leader. Kimera is the editing AI leader. They serve different needs (generative vs. editing).
+**Verdict:** Runway is the generative AI leader. Orreris is the editing AI leader. They serve different needs (generative vs. editing).
 
 ---
 
-### 6. Kimera vs. Canva
+### 6. Orreris vs. Canva
 
-| Feature | Kimera | Canva | Verdict |
+| Feature | Orreris | Canva | Verdict |
 |---------|-------|-------|---------|
 | **Primary Focus** | Video editing | Design + simple video | Canva - broader |
-| **Video Editing** | ✅ Professional NLE | ⚠️ Basic timeline | Kimera - more capable |
-| **Templates** | ✅ Kimera templates | ✅ 1000+ templates | Canva - more templates |
+| **Video Editing** | ✅ Professional NLE | ⚠️ Basic timeline | Orreris - more capable |
+| **Templates** | ✅ Orreris templates | ✅ 1000+ templates | Canva - more templates |
 | **Collaboration** | ✅ Cloud projects | ✅ Real-time co-edit | Tie |
 | **Learning Curve** | ✅ Professional | ✅ Very easy | Canva - easier |
 | **Export** | ✅ 4K video | ✅ 4K video | Tie |
 
-**Verdict:** Canva is for quick, template-based content. Kimera is for creators who want full control over professional output.
+**Verdict:** Canva is for quick, template-based content. Orreris is for creators who want full control over professional output.
 
 ---
 
 ## Competitive Positioning
 
-### Kimera's Sweet Spot
+### Orreris's Sweet Spot
 
-Kimera's ideal customer is the **professional short-form creator** who:
+Orreris's ideal customer is the **professional short-form creator** who:
 
 1. **Outgrows CapCut** - needs more control, better export, professional tools
 2. **Cannot use Premiere** - Mac-only, expensive, steep learning curve
@@ -152,9 +152,9 @@ Kimera's ideal customer is the **professional short-form creator** who:
 4. **Values accessibility** - no install, works on any device
 5. **Creates for social media** - TikTok, YouTube Shorts, Instagram Reels
 
-### Competitor Weaknesses Kimera Exploits
+### Competitor Weaknesses Orreris Exploits
 
-| Competitor | Weakness | Kimera's Edge |
+| Competitor | Weakness | Orreris's Edge |
 |------------|----------|--------------|
 | **Premiere Pro** | Expensive ($21/mo), desktop-only, complex | Free tier possible, web-based, simpler |
 | **DaVinci Resolve** | Steep learning curve, no cloud | Web-first, collaborative |
@@ -167,9 +167,9 @@ Kimera's ideal customer is the **professional short-form creator** who:
 
 ## Feature Gap Analysis
 
-### What Kimera Has That Competitors Lack
+### What Orreris Has That Competitors Lack
 
-| Feature | Kimera | Others |
+| Feature | Orreris | Others |
 |---------|-------|--------|
 | **AI-first design** | ✅ Core to architecture | ❌ Afterthought |
 | **Browser-native rendering** | ✅ WebGL/WebCodecs | ❌ Plugin-dependent |
@@ -178,9 +178,9 @@ Kimera's ideal customer is the **professional short-form creator** who:
 | **Integrated AI tools** | ✅ All in one place | ❌ Separate tools |
 | **Cross-platform (Windows/macOS/Linux)** | ✅ Chrome/Firefox/Safari | ❌ Platform locked |
 
-### What Competitors Have That Kimera Lacks
+### What Competitors Have That Orreris Lacks
 
-| Feature | Competitors | Kimera Status |
+| Feature | Competitors | Orreris Status |
 |---------|-------------|--------------|
 | **Fusion VFX (node-based)** | DaVinci | Not planned (scope creep) |
 | **Fairlight Audio Suite** | DaVinci | Basic mixer (sufficient for target) |
@@ -196,7 +196,7 @@ Kimera's ideal customer is the **professional short-form creator** who:
 
 ### 1. Double Down on AI Differentiation
 
-Kimera's strongest advantage is **integrated AI**. Competitors treat AI as add-ons; Kimera has it in the core architecture.
+Orreris's strongest advantage is **integrated AI**. Competitors treat AI as add-ons; Orreris has it in the core architecture.
 
 **Actions:**
 - Continue expanding AI tools (Scene Detection, Auto-Reframe, Motion Blur)
@@ -218,7 +218,7 @@ The sweet spot is creators who need:
 
 ### 3. Build the "Free Tier" Path
 
-CapCut and Canva succeeded with free tiers. Kimera should too.
+CapCut and Canva succeeded with free tiers. Orreris should too.
 
 **Actions:**
 - Free tier with AI limits (e.g., 5 AI captions/day)
@@ -247,9 +247,9 @@ Web users worry about uploading videos to "the cloud."
 
 ## Market Position
 
-### Kimera's Market Segment
+### Orreris's Market Segment
 
-| Segment | Description | Kimera Fit |
+| Segment | Description | Orreris Fit |
 |---------|-------------|-----------|
 | **Professional Creators** | Full-time video editors | ✅ Strong fit |
 | **SMB Creators** | Small businesses, agencies | ✅ Strong fit |
@@ -261,7 +261,7 @@ Web users worry about uploading videos to "the cloud."
 
 | Product | Free Tier | Paid Tier | Best For |
 |---------|-----------|-----------|----------|
-| **Kimera** | ✅ Limited AI | $19/mo | Creators needing AI |
+| **Orreris** | ✅ Limited AI | $19/mo | Creators needing AI |
 | **Premiere Pro** | ❌ No | $21/mo | Professionals, teams |
 | **DaVinci Resolve** | ✅ Yes (Studio $295) | $295 | Professionals, colorists |
 | **Final Cut Pro** | ❌ No | $299 | Mac professionals |
@@ -281,7 +281,7 @@ Web users worry about uploading videos to "the cloud."
 
 ### 2. AI Dependency
 
-**Risk:** Competitors improve AI, making Kimera's advantage less significant.
+**Risk:** Competitors improve AI, making Orreris's advantage less significant.
 
 **Mitigation:** Deepen AI integration (not just features, but workflow integration), build proprietary AI capabilities.
 
@@ -293,9 +293,9 @@ Web users worry about uploading videos to "the cloud."
 
 ---
 
-## Summary Table: Kimera vs. Key Competitors
+## Summary Table: Orreris vs. Key Competitors
 
-| | Kimera | Premiere | Resolve | CapCut | Runway |
+| | Orreris | Premiere | Resolve | CapCut | Runway |
 |---|---|---|---|---|---|
 | **Best For** | Pro short-form | Feature films | Colorists | TikTok/Reels | Generative AI |
 | **Price** | $19/mo | $21/mo | Free/$295 | Free | $12/mo |
@@ -309,7 +309,7 @@ Web users worry about uploading videos to "the cloud."
 
 ## Conclusion
 
-Kimera's competitive position is strong in the **browser-first, AI-enhanced video editing** space. It's not trying to beat Premiere Pro at its own game (which is fine - it would lose), but instead creating a new category:
+Orreris's competitive position is strong in the **browser-first, AI-enhanced video editing** space. It's not trying to beat Premiere Pro at its own game (which is fine - it would lose), but instead creating a new category:
 
 **"The AI-powered, browser-first video editor for professional short-form creators."**
 

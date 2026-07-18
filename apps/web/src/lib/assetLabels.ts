@@ -1,4 +1,4 @@
-import type { SourceAsset, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { SourceAsset, TimelineLayer } from "@orreris/shared";
 
 // Premiere-style color labels. Asset labels persist as a "label:<color>" tag on the asset (API
 // store and local fallback alike, no schema change); clip labels live on `TimelineLayer.label`

@@ -23,7 +23,7 @@ export interface OllamaConfig {
 }
 
 export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
-const STORAGE_KEY = "kimera.ai.ollama.v1";
+const STORAGE_KEY = "orreris.ai.ollama.v1";
 
 export function loadOllamaConfig(): OllamaConfig | null {
   if (typeof localStorage === "undefined") return null;
@@ -162,7 +162,7 @@ export async function streamOllamaChat(request: OllamaChatRequest, handlers: Ope
     if (response.status === 403 && !warnedCors) {
       warnedCors = true;
       console.warn(
-        "[kimera] Ollama rejected the browser request (403 — CORS). Allow this origin and restart Ollama:\n" +
+        "[orreris] Ollama rejected the browser request (403 — CORS). Allow this origin and restart Ollama:\n" +
           '  Windows:  setx OLLAMA_ORIGINS "*"   (then quit the Ollama tray app and start it again)\n' +
           "  mac/linux:  OLLAMA_ORIGINS=* ollama serve\n" +
           `  (or list the exact origin, e.g. "${typeof location !== "undefined" ? location.origin : "http://localhost:5173"}")`

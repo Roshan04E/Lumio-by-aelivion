@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
 } from "react";
-import { colorPipelineCacheKey, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@kimera-by-aelivion/shared";
+import { colorPipelineCacheKey, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@orreris/shared";
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
@@ -96,7 +96,7 @@ function recordWcHeal(kind: "initTimeout" | "noSource" | "busyWedge" | "divergen
   const stats = (w.__rfWcHeals ??= {});
   stats[kind] = (stats[kind] ?? 0) + 1;
   try {
-    if (localStorage.getItem("kimera.perfLog") === "1") {
+    if (localStorage.getItem("orreris.perfLog") === "1") {
       console.warn(`[perf] wc self-heal: ${kind} → element fallback`);
     }
   } catch {
@@ -200,7 +200,7 @@ interface BaseProps {
    */
   bakeOpacity?: boolean | undefined;
   /**
-   * Single-context preview (Phase 5, `kimera.singleCtxPreview`): when set, this layer creates NO
+   * Single-context preview (Phase 5, `orreris.singleCtxPreview`): when set, this layer creates NO
    * `MediaWebGLRenderer` context/canvas of its own. It registers a raw frame-source descriptor
    * (element / held WC VideoFrame / settle frame / still bitmap + the live grade inputs) and pokes
    * `onFrame()` after each new frame; `ScenePreviewCanvas` uploads + grades it in-context. All the
@@ -284,7 +284,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       bakeOpacity = true, sceneMediaSink,
     } = props;
 
-    // ── SINGLE-CTX PREVIEW (Phase 5, kimera.singleCtxPreview) ────────────────
+    // ── SINGLE-CTX PREVIEW (Phase 5, orreris.singleCtxPreview) ────────────────
     // Sink presence IS the mode: no own renderer/context; draws become raw-frame publishes. Read
     // through a ref inside the (hoisted, per-render) draw functions and the mount effect.
     const sceneSinkRef = useRef(sceneMediaSink);
@@ -788,7 +788,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             img.src = src;
             await img.decode();
           } catch (error) {
-            if (!cancelled) console.warn("[kimera] still decode failed — layer stays empty:", src.slice(0, 128), error);
+            if (!cancelled) console.warn("[orreris] still decode failed — layer stays empty:", src.slice(0, 128), error);
             return; // poster/empty stays, same as the old onload-never-fired path
           }
         }
@@ -1142,7 +1142,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // else can see: no-source (init hang) and a hung getFrame (busy wedged — no lag updates, no
     // nulls, no bail, total silence). Runs while PAUSED too — the original playing-only gate made
     // every paused pathology invisible, which is exactly where the user kept catching them.
-    // Counter+ring only; console output behind `kimera.perfLog`.
+    // Counter+ring only; console output behind `orreris.perfLog`.
     useEffect(() => {
       if (mediaType !== "video" || hidden) return undefined;
       const FREEZE_BEHIND_S = 1.0;
@@ -1157,7 +1157,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         stats.recent.push({ at: Math.round(performance.now()), timelineS: Math.round(timelineS * 100) / 100, behindS: Math.round(behind * 100) / 100, src: srcTail, ...detail });
         if (stats.recent.length > 40) stats.recent.shift();
         try {
-          if (localStorage.getItem("kimera.perfLog") === "1") {
+          if (localStorage.getItem("orreris.perfLog") === "1") {
             console.warn(`[perf] live layer frozen ${behind.toFixed(2)}s behind @ t=${timelineS.toFixed(2)}s (${String(detail.mode)})`, detail);
           }
         } catch {

@@ -8,12 +8,12 @@
  * target layer (keyframes remapped with them) and editing one applied preset never aliases another.
  * Presets saved before keyframe support (no `animations` field) apply exactly as before.
  *
- * Persistence: localStorage `kimera.effectPresets` (device-local, like the rest of the editor's
+ * Persistence: localStorage `orreris.effectPresets` (device-local, like the rest of the editor's
  * lightweight prefs). Corrupt/legacy payloads are dropped silently — presets are convenience data.
  */
 
-import type { LayerAttributes, TimelineLayer } from "@kimera-by-aelivion/shared";
-import { snapshotLayerAttributes } from "@kimera-by-aelivion/shared";
+import type { LayerAttributes, TimelineLayer } from "@orreris/shared";
+import { snapshotLayerAttributes } from "@orreris/shared";
 
 export interface EffectPreset {
   id: string;
@@ -22,7 +22,7 @@ export interface EffectPreset {
   attributes: LayerAttributes;
 }
 
-const STORAGE_KEY = "kimera.effectPresets";
+const STORAGE_KEY = "orreris.effectPresets";
 
 function readAll(): EffectPreset[] {
   if (typeof window === "undefined") return [];

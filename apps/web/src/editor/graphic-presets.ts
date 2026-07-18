@@ -6,11 +6,11 @@
  * through the same `onAddGraphic` path as a Graphics-chip pick, so a preset instance is a fully
  * editable vector layer — never a rasterized copy.
  *
- * Persistence: localStorage `kimera.graphicPresets` (device-local, mirrors effect-presets.ts).
+ * Persistence: localStorage `orreris.graphicPresets` (device-local, mirrors effect-presets.ts).
  * Corrupt/legacy payloads are dropped silently — presets are convenience data.
  */
 
-import type { LayerGraphic } from "@kimera-by-aelivion/shared";
+import type { LayerGraphic } from "@orreris/shared";
 
 export interface GraphicPreset {
   id: string;
@@ -19,7 +19,7 @@ export interface GraphicPreset {
   graphic: LayerGraphic;
 }
 
-const STORAGE_KEY = "kimera.graphicPresets";
+const STORAGE_KEY = "orreris.graphicPresets";
 
 function readAll(): GraphicPreset[] {
   if (typeof window === "undefined") return [];

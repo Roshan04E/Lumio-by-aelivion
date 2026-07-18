@@ -9,7 +9,7 @@ import {
   type EffectModule,
   type ModuleType,
   type ToolCapabilityDefinition
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import {
   BookOpen,
   Boxes,
@@ -149,7 +149,7 @@ function ToolCard({ tool }: { tool: ToolCapabilityDefinition }) {
 export const cookbookSections: CookbookSection[] = [
   {
     id: "overview",
-    title: "What Kimera is",
+    title: "What Orreris is",
     blurb: "The pitch, the people it's built for, and the one belief everything else follows from.",
     icon: BookOpen,
     subsections: [
@@ -160,7 +160,7 @@ export const cookbookSections: CookbookSection[] = [
         render: () => (
           <>
             <p>
-              Kimera turns a normal video into a short-form reel, entirely in your browser. Upload a clip, shape it on a
+              Orreris turns a normal video into a short-form reel, entirely in your browser. Upload a clip, shape it on a
               real timeline, preview it for free, and export only when you're happy. No install, no upload-and-pray —
               the editing happens on your machine, in the open.
             </p>
@@ -236,15 +236,15 @@ export const cookbookSections: CookbookSection[] = [
               <div>
                 <h4>Free prompt bridge</h4>
                 <Diagram>{`open a tool
-  → Kimera writes a precise prompt
+  → Orreris writes a precise prompt
   → you paste it into your own chat AI
   → paste the result back
-  → Kimera validates + applies it`}</Diagram>
+  → Orreris validates + applies it`}</Diagram>
                 <p className="cookbook-muted">For anyone who already has a free chat tool and doesn't want to pay for integrated AI.</p>
               </div>
               <div>
                 <h4>Integrated AI</h4>
-                <Diagram>{`ask Kimera chat
+                <Diagram>{`ask Orreris chat
   → AI picks a tool
   → fills the params
   → you confirm
@@ -458,7 +458,7 @@ export const cookbookSections: CookbookSection[] = [
         render: () => (
           <>
             <p>
-              Every effect and transition in Kimera is a genuine GPU shader or algorithm — never a CSS overlay faking the look.
+              Every effect and transition in Orreris is a genuine GPU shader or algorithm — never a CSS overlay faking the look.
               A dissolve actually blends two clips on the GPU; a glitch is a real fragment shader. That's the bar: pro-grade,
               but light enough to run smoothly in a browser.
             </p>
@@ -488,7 +488,7 @@ export const cookbookSections: CookbookSection[] = [
         render: () => (
           <>
             <p>
-              Kimera grades in a managed color pipeline rather than nudging raw pixels and hoping. Exposure, temperature, tint,
+              Orreris grades in a managed color pipeline rather than nudging raw pixels and hoping. Exposure, temperature, tint,
               contrast, saturation, and the curves all operate in a consistent Rec.709 SDR space, so a move you make reads the
               same on your screen and in the exported file — the same "preview equals export" contract the rest of the pipeline
               lives by, applied to color.
@@ -510,7 +510,7 @@ export const cookbookSections: CookbookSection[] = [
         render: () => (
           <>
             <p>
-              Grading by eye lies to you — monitors vary, rooms vary. So Kimera ships real scopes to measure what you're doing:
+              Grading by eye lies to you — monitors vary, rooms vary. So Orreris ships real scopes to measure what you're doing:
             </p>
             <ul className="cookbook-people">
               <li><strong>Waveform</strong> — luma (Rec.709 Y) per column, with legal-range guides so you can see clipping.</li>
@@ -529,7 +529,7 @@ export const cookbookSections: CookbookSection[] = [
   {
     id: "speed",
     title: "Speed on real hardware",
-    blurb: "How Kimera stays smooth on a modest laptop without lying about quality.",
+    blurb: "How Orreris stays smooth on a modest laptop without lying about quality.",
     icon: Zap,
     subsections: [
       {
@@ -539,7 +539,7 @@ export const cookbookSections: CookbookSection[] = [
         render: () => (
           <>
             <p>
-              Editing 4K in a browser could crawl, so Kimera quietly builds lighter <strong>proxy</strong> versions of your
+              Editing 4K in a browser could crawl, so Orreris quietly builds lighter <strong>proxy</strong> versions of your
               sources to scrub and play against. You get a responsive timeline on ordinary hardware; the originals are always
               kept for export, so nothing about the final quality is compromised.
             </p>
@@ -648,11 +648,11 @@ export const cookbookSections: CookbookSection[] = [
             <dt>Proxy</dt>
             <dd>A lighter stand-in version of a source clip, used for smooth scrubbing and playback. The original is always kept for export.</dd>
             <dt>WebCodecs</dt>
-            <dd>The browser API Kimera uses to encode your export locally — the reason your footage never has to be uploaded.</dd>
+            <dd>The browser API Orreris uses to encode your export locally — the reason your footage never has to be uploaded.</dd>
             <dt>Scopes</dt>
             <dd>Measurement displays (waveform, RGB parade, vectorscope, histogram) that show what your grade is actually doing, beyond what the eye can judge.</dd>
             <dt>Rec.709</dt>
-            <dd>The standard HD color space Kimera grades and exports in, tagged into the file so players show your colors correctly.</dd>
+            <dd>The standard HD color space Orreris grades and exports in, tagged into the file so players show your colors correctly.</dd>
           </dl>
         )
       }

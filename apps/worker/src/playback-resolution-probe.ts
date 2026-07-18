@@ -7,7 +7,7 @@
  * Drives the real editor in `?compositor=scene`, plays, switches the playback-resolution control, and
  * reads `.preview-scene-canvas` `.width` (backing) vs its CSS width (logical comp).
  *
- * Run: PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker exec tsx src/playback-resolution-probe.ts
+ * Run: PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker exec tsx src/playback-resolution-probe.ts
  */
 import { chromium, type Page } from "playwright";
 
@@ -39,7 +39,7 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
   await page.addInitScript("window.__name = window.__name || function (f) { return f; };");
   await page.goto(BASE, { waitUntil: "domcontentloaded" });
-  await page.evaluate(() => localStorage.setItem("kimera.compositor", "scene"));
+  await page.evaluate(() => localStorage.setItem("orreris.compositor", "scene"));
   await page.waitForTimeout(400);
   await reachEditor(page);
 

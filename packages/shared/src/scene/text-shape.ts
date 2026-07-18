@@ -1,5 +1,5 @@
 /**
- * Text & shape rasterization (Phase L2; promoted into @kimera-by-aelivion/shared in Method 3 Phase 6.1).
+ * Text & shape rasterization (Phase L2; promoted into @orreris/shared in Method 3 Phase 6.1).
  *
  * Draws `text` (incl. rich runs + warp) and `shape` layers onto a 2D compositor canvas,
  * reusing the shared style helpers so sizes/colors/positions match the editor preview.

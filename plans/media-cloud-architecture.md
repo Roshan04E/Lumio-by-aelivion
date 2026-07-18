@@ -35,11 +35,11 @@ Two rules fall out of this, and both are load-bearing for us:
   registry in `apps/web/src/lib/sync.ts` (`markLocalAssetPromoted`/`getAssetPromotionMap`); NO
   timeline remap on upload, NO duplicate tiles. This plan EXTENDS that model (adds the pull
   direction); it must not reintroduce auto-upload.
-- Local bytes: OPFS single flat dir `kimera-assets/` (`asset-blob-store.ts`), ids
+- Local bytes: OPFS single flat dir `orreris-assets/` (`asset-blob-store.ts`), ids
   `asset_local_<ts>_<rand>`.
 - Cloud bytes: R2 keys `uploads/u_<userId>/<ts>-<rand>-<name>` — flat, no product/project level.
 - Folders: `SourceAsset.folder` is a flat string; the user-created folder LIST + active-folder state
-  live in GLOBAL localStorage (`kimera_asset_custom_folders`, `kimera_asset_folder_local|brand|ai` —
+  live in GLOBAL localStorage (`orreris_asset_custom_folders`, `orreris_asset_folder_local|brand|ai` —
   EditorPage.tsx ~9645/10267) → **this is the reported "folders leak into every new project" bug.**
 - Scoping: `SourceAsset.ownerProjectId` (project-owned uploads) + `ProjectAsset` join (user-level
   reusables linked per project) already exist (MEDIA_LIBRARY.md "Project scoping"). But the web's
@@ -67,7 +67,7 @@ account (userId)
   `u_<userId>/video/library/<assetId>/{original.<ext>|proxy.mp4|thumb.jpg}` and
   `u_<userId>/video/projects/<projectId>/assets/<assetId>/…`. Never encode user folder names in keys.
 - **Local (OPFS) mirrors the SAME shape**: `u_<userId>/video/library/…` and
-  `u_<userId>/video/projects/<projectId>/…` (replaces the flat `kimera-assets/`). A one-time
+  `u_<userId>/video/projects/<projectId>/…` (replaces the flat `orreris-assets/`). A one-time
   migration walks existing blobs and re-homes them by `ownerProjectId` (project-owned) vs source
   brand/ai/stock (library). Same structure both sides = the founder's "cloud keeps the same folder
   structure", done the durable way.

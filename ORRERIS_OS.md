@@ -1,6 +1,6 @@
-# Kimera OS — The Creative Operating System
+# Orreris OS — The Creative Operating System
 
-> **What this file is:** the decade-scale architectural north star for Kimera's intelligence
+> **What this file is:** the decade-scale architectural north star for Orreris's intelligence
 > platform — how every future intelligence capability (local rules, LLMs, perception, plugins,
 > marketplace extensions, automation, collaborative AI) fits into one coherent operating
 > system. It is a **direction document, not a build plan**: it constrains shape, records
@@ -21,7 +21,7 @@
 
 ## Thesis
 
-Kimera is **a professional editor with an intelligence operating system on top** — never an
+Orreris is **a professional editor with an intelligence operating system on top** — never an
 "AI video generator." The editor is fully usable without AI; intelligence *operates the
 editor's tools* through one narrow, validated, undoable interface.
 
@@ -49,7 +49,7 @@ The mental model every layer must obey:
 The operating-system metaphor is load-bearing, not rhetorical — it unifies the golden rules
 in one picture and names the missing subsystems:
 
-| OS concept | Kimera equivalent |
+| OS concept | Orreris equivalent |
 |---|---|
 | **Syscall interface** | **Timeline Action Registry** — the ONLY mutation path, Zod-validated, undoable (already law) |
 | User programs | Blueprints — validated, sandboxed above the syscall line |
@@ -440,7 +440,7 @@ snapshot reproduces the edit deterministically — which doubles as the regressi
 
 ## Existing seeds — what already exists and what it becomes
 
-| Kimera OS concept | Existing seed (shipped) |
+| Orreris OS concept | Existing seed (shipped) |
 |---|---|
 | Intent Compiler / Intent AST | Brain tiers 0–2; `semantic.ts` intent skeletons; `clip-reference.ts` |
 | Blueprint IR + craft compilers | `GradeIntent` → deterministic grade compiler (the proven template) |
@@ -458,7 +458,7 @@ snapshot reproduces the edit deterministically — which doubles as the regressi
 | Eval harness | `brain:eval`, 50-prompt ledger, routing ledger (B0) |
 | Syscall boundary | Timeline Action Registry (unchanged, forever) |
 
-Kimera OS is a **promotion of shipped seeds into first-class contracts** — not a rewrite.
+Orreris OS is a **promotion of shipped seeds into first-class contracts** — not a rewrite.
 The second-system trap is the failure mode to guard against: any phase that requires
 pausing AI_ARCHITECTURE.md's shipping cadence is mis-scoped.
 

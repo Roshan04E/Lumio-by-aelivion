@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0.0",
   "kind": "effect",
-  "id": "aelivion.soft-bloom",
+  "id": "pesamee.soft-bloom",
   "name": "Soft Bloom",
   "version": "1.0.0",
-  "description": "A creator-pack glow preset mapped onto Kimera's native Glow renderer.",
+  "description": "A creator-pack glow preset mapped onto Orreris's native Glow renderer.",
   "author": {
-    "name": "Aelivion Studio"
+    "name": "Pesamee Studio"
   },
   "license": {
     "type": "free",

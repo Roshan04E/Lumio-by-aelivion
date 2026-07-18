@@ -3,7 +3,7 @@ import {
   hydrateActionAnalytics,
   subscribeActionAnalytics,
   type ActionAnalyticsSnapshot
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 /**
  * Host-side persistence for the shared analytics counters (P7). The shared
@@ -12,7 +12,7 @@ import {
  * Dashboard survives reloads. Call `initAnalyticsPersistence()` once at startup.
  */
 
-const STORAGE_KEY = "kimera.ai.analytics.v1";
+const STORAGE_KEY = "orreris.ai.analytics.v1";
 let initialized = false;
 
 export function initAnalyticsPersistence(): void {

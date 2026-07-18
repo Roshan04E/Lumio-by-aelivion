@@ -1,5 +1,5 @@
 /**
- * Kimera OS — World Model contracts (K1, see KIMERA_OS.md → Layer 2).
+ * Orreris OS — World Model contracts (K1, see ORRERIS_OS.md → Layer 2).
  *
  * The World Model is the typed-query layer the cognitive tiers consult for FACTS about the
  * project's media and composition. Three laws, enforced by these types:
@@ -20,7 +20,7 @@
  * field signature, not a byte hash — same stand-in the source-proxy engine uses.
  */
 
-import type { SourceAsset, TimelineComposition } from "@kimera-by-aelivion/shared";
+import type { SourceAsset, TimelineComposition } from "@orreris/shared";
 
 // ---------------------------------------------------------------------------
 // Targets
@@ -28,7 +28,7 @@ import type { SourceAsset, TimelineComposition } from "@kimera-by-aelivion/share
 
 /**
  * K2 note: "system" / "user" / "project" are the World Model's non-media state branches
- * (KIMERA_OS.md → Layer 2). Editor state (selection/playhead/mode) deliberately stays in
+ * (ORRERIS_OS.md → Layer 2). Editor state (selection/playhead/mode) deliberately stays in
  * BrainContext instead of becoming facts: it is ephemeral and free to read, so there is no
  * acquisition cost to amortize — caching it would only create staleness.
  */
@@ -113,7 +113,7 @@ export interface ObservedFact<V = unknown> {
   sampledRanges?: Array<[number, number]> | undefined;
 }
 
-/** Perception fidelity ladder (KIMERA_OS.md): L0 metadata … L4 inferred meaning. */
+/** Perception fidelity ladder (ORRERIS_OS.md): L0 metadata … L4 inferred meaning. */
 export type ObserverFidelity = 0 | 1 | 2 | 3 | 4;
 
 export interface WorldObserver {

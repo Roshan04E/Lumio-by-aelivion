@@ -52,7 +52,7 @@ export function createMockRunner(jobs: WorkerJobPayload[] = []): JobRunner {
 export function createBullMqRunner(redisUrl: string): JobRunner {
   const connection = parseRedisUrl(redisUrl);
   const worker = new Worker<WorkerJobPayload>(
-    "kimera-jobs",
+    "orreris-jobs",
     async (job) => {
       console.log(`[bullmq-worker] processing ${job.data.type}`, job.data);
       return {
@@ -65,7 +65,7 @@ export function createBullMqRunner(redisUrl: string): JobRunner {
 
   return {
     async start() {
-      console.log("Worker running with BullMQ queue: kimera-jobs");
+      console.log("Worker running with BullMQ queue: orreris-jobs");
     },
     async stop() {
       await worker.close();

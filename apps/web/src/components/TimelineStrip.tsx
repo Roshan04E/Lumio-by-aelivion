@@ -1,7 +1,7 @@
 import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, effectiveTransitionDuration, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, resolveTransitionWindowSides, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@kimera-by-aelivion/shared";
+import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, effectiveTransitionDuration, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, resolveTransitionWindowSides, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@orreris/shared";
 import { getAudioPeaks, getCachedPyramid, sampleWaveformWindow, type Pyramid } from "../lib/audioPeaks";
 import { isWaveformGLEnabled } from "./waveform/waveformGLFlag";
 import { registerWaveformClip, unregisterWaveformClip } from "./waveform/waveformGLStore";
@@ -140,7 +140,7 @@ type CrossDragState = {
 } | null;
 
 /** MIME the Effects-panel transition tiles/rows write on drag (see EffectGraphPanel/TransitionThumb). */
-const TRANSITION_DRAG_MIME = "application/x-kimera-transition";
+const TRANSITION_DRAG_MIME = "application/x-orreris-transition";
 
 /** The cut currently highlighted while a transition tile is dragged over a lane. */
 type JunctionDropTarget = { trackId: string; leftLayerId: string; rightLayerId: string; cutSeconds: number } | null;
@@ -285,7 +285,7 @@ const shortcutCheatSheet: Array<{ keys: string; label: string }> = [
   { keys: "↑ / ↓", label: "Previous / next edit point" },
   { keys: "/", label: "Focus the AI edit box (opens the AI panel)" },
   { keys: ".", label: "Voice input — dictate to the AI (⌘. or ⌥M while typing)" },
-  { keys: "⌥L", label: "Voice mode — hands-free AI session (or say “Hey Kimera” with the wake word on)" },
+  { keys: "⌥L", label: "Voice mode — hands-free AI session (or say “Hey Orreris” with the wake word on)" },
   { keys: "?", label: "Toggle this cheat sheet" }
 ];
 
@@ -987,7 +987,7 @@ function TimelineStripImpl({
   // Collapsible full-project minimap (thin strip under the tracks); persisted across sessions.
   const [showMinimap, setShowMinimap] = useState(() => {
     try {
-      return window.localStorage.getItem("kimera:timeline-minimap") !== "0";
+      return window.localStorage.getItem("orreris:timeline-minimap") !== "0";
     } catch {
       return true;
     }
@@ -2650,7 +2650,7 @@ function TimelineStripImpl({
     setShowMinimap((value) => {
       const next = !value;
       try {
-        window.localStorage.setItem("kimera:timeline-minimap", next ? "1" : "0");
+        window.localStorage.setItem("orreris:timeline-minimap", next ? "1" : "0");
       } catch {
         // localStorage unavailable (private mode) — session-only toggle is fine.
       }
@@ -2927,7 +2927,7 @@ function TimelineStripImpl({
   }
 
   function handleTrackDragOver(event: DragEvent<HTMLElement>, targetTrackId: string) {
-    const sourceTrackId = trackDrag?.trackId || event.dataTransfer.getData("application/x-kimera-track");
+    const sourceTrackId = trackDrag?.trackId || event.dataTransfer.getData("application/x-orreris-track");
     if (!sourceTrackId || !canDropTrackOnTarget(sourceTrackId, targetTrackId)) {
       return;
     }
@@ -2937,7 +2937,7 @@ function TimelineStripImpl({
   }
 
   function handleTrackDrop(event: DragEvent<HTMLElement>, targetTrackId: string) {
-    const sourceTrackId = event.dataTransfer.getData("application/x-kimera-track") || trackDrag?.trackId;
+    const sourceTrackId = event.dataTransfer.getData("application/x-orreris-track") || trackDrag?.trackId;
     const placement = trackDropPlacement(event);
     setTrackDrag(null);
     if (!sourceTrackId || !canDropTrackOnTarget(sourceTrackId, targetTrackId)) {
@@ -3600,7 +3600,7 @@ function TimelineStripImpl({
                     onDragStart={(event) => {
                       event.stopPropagation();
                       event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("application/x-kimera-track", track.id);
+                      event.dataTransfer.setData("application/x-orreris-track", track.id);
                       setTrackDrag({ trackId: track.id, targetTrackId: null, placement: "before" });
                     }}
                     onDragEnd={() => setTrackDrag(null)}
@@ -3647,13 +3647,13 @@ function TimelineStripImpl({
                 data-track-id={track.id}
                 style={{ "--timeline-ruler-step-percent": `${(rulerStepSeconds / Math.max(0.001, timelineDurationSeconds)) * 100}%` } as CSSProperties & Record<"--timeline-ruler-step-percent", string>}
                 onDragOver={(event) => {
-                  if (!track.locked && event.dataTransfer.types.includes("application/x-kimera-asset")) {
+                  if (!track.locked && event.dataTransfer.types.includes("application/x-orreris-asset")) {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
                     return;
                   }
                   // Timelines-section drag (nesting Block 3): sequences land on visual tracks only.
-                  if (!track.locked && track.type !== "audio" && event.dataTransfer.types.includes("application/x-kimera-composition")) {
+                  if (!track.locked && track.type !== "audio" && event.dataTransfer.types.includes("application/x-orreris-composition")) {
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
                     return;
@@ -3684,13 +3684,13 @@ function TimelineStripImpl({
                     }
                     return;
                   }
-                  const droppedCompositionId = event.dataTransfer.getData("application/x-kimera-composition");
+                  const droppedCompositionId = event.dataTransfer.getData("application/x-orreris-composition");
                   if (droppedCompositionId && !track.locked && track.type !== "audio" && onDropComposition) {
                     event.preventDefault();
                     onDropComposition(droppedCompositionId, track.id, getDropTime(event));
                     return;
                   }
-                  const assetId = event.dataTransfer.getData("application/x-kimera-asset");
+                  const assetId = event.dataTransfer.getData("application/x-orreris-asset");
                   if (!assetId || track.locked) {
                     return;
                   }
@@ -4932,7 +4932,7 @@ const Filmstrip = memo(function Filmstrip({ url }: { url?: string | undefined })
 });
 
 function getDraggedTimelineEffect(event: DragEvent<HTMLElement>): TimelineEffectType | undefined {
-  const type = event.dataTransfer.getData("application/x-kimera-timeline-effect");
+  const type = event.dataTransfer.getData("application/x-orreris-timeline-effect");
   return getTimelineEffectDefinition(type as TimelineEffectType) ? (type as TimelineEffectType) : undefined;
 }
 
@@ -5122,13 +5122,13 @@ const TimelineClip = memo(function TimelineClip({
         }
       }}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes("application/x-kimera-asset")) {
+        if (event.dataTransfer.types.includes("application/x-orreris-asset")) {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
           return;
         }
 
-        if (event.dataTransfer.types.includes("application/x-kimera-timeline-effect")) {
+        if (event.dataTransfer.types.includes("application/x-orreris-timeline-effect")) {
           const effectType = getDraggedTimelineEffect(event);
           if (effectType && canDropTimelineEffect(effectType, layer)) {
             event.preventDefault();
@@ -5147,7 +5147,7 @@ const TimelineClip = memo(function TimelineClip({
       }}
       onDrop={(event) => {
         onSetEffectDropTarget(null);
-        const assetId = event.dataTransfer.getData("application/x-kimera-asset");
+        const assetId = event.dataTransfer.getData("application/x-orreris-asset");
         if (assetId) {
           event.preventDefault();
           event.stopPropagation();
@@ -5362,7 +5362,7 @@ const TimelineClip = memo(function TimelineClip({
                   event.stopPropagation();
                   onSelectLayer(layer.id, "replace");
                   window.dispatchEvent(
-                    new CustomEvent("kimera:open-graph-editor", { detail: { targetKey: keyframeGraphTargetKey(keyframe) } })
+                    new CustomEvent("orreris:open-graph-editor", { detail: { targetKey: keyframeGraphTargetKey(keyframe) } })
                   );
                 }}
                 onPointerCancel={onCancelKeyframeDrag}

@@ -2,7 +2,7 @@
  * Standalone assert script for the group-move resolver (repo convention: no test framework —
  * exits non-zero on first failure).
  *
- *   pnpm --filter @kimera-by-aelivion/shared resolver:test
+ *   pnpm --filter @orreris/shared resolver:test
  *
  * These lock the two invariants the old preview/commit split got wrong: a multi-clip move is
  * RIGID on both axes — the whole selection shifts by one shared delta clamped so every member

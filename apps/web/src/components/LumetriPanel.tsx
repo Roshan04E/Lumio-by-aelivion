@@ -24,13 +24,13 @@ import {
   pipelineToCubeFile,
   type TimelineEffect,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { CurveEditor } from "./CurveEditor";
 import { ColorWheels } from "./ColorWheels";
 import { HueSatCurves } from "./HueSatCurves";
 import { HslSecondary } from "./HslSecondary";
 import { LutFileImport } from "./LutFileImport";
-import { CREATIVE_LOOK_NAMES } from "@kimera-by-aelivion/shared";
+import { CREATIVE_LOOK_NAMES } from "@orreris/shared";
 import { EffectSliderControl } from "./EffectSliderControl";
 import { effectSliderTone } from "./effectSliderTone";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
@@ -263,7 +263,7 @@ export function LumetriPanel({ layer, currentTime, onChange, onSeek }: Props) {
   function exportGradeAsCube() {
     const pipeline = getCompositionColorPipeline(layer, { currentTimeSeconds: currentTime });
     if (!pipeline) return;
-    const title = layer.name || "Kimera Grade";
+    const title = layer.name || "Orreris Grade";
     const text = pipelineToCubeFile(pipeline, title);
     const blob = new Blob([text], { type: "text/plain" });
     const url = URL.createObjectURL(blob);

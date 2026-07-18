@@ -7,7 +7,7 @@ import {
   type RankedModel,
   type SkillTaskKind,
   type SourceAsset
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { ThemedSelect } from "../../editor/inspector/controls/ThemedSelect";
 import {
   getGenerationAvailability,

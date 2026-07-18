@@ -1,5 +1,5 @@
 /**
- * Kimera OS — the Knowledge Service query planner (K1). The single read seam of the World
+ * Orreris OS — the Knowledge Service query planner (K1). The single read seam of the World
  * Model: callers ask typed `FactQuery`s; this module picks the cheapest access path that
  * satisfies (budget, minConfidence) — cached fact first, then observers cheapest-first —
  * exactly like a database query planner choosing indexes over table scans.

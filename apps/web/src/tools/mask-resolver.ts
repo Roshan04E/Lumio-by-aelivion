@@ -3,7 +3,7 @@ import type {
   MatteRef,
   TimelineComposition,
   TrackingPathArtifactData
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 /**
  * Cross-tool artifact reuse ("extract once, reuse everywhere"): finds a real,

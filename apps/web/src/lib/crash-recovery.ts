@@ -1,4 +1,4 @@
-import type { ProjectGraph } from "@kimera-by-aelivion/shared";
+import type { ProjectGraph } from "@orreris/shared";
 
 /**
  * Crash-recovery checkpoint store.
@@ -23,7 +23,7 @@ export interface RecoveryCheckpoint {
 const OPFS_DIR = "recovery";
 const CHECKPOINT_DEBOUNCE_MS = 1000;
 
-/** Resolution order: `?crashRecovery=0|1` → localStorage `kimera.crashRecovery` → `VITE_CRASH_RECOVERY` → true. */
+/** Resolution order: `?crashRecovery=0|1` → localStorage `orreris.crashRecovery` → `VITE_CRASH_RECOVERY` → true. */
 export function getCrashRecoveryEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
   if (typeof window !== "undefined") {
@@ -31,7 +31,7 @@ export function getCrashRecoveryEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("crashRecovery")) {
         return truthy(new URLSearchParams(window.location.search).get("crashRecovery"));
       }
-      const stored = window.localStorage?.getItem("kimera.crashRecovery");
+      const stored = window.localStorage?.getItem("orreris.crashRecovery");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

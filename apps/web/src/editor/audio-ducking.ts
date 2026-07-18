@@ -13,7 +13,7 @@
  * "Generate Keyframes" re-run.
  */
 
-import { layerSourceTimeSeconds, type TimelineComposition, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { layerSourceTimeSeconds, type TimelineComposition, type TimelineLayer } from "@orreris/shared";
 import { addVolumePoint, getVolumeBase, getVolumeEffectId } from "./audioVolume";
 
 export interface DuckingOptions {

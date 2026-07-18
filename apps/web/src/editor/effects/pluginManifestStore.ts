@@ -9,12 +9,12 @@ import {
   type PluginCatalogPackage,
   type PluginLookManifest,
   type PluginTransitionManifest
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
-const STORE_KEY = "kimera.importedPluginLibrary.v1";
-const HIDDEN_EFFECTS_KEY = "kimera.hiddenImportedEffectIds.v1";
-const HIDDEN_LOOKS_KEY = "kimera.hiddenImportedLookIds.v1";
-const HIDDEN_TRANSITIONS_KEY = "kimera.hiddenImportedTransitionIds.v1";
+const STORE_KEY = "orreris.importedPluginLibrary.v1";
+const HIDDEN_EFFECTS_KEY = "orreris.hiddenImportedEffectIds.v1";
+const HIDDEN_LOOKS_KEY = "orreris.hiddenImportedLookIds.v1";
+const HIDDEN_TRANSITIONS_KEY = "orreris.hiddenImportedTransitionIds.v1";
 
 export interface ImportedPluginLibrary {
   effects: PluginEffectManifest[];

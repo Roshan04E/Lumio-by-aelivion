@@ -73,5 +73,5 @@ export function readManifestFromPackage(value: unknown): unknown {
 }
 
 export function pluginCatalogCacheKey(revision: string): string {
-  return `kimera.pluginCatalog.${revision}`;
+  return `orreris.pluginCatalog.${revision}`;
 }

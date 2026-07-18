@@ -19,7 +19,7 @@ props, if it ever needs sub-commit freshness or could outlive a render pause.
 ## v3 — Junction transition UX: params popover + drag-tile-to-cut + shared junction actions (2026-07-13)
 **Problem:** transition parameters were unreachable where editors expect them — the on-cut junction
 element only drag-resized duration and double-click-removed; the gallery emitted an
-`application/x-kimera-transition` drag payload that NOTHING consumed; and the junction apply/remove
+`application/x-orreris-transition` drag payload that NOTHING consumed; and the junction apply/remove
 reducers lived as EditorPage-local functions the AI action surface couldn't call.
 **Fix:**
 - **Shared lift:** `applyJunctionTransition` / `removeJunctionTransition` / neighbor finders /
@@ -235,7 +235,7 @@ icon is SNAPPING, not this; magnetic gets its own icon/toggle.
 - `commitGroupMove` honors `policy.magnetic`: after placing, compacts the union of destination + original
   tracks of the moved clips; magnetic subsumes the overlap rule (compaction can't leave an overlap).
 - `moveLayers` action gained a `magnetic` boolean param (threads into the policy).
-- UI: `magneticEnabled` state in EditorPage (persisted `kimera_timeline_magnetic`, **default OFF**), a
+- UI: `magneticEnabled` state in EditorPage (persisted `orreris_timeline_magnetic`, **default OFF**), a
   toolbar toggle in TimelineStrip (AlignHorizontalJustifyStart icon, next to the snap Magnet), and the
   drag commit passes `{ magnetic: magneticEnabled }` into `commitGroupMove`.
 **Policy scorecard now:** overlap ✅, lockedTracks ✅, linkedMedia ✅, magnetic ✅ (move ops), snapping —

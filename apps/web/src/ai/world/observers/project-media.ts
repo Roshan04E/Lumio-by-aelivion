@@ -1,12 +1,12 @@
 /**
- * Kimera OS observer — Project State (K2, L0, free). Summarizes the project's media bin from
+ * Orreris OS observer — Project State (K2, L0, free). Summarizes the project's media bin from
  * the asset records already in the WorldContext: counts per kind, total footage duration and
  * size, resolution ceiling, source mix (local / stock / generated). The planner's cheap first
  * stop before any per-asset perception. Target: `project:current` (the context's asset list
  * IS the current project bin — the host provider scopes it).
  */
 
-import type { SourceAsset } from "@kimera-by-aelivion/shared";
+import type { SourceAsset } from "@orreris/shared";
 import type { WorldContext, WorldObserver, WorldTarget } from "../types";
 import { fnv1a } from "../types";
 

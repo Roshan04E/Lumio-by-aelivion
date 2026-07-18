@@ -20,7 +20,7 @@
  *    playback correction at all before); the master is never corrected — it *defines* time.
  *  - No audible clip → pure wall clock, exactly as before.
  *
- * Kill switch (repo convention): `?audioClock=0` → localStorage `kimera.audioClock` →
+ * Kill switch (repo convention): `?audioClock=0` → localStorage `orreris.audioClock` →
  * `VITE_AUDIO_CLOCK` → ON. Telemetry: `window.__rfAudioClock` + the Stats HUD "A/V drift" row.
  */
 
@@ -47,7 +47,7 @@ export interface AudioClockReader {
   read(): number | null;
 }
 
-/** Resolution order: `?audioClock=0|1` → localStorage `kimera.audioClock` → `VITE_AUDIO_CLOCK` → true. */
+/** Resolution order: `?audioClock=0|1` → localStorage `orreris.audioClock` → `VITE_AUDIO_CLOCK` → true. */
 export function getAudioClockEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
   if (typeof window !== "undefined") {
@@ -55,7 +55,7 @@ export function getAudioClockEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("audioClock")) {
         return truthy(new URLSearchParams(window.location.search).get("audioClock"));
       }
-      const stored = window.localStorage?.getItem("kimera.audioClock");
+      const stored = window.localStorage?.getItem("orreris.audioClock");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

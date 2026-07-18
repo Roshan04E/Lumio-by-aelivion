@@ -17,8 +17,8 @@
  */
 import { useState } from "react";
 import { ArrowDownWideNarrow, SlidersHorizontal, Volume2, VolumeX, X } from "lucide-react";
-import type { TimelineComposition, TimelineTrack } from "@kimera-by-aelivion/shared";
-import { getTrackAudioGainAt, getTrackPanAt } from "@kimera-by-aelivion/shared";
+import type { TimelineComposition, TimelineTrack } from "@orreris/shared";
+import { getTrackAudioGainAt, getTrackPanAt } from "@orreris/shared";
 import { DEFAULT_DUCKING, type DuckingOptions } from "../editor/audio-ducking";
 import { EffectSliderControl } from "./EffectSliderControl";
 

@@ -1,4 +1,4 @@
-import { createTimelineEffect, type KeyframeHandle, type KeyframeInterpolation, type TimelineKeyframeV2, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { createTimelineEffect, type KeyframeHandle, type KeyframeInterpolation, type TimelineKeyframeV2, type TimelineLayer } from "@orreris/shared";
 import { getEffectParamBaseValue, getEffectParamKeyframes, mintKeyframeId } from "./inspector/keyframeUtils";
 
 /**

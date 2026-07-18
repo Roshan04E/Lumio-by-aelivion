@@ -513,7 +513,7 @@ animated layers align by where they actually sit on the current frame.
 ### S8 — Testing / QA
 
 No web test runner in this repo (`pnpm lint` == `pnpm typecheck`). Plan:
-- **Typecheck:** `pnpm --filter @kimera-by-aelivion/web typecheck` must pass.
+- **Typecheck:** `pnpm --filter @orreris/web typecheck` must pass.
 - **Pure geometry (recommended):** because S7#2 is pure, add a worker-style
   standalone `tsx` assert script (mirroring `animation:test`) for
   `selectionBounds` / `distributeTargets` / `alignTargets` — cheap regression
@@ -540,7 +540,7 @@ No web test runner in this repo (`pnpm lint` == `pnpm typecheck`). Plan:
 ### §3 BUILD RESULT (2026-07-14)
 
 Built to spec. Typecheck clean; 20/20 geometry asserts pass
-(`pnpm --filter @kimera-by-aelivion/web graphics:align:test`); editor suite still green.
+(`pnpm --filter @orreris/web graphics:align:test`); editor suite still green.
 
 Files landed:
 - **New** `apps/web/src/editor/selectionMode.ts` — `resolveSelectMode` + `LayerSelectMode`,
@@ -744,7 +744,7 @@ Two enhancements the user asked to land before §1:
   multi-layer manager (must stay interactive to select/unlock others). Unlock writes
   through `onChangeLayer` (unguarded), so it can't lock you out.
 
-Verified: `pnpm --filter @kimera-by-aelivion/web typecheck` clean; **user-verified in-app 2026-07-14** ("verified all good" — multi-select dup/delete in both menus + full lock banner/enforcement).
+Verified: `pnpm --filter @orreris/web typecheck` clean; **user-verified in-app 2026-07-14** ("verified all good" — multi-select dup/delete in both menus + full lock banner/enforcement).
 
 Status: ✅ SHIPPED — §4 follow-ups (multi-select stack/timeline ops + full lock) user-verified 2026-07-14.
 

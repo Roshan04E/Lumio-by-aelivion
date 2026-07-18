@@ -15,7 +15,7 @@ import {
   getLayerAnimations,
   type BlendMode,
   type KeyframeInterpolation
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { ScrubNumberInput } from "../../../components/ScrubNumberInput";
 
 // ── Perspective control mapping ─────────────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ function perspectiveDepthToPx(depth: number): number {
  * Blend-mode options shown in the inspector, grouped the way creators expect
  * (Photoshop/Premiere ordering). Every entry below is fully implemented in all
  * three renderers (preview CSS, browser-export canvas, Remotion) — see
- * BLEND_CSS / BLEND_CANVAS in `@kimera-by-aelivion/shared`. To expose a new mode later,
+ * BLEND_CSS / BLEND_CANVAS in `@orreris/shared`. To expose a new mode later,
  * add it to the BlendMode union + those maps, then list it here.
  */
 const BLEND_MODE_GROUPS: { label: string; options: { value: BlendMode; label: string }[] }[] = [
@@ -489,7 +489,7 @@ export default function TransformPanel({ layer, onChange, currentTime = 0, onSee
         <button
           className="graph-open-button"
           type="button"
-          onClick={() => window.dispatchEvent(new CustomEvent("kimera:open-graph-editor"))}
+          onClick={() => window.dispatchEvent(new CustomEvent("orreris:open-graph-editor"))}
         >
           <SlidersHorizontal size={13} />
           Open Graph Editor

@@ -1,4 +1,4 @@
-import type { ToolArtifact } from "@kimera-by-aelivion/shared";
+import type { ToolArtifact } from "@orreris/shared";
 
 export interface StoredToolArtifact extends ToolArtifact {
   blob?: Blob | undefined;
@@ -27,7 +27,7 @@ export async function createToolArtifactStore(): Promise<ToolArtifactStore> {
 
   try {
     const root = await storage.getDirectory();
-    const directory = await root.getDirectoryHandle("kimera-tool-artifacts", { create: true });
+    const directory = await root.getDirectoryHandle("orreris-tool-artifacts", { create: true });
     return createOpfsArtifactStore(directory);
   } catch {
     return createMemoryArtifactStore();
@@ -70,7 +70,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
         const writable = await file.createWritable();
         await writable.write(artifact.blob);
         await writable.close();
-        nextArtifact.uri = `opfs://kimera-tool-artifacts/${fileName}`;
+        nextArtifact.uri = `opfs://orreris-tool-artifacts/${fileName}`;
       }
       metadata.set(artifact.id, nextArtifact);
       return stripBlob(nextArtifact);
@@ -89,7 +89,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
           return {
             id: artifactId,
             type: "maskSequence",
-            uri: `opfs://kimera-tool-artifacts/${artifactId}.bin`,
+            uri: `opfs://orreris-tool-artifacts/${artifactId}.bin`,
             metadata: {},
             blob: file
           };
@@ -98,7 +98,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
         }
       }
 
-      const fileName = artifact.uri?.replace("opfs://kimera-tool-artifacts/", "");
+      const fileName = artifact.uri?.replace("opfs://orreris-tool-artifacts/", "");
       if (!fileName) {
         return artifact;
       }
@@ -114,7 +114,7 @@ function createOpfsArtifactStore(directory: FileSystemDirectoryHandle): ToolArti
     async remove(artifactId) {
       const artifact = metadata.get(artifactId);
       metadata.delete(artifactId);
-      const fileName = artifact?.uri?.replace("opfs://kimera-tool-artifacts/", "");
+      const fileName = artifact?.uri?.replace("opfs://orreris-tool-artifacts/", "");
       if (fileName) {
         await directory.removeEntry(fileName).catch(() => undefined);
       }

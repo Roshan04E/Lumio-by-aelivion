@@ -1,4 +1,4 @@
-import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@kimera-by-aelivion/shared";
+import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@orreris/shared";
 
 /** Manifest field that lets the renderer PLAY a SMIL-animated graphic (see `RenderManifestLayer.graphic`).
  *  Static/absent graphics contribute nothing, so the settled `assetUrl` stays the source. */
@@ -27,7 +27,7 @@ import type {
   TimelineLayer,
   TrackAudioKeyframe,
   TransitionSpec
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 export interface RenderComposition {
   id: string;
@@ -90,7 +90,7 @@ export function buildCompositionFromGraph(
 
 export function createPreviewOverlay(graph: ProjectGraph) {
   return {
-    watermark: "Kimera Preview",
+    watermark: "Orreris Preview",
     effectBadges: graph.effects.map((effect) => effect.name),
     trackingDots: graph.effects.some((effect) => effect.type === "SMART_3D_FOLLOW_TEXT"),
     personCutoutLayer: graph.effects.some((effect) => effect.type === "TEXT_BEHIND_PERSON")
@@ -247,7 +247,7 @@ export interface RenderManifest {
   rawJunctionLayers?: TimelineLayer[] | undefined;
   createdAt: string;
   renderer: {
-    engine: "kimera-manifest";
+    engine: "orreris-manifest";
     version: 1;
     note: string;
   };
@@ -537,7 +537,7 @@ export function buildRenderManifest(input: {
     ...(nestExpansion.groups.size > 0 && rawJunctionLayers.length > 0 ? { rawJunctionLayers } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
     renderer: {
-      engine: "kimera-manifest",
+      engine: "orreris-manifest",
       version: 1,
       note: "This manifest is the render contract. Remotion/FFmpeg encoding plugs into this boundary next."
     }

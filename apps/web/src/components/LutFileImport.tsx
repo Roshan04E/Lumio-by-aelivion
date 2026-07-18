@@ -12,7 +12,7 @@
 
 import { useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
-import { lut3dToBase64, parseCubeFile } from "@kimera-by-aelivion/shared";
+import { lut3dToBase64, parseCubeFile } from "@orreris/shared";
 
 interface Props {
   value: string;

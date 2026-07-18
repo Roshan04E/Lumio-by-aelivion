@@ -3,7 +3,7 @@ import { loadFacts, rememberFact, forgetFact, type MemoryFact, type MemoryValue 
 
 /**
  * Phase 15 — Memory Panel UI + trust controls. A surface where the user sees
- * exactly what Kimera remembers (the creator + project facts behind `loadFacts()`)
+ * exactly what Orreris remembers (the creator + project facts behind `loadFacts()`)
  * and can curate it: **Edit** a value (pins it), **Forget** it, or pull a creator
  * default down to **this project only**. Low-confidence inferred facts (below the
  * retriever's steer threshold) surface as a gentle "save as your default?" nudge
@@ -111,23 +111,23 @@ export function MemoryPanel({ projectId, onClose }: { projectId?: string | undef
   return (
     <div className="ai-memory">
       <div className="ai-memory-head">
-        <strong>What Kimera remembers</strong>
+        <strong>What Orreris remembers</strong>
         <button type="button" className="ai-dock-close" onClick={onClose} aria-label="Back to chat">
           ✕
         </button>
       </div>
       <p className="ai-memory-note">
-        Kimera uses these to fill in your usual style. Everything here is editable — pin it, forget it, or keep it to this
+        Orreris uses these to fill in your usual style. Everything here is editable — pin it, forget it, or keep it to this
         project only. Stored on this device and synced to your account when signed in.
       </p>
 
       {isEmpty ? (
-        <p className="ai-memory-empty">Nothing remembered yet. As you apply edits, Kimera learns your preferences here.</p>
+        <p className="ai-memory-empty">Nothing remembered yet. As you apply edits, Orreris learns your preferences here.</p>
       ) : null}
 
       {nudges.length > 0 ? (
         <div className="ai-memory-section ai-memory-nudges">
-          <h4>Kimera noticed</h4>
+          <h4>Orreris noticed</h4>
           {nudges.map((fact) => (
             <div key={`${fact.scope}|${fact.projectId ?? ""}|${fact.key}`} className="ai-memory-nudge">
               <span className="ai-memory-nudge-text">

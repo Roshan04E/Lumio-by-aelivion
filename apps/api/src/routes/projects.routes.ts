@@ -12,7 +12,7 @@ import {
   resolveModuleInsertions,
   templateDefinitions,
   type ProjectGraph
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { asJson, fromJson } from "../lib/json";
 import { prisma } from "../lib/prisma";

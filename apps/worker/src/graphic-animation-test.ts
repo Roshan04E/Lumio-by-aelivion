@@ -6,7 +6,7 @@
  * frame-selection math. Preview, local export, and Remotion all call these, so a regression here
  * silently desyncs all three (or freezes animation back to the settled frame).
  *
- * Run: pnpm --filter @kimera-by-aelivion/worker graphic:test
+ * Run: pnpm --filter @orreris/worker graphic:test
  */
 
 import {
@@ -27,7 +27,7 @@ import {
   shiftSvgSmilBegin,
   GRAPHIC_ANIM_MAX_FRAMES,
   type TimelineKeyframeV2,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 let failures = 0;
 function check(name: string, condition: boolean, detail?: string): void {

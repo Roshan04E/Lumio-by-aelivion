@@ -28,7 +28,7 @@ import {
   registerContextDisposer,
   setGlGovernorEnabled,
   type TimelineLayer,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { ScenePreviewCanvas } from "../components/ScenePreviewCanvas";
 
 const WAVES = 4;

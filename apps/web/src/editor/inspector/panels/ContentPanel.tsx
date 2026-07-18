@@ -10,7 +10,7 @@
  */
 
 import { Crop } from "lucide-react";
-import { getCompositionContentTransform } from "@kimera-by-aelivion/shared";
+import { getCompositionContentTransform } from "@orreris/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { InspectorSection } from "../InspectorSection";
 import { EffectSliderControl } from "../../../components/EffectSliderControl";

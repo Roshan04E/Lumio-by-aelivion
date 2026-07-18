@@ -6,7 +6,7 @@
  * mute (layer or track). The result is sliced into `AudioData` frames for the encoder.
  */
 
-import { getCompositionVolume, getLayerSpeed, getTrackAudioGainAt, getTrackPan, getTrackPanAt, isTrackEnabled, layerSourceTimeSeconds, processAudioFxBuffer, resolveAudioFxChain, trackHasAudioAutomation, type AudioFxStep, type SpeedKeyframe, type TimelineComposition, type TimelineLayer, type TimelineTrack } from "@kimera-by-aelivion/shared";
+import { getCompositionVolume, getLayerSpeed, getTrackAudioGainAt, getTrackPan, getTrackPanAt, isTrackEnabled, layerSourceTimeSeconds, processAudioFxBuffer, resolveAudioFxChain, trackHasAudioAutomation, type AudioFxStep, type SpeedKeyframe, type TimelineComposition, type TimelineLayer, type TimelineTrack } from "@orreris/shared";
 import type { MediaEncoder } from "./video-encoder";
 
 const SAMPLE_RATE = 48_000;

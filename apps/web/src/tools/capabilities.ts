@@ -1,4 +1,4 @@
-import type { ToolDiagnostic } from "@kimera-by-aelivion/shared";
+import type { ToolDiagnostic } from "@orreris/shared";
 
 export interface BrowserToolCapabilities {
   webWorkers: boolean;

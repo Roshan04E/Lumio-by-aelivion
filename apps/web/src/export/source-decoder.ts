@@ -7,7 +7,7 @@
  * frame's lifetime (callers draw it synchronously and must not close it).
  */
 
-import { graphicAnimationFrameAt, type GraphicAnimationPlan } from "@kimera-by-aelivion/shared";
+import { graphicAnimationFrameAt, type GraphicAnimationPlan } from "@orreris/shared";
 import { createWebCodecsVideoSource } from "./webcodecs-decoder";
 
 export interface FrameProvider {

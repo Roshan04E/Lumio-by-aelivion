@@ -19,8 +19,8 @@ import {
   type TimelineKeyframeV2,
   type TimelineLayer,
   type TimelineEffectParamDefinition
-} from "@kimera-by-aelivion/shared";
-export { evaluateTextRevealProgress, sliceTextRuns, getVisibleTextRuns } from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
+export { evaluateTextRevealProgress, sliceTextRuns, getVisibleTextRuns } from "@orreris/shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1616,4 +1616,4 @@ export function applyAnimationPreset(layer: TimelineLayer, presetId: AnimationPr
   };
 }
 
-// evaluateTextRevealProgress, sliceTextRuns, getVisibleTextRuns re-exported from @kimera-by-aelivion/shared above.
+// evaluateTextRevealProgress, sliceTextRuns, getVisibleTextRuns re-exported from @orreris/shared above.

@@ -1,4 +1,4 @@
-import { moduleTypes, templateDefinitions, type AiPlan, type ModuleType } from "@kimera-by-aelivion/shared";
+import { moduleTypes, templateDefinitions, type AiPlan, type ModuleType } from "@orreris/shared";
 import { gatewayHasProvider, planWithGateway } from "./aiGateway.service";
 import { aiLog } from "../lib/logger";
 
@@ -23,7 +23,7 @@ function buildSystemPrompt(): string {
     .map((template) => `- ${template.slug}: ${template.name} (modules: ${template.requiredModules.join(", ")})`)
     .join("\n");
   return [
-    "You are Kimera's reel planner. Turn a creator's prompt into a starting plan for a short vertical video.",
+    "You are Orreris's reel planner. Turn a creator's prompt into a starting plan for a short vertical video.",
     "",
     "Pick the SINGLE best-fitting template and use its exact slug from this list:",
     templateList,

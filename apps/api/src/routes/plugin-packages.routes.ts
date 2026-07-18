@@ -8,7 +8,7 @@ import {
   pluginSafetyReportToMessage,
   type PluginCatalogPackage,
   type PluginManifest
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import type { PluginPackage, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";

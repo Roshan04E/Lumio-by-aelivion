@@ -1,4 +1,4 @@
-import type { ExecutorAvailability } from "@kimera-by-aelivion/shared";
+import type { ExecutorAvailability } from "@orreris/shared";
 import { detectBrowserToolCapabilities } from "./capabilities";
 
 /**

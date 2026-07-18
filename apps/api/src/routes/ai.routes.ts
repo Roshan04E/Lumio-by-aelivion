@@ -10,7 +10,7 @@ import {
   buildConsultantUserContent,
   buildFastPlannerUserContent,
   extractPlanJson
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { env } from "../config/env";
 import { asyncHandler, ok, validateBody } from "../lib/http";
 import { aiLog, promptHash, snippet } from "../lib/logger";
@@ -41,7 +41,7 @@ function optionalUserId(req: Request): string | undefined {
 }
 
 /**
- * Kimera AI — planner gateway route (GP1). The browser's `LlmPlanner` POSTs here;
+ * Orreris AI — planner gateway route (GP1). The browser's `LlmPlanner` POSTs here;
  * this turns a prompt + the live capability description + a relevant project slice
  * into an ordered plan of REGISTERED tools/actions, via the multi-provider failover
  * gateway. It never mutates anything — the web side validates every step against the
@@ -50,7 +50,7 @@ function optionalUserId(req: Request): string | undefined {
  *
  * No provider key configured → `{ available: false }` (200), so the client falls back.
  * AI is an operator, not a magic box: the model only *selects* among capabilities
- * Kimera already exposes, and returns a numeric confidence the UI surfaces directly.
+ * Orreris already exposes, and returns a numeric confidence the UI surfaces directly.
  */
 export const aiRouter = Router();
 
@@ -178,7 +178,7 @@ aiRouter.post(
   })
 );
 
-// --- Kimera Brain B4 — tier-3 transactional compiler (`fast` model class) -----
+// --- Orreris Brain B4 — tier-3 transactional compiler (`fast` model class) -----
 
 const fastPlanRequestSchema = z.object({
   prompt: z.string().min(1).max(300),

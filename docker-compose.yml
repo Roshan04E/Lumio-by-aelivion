@@ -1,25 +1,25 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: kimera-postgres
+    container_name: orreris-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: kimera
-      POSTGRES_PASSWORD: kimera
-      POSTGRES_DB: kimera
+      POSTGRES_USER: orreris
+      POSTGRES_PASSWORD: orreris
+      POSTGRES_DB: orreris
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kimera -d kimera"]
+      test: ["CMD-SHELL", "pg_isready -U orreris -d orreris"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   redis:
     image: redis:7-alpine
-    container_name: kimera-redis
+    container_name: orreris-redis
     restart: unless-stopped
     ports:
       - "6379:6379"

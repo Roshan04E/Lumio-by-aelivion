@@ -1,4 +1,4 @@
-import type { TimelineComposition, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineComposition, TimelineLayer } from "@orreris/shared";
 
 /**
  * Frame render cache (Phase 3 interface + a small LRU impl; wired in Phase 5).
@@ -717,7 +717,7 @@ export function baseCompositionSignature(composition: TimelineComposition): stri
       // it → whole store regenerates — the 2026-07-03 frozen-stale-span incident cannot recur from
       // a forgotten manual bump. The constant above remains for coarse manual invalidation and as
       // the only key in non-vite consumers (tsx tests), where the fingerprint is undefined.
-      renderFingerprint: typeof __KIMERA_RENDER_FINGERPRINT__ === "string" ? __KIMERA_RENDER_FINGERPRINT__ : "test"
+      renderFingerprint: typeof __ORRERIS_RENDER_FINGERPRINT__ === "string" ? __ORRERIS_RENDER_FINGERPRINT__ : "test"
     })
   );
 }

@@ -2,9 +2,9 @@
  * Standalone assert script for Text Styles (§2) capture/apply. Repo convention: no test framework —
  * exits non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web text-style:test
+ *   pnpm --filter @orreris/web text-style:test
  */
-import { applyTextStyle, captureTextStyle, createTextStyleFromLayer, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { applyTextStyle, captureTextStyle, createTextStyleFromLayer, type TimelineLayer } from "@orreris/shared";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {

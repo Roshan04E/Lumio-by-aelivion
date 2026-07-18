@@ -1,5 +1,5 @@
 /**
- * Kimera OS — the fact store (K1). In-memory, bounded, provenance-keyed.
+ * Orreris OS — the fact store (K1). In-memory, bounded, provenance-keyed.
  *
  * One live fact per (type, target). Truth maintenance is the store's whole job:
  *  - facts remember the input signature they were observed under (provenance),
@@ -18,8 +18,8 @@ const MAX_FACTS = 500;
 // K2 persistence: facts survive a refresh via localStorage (bounded JSON, same convention as
 // the routing ledger). This is CORRECTNESS-FREE caching — every read is signature-verified by
 // knowledge.ts, so a stale persisted fact simply invalidates on first touch. Deliberately not
-// OPFS: <500 small JSON facts is localStorage territory (tables-first, KIMERA_OS invariant 6).
-const STORAGE_KEY = "kimera.world.facts.v1";
+// OPFS: <500 small JSON facts is localStorage territory (tables-first, ORRERIS_OS invariant 6).
+const STORAGE_KEY = "orreris.world.facts.v1";
 const PERSIST_DEBOUNCE_MS = 500;
 
 const facts = new Map<string, Fact>();

@@ -1,7 +1,7 @@
 import type { AiPlan } from "./types";
 
 /**
- * Confidence is communicated as a label, never a percentage (Kimera AI rule).
+ * Confidence is communicated as a label, never a percentage (Orreris AI rule).
  * Each label gets a short, honest explanation surfaced in the Plan Review card.
  */
 export const CONFIDENCE_INFO: Record<AiPlan["confidence"], { tone: string; detail: string }> = {

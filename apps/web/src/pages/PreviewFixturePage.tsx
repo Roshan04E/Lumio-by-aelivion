@@ -1,4 +1,4 @@
-import { createRenderComparisonFixture, renderComparisonFixtureKeys, type RenderComparisonFixtureKey } from "@kimera-by-aelivion/shared";
+import { createRenderComparisonFixture, renderComparisonFixtureKeys, type RenderComparisonFixtureKey } from "@orreris/shared";
 import { VideoPreview } from "../components/VideoPreview";
 
 function fixtureKeyFromUrl(): RenderComparisonFixtureKey {

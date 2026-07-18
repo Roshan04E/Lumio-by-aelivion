@@ -19,10 +19,10 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1085.0
         version: 3.1085.0
-      '@kimera-by-aelivion/render-templates':
+      '@orreris/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
-      '@kimera-by-aelivion/shared':
+      '@orreris/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@prisma/client':
@@ -89,7 +89,7 @@ importers:
       '@huggingface/transformers':
         specifier: ^3.8.1
         version: 3.8.1
-      '@kimera-by-aelivion/shared':
+      '@orreris/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@vitejs/plugin-react':
@@ -156,10 +156,10 @@ importers:
 
   apps/worker:
     dependencies:
-      '@kimera-by-aelivion/render-templates':
+      '@orreris/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
-      '@kimera-by-aelivion/shared':
+      '@orreris/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@prisma/client':
@@ -220,7 +220,7 @@ importers:
 
   packages/render-templates:
     dependencies:
-      '@kimera-by-aelivion/shared':
+      '@orreris/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:

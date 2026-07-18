@@ -1,5 +1,5 @@
-import type { TrackingPathArtifactData, TrackingPoint } from "@kimera-by-aelivion/shared";
-import { smoothTrackingPoints } from "@kimera-by-aelivion/shared";
+import type { TrackingPathArtifactData, TrackingPoint } from "@orreris/shared";
+import { smoothTrackingPoints } from "@orreris/shared";
 import { detectInitialSubjectBox, loadVideoElement, sampleFrameTimes, seekVideo } from "./local-segmentation";
 import { downsampleGrayHalf, extractPatch, nccToConfidence, prepareTemplate, searchNcc, type GrayImage } from "./tracking-core";
 

@@ -27,7 +27,7 @@
  * preload leases, PREEMPTS the oldest one (its `onPreempted` fires → the shell falls back to the
  * `<video>` path it would have used anyway). Visibility changes flow in via `lease.setPriority`.
  *
- * Flag (repo convention): `?wcDecode=0|1` → localStorage `kimera.wcDecode` → `VITE_WC_DECODE` →
+ * Flag (repo convention): `?wcDecode=0|1` → localStorage `orreris.wcDecode` → `VITE_WC_DECODE` →
  * **ON** (default since 2026-07-04: long ON-flag soaks were clean, every WC failure mode self-heals
  * to the `<video>` element path, and source proxies made the decode side cheap; the flag remains
  * the kill switch). Telemetry: `window.__rfWcPool`.
@@ -42,7 +42,7 @@ const MAX_IDLE = 2;
 
 export type WcLeasePriority = "playhead" | "preload";
 
-/** Resolution order: `?wcDecode=0|1` → localStorage `kimera.wcDecode` → `VITE_WC_DECODE` → TRUE. */
+/** Resolution order: `?wcDecode=0|1` → localStorage `orreris.wcDecode` → `VITE_WC_DECODE` → TRUE. */
 export function getWcPreviewDecodeEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
   if (typeof window !== "undefined") {
@@ -50,7 +50,7 @@ export function getWcPreviewDecodeEnabled(): boolean {
       if (new URLSearchParams(window.location.search).has("wcDecode")) {
         return truthy(new URLSearchParams(window.location.search).get("wcDecode"));
       }
-      const stored = window.localStorage?.getItem("kimera.wcDecode");
+      const stored = window.localStorage?.getItem("orreris.wcDecode");
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

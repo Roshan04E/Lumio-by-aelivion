@@ -14,13 +14,13 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRenderManifest } from "@kimera-by-aelivion/render-templates";
+import { buildRenderManifest } from "@orreris/render-templates";
 import {
   createRenderComparisonFixture,
   renderComparisonFrameSeconds,
   type RenderComparisonFixtureKey,
   type TimelineComposition
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import pixelmatch from "pixelmatch";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";

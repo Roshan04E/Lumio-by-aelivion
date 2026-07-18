@@ -1,11 +1,11 @@
 /**
- * Kimera OS — World Model entry point (K1). Registers the built-in observers, owns the
+ * Orreris OS — World Model entry point (K1). Registers the built-in observers, owns the
  * WorldContext assembly (live editor assets via a host-registered provider, falling back to
- * the local-first asset records), and exposes the debug handle (`window.__kimeraWorld`)
+ * the local-first asset records), and exposes the debug handle (`window.__orrerisWorld`)
  * the verification flow uses.
  */
 
-import type { SourceAsset, TimelineComposition } from "@kimera-by-aelivion/shared";
+import type { SourceAsset, TimelineComposition } from "@orreris/shared";
 import { listLocalAssetRecords } from "../../lib/api";
 import { clearFactStore, listFacts } from "./fact-store";
 import { registerObserver, listObservers } from "./observers";
@@ -58,7 +58,7 @@ function safeLocalAssets(): SourceAsset[] {
 
 // Debug handle, matching the repo's window telemetry convention (__rfBgGate etc.).
 if (typeof window !== "undefined") {
-  Object.defineProperty(window, "__kimeraWorld", {
+  Object.defineProperty(window, "__orrerisWorld", {
     configurable: true,
     get: () => ({
       facts: listFacts(),

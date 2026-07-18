@@ -1,4 +1,4 @@
-import type { SourceAsset, ToolCapabilityDefinition } from "@kimera-by-aelivion/shared";
+import type { SourceAsset, ToolCapabilityDefinition } from "@orreris/shared";
 
 export function isCompatibleToolAsset(tool: ToolCapabilityDefinition, asset: SourceAsset) {
   if (tool.accepts.includes("video") && asset.fileType.startsWith("video/")) {

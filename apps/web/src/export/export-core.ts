@@ -25,7 +25,7 @@ import {
   type PluginTransitionManifest,
   type TimelineComposition,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { EncoderStallRecoveredError, MediaEncoder, REC709_SDR_LIMITED, type ExportFormat } from "./video-encoder";
 import { getRegionPassesEnabled } from "../color/render-engine";
 import { SceneFrameCompositor } from "./scene-frame-compositor";

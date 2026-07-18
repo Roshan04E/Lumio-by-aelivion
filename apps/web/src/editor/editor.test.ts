@@ -2,9 +2,9 @@
  * Standalone assert script for the editor foundation (Phase 3). Repo convention:
  * no test framework — exits non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web editor:test
+ *   pnpm --filter @orreris/web editor:test
  */
-import { applyLayerAttributes, buildKimeraPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isKimeraPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseKimeraPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, shiftSpeedKeyframes, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { applyLayerAttributes, buildOrrerisPackageZip, buildSceneDraws, buildTimelineTemplatePackage, clipCompositionToWorkArea, collectEditPoints, copyLayerAttributes, createBoxMask, createDefaultComposition, deriveNestBreadcrumb, ensureComposition, expandNestedCompositions, exportCompositionToFcpxml, findRootCompositionId, getCompositionVolume, getLayerSpeed, getLayerSpeedAt, getNestedSourceDurationSeconds, hasClipboardAttributes, healCompositionRegistry, isOrrerisPackageZipBytes, layerSourceTimeSeconds, mapExternalTransition, nestLayersIntoComposition, nestParentClipId, parseExternalTimelineFile, parseOrrerisPackageZip, pasteLayerAttributes, rippleTrimLayer, rollEditAtCut, rollEditLimits, shiftSpeedKeyframes, slideLayer, snapshotLayerAttributes, splitLayerAtTime, stampCompositionRegistry, trimLayerEdgeTo, trimLayerKeyframesTo, unnestClip, wouldCreateCompositionCycle, type ProjectGraph, type TimelineLayer, type SourceAsset } from "@orreris/shared";
 import { editorStore } from "./state/editorStore";
 import { moduleRegistry } from "./registry/modules";
 import { commandRegistry } from "./registry/commands";
@@ -357,7 +357,7 @@ function check(name: string, condition: boolean): void {
     <asset id="r3" name="bus-closeup.mov" src="file:///Volumes/Media/bus-closeup.mov" duration="6s"/>
   </resources>
   <library>
-    <event name="Kimera Import Tests">
+    <event name="Orreris Import Tests">
       <project name="Titled Transition FCPXML">
         <sequence format="r1" duration="12s">
           <spine>
@@ -370,7 +370,7 @@ function check(name: string, condition: boolean): void {
             <transition name="Cross Dissolve" offset="4s" duration="1s"/>
             <asset-clip name="Bus Closeup" ref="r3" offset="5s" start="1s" duration="5s"/>
             <title name="Intro Title" offset="10s" duration="2s">
-              <text>Hello Kimera</text>
+              <text>Hello Orreris</text>
             </title>
           </spine>
         </sequence>
@@ -384,7 +384,7 @@ function check(name: string, condition: boolean): void {
   const busLayer = fcpxmlClips.find((layer) => layer.name === "Bus Closeup");
   const cityLayer = fcpxmlClips.find((layer) => layer.name === "City Wide");
   check("fcpxml import detects format", fcpxml.report.format === "fcpxml");
-  check("fcpxml title maps to an editable text layer", titleLayer?.text === "Hello Kimera");
+  check("fcpxml title maps to an editable text layer", titleLayer?.text === "Hello Orreris");
   check("fcpxml reports the title mapping", fcpxml.report.mapped.some((item) => item.code === "fcpxml.title"));
   check("fcpxml transition maps to crossDissolve on the incoming clip", busLayer?.transitionIn?.kind === "crossDissolve");
   check("fcpxml reports the transition mapping", fcpxml.report.mapped.some((item) => item.code === "fcpxml.transition"));
@@ -1611,7 +1611,7 @@ function check(name: string, condition: boolean): void {
   );
 }
 
-// --- .kimera ZIP package round-trip (Task 1.6: embedded-media packages) --------
+// --- .orreris ZIP package round-trip (Task 1.6: embedded-media packages) --------
 {
   const layer: TimelineLayer = {
     id: "v1",
@@ -1656,17 +1656,17 @@ function check(name: string, condition: boolean): void {
   };
   const pkg = buildTimelineTemplatePackage({ projectId: graph.projectId, title: "Zip Test", graph, composition, assets: [asset] });
   const assetBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
-  const zip = buildKimeraPackageZip({ pkg, assets: [{ id: "asset_test", fileName: "clip.mp4", bytes: assetBytes }] });
-  check("kimera zip: produces ZIP magic bytes", isKimeraPackageZipBytes(zip));
-  const parsed = parseKimeraPackageZip(zip);
-  check("kimera zip: timeline layer count survives", parsed.pkg.graph.composition?.tracks[0]?.layers.length === 1);
-  check("kimera zip: manifest name survives", parsed.pkg.manifest.name === "Zip Test");
+  const zip = buildOrrerisPackageZip({ pkg, assets: [{ id: "asset_test", fileName: "clip.mp4", bytes: assetBytes }] });
+  check("orreris zip: produces ZIP magic bytes", isOrrerisPackageZipBytes(zip));
+  const parsed = parseOrrerisPackageZip(zip);
+  check("orreris zip: timeline layer count survives", parsed.pkg.graph.composition?.tracks[0]?.layers.length === 1);
+  check("orreris zip: manifest name survives", parsed.pkg.manifest.name === "Zip Test");
   const roundTrippedBytes = parsed.assetBytes.get("asset_test");
   check(
-    "kimera zip: asset bytes survive byte-for-byte",
+    "orreris zip: asset bytes survive byte-for-byte",
     Boolean(roundTrippedBytes) && roundTrippedBytes!.length === assetBytes.length && roundTrippedBytes!.every((b, i) => b === assetBytes[i])
   );
-  check("kimera zip: bare JSON bytes are NOT sniffed as ZIP", !isKimeraPackageZipBytes(new TextEncoder().encode(JSON.stringify(pkg))));
+  check("orreris zip: bare JSON bytes are NOT sniffed as ZIP", !isOrrerisPackageZipBytes(new TextEncoder().encode(JSON.stringify(pkg))));
 }
 
 // --- Shared transition-name mapping table (Task 2.1) --------------------------
@@ -1800,7 +1800,7 @@ function check(name: string, condition: boolean): void {
     registerTrackingForAsset
   } = await import("../tools/mask-resolver");
 
-  check("mask reuse: durable uri accepts http(s) only", isDurableMatteUri("https://api.test/storage/m.webm") && !isDurableMatteUri("blob:https://app/x") && !isDurableMatteUri("opfs://kimera-tool-artifacts/a.bin") && !isDurableMatteUri(undefined));
+  check("mask reuse: durable uri accepts http(s) only", isDurableMatteUri("https://api.test/storage/m.webm") && !isDurableMatteUri("blob:https://app/x") && !isDurableMatteUri("opfs://orreris-tool-artifacts/a.bin") && !isDurableMatteUri(undefined));
 
   const matte = {
     artifactId: "mask_browser_1",
@@ -1911,7 +1911,7 @@ function check(name: string, condition: boolean): void {
   const { collectUnresolvedMattes, rewriteMatteUris } = await import("../export/matte-resolve");
 
   const blobLayer: TimelineLayer = { ...maskedLayer, id: "e1", name: "Blob matte", matte: { ...matte, artifactId: "m_blob", uri: "blob:https://app/x" } };
-  const opfsLayer: TimelineLayer = { ...maskedLayer, id: "e2", name: "OPFS matte", matte: { ...matte, artifactId: "m_opfs", uri: "opfs://kimera-tool-artifacts/m_opfs.bin" } };
+  const opfsLayer: TimelineLayer = { ...maskedLayer, id: "e2", name: "OPFS matte", matte: { ...matte, artifactId: "m_opfs", uri: "opfs://orreris-tool-artifacts/m_opfs.bin" } };
   const missingUriLayer: TimelineLayer = { ...maskedLayer, id: "e3", name: "No uri", matte: { ...matte, artifactId: "m_none", uri: undefined } };
   const httpLayer: TimelineLayer = { ...maskedLayer, id: "e4", name: "Http matte", matte: { ...matte, artifactId: "m_http" } };
   const plainLayer: TimelineLayer = { ...maskedLayer, id: "e5", name: "No matte" };
@@ -1957,7 +1957,7 @@ function check(name: string, condition: boolean): void {
   check("matte resolve: no-uri matte still resolvable by artifactId", rewriteMatteUris(exportComposition2, { m_none: "https://api.test/m.webm" }).tracks[0]!.layers[2]!.matte?.uri === "https://api.test/m.webm");
 
   // --- Dependency resolver: durable artifacts satisfy auto-inserted prerequisites ---
-  const { artifactSatisfiesModule, resolveModuleInsertions } = await import("@kimera-by-aelivion/shared");
+  const { artifactSatisfiesModule, resolveModuleInsertions } = await import("@orreris/shared");
 
   const durableFields = { maskSequence: durableFieldsMask, trackingPath: { ...trackingPath, sourceAssetId: "asset_fields" } };
   check(
@@ -1992,7 +1992,7 @@ function check(name: string, condition: boolean): void {
   );
 
   // --- Standalone vs editor apply modes (the handler contract's `context` maps onto these) ---
-  const { applyTextBehindPersonComposition } = await import("@kimera-by-aelivion/shared");
+  const { applyTextBehindPersonComposition } = await import("@orreris/shared");
   const tbpOptions = { text: "HELLO", textColor: "#fff", maskId: durableFieldsMask.id, mask: durableFieldsMask, sourceAssetId: "asset_mask_src" };
   const editorApply = applyTextBehindPersonComposition(maskComposition, tbpOptions, "insert");
   const standaloneApply = applyTextBehindPersonComposition(maskComposition, tbpOptions, "replace");

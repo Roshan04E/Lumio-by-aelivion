@@ -23,7 +23,7 @@ import {
   type MediaEffects,
   type MediaRendererDrawParams,
   type TimelineLayer,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 const W = 256;
 const H = 256;

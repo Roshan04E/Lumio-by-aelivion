@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createFile, type MP4Sample, type MP4VideoTrackInfo } from "mp4box";
-import { MediaWebGLRenderer } from "@kimera-by-aelivion/shared";
+import { MediaWebGLRenderer } from "@orreris/shared";
 import { createImageSource } from "../export/source-decoder";
 import { createWebCodecsVideoSource, wcDecoderStats } from "../export/webcodecs-decoder";
 import { acquirePreviewFrameProvider, getWcPoolStats, getWcPreviewDecodeEnabled } from "../playback/preview-frame-pool";

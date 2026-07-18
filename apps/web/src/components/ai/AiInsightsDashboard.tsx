@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { ActionAnalyticsSnapshot } from "@kimera-by-aelivion/shared";
+import type { ActionAnalyticsSnapshot } from "@orreris/shared";
 import { readAnalytics } from "../../ai/analytics-store";
 import { summarizeRouting, type RoutingSummary } from "../../ai/brain/ledger";
 
@@ -74,7 +74,7 @@ export function AiInsightsDashboard({ onClose }: { onClose: () => void }) {
       <div className="ai-insights-section">
         <h4>Missing capabilities ({data.unsupported.length})</h4>
         {data.unsupported.length === 0 ? (
-          <p className="ai-insights-empty">Every request mapped to something Kimera can do. 🎉</p>
+          <p className="ai-insights-empty">Every request mapped to something Orreris can do. 🎉</p>
         ) : (
           <ul className="ai-insights-missing">
             {[...data.unsupported]

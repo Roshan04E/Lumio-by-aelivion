@@ -12,7 +12,7 @@ import {
   parseTranscriptInput,
   validateTranscriptArtifact,
   type SourceAsset
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 const transcript = parseTranscriptInput(`WEBVTT
 

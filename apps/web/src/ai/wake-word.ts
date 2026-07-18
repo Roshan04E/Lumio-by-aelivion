@@ -1,41 +1,44 @@
 /**
- * "Hey Kimera" wake-word matcher — pure and eval-tested (router-eval.test.ts).
+ * "Hey Orreris" wake-word matcher — pure and eval-tested (router-eval.test.ts).
  *
- * Web Speech never hears the brand name cleanly: "hey kimera" (spoken like "chimera") comes back
- * as "hey chimera", "hey camera", "hello kimira", "hey kimmer". So matching is three-layered:
- *   1. a builtin variant set (every observed/adjacent mishearing, incl. the "chimera"/"camera" homophones),
- *   2. edit-distance ≤ 2 from "kimera" for k-/c-initial tokens (catches new mishearings),
+ * Web Speech never hears the brand name cleanly: "hey orreris" (spoken "or-EH-riss") comes back
+ * as "hey orris", "hey oris", "hello orres", "hey aureus". So matching is three-layered:
+ *   1. a builtin variant set (observed/adjacent mishearings of the vowel-initial name),
+ *   2. edit-distance ≤ 2 from "orreris" for vowel-initial tokens (catches new mishearings),
  *   3. LEARNED phrases — exact transcripts the user confirmed via the "were you calling me?"
  *      card, persisted per browser. This is how the user trains the ear to THEIR voice/accent.
  *
  * Precision guard: a greeting token (hey/hello/…) is REQUIRED before the name — the only thing
  * a match does is open the voice session, but ambient speech still shouldn't flicker it.
+ *
+ * NOTE: "orreris" is a new brand; this variant set is a best-effort seed for how ASR is likely to
+ * mangle a vowel-initial name. Real per-device mishearings are captured by the learned-phrase layer.
  */
 
 const GREETINGS = new Set(["hey", "heya", "hello", "hi", "hiya", "hay", "aye", "okay", "ok", "yo"]);
 
-/** Observed mishearings + close neighbours. The c-initial homophones (chimera/camera/cimera) are
- * safe here because the greeting requirement already anchors the phrase shape — only the distinctive
- * k-initial tokens are allowed to wake WITHOUT a greeting (isStrongNameToken). */
+/** Observed mishearings + close neighbours of "orreris". Short forms (oris/orris) live here because
+ * the length gap puts them out of levenshtein range of the 7-char name; the greeting requirement
+ * anchors them so they don't wake on ambient speech. Only tokens within edit-distance 1 of the full
+ * name are allowed to wake WITHOUT a greeting (isStrongNameToken). */
 const NAME_VARIANTS = new Set([
-  "kimera",
-  "kimira",
-  "kymera",
-  "kimmera",
-  "kimerra",
-  "kemera",
-  "khimera",
-  "kimara",
-  "kimero",
-  "kimmer",
-  "chimera",
-  "cimera",
-  "camera"
+  "orreris",
+  "orris",
+  "oris",
+  "orres",
+  "oreris",
+  "orerus",
+  "oreece",
+  "aureus",
+  "orias",
+  "arreris"
 ]);
+
+const VOWELS = new Set(["a", "e", "i", "o", "u"]);
 
 export interface WakeWordMatch {
   matched: boolean;
-  /** Trailing words after the name — "hey kimera blur clip 2" → "blur clip 2". */
+  /** Trailing words after the name — "hey orreris blur clip 2" → "blur clip 2". */
   command?: string;
 }
 
@@ -68,13 +71,13 @@ function isNameToken(token: string): boolean {
   if (NAME_VARIANTS.has(token)) {
     return true;
   }
-  return token.length >= 4 && (token.startsWith("k") || token.startsWith("c")) && levenshtein(token, "kimera") <= 2;
+  return token.length >= 5 && VOWELS.has(token[0]!) && levenshtein(token, "orreris") <= 2;
 }
 
-/** k-initial variants are distinctive enough to wake WITHOUT a greeting ("Kimera, pause");
- * the c-initial homophones (chimera/camera) stay greeting-anchored to avoid ambient false wakes. */
+/** Tokens within edit-distance 1 of the full name are distinctive enough to wake WITHOUT a greeting
+ * ("Orreris, pause"); shorter/looser mishearings stay greeting-anchored to avoid ambient false wakes. */
 function isStrongNameToken(token: string): boolean {
-  return token.startsWith("k") && token.length >= 4 && isNameToken(token);
+  return token.length >= 6 && VOWELS.has(token[0]!) && levenshtein(token, "orreris") <= 1;
 }
 
 /**
@@ -95,7 +98,7 @@ export function matchWakeWord(transcript: string, learnedPhrases: readonly strin
   }
 
   const tokens = normalized.split(" ");
-  // Name-first wake ("Kimera, pause") — no greeting needed for the distinctive k-variants.
+  // Name-first wake ("Orreris, pause") — no greeting needed for tokens near the full name.
   if (isStrongNameToken(tokens[0]!)) {
     const command = tokens.slice(1).join(" ").trim();
     return command ? { matched: true, command } : { matched: true };
@@ -110,7 +113,7 @@ export function matchWakeWord(transcript: string, learnedPhrases: readonly strin
       const command = tokens.slice(i + 2).join(" ").trim();
       return command ? { matched: true, command } : { matched: true };
     }
-    // Split name ("kim era", "ki mera") — join the next two tokens.
+    // Split name ("or reris", "orre ris") — join the next two tokens.
     const pair = tokens[i + 2] ? next + tokens[i + 2]! : "";
     if (pair && isNameToken(pair)) {
       const command = tokens.slice(i + 3).join(" ").trim();
@@ -134,7 +137,7 @@ export function looksLikeWakeAttempt(transcript: string): boolean {
 // Learned phrases — the user's confirmed mishearings ("hello camera" → wakes)
 // ---------------------------------------------------------------------------
 
-const WAKE_PHRASES_KEY = "kimera.voice.wakephrases.v1";
+const WAKE_PHRASES_KEY = "orreris.voice.wakephrases.v1";
 const MAX_WAKE_PHRASES = 12;
 
 let memoryWakePhrases: string[] = [];
@@ -181,7 +184,7 @@ export function clearWakePhrases(): void {
 // (which must keep the AI dock mounted for standby even with the chat closed)
 // ---------------------------------------------------------------------------
 
-const WAKE_ENABLED_KEY = "kimera.voice.wakeword.v1";
+const WAKE_ENABLED_KEY = "orreris.voice.wakeword.v1";
 
 export function loadWakeWordEnabled(): boolean {
   try {

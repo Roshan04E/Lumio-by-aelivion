@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Diamond, Trash2 } from "lucide-react";
-import type { KeyframeInterpolation } from "@kimera-by-aelivion/shared";
+import type { KeyframeInterpolation } from "@orreris/shared";
 
 /**
  * Canonical keyframe control group — Previous / diamond-toggle / Next / (Clear all) — used by

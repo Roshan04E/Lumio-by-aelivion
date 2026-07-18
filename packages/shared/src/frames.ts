@@ -43,7 +43,7 @@ export interface LayerFrame {
  * Pure data: a generator id + a param SCHEMA (reuses the effect param-def shape → Effects-subpanel controls).
  */
 export interface FrameDefinition {
-  /** Stable id, namespaced by author: "kimera.rounded-rect", "acme.torn-note". */
+  /** Stable id, namespaced by author: "orreris.rounded-rect", "acme.torn-note". */
   id: string;
   name: string;
   generatorId: FrameGeneratorId;
@@ -376,7 +376,7 @@ export function frameOutlinePathD(frame: Pick<LayerFrame, "generatorId" | "param
 
 export const builtInFrames: FrameDefinition[] = [
   {
-    id: "kimera.rounded-rect",
+    id: "orreris.rounded-rect",
     name: "Rounded Rectangle",
     generatorId: "rounded-rect",
     params: [{ key: "roundness", label: "Roundness", type: "number", min: 0, max: 100, step: 1, defaultValue: 20, unit: "%" }]
@@ -384,14 +384,14 @@ export const builtInFrames: FrameDefinition[] = [
   {
     // No generator params of its own — a circle is fully described by its box. `aspectLock` is what
     // makes it a CIRCLE rather than an oval stretched to the comp's aspect (QA round 1).
-    id: "kimera.circle",
+    id: "orreris.circle",
     name: "Circle",
     generatorId: "ellipse",
     params: [],
     chromeDefaults: { aspectLock: true }
   },
   {
-    id: "kimera.hexagon",
+    id: "orreris.hexagon",
     name: "Hexagon",
     generatorId: "polygon",
     params: [
@@ -404,7 +404,7 @@ export const builtInFrames: FrameDefinition[] = [
   {
     // Phase 2 — organic blob. Seeded + deterministic: `seed` re-rolls the variation, `wobble` sets how
     // far radii/angles stray from a circle, `points` how many lobes the outline can have.
-    id: "kimera.blob",
+    id: "orreris.blob",
     name: "Blob",
     generatorId: "blob",
     params: [
@@ -418,7 +418,7 @@ export const builtInFrames: FrameDefinition[] = [
   {
     // Phase 2 — torn paper. Seeded jagged edges tearing INWARD from the sheet edge; `edges` picks which
     // sides tear (top-bottom = the classic ripped strip), `detail` the tooth count, `roughness` the depth.
-    id: "kimera.torn-paper",
+    id: "orreris.torn-paper",
     name: "Torn Paper",
     generatorId: "torn-paper",
     params: [

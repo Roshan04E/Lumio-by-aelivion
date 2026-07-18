@@ -5,7 +5,7 @@ import {
   type TransitionDirection,
   type TransitionParam,
   type TransitionSpec,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { ThemedSelect, type ThemedSelectOption } from "../editor/inspector/controls/ThemedSelect";
 
 /**

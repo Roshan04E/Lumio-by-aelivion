@@ -1,10 +1,10 @@
-/** Kimera by Aelivion wordmark — plain uppercase text lockup, no icon.
- *  "Kimera" alone is another company's product, so the mark always carries "by Aelivion". */
+/** Orreris Pro by Pesamee wordmark — plain uppercase text lockup, no icon.
+ *  Full product name "Orreris Pro" over the brand attribution "by Pesamee". */
 export function BrandMark() {
   return (
     <span className="mkt-brand">
-      <span className="mkt-brand-name">Kimera</span>
-      <span className="mkt-brand-by">by Aelivion</span>
+      <span className="mkt-brand-name">Orreris Pro</span>
+      <span className="mkt-brand-by">by Pesamee</span>
     </span>
   );
 }

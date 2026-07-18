@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Clapperboard, Wand2 } from "lucide-react";
-import type { ModuleType } from "@kimera-by-aelivion/shared";
+import type { ModuleType } from "@orreris/shared";
 import { UploadDropzone } from "../components/UploadDropzone";
 import { createAsset, createProject } from "../lib/api";
 import { usePro } from "../lib/proMode";
@@ -53,7 +53,7 @@ export function CreatePage() {
   const [intent, setIntent] = useState<Intent>("manual");
   const [preset, setPreset] = useState<CreatePreset | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [title, setTitle] = useState("My Kimera edit");
+  const [title, setTitle] = useState("My Orreris edit");
   const [orientationOverride, setOrientationOverride] = useState<"auto" | Orientation>("auto");
   const [busy, setBusy] = useState(false);
   const [pro] = usePro();
@@ -170,7 +170,7 @@ export function CreatePage() {
                   <span className="create-pro-pill">Pro</span>
                   <Wand2 size={20} />
                   <strong>Help me with AI</strong>
-                  <span>{pro ? "Kimera drafts a starting edit." : "Turn on Pro to use AI planning."}</span>
+                  <span>{pro ? "Orreris drafts a starting edit." : "Turn on Pro to use AI planning."}</span>
                 </button>
               </div>
             </div>

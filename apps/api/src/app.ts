@@ -75,7 +75,7 @@ export function createApp() {
   app.use(express.json({ limit: "4mb" }));
 
   app.get("/health", (_req, res) => {
-    res.json({ success: true, message: "Kimera API is healthy", data: { uptime: process.uptime() } });
+    res.json({ success: true, message: "Orreris API is healthy", data: { uptime: process.uptime() } });
   });
 
   app.use("/api/auth", authRouter);

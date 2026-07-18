@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AttributeGroup } from "@kimera-by-aelivion/shared";
+import type { AttributeGroup } from "@orreris/shared";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 
@@ -12,7 +12,7 @@ const GROUP_OPTIONS: { id: AttributeGroup; label: string; hint: string }[] = [
   { id: "speed", label: "Speed", hint: "playback rate" }
 ];
 
-const STORAGE_KEY = "kimera_paste_attributes_groups";
+const STORAGE_KEY = "orreris_paste_attributes_groups";
 
 export function loadPasteAttributeGroups(): Set<AttributeGroup> {
   if (typeof window === "undefined") return new Set(GROUP_OPTIONS.map((g) => g.id));

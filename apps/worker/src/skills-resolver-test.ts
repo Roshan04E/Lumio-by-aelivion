@@ -20,7 +20,7 @@ import {
   resolveModels,
   type GenerationAvailability,
   type ResolveTask
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 const ALL: GenerationAvailability = { falKey: true, localEndpoint: true, byoKey: true };
 const CLOUD_ONLY: GenerationAvailability = { falKey: true, localEndpoint: false, byoKey: false };

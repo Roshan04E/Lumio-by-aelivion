@@ -12,7 +12,7 @@
 
 import { useMemo } from "react";
 import { Anchor } from "lucide-react";
-import type { LayerResponsivePin, PinX, PinY, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { LayerResponsivePin, PinX, PinY, TimelineLayer } from "@orreris/shared";
 import { InspectorSection } from "../InspectorSection";
 
 const ROWS: PinY[] = ["top", "center", "bottom"];

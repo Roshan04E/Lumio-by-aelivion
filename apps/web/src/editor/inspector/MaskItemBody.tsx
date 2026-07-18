@@ -8,7 +8,7 @@ import {
   type MaskMode,
   type MaskScalarProperty,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { ThemedSelect, type ThemedSelectGroup } from "./controls/ThemedSelect";
 import { EffectSliderControl } from "../../components/EffectSliderControl";
 import { averageTrackConfidence, type SavedTrack } from "../../lib/trackLibrary";

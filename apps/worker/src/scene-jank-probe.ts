@@ -6,7 +6,7 @@
  * requestAnimationFrame intervals for ~3s — reporting how many frames overran (>20ms / >33ms), plus
  * p95/max. If Q has materially more long frames than P, the stutter-vs-quality hypothesis holds.
  *
- * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/scene-jank-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @orreris/worker exec tsx src/scene-jank-probe.ts   (dev server must be up)
  */
 import { chromium, type Page } from "playwright";
 
@@ -55,7 +55,7 @@ async function main() {
   // tsx/esbuild keepNames injects a `__name` helper into evaluated functions; shim it (string init = no esbuild).
   await page.addInitScript("window.__name = window.__name || function (f) { return f; };");
   await page.goto(BASE, { waitUntil: "domcontentloaded" });
-  await page.evaluate(() => localStorage.setItem("kimera.compositor", "scene"));
+  await page.evaluate(() => localStorage.setItem("orreris.compositor", "scene"));
   await page.waitForTimeout(500);
   await reachEditor(page);
 

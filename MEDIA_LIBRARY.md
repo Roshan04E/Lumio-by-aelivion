@@ -89,10 +89,10 @@ Uploads bind to ONE project; Brand/AI/Stock/Graphics stay user-level and reusabl
   (`linkAssetToProject`, `apps/web/src/lib/api.ts`).
 - **Local-first mirror is mandatory**: every server-side scope filter has an offline equivalent. Web
   `listAssets(projectId?, scope?)` filters the local fallback (`filterLocalAssetsByScope`) the same way;
-  a `localStorage["kimera_project_asset_links"]` map (`{projectId: assetId[]}`) mirrors `ProjectAsset` when
+  a `localStorage["orreris_project_asset_links"]` map (`{projectId: assetId[]}`) mirrors `ProjectAsset` when
   there's no server.
 - **Backfill**: existing projects' already-referenced assets were linked/assigned via a one-shot script
-  (`apps/api/src/scripts/backfill-project-assets.ts`, `pnpm --filter @kimera-by-aelivion/api
+  (`apps/api/src/scripts/backfill-project-assets.ts`, `pnpm --filter @orreris/api
   assets:backfill`) so migrating to this model didn't empty anyone's Local tab.
 - **Known gap**: the inspector's replace-picker `AssetBin` instance isn't project-scoped (no project id
   threaded into that component) — it shows everything, same as before this change. Low risk (it's a
@@ -209,7 +209,7 @@ A new **Templates** bin tab applies a pre-designed timeline directly into the CU
   (worker/API) holds the query engine. Stop dev, then `pnpm db:generate`.
 - **Migrations need DATABASE_URL**: the API reads a default from `apps/api/src/config/env.ts`,
   but the Prisma CLI does not. Run migrations with
-  `DATABASE_URL="postgresql://kimera:kimera@localhost:5432/kimera?schema=public"` set,
+  `DATABASE_URL="postgresql://orreris:orreris@localhost:5432/orreris?schema=public"` set,
   e.g. `npx prisma migrate dev --schema prisma/schema.prisma --name <name> --skip-generate`.
 - **exactOptionalPropertyTypes**: Prisma Json columns reject an explicit `undefined`; set those
   keys conditionally (spread `...(x ? {col:x} : {})`).

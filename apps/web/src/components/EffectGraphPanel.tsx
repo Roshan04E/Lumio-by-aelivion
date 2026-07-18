@@ -16,7 +16,7 @@ import {
   type TimelineLayerType,
   type TransitionDirection,
   type TransitionKind
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import {
   buildEffectCatalog,
   effectPanelCategories,
@@ -51,7 +51,7 @@ export interface TransitionApplySpec {
 }
 
 // ── Folder open/closed state (persisted; folders start closed) ─────────────────────────────
-const FOLDERS_KEY = "kimera.effectFoldersCollapsed";
+const FOLDERS_KEY = "orreris.effectFoldersCollapsed";
 const ALL_FOLDER_IDS = ["favourites", ...effectPanelCategories.map((entry) => entry.id)];
 
 function loadCollapsed(): Set<string> {
@@ -351,12 +351,12 @@ export function EffectGraphPanel({
           onDragStart={(event) => {
             if (draggableEffect) {
               event.dataTransfer.effectAllowed = "copy";
-              event.dataTransfer.setData("application/x-kimera-timeline-effect", item.effectType);
+              event.dataTransfer.setData("application/x-orreris-timeline-effect", item.effectType);
               event.dataTransfer.setData("text/plain", item.label);
             } else if (draggableTransition && item.kind === "transition") {
               event.dataTransfer.effectAllowed = "copy";
               event.dataTransfer.setData(
-                "application/x-kimera-transition",
+                "application/x-orreris-transition",
                 JSON.stringify({ kind: item.transition, direction: item.direction, mode: item.mode, color: item.color, params: item.params, manifest: item.manifest })
               );
               event.dataTransfer.setData("text/plain", item.label);

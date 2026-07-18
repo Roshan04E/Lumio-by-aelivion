@@ -1,7 +1,7 @@
 /**
- * Kimera OS — World Model acceptance suite (K1). Run: `pnpm --filter @kimera-by-aelivion/web world:eval`
+ * Orreris OS — World Model acceptance suite (K1). Run: `pnpm --filter @orreris/web world:eval`
  *
- * Covers the K1 laws (KIMERA_OS.md → Layer 2):
+ * Covers the K1 laws (ORRERIS_OS.md → Layer 2):
  *  - memoization: a signature-stable fact is served from cache, the observer runs ONCE;
  *  - truth maintenance: signature change invalidates + re-observes; invalidation cascades
  *    through `dependencies` (derived facts die with their inputs);
@@ -14,7 +14,7 @@
  * Standalone tsx assert script (no test framework), same convention as brain:eval.
  */
 
-import type { SourceAsset, TimelineComposition, TimelineLayer, TimelineTrackType } from "@kimera-by-aelivion/shared";
+import type { SourceAsset, TimelineComposition, TimelineLayer, TimelineTrackType } from "@orreris/shared";
 
 // K2 persistence tests need storage BEFORE any store access — a Map-backed localStorage fake
 // (node has none). Set first so every lazily-loading module (fact store, feedback, ledger)

@@ -1,5 +1,5 @@
 /**
- * Kimera OS — observer registry (K1). Observers are plugins from day one: anything —
+ * Orreris OS — observer registry (K1). Observers are plugins from day one: anything —
  * built-in analyzers, future browser-ML models, cloud services — enters through
  * `registerObserver()` and becomes an access path the query planner can choose.
  * The runtime never knows HOW an observer works, only its declared economics.

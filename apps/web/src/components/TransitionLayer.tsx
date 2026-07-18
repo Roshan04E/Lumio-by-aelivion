@@ -6,7 +6,7 @@ import {
   TransitionCompositor,
   type TimelineLayer,
   type TransitionSpec,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 /**
  * Editor-preview overlay for the unified GPU transition engine (DOM fallback path only — scene mode

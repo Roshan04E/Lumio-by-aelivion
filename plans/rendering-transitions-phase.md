@@ -20,7 +20,7 @@ an exploration pass — re-verify anchors with grep before editing (lines drift)
 - **Render parity**: web preview, local export, and the Remotion worker must stay pixel-aligned.
   Anything touching `packages/shared/src/scene/build-scene-draws.ts`,
   `packages/shared/src/composition-style.ts`, or transition math requires
-  `pnpm --filter @kimera-by-aelivion/worker render:compare:pixels` (expected 27/27 ≤0.001%) and,
+  `pnpm --filter @orreris/worker render:compare:pixels` (expected 27/27 ≤0.001%) and,
   for R3, a real `render:manifest` inspection of a transition fixture.
 - **Do not touch** the timeline's imperative gesture patterns (protected user directive).
 - Effects/transitions are real WebGL — never CSS fakes (repo doctrine).
@@ -120,7 +120,7 @@ rough sync, CPU stays sane; frame-accuracy is restored at pause (exact seek). Ex
    `durationSeconds - headTrim` when positive, else drop (`nesting.ts:196-198`).
 5. **Audit nested texts end-to-end** (user asked): build a manifest with a nest containing a plain
    text child + a transition pair, run
-   `pnpm --filter @kimera-by-aelivion/worker render:manifest <file>` and inspect frames; also check
+   `pnpm --filter @orreris/worker render:manifest <file>` and inspect frames; also check
    the web preview. Expansion spreads text fields correctly (verified), so any remaining text drop
    is the step-1 folding or the DOM fallback path (`VideoPreview.tsx:1011-1014`) — fix what the
    repro shows.
@@ -206,8 +206,8 @@ Do not start this in this phase.
 ## Phase gates
 
 1. `pnpm -r typecheck` after each task.
-2. `pnpm --filter @kimera-by-aelivion/worker animation:test` (R4/R5 touch ramp call sites).
-3. `$env:PIXEL_BROWSER_CHANNEL='chrome'; pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`
+2. `pnpm --filter @orreris/worker animation:test` (R4/R5 touch ramp call sites).
+3. `$env:PIXEL_BROWSER_CHANNEL='chrome'; pnpm --filter @orreris/worker render:compare:pixels`
    after R1 (must be unchanged) and R3 (transition fixture re-baselined deliberately).
 4. `render:manifest` manual inspection for R2 (nested text+transition) and R3 (edge-hold).
 5. Update `architecture.md` shipped/deferred entries at phase end.

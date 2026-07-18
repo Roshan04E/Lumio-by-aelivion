@@ -2,7 +2,7 @@
  * Standalone assert script for the Graphics-tab align/distribute geometry (§3).
  * Repo convention: no test framework — exits non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web graphics:align:test
+ *   pnpm --filter @orreris/web graphics:align:test
  */
 import { alignTargets, distributeTargets, unionBounds, type PaintedBox } from "./graphicsAlignGeometry";
 

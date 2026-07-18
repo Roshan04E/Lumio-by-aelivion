@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { BLEND_MODE_INDEX, blendComposeJs, blendModeIndex, type BlendMode, type Rgba } from "@kimera-by-aelivion/shared";
+import { BLEND_MODE_INDEX, blendComposeJs, blendModeIndex, type BlendMode, type Rgba } from "@orreris/shared";
 
 const EPS = 1e-6;
 function near(a: Rgba, b: Rgba, msg: string): void {

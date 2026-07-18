@@ -24,7 +24,7 @@ const envSchema = z.object({
   DATABASE_URL: z
     .string()
     .min(1)
-    .default("postgresql://kimera:kimera@localhost:5432/kimera?schema=public"),
+    .default("postgresql://orreris:orreris@localhost:5432/orreris?schema=public"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
   JWT_SECRET: z.string().min(16).default("local-dev-secret-change-me"),
   STORAGE_ROOT: z.string().default("apps/api/storage"),
@@ -52,7 +52,7 @@ const envSchema = z.object({
   // own storage as a SourceAsset(source="ai"). Cost is metadata only (no gating).
   FAL_KEY: z.string().optional(),
   FAL_QUEUE_BASE_URL: z.string().url().default("https://queue.fal.run"),
-  // Kimera AI — multi-provider planner gateway (GP1). Each provider is enabled only when its key
+  // Orreris AI — multi-provider planner gateway (GP1). Each provider is enabled only when its key
   // is present; the gateway fails over in priority order. Model IDs are env-overridable because
   // free tiers drift. All endpoints are OpenAI-compatible (/v1/chat/completions).
   CEREBRAS_API_KEY: z.string().optional(),
@@ -62,7 +62,7 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_MODEL: z.string().default("meta-llama/llama-3.3-70b-instruct:free"),
   GEMINI_PLANNER_MODEL: z.string().default("gemini-2.5-flash"),
-  // Kimera Brain B4 — the gateway's `fast` model class: small NON-reasoning instruct models for
+  // Orreris Brain B4 — the gateway's `fast` model class: small NON-reasoning instruct models for
   // tier-3 transactional compilation (one call, temperature 0, JSON only). Same keys as above.
   CEREBRAS_FAST_MODEL: z.string().default("llama3.1-8b"),
   GROQ_FAST_MODEL: z.string().default("llama-3.1-8b-instant"),
@@ -71,9 +71,9 @@ const envSchema = z.object({
   // Premium last-hop (GP4); opt-in, used only when present.
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_PLANNER_MODEL: z.string().default("claude-opus-4-8"),
-  // Kimera AI debug logging. When set (or LOG_LEVEL=debug), the planner gateway logs every
+  // Orreris AI debug logging. When set (or LOG_LEVEL=debug), the planner gateway logs every
   // provider attempt/failure and JSON-parse miss to the server console (keys/prompts never logged).
-  KIMERA_AI_DEBUG: z
+  ORRERIS_AI_DEBUG: z
     .string()
     .optional()
     .transform((value) => value === "1" || value?.toLowerCase() === "true"),

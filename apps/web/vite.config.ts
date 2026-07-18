@@ -56,7 +56,7 @@ function renderPipelineFingerprint(): string {
 
 export default defineConfig({
   define: {
-    __KIMERA_RENDER_FINGERPRINT__: JSON.stringify(renderPipelineFingerprint())
+    __ORRERIS_RENDER_FINGERPRINT__: JSON.stringify(renderPipelineFingerprint())
   },
   plugins: [
     react(),

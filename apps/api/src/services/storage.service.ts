@@ -112,7 +112,7 @@ async function persistBytes(relativeKey: string, bytes: Buffer, contentType: str
 export async function saveUpload(file: Express.Multer.File | undefined, fallbackName: string, userId?: string, projectId?: string | null) {
   const safeName = sanitizeFileName(file?.originalname ?? fallbackName);
   const key = uploadKeyFor(safeName, userId, projectId);
-  const bytes = file?.buffer ?? Buffer.from("Mock upload placeholder for Kimera.\n");
+  const bytes = file?.buffer ?? Buffer.from("Mock upload placeholder for Orreris.\n");
   const contentType = file?.mimetype || contentTypeFor(safeName);
   return persistBytes(key, bytes, contentType);
 }

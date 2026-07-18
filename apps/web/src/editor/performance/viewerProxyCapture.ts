@@ -40,7 +40,7 @@ import {
   type TimelineLayer,
   type TransitionSpec,
   type TransitionWindowSides,
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { MediaEncoder } from "../../export/video-encoder";
 import { acquireVideo, type VideoLease } from "../../lib/video-element-pool";
 import { applyActiveAdjustmentEffects, isLayerActive, isIncomingInPreroll, isOutgoingInPostroll } from "../../components/VideoPreview";

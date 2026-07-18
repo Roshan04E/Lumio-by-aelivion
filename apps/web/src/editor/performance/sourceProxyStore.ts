@@ -9,7 +9,7 @@
  * for every playhead drop; its 480p 1s-GOP proxy seeks in ~15 delta frames). Exports always read
  * the ORIGINAL bytes — proxies are a preview-only substitution via `SourceAsset.proxyUrl`.
  *
- * Storage: OPFS directory `kimera-source-proxies/` — `<assetId>.mp4` blobs plus an `index.json` of
+ * Storage: OPFS directory `orreris-source-proxies/` — `<assetId>.mp4` blobs plus an `index.json` of
  * metadata records. A record is valid only while its `sourceByteSize` matches the current asset
  * bytes (relinking different footage under the same id invalidates the proxy). No IndexedDB/memory
  * fallback: proxies are a performance layer, and where OPFS is unavailable the editor simply plays
@@ -48,7 +48,7 @@ export interface SourceProxyRecord {
 // provider's demuxed `decodableEndSeconds`; rebuild everything encoded without that clamp.
 export const SOURCE_PROXY_VERSION = 5;
 
-const OPFS_DIR = "kimera-source-proxies";
+const OPFS_DIR = "orreris-source-proxies";
 const INDEX_FILE = "index.json";
 
 interface OpfsHandle {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { estimateCreditsForEffects, walletPacks } from "@kimera-by-aelivion/shared";
+import { estimateCreditsForEffects, walletPacks } from "@orreris/shared";
 import { buyCredits, fetchUsage, getMe, getProject, type ProjectRecord, type UsageSummary, type UserRecord } from "../lib/api";
 import { inr } from "../lib/format";
 

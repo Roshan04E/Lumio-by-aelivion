@@ -1,4 +1,4 @@
-import type { ModuleType } from "@kimera-by-aelivion/shared";
+import type { ModuleType } from "@orreris/shared";
 
 export const workerJobTypes = [
   "PROCESS_PERSON_EXTRACTION",

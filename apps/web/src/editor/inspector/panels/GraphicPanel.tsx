@@ -21,7 +21,7 @@ import {
   type LayerGraphic,
   type KeyframeInterpolation,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { InspectorSection } from "../InspectorSection";
 import { ColorControl } from "../../../components/ColorControl";

@@ -11,7 +11,7 @@
  *      ownerProjectId — those are genuinely that project's uploads.
  *
  * Idempotent: links are upserted; ownership only fills nulls. Safe to re-run.
- * Run: pnpm --filter @kimera-by-aelivion/api assets:backfill
+ * Run: pnpm --filter @orreris/api assets:backfill
  */
 import { prisma } from "../lib/prisma";
 

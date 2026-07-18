@@ -36,7 +36,7 @@ export type TranscriptItem =
   /** Wake-word near-miss: a greeting-led phrase standby heard but didn't match — the user can
    * confirm it to TRAIN the wake word ("hello mia" → wakes from now on). */
   | { kind: "wakeTrain"; id: string; heard: string; resolved?: "learned" | "dismissed" | undefined }
-  /** First-run voice onboarding: teach Kimera YOUR wake phrase ("hey kimera", "heya kimera"…).
+  /** First-run voice onboarding: teach Orreris YOUR wake phrase ("hey orreris", "heya orreris"…).
    * offer → listening (captures 3 spoken samples) → done/dismissed. */
   | { kind: "wakeSetup"; id: string; stage: "offer" | "listening" | "done" | "dismissed"; samples: string[] };
 
@@ -85,7 +85,7 @@ export function thoughtTail(text: string, maxLines = 6): string {
 // "streaming"/"running" from a session that no longer exists.
 // ---------------------------------------------------------------------------
 
-const TRANSCRIPT_KEY_PREFIX = "kimera.ai.transcript.v1.";
+const TRANSCRIPT_KEY_PREFIX = "orreris.ai.transcript.v1.";
 const MAX_PERSISTED_ITEMS = 150;
 const MAX_PERSISTED_TEXT = 4000;
 

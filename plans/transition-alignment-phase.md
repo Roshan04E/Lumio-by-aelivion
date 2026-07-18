@@ -10,7 +10,7 @@ Ground rules (repo doctrine — do not violate):
 - ONE shared implementation: `resolveTransitionWindowSides` in `packages/shared/src/composition-style.ts`
   is the only place window placement math may live. Every renderer + the timeline pill already call it.
 - Absent alignment MUST behave exactly like today (auto). No behavior change without the new field set.
-- Run `pnpm -r typecheck` and `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker render:compare:pixels` before finishing.
+- Run `pnpm -r typecheck` and `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker render:compare:pixels` before finishing.
 
 ## T1 — data: `alignment` on TransitionSpec
 
@@ -85,6 +85,6 @@ See architecture.md "Phase C".
 
 - `pnpm -r typecheck`
 - math sweep incl. manual alignments (copy scratchpad `repeated-frames-sweep.ts` into a temp run)
-- `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`
+- `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker render:compare:pixels`
 - Add ONE new pixel fixture: two video clips, `alignment: "center"`, outgoing with NO tail handle —
   asserts the edge-hold parity across web/remotion (the repeats case must look identical).

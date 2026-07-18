@@ -22,7 +22,7 @@ export const BYO_PROVIDERS: { id: ByoProvider; label: string; keyHint: string }[
   { id: "anthropic", label: "Claude (Anthropic)", keyHint: "console.anthropic.com — paid, best quality" }
 ];
 
-const STORAGE_KEY = "kimera.ai.byok.v1";
+const STORAGE_KEY = "orreris.ai.byok.v1";
 
 export function loadByoKey(): ByoKeyConfig | null {
   if (typeof localStorage === "undefined") return null;

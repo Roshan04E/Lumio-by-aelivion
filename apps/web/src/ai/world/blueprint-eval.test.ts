@@ -1,5 +1,5 @@
 /**
- * Kimera OS — Blueprint IR acceptance suite (K3). Run: `pnpm --filter @kimera-by-aelivion/web blueprint:eval`
+ * Orreris OS — Blueprint IR acceptance suite (K3). Run: `pnpm --filter @orreris/web blueprint:eval`
  *
  * The founding regression: "make it moody" → the LLM emitted `look:"Moody"`, the schema
  * passed, the exact-match look registry returned nothing, and the user saw a silent
@@ -22,7 +22,7 @@ import {
   type Blueprint,
   type TimelineComposition,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 let failures = 0;
 

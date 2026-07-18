@@ -1,7 +1,7 @@
 import multer from "multer";
 import { Router } from "express";
 import type { Prisma } from "@prisma/client";
-import { createAssetSchema, moduleTypeSchema, normalizeSourceColorMetadata } from "@kimera-by-aelivion/shared";
+import { createAssetSchema, moduleTypeSchema, normalizeSourceColorMetadata } from "@orreris/shared";
 import { z } from "zod";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
 import { prisma } from "../lib/prisma";

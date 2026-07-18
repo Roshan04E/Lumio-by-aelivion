@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import type { TimelineLayer, TimelineLayerType } from "@kimera-by-aelivion/shared";
+import type { TimelineLayer, TimelineLayerType } from "@orreris/shared";
 import type { SavedTrack } from "../../lib/trackLibrary";
 
 /**

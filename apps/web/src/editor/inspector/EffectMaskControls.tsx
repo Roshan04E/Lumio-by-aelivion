@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Circle, Eye, EyeOff, Hexagon, PenTool, Pencil, Square, Trash2 } from "lucide-react";
-import { type Mask, type TimelineEffect, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { type Mask, type TimelineEffect, type TimelineLayer } from "@orreris/shared";
 import type { MaskTool } from "../registry/inspector";
 import type { SavedTrack } from "../../lib/trackLibrary";
 import { MaskItemBody } from "./MaskItemBody";

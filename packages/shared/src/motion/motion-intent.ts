@@ -1,6 +1,6 @@
 /**
- * Kimera OS — MotionIntent + deterministic compiler (K3 motion dialect, the second
- * GradeIntent-class craft compiler; see KIMERA_OS.md → Layer 5).
+ * Orreris OS — MotionIntent + deterministic compiler (K3 motion dialect, the second
+ * GradeIntent-class craft compiler; see ORRERIS_OS.md → Layer 5).
  *
  * The AI (or a tier-0 rule) authors a COMPACT intent — "entrance, pop, 0.6s" — and this
  * module expands it deterministically into ORDINARY layer keyframes (the same

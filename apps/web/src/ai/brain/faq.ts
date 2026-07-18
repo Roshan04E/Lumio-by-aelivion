@@ -1,12 +1,12 @@
 /**
- * Kimera Brain — tier-0 FAQ (B1). Answers registry-answerable questions locally, instantly, for
+ * Orreris Brain — tier-0 FAQ (B1). Answers registry-answerable questions locally, instantly, for
  * zero tokens: capability questions are GENERATED from the live registries (so the answer is
- * always current), and editor how-tos come from a small table of REAL Kimera shortcuts (the
+ * always current), and editor how-tos come from a small table of REAL Orreris shortcuts (the
  * timeline cheat sheet is the source of truth — the LLM used to invent generic-NLE answers).
  * Precision-first: anchored patterns only; anything else returns null and escalates.
  */
 
-import { buildCapabilityIndex, getTimelineEffectDefinition, skillRegistry } from "@kimera-by-aelivion/shared";
+import { buildCapabilityIndex, getTimelineEffectDefinition, skillRegistry } from "@orreris/shared";
 
 /**
  * Capability questions — the ONE place a slightly wider net is safe: the response is a local
@@ -28,7 +28,7 @@ interface EditorKnowledgeEntry {
 }
 
 /**
- * Real Kimera shortcuts only (mirrors the timeline cheat sheet in TimelineStrip.tsx). Every entry
+ * Real Orreris shortcuts only (mirrors the timeline cheat sheet in TimelineStrip.tsx). Every entry
  * is verified against that sheet — do not add folklore.
  */
 /** NOTE: playback/pan-mode IMPERATIVES used to live here as shortcut tips — they now EXECUTE

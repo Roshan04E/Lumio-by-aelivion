@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import type { RenderManifest } from "@kimera-by-aelivion/render-templates";
+import type { RenderManifest } from "@orreris/render-templates";
 import { renderManifestToMp4, renderManifestStill } from "./remotion-renderer";
 
 async function main() {

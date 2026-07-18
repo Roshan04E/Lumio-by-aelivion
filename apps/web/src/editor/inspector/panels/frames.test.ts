@@ -2,7 +2,7 @@
  * Standalone assert script for Frames (Phase 1 foundation — see FRAMES.md). Repo convention: no test
  * framework — exits non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web frames:test
+ *   pnpm --filter @orreris/web frames:test
  *
  * Covers the pure generators (unit-box path `d`), param defaults, and the built-in catalogue.
  */
@@ -35,7 +35,7 @@ import {
   type LayerFrame,
   type TimelineComposition,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {
@@ -117,31 +117,31 @@ function check(name: string, condition: boolean): void {
 
 // --- param defaults + makeLayerFrame ---------------------------------------------------
 {
-  const def = findFrameDefinition("kimera.rounded-rect")!;
+  const def = findFrameDefinition("orreris.rounded-rect")!;
   check("findFrameDefinition resolves built-in", def && def.generatorId === "rounded-rect");
   const defaults = frameParamDefaults(def);
   check("frameParamDefaults picks schema defaults", defaults.roundness === 20);
   const frame = makeLayerFrame(def);
-  check("makeLayerFrame carries id + generator + defaults", frame.definitionId === "kimera.rounded-rect" && frame.generatorId === "rounded-rect" && frame.params.roundness === 20);
+  check("makeLayerFrame carries id + generator + defaults", frame.definitionId === "orreris.rounded-rect" && frame.generatorId === "rounded-rect" && frame.params.roundness === 20);
 
-  const hex = findFrameDefinition("kimera.hexagon")!;
+  const hex = findFrameDefinition("orreris.hexagon")!;
   check("hexagon defaults: sides 6, rotation 0", frameParamDefaults(hex).sides === 6 && frameParamDefaults(hex).rotation === 0);
-  check("circle declares no generator params of its own", (findFrameDefinition("kimera.circle") as FrameDefinition).params.length === 0);
+  check("circle declares no generator params of its own", (findFrameDefinition("orreris.circle") as FrameDefinition).params.length === 0);
 }
 
 // --- Tier 2 chrome: every frame gets a box, even one with no generator params (QA round 1) ------
 {
-  const circle = findFrameDefinition("kimera.circle")!;
+  const circle = findFrameDefinition("orreris.circle")!;
   const schema = frameParamSchema(circle);
   check("circle's FULL schema is the chrome (was: 'no adjustment in effects tab')", schema.length === frameChromeParams.length && schema.some((p) => p.key === "width"));
   check("chrome exposes width/height/aspectLock", ["width", "height", "aspectLock"].every((key) => frameChromeParams.some((p) => p.key === key)));
 
   const defaults = frameParamDefaults(circle);
   check("boolean defaults are no longer dropped", defaults.aspectLock === true);
-  check("chromeDefaults override the shared default", frameParamDefaults(findFrameDefinition("kimera.rounded-rect")!).aspectLock === false);
+  check("chromeDefaults override the shared default", frameParamDefaults(findFrameDefinition("orreris.rounded-rect")!).aspectLock === false);
   check("box defaults to the full comp", defaults.width === 100 && defaults.height === 100);
 
-  const sections = frameParamSections(findFrameDefinition("kimera.rounded-rect")!);
+  const sections = frameParamSections(findFrameDefinition("orreris.rounded-rect")!);
   check("sections group Shape then Box then Border", sections.length === 3 && sections[0]!.title === "Shape" && sections[1]!.title === "Box" && sections[2]!.title === "Border");
   check("Shape section holds only the generator's own params", sections[0]!.params.every((p) => p.key === "roundness"));
   const circleSections = frameParamSections(circle);
@@ -180,7 +180,7 @@ function check(name: string, condition: boolean): void {
 // --- frameBoxPercent + setFrameBoxAxis: the inspector fields must never lie (QA round 2) --------
 {
   const comp = { width: 1920, height: 1080 };
-  const locked = { definitionId: "kimera.circle", generatorId: "ellipse" as const, params: { width: 100, height: 100, aspectLock: true } };
+  const locked = { definitionId: "orreris.circle", generatorId: "ellipse" as const, params: { width: 100, height: 100, aspectLock: true } };
 
   // The bug: params say 100/100, but the squared box really occupies 56.25% × 100% of a 16:9 comp.
   const shown = frameBoxPercent(locked, comp);
@@ -221,7 +221,7 @@ function check(name: string, condition: boolean): void {
 // aspect). The inspector now shows px so a square reads the same both ways; this pins the geometry.
 {
   const comp = { width: 1920, height: 1080 };
-  const frame = { definitionId: "kimera.rounded-rect", generatorId: "rounded-rect" as const, params: { width: 100, height: 100, aspectLock: true } };
+  const frame = { definitionId: "orreris.rounded-rect", generatorId: "rounded-rect" as const, params: { width: 100, height: 100, aspectLock: true } };
   const params = setFrameBoxAxis(frame, "height", 51, comp);
   check("the reported 29/51 case stores width ≈ 28.6875%", Math.abs((params.width as number) - 28.6875) < 0.0001);
   const box = frameBoxRect({ ...frame, params }, comp);
@@ -233,7 +233,7 @@ function check(name: string, condition: boolean): void {
 {
   const comp = { width: 1920, height: 1080 };
   const free = { params: { width: 100, height: 100, aspectLock: false } };
-  const locked = { definitionId: "kimera.circle", generatorId: "ellipse" as const, params: { width: 100, height: 100, aspectLock: true } };
+  const locked = { definitionId: "orreris.circle", generatorId: "ellipse" as const, params: { width: 100, height: 100, aspectLock: true } };
 
   // Unlocked: an EDGE handle moves only its own axis (shearing the shape from an edge would be wrong).
   const east = setFrameBoxFromResize(free, { width: 40, height: 77 }, "x", comp);
@@ -271,12 +271,12 @@ function check(name: string, condition: boolean): void {
 
 // --- frameEffectiveParams: stored params are an OVERRIDE layer over the definition --------------
 {
-  const stale: LayerFrame = { definitionId: "kimera.circle", generatorId: "ellipse", params: {} };
+  const stale: LayerFrame = { definitionId: "orreris.circle", generatorId: "ellipse", params: {} };
   check("a frame saved before chrome existed inherits it", frameEffectiveParams(stale).aspectLock === true);
   const box = frameBoxRect(stale, { width: 1920, height: 1080 });
   check("→ so an old saved circle self-heals to a CIRCLE", box.width === box.height);
 
-  const overridden: LayerFrame = { definitionId: "kimera.circle", generatorId: "ellipse", params: { aspectLock: false } };
+  const overridden: LayerFrame = { definitionId: "orreris.circle", generatorId: "ellipse", params: { aspectLock: false } };
   check("an explicit stored value still wins over the default", frameEffectiveParams(overridden).aspectLock === false);
   const unknown: LayerFrame = { definitionId: "acme.not-installed", generatorId: "ellipse", params: { width: 40 } };
   check("an uninstalled pack renders from what the layer stored", frameEffectiveParams(unknown).width === 40);
@@ -293,43 +293,43 @@ function check(name: string, condition: boolean): void {
   const layer = (frame?: LayerFrame) => ({ id: "L1", frame });
   check("no frame → null", frameClipMask(layer(undefined), { width: 1920, height: 1080 }) === null);
 
-  const rr = frameClipMask(layer({ definitionId: "kimera.rounded-rect", generatorId: "rounded-rect", params: { roundness: 50 } }), { width: 1920, height: 1080 })!;
+  const rr = frameClipMask(layer({ definitionId: "orreris.rounded-rect", generatorId: "rounded-rect", params: { roundness: 50 } }), { width: 1920, height: 1080 })!;
   check("rounded-rect → rectangle mask, 4 corner points", rr.shape === "rectangle" && rr.points.length === 4);
   check("rounded-rect corners span the comp box", rr.points[1]!.x === 1920 && rr.points[2]!.y === 1080);
   check("rounded-rect cornerRadius = min/2 × roundness%", rr.cornerRadius === (Math.min(1920, 1080) / 2) * 0.5);
   check("frame mask id is deterministic", rr.id === frameMaskId("L1") && rr.mode === "add" && rr.enabled === true);
 
-  const el = frameClipMask(layer({ definitionId: "kimera.circle", generatorId: "ellipse", params: {} }), { width: 800, height: 800 })!;
+  const el = frameClipMask(layer({ definitionId: "orreris.circle", generatorId: "ellipse", params: {} }), { width: 800, height: 800 })!;
   check("ellipse → ellipse mask", el.shape === "ellipse" && el.points.length === 4);
 
   // THE bug from QA round 1: an ellipse inscribed in a 16:9 comp box is an oval. The circle's
   // aspectLock must square the mask box so the clip is round on a 16:9 timeline.
-  const circle16x9 = frameClipMask(layer({ definitionId: "kimera.circle", generatorId: "ellipse", params: {} }), { width: 1920, height: 1080 })!;
+  const circle16x9 = frameClipMask(layer({ definitionId: "orreris.circle", generatorId: "ellipse", params: {} }), { width: 1920, height: 1080 })!;
   const cw = circle16x9.points[1]!.x - circle16x9.points[0]!.x;
   const ch = circle16x9.points[2]!.y - circle16x9.points[1]!.y;
   check("circle in a 16:9 comp → SQUARE mask box (round, not oval)", cw === ch && cw === 1080);
   check("circle mask box is centered in the comp", circle16x9.points[0]!.x === 420 && circle16x9.points[0]!.y === 0);
 
-  const poly = frameClipMask(layer({ definitionId: "kimera.hexagon", generatorId: "polygon", params: { sides: 6, rotation: 0 } }), { width: 1000, height: 1000 })!;
+  const poly = frameClipMask(layer({ definitionId: "orreris.hexagon", generatorId: "polygon", params: { sides: 6, rotation: 0 } }), { width: 1000, height: 1000 })!;
   check("polygon → polygon mask with 6 verts", poly.shape === "polygon" && poly.points.length === 6);
 
   // A frame box smaller than the comp must inscribe the shape, not span the whole frame.
-  const inset = frameClipMask(layer({ definitionId: "kimera.rounded-rect", generatorId: "rounded-rect", params: { roundness: 0, width: 50, height: 50 } }), { width: 1000, height: 1000 })!;
+  const inset = frameClipMask(layer({ definitionId: "orreris.rounded-rect", generatorId: "rounded-rect", params: { roundness: 0, width: 50, height: 50 } }), { width: 1000, height: 1000 })!;
   check("a 50% box inscribes the mask (centered, half size)", inset.points[0]!.x === 250 && inset.points[0]!.y === 250 && inset.points[2]!.x === 750 && inset.points[2]!.y === 750);
-  const insetPoly = frameClipMask(layer({ definitionId: "kimera.hexagon", generatorId: "polygon", params: { sides: 4, rotation: 0, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
+  const insetPoly = frameClipMask(layer({ definitionId: "orreris.hexagon", generatorId: "polygon", params: { sides: 4, rotation: 0, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
   check("polygon verts stay inside the frame box", insetPoly.points.every((p) => p.x >= 249.9 && p.x <= 750.1 && p.y >= 249.9 && p.y <= 750.1));
 
   const svg = frameClipMask(layer({ definitionId: "acme.torn", generatorId: "svg-path", params: {}, staticPath: "M0 0H1V1H0Z" }), { width: 100, height: 100 });
   check("svg-path → null (no clip yet)", svg === null);
 
   // Phase 2: blob → bezier mask (smooth tangents), torn-paper → polygon mask (jagged), both in the box.
-  const blob = frameClipMask(layer({ definitionId: "kimera.blob", generatorId: "blob", params: { points: 8, seed: 7, wobble: 40, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
+  const blob = frameClipMask(layer({ definitionId: "orreris.blob", generatorId: "blob", params: { points: 8, seed: 7, wobble: 40, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
   check("blob → bezier mask with tangents", blob.shape === "bezier" && blob.points.length === 8 && blob.points.every((p) => p.inTangent && p.outTangent));
   check("blob mask points stay inside the frame box", blob.points.every((p) => p.x >= 249.9 && p.x <= 750.1 && p.y >= 249.9 && p.y <= 750.1));
-  const blobAgain = frameClipMask(layer({ definitionId: "kimera.blob", generatorId: "blob", params: { points: 8, seed: 7, wobble: 40, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
+  const blobAgain = frameClipMask(layer({ definitionId: "orreris.blob", generatorId: "blob", params: { points: 8, seed: 7, wobble: 40, width: 50, height: 50, aspectLock: false } }), { width: 1000, height: 1000 })!;
   check("blob mask is deterministic", JSON.stringify(blob.points) === JSON.stringify(blobAgain.points));
 
-  const torn = frameClipMask(layer({ definitionId: "kimera.torn-paper", generatorId: "torn-paper", params: { roughness: 50, seed: 3, detail: 10 } }), { width: 1000, height: 800 })!;
+  const torn = frameClipMask(layer({ definitionId: "orreris.torn-paper", generatorId: "torn-paper", params: { roughness: 50, seed: 3, detail: 10 } }), { width: 1000, height: 800 })!;
   check("torn-paper → polygon mask, 4 + 4×(detail−1) points", torn.shape === "polygon" && torn.points.length === 4 + 4 * 9);
   check("torn-paper mask spans the comp box (tears inward)", torn.points.every((p) => p.x >= -1e-6 && p.x <= 1000 + 1e-6 && p.y >= -1e-6 && p.y <= 800 + 1e-6));
 }
@@ -348,7 +348,7 @@ function check(name: string, condition: boolean): void {
     transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
     effects: [],
     animations: [],
-    frame: { definitionId: "kimera.blob", generatorId: "blob" as const, params: { points: 8, seed: 7, wobble: 40 } }
+    frame: { definitionId: "orreris.blob", generatorId: "blob" as const, params: { points: 8, seed: 7, wobble: 40 } }
   } as unknown as TimelineLayer;
   const baked = frameToShapeLayer(layer, comp);
   check("blob converts to pen + tangent shapePath", baked.shapeKind === "pen" && (baked.shapePath?.length ?? 0) === 8 && (baked.shapePath ?? []).every((p) => p.inTangent && p.outTangent));
@@ -441,7 +441,7 @@ function check(name: string, condition: boolean): void {
     }) as unknown as TimelineLayer;
 
   // rounded-rect → native rounded-rectangle + borderRadius (roundness stays a live shape slider).
-  const rr = frameToShapeLayer(base({ definitionId: "kimera.rounded-rect", generatorId: "rounded-rect", params: { roundness: 50, width: 50, height: 50 } }), comp);
+  const rr = frameToShapeLayer(base({ definitionId: "orreris.rounded-rect", generatorId: "rounded-rect", params: { roundness: 50, width: 50, height: 50 } }), comp);
   check("rounded-rect → shape rounded-rectangle", rr.type === "shape" && rr.shapeKind === "rounded-rectangle");
   // box = 50% → 960×540 px; borderRadius = min/2 × 50% = 540/2 × 0.5 = 135.
   check("rounded-rect → borderRadius from roundness", Math.abs((rr.borderRadius ?? 0) - 135) < 1e-6);
@@ -453,13 +453,13 @@ function check(name: string, condition: boolean): void {
   check("identity preserved (id/track/timing/transform)", rr.id === "L1" && rr.trackId === "T1" && rr.durationSeconds === 5 && rr.transform.x === 50);
 
   // circle → native ellipse.
-  const circle = frameToShapeLayer(base({ definitionId: "kimera.circle", generatorId: "ellipse", params: {} }), comp);
+  const circle = frameToShapeLayer(base({ definitionId: "orreris.circle", generatorId: "ellipse", params: {} }), comp);
   check("circle → shape ellipse", circle.shapeKind === "ellipse");
   // aspectLock circle in 16:9 → square box, so width% (56.25) ≠ height% (100) but pixels are equal.
   check("circle box % is the effective (squared) box", Math.abs((circle.widthPercent ?? 0) - 56.25) < 1e-6 && circle.heightPercent === 100);
 
   // polygon → pen + shapePath (vertices in 0..100 shape-box coords, 0° → a vertex at the top).
-  const hex = frameToShapeLayer(base({ definitionId: "kimera.hexagon", generatorId: "polygon", params: { sides: 6, rotation: 0 } }), comp);
+  const hex = frameToShapeLayer(base({ definitionId: "orreris.hexagon", generatorId: "polygon", params: { sides: 6, rotation: 0 } }), comp);
   check("polygon → pen + shapePath", hex.shapeKind === "pen" && (hex.shapePath?.length ?? 0) === 6);
   check("shapePath verts are in 0..100", (hex.shapePath ?? []).every((p) => p.x >= -0.01 && p.x <= 100.01 && p.y >= -0.01 && p.y <= 100.01));
   check("first hex vertex sits at the top (x=50, y≈0)", Math.abs((hex.shapePath?.[0]?.x ?? 0) - 50) < 1e-6 && Math.abs(hex.shapePath?.[0]?.y ?? 99) < 1e-6);
@@ -473,7 +473,7 @@ function check(name: string, condition: boolean): void {
 {
   const comp = { width: 1080, height: 1920 };
   const framed = (params: Record<string, LayerFrame["params"][string]>): LayerFrame => ({
-    definitionId: "kimera.rounded-rect",
+    definitionId: "orreris.rounded-rect",
     generatorId: "rounded-rect",
     params
   });

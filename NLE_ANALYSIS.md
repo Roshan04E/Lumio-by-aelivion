@@ -1,4 +1,4 @@
-# Kimera vs Professional NLEs — Engineering Analysis (v2)
+# Orreris vs Professional NLEs — Engineering Analysis (v2)
 
 > **Re-analyzed 2026-07-03; status refreshed 2026-07-04.** The v1 baseline (2026-07-02) drove the
 > P0→P3 roadmap; this rewrite replaces it with the current state so the comparison stays honest:
@@ -15,7 +15,7 @@
 > rewind catch-up hold made wall-clock-bounded; borderless shade-based UI pass.
 
 **One-line verdict (updated):** the rendering architecture was always the moat; the two killer gaps
-from v1 — per-clip decoders and the missing pro editing floor — are now closed or flag-ready. Kimera
+from v1 — per-clip decoders and the missing pro editing floor — are now closed or flag-ready. Orreris
 is roughly **~90% of a social-video editor and ~70% of a pro NLE** today. What separates it from
 "fully professional" is no longer playback or timeline craft; it's the **cloud path not being real
 end-to-end**, a handful of pro conveniences (source monitor/3-point, nesting, export presets,
@@ -136,7 +136,7 @@ stabilization/scene-detection), and color-pipeline maturity (linear/10-bit).
 
 ## 5. COMPARISON SNAPSHOT (2026-07-03)
 
-| Capability | Kimera | Premiere | Resolve | CapCut Web |
+| Capability | Orreris | Premiere | Resolve | CapCut Web |
 |---|---|---|---|---|
 | GPU compositing pipeline | ✅ single WebGL2 pass | ✅ | ✅ | ⚠️ |
 | Preview↔export parity | ✅ gate-locked | ✅ | ✅ | ⚠️ |
@@ -206,7 +206,7 @@ stabilization/scene-detection), and color-pipeline maturity (linear/10-bit).
 ## 7. FUTURE DIRECTION
 
 **Near (finish the started arcs):** wcDecode soak→flip; cloud render end-to-end (6.1 — this
-converts Kimera from "editor with a cloud renderer in the repo" to a cloud product); source
+converts Orreris from "editor with a cloud renderer in the repo" to a cloud product); source
 monitor/3-point; export presets + background export.
 
 **Mid (quality ceiling):** color pipeline maturity —

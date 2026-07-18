@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { ensureBrowser, renderMedia, renderStill, selectComposition, type CancelSignal } from "@remotion/renderer";
-import type { RenderManifest } from "@kimera-by-aelivion/render-templates";
+import type { RenderManifest } from "@orreris/render-templates";
 import { compositionId } from "./remotion/Root";
 import { manifestNeedsAudioPostMix, postMixManifestAudio } from "./audio-post-mix";
 

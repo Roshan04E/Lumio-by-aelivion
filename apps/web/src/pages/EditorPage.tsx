@@ -75,12 +75,12 @@ import {
 } from "lucide-react";
 import {
   applyTimelineTemplatePackage,
-  buildKimeraPackageZipAsync,
+  buildOrrerisPackageZipAsync,
   buildTimelineTemplatePackage,
   buildTemplateGraphFromProject,
   exportCompositionToFcpxml,
-  isKimeraPackageZipBytes,
-  parseKimeraPackageZipAsync,
+  isOrrerisPackageZipBytes,
+  parseOrrerisPackageZipAsync,
   buildTransitionKeyframes,
   COLOR_EFFECT_TYPES,
   getTransition,
@@ -200,7 +200,7 @@ import {
   type TrackingPathArtifactData,
   type TransitionKind,
   type TransitionSpec
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { AiActivityIndicator } from "../components/AiActivityIndicator";
 // Lazy: the AI chat panel pulls the whole ai/ graph (planner, executor, memory, talk streaming)
 // — none of it should load until the AI dock is actually opened.
@@ -385,7 +385,7 @@ import {
   type BundledGraphic,
   type LayerGraphic,
   type TemplateDefinition
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
 import { ASSET_LABEL_COLORS, assetLabelOf, defaultAssetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
 import { assetHasAudioStream } from "../lib/assetAudio";
@@ -453,8 +453,8 @@ function proxyDebugEnabled(): boolean {
     return (
       params.get("debugGl") === "1" ||
       params.get("debugProxy") === "1" ||
-      window.localStorage?.getItem("kimera_debug_gl") === "1" ||
-      window.localStorage?.getItem("kimera_debug_proxy") === "1"
+      window.localStorage?.getItem("orreris_debug_gl") === "1" ||
+      window.localStorage?.getItem("orreris_debug_proxy") === "1"
     );
   } catch {
     return false;
@@ -698,7 +698,7 @@ function safeFileStem(value: string) {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "kimera-template"
+      .replace(/^-+|-+$/g, "") || "orreris-template"
   );
 }
 
@@ -790,7 +790,7 @@ export function EditorPage() {
   // gesture) drops a keyframe at the playhead. Default off, matching After Effects / Premiere.
   const [autoKeyframe, setAutoKeyframe] = useState(false);
   // Bottom workspace (Graph editor drawer, Shift+G). Also opened by the
-  // "kimera:open-graph-editor" event from inspector rows / timeline keyframe diamonds.
+  // "orreris:open-graph-editor" event from inspector rows / timeline keyframe diamonds.
   const [bottomWorkspaceOpen, setBottomWorkspaceOpen] = useState(false);
   const [graphFocusTargetKey, setGraphFocusTargetKey] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -807,10 +807,10 @@ export function EditorPage() {
       setBottomWorkspaceOpen(true);
     };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("kimera:open-graph-editor", onOpen);
+    window.addEventListener("orreris:open-graph-editor", onOpen);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("kimera:open-graph-editor", onOpen);
+      window.removeEventListener("orreris:open-graph-editor", onOpen);
     };
   }, []);
   // Remember the last single-selected layer so the Controls tab keeps showing
@@ -841,7 +841,7 @@ export function EditorPage() {
   // Bumped by the Alt+M shortcut to toggle voice dictation in the AI composer — same token pattern as
   // aiFocusToken. See the Alt+M keydown effect and AiChatPanel's micToggleToken.
   const [aiMicToggleToken, setAiMicToggleToken] = useState(0);
-  // Alt+L ("Kimera, listen") → toggle the hands-free VOICE SESSION (distinct from Alt+M dictation).
+  // Alt+L ("Orreris, listen") → toggle the hands-free VOICE SESSION (distinct from Alt+M dictation).
   // Deliberately does NOT open the chat panel: `aiVoiceWanted` mounts the dock HIDDEN so the
   // session can run, the aurora + the topbar AI button carry the "AI is live" signal, and
   // `aiVoiceActive` mirrors the panel's real session state back up for that button.
@@ -851,7 +851,7 @@ export function EditorPage() {
   const [aiVoiceWanted, setAiVoiceWanted] = useState(false);
   const [aiVoiceActive, setAiVoiceActive] = useState(false);
   const [aiVoiceToggleToken, setAiVoiceToggleToken] = useState(0);
-  // "Hey Kimera" standby lives INSIDE AiChatPanel — while the Ear is armed the dock must stay
+  // "Hey Orreris" standby lives INSIDE AiChatPanel — while the Ear is armed the dock must stay
   // mounted (hidden) even with the chat closed, or the wake word is deaf.
   const [aiWakeArmed, setAiWakeArmed] = useState(loadWakeWordEnabled);
   const [generateStudioOpen, setGenerateStudioOpen] = useState(false);
@@ -862,7 +862,7 @@ export function EditorPage() {
   // profile under load; OFF = the manual ¼/½/1 choice is absolute (strong-GPU users).
   const [adaptiveResOn, setAdaptiveResOn] = useState(() => isAdaptiveQualityOn());
   const [previewQuality, setPreviewQuality] = useState<"performance" | "balanced" | "quality">(() =>
-    readStoredChoice("kimera_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
+    readStoredChoice("orreris_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
   );
   const previewCacheControllerRef = useRef<PreviewCacheController | null>(null);
   const previewCacheRenderStateRef = useRef<{ signature: string; renderScale: number; fps: number; durationSeconds: number } | null>(null);
@@ -915,7 +915,7 @@ export function EditorPage() {
   // Default ON: preview-proxy generation is opt-in (user request 2026-07-14) — most users should get the
   // live compositor by default and turn proxy generation on deliberately if their machine needs it.
   const [livePlaybackMode, setLivePlaybackMode] = useState(
-    () => readStoredChoice("kimera_live_playback", "on", ["on", "off"] as const) === "on"
+    () => readStoredChoice("orreris_live_playback", "on", ["on", "off"] as const) === "on"
   );
   // Transport "1" with Auto off = FULL-quality playback (see the effect further down): originals play
   // raw, and the span-proxy system goes DORMANT — no generation at scale 1 (expensive, nobody plays it),
@@ -928,35 +928,35 @@ export function EditorPage() {
   // manual In/Out regenerate, which marks spans dirty without altering the composition reference.
   const [proxyGenNonce, setProxyGenNonce] = useState(0);
   const editorPageRef = useRef<HTMLDivElement | null>(null);
-  const [leftPaneWidth, setLeftPaneWidth] = useState(() => readStoredNumber("kimera_editor_left_width", EDITOR_RESPONSIVE_LAYOUT.panes.left.preferred));
-  const [rightPaneWidth, setRightPaneWidth] = useState(() => readStoredNumber("kimera_editor_right_width", EDITOR_RESPONSIVE_LAYOUT.panes.right.preferred));
-  const [timelineHeight, setTimelineHeight] = useState(() => readStoredNumber("kimera_editor_timeline_height", EDITOR_RESPONSIVE_LAYOUT.panes.timeline.preferred));
-  const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("kimera_editor_track_height", 44));
+  const [leftPaneWidth, setLeftPaneWidth] = useState(() => readStoredNumber("orreris_editor_left_width", EDITOR_RESPONSIVE_LAYOUT.panes.left.preferred));
+  const [rightPaneWidth, setRightPaneWidth] = useState(() => readStoredNumber("orreris_editor_right_width", EDITOR_RESPONSIVE_LAYOUT.panes.right.preferred));
+  const [timelineHeight, setTimelineHeight] = useState(() => readStoredNumber("orreris_editor_timeline_height", EDITOR_RESPONSIVE_LAYOUT.panes.timeline.preferred));
+  const [timelineTrackHeight, setTimelineTrackHeight] = useState(() => readStoredNumber("orreris_editor_track_height", 44));
   // Fraction (0-1) of .viewer-monitors width given to the source monitor in dual-monitor mode.
-  const [sourceMonitorSplit, setSourceMonitorSplit] = useState(() => readStoredNumber("kimera_editor_source_split", 0.5));
+  const [sourceMonitorSplit, setSourceMonitorSplit] = useState(() => readStoredNumber("orreris_editor_source_split", 0.5));
   const responsiveLayout = useEditorResponsiveLayout(editorPageRef, { leftPaneWidth, rightPaneWidth, timelineHeight });
   const [activeResponsiveOverlay, setActiveResponsiveOverlay] = useState<EditorOverlayPanel>(null);
   const [expandedResponsiveOverlays, setExpandedResponsiveOverlays] = useState<Set<NonNullable<EditorOverlayPanel>>>(() => new Set());
   const [topbarMenuOpen, setTopbarMenuOpen] = useState(false);
   const [editorTheme, setEditorTheme] = useState<EditorThemeId>(() =>
-    readStoredChoice("kimera_editor_theme", "blue", EDITOR_THEME_IDS)
+    readStoredChoice("orreris_editor_theme", "blue", EDITOR_THEME_IDS)
   );
   // Accent-theme dropdown — portaled to <body> at the trigger's rect (same pattern as ThemedSelect
   // and the asset menu): CSS-hardcoded fixed coords drifted whenever the topbar layout changed.
   const [themeMenu, setThemeMenu] = useState<{ left: number; top: number } | null>(null);
   const [timelineTool, setTimelineTool] = useState<TimelineToolMode>("select");
-  const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("kimera_timeline_snap", "on", ["on", "off"] as const) === "on");
+  const [snapEnabled, setSnapEnabled] = useState(() => readStoredChoice("orreris_timeline_snap", "on", ["on", "off"] as const) === "on");
   // Magnetic timeline (opt-in, off by default so free positioning stays the norm): when on, a move
   // compacts the touched tracks gapless + overlap-free through the editing-policy seam (commitGroupMove).
-  const [magneticEnabled, setMagneticEnabled] = useState(() => readStoredChoice("kimera_timeline_magnetic", "off", ["on", "off"] as const) === "on");
+  const [magneticEnabled, setMagneticEnabled] = useState(() => readStoredChoice("orreris_timeline_magnetic", "off", ["on", "off"] as const) === "on");
   // Viewer scaling (Premiere-style): "fit" auto-scales the comp to the viewer (re-fits on panel resize);
   // "manual" uses `manualScale` (1:1 — 1.0 = 100% actual pixels). `fitScale` is reported up from the
   // preview (measured from the stable viewer box, no feedback) purely so the toolbar can show the % in
   // fit mode. Single scale end-to-end — no width/height fit modes, no zoom² coupling.
   const [viewMode, setViewMode] = useState<"fit" | "manual">(() =>
-    readStoredChoice("kimera_viewer_view_mode", "fit", ["fit", "manual"] as const)
+    readStoredChoice("orreris_viewer_view_mode", "fit", ["fit", "manual"] as const)
   );
-  const [manualScale, setManualScale] = useState(() => readStoredNumber("kimera_viewer_manual_scale", 1));
+  const [manualScale, setManualScale] = useState(() => readStoredNumber("orreris_viewer_manual_scale", 1));
   const [fitScale, setFitScale] = useState(1);
   const isResponsiveOverlayExpanded = useCallback(
     (panel: NonNullable<EditorOverlayPanel>) => responsiveLayout.usesPhoneShell && expandedResponsiveOverlays.has(panel),
@@ -975,7 +975,7 @@ export function EditorPage() {
     setViewMode("manual");
   }, []);
   useEffect(() => {
-    localStorage.setItem("kimera_viewer_view_mode", viewMode);
+    localStorage.setItem("orreris_viewer_view_mode", viewMode);
   }, [viewMode]);
   const [imagePalette, setImagePalette] = useState(defaultColorPalette);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -1601,7 +1601,7 @@ export function EditorPage() {
   }, [activeRenderJob, projectId]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_preview_quality", previewQuality);
+    localStorage.setItem("orreris_preview_quality", previewQuality);
   }, [previewQuality]);
 
   // FULL-QUALITY PLAYBACK (pro ask, 2026-07-05): fixed "1" (quality, Auto off) also bypasses the
@@ -1652,7 +1652,7 @@ export function EditorPage() {
       setBackgroundGate("playing", false);
     };
   }, []);
-  // Kimera OS (K1): hand the World Model the LIVE asset list (server/stock assets included)
+  // Orreris OS (K1): hand the World Model the LIVE asset list (server/stock assets included)
   // so "analyze clip N" can resolve any clip's source, not just local-first imports.
   useEffect(() => {
     setWorldAssetProvider(() => assets);
@@ -2215,7 +2215,7 @@ export function EditorPage() {
   }, [runProxyGeneration]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_live_playback", livePlaybackMode ? "on" : "off");
+    localStorage.setItem("orreris_live_playback", livePlaybackMode ? "on" : "off");
   }, [livePlaybackMode]);
 
   // On project switch/unmount: release object URLs only — the OPFS blobs + span index stay so the
@@ -2584,7 +2584,7 @@ export function EditorPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Alt+L → toggle hands-free voice mode ("Kimera, listen"). No typing bail on purpose — it must
+  // Alt+L → toggle hands-free voice mode ("Orreris, listen"). No typing bail on purpose — it must
   // work mid-edit and even while the composer is focused, exactly like Alt+M. It does NOT open
   // the chat panel (user request): the aurora + topbar AI button show the session instead.
   useEffect(() => {
@@ -2666,19 +2666,19 @@ export function EditorPage() {
   }, [toggleLeftPanelTab, toggleInspectorFromTopbar]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_editor_left_width", String(leftPaneWidth));
+    localStorage.setItem("orreris_editor_left_width", String(leftPaneWidth));
   }, [leftPaneWidth]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_editor_right_width", String(rightPaneWidth));
+    localStorage.setItem("orreris_editor_right_width", String(rightPaneWidth));
   }, [rightPaneWidth]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_editor_timeline_height", String(timelineHeight));
+    localStorage.setItem("orreris_editor_timeline_height", String(timelineHeight));
   }, [timelineHeight]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_editor_source_split", String(sourceMonitorSplit));
+    localStorage.setItem("orreris_editor_source_split", String(sourceMonitorSplit));
   }, [sourceMonitorSplit]);
 
   useEffect(() => {
@@ -2712,7 +2712,7 @@ export function EditorPage() {
   }, [topbarMenuOpen]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_editor_theme", editorTheme);
+    localStorage.setItem("orreris_editor_theme", editorTheme);
   }, [editorTheme]);
 
   useEffect(() => {
@@ -2734,15 +2734,15 @@ export function EditorPage() {
   }, [themeMenu]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_timeline_snap", snapEnabled ? "on" : "off");
+    localStorage.setItem("orreris_timeline_snap", snapEnabled ? "on" : "off");
   }, [snapEnabled]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_timeline_magnetic", magneticEnabled ? "on" : "off");
+    localStorage.setItem("orreris_timeline_magnetic", magneticEnabled ? "on" : "off");
   }, [magneticEnabled]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_editor_track_height", String(timelineTrackHeight));
+    localStorage.setItem("orreris_editor_track_height", String(timelineTrackHeight));
   }, [timelineTrackHeight]);
 
   useEffect(() => {
@@ -2752,7 +2752,7 @@ export function EditorPage() {
   }, [selectedLayerId]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_viewer_manual_scale", String(manualScale));
+    localStorage.setItem("orreris_viewer_manual_scale", String(manualScale));
   }, [manualScale]);
 
   useEffect(() => {
@@ -4839,8 +4839,8 @@ export function EditorPage() {
       setNotice("Open a timeline before exporting a template package");
       return;
     }
-    // Default = ".kimera" ZIP with embedded media (self-contained, no relink warnings on import).
-    // Shift+click = the lightweight bare ".kimera-template.json" (no media, git-friendly).
+    // Default = ".orreris" ZIP with embedded media (self-contained, no relink warnings on import).
+    // Shift+click = the lightweight bare ".orreris-template.json" (no media, git-friendly).
     if (!event?.shiftKey) {
       void exportTimelineTemplatePackageZip();
       return;
@@ -4849,12 +4849,12 @@ export function EditorPage() {
       const pkg = buildTimelineTemplatePackage({
         projectId: project.id,
         title: `${project.title} Template`,
-        description: `Kimera template package exported from ${project.title}.`,
+        description: `Orreris template package exported from ${project.title}.`,
         graph,
         composition,
         assets: resolvedAssets
       });
-      downloadJsonFile(timelineTemplatePackageToJson(pkg), `${safeFileStem(project.title)}.kimera-template.json`);
+      downloadJsonFile(timelineTemplatePackageToJson(pkg), `${safeFileStem(project.title)}.orreris-template.json`);
       const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
       setNotice(`Template package exported${warningText}`);
     } catch (error) {
@@ -4888,12 +4888,12 @@ export function EditorPage() {
       return;
     }
     setBusy("template-package");
-    setNotice("Building .kimera package (embedding media)…");
+    setNotice("Building .orreris package (embedding media)…");
     try {
       const pkg = buildTimelineTemplatePackage({
         projectId: project.id,
         title: `${project.title} Template`,
-        description: `Kimera template package exported from ${project.title}.`,
+        description: `Orreris template package exported from ${project.title}.`,
         graph,
         composition,
         assets: resolvedAssets
@@ -4906,8 +4906,8 @@ export function EditorPage() {
         })
       );
       const embeddedAssets = assetBytesById.filter((a): a is { id: string; fileName: string; bytes: Uint8Array } => a !== null);
-      const zip = await buildKimeraPackageZipAsync({ pkg, assets: embeddedAssets });
-      downloadBlobFile(new Blob([zip.slice()], { type: "application/zip" }), `${safeFileStem(project.title)}.kimera`);
+      const zip = await buildOrrerisPackageZipAsync({ pkg, assets: embeddedAssets });
+      downloadBlobFile(new Blob([zip.slice()], { type: "application/zip" }), `${safeFileStem(project.title)}.orreris`);
       const skipped = pkg.assets.length - embeddedAssets.length;
       const warningText = pkg.warnings.length ? ` (${pkg.warnings.length} warning${pkg.warnings.length === 1 ? "" : "s"})` : "";
       const skippedText = skipped > 0 ? ` · ${skipped} asset${skipped === 1 ? "" : "s"} could not be embedded and stay relink-by-name` : "";
@@ -4924,15 +4924,15 @@ export function EditorPage() {
       return;
     }
 
-    if (file.name.toLowerCase().endsWith(".kimera")) {
-      await importKimeraPackageZip(file);
+    if (file.name.toLowerCase().endsWith(".orreris")) {
+      await importOrrerisPackageZip(file);
       return;
     }
-    // Non-".kimera"-named files still get sniffed for the ZIP magic (a renamed/downloaded package),
+    // Non-".orreris"-named files still get sniffed for the ZIP magic (a renamed/downloaded package),
     // matching how the JSON branch below already sniffs content rather than trusting the extension.
     const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-    if (isKimeraPackageZipBytes(head)) {
-      await importKimeraPackageZip(file);
+    if (isOrrerisPackageZipBytes(head)) {
+      await importOrrerisPackageZip(file);
       return;
     }
 
@@ -4976,17 +4976,17 @@ export function EditorPage() {
   }
 
   /**
-   * Import a ".kimera" ZIP package: unzip, create a real local `SourceAsset` per embedded asset (via the
+   * Import a ".orreris" ZIP package: unzip, create a real local `SourceAsset` per embedded asset (via the
    * normal `createAsset` — local OPFS-first with an opt-in server fallback, same as any drag-drop upload),
    * then remap `layer.assetId` from the package's original ids to the freshly created ones so the applied
    * composition points at real, present media instead of relink-by-name placeholders.
    */
-  async function importKimeraPackageZip(file: File) {
+  async function importOrrerisPackageZip(file: File) {
     if (!project) return;
     setBusy("template-package");
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const { pkg, assetBytes } = await parseKimeraPackageZipAsync(bytes);
+      const { pkg, assetBytes } = await parseOrrerisPackageZipAsync(bytes);
       const idMap = new Map<string, string>();
       const assetWarnings: string[] = [];
       for (const assetRef of pkg.assets) {
@@ -5043,7 +5043,7 @@ export function EditorPage() {
       setEditorCurrentTime(0);
       const warnings = [...applied.warnings, ...assetWarnings];
       if (warnings.length) {
-        console.warn("[templates] .kimera import warnings", warnings);
+        console.warn("[templates] .orreris import warnings", warnings);
       }
       setNotice(
         warnings[0]
@@ -5051,7 +5051,7 @@ export function EditorPage() {
           : `Imported "${pkg.manifest.name}" with ${idMap.size} embedded asset(s)`
       );
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : ".kimera package import failed");
+      setNotice(error instanceof Error ? error.message : ".orreris package import failed");
     } finally {
       setBusy(null);
     }
@@ -5287,7 +5287,7 @@ export function EditorPage() {
     setBusy(null);
   }
 
-  /** Extension-derived MIME for files the browser reports with an empty type (.cube, .kimera…). */
+  /** Extension-derived MIME for files the browser reports with an empty type (.cube, .orreris…). */
   function genericMimeFor(fileName: string): string {
     const ext = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
     const map: Record<string, string> = {
@@ -6591,7 +6591,7 @@ export function EditorPage() {
         onProgress: (progress, label) => setLocalExport({ progress, label })
       });
       const ext = format === "webm" ? "webm" : "mp4";
-      await saveExportedFile(blob, `${project.title || "kimera"}.${ext}`);
+      await saveExportedFile(blob, `${project.title || "orreris"}.${ext}`);
       setNotice("Exported on this device");
     } catch (error) {
       if (!(error instanceof Error && error.name === "Aborted")) {
@@ -6609,7 +6609,7 @@ export function EditorPage() {
       return;
     }
     setExportDialogOpen(false);
-    const handoffKey = `kimera.localExportHandoff.${project.id}.${Date.now()}`;
+    const handoffKey = `orreris.localExportHandoff.${project.id}.${Date.now()}`;
     let handoffWritten = false;
     try {
       localStorage.setItem(handoffKey, JSON.stringify({ project, assets: resolvedAssets, createdAt: Date.now() }));
@@ -6628,7 +6628,7 @@ export function EditorPage() {
     const url = `/editor/__local-export?${params.toString()}`;
     const opened = window.open(url, "_blank");
     if (!opened) {
-      setNotice("Popup blocked. Allow popups for Kimera, then export again.");
+      setNotice("Popup blocked. Allow popups for Orreris, then export again.");
       return;
     }
     try {
@@ -7521,12 +7521,12 @@ export function EditorPage() {
       className={`editor-page${aiPanelOpen ? " is-ai-open" : ""}${topbarMenuOpen ? " is-topbar-menu-open" : ""}`}
       data-editor-mode={responsiveLayout.mode}
       data-editor-density={responsiveLayout.density}
-      data-kimera-theme={editorTheme}
+      data-orreris-theme={editorTheme}
     >
       <div className="editor-topbar" data-overflow={responsiveLayout.usesTopbarOverflow ? "menu" : "inline"}>
         <div className="topbar-left">
           <Link to="/" className="editor-brand">
-            Kimera
+            Orreris
           </Link>
           <div className="topbar-panel-toggles" role="toolbar" aria-label="Panels">
             <button
@@ -7616,7 +7616,7 @@ export function EditorPage() {
           <input
             ref={templatePackageInputRef}
             type="file"
-            accept="application/json,.json,.kimera-template,.kimera,.edl,.fcpxml,.xml,.prproj"
+            accept="application/json,.json,.orreris-template,.orreris,.edl,.fcpxml,.xml,.prproj"
             className="effect-import-input"
             onChange={(event) => {
               const file = event.currentTarget.files?.[0];
@@ -7662,7 +7662,7 @@ export function EditorPage() {
             disabled={busy === "template-package" || !composition}
             onClick={(event) => exportTimelineTemplatePackage(event)}
             aria-label="Export template package"
-            title="Export .kimera package with embedded media (Shift+click: lightweight .kimera-template.json)"
+            title="Export .orreris package with embedded media (Shift+click: lightweight .orreris-template.json)"
           />
           <Button
             className="icon-only"
@@ -7773,7 +7773,7 @@ export function EditorPage() {
                     ))}
                   </div>,
                   // Portal into .editor-page (NOT body): fixed coords escape the topbar's clipping
-                  // while the menu keeps the [data-kimera-theme] accent variable scope.
+                  // while the menu keeps the [data-orreris-theme] accent variable scope.
                   editorPageRef.current ?? document.body
                 )
               : null}
@@ -8121,13 +8121,13 @@ export function EditorPage() {
               onDragOver={(event) => {
                 // A source-monitor drag dropped on the program viewer = INSERT at the playhead,
                 // respecting the marked In/Out range + dragged V/A mode.
-                if (event.dataTransfer.types.includes("application/x-kimera-source-drag")) {
+                if (event.dataTransfer.types.includes("application/x-orreris-source-drag")) {
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "copy";
                 }
               }}
               onDrop={(event) => {
-                const raw = event.dataTransfer.getData("application/x-kimera-source-drag");
+                const raw = event.dataTransfer.getData("application/x-orreris-source-drag");
                 if (!raw) return;
                 event.preventDefault();
                 try {
@@ -8221,7 +8221,7 @@ export function EditorPage() {
                 <button
                   className={adaptiveResOn ? "is-active" : ""}
                   type="button"
-                  title="Auto: Kimera adjusts playback resolution while playing — drops it when frames are dropped, recovers when smooth. Pick ¼/½/1 for a fixed resolution instead."
+                  title="Auto: Orreris adjusts playback resolution while playing — drops it when frames are dropped, recovers when smooth. Pick ¼/½/1 for a fixed resolution instead."
                   onClick={() => {
                     if (adaptiveResOn) return; // radio semantics: deselect by picking a manual res
                     setPreviewQuality("balanced");
@@ -9414,7 +9414,7 @@ function moveLayerAndLinkedCompanions(
 
 // Junction transition model (isJunctionTransitionKind / findLeftNeighbor / findRightNeighbor /
 // findTransitionCutForClip / applyJunctionTransition / removeJunctionTransition /
-// DEFAULT_CROSS_DISSOLVE_SECONDS) now lives in @kimera-by-aelivion/shared
+// DEFAULT_CROSS_DISSOLVE_SECONDS) now lives in @orreris/shared
 // (timeline-actions/actions/transition.ts) so the editor UI and the AI action surface
 // (setJunctionTransition / removeJunctionTransition actions) mutate the cut through one code path.
 
@@ -10026,7 +10026,7 @@ type AssetUploadOptions = { source?: AssetSource; folder?: string };
 
 function isTimelineOrTemplateImportFile(file: File): boolean {
   const lower = file.name.toLowerCase();
-  return isExternalTimelineFile(file.name) || lower.endsWith(".json") || lower.endsWith(".kimera-template");
+  return isExternalTimelineFile(file.name) || lower.endsWith(".json") || lower.endsWith(".orreris-template");
 }
 
 function assetKind(asset: SourceAsset): "video" | "image" | "audio" | "graphic" | "file" {
@@ -10521,7 +10521,7 @@ function TimelinesPanel({
                 className={`timelines-row${isActive ? " is-active" : ""}`}
                 draggable={renamingId !== comp.id}
                 onDragStart={(event) => {
-                  event.dataTransfer.setData("application/x-kimera-composition", comp.id);
+                  event.dataTransfer.setData("application/x-orreris-composition", comp.id);
                   event.dataTransfer.setData("text/plain", comp.name);
                   event.dataTransfer.effectAllowed = "copy";
                 }}
@@ -10746,24 +10746,24 @@ function AssetBinImpl({
   };
   const [query, setQuery] = useState("");
   const [sourceTab, setSourceTab] = useState<AssetSourceTab>(() =>
-    readStoredChoice("kimera_asset_tab", "local", ["local", "ai", "search", "brand", "used", "timelines"] as const)
+    readStoredChoice("orreris_asset_tab", "local", ["local", "ai", "search", "brand", "used", "timelines"] as const)
   );
   const [filter, setFilter] = useState<AssetTypeFilter>(() =>
-    readStoredChoice("kimera_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
+    readStoredChoice("orreris_asset_filter", "all", ["all", "video", "image", "audio", "graphics"] as const)
   );
-  const [view, setView] = useState<"tiles" | "list">(() => readStoredChoice("kimera_asset_view", "tiles", ["tiles", "list"] as const));
+  const [view, setView] = useState<"tiles" | "list">(() => readStoredChoice("orreris_asset_view", "tiles", ["tiles", "list"] as const));
   const [size, setSize] = useState<"small" | "medium" | "large">(() =>
-    readStoredChoice("kimera_asset_size", "medium", ["small", "medium", "large"] as const)
+    readStoredChoice("orreris_asset_size", "medium", ["small", "medium", "large"] as const)
   );
   // Active folder per tab, remembered PER PROJECT (the old global keys carried one project's
   // navigation — and worse, its custom folder list — into every other project, 2026-07-17 report).
   const folderKeySuffix = currentProjectId ? `:${currentProjectId}` : "";
   const readActiveFolders = useCallback(
     (): Record<FolderAssetTab, string> => ({
-      local: localStorage.getItem(`kimera_asset_folder_local${folderKeySuffix}`) || defaultAssetFolder("local"),
-      brand: localStorage.getItem(`kimera_asset_folder_brand${folderKeySuffix}`) || defaultAssetFolder("brand"),
-      ai: localStorage.getItem(`kimera_asset_folder_ai${folderKeySuffix}`) || defaultAssetFolder("ai"),
-      search: localStorage.getItem(`kimera_asset_folder_search${folderKeySuffix}`) || defaultAssetFolder("search")
+      local: localStorage.getItem(`orreris_asset_folder_local${folderKeySuffix}`) || defaultAssetFolder("local"),
+      brand: localStorage.getItem(`orreris_asset_folder_brand${folderKeySuffix}`) || defaultAssetFolder("brand"),
+      ai: localStorage.getItem(`orreris_asset_folder_ai${folderKeySuffix}`) || defaultAssetFolder("ai"),
+      search: localStorage.getItem(`orreris_asset_folder_search${folderKeySuffix}`) || defaultAssetFolder("search")
     }),
     [folderKeySuffix]
   );
@@ -10810,10 +10810,10 @@ function AssetBinImpl({
   // No provider identity in the UI — `stockType` doubles as the type chip (photos/videos/graphics).
   const [stockType, setStockType] = useState<"image" | "video" | "graphics" | "frames" | "templates">("image");
   const [stockOrientation, setStockOrientation] = useState<StockOrientation>(() =>
-    readStoredChoice("kimera_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
+    readStoredChoice("orreris_stock_orientation", "all", ["all", "horizontal", "vertical", "square"] as const)
   );
   const [stockQuality, setStockQuality] = useState<StockQuality>(() =>
-    readStoredChoice("kimera_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
+    readStoredChoice("orreris_stock_quality", "highest", ["highest", "4k", "1080p", "720p", "sd"] as const)
   );
   const [stockStatus, setStockStatus] = useState<{ configured: boolean } | null>(null);
   const [stockResults, setStockResults] = useState<StockResult[]>([]);
@@ -10940,22 +10940,22 @@ function AssetBinImpl({
   // Premiere-style list-view sorting (2026-07-04): click a column header to sort, click again to
   // flip direction. Persisted like every other bin preference. Tiles view keeps library order.
   const [sortKey, setSortKey] = useState<"name" | "type" | "duration" | "dimensions" | "used">(() =>
-    readStoredChoice("kimera_asset_sort", "name", ["name", "type", "duration", "dimensions", "used"] as const)
+    readStoredChoice("orreris_asset_sort", "name", ["name", "type", "duration", "dimensions", "used"] as const)
   );
-  const [sortDir, setSortDir] = useState<1 | -1>(() => (localStorage.getItem("kimera_asset_sort_dir") === "-1" ? -1 : 1));
+  const [sortDir, setSortDir] = useState<1 | -1>(() => (localStorage.getItem("orreris_asset_sort_dir") === "-1" ? -1 : 1));
   const toggleSort = (key: typeof sortKey) => {
     if (sortKey === key) {
       setSortDir((dir) => {
         const next = dir === 1 ? -1 : 1;
-        localStorage.setItem("kimera_asset_sort_dir", String(next));
+        localStorage.setItem("orreris_asset_sort_dir", String(next));
         return next as 1 | -1;
       });
       return;
     }
     setSortKey(key);
     setSortDir(1);
-    localStorage.setItem("kimera_asset_sort", key);
-    localStorage.setItem("kimera_asset_sort_dir", "1");
+    localStorage.setItem("orreris_asset_sort", key);
+    localStorage.setItem("orreris_asset_sort_dir", "1");
   };
   const compareAssets = (a: SourceAsset, b: SourceAsset): number => {
     const nameOf = (asset: SourceAsset) => (asset.originalName ?? asset.fileName).toLowerCase();
@@ -10987,14 +10987,14 @@ function AssetBinImpl({
   // Inline bin tree (list view): expanded bins persist like every other bin preference.
   const [expandedBins, setExpandedBins] = useState<string[]>(() => {
     try {
-      const raw = JSON.parse(localStorage.getItem("kimera_asset_expanded_bins") || "[]");
+      const raw = JSON.parse(localStorage.getItem("orreris_asset_expanded_bins") || "[]");
       return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
     } catch {
       return [];
     }
   });
   useEffect(() => {
-    localStorage.setItem("kimera_asset_expanded_bins", JSON.stringify(expandedBins));
+    localStorage.setItem("orreris_asset_expanded_bins", JSON.stringify(expandedBins));
   }, [expandedBins]);
   const toggleBinExpanded = (path: string) =>
     setExpandedBins((current) => (current.includes(path) ? current.filter((entry) => entry !== path) : [...current, path]));
@@ -11077,34 +11077,34 @@ function AssetBinImpl({
   );
 
   useEffect(() => {
-    localStorage.setItem("kimera_asset_tab", sourceTab);
+    localStorage.setItem("orreris_asset_tab", sourceTab);
   }, [sourceTab]);
 
   useEffect(() => {
-    localStorage.setItem(`kimera_asset_folder_local${folderKeySuffix}`, activeAssetFolders.local);
-    localStorage.setItem(`kimera_asset_folder_brand${folderKeySuffix}`, activeAssetFolders.brand);
-    localStorage.setItem(`kimera_asset_folder_ai${folderKeySuffix}`, activeAssetFolders.ai);
-    localStorage.setItem(`kimera_asset_folder_search${folderKeySuffix}`, activeAssetFolders.search);
+    localStorage.setItem(`orreris_asset_folder_local${folderKeySuffix}`, activeAssetFolders.local);
+    localStorage.setItem(`orreris_asset_folder_brand${folderKeySuffix}`, activeAssetFolders.brand);
+    localStorage.setItem(`orreris_asset_folder_ai${folderKeySuffix}`, activeAssetFolders.ai);
+    localStorage.setItem(`orreris_asset_folder_search${folderKeySuffix}`, activeAssetFolders.search);
   }, [activeAssetFolders, folderKeySuffix]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_asset_filter", filter);
+    localStorage.setItem("orreris_asset_filter", filter);
   }, [filter]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_asset_view", view);
+    localStorage.setItem("orreris_asset_view", view);
   }, [view]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_asset_size", size);
+    localStorage.setItem("orreris_asset_size", size);
   }, [size]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_stock_orientation", stockOrientation);
+    localStorage.setItem("orreris_stock_orientation", stockOrientation);
   }, [stockOrientation]);
 
   useEffect(() => {
-    localStorage.setItem("kimera_stock_quality", stockQuality);
+    localStorage.setItem("orreris_stock_quality", stockQuality);
   }, [stockQuality]);
 
   // Close the folder context menu when clicking elsewhere or pressing Escape.
@@ -11424,7 +11424,7 @@ function AssetBinImpl({
   }
 
   function assetByDragEvent(event: ReactDragEvent<HTMLElement>): SourceAsset | null {
-    const assetId = event.dataTransfer.getData("application/x-kimera-asset");
+    const assetId = event.dataTransfer.getData("application/x-orreris-asset");
     return assetId ? assets.find((asset) => asset.id === assetId) ?? null : null;
   }
 
@@ -11435,13 +11435,13 @@ function AssetBinImpl({
   function handleAssetFolderDragOver(event: ReactDragEvent<HTMLElement>, folder: string) {
     if (!folderTab) return;
     const types = event.dataTransfer.types;
-    if (!types.includes("application/x-kimera-asset") && !types.includes("application/x-kimera-asset-folder")) return;
+    if (!types.includes("application/x-orreris-asset") && !types.includes("application/x-orreris-asset-folder")) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
   }
 
   function handleAssetFolderDrop(event: ReactDragEvent<HTMLElement>, folder: string) {
-    const draggedFolder = event.dataTransfer.getData("application/x-kimera-asset-folder");
+    const draggedFolder = event.dataTransfer.getData("application/x-orreris-asset-folder");
     if (draggedFolder) {
       event.preventDefault();
       event.stopPropagation();
@@ -12199,7 +12199,7 @@ function AssetBinImpl({
                           setFolderMenu({ path: folder.path, left: Math.max(8, Math.min(event.clientX, window.innerWidth - 252)), top: clampMenuTop(event.clientY) });
                         }}
                         onDragStart={(event) => {
-                          event.dataTransfer.setData("application/x-kimera-asset-folder", folder.path);
+                          event.dataTransfer.setData("application/x-orreris-asset-folder", folder.path);
                           event.dataTransfer.effectAllowed = "move";
                         }}
                         onDragOver={(event) => handleAssetFolderDragOver(event, folder.path)}
@@ -12276,7 +12276,7 @@ function AssetBinImpl({
                         openAssetMenuAtCursor(asset.id, event.clientX, event.clientY);
                       }}
                       onDragStart={(event) => {
-                        event.dataTransfer.setData("application/x-kimera-asset", asset.id);
+                        event.dataTransfer.setData("application/x-orreris-asset", asset.id);
                         event.dataTransfer.effectAllowed = "copyMove";
                       }}
                       onKeyDown={(event) => {
@@ -12340,7 +12340,7 @@ function AssetBinImpl({
                       </span>
                       {/* Portaled into .editor-page (ThemedSelect pattern): escapes the panel's
                           transform/backdrop-filter containing blocks so fixed coords are viewport-
-                          true, while keeping the [data-kimera-theme] accent variable scope. */}
+                          true, while keeping the [data-orreris-theme] accent variable scope. */}
                       {assetMenu?.id === asset.id ? createPortal(
                         <div
                           className="asset-tile-menu asset-list-menu"
@@ -12431,7 +12431,7 @@ function AssetBinImpl({
                     setFolderMenu({ path: folder.path, left: Math.max(8, Math.min(event.clientX, window.innerWidth - 252)), top: clampMenuTop(event.clientY) });
                   }}
                   onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-kimera-asset-folder", folder.path);
+                    event.dataTransfer.setData("application/x-orreris-asset-folder", folder.path);
                     event.dataTransfer.effectAllowed = "move";
                   }}
                   onDragOver={(event) => handleAssetFolderDragOver(event, folder.path)}
@@ -12496,7 +12496,7 @@ function AssetBinImpl({
                     openAssetMenuAtCursor(asset.id, event.clientX, event.clientY);
                   }}
                   onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-kimera-asset", asset.id);
+                    event.dataTransfer.setData("application/x-orreris-asset", asset.id);
                     event.dataTransfer.effectAllowed = "copyMove";
                   }}
                   onKeyDown={(event) => {
@@ -12583,7 +12583,7 @@ function AssetBinImpl({
                   </div>
                   {/* Portaled into .editor-page (ThemedSelect pattern): escapes the panel's
                       transform/backdrop-filter containing blocks so fixed coords are viewport-
-                      true, while keeping the [data-kimera-theme] accent variable scope. */}
+                      true, while keeping the [data-orreris-theme] accent variable scope. */}
                   {assetMenu?.id === asset.id ? createPortal(
                     <div
                       className="asset-tile-menu"

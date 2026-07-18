@@ -10,7 +10,7 @@ import {
   useVideoConfig,
   type OnVideoFrame
 } from "remotion";
-import type { RenderManifest, RenderManifestLayer } from "@kimera-by-aelivion/render-templates";
+import type { RenderManifest, RenderManifestLayer } from "@orreris/render-templates";
 import {
   MediaWebGLRenderer,
   SceneCompositor,
@@ -46,7 +46,7 @@ import {
   type TimelineLayer,
   type TransitionSpec,
   type TransitionWindowSides
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 /**
  * Method-3 Phase 6.4 — Remotion SceneStage (default cloud compositor; see `getRemotionCompositor`).

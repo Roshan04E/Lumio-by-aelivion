@@ -1,4 +1,4 @@
-import { buildConsultantUserContent, CONSULTANT_SYSTEM_PROMPT } from "@kimera-by-aelivion/shared";
+import { buildConsultantUserContent, CONSULTANT_SYSTEM_PROMPT } from "@orreris/shared";
 import { loadByoKey } from "./byok";
 import { isOllamaLocalActive, loadOllamaConfig, streamOllamaChat } from "./ollama";
 import type { PlannerContext } from "./types";

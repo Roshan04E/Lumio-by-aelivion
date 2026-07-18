@@ -31,8 +31,8 @@ export interface MemoryFact {
   lastUsedAt: string;
 }
 
-const STORAGE_KEY = "kimera.ai.memory.v2";
-const LEGACY_KEY = "kimera.ai.memory.v1";
+const STORAGE_KEY = "orreris.ai.memory.v2";
+const LEGACY_KEY = "orreris.ai.memory.v1";
 
 // The creator-scope keys that back the legacy AiMemoryPreferences shape.
 const PREFERENCE_KEYS = ["captionStyle", "colorGrade", "qualityMode", "language", "permissionMode", "textColor"] as const;

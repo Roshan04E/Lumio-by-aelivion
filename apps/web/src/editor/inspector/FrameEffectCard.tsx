@@ -14,7 +14,7 @@ import {
   setFrameBoxAxis,
   type FrameParamValue,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { BooleanControl } from "./controls/BooleanControl";
 import { ColorControl } from "./controls/ColorControl";
 import { NumberControl } from "./controls/NumberControl";

@@ -148,7 +148,7 @@ function TranscriptRow({
             {item.stage === "offer" ? (
               <>
                 Want hands-free control? Teach me your wake phrase — say whatever feels natural
-                (“hey kimera”, “heya kimera”, anything).
+                (“hey orreris”, “heya orreris”, anything).
                 <span className="ai-tr-wake-train-actions">
                   <button type="button" onClick={() => onWakeSetup?.(item.id, true)}>
                     🎙 Teach me

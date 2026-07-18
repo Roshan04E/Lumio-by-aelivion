@@ -2,7 +2,7 @@
  * Main-thread responsiveness diagnostics — DATA over theories for "the UI feels laggy" reports.
  *
  * Always-on (counters are near-free); verbose console logging behind localStorage
- * `kimera.perfLog = "1"`. Everything lands on window so a soak report is one paste:
+ * `orreris.perfLog = "1"`. Everything lands on window so a soak report is one paste:
  *
  *   __rfLongTasks     — main-thread blocks >50ms: count/total/max + the last 20 with timestamps.
  *                       THE answer to "what is hanging": if clicks feel 500ms, the culprit shows
@@ -39,7 +39,7 @@ const stats: PerfStats = {
 
 function verbose(): boolean {
   try {
-    return localStorage.getItem("kimera.perfLog") === "1";
+    return localStorage.getItem("orreris.perfLog") === "1";
   } catch {
     return false;
   }
@@ -78,7 +78,7 @@ export function useRenderCost(name: string): void {
 /**
  * Names the "unknown" long tasks: wrap a suspect synchronous stretch (WebGL renderer init, LUT
  * bake, first texture upload, demux round…) and any run >40ms lands in window.__rfHotSpots with
- * its label + duration, plus a console.warn behind kimera.perfLog. This is how a bare
+ * its label + duration, plus a console.warn behind orreris.perfLog. This is how a bare
  * "long task 2077ms (unknown)" inside a rAF (2026-07-04 playhead-placement report) gets a name —
  * long-task attribution can't see into rAF callbacks, but these probes can.
  */
@@ -227,7 +227,7 @@ export function installPerfDiagnostics(): void {
         .map(([where, samples]) => ({ samples, where }));
       stallStacks.push({ at: Math.round(stallStart), blockedMs: Math.round(blockedMs), top });
       if (stallStacks.length > 10) stallStacks.shift();
-      // Unconditional (not behind kimera.perfLog): a Page-Unresponsive-class stall IS the report.
+      // Unconditional (not behind orreris.perfLog): a Page-Unresponsive-class stall IS the report.
       if (top.length > 0) {
         console.warn(`[perf] STALL ${Math.round(blockedMs)}ms — sampled culprits:`);
         for (const entry of top) console.warn(`  ${String(entry.samples).padStart(4)}×  ${entry.where}`);

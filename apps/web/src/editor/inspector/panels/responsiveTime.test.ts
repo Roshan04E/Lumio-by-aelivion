@@ -2,12 +2,12 @@
  * Standalone assert script for Responsive Time (§5). Repo convention: no test framework — exits
  * non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web resp-time:test
+ *   pnpm --filter @orreris/web resp-time:test
  *
  * Covers the pure re-time (remapResponsiveTime) and the region-aware squeeze integration
  * (squeezeLayerKeyframesTo with layer.responsiveTime).
  */
-import { remapResponsiveTime, squeezeLayerKeyframesTo, type TimelineKeyframeV2, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { remapResponsiveTime, squeezeLayerKeyframesTo, type TimelineKeyframeV2, type TimelineLayer } from "@orreris/shared";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {

@@ -1,14 +1,14 @@
 import { PrismaClient } from "@prisma/client";
 
-process.env.DATABASE_URL ??= "postgresql://kimera:kimera@localhost:5432/kimera?schema=public";
+process.env.DATABASE_URL ??= "postgresql://orreris:orreris@localhost:5432/orreris?schema=public";
 
 declare global {
   // eslint-disable-next-line no-var
-  var __kimeraPrisma: PrismaClient | undefined;
+  var __orrerisPrisma: PrismaClient | undefined;
 }
 
-export const prisma = globalThis.__kimeraPrisma ?? new PrismaClient();
+export const prisma = globalThis.__orrerisPrisma ?? new PrismaClient();
 
 if (process.env.NODE_ENV !== "production") {
-  globalThis.__kimeraPrisma = prisma;
+  globalThis.__orrerisPrisma = prisma;
 }

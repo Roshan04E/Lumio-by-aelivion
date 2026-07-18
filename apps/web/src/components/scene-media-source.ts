@@ -1,5 +1,5 @@
 /**
- * Single-context GPU-first preview (Phase 5, flag `kimera.singleCtxPreview`) — the seam between
+ * Single-context GPU-first preview (Phase 5, flag `orreris.singleCtxPreview`) — the seam between
  * `WebglMediaLayer` (frame PRODUCER) and `ScenePreviewCanvas` (in-context GRADER).
  *
  * When the flag is on, a scene-composited media layer stops creating its own `MediaWebGLRenderer`
@@ -19,7 +19,7 @@
  * photo win the producer-version upload skip used to provide).
  */
 
-import type { ColorPipeline, MediaEffects, MediaTransition } from "@kimera-by-aelivion/shared";
+import type { ColorPipeline, MediaEffects, MediaTransition } from "@orreris/shared";
 
 export interface ScenePreviewMediaFrame {
   /** The raw decode source to upload (video element / VideoFrame clone / ImageBitmap / img). */

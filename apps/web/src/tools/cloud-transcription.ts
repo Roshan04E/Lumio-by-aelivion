@@ -4,7 +4,7 @@ import {
   type CloudTranscriptionProgress,
   type CloudTranscriptionResult,
   type SourceAsset
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import {
   cancelAutoCaptionTranscriptionJob,
   getAutoCaptionTranscriptionJob,

@@ -11,7 +11,7 @@
  * so point text keeps auto-growing on later edits (true Premiere point-text behavior).
  */
 
-import { getCompositionTextStyle, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { getCompositionTextStyle, type TimelineLayer } from "@orreris/shared";
 
 let host: HTMLDivElement | null = null;
 

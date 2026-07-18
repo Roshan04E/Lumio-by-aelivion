@@ -1,4 +1,4 @@
-import type { MaskSequenceArtifactData } from "@kimera-by-aelivion/shared";
+import type { MaskSequenceArtifactData } from "@orreris/shared";
 import { createAsset } from "../lib/api";
 import type { SegmentVideoResult } from "./local-segmentation";
 import type { ToolArtifactStore } from "./artifact-store";

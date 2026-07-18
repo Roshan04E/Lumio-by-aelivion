@@ -1,14 +1,14 @@
 import React from "react";
 import { Composition, staticFile } from "remotion";
-import type { RenderManifest } from "@kimera-by-aelivion/render-templates";
-import { configureFontResolver, warpFontFile } from "@kimera-by-aelivion/shared";
+import type { RenderManifest } from "@orreris/render-templates";
+import { configureFontResolver, warpFontFile } from "@orreris/shared";
 import { SceneStage, getRemotionCompositor } from "./SceneStage";
 
 // Text-warp outline engine: resolve warp font families to the binaries served from the
 // Remotion public/ dir, so the exported warp matches the editor preview exactly.
 configureFontResolver((family, weight) => staticFile(warpFontFile(family, weight)));
 
-export const compositionId = "KimeraTimeline";
+export const compositionId = "OrrerisTimeline";
 
 const fallbackManifest: RenderManifest = {
   id: "fallback",
@@ -28,7 +28,7 @@ const fallbackManifest: RenderManifest = {
   layers: [],
   createdAt: new Date(0).toISOString(),
   renderer: {
-    engine: "kimera-manifest",
+    engine: "orreris-manifest",
     version: 1,
     note: "Fallback manifest"
   }

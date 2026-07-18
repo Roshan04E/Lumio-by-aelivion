@@ -7,14 +7,14 @@
  * per-frame `graphicToAnimatedDataUrl` src in SceneStage, every frame would be the settled final frame
  * and the "frames advance" checks would fail.
  *
- * Run: pnpm --filter @kimera-by-aelivion/worker graphic:render
+ * Run: pnpm --filter @orreris/worker graphic:render
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRenderManifest } from "@kimera-by-aelivion/render-templates";
-import { getGraphicAnimationCycleSeconds, resolveGraphicAnimation, type GraphicLoopMode, type ProjectGraph, type TimelineKeyframeV2 } from "@kimera-by-aelivion/shared";
+import { buildRenderManifest } from "@orreris/render-templates";
+import { getGraphicAnimationCycleSeconds, resolveGraphicAnimation, type GraphicLoopMode, type ProjectGraph, type TimelineKeyframeV2 } from "@orreris/shared";
 import { PNG } from "pngjs";
 import { renderManifestStill } from "./remotion-renderer";
 

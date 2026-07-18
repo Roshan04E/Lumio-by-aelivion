@@ -9,7 +9,7 @@ import {
   type RankedModel,
   type ResolveTask,
   type SourceAsset
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { apiRequest, createAsset } from "../lib/api";
 import { generateLocalImage, loadLocalGenConfig, pingLocalGen } from "./localGen";
 

@@ -159,7 +159,7 @@ export function parseExternalTimeline(fileName: string, contents: string, option
 function parseEdl(contents: string, fileName: string): ParsedTimeline {
   const lines = contents.replace(/\r/g, "").split("\n");
   const reportItems: TimelineImportReportItem[] = [
-    reportItem("mapped", "edl.placeholder_media", "EDL carries media names/timecodes only. Kimera creates placeholder clips that can be relinked.")
+    reportItem("mapped", "edl.placeholder_media", "EDL carries media names/timecodes only. Orreris creates placeholder clips that can be relinked.")
   ];
   const titleLine = lines.find((line) => /^TITLE:/i.test(line));
   const title = titleLine?.replace(/^TITLE:\s*/i, "").trim() || stripExtension(fileName);
@@ -947,7 +947,7 @@ function parsePrprojTextObjectGraph(contents: string, fileName: string): ParsedT
       reportItem(
         "mapped",
         "prproj.nested_sequences",
-        `Preserved ${nestedClipCount} nested Premiere sequence clip(s) as linked Kimera compositions.`
+        `Preserved ${nestedClipCount} nested Premiere sequence clip(s) as linked Orreris compositions.`
       )
     );
   }

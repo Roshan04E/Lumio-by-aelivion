@@ -7,14 +7,14 @@ import {
   type KeyframeInterpolation,
   type TimelineKeyframeV2,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { clamp, findKeyframeIn, isKeyframeAt, mintKeyframeId } from "./keyframeUtils";
 
 /**
  * Mask keyframe mutations — the mask analogue of the transform/effect helpers in `keyframeUtils.ts`.
  * Scalar mask props (feather/expansion/opacity/transform.*) animate through the layer `animations`
  * array with `scope: "mask"` + `maskId`; the outline path animates through `mask.pathKeyframes`.
- * Evaluation lives in `@kimera-by-aelivion/shared` (clip-masks) so preview AND export resolve identically.
+ * Evaluation lives in `@orreris/shared` (clip-masks) so preview AND export resolve identically.
  */
 
 // --- scalar props --------------------------------------------------------------------------------

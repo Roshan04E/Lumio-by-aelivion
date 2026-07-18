@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { TrackingPathArtifactData } from "@kimera-by-aelivion/shared";
+import type { TrackingPathArtifactData } from "@orreris/shared";
 import type { TrackPointPercent } from "../tools/local-tracking";
 import { estimateTrackability, type GrayImage } from "../tools/tracking-core";
 

@@ -1180,7 +1180,7 @@ export function getMaskedEffectOverlays(
 export interface CompositionColorFilter {
   /** SVG `<filter>` id, stable per layer. */
   id: string;
-  /** CSS value to append to a layer's `filter` (e.g. `"url(#kimera-color-…)"`). */
+  /** CSS value to append to a layer's `filter` (e.g. `"url(#orreris-color-…)"`). */
   filterRef: string;
   /** The serializable filter spec, for the renderer's `<defs>` injection. */
   svg: SvgColorFilter;
@@ -1478,7 +1478,7 @@ export function getCompositionColorFilter(
   if (!pipeline) {
     return null;
   }
-  const id = `kimera-color-${layerId}`;
+  const id = `orreris-color-${layerId}`;
   const svg = pipelineToSvgFilter(pipeline, id);
   if (!svg) {
     return null;

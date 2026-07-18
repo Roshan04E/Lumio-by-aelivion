@@ -1,5 +1,5 @@
 import { Sparkles } from "lucide-react";
-import { creditCost, type BillableUnit } from "@kimera-by-aelivion/shared";
+import { creditCost, type BillableUnit } from "@orreris/shared";
 
 /**
  * Phase 0 shadow-billing badge (MONETIZATION_STRATEGY.md §4): shows what a cloud action WOULD

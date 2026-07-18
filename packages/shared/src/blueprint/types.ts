@@ -1,5 +1,5 @@
 /**
- * Kimera OS — Blueprint IR core (K3, see KIMERA_OS.md → Layer 4).
+ * Orreris OS — Blueprint IR core (K3, see ORRERIS_OS.md → Layer 4).
  *
  * A Blueprint is the seam between the two brains: a serializable, validated statement of
  * WHAT should happen, with zero knowledge of HOW. The IR is dialect-based (MLIR-style, not

@@ -5,12 +5,12 @@
  * samples the displayed viewer-zoom % over ~3s. A healthy fit CONVERGES (stable value); the bug is a
  * 2-cycle oscillation (e.g. 57↔100 / 74↔78). Reports min/max/spread + the sample sequence.
  *
- * Run: pnpm --filter @kimera-by-aelivion/worker exec tsx src/zoom-probe.ts   (dev server must be up)
+ * Run: pnpm --filter @orreris/worker exec tsx src/zoom-probe.ts   (dev server must be up)
  */
 import { chromium, type Page } from "playwright";
 
 const BASE = process.env.PROBE_BASE ?? "http://localhost:5173";
-const DEMO = { email: "demo@aelivion.studio", password: "password123" };
+const DEMO = { email: "demo@pesamee.studio", password: "password123" };
 
 async function tryLogin(page: Page) {
   const email = page.locator('input[type="email"]').first();

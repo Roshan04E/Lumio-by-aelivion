@@ -1,4 +1,4 @@
-import type { EditableFieldDefinition } from "@kimera-by-aelivion/shared";
+import type { EditableFieldDefinition } from "@orreris/shared";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 
 export function EditableFieldPanel({

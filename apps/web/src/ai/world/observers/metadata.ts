@@ -1,5 +1,5 @@
 /**
- * Kimera OS observer — media metadata (L0, free). Reads the SourceAsset record the ingest
+ * Orreris OS observer — media metadata (L0, free). Reads the SourceAsset record the ingest
  * pipeline already produced: duration, dimensions, fps, size, container rotation. Costs
  * nothing because the work was done at import — the fidelity-ladder's ground floor.
  */

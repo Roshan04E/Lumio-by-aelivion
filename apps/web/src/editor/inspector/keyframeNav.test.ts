@@ -2,7 +2,7 @@
  * Keyframe prev/next NAVIGATION — standalone assert script (repo convention: no test framework,
  * exits non-zero on failure).
  *
- *   pnpm --filter @kimera-by-aelivion/web keyframe:nav:test
+ *   pnpm --filter @orreris/web keyframe:nav:test
  *
  * Guards the falsy-zero trap that disabled the "previous keyframe" button whenever the previous key
  * sat at layer-local time 0 — the clip's first frame, where the first key of most ramps lives. The
@@ -10,7 +10,7 @@
  * a legitimate hit). See project-tracker/editor.md v1.
  */
 
-import type { TimelineKeyframeV2, TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineKeyframeV2, TimelineLayer } from "@orreris/shared";
 import { findKeyframeIn, findLayerPropertyKeyframe, findTransformKeyframe } from "./keyframeUtils";
 
 let failures = 0;

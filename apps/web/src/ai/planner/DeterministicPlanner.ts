@@ -13,7 +13,7 @@ import {
   type HueName,
   type TimelineComposition,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import type { AiPlan, PlanEventHandler, PlanStep, PlannerContext, PlannerProvider } from "../types";
 import { extractColor, extractPosition, extractSize, extractTextStyle, resolveShapeGeometry } from "./entities";
 import { analyze, hasLemma, type NluDoc } from "./nlu";

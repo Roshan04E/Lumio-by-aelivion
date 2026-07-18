@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type CSSProperties, type HTMLAttributes } from "react";
-import { compositeMatteToImageData, type MatteRef } from "@kimera-by-aelivion/shared";
+import { compositeMatteToImageData, type MatteRef } from "@orreris/shared";
 import { setMediaPlaybackRate } from "../playback/media-rate";
 
 /**

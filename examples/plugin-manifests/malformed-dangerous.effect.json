@@ -4,9 +4,9 @@
   "id": "bad.dangerous-effect",
   "name": "Dangerous Test Effect",
   "version": "1.0.0",
-  "description": "Intentionally malformed manifest for testing Kimera package safety rejection.",
+  "description": "Intentionally malformed manifest for testing Orreris package safety rejection.",
   "author": {
-    "name": "Aelivion Studio"
+    "name": "Pesamee Studio"
   },
   "tags": ["test", "malformed"],
   "engine": "native",

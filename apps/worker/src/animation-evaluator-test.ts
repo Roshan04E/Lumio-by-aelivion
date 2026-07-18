@@ -6,7 +6,7 @@ import {
   migrateTimelineKeyframes,
   type TimelineKeyframe,
   type TimelineKeyframeV2
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 
 const oldKeyframes: TimelineKeyframe[] = [
   { id: "old_1", property: "opacity", timeSeconds: 2, value: 0, easing: "linear" },

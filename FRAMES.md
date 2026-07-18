@@ -71,7 +71,7 @@ Four pillars, each reusing an existing system so nothing is hardcoded:
 **Frame definition format (built-in AND marketplace, identical):**
 ```
 FrameDefinition = {
-  id: string;               // "kimera.rounded-rect" | "acme.torn-note"
+  id: string;               // "orreris.rounded-rect" | "acme.torn-note"
   name: string;
   generatorId: GeneratorId; // trusted generator key
   params: ParamSchema;      // reuses the effect param-def shape (min/max/step/default/label)
@@ -190,7 +190,7 @@ media ignores them. `frameClipMask` inscribes the shape in that comp box. Hence:
 |---|---|
 | "circle is not circle" | an ellipse inscribed in a **16:9** box IS an oval |
 | "they are consuming the handles" | handles belong to the **media box** (= full comp frame), not the visible frame shape → they sit at the box corners, under/away from the media |
-| "circle is with no adjustment" | `kimera.circle` has `params: []` — and can't have width/height while the frame owns no box |
+| "circle is with no adjustment" | `orreris.circle` has `params: []` — and can't have width/height while the frame owns no box |
 | "rectangle should have width height" | same gap |
 | "border, borderWidth, borderColor" | **different**: masks only CLIP. There is no stroke anywhere in the media render path → a border is a genuinely NEW render surface (both renderers, pixel gate). |
 | "change to graphics + graphics color settings" | shape layers already own fill/stroke/width/height/radius/custom-path, rendered in both renderers ([text-shape.ts:530](packages/shared/src/scene/text-shape.ts#L530)) |
@@ -572,7 +572,7 @@ Steps 1, 2, 4 done + pan-snap (step 3); the corner-content-zoom snap is the one 
     clip mask, AND the D4 bake — the three can never disagree. Convert-to-graphic now BAKES blob/torn to
     `pen` + tangent `shapePath` (per D4: roughness/seed freeze into an editable path); `svg-path` remains
     the only rectangle fallback. Card gains the shared `SelectControl` (the `select` param variant's first
-    inspector control, PropertyRow shell) for `edges`. Two new built-ins (kimera.blob, kimera.torn-paper);
+    inspector control, PropertyRow shell) for `edges`. Two new built-ins (orreris.blob, orreris.torn-paper);
     panel tiles + empty-placeholder outlines come free via `frameOutlinePathD`.
   - **Verified:** shared/render-templates/worker typecheck clean (web blocked by an UNRELATED in-flight
     speed-ramp graph error in `keyframeUtils.ts:1021`, not Frames); `frames:test` **133/133** (+18:

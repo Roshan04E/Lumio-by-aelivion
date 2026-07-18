@@ -1,5 +1,5 @@
 /**
- * Kimera editor foundation (Phase 3). Shell + registries + store + performance
+ * Orreris editor foundation (Phase 3). Shell + registries + store + performance
  * primitives that the monolith migrates onto in Phase 4+. See
  * EDITOR_REFACTOR_PLAN.md.
  */

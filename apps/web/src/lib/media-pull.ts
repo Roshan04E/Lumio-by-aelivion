@@ -13,7 +13,7 @@
  * resolution overlay (api.ts), so playback switches from network streaming to on-device reads.
  */
 
-import type { ProjectGraph, SourceAsset, TimelineComposition } from "@kimera-by-aelivion/shared";
+import type { ProjectGraph, SourceAsset, TimelineComposition } from "@orreris/shared";
 import { getAssetBlobStore, type AssetScope } from "./asset-blob-store";
 import { LOCAL_BLOB_PREFIX } from "./api";
 

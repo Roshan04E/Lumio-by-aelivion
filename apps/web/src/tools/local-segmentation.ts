@@ -1,5 +1,5 @@
-import type { MaskSequenceArtifactData, SubjectBounds, TrackingPathArtifactData } from "@kimera-by-aelivion/shared";
-import { smoothTrackingPoints } from "@kimera-by-aelivion/shared";
+import type { MaskSequenceArtifactData, SubjectBounds, TrackingPathArtifactData } from "@orreris/shared";
+import { smoothTrackingPoints } from "@orreris/shared";
 import type { BrowserToolCapabilities } from "./capabilities";
 
 /**

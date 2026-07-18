@@ -1,5 +1,5 @@
 /**
- * Kimera OS observer — User State (K2, L0, free). Summarizes the brain's own learning data
+ * Orreris OS observer — User State (K2, L0, free). Summarizes the brain's own learning data
  * (B6 per-rule trust counters + the routing ledger) as a queryable fact: how often the local
  * tiers resolve this user's asks, which rules they distrust, estimated tokens saved. This is
  * the "the brain can introspect its own learning" branch of the World Model — all data that

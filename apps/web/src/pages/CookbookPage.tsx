@@ -56,7 +56,7 @@ export function CookbookPage() {
         <div className="mkt-wrap mkt-hero-inner">
           <span className="mkt-eyebrow">Cookbook</span>
           <h1 style={{ fontSize: "clamp(28px, 3.6vw, 42px)" }}>
-            How Kimera works — <span className="mkt-grad">all of it.</span>
+            How Orreris works — <span className="mkt-grad">all of it.</span>
           </h1>
           <p className="mkt-sub">
             A no-secrets tour: what the product is, how a reel flows from raw clip to export, and exactly

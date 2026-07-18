@@ -2,7 +2,7 @@
  * Animated-graphic GRAPH EDITOR lanes — standalone assert script (repo convention: no test
  * framework, exits non-zero on failure).
  *
- *   pnpm --filter @kimera-by-aelivion/web graph:graphic:test
+ *   pnpm --filter @orreris/web graph:graphic:test
  *
  * The graph editor's contract is that a curve shows what the renderers actually render. For the
  * graphic lanes that's non-trivial: the PHASE the renderer runs is only sometimes a keyframe track
@@ -10,7 +10,7 @@
  * holds. These checks pin the lanes to the shared resolver rather than the raw keys.
  */
 
-import { graphicAnimationPhase, resolveGraphicAnimation, type TimelineKeyframeV2, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { graphicAnimationPhase, resolveGraphicAnimation, type TimelineKeyframeV2, type TimelineLayer } from "@orreris/shared";
 import { buildGraphicGraphTargets, graphTargetKey } from "../inspector/keyframeUtils";
 import { evaluateGraphTargetValue, targetKeyframes } from "./graph-scene";
 

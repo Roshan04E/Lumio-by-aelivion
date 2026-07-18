@@ -1,5 +1,5 @@
 /**
- * Kimera OS — Blueprint motion dialect (K3, second dialect). Payload = MotionIntent
+ * Orreris OS — Blueprint motion dialect (K3, second dialect). Payload = MotionIntent
  * (motion-intent.ts). Closure canonicalizes the style against the motion vocabulary
  * (exact → alias, repairs recorded) and fails unknown styles with the per-kind vocabulary
  * as suggestions. Lowering = one `applyMotion` action template — the deterministic compiler

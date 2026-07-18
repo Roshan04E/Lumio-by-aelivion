@@ -1,4 +1,4 @@
-import type { SourceAsset, TranscriptArtifactData, TranscriptSegment, TranscriptWord } from "@kimera-by-aelivion/shared";
+import type { SourceAsset, TranscriptArtifactData, TranscriptSegment, TranscriptWord } from "@orreris/shared";
 
 type ProgressCallback = (message: string) => void;
 

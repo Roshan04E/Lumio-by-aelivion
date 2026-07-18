@@ -5,7 +5,7 @@
 name containing "dissolve"/"cross") and dropped everything else as "unsupported"; FCPXML `<title>`
 elements were skipped entirely (never even placeholder text); `.prproj` multi-sequence projects
 silently picked "whichever sequence has the most readable clips" with no way to choose another; there
-was no export direction at all (Kimera → any NLE).
+was no export direction at all (Orreris → any NLE).
 
 **Fix:**
 - `mapExternalTransition(name)` (`packages/shared/src/external-timeline-adapter.ts`) is now the ONE

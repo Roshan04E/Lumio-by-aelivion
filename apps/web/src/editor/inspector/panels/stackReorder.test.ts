@@ -2,12 +2,12 @@
  * Standalone assert script for Graphics-stack drag-reorder (§4). Repo convention: no test framework —
  * exits non-zero on first failure.
  *
- *   pnpm --filter @kimera-by-aelivion/web stack:reorder:test
+ *   pnpm --filter @orreris/web stack:reorder:test
  *
  * Draw order within a track is ARRAY order — higher index renders on top. "front-of" reinserts after
  * the target (on top), "behind" reinserts before it (under). Cross-track drops are rejected.
  */
-import { moveLayerWithinTrack, type TimelineComposition, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { moveLayerWithinTrack, type TimelineComposition, type TimelineLayer } from "@orreris/shared";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {

@@ -1,5 +1,5 @@
-import { buildRenderManifest, type RenderManifest, type RenderQuality } from "@kimera-by-aelivion/render-templates";
-import { type ModuleType, type ProjectGraph, type SourceAsset } from "@kimera-by-aelivion/shared";
+import { buildRenderManifest, type RenderManifest, type RenderQuality } from "@orreris/render-templates";
+import { type ModuleType, type ProjectGraph, type SourceAsset } from "@orreris/shared";
 import { HttpError } from "../lib/http";
 import { asJson, fromJson } from "../lib/json";
 import { prisma } from "../lib/prisma";

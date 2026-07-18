@@ -1,4 +1,4 @@
-# Kimera Monetization Strategy & Roadmap
+# Orreris Monetization Strategy & Roadmap
 
 **Doctrine (locked by founder, 2026-07-13):** The editor stays free forever. We never charge
 for creativity — cutting, grading, effects, transitions, captions-on-device, keyframes, the
@@ -15,20 +15,20 @@ This is not a compromise — it is the strategy. Everything below flows from it.
 Most competitors' paid features are our free features, because our architecture makes their
 marginal cost ≈ zero:
 
-| Capability | CapCut / Veed / Kapwing | Kimera |
+| Capability | CapCut / Veed / Kapwing | Orreris |
 |---|---|---|
 | Background removal, person extraction | Pro / credits (cloud GPU) | **Free** — browser adapter (WebGPU/WebCodecs, `apps/web/src/tools/`) |
 | Auto captions | Pro / minutes-metered | **Free** — local `@huggingface/transformers` transcription |
 | Voice control / TTS read-back | N/A or cloud | **Free** — local WebGPU Kokoro TTS + Moonshine ASR |
 | Watermark-free export | Pro ($19.99/mo on CapCut) | **Free** — local WebCodecs export, our cost is zero |
 | Pro color pipeline, scopes, keyframes | Often gated | **Free** — runs on the user's GPU |
-| AI assistant edits | Credits per action | **Nearly free to us** — Kimera Brain's 5-tier cascade makes the LLM the *last* resort; most commands resolve deterministically at zero token cost |
+| AI assistant edits | Credits per action | **Nearly free to us** — Orreris Brain's 5-tier cascade makes the LLM the *last* resort; most commands resolve deterministically at zero token cost |
 
 Structural cost advantages no competitor can copy quickly:
 
 1. **Local-first compute** — the user's machine does the work. Our COGS for the core product
    is bandwidth + a Postgres box.
-2. **Kimera Brain token frugality** — tiers 0–4 answer most requests without an LLM call.
+2. **Orreris Brain token frugality** — tiers 0–4 answer most requests without an LLM call.
    Where CapCut pays cloud GPU for every AI action, we pay tokens only on the hard residue.
 3. **The prompt bridge** — users who refuse to pay can route AI through *their own* chat AI
    for free. This is a conversion funnel, not a leak: it proves the value, then we sell
@@ -107,7 +107,7 @@ browsing (Pexels/Pixabay are free APIs — bandwidth-only; keep free as an acqui
   "we only charge what costs us" *verifiable*.
 
 ### Stream B — Cloud subscription (predictable base for hard costs)
-One plan, not a ladder (add tiers only when data demands it): **Kimera Cloud**, ~₹199–₹499/mo
+One plan, not a ladder (add tiers only when data demands it): **Orreris Cloud**, ~₹199–₹499/mo
 India (~$8–12 global), bundling:
 - **Cloud render** — the worker's Remotion + BullMQ pipeline is real; sell background /
   faster-than-realtime / batch / 4K renders as *convenience* (local export stays free —
@@ -188,7 +188,7 @@ costs a creator far more than a scan.
 - KPIs: % of MAU hitting the daily allowance ceiling; pack purchase conversion (target 1–2%
   of active editors initially; Canva's mature 3–6% is the ceiling); blended margin ≥ 55%.
 
-### Phase 2 — Kimera Cloud subscription (+2–4 months)
+### Phase 2 — Orreris Cloud subscription (+2–4 months)
 - Ship **cloud render** as a paid queue on the existing worker (BullMQ mode is already
   built; needs hosting + artifact delivery), and **cloud storage** quotas on the media
   library's opt-in upload path.
@@ -218,7 +218,7 @@ costs a creator far more than a scan.
 
 Assume 100k MAU at month 12 (India-weighted), doctrine intact:
 - **Credits**: 2% buy packs monthly at avg ₹120 → ~₹2.4L/mo (~$2.9k) at ≥55% margin.
-- **Kimera Cloud**: 0.7% subscribe at ₹299 → ~₹2.1L/mo (~$2.5k), margin dominated by
+- **Orreris Cloud**: 0.7% subscribe at ₹299 → ~₹2.1L/mo (~$2.5k), margin dominated by
   storage/render COGS (~50–60%).
 - **Marketplace**: early GMV ₹5L/mo at 20% take → ₹1L/mo, ~90% margin.
 - Total ≈ ₹5.5L/mo (~$6.6k) at 100k MAU — small, but every stream scales linearly with MAU

@@ -1,4 +1,4 @@
-import { billableSurfaces, creditCost } from "@kimera-by-aelivion/shared";
+import { billableSurfaces, creditCost } from "@orreris/shared";
 import { prisma } from "../lib/prisma";
 
 /**

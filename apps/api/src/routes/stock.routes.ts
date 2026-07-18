@@ -5,7 +5,7 @@ import { prisma } from "../lib/prisma";
 import { serializeAsset } from "../lib/asset-serializer";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 import { saveBuffer } from "../services/storage.service";
-import type { StockOrientation } from "@kimera-by-aelivion/shared";
+import type { StockOrientation } from "@orreris/shared";
 import { downloadStockMedia, searchStock, STOCK_PER_PAGE, stockProviderConfigured, type StockMediaType } from "../services/stock.service";
 
 export const stockRouter = Router();

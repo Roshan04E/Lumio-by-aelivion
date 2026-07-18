@@ -14,7 +14,7 @@ import {
   type TimelineComposition,
   type TimelineLayer,
   type TrackingPathArtifactData
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { createAsset } from "../lib/api";
 import { createToolArtifactStore } from "./artifact-store";
 import { detectBrowserToolCapabilities } from "./capabilities";

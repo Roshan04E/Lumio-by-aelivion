@@ -35,7 +35,7 @@ import {
   type KeyframeInterpolation,
   type TimelineKeyframeV2,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { copyKeyframes, hasClipboardKeyframes, pasteKeyframes } from "./graph-clipboard";
 import { ScrubNumberInput } from "../../components/ScrubNumberInput";
 import { ThemedSelect } from "../inspector/controls/ThemedSelect";
@@ -175,14 +175,14 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
   // delete) drive both, so switching views never loses context. Choice persists per session.
   const [graphView, setGraphView] = useState<"curves" | "lanes">(() => {
     try {
-      return window.localStorage.getItem("kimera.graph.view") === "lanes" ? "lanes" : "curves";
+      return window.localStorage.getItem("orreris.graph.view") === "lanes" ? "lanes" : "curves";
     } catch {
       return "curves";
     }
   });
   useEffect(() => {
     try {
-      window.localStorage.setItem("kimera.graph.view", graphView);
+      window.localStorage.setItem("orreris.graph.view", graphView);
     } catch {
       /* private mode */
     }

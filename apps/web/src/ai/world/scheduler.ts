@@ -1,5 +1,5 @@
 /**
- * Kimera OS — perception scheduler (K1). All observer work funnels through here so perception
+ * Orreris OS — perception scheduler (K1). All observer work funnels through here so perception
  * can never fight playback for the main thread / decoder sessions (the lesson the source-proxy
  * engine learned the hard way — see sourceProxyEngine.ts SUSPEND note).
  *

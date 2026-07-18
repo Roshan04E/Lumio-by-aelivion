@@ -21,7 +21,7 @@
  * asset-blob-store.ts. No DB/shared type changes.
  */
 
-import type { ProjectGraph, SourceAsset } from "@kimera-by-aelivion/shared";
+import type { ProjectGraph, SourceAsset } from "@orreris/shared";
 import {
   apiRequest,
   AuthRequiredError,
@@ -38,7 +38,7 @@ import { collectUnresolvedMattes, MatteResolveError, resolveGraphMattes } from "
 import { getAssetBlobStore } from "./asset-blob-store";
 import { scheduleRecoveryCheckpoint } from "./crash-recovery";
 
-const SYNC_KEY = "kimera_sync_state";
+const SYNC_KEY = "orreris_sync_state";
 const LOCAL_PROJECT_PREFIX = "project_local_";
 const LOCAL_ASSET_PREFIX = "asset_local_";
 const SAVE_DEBOUNCE_MS = 800;

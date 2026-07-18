@@ -25,7 +25,7 @@ export function cubeLutToEffectManifest(input: {
     id,
     name,
     version: "1.0.0",
-    description: `Imported .cube LUT (${parsed.lut.size}x${parsed.lut.size}x${parsed.lut.size}) for Kimera.`,
+    description: `Imported .cube LUT (${parsed.lut.size}x${parsed.lut.size}x${parsed.lut.size}) for Orreris.`,
     author: { name: "External LUT" },
     license: { type: "unknown" },
     tags: ["lut", "cube", "external"],
@@ -52,7 +52,7 @@ export function cubeLutToEffectManifest(input: {
   });
   return {
     manifest,
-    warnings: parsed.title ? [] : ["The .cube file has no TITLE; Kimera used the file name."]
+    warnings: parsed.title ? [] : ["The .cube file has no TITLE; Orreris used the file name."]
   };
 }
 

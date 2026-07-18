@@ -1,5 +1,5 @@
 /**
- * Kimera OS — the World Model's first brain consumer (K1). An async local tier that answers
+ * Orreris OS — the World Model's first brain consumer (K1). An async local tier that answers
  * "analyze clip 3" / "what does clip 2 look like" / "analyze the timeline" from MEASURED
  * facts — metadata (L0), sampled-frame look (L1), text coverage (L2) — zero tokens, honest
  * provenance in the answer ("3 sampled frames", "from the import record").
@@ -9,7 +9,7 @@
  * Answers here are read-only (kind "answer") — the world route NEVER mutates.
  */
 
-import { layerIdForOrdinal, type TimelineComposition, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { layerIdForOrdinal, type TimelineComposition, type TimelineLayer } from "@orreris/shared";
 import type { BrainContext, BrainRouteResult } from "../brain/router";
 import { normalizePrompt, parseExactClipPhrase } from "../brain/router";
 import { queryFact } from "./knowledge";

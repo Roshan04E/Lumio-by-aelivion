@@ -83,7 +83,7 @@ drag, Polygon/Pen click points), draw it in the preview, then drag it. Nothing i
 8. **Move.** With the **Select** tool, drag **inside** an active mask to move the whole shape; drag a point to
    reshape; **Alt-drag** a point to pull out Bézier handles.
 9. **Export parity.** The exported MP4 shows the identical cutout (everything bakes into the same SVG stencil).
-   Spot-check with `pnpm --filter @kimera-by-aelivion/worker render:compare:pixels`.
+   Spot-check with `pnpm --filter @orreris/worker render:compare:pixels`.
 
 ---
 
@@ -140,9 +140,9 @@ backwards?"* No — our model targets the **same places** Premiere does.
   carve shapes out with **Inverted**. (Per-mask **modes** — Add / Subtract / Intersect / Difference — are an
   **After Effects** feature.)
 
-**Kimera maps 1:1 to that target** (so the result matches Premiere):
+**Orreris maps 1:1 to that target** (so the result matches Premiere):
 
-| Premiere | Kimera |
+| Premiere | Orreris |
 | --- | --- |
 | Mask under **Opacity** (clip-level) | `layer.masks` — surfaced directly as the clip's **Mask** panel |
 | Mask under an **effect** (effect-level) | `effect.masks` — e.g. the Blur effect's **Region mask** |

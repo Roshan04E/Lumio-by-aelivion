@@ -113,7 +113,7 @@ export function inspectPluginManifestSafety(value: unknown, options: PluginSafet
     issues.push({
       severity: "error",
       code: "plugin.unsupported_schema_version",
-      message: `Schema version "${String(rawSchemaVersion)}" is not supported. Kimera currently supports ${pluginSchemaVersion}.`,
+      message: `Schema version "${String(rawSchemaVersion)}" is not supported. Orreris currently supports ${pluginSchemaVersion}.`,
       path: "schemaVersion"
     });
   }

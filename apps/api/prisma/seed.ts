@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { parsePluginManifest, templateDefinitions, toolDefinitions } from "@kimera-by-aelivion/shared";
+import { parsePluginManifest, templateDefinitions, toolDefinitions } from "@orreris/shared";
 import { prisma } from "../src/lib/prisma";
 import { asJson } from "../src/lib/json";
 
@@ -9,14 +9,14 @@ async function main() {
   const passwordHash = await bcrypt.hash("password123", 12);
 
   const demoUser = await prisma.user.upsert({
-    where: { email: "demo@aelivion.studio" },
+    where: { email: "demo@pesamee.studio" },
     update: {
       name: "Demo Creator",
       walletCredits: 120
     },
     create: {
       name: "Demo Creator",
-      email: "demo@aelivion.studio",
+      email: "demo@pesamee.studio",
       passwordHash,
       walletCredits: 120
     }

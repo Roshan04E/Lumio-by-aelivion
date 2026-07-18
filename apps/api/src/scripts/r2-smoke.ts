@@ -1,5 +1,5 @@
 /**
- * R2 connectivity smoke test — run: pnpm --filter @kimera-by-aelivion/api exec tsx src/scripts/r2-smoke.ts
+ * R2 connectivity smoke test — run: pnpm --filter @orreris/api exec tsx src/scripts/r2-smoke.ts
  * Uploads a tiny object, reads it back, deletes it — proving endpoint + credentials work end to end.
  * Safe to delete this file; it's a one-off diagnostic.
  */
@@ -29,7 +29,7 @@ async function main() {
   }
 
   const stamp = Date.now();
-  const expected = `kimera r2 smoke test ${stamp}\n`;
+  const expected = `orreris r2 smoke test ${stamp}\n`;
 
   console.log("\n1) Uploading test object…");
   const url = await saveBuffer(Buffer.from(expected), `r2-smoke-${stamp}.txt`);
@@ -52,7 +52,7 @@ async function main() {
 main().catch((error) => {
   console.error("\n❌ R2 smoke test FAILED:\n  ", error instanceof Error ? error.message : error);
   console.error(
-    "\nCommon causes: wrong R2_ENDPOINT (must NOT include /kimera), bad keys, or the token isn't scoped to this bucket."
+    "\nCommon causes: wrong R2_ENDPOINT (must NOT include /orreris), bad keys, or the token isn't scoped to this bucket."
   );
   process.exit(1);
 });

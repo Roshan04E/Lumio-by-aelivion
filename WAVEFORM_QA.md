@@ -51,7 +51,7 @@ height, and Resolve's proprietary DSP/display tuning** — not the renderer.
 
 ## Regression matrix — capture a screenshot per cell
 
-Compare Kimera vs Resolve. Rows = content, Columns = zoom (px/sec). Save PNGs under
+Compare Orreris vs Resolve. Rows = content, Columns = zoom (px/sec). Save PNGs under
 `docs/waveform-baseline/<content>-<pxps>.png` so any future renderer diff can be A/B'd.
 
 | Content \ Zoom | 8 px/s | 20 px/s | 50 px/s | 100 px/s | 300 px/s |
@@ -82,5 +82,5 @@ Compare Kimera vs Resolve. Rows = content, Columns = zoom (px/sec). Save PNGs un
 ## How to capture
 
 Run the editor (`pnpm dev`), drop the content types onto audio tracks, set the zoom to each
-px/sec step, and screenshot the same clip region in Kimera and Resolve side by side. Keep track
+px/sec step, and screenshot the same clip region in Orreris and Resolve side by side. Keep track
 height fixed (note which preset) so comparisons are apples-to-apples.

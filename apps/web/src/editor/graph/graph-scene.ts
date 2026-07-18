@@ -15,7 +15,7 @@ import {
   GRAPHIC_PROGRESS_PROPERTY,
   type TimelineKeyframeV2,
   type TimelineLayer
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import {
   getContentBaseValue,
   getEffectParamBaseValue,

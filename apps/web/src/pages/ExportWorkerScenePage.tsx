@@ -28,7 +28,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { createExportStressFixture, type TimelineComposition, type TimelineLayer } from "@kimera-by-aelivion/shared";
+import { createExportStressFixture, type TimelineComposition, type TimelineLayer } from "@orreris/shared";
 import { type ExportCoreInput, type SourceUrlMap } from "../export/export-core";
 import { clipSourceKey, createFrameProvider, type FrameProvider } from "../export/source-decoder";
 import { SceneFrameCompositor } from "../export/scene-frame-compositor";

@@ -240,7 +240,7 @@ const glowEffects: TimelineLayer["effects"] = [
 // manifest-import step first; `examples/plugin-manifests/invert.effect.json` carries the SAME GLSL for the
 // user-facing import flow. Deterministic (pure invert, no randomness) so preview/export/Remotion should
 // match at ~0.000% at a strict pixel-gate tolerance.
-export const EXAMPLE_INVERT_FRAGMENT_EFFECT_ID = "com.kimera.examples.invert";
+export const EXAMPLE_INVERT_FRAGMENT_EFFECT_ID = "com.orreris.examples.invert";
 registerFragmentEffect(
   {
     id: EXAMPLE_INVERT_FRAGMENT_EFFECT_ID,
@@ -555,7 +555,7 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         effects: [],
         fit: "cover",
         frame: {
-          definitionId: "kimera.blob",
+          definitionId: "orreris.blob",
           generatorId: "blob",
           params: {
             points: 9,
@@ -580,7 +580,7 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         effects: [],
         fit: "cover",
         frame: {
-          definitionId: "kimera.rounded-rect",
+          definitionId: "orreris.rounded-rect",
           generatorId: "rounded-rect",
           params: {
             roundness: 40,

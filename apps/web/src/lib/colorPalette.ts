@@ -1,4 +1,4 @@
-import type { SourceAsset } from "@kimera-by-aelivion/shared";
+import type { SourceAsset } from "@orreris/shared";
 
 export type EyeDropperConstructor = new () => {
   open: () => Promise<{ sRGBHex: string }>;

@@ -1,9 +1,9 @@
 /**
- * Kimera OS observer — visual look (L1, cheap). Samples a few frames of a video/image asset
+ * Orreris OS observer — visual look (L1, cheap). Samples a few frames of a video/image asset
  * into a small canvas and measures luma distribution, contrast spread, warm/cool balance and
  * saturation — the footage facts a grade planner needs BEFORE it decides anything ("already
  * dark → don't lower exposure"). Deliberately the cheapest sufficient fidelity: 3 sampled
- * frames at 96px wide, never a full scan (KIMERA_OS.md fidelity ladder).
+ * frames at 96px wide, never a full scan (ORRERIS_OS.md fidelity ladder).
  *
  * Local-first: resolves bytes from the on-device blob store first (same as playback), falling
  * back to the asset's proxy/file URL. DOM-only — `signature()` returns null under node, so

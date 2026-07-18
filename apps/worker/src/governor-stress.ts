@@ -13,7 +13,7 @@
  *      genuine contention, so scenario 1 can't rot into a tautology.
  *
  * Standalone assert-and-exit script (repo convention — no test framework). Needs a real WebGL2 GPU →
- * `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @kimera-by-aelivion/worker governor:stress`.
+ * `PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker governor:stress`.
  */
 
 import assert from "node:assert/strict";

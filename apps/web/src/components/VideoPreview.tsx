@@ -85,7 +85,7 @@ import {
   type TimelineLayer,
   type TimelineTrack,
   type TransitionSpec
-} from "@kimera-by-aelivion/shared";
+} from "@orreris/shared";
 import { MaskedVideoLayer } from "./MaskedVideoLayer";
 import { TransitionOverlay } from "./TransitionLayer";
 import { ColorEngineBoundary } from "./ColorEngineBoundary";
@@ -185,7 +185,7 @@ const eqTransitionPair = (a: TransitionPairEntry, b: TransitionPairEntry): boole
   a.toFit === b.toFit;
 
 // Dev-only, opt-in render instrumentation for the playback-jank investigation. Enable with
-// `?debugRenders=1` or localStorage["kimera_debug_renders"]="1"; counts accumulate on
+// `?debugRenders=1` or localStorage["orreris_debug_renders"]="1"; counts accumulate on
 // `window.__rfRenderCounts` (inspect in the console). Off by default and never logs → no prod noise.
 let renderDebugFlag: boolean | null = null;
 function renderDebugEnabled(): boolean {
@@ -193,7 +193,7 @@ function renderDebugEnabled(): boolean {
     try {
       renderDebugFlag =
         new URLSearchParams(window.location.search).get("debugRenders") === "1" ||
-        window.localStorage?.getItem("kimera_debug_renders") === "1";
+        window.localStorage?.getItem("orreris_debug_renders") === "1";
     } catch {
       renderDebugFlag = false;
     }
@@ -585,7 +585,7 @@ function VideoPreviewImpl({
   // Collapse the floating tool bar to a single chevron to free up viewer room.
   const [toolsCollapsed, setToolsCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("kimera_preview_tools_collapsed") === "1";
+      return localStorage.getItem("orreris_preview_tools_collapsed") === "1";
     } catch {
       return false;
     }
@@ -921,7 +921,7 @@ function VideoPreviewImpl({
   // while PAUSED) re-arms a recomposite — otherwise the new graded frame only lands via the settle
   // window and the paused viewer can show a stale frame after an edit.
   const sceneRedrawRef = useRef<(() => void) | null>(null);
-  // Single-context GPU-first preview (Phase 5, `kimera.singleCtxPreview`): media layers publish a raw
+  // Single-context GPU-first preview (Phase 5, `orreris.singleCtxPreview`): media layers publish a raw
   // frame-source descriptor here (keyed by layer id) instead of grading into `gradedCanvasesRef`;
   // ScenePreviewCanvas grades them in-context. The per-layer sinks are cached (stable identity) so
   // toggling other props never re-registers a descriptor. Flag read once (doesn't change mid-session).
@@ -1408,7 +1408,7 @@ function VideoPreviewImpl({
             setToolsCollapsed((v) => {
               const next = !v;
               try {
-                localStorage.setItem("kimera_preview_tools_collapsed", next ? "1" : "0");
+                localStorage.setItem("orreris_preview_tools_collapsed", next ? "1" : "0");
               } catch {
                 /* ignore storage failures */
               }
@@ -1847,7 +1847,7 @@ type PreviewLayerProps = {
   /** Report the graded canvas so the transition overlay can sample it as a from/to texture. */
   onGradedFrame?: ((canvas: HTMLCanvasElement) => void) | undefined;
   /** Single-ctx preview (Phase 5): publish this media layer's raw frame source to the scene compositor
-   *  (no own GL context); set only for scene-composited media when `kimera.singleCtxPreview` is on. */
+   *  (no own GL context); set only for scene-composited media when `orreris.singleCtxPreview` is on. */
   sceneMediaSink?: SceneMediaSink | undefined;
   /** False for scene-composited media → opacity is applied LIVE at composite, not baked (no seek staleness). */
   bakeOpacity?: boolean | undefined;
@@ -4052,7 +4052,7 @@ function PreviewSelectionOverlay({
 
 /**
  * Phase 3 color system — injects the shared SVG color-filter `<defs>` for every
- * visible layer, referenced by each layer's `filter: url(#kimera-color-…)`. Same
+ * visible layer, referenced by each layer's `filter: url(#orreris-color-…)`. Same
  * shared generator + inline-SVG pattern the text-warp overlay uses, so the web
  * preview and the Remotion export stay pixel-aligned. Recomputed per frame
  * (currentTime) so keyframed color params animate.

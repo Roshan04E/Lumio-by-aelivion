@@ -58,10 +58,10 @@ export interface TemplateProvider {
   listTemplates(): RuntimeTemplateItem[];
 }
 
-const BUILTIN_SOURCE: PluginSource = { kind: "builtin", id: "kimera.builtin", name: "Kimera Built-ins" };
+const BUILTIN_SOURCE: PluginSource = { kind: "builtin", id: "orreris.builtin", name: "Orreris Built-ins" };
 
 export const builtInEffectProvider: EffectProvider = {
-  id: "kimera.builtin.effects",
+  id: "orreris.builtin.effects",
   name: "Built-in Effects",
   listEffects() {
     return timelineEffectRegistry.map((definition) => ({
@@ -76,7 +76,7 @@ export const builtInEffectProvider: EffectProvider = {
 };
 
 export const builtInTransitionProvider: TransitionProvider = {
-  id: "kimera.builtin.transitions",
+  id: "orreris.builtin.transitions",
   name: "Built-in Transitions",
   listTransitions() {
     return listTransitions().map((definition) => ({
@@ -90,7 +90,7 @@ export const builtInTransitionProvider: TransitionProvider = {
 };
 
 export const builtInLookProvider: LookProvider = {
-  id: "kimera.builtin.looks",
+  id: "orreris.builtin.looks",
   name: "Built-in Looks",
   listLooks() {
     return CREATIVE_LOOKS.map((definition) => ({

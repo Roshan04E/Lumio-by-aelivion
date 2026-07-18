@@ -28,7 +28,7 @@ import {
   AlignVerticalSpaceBetween,
   LayoutPanelTop
 } from "lucide-react";
-import type { TimelineLayer } from "@kimera-by-aelivion/shared";
+import type { TimelineLayer } from "@orreris/shared";
 import { InspectorSection } from "../InspectorSection";
 import { applyTransformValueAtTime } from "../keyframeUtils";
 import {

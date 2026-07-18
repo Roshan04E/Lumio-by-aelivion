@@ -1,5 +1,5 @@
 /**
- * Kimera OS — Blueprint color dialect (K3). Payload = the shipped `GradeIntent` (this
+ * Orreris OS — Blueprint color dialect (K3). Payload = the shipped `GradeIntent` (this
  * dialect FORMALIZES what GradeIntent proved — same schema, same deterministic compiler,
  * now with capability closure in front).
  *

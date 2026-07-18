@@ -1,21 +1,21 @@
 {
-  "name": "kimera-by-aelivion",
+  "name": "orreris",
   "version": "0.1.0",
   "private": true,
   "description": "Production-minded MVP for turning raw videos into modular reel-style edits.",
   "packageManager": "pnpm@11.5.1",
   "scripts": {
-    "dev": "pnpm --parallel --stream --filter @kimera-by-aelivion/api --filter @kimera-by-aelivion/web --filter @kimera-by-aelivion/worker dev",
+    "dev": "pnpm --parallel --stream --filter @orreris/api --filter @orreris/web --filter @orreris/worker dev",
     "build": "pnpm -r build",
-    "caption:qa": "pnpm --filter @kimera-by-aelivion/worker caption:qa",
+    "caption:qa": "pnpm --filter @orreris/worker caption:qa",
     "lint": "pnpm -r lint",
-    "animation:test": "pnpm --filter @kimera-by-aelivion/worker animation:test",
-    "render:compare": "pnpm --filter @kimera-by-aelivion/worker render:compare",
-    "render:compare:pixels": "pnpm --filter @kimera-by-aelivion/worker render:compare:pixels",
+    "animation:test": "pnpm --filter @orreris/worker animation:test",
+    "render:compare": "pnpm --filter @orreris/worker render:compare",
+    "render:compare:pixels": "pnpm --filter @orreris/worker render:compare:pixels",
     "typecheck": "pnpm -r typecheck",
     "models:fetch": "node scripts/fetch-local-models.mjs",
-    "db:generate": "pnpm --filter @kimera-by-aelivion/api prisma:generate",
-    "db:migrate": "pnpm --filter @kimera-by-aelivion/api prisma:migrate",
-    "db:seed": "pnpm --filter @kimera-by-aelivion/api db:seed"
+    "db:generate": "pnpm --filter @orreris/api prisma:generate",
+    "db:migrate": "pnpm --filter @orreris/api prisma:migrate",
+    "db:seed": "pnpm --filter @orreris/api db:seed"
   }
 }
