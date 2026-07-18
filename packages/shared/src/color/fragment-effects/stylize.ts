@@ -237,8 +237,11 @@ vec4 effect(vec2 uv) {
   if (bands >= 2.0) {
     float l = max(_luma(c), 1e-4);
     float dith = (_rand(floor(uv * uResolution)) - 0.5) / max(bands, 2.0) * 0.25;
-    float lq = (floor(clamp(l + dith, 0.0, 0.9999) * bands) + 0.5) / bands;
-    c *= lq / l;
+    // Band EDGES (0..1 inclusive), not centers: the bottom band must stay true black — center
+    // quantization lifted near-black lumas by up to ~bands/2 x, which blew compression-noise
+    // chroma into saturated color blobs. Gain-clamp for the same reason.
+    float lq = floor(clamp(l + dith, 0.0, 0.9999) * bands) / max(bands - 1.0, 1.0);
+    c *= min(lq / l, 2.0);
   }
 
   float punch = clamp(palettePunch, 0.0, 100.0) / 100.0;

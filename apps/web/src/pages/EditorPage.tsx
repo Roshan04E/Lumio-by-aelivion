@@ -13345,7 +13345,7 @@ function ClipSpeedControl({
           }}
         >
           <option value="0">Off (smooth)</option>
-          <option value="12">12 fps — on twos (Spider-Verse feel)</option>
+          <option value="12">12 fps — on twos (animated feel)</option>
           <option value="8">8 fps — on threes</option>
           <option value="6">6 fps — stop motion</option>
         </select>
