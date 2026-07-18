@@ -34,6 +34,7 @@ import { metadataObserver, MEDIA_METADATA_FACT, type MediaMetadataFact } from ".
 import { lookObserver, MEDIA_LOOK_FACT } from "./observers/look";
 import { aggregateFaceSamples, facesObserver, MEDIA_FACES_FACT } from "./observers/faces";
 import { classifyFormat, formatObserver, COMPOSITION_FORMAT_FACT } from "./observers/format";
+import { classifyScene, sceneObserver, MEDIA_SCENE_FACT } from "./observers/scene";
 import { textSummaryObserver, COMPOSITION_TEXT_FACT, type CompositionTextFact } from "./observers/text-summary";
 import { characterObserver, COMPOSITION_CHARACTER_FACT, type CompositionCharacterFact } from "./observers/character";
 import { systemObserver, SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID, type SystemCapabilitiesFact } from "./observers/system";
@@ -174,6 +175,7 @@ registerObserver(projectMediaObserver);
 registerObserver(characterObserver);
 registerObserver(facesObserver);
 registerObserver(formatObserver);
+registerObserver(sceneObserver);
 
 const assetTarget = { kind: "asset" as const, id: "a1" };
 const compTarget = { kind: "composition" as const, id: "c" };
@@ -398,6 +400,19 @@ async function run(): Promise<void> {
   clearFactStore();
   __resetFactStoreMemoryForTests();
   check("clear removes persisted facts too", getStoredFact("test.value", "asset:a1") === undefined);
+
+  // ---- SDK reference inference (media.scene — asset-level, single input) ----
+  console.log("SDK reference inference (media.scene):");
+  const dark = classifyScene({ avgLuma: 0.2, temperature: -0.1, saturation: 0.1 });
+  check("classify: dark cool muted footage", dark.lighting === "low-light" && dark.palette === "cool" && dark.energy === "muted");
+  const golden = classifyScene({ avgLuma: 0.7, temperature: 0.12, saturation: 0.5 });
+  check("classify: bright warm vivid footage", golden.lighting === "bright" && golden.palette === "warm" && golden.energy === "vivid");
+  const plain = classifyScene({ avgLuma: 0.45, temperature: 0, saturation: 0.3 });
+  check("classify: unremarkable footage stays standard/neutral/moderate", plain.lighting === "standard" && plain.palette === "neutral" && plain.energy === "moderate");
+  check(
+    "scene observer declines under node (its look input path doesn't exist here)",
+    (await queryFact({ type: MEDIA_SCENE_FACT, target: assetTarget, budgetMs: 12_000 }, ctx)) === null
+  );
 
   // ---- SDK v1 registration contract (ORRERIS_SDK.md) ----
   console.log("SDK v1 registration contract:");

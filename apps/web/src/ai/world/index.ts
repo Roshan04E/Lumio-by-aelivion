@@ -18,6 +18,7 @@ import { projectMediaObserver } from "./observers/project-media";
 import { characterObserver } from "./observers/character";
 import { facesObserver } from "./observers/faces";
 import { formatObserver } from "./observers/format";
+import { sceneObserver } from "./observers/scene";
 import { perceptionQueueDepth } from "./scheduler";
 import type { WorldContext } from "./types";
 
@@ -34,6 +35,8 @@ registerObserver(characterObserver);
 registerObserver(facesObserver);
 // K5 two-input inference — format (talking-head/b-roll/mixed) from faces × text.
 registerObserver(formatObserver);
+// SDK v1 reference inference — asset-level scene ambience from the measured look.
+registerObserver(sceneObserver);
 
 // Host-registered live asset list (EditorPage state — includes server/stock assets the
 // local-first records don't). Absent → local records alone still serve local imports.

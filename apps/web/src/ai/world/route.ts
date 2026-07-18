@@ -26,6 +26,8 @@ import type { MediaFacesFact } from "./observers/faces";
 import { MEDIA_FACES_FACT } from "./observers/faces";
 import type { CompositionFormatFact } from "./observers/format";
 import { COMPOSITION_FORMAT_FACT } from "./observers/format";
+import type { MediaSceneFact } from "./observers/scene";
+import { MEDIA_SCENE_FACT } from "./observers/scene";
 import type { SystemCapabilitiesFact } from "./observers/system";
 import { SYSTEM_CAPABILITIES_FACT, SYSTEM_TARGET_ID } from "./observers/system";
 import type { UserAiProfileFact } from "./observers/user-profile";
@@ -191,11 +193,12 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
     return ESCALATE;
   }
   const target = { kind: "asset" as const, id: layer.assetId };
-  const [metadata, look, faces] = await Promise.all([
+  const [metadata, look, faces, scene] = await Promise.all([
     queryFact<MediaMetadataFact>({ type: MEDIA_METADATA_FACT, target, budgetMs: 250 }, ctx),
     queryFact<MediaLookFact>({ type: MEDIA_LOOK_FACT, target, budgetMs: 12_000 }, ctx),
     // L3 browser-ML purchase — first run pays the model download; cached per asset after.
-    queryFact<MediaFacesFact>({ type: MEDIA_FACES_FACT, target, budgetMs: 12_000 }, ctx)
+    queryFact<MediaFacesFact>({ type: MEDIA_FACES_FACT, target, budgetMs: 12_000 }, ctx),
+    queryFact<MediaSceneFact>({ type: MEDIA_SCENE_FACT, target, budgetMs: 12_000 }, ctx)
   ]);
 
   if (!metadata && !look) {
@@ -221,6 +224,16 @@ async function analyzeClip(composition: TimelineComposition, ordinal: number): P
     lines.push(
       `- Look: **${v.exposure}** exposure (mean luma ${(v.avgLuma * 100).toFixed(0)}%), contrast spread ${(v.contrast * 100).toFixed(0)}%, ${temperatureLabel} balance, ${saturationLabel} saturation`
     );
+    // Scene ambience (inferred) — shown only when it says something a grade should care
+    // about; "standard/neutral/moderate" footage adds no line (zero noise rule).
+    if (scene && (scene.fact.value.lighting !== "standard" || scene.fact.value.palette !== "neutral")) {
+      const s = scene.fact.value;
+      const parts = [
+        s.lighting === "low-light" ? "low-light footage — lift gently, don't crush shadows" : s.lighting === "bright" ? "bright footage — watch the highlights" : null,
+        s.palette === "warm" ? "already warm-leaning" : s.palette === "cool" ? "already cool-leaning" : null
+      ].filter(Boolean);
+      lines.push(`- Scene: ${parts.join(", ")} (my read · ${Math.round(scene.fact.confidence * 100)}% sure)`);
+    }
     if (faces) {
       const f = faces.fact.value;
       if (f.presenceShare > 0) {
