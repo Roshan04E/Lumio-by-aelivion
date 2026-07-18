@@ -473,7 +473,8 @@ export const timelineEffectTypes = [
   "oldTv",
   "glitchFx",
   "halftone",
-  "posterize"
+  "posterize",
+  "stylize"
 ] as const;
 
 export type TimelineEffectType = (typeof timelineEffectTypes)[number];

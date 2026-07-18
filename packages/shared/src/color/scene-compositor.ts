@@ -41,9 +41,11 @@ import {
 } from "./transitions/registry";
 import { PipelineAssembler } from "./transitions/pipeline-assembler";
 import {
+  buildFragmentEffectPassShader,
   buildFragmentEffectShader,
   resolveFragmentEffectParams,
   type FragmentEffectDefinition,
+  type FragmentEffectPassDefinition,
   type FragmentEffectParam,
 } from "./fragment-effects/registry";
 import type { BlendMode } from "../types";
@@ -356,10 +358,18 @@ interface CompiledTransition {
 interface CompiledFragmentEffect {
   program: WebGLProgram;
   uSrc: WebGLUniformLocation | null;
+  /** Multi-pass only: uPass0..N sampler locations, in the pass's declared `inputs` order. */
+  uPasses: (WebGLUniformLocation | null)[];
   uResolution: WebGLUniformLocation | null;
   uIntensity: WebGLUniformLocation | null;
   uTime: WebGLUniformLocation | null;
   params: { param: FragmentEffectParam; location: WebGLUniformLocation | null }[];
+  lastFrame: number;
+}
+
+/** A pooled intermediate target for one pass of a multi-pass fragment effect. */
+interface PassGraphTarget {
+  rt: RenderTarget;
   lastFrame: number;
 }
 
@@ -781,6 +791,8 @@ export class SceneCompositor {
   // the layer keeps its base image instead of going black.
   private readonly fragmentPrograms = new Map<string, CompiledFragmentEffect>();
   private readonly fragmentCompileFailureWarnings = new Set<string>();
+  /** Intermediate render targets for multi-pass fragment effects, keyed `${defId}:${passId}`. */
+  private readonly passGraphTargets = new Map<string, PassGraphTarget>();
   private accumA: RenderTarget;
   private accumB: RenderTarget;
   private width = 0;
@@ -1242,34 +1254,40 @@ export class SceneCompositor {
     return compiled;
   }
 
-  /** Compile + cache the program for a fragment-effect definition. Throws on GLSL compile/link failure. */
-  private prepareFragmentEffect(def: FragmentEffectDefinition): CompiledFragmentEffect {
-    const existing = this.fragmentPrograms.get(def.id);
+  /** Compile + cache the program for a fragment-effect definition (or ONE pass of a multi-pass one).
+   *  Throws on GLSL compile/link failure. */
+  private prepareFragmentEffect(def: FragmentEffectDefinition, pass?: FragmentEffectPassDefinition): CompiledFragmentEffect {
+    const key = pass ? `${def.id}#${pass.id}` : def.id;
+    const existing = this.fragmentPrograms.get(key);
     if (existing) {
       existing.lastFrame = this.frameCounter;
       return existing;
     }
     const gl = this.gl;
-    const program = linkProgram(gl, FULLSCREEN_TRI_VS, buildFragmentEffectShader(def));
+    const program = linkProgram(gl, FULLSCREEN_TRI_VS, pass ? buildFragmentEffectPassShader(def, pass) : buildFragmentEffectShader(def));
     const compiled: CompiledFragmentEffect = {
       program,
       uSrc: gl.getUniformLocation(program, "uSrc"),
+      uPasses: (pass?.inputs ?? []).map((_, i) => gl.getUniformLocation(program, `uPass${i}`)),
       uResolution: gl.getUniformLocation(program, "uResolution"),
       uIntensity: gl.getUniformLocation(program, "uIntensity"),
       uTime: gl.getUniformLocation(program, "uTime"),
       params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
       lastFrame: this.frameCounter,
     };
-    this.fragmentPrograms.set(def.id, compiled);
+    this.fragmentPrograms.set(key, compiled);
     return compiled;
   }
 
   /**
    * Run one fragment-effect pass: `srcTex` (the layer's running nest image) → `dstRT` (comp-sized).
-   * Returns false (no-op, base image preserved) if the def fails to compile — never black-frames.
+   * Multi-pass definitions run their whole graph (intermediate scaled targets → final into `dstRT`).
+   * Returns false (no-op, base image preserved) if any program fails to compile — never black-frames.
    */
   private runFragmentPass(srcTex: WebGLTexture, pass: SceneFragmentPass, dstRT: RenderTarget): boolean {
-    const gl = this.gl;
+    if (pass.def.passes && pass.def.passes.length > 0) {
+      return this.runFragmentPassGraph(srcTex, pass, dstRT);
+    }
     let compiled: CompiledFragmentEffect;
     try {
       compiled = this.prepareFragmentEffect(pass.def);
@@ -1280,15 +1298,95 @@ export class SceneCompositor {
       }
       return false;
     }
+    this.drawFragmentProgram(compiled, srcTex, [], pass, dstRT, this.width, this.height);
+    return true;
+  }
+
+  /**
+   * The stylize pass-graph runner (plans/stylize-anime-engine.md P1). Intermediate passes render
+   * into pooled, possibly DOWNSCALED targets (expensive filters at working res); the final pass
+   * renders full-res into `dstRT` and is the only one intensity-mixed against the source. Inputs
+   * resolve strictly to EARLIER passes — an unknown input id skips the whole effect (compile-time
+   * data bug, warned once, never a black frame).
+   */
+  private runFragmentPassGraph(srcTex: WebGLTexture, pass: SceneFragmentPass, dstRT: RenderTarget): boolean {
+    const passes = pass.def.passes!;
+    const outputs = new Map<string, RenderTarget>();
+    for (let i = 0; i < passes.length; i++) {
+      const stage = passes[i]!;
+      const isFinal = i === passes.length - 1;
+      let compiled: CompiledFragmentEffect;
+      try {
+        compiled = this.prepareFragmentEffect(pass.def, stage);
+      } catch (error) {
+        const key = `${pass.def.id}#${stage.id}`;
+        if (!this.fragmentCompileFailureWarnings.has(key)) {
+          this.fragmentCompileFailureWarnings.add(key);
+          console.warn(`SceneCompositor: fragment pass "${key}" failed to compile; skipping effect.`, error);
+        }
+        return false;
+      }
+      const inputTextures: WebGLTexture[] = [];
+      for (const inputId of stage.inputs ?? []) {
+        const rt = outputs.get(inputId);
+        if (!rt) {
+          const key = `${pass.def.id}#${stage.id}`;
+          if (!this.fragmentCompileFailureWarnings.has(key)) {
+            this.fragmentCompileFailureWarnings.add(key);
+            console.warn(`SceneCompositor: fragment pass "${key}" references unknown input "${inputId}"; skipping effect.`);
+          }
+          return false;
+        }
+        inputTextures.push(rt.tex);
+      }
+      const scale = isFinal ? 1 : Math.min(1, Math.max(0.1, stage.scale ?? 1));
+      const w = Math.max(1, Math.round(this.width * scale));
+      const h = Math.max(1, Math.round(this.height * scale));
+      const target = isFinal ? dstRT : this.passGraphTarget(`${pass.def.id}:${stage.id}`, w, h);
+      this.drawFragmentProgram(compiled, srcTex, inputTextures, pass, target, w, h);
+      if (!isFinal) outputs.set(stage.id, target);
+    }
+    return true;
+  }
+
+  /** Pooled intermediate target for a graph pass (resized in place when the comp size changes). */
+  private passGraphTarget(key: string, width: number, height: number): RenderTarget {
+    let entry = this.passGraphTargets.get(key);
+    if (!entry) {
+      entry = { rt: new RenderTarget(this.gl, width, height), lastFrame: this.frameCounter };
+      this.passGraphTargets.set(key, entry);
+    }
+    entry.rt.resize(width, height);
+    entry.lastFrame = this.frameCounter;
+    return entry.rt;
+  }
+
+  /** Bind + draw one fragment-effect program (shared by the single-pass path and graph stages). */
+  private drawFragmentProgram(
+    compiled: CompiledFragmentEffect,
+    srcTex: WebGLTexture,
+    inputTextures: WebGLTexture[],
+    pass: SceneFragmentPass,
+    dstRT: RenderTarget,
+    width: number,
+    height: number,
+  ): void {
+    const gl = this.gl;
     const resolved = resolveFragmentEffectParams(pass.def, pass.params);
     gl.bindFramebuffer(gl.FRAMEBUFFER, dstRT.fbo);
-    gl.viewport(0, 0, this.width, this.height);
+    gl.viewport(0, 0, width, height);
     gl.useProgram(compiled.program);
     gl.bindVertexArray(this.presentVao);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, srcTex);
     gl.uniform1i(compiled.uSrc, 0);
-    gl.uniform2f(compiled.uResolution, this.width, this.height);
+    inputTextures.forEach((tex, i) => {
+      gl.activeTexture(gl.TEXTURE1 + i);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      const loc = compiled.uPasses[i];
+      if (loc) gl.uniform1i(loc, 1 + i);
+    });
+    gl.uniform2f(compiled.uResolution, width, height);
     gl.uniform1f(compiled.uIntensity, Math.max(0, Math.min(1, pass.intensity)));
     gl.uniform1f(compiled.uTime, pass.timeSeconds);
     for (const { param, location } of compiled.params) {
@@ -1300,17 +1398,23 @@ export class SceneCompositor {
       else if (param.type === "vec3" && Array.isArray(value)) gl.uniform3f(location, value[0] ?? 0, value[1] ?? 0, value[2] ?? 0);
     }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    return true;
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   /** Drop fragment-effect programs whose def hasn't drawn recently (mirrors pruneRegionGradeRenderers). */
   private pruneFragmentPrograms(): void {
-    if (this.fragmentPrograms.size === 0) return;
+    if (this.fragmentPrograms.size === 0 && this.passGraphTargets.size === 0) return;
     const gl = this.gl;
     for (const [key, entry] of this.fragmentPrograms) {
       if (this.frameCounter - entry.lastFrame > 300) {
         gl.deleteProgram(entry.program);
         this.fragmentPrograms.delete(key);
+      }
+    }
+    for (const [key, entry] of this.passGraphTargets) {
+      if (this.frameCounter - entry.lastFrame > 300) {
+        entry.rt.dispose();
+        this.passGraphTargets.delete(key);
       }
     }
   }
@@ -2529,6 +2633,8 @@ export class SceneCompositor {
     gl.deleteTexture(this.emptyTex);
     this.accumA.dispose();
     this.accumB.dispose();
+    for (const entry of this.passGraphTargets.values()) entry.rt.dispose();
+    this.passGraphTargets.clear();
     this.plateRT?.dispose();
     this.scratch1?.dispose();
     this.scratch2?.dispose();

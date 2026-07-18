@@ -81,6 +81,7 @@ export type RenderComparisonFixtureKey =
   | "transition"
   | "advanced-transition"
   | "plugin-shader"
+  | "stylize"
   | "vignette"
 
   | "grain"
@@ -121,6 +122,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "transition",
   "advanced-transition",
   "plugin-shader",
+  "stylize",
   "vignette",
 
   "grain",
@@ -260,6 +262,22 @@ const pluginShaderEffects: TimelineLayer["effects"] = [
     enabled: true,
     intensity: 100,
     params: { [SHADER_MANIFEST_ID_PARAM_KEY]: EXAMPLE_INVERT_FRAGMENT_EFFECT_ID }
+  }
+];
+
+// Stylize pass-graph fixture (plans/stylize-anime-engine.md P1): the FIRST multi-pass fragment
+// effect through the pixel gate — tensor → tensorBlur → half-res anisotropic-Kuwahara paint →
+// full-res tone, all deterministic (no time-driven randomness), so preview/export/Remotion must
+// land at the strict bar. Trips if any renderer diverges on the scaled intermediate targets
+// (working-res rounding), the multi-input sampler bindings, or the final intensity mix.
+const stylizeEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_stylize",
+    type: "stylize",
+    name: "Stylize",
+    enabled: true,
+    intensity: 100,
+    params: { paintRadius: 4, paintSharpness: 8, palettePunch: 35 }
   }
 ];
 
@@ -540,6 +558,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", transition: true };
     case "plugin-shader":
       return { effects: pluginShaderEffects, fit: "cover" };
+    case "stylize":
+      return { effects: stylizeEffects, fit: "cover" };
     case "vignette":
       return { effects: vignetteEffects, fit: "cover" };
     case "grain":

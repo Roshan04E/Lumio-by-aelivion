@@ -1,8 +1,9 @@
 # Stylize Engine — photoreal footage → illustrated / anime / comic-print motion
 
-Status: **RESEARCH + PLAN (2026-07-18). Not started. Do not execute until the plan is
-approved.** Reference brief: user wants a Spider-Verse-class stylization of real footage —
-an advanced effect no mainstream browser editor ships. "Best effects, no hurry."
+Status: **P1 SHIPPED 2026-07-18** (pass-graph infra + Painterly; pixel gate 38/38, stylize
+fixture 0.000%). P2 (ink/cel/manga) next. Reference brief: user wants a Spider-Verse-class
+stylization of real footage — an advanced effect no mainstream browser editor ships.
+"Best effects, no hurry."
 
 ---
 

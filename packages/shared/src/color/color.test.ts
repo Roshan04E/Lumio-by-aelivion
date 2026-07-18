@@ -421,6 +421,35 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   check("warm WB: R above B, all channels in display range", out[0] > out[2] && out[0] <= 1 && out[2] >= 0);
 }
 
+// 39. Stylize pass-graph assembly (plans/stylize-anime-engine.md P1) — the pure half of the
+//     multi-pass harness: per-pass shader assembly, input sampler wiring, and the
+//     final-pass-only intensity mix. The GPU half is covered by the `stylize` pixel fixture.
+{
+  const { STYLIZE_PAINTERLY } = await import("./fragment-effects/stylize");
+  const { buildFragmentEffectPassShader, getFragmentEffect } = await import("./fragment-effects/registry");
+  await import("../effects"); // triggers registerBuiltinFragmentEffects()
+
+  check("stylize registered as a builtin fragment effect", getFragmentEffect("builtin.stylize") === STYLIZE_PAINTERLY);
+  const passes = STYLIZE_PAINTERLY.passes!;
+  check(
+    "stylize graph order: tensor → tensorBlur → paint → tone",
+    passes.map((p) => p.id).join(",") === "tensor,tensorBlur,paint,tone"
+  );
+  check(
+    "every stylize pass input references an EARLIER pass",
+    passes.every((p, i) => (p.inputs ?? []).every((input) => passes.findIndex((q) => q.id === input) >= 0 && passes.findIndex((q) => q.id === input) < i))
+  );
+  const tensor = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[0]!);
+  const paint = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[2]!);
+  const tone = buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[3]!);
+  check("intermediate pass writes raw output (no intensity mix)", !tensor.includes("mix(s, e,") && tensor.includes("fragColor = effect(v_uv);"));
+  check("input-consuming pass declares uPass0", paint.includes("uniform sampler2D uPass0;"));
+  check("final pass mixes against the source by uIntensity", tone.includes("mix(s, e, clamp(uIntensity, 0.0, 1.0))"));
+  check("no-input pass declares no uPass samplers", !tensor.includes("uPass0"));
+  check("all stylize params are declared uniforms in the paint pass", ["paintRadius", "paintSharpness"].every((p) => paint.includes(`uniform float ${p};`)));
+  check("assembly is memoized (same reference on re-build)", buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[0]!) === tensor);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} color test(s) failed.`);
   process.exit(1);

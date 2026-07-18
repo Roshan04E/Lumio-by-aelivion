@@ -27,14 +27,34 @@ export interface FragmentEffectParam {
   label?: string;
 }
 
+/**
+ * One pass of a multi-pass fragment effect (the stylize pass-graph, plans/stylize-anime-engine.md).
+ * Passes run in array order; each renders a full-screen triangle into its own render target.
+ * `uSrc` is ALWAYS the layer's original composited image; `inputs` lists EARLIER pass ids whose
+ * outputs are bound as `uPass0..N` (in the listed order). `scale` shrinks the pass's working
+ * resolution (0.5 = half comp res — where expensive filters live); the LAST pass always renders at
+ * full comp resolution and is the only one mixed against the source by `uIntensity`.
+ */
+export interface FragmentEffectPassDefinition {
+  id: string;
+  /** Earlier pass ids bound as uPass0..N. Omit for src-only passes. */
+  inputs?: string[];
+  /** Working-resolution factor (0,1]; ignored (forced 1) on the final pass. */
+  scale?: number;
+  /** The body: must define `vec4 effect(vec2 uv) { ... }`. */
+  glsl: string;
+}
+
 export interface FragmentEffectDefinition {
   /** Stable id - stored as `effect.params.__shaderManifestId`. */
   id: string;
   name: string;
   category: string;
   params: FragmentEffectParam[];
-  /** The body: must define `vec4 effect(vec2 uv) { ... }`. */
+  /** Single-pass body: must define `vec4 effect(vec2 uv) { ... }`. Ignored when `passes` is set. */
   glsl: string;
+  /** Multi-pass graph (ordered). When present the compositor runs the chain instead of `glsl`. */
+  passes?: FragmentEffectPassDefinition[];
 }
 
 const GLSL_TYPE: Record<FragmentParamType, string> = {
@@ -61,11 +81,21 @@ function paramUniformLines(params: FragmentEffectParam[]): string {
 
 const shaderCache = new Map<string, string>();
 
-/** Assemble the full fragment shader for a definition. Memoized by id (definitions are static). */
-export function buildFragmentEffectShader(def: FragmentEffectDefinition): string {
-  const cached = shaderCache.get(def.id);
-  if (cached) return cached;
-  const src = `#version 300 es
+function assembleShader(def: FragmentEffectDefinition, body: string, passInputCount: number, isFinal: boolean): string {
+  const passSamplers = Array.from({ length: passInputCount }, (_, i) => `uniform sampler2D uPass${i};`).join("\n");
+  // Intermediate passes write their raw output (data textures — tensors, flow fields, paint
+  // buffers); ONLY the final pass mixes against the source, so `uIntensity` keeps its product
+  // meaning ("how much of the effect") across single- and multi-pass definitions.
+  const main = isFinal
+    ? `void main(){
+  vec4 s = getSrcColor(v_uv);
+  vec4 e = effect(v_uv);
+  fragColor = mix(s, e, clamp(uIntensity, 0.0, 1.0));
+}`
+    : `void main(){
+  fragColor = effect(v_uv);
+}`;
+  return `#version 300 es
 precision highp float;
 precision highp sampler2D;
 
@@ -73,20 +103,40 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 uniform sampler2D uSrc;      // the layer's own composited image
-uniform vec2 uResolution;
-uniform float uIntensity;    // 0..1, mixed against the source in main()
+${passSamplers}
+uniform vec2 uResolution;    // THIS pass's output resolution (scaled passes see their working res)
+uniform float uIntensity;    // 0..1, mixed against the source in the final pass's main()
 uniform float uTime;
 ${paramUniformLines(def.params)}
 ${HARNESS_PRELUDE}
-${def.glsl}
+${body}
 
-void main(){
-  vec4 s = getSrcColor(v_uv);
-  vec4 e = effect(v_uv);
-  fragColor = mix(s, e, clamp(uIntensity, 0.0, 1.0));
-}
+${main}
 `;
+}
+
+/** Assemble the full fragment shader for a SINGLE-PASS definition. Memoized by id (definitions are static). */
+export function buildFragmentEffectShader(def: FragmentEffectDefinition): string {
+  const cached = shaderCache.get(def.id);
+  if (cached) return cached;
+  const src = assembleShader(def, def.glsl, 0, true);
   shaderCache.set(def.id, src);
+  return src;
+}
+
+/**
+ * Assemble the shader for ONE pass of a multi-pass definition. Memoized per (def, pass). The same
+ * assembled source is compiled by every renderer (web preview, browser export, Remotion) — the
+ * parity-by-construction law extends to graphs unchanged.
+ */
+export function buildFragmentEffectPassShader(def: FragmentEffectDefinition, pass: FragmentEffectPassDefinition): string {
+  const passes = def.passes ?? [];
+  const key = `${def.id}#${pass.id}`;
+  const cached = shaderCache.get(key);
+  if (cached) return cached;
+  const isFinal = passes.length > 0 && passes[passes.length - 1]!.id === pass.id;
+  const src = assembleShader(def, pass.glsl, pass.inputs?.length ?? 0, isFinal);
+  shaderCache.set(key, src);
   return src;
 }
 
@@ -101,6 +151,9 @@ export function registerFragmentEffect(def: FragmentEffectDefinition, options: {
     return false;
   }
   shaderCache.delete(def.id);
+  for (const pass of def.passes ?? []) {
+    shaderCache.delete(`${def.id}#${pass.id}`);
+  }
   registry.set(def.id, def);
   return true;
 }

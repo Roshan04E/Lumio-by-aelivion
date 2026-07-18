@@ -1,4 +1,5 @@
 import { registerFragmentEffect, type FragmentEffectDefinition } from "./registry";
+import { STYLIZE_PAINTERLY } from "./stylize";
 
 /**
  * Builtin fragment-shader effects (2026-07-14 batch: radial blur, directional/motion blur, sharpen,
@@ -284,7 +285,9 @@ const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [
   OLD_TV,
   GLITCH_FX,
   HALFTONE,
-  POSTERIZE
+  POSTERIZE,
+  // The stylize pass-graph (multi-pass — plans/stylize-anime-engine.md P1: Painterly).
+  STYLIZE_PAINTERLY
 ];
 
 let registered = false;

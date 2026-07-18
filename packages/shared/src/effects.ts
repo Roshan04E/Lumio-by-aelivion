@@ -595,6 +595,22 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     previewSupport: "native",
     renderSupport: "native",
     params: [{ key: "levels", label: "Levels", type: "number", min: 2, max: 16, step: 1, defaultValue: 5, keyframeable: true }]
+  },
+  {
+    type: "stylize",
+    name: "Stylize",
+    description: "Painterly illustration engine: anisotropic Kuwahara paint + tone punch (multi-pass GPU graph, temporally stable on video).",
+    category: "Stylize",
+    scope: ["clip", "adjustment"],
+    compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
+    defaultIntensity: 100,
+    previewSupport: "native",
+    renderSupport: "native",
+    params: [
+      { key: "paintRadius", label: "Brush Size", type: "number", min: 1, max: 6, step: 1, defaultValue: 4, unit: "px", keyframeable: true },
+      { key: "paintSharpness", label: "Edge Hardness", type: "number", min: 1, max: 16, step: 1, defaultValue: 8, keyframeable: true },
+      { key: "palettePunch", label: "Color Punch", type: "number", min: 0, max: 100, step: 1, defaultValue: 35, unit: "%", keyframeable: true }
+    ]
   }
 ];
 

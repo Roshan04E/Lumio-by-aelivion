@@ -146,7 +146,8 @@ const BUILTIN_FRAGMENT_EFFECT_TYPES = new Set([
   "oldTv",
   "glitchFx",
   "halftone",
-  "posterize"
+  "posterize",
+  "stylize"
 ]);
 
 /** Parse `#rgb`/`#rrggbb`/`rgb()`/`rgba()` into straight-alpha rgb 0..1 (alpha ignored — glow tint). */
