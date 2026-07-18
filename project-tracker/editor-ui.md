@@ -89,3 +89,23 @@ wiring bug into dead UI, which is unfindable by every gate we own — it typeche
 doesn't work. Symptom-level suspicion ("the finder is wrong") cost a full cycle here; the giveaway was
 "only ONE tab is broken" — that's WIRING, not shared logic. Compare the broken call site against its
 working siblings FIRST.
+
+## v5 — Position/Anchor labels in permanent ellipses (grid packing, not label width) (2026-07-18)
+
+**Problem:** In the Transform panel, "Position" and "Anchor" always rendered as "Posi…" /
+"Anc…" — the two rows sat side by side fighting for the panel width (user screenshot).
+
+**Root cause:** single-value rows (`NumberControl`) carry `.number-row` with
+`grid-column: 1 / -1`, spanning the full inspector width — but `PropertyRowGroup`
+(Position X/Y, Anchor X/Y, tilt) never got an equivalent rule. Inside `.control-grid`'s
+`repeat(auto-fill, minmax(88px, 1fr))` the two groups packed into one line, and the
+group's label column (`minmax(52px, 0.32fr)`) ellipsized at half-panel width no matter
+how wide the panel was.
+
+**Fix:** `.property-row-group { grid-column: 1 / -1 }` (global.css, next to its existing
+grid-template rule) — one group per line like every other row; the label fits and X/Y
+share the line to its right, flex-wrapping only when the panel is genuinely narrow.
+All three `PropertyRowGroup` call sites are TransformPanel rows that want full width.
+
+**Lesson (pattern):** any new row shell rendered into `.control-grid` must decide its
+span explicitly — auto-fill packs unspanned items into skinny columns silently.

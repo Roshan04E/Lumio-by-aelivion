@@ -15920,6 +15920,11 @@ input.scrub-number:focus {
 /* Narrower label column than plain rows — two tagged fields + diamonds need the room
    at the 256px minimum panel width (user report: X/Y values clipped). */
 .property-row-group {
+  /* Full inspector width like every .number-row — without this the auto-fill control
+     grid packed Position and Anchor side by side and BOTH labels lived in permanent
+     ellipses ("Posi…" / "Anc…", user report 2026-07-18). One group per line: the label
+     fits, and X/Y share the line right of it (wrapping only when truly narrow). */
+  grid-column: 1 / -1;
   grid-template-columns: minmax(52px, 0.32fr) minmax(0, 1fr);
 }
 
