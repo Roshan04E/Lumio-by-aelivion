@@ -41,6 +41,14 @@ export interface FragmentEffectPassDefinition {
   inputs?: string[];
   /** Working-resolution factor (0,1]; ignored (forced 1) on the final pass. */
   scale?: number;
+  /**
+   * Cost gate: when it returns true for the resolved params, the pass is SKIPPED and later passes
+   * that list it as an input receive the SOURCE texture instead. Only valid when the consuming
+   * math makes the input irrelevant under the same condition (e.g. ink passes skipped at
+   * inkStrength 0, whose consumer mixes by inkStrength). Deterministic — same params skip the
+   * same passes in every renderer, so parity holds.
+   */
+  skipWhen?: (params: Record<string, number | number[] | boolean>) => boolean;
   /** The body: must define `vec4 effect(vec2 uv) { ... }`. */
   glsl: string;
 }

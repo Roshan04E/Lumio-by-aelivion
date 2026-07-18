@@ -1311,10 +1311,18 @@ export class SceneCompositor {
    */
   private runFragmentPassGraph(srcTex: WebGLTexture, pass: SceneFragmentPass, dstRT: RenderTarget): boolean {
     const passes = pass.def.passes!;
+    const resolvedParams = resolveFragmentEffectParams(pass.def, pass.params);
     const outputs = new Map<string, RenderTarget>();
+    const skipped = new Set<string>();
     for (let i = 0; i < passes.length; i++) {
       const stage = passes[i]!;
       const isFinal = i === passes.length - 1;
+      // Cost gate: a pass whose result can't affect the output at these params is never drawn
+      // (deterministic — every renderer skips identically; consumers of a skipped pass get src).
+      if (!isFinal && stage.skipWhen?.(resolvedParams)) {
+        skipped.add(stage.id);
+        continue;
+      }
       let compiled: CompiledFragmentEffect;
       try {
         compiled = this.prepareFragmentEffect(pass.def, stage);
@@ -1330,6 +1338,10 @@ export class SceneCompositor {
       for (const inputId of stage.inputs ?? []) {
         const rt = outputs.get(inputId);
         if (!rt) {
+          if (skipped.has(inputId)) {
+            inputTextures.push(srcTex); // skipped input — the consumer's math ignores it at these params
+            continue;
+          }
           const key = `${pass.def.id}#${stage.id}`;
           if (!this.fragmentCompileFailureWarnings.has(key)) {
             this.fragmentCompileFailureWarnings.add(key);
@@ -1339,7 +1351,17 @@ export class SceneCompositor {
         }
         inputTextures.push(rt.tex);
       }
-      const scale = isFinal ? 1 : Math.min(1, Math.max(0.1, stage.scale ?? 1));
+      let scale = isFinal ? 1 : Math.min(1, Math.max(0.1, stage.scale ?? 1));
+      if (!isFinal) {
+        // Absolute working-res budget for intermediate buffers: heavy filters (ink DoG, Kuwahara)
+        // never pay more than ~1440p-class cost even on a full-res 4K comp. Applied in SHARED code
+        // → every renderer caps identically (parity holds); frame-relative shader params keep the
+        // LOOK stable across the cap. This is what keeps full-quality playback interactive
+        // (2026-07-18 "plays 1.5s then freezes" report).
+        const longEdge = Math.max(this.width, this.height) * scale;
+        const budget = 1440;
+        if (longEdge > budget) scale *= budget / longEdge;
+      }
       const w = Math.max(1, Math.round(this.width * scale));
       const h = Math.max(1, Math.round(this.height * scale));
       const target = isFinal ? dstRT : this.passGraphTarget(`${pass.def.id}:${stage.id}`, w, h);

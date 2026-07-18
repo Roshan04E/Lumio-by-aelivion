@@ -280,8 +280,21 @@ export const STYLIZE_PAINTERLY: FragmentEffectDefinition = {
     { id: "tensor", scale: 0.5, glsl: TENSOR_GLSL },
     { id: "tensorBlur", scale: 0.5, inputs: ["tensor"], glsl: TENSOR_BLUR_GLSL },
     { id: "paint", scale: 0.5, inputs: ["tensorBlur"], glsl: PAINT_GLSL },
-    { id: "dog", inputs: ["tensorBlur"], glsl: FLOW_DECODE_GLSL + INK_DOG_GLSL },
-    { id: "ink", inputs: ["tensorBlur", "dog"], glsl: FLOW_DECODE_GLSL + INK_GLSL },
+    // Cost gate: at inkStrength 0 the tone pass multiplies by mix(1, ink, 0) — the ink value is
+    // mathematically irrelevant, so both full-res ink passes skip entirely (the Painterly default
+    // pays zero for lines it doesn't draw).
+    {
+      id: "dog",
+      inputs: ["tensorBlur"],
+      skipWhen: (params) => !(typeof params.inkStrength === "number" && params.inkStrength > 0),
+      glsl: FLOW_DECODE_GLSL + INK_DOG_GLSL
+    },
+    {
+      id: "ink",
+      inputs: ["tensorBlur", "dog"],
+      skipWhen: (params) => !(typeof params.inkStrength === "number" && params.inkStrength > 0),
+      glsl: FLOW_DECODE_GLSL + INK_GLSL
+    },
     { id: "tone", inputs: ["paint", "ink"], glsl: TONE_GLSL }
   ]
 };
