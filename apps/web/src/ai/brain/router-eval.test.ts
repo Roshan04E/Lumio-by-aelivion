@@ -767,6 +767,32 @@ async function main(): Promise<void> {
     clearSemanticStores();
   }
 
+  {
+    // v2 ordinal pinning (user question 2026-07-18): ordinals are POSITIONS — inserting a
+    // clip re-numbers them WITHOUT touching the old layers' state, so the layersHash alone
+    // can't catch it. "blur clip 3" cached against vid_b must not replay once a new clip
+    // makes text_1 the third clip.
+    storeCachedPlan("blur clip 3", base, [
+      { actionId: "addEffect", params: { layerId: "vid_b", effectType: "blur" }, summary: "Blur clip 3" }
+    ]);
+    const samePositions = await semantic("blur clip 3");
+    check("plan cache v2: ordinal-pinned prompt replays while positions hold", samePositions.kind === "plan");
+    const inserted = {
+      ...composition,
+      tracks: composition.tracks.map((track, index) =>
+        index === 0
+          ? { ...track, layers: [layer({ id: "vid_new", type: "video" as const, startSeconds: 0.5, durationSeconds: 1 }), ...track.layers] }
+          : track
+      )
+    };
+    const renumbered = await semantic("blur clip 3", { composition: inserted });
+    check(
+      "plan cache v2: INSERTED clip re-numbers ordinals → escalates (never wrong-target)",
+      renumbered.kind === "escalate"
+    );
+    clearSemanticStores();
+  }
+
   console.log("\nWAKE WORD (voice — fuzzy matcher + user training, ai/wake-word.ts):");
   clearWakePhrases();
   check("'Hey Orreris!' wakes", matchWakeWord("Hey Orreris!").matched);

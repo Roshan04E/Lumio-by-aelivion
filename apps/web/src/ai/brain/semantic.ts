@@ -23,7 +23,7 @@
  * `t2.*` ruleId, so 👎 feedback can distrust a mapping per-user like any other rule.
  */
 
-import type { TimelineComposition } from "@orreris/shared";
+import { layerIdForOrdinal, type TimelineComposition } from "@orreris/shared";
 import { getSkill, getSkillTaskKind } from "@orreris/shared";
 import { extractColor } from "../planner/entities";
 import type { AiPlan } from "../types";
@@ -682,6 +682,11 @@ interface CachedPlan {
   layersHash: string;
   /** Set for deictic prompts ("it", "here"…): replay also needs this exact selection+playhead. */
   exact: { selection: string[]; nowMs: number } | null;
+  /** "clip N" mentions in the prompt, pinned to the layer each ordinal resolved to at store
+   * time. Ordinals are POSITIONS, not identities — inserting a clip re-numbers everything
+   * without touching the old layers' state, so the layersHash alone can't catch it (user
+   * question 2026-07-18): replay requires every ordinal to still resolve to the SAME layer. */
+  ordinalBindings?: Array<{ ordinal: number; layerId: string }>;
   at: number;
 }
 
@@ -777,9 +782,27 @@ export function storeCachedPlan(prompt: string, context: PlanCacheContext, steps
   const exact = DEIXIS_RE.test(promptKey)
     ? { selection: [...context.selection].sort(), nowMs: Math.round(context.nowSeconds * 1000) }
     : null;
+  const ordinalBindings = ordinalBindingsOf(promptKey, context.composition);
+  if (ordinalBindings === null) {
+    return; // an unresolvable "clip N" in the prompt → this plan can't be safely pinned
+  }
   const cache = loadPlanCache().filter((entry) => entry.promptKey !== promptKey);
-  cache.push({ promptKey, steps, layerIds, layersHash: hash, exact, at: Date.now() });
+  cache.push({ promptKey, steps, layerIds, layersHash: hash, exact, ordinalBindings, at: Date.now() });
   savePlanCache(cache);
+}
+
+/** Every "clip N" in the prompt resolved to its CURRENT layer; null when one doesn't resolve. */
+function ordinalBindingsOf(promptKey: string, composition: TimelineComposition): Array<{ ordinal: number; layerId: string }> | null {
+  const bindings: Array<{ ordinal: number; layerId: string }> = [];
+  for (const match of promptKey.matchAll(/\bclip (\d{1,3})\b/g)) {
+    const ordinal = Number(match[1]);
+    const layerId = layerIdForOrdinal(composition, ordinal);
+    if (!layerId) {
+      return null;
+    }
+    bindings.push({ ordinal, layerId });
+  }
+  return bindings;
 }
 
 function lookupCachedPlan(prompt: string, context: PlanCacheContext): RuleStepInput[] | undefined {
@@ -792,6 +815,14 @@ function lookupCachedPlan(prompt: string, context: PlanCacheContext): RuleStepIn
   // means the stored step params may no longer say what the user means (never wrong-target).
   if (layersHash(context.composition, entry.layerIds) !== entry.layersHash) {
     return undefined;
+  }
+  // And every "clip N" the PROMPT mentions must still resolve to the same layer — inserting
+  // a clip re-numbers ordinals without touching the old layers' state (2026-07-18): "blur
+  // clip 1" must never replay onto what is now clip 2.
+  for (const binding of entry.ordinalBindings ?? []) {
+    if (layerIdForOrdinal(context.composition, binding.ordinal) !== binding.layerId) {
+      return undefined;
+    }
   }
   if (entry.exact) {
     if (Math.round(context.nowSeconds * 1000) !== entry.exact.nowMs) {
