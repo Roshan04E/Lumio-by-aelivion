@@ -235,6 +235,19 @@ async function analyzeUsage(composition: TimelineComposition): Promise<BrainRout
   return answer(lines.join("\n"), "world.analyze-usage");
 }
 
+// Plain-language surface labels for the inferred edit-style fact. The fact keeps its compact
+// internal vocabulary ("caption-driven"/"long-take") — only the chat line speaks human.
+const EDIT_PROFILE_LABELS: Record<CompositionCharacterFact["profile"], string> = {
+  "caption-driven": "built around text/captions",
+  mixed: "a mix of footage and text",
+  "footage-driven": "mostly raw footage"
+};
+const EDIT_PACING_LABELS: Record<CompositionCharacterFact["pacing"], string> = {
+  "fast-cut": "quick cuts",
+  moderate: "medium-paced cuts",
+  "long-take": "long unhurried shots"
+};
+
 async function analyzeComposition(composition: TimelineComposition): Promise<BrainRouteResult> {
   const ctx = await worldContext(composition);
   if (!ctx) {
@@ -250,8 +263,8 @@ async function analyzeComposition(composition: TimelineComposition): Promise<Bra
   const v = result.fact.value;
   const clipTotal = composition.tracks.reduce((sum, track) => sum + track.layers.length, 0);
   const coverage = v.timelineSeconds > 0 ? Math.round((v.coveredSeconds / v.timelineSeconds) * 100) : 0;
-  // K5 inference: the derived L4 character fact (confidence-propagated; labeled "inferred",
-  // never dressed up as a measurement — honest-labels invariant).
+  // K5 inference: the derived L4 character fact (confidence-propagated; labeled as an
+  // inference, never dressed up as a measurement — honest-labels invariant).
   const character = await queryFact<CompositionCharacterFact>(
     { type: COMPOSITION_CHARACTER_FACT, target: { kind: "composition", id: composition.id }, budgetMs: 500 },
     ctx
@@ -264,7 +277,7 @@ async function analyzeComposition(composition: TimelineComposition): Promise<Bra
       : `- Text: none on the timeline`,
     ...(character
       ? [
-          `- Character: **${character.fact.value.profile}**, ${character.fact.value.pacing} (inferred · ${Math.round(character.fact.confidence * 100)}% confidence)`
+          `- Edit style: **${EDIT_PROFILE_LABELS[character.fact.value.profile]}**, ${EDIT_PACING_LABELS[character.fact.value.pacing]} (my read of the timeline · ${Math.round(character.fact.confidence * 100)}% sure)`
         ]
       : []),
     `\n_Measured on-device · ${result.path === "cached" ? "cached fact" : "fresh observation"} · 0 tokens_`
