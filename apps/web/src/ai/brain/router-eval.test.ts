@@ -181,6 +181,90 @@ check("'apply the noir look' with no unique target → escalates", route("apply 
   check("'apply the noir look to clip 9' (doesn't exist) → honest bounds answer", result.kind === "answer" && /no clip 9/i.test(answerText(result)));
 }
 
+console.log("\nREMOVE-LOOK reflex (real transcript 2026-07-18 — the fast lane invented applyTextLook('new look') and removeEffect('neonLook')):");
+{
+  // Same layout as the base fixture, but clip 3 carries a creative look to remove.
+  const graded = comp([
+    {
+      type: "video",
+      layers: [
+        layer({ id: "vid_a", type: "video", startSeconds: 0, durationSeconds: 5 }),
+        layer({
+          id: "vid_b",
+          type: "video",
+          startSeconds: 5,
+          durationSeconds: 5,
+          effects: [{ id: "fx_look", type: "creativeLook", params: { look: "Noir", intensity: 55 } }]
+        } as unknown as TimelineLayer)
+      ]
+    },
+    {
+      type: "text",
+      layers: [
+        // Text layer carrying a creativeLook EFFECT (applyLook allows this) — bare removal
+        // must remove the effect, not lecture about baked text looks (probe-caught 2026-07-18).
+        layer({
+          id: "text_1",
+          type: "text",
+          startSeconds: 2,
+          durationSeconds: 4,
+          effects: [{ id: "fx_text_look", type: "creativeLook", params: { look: "Noir", intensity: 55 } }]
+        } as unknown as TimelineLayer)
+      ]
+    }
+  ]);
+  const gradedRoute = (prompt: string) => routePrompt(prompt, { composition: graded, selection: [], nowSeconds: 3 });
+  {
+    const step = firstAction(gradedRoute("remove the look from clip 2"));
+    const params = step.params as { effectId?: string };
+    check(
+      "bare 'remove the look' on a TEXT clip WITH a creativeLook effect → removes the effect",
+      step.actionId === "removeEffect" && params.effectId === "fx_text_look"
+    );
+  }
+  {
+    const step = firstAction(gradedRoute("remove the noir look from clip 3"));
+    const params = step.params as { layerId?: string; effectId?: string };
+    check("'remove the noir look from clip 3' → removeEffect(fx_look) plan", step.actionId === "removeEffect" && params.layerId === "vid_b" && params.effectId === "fx_look");
+  }
+  {
+    const step = firstAction(gradedRoute("remove the moody look from clip 3"));
+    check("'remove the moody look' → alias resolves to the stored Noir, same plan", step.actionId === "removeEffect");
+  }
+  {
+    const step = firstAction(gradedRoute("remove the look from clip 3"));
+    check("bare 'remove the look from clip 3' → removes whatever is applied", step.actionId === "removeEffect");
+  }
+  {
+    const step = firstAction(gradedRoute("remove the color grade from clip 3"));
+    check("'remove the color grade' phrasing works too", step.actionId === "removeEffect");
+  }
+  {
+    const result = gradedRoute("remove the teal & orange look from clip 3");
+    check(
+      "asked look ≠ stored look → honest answer naming what's ACTUALLY applied, no plan",
+      result.kind === "answer" && /Noir/.test(answerText(result))
+    );
+  }
+  {
+    const result = gradedRoute("remove the noir look from clip 1");
+    check("'remove the noir look' on an ungraded clip → honest 'nothing to remove'", result.kind === "answer" && /no creative look/i.test(answerText(result)));
+  }
+  {
+    const result = gradedRoute("remove the neon look from clip 2");
+    check(
+      "'remove the neon look' on a TEXT clip → honest bake answer offering undo/restyle",
+      result.kind === "answer" && /bake/i.test(answerText(result)) && /undo/i.test(answerText(result))
+    );
+  }
+  {
+    const result = gradedRoute("remove the vaporwave look from clip 3");
+    check("unknown look name → instant gap answer listing both libraries", result.kind === "answer" && /Color looks/.test(answerText(result)));
+  }
+  check("MUST NOT: 'remove clip 3' still deletes the clip (delete handler untouched)", firstAction(gradedRoute("remove clip 3")).actionId === "deleteLayer");
+  check("MUST NOT: 'remove the noir look from the intro' (vague target) → escalates", gradedRoute("remove the noir look from the intro").kind === "escalate");
+}
+
 {
   const step = firstAction(route("split clip 1 at playhead"));
   const params = step.params as { layerId?: string; atSeconds?: number };
@@ -715,6 +799,11 @@ async function main(): Promise<void> {
     arbitrateFinal("blur clip one", "blur clip two") === "blur clip two"
   );
   check("empty interim → final unchanged", arbitrateFinal("", "apply the new look") === "apply the new look");
+  check(
+    "remove frame: 'remove neon look' beats final 'remove new look' (real transcript)",
+    arbitrateFinal("remove neon look from text clip 3", "remove new look from text clip 3") === "remove neon look from text clip 3",
+    arbitrateFinal("remove neon look from text clip 3", "remove new look from text clip 3")
+  );
   check(
     "frame slot replacement is surgical (surrounding text intact)",
     arbitrateFinal("please apply the neon look to clip 2 now", "please apply the new look to clip 2 now") ===

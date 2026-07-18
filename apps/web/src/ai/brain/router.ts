@@ -188,6 +188,12 @@ const RIPPLE_DELETE_RE = /^ripple[- ]?(?:delete|remove) (.+)$|^(?:delete|remove)
  */
 const APPLY_LOOK_RE = /^(?:apply|add|use|give (?:it|this)?) ?(?:a |the )?(.{1,40}?) look(?: (?:to|on|in) (.+))?$/;
 
+// "remove the noir look (from clip 2)" — named form; the bare form ("remove the look/grade")
+// removes whatever creative look the clip carries. Real transcript 2026-07-18: the fast lane
+// guessed applyTextLook("new look") and removeEffect("neonLook") for these — neither exists.
+const REMOVE_LOOK_NAMED_RE = /^(?:remove|clear|delete|drop|take off) (?:the |a )?(.{1,40}?) (?:look|grade)(?: (?:from|off|on) (.+))?$/;
+const REMOVE_LOOK_BARE_RE = /^(?:remove|clear|delete|drop|take off) (?:the )?(?:creative |color )?(?:look|grade)(?: (?:from|off|on) (.+))?$/;
+
 const SPLIT_TARGETED_RE = /^(?:split|cut) (.+?) (?:at|on) (?:the )?playhead$/;
 const SPLIT_HERE_RE = /^(?:split|cut)(?: (?:the |my )?(?:selected |this )?clip)? (?:at|on) (?:the )?playhead$/;
 
@@ -328,6 +334,91 @@ function applyLook(context: BrainContext, prompt: string, rawName: string, targe
   return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.apply-look" }, "t0.apply-look") : ESCALATE;
 }
 
+/**
+ * Tier-0 REMOVE-LOOK: the inverse ask of applyLook. Color looks are a `creativeLook` effect
+ * → a real `removeEffect` plan. Text looks BAKE into the style (applyTextLook), so there is
+ * nothing to remove — the honest answer explains that and offers the two real exits (undo /
+ * apply another look) instead of letting the fast lane invent actions that fail validation.
+ */
+function removeLook(context: BrainContext, prompt: string, rawName: string | undefined, targetPhrase: string | undefined): BrainRouteResult {
+  let layerId: string | undefined;
+  let label: string;
+  if (targetPhrase !== undefined) {
+    const ordinal = parseExactClipPhrase(targetPhrase);
+    if (!ordinal) {
+      return ESCALATE; // "…from the intro" — not structurally certain
+    }
+    layerId = layerIdForOrdinal(context.composition, ordinal);
+    if (!layerId) {
+      return reflexAnswer(
+        `There's no clip ${ordinal} on the timeline — I count ${clipCount(context.composition)} clip(s).`,
+        "t0.remove-look"
+      );
+    }
+    label = `clip ${ordinal}`;
+  } else {
+    const target = resolveTargetLayer(context.composition, { selection: context.selection, nowSeconds: context.nowSeconds });
+    if (!target.layerId || (target.reason !== "selection" && target.reason !== "playhead")) {
+      return ESCALATE;
+    }
+    layerId = target.layerId;
+    label = target.reason === "selection" ? "the selected clip" : "the clip under the playhead";
+  }
+  const layer = findLayer(context.composition, layerId);
+  if (!layer || layer.type === "audio") {
+    return ESCALATE;
+  }
+
+  const name = rawName?.trim();
+  const colorResolved = name ? resolveLookName(name) : null;
+  const textResolved = name && !colorResolved ? resolveTextLookName(name) : null;
+  if (name && !colorResolved && !textResolved) {
+    return reflexAnswer(
+      `I don't have a "${name}" look, so there's nothing of that name to remove. Color looks: ${listCreativeLooks()
+        .map((look) => look.name)
+        .join(", ")}. Text looks: ${TEXT_LOOK_NAMES.join(", ")}.`,
+      "t0.remove-look-gap"
+    );
+  }
+
+  // Text looks bake — there is no separate thing to remove, and pretending otherwise is how
+  // the fast lane ended up emitting removeEffect("neonLook").
+  if (textResolved) {
+    return reflexAnswer(
+      `Text looks bake into the clip's own style, so there's no "${textResolved.look}" layer to remove from ${label}. Say **"undo"** to revert the last apply, or restyle it with another look ("apply the Minimal look").`,
+      "t0.remove-look"
+    );
+  }
+
+  // A text layer can legitimately carry a creativeLook EFFECT too (applyLook allows it), so
+  // the effect check comes first — the bake answer is only for text layers with nothing on.
+  const existing = (layer.effects ?? []).find((effect) => effect.type === "creativeLook");
+  if (!existing) {
+    if (layer.type === "text") {
+      return reflexAnswer(
+        `Text looks bake into the clip's own style, so there's no separate look to remove from ${label}. Say **"undo"** to revert the last apply, or restyle it with another look ("apply the Minimal look").`,
+        "t0.remove-look"
+      );
+    }
+    return reflexAnswer(`${label[0]!.toUpperCase()}${label.slice(1)} has no creative look applied — nothing to remove.`, "t0.remove-look");
+  }
+  const storedLook = typeof existing.params?.["look"] === "string" ? (existing.params["look"] as string) : undefined;
+  if (colorResolved && storedLook && storedLook !== colorResolved.look) {
+    return reflexAnswer(
+      `${label[0]!.toUpperCase()}${label.slice(1)}'s creative look is **${storedLook}**, not ${colorResolved.look}. Say "remove the ${storedLook} look" — or just "remove the look" to clear whatever is applied.`,
+      "t0.remove-look"
+    );
+  }
+  const plan = brainPlan(prompt, [
+    {
+      actionId: "removeEffect",
+      params: { layerId, effectId: existing.id },
+      summary: `Remove the ${storedLook ?? "creative"} look from ${label}`
+    }
+  ]);
+  return plan ? gated({ kind: "plan", plan, tier: "reflex", ruleId: "t0.remove-look" }, "t0.remove-look") : ESCALATE;
+}
+
 function splitAtPlayhead(context: BrainContext, prompt: string, phrase: string | undefined): BrainRouteResult {
   let layerId: string | undefined;
   let label: string;
@@ -436,6 +527,19 @@ export function routePrompt(prompt: string, context: BrainContext): BrainRouteRe
   const lookMatch = APPLY_LOOK_RE.exec(text);
   if (lookMatch) {
     const result = applyLook(context, prompt, lookMatch[1]!, lookMatch[2]);
+    if (result.kind !== "escalate") {
+      return result;
+    }
+  }
+
+  // Remove-look runs BEFORE the generic delete handler ("remove X" would otherwise swallow
+  // it) — bare form first so "remove the look" never parses "creative" as a look name.
+  const removeBare = REMOVE_LOOK_BARE_RE.exec(text);
+  const removeNamed = removeBare ? null : REMOVE_LOOK_NAMED_RE.exec(text);
+  if (removeBare || removeNamed) {
+    const result = removeBare
+      ? removeLook(context, prompt, undefined, removeBare[1])
+      : removeLook(context, prompt, removeNamed![1]!, removeNamed![2]);
     if (result.kind !== "escalate") {
       return result;
     }

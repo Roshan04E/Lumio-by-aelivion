@@ -149,6 +149,9 @@ function fuzzyEditorTerm(token: string): string | null {
 
 /** "apply/add/use/give (a|the) X look" — same shape as the router's APPLY_LOOK reflex. */
 const LOOK_FRAME_RE = /\b(?:apply|add|use|give)\s+(?:it\s+|this\s+)?(?:an?\s+|the\s+)?(.{1,40}?)\s+look\b/i;
+/** "remove/clear/drop (the) X look" — the REMOVE_LOOK reflex's frame (real report: dictated
+ * "remove neon look", final said "new"). */
+const REMOVE_LOOK_FRAME_RE = /\b(?:remove|clear|delete|drop|take off)\s+(?:the\s+|a\s+)?(.{1,40}?)\s+(?:look|grade)\b/i;
 /** "make it/this (feel|look) X" — the K4 mood-ask frame. Tail-anchored (trailing punctuation ok). */
 const MOOD_FRAME_RE = /\bmake\s+(?:it|this|everything)\s+(?:feel\s+|look\s+)?([a-z][a-z -]{2,24}?)(?:[.!?]\s*)?$/i;
 
@@ -169,6 +172,7 @@ interface CommandFrame {
 
 const COMMAND_FRAMES: readonly CommandFrame[] = [
   { re: LOOK_FRAME_RE, resolves: lookNameResolves },
+  { re: REMOVE_LOOK_FRAME_RE, resolves: lookNameResolves },
   { re: MOOD_FRAME_RE, resolves: moodResolves }
 ];
 
