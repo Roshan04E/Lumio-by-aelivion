@@ -14,6 +14,7 @@ export const moduleTypes = [
   "ZOOM_CUTS",
   "BACKGROUND_REPLACEMENT",
   "MOTION_TEXT",
+  "GENERATIVE_STYLIZE",
   "FINAL_RENDER"
 ] as const;
 

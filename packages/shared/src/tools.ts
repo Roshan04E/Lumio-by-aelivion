@@ -184,6 +184,32 @@ export const toolCapabilityDefinitions: ToolCapabilityDefinition[] = [
       "MVP can create a mock layer stack before real mask rendering.",
       "Preview/export parity needs a masked-frame comparison fixture later."
     ]
+  },
+  {
+    id: "tool_generative_stylize",
+    name: "Generative Stylize",
+    slug: "generative-stylize",
+    icon: "generic",
+    shortDescription: "Redraw a frame as anime, comic, watercolor, or CG art — your AI, your style.",
+    userDescription:
+      "Turn any frame or image into a genuinely re-drawn illustration: pick a style, copy the crafted prompt into your own chat AI (free), and bring the redrawn image back as a media-library asset for posters, thumbnails, and stylized freeze-frames. For styling full VIDEO, use the deterministic Stylize effect instead — it's temporally stable; generative redraw is per-frame only.",
+    aiDescription:
+      "Single-frame generative restyling via the prompt bridge: builds a fidelity-locked style prompt (preserve composition, pose, identity, aspect ratio; change rendering style only) for an input image, ingests the externally generated result, and saves it as a local-first ai-source asset carrying its prompt metadata. Cloud diffusion adapter is a contract stub (per-use pricing later). Explicitly NOT a video path — direct video requests to the stylize timeline effect.",
+    category: "compositing",
+    moduleType: "GENERATIVE_STYLIZE",
+    accepts: ["image"],
+    outputs: ["generatedImage", "diagnostics"],
+    stages: ["upload", "style", "preview", "apply"],
+    browserMode: "instant",
+    adapters: ["cloud"],
+    timelineActions: ["createAssets"],
+    estimatedCredits: 0,
+    bestFor: "Anime/comic poster frames, thumbnails, stylized intro stills, and cover art from your own footage",
+    limitations: [
+      "Single frames only — generative video redraw boils frame-to-frame; the Stylize effect is the stable video path.",
+      "Free path relies on your own chat AI's image quality and its content rules.",
+      "Integrated cloud rendering is a contract stub today (will be priced per use, at cost, when wired)."
+    ]
   }
 ];
 

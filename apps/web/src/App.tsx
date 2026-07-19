@@ -8,6 +8,7 @@ const HomePage = lazy(() => import("./pages/HomePage").then((module) => ({ defau
 const TemplatesPage = lazy(() => import("./pages/TemplatesPage").then((module) => ({ default: module.TemplatesPage })));
 const ToolsPage = lazy(() => import("./pages/ToolsPage").then((module) => ({ default: module.ToolsPage })));
 const ToolDetailPage = lazy(() => import("./pages/ToolDetailPage").then((module) => ({ default: module.ToolDetailPage })));
+const GenerativeStylizePage = lazy(() => import("./pages/GenerativeStylizePage").then((module) => ({ default: module.GenerativeStylizePage })));
 const CookbookPage = lazy(() => import("./pages/CookbookPage").then((module) => ({ default: module.CookbookPage })));
 const CreatePage = lazy(() => import("./pages/CreatePage").then((module) => ({ default: module.CreatePage })));
 const EditorPage = lazy(() => import("./pages/EditorPage").then((module) => ({ default: module.EditorPage })));
@@ -49,6 +50,9 @@ export default function App() {
           <Route path="/login" element={<AuthPage />} />
           <Route path="/templates" element={<TemplatesPage />} />
           <Route path="/tools" element={<ToolsPage />} />
+          {/* Dedicated page BEFORE the generic detail route — Generative Stylize is a prompt-bridge
+              flow, not a ToolRun pipeline, so it doesn't ride the ToolDetailPage machinery. */}
+          <Route path="/tools/generative-stylize" element={<GenerativeStylizePage />} />
           <Route path="/tools/:slug" element={<ToolDetailPage />} />
           <Route path="/cookbook" element={<CookbookPage />} />
           <Route path="/cookbook/:sectionId" element={<CookbookPage />} />

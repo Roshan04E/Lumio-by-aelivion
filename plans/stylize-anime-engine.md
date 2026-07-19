@@ -242,9 +242,18 @@ Presets = which passes are identity and the param defaults; the graph is always 
   loader pattern → mask feeding the EXISTING pass-mask slot: subject vs background get
   different ink/paint weights (the reference image's figure-vs-city separation).
   Capability-gated; declines to uniform styling when the model can't load.
-- **P6 (unscheduled research) — generative tier.** Cloud diffusion adapter (true
-  anime re-drawing, per-use COGS pricing) and/or browser fast-neural-style as a
-  WebGPU-gated middle tier. Explicitly NOT part of the current effort.
+- **P6 — generative tier.** v1 SHIPPED 2026-07-19 as **Generative Stylize** (slug
+  `generative-stylize`, moduleType `GENERATIVE_STYLIZE`): true generative re-drawing of a
+  SINGLE FRAME (posters, thumbnails, stylized freeze-frames), prompt-bridge first per the
+  two-paths doctrine — the page builds a fidelity-locked style prompt (preserve
+  composition/pose/identity/aspect; five presets + custom), the user runs it in their own
+  chat AI for free, pastes/drops the redrawn image back, side-by-side compares, and saves
+  it to the media library as a LOCAL-FIRST `source:"ai"` asset carrying its `AssetAiRef`
+  prompt. Cloud diffusion adapter stays a CONTRACT STUB (registry lists `cloud`; per-use
+  COGS pricing later, metadata only — no enforcement). Honesty line rendered on-page:
+  generative redraw is per-frame and temporally unstable, so video redraw is explicitly
+  out — the deterministic stylize shader engine remains the video path. Browser
+  fast-neural-style stays deferred (recorded in §6 — not re-litigated).
 
 Order of work inside each phase: shader in shared → controls → AI/action seam →
 fixtures/evals → architecture.md entry.
