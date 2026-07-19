@@ -63,6 +63,82 @@ function buildPrompt(preset: StylePreset, custom: string): string {
   return `Redraw the attached image as ${directive}. ${FIDELITY_LOCK}`;
 }
 
+/**
+ * Integrated path (P6 completion): direct browser → Gemini image-output call with the USER'S OWN
+ * API key — the key lives in localStorage only and never touches Orreris servers. This is the
+ * monetization doctrine in code: the editor stays free, generation costs are the user's own
+ * provider COGS, credits stay 0.
+ */
+const GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image";
+const GEMINI_KEY_STORAGE = "orreris.generativeStylize.geminiKey";
+
+/** Downscale + re-encode the source so the request payload stays sane (provider caps + base64 bloat). */
+async function fileToInlineData(file: File, maxEdge = 1536): Promise<{ mimeType: string; data: string }> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Could not read image"));
+      el.src = url;
+    });
+    const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    return { mimeType: "image/jpeg", data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function base64ToFile(base64: string, mimeType: string, name: string): File {
+  const bytes = atob(base64);
+  const buf = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
+  return new File([buf], name, { type: mimeType });
+}
+
+async function generateWithGemini(apiKey: string, prompt: string, source: File): Promise<File> {
+  const inline = await fileToInlineData(source);
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [{ text: prompt }, { inlineData: { mimeType: inline.mimeType, data: inline.data } }]
+          }
+        ]
+      })
+    }
+  );
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const err = (await res.json()) as { error?: { message?: string } };
+      if (err.error?.message) detail = err.error.message;
+    } catch {
+      /* status alone */
+    }
+    throw new Error(detail);
+  }
+  const body = (await res.json()) as {
+    candidates?: { content?: { parts?: { inlineData?: { mimeType?: string; data?: string } }[] } }[];
+  };
+  const part = body.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
+  if (!part?.inlineData?.data) {
+    throw new Error("The model returned no image (it may have declined this content). Try the free prompt path.");
+  }
+  return base64ToFile(part.inlineData.data, part.inlineData.mimeType ?? "image/png", "stylized-frame.png");
+}
+
 function readImageDimensions(file: File): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -108,6 +184,15 @@ export function GenerativeStylizePage() {
   const [copied, setCopied] = useState(false);
   const [savedAssetName, setSavedAssetName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [apiKey, setApiKey] = useState(() => {
+    try {
+      return window.localStorage.getItem(GEMINI_KEY_STORAGE) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState("");
   const sourceInputRef = useRef<HTMLInputElement>(null);
   const resultInputRef = useRef<HTMLInputElement>(null);
 
@@ -193,6 +278,30 @@ export function GenerativeStylizePage() {
       setStatus("Saving failed — you can still Download and import the file manually.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  function updateApiKey(value: string) {
+    setApiKey(value);
+    try {
+      if (value) window.localStorage.setItem(GEMINI_KEY_STORAGE, value);
+      else window.localStorage.removeItem(GEMINI_KEY_STORAGE);
+    } catch {
+      /* private-mode storage denial: the key still works for this session */
+    }
+  }
+
+  async function generateDirectly() {
+    if (!source || !apiKey.trim() || generating) return;
+    setGenerating(true);
+    setGenerateError("");
+    try {
+      const file = await generateWithGemini(apiKey.trim(), prompt, source.file);
+      await acceptImage(file, "result");
+    } catch (error) {
+      setGenerateError(error instanceof Error ? error.message : "Generation failed.");
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -305,8 +414,49 @@ export function GenerativeStylizePage() {
             </button>
             <span style={{ fontSize: 13, opacity: 0.75 }}>
               Free path: paste the prompt + your image into any chat AI (ChatGPT, Gemini, Claude…), then bring the
-              generated image back below. Integrated cloud rendering arrives later, priced per use at cost.
+              generated image back below.
             </span>
+          </div>
+
+          {/* Integrated path: user's own key, browser → provider direct, key never leaves the device. */}
+          <div
+            style={{
+              marginTop: 16,
+              padding: 14,
+              border: "1px solid rgba(128,128,128,0.35)",
+              borderRadius: 10
+            }}
+          >
+            <strong style={{ fontSize: 14 }}>Or generate right here (your own key)</strong>
+            <p style={{ fontSize: 13, opacity: 0.75, margin: "6px 0 10px" }}>
+              Paste a Google AI Studio API key and Orreris calls <code>{GEMINI_IMAGE_MODEL}</code> directly from your
+              browser. The key is stored only on this device and generation is billed to your own Google account —
+              Orreris adds nothing on top.
+            </p>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => updateApiKey(e.target.value)}
+                placeholder="Gemini API key (AIza…)"
+                autoComplete="off"
+                style={{ flex: "1 1 260px", minWidth: 220 }}
+              />
+              <button
+                type="button"
+                className="mkt-linkbtn"
+                disabled={!source || !apiKey.trim() || generating}
+                onClick={() => void generateDirectly()}
+              >
+                {generating ? "Generating…" : "Generate"}
+              </button>
+            </div>
+            {!source && apiKey.trim() ? (
+              <p style={{ fontSize: 13, opacity: 0.7, marginTop: 8 }}>Add a source frame above first.</p>
+            ) : null}
+            {generateError ? (
+              <p style={{ color: "#e07070", fontSize: 13, marginTop: 8 }}>Generation failed: {generateError}</p>
+            ) : null}
           </div>
         </section>
 

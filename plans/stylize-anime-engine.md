@@ -249,8 +249,12 @@ Presets = which passes are identity and the param defaults; the graph is always 
   composition/pose/identity/aspect; five presets + custom), the user runs it in their own
   chat AI for free, pastes/drops the redrawn image back, side-by-side compares, and saves
   it to the media library as a LOCAL-FIRST `source:"ai"` asset carrying its `AssetAiRef`
-  prompt. Cloud diffusion adapter stays a CONTRACT STUB (registry lists `cloud`; per-use
-  COGS pricing later, metadata only — no enforcement). Honesty line rendered on-page:
+  prompt. INTEGRATED PATH shipped same day (P6 complete): BYO-key direct generation — the
+  browser calls `gemini-2.5-flash-image` with the USER'S OWN Google AI Studio key
+  (localStorage only, never touches Orreris servers; source downscaled to ≤1536 long edge
+  before upload; billed to the user's own account, credits stay 0 = monetization doctrine
+  in code). Orreris-managed cloud adapter stays a CONTRACT STUB (per-use COGS pricing
+  later, metadata only — no enforcement). Honesty line rendered on-page:
   generative redraw is per-frame and temporally unstable, so video redraw is explicitly
   out — the deterministic stylize shader engine remains the video path. Browser
   fast-neural-style stays deferred (recorded in §6 — not re-litigated).
