@@ -63,6 +63,14 @@ export interface FragmentEffectDefinition {
   glsl: string;
   /** Multi-pass graph (ordered). When present the compositor runs the chain instead of `glsl`. */
   passes?: FragmentEffectPassDefinition[];
+  /**
+   * Mask-aware effect (stylize P5): the effect's pass mask is bound INTO the shader as
+   * `uniform sampler2D uPassMask` (+ `uniform float uHasPassMask`, 0/1) instead of being applied
+   * as the usual binary after-composite gate — the shader reads the matte's ALPHA as a per-pixel
+   * weight map (subject vs background treatment). Only mask-aware defs get the extra uniforms, so
+   * every other definition's assembled GLSL stays byte-identical.
+   */
+  maskAware?: boolean;
 }
 
 const GLSL_TYPE: Record<FragmentParamType, string> = {
@@ -91,6 +99,9 @@ const shaderCache = new Map<string, string>();
 
 function assembleShader(def: FragmentEffectDefinition, body: string, passInputCount: number, isFinal: boolean): string {
   const passSamplers = Array.from({ length: passInputCount }, (_, i) => `uniform sampler2D uPass${i};`).join("\n");
+  // Mask-aware defs (stylize P5) read the effect mask inside the shader; everyone else's
+  // assembled source is untouched (parity baselines stay byte-identical).
+  const maskUniforms = def.maskAware ? "uniform sampler2D uPassMask;\nuniform float uHasPassMask;" : "";
   // Intermediate passes write their raw output (data textures — tensors, flow fields, paint
   // buffers); ONLY the final pass mixes against the source, so `uIntensity` keeps its product
   // meaning ("how much of the effect") across single- and multi-pass definitions.
@@ -112,6 +123,7 @@ out vec4 fragColor;
 
 uniform sampler2D uSrc;      // the layer's own composited image
 ${passSamplers}
+${maskUniforms}
 uniform vec2 uResolution;    // THIS pass's output resolution (scaled passes see their working res)
 uniform float uIntensity;    // 0..1, mixed against the source in the final pass's main()
 uniform float uTime;

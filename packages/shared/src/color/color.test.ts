@@ -450,6 +450,15 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   check("no-input pass declares no uPass samplers", !tensor.includes("uPass0"));
   check("all stylize params are declared uniforms in the paint pass", ["paintRadius", "paintSharpness"].every((p) => paint.includes(`uniform float ${p};`)));
   check("assembly is memoized (same reference on re-build)", buildFragmentEffectPassShader(STYLIZE_PAINTERLY, passes[0]!) === tensor);
+
+  // P5 mask-aware contract: stylize declares the in-shader mask uniforms; a NON-mask-aware
+  // definition must not (its assembled source — and parity baseline — stays byte-identical).
+  check("stylize is maskAware", STYLIZE_PAINTERLY.maskAware === true);
+  check("mask-aware pass declares uPassMask + uHasPassMask", tone.includes("uniform sampler2D uPassMask;") && tone.includes("uniform float uHasPassMask;"));
+  check("tone pass reads the subject weight from the mask", tone.includes("texture(uPassMask, uv).a"));
+  const { buildFragmentEffectShader, listFragmentEffects } = await import("./fragment-effects/registry");
+  const plain = listFragmentEffects().find((d) => d.id !== "builtin.stylize" && !d.maskAware && !d.passes);
+  check("non-mask-aware defs stay free of uPassMask", plain != null && !buildFragmentEffectShader(plain).includes("uPassMask"));
 }
 
 if (failures > 0) {

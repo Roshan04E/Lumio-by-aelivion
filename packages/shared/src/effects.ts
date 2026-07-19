@@ -627,6 +627,18 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
       { key: "inkStrength", label: "Ink Lines", type: "number", min: 0, max: 100, step: 1, defaultValue: 0, unit: "%", keyframeable: true },
       { key: "inkThickness", label: "Line Weight", type: "number", min: 0.5, max: 4, step: 0.5, defaultValue: 2, keyframeable: true },
       { key: "celBands", label: "Cel Bands", type: "number", min: 0, max: 10, step: 1, defaultValue: 0, keyframeable: true },
+      {
+        key: "subjectMode",
+        label: "Subject",
+        type: "select",
+        defaultValue: "0",
+        options: [
+          { label: "Uniform", value: "0" },
+          { label: "Focus subject", value: "1" },
+          { label: "Focus background", value: "2" }
+        ]
+      },
+      { key: "subjectBoost", label: "Subject Boost", type: "number", min: 0, max: 100, step: 1, defaultValue: 60, unit: "%", keyframeable: true },
       { key: "printDots", label: "Print Dots", type: "number", min: 0, max: 100, step: 1, defaultValue: 50, unit: "%", keyframeable: true },
       { key: "printScale", label: "Dot Size", type: "number", min: 2, max: 16, step: 0.5, defaultValue: 6, keyframeable: true },
       { key: "misprintPx", label: "Misprint", type: "number", min: 0, max: 10, step: 0.5, defaultValue: 1.5, unit: "px", keyframeable: true },

@@ -363,6 +363,9 @@ interface CompiledFragmentEffect {
   uResolution: WebGLUniformLocation | null;
   uIntensity: WebGLUniformLocation | null;
   uTime: WebGLUniformLocation | null;
+  /** Mask-aware defs only (stylize P5): the in-shader effect-mask sampler + has-flag. */
+  uPassMask: WebGLUniformLocation | null;
+  uHasPassMask: WebGLUniformLocation | null;
   params: { param: FragmentEffectParam; location: WebGLUniformLocation | null }[];
   lastFrame: number;
 }
@@ -1272,6 +1275,8 @@ export class SceneCompositor {
       uResolution: gl.getUniformLocation(program, "uResolution"),
       uIntensity: gl.getUniformLocation(program, "uIntensity"),
       uTime: gl.getUniformLocation(program, "uTime"),
+      uPassMask: def.maskAware ? gl.getUniformLocation(program, "uPassMask") : null,
+      uHasPassMask: def.maskAware ? gl.getUniformLocation(program, "uHasPassMask") : null,
       params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
       lastFrame: this.frameCounter,
     };
@@ -1408,6 +1413,18 @@ export class SceneCompositor {
       const loc = compiled.uPasses[i];
       if (loc) gl.uniform1i(loc, 1 + i);
     });
+    // Mask-aware defs sample the effect mask in-shader (fixed unit 7 — pass inputs use 1..N and
+    // never reach it). Absent mask binds the empty texture with the has-flag at 0, so the shader's
+    // decline path (uniform styling) engages deterministically in every renderer.
+    if (pass.def.maskAware) {
+      const maskTex = pass.mask
+        ? this.uploadSource(pass.mask, pass.maskVersion, { role: "mask", frameTime: this.debugFrameTime })
+        : null;
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex ?? this.emptyTex);
+      if (compiled.uPassMask) gl.uniform1i(compiled.uPassMask, 7);
+      if (compiled.uHasPassMask) gl.uniform1f(compiled.uHasPassMask, maskTex ? 1 : 0);
+    }
     gl.uniform2f(compiled.uResolution, width, height);
     gl.uniform1f(compiled.uIntensity, Math.max(0, Math.min(1, pass.intensity)));
     gl.uniform1f(compiled.uTime, pass.timeSeconds);
@@ -2095,13 +2112,16 @@ export class SceneCompositor {
       const { s2 } = this.effectTargets();
       const ok = this.runFragmentPass(this.accumA.tex, pass, s2);
       if (!ok) continue;
-      const maskTex = pass.mask
-        ? this.uploadSource(pass.mask, pass.maskVersion, {
-            layerId: layer.debugLayerId,
-            role: "mask",
-            frameTime: this.debugFrameTime,
-          })
-        : null;
+      // Mask-aware defs (stylize P5) consumed the mask INSIDE the shader as a weight map — the
+      // binary after-composite gate would double-apply it, so it's skipped for them.
+      const maskTex =
+        pass.mask && !pass.def.maskAware
+          ? this.uploadSource(pass.mask, pass.maskVersion, {
+              layerId: layer.debugLayerId,
+              role: "mask",
+              frameTime: this.debugFrameTime,
+            })
+          : null;
       this.compositeTexture(
         s2.tex,
         maskTex,

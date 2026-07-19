@@ -84,6 +84,7 @@ export type RenderComparisonFixtureKey =
   | "stylize"
   | "stylize-ink"
   | "stylize-print"
+  | "stylize-subject"
   | "vignette"
 
   | "grain"
@@ -127,6 +128,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "stylize",
   "stylize-ink",
   "stylize-print",
+  "stylize-subject",
   "vignette",
 
   "grain",
@@ -322,6 +324,31 @@ const stylizePrintEffects: TimelineLayer["effects"] = [
       misprintPx: 2,
       paperAmount: 40
     }
+  }
+];
+
+// P5: subject-aware styling — an ellipse "person" mask on the effect + Focus subject mode. Gates
+// the maskAware path end to end: in-shader uPassMask weighting (focus keeps ink/punch, background
+// flattens) INSTEAD of the binary after-composite, identically in every renderer.
+const stylizeSubjectEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_stylize_subject",
+    type: "stylize",
+    name: "Stylize",
+    enabled: true,
+    intensity: 100,
+    params: {
+      styleMode: "1",
+      paintRadius: 4,
+      paintSharpness: 8,
+      palettePunch: 45,
+      inkStrength: 70,
+      inkThickness: 2,
+      celBands: 5,
+      subjectMode: "1",
+      subjectBoost: 80
+    },
+    masks: [createBoxMask("ellipse", 420, 500, 660, 1420, 0)]
   }
 ];
 
@@ -608,6 +635,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: stylizeInkEffects, fit: "cover" };
     case "stylize-print":
       return { effects: stylizePrintEffects, fit: "cover" };
+    case "stylize-subject":
+      return { effects: stylizeSubjectEffects, fit: "cover" };
     case "vignette":
       return { effects: vignetteEffects, fit: "cover" };
     case "grain":

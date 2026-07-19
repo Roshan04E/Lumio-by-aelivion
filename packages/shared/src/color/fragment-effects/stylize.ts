@@ -359,8 +359,31 @@ vec4 effect(vec2 uv) {
     c = c * mix(vec3(1.0), vec3(0.965, 0.945, 0.905), paper) + g * paper;
   }
 
+  // Subject-aware weighting (P5): the effect mask's alpha is a per-pixel SUBJECT map (attach a
+  // pen/tracked/AI mask to the effect; SceneMaskMatteCache rasterizes it identically in every
+  // renderer). The FOCUS region keeps full ink + punch; the other region flattens — desaturated,
+  // contrast-lifted toward paint, ink mostly muted — the figure-vs-city separation. No mask
+  // (uHasPassMask 0) or subjectMode 0 → uniform styling, the graceful decline.
+  float inkRegion = 1.0;
+  float sMode = floor(subjectMode + 0.5);
+  if (sMode > 0.5 && uHasPassMask > 0.5) {
+    float subj = texture(uPassMask, uv).a;
+    float focusW = (sMode == 2.0) ? 1.0 - subj : subj;
+    float off = (1.0 - focusW) * (clamp(subjectBoost, 0.0, 100.0) / 100.0);
+    c = mix(c, mix(vec3(_luma(c)), c, 0.45), off * 0.75);
+    c = mix(c, c * 0.9 + 0.06, off * 0.55);
+    inkRegion = 1.0 - off * 0.85;
+  }
+
   float ink = texture(uPass1, uv).r;
-  c *= mix(1.0, ink, clamp(inkStrength, 0.0, 100.0) / 100.0);
+  c *= mix(1.0, ink, clamp(inkStrength, 0.0, 100.0) / 100.0 * inkRegion);
+
+  // subjectMode 0 + a mask = the CLASSIC region gate (styled inside, original outside), preserved
+  // in-shader since maskAware skips the compositor's binary after-composite. mix-by-alpha here is
+  // algebraically identical to the old gate (uIntensity distributes over it).
+  if (sMode < 0.5 && uHasPassMask > 0.5) {
+    c = mix(src.rgb, clamp(c, 0.0, 1.0), texture(uPassMask, uv).a);
+  }
   return vec4(clamp(c, 0.0, 1.0), src.a);
 }
 `;
@@ -384,9 +407,15 @@ export const STYLIZE_PAINTERLY: FragmentEffectDefinition = {
     { name: "printDots", type: "float", default: 50, min: 0, max: 100, step: 1, label: "Print Dots" },
     { name: "printScale", type: "float", default: 6, min: 2, max: 16, step: 0.5, label: "Dot Size" },
     { name: "misprintPx", type: "float", default: 1.5, min: 0, max: 10, step: 0.5, label: "Misprint" },
-    { name: "paperAmount", type: "float", default: 0, min: 0, max: 100, step: 1, label: "Paper" }
+    { name: "paperAmount", type: "float", default: 0, min: 0, max: 100, step: 1, label: "Paper" },
+    // P5 subject-aware styling — inert at default 0, and inert without a mask on the effect.
+    { name: "subjectMode", type: "float", default: 0, min: 0, max: 2, step: 1, label: "Subject" },
+    { name: "subjectBoost", type: "float", default: 60, min: 0, max: 100, step: 1, label: "Subject Boost" }
   ],
   glsl: "", // multi-pass definition — `passes` below is the whole effect
+  // P5: the effect mask feeds the shader as a subject weight map (see the tone pass) instead of
+  // the binary after-composite gate.
+  maskAware: true,
   passes: [
     { id: "tensor", scale: 0.5, glsl: TENSOR_GLSL },
     { id: "tensorBlur", scale: 0.5, inputs: ["tensor"], glsl: TENSOR_BLUR_GLSL },

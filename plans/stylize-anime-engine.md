@@ -238,10 +238,18 @@ Presets = which passes are identity and the param defaults; the graph is always 
   (web preview `resolveSourceSeconds` seam, worker `SceneStage` remap, export
   compositor) + optional line boil. Ships separately; `render:manifest` visual QA
   mandatory (frame-hold parity is exactly the class of bug the repo has been bitten by).
-- **P5 — Subject-aware styling.** MediaPipe person segmentation via the browser-ML
-  loader pattern → mask feeding the EXISTING pass-mask slot: subject vs background get
-  different ink/paint weights (the reference image's figure-vs-city separation).
-  Capability-gated; declines to uniform styling when the model can't load.
+- **P5 — Subject-aware styling.** v1 SHIPPED 2026-07-20: the stylize def is `maskAware` —
+  the effect's pass mask binds INTO the shader (`uPassMask`/`uHasPassMask`, harness declares
+  them only for mask-aware defs so every other assembled shader stays byte-identical) as a
+  per-pixel SUBJECT weight map instead of the binary after-composite gate. New params:
+  `subjectMode` (0 Uniform / 1 Focus subject / 2 Focus background) + `subjectBoost` — the
+  focus region keeps full ink + punch, the other region desaturates/flattens and loses ink
+  (the figure-vs-city separation). subjectMode 0 + mask reproduces the classic region gate
+  in-shader (algebraically identical). No mask → uniform styling (the decline path).
+  Mask sources today: pen/shape/tracked effect masks (same editor as masked blur) — attach
+  an AI Roto-derived shape or draw one. DEFERRED TAIL: automatic person-matte-as-effect-mask
+  (MatteRef sequences as effect masks needs matte-cache plumbing) and live MediaPipe
+  segmentation; `stylize-subject` fixture pixel-gates the maskAware path.
 - **P6 — generative tier.** v1 SHIPPED 2026-07-19 as **Generative Stylize** (slug
   `generative-stylize`, moduleType `GENERATIVE_STYLIZE`): true generative re-drawing of a
   SINGLE FRAME (posters, thumbnails, stylized freeze-frames), prompt-bridge first per the
