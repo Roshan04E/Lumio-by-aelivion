@@ -37,6 +37,14 @@ export interface FrameStatsSnapshot {
   renderScale: number;
   /** True while the editor is playing (stats only accumulate during playback). */
   playing: boolean;
+  /**
+   * NEW video frames presented per second (requestVideoFrameCallback count across playing video
+   * layers) — the MOTION-delivery rate, distinct from `fps` (the compositor's repaint rate, which
+   * runs at display refresh and happily redraws an unchanged video frame). A 30fps proxy under a
+   * 75Hz compositor reads fps≈75, mediaFps≈30 — exactly the gap the 2026-07-19 "½ quality feels
+   * low-fps" report lived in. 0 when no video layer is playing (stills/text-only comps).
+   */
+  mediaFps: number;
 }
 
 const EMPTY_SNAPSHOT: FrameStatsSnapshot = {
@@ -49,6 +57,7 @@ const EMPTY_SNAPSHOT: FrameStatsSnapshot = {
   sampleCount: 0,
   renderScale: 1,
   playing: false,
+  mediaFps: 0,
 };
 
 const intervals = new Float64Array(RING_SIZE);
@@ -60,12 +69,30 @@ let renderScale = 1;
 let lastNotifyAt = 0;
 let snapshot: FrameStatsSnapshot = EMPTY_SNAPSHOT;
 let snapshotDirty = false;
+// Media-frame rate: a bare counter bumped by recordMediaFrame (allocation-free hot path); the rate
+// is computed lazily over the elapsed window whenever a snapshot is built.
+let mediaFrameCount = 0;
+let mediaWindowStartAt = 0;
+let lastMediaFps = 0;
 
 const listeners = new Set<() => void>();
 
+function currentMediaFps(now: number): number {
+  const elapsed = now - mediaWindowStartAt;
+  // Refresh the published rate once enough window has accumulated; between refreshes the last
+  // published value holds (rates over tiny windows are noise, not signal).
+  if (elapsed >= 900) {
+    lastMediaFps = mediaWindowStartAt === 0 ? 0 : (mediaFrameCount * 1000) / elapsed;
+    mediaFrameCount = 0;
+    mediaWindowStartAt = now;
+  }
+  return lastMediaFps;
+}
+
 function computeSnapshot(): FrameStatsSnapshot {
+  const now = typeof performance !== "undefined" ? performance.now() : Date.now();
   if (count === 0) {
-    return { ...EMPTY_SNAPSHOT, renderScale, playing };
+    return { ...EMPTY_SNAPSHOT, renderScale, playing, mediaFps: currentMediaFps(now) };
   }
   let sumInterval = 0;
   let sumDraw = 0;
@@ -91,7 +118,21 @@ function computeSnapshot(): FrameStatsSnapshot {
     sampleCount: count,
     renderScale,
     playing,
+    mediaFps: currentMediaFps(now),
   };
+}
+
+/**
+ * Record one NEW video frame presented by a playing video layer (requestVideoFrameCallback tick).
+ * Allocation-free. With several simultaneously-playing video layers the counts sum — read the
+ * number as "media frames delivered", which for the common one-clip-under-the-playhead case IS the
+ * clip's effective fps.
+ */
+export function recordMediaFrame(): void {
+  if (mediaWindowStartAt === 0) {
+    mediaWindowStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  }
+  mediaFrameCount += 1;
 }
 
 function notifyThrottled(now: number) {

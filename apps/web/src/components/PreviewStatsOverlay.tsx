@@ -32,6 +32,13 @@ export function PreviewStatsOverlay() {
         <span>FPS</span>
         <span>{stats.playing && hasSamples ? stats.fps.toFixed(0) : "—"}</span>
       </div>
+      {/* NEW video frames presented per second (rVFC) — the motion-delivery rate. FPS above is the
+          compositor repaint rate (display refresh); a 30fps proxy under a 75Hz screen reads
+          FPS 75 / Media 30. "—" when no video layer is playing. */}
+      <div className="preview-stats-row">
+        <span>Media</span>
+        <span>{stats.playing && stats.mediaFps > 0.5 ? stats.mediaFps.toFixed(0) : "—"}</span>
+      </div>
       <div className="preview-stats-row">
         <span>Dropped</span>
         <span>{stats.playing && hasSamples ? `${droppedPct}%` : "—"}</span>

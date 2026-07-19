@@ -13,6 +13,7 @@ import { colorPipelineCacheKey, MediaWebGLRenderer, registerContextDisposer, res
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
+import { recordMediaFrame } from "../editor/performance/frame-stats";
 import { acquirePreviewFrameProvider } from "../playback/preview-frame-pool";
 import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
@@ -602,6 +603,29 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // mode:element, readyState:4, paused:true while the playhead moved on). Every element-arrival
     // path bumps wcEpoch, so the handle now always reflects the CURRENT source element.
     useImperativeHandle(forwardedRef, () => sourceVideoRef.current as HTMLVideoElement, [wcEpoch, mediaType, src]);
+
+    // Media-fps telemetry (HUD "Media" row): count NEW presented video frames via
+    // requestVideoFrameCallback while PLAYING. The compositor's FPS row runs at display refresh and
+    // redraws unchanged frames — this is the number that exposes a low-cadence source/proxy
+    // (30fps proxy under a 75Hz compositor: FPS 75, Media 30 — the 2026-07-19 report's gap).
+    useEffect(() => {
+      const video = sourceVideoRef.current as VideoFrameCapableElement | null;
+      const playing = "isPlaying" in props ? props.isPlaying === true : false;
+      if (!video || mediaType !== "video" || !playing || !video.requestVideoFrameCallback) return;
+      let cancelled = false;
+      let handle = 0;
+      const tick = () => {
+        if (cancelled) return;
+        recordMediaFrame();
+        handle = video.requestVideoFrameCallback!(tick);
+      };
+      handle = video.requestVideoFrameCallback(tick);
+      return () => {
+        cancelled = true;
+        video.cancelVideoFrameCallback?.(handle);
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, ["isPlaying" in props ? props.isPlaying : false, mediaType, src, wcEpoch]);
 
     /**
      * Get the renderer, lazily (re)creating it when absent. Absent means either first mount OR the context
