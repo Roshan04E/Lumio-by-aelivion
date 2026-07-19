@@ -392,3 +392,30 @@ user feedback, and ingest jank made the timeline read as frozen/hung.
 on the crosswalk clip should be judgeably sharp at fit zoom; no frozen-timeline feel during the
 rebuild burst. If 720p proxies still feel soft on 4K sources at 100% zoom, the next lever is a
 per-source ladder (proxy = min(1280, half the source long edge)) — NOT more bitrate.
+
+## v18 — Proxy playback "fps is very down" at ½ quality (2026-07-19)
+
+**Report:** at ½ quality playback feels heavily fps-dropped; "in Premiere quality decreases but
+never fps". Full quality (originals) felt smooth-motion by comparison.
+
+**Root cause:** recipe v6's `PROXY_FPS = 30` CAP. ½/¼/Auto substitute the ingest proxy
+(`resolvePlaybackUrl`), so any >30fps source (60fps phone/action footage) played at HALF its
+frame rate whenever quality wasn't "1" — a motion loss no hardware or render-scale could fix.
+The adaptive-quality ladder was innocent: it only caps render SCALE; the missing frames were
+never in the proxy file. Premiere's proxy model = lower resolution, NEVER lower motion.
+
+**Fix (recipe v7):**
+- `PROXY_FPS` 30 → 60. Sampling still follows the source's own cadence (`min(cap, nominalFps)`),
+  so 24/30fps sources re-encode byte-identically to v6 — only >30fps sources change.
+- Unknown-cadence fallback (`nominalFps` null, the `<video>` provider) now assumes 30, NOT the
+  cap — a 60 grid would have duplicated every frame of typical 30fps footage (both worker and
+  main-thread sites).
+- Sublinear bitrate law at both encode sites: `× min(1, √(30/fps))` — consecutive frames at high
+  fps compress better, so 60fps proxies land ~√2× the v6 size (~7 Mbps @ 720p60), not 2×.
+- `SOURCE_PROXY_VERSION` 6 → 7: one-time rebuild (with the v17 % notice) to catch every >30fps
+  proxy encoded at half rate.
+
+**Verify (user):** reload → rebuild notice runs once; then play a 60fps clip at ½ quality — motion
+should feel identical to full quality, only softer. If ½ STILL feels low-fps on a 24/30fps source,
+that's a different bug (render loop, not proxy cadence) — read the debug HUD's Frame ms while it
+happens and start from there; do NOT bump PROXY_FPS further.

@@ -26,13 +26,17 @@ import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable } from "./so
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 import type { SourceAsset } from "@orreris/shared";
 
-// QUALITY RECIPE v6 (2026-07-18, user report: busy street footage "not workable" on proxy while
-// small/skipped clips looked sharp — the 854/0.1bpp recipe was the whole gap). 720p-class long edge
-// + 0.18 bits/pixel/frame ≈ 5 Mbps at 1280×720@30 — Premiere's proxy tier, sharp enough to judge
-// focus/motion at fit zoom. Storage ~4× the old recipe (~37 MB/min) — fine for OPFS; decode stays
-// cheap vs the original. Bump SOURCE_PROXY_VERSION when touching EITHER constant.
+// QUALITY RECIPE v7 (2026-07-19, user report: ½-quality playback "fps is very down" vs Premiere,
+// where proxies lower ONLY resolution, never motion). v6 capped proxies at 30fps — 60fps footage
+// played at HALF its frame rate whenever the proxy substituted (½/¼/Auto), which read as
+// choppiness no hardware could fix. The cap is now 60: sampling still follows the SOURCE's own
+// cadence (24/30fps sources are byte-identical in cost and cadence to v6), only >30fps sources
+// keep their motion. Bitrate scales sublinearly with fps in the transcoders (temporal compression
+// gets MORE effective at high fps) so 60fps proxies land ~√2× the v6 size, not 2×.
+// v6 (2026-07-18) history: 1280 long edge + 0.18 bpp ≈ 5 Mbps at 720p30 — Premiere's proxy tier.
+// Bump SOURCE_PROXY_VERSION when touching ANY of these constants.
 const PROXY_LONG_EDGE = 1280;
-const PROXY_FPS = 30;
+const PROXY_FPS = 60;
 const PROXY_KEYFRAME_S = 1;
 const PROXY_BITS_PER_PIXEL_FRAME = 0.18;
 /** Below this the original is already cheap to decode — don't spend a transcode on it. */
@@ -478,14 +482,16 @@ async function transcodeOnMainThread(
   // Sample at the SOURCE's own cadence (capped at PROXY_FPS): forcing 24fps content onto a hardcoded
   // 30fps grid duplicated every 4th frame — a visible judder/jerk the user caught by eye (2026-07-04).
   // At source fps every proxy frame maps 1:1 to a real source frame, and shorter sources need fewer
-  // decode round-trips. The <video> fallback provider has no nominalFps → keep PROXY_FPS.
-  const fps = Math.min(PROXY_FPS, provider.nominalFps ?? PROXY_FPS);
+  // decode round-trips. Unknown cadence (the <video> fallback has no nominalFps) assumes 30 — NOT
+  // the 60 cap, which would duplicate every frame of typical 30fps footage (recipe v7).
+  const fps = Math.min(PROXY_FPS, provider.nominalFps ?? 30);
   const encoder = new MediaEncoder({
     width,
     height,
     fps,
     format: "mp4",
-    videoBitrate: Math.round(width * height * fps * PROXY_BITS_PER_PIXEL_FRAME),
+    // Sublinear fps scaling — same law as the worker path (recipe v7): 60fps ≈ √2× the 30fps size.
+    videoBitrate: Math.round(width * height * fps * PROXY_BITS_PER_PIXEL_FRAME * Math.min(1, Math.sqrt(30 / fps))),
     keyFrameIntervalSeconds: PROXY_KEYFRAME_S,
     audio: audio ? { sampleRate: audio.sampleRate, channels: audio.channels } : undefined,
   });

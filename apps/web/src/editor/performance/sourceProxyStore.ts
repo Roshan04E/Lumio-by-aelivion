@@ -49,7 +49,10 @@ export interface SourceProxyRecord {
 // v6 (2026-07-18): quality recipe upgrade — long edge 854 → 1280, 0.1 → 0.18 bits/pixel/frame
 // (user report: crowd/street proxies unusably soft while skipped clips played the sharp original).
 // Rebuild everything encoded with the 480p recipe.
-export const SOURCE_PROXY_VERSION = 6;
+// v7 (2026-07-19): motion parity — PROXY_FPS cap 30 → 60 (60fps footage played at HALF rate on
+// ½/¼/Auto quality; Premiere proxies drop resolution, never motion) + sublinear fps bitrate law.
+// 24/30fps sources re-encode identically; the rebuild exists to catch every >30fps proxy.
+export const SOURCE_PROXY_VERSION = 7;
 
 const OPFS_DIR = "orreris-source-proxies";
 const INDEX_FILE = "index.json";

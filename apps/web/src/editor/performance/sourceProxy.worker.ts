@@ -88,14 +88,18 @@ async function build(
   // WebCodecs path can't open — the engine falls back to the main thread for those.
   const provider = await createFrameProvider(sourceUrl, "video", { preferSoftware: true });
   // Sample at the SOURCE's own cadence (capped): forcing 24fps content onto a hardcoded 30fps grid
-  // duplicated every 4th frame — a visible judder the user caught by eye (2026-07-04).
-  const fps = Math.min(maxFps, provider.nominalFps ?? maxFps);
+  // duplicated every 4th frame — a visible judder the user caught by eye (2026-07-04). Unknown
+  // cadence assumes 30, NOT the cap — a 60 grid would duplicate every frame of 30fps footage.
+  const fps = Math.min(maxFps, provider.nominalFps ?? 30);
   const encoder = new MediaEncoder({
     width,
     height,
     fps,
     format: "mp4",
-    videoBitrate: Math.round(width * height * fps * bitsPerPixelFrame),
+    // Sublinear fps scaling (recipe v7): consecutive frames at high fps are more similar, so
+    // temporal compression needs fewer bits/frame — √(30/fps) keeps 60fps proxies at ~√2× the
+    // 30fps size instead of 2× with no visible quality change. ≤30fps sources are unaffected.
+    videoBitrate: Math.round(width * height * fps * bitsPerPixelFrame * Math.min(1, Math.sqrt(30 / fps))),
     keyFrameIntervalSeconds,
     audio: audio ? { sampleRate: audio.sampleRate, channels: audio.channels } : undefined
   });
