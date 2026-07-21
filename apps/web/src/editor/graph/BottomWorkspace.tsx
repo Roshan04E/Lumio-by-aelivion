@@ -9,6 +9,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, ty
 import { Activity, AudioLines, Info, Spline, X } from "lucide-react";
 import type { TimelineLayer } from "@orreris/shared";
 import { GraphEditor } from "./GraphEditor";
+import { ColorScopes, type ScopeFrameSampler } from "../../components/ColorScopes";
 
 export type BottomWorkspaceTab = "graph" | "audio" | "scopes" | "metadata";
 
@@ -38,10 +39,18 @@ export interface BottomWorkspaceProps {
   focusTargetKey?: string | undefined;
   /** Other SELECTED clips — the graph draws their matching curves faded (read-only ghosts). */
   ghostLayers?: TimelineLayer[] | undefined;
+  /** Video scopes (Scopes tab) — trustworthy scene-compositor readback + DOM-preview fallback. */
+  scopeSampler?: ScopeFrameSampler | undefined;
+  scopeContainerRef?: React.RefObject<HTMLElement | null> | undefined;
+  /** Frame tick (re-samples the scopes) + transport state (coarser sampling while playing). */
+  scopeTick?: number | undefined;
+  isPlaying?: boolean | undefined;
+  /** Open the Scopes tab initially (e.g. when invoked from the removed Color→Scopes affordance). */
+  initialTab?: BottomWorkspaceTab | undefined;
 }
 
-export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers }: BottomWorkspaceProps) {
-  const [tab, setTab] = useState<BottomWorkspaceTab>("graph");
+export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers, scopeSampler, scopeContainerRef, scopeTick, isPlaying, initialTab }: BottomWorkspaceProps) {
+  const [tab, setTab] = useState<BottomWorkspaceTab>(initialTab ?? "graph");
   const [height, setHeight] = useState<number>(() => loadHeight());
   const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
 
@@ -136,7 +145,20 @@ export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onC
         ) : tab === "audio" ? (
           <div className="bottom-workspace-empty">Audio workspace — the mixer and clip audio FX move here next.</div>
         ) : tab === "scopes" ? (
-          <div className="bottom-workspace-empty">Scopes workspace — video scopes move here next (today: Color tab → Scopes).</div>
+          scopeContainerRef ? (
+            <div className="bottom-workspace-scopes">
+              <ColorScopes
+                containerRef={scopeContainerRef}
+                sampleSource={scopeSampler}
+                tick={scopeTick ?? 0}
+                isPlaying={isPlaying ?? false}
+                storageKey="drawer"
+                defaultLayout="two"
+              />
+            </div>
+          ) : (
+            <div className="bottom-workspace-empty">Scopes unavailable — no preview surface.</div>
+          )
         ) : (
           <div className="bottom-workspace-empty">
             {layer

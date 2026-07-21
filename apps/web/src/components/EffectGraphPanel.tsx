@@ -534,6 +534,60 @@ export function EffectGraphPanel({
     );
   }
 
+  /** CSS-only preview approximations for the Creative Effects tiles (display only — the real
+   * effects are GPU shaders; this just gives each tile a recognizable flavor over the sample frame). */
+  const creativeTileFilter: Record<string, string> = {
+    sketch: "grayscale(1) contrast(1.7) brightness(1.15)",
+    oldTv: "sepia(0.45) saturate(1.35) contrast(1.2) brightness(0.95)",
+    glitchFx: "hue-rotate(70deg) saturate(2.2) contrast(1.25)",
+    halftone: "grayscale(0.4) contrast(1.9)",
+    posterize: "saturate(1.8) contrast(1.6)",
+    pixelate: "blur(1.5px) contrast(1.3) saturate(1.2)",
+    chromaticAberration: "saturate(1.5) hue-rotate(-15deg) contrast(1.1)",
+    stylize: "saturate(1.7) contrast(1.2) brightness(1.05)"
+  };
+
+  function renderCreativeTile(item: CatalogItem) {
+    if (item.kind !== "effect") return null;
+    const starred = favourites.has(item.id);
+    const sampleSrc = aSrc ?? bSrc;
+    return (
+      <div className="look-thumb-wrap" key={item.id} title={item.description}>
+        <button
+          type="button"
+          className="look-thumb"
+          draggable
+          onClick={() => addItem(item)}
+          onDragStart={(event) => {
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-orreris-timeline-effect", item.effectType);
+            event.dataTransfer.setData("text/plain", item.label);
+          }}
+        >
+          <span
+            className="look-thumb-preview"
+            style={{
+              backgroundImage: sampleSrc ? `url("${sampleSrc}")` : undefined,
+              filter: creativeTileFilter[item.effectType] ?? "saturate(1.4) contrast(1.2)"
+            }}
+          />
+          <span className="look-thumb-vignette" />
+          <span className="look-thumb-name">{item.label}</span>
+        </button>
+        <button
+          type="button"
+          className={`transition-thumb-star ${starred ? "is-on" : ""}`}
+          aria-label={starred ? "Remove from favourites" : "Add to favourites"}
+          aria-pressed={starred}
+          onClick={() => toggleFavourite(item.id)}
+        >
+          <Star size={12} fill={starred ? "currentColor" : "none"} />
+        </button>
+        <span className="transition-thumb-label">{item.label}</span>
+      </div>
+    );
+  }
+
   function removeFavourite(prev: Set<string>, id: string) {
     if (!prev.has(id)) return prev;
     const next = new Set(prev);
@@ -555,6 +609,12 @@ export function EffectGraphPanel({
     .sort((a, b) => Number(favourites.has(b.id)) - Number(favourites.has(a.id)));
   const lookTiles = catalog.look
     .filter(matchesQuery)
+    .slice()
+    .sort((a, b) => Number(favourites.has(b.id)) - Number(favourites.has(a.id)));
+  // Creative Effects strip: registry-flagged artistic restyling effects (sketch, old TV, glitch, …).
+  // Own row so new creators find them without digging through the Video → Stylize tree.
+  const creativeTiles = catalog.video
+    .filter((item) => item.kind === "effect" && item.creative && matchesQuery(item))
     .slice()
     .sort((a, b) => Number(favourites.has(b.id)) - Number(favourites.has(a.id)));
   const aiTiles = catalog.ai.filter(matchesQuery);
@@ -612,26 +672,9 @@ export function EffectGraphPanel({
         ) : null}
       </div>
 
-      {/* Bottom strip — browsable square tiles. Transitions preview on hover; AI tools run on click. */}
+      {/* Bottom strip — browsable square tiles. Row order (user spec): Transitions, Creative
+          Effects, Looks. Transitions preview on hover; AI tools run on click. */}
       <div className="effect-strip-panel">
-        {lookTiles.length ? (
-          <div className="effect-strip-row">
-            <div className="effect-strip-head">
-              <span>Looks</span>
-              <Badge tone="muted">{lookTiles.length}</Badge>
-            </div>
-            <div className="effect-strip-track">
-              {lookTiles.slice(0, LOOK_STRIP_CAP).map(renderLookTile)}
-              {lookTiles.length > LOOK_STRIP_CAP ? (
-                <button type="button" className="transition-show-more" onClick={() => { setLookGalleryCategory("all"); setLookGalleryOpen(true); }}>
-                  <span className="transition-show-more-plus">+{lookTiles.length - LOOK_STRIP_CAP}</span>
-                  <span>Show more</span>
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-
         {transitionTiles.length ? (
           <div className="effect-strip-row">
             <div className="effect-strip-head">
@@ -643,6 +686,34 @@ export function EffectGraphPanel({
               {transitionTiles.length > TRANSITION_STRIP_CAP ? (
                 <button type="button" className="transition-show-more" onClick={() => { setGalleryCategory("all"); setGalleryOpen(true); }}>
                   <span className="transition-show-more-plus">+{transitionTiles.length - TRANSITION_STRIP_CAP}</span>
+                  <span>Show more</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {creativeTiles.length ? (
+          <div className="effect-strip-row">
+            <div className="effect-strip-head">
+              <span>Creative Effects</span>
+              <Badge tone="muted">{creativeTiles.length}</Badge>
+            </div>
+            <div className="effect-strip-track">{creativeTiles.map(renderCreativeTile)}</div>
+          </div>
+        ) : null}
+
+        {lookTiles.length ? (
+          <div className="effect-strip-row">
+            <div className="effect-strip-head">
+              <span>Looks</span>
+              <Badge tone="muted">{lookTiles.length}</Badge>
+            </div>
+            <div className="effect-strip-track">
+              {lookTiles.slice(0, LOOK_STRIP_CAP).map(renderLookTile)}
+              {lookTiles.length > LOOK_STRIP_CAP ? (
+                <button type="button" className="transition-show-more" onClick={() => { setLookGalleryCategory("all"); setLookGalleryOpen(true); }}>
+                  <span className="transition-show-more-plus">+{lookTiles.length - LOOK_STRIP_CAP}</span>
                   <span>Show more</span>
                 </button>
               ) : null}

@@ -72,7 +72,7 @@ export function WaveformGLLayer({ canvas, laneOffsetPx }: Props) {
 
         const pyramid = getCachedPyramid(entry.url);
         if (!pyramid) {
-          void getAudioPeaks(entry.url); // warm the cache; drawn next frame once ready
+          void getAudioPeaks(entry.url, entry.peaksKey); // warm the cache; drawn next frame once ready
           continue;
         }
         if (!gl.hasSource(entry.url)) {

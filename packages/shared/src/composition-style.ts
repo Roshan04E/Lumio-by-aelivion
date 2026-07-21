@@ -1243,6 +1243,14 @@ export function getCompositionColorPipeline(
     if (!COLOR_EFFECT_TYPES.has(type)) {
       continue;
     }
+    // Same masked-skip rule as getEffectCss/getCompositionFilterEffects: a color effect that carries a
+    // renderable region mask renders through the region machinery (duplicate-layer clones, whose copy is
+    // mask-STRIPPED, or the scene compositor's masked region passes) — baking it here would grade the
+    // WHOLE frame. This is what confined adjustment-layer masks: their stamped color effects reach the
+    // grade only after `effectsWithLayerRegionMask`, i.e. always masked, so they must never bake globally.
+    if (Array.isArray(effect.masks) && (effect.masks as Mask[]).some(isRenderableMask)) {
+      continue;
+    }
     const params = asRecord(effect.params);
     const effectId = stringOr(effect.id, "");
 

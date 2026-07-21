@@ -682,6 +682,7 @@ export async function removeLocalAssetRecord(assetId: string): Promise<void> {
   } catch {
     /* best-effort — reclaiming the OPFS blob must never block the caller */
   }
+  void import("./audioPeaks").then((m) => m.removePersistedPeaks(assetId)).catch(() => undefined);
 }
 
 /**
@@ -762,6 +763,7 @@ export async function deleteAsset(assetId: string) {
     } catch {
       /* best-effort cleanup */
     }
+    void import("./audioPeaks").then((m) => m.removePersistedPeaks(assetId)).catch(() => undefined);
   }
 }
 

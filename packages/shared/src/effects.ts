@@ -113,6 +113,10 @@ export interface TimelineEffectDefinition {
   name: string;
   description: string;
   category: TimelineEffectCategory;
+  /** Surfaced in the effects panel's "Creative Effects" strip (sketch, old TV, glitch, …) —
+   * artistic restyling effects, as opposed to corrective/enhancement ones. Registry-driven so
+   * new creative effects appear in the strip without touching the panel. */
+  creative?: boolean;
   scope: TimelineEffectScope[];
   compatibleLayerTypes: TimelineLayerType[];
   defaultIntensity: number;
@@ -143,7 +147,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     // Colour grades apply to text/shape too — every renderer grades overlays (DOM SVG filter, Remotion,
     // export overlay-grade, and the GPU scene pass), so they belong in the inspector for those layers.
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
-    defaultIntensity: 50,
+    defaultIntensity: 100,
     previewSupport: "native",
     renderSupport: "native",
     params: [
@@ -497,6 +501,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Pixelate",
     description: "Mosaic pixelation block effect (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -509,6 +514,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Chromatic Aberration",
     description: "RGB channel offset along an angle for a lens/glitch fringing look (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -526,6 +532,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Pencil Sketch",
     description: "Sobel-edge pencil sketch on paper with grain (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -541,6 +548,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Old TV",
     description: "CRT look: scanlines, static, sync jitter, aged-phosphor tint, vignette (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -558,6 +566,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Glitch",
     description: "Digital glitch: row tearing + RGB split, tick-animated (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -574,6 +583,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Halftone",
     description: "Print-style halftone dot screen with screen angle (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -589,6 +599,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     name: "Posterize",
     description: "Quantize colors to a fixed number of levels (real GLSL shader).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,
@@ -602,6 +613,7 @@ export const timelineEffectRegistry: TimelineEffectDefinition[] = [
     description:
       "Illustration engine: anisotropic-Kuwahara paint, flow-guided ink lines, cel shading, comic halftone print — Painterly / Anime Cel / Manga / Sketch / Comic Print (multi-pass GPU graph, temporally stable on video).",
     category: "Stylize",
+    creative: true,
     scope: ["clip", "adjustment"],
     compatibleLayerTypes: ["video", "image", "text", "shape", "adjustment"],
     defaultIntensity: 100,

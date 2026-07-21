@@ -279,6 +279,15 @@ interface VideoProps extends BaseProps {
    * whole pre-roll ("frozen initial frames", 2026-07-17 report). 0/absent → exact legacy behavior.
    */
   prerollSeconds?: number | undefined;
+  /**
+   * This clip's asset is stacked with another active layer (same-source stack). On the WebCodecs
+   * path both request the frame at the shared transport clock (already locked); on the <video>
+   * ELEMENT fallback, native play() free-runs each element's own clock so twins can drift a few
+   * frames apart → a ghost. When set, the live watchdog corrects element drift at a tight (~1.5
+   * frame) threshold instead of its 1s freeze threshold, keeping the stack aligned. Only stacked
+   * clips get this — single clips keep the smooth, correction-free element path.
+   */
+  strictSourceSync?: boolean | undefined;
   onLoadedMetadata?: ((event: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
 }
 
@@ -341,6 +350,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // The transition reveal changes every frame; the playing draw loop reads the latest from this ref.
     const transitionRef = useRef<MediaTransition | null>(transition);
     transitionRef.current = transition;
+
+    // Same-source-stack flag, read inside the watchdog interval closure (which doesn't re-subscribe
+    // when this prop flips). Element-path only; the WC path is already transport-frame-locked.
+    const strictSourceSyncRef = useRef(false);
+    strictSourceSyncRef.current = props.mediaType === "video" ? (props.strictSourceSync ?? false) : false;
 
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const rendererRef = useRef<MediaWebGLRenderer | null>(null);
@@ -1201,6 +1215,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // Element-path nudge rate limit (SELF-HEAL 3 below) — per effect lifetime is fine: a src/epoch
       // change re-arms it, which is exactly when a fresh nudge should be allowed anyway.
       let elementNudgeAtMs = 0;
+      // Same-source-stack sync rate limit (see strictSourceSyncRef). Independent of the freeze nudge
+      // so a stacked twin can re-align without waiting on the 1s/2.5s freeze machinery.
+      let strictSyncAtMs = 0;
+      const STRICT_SYNC_DRIFT_S = 0.05; // ~1.5 frames at 30fps — below this the ghost isn't visible
+      const STRICT_SYNC_MIN_INTERVAL_MS = 700; // gentle: at most ~1 corrective seek/sec while drifting
       const interval = window.setInterval(() => {
         const tp = wcTimeRef.current;
         const nowMs = performance.now();
@@ -1266,6 +1285,32 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           drawVideoFrameRef.current();
         }
 
+        // SAME-SOURCE STACK SYNC: a clip stacked over itself (same asset on 2+ active layers) ghosts
+        // when one layer is on the <video> element path and its clock free-runs a few frames off its
+        // twin. Keep the element tight to the transport's LIVE clock (what the WC path targets), hard-
+        // seeking only past ~1.5 frames of drift and rate-limited. Runs BEFORE the freeze early-return
+        // so a sub-1s drift still corrects; gated to stacked assets so single clips never pay for it.
+        if (strictSourceSyncRef.current && video && tp.isPlaying && !video.ended && video.readyState >= 1) {
+          let liveTime = tp.currentTime;
+          const live = getLivePlaybackTime();
+          if (Math.abs(live - tp.currentTime) < WC_LIVE_CLOCK_MAX_DIVERGENCE_S) liveTime = live;
+          const expectedLive = mapSourceTime(tp, liveTime);
+          if (Math.abs(expectedLive - video.currentTime) > STRICT_SYNC_DRIFT_S && nowMs - strictSyncAtMs > STRICT_SYNC_MIN_INTERVAL_MS) {
+            strictSyncAtMs = nowMs;
+            if (typeof window !== "undefined") {
+              const w = window as { __rfStrictSyncCorrections?: number };
+              w.__rfStrictSyncCorrections = (w.__rfStrictSyncCorrections ?? 0) + 1;
+            }
+            try {
+              video.currentTime = expectedLive;
+            } catch {
+              /* transient seek failure — next watchdog tick retries */
+            }
+            if (video.paused) void video.play().catch(() => undefined);
+            drawVideoFrameRef.current();
+          }
+        }
+
         if (behind <= FREEZE_BEHIND_S) return;
         report(behind, tp.currentTime, detail);
         // SELF-HEAL 3 (2026-07-06): the ELEMENT path had report-only coverage — a <video> that
@@ -1322,7 +1367,14 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         const video = sourceVideoRef.current;
         if (!video) return;
         const expected = mapSourceTime(tp);
-        if (video.readyState >= 1 && Math.abs(video.currentTime - expected) > 0.3) {
+        // Reprime is an explicit "snap NOW" signal (coverage-exit, track-visibility toggle), not a
+        // per-frame path — so use a TIGHT threshold (~1.5 frames) instead of the watchdog's coarse
+        // 0.3s. This is what re-aligns a freshly-revealed overlay with a same-source base clip whose
+        // element kept decoding: a 3–4 frame drift ghosts under a soft-light stack, and 0.3s let it
+        // slide. The cost is at most one extra element seek per reprime event (never during normal
+        // playback), so it can't reintroduce the seek-storm the 0.3s guard was protecting against.
+        const REPRIME_MAX_DRIFT_S = 0.05; // ~1.5 frames at 30fps — tight enough to kill the ghost
+        if (video.readyState >= 1 && Math.abs(video.currentTime - expected) > REPRIME_MAX_DRIFT_S) {
           try {
             video.currentTime = expected;
           } catch {

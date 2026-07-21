@@ -38,6 +38,24 @@ export const SERVO_GAIN = 0.12;
  * Must be > HARD_RESYNC_S so genuine mid-play stalls inside the gate still hard-resync.
  */
 export const AUDIO_MASTER_GATE_S = 0.5;
+/**
+ * FIRST-election gate (v23): a registration may only become master once its mapped time is within
+ * ~2 frames of the live playhead. Anything farther (play() startup latency) stays non-master and
+ * is seeked FORWARD onto the clock by the session-tightened non-master corrector — so the clock
+ * (and therefore the picture) never moves backward or visibly slows at play start. The v20
+ * pre-roll hold that tried to swallow latency by freezing the anchor is retired: while the anchor
+ * held, the video elements free-ran ahead and the drift corrector yanked the PICTURE backward —
+ * the exact symptom the hold was meant to fix. Established masters use AUDIO_MASTER_GATE_S.
+ */
+export const AUDIO_FIRST_ELECTION_GATE_S = 0.06;
+/**
+ * Non-master correction tolerance for the first ~2s of a playback session (seconds): tight, so a
+ * startup latency below the steady-state 0.15 tolerance still gets seeked onto the clock (and can
+ * then pass the first-election gate) instead of persisting as a permanent small A/V offset.
+ * Steady state keeps the coarse tolerance — no seek storms.
+ */
+export const AUDIO_SESSION_START_TOLERANCE_S = 0.05;
+export const AUDIO_SESSION_START_WINDOW_MS = 2000;
 
 export interface AudioClockReader {
   layerId: string;

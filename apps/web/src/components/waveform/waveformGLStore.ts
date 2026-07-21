@@ -8,6 +8,8 @@
 export type WaveformGLEntry = {
   element: HTMLElement;
   url: string;
+  /** Stable persistence key (asset id) for the IndexedDB peak cache — blob: URLs change per session. */
+  peaksKey?: string | undefined;
   sourceInSeconds: number;
   durationSeconds: number;
   tint: [number, number, number];

@@ -1370,27 +1370,36 @@ export function commitGroupMove(
 export function ensureVacantEdgeTracks(composition: TimelineComposition): TimelineComposition {
   const tracks = composition.tracks;
   const isVisual = (track: TimelineTrack) => track.type !== "audio";
+  // Only pads this function minted are collapsible — a user-created empty track (the explicit
+  // "Add layer" buttons) must survive normalization or the buttons become no-ops.
+  const isAutoPad = (track: TimelineTrack) => track.id.startsWith("track_auto_") && track.layers.length === 0;
   if (tracks.length === 0) return composition;
 
-  // Leading consecutive empty visual tracks / trailing consecutive empty audio tracks.
+  // Leading consecutive empty AUTO visual pads / trailing consecutive empty AUTO audio pads.
   let leadingEmptyVisuals = 0;
-  while (leadingEmptyVisuals < tracks.length && isVisual(tracks[leadingEmptyVisuals]!) && tracks[leadingEmptyVisuals]!.layers.length === 0) {
+  while (leadingEmptyVisuals < tracks.length && isVisual(tracks[leadingEmptyVisuals]!) && isAutoPad(tracks[leadingEmptyVisuals]!)) {
     leadingEmptyVisuals += 1;
   }
   let trailingEmptyAudio = 0;
   while (
     trailingEmptyAudio < tracks.length &&
     tracks[tracks.length - 1 - trailingEmptyAudio]!.type === "audio" &&
-    tracks[tracks.length - 1 - trailingEmptyAudio]!.layers.length === 0
+    isAutoPad(tracks[tracks.length - 1 - trailingEmptyAudio]!)
   ) {
     trailingEmptyAudio += 1;
   }
   const hasVisual = tracks.some(isVisual);
   const hasAudio = tracks.some((track) => track.type === "audio");
-  const wantVisualPad = hasVisual && leadingEmptyVisuals === 0;
-  const wantAudioPad = hasAudio && trailingEmptyAudio === 0;
-  const surplusVisuals = Math.max(0, leadingEmptyVisuals - 1);
-  const surplusAudio = Math.max(0, trailingEmptyAudio - 1);
+  const topTrack = tracks[leadingEmptyVisuals];
+  const bottomTrack = tracks[tracks.length - 1 - trailingEmptyAudio];
+  // A user-created empty track already sitting at the edge serves as the vacant pad — don't stack
+  // an auto pad beyond it.
+  const edgeVisualIsEmpty = topTrack !== undefined && isVisual(topTrack) && topTrack.layers.length === 0;
+  const edgeAudioIsEmpty = bottomTrack !== undefined && bottomTrack.type === "audio" && bottomTrack.layers.length === 0;
+  const wantVisualPad = hasVisual && leadingEmptyVisuals === 0 && !edgeVisualIsEmpty;
+  const wantAudioPad = hasAudio && trailingEmptyAudio === 0 && !edgeAudioIsEmpty;
+  const surplusVisuals = Math.max(0, leadingEmptyVisuals - (edgeVisualIsEmpty ? 0 : 1));
+  const surplusAudio = Math.max(0, trailingEmptyAudio - (edgeAudioIsEmpty ? 0 : 1));
   if (!wantVisualPad && !wantAudioPad && surplusVisuals === 0 && surplusAudio === 0) {
     return composition;
   }

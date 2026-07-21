@@ -101,6 +101,8 @@ export type CatalogItem =
       draggable: true;
       /** The registry's Blur/Adjust/Stylize/Keying/Texture/Audio bucket — powers the panel's subcategory headers. */
       category?: TimelineEffectCategory | undefined;
+      /** Registry `creative` flag — collected into the panel's "Creative Effects" strip row. */
+      creative?: boolean | undefined;
     }
   | {
       kind: "effectManifest";
@@ -236,8 +238,8 @@ const AUDIO_ITEMS: CatalogItem[] = [
   { kind: "audio", id: "audio-fadeOut", label: "Fade Out (audio)", description: "Ramp the audio down to silence at the clip end.", effectType: "volume", fade: "out" }
 ];
 
-function effectItem(type: TimelineEffectType, name: string, description: string, category?: TimelineEffectCategory): CatalogItem {
-  return { kind: "effect", id: `fx-${type}`, label: name, description, effectType: type, draggable: true, category };
+function effectItem(type: TimelineEffectType, name: string, description: string, category?: TimelineEffectCategory, creative?: boolean): CatalogItem {
+  return { kind: "effect", id: `fx-${type}`, label: name, description, effectType: type, draggable: true, category, creative };
 }
 
 function presetItem(id: string, label: string): CatalogItem {
@@ -325,7 +327,7 @@ export function buildEffectCatalog(
   const uploaded: CatalogItem[] = [];
   for (const effect of effects) {
     if (effect.type === "volume") continue; // curated under Audio
-    const item = effectItem(effect.type, effect.name, effect.description, effect.category);
+    const item = effectItem(effect.type, effect.name, effect.description, effect.category, effect.creative);
     // Audio-category clip FX (EQ/compressor/gate/limiter) live under the Audio bin, after the
     // curated volume/fade items — they'd otherwise be dropped by the video/text bucketing below.
     if (effect.category === "Audio") {

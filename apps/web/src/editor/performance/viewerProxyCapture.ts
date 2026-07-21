@@ -308,6 +308,10 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
       let sw: number;
       let sh: number;
       if (entry.lease) {
+        // v24: check RIGHT BEFORE every element seek — after the abort (play started) a stray
+        // `currentTime` write here scrubbed a pooled element to a span time while playback was
+        // adopting warm elements from the same pool (play-start "replays" appearance).
+        throwIfAborted(signal);
         await seekTo(entry.lease.video, sourceTime, signal);
         source = entry.lease.video;
         sw = entry.lease.video.videoWidth;
@@ -322,6 +326,7 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
       if (sw <= 0 || sh <= 0) throw new ViewerCaptureUnavailable(`source has no pixels for layer ${layer.id}`);
       let matte: TexImageSource | null = null;
       if (entry.matteLease) {
+        throwIfAborted(signal);
         await seekTo(entry.matteLease.video, sourceTime, signal);
         matte = entry.matteLease.video;
       }
@@ -354,6 +359,9 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
     // Compose offscreen through the LIVE compositor (no present). Retry briefly for late async pieces.
     let frame: { pixels: Uint8Array; width: number; height: number } | null = null;
     for (let attempt = 0; attempt <= FRAME_RETRIES && !frame; attempt++) {
+      // v24: never issue an offscreen compositor render after the abort — it shares the LIVE
+      // compositor and (pre-guard) could resize/clear the on-screen canvas mid-playback.
+      throwIfAborted(signal);
       frame = capture.renderOffscreen({
         layers: mergedLayers,
         timeSeconds: t,

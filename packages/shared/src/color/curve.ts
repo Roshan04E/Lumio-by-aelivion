@@ -57,17 +57,17 @@ function sanitizePoints(points: CurvePoint[] | undefined): CurvePoint[] {
 }
 
 /**
- * Evaluate the monotonic cubic Hermite (Fritsch–Carlson) spline through `points`
- * at input `x` (0..1). Linear outside the control-point range; identity-ish when
- * fewer than 2 usable points.
+ * Fritsch–Carlson monotone-Hermite evaluation over points that are ALREADY sorted
+ * ascending by x with distinct x values. The query `x` and the point x's may lie
+ * outside [0,1] (the periodic hue path relies on this) — only the OUTPUT is clamped
+ * to [0,1]. Callers that want the [0,1] tone-curve domain go through `evaluateCurve`.
  */
-export function evaluateCurve(points: CurvePoint[], x: number): number {
-  const pts = sanitizePoints(points);
+function evaluateHermite(pts: CurvePoint[], x: number): number {
   const n = pts.length;
-  const xi = clamp01(x);
-
-  if (xi <= pts[0]!.x) return pts[0]!.y;
-  if (xi >= pts[n - 1]!.x) return pts[n - 1]!.y;
+  if (n === 0) return 0;
+  if (n === 1) return clamp01(pts[0]!.y);
+  if (x <= pts[0]!.x) return clamp01(pts[0]!.y);
+  if (x >= pts[n - 1]!.x) return clamp01(pts[n - 1]!.y);
 
   // Secant slopes between consecutive points.
   const h: number[] = [];
@@ -105,15 +105,15 @@ export function evaluateCurve(points: CurvePoint[], x: number): number {
     }
   }
 
-  // Find the segment containing xi and evaluate the Hermite basis.
+  // Find the segment containing x and evaluate the Hermite basis.
   let seg = 0;
   for (let i = 0; i < n - 1; i += 1) {
-    if (xi >= pts[i]!.x && xi <= pts[i + 1]!.x) {
+    if (x >= pts[i]!.x && x <= pts[i + 1]!.x) {
       seg = i;
       break;
     }
   }
-  const t = (xi - pts[seg]!.x) / h[seg]!;
+  const t = (x - pts[seg]!.x) / h[seg]!;
   const t2 = t * t;
   const t3 = t2 * t;
   const h00 = 2 * t3 - 3 * t2 + 1;
@@ -122,6 +122,44 @@ export function evaluateCurve(points: CurvePoint[], x: number): number {
   const h11 = t3 - t2;
   const y = h00 * pts[seg]!.y + h10 * h[seg]! * m[seg]! + h01 * pts[seg + 1]!.y + h11 * h[seg]! * m[seg + 1]!;
   return clamp01(y);
+}
+
+/**
+ * Evaluate the monotonic cubic Hermite (Fritsch–Carlson) spline through `points`
+ * at input `x` (0..1). Linear outside the control-point range; identity-ish when
+ * fewer than 2 usable points.
+ */
+export function evaluateCurve(points: CurvePoint[], x: number): number {
+  return evaluateHermite(sanitizePoints(points), clamp01(x));
+}
+
+/** Wrap a value into [0,1) — for the periodic (hue) domain. */
+function wrap01(v: number): number {
+  const r = v - Math.floor(v);
+  return r < 0 ? r + 1 : r;
+}
+
+/**
+ * Evaluate a **periodic** curve (hue domain: x=0 ≡ x=1) at `x`. The control points are
+ * tiled one full period on each side so the monotone-Hermite tangents are continuous
+ * ACROSS the 0/1 seam — the old path mirrored a single anchor at x=last−1 / x=first+1 but
+ * then ran it through `evaluateCurve`, whose `sanitizePoints` clamps x back into [0,1],
+ * collapsing those anchors onto 0/1 and making hue curves jump near red. Tiling + an
+ * unclamped evaluator fixes that; the editor draws with this same fn so graph == render.
+ */
+export function evaluatePeriodicCurve(points: CurvePoint[], x: number): number {
+  const base = sanitizePoints(points); // sorted asc, x/y clamped to [0,1], ≥2 points
+  const shifted = (dx: number): CurvePoint[] => base.map((p) => ({ x: p.x + dx, y: p.y }));
+  // Three tiled periods, then drop any point whose x coincides with the previous one
+  // (a base point at exactly x=0 and the −1 tile's x=1 copy would otherwise share an x).
+  const tiled = [...shifted(-1), ...base, ...shifted(1)];
+  const ext: CurvePoint[] = [];
+  for (const p of tiled) {
+    const prev = ext[ext.length - 1];
+    if (prev && Math.abs(prev.x - p.x) < 1e-6) ext[ext.length - 1] = p;
+    else ext.push(p);
+  }
+  return evaluateHermite(ext, wrap01(x));
 }
 
 /** Sample a curve into a `size`-entry LUT (0..1 → 0..1). */

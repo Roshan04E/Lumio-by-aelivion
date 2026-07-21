@@ -268,7 +268,7 @@ import { lut3dToRgbaFloat } from "./shader";
 }
 
 // ---------------------------------------------------------------- 13C.3 HSL ops
-import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hueSatCurvesAreIdentity, secondaryIsIdentity, NEUTRAL_SECONDARY, type HslSecondary } from "./hsl";
+import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hueSatCurvesAreIdentity, secondaryIsIdentity, sampleHueSatCurve, NEUTRAL_SECONDARY, type HslSecondary } from "./hsl";
 
 // 25. RGB↔HSL round-trips across a spread of colors (incl. gray + saturated primaries).
 {
@@ -306,6 +306,35 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   const green: Rgb = hslToRgb(1 / 3, 0.6, 0.5);
   const shifted = applyHueSatCurves({ hueVsHue: [{ x: 0, y: 0.5 }, { x: 1 / 3, y: 0.7 }, { x: 1, y: 0.5 }] }, green);
   check("hueVsHue moves the targeted hue", Math.abs(rgbToHsl(shifted)[0] - 1 / 3) > 0.02);
+}
+
+// 27b. Periodic hue curve is CONTINUOUS across the red seam (hue 0 ≡ hue 1). Regression guard for
+//      the wrap bug where the seam anchors were clamped onto 0/1 (evaluateCurve's sanitize), which
+//      made the curve jump right at red instead of wrapping smoothly.
+{
+  // Symmetric curve peaking mid-domain, endpoints equal: sampling across the seam (0.999 → 0 → 0.001)
+  // must not jump — and the interior peak must be preserved (the old clamp discarded seam context).
+  const curve = [{ x: 0, y: 0.5 }, { x: 0.5, y: 0.85 }, { x: 1, y: 0.5 }];
+  const belowSeam = sampleHueSatCurve(curve, 0.999, true);
+  const atSeam = sampleHueSatCurve(curve, 0.0, true);
+  const aboveSeam = sampleHueSatCurve(curve, 0.001, true);
+  check("periodic hue curve continuous at the seam", Math.abs(belowSeam - atSeam) < 0.01 && Math.abs(aboveSeam - atSeam) < 0.01);
+  check("periodic hue curve preserves interior peak", Math.abs(sampleHueSatCurve(curve, 0.5, true) - 0.85) < 1e-6);
+
+  // Periodic domain: x=0 and x=1 are the SAME point on the wheel, so the seam value is single-valued
+  // (f(0) === f(1)); a peak placed at ONE edge wraps to appear at both — that's the wrap working, not
+  // a clamp artifact. An interior-only curve (the shape the editor actually authors — flanking anchors,
+  // no forced endpoints) crosses the seam smoothly.
+  const interior = [{ x: 0.3, y: 0.5 }, { x: 0.5, y: 0.8 }, { x: 0.7, y: 0.5 }];
+  check("periodic seam is single-valued (f(0) == f(1))", Math.abs(sampleHueSatCurve(interior, 0, true) - sampleHueSatCurve(interior, 1, true)) < 1e-9);
+  const near1 = sampleHueSatCurve(interior, 0.98, true);
+  const near0 = sampleHueSatCurve(interior, 0.02, true);
+  check("interior periodic curve wraps continuously", Math.abs(near1 - sampleHueSatCurve(interior, 0, true)) < 0.05 && Math.abs(near0 - sampleHueSatCurve(interior, 0, true)) < 0.05);
+
+  // Non-periodic (luma/sat) domain is unaffected: still clamps flat outside the control range.
+  const ramp = [{ x: 0.2, y: 0.4 }, { x: 0.8, y: 0.6 }];
+  check("non-periodic curve clamps below first point", Math.abs(sampleHueSatCurve(ramp, 0, false) - 0.4) < 1e-6);
+  check("non-periodic curve clamps above last point", Math.abs(sampleHueSatCurve(ramp, 1, false) - 0.6) < 1e-6);
 }
 
 // 28. Secondary key: a tight red key selects red strongly and rejects blue.

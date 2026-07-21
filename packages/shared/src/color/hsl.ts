@@ -13,7 +13,7 @@
  * PCHIP spline from `curve.ts` so the editor's drawn path and the renderer's LUT agree.
  */
 
-import { evaluateCurve, type CurvePoint } from "./curve";
+import { evaluateCurve, evaluatePeriodicCurve, type CurvePoint } from "./curve";
 
 /* ------------------------------------------------------------------ sRGB ↔ HSL */
 
@@ -118,14 +118,12 @@ export function neutralHueCurvePoints(): CurvePoint[] {
 function evalCurveAt(points: CurvePoint[] | undefined, x: number, periodic: boolean): number {
   if (!points || points.length === 0) return 0.5;
   if (points.length === 1) return clamp01(points[0]!.y);
-  if (!periodic) return evaluateCurve(points, x);
-  // Periodic: mirror the first point one turn ahead and the last one turn behind so the
-  // PCHIP spline is continuous across hue 0 == hue 1.
-  const sorted = [...points].sort((a, b) => a.x - b.x);
-  const first = sorted[0]!;
-  const last = sorted[sorted.length - 1]!;
-  const extended: CurvePoint[] = [{ x: last.x - 1, y: last.y }, ...sorted, { x: first.x + 1, y: first.y }];
-  return evaluateCurve(extended, x);
+  // Periodic hue domain: `evaluatePeriodicCurve` tiles the control points a full period on
+  // each side and evaluates WITHOUT clamping x to [0,1], so the spline is continuous across
+  // the red seam (hue 0 ≡ hue 1). The old inline extension routed through `evaluateCurve`,
+  // whose sanitize clamps x back into [0,1] and collapsed the wrap anchors onto 0/1 —
+  // discarding the seam's own control value and making hue curves jump. See curve.ts.
+  return periodic ? evaluatePeriodicCurve(points, x) : evaluateCurve(points, x);
 }
 
 /**

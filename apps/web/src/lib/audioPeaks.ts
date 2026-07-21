@@ -142,8 +142,109 @@ async function decodeOnMain(url: string): Promise<Pyramid | null> {
   return { duration: buffer.duration, levels: buildPyramid(base) };
 }
 
-/** Decode an asset once into a cached LOD pyramid (cheap to resample afterwards). */
-export async function getAudioPeaks(url: string): Promise<Pyramid | null> {
+// --- Durable peak persistence (IndexedDB) -----------------------------------
+// The pyramid cache used to be memory-only: every refresh re-decoded the whole source, and a
+// memory-pressure clearAudioPeakCaches() made already-mounted clips lose their waveform for the
+// rest of the session (nothing re-triggered a decode). Persist the FINEST level per STABLE key —
+// the asset id, because blob: object URLs change every session — and rebuild the LOD pyramid on
+// read (pure math, far cheaper than a re-decode).
+const PEAKS_DB = "orreris-waveform-peaks";
+const PEAKS_STORE = "pyramids";
+let peaksDbPromise: Promise<IDBDatabase | null> | null = null;
+
+function openPeaksDb(): Promise<IDBDatabase | null> {
+  if (peaksDbPromise) return peaksDbPromise;
+  peaksDbPromise = new Promise((resolve) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    try {
+      const request = indexedDB.open(PEAKS_DB, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(PEAKS_STORE)) {
+          request.result.createObjectStore(PEAKS_STORE);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  return peaksDbPromise;
+}
+
+type StoredPeaks = { duration: number; max: ArrayBuffer; min: ArrayBuffer; rms: ArrayBuffer };
+
+async function loadPersistedPyramid(key: string): Promise<Pyramid | null> {
+  const db = await openPeaksDb();
+  if (!db) return null;
+  try {
+    const stored = await new Promise<StoredPeaks | undefined>((resolve, reject) => {
+      const request = db.transaction(PEAKS_STORE, "readonly").objectStore(PEAKS_STORE).get(key);
+      request.onsuccess = () => resolve(request.result as StoredPeaks | undefined);
+      request.onerror = () => reject(request.error);
+    });
+    if (!stored || !(stored.duration > 0)) return null;
+    const base: HiresPeaks = {
+      max: new Float32Array(stored.max),
+      min: new Float32Array(stored.min),
+      rms: new Float32Array(stored.rms)
+    };
+    if (base.max.length === 0) return null;
+    return { duration: stored.duration, levels: buildPyramid(base) };
+  } catch {
+    return null;
+  }
+}
+
+function persistPyramid(key: string, pyramid: Pyramid): void {
+  void (async () => {
+    const db = await openPeaksDb();
+    const base = pyramid.levels[0];
+    if (!db || !base) return;
+    try {
+      const payload: StoredPeaks = {
+        duration: pyramid.duration,
+        max: base.max.slice().buffer,
+        min: base.min.slice().buffer,
+        rms: base.rms.slice().buffer
+      };
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(PEAKS_STORE, "readwrite");
+        tx.objectStore(PEAKS_STORE).put(payload, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch {
+      /* best-effort — the in-memory cache still has it */
+    }
+  })();
+}
+
+/** Remove a persisted waveform (call when an asset's bytes are deleted/replaced). */
+export async function removePersistedPeaks(key: string): Promise<void> {
+  const db = await openPeaksDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(PEAKS_STORE, "readwrite");
+      tx.objectStore(PEAKS_STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Decode an asset once into a cached LOD pyramid (cheap to resample afterwards).
+ * `persistKey` (the asset id — stable across sessions, unlike blob: URLs) additionally
+ * round-trips the peaks through IndexedDB so refresh/eviction never costs a re-decode.
+ */
+export async function getAudioPeaks(url: string, persistKey?: string): Promise<Pyramid | null> {
   if (!url) return null;
   const cached = cacheGet(url);
   if (cached) return cached;
@@ -152,6 +253,14 @@ export async function getAudioPeaks(url: string): Promise<Pyramid | null> {
 
   const task = (async () => {
     try {
+      // Durable hit first: rebuilding the pyramid from persisted peaks skips fetch+decode entirely.
+      if (persistKey) {
+        const persisted = await loadPersistedPyramid(persistKey);
+        if (persisted) {
+          cacheSet(url, persisted);
+          return persisted;
+        }
+      }
       // Background-gate first: a whole-file fetch + decode + bucket loop must never land during
       // playback / a gesture / an export. The worker path still runs off-thread, but gating the
       // START keeps network/decode load off the critical moments too.
@@ -162,7 +271,10 @@ export async function getAudioPeaks(url: string): Promise<Pyramid | null> {
       } catch {
         pyramid = await decodeOnMain(url); // worker missing/crashed/unsupported → main-thread fallback
       }
-      if (pyramid) cacheSet(url, pyramid);
+      if (pyramid) {
+        cacheSet(url, pyramid);
+        if (persistKey) persistPyramid(persistKey, pyramid);
+      }
       return pyramid;
     } catch {
       return null; // CORS / decode failure → caller falls back to a placeholder

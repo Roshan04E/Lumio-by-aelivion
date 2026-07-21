@@ -494,23 +494,53 @@ function isRegionEffectType(type: string): boolean {
   return COLOR_EFFECT_TYPES.has(type) || type === "blur";
 }
 
+/**
+ * Effect types that render through the scene compositor's per-effect fragment-pass harness
+ * (`buildFragmentPasses` in scene/build-scene-draws.ts), which natively honours a per-effect `masks`
+ * list by building its own matte. So an adjustment layer's clip masks CAN confine these (stamped in
+ * `effectsWithLayerRegionMask` below), and region expansion must never strip their masks — no
+ * duplicate-layer clone is needed. Keep the list in lockstep with `color/fragment-effects/builtins.ts`.
+ */
+export const FRAGMENT_PASS_EFFECT_TYPES = new Set([
+  "radialBlur",
+  "directionalBlur",
+  "sharpen",
+  "pixelate",
+  "chromaticAberration",
+  "sketch",
+  "oldTv",
+  "glitchFx",
+  "halftone",
+  "posterize",
+  "stylize"
+]);
+
+/** True for effects whose masks the fragment-pass harness applies itself (builtins + user GLSL). */
+export function isFragmentPassEffectType(type: string): boolean {
+  return FRAGMENT_PASS_EFFECT_TYPES.has(type) || type === "pluginShader";
+}
+
 function effectHasRenderableMask(effect: TimelineEffect): boolean {
   return Array.isArray(effect.masks) && effect.masks.some(isRenderableMask);
 }
 
 /**
- * Stamps an adjustment layer's own clip masks onto its region-eligible (color/blur) effects, so that when
- * those effects are merged into the layers below (`applyActiveAdjustmentEffects` / `mergedLayer`), the
- * existing effect-region expansion (`expandLayerEffectRegions` et al) clips them to the adjustment layer's
- * mask shape instead of grading the whole frame. Effect types that can't be region-masked (glow, stylize,
- * …) ride along unchanged — an adjustment layer's mask simply doesn't constrain those, same limitation as
- * any other layer's effect masks.
+ * Stamps an adjustment layer's own clip masks onto its maskable effects, so that when those effects are
+ * merged into the layers below (`applyActiveAdjustmentEffects` / `mergedLayer`) they stay confined to the
+ * adjustment layer's mask shape instead of hitting the whole frame. Two mask machineries apply:
+ * region-eligible effects (color/blur) go through the effect-region expansion / scene region passes
+ * (`expandLayerEffectRegions` et al), while fragment-pass effects (radial/directional blur, pixelate,
+ * stylize, custom shaders, …) carry their masks straight into `buildFragmentPasses`, which mattes them
+ * itself. Effect types in neither camp (glow) ride along unchanged — an adjustment layer's mask simply
+ * doesn't constrain those, same limitation as any other layer's effect masks.
  */
 export function effectsWithLayerRegionMask(layer: { masks?: Mask[] | undefined; effects: TimelineEffect[] }): TimelineEffect[] {
   const masks = (layer.masks ?? []).filter(isRenderableMask);
   if (!masks.length) return layer.effects;
   return layer.effects.map((effect) =>
-    isRegionEffectType(effect.type) ? { ...effect, masks: [...(effect.masks ?? []), ...masks] } : effect
+    isRegionEffectType(effect.type) || isFragmentPassEffectType(effect.type)
+      ? { ...effect, masks: [...(effect.masks ?? []), ...masks] }
+      : effect
   );
 }
 
@@ -537,7 +567,9 @@ export function hasRegionColorEffect(layer: TimelineLayer): boolean {
 export function expandLayerEffectRegions(layer: TimelineLayer): TimelineLayer[] {
   if (!hasRegionColorEffect(layer)) return [layer];
   const regionEffects = layer.effects.filter((e) => isRegionEffectType(e.type) && effectHasRenderableMask(e));
-  const strip = (e: TimelineEffect): TimelineEffect => ({ ...e, masks: undefined });
+  // Fragment-pass effects keep their masks — buildFragmentPasses mattes them per-effect, so stripping here
+  // would silently un-mask e.g. a masked radial blur whenever the layer ALSO carries a region color effect.
+  const strip = (e: TimelineEffect): TimelineEffect => (isFragmentPassEffectType(e.type) ? e : { ...e, masks: undefined });
   // Everything that isn't a region effect, applied globally on every clone (a leftover masked glow rides here
   // mask-stripped so it still glows on the whole clip).
   const globals = layer.effects.filter((e) => !regionEffects.includes(e)).map(strip);
