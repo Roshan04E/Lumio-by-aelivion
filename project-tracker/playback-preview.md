@@ -419,3 +419,312 @@ never in the proxy file. Premiere's proxy model = lower resolution, NEVER lower 
 should feel identical to full quality, only softer. If ½ STILL feels low-fps on a 24/30fps source,
 that's a different bug (render loop, not proxy cadence) — read the debug HUD's Frame ms while it
 happens and start from there; do NOT bump PROXY_FPS further.
+
+## v19 — Play start: runs ~300–500ms, then jumps back and replays from the start (2026-07-21)
+
+**Report:** pressing play sometimes shows ~a second of black, and/or plays 300–500ms then the
+playhead yanks back to the start and replays. Third occurrence of the "playhead jumps backward at
+play start" lineage (2026-07-03 ×2 → distance gate + advancement gate + live-time reader).
+
+**Root cause:** a crack BETWEEN the two prior fixes' thresholds. The audio-master authority gate
+(`AUDIO_MASTER_GATE_S = 0.5`) admits any element whose mapped time is within 0.5s of the live
+playhead; the anchor servo hard-resyncs when |drift| > `HARD_RESYNC_S = 0.25`. A cold-starting
+audio element with a play() startup latency in (0.25s, 0.5s) — i.e. exactly 300–500ms — passes the
+advancement gate the moment its currentTime first moves, passes the wide authority gate, gets
+elected master reporting time ~its latency BEHIND the clock, and the hard resync yanks the shared
+anchor backward by that amount. Every derived consumer (playhead, video elements via the jump/drift
+correctors) replays. The forced seeks flush video decoders → the black flash.
+
+**Fix (VideoPreview.tsx audio-clock reader):** first election uses the NARROW servo-zone gate — a
+per-registration `wasAuthoritative` flag; until it has been authoritative once the reader returns
+null unless |mapped − live| ≤ `HARD_RESYNC_S`. In the crack the element stays non-master, the 500ms
+non-master corrector seeks it FORWARD onto the wall clock, and it then becomes master smoothly
+(this was always the documented intent of the gate). Established masters keep the wide gate so
+genuine mid-play stalls still hard-resync.
+
+**Verify:** typecheck; user re-test — watch `window.__rfAudioClock.driftMs` / HUD A/V drift at play
+start: it must never report a negative drift > 250ms in the first second. Kill switch unchanged:
+`?audioClock=0`.
+
+## v20 — Pre-roll anchor: residual ~50–80ms catch-up at play start (2026-07-21)
+
+**Report (after v19):** the 300–500ms replay is gone, but a smaller ~50–80ms "pulls back / catches
+up" remains right at play start (a startup latency INSIDE the servo zone now converges via the
+4ms/tick servo — a brief visibly-slow playhead).
+
+**Fix (pro-NLE pre-roll, EditorPage tick + audio-clock.ts):** until the FIRST master election the
+tick HOLDS the playhead at its start position (slides the anchor each frame — no time accrues),
+then anchors EXACTLY to the master's first report: the startup latency is swallowed before the
+playhead ever moves, so there is nothing to servo/catch up. Guards: no candidate sources (silent
+region — readers only exist for audio clips under the playhead) → immediate wall-clock start, no
+added latency; `AUDIO_PREROLL_MAX_MS = 350` cap → a stalled element can only delay start by that
+much; a master electing LATER (first audible clip mid-timeline) enters through the normal servo,
+never an anchor jump. Kill switch unchanged (`?audioClock=0`).
+
+**Still open:** user reports a brief BLACK FLICKER at play start. Not yet root-caused (proxy
+overlay reveal is guarded, src does not flip on play, GL layer holds last frame). If it persists
+after v20, capture whether it coincides with a playhead jump and what the HUD Frame ms / A/V drift
+rows show in the first second.
+
+### v20 addendum — black-flicker forensics (2026-07-21)
+
+Flicker persists after v19+v20 (start of playback only; mid-play/pause clean). Static analysis
+cleared the proxy overlay, src flips, and the settle-frame drop (single-ctx holds the last graded
+frame on transient nulls). Remaining candidate paths that can composite a HOLE are now counted in
+`window.__rfMediaHoles` (ScenePreviewCanvas): "escape-hatch" (NOT_READY_HOLD_MS=300 expired while
+playing — composited with the hole), "no-frame" (snapshot null with nothing held), "no-descriptor"
+(media layer had no registered frame source). Repro once, read the object, and the moved counter
+fingers the mechanism. Prime suspect: escape-hatch (play-start source warmup > 300ms → bounded
+black by design — fix would be a longer/adaptive hold once confirmed).
+
+## v21 — Black flicker at play start ROOT-CAUSED + fixed (2026-07-21)
+
+**Evidence (the v20 forensics did their job):** after one repro `window.__rfMediaHoles` read
+`{ "no-frame": 2 }` with "escape-hatch" at zero. Translation: exactly 1–2 composites hit a media
+layer whose single-ctx snapshot had NO frame and NO previously-graded texture to hold — and those
+composites PRESENTED the hole instead of engaging the R1 present-hold, because the hold was
+playing-gated and they ran at the play flip before/while the playing flag propagated (paused
+composites were exempt by design). The source landed within ~2 frames (hence no escape-hatch),
+so the visible artifact is a 1–2 frame black hole: the reported play-start flicker.
+
+**Fix (ScenePreviewCanvas):** the not-ready present-hold now also engages while PAUSED when the
+not-ready layer is MEDIA (video/image). Text/shape keep the paused exemption (R1 scrub-lag
+rationale: a pending text raster mid-typing must not freeze the viewer). Media not-ready while
+paused is only ever the first-frame or source-handoff case, where holding the last picture is
+exactly right. The escape hatch (NOT_READY_HOLD_MS = 300, untouched) still bounds a genuinely
+broken source; it now records __rfMediaHoles "escape-hatch" whenever it composites a real hole.
+
+**Verify:** user re-test play start — no black; `__rfMediaHoles` may still count "no-frame" (the
+counter sits at the snapshot, before the hold) but nothing black should PRESENT. If a flicker
+somehow remains, "escape-hatch" moving is now the discriminator.
+
+## v22 — Flicker round 3: descriptor-gap dispose + media-length hold (2026-07-21)
+
+**Evidence (second __rfMediaHoles trace, v21 in place):** one play-start flicker produced
+`{ no-descriptor: 4, no-frame: 2, escape-hatch: 3 }`. Chain: the PROXY-ARRIVAL REMOUNT (mediaUrl
+original→proxyUrl flips the layer key seconds after project load) unregisters the scene-media
+descriptor before the new mount registers its own → composites in the gap saw "no-descriptor" →
+the dispose-on-unconsumed prune DESTROYED the held graded texture on the first gap composite →
+follow-up composites had nothing to hold ("no-frame") → the 300ms hold expired while the new
+element was still decoding → 3 "escape-hatch" composites presented the hole = the visible black.
+
+**Fix (ScenePreviewCanvas):**
+1. Descriptor gap: `getMediaSingleCtx` now serves the LAST-GRADED texture (and keeps its renderer
+   alive) when the descriptor is missing but a held frame exists — the remount gap composites the
+   previous frame instead of a hole.
+2. `NOT_READY_HOLD_MEDIA_MS = 1500` (text/shape keep 300): a truly cold media source freezes the
+   last picture up to 1.5s — never black — before the escape hatch may composite the hole.
+
+Also added this round: `__rfPlayStartLuma` presented-pixel probe (16×16 center readback for 1.5s
+after each play start; { samples, min, minAtMs, dark }) — objective confirmation that nothing
+black PRESENTS; remove the probe + __rfMediaHoles counters once the fix is user-confirmed.
+
+## v23 — Adjustment-layer masks ignored (color baked full-frame; export never stamped) (2026-07-21)
+
+**Report:** drawing a mask on an adjustment layer did nothing — the adjustment's effects (curves/
+color, blur) kept applying to the WHOLE frame below instead of being confined to the mask region.
+
+**Root cause (two independent gaps):**
+1. `getCompositionColorPipeline` (shared composition-style.ts) had NO masked-skip rule. Its siblings
+   `getEffectCss`/`getCompositionFilterEffects` skip effects carrying renderable region masks (those
+   render via region clones/passes), but the COLOR pipeline baked them anyway. In the clone model this
+   never surfaced (expansion strips masks upstream), but adjustment-merged effects
+   (`effectsWithLayerRegionMask` → `applyActiveAdjustmentEffects`) join AFTER `expandEffectRegionMasks`
+   runs, so their stamped masks reached the grade bake — and the whole frame got graded. The scene
+   builder's draw-time expansion (`buildLayerDrawWithPasses`) built the correct masked region passes,
+   but they applied ON TOP of the already-fully-graded media canvas → mask visually ignored.
+2. Local export (`scene-frame-compositor.ts` `mergedLayer`) merged raw `a.layer.effects` without
+   `effectsWithLayerRegionMask` — the adjustment's mask never even stamped in export (preview and
+   worker SceneStage both stamped; export was the odd one out).
+
+**Fix:** (1) masked-skip added to `getCompositionColorPipeline`'s effect loop — one shared point, so
+preview grade (WebglMediaLayer), export grade, worker grade, and the SVG filter path
+(`getCompositionColorFilter` wraps the same pipeline) all stop baking region-masked color at once;
+the scene region passes are then the only application, correctly matte-clipped. (2) export
+`mergedLayer` now stamps via `effectsWithLayerRegionMask`, matching preview + SceneStage.
+
+**Semantics note:** an "Add" mask = effect INSIDE the shape; for a "hole" (effect everywhere EXCEPT
+the shape) use the mask's Invert. A lone Subtract mask acts as Add (first matte layer composites
+source-over by design, same as clip masks). Glow/stylize/fragment effects on adjustment layers still
+apply full-frame (region-eligible = color + blur), unchanged documented limitation.
+
+**Verify:** scratch repro through the exact preview pipeline (expand → merge → buildSceneDraws,
+regionPassModel on): grade-bake pipeline now null, region passes carry masked blur + color pipeline.
+color.test.ts, editor.test.ts, typecheck all green; render:compare:pixels run for parity.
+
+## v23 — v20 pre-roll REVERTED (it caused the yank + black frame); forward-only start sync (2026-07-21)
+
+**Evidence (luma trace):** presented ring showed bright → ONE ~black frame (luma 8) ~230ms after
+play-from-0 → bright; media ring showed no fresh grade at that instant (held texture serving); and
+the user-visible regression "plays ~300ms, jumps backward, replays" returned WITH v20 active.
+
+**Root cause — the v20 pre-roll was self-defeating:** while the anchor held waiting for the audio
+master, the VIDEO elements kept free-running; after anchoring, the picture sat up to ~350ms AHEAD
+of the clock, the video drift corrector seeked it BACKWARD (picture jump-back + replay), and the
+seek flushed the decoder (the black frame). It recreated both original symptoms.
+
+**New design (nothing moves backward at play start, ever):**
+- Pre-roll hold removed from the EditorPage tick (back to the v19 wall-clock start + servo shape).
+- `AUDIO_FIRST_ELECTION_GATE_S = 0.06` (~2 frames): an element only ELECTS master once nearly
+  aligned — real startup latency keeps it non-master (v19 used the 0.25 servo zone here, which let
+  a ≤250ms latency elect and drag the playhead into the ~50–80ms catch-up).
+- Session-tightened non-master audio corrector (VideoPreview): first ~2s of a session corrects at
+  `AUDIO_SESSION_START_TOLERANCE_S = 0.05` with an extra first check at 250ms — the late element
+  is seeked FORWARD onto the clock, then elects with negligible drift. Steady state stays 0.15 /
+  500ms (no seek storms). Video corrector untouched.
+
+**Verify:** Home+Space repro — playhead monotonic, no picture jump-back, and the presented-luma
+ring (`__rfPlayStart.presented`) should show NO ~luma-8 dip. Probes stay in until confirmed.
+
+## v24 — ROOT CAUSES: span-capture races live playback; cold-start servo direction (2026-07-21)
+
+**Bug 1 (play-start black frames) — the background viewer-capture proxy generator.** It renders
+span frames through the SAME SceneCompositor instance as the on-screen preview and only runs while
+paused — but its abort on play was fire-and-forget (an effect, one commit late), so an in-flight
+capture frame kept going after play began: it seeked pooled <video> elements to span times AND
+called renderFrameOffscreen → renderFrameCore → ensureSize, which RESIZES THE VISIBLE CANVAS
+(canvas.width = … clears it to black) whenever the capture size (paused scale 1) differs from the
+playing size (renderScale 0.5/0.25). Head spans are pending right after load and playhead-at-0
+priority makes them the ones being captured → the flash concentrated at the timeline start.
+renderFrameOffscreen's own doc comment promised "the on-screen canvas keeps its last presented
+image untouched" — the race violated it.
+
+Fixes (four independent layers):
+1. Gesture-time abort: `startEnginePlayback()` aborts `proxyGenAbortRef` BEFORE `setIsPlaying(true)`
+   (togglePlayback, L-key start, transport "play").
+2. viewerProxyCapture: `throwIfAborted` immediately before every element seek and before
+   `capture.renderOffscreen`.
+3. ScenePreviewCanvas.renderOffscreen: returns null while `isPlaying` — playback owns the compositor.
+4. scene-compositor.renderFrameOffscreen: refuses specs whose size ≠ current size (an offscreen
+   path may NEVER resize/clear the visible canvas). Export/Remotion untouched (they don't call it).
+
+**Bug 2 (playhead moves backward right as play starts).** With the v23 first-election gate
+(≤60ms), a master electing slightly behind made the anchor servo drag the playhead BACKWARD
+~4ms/tick for ~15 frames — a visible backward crawl before the picture got moving. Fix: the servo
+is FORWARD-ONLY for the first AUDIO_SESSION_START_WINDOW_MS (2s) of a session; negative drift is
+ignored (the session-tight audio corrector seeks the element forward instead; residual ≤60ms
+converges via the servo after the window). Steady-state behavior unchanged.
+
+**Forensics in tree (remove after user confirms):** __rfMediaHoles, __rfPlayStart (presented +
+media luma rings), __rfClockJumps (backward committed-clock moves), __rfHardResyncs,
+__rfVideoSeeks (backward seeks on playing video elements, tagged sync/jump/drift).
+
+**Verify:** Home+Space ×3 → no black, no backward playhead; __rfClockJumps empty during plays;
+__rfPlayStart.presented has no dip <16; __rfVideoSeeks empty at start; coverage-bar live trail
+continuous. Paused ~15s → pending spans still seal (capture unaffected when idle).
+
+## v24 — Adjustment-layer mask: fragment effects (radial blur etc.) leaked past the mask (2026-07-21)
+
+**Report (follow-up to v23):** Radial Blur on a masked adjustment clip applied full-frame below —
+the ellipse mask ignored. Same for any fragment-pass effect (directional blur, pixelate, sharpen,
+chromatic aberration, sketch/oldTv/glitch/halftone/posterize/stylize, custom shaders).
+
+**Root cause:** `effectsWithLayerRegionMask` only stamped the adjustment's masks onto
+region-ELIGIBLE effects (color + gaussian blur). Fragment effects rode along unstamped →
+`buildFragmentPasses` built an UNMASKED pass on the merged layer below. The harness itself already
+supports per-effect masks natively (it builds its own matte from `effect.masks`) — only the stamp
+was missing. Bonus latent bug: `expandLayerEffectRegions`' global-effect `strip()` removed masks
+from EVERY non-region effect, so a directly-masked fragment effect lost its mask whenever the same
+layer also carried a region color effect.
+
+**Fix (all in shared/clip-masks.ts):** canonical `FRAGMENT_PASS_EFFECT_TYPES` set +
+`isFragmentPassEffectType` (pluginShader included) now live in clip-masks; build-scene-draws
+imports it (was a private duplicate list). `effectsWithLayerRegionMask` stamps masks onto
+region-eligible OR fragment-pass effects; `strip()` preserves masks on fragment-pass effects.
+Glow remains the only unmaskable adjustment effect (outward bloom would be clipped — deferred).
+
+**Verify:** repro (expand → merge → buildSceneDraws, pass model): merged radialBlur carries the
+mask and emits `fragmentPasses: [{ key: adj_radial, hasMask: true }]`; typecheck ×3, color +
+editor tests green; render:compare:pixels 41/41 passed post-change with diffs identical to the pre-change baseline run.
+
+## v25 — CAUGHT RED-HANDED: the servo itself was the backward writer; clock is now forward-only (2026-07-21)
+
+**Evidence:** __rfClockJumps with stack capture. Every pathological write came from the playback
+tick: `{from:0, to:-0.158}` at play-from-0 (NEGATIVE committed time), and mid-play rewinds of
+150–450ms every ~2s (`2.876→2.721`, `3.931→3.777`, `6.026→5.581`). The user's asset streams from
+a REMOTE Pexels URL on a slow link (their console showed a thumbnail decode timeout on the same
+URL) — the audio element repeatedly stalls BEHIND the clock, and the servo/hard-resync responded
+by dragging the whole timeline backward to match. Elements' mapped time can also be NEGATIVE
+(ct < sourceIn), which the anchor happily adopted.
+
+**Fix (structural, three layers):**
+1. Reader behind-demotion (VideoPreview audio-clock reader): a master that falls > 0.15s BEHIND
+   the live playhead loses authority (returns null); the non-master corrector seeks IT forward and
+   it re-elects aligned. Ahead-drift keeps the wide 0.5 gate.
+2. Tick servo is FORWARD-ONLY (EditorPage): hard resync only for drift > +HARD_RESYNC_S (audio
+   genuinely ahead = clock stalled); negative drift is bounded by the ±4ms/tick servo — the
+   timeline can never visibly rewind because audio hiccuped. (Replaces the v24 2s-window guard.)
+3. Absolute floor: the tick clamps nextTime to ≥ 0 — a negative committed clock (observed) can
+   corrupt downstream source lookups and is now impossible.
+
+**Note:** slow/remote media now degrades as it should — audio skips forward to stay with the
+picture instead of the picture rewinding. Local-first imports (the product default) never hit this.
+
+**Verify:** fresh-bundle check (`__rfVideoSeeks` prints [] not undefined), then Home+Space and
+long plays: __rfClockJumps must gain NO tick-stack entries (scrub entries are user-initiated and
+fine); no black frames; no backward playhead. Probes removed once confirmed.
+
+## v26 — Found it: TimelineStrip's playhead DOM writer, not the clock (2026-07-21)
+
+**Evidence:** user reported the visible backward step (~80–100ms) survives v25 on EVERY play press
+despite `__rfClockJumps` no longer showing pathological tick entries for it — meaning the COMMITTED
+clock was fine and the regression was in an imperative DOM writer that doesn't go through
+`setPlaybackClock` at all.
+
+**Root cause:** `TimelineStrip.tsx`'s playback-follow effect (~line 1402) initializes the playhead
+element's `--playhead-percent` CSS var to `playbackStart.timeSeconds` — the anchor's ORIGIN — on
+mount, then starts its own rAF (`animate`) that computes the true elapsed-time position. But this
+effect is a REACT EFFECT: it commits ~1-2 frames (up to ~100ms) after `setIsPlaying(true)`, by
+which point the paused playhead writer and the hot preview clock have already advanced the visible
+needle forward via the session's first clock commits. Snapping to the stale origin on mount
+therefore visibly stepped the needle BACKWARD, and the very next rAF (`animate`) immediately
+caught it back up to the correct position — "moves back a little then moves forward, every play".
+
+**Fix:** initialize to the anchor-DERIVED current time (`playbackStart.timeSeconds + elapsed`),
+not the anchor's origin — the same math `animate`'s first frame would produce, just computed
+synchronously at mount so there is no backward step to begin with.
+
+**Also added:** `notePlaybackClockContext` — the tick now publishes its internals (anchor, elapsed,
+audio master state, drift) each iteration; any recorded `__rfClockJumps` entry carries a `ctx`
+field with the exact arithmetic that produced it, no more guessing from bare before/after numbers.
+
+**Verify:** Home+Space repeatedly — no visible playhead step-back at any play press. `__rfClockJumps`
+should show no tick-context entries with negative `to` deltas that aren't a genuine audio-ahead
+hard resync (check `ctx` if any appear).
+
+### v26.1 — Residual ~20ms needle step (2026-07-21)
+
+The v26 init fix left a ~20ms backward step: the first `animate` rAF timestamp can be up to one
+frame EARLIER than the mount-time `performance.now()` used for the initial needle write (rAF
+timestamps are vsync times, not call times), and the forward-only servo may still nudge the anchor
+back ≤4ms/tick. Fix: the needle is now MONOTONIC within one anchor lifetime (`monotonicFloor` in
+the TimelineStrip playback-follow loop, seeded by the initial write). A backward mid-play seek
+replaces the anchor and re-runs the effect, resetting the floor — user seeks unaffected.
+
+## v27 — Live-coverage trail artifacts: bridged marks + pause settle (2026-07-21)
+
+**Report:** two visible artifacts in the ruler coverage strip: (1) hairline orange slivers INSIDE
+the blue "watched live" trail, (2) the trail head stops a beat short of the parked playhead.
+
+**Root cause (one mechanism, two symptoms):** `markFrameRendered` stamped each rendered frame as a
+single 1/fps-wide island, but frame notifications arrive at the CLOCK-COMMIT cadence (16/40/90ms
+by quality tier) — so the marks were 33ms islands spaced up to 90ms apart. The un-marked cracks
+between islands rendered as orange slivers, and the final island (plus the playing-gated
+notification — the paused settle composite never marks) left the head short of the playhead.
+
+**Fix (EditorPage):** BRIDGED marking — each notification marks [previousMark, t + 1/fps]; every
+moment between two consecutive rendered frames was visually covered by the earlier frame, so the
+bridge is truthful coverage, not decoration (backward or >0.5s jumps = seek → no bridge). And
+`bridgeLiveMarkTo(stopped)` on both stop paths (pause + end-of-playback) extends the trail to the
+exact settle position — the settle composite has that frame on screen.
+
+## v28 — Playback saga CLOSED; all forensic probes removed (2026-07-21)
+
+User confirmed every playback-start symptom fixed (black frames, backward playhead, coverage-trail
+artifacts). Removed the full probe set in one pass, keeping every fix: __rfClockJumps + stack/ctx
+capture + notePlaybackClockContext (playback-clock.ts), __rfHardResyncs ring (EditorPage tick),
+__rfVideoSeeks recorder (VideoPreview), __rfMediaHoles counters + __rfPlayStart luma probes
+(ScenePreviewCanvas). Fixes retained: v19 narrow first-election gate, v21/v22 media present-holds +
+held-texture serves, v23/v25 behind-demotion + forward-only servo + non-negative clock, v24
+capture-race fences (gesture abort, seek guards, renderOffscreen playing/size guards), v26/v26.1
+needle init + monotonic floor, v27 bridged live marks.
