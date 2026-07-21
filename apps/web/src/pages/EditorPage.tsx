@@ -70,10 +70,12 @@ import {
   Square,
   StepBack,
   StepForward,
+  StickyNote,
   Trash2,
   Type,
   Upload,
-  X
+  X,
+  Workflow,
 } from "lucide-react";
 import {
   applyTimelineTemplatePackage,
@@ -475,6 +477,9 @@ function proxyDebugEnabled(): boolean {
 const EffectGraphPanel = lazy(() => import("../components/EffectGraphPanel"));
 // Flarex CG page (FLAREX.md) — the node-compositing workspace that swaps in for the timeline area.
 const FlarexWorkspace = lazy(() => import("../editor/flarex/FlarexWorkspace"));
+// Notes CG page (plans/notes-sonnet-execution.md) — the Miro/Milanote-style creative board that
+// swaps into the same viewer+inspector area while the Notes page is active.
+const NotesWorkspace = lazy(() => import("../editor/notes/NotesWorkspace"));
 type TransitionApplySpec = import("../components/EffectGraphPanel").TransitionApplySpec;
 const ToolEffectRunnerModal = lazy(() =>
   import("../components/ToolEffectRunnerModal").then((module) => ({ default: module.ToolEffectRunnerModal }))
@@ -811,7 +816,23 @@ export function EditorPage() {
   // Resolve-style page switch (FLAREX.md): "edit" = the normal timeline area; "flarex" = the node
   // compositing workspace swapped into the same grid slot. The viewer stays mounted across pages —
   // the comp output renders live through the shared lowering hook, so it IS the Flarex viewer.
-  const [editorPage, setEditorPage] = useState<"edit" | "flarex">("edit");
+  const [editorPage, setEditorPage] = useState<"edit" | "flarex" | "notes">("edit");
+  // Mirror the active page into a ref so the big global-keydown effect can gate timeline shortcuts
+  // without rebinding on every page switch.
+  const editorPageRef2 = useRef(editorPage);
+  editorPageRef2.current = editorPage;
+  // Entering the Notes page: no timeline-editing surface belongs here. Pin the browse panel to the
+  // Media pool (keeps drag-in working) and force every edit-only panel CLOSED — the Inspector /
+  // Effects / Color toggles are hidden on Notes, so an inspector left open in Edit would otherwise
+  // stay mounted with no affordance to dismiss it. Collapsing the inspector also clears
+  // inspectorFullHeight (is-right-expanded) since that derives from it.
+  useEffect(() => {
+    if (editorPage !== "notes") return;
+    setPanelTab("assets");
+    setInspectorCollapsed(true);
+    setPanelExpanded(false);
+    setActiveResponsiveOverlay(null);
+  }, [editorPage]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -819,6 +840,11 @@ export function EditorPage() {
       if (event.shiftKey && (event.key === "F" || event.key === "f")) {
         event.preventDefault();
         setEditorPage((page) => (page === "flarex" ? "edit" : "flarex"));
+        return;
+      }
+      if (event.shiftKey && (event.key === "N" || event.key === "n")) {
+        event.preventDefault();
+        setEditorPage((page) => (page === "notes" ? "edit" : "notes"));
         return;
       }
       if (!(event.shiftKey && (event.key === "G" || event.key === "g"))) return;
@@ -1317,6 +1343,28 @@ export function EditorPage() {
   }, [project?.id]);
 
   const graph = project?.projectGraph;
+  // Reverse-direction jump (plans/notes-sonnet-execution-2.md P2.3): a clip's note badge was
+  // double-clicked. Monotonic token prop (repo convention: host↔panel intents travel as tokens,
+  // never two-way booleans) — bumping `nonce` re-triggers the select+center even for the same
+  // clip clicked twice in a row.
+  const [notesFocusRequest, setNotesFocusRequest] = useState<{ layerId: string; nonce: number } | null>(null);
+  // Notes linked to each layer (P2.3 clip badge) — recomputed only when the notes registry changes.
+  const notedLayerIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const b of Object.values(graph?.notesBoards ?? {})) {
+      for (const item of Object.values(b.items)) {
+        if (item.linkedLayerId) ids.add(item.linkedLayerId);
+      }
+    }
+    return ids;
+  }, [graph?.notesBoards]);
+  // P1 AI entry point — the deterministic compiler ships this round; real LLM routing through the
+  // brain tier is fenced (Fable). Stub: acknowledge the prompt, do nothing structural.
+  // TODO(fable): route through brain tier (packages/shared/src/notes/notes-intent.ts compiler).
+  const handleNotesPrompt = useCallback((text: string) => {
+    console.info("[notes] AI prompt (stub, not yet routed):", text);
+    setNotice("Notes AI coming soon");
+  }, []);
   const importedPluginLibrary = useMemo(
     () => {
       const merged = mergeImportedPluginLibraries(
@@ -2341,6 +2389,14 @@ export function EditorPage() {
         return;
       }
       const wantsModifierShortcut = event.ctrlKey || event.metaKey;
+      // On the Notes page this whole timeline-shortcut listener is inert EXCEPT undo/redo — Notes
+      // edits go through the same graph history, so ⌘Z/⌘⇧Z/⌘Y stay useful, but no clip op
+      // (select-all, paste-attrs, nest, delete, transport, …) may touch the hidden timeline.
+      if (editorPageRef2.current === "notes") {
+        const undoRedo =
+          wantsModifierShortcut && !event.altKey && (event.key.toLowerCase() === "z" || event.key.toLowerCase() === "y");
+        if (!undoRedo) return;
+      }
       if (wantsModifierShortcut && !event.altKey && event.key.toLowerCase() === "a") {
         const allLayerIds = composition?.tracks.flatMap((track) => track.layers.map((layer) => layer.id)) ?? [];
         if (!allLayerIds.length) return;
@@ -2513,6 +2569,7 @@ export function EditorPage() {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (editorPageRef2.current === "notes") return; // no timeline clip-delete from the Notes page
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
         return;
@@ -2535,6 +2592,7 @@ export function EditorPage() {
   // the same keydown their two updateComposition writes raced and the mask write clobbered the marker.
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (editorPageRef2.current === "notes") return; // mask tools (V/P/⇧M) are timeline-only
       const target = event.target;
       if (
         target instanceof HTMLInputElement ||
@@ -2730,20 +2788,26 @@ export function EditorPage() {
       ) {
         return;
       }
+      // The Notes page hides the Effects/Color/Inspector affordances — keep their Alt shortcuts
+      // from reopening them there too (Media/Alt+1 and the height toggles still work).
+      const notesPage = editorPageRef2.current === "notes";
       switch (event.code) {
         case "Digit1":
           event.preventDefault();
           toggleLeftPanelTab("assets");
           break;
         case "Digit2":
+          if (notesPage) break;
           event.preventDefault();
           toggleLeftPanelTab("effects");
           break;
         case "Digit3":
+          if (notesPage) break;
           event.preventDefault();
           openInspectorColor();
           break;
         case "Digit4":
+          if (notesPage) break;
           event.preventDefault();
           toggleInspectorFromTopbar();
           break;
@@ -7300,7 +7364,21 @@ export function EditorPage() {
     onRollEdit: (leftLayerId: string, rightLayerId: string, deltaSeconds: number) => void handleRollEdit(leftLayerId, rightLayerId, deltaSeconds),
     onSlideLayer: (layerId: string, deltaSeconds: number) => void handleSlideLayer(layerId, deltaSeconds),
     onPreviewVolume: handlePreviewLayer,
-    onSetLayerLabel: (layerId: string, label: string | null) => void updateLayer(layerId, (layer) => ({ ...layer, label: label ?? undefined }))
+    onSetLayerLabel: (layerId: string, label: string | null) => void updateLayer(layerId, (layer) => ({ ...layer, label: label ?? undefined })),
+    // Double-click a clip's fx badge (N4): select the clip and switch to the Flarex page for it —
+    // single-click on the badge keeps the clip's normal selection/seek behavior (no handler there).
+    onOpenFlarexForClip: (layerId: string) => {
+      setSelectedLayerIds([layerId]);
+      setEditorPage("flarex");
+    },
+    // Reverse-direction jump (P2.3): double-click a clip's note badge — select it, switch to the
+    // Notes page, and bump the focus nonce so NotesWorkspace selects+centers its linked notes even
+    // if the same clip is clicked twice in a row.
+    onOpenNotesForLayer: (layerId: string) => {
+      setSelectedLayerIds([layerId]);
+      setEditorPage("notes");
+      setNotesFocusRequest((prev) => ({ layerId, nonce: (prev?.nonce ?? 0) + 1 }));
+    }
   });
 
   // Same doctrine for the memo'd LayerInspector (and the memo'd InspectorHosts inside it): frozen
@@ -7662,37 +7740,43 @@ export function EditorPage() {
               <FolderOpen size={14} />
               <span>Media</span>
             </button>
-            <button
-              type="button"
-              className={`topbar-toggle${isLeftPanelTabActive("effects") ? " is-active" : ""}`}
-              aria-pressed={isLeftPanelTabActive("effects")}
-              onClick={() => toggleLeftPanelTab("effects")}
-              title={`Effects (${altKeyLabel}+2)`}
-              aria-keyshortcuts={`${altKeyLabel}+2`}
-            >
-              <SlidersHorizontal size={14} />
-              <span>Effects</span>
-            </button>
-            <button
-              type="button"
-              className="topbar-toggle"
-              onClick={openInspectorColor}
-              title={`Color — opens the Inspector Color tab (${altKeyLabel}+3)`}
-              aria-keyshortcuts={`${altKeyLabel}+3`}
-            >
-              <Palette size={14} />
-              <span>Color</span>
-            </button>
-            <button
-              type="button"
-              className={`topbar-toggle is-icon${isLeftPanelTabActive("settings") ? " is-active" : ""}`}
-              aria-pressed={isLeftPanelTabActive("settings")}
-              onClick={() => toggleLeftPanelTab("settings")}
-              title="Project settings"
-              aria-label="Project settings"
-            >
-              <Settings size={14} />
-            </button>
+            {/* Effects/Color/Settings act on a selected timeline clip — hidden on the Notes page,
+                which has no timeline (only the Media pool stays, for dragging media onto the board). */}
+            {editorPage !== "notes" ? (
+              <>
+                <button
+                  type="button"
+                  className={`topbar-toggle${isLeftPanelTabActive("effects") ? " is-active" : ""}`}
+                  aria-pressed={isLeftPanelTabActive("effects")}
+                  onClick={() => toggleLeftPanelTab("effects")}
+                  title={`Effects (${altKeyLabel}+2)`}
+                  aria-keyshortcuts={`${altKeyLabel}+2`}
+                >
+                  <SlidersHorizontal size={14} />
+                  <span>Effects</span>
+                </button>
+                <button
+                  type="button"
+                  className="topbar-toggle"
+                  onClick={openInspectorColor}
+                  title={`Color — opens the Inspector Color tab (${altKeyLabel}+3)`}
+                  aria-keyshortcuts={`${altKeyLabel}+3`}
+                >
+                  <Palette size={14} />
+                  <span>Color</span>
+                </button>
+                <button
+                  type="button"
+                  className={`topbar-toggle is-icon${isLeftPanelTabActive("settings") ? " is-active" : ""}`}
+                  aria-pressed={isLeftPanelTabActive("settings")}
+                  onClick={() => toggleLeftPanelTab("settings")}
+                  title="Project settings"
+                  aria-label="Project settings"
+                >
+                  <Settings size={14} />
+                </button>
+              </>
+            ) : null}
           </div>
           <Button
             className={`editor-ai-topbar-button topbar-toggle${aiVoiceActive ? " is-voice-live" : ""}`}
@@ -7899,17 +7983,21 @@ export function EditorPage() {
                 )
               : null}
           </div>
-          <button
-            type="button"
-            className={`topbar-toggle${isInspectorOpenFromTopbar ? " is-active" : ""}`}
-            aria-pressed={isInspectorOpenFromTopbar}
-            onClick={toggleInspectorFromTopbar}
-            title={`Inspector (${altKeyLabel}+4)`}
-            aria-keyshortcuts={`${altKeyLabel}+4`}
-          >
-            {isInspectorOpenFromTopbar ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-            <span>Inspector</span>
-          </button>
+          {/* The Inspector edits a selected clip — no meaning on the Notes page (nodes/cards have
+              their own inline editing), so hide it there too. */}
+          {editorPage !== "notes" ? (
+            <button
+              type="button"
+              className={`topbar-toggle${isInspectorOpenFromTopbar ? " is-active" : ""}`}
+              aria-pressed={isInspectorOpenFromTopbar}
+              onClick={toggleInspectorFromTopbar}
+              title={`Inspector (${altKeyLabel}+4)`}
+              aria-keyshortcuts={`${altKeyLabel}+4`}
+            >
+              {isInspectorOpenFromTopbar ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+              <span>Inspector</span>
+            </button>
+          ) : null}
         </div>
       </div>
       {/* Transient action feedback — module-store leaf, so toasts don't re-render EditorPage. */}
@@ -7945,7 +8033,7 @@ export function EditorPage() {
       ) : null}
 
       <div
-        className={`editor-layout${panelExpanded ? " is-left-expanded" : ""}${inspectorFullHeight ? " is-right-expanded" : ""}${panelExpanded || inspectorFullHeight ? " is-any-expanded" : ""}${inspectorCollapsed ? " is-inspector-collapsed" : ""}${panelCollapsed ? " is-left-collapsed" : ""}`}
+        className={`editor-layout${panelExpanded ? " is-left-expanded" : ""}${inspectorFullHeight ? " is-right-expanded" : ""}${panelExpanded || inspectorFullHeight ? " is-any-expanded" : ""}${inspectorCollapsed ? " is-inspector-collapsed" : ""}${panelCollapsed ? " is-left-collapsed" : ""}${editorPage === "notes" ? " is-notes-page" : ""}`}
         data-editor-mode={responsiveLayout.mode}
         data-editor-density={responsiveLayout.density}
         data-overlay={activeResponsiveOverlay ?? "none"}
@@ -8046,14 +8134,15 @@ export function EditorPage() {
                   assets={assets}
                   currentProjectId={project?.id}
                   currentUserId={project?.userId}
-                  onApplyTemplate={stableApplyTemplate}
+                  onApplyTemplate={editorPage === "notes" ? undefined : stableApplyTemplate}
                   selectedAssetId={selectedLayer?.assetId}
                   usedCounts={assetUseCounts}
                   replaceActive={assetPickerForLayerId !== null}
                   onAssignAsset={stableAssignAsset}
                   onAddAssetToTimeline={stableAddAssetToTimeline}
-                  onAddGraphic={stableAddGraphic}
-                  onApplyFrame={stableApplyFrame}
+                  disableTimelineAdd={editorPage === "notes"}
+                  onAddGraphic={editorPage === "notes" ? undefined : stableAddGraphic}
+                  onApplyFrame={editorPage === "notes" ? undefined : stableApplyFrame}
                   onPickReplacement={stablePickReplacement}
                   onCancelReplace={stableCancelReplace}
                   onDeleteAsset={stableDeleteAsset}
@@ -8072,7 +8161,7 @@ export function EditorPage() {
                   onOpenSourceMonitor={responsiveLayout.usesOverlayPanels ? undefined : stableOpenSourceMonitor}
                   timelines={timelinesTabData}
                   onOpenTimeline={stableOpenTimeline}
-                  onInsertTimelineAtPlayhead={stableInsertTimelineAtPlayhead}
+                  onInsertTimelineAtPlayhead={editorPage === "notes" ? undefined : stableInsertTimelineAtPlayhead}
                   onRenameTimeline={stableRenameTimeline}
                   onDuplicateTimeline={stableDuplicateTimeline}
                   onDeleteTimeline={stableDeleteTimeline}
@@ -8498,6 +8587,25 @@ export function EditorPage() {
             )}
           </aside>
           )}
+          {editorPage === "notes" && graph ? (
+            <Suspense fallback={<div className="notes-workspace notes-workspace-empty">Loading Notes…</div>}>
+              <ColdTime>
+                {(currentTime) => (
+                  <NotesWorkspace
+                    graph={graph}
+                    assets={assets}
+                    onUpdateGraph={(nextGraph) => {
+                      void updateGraph(nextGraph);
+                    }}
+                    currentTime={currentTime}
+                    onSeek={setEditorCurrentTime}
+                    onNotesPrompt={handleNotesPrompt}
+                    focusRequest={notesFocusRequest}
+                  />
+                )}
+              </ColdTime>
+            </Suspense>
+          ) : null}
         </div>
 
         <div className="pane-resizer pane-resizer-horizontal" role="separator" aria-orientation="horizontal" onPointerDown={startVerticalResize} />
@@ -8508,17 +8616,7 @@ export function EditorPage() {
         {/* Column stack so the bottom workspace (graph editor drawer) borrows track space
             while the dock row above keeps its untouched scroll/auto-follow behavior. */}
         <div className="timeline-stack">
-        {/* Resolve-style page tabs (FLAREX.md): Edit = the timeline below; Flarex = the node
-            compositing workspace swapped into the same slot (Shift+F). The viewer above persists. */}
-        <div className="flarex-page-tabs" role="tablist" aria-label="Editor pages">
-          <button type="button" role="tab" aria-selected={editorPage === "edit"} className={editorPage === "edit" ? "is-active" : ""} onClick={() => setEditorPage("edit")}>
-            Edit
-          </button>
-          <button type="button" role="tab" aria-selected={editorPage === "flarex"} className={editorPage === "flarex" ? "is-active" : ""} onClick={() => setEditorPage("flarex")}>
-            Flarex
-          </button>
-        </div>
-        <div className="timeline-dock-row" style={editorPage === "flarex" ? { display: "none" } : undefined}>
+        <div className="timeline-dock-row" style={editorPage === "flarex" || editorPage === "notes" ? { display: "none" } : undefined}>
         <section className="editor-timeline-dock">
           {nestPath.length > 0 ? (
             <div className="timeline-nest-breadcrumb">
@@ -8538,7 +8636,9 @@ export function EditorPage() {
               changes: composition edits, selection, tool/zoom, and the cold playhead commit. */}
           <TimelineStrip
             {...timelineHandlers}
+            shortcutsEnabled={editorPage === "edit"}
             assets={resolvedAssets}
+            notedLayerIds={notedLayerIds}
             composition={composition}
             currentTime={currentTimeRef.current}
             hasClipboardClip={hasClipboardLayer()}
@@ -8619,6 +8719,24 @@ export function EditorPage() {
             )}
           </ColdTime>
         ) : null}
+        {/* DaVinci-style page bar (user ask 2026-07-21): centered page buttons at the BOTTOM of the
+            timeline area — Edit = the timeline; Flarex = the node compositing workspace swapped
+            into the same slot (Shift+F). The viewer above persists. Future pages (Audio, Notes)
+            join this bar. */}
+        <div className="flarex-page-tabs" role="tablist" aria-label="Editor pages">
+          <button type="button" role="tab" aria-selected={editorPage === "edit"} className={editorPage === "edit" ? "is-active" : ""} onClick={() => setEditorPage("edit")}>
+            <Film size={14} aria-hidden="true" />
+            <span>Edit</span>
+          </button>
+          <button type="button" role="tab" aria-selected={editorPage === "flarex"} className={editorPage === "flarex" ? "is-active" : ""} onClick={() => setEditorPage("flarex")}>
+            <Workflow size={14} aria-hidden="true" />
+            <span>Flarex</span>
+          </button>
+          <button type="button" role="tab" aria-selected={editorPage === "notes"} className={editorPage === "notes" ? "is-active" : ""} onClick={() => setEditorPage("notes")}>
+            <StickyNote size={14} aria-hidden="true" />
+            <span>Notes</span>
+          </button>
+        </div>
         </div>
       </div>
       {responsiveLayout.usesOverlayPanels && activeResponsiveOverlay ? (
@@ -10765,6 +10883,7 @@ function AssetBinImpl({
   clickAssigns = false,
   onAssignAsset,
   onAddAssetToTimeline,
+  disableTimelineAdd = false,
   onAddGraphic,
   onApplyFrame,
   onPickReplacement,
@@ -10798,7 +10917,7 @@ function AssetBinImpl({
   /** Owner of the open project — distinguishes "my saved templates" (deletable here) from curated ones. */
   currentUserId?: string | undefined;
   /** Applies a template's composition into the currently open project (append). Templates tab only. */
-  onApplyTemplate?: (template: TemplateDefinition) => void;
+  onApplyTemplate?: ((template: TemplateDefinition) => void) | undefined;
   selectedAssetId?: string | undefined;
   usedCounts?: Record<string, number>;
   replaceActive?: boolean;
@@ -10806,9 +10925,13 @@ function AssetBinImpl({
   clickAssigns?: boolean;
   onAssignAsset: (asset: SourceAsset) => void;
   onAddAssetToTimeline?: (asset: SourceAsset, mode?: AssetAddMode) => void;
-  onAddGraphic?: (graphic: LayerGraphic, name: string) => void;
+  /** Hide every "add to timeline" affordance (grid/list add buttons + click-to-add). Set on the
+   *  Notes page, where the timeline is hidden and injecting a clip into it would be a silent, hard-
+   *  to-notice mutation. Dragging an asset onto the board still works (that uses dataTransfer). */
+  disableTimelineAdd?: boolean;
+  onAddGraphic?: ((graphic: LayerGraphic, name: string) => void) | undefined;
   /** Frames (Phase 1): apply the picked frame to the selected image/video clip. */
-  onApplyFrame?: (def: FrameDefinition) => void;
+  onApplyFrame?: ((def: FrameDefinition) => void) | undefined;
   onPickReplacement?: (asset: SourceAsset) => void;
   onCancelReplace?: () => void;
   onDeleteAsset?: ((asset: SourceAsset) => void) | undefined;
@@ -12484,17 +12607,19 @@ function AssetBinImpl({
                         )}
                       </span>
                       <span className="asset-list-actions">
-                        <button
-                          type="button"
-                          title={replaceActive ? "Replace clip asset" : "Add to timeline"}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            if (replaceActive) onPickReplacement?.(asset);
-                            else onAddAssetToTimeline?.(asset, "auto");
-                          }}
-                        >
-                          <Plus size={13} />
-                        </button>
+                        {disableTimelineAdd ? null : (
+                          <button
+                            type="button"
+                            title={replaceActive ? "Replace clip asset" : "Add to timeline"}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (replaceActive) onPickReplacement?.(asset);
+                              else onAddAssetToTimeline?.(asset, "auto");
+                            }}
+                          >
+                            <Plus size={13} />
+                          </button>
+                        )}
                         <button
                           className="asset-more-button"
                           type="button"
@@ -12720,7 +12845,7 @@ function AssetBinImpl({
                       {meta ? <small>{meta}</small> : null}
                     </div>
                     <div className="asset-card-actions">
-                      {kind === "video" ? (
+                      {disableTimelineAdd ? null : kind === "video" ? (
                         <>
                           <button type="button" title={replaceActive ? "Replace clip asset" : "Add video only"} onClick={(event) => { event.stopPropagation(); replaceActive ? onPickReplacement?.(asset) : onAddAssetToTimeline?.(asset, "video"); }}>
                             <Film size={14} />

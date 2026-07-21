@@ -4189,6 +4189,52 @@ input[type="checkbox"] {
   grid-column: 5;
 }
 
+/* Notes page (plans/notes-sonnet-execution.md): the board takes over the viewer+inspector
+   columns while the left media pool stays put; the timeline row collapses to just the page bar.
+   `display: contents` on `.editor-main` hoists its children into `.editor-layout`'s OWN grid
+   (same trick `.is-any-expanded` uses below) — otherwise `.editor-main`'s implicit row has no
+   definite track size for percentage-height children to resolve against, which was collapsing/
+   overflowing the board (blank space under the media pool, a stray outer scrollbar). */
+.editor-layout.is-notes-page {
+  grid-template-columns: var(--editor-left-pane-width, var(--left-pane-width, 420px)) 8px minmax(0, 1fr) 8px var(--editor-right-pane-width, var(--right-pane-width, 340px));
+  grid-template-rows: minmax(0, 1fr) 0 auto;
+}
+/* Media pool collapsed → its column + resizer drop to 0 so the board reclaims the full width
+   (the board already spans grid-column 3 / 6, i.e. the 1fr track through the right edge). */
+.editor-layout.is-notes-page.is-left-collapsed {
+  grid-template-columns: 0 0 minmax(0, 1fr) 8px var(--editor-right-pane-width, var(--right-pane-width, 340px));
+}
+.editor-layout.is-notes-page .editor-main {
+  display: contents;
+}
+.editor-layout.is-notes-page .studio-panel {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  max-height: none;
+}
+.editor-layout.is-notes-page .pane-resizer-vertical:not(.pane-resizer-right) {
+  grid-column: 2;
+  grid-row: 1 / 3;
+}
+.editor-layout.is-notes-page .editor-viewer,
+.editor-layout.is-notes-page .pane-resizer-right,
+.editor-layout.is-notes-page .editor-inspector,
+.editor-layout.is-notes-page .pane-resizer-horizontal {
+  display: none;
+}
+.editor-layout.is-notes-page .timeline-stack {
+  grid-column: 1 / -1;
+  grid-row: 3;
+}
+.editor-layout.is-notes-page .timeline-stack > *:not(.flarex-page-tabs) {
+  display: none;
+}
+.editor-layout.is-notes-page .notes-workspace {
+  grid-column: 3 / 6;
+  grid-row: 1 / 3;
+  min-height: 0;
+}
+
 /* Inspector fully collapsed → drop its column + resizer; a slim reopen tab takes over. */
 .editor-layout.is-inspector-collapsed .editor-main {
   grid-template-columns: var(--editor-left-pane-width, var(--left-pane-width, 420px)) 8px minmax(0, 1fr) 0 0;
@@ -22323,32 +22369,44 @@ input.scrub-number:focus {
 
 /* ── Flarex CG page (FLAREX.md) ──────────────────────────────────────────────────────────────── */
 
+/* DaVinci-style bottom page bar: centered page buttons under the timeline area. Future pages
+   (Audio, Notes) join this row. */
 .flarex-page-tabs {
   display: flex;
-  gap: 2px;
-  padding: 2px 8px 0;
-  align-items: flex-end;
-  background: rgba(12, 14, 18, 0.85);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+  padding: 3px 8px;
+  background: rgba(12, 14, 18, 0.92);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 .flarex-page-tabs button {
   appearance: none;
   border: 1px solid transparent;
-  border-bottom: none;
   background: transparent;
-  color: rgba(230, 236, 244, 0.55);
-  font-size: 11px;
+  color: rgba(230, 236, 244, 0.5);
+  font-size: 9.5px;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  padding: 3px 14px;
-  border-radius: 5px 5px 0 0;
+  letter-spacing: 0.05em;
+  padding: 3px 16px 2px;
+  border-radius: 5px;
   cursor: pointer;
+  /* DaVinci-style: icon stacked above a tiny label. */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  line-height: 1.1;
+}
+.flarex-page-tabs button svg {
+  opacity: 0.85;
 }
 .flarex-page-tabs button:hover {
   color: rgba(230, 236, 244, 0.85);
+  background: rgba(255, 255, 255, 0.05);
 }
 .flarex-page-tabs button.is-active {
-  color: #e8b04b;
+  color: var(--nle-accent);
   background: rgba(38, 42, 50, 0.9);
   border-color: rgba(255, 255, 255, 0.08);
 }
@@ -22380,9 +22438,9 @@ input.scrub-number:focus {
 }
 .flarex-create-btn {
   appearance: none;
-  border: 1px solid rgba(232, 176, 75, 0.5);
-  background: rgba(232, 176, 75, 0.12);
-  color: #e8b04b;
+  border: 1px solid color-mix(in srgb, var(--nle-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
+  color: var(--nle-accent);
   font-size: 12px;
   font-weight: 600;
   padding: 6px 16px;
@@ -22390,7 +22448,7 @@ input.scrub-number:focus {
   cursor: pointer;
 }
 .flarex-create-btn:hover {
-  background: rgba(232, 176, 75, 0.22);
+  background: color-mix(in srgb, var(--nle-accent) 22%, transparent);
 }
 
 .flarex-toolbar {
@@ -22428,7 +22486,7 @@ input.scrub-number:focus {
 }
 .flarex-toolbar-comp-input:focus {
   outline: none;
-  border-color: rgba(232, 176, 75, 0.6);
+  border-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
   background: rgba(12, 14, 18, 0.6);
 }
 .flarex-toolbar-group {
@@ -22456,8 +22514,943 @@ input.scrub-number:focus {
   white-space: nowrap;
 }
 .flarex-toolbar-btn:hover {
-  border-color: rgba(232, 176, 75, 0.5);
-  color: #e8b04b;
+  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
+  color: var(--nle-accent);
+}
+
+/* ── Notes page (plans/notes-sonnet-execution.md) ────────────────────────────────────────────── */
+
+.notes-workspace {
+  display: flex;
+  flex-direction: column;
+  min-height: 260px;
+  height: 100%;
+  background: #14161b;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.notes-workspace-empty {
+  align-items: center;
+  justify-content: center;
+  color: rgba(230, 236, 244, 0.6);
+  font-size: 12px;
+}
+
+.notes-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(20, 23, 28, 0.95);
+  overflow-x: auto;
+  flex: 0 0 auto;
+}
+.notes-toolbar-name-input {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.8);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 6px 2px 4px;
+  margin-right: 4px;
+  width: 140px;
+  min-width: 60px;
+}
+.notes-toolbar-name-input:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.notes-toolbar-name-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
+  background: rgba(12, 14, 18, 0.6);
+}
+.notes-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.notes-toolbar-zoom {
+  margin-left: auto;
+}
+.notes-toolbar-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(38, 42, 50, 0.8);
+  color: rgba(230, 236, 244, 0.8);
+  font-size: 10.5px;
+  padding: 3px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.notes-toolbar-btn:hover {
+  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
+  color: var(--nle-accent);
+}
+.notes-zoom-readout {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.55);
+  width: 38px;
+  text-align: center;
+}
+
+.notes-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: #101216;
+  cursor: default;
+  touch-action: none;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.notes-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  width: 0;
+  height: 0;
+}
+
+.notes-edges-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.notes-edge-path {
+  fill: none;
+  stroke: color-mix(in srgb, var(--nle-accent) 55%, transparent);
+  stroke-width: 2;
+}
+.notes-edge.is-selected .notes-edge-path {
+  stroke: var(--nle-accent);
+  stroke-width: 3;
+}
+.notes-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 10;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.notes-edge-preview {
+  fill: none;
+  stroke: color-mix(in srgb, var(--nle-accent) 70%, transparent);
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+}
+.notes-edge-label,
+.notes-edge-label-input {
+  position: absolute;
+  left: 0;
+  top: 0;
+  translate: -50% -50%;
+  font-size: 10.5px;
+  color: rgba(230, 236, 244, 0.85);
+  background: rgba(20, 23, 28, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.notes-edge-label-input {
+  pointer-events: auto;
+  outline: none;
+  min-width: 60px;
+}
+.notes-edge-label-input:focus {
+  border-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
+}
+
+.notes-marquee {
+  position: absolute;
+  border: 1px dashed color-mix(in srgb, var(--nle-accent) 80%, transparent);
+  background: color-mix(in srgb, var(--nle-accent) 8%, transparent);
+  pointer-events: none;
+}
+
+.notes-empty-hint {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  color: rgba(230, 236, 244, 0.35);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The card is only a positioning box now (overflow VISIBLE) so connector dots / resize handles /
+   the hover toolbar can sit fully outside it. All visual chrome + media clipping lives on the
+   inner `.notes-card-surface`. */
+.notes-card {
+  position: absolute;
+  left: 0;
+  top: 0;
+  user-select: none;
+  cursor: default;
+}
+.notes-card-surface {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #1c1f26;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.notes-card.is-selected .notes-card-surface {
+  box-shadow: 0 0 0 2px var(--nle-accent), 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.notes-card.is-dragging .notes-card-surface {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.notes-card.is-dragging {
+  opacity: 0.92;
+}
+.notes-card.is-locked {
+  cursor: not-allowed;
+}
+
+.notes-card-frame .notes-card-surface {
+  background: color-mix(in srgb, var(--nle-accent) 4%, #1c1f26);
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  box-shadow: none;
+}
+.notes-card-frame.is-selected .notes-card-surface {
+  box-shadow: 0 0 0 2px var(--nle-accent);
+}
+.notes-frame-titlebar {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.85);
+  cursor: move;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.notes-frame-title,
+.notes-frame-title-input {
+  display: block;
+}
+.notes-frame-title-input {
+  width: 100%;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--nle-accent) 50%, transparent);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  padding: 0 3px;
+}
+
+.notes-card-hover-toolbar {
+  position: absolute;
+  top: -26px;
+  left: 0;
+  display: none;
+  z-index: 2;
+}
+.notes-card:hover .notes-card-hover-toolbar,
+.notes-card.is-selected .notes-card-hover-toolbar {
+  display: block;
+}
+.notes-swatch-row {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  background: rgba(20, 23, 28, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+}
+.notes-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+  padding: 0;
+}
+.notes-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--nle-accent);
+}
+
+.notes-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.notes-note-body {
+  gap: 4px;
+  cursor: text;
+}
+.notes-note-title,
+.notes-note-title-input {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.9);
+}
+.notes-note-title-input {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin-bottom: 2px;
+}
+.notes-note-text {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: rgba(230, 236, 244, 0.85);
+  white-space: pre-wrap;
+  overflow: auto;
+  flex: 1 1 auto;
+}
+.notes-note-placeholder {
+  color: rgba(230, 236, 244, 0.35);
+}
+.notes-note-body-input {
+  flex: 1 1 auto;
+  resize: none;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--nle-accent) 50%, transparent);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  padding: 4px;
+  outline: none;
+}
+
+.notes-asset-body {
+  padding: 0;
+  gap: 0;
+  align-items: center;
+  justify-content: center;
+  background: #0d0e11;
+  position: relative;
+}
+.notes-asset-body img,
+.notes-asset-body video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.notes-asset-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 3px 6px;
+  font-size: 10px;
+  color: #fff;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notes-asset-player {
+  padding: 0;
+  background: transparent;
+}
+.notes-asset-file {
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  color: rgba(230, 236, 244, 0.7);
+  font-size: 11px;
+}
+.notes-asset-missing {
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  color: rgba(230, 236, 244, 0.4);
+  font-size: 11px;
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  margin: 6px;
+  border-radius: 6px;
+}
+
+.notes-link-body {
+  gap: 4px;
+  cursor: default;
+}
+.notes-link-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--nle-accent);
+}
+.notes-link-title,
+.notes-link-title-input {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.9);
+}
+.notes-link-title-input {
+  flex: 1 1 auto;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.notes-link-url {
+  font-size: 10.5px;
+  color: rgba(230, 236, 244, 0.55);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-todo-body {
+  gap: 4px;
+}
+.notes-todo-progress {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.45);
+  align-self: flex-end;
+}
+.notes-todo-rows {
+  flex: 1 1 auto;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.notes-todo-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.notes-todo-row input[type="checkbox"] {
+  accent-color: var(--nle-accent);
+}
+.notes-todo-text-input,
+.notes-todo-new-input {
+  flex: 1 1 auto;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: rgba(230, 236, 244, 0.85);
+  font-size: 11px;
+  padding: 1px 2px;
+}
+.notes-todo-text-input:focus,
+.notes-todo-new-input:focus {
+  outline: none;
+  border-bottom-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
+}
+.notes-todo-new-input {
+  color: rgba(230, 236, 244, 0.5);
+}
+
+/* Connector dots sit fully OUTSIDE the card edge (with a small gap) and are complete circles —
+   the card no longer clips them (chrome moved off the overflow:hidden surface). Each dot is
+   anchored to an edge midpoint, then pushed entirely past that edge by its own size + a 5px gap. */
+.notes-connector-dot {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--nle-accent);
+  border: 2px solid var(--nle-panel, #14161b);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  cursor: crosshair;
+  padding: 0;
+  z-index: 6;
+}
+.notes-card:hover .notes-connector-dot {
+  opacity: 1;
+}
+.notes-connector-dot-top {
+  left: 50%;
+  top: 0;
+  transform: translate(-50%, calc(-100% - 5px));
+}
+.notes-connector-dot-bottom {
+  left: 50%;
+  top: 100%;
+  transform: translate(-50%, 5px);
+}
+.notes-connector-dot-left {
+  left: 0;
+  top: 50%;
+  transform: translate(calc(-100% - 5px), -50%);
+}
+.notes-connector-dot-right {
+  left: 100%;
+  top: 50%;
+  transform: translate(5px, -50%);
+}
+
+.notes-resize-handle {
+  position: absolute;
+  width: calc(var(--handle-size, 13px) / var(--notes-zoom, 1));
+  height: calc(var(--handle-size, 13px) / var(--notes-zoom, 1));
+  background: var(--handle-fill, #fff);
+  border: var(--handle-border-width, 2px) solid var(--handle-border-color, var(--nle-accent));
+  border-radius: var(--handle-radius, 2px);
+  box-shadow: var(--handle-shadow, 0 1px 4px rgba(0, 0, 0, 0.5));
+  transform: translate(-50%, -50%);
+  z-index: 6;
+}
+
+/* ── Notes custom media players (video + audio) with waveform scrubber ───────────────────────── */
+
+.notes-player {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Video: media fills the card; a slim control bar overlays the bottom on a gradient. */
+.notes-player-video {
+  position: relative;
+  background: #0d0e11;
+}
+.notes-player-video-surface {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  cursor: pointer;
+}
+.notes-player-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 8px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0));
+}
+.notes-player-bar .notes-wave {
+  flex: 1 1 auto;
+  height: 20px;
+}
+
+/* Audio: header (icon + name) → play + tall waveform → time + mute. */
+.notes-player-audio {
+  padding: 10px;
+  gap: 8px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--nle-accent) 10%, #1c1f26), #16181d);
+}
+.notes-player-audio-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nle-accent);
+  font-size: 11px;
+  min-height: 0;
+  flex: 0 0 auto;
+}
+.notes-player-audio-name {
+  color: rgba(230, 236, 244, 0.9);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notes-player-audio-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.notes-player-audio-main .notes-wave {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 28px;
+}
+.notes-player-audio-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.notes-player-time {
+  font-size: 10.5px;
+  color: rgba(230, 236, 244, 0.7);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.notes-player-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(230, 236, 244, 0.75);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+.notes-player-btn:hover {
+  color: var(--nle-accent);
+  background: rgba(255, 255, 255, 0.08);
+}
+.notes-player-video .notes-player-btn {
+  color: rgba(255, 255, 255, 0.9);
+}
+.notes-player-play {
+  appearance: none;
+  border: 0;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--nle-accent);
+  color: #0d0e11;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.notes-player-play:hover {
+  filter: brightness(1.1);
+}
+
+/* Waveform scrubber: two overlaid bar layers — muted base + accent "played", the accent revealed
+   by a clip-path inset driven by playback progress. The strip is the seek surface. */
+.notes-wave {
+  position: relative;
+  cursor: pointer;
+  min-width: 0;
+  touch-action: none;
+}
+.notes-wave-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 1px;
+}
+.notes-wave-bar {
+  flex: 1 1 0;
+  min-width: 1px;
+  border-radius: 1px;
+  background: rgba(230, 236, 244, 0.22);
+}
+.notes-wave-layer-fill .notes-wave-bar {
+  background: var(--nle-accent);
+}
+/* Progress-track fallback (no waveform available): a slim rounded bar with an accent fill + thumb,
+   so video/audio without decoded peaks still shows playback position. */
+.notes-wave-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  background: rgba(230, 236, 244, 0.22);
+  border-radius: 2px;
+}
+.notes-wave-track-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--nle-accent);
+  border-radius: 2px;
+}
+.notes-wave-track-thumb {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--nle-accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%);
+}
+
+/* ── Notes round 2 (plans/notes-sonnet-execution-2.md) ───────────────────────────────────────── */
+
+/* Board switcher + template menu share this popover shell. */
+.notes-board-switcher {
+  position: relative;
+}
+.notes-board-switcher-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(230, 236, 244, 0.8);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 4px;
+  border-radius: 3px;
+  margin-right: 4px;
+  cursor: pointer;
+}
+.notes-board-switcher-btn:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.notes-board-switcher-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 180px;
+  background: rgba(20, 23, 28, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.notes-board-switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.notes-board-switcher-row.is-active .notes-board-switcher-name {
+  color: var(--nle-accent);
+}
+.notes-board-switcher-name {
+  flex: 1 1 auto;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(230, 236, 244, 0.85);
+  font-size: 11px;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.notes-board-switcher-name:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.notes-board-switcher-rename-input {
+  flex: 1 1 auto;
+  font-size: 11px;
+  background: rgba(12, 14, 18, 0.7);
+  border: 1px solid color-mix(in srgb, var(--nle-accent) 60%, transparent);
+  border-radius: 4px;
+  color: rgba(230, 236, 244, 0.9);
+  padding: 3px 6px;
+}
+.notes-board-switcher-delete,
+.notes-board-switcher-delete-confirm {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(230, 236, 244, 0.4);
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+.notes-board-switcher-delete:hover {
+  color: #e0708a;
+  background: rgba(224, 112, 138, 0.12);
+}
+.notes-board-switcher-delete-confirm {
+  color: #e0708a;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.notes-board-switcher-add {
+  appearance: none;
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  background: transparent;
+  color: rgba(230, 236, 244, 0.65);
+  font-size: 10.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+  margin-top: 3px;
+  cursor: pointer;
+}
+.notes-board-switcher-add:hover {
+  color: var(--nle-accent);
+  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
+}
+
+/* "✦ Generate" prompt */
+.notes-generate-btn {
+  color: var(--nle-accent);
+  border-color: color-mix(in srgb, var(--nle-accent) 40%, transparent);
+}
+.notes-generate-form {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(38, 42, 50, 0.8);
+  border: 1px solid color-mix(in srgb, var(--nle-accent) 50%, transparent);
+  border-radius: 4px;
+  padding: 3px 8px;
+  color: rgba(230, 236, 244, 0.5);
+}
+.notes-generate-form input {
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: rgba(230, 236, 244, 0.9);
+  font-size: 10.5px;
+  width: 220px;
+}
+
+/* Search/jump (Ctrl+F) */
+.notes-search-box {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(20, 23, 28, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 5px 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  color: rgba(230, 236, 244, 0.5);
+}
+.notes-search-box input {
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: rgba(230, 236, 244, 0.9);
+  font-size: 11px;
+  width: 160px;
+}
+.notes-search-count {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.45);
+  white-space: nowrap;
+}
+.notes-search-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(230, 236, 244, 0.5);
+  cursor: pointer;
+  display: inline-flex;
+  padding: 2px;
+}
+.notes-search-close:hover {
+  color: rgba(230, 236, 244, 0.9);
+}
+.notes-card.is-search-match {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--nle-accent) 70%, transparent);
+}
+
+.notes-oversize-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  translate: -50% 0;
+  z-index: 15;
+  background: rgba(20, 23, 28, 0.96);
+  border: 1px solid color-mix(in srgb, #e0708a 50%, transparent);
+  color: #e0708a;
+  font-size: 11px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+/* Linked-time chip (P2): always visible (not hover-gated, unlike the color swatches). */
+.notes-linked-time-wrap {
+  position: absolute;
+  top: -9px;
+  right: 8px;
+  z-index: 5;
+}
+.notes-linked-time-chip {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(20, 23, 28, 0.95);
+  color: var(--nle-accent);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.notes-linked-time-chip:hover {
+  border-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
+}
+
+.notes-pin-time-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(38, 42, 50, 0.8);
+  color: rgba(230, 236, 244, 0.7);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  margin-left: 3px;
+}
+.notes-pin-time-btn:hover {
+  color: var(--nle-accent);
+  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
+}
+
+/* Shape cards (P4.2): pure visual organizers. Rect/ellipse are tinted backdrops in the low
+   z-band; arrows have NO card surface at all — see the `isArrow` branch in NotesBoard.tsx. */
+.notes-shape-body {
+  width: 100%;
+  height: 100%;
+  border: 2px solid;
+}
+.notes-shape-ellipse {
+  border-radius: 50%;
+}
+.notes-card-shape-arrow .notes-card-hover-toolbar {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.notes-shape-arrow {
+  fill: none;
+  stroke-width: 2.5;
 }
 
 .flarex-body {
@@ -22474,6 +23467,100 @@ input.scrub-number:focus {
 .flarex-canvas {
   display: block;
   touch-action: none;
+}
+
+/* F1: add-node search menu + node context menu (Sonnet round 3) */
+.flarex-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+}
+.flarex-node-menu {
+  position: absolute;
+  z-index: 41;
+  min-width: 200px;
+  max-width: 260px;
+  background: rgba(24, 27, 33, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.flarex-node-menu-input {
+  background: rgba(10, 12, 16, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+  color: #e8ecf3;
+  padding: 5px 8px;
+  font-size: 12px;
+  outline: none;
+}
+.flarex-node-menu-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.flarex-node-menu-empty {
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: rgba(230, 236, 244, 0.45);
+}
+.flarex-node-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: #e8ecf3;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.flarex-node-menu-item:hover,
+.flarex-node-menu-item.is-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.flarex-node-menu-group {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.4);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.flarex-node-context-menu {
+  min-width: 130px;
+  max-width: 160px;
+}
+.flarex-node-context-menu button {
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: #e8ecf3;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.flarex-node-context-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.flarex-node-rename-input {
+  position: absolute;
+  z-index: 42;
+  background: rgba(10, 12, 16, 0.95);
+  border: 1.5px solid var(--nle-accent, #e8b04b);
+  border-radius: 4px;
+  color: #e8ecf3;
+  font-size: 11px;
+  padding: 0 6px;
+  outline: none;
 }
 
 .flarex-inspector {
@@ -22528,9 +23615,21 @@ input.scrub-number:focus {
   bottom: 0;
   width: 2px;
   margin-left: -1px;
-  background: #e8b04b;
-  box-shadow: 0 0 4px rgba(232, 176, 75, 0.5);
+  background: var(--nle-accent);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--nle-accent) 50%, transparent);
   pointer-events: none;
+}
+.flarex-framebar-keyframe {
+  position: absolute;
+  bottom: 1px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  background: var(--nle-accent);
+  transform: rotate(45deg);
+  border-radius: 1px;
+  box-shadow: 0 0 3px color-mix(in srgb, var(--nle-accent) 60%, transparent);
+  cursor: pointer;
 }
 .flarex-framebar-readout {
   align-self: center;
@@ -22539,7 +23638,7 @@ input.scrub-number:focus {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: #e8b04b;
+  color: var(--nle-accent);
 }
 
 /* Left-edge resize handle (width persisted). */
@@ -22554,7 +23653,7 @@ input.scrub-number:focus {
   touch-action: none;
 }
 .flarex-inspector-resize:hover {
-  background: rgba(232, 176, 75, 0.35);
+  background: color-mix(in srgb, var(--nle-accent) 35%, transparent);
 }
 /* Main-inspector rows inside the flarex panel: same shells, slightly tightened gutters. */
 .flarex-inspector-body .effect-slider-control {
@@ -22626,7 +23725,7 @@ input.scrub-number:focus {
 .flarex-param-row input[type="range"] {
   width: 100%;
   height: 14px;
-  accent-color: #e8b04b;
+  accent-color: var(--nle-accent);
 }
 .flarex-param-row input[type="text"],
 .flarex-param-row select,
@@ -22657,7 +23756,7 @@ input.scrub-number:focus {
 }
 .flarex-param-bool input {
   justify-self: start;
-  accent-color: #e8b04b;
+  accent-color: var(--nle-accent);
 }
 .flarex-param-multiline {
   grid-template-columns: 1fr;
@@ -22677,6 +23776,57 @@ input.scrub-number:focus {
   min-width: 0;
 }
 
+/* F3 (round 3): structured point-list editor for polygonMask/bezierMask, replacing the raw JSON
+   textarea — a row per point (x/y comp-fraction fields + reorder/remove). */
+.flarex-points-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 10px 8px;
+}
+.flarex-points-editor-label {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.55);
+  margin-bottom: 2px;
+}
+.flarex-points-row {
+  display: grid;
+  grid-template-columns: 14px 1fr 1fr auto auto auto;
+  align-items: center;
+  gap: 4px;
+}
+.flarex-points-index {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.4);
+  text-align: right;
+}
+.flarex-points-row button {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  color: rgba(230, 236, 244, 0.8);
+  font-size: 10px;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.flarex-points-row button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.flarex-points-add {
+  align-self: flex-start;
+  margin-top: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: rgba(230, 236, 244, 0.8);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
 /* Flarex clip badge (FLAREX.md): marks clips that render through a node comp. Positioned like
    .clip-number (direct clip child, top-left corner, right of the number) so it stays visible at
    every row height — the .clip-label bar it originally lived in is hidden at S/XS rows. */
@@ -22686,7 +23836,7 @@ input.scrub-number:focus {
   left: 17px;
   z-index: 4;
   color: #10131a;
-  background: #e8b04b;
+  background: var(--nle-accent);
   border-radius: 3px;
   padding: 0 3px;
   height: 12px;
@@ -22697,4 +23847,24 @@ input.scrub-number:focus {
   text-transform: uppercase;
   pointer-events: none;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+/* Notes clip badge (plans/notes-sonnet-execution-2.md P2.3): same corner-badge idiom as the fx
+   badge, offset right of it so both can show at once. UNLIKE the fx badge, this one keeps pointer
+   events (its double-click is the whole point of the affordance). */
+.timeline-editor .timeline-clip .clip-notes-badge {
+  position: absolute;
+  top: 2px;
+  left: 32px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #10131a;
+  background: var(--nle-accent);
+  border-radius: 3px;
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
 }

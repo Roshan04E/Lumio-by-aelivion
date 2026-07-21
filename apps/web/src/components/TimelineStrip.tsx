@@ -1,4 +1,4 @@
-import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
+import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, StickyNote, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, effectiveTransitionDuration, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, resolveTransitionWindowSides, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@orreris/shared";
@@ -419,6 +419,7 @@ function TimelineStripImpl({
   onToggleMagnetic,
   onSplitLayerAt,
   onSplitAtPlayhead,
+  shortcutsEnabled,
   onNotice,
   onRippleDeleteLayer,
   onRippleDeleteLayers,
@@ -452,10 +453,15 @@ function TimelineStripImpl({
   onRollEdit,
   onSlideLayer,
   onPreviewVolume,
-  onSetLayerLabel
+  onSetLayerLabel,
+  onOpenFlarexForClip,
+  onOpenNotesForLayer,
+  notedLayerIds
 }: {
   composition: TimelineComposition;
   assets?: SourceAsset[];
+  /** Layer ids with ≥1 linked note (P2.3) — drives the clip's note badge. */
+  notedLayerIds?: Set<string> | undefined;
   currentTime: number;
   isPlaying: boolean;
   layerMaxDurations?: Record<string, number>;
@@ -524,6 +530,10 @@ function TimelineStripImpl({
   onToggleMagnetic?: (() => void) | undefined;
   onSplitLayerAt?: ((layerId: string, atSeconds: number) => void) | undefined;
   onSplitAtPlayhead?: (() => void) | undefined;
+  /** When false, ALL of the timeline's own keyboard shortcuts (split/blade/trim/marker/snap/…) are
+   *  inert. The host sets this off whenever the timeline isn't the active page (Flarex/Notes), so a
+   *  bare "S"/"C"/etc. can't silently mutate the hidden timeline. Default (undefined) = enabled. */
+  shortcutsEnabled?: boolean | undefined;
   /** Transient editor toast — used for "why did nothing happen" feedback (roll/slide preconditions). */
   onNotice?: ((message: string) => void) | undefined;
   onRippleDeleteLayer?: ((layerId: string) => void) | undefined;
@@ -567,6 +577,11 @@ function TimelineStripImpl({
   onPreviewVolume?: ((layerId: string, updater: (layer: TimelineLayer) => TimelineLayer, commit: boolean) => void) | undefined;
   /** Premiere-style color label for a clip (null clears the override → inherits the asset's label). */
   onSetLayerLabel?: ((layerId: string, label: string | null) => void) | undefined;
+  /** Double-click the clip's "fx" badge (N4): select the clip + switch to the Flarex page for it. */
+  onOpenFlarexForClip?: ((layerId: string) => void) | undefined;
+  /** Double-click the clip's note badge (P2.3): select the clip + switch to Notes, centered on
+   *  its linked notes. */
+  onOpenNotesForLayer?: ((layerId: string) => void) | undefined;
 }) {
   useRenderCost("TimelineStrip");
   // Must mirror the CSS: --timeline-label-width per row size, with --timeline-label-gap now 0
@@ -2698,6 +2713,9 @@ function TimelineStripImpl({
   // don't hijack normal text entry elsewhere in the editor.
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      // Timeline shortcuts are inert unless the timeline is the active page — otherwise a bare "S"
+      // (split), "C" (blade), etc. would silently mutate the CSS-hidden timeline from Flarex/Notes.
+      if (shortcutsEnabled === false) return;
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable)) {
         return;
@@ -2809,6 +2827,7 @@ function TimelineStripImpl({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
+    shortcutsEnabled,
     selectedLayerId,
     onDuplicateLayer,
     onRippleDeleteLayer,
@@ -3834,6 +3853,9 @@ function TimelineStripImpl({
                       onUnlinkLayer={onUnlinkLayer}
                       onOpenNestedClip={onOpenNestedClip}
                       onRemoveClipMarker={onRemoveClipMarker}
+                      onOpenFlarexForClip={onOpenFlarexForClip}
+                      onOpenNotesForLayer={onOpenNotesForLayer}
+                      hasLinkedNotes={notedLayerIds?.has(layer.id) ?? false}
                       onOpenClipMarkerEditor={openClipMarkerEditor}
                       selectedClipKeyframeId={isLayerSelectedForKeyframes ? selectedKeyframeId : null}
                       startSeconds={preview?.startSeconds ?? layer.startSeconds}
@@ -5170,6 +5192,9 @@ interface TimelineClipProps {
   onOpenNestedClip?: ((layerId: string) => void) | undefined;
   onRemoveClipMarker?: ((layerId: string, timeSeconds: number) => void) | undefined;
   onOpenClipMarkerEditor?: ((layerId: string, timeSeconds: number, name: string) => void) | undefined;
+  onOpenFlarexForClip?: ((layerId: string) => void) | undefined;
+  onOpenNotesForLayer?: ((layerId: string) => void) | undefined;
+  hasLinkedNotes?: boolean;
 }
 
 // Memoized so dragging/resizing/scrubbing one clip doesn't re-render every other
@@ -5230,7 +5255,10 @@ const TimelineClip = memo(function TimelineClip({
   onSetEffectDropTarget,
   onOpenNestedClip,
   onRemoveClipMarker,
-  onOpenClipMarkerEditor
+  onOpenClipMarkerEditor,
+  onOpenFlarexForClip,
+  onOpenNotesForLayer,
+  hasLinkedNotes
 }: TimelineClipProps) {
   const left = (startSeconds / timelineDurationSeconds) * 100;
   const width = (durationSeconds / timelineDurationSeconds) * 100;
@@ -5507,8 +5535,31 @@ const TimelineClip = memo(function TimelineClip({
           A DIRECT child of the clip (like .clip-number), NOT inside .clip-label — the label bar
           is display:none on video clips at S/XS row heights, which would hide the badge. */}
       {layer.flarexCompId ? (
-        <span className="clip-flarex-badge" aria-hidden="true" title="Has a Flarex node comp (Shift+F)">
+        <span
+          className="clip-flarex-badge"
+          title="Has a Flarex node comp — double-click to open (Shift+F)"
+          onDoubleClick={(event) => {
+            // Single-click falls through to the clip's normal select/seek behavior; only the
+            // double-click navigates, so the badge never steals a plain click.
+            event.stopPropagation();
+            onOpenFlarexForClip?.(layer.id);
+          }}
+        >
           fx
+        </span>
+      ) : null}
+      {/* Notes badge (P2.3): same idiom as the fx badge — a DIRECT child of the clip, never inside
+          .clip-label (display:none at S/XS row heights). */}
+      {hasLinkedNotes ? (
+        <span
+          className="clip-notes-badge"
+          title="Has notes linked to this clip — double-click to open (Shift+N)"
+          onDoubleClick={(event) => {
+            event.stopPropagation();
+            onOpenNotesForLayer?.(layer.id);
+          }}
+        >
+          <StickyNote size={9} />
         </span>
       ) : null}
       <span className="clip-label">
