@@ -2122,6 +2122,16 @@ export class SceneCompositor {
               frameTime: this.debugFrameTime,
             })
           : null;
+      if (pass.def.rewritesAlpha && !maskTex) {
+        // Keyer-class passes LOWER alpha; compositing them OVER the running image would show the
+        // original opaque pixel through every keyed hole (key invisible). Replace the running
+        // nest image with the pass output instead.
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, s2.fbo);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.accumA.fbo);
+        gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        continue;
+      }
       this.compositeTexture(
         s2.tex,
         maskTex,
@@ -2468,6 +2478,13 @@ export class SceneCompositor {
    * context is lost. Pass `buffer` (≥ w*h*4 bytes) to avoid a fresh allocation per frame.
    */
   renderFrameOffscreen(spec: SceneFrameSpec, buffer?: Uint8Array): { pixels: Uint8Array; width: number; height: number } | null {
+    // ENFORCE the "on-screen canvas untouched" contract above: renderFrameCore's ensureSize resizes
+    // `this.canvas` — the VISIBLE canvas — whenever the spec size differs, and assigning
+    // canvas.width clears the presented image to black. A background-capture frame racing a
+    // playback render-scale flip did exactly that (2026-07-21 play-start black flash, tracker
+    // playback-preview v24). Offscreen renders may only run at the compositor's current size;
+    // callers treat null as not-ready and retry (or abort).
+    if (spec.width !== this.width || spec.height !== this.height) return null;
     let drawn = false;
     try {
       drawn = this.renderFrameCore(spec);

@@ -275,6 +275,166 @@ vec4 effect(vec2 uv) {
 `
 };
 
+/** Flarex chroma keyer v2 (FLAREX.md Phase 1; upgraded to the pro 3-pass graph 2026-07-21).
+ *  Not a `TimelineEffectType` — referenced by id from the Flarex lowering compiler's chromaKey node.
+ *
+ *  Pass graph (Keylight / Delta-Keyer family, not a distance key):
+ *    matte  — COLOR-DIFFERENCE matte in the CbCr plane: alpha is LINEAR in the key mixture, so a
+ *             50% green hair/motion-blur edge gets 50% alpha (translucency a distance matte cannot
+ *             produce). Then screen levels: clipBlack/clipWhite + softness shoulder.
+ *    edge   — matte-space refinement: Gaussian feather whose radius is FRAME-RELATIVE (defined at a
+ *             1080p short edge, scales with working res — proxy/preview/export paint the same
+ *             picture-space edge), then choke levels (positive eats the fringe, negative grows back).
+ *    final  — y-preserving despill (project the key hue out of the chroma plane; luma untouched, no
+ *             darkening) + EDGE DECONTAMINATION: an edge pixel is fg + key*(1-m), so the key
+ *             contribution is divided back out (screen subtraction) — green casts leave the hair
+ *             entirely instead of being dimmed. `matteOnly` shows the refined matte for tuning. */
+export const FLAREX_CHROMA_KEY_ID = "flarex.chromaKey";
+
+const CHROMA_HELPERS = `
+vec2 _chroma(vec3 c) {
+  // BT.601 CbCr, centered at 0 — hue/saturation plane, luma-independent.
+  float cb = -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
+  float cr =  0.5      * c.r - 0.418688 * c.g - 0.081312 * c.b;
+  return vec2(cb, cr);
+}
+`;
+
+const FLAREX_CHROMA_KEY: FragmentEffectDefinition = {
+  id: FLAREX_CHROMA_KEY_ID,
+  name: "Chroma Keyer",
+  category: "Keying",
+  rewritesAlpha: true,
+  params: [
+    { name: "keyColor", type: "vec3", default: [0.0, 0.69, 0.25], label: "Key Color" },
+    { name: "tolerance", type: "float", default: 0.35, min: 0, max: 1, step: 0.01, label: "Tolerance" },
+    { name: "softness", type: "float", default: 0.1, min: 0, max: 1, step: 0.01, label: "Softness" },
+    { name: "clipBlack", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Clip Black" },
+    { name: "clipWhite", type: "float", default: 1, min: 0, max: 1, step: 0.01, label: "Clip White" },
+    { name: "spillSuppression", type: "float", default: 0.5, min: 0, max: 1, step: 0.01, label: "Spill Suppression" },
+    { name: "edgeSoftness", type: "float", default: 2, min: 0, max: 20, step: 0.5, label: "Edge Softness" },
+    { name: "choke", type: "float", default: 0.05, min: -1, max: 1, step: 0.01, label: "Choke" },
+    { name: "decontaminate", type: "float", default: 0.5, min: 0, max: 1, step: 0.01, label: "Edge Cleanup" },
+    { name: "matteOnly", type: "bool", default: false, label: "Matte Only" }
+  ],
+  glsl: "", // multi-pass — see `passes`
+  passes: [
+    {
+      id: "matte",
+      glsl: `
+${CHROMA_HELPERS}
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  vec2 kc = _chroma(keyColor);
+  float sat = max(length(kc), 1e-4);
+  vec2 keyDir = kc / sat;
+  vec2 pc = _chroma(c.rgb);
+  float along = dot(pc, keyDir);
+  float across = length(pc - keyDir * along);
+  // Color-difference matte: how much MORE key-hued than anything-else-hued the pixel is,
+  // normalized by the key's own saturation — 0 on the subject, 1 on the pure screen, and
+  // LINEAR in between (the property that keeps hair edges translucent).
+  float gain = 0.5 + tolerance * 2.0;
+  float keyness = max(along - across, 0.0);
+  float raw = 1.0 - clamp(keyness / sat * gain, 0.0, 1.0);
+  // Screen levels: everything below clipBlack is fully removed, above clipWhite fully kept.
+  float lo = clamp(clipBlack, 0.0, 0.95);
+  float hi = max(clipWhite, lo + 0.02);
+  float m = clamp((raw - lo) / (hi - lo), 0.0, 1.0);
+  m = mix(m, m * m * (3.0 - 2.0 * m), clamp(softness, 0.0, 1.0));
+  return vec4(vec3(m), 1.0);
+}
+`
+    },
+    {
+      id: "edge",
+      inputs: ["matte"],
+      glsl: `
+vec4 effect(vec2 uv) {
+  vec2 px = 1.0 / uResolution;
+  float shortEdge = min(uResolution.x, uResolution.y);
+  // Frame-relative feather (defined at a 1080p short edge) — spacing 0 degenerates to identity.
+  float spacing = max(edgeSoftness, 0.0) * (shortEdge / 1080.0) * 0.5;
+  float sum = 0.0;
+  float wsum = 0.0;
+  for (int j = -2; j <= 2; j++) {
+    for (int i = -2; i <= 2; i++) {
+      float w = exp(-float(i * i + j * j) / 2.5);
+      sum += texture(uPass0, uv + px * vec2(float(i), float(j)) * spacing).r * w;
+      wsum += w;
+    }
+  }
+  float m = sum / wsum;
+  // Choke levels on the feathered matte: positive raises the black point (eats INTO the kept
+  // side, killing residual fringe); negative lowers the white point (grows the matte back).
+  float lo = max(choke, 0.0);
+  float hi = min(1.0, 1.0 + choke);
+  m = clamp((m - lo) / max(hi - lo, 1e-4), 0.0, 1.0);
+  return vec4(vec3(m), 1.0);
+}
+`
+    },
+    {
+      id: "final",
+      inputs: ["edge"],
+      glsl: `
+${CHROMA_HELPERS}
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  float m = texture(uPass0, uv).r;
+  if (matteOnly) return vec4(vec3(m), c.a);
+  vec2 kc = _chroma(keyColor);
+  float sat = max(length(kc), 1e-4);
+  vec2 keyDir = kc / sat;
+  vec2 pc = _chroma(c.rgb);
+  float along = dot(pc, keyDir);
+  // Despill: project the key hue OUT of the chroma plane; luma is rebuilt untouched (no darkening).
+  vec2 dsc = pc - keyDir * max(along, 0.0) * clamp(spillSuppression, 0.0, 1.0);
+  float y = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+  vec3 despilled = vec3(
+    y + 1.402 * dsc.y,
+    y - 0.344136 * dsc.x - 0.714136 * dsc.y,
+    y + 1.772 * dsc.x
+  );
+  // Edge decontamination (screen subtraction): the semi-transparent pixel is fg + key*(1-m);
+  // divide the key contribution back out so the fringe color leaves entirely.
+  vec3 unmix = clamp((despilled - keyColor * (1.0 - m)) / max(m, 0.08), 0.0, 1.0);
+  vec3 outC = mix(despilled, unmix, clamp(decontaminate, 0.0, 1.0) * (1.0 - m));
+  return vec4(clamp(outC, 0.0, 1.0), c.a * m);
+}
+`
+    }
+  ]
+};
+
+/** Flarex luma keyer (FLAREX.md Phase 1.5-ready; ships with the chroma keyer since it shares the seam). */
+export const FLAREX_LUMA_KEY_ID = "flarex.lumaKey";
+const FLAREX_LUMA_KEY: FragmentEffectDefinition = {
+  id: FLAREX_LUMA_KEY_ID,
+  name: "Luma Keyer",
+  category: "Keying",
+  rewritesAlpha: true,
+  params: [
+    { name: "low", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Low" },
+    { name: "high", type: "float", default: 1, min: 0, max: 1, step: 0.01, label: "High" },
+    { name: "softness", type: "float", default: 0.1, min: 0, max: 1, step: 0.01, label: "Softness" },
+    { name: "invertKey", type: "bool", default: false, label: "Invert" },
+    { name: "matteOnly", type: "bool", default: false, label: "Matte Only" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  float y = _luma(c.rgb);
+  float soft = max(softness * 0.25, 0.001);
+  // Keep luma inside [low, high]; ramp over soft at each edge.
+  float matte = smoothstep(low - soft, low + soft, y) * (1.0 - smoothstep(high - soft, high + soft, y));
+  if (invertKey) matte = 1.0 - matte;
+  if (matteOnly) return vec4(vec3(matte), c.a);
+  return vec4(c.rgb, c.a * matte);
+}
+`
+};
+
 const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [
   RADIAL_BLUR,
   DIRECTIONAL_BLUR,
@@ -287,7 +447,10 @@ const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [
   HALFTONE,
   POSTERIZE,
   // The stylize pass-graph (multi-pass — plans/stylize-anime-engine.md P1: Painterly).
-  STYLIZE_PAINTERLY
+  STYLIZE_PAINTERLY,
+  // Flarex keyer nodes (FLAREX.md) — id-referenced by the lowering compiler, not TimelineEffectTypes.
+  FLAREX_CHROMA_KEY,
+  FLAREX_LUMA_KEY
 ];
 
 let registered = false;

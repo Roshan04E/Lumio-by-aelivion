@@ -9,7 +9,7 @@
  * pipeline on the main thread (where the `<video>`-seek fallback exists).
  */
 
-import { clipCompositionToWorkArea, expandNestedCompositions, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@orreris/shared";
+import { clipCompositionToWorkArea, expandNestedCompositions, type FlarexComp, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@orreris/shared";
 import { detectBrowserToolCapabilities } from "../tools/capabilities";
 import { type ExportFormat } from "./video-encoder";
 import {
@@ -30,6 +30,8 @@ export interface LocalExportRequest {
   /** Auxiliary compositions (`ProjectGraph.compositions`) — nested sequences (NESTING.md Phase C).
    *  Undefined = no nesting support for this export. */
   compositions?: Record<string, TimelineComposition> | undefined;
+  /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md). Undefined = comp'd clips render plain. */
+  flarexComps?: Record<string, FlarexComp> | undefined;
   /** Resolve a timeline asset id to a playable URL (object URL / OPFS-resolved). */
   urlForAsset: (assetId: string) => string | undefined;
   format?: ExportFormat;
@@ -119,6 +121,7 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   const input: ExportCoreInput = {
     composition,
     compositions: request.compositions,
+    flarexComps: request.flarexComps,
     urlMap,
     audio,
     format,

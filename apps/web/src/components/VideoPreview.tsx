@@ -113,8 +113,7 @@ setGlContextBudget(8, 12);
 import { getLivePlaybackTime, getPlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
 import { useRenderCost } from "../lib/perfDiagnostics";
-import { AUDIO_MASTER_GATE_S, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";
-import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
+import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
 import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../playback/audio-fx-worklet";
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
 import { notePlaybackActive, noteRenderScale } from "../editor/performance/frame-stats";
@@ -713,6 +712,26 @@ function VideoPreviewImpl({
   useEffect(() => {
     noteRenderScale(playbackRenderScale);
   }, [playbackRenderScale]);
+  // Track-visibility change → re-prime every live layer to the exact transport-mapped source time.
+  // Toggling a track's eye UNMOUNTS/REMOUNTS its layers (they drop out of the enabled-track filter),
+  // and a freshly-remounted overlay decodes cold — it can present a frame 3–4 frames behind the base
+  // clip that stayed mounted, so a same-source overlay (e.g. soft-light stacked on itself) ghosts.
+  // Snapping ALL live layers to one transport-mapped time in the same tick re-aligns them; the rAF
+  // defer lets the just-revealed layer mount + register its reprime listener first. Signature is the
+  // ordered enabled/muted/disabled state per track — playhead ticks don't change it, so this fires
+  // only on an actual visibility toggle.
+  const trackVisibilitySignature = useMemo(
+    () => composition.tracks.map((track) => `${track.id}:${track.muted ? 0 : 1}:${track.solo ? 1 : 0}`).join("|"),
+    [composition.tracks]
+  );
+  useEffect(() => {
+    if (!isPlaying) return undefined;
+    const raf = requestAnimationFrame(() => requestLiveReprime());
+    return () => cancelAnimationFrame(raf);
+    // isPlaying intentionally excluded from re-firing: we only reprime on a visibility change, not on
+    // every play/pause (those paths already seek).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackVisibilitySignature]);
   const resolvedAssets = useMemo(() => {
     if (!sourceAsset || assets.some((asset) => asset.id === sourceAsset.id)) {
       return assets;
@@ -810,6 +829,22 @@ function VideoPreviewImpl({
         })),
     [activeVisualLayerEntries]
   );
+  // Same-source stacks: assetIds carried by 2+ ACTIVE video layers at once (e.g. a clip stacked over
+  // itself for a blend-mode look). On the WebCodecs path both layers already request the frame at the
+  // shared transport clock, so they're frame-locked; but a layer on the <video> ELEMENT fallback lets
+  // native play() free-run its own clock and can drift a few frames from its twin → a ghost/double
+  // image. Flagging these layers tells WebglMediaLayer to keep its element tight to the transport
+  // (tighter drift correction) so the stack stays aligned. Single (unstacked) clips are NOT flagged,
+  // so the common playback path is untouched.
+  const sameSourceStackAssetIds = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const { layer } of renderVisualLayerEntries) {
+      if (layer.type === "video" && layer.assetId) counts.set(layer.assetId, (counts.get(layer.assetId) ?? 0) + 1);
+    }
+    const stacked = new Set<string>();
+    for (const [assetId, count] of counts) if (count >= 2) stacked.add(assetId);
+    return stacked;
+  }, [renderVisualLayerEntries]);
   // Mount the next video clip's <video> a moment before its cut so it has time
   // to seek to the right source frame in the background - avoids the visible
   // black/stale frame flash that a fresh seek-on-mount causes right at a cut.
@@ -904,7 +939,9 @@ function VideoPreviewImpl({
         .find(
           (layer) =>
             layer.id === selectedLayerId &&
-            (layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape")
+            // Adjustment layers are maskable too: their clip masks confine the adjustment's color/blur
+            // effects to the drawn region when merged into the stack below (effectsWithLayerRegionMask).
+            (layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape" || layer.type === "adjustment")
         )
     : undefined;
   // The mask collection the overlay edits: a blur effect's region masks (Phase 3) or the clip masks.
@@ -1650,6 +1687,7 @@ function VideoPreviewImpl({
                   onFrameRendered={(timeSeconds) => onPreviewFrameRendered?.(timeSeconds, playbackRenderScale)}
                   mediaSourceAlias={sceneSharedMediaClones}
                   nestedGroups={nestExpansion.groups}
+                  flarexComps={graph.flarexComps}
                   captureRef={proxyCaptureRef}
                   prewarmTransitionIds={prewarmTransitionIds}
                   singleCtxMedia={sceneEnabled && singleCtxPreview}
@@ -1703,6 +1741,7 @@ function VideoPreviewImpl({
                     // DOM-transition hide (visibility:hidden) is for the DOM path's incoming clip only;
                     // scene-composited media is hidden via opacity:0 (sceneComposited) so it stays clickable.
                     hideForTransition={transitionHiddenIds.has(layer.id)}
+                    strictSourceSync={Boolean(layer.assetId && sameSourceStackAssetIds.has(layer.assetId))}
                     sceneComposited={sceneEnabled && sceneMediaIds.has(layer.id)}
                     hideVisual={sceneEnabled && sceneOverlayIds.has(layer.id)}
                     // Scene-composited media: don't bake opacity into the grade — ScenePreviewCanvas
@@ -1891,6 +1930,9 @@ type PreviewLayerProps = {
   frameAspect?: number | undefined;
   onSelectLayer: (layerId: string) => void;
   rotationSnapEnabled?: boolean | undefined;
+  /** This layer shares its asset with another active layer (same-source stack) — keep the element
+   *  path tightly synced to the transport so stacked twins don't drift into a ghost. */
+  strictSourceSync?: boolean | undefined;
 };
 
 type PreviewTransformHud = {
@@ -1957,6 +1999,7 @@ const PreviewLayer = memo(function PreviewLayer({
   rotationSnapEnabled = false,
   hideForTransition = false,
   hideVisual = false,
+  strictSourceSync = false,
   sceneComposited = false,
   bypassColor = false,
   onGradedFrame,
@@ -3105,6 +3148,7 @@ const PreviewLayer = memo(function PreviewLayer({
             dragHandlers={effectiveDragHandlers}
             onWebglFailed={() => setWebglMediaFailed(true)}
             poster={videoPoster ?? undefined}
+            strictSourceSync={strictSourceSync}
             hidden={pending || (hideForTransition && !sceneComposited)}
             interactiveHidden={sceneComposited && !pending}
             // Scene-composited media carries no per-clip reveal (junctions fold in-compositor) — null it for
@@ -3709,6 +3753,7 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     // brief flat reads are tolerated (audio currentTime advances in coarse browser-dependent steps).
     let lastSeenCt = audio.currentTime;
     let lastMovedAtMs = 0;
+    let wasAuthoritative = false;
     return registerAudioClockSource({
       layerId: layer.id,
       startSeconds: layer.startSeconds,
@@ -3727,7 +3772,25 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
         // Not authoritative yet → the non-master corrector below seeks it onto the clock instead.
         // Compared against the LIVE playhead (the committed store clock trails it by up to one
         // commit interval right after play starts, which weakened this gate).
-        if (Math.abs(mapped - getLivePlaybackTime()) > AUDIO_MASTER_GATE_S) return null;
+        //
+        // FIRST election uses the ~2-frame gate (v23, AUDIO_FIRST_ELECTION_GATE_S): any real
+        // startup latency keeps the element non-master; the session-tightened corrector below
+        // seeks it FORWARD onto the clock, and it then elects with negligible drift — so the
+        // clock/picture never jumps backward OR visibly slows at play start (the v19 servo-zone
+        // gate still let a ≤250ms latency elect and drag the playhead into a ~50–80ms catch-up).
+        //
+        // v25 BEHIND-DEMOTION (from the __rfClockJumps stack traces: the tick's servo was yanking
+        // the timeline backward 150–450ms every ~2s because this master kept falling behind — a
+        // network-streamed source stalling): a master that drops more than the demotion threshold
+        // BEHIND the clock is no longer authoritative — it returns null, the non-master corrector
+        // seeks IT forward, and it re-elects aligned. The timeline never rewinds because audio
+        // stalled; only AHEAD drift (audio ahead of clock) keeps the wide gate + hard resync.
+        const live = getLivePlaybackTime();
+        const behind = live - mapped; // positive → element is BEHIND the clock
+        const behindGate = wasAuthoritative ? 0.15 : AUDIO_FIRST_ELECTION_GATE_S;
+        const aheadGate = wasAuthoritative ? AUDIO_MASTER_GATE_S : AUDIO_FIRST_ELECTION_GATE_S;
+        if (behind > behindGate || -behind > aheadGate) return null;
+        wasAuthoritative = true;
         return mapped;
       },
     });
@@ -3742,15 +3805,29 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
     if (!audio || !mediaUrl || !isPlaying || !getAudioClockEnabled()) {
       return;
     }
-    const interval = window.setInterval(() => {
+    // v23: TIGHT tolerance for the session's first ~2s so a startup latency below the coarse
+    // steady-state 0.15 still gets seeked FORWARD onto the clock (and can then pass the narrow
+    // first-election gate) instead of persisting as a small permanent A/V offset. The first check
+    // also runs sooner (250ms) so the landing isn't gated on the 500ms cadence. Forward-only at
+    // start: play() latency always leaves the element BEHIND the clock, and a forward seek can
+    // never yank the picture (the video corrector stays untouched at its coarse threshold).
+    const sessionStartMs = performance.now();
+    const correct = () => {
       if (isAudioClockMaster(layer.id) || audio.paused || audio.seeking || audio.readyState < 2) return;
       const local = Math.max(0, Math.min(layer.durationSeconds, getPlaybackClock() - layer.startSeconds));
       const expected = layerSourceTimeSeconds(layer, local);
-      if (Number.isFinite(expected) && Math.abs(audio.currentTime - expected) > 0.15 * Math.max(1, Math.abs(getLayerSpeedAt(layer, local)))) {
+      const inSessionStart = performance.now() - sessionStartMs < AUDIO_SESSION_START_WINDOW_MS;
+      const tolerance = inSessionStart ? AUDIO_SESSION_START_TOLERANCE_S : 0.15;
+      if (Number.isFinite(expected) && Math.abs(audio.currentTime - expected) > tolerance * Math.max(1, Math.abs(getLayerSpeedAt(layer, local)))) {
         audio.currentTime = expected;
       }
-    }, 500);
-    return () => window.clearInterval(interval);
+    };
+    const firstCheck = window.setTimeout(correct, 250);
+    const interval = window.setInterval(correct, 500);
+    return () => {
+      window.clearTimeout(firstCheck);
+      window.clearInterval(interval);
+    };
   }, [isPlaying, layer.durationSeconds, layer.id, layer.startSeconds, mediaUrl, sourceIn, speed]);
 
   // Volume / fade tracked against currentTime so it updates during scrub + playback. The GainNode

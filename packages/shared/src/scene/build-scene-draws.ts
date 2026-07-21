@@ -30,9 +30,11 @@ import {
   type ActiveTransition,
 } from "../composition-style";
 import { evaluateTimelineEffectParam } from "../animation";
-import { expandLayerEffectRegions, hasRegionColorEffect } from "../clip-masks";
+import { FRAGMENT_PASS_EFFECT_TYPES, expandLayerEffectRegions, hasRegionColorEffect } from "../clip-masks";
 import { NEST_ID_SEPARATOR, type NestedGroupSpec } from "../nesting";
 import { fragmentEffectParamsFromStorage, SHADER_MANIFEST_ID_PARAM_KEY } from "../plugin-effect-adapter";
+import { compileFlarexComp } from "../flarex/compile-flarex";
+import type { FlarexComp } from "../flarex/types";
 import type { TimelineEffectParamValue, TimelineLayer, TransitionSpec } from "../types";
 // VALUE import (not type-only): nested-comp masks need their OWN matte-cache instance, sized to the
 // nested composition, distinct from the parent's — lazily constructed here and pooled in the caller-
@@ -133,22 +135,20 @@ export interface BuildSceneDrawsInputs {
    * it never changes what `buildSceneDraws` returns.
    */
   onLayerNotReady?: (layerId: string) => void;
+  /**
+   * Flarex node-comp registry (FLAREX.md): when a layer carries `flarexCompId` and its comp is here,
+   * the layer's finished draw becomes the comp's MediaIn and the LOWERED graph replaces it at the
+   * clip's z-slot (`compileFlarexComp` — pure SceneDraw construction, so all three renderers get the
+   * comp output through this one hook). Undefined/missing comp = the clip renders plain, byte-identical
+   * to before this field existed.
+   */
+  flarexComps?: Record<string, FlarexComp> | undefined;
 }
 
-/** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below). */
-const BUILTIN_FRAGMENT_EFFECT_TYPES = new Set([
-  "radialBlur",
-  "directionalBlur",
-  "sharpen",
-  "pixelate",
-  "chromaticAberration",
-  "sketch",
-  "oldTv",
-  "glitchFx",
-  "halftone",
-  "posterize",
-  "stylize"
-]);
+/** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below).
+ *  Canonical list lives in clip-masks.ts (`FRAGMENT_PASS_EFFECT_TYPES`) so the adjustment-mask stamping
+ *  and region expansion stay in lockstep with what actually mattes per-effect here. */
+const BUILTIN_FRAGMENT_EFFECT_TYPES = FRAGMENT_PASS_EFFECT_TYPES;
 
 /** Parse `#rgb`/`#rrggbb`/`rgb()`/`rgba()` into straight-alpha rgb 0..1 (alpha ignored — glow tint). */
 function parseCssColor(input: string): [number, number, number] {
@@ -354,8 +354,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   // A clip's group as ordered (back-to-front) layer draws: base + its region-expansion layers, dropping any
   // whose source/raster isn't ready. The compositor renders these into the side RTT in order, then mixes.
   // Pass model: the clones ARE the base draw's `regionPasses`, so the group collapses to the single base draw.
-  const buildClipGroup = (baseId: string): SceneLayerDraw[] => {
-    const group: SceneLayerDraw[] = [];
+  const buildClipGroup = (baseId: string): (SceneLayerDraw | SceneGroupDraw)[] => {
+    const group: (SceneLayerDraw | SceneGroupDraw)[] = [];
     for (const layer of ls) {
       if (regionPassModel ? layer.id === baseId : layer.id === baseId || regionCloneBaseId(layer.id) === baseId) {
         const draw = buildLayerDrawWithPasses(layer);
@@ -691,12 +691,35 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     return passes;
   };
 
+  /**
+   * Flarex hook (FLAREX.md): the finished layer draw becomes the comp's MediaIn and the lowered graph
+   * replaces it. Applied at the END of `buildLayerDrawWithPasses` so every consumer path (top-level,
+   * transition sides, nested children, track-matte sources) gets comp output uniformly. A comp that
+   * lowers to nothing (e.g. broken graph) falls back to the plain draw — soft degrade, never black.
+   */
+  const applyFlarex = (layer: TimelineLayer, draw: SceneLayerDraw | null, dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null }): SceneLayerDraw | SceneGroupDraw | null => {
+    if (!draw || !layer.flarexCompId) return draw;
+    const comp = inputs.flarexComps?.[layer.flarexCompId];
+    if (!comp) return draw;
+    const lowered = compileFlarexComp(comp, {
+      compWidth: dims.w,
+      compHeight: dims.h,
+      renderScale: rScale,
+      timeSeconds: Math.max(0, t - layer.startSeconds),
+      frameTimeSeconds: t,
+      hostSourceDraw: draw,
+      matteCache: dims.matteCache,
+    });
+    return lowered ?? draw;
+  };
+
   /** `buildLayerDraw`, plus the layer's folded region + fragment passes. `dims` threads through to both
-   *  (see `buildLayerDraw`'s doc) — nested children (Task 2) pass their nest's size/matte. */
+   *  (see `buildLayerDraw`'s doc) — nested children (Task 2) pass their nest's size/matte. A layer with a
+   *  Flarex comp returns the LOWERED graph (possibly a group draw) instead of its plain draw. */
   function buildLayerDrawWithPasses(
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
-  ): SceneLayerDraw | null {
+  ): SceneLayerDraw | SceneGroupDraw | null {
     if (!regionPassModel || regionCloneBaseId(layer.id)) {
       const draw = buildLayerDraw(layer, dims);
       if (draw) {
@@ -704,7 +727,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         if (fragmentPasses.length > 0) draw.fragmentPasses = fragmentPasses;
         attachTrackMatte(layer, draw, dims);
       }
-      return draw;
+      return applyFlarex(layer, draw, dims);
     }
     let baseLayer = layer;
     let clones = clonesByBase.get(layer.id) ?? [];
@@ -730,7 +753,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         passes: passes.map((pass) => ({ key: pass.effectKey, blurPx: pass.blurPx, hasPipeline: Boolean(pass.pipeline) })),
       };
     }
-    return draw;
+    return applyFlarex(layer, draw, dims);
   }
 
   // ─── Nesting: fold __nest_ children into compound-clip GROUP draws (NESTING.md Phase C) ─────────────

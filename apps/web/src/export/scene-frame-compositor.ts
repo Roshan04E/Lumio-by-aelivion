@@ -31,6 +31,7 @@ import {
   SceneCompositor,
   colorPipelineCacheKey,
   effectiveTransitionDuration,
+  effectsWithLayerRegionMask,
   findTransitionPairs,
   findTransitionPairsWithGroupJunctions,
   getActiveGlContextCount,
@@ -49,6 +50,7 @@ import {
   layerSourceTimeSeconds,
   resolveTransitionWindowSides,
   type ColorPipeline,
+  type FlarexComp,
   type NestedGroupSpec,
   type SceneCompositorDebugSnapshot,
   type SceneDraw,
@@ -122,6 +124,8 @@ export class SceneFrameCompositor {
   // as ordinary layers (export-core nest-expands before constructing this), so this is ONLY consulted by
   // buildSceneDraws to fold those children back into a group + build the compound clip's shell.
   private readonly nestedGroups: ReadonlyMap<string, NestedGroupSpec> | undefined;
+  // Flarex node comps (FLAREX.md) — threaded into buildSceneDraws so exports lower comp'd clips.
+  private readonly flarexComps: Record<string, FlarexComp> | undefined;
   // Per-nested-composition matte caches — mirrors `this.matteCache` but sized per nest, not the export
   // frame. See `nestMatteCaches` doc on `BuildSceneDrawsInputs`.
   private readonly nestMatteCaches = new Map<string, SceneMaskMatteCache>();
@@ -141,6 +145,9 @@ export class SceneFrameCompositor {
       /** RAW (unexpanded) comp layers — junctions where a side is a compound clip only exist there
        *  (nesting Block 4c). Omitted/empty = no group junctions, scan unchanged. */
       rawJunctionLayers?: readonly TimelineLayer[];
+      /** Flarex node comps (FLAREX.md) — `buildSceneDraws` lowers `flarexCompId` clips through the
+       *  shared compiler, identical to the preview/worker paths. */
+      flarexComps?: Record<string, FlarexComp>;
     }
   ) {
     this.width = composition.width;
@@ -157,6 +164,7 @@ export class SceneFrameCompositor {
     this.rasterizer = new SceneTextRasterizer();
     this.nestedGroups = options?.nestedGroups;
     this.rawJunctionLayers = options?.rawJunctionLayers ?? [];
+    this.flarexComps = options?.flarexComps;
 
     const flat: FlatLayer[] = [];
     this.composition.tracks.forEach((track, trackIndex) => {
@@ -326,7 +334,10 @@ export class SceneFrameCompositor {
           t >= a.layer.startSeconds &&
           t < a.layer.startSeconds + a.layer.durationSeconds
       )
-      .flatMap((a) => a.layer.effects);
+      // Same mask stamping as the editor + worker SceneStage: an adjustment layer's own clip masks
+      // confine its color/blur effects to the drawn region (effectsWithLayerRegionMask), which the
+      // scene builder's region passes then honour. Raw effects here = the mask silently ignored in export.
+      .flatMap((a) => effectsWithLayerRegionMask(a.layer));
     if (!extra.length) return target.layer;
     return { ...target.layer, effects: [...target.layer.effects, ...extra] };
   }
@@ -746,6 +757,7 @@ export class SceneFrameCompositor {
       regionPassModel: getRegionPassesEnabled(),
       nestedGroups: this.nestedGroups,
       nestMatteCaches: this.nestMatteCaches,
+      flarexComps: this.flarexComps,
     });
 
     if (this.stageProbe && this.shouldProbe(t)) {

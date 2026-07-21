@@ -7,6 +7,7 @@ function graphicAnimationFields(graphic: LayerGraphic | undefined): { graphic?: 
 }
 import type {
   BlendMode,
+  FlarexComp,
   LayerContentTransform,
   Mask,
   MatteRef,
@@ -189,6 +190,9 @@ export interface RenderManifestLayer {
   transitionIn?: TransitionSpec | undefined;
   /** Layer blend mode, carried verbatim; the renderer applies it as CSS mix-blend-mode. */
   blendMode?: BlendMode | undefined;
+  /** Flarex node-comp reference (FLAREX.md), carried verbatim — resolved against `RenderManifest.flarexComps`
+   *  by the shared lowering compiler; without both, a comp'd clip renders as plain media in the cloud path. */
+  flarexCompId?: string | undefined;
   /** Source-within-frame media pan/zoom/crop, carried verbatim for scene-compositor paths. */
   content?: LayerContentTransform | undefined;
   transform: Record<string, unknown>;
@@ -243,6 +247,12 @@ export interface RenderManifest {
    * shell, exactly like the web preview/local export. Absent/empty = no nesting in this manifest.
    */
   nestedGroups?: Record<string, NestedGroupSpec> | undefined;
+  /**
+   * Flarex node-comp registry (FLAREX.md), carried verbatim from `ProjectGraph.flarexComps` — the
+   * shared lowering compiler resolves `layer.flarexCompId` against it identically in all three
+   * renderers. Absent = no comp'd clips in this manifest.
+   */
+  flarexComps?: Record<string, FlarexComp> | undefined;
   /**
    * RAW (unexpanded) layers of every track containing a compound clip (nesting Block 4c): junctions
    * where a side IS a compound clip only exist on the raw composition — nest expansion removes the
@@ -378,6 +388,7 @@ export function buildRenderManifest(input: {
             fillTexture: layer.fillTexture,
             transitionIn: layer.transitionIn,
             blendMode: layer.blendMode,
+            flarexCompId: layer.flarexCompId,
             content: layer.content,
             transform: layer.transform as unknown as Record<string, unknown>,
             style: {
@@ -458,6 +469,7 @@ export function buildRenderManifest(input: {
           fillTexture: layer.fillTexture,
           transitionIn: layer.transitionIn,
           blendMode: layer.blendMode,
+          flarexCompId: layer.flarexCompId,
           content: layer.content,
           transform: layer.transform as unknown as Record<string, unknown>,
           style: {
@@ -541,6 +553,11 @@ export function buildRenderManifest(input: {
     // start/duration correction here, or switching this function to the whole-composition clip utility.
     // Deferred as a narrow, documented gap rather than a rushed fix to shared work-area logic.
     ...(nestExpansion.groups.size > 0 ? { nestedGroups: Object.fromEntries(nestExpansion.groups) } : {}),
+    // Flarex comps ride verbatim (FLAREX.md): only when at least one clip references one, so
+    // non-Flarex manifests are byte-identical to before.
+    ...(input.graph.flarexComps && Object.keys(input.graph.flarexComps).length > 0
+      ? { flarexComps: input.graph.flarexComps }
+      : {}),
     ...(nestExpansion.groups.size > 0 && rawJunctionLayers.length > 0 ? { rawJunctionLayers } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
     renderer: {

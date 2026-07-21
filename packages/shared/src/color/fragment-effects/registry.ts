@@ -71,6 +71,13 @@ export interface FragmentEffectDefinition {
    * every other definition's assembled GLSL stays byte-identical.
    */
   maskAware?: boolean;
+  /**
+   * The effect LOWERS alpha (keyers). The default composite-back draws the pass result OVER the
+   * running nest image, which is correct only for opaque outputs — a keyed hole would show the
+   * original opaque pixel underneath and the key would be invisible. `rewritesAlpha` passes with
+   * no mask REPLACE the running image instead.
+   */
+  rewritesAlpha?: boolean;
 }
 
 const GLSL_TYPE: Record<FragmentParamType, string> = {

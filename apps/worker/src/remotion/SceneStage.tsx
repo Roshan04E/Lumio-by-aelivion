@@ -41,6 +41,7 @@ import {
   registerLookManifests,
   registerTransitionManifests,
   type ColorPipeline,
+  type FlarexComp,
   type Mask,
   type NestedGroupSpec,
   type SceneFrameSpec,
@@ -217,7 +218,10 @@ class SceneController {
     // Compound-clip group specs (from `manifest.nestedGroups`, rebuilt into a Map by the caller). `layers`
     // passed into `composite()` already carries nested children flattened in as ordinary entries; this is
     // consulted only to fold them back into a group + build the compound clip's shell.
-    private readonly nestedGroups?: ReadonlyMap<string, NestedGroupSpec>
+    private readonly nestedGroups?: ReadonlyMap<string, NestedGroupSpec>,
+    // Flarex node comps (FLAREX.md), carried verbatim on the manifest — `buildSceneDraws` lowers a
+    // `flarexCompId` clip's draw through the shared compiler, same as preview/local export.
+    private readonly flarexComps?: Record<string, FlarexComp>
   ) {
     this.compositor = new SceneCompositor(canvas, width, height);
     this.matteCache = new SceneMaskMatteCache(width, height);
@@ -332,7 +336,8 @@ class SceneController {
       // preview/local export that produced the manifest. Never hardcode a different value here.
       regionPassModel: this.regionPassModel,
       nestedGroups: this.nestedGroups,
-      nestMatteCaches: this.nestMatteCaches
+      nestMatteCaches: this.nestMatteCaches,
+      flarexComps: this.flarexComps
     });
 
     const spec: SceneFrameSpec = {
@@ -562,7 +567,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     try {
-      controllerRef.current = new SceneController(canvas, width, height, "#000000", manifest.regionPassModel ?? false, nestedGroups);
+      controllerRef.current = new SceneController(canvas, width, height, "#000000", manifest.regionPassModel ?? false, nestedGroups, manifest.flarexComps);
     } catch (error) {
       console.error("SceneStage: SceneCompositor init failed", error);
       controllerRef.current = null;

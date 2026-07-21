@@ -51,7 +51,7 @@ const sortedKeyframeCache = new WeakMap<TimelineKeyframeV2[], Map<string, Timeli
 
 function sortedKeyframesFor(
   animations: TimelineKeyframeV2[],
-  scope: "effect" | "layer" | "mask",
+  scope: "effect" | "layer" | "mask" | "flarexNode",
   property: string,
   effectId?: string
 ): TimelineKeyframeV2[] {
@@ -168,6 +168,23 @@ export function evaluateTimelineEffectParam(input: {
 
   // Composes to the same predicate the old filter + evaluateAnimatedValue re-filter did.
   const sorted = sortedKeyframesFor(input.animations ?? EMPTY_ANIMATIONS, "effect", input.paramKey, input.effectId);
+  return evaluateSortedKeyframes(sorted, input.baseValue, input.timeSeconds);
+}
+
+/** Flarex node-param keyframes (FLAREX.md): stored in `FlarexComp.animations` with
+ *  `target: { scope: "flarexNode", effectId: <nodeId>, property: <paramKey> }` — the exact
+ *  effect-param convention with the node id riding the `effectId` slot. Time is comp-local. */
+export function evaluateFlarexNodeParam(input: {
+  animations?: TimelineKeyframeV2[] | undefined;
+  baseValue: number;
+  nodeId: string;
+  paramKey: string;
+  timeSeconds?: number | undefined;
+}) {
+  if (typeof input.timeSeconds !== "number") {
+    return input.baseValue;
+  }
+  const sorted = sortedKeyframesFor(input.animations ?? EMPTY_ANIMATIONS, "flarexNode", input.paramKey, input.nodeId);
   return evaluateSortedKeyframes(sorted, input.baseValue, input.timeSeconds);
 }
 

@@ -251,6 +251,13 @@ export interface ProjectGraph {
   /** Id of the composition currently open in the editor (`composition.id`). Absent on legacy graphs. */
   activeCompositionId?: string | undefined;
   /**
+   * Flarex node-comp registry (FLAREX.md): per-clip Fusion-style node graphs, keyed by id and
+   * referenced from `TimelineLayer.flarexCompId` — the same first-class-registry pattern as
+   * `compositions`. Renderers never read this directly; the shared lowering compiler turns a
+   * comp into SceneDraw primitives. Carried verbatim through the render manifest.
+   */
+  flarexComps?: Record<string, import("./flarex/types").FlarexComp> | undefined;
+  /**
    * Per-project media-library organization (folder tree etc. — see shared/media-manifest.ts).
    * Living inside the graph means it syncs to the cloud with the project through the existing
    * save path, so local and cloud keep the same folder structure. Renderers ignore it.
@@ -507,7 +514,7 @@ export type AnimatedValue =
   | TimelineVector2
   | { r: number; g: number; b: number; a?: number | undefined };
 
-export type KeyframeTargetScope = "layer" | "effect" | "mask" | "track" | "composition";
+export type KeyframeTargetScope = "layer" | "effect" | "mask" | "track" | "composition" | "flarexNode";
 export type KeyframeInterpolation = "hold" | "linear" | "ease" | "easeIn" | "easeOut" | "easeInOut" | "bezier" | "autoBezier";
 
 export interface KeyframeHandle {
@@ -699,6 +706,9 @@ export interface TimelineLayer {
   label?: string | undefined;
   /** References a composition stored in `ProjectGraph.compositions`; used for imported nested timelines. */
   nestedCompositionId?: string | undefined;
+  /** References a Flarex node comp in `ProjectGraph.flarexComps` (FLAREX.md). When set, the clip's
+   *  rendered output is the comp's MediaOut instead of its plain graded media. */
+  flarexCompId?: string | undefined;
   text?: string | undefined;
   textRuns?: TextRun[] | undefined;
   /** Source-text keyframes (hold): when present they OVERRIDE `text`/`textRuns` at render time —

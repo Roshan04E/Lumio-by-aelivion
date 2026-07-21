@@ -23,6 +23,7 @@ import {
   registerTransitionManifests,
   type PluginLookManifest,
   type PluginTransitionManifest,
+  type FlarexComp,
   type TimelineComposition,
   type TimelineLayer
 } from "@orreris/shared";
@@ -60,6 +61,9 @@ export interface ExportCoreInput {
    * Worker postMessage boundary.
    */
   compositions?: Record<string, TimelineComposition> | undefined;
+  /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md) — clips with `flarexCompId` lower
+   *  through the shared compiler in buildSceneDraws. Undefined = comp'd clips render plain. */
+  flarexComps?: Record<string, FlarexComp> | undefined;
   /** Every visual source the timeline references, pre-resolved to fetchable URLs. */
   urlMap: SourceUrlMap;
   /** Pre-mixed audio PCM (null when the timeline is silent). */
@@ -350,6 +354,8 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
           rawJunctionLayers: composition.tracks.flatMap((track) => track.layers),
         }
       : {}),
+    // Flarex node comps (FLAREX.md) — only when at least one exists, keeping non-Flarex exports identical.
+    ...(input.flarexComps && Object.keys(input.flarexComps).length > 0 ? { flarexComps: input.flarexComps } : {}),
   };
   const activeCanvas = new OffscreenCanvas(width, height);
   let consecutiveBlackExpectedMediaFrames = 0;

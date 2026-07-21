@@ -3,6 +3,9 @@ import { applyCaptionTrackToComposition, captionStylePresets, createCaptionTrack
 import { createBoxMask } from "./clip-masks";
 import { registerFragmentEffect } from "./color/fragment-effects/registry";
 import { SHADER_MANIFEST_ID_PARAM_KEY } from "./plugin-effect-adapter";
+import { createFlarexNode } from "./flarex/node-defs";
+import { createFlarexComp } from "./flarex/registry";
+import type { FlarexComp } from "./flarex/types";
 
 const fixtureImageSvg = encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
@@ -97,7 +100,8 @@ export type RenderComparisonFixtureKey =
   | "nested-grade"
   | "nested-junction-transition"
   | "nested-junction-preroll"
-  | "texture-fill";
+  | "texture-fill"
+  | "flarex-key-glow";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -141,7 +145,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "nested-grade",
   "nested-junction-transition",
   "nested-junction-preroll",
-  "texture-fill"
+  "texture-fill",
+  "flarex-key-glow"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -506,6 +511,32 @@ const chromaKeyEffects: TimelineLayer["effects"] = [
   }
 ];
 
+// Flarex parity fixture (FLAREX.md / plans/flarex-sonnet-execution.md S4): locks 3-renderer parity
+// for the node-compositing lowering path (`compileFlarexComp` → SceneDraw), independent of the
+// ordinary effects-array pixel gates above. MediaIn → ChromaKey → Transform → Glow → MediaOut,
+// keying the SAME fixture-landscape orange hill the plain `chroma-key` effects fixture uses (no
+// dedicated green-screen asset exists in this harness), scaled/offset, then glowed. The keyed-away
+// corners must reveal the background layer underneath — a real composite, not a self-check.
+function buildFlarexKeyGlowComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_comp", "Flarex fixture");
+  const key = createFlarexNode("chromaKey", "fixture_flarex_key");
+  key.params = { ...key.params, color: "#b85b20", tolerance: 0.3, softness: 0.12, spillSuppression: 0.5 };
+  const transform = createFlarexNode("transform", "fixture_flarex_transform");
+  transform.params = { ...transform.params, x: 8, y: -4, scale: 0.8 };
+  const glow = createFlarexNode("glow", "fixture_flarex_glow");
+  glow.params = { ...glow.params, radius: 20, intensity: 0.5, threshold: 0.6 };
+  comp.nodes[key.id] = key;
+  comp.nodes[transform.id] = transform;
+  comp.nodes[glow.id] = glow;
+  comp.edges = [
+    { id: "fixture_flarex_e1", from: { nodeId: "fixture_flarex_comp_in", socket: "out" }, to: { nodeId: key.id, socket: "in" } },
+    { id: "fixture_flarex_e2", from: { nodeId: key.id, socket: "out" }, to: { nodeId: transform.id, socket: "in" } },
+    { id: "fixture_flarex_e3", from: { nodeId: transform.id, socket: "out" }, to: { nodeId: glow.id, socket: "in" } },
+    { id: "fixture_flarex_e4", from: { nodeId: glow.id, socket: "out" }, to: { nodeId: "fixture_flarex_comp_out", socket: "in" } },
+  ];
+  return comp;
+}
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -546,6 +577,9 @@ interface FixtureVariant {
   nestedJunctionPreroll?: boolean;
   /** Texture fill (D2): image paint on the TEXT fixture's glyphs. */
   textFillTexture?: TimelineLayer["fillTexture"];
+  /** Flarex parity (S4): the media layer renders through this node comp instead of its own
+   *  effects array — over a background layer so the keyed-away area is a real composite. */
+  flarex?: FlarexComp;
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -643,6 +677,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: grainEffects, fit: "cover" };
     case "chroma-key":
       return { effects: chromaKeyEffects, fit: "cover" };
+    case "flarex-key-glow":
+      return { effects: [], fit: "cover", flarex: buildFlarexKeyGlowComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
@@ -800,6 +836,25 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     ...(variant.masks ? { masks: variant.masks } : {}),
     ...(variant.frame ? { frame: variant.frame } : {}),
     ...(variant.trackMatte ? { trackMatte: variant.trackMatte } : {}),
+    ...(variant.flarex ? { flarexCompId: variant.flarex.id } : {}),
+    keyframes: []
+  };
+
+  // flarex-key-glow: a full-bleed background layer sharing `video_track` with the flarex-comped
+  // image layer, so the ChromaKey node's keyed-away hill visibly reveals a real composited color
+  // (not just the comp's black backdrop — Remotion's SceneStage hardcodes its clear color to
+  // black regardless of `composition.backgroundColor`, so that field is NOT cross-renderer
+  // reliable for this purpose; an actual layer draw is).
+  const flarexBackgroundLayer: TimelineLayer = {
+    id: "fixture_flarex_bg",
+    trackId: "video_track",
+    type: "shape",
+    name: "Flarex background",
+    startSeconds: 0,
+    durationSeconds: 12,
+    color: "#1e6091",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
     keyframes: []
   };
 
@@ -1088,14 +1143,17 @@ Save this style now`);
                   ? [prerollOutgoing, prerollNestClip]
                   : variant.transition
                     ? [transitionOutgoing, transitionIncoming]
-                    : [imageLayer]
+                    : variant.flarex
+                      ? [flarexBackgroundLayer, imageLayer]
+                      : [imageLayer]
         }
       ]
     },
     ...(variant.nestedTransition ? { compositions: { [nestedComposition.id]: nestedComposition } } : {}),
     ...(variant.nestedGrade ? { compositions: { [gradedNestComposition.id]: gradedNestComposition } } : {}),
     ...(variant.nestedJunctionTransition ? { compositions: { [junctionNestComposition.id]: junctionNestComposition } } : {}),
-    ...(variant.nestedJunctionPreroll ? { compositions: { [prerollNestComposition.id]: prerollNestComposition } } : {})
+    ...(variant.nestedJunctionPreroll ? { compositions: { [prerollNestComposition.id]: prerollNestComposition } } : {}),
+    ...(variant.flarex ? { flarexComps: { [variant.flarex.id]: variant.flarex } } : {})
   };
   // Text-only + transition/nesting fixtures isolate their concern — skip captions so the diff is just that.
   const nestedFixture =

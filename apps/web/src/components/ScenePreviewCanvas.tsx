@@ -34,6 +34,7 @@ import {
   buildSceneDraws,
   colorPipelineCacheKey,
   type ColorPipeline,
+  type FlarexComp,
   type NestedGroupSpec,
   type SceneFrameSpec,
   type SceneTextureSource,
@@ -102,6 +103,12 @@ const SCENE_SETTLE_MS = 600;
 // frame and composite anyway (escape hatch for a permanently-broken source — e.g. a renamed/missing
 // asset — so the preview never freezes forever waiting on it).
 const NOT_READY_HOLD_MS = 300;
+// Media sources can legitimately need >300ms to (re)prime at play start — proxy-arrival remount,
+// settle→element handoff, cold decoder after load (the play-start black-flicker lineage, tracker
+// playback-preview v20–v24). MEDIA layers hold the last presented picture up to this longer cap —
+// freeze, never black, like every pro NLE — while text/shape keep the short cap (a mid-typing
+// raster must not freeze the viewer for 1.5s).
+const NOT_READY_HOLD_MEDIA_MS = 1500;
 
 // Bounded GPU recovery. On a WebGL context loss the preview used to latch PERMANENTLY to the DOM path — which
 // is NOT pixel-identical to the scene compositor, so a transient GPU eviction meant a lasting fidelity + quality
@@ -168,6 +175,9 @@ export interface ScenePreviewCanvasProps {
    *  already the FULLY EXPANDED list (nested children present as ordinary layers); this is consulted only
    *  to fold them back into a `SceneGroupDraw` per compound-clip instance. Undefined/empty = no nesting. */
   nestedGroups?: ReadonlyMap<string, NestedGroupSpec> | undefined;
+  /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md) — buildSceneDraws lowers `flarexCompId`
+   *  clips through the shared compiler. Undefined = comp'd clips render plain. */
+  flarexComps?: Record<string, FlarexComp> | undefined;
   /** Populated with the viewer-capture handle (background proxy generation renders through THIS preview). */
   captureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
   /**
@@ -192,6 +202,7 @@ export function ScenePreviewCanvas({
   onFrameRendered,
   mediaSourceAlias,
   nestedGroups,
+  flarexComps,
   captureRef,
   prewarmTransitionIds,
   singleCtxMedia = false,
@@ -343,8 +354,8 @@ export function ScenePreviewCanvas({
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
-  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups });
-  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups };
+  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps });
+  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps };
   // Event-driven redraw: composite while playing, or for a settle window after any input change /
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
@@ -498,7 +509,7 @@ export function ScenePreviewCanvas({
   drawRef.current = () => {
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
-    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups } = inputsRef.current;
+    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
@@ -620,7 +631,21 @@ export function ScenePreviewCanvas({
         src = sources[id] ?? undefined;
         if (src) resolvedId = id;
       }
-      if (!src) return null;
+      if (!src) {
+        // Descriptor briefly missing — the proxy-arrival REMOUNT unregisters the old layer's source
+        // before the new mount registers ITS descriptor (and the new element then needs a moment to
+        // decode). Serve the last-graded texture through the gap instead of dropping the layer: the
+        // dispose-on-unconsumed prune below otherwise destroyed the held frame on the FIRST gap
+        // composite, leaving the follow-up composites nothing to hold (play-start black-flicker
+        // lineage, tracker playback-preview v22).
+        const held = sharedMediaRenderersRef.current.get(resolvedId);
+        if (held && held.lastW > 0) {
+          liveMediaSourceIds.add(resolvedId);
+          recordSingleCtx("skips");
+          return { texture: held.target.tex, width: held.lastW, height: held.lastH };
+        }
+        return null;
+      }
       // Present (descriptor registered) → keep its renderer alive even if this frame's source isn't ready
       // yet, so a brief frame gap doesn't dispose+recreate the shared renderer/target.
       liveMediaSourceIds.add(resolvedId);
@@ -651,6 +676,7 @@ export function ScenePreviewCanvas({
       regionPassModel: getRegionPassesEnabled(),
       nestedGroups: nestGroups,
       nestMatteCaches: nestMatteCachesRef.current,
+      flarexComps: fxComps,
       onLayerNotReady: (id) => notReadyIds.push(id),
       });
     } catch (error) {
@@ -671,10 +697,26 @@ export function ScenePreviewCanvas({
     for (const id of blockedSince.keys()) {
       if (!notReadyIds.includes(id)) blockedSince.delete(id);
     }
-    if (playing && notReadyIds.some((id) => now - (blockedSince.get(id) ?? now) < NOT_READY_HOLD_MS)) {
+    // v21 (play-start black-flicker lineage): at the play flip a composite can run BEFORE the
+    // playing flag propagates, exactly while the media element re-primes (settle/WC → element
+    // handoff) with nothing held yet — and when this hold was playing-gated, that composite
+    // PRESENTED the hole: a 1–2 frame black flicker at play start.
+    // Media layers therefore hold the previous present even while paused; text/shape keep the
+    // paused exemption (the R1 scrub-lag rationale — a pending text raster mid-typing must not
+    // freeze the whole viewer). Media not-ready while paused is only ever the first-frame or
+    // source-handoff case, where holding the last picture is exactly right.
+    const isMediaLayerId = (id: string): boolean => {
+      const layer = ls.find((item) => item.id === id);
+      return layer != null && (layer.type === "video" || layer.type === "image");
+    };
+    const heldIds = playing ? notReadyIds : notReadyIds.filter(isMediaLayerId);
+    if (
+      heldIds.some(
+        (id) => now - (blockedSince.get(id) ?? now) < (isMediaLayerId(id) ? NOT_READY_HOLD_MEDIA_MS : NOT_READY_HOLD_MS)
+      )
+    ) {
       return;
     }
-
     const liveLayerIds = new Set(ls.map((layer) => layer.id));
     for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
       // "capture:"-prefixed entries belong to the viewer-capture run (arbitrary times / layers) — its own
@@ -826,6 +868,12 @@ export function ScenePreviewCanvas({
       renderOffscreen({ layers: ls, timeSeconds: t, transitions: tPairs, getMediaGraded, buffer }) {
         const compositor = compositorRef.current;
         if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return null;
+        // v24 (capture race): NEVER render offscreen while playing — playback owns this compositor.
+        // An in-flight capture frame landing after play start composited a span-time frame into the
+        // shared accumulators and (pre-guard) could resize/clear the on-screen canvas via ensureSize
+        // (paused scale 1 vs playing scale 0.5/0.25) — the play-start black flash. The capture loop
+        // treats null as not-ready and its abort (fired at the play gesture) lands right after.
+        if (inputsRef.current.isPlaying) return null;
         const { width: w, height: h, backgroundColor: bg, renderScale: rScale, nestedGroups: nestGroups } = inputsRef.current;
         const renderW = Math.max(1, Math.round(w * rScale));
         const renderH = Math.max(1, Math.round(h * rScale));
@@ -850,6 +898,7 @@ export function ScenePreviewCanvas({
             // never corrupts — the same trade-off the pre-existing code already accepts for `matteCacheRef`).
             nestedGroups: nestGroups,
             nestMatteCaches: nestMatteCachesRef.current,
+            flarexComps: inputsRef.current.flarexComps,
           });
           return compositor.renderFrameOffscreen(
             { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t },
