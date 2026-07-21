@@ -2,8 +2,10 @@ import { Fragment, lazy, memo, startTransition, Suspense, useCallback, useEffect
 import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  Activity,
   Download,
   Eye,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronsRight,
@@ -156,6 +158,10 @@ import {
   healCompositionRegistry,
   nestLayersIntoComposition,
   stampCompositionRegistry,
+  compileNodeGraphIntent,
+  createFlarexComp,
+  stampFlarexComp,
+  type NodeGraphIntent,
   unnestClip,
   wouldCreateCompositionCycle,
   type NestBreadcrumbEntry,
@@ -228,7 +234,7 @@ import type { MaskTool } from "../editor/registry/inspector";
 import { recordMaskPoints } from "../editor/inspector/maskKeyframeUtils";
 import { EffectMaskControls } from "../editor/inspector/EffectMaskControls";
 import { InspectorSection } from "../editor/inspector/InspectorSection";
-import { InspectorTabs, rememberInspectorTab, rememberedInspectorTab, type InspectorTabId } from "../editor/inspector/InspectorTabs";
+import { InspectorTabs, availableInspectorTabs, rememberInspectorTab, rememberedInspectorTab, type InspectorTabId } from "../editor/inspector/InspectorTabs";
 import GraphicsStackPanel from "../editor/inspector/panels/GraphicsStackPanel";
 import GraphicsAlignPanel from "../editor/inspector/panels/GraphicsAlignPanel";
 import GraphicsPinPanel from "../editor/inspector/panels/GraphicsPinPanel";
@@ -467,6 +473,8 @@ function proxyDebugEnabled(): boolean {
 // the Effects tab opens, and the tool-runner modals (which pull the heavy ML handler graph) load
 // only when a tool is actually run.
 const EffectGraphPanel = lazy(() => import("../components/EffectGraphPanel"));
+// Flarex CG page (FLAREX.md) — the node-compositing workspace that swaps in for the timeline area.
+const FlarexWorkspace = lazy(() => import("../editor/flarex/FlarexWorkspace"));
 type TransitionApplySpec = import("../components/EffectGraphPanel").TransitionApplySpec;
 const ToolEffectRunnerModal = lazy(() =>
   import("../components/ToolEffectRunnerModal").then((module) => ({ default: module.ToolEffectRunnerModal }))
@@ -758,7 +766,7 @@ export function EditorPage() {
   // When a transition is applied with no selection and several clips sit under the playhead, ask which.
   const [transitionChoice, setTransitionChoice] = useState<{ spec: TransitionApplySpec; candidates: TimelineLayer[] } | null>(null);
   const [assets, setAssets] = useState<SourceAsset[]>([]);
-  const [panelTab, setPanelTab] = useState<"assets" | "effects" | "color" | "settings">("assets");
+  const [panelTab, setPanelTab] = useState<"assets" | "effects" | "settings" | "scopes">("assets");
   // Clip properties now live in the always-visible right Inspector (driven by selection), so actions that
   // used to switch the left panel to a "Controls" tab just need the clip selected — this is the shim.
   const focusInspector = () => {};
@@ -774,6 +782,11 @@ export function EditorPage() {
   // dock is open and the viewer gets cramped). Starts COLLAPSED (user request 2026-07-11):
   // the viewer gets the space until the user opens the inspector.
   const [inspectorCollapsed, setInspectorCollapsed] = useState(true);
+  // Color now lives ONLY in the Inspector's Color sub-tab (the left Color panel was removed). The
+  // topbar "Color" button / Alt+3 open the Inspector and select that tab via this consume-once flag:
+  // the Inspector applies it (on mount-from-open or while already open) then clears it, so a later
+  // layer-selection change never re-forces the Color tab (host→panel intent, per panel-sync doctrine).
+  const [pendingColorTab, setPendingColorTab] = useState(false);
   // Same idea for the left browse panel — collapse to a rail to give the viewer full width.
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   // Masking (Phase 2): active draw tool, the mask being edited in the preview, and overlay visibility.
@@ -795,11 +808,20 @@ export function EditorPage() {
   // "orreris:open-graph-editor" event from inspector rows / timeline keyframe diamonds.
   const [bottomWorkspaceOpen, setBottomWorkspaceOpen] = useState(false);
   const [graphFocusTargetKey, setGraphFocusTargetKey] = useState<string | undefined>(undefined);
+  // Resolve-style page switch (FLAREX.md): "edit" = the normal timeline area; "flarex" = the node
+  // compositing workspace swapped into the same grid slot. The viewer stays mounted across pages —
+  // the comp output renders live through the shared lowering hook, so it IS the Flarex viewer.
+  const [editorPage, setEditorPage] = useState<"edit" | "flarex">("edit");
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.shiftKey && (event.key === "G" || event.key === "g"))) return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (event.shiftKey && (event.key === "F" || event.key === "f")) {
+        event.preventDefault();
+        setEditorPage((page) => (page === "flarex" ? "edit" : "flarex"));
+        return;
+      }
+      if (!(event.shiftKey && (event.key === "G" || event.key === "g"))) return;
       event.preventDefault();
       setBottomWorkspaceOpen((open) => !open);
     };
@@ -1020,12 +1042,12 @@ export function EditorPage() {
 
   // Top-toolbar panel toggles (DaVinci-style): drives the same panelTab/panelCollapsed
   // state the left panel's own controls use, so behavior stays identical across modes.
-  function isLeftPanelTabActive(tab: "assets" | "effects" | "color" | "settings") {
+  function isLeftPanelTabActive(tab: "assets" | "effects" | "settings" | "scopes") {
     return responsiveLayout.usesOverlayPanels
       ? activeResponsiveOverlay === "assets" && panelTab === tab
       : !panelCollapsed && panelTab === tab;
   }
-  function toggleLeftPanelTab(tab: "assets" | "effects" | "color" | "settings") {
+  function toggleLeftPanelTab(tab: "assets" | "effects" | "settings" | "scopes") {
     if (isLeftPanelTabActive(tab)) {
       if (responsiveLayout.usesOverlayPanels) setActiveResponsiveOverlay(null);
       else setPanelCollapsed(true);
@@ -1035,6 +1057,12 @@ export function EditorPage() {
     if (responsiveLayout.usesOverlayPanels) setActiveResponsiveOverlay("assets");
     else setPanelCollapsed(false);
   }
+  // Inspector Color tab → "open scopes in the left panel". Stable identity (LayerInspector is memo'd).
+  const openScopesLeftPanel = useCallback(() => {
+    setPanelTab("scopes");
+    if (responsiveLayout.usesOverlayPanels) setActiveResponsiveOverlay("assets");
+    else setPanelCollapsed(false);
+  }, [responsiveLayout.usesOverlayPanels]);
   function toggleInspectorFromTopbar() {
     if (responsiveLayout.usesOverlayPanels) {
       setActiveResponsiveOverlay((current) => (current === "inspector" ? null : "inspector"));
@@ -1045,6 +1073,15 @@ export function EditorPage() {
   const isInspectorOpenFromTopbar = responsiveLayout.usesOverlayPanels
     ? activeResponsiveOverlay === "inspector"
     : !inspectorCollapsed;
+  /** Topbar "Color" / Alt+3: open the Inspector and switch it to the Color tab (its new home). */
+  function openInspectorColor() {
+    if (responsiveLayout.usesOverlayPanels) setActiveResponsiveOverlay("inspector");
+    else setInspectorCollapsed(false);
+    setPendingColorTab(true);
+  }
+  // Stable (memo-safe) consumer for the Color-tab intent — an inline closure would break the memoized
+  // LayerInspector's shallow prop compare and re-render it every tick.
+  const consumeColorTab = useCallback(() => setPendingColorTab(false), []);
   /**
    * Full-height Inspector drives the EXPANDED grid (`is-any-expanded` hoists .editor-main via
    * `display: contents` and re-lays the whole editor). A COLLAPSED inspector isn't even mounted, so it
@@ -1060,7 +1097,6 @@ export function EditorPage() {
   const showSourceMonitor = sourceMonitorAsset !== null && !responsiveLayout.usesOverlayPanels;
   const dualMonitors = showSourceMonitor && responsiveLayout.density === "comfortable";
 
-  const [scopesOpen, setScopesOpen] = useState(false);
   // Resolver for an AI-driven tool step: set when the AI executor opens a tool
   // modal, resolved by the modal's Apply (applied) or Close (cancelled) so the
   // executor pauses until the user confirms (e.g. picks tracking points).
@@ -1496,6 +1532,7 @@ export function EditorPage() {
       setColdPlaybackSuspended(false);
       if (playbackStartRef.current) {
         const stopped = getPlaybackClock();
+        bridgeLiveMarkTo(stopped); // v27: settle the live trail on the stop frame (end-of-playback path)
         currentTimeRef.current = stopped;
         flushColdPlaybackNotify();
       }
@@ -1534,13 +1571,28 @@ export function EditorPage() {
       // stalls, main-thread jank). The servo nudges the SHARED `playbackStart` anchor (≤4ms/tick, one hard
       // re-anchor past 250ms), so the timeline playhead / transport / getLivePlaybackTime — which all
       // derive from the same anchor — follow audio in lockstep. No audible clip → pure wall clock.
+      // v23: the v20 pre-roll hold is GONE — holding the anchor while the video elements free-ran
+      // put the picture AHEAD of the clock, and the drift corrector then seeked it BACKWARD
+      // (picture "plays ~300ms, jumps back, replays" + the seek-flush black frame — the very
+      // symptoms it tried to fix). The playhead now starts immediately and stays monotonic; a
+      // late-starting audio element is seeked FORWARD onto the clock by the non-master corrector
+      // (VideoPreview, session-tightened) and only becomes master once nearly aligned
+      // (AUDIO_FIRST_ELECTION_GATE_S), so neither the clock nor the picture ever moves backward
+      // at play start.
       if (audioClockEnabled) {
         const wallTime = started.timeSeconds + (clockMs - started.clockMs) / 1000;
         const audioTime = getAudioMasterTime();
         if (audioTime != null) {
           const drift = audioTime - wallTime;
           noteAudioClockDrift(drift * 1000);
-          if (Math.abs(drift) > HARD_RESYNC_S) {
+          // v25 FORWARD-ONLY servo (confirmed by __rfClockJumps stack traces: the tick itself was
+          // the backward writer — negative pushes at play start and 150–450ms rewinds every ~2s
+          // whenever a network-streamed audio source stalled behind the clock). The anchor may
+          // hard-resync FORWARD (audio genuinely ahead — a real clock stall), but NEVER backward
+          // beyond the sub-frame servo rate: a lagging master is DEMOTED by the reader's
+          // behind-gate (VideoPreview) and seeked forward by the corrector instead. The timeline
+          // never rewinds because audio hiccuped — pro-NLE behavior.
+          if (drift > HARD_RESYNC_S) {
             started.timeSeconds += drift;
           } else {
             started.timeSeconds += Math.max(-MAX_SERVO_PER_TICK_S, Math.min(MAX_SERVO_PER_TICK_S, drift * SERVO_GAIN));
@@ -1549,7 +1601,9 @@ export function EditorPage() {
           noteAudioClockDrift(null);
         }
       }
-      const nextTime = started.timeSeconds + (clockMs - started.clockMs) / 1000;
+      // Absolute floor: playback time can never be negative regardless of anchor math (a negative
+      // committed clock was observed pre-v25 and corrupts downstream layer/source lookups).
+      const nextTime = Math.max(0, started.timeSeconds + (clockMs - started.clockMs) / 1000);
       currentTimeRef.current = nextTime; // always live for handlers reading the ref
       if (nextTime >= composition.durationSeconds) {
         setPlaybackClock(composition.durationSeconds);
@@ -1847,6 +1901,30 @@ export function EditorPage() {
     updateProxyCacheRuler();
   }, [composition, isPlaying, previewQuality, updateProxyCacheRuler]);
 
+  // Last live-coverage mark time (bridged marking, v27) — reset implicitly by the bridge's own
+  // gap/backward checks, so no per-session bookkeeping is needed.
+  const lastLiveMarkRef = useRef<number | null>(null);
+
+  // v27: on pause, extend the live trail to the EXACT settle position. The paused settle composite
+  // renders the stop frame, but frame-rendered notifications are playing-gated — so the trail's
+  // head froze up to a commit interval (~90ms) short of the parked playhead (the "cyan gap from
+  // the playhead" report). Bridging to the stop time is truthful: that frame is on screen.
+  function bridgeLiveMarkTo(timeSeconds: number) {
+    const controller = previewCacheControllerRef.current;
+    const state = previewCacheRenderStateRef.current;
+    const prev = lastLiveMarkRef.current;
+    if (!controller || !state || !composition || prev == null) return;
+    if (!(timeSeconds > prev) || timeSeconds - prev > 0.5) return;
+    controller.markFrameRendered({
+      signature: state.signature,
+      renderScale: state.renderScale,
+      timeSeconds: prev,
+      frameDurationSeconds: timeSeconds - prev + 1 / Math.max(1, composition.fps),
+      now: Date.now()
+    });
+    lastLiveMarkRef.current = timeSeconds;
+  }
+
   const handlePreviewFrameRendered = useCallback(
     (timeSeconds: number, renderScale: number) => {
       if (!composition) {
@@ -1857,11 +1935,21 @@ export function EditorPage() {
       if (!controller || !state || state.renderScale !== renderScale) {
         return;
       }
+      // v27 BRIDGED live marks: rendered-frame notifications arrive at the clock-commit cadence
+      // (16–90ms by quality) but each mark was stamped only ONE frame wide — leaving hairline
+      // un-marked cracks between marks (the tiny orange slivers inside the blue "watched" trail)
+      // and a trailing gap behind the playhead. Every moment between two CONSECUTIVE rendered
+      // frames was visually covered by the earlier frame, so bridging from the previous mark is
+      // truthful coverage, not decoration. A backward or >0.5s jump is a seek — no bridge.
+      const prev = lastLiveMarkRef.current;
+      lastLiveMarkRef.current = timeSeconds;
+      const frameSeconds = 1 / Math.max(1, composition.fps);
+      const bridgeStart = prev != null && timeSeconds > prev && timeSeconds - prev < 0.5 ? prev : timeSeconds;
       const span = controller.markFrameRendered({
         signature: state.signature,
         renderScale,
-        timeSeconds,
-        frameDurationSeconds: 1 / Math.max(1, composition.fps),
+        timeSeconds: bridgeStart,
+        frameDurationSeconds: timeSeconds - bridgeStart + frameSeconds,
         now: Date.now()
       });
       if (span && typeof window !== "undefined") {
@@ -2391,7 +2479,7 @@ export function EditorPage() {
       if (key === "l" && !event.repeat) {
         event.preventDefault();
         if (!isPlayingRef.current && !shuttleRef.current) {
-          setIsPlaying(true); // first L from a stop = normal 1x engine playback (with audio)
+          startEnginePlayback(); // first L from a stop = normal 1x engine playback (with audio)
         } else {
           startShuttle(1);
         }
@@ -2653,7 +2741,7 @@ export function EditorPage() {
           break;
         case "Digit3":
           event.preventDefault();
-          toggleLeftPanelTab("color");
+          openInspectorColor();
           break;
         case "Digit4":
           event.preventDefault();
@@ -2676,7 +2764,7 @@ export function EditorPage() {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleLeftPanelTab, toggleInspectorFromTopbar]);
+  }, [toggleLeftPanelTab, toggleInspectorFromTopbar, openInspectorColor]);
 
   useEffect(() => {
     localStorage.setItem("orreris_editor_left_width", String(leftPaneWidth));
@@ -4462,11 +4550,27 @@ export function EditorPage() {
   }
 
   async function handleRippleDeleteLayer(layerId: string) {
-    if (!composition || !isLayerEditable(layerId)) {
+    await handleRippleDeleteLayers([layerId]);
+  }
+
+  /** Ripple-delete every selected clip (multi-select aware): each removal closes the gap on its
+   * own track. Sequential per-id application is order-independent — each deletion only shifts
+   * later clips on the removed clip's track. */
+  async function handleRippleDeleteLayers(layerIds: string[]) {
+    if (!composition) {
       return;
     }
+    const deletable = [...new Set(layerIds)].filter((id) => isLayerEditable(id));
+    if (deletable.length === 0) {
+      return;
+    }
+    let next = composition;
+    for (const id of deletable) {
+      next = rippleDeleteLayer(next, id);
+    }
     setSelectedLayerIds([]);
-    await updateComposition(rippleDeleteLayer(composition, layerId));
+    await updateComposition(next);
+    if (deletable.length > 1) setNotice(`Ripple-deleted ${deletable.length} clips`);
   }
 
   // Trim-suite clamp inputs shared by roll/slide/extend: asset-backed max durations + one frame minimum.
@@ -5094,11 +5198,11 @@ export function EditorPage() {
     }
   }
 
-  async function handlePasteLayer() {
+  async function handlePasteLayer(atSeconds?: number) {
     if (!composition || !hasClipboardLayer()) {
       return;
     }
-    const pasted = pasteLayerFromClipboard(currentTimeRef.current);
+    const pasted = pasteLayerFromClipboard(atSeconds ?? currentTimeRef.current);
     if (!pasted) {
       return;
     }
@@ -5928,6 +6032,7 @@ export function EditorPage() {
       tracks: visualTrack ? [track, ...composition.tracks] : [...composition.tracks, track]
     };
     await updateComposition(nextComposition);
+    setNotice(visualTrack ? `Added ${track.name} above` : `Added ${track.name} below`);
   }
 
   async function handleRemoveEffect(effectId: string) {
@@ -6544,6 +6649,7 @@ export function EditorPage() {
       const blob = await exportLocally({
         composition,
         compositions: graph?.compositions,
+        flarexComps: graph?.flarexComps,
         urlForAsset: (id) => resolvedAssets.find((asset) => asset.id === id)?.fileUrl,
         format,
         fps,
@@ -6669,6 +6775,7 @@ export function EditorPage() {
 
   function pausePlaybackAtLiveClock() {
     const stopped = getLivePlaybackTime();
+    bridgeLiveMarkTo(stopped); // v27: live trail reaches the exact parked playhead, no cyan gap
     currentTimeRef.current = stopped;
     playbackStartRef.current = null;
     setPlaybackClock(stopped);
@@ -6678,13 +6785,23 @@ export function EditorPage() {
     setIsPlaying(false);
   }
 
+  function startEnginePlayback() {
+    // v24 (capture race, Fix A1): kill the background span-proxy capture AT THE GESTURE, before the
+    // play render commits. The effect-based abort fired one commit later, leaving an in-flight
+    // capture frame free to race the first playing composites — it could resize/clear the on-screen
+    // canvas (ensureSize at the paused scale) and seek pooled elements to span times: the play-start
+    // black flash + "replays" (tracker playback-preview v24).
+    proxyGenAbortRef.current?.abort();
+    setIsPlaying(true);
+  }
+
   function togglePlayback() {
     stopShuttle();
     if (isPlayingRef.current) {
       pausePlaybackAtLiveClock();
       return;
     }
-    setIsPlaying(true);
+    startEnginePlayback();
   }
 
   function stepFrame(direction: -1 | 1, frames = 1) {
@@ -7147,6 +7264,14 @@ export function EditorPage() {
     onRippleDeleteLayer: (layerId: string) => {
       void handleRippleDeleteLayer(layerId);
     },
+    onRippleDeleteLayers: (layerIds: string[]) => {
+      void handleRippleDeleteLayers(layerIds);
+    },
+    onCopyLayer: handleCopyLayer,
+    onPasteLayerAt: (atSeconds: number) => {
+      void handlePasteLayer(atSeconds);
+    },
+    onOpenPasteAttributes: () => setPasteAttributesModalOpen(true),
     onDuplicateLayer: (layerId: string) => {
       void handleDuplicateLayer(layerId);
     },
@@ -7312,6 +7437,35 @@ export function EditorPage() {
     onUndo: () => {
       void undo();
     },
+    // Flarex compositor skill (FLAREX.md Part 7): ensure the clip's node comp, expand the compact
+    // intent into real nodes, commit through the normal graph path (one undo entry). Lives here
+    // because comps are GRAPH-level state the panel deliberately can't touch.
+    applyFlarexIntent: async (intent: NodeGraphIntent, target: { layerId: string }) => {
+      const working = project?.projectGraph;
+      if (!working?.composition) return { applied: false, detail: "No project loaded." };
+      const layer = working.composition.tracks.flatMap((track) => track.layers).find((item) => item.id === target.layerId);
+      if (!layer) return { applied: false, detail: "Clip not found." };
+      let nextGraph = working;
+      let compId = layer.flarexCompId;
+      if (!compId || !nextGraph.flarexComps?.[compId]) {
+        compId = `flarex_${layer.id}_${Date.now().toString(36)}`;
+        const created = createFlarexComp(compId, `${layer.name || "Clip"} Comp`);
+        const nextComposition = {
+          ...nextGraph.composition!,
+          tracks: nextGraph.composition!.tracks.map((track) => ({
+            ...track,
+            layers: track.layers.map((item) => (item.id === layer.id ? { ...item, flarexCompId: compId } : item)),
+          })),
+        };
+        nextGraph = stampCompositionRegistry(stampFlarexComp({ ...nextGraph, composition: nextComposition }, created));
+      }
+      const baseComp = nextGraph.flarexComps?.[compId];
+      if (!baseComp) return { applied: false, detail: "Couldn't create the Flarex comp." };
+      const { comp: compiledComp, ops } = compileNodeGraphIntent(intent, baseComp);
+      await updateGraph({ ...stampFlarexComp(nextGraph, compiledComp), version: working.version + 1 });
+      const summary = ops.map((op) => op.summary).join(" → ");
+      return { applied: true, detail: `Flarex nodes added: ${summary || "none"} (Shift+F to edit)` };
+    },
     onClose: () => setAiPanelOpen(false),
     onOpenGenerate: (prefill?: GenerateStudioPrefill) => {
       setGenerateStudioPrefill(prefill);
@@ -7341,7 +7495,7 @@ export function EditorPage() {
         const { op } = rawParams as EditorCommandParams<"transport">;
         if (op === "play") {
           stopShuttle();
-          if (!isPlayingRef.current) setIsPlaying(true);
+          if (!isPlayingRef.current) startEnginePlayback();
         } else if (op === "pause" || op === "stop") {
           stopShuttle();
           pausePlaybackAtLiveClock();
@@ -7451,6 +7605,12 @@ export function EditorPage() {
           }
           return { ok: true, say: "" };
         }
+        // Color moved into the Inspector (left Color panel removed) — route any "color" panel intent
+        // to the Inspector's Color tab.
+        if (params.panel === "color") {
+          openInspectorColor();
+          return { ok: true, say: "" };
+        }
         // Left browse tabs — same open/close semantics as the topbar toggles.
         const tab = params.panel;
         if (op === "toggle") {
@@ -7515,10 +7675,9 @@ export function EditorPage() {
             </button>
             <button
               type="button"
-              className={`topbar-toggle${isLeftPanelTabActive("color") ? " is-active" : ""}`}
-              aria-pressed={isLeftPanelTabActive("color")}
-              onClick={() => toggleLeftPanelTab("color")}
-              title={`Color (${altKeyLabel}+3)`}
+              className="topbar-toggle"
+              onClick={openInspectorColor}
+              title={`Color — opens the Inspector Color tab (${altKeyLabel}+3)`}
               aria-keyshortcuts={`${altKeyLabel}+3`}
             >
               <Palette size={14} />
@@ -7804,9 +7963,6 @@ export function EditorPage() {
                   <button className={panelTab === "effects" ? "is-active" : ""} type="button" onClick={() => setPanelTab("effects")}>
                     Effects
                   </button>
-                  <button className={panelTab === "color" ? "is-active" : ""} type="button" onClick={() => setPanelTab("color")}>
-                    Color
-                  </button>
                   <button
                     className={`tabbar-icon-button ${isResponsiveOverlayExpanded("assets") ? "is-active" : ""}`}
                     type="button"
@@ -7839,7 +7995,7 @@ export function EditorPage() {
               ) : (
                 <div className="studio-panel-head">
                   <span className="studio-panel-title">
-                    {panelTab === "assets" ? "Media Pool" : panelTab === "effects" ? "Effects" : panelTab === "color" ? "Color" : "Project Settings"}
+                    {panelTab === "assets" ? "Media Pool" : panelTab === "effects" ? "Effects" : panelTab === "scopes" ? "Scopes" : "Project Settings"}
                   </span>
                   <div className="studio-panel-head-actions">
                     {panelTab === "assets" && pro ? (
@@ -7957,62 +8113,26 @@ export function EditorPage() {
                 <div className="panel-tab-content">
                   <ProjectSettingsPanel composition={composition} onChange={updateCompositionSettings} />
                 </div>
-              ) : panelTab === "color" ? (
+              ) : panelTab === "scopes" ? (
+                // Full-height scopes view (user request 2026-07-21): the whole media-pool column
+                // becomes the analyzer surface — column layout by default (all four stacked), with
+                // the in-component switcher for single/two/grid. Rides <ColdTime> like the drawer
+                // host; while playing ColorScopes drives its own live resample loop.
                 <div className="panel-tab-content">
-                  {inspectorLayer && (inspectorLayer.type === "video" || inspectorLayer.type === "image" || inspectorLayer.type === "adjustment") ? (
-                    <>
-                      <div className="scopes-toggle-bar">
-                        <button
-                          className={`scopes-toggle-btn${scopesOpen ? " is-active" : ""}`}
-                          type="button"
-                          onClick={() => setScopesOpen((v) => !v)}
-                          title={scopesOpen ? "Hide color scopes" : "Show color scopes"}
-                        >
-                          <SlidersHorizontal size={13} />
-                          Scopes
-                        </button>
-                      </div>
-                      {(() => {
-                        // Source color-space notice: HDR/wide-gamut/log downcast (amber) or "Assumed Rec.709"
-                        // (info). Detected Rec.709 SDR sources produce no warnings → nothing shown.
-                        if (inspectorLayer.type !== "video" && inspectorLayer.type !== "image") return null;
-                        const asset = inspectorLayer.assetId ? assets.find((a) => a.id === inspectorLayer.assetId) : undefined;
-                        const warnings = sourceColorWarnings(asset?.color);
-                        if (warnings.length === 0) return null;
-                        const worst = warnings.find((w) => w.severity === "warning") ?? warnings[0]!;
-                        return (
-                          <div className={`source-color-notice${worst.severity === "warning" ? " is-warning" : ""}`} title={colorWarningsLabel(warnings)}>
-                            {worst.message}
-                          </div>
-                        );
-                      })()}
-                      <ColdTime>
-                        {(currentTime) => (
-                          <>
-                            {scopesOpen && (
-                              <ColorScopes
-                                containerRef={previewFrameRef}
-                                sampleSource={sampleScopeFrame}
-                                tick={Math.round(currentTime * 30)}
-                                isPlaying={isPlaying}
-                              />
-                            )}
-                            <LumetriPanel
-                              layer={inspectorLayer}
-                              currentTime={currentTime}
-                              onChange={(updater) => updateLayer(inspectorLayer.id, updater)}
-                              onSeek={setEditorCurrentTime}
-                            />
-                          </>
-                        )}
-                      </ColdTime>
-                    </>
-                  ) : (
-                    <div className="empty-mini">
-                      <SlidersHorizontal size={16} />
-                      Select a video, image, or adjustment layer
-                    </div>
-                  )}
+                  <div className="panel-scopes-host">
+                    <ColdTime>
+                      {(currentTime) => (
+                        <ColorScopes
+                          containerRef={previewFrameRef}
+                          sampleSource={sampleScopeFrame}
+                          tick={Math.round(currentTime * 30)}
+                          isPlaying={isPlaying}
+                          storageKey="left-panel"
+                          defaultLayout="column"
+                        />
+                      )}
+                    </ColdTime>
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -8351,6 +8471,12 @@ export function EditorPage() {
                   primaryLayerId={multiSelectPrimaryLayer?.id ?? inspectorLayer.id}
                   nestedCompositions={graph?.compositions}
                   textStyles={graph?.textStyles}
+                  requestColorTab={pendingColorTab}
+                  onConsumeColorTab={consumeColorTab}
+                  scopeSampler={sampleScopeFrame}
+                  scopeContainerRef={previewFrameRef}
+                  scopeIsPlaying={isPlaying}
+                  onOpenScopesPanel={openScopesLeftPanel}
                 />
                   )}
                 </ColdTime>
@@ -8382,7 +8508,17 @@ export function EditorPage() {
         {/* Column stack so the bottom workspace (graph editor drawer) borrows track space
             while the dock row above keeps its untouched scroll/auto-follow behavior. */}
         <div className="timeline-stack">
-        <div className="timeline-dock-row">
+        {/* Resolve-style page tabs (FLAREX.md): Edit = the timeline below; Flarex = the node
+            compositing workspace swapped into the same slot (Shift+F). The viewer above persists. */}
+        <div className="flarex-page-tabs" role="tablist" aria-label="Editor pages">
+          <button type="button" role="tab" aria-selected={editorPage === "edit"} className={editorPage === "edit" ? "is-active" : ""} onClick={() => setEditorPage("edit")}>
+            Edit
+          </button>
+          <button type="button" role="tab" aria-selected={editorPage === "flarex"} className={editorPage === "flarex" ? "is-active" : ""} onClick={() => setEditorPage("flarex")}>
+            Flarex
+          </button>
+        </div>
+        <div className="timeline-dock-row" style={editorPage === "flarex" ? { display: "none" } : undefined}>
         <section className="editor-timeline-dock">
           {nestPath.length > 0 ? (
             <div className="timeline-nest-breadcrumb">
@@ -8405,6 +8541,7 @@ export function EditorPage() {
             assets={resolvedAssets}
             composition={composition}
             currentTime={currentTimeRef.current}
+            hasClipboardClip={hasClipboardLayer()}
             isPlaying={isPlaying}
             layerMaxDurations={layerMaxDurations}
             playbackStart={playbackStart}
@@ -8444,7 +8581,25 @@ export function EditorPage() {
         ) : null}
         {responsiveLayout.showDedicatedAudio ? <TimelineAudioMeters isPlaying={isPlaying} /> : null}
         </div>
-        {bottomWorkspaceOpen ? (
+        {editorPage === "flarex" && graph ? (
+          <Suspense fallback={<div className="flarex-workspace flarex-workspace-empty">Loading Flarex…</div>}>
+            <ColdTime>
+              {(currentTime) => (
+                <FlarexWorkspace
+                  graph={graph}
+                  layer={inspectorLayer ?? null}
+                  onUpdateGraph={(nextGraph) => {
+                    void updateGraph(nextGraph);
+                  }}
+                  timeSeconds={currentTime}
+                  onSeek={setEditorCurrentTime}
+                  isPlaying={isPlaying}
+                />
+              )}
+            </ColdTime>
+          </Suspense>
+        ) : null}
+        {bottomWorkspaceOpen && editorPage === "edit" ? (
           <ColdTime>
             {(currentTime) => (
               <BottomWorkspace
@@ -8455,6 +8610,10 @@ export function EditorPage() {
                 fps={composition.fps}
                 focusTargetKey={graphFocusTargetKey}
                 ghostLayers={graphGhostLayers}
+                scopeSampler={sampleScopeFrame}
+                scopeContainerRef={previewFrameRef}
+                scopeTick={Math.round(currentTime * 30)}
+                isPlaying={isPlaying}
                 onClose={() => setBottomWorkspaceOpen(false)}
               />
             )}
@@ -8587,6 +8746,7 @@ export function EditorPage() {
             openTool={aiPanelHandlers.openTool}
             onUndo={aiPanelHandlers.onUndo}
             runEditorCommand={runEditorCommand}
+            applyFlarexIntent={aiPanelHandlers.applyFlarexIntent}
             onClose={aiPanelHandlers.onClose}
             onOpenGenerate={aiPanelHandlers.onOpenGenerate}
             onAddAssetToTimeline={aiPanelHandlers.onAddAssetToTimeline}
@@ -12888,7 +13048,13 @@ function LayerInspectorImpl({
   onUpdateTextStyle,
   onRenameTextStyle,
   onDeleteTextStyle,
-  autoKeyframe
+  autoKeyframe,
+  requestColorTab,
+  onConsumeColorTab,
+  scopeSampler,
+  scopeContainerRef,
+  scopeIsPlaying,
+  onOpenScopesPanel
 }: {
   assets: SourceAsset[];
   palette: string[];
@@ -12941,9 +13107,37 @@ function LayerInspectorImpl({
   onUpdateTextStyle?: ((styleId: string) => void) | undefined;
   onRenameTextStyle?: ((styleId: string, name: string) => void) | undefined;
   onDeleteTextStyle?: ((styleId: string) => void) | undefined;
+  /** Consume-once flag from the topbar "Color" button / Alt+3 — switches this inspector to the Color
+   *  tab (color's only home now that the left Color panel is gone), then calls onConsumeColorTab. */
+  requestColorTab?: boolean | undefined;
+  onConsumeColorTab?: (() => void) | undefined;
+  /** Color-tab scopes (2026-07-21): trustworthy compositor readback + DOM fallback + transport state. */
+  scopeSampler?: ScopeFrameSampler | undefined;
+  scopeContainerRef?: React.RefObject<HTMLElement | null> | undefined;
+  scopeIsPlaying?: boolean | undefined;
+  /** Pop the scopes out to the full-height left-panel view. */
+  onOpenScopesPanel?: (() => void) | undefined;
 }) {
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
   const [dragEffectId, setDragEffectId] = useState<string | null>(null);
+  // Color-tab scopes: closed by default (grading controls come first), remembered across sessions.
+  const [scopesOpen, setScopesOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("orreris.scopes.inspector.open") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleInspectorScopes = () => {
+    setScopesOpen((open) => {
+      try {
+        window.localStorage.setItem("orreris.scopes.inspector.open", open ? "0" : "1");
+      } catch {
+        /* private mode — just won't persist */
+      }
+      return !open;
+    });
+  };
   const [dragOverEffectId, setDragOverEffectId] = useState<string | null>(null);
   // Stable {width,height} for the mask InspectorHost — an inline literal would defeat its memo.
   const compositionSize = useMemo(
@@ -12973,6 +13167,20 @@ function LayerInspectorImpl({
     rememberInspectorTab(layer.type, tab);
     setInspectorTab(tab);
   };
+  // Host intent (topbar "Color" / Alt+3): a consume-once flag. Fires on mount-from-open AND while
+  // already open; applies the Color tab then clears the flag. Because it's consumed, a later
+  // layer-selection change (which does NOT set the flag) never re-forces Color.
+  useEffect(() => {
+    if (!requestColorTab) return;
+    if (availableInspectorTabs(layer.type).includes("color")) {
+      rememberInspectorTab(layer.type, "color");
+      setInspectorTab("color");
+    }
+    onConsumeColorTab?.();
+    // layer.type intentionally excluded: this must react to the request flag only, not re-run on
+    // every clip change (the flag is already false by then).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestColorTab]);
   // Video and Audio are both the "clip" tab — the blocks inside self-gate on layer.type.
   const isClipTab = inspectorTab === "video" || inspectorTab === "audio";
 
@@ -12980,6 +13188,14 @@ function LayerInspectorImpl({
   // layer.effects — surface it in the Effects subtab as its own card so its speed is editable
   // where the user applied it from.
   const typewriterActive = layer.type === "text" && getStyleKeyframes(layer, "textRevealProgress").length > 0;
+  // Roll/Crawl presets also live as layer.animations keyframes (position lanes), not layer.effects —
+  // detect them by the preset marker baked into their keyframe ids so they surface as editable cards.
+  const rollActive =
+    layer.type === "text" &&
+    (layer.animations ?? []).some((kf) => kf.target.scope === "layer" && kf.target.property === "transform.position.y" && kf.id.includes("_roll_"));
+  const crawlActive =
+    layer.type === "text" &&
+    (layer.animations ?? []).some((kf) => kf.target.scope === "layer" && kf.target.property === "transform.position.x" && kf.id.includes("_crawl_"));
 
   return (
     // Dim/block the property body while locked — EXCEPT on the Graphics tab, whose layer stack is a
@@ -13051,7 +13267,7 @@ function LayerInspectorImpl({
         </InspectorSection>
       ) : null}
 
-      {layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape" ? (
+      {layer.type === "video" || layer.type === "image" || layer.type === "text" || layer.type === "shape" || layer.type === "adjustment" ? (
         <InspectorHost
           layer={layer}
           onChange={onChange}
@@ -13074,11 +13290,19 @@ function LayerInspectorImpl({
       ) : null}
 
       {inspectorTab === "effects" ? (
-      <InspectorSection title="Effects" icon={<SlidersHorizontal size={13} />} count={layer.effects.length + (typewriterActive ? 1 : 0) + (layer.frame ? 1 : 0)}>
+      <InspectorSection
+        title="Effects"
+        icon={<SlidersHorizontal size={13} />}
+        count={layer.effects.length + (typewriterActive ? 1 : 0) + (rollActive ? 1 : 0) + (crawlActive ? 1 : 0) + (layer.frame ? 1 : 0)}
+      >
       <EffectPresetRow layer={layer} onChange={onChange} />
       <div className="effect-controls">
         {layer.frame ? <FrameEffectCard layer={layer} comp={{ width: composition.width, height: composition.height }} onChange={onChange} /> : null}
-        {typewriterActive ? <TypewriterEffectCard layer={layer} onChange={onChange} /> : null}
+        {typewriterActive ? (
+          <TypewriterEffectCard layer={layer} onChange={onChange} currentTime={currentTime} onSeek={onSeek} autoKeyframe={autoKeyframe} />
+        ) : null}
+        {rollActive ? <RollCrawlEffectCard layer={layer} kind="roll" onChange={onChange} /> : null}
+        {crawlActive ? <RollCrawlEffectCard layer={layer} kind="crawl" onChange={onChange} /> : null}
         {layer.effects.length ? (
           layer.effects.map((effect, index) => (
             <div
@@ -13226,7 +13450,48 @@ function LayerInspectorImpl({
         // Color sub-tab (user request 2026-07-16, reversing the 2026-07-12 "left panel only" call):
         // the SAME LumetriPanel component the left panel renders — one color implementation, two
         // entry points, so edits from either surface land on the identical effect stack.
-        <LumetriPanel layer={layer} currentTime={currentTime} onChange={onChange} onSeek={onSeek} />
+        <>
+          {scopeContainerRef ? (
+            // Collapsible scopes right where grading happens (2026-07-21), with a pop-out to the
+            // full-height left-panel view for maximum-productivity grading.
+            <div className="inspector-scopes">
+              <div className="inspector-scopes-head">
+                <button
+                  type="button"
+                  className="inspector-scopes-toggle"
+                  aria-expanded={scopesOpen}
+                  onClick={() => toggleInspectorScopes()}
+                >
+                  {scopesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  <Activity size={12} />
+                  Scopes
+                </button>
+                {onOpenScopesPanel ? (
+                  <button
+                    type="button"
+                    className="inspector-scopes-popout"
+                    title="Open scopes in the left panel — full-height view"
+                    aria-label="Open scopes in the left panel"
+                    onClick={onOpenScopesPanel}
+                  >
+                    <PanelLeftOpen size={13} />
+                  </button>
+                ) : null}
+              </div>
+              {scopesOpen ? (
+                <ColorScopes
+                  containerRef={scopeContainerRef}
+                  sampleSource={scopeSampler}
+                  tick={Math.round(currentTime * 30)}
+                  isPlaying={scopeIsPlaying ?? false}
+                  storageKey="inspector"
+                  defaultLayout="single"
+                />
+              ) : null}
+            </div>
+          ) : null}
+          <LumetriPanel layer={layer} currentTime={currentTime} onChange={onChange} onSeek={onSeek} />
+        </>
       ) : null}
     </div>
   );
@@ -13881,12 +14146,22 @@ function buildPluginShaderParamDefinitions(effect: TimelineEffect): TimelineEffe
  */
 function TypewriterEffectCard({
   layer,
-  onChange
+  onChange,
+  currentTime = 0,
+  onSeek,
+  autoKeyframe
 }: {
   layer: TimelineLayer;
   onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+  currentTime?: number | undefined;
+  onSeek?: ((seconds: number) => void) | undefined;
+  autoKeyframe?: boolean | undefined;
 }) {
   const revealKeyframes = getStyleKeyframes(layer, "textRevealProgress");
+  // Keyframable reveal-progress row: the same canonical KeyframeButtons + playhead-value editing
+  // every other keyframeable parameter gets, on top of the whole-preset duration scaler below.
+  const kfTools = makeStyleKeyframeTools(layer, currentTime, onChange, onSeek, autoKeyframe);
+  const revealAtPlayhead = kfTools.value("textRevealProgress", 100, 100);
   if (!revealKeyframes.length) return null;
   const revealDuration = Math.max(...revealKeyframes.map((kf) => kf.timeSeconds));
   return (
@@ -13931,7 +14206,94 @@ function TypewriterEffectCard({
           })
         }
       />
+      <NumberControl
+        icon={<Sparkles size={14} />}
+        label="Reveal at playhead (%)"
+        keyframe={kfTools.keyframe("textRevealProgress", revealAtPlayhead, 100)}
+        value={Math.round(revealAtPlayhead)}
+        min={0}
+        max={100}
+        step={1}
+        onChange={(value) => kfTools.change("textRevealProgress", value, 100)}
+      />
       <p className="rich-text-kf-hint">Curve editable as “Typewriter reveal” in the graph editor (Shift+G).</p>
+    </div>
+  );
+}
+
+/**
+ * Roll (credits) / Crawl (ticker) as Effects-subtab cards. Like Typewriter, these presets are not
+ * TimelineEffects — they write linear `transform.position.y`/`.x` keyframes (tagged with the preset
+ * marker in their ids) — so without this card the Effects subtab would show nothing to edit.
+ */
+function RollCrawlEffectCard({
+  layer,
+  kind,
+  onChange
+}: {
+  layer: TimelineLayer;
+  kind: "roll" | "crawl";
+  onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+}) {
+  const property = kind === "roll" ? "transform.position.y" : "transform.position.x";
+  const marker = `_${kind}_`;
+  const keys = (layer.animations ?? [])
+    .filter((kf) => kf.target.scope === "layer" && kf.target.property === property && kf.id.includes(marker))
+    .sort((a, b) => a.timeSeconds - b.timeSeconds);
+  if (keys.length < 2) return null;
+  const first = keys[0]!;
+  const last = keys[keys.length - 1]!;
+  // Keyframe.value is AnimatedValue (number | string); these position lanes are always numeric.
+  const numeric = (v: unknown): number => (typeof v === "number" ? v : Number(v) || 0);
+  const firstValue = numeric(first.value);
+  const lastValue = numeric(last.value);
+  const setKeyValue = (id: string, value: number) =>
+    onChange((item) => ({
+      ...item,
+      animations: (item.animations ?? []).map((kf) => (kf.id === id ? { ...kf, value } : kf))
+    }));
+  const axisLabel = kind === "roll" ? "Y" : "X";
+  return (
+    <div className="effect-control-card">
+      <div className="effect-control-header">
+        <strong>{kind === "roll" ? "Roll (credits)" : "Crawl (ticker)"}</strong>
+        <button
+          aria-label="Delete effect"
+          type="button"
+          onClick={() =>
+            onChange((item) => {
+              const animations = (item.animations ?? []).filter(
+                (kf) => !(kf.target.scope === "layer" && kf.target.property === property && kf.id.includes(marker))
+              );
+              return { ...item, animations: animations.length ? animations : undefined };
+            })
+          }
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+      <NumberControl
+        icon={kind === "roll" ? <MoveVertical size={14} /> : <MoveHorizontal size={14} />}
+        label={`Enter ${axisLabel} (%) — ${kind === "roll" ? "below frame" : "right of frame"}`}
+        value={Number(firstValue.toFixed(1))}
+        min={-200}
+        max={300}
+        step={1}
+        onChange={(value) => setKeyValue(first.id, value)}
+      />
+      <NumberControl
+        icon={kind === "roll" ? <MoveVertical size={14} /> : <MoveHorizontal size={14} />}
+        label={`Exit ${axisLabel} (%) — ${kind === "roll" ? "above frame" : "left of frame"}`}
+        value={Number(lastValue.toFixed(1))}
+        min={-200}
+        max={300}
+        step={1}
+        onChange={(value) => setKeyValue(last.id, value)}
+      />
+      <p className="rich-text-kf-hint">
+        Runs edge-to-edge over the whole clip — trim the clip to change speed. Curve editable as “Position {axisLabel}” in the graph
+        editor (Shift+G).
+      </p>
     </div>
   );
 }

@@ -421,6 +421,11 @@ function TimelineStripImpl({
   onSplitAtPlayhead,
   onNotice,
   onRippleDeleteLayer,
+  onRippleDeleteLayers,
+  onCopyLayer,
+  onPasteLayerAt,
+  hasClipboardClip,
+  onOpenPasteAttributes,
   onDuplicateLayer,
   markers = [],
   onToggleMarkerAtPlayhead,
@@ -522,6 +527,14 @@ function TimelineStripImpl({
   /** Transient editor toast — used for "why did nothing happen" feedback (roll/slide preconditions). */
   onNotice?: ((message: string) => void) | undefined;
   onRippleDeleteLayer?: ((layerId: string) => void) | undefined;
+  /** Multi-select-aware ripple delete — removes every id and closes each gap. */
+  onRippleDeleteLayers?: ((layerIds: string[]) => void) | undefined;
+  onCopyLayer?: ((layerId: string) => void) | undefined;
+  /** Paste the clipboard clip starting at the given timeline time (track-area context menu). */
+  onPasteLayerAt?: ((timeSeconds: number) => void) | undefined;
+  hasClipboardClip?: boolean | undefined;
+  /** Open the Paste Attributes modal (applies copied clip's attributes to the selection). */
+  onOpenPasteAttributes?: (() => void) | undefined;
   onRollEdit?: ((leftLayerId: string, rightLayerId: string, deltaSeconds: number) => void) | undefined;
   onSlideLayer?: ((layerId: string, deltaSeconds: number) => void) | undefined;
   onDuplicateLayer?: ((layerId: string) => void) | undefined;
@@ -1412,11 +1425,22 @@ function TimelineStripImpl({
     };
 
     let frame = 0;
+    // v26.1: the needle is MONOTONIC within this anchor's lifetime. The first rAF timestamp can be
+    // up to a frame EARLIER than the mount-time performance.now() used for the initial write (rAF
+    // timestamps are vsync times), and the audio servo may nudge the anchor back a few ms — neither
+    // may ever move the visible needle backward (the residual ~20ms step-back at play start,
+    // 2026-07-21). A user's backward mid-play seek replaces the anchor → this effect re-runs →
+    // the floor resets, so real seeks are unaffected.
+    let monotonicFloor = 0;
     const animate = (clockMs: number) => {
       // Reads BEFORE writes: read scrollLeft while layout is clean (last frame already painted), then
       // do all writes (scrollLeft via follow, then the playhead CSS var). No forced reflow per frame.
       const scrollLeft = dock?.scrollLeft ?? 0;
-      const nextTime = clamp(playbackStart.timeSeconds + (clockMs - playbackStart.clockMs) / 1000, 0, composition.durationSeconds);
+      const nextTime = Math.max(
+        monotonicFloor,
+        clamp(playbackStart.timeSeconds + (clockMs - playbackStart.clockMs) / 1000, 0, composition.durationSeconds)
+      );
+      monotonicFloor = nextTime;
       if (dock) followPlaybackPlayhead(nextTime, scrollLeft);
       const playheadPercent = playheadOffsetPercent(nextTime, timelineDurationSeconds);
       playhead.style.setProperty("--playhead-percent", playheadPercent);
@@ -1427,11 +1451,22 @@ function TimelineStripImpl({
       }
     };
 
-    if (dock) followPlaybackPlayhead(playbackStart.timeSeconds, dock.scrollLeft);
-    const startPercent = playheadOffsetPercent(playbackStart.timeSeconds, timelineDurationSeconds);
+    // v26: initialize at the anchor-derived CURRENT time, not the anchor's ORIGIN. This effect
+    // mounts a React commit (~1–2 frames, up to ~100ms) AFTER play started, and the paused writer
+    // has already followed the session's first clock commits forward — snapping to the origin
+    // stepped the needle BACKWARD ~80–100ms on every play press before `animate` caught up
+    // (2026-07-21 report: "playhead moves back a little and then moves forward, every play").
+    const initialTime = clamp(
+      playbackStart.timeSeconds + (performance.now() - playbackStart.clockMs) / 1000,
+      0,
+      composition.durationSeconds
+    );
+    monotonicFloor = initialTime;
+    if (dock) followPlaybackPlayhead(initialTime, dock.scrollLeft);
+    const startPercent = playheadOffsetPercent(initialTime, timelineDurationSeconds);
     playhead.style.setProperty("--playhead-percent", startPercent);
     minimapPlayheadRef.current?.style.setProperty("--playhead-percent", startPercent);
-    updateLiveProxyBar(playbackStart.timeSeconds);
+    updateLiveProxyBar(initialTime);
     frame = window.requestAnimationFrame(animate);
     return () => {
       window.cancelAnimationFrame(frame);
@@ -2692,6 +2727,11 @@ function TimelineStripImpl({
         return;
       }
       if (event.shiftKey && (event.key === "Backspace" || event.key === "Delete")) {
+        if (selectedLayerIds.length > 1 && onRippleDeleteLayers) {
+          event.preventDefault();
+          onRippleDeleteLayers(selectedLayerIds);
+          return;
+        }
         if (selectedLayerId) {
           event.preventDefault();
           onRippleDeleteLayer?.(selectedLayerId);
@@ -2772,6 +2812,7 @@ function TimelineStripImpl({
     selectedLayerId,
     onDuplicateLayer,
     onRippleDeleteLayer,
+    onRippleDeleteLayers,
     onChangeToolMode,
     onSplitAtPlayhead,
     onToggleSnap,
@@ -2952,8 +2993,10 @@ function TimelineStripImpl({
   const handleClipContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>, layer: TimelineLayer) => {
       event.preventDefault();
-      const replaceable = layer.type === "video" || layer.type === "image" || layer.type === "audio";
-      const slippable = (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId);
+      // Nested comps render as video-type layers but have no source asset — "Replace asset"
+      // and slip make no sense on them (the guard was missing: replace corrupted the nest).
+      const replaceable = (layer.type === "video" || layer.type === "image" || layer.type === "audio") && !layer.nestedCompositionId;
+      const slippable = (layer.type === "video" || layer.type === "audio") && Boolean(layer.assetId) && !layer.nestedCompositionId;
       const track = composition.tracks.find((item) => item.id === layer.trackId);
       const junction = track ? findClipTransitionContext(track, layer) : null;
       // Premiere-style insufficient-media state for the "Trim clips to create overlap" menu action:
@@ -3020,6 +3063,8 @@ function TimelineStripImpl({
     [onSelectLayer]
   );
 
+  const exitSlipMode = useCallback(() => setSlipLayerId(null), []);
+
   // Leave slip mode on Escape so it's never a sticky surprise.
   useEffect(() => {
     if (!slipLayerId) {
@@ -3034,9 +3079,25 @@ function TimelineStripImpl({
     return () => window.removeEventListener("keydown", handleSlipEscape);
   }, [slipLayerId]);
 
+  // Slip mode is scoped to the selected clip: selecting anything else (or clearing the
+  // selection) leaves it, so it can never linger invisibly on an unselected clip.
+  useEffect(() => {
+    if (slipLayerId && !selectedLayerSet.has(slipLayerId)) {
+      setSlipLayerId(null);
+    }
+  }, [slipLayerId, selectedLayerSet]);
+
   return (
     <div className="timeline-workspace">
       {WAVEFORM_GL_ENABLED ? <WaveformGLLayer canvas={glCanvasEl} laneOffsetPx={laneOffsetPx} /> : null}
+      {slipLayerId ? (
+        <div className="timeline-slip-chip" role="status">
+          <span>Slip mode — drag the clip horizontally to shift its source</span>
+          <button type="button" onClick={exitSlipMode}>
+            Exit (Esc)
+          </button>
+        </div>
+      ) : null}
       <div
         className={`timeline-editor scroll-performance-pane ${
           trackHeight <= 30 ? "is-xs-rows" : trackHeight <= 42 ? "is-s-rows" : trackHeight <= 60 ? "is-m-rows" : "is-l-rows"
@@ -3208,7 +3269,18 @@ function TimelineStripImpl({
               <button type="button" title="Duplicate clip (⌘D)" disabled={!selectedLayerId} onClick={() => selectedLayerId && onDuplicateLayer?.(selectedLayerId)}>
                 <Copy size={13} />
               </button>
-              <button type="button" title="Ripple delete — remove and close gap (⇧⌫)" disabled={!selectedLayerId} onClick={() => selectedLayerId && onRippleDeleteLayer?.(selectedLayerId)}>
+              <button
+                type="button"
+                title="Ripple delete — remove and close gap (⇧⌫)"
+                disabled={!selectedLayerId}
+                onClick={() => {
+                  if (selectedLayerIds.length > 1 && onRippleDeleteLayers) {
+                    onRippleDeleteLayers(selectedLayerIds);
+                    return;
+                  }
+                  if (selectedLayerId) onRippleDeleteLayer?.(selectedLayerId);
+                }}
+              >
                 <Trash2 size={13} />
               </button>
               <button type="button" title="Link selected clips" onClick={onLinkSelectedLayers}>
@@ -3737,6 +3809,7 @@ function TimelineStripImpl({
                       onDropAsset={onDropAsset}
                       onDropTimelineEffect={onDropTimelineEffect}
                       onEnterSlipMode={enterSlipMode}
+                      onExitSlipMode={exitSlipMode}
                       onFinishDrag={finishDrag}
                       onFinishKeyframeDrag={finishKeyframeDrag}
                       onFinishResize={finishResize}
@@ -4043,6 +4116,18 @@ function TimelineStripImpl({
             >
               Go to here ({trackContextMenu.timeSeconds.toFixed(2)}s)
             </button>
+            {onPasteLayerAt ? (
+              <button
+                type="button"
+                disabled={!hasClipboardClip}
+                onClick={() => {
+                  onPasteLayerAt(trackContextMenu.timeSeconds);
+                  setTrackContextMenu(null);
+                }}
+              >
+                Paste clip here
+              </button>
+            ) : null}
             <span className="timeline-context-menu-divider" />
             <button
               type="button"
@@ -4139,15 +4224,27 @@ function TimelineStripImpl({
               </button>
             ) : null}
             {clipContextMenu.slippable ? (
-              <button
-                type="button"
-                onClick={() => {
-                  enterSlipMode(clipContextMenu.layerId);
-                  setClipContextMenu(null);
-                }}
-              >
-                Slip source (drag to shift)
-              </button>
+              slipLayerId === clipContextMenu.layerId ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    exitSlipMode();
+                    setClipContextMenu(null);
+                  }}
+                >
+                  Exit slip mode
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    enterSlipMode(clipContextMenu.layerId);
+                    setClipContextMenu(null);
+                  }}
+                >
+                  Slip source (drag to shift)
+                </button>
+              )
             ) : null}
             {clipContextMenu.linked && onUnlinkLayer ? (
               <button
@@ -4288,6 +4385,47 @@ function TimelineStripImpl({
                 })()
               : null}
             <span className="timeline-context-menu-divider" />
+            {(() => {
+              // Split here: only offered when the playhead actually intersects this clip.
+              const contextLayer = composition.tracks.flatMap((track) => track.layers).find((item) => item.id === clipContextMenu.layerId);
+              const playheadInside =
+                contextLayer !== undefined &&
+                currentTime > contextLayer.startSeconds + 0.001 &&
+                currentTime < contextLayer.startSeconds + contextLayer.durationSeconds - 0.001;
+              return onSplitLayerAt && playheadInside ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSplitLayerAt(clipContextMenu.layerId, currentTime);
+                    setClipContextMenu(null);
+                  }}
+                >
+                  Split at playhead (S)
+                </button>
+              ) : null;
+            })()}
+            {onCopyLayer ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onCopyLayer(clipContextMenu.layerId);
+                  setClipContextMenu(null);
+                }}
+              >
+                Copy clip
+              </button>
+            ) : null}
+            {onOpenPasteAttributes && hasClipboardClip ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenPasteAttributes();
+                  setClipContextMenu(null);
+                }}
+              >
+                Paste attributes…
+              </button>
+            ) : null}
             {/* When the right-clicked clip is part of a 2+ selection, act on the WHOLE selection in
                 one undo (selectionCount is already selectedLayerIds.length in that case; else 1). */}
             <button
@@ -4325,6 +4463,20 @@ function TimelineStripImpl({
             >
               {clipContextMenu.selectionCount >= 2 ? `Delete ${clipContextMenu.selectionCount} clips` : "Delete clip"}
             </button>
+            {onRippleDeleteLayer || onRippleDeleteLayers ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (clipContextMenu.selectionCount >= 2 && onRippleDeleteLayers) onRippleDeleteLayers(selectedLayerIds);
+                  else onRippleDeleteLayer?.(clipContextMenu.layerId);
+                  setClipContextMenu(null);
+                }}
+              >
+                {clipContextMenu.selectionCount >= 2
+                  ? `Ripple delete ${clipContextMenu.selectionCount} clips`
+                  : "Ripple delete (⇧⌫)"}
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -4431,12 +4583,15 @@ function smoothBody(src: number[], radius: number): number[] {
 const Waveform = memo(function Waveform({
   layerId,
   url,
+  peaksKey,
   sourceInSeconds,
   durationSeconds,
   tint
 }: {
   layerId: string;
   url?: string | undefined;
+  /** Stable IndexedDB persistence key (asset id) — object URLs change every session. */
+  peaksKey?: string | undefined;
   sourceInSeconds: number;
   durationSeconds: number;
   tint?: string | undefined;
@@ -4458,12 +4613,13 @@ const Waveform = memo(function Waveform({
     registerWaveformClip(layerId, {
       element: el,
       url,
+      peaksKey,
       sourceInSeconds,
       durationSeconds,
       tint: [baseRgb.r / 255, baseRgb.g / 255, baseRgb.b / 255]
     });
     return () => unregisterWaveformClip(layerId);
-  }, [layerId, url, sourceInSeconds, durationSeconds, baseRgb.r, baseRgb.g, baseRgb.b]);
+  }, [layerId, url, peaksKey, sourceInSeconds, durationSeconds, baseRgb.r, baseRgb.g, baseRgb.b]);
 
   // Decode the source into the shared LOD pyramid cache. We only need a "ready" signal in React here —
   // the imperative draw below reads the cached pyramid directly, so scrolling never re-renders.
@@ -4479,13 +4635,13 @@ const Waveform = memo(function Waveform({
       return;
     }
     let active = true;
-    void getAudioPeaks(url).then((p) => {
+    void getAudioPeaks(url, peaksKey).then((p) => {
       if (active) setPyramid(p);
     });
     return () => {
       active = false;
     };
-  }, [url]);
+  }, [url, peaksKey]);
 
   // VIEWPORT RENDERER (see sampleWaveformWindow). Draws ONLY the on-screen slice of the clip, at one
   // device-pixel column per bucket — so visual quality is constant at every zoom and identical to the
@@ -4545,7 +4701,11 @@ const Waveform = memo(function Waveform({
       dirty = false;
 
       // Source-time window under the band → sample at exactly one bucket per device column (1:1).
+      // Cache miss with data we've shown before means the LRU / memory-pressure clear evicted the
+      // pyramid mid-session — kick a re-decode (IDB-backed, usually instant) so the waveform
+      // comes back instead of silently degrading to the placeholder forever.
       const cached = getCachedPyramid(url);
+      if (!cached && url) requestRedecode();
       const startSec = sourceInSeconds + (left / clipW) * durationSeconds;
       const endSec = sourceInSeconds + (right / clipW) * durationSeconds;
       const peaks = cached && durationSeconds > 0 ? sampleWaveformWindow(cached, startSec, endSec, cssW, dpr) : null;
@@ -4613,6 +4773,15 @@ const Waveform = memo(function Waveform({
       dirty = true;
       schedule();
     };
+    let redecodeQueued = false;
+    const requestRedecode = () => {
+      if (redecodeQueued || !url) return;
+      redecodeQueued = true;
+      void getAudioPeaks(url, peaksKey).then((p) => {
+        redecodeQueued = false;
+        if (p) markDirty();
+      });
+    };
     const ro = new ResizeObserver(markDirty);
     ro.observe(host);
     dock?.addEventListener("scroll", schedule, { passive: true });
@@ -4625,7 +4794,7 @@ const Waveform = memo(function Waveform({
       dock?.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", markDirty);
     };
-  }, [url, sourceInSeconds, durationSeconds, layerId, pyramid, bodyRgb, peakFillRgb, peakEdgeRgb]);
+  }, [url, peaksKey, sourceInSeconds, durationSeconds, layerId, pyramid, bodyRgb, peakFillRgb, peakEdgeRgb]);
 
   return (
     <span ref={hostRef} className={`clip-waveform ${pyramid ? "is-real" : "is-loading"}`} aria-hidden="true">
@@ -4964,6 +5133,7 @@ interface TimelineClipProps {
   clipNumber?: number | undefined;
   onClipContextMenu: (event: ReactMouseEvent<HTMLDivElement>, layer: TimelineLayer) => void;
   onEnterSlipMode: (layerId: string) => void;
+  onExitSlipMode: () => void;
   onStartDrag: (event: PointerEvent<HTMLDivElement>, layer: TimelineLayer) => void;
   onMoveDrag: (event: PointerEvent<HTMLDivElement>) => void;
   onFinishDrag: (event: PointerEvent<HTMLDivElement>) => void;
@@ -5027,6 +5197,7 @@ const TimelineClip = memo(function TimelineClip({
   clipNumber,
   onClipContextMenu,
   onEnterSlipMode,
+  onExitSlipMode,
   onStartDrag,
   onMoveDrag,
   onFinishDrag,
@@ -5113,6 +5284,10 @@ const TimelineClip = memo(function TimelineClip({
           return;
         }
         event.stopPropagation();
+        if (isSlipping) {
+          onExitSlipMode();
+          return;
+        }
         onEnterSlipMode(layer.id);
       }}
       onContextMenu={(event) => onClipContextMenu(event, layer)}
@@ -5288,6 +5463,7 @@ const TimelineClip = memo(function TimelineClip({
         <Waveform
           layerId={layer.id}
           url={audioUrl}
+          peaksKey={layer.assetId}
           sourceInSeconds={isSlipping ? (slipPreviewSourceInSeconds ?? layer.sourceInSeconds ?? 0) : (layer.sourceInSeconds ?? 0)}
           durationSeconds={layer.durationSeconds}
           tint={labelColor}
@@ -5326,6 +5502,14 @@ const TimelineClip = memo(function TimelineClip({
       ))}
       {clipNumber !== undefined ? (
         <span className="clip-number" aria-hidden="true">{clipNumber}</span>
+      ) : null}
+      {/* Flarex badge (FLAREX.md): the clip renders through a node comp — Shift+F opens it.
+          A DIRECT child of the clip (like .clip-number), NOT inside .clip-label — the label bar
+          is display:none on video clips at S/XS row heights, which would hide the badge. */}
+      {layer.flarexCompId ? (
+        <span className="clip-flarex-badge" aria-hidden="true" title="Has a Flarex node comp (Shift+F)">
+          fx
+        </span>
       ) : null}
       <span className="clip-label">
         <span className="clip-icon" aria-hidden="true">{clipTypeIcon(layer.type)}</span>

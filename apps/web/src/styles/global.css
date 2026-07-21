@@ -5466,20 +5466,42 @@ input[type="checkbox"] {
    [max-content, 1fr] silently measured .studio-tabs as max-content and let the asset bin
    collapse to content height (footer floated mid-panel). Scoped to a VISIBLE asset bin: the
    always-mounted (hidden) instance must not impose full-height rows on the other tabs. */
-.studio-panel:has(.panel-tab-content:not(.panel-tab-hidden) .asset-bin) {
+.studio-panel:has(.panel-tab-content:not(.panel-tab-hidden) :is(.asset-bin, .panel-scopes-host)) {
   grid-template-rows: minmax(0, 1fr);
   align-content: stretch;
   min-height: 0;
 }
 
-.studio-panel:has(.panel-tab-content:not(.panel-tab-hidden) .asset-bin) .studio-tabs {
+.studio-panel:has(.panel-tab-content:not(.panel-tab-hidden) :is(.asset-bin, .panel-scopes-host)) .studio-tabs {
   min-height: 0;
   grid-template-rows: max-content minmax(0, 1fr);
 }
 
-.studio-panel:has(.panel-tab-content:not(.panel-tab-hidden) .asset-bin) .panel-tab-content {
+.studio-panel:has(.panel-tab-content:not(.panel-tab-hidden) :is(.asset-bin, .panel-scopes-host)) .panel-tab-content {
   height: 100%;
   min-height: 0;
+  /* The tab content is a grid whose single row was implicitly `auto` — the asset bin's
+     height:100% then resolved against an auto-sized area (circular) and collapsed to content
+     height, ending the scroll area mid-panel; the masonry columns overflowed HORIZONTALLY into
+     the extra space ("media pool is half cut", 2026-07-21). An explicit 1fr row pins the chain. */
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* Scopes as a left-panel view (panelTab "scopes"): fill the whole media-pool column. */
+.panel-tab-content:has(.panel-scopes-host) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.panel-scopes-host {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
+.panel-scopes-host .color-scopes {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
 }
 
 .project-settings-panel {
@@ -5680,7 +5702,7 @@ input[type="checkbox"] {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 3px;
   /* Darker matte than the surrounding panels so the canvas reads as the focal surface. */
   background: var(--nle-bg);
 }
@@ -6095,18 +6117,22 @@ input[type="checkbox"] {
    islands (user report 2026-07-03). */
 .viewer-controls {
   position: relative;
-  min-height: 34px;
+  min-height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
   /* Wide inter-group gap so the readout / quality / transport / zoom clusters read as distinct
      groups within the centered row (user: 10px felt cluttered). */
   gap: 18px;
-  padding: 3px 8px;
-  /* De-box: the controls row separates from the canvas by shade, not a hairline. */
+  /* A little breathing room top/bottom (user 2026-07-21) — not the old fat 34px bar, just enough
+     that the controls don't sit flush against the canvas edge and the timeline below. */
+  padding: 5px 8px;
+  /* Lifted to the CHROME panel tone (--editor-surface = --nle-panel) so it matches the timeline
+     toolbar and the media-pool panel — the editor's control bars are all this lighter bluish
+     surface; leaving it dark made it the odd one out (user 2026-07-21). */
   border: none;
   border-radius: var(--editor-radius-sm);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--editor-surface);
   user-select: none;
 }
 
@@ -6118,10 +6144,10 @@ input[type="checkbox"] {
 .viewer-transport-control,
 .preview-quality-control,
 .viewer-zoom-control {
-  height: 30px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
-  padding: 3px;
+  padding: 2px;
   border: none;
   border-radius: 8px;
   /* Minimal: no pill/box behind the cluster — icons sit directly on the viewer-controls bar,
@@ -6146,7 +6172,7 @@ input[type="checkbox"] {
 }
 
 .viewer-transport-control button:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
@@ -6167,14 +6193,14 @@ input[type="checkbox"] {
 }
 
 .viewer-autokey-toggle:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
 .viewer-autokey-toggle.is-active {
-  background: color-mix(in srgb, var(--nle-accent) 16%, transparent);
-  border-color: color-mix(in srgb, var(--nle-accent) 45%, transparent);
-  color: var(--primary, var(--nle-accent));
+  background: var(--editor-accent-bg);
+  border-color: transparent;
+  color: var(--editor-accent);
 }
 
 .viewer-time-readout {
@@ -6202,14 +6228,14 @@ input[type="checkbox"] {
   font-weight: 1000;
 }
 
-.viewer-controls .preview-quality-control button:hover {
-  background: rgba(255, 255, 255, 0.06);
+.viewer-controls .preview-quality-control button:hover:not(.is-active) {
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
 .viewer-controls .preview-quality-control button.is-active {
-  background: color-mix(in srgb, var(--nle-accent) 16%, transparent);
-  color: #fff;
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
 }
 
 .viewer-zoom-control {
@@ -6306,16 +6332,16 @@ input[type="checkbox"] {
 
 .viewer-controls .zoom-preset-select .themed-select-trigger:hover,
 .viewer-controls .zoom-fit-button:hover {
-  border-color: rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.035);
+  border-color: transparent;
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
 .viewer-controls .zoom-preset-select .themed-select-trigger[aria-expanded="true"],
 .zoom-fit-button.is-active {
-  border-color: color-mix(in srgb, var(--nle-accent) 45%, transparent);
-  background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
-  color: #fff;
+  border-color: transparent;
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
 }
 
 .viewer-controls .zoom-preset-buttons button {
@@ -7941,8 +7967,10 @@ input[type="checkbox"] {
   padding: 4px;
   border: 1px solid var(--editor-border);
   border-radius: var(--editor-radius-sm);
+  /* Cool tone to match the editor (user 2026-07-21): the white linear overlay read grey; a faint
+     cool lift over --nle-bg keeps the frame in the same bluish family as the panels/timeline. */
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+    linear-gradient(180deg, rgba(96, 132, 205, 0.03), transparent),
     var(--nle-bg);
   position: relative;
 }
@@ -9595,20 +9623,29 @@ input[type="checkbox"] {
    Lighter vignette matte behind the canvas + a crisp 1px ring on the comp box. */
 .editor-viewer .preview-viewport {
   border-radius: 3px;
+  /* Cool matte in the SAME family as the rest of the editor (user 2026-07-21: the viewer read grey
+     against the bluish editor). The old base was a greyer #14171d lifted by a WHITE radial — the
+     white is what desaturated it to grey. Now: --nle-bg base + a faint COOL/blue focal lift, so it
+     stays bluish; the comp-boundary ring keeps a black comp findable against it. */
   background:
-    radial-gradient(120% 90% at 50% 42%, rgba(255, 255, 255, 0.05), transparent 72%),
-    #14171d;
+    radial-gradient(120% 90% at 50% 42%, rgba(96, 132, 205, 0.06), transparent 72%),
+    var(--nle-bg);
 }
 
+/* Boundary ring toned WAY down (user request 2026-07-21: "remove the white border"): the comp box
+   still gets a hairline so a pure-black comp remains findable against the matte (the 2026-07-12
+   rationale), but it reads as an edge, not a frame. The base .phone-frame border is dropped here —
+   it stacked with the ring into a visible double line. */
 .editor-viewer .phone-frame {
+  border: none;
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.24),
+    0 0 0 1px rgba(255, 255, 255, 0.07),
     0 16px 48px rgba(0, 0, 0, 0.55);
 }
 
-/* Performance quality drops the soft shadow but KEEPS the boundary ring. */
+/* Performance quality drops the soft shadow but KEEPS the (subtle) boundary ring. */
 .editor-viewer .preview-stage.preview-quality-performance .phone-frame {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.24);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07);
 }
 
 /* In the editor, the frame adopts the composition's aspect ratio (portrait, square,
@@ -9855,6 +9892,43 @@ input[type="checkbox"] {
   min-width: max-content;
 }
 
+/* Slip-mode chip: fixed banner over the timeline while a clip is in slip mode, with an
+   explicit exit affordance (Esc / double-click also leave the mode). */
+.timeline-slip-chip {
+  position: sticky;
+  top: 4px;
+  left: 8px;
+  z-index: 40;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 -28px 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent, #7c6cff) 55%, transparent);
+  background: color-mix(in srgb, var(--surface-2, #17181d) 88%, var(--accent, #7c6cff) 12%);
+  color: var(--text-1, #e8e8ee);
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: auto;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.timeline-slip-chip button {
+  border: 1px solid color-mix(in srgb, var(--accent, #7c6cff) 65%, transparent);
+  background: color-mix(in srgb, var(--accent, #7c6cff) 25%, transparent);
+  color: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.timeline-slip-chip button:hover {
+  background: color-mix(in srgb, var(--accent, #7c6cff) 45%, transparent);
+}
+
 /* Add-layer tools: a horizontal group inside the sticky timebar (was a vertical left rail). */
 .timeline-side-tools {
   display: inline-flex;
@@ -9874,6 +9948,20 @@ input[type="checkbox"] {
   padding: 0;
   font-size: 0.68rem;
   font-weight: 900;
+}
+
+/* Match the shared flat hover (viewer toolbar / media pool / transport) — the base rule above still
+   carried the old translucent-white + border hover, the last outlier after the 2026-07-21 pass. */
+.timeline-side-tools button:hover {
+  border-color: transparent;
+  background: var(--nle-panel-3);
+  color: #fff;
+}
+
+.timeline-side-tools button.is-active {
+  border-color: transparent;
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
 }
 
 .timeline-side-tools > span {
@@ -10586,8 +10674,8 @@ input.scrub-number:focus {
   color: rgba(161, 161, 170, 0.72);
 }
 
-.timeline-toolbar button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.07);
+.timeline-toolbar button:hover:not(:disabled):not(.is-active) {
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
@@ -13988,17 +14076,19 @@ input.scrub-number:focus {
 }
 
 .asset-control-strip .asset-upload-button {
-  width: 27px;
-  min-height: 25px;
+  width: 24px;
+  min-height: 22px;
+  height: 22px;
   padding: 0;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--muted);
+  border: none;
+  border-radius: var(--nle-radius-xs);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--editor-text-muted);
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
 .asset-control-strip .asset-upload-button:hover {
-  background: color-mix(in srgb, var(--nle-accent) 14%, transparent);
-  border-color: color-mix(in srgb, var(--nle-accent) 36%, transparent);
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
@@ -14175,8 +14265,12 @@ input.scrub-number:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  overflow: hidden;
+  gap: 6px;
+  /* Wrap the clusters onto a second line when the panel is narrow instead of clipping them behind a
+     horizontal scrollbar (2026-07-21: the bottom strip showed a scrollbar with the filters half
+     hidden). No hidden-scroll traps — every control stays reachable. */
+  flex-wrap: wrap;
+  row-gap: 5px;
   padding-bottom: 1px;
   margin-top: auto;
   padding-top: 5px;
@@ -14193,13 +14287,8 @@ input.scrub-number:focus {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.asset-control-left::-webkit-scrollbar {
-  display: none;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .asset-control-actions {
@@ -14210,56 +14299,68 @@ input.scrub-number:focus {
   gap: 5px;
 }
 
+/* Segmented pill (filters, view controls) — the shared flat button language: the row is a subtle
+   container, buttons are borderless, hover is neutral, active is the accent tint. Replaces the old
+   per-chip boxed look (each chip its own border + 900-weight text) that read as "old" and heavy. */
 .asset-icon-row {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   flex: 0 0 auto;
   min-width: 0;
+  padding: 2px;
+  border-radius: var(--nle-radius-sm);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .asset-icon-row button {
   flex: 0 0 auto;
-  min-width: 27px;
-  height: 25px;
+  min-width: 24px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--muted);
+  gap: 4px;
+  padding: 0 7px;
+  border: none;
+  border-radius: var(--nle-radius-xs);
+  background: transparent;
+  color: var(--editor-text-muted);
   cursor: pointer;
-  font-size: 0.7rem;
-  font-weight: 900;
+  font-size: 0.68rem;
+  font-weight: 700;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
-.asset-icon-row button:hover,
-.asset-icon-row button.is-active {
-  background: color-mix(in srgb, var(--nle-accent) 14%, transparent);
-  border-color: color-mix(in srgb, var(--nle-accent) 36%, transparent);
+.asset-icon-row button:hover:not(.is-active) {
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
+.asset-icon-row button.is-active {
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+
+/* Standalone action buttons (New bin, Upload) — same flat icon-button footprint, faint resting
+   fill so they read as tappable without the old heavy border. */
 .asset-toolbar-button {
   flex: 0 0 auto;
-  width: 27px;
-  height: 25px;
+  width: 24px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--muted);
+  border: none;
+  border-radius: var(--nle-radius-xs);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--editor-text-muted);
   cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
 .asset-toolbar-button:hover {
-  background: color-mix(in srgb, var(--nle-accent) 14%, transparent);
-  border-color: color-mix(in srgb, var(--nle-accent) 36%, transparent);
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
@@ -14555,22 +14656,26 @@ input.scrub-number:focus {
   background: var(--editor-panel);
 }
 
+/* Flat segmented control, matching the viewer toolbar (.preview-tools) — the shared button language
+   across the editor (2026-07-21): borderless buttons in a subtle container, accent tint only when
+   active, lighter weight so more of each label fits before it truncates. */
 .asset-bin-tabs button {
   flex: 1 1 0;
   min-width: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  height: 28px;
+  gap: 4px;
+  height: 26px;
   padding: 0 4px;
-  border: 1px solid transparent;
-  border-radius: var(--editor-radius-sm);
+  border: none;
+  border-radius: var(--nle-radius-xs);
   background: transparent;
   color: var(--editor-text-muted);
   cursor: pointer;
-  font-size: 0.72rem;
-  font-weight: 800;
+  font-size: 0.7rem;
+  font-weight: 600;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
 .asset-bin-tabs button span {
@@ -14580,12 +14685,11 @@ input.scrub-number:focus {
 }
 
 .asset-bin-tabs button:hover:not(.is-active) {
-  background: var(--editor-panel-soft);
+  background: var(--nle-panel-3);
   color: #fff;
 }
 
 .asset-bin-tabs button.is-active {
-  border-color: var(--editor-accent-border);
   background: var(--editor-accent-bg);
   color: var(--editor-accent);
 }
@@ -16363,14 +16467,98 @@ input.scrub-number:focus {
   stroke: #e5e7eb;
 }
 
-.hue-sat-curves .graph-editor-point {
-  fill: #e5e7eb;
-  stroke: #0b0c10;
+/* Point fill comes from the SVG `fill` attribute (the applied color at that point) — no CSS
+   fill here or it would override the per-point feedback color. */
+
+/* Stacked vertical layout (Premiere-style): all five graphs visible + editable at once. */
+.hue-sat-curves-stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hue-sat-curves-title {
+  font-size: 0.66rem;
+  color: var(--muted);
+  margin-right: auto;
+}
+
+.hue-sat-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hue-sat-graph-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hue-sat-graph-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.62rem;
+  color: var(--text-2, #cfd2dc);
+  margin-right: auto;
+}
+
+.hue-sat-graph.is-edited .hue-sat-graph-label {
+  color: var(--nle-accent);
+}
+
+/* Color picker chip: the pipette icon overlays a native color input for a compact affordance. */
+.hue-sat-graph-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.hue-sat-graph-picker:hover {
+  color: var(--text-1, #e8e8ee);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.hue-sat-graph-picker input[type="color"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  padding: 0;
+  border: none;
+}
+
+/* Shorter per-graph frames so five stack comfortably; curve color IS the axis (no bottom strip). */
+.hue-sat-graph-svg.curve-editor-svg {
+  aspect-ratio: auto;
+  min-height: 74px;
+  max-height: 96px;
+}
+
+.hue-sat-curve-segment {
+  stroke-width: 7;
+  stroke-linecap: round;
+  fill: none;
+}
+
+/* Keyframe-quality handles: colored core (the applied result at that point) with a crisp rim. */
+.hue-sat-graph-point {
+  stroke: rgba(255, 255, 255, 0.9);
   stroke-width: 3;
 }
 
-.hue-sat-curves .graph-editor-point.is-selected {
-  fill: var(--nle-accent);
+.hue-sat-graph-point.is-selected {
+  stroke: var(--nle-accent);
+  stroke-width: 4;
 }
 
 /* HSL Secondary keyer (Phase 3 color, 13C.3). */
@@ -16935,17 +17123,19 @@ input.scrub-number:focus {
   grid-column: 1 / -1;
 }
 
+/* Match the inspector's 24px row rhythm (the 30px/900-weight pills read as oversized outliers
+   next to the compact rows around them — 2026-07-21 consistency pass). */
 .fit-canvas-actions button {
   min-width: 0;
-  min-height: 30px;
+  min-height: 24px;
   padding: 0 8px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 7px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.045);
   color: rgba(255, 255, 255, 0.82);
   cursor: pointer;
-  font-size: 0.7rem;
-  font-weight: 900;
+  font-size: 0.68rem;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -20037,11 +20227,200 @@ input.scrub-number:focus {
 /* --- Color scopes ---------------------------------------------------------- */
 .color-scopes {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 6px;
   padding: 7px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: rgba(0, 0, 0, 0.25);
+}
+
+/* Head row: mode tabs (single layout) or title, then the layout switcher + optional host action. */
+.color-scopes-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.color-scopes-head .color-scopes-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.color-scopes-head-title {
+  flex: 1 1 auto;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-left: 2px;
+}
+
+.color-scopes-layouts {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.color-scopes-layout {
+  width: 22px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.color-scopes-layout:hover:not(.color-scopes-layout--active) {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.color-scopes-layout--active {
+  background: color-mix(in srgb, var(--nle-accent) 14%, transparent);
+  color: #fff;
+}
+
+/* Pane arena: layout-dependent grid of 1–4 analyzer panes. */
+.color-scopes-panes {
+  display: grid;
+  gap: 6px;
+  min-height: 0;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.color-scopes[data-layout="two"] .color-scopes-panes {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.color-scopes[data-layout="grid"] .color-scopes-panes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+/* Column = all four stacked; scrolls when the host is shorter than 4 readable panes. */
+.color-scopes[data-layout="column"] .color-scopes-panes {
+  overflow-y: auto;
+  grid-auto-rows: minmax(170px, 1fr);
+}
+
+.color-scopes-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.color-scopes-pane-label {
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-left: 2px;
+}
+
+.color-scopes-pane-select {
+  align-self: flex-start;
+  font-size: 10px;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+/* The canvas backing store tracks this wrapper's laid-out size (ResizeObserver in ColorScopes),
+   so the analyzer fills whatever space the host gives the pane. */
+.color-scopes-canvas-wrap {
+  flex: 1 1 auto;
+  min-height: 120px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 6px;
+}
+
+/* Inspector Color tab host: a collapsible "Scopes" row above the Lumetri sections, styled to sit
+   flush with them, with a pop-out to the full-height left-panel view. */
+.inspector-scopes {
+  display: grid;
+  gap: 6px;
+}
+
+.inspector-scopes-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.inspector-scopes-toggle {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inspector-scopes-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.inspector-scopes-popout {
+  width: 26px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.inspector-scopes-popout:hover {
+  background: color-mix(in srgb, var(--nle-accent) 14%, transparent);
+  color: #fff;
+}
+
+/* Compact in the narrow inspector column: shorter panes than the drawer/left-panel hosts. */
+.inspector-scopes .color-scopes-canvas-wrap {
+  min-height: 130px;
+}
+
+.inspector-scopes .color-scopes[data-layout="column"] .color-scopes-panes {
+  grid-auto-rows: minmax(130px, 1fr);
+}
+
+/* Scopes hosted in the bottom workspace (graph-editor drawer): fill the drawer's full width and
+   height — the analyzer trace is the whole point of the tab, so it gets all the space. */
+.bottom-workspace-scopes {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px;
+  display: flex;
+}
+
+.bottom-workspace-scopes .color-scopes {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
 }
 
 .color-scopes-tabs {
@@ -21940,4 +22319,382 @@ input.scrub-number:focus {
 .timelines-row-badge.is-count {
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.7);
+}
+
+/* ── Flarex CG page (FLAREX.md) ──────────────────────────────────────────────────────────────── */
+
+.flarex-page-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px 8px 0;
+  align-items: flex-end;
+  background: rgba(12, 14, 18, 0.85);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.flarex-page-tabs button {
+  appearance: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: rgba(230, 236, 244, 0.55);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 3px 14px;
+  border-radius: 5px 5px 0 0;
+  cursor: pointer;
+}
+.flarex-page-tabs button:hover {
+  color: rgba(230, 236, 244, 0.85);
+}
+.flarex-page-tabs button.is-active {
+  color: #e8b04b;
+  background: rgba(38, 42, 50, 0.9);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.flarex-workspace {
+  display: flex;
+  flex-direction: column;
+  min-height: 260px;
+  height: 100%;
+  background: #14161b;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.flarex-workspace-empty {
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: rgba(230, 236, 244, 0.6);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px;
+}
+.flarex-workspace-empty p {
+  margin: 0;
+}
+.flarex-hint {
+  font-size: 11px;
+  color: rgba(230, 236, 244, 0.4);
+}
+.flarex-create-btn {
+  appearance: none;
+  border: 1px solid rgba(232, 176, 75, 0.5);
+  background: rgba(232, 176, 75, 0.12);
+  color: #e8b04b;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.flarex-create-btn:hover {
+  background: rgba(232, 176, 75, 0.22);
+}
+
+.flarex-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(20, 23, 28, 0.95);
+  overflow-x: auto;
+  flex: 0 0 auto;
+}
+.flarex-toolbar-comp {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.8);
+  white-space: nowrap;
+  padding-right: 8px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+.flarex-toolbar-comp-input {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.8);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 6px 2px 4px;
+  margin-right: 8px;
+  width: 140px;
+  min-width: 60px;
+}
+.flarex-toolbar-comp-input:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.flarex-toolbar-comp-input:focus {
+  outline: none;
+  border-color: rgba(232, 176, 75, 0.6);
+  background: rgba(12, 14, 18, 0.6);
+}
+.flarex-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.flarex-toolbar-group-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(230, 236, 244, 0.35);
+  padding-right: 2px;
+  white-space: nowrap;
+}
+.flarex-toolbar-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(38, 42, 50, 0.8);
+  color: rgba(230, 236, 244, 0.8);
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.flarex-toolbar-btn:hover {
+  border-color: rgba(232, 176, 75, 0.5);
+  color: #e8b04b;
+}
+
+.flarex-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.flarex-canvas-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+  background: #101216;
+}
+.flarex-canvas {
+  display: block;
+  touch-action: none;
+}
+
+.flarex-inspector {
+  flex: 0 0 240px; /* overridden inline by the resizable width */
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(20, 23, 28, 0.95);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  position: relative;
+  min-width: 240px;
+  max-width: 560px;
+}
+/* Fusion-style frame ruler above the node canvas (clip-local frames on the shared transport). */
+.flarex-framebar {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 0 10px;
+  height: 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(16, 18, 22, 0.9);
+  user-select: none;
+}
+.flarex-framebar-ruler {
+  position: relative;
+  flex: 1 1 auto;
+  cursor: pointer;
+  touch-action: none;
+  /* Second ticks via a repeating gradient sized per second (--tick-w set inline). */
+  background-image: repeating-linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0.14) 0 1px,
+    transparent 1px var(--tick-w, 10%)
+  );
+  background-size: 100% 7px;
+  background-position: 0 bottom;
+  background-repeat: no-repeat;
+}
+.flarex-framebar-label {
+  position: absolute;
+  top: 1px;
+  transform: translateX(2px);
+  font-size: 8.5px;
+  letter-spacing: 0.02em;
+  color: rgba(230, 236, 244, 0.4);
+  pointer-events: none;
+}
+.flarex-framebar-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #e8b04b;
+  box-shadow: 0 0 4px rgba(232, 176, 75, 0.5);
+  pointer-events: none;
+}
+.flarex-framebar-readout {
+  align-self: center;
+  min-width: 44px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #e8b04b;
+}
+
+/* Left-edge resize handle (width persisted). */
+.flarex-inspector-resize {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 3;
+  touch-action: none;
+}
+.flarex-inspector-resize:hover {
+  background: rgba(232, 176, 75, 0.35);
+}
+/* Main-inspector rows inside the flarex panel: same shells, slightly tightened gutters. */
+.flarex-inspector-body .effect-slider-control {
+  min-width: 0;
+}
+.flarex-row-select select,
+.flarex-row-text input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: rgba(230, 236, 244, 0.85);
+  font-size: 10.5px;
+  padding: 2px 6px;
+}
+.flarex-row-color input[type="color"] {
+  width: 100%;
+  height: 18px;
+  border: none;
+  background: none;
+  padding: 0;
+}
+.flarex-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.flarex-inspector-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.9);
+}
+.flarex-inspector-enable {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.6);
+  cursor: pointer;
+}
+.flarex-inspector-body {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.flarex-inspector-empty {
+  padding: 18px 10px;
+  font-size: 11px;
+  color: rgba(230, 236, 244, 0.4);
+  text-align: center;
+}
+.flarex-param-row {
+  display: grid;
+  grid-template-columns: 82px 1fr 56px;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: rgba(230, 236, 244, 0.7);
+}
+.flarex-param-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flarex-param-row input[type="range"] {
+  width: 100%;
+  height: 14px;
+  accent-color: #e8b04b;
+}
+.flarex-param-row input[type="text"],
+.flarex-param-row select,
+.flarex-param-num {
+  grid-column: 2 / 4;
+  background: rgba(12, 14, 18, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: rgba(230, 236, 244, 0.85);
+  font-size: 10.5px;
+  padding: 2px 6px;
+  min-width: 0;
+}
+.flarex-param-row input[type="range"] + .flarex-param-num {
+  grid-column: 3 / 4;
+}
+.flarex-param-row input[type="color"] {
+  grid-column: 2 / 4;
+  width: 100%;
+  height: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+}
+.flarex-param-bool {
+  grid-template-columns: 82px 1fr;
+}
+.flarex-param-bool input {
+  justify-self: start;
+  accent-color: #e8b04b;
+}
+.flarex-param-multiline {
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 3px;
+}
+.flarex-param-multiline textarea {
+  grid-column: 1 / -1;
+  background: rgba(12, 14, 18, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: rgba(230, 236, 244, 0.85);
+  font-size: 10px;
+  font-family: monospace;
+  padding: 4px 6px;
+  resize: vertical;
+  min-width: 0;
+}
+
+/* Flarex clip badge (FLAREX.md): marks clips that render through a node comp. Positioned like
+   .clip-number (direct clip child, top-left corner, right of the number) so it stays visible at
+   every row height — the .clip-label bar it originally lived in is hidden at S/XS rows. */
+.timeline-editor .timeline-clip .clip-flarex-badge {
+  position: absolute;
+  top: 2px;
+  left: 17px;
+  z-index: 4;
+  color: #10131a;
+  background: #e8b04b;
+  border-radius: 3px;
+  padding: 0 3px;
+  height: 12px;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 12px;
+  text-transform: uppercase;
+  pointer-events: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
