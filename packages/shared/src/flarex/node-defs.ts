@@ -22,7 +22,7 @@ export interface FlarexNodeDefinition {
   type: FlarexNodeType;
   label: string;
   /** Palette grouping (Fusion-style toolbar sections). */
-  group: "io" | "composite" | "color" | "filter" | "mask" | "generator" | "tracking";
+  group: "io" | "composite" | "color" | "filter" | "mask" | "generator" | "tracking" | "layout";
   inputs: FlarexSocketDef[];
   outputs: FlarexSocketDef[];
   /** `.strict()` schema whose defaults define the node's initial params (output must stay
@@ -315,6 +315,32 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
       invert: z.boolean().default(false),
     }).strict(),
     keyframeable: ["feather"],
+    phase: 1.5,
+  },
+  backdrop: {
+    label: "Backdrop",
+    group: "layout",
+    // No sockets — pure canvas organization, never enters the lowering DFS (the compiler cannot
+    // reach it: nothing can wire FROM a node with no outputs).
+    inputs: [],
+    outputs: [],
+    params: z.object({
+      title: z.string().default("Backdrop"),
+      color: z.string().default("#3a3f4a"),
+      w: num(320, 80, 4000),
+      h: num(200, 60, 4000),
+    }).strict(),
+    keyframeable: [],
+    phase: 1.5,
+  },
+  reroute: {
+    label: "Reroute",
+    group: "layout",
+    // Fusion-style wire dot: pure pass-through (organization only — same image type in and out).
+    inputs: [image("in", "In", true)],
+    outputs: OUT,
+    params: z.object({}).strict(),
+    keyframeable: [],
     phase: 1.5,
   },
   tracker: {

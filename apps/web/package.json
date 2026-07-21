@@ -22,7 +22,9 @@
     "world:eval": "tsx src/ai/world/world-eval.test.ts",
     "blueprint:eval": "tsx src/ai/world/blueprint-eval.test.ts",
     "continuity:test": "tsx src/ai/planner/continuity.test.ts",
-    "memory:test": "tsx src/ai/memory.test.ts"
+    "memory:test": "tsx src/ai/memory.test.ts",
+    "flarex:clipboard:test": "tsx src/editor/flarex/flarex-clipboard.test.ts",
+    "flarex:align:test": "tsx src/editor/flarex/flarex-align.test.ts"
   },
   "dependencies": {
     "@fontsource/inter": "^5.2.8",

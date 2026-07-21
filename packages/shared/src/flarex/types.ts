@@ -37,7 +37,9 @@ export type FlarexNodeType =
   | "lumaKey"
   | "text"
   | "aiMatte"
-  | "tracker";
+  | "tracker"
+  | "backdrop"
+  | "reroute";
 
 export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "mediaIn",
@@ -61,6 +63,8 @@ export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "text",
   "aiMatte",
   "tracker",
+  "backdrop",
+  "reroute",
 ] as const;
 
 export interface FlarexNode {

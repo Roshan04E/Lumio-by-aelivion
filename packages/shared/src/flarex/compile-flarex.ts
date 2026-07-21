@@ -316,6 +316,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "mediaOut":
         return inputValue(node, "in");
 
+      // Reroute (F2, round 3): pure pass-through — a wire-organization dot, never alters output.
+      case "reroute":
+        return inputValue(node, "in");
+
       case "merge": {
         const bg = imageInput(node, "bg");
         let fg = imageInput(node, "fg");
@@ -391,12 +395,26 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "hueSat": {
         const input = imageInput(node, "in");
         if (!input) return null;
-        const paramKey = node.type === "colorCurves" ? "curves" : "hueCurves";
-        const payload = str(node, paramKey, "");
+        // Node storage key vs. the effect-registry's own param key differ (composition-style.ts
+        // reads `colorCurves` effects via `params.curve` and `hueSatCurves` via `params.curves`,
+        // both singular/plural mismatches from the node's own param name — keep both straight).
+        const nodeParamKey = node.type === "colorCurves" ? "curves" : "hueCurves";
+        const effectParamKey = node.type === "colorCurves" ? "curve" : "curves";
+        const payload = str(node, nodeParamKey, "");
         if (!payload) return { kind: "image", draw: input };
         const effectType = node.type === "colorCurves" ? "colorCurves" : "hueSatCurves";
-        const pipeline = pipelineFor(node.id, effectType, { [paramKey]: payload });
+        const pipeline = pipelineFor(node.id, effectType, { [effectParamKey]: payload });
         if (!pipeline) return { kind: "image", draw: input };
+        const mask = matteInput(node, "mask");
+        if (mask) {
+          const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
+          if (raster) {
+            return {
+              kind: "image",
+              draw: pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline }),
+            };
+          }
+        }
         const wrap = wrapFor(input, STAGE_PIPELINE);
         wrap.pipeline = pipeline;
         wrap.groupKey = `flarex_${comp.id}_${node.id}`;

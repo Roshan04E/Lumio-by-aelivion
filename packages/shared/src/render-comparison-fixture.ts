@@ -101,7 +101,13 @@ export type RenderComparisonFixtureKey =
   | "nested-junction-transition"
   | "nested-junction-preroll"
   | "texture-fill"
-  | "flarex-key-glow";
+  | "flarex-key-glow"
+  | "flarex-curves"
+  | "flarex-keyframed-blur"
+  | "flarex-merge-blend"
+  | "flarex-transform"
+  | "flarex-ellipse-matte"
+  | "flarex-reroute";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -146,7 +152,13 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "nested-junction-transition",
   "nested-junction-preroll",
   "texture-fill",
-  "flarex-key-glow"
+  "flarex-key-glow",
+  "flarex-curves",
+  "flarex-keyframed-blur",
+  "flarex-merge-blend",
+  "flarex-transform",
+  "flarex-ellipse-matte",
+  "flarex-reroute"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -537,6 +549,130 @@ function buildFlarexKeyGlowComp(): FlarexComp {
   return comp;
 }
 
+// N2 (plans/flarex-sonnet-execution-2.md): locks 3-renderer parity for the colorCurves node's
+// lowering path, which the compiler previously built with a MISMATCHED synthetic effect param key
+// (node stores `curves`, but the `colorCurves` effect type's pipeline reads `params.curve` —
+// singular — so the node silently passed through). A strong, visible S-curve on the master channel
+// makes a broken param-key wiring show up as a real pixel diff, not a silent no-op.
+function buildFlarexCurvesComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_curves_comp", "Flarex curves fixture");
+  const curves = createFlarexNode("colorCurves", "fixture_flarex_curves");
+  curves.params = {
+    ...curves.params,
+    curves: JSON.stringify({
+      master: [
+        { x: 0, y: 0 },
+        { x: 0.25, y: 0.06 },
+        { x: 0.75, y: 0.94 },
+        { x: 1, y: 1 }
+      ]
+    })
+  };
+  comp.nodes[curves.id] = curves;
+  comp.edges = [
+    { id: "fixture_flarex_curves_e1", from: { nodeId: "fixture_flarex_curves_comp_in", socket: "out" }, to: { nodeId: curves.id, socket: "in" } },
+    { id: "fixture_flarex_curves_e2", from: { nodeId: curves.id, socket: "out" }, to: { nodeId: "fixture_flarex_curves_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+// N5 (plans/flarex-sonnet-execution-2.md, round-1 leftover): the harness renders ONE frame per
+// fixture (`renderComparisonFrameSeconds` = 0.45s), so a keyframed-param fixture must sample
+// MID-animation (not at a keyframe's own timestamp) — a broken evaluator path (e.g. one renderer
+// silently ignoring `comp.animations` and using the base param) would still coincidentally match
+// at t=0, but diverges at any interpolated point.
+function buildFlarexKeyframedBlurComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_kfblur_comp", "Flarex keyframed blur fixture");
+  const blur = createFlarexNode("blur", "fixture_flarex_kfblur");
+  comp.nodes[blur.id] = blur;
+  comp.edges = [
+    { id: "fixture_flarex_kfblur_e1", from: { nodeId: "fixture_flarex_kfblur_comp_in", socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: "fixture_flarex_kfblur_e2", from: { nodeId: blur.id, socket: "out" }, to: { nodeId: "fixture_flarex_kfblur_comp_out", socket: "in" } }
+  ];
+  // 0 -> 40px over t=[0, 1]; sampled at the harness's fixed frame (0.45s) lands mid-ramp (~18px),
+  // nowhere near either keyframe's own value.
+  comp.animations = [
+    { id: "fixture_flarex_kfblur_k0", target: { scope: "flarexNode", effectId: blur.id, property: "sigma" }, timeSeconds: 0, value: 0, interpolation: "linear", temporal: {} },
+    { id: "fixture_flarex_kfblur_k1", target: { scope: "flarexNode", effectId: blur.id, property: "sigma" }, timeSeconds: 1, value: 40, interpolation: "linear", temporal: {} }
+  ];
+  return comp;
+}
+
+// F6 (plans/flarex-sonnet-execution-3.md): merge with a NON-NORMAL blend mode. MediaIn feeds both
+// merge inputs — bg unchanged, fg pushed through ColorCorrect first — so `multiply` at partial
+// opacity produces a real, renderer-comparable composite (no keyer/asset dependency needed).
+function buildFlarexMergeBlendComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_blend_comp", "Flarex merge blend fixture");
+  const grade = createFlarexNode("colorCorrect", "fixture_flarex_blend_grade");
+  grade.params = { ...grade.params, exposure: 1.5, contrast: 0.3 };
+  const merge = createFlarexNode("merge", "fixture_flarex_blend_merge");
+  merge.params = { ...merge.params, blend: "multiply", opacity: 0.7 };
+  comp.nodes[grade.id] = grade;
+  comp.nodes[merge.id] = merge;
+  comp.edges = [
+    { id: "fixture_flarex_blend_e1", from: { nodeId: "fixture_flarex_blend_comp_in", socket: "out" }, to: { nodeId: grade.id, socket: "in" } },
+    { id: "fixture_flarex_blend_e2", from: { nodeId: "fixture_flarex_blend_comp_in", socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
+    { id: "fixture_flarex_blend_e3", from: { nodeId: grade.id, socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
+    { id: "fixture_flarex_blend_e4", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "fixture_flarex_blend_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+// F6: Transform (scale + rotate + translate combined) over the background layer — the keyed-away
+// area in flarex-key-glow already covers Transform+Glow together; this isolates Transform alone
+// with a rotation term (untested in that fixture) so a rotation-order or anchor regression shows.
+function buildFlarexTransformComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_transform_comp", "Flarex transform fixture");
+  const transform = createFlarexNode("transform", "fixture_flarex_transform_t1");
+  transform.params = { ...transform.params, x: 14, y: -9, scale: 0.65, rotation: 18 };
+  comp.nodes[transform.id] = transform;
+  comp.edges = [
+    { id: "fixture_flarex_transform_e1", from: { nodeId: "fixture_flarex_transform_comp_in", socket: "out" }, to: { nodeId: transform.id, socket: "in" } },
+    { id: "fixture_flarex_transform_e2", from: { nodeId: transform.id, socket: "out" }, to: { nodeId: "fixture_flarex_transform_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+// F6: ellipseMask -> matteControl (feather) -> masked Blur. Exercises the matteControl feather
+// path (not just a raw shape mask's own feather) through the masked-region-pass renderer path.
+function buildFlarexEllipseMatteComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_ellipse_matte_comp", "Flarex ellipse+matteControl fixture");
+  const ellipse = createFlarexNode("ellipseMask", "fixture_flarex_ellipse");
+  ellipse.params = { ...ellipse.params, centerX: 0.5, centerY: 0.45, width: 0.5, height: 0.45, feather: 0 };
+  const matte = createFlarexNode("matteControl", "fixture_flarex_matte");
+  matte.params = { ...matte.params, operation: "add", feather: 0.12 };
+  const blur = createFlarexNode("blur", "fixture_flarex_ellipse_blur");
+  blur.params = { ...blur.params, sigma: 22 };
+  comp.nodes[ellipse.id] = ellipse;
+  comp.nodes[matte.id] = matte;
+  comp.nodes[blur.id] = blur;
+  comp.edges = [
+    { id: "fixture_flarex_em_e1", from: { nodeId: "fixture_flarex_ellipse_matte_comp_in", socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: "fixture_flarex_em_e2", from: { nodeId: ellipse.id, socket: "out" }, to: { nodeId: matte.id, socket: "a" } },
+    { id: "fixture_flarex_em_e3", from: { nodeId: matte.id, socket: "out" }, to: { nodeId: blur.id, socket: "mask" } },
+    { id: "fixture_flarex_em_e4", from: { nodeId: blur.id, socket: "out" }, to: { nodeId: "fixture_flarex_ellipse_matte_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+// F6.2: reroute pass-through parity ACROSS REAL RENDERERS (the flarex.test.ts check already
+// proves the compiler's own output is structurally identical; this proves web preview and
+// Remotion agree pixel-for-pixel when a reroute sits in the middle of a real chain).
+function buildFlarexRerouteComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_reroute_comp", "Flarex reroute fixture");
+  const blur = createFlarexNode("blur", "fixture_flarex_reroute_blur");
+  blur.params = { ...blur.params, sigma: 12 };
+  const reroute = createFlarexNode("reroute", "fixture_flarex_reroute_r1");
+  comp.nodes[blur.id] = blur;
+  comp.nodes[reroute.id] = reroute;
+  comp.edges = [
+    { id: "fixture_flarex_reroute_e1", from: { nodeId: "fixture_flarex_reroute_comp_in", socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: "fixture_flarex_reroute_e2", from: { nodeId: blur.id, socket: "out" }, to: { nodeId: reroute.id, socket: "in" } },
+    { id: "fixture_flarex_reroute_e3", from: { nodeId: reroute.id, socket: "out" }, to: { nodeId: "fixture_flarex_reroute_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -679,6 +815,18 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: chromaKeyEffects, fit: "cover" };
     case "flarex-key-glow":
       return { effects: [], fit: "cover", flarex: buildFlarexKeyGlowComp() };
+    case "flarex-curves":
+      return { effects: [], fit: "cover", flarex: buildFlarexCurvesComp() };
+    case "flarex-keyframed-blur":
+      return { effects: [], fit: "cover", flarex: buildFlarexKeyframedBlurComp() };
+    case "flarex-merge-blend":
+      return { effects: [], fit: "cover", flarex: buildFlarexMergeBlendComp() };
+    case "flarex-transform":
+      return { effects: [], fit: "cover", flarex: buildFlarexTransformComp() };
+    case "flarex-ellipse-matte":
+      return { effects: [], fit: "cover", flarex: buildFlarexEllipseMatteComp() };
+    case "flarex-reroute":
+      return { effects: [], fit: "cover", flarex: buildFlarexRerouteComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone

@@ -8,9 +8,18 @@
  * param normalization, edge validation, cycle guard, healer behavior.
  */
 import { compileFlarexComp, type FlarexLowerCtx } from "./compile-flarex";
+import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
 import { compileNodeGraphIntent, nodeGraphIntentSchema, type NodeGraphIntent } from "./node-graph-intent";
 import type { SceneGroupDraw, SceneLayerDraw } from "../color/scene-compositor";
-import { createFlarexComp, getFlarexComp, healFlarexRegistry, isValidFlarexEdge, stampFlarexComp, wouldCreateFlarexCycle } from "./registry";
+import {
+  createFlarexComp,
+  getFlarexComp,
+  healFlarexRegistry,
+  isValidFlarexEdge,
+  spliceFlarexNodeIntoEdge,
+  stampFlarexComp,
+  wouldCreateFlarexCycle,
+} from "./registry";
 import { createFlarexNode, flarexNodeDefs, parseFlarexNodeParams } from "./node-defs";
 import type { FlarexComp } from "./types";
 import type { Mask, ProjectGraph } from "../types";
@@ -450,6 +459,284 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   const { cache, calls } = stubMatteCache();
   const out = compileFlarexComp(comp, { ...lowerCtx(), matteCache: cache });
   check("matteControl combines a polygon matte with a rect matte", isGroupDraw(out!) && calls[0]?.length === 2);
+}
+
+// --- spliceFlarexNodeIntoEdge (Sonnet round 2, N5 — round-1 leftover) --------
+{
+  // Valid splice: blur wired in -> out; splicing sharpen into that edge produces 2 valid edges
+  // (in -> sharpen -> out) and removes the original.
+  const comp = createFlarexComp("sp1", "Splice");
+  const sharpen = createFlarexNode("sharpen", "sh1");
+  comp.nodes[sharpen.id] = sharpen;
+  const originalEdge = { id: "e1", from: { nodeId: "sp1_in", socket: "out" }, to: { nodeId: "sp1_out", socket: "in" } };
+  comp.edges = [originalEdge];
+  const spliced = spliceFlarexNodeIntoEdge(comp, "sh1", "e1");
+  check("valid splice returns a comp", spliced !== null);
+  if (spliced) {
+    check("original edge is removed", !spliced.edges.some((e) => e.id === "e1"));
+    check("splice produces exactly 2 edges", spliced.edges.length === 2);
+    check("both new edges are valid", spliced.edges.every((e) => isValidFlarexEdge(spliced.nodes, e)));
+    check("in -> sharpen edge exists", spliced.edges.some((e) => e.from.nodeId === "sp1_in" && e.to.nodeId === "sh1"));
+    check("sharpen -> out edge exists", spliced.edges.some((e) => e.from.nodeId === "sh1" && e.to.nodeId === "sp1_out"));
+  }
+
+  // Matte-only node (rectMask, image-in-image-out has no image input) on an IMAGE wire -> null.
+  const comp2 = createFlarexComp("sp2", "MatteOnSplice");
+  const rect = createFlarexNode("rectMask", "r1");
+  comp2.nodes[rect.id] = rect;
+  comp2.edges = [{ id: "e1", from: { nodeId: "sp2_in", socket: "out" }, to: { nodeId: "sp2_out", socket: "in" } }];
+  check("matte-only node on an image wire -> null", spliceFlarexNodeIntoEdge(comp2, "r1", "e1") === null);
+
+  // Already-wired input: the target node's only image input is already taken by another wire.
+  const comp3 = createFlarexComp("sp3", "AlreadyWired");
+  const blurA = createFlarexNode("blur", "bA");
+  const blurB = createFlarexNode("blur", "bB");
+  comp3.nodes[blurA.id] = blurA;
+  comp3.nodes[blurB.id] = blurB;
+  comp3.edges = [
+    { id: "e1", from: { nodeId: "sp3_in", socket: "out" }, to: { nodeId: "bA", socket: "in" } },
+    { id: "e2", from: { nodeId: "bA", socket: "out" }, to: { nodeId: "bB", socket: "in" } },
+    { id: "e3", from: { nodeId: "bB", socket: "out" }, to: { nodeId: "sp3_out", socket: "in" } },
+  ];
+  // bA's "in" socket is already wired (e1) — splicing it into e3 (bB -> out) has no free input.
+  check("already-wired input -> null", spliceFlarexNodeIntoEdge(comp3, "bA", "e3") === null);
+
+  // Edge endpoint IS the node itself -> null (splicing a node into its own wire is nonsensical).
+  const comp4 = createFlarexComp("sp4", "SelfEdge");
+  const blur4 = createFlarexNode("blur", "b1");
+  comp4.nodes[blur4.id] = blur4;
+  comp4.edges = [
+    { id: "e1", from: { nodeId: "sp4_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "sp4_out", socket: "in" } },
+  ];
+  check("edge endpoint = the node itself -> null", spliceFlarexNodeIntoEdge(comp4, "b1", "e1") === null);
+  check("edge endpoint = the node itself -> null (other side)", spliceFlarexNodeIntoEdge(comp4, "b1", "e2") === null);
+}
+
+// --- Curves / Hue-Sat nodes lower for real (Sonnet round 2, N2) -------------
+{
+  // A strong S-curve master channel must produce a REAL (non-identity) color pipeline wrap —
+  // guards the node-storage-key vs. effect-registry-param-key mismatch (`curve` vs `curves`).
+  const comp = createFlarexComp("cc1", "Curves");
+  const curves = createFlarexNode("colorCurves", "cv1");
+  curves.params = {
+    ...curves.params,
+    curves: JSON.stringify({ master: [{ x: 0, y: 0 }, { x: 0.25, y: 0.05 }, { x: 0.75, y: 0.95 }, { x: 1, y: 1 }] }),
+  };
+  comp.nodes[curves.id] = curves;
+  comp.edges = [
+    { id: "e1", from: { nodeId: "cc1_in", socket: "out" }, to: { nodeId: "cv1", socket: "in" } },
+    { id: "e2", from: { nodeId: "cv1", socket: "out" }, to: { nodeId: "cc1_out", socket: "in" } },
+  ];
+  const out = compileFlarexComp(comp, lowerCtx());
+  check("colorCurves node lowers to a pipeline wrap", isGroupDraw(out!) && Boolean(out!.pipeline) && out!.pipeline?.identity !== true);
+
+  const comp2 = createFlarexComp("hs1", "HueSat");
+  const hueSat = createFlarexNode("hueSat", "hs1");
+  hueSat.params = {
+    ...hueSat.params,
+    hueCurves: JSON.stringify({ hueVsSat: [{ x: 0, y: 0.2 }, { x: 1, y: 0.8 }] }),
+  };
+  comp2.nodes[hueSat.id] = hueSat;
+  comp2.edges = [
+    { id: "e1", from: { nodeId: "hs1_in", socket: "out" }, to: { nodeId: "hs1", socket: "in" } },
+    { id: "e2", from: { nodeId: "hs1", socket: "out" }, to: { nodeId: "hs1_out", socket: "in" } },
+  ];
+  const out2 = compileFlarexComp(comp2, lowerCtx());
+  check("hueSat node lowers to a pipeline wrap", isGroupDraw(out2!) && Boolean(out2!.pipeline) && out2!.pipeline?.identity !== true);
+
+  // Empty payload still passes through untouched (no throw, no wrap).
+  const comp3 = createFlarexComp("cc2", "EmptyCurves");
+  const emptyCurves = createFlarexNode("colorCurves", "cv2");
+  comp3.nodes[emptyCurves.id] = emptyCurves;
+  comp3.edges = [
+    { id: "e1", from: { nodeId: "cc2_in", socket: "out" }, to: { nodeId: "cv2", socket: "in" } },
+    { id: "e2", from: { nodeId: "cv2", socket: "out" }, to: { nodeId: "cc2_out", socket: "in" } },
+  ];
+  const out3 = compileFlarexComp(comp3, lowerCtx());
+  check("empty colorCurves payload passes through untouched", Boolean(out3) && !isGroupDraw(out3));
+}
+
+// --- Filter node registry-driven UI/lowering (Sonnet round 2, N1) -----------
+{
+  // A filter node with a resolved effectId + params JSON override lowers to a fragment pass
+  // carrying the OVERRIDDEN param values (not the def's defaults).
+  const comp = createFlarexComp("f1", "Filter");
+  const filter = createFlarexNode("filter", "flt1");
+  filter.params = {
+    ...filter.params,
+    effectId: builtinFragmentEffectId("pixelate"),
+    effectParams: JSON.stringify({ blockSize: 40 }),
+  };
+  comp.nodes[filter.id] = filter;
+  comp.edges = [
+    { id: "e1", from: { nodeId: "f1_in", socket: "out" }, to: { nodeId: "flt1", socket: "in" } },
+    { id: "e2", from: { nodeId: "flt1", socket: "out" }, to: { nodeId: "f1_out", socket: "in" } },
+  ];
+  const out = compileFlarexComp(comp, lowerCtx());
+  check("filter node lowers to a fragment pass", isGroupDraw(out!) && (out!.shell.fragmentPasses?.length ?? 0) === 1);
+  const pass = out && isGroupDraw(out) ? out.shell.fragmentPasses?.[0] : undefined;
+  check("filter pass resolves the chosen def", pass?.def.id === builtinFragmentEffectId("pixelate"));
+  check("filter pass carries the JSON override value", pass?.params.blockSize === 40);
+
+  // Unknown/garbage effectId never throws and passes the image through untouched.
+  const comp2 = createFlarexComp("f2", "UnknownFilter");
+  const filter2 = createFlarexNode("filter", "flt2");
+  filter2.params = { ...filter2.params, effectId: "not.a.real.effect", effectParams: "" };
+  comp2.nodes[filter2.id] = filter2;
+  comp2.edges = [
+    { id: "e1", from: { nodeId: "f2_in", socket: "out" }, to: { nodeId: "flt2", socket: "in" } },
+    { id: "e2", from: { nodeId: "flt2", socket: "out" }, to: { nodeId: "f2_out", socket: "in" } },
+  ];
+  let threwUnknown = false;
+  let outUnknown: ReturnType<typeof compileFlarexComp> = null;
+  try {
+    outUnknown = compileFlarexComp(comp2, lowerCtx());
+  } catch {
+    threwUnknown = true;
+  }
+  check("unknown effectId never throws", !threwUnknown);
+  check("unknown effectId passes through (host draw, no wrap)", Boolean(outUnknown) && !isGroupDraw(outUnknown));
+}
+
+// --- Reroute + Backdrop nodes (Sonnet round 3, F2) ---------------------------
+{
+  // Reroute is a pure pass-through: in -> blur -> reroute -> out must lower IDENTICALLY to
+  // in -> blur -> out (structurally, modulo the reroute's own absence from the draw tree).
+  const direct = createFlarexComp("rr1", "Direct");
+  const blurA = createFlarexNode("blur", "b1");
+  blurA.params = { ...blurA.params, sigma: 15 };
+  direct.nodes[blurA.id] = blurA;
+  direct.edges = [
+    { id: "e1", from: { nodeId: "rr1_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "rr1_out", socket: "in" } },
+  ];
+  const rerouted = createFlarexComp("rr2", "Rerouted");
+  const blurB = createFlarexNode("blur", "b1");
+  blurB.params = { ...blurB.params, sigma: 15 };
+  const reroute = createFlarexNode("reroute", "r1");
+  rerouted.nodes[blurB.id] = blurB;
+  rerouted.nodes[reroute.id] = reroute;
+  rerouted.edges = [
+    { id: "e1", from: { nodeId: "rr2_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "r1", socket: "in" } },
+    { id: "e3", from: { nodeId: "r1", socket: "out" }, to: { nodeId: "rr2_out", socket: "in" } },
+  ];
+  const strip = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" || key === "debugGroupId" ? undefined : val));
+  const directOut = compileFlarexComp(direct, lowerCtx());
+  const reroutedOut = compileFlarexComp(rerouted, lowerCtx());
+  check("reroute lowers identically to a direct wire", strip(directOut) === strip(reroutedOut));
+
+  // Backdrop never enters the DFS (no sockets to be reached through) — a stray backdrop must not
+  // change lowering output at all vs. the same comp without it.
+  // SAME comp id for both variants — `debugGroupId`/matte keys embed `comp.id`, so a differing
+  // id would make the strip-compare fail for a reason that has nothing to do with the backdrop.
+  const withoutBackdrop = createFlarexComp("bd", "NoBackdrop");
+  const g1 = createFlarexNode("glow", "g1");
+  withoutBackdrop.nodes[g1.id] = g1;
+  withoutBackdrop.edges = [
+    { id: "e1", from: { nodeId: "bd_in", socket: "out" }, to: { nodeId: "g1", socket: "in" } },
+    { id: "e2", from: { nodeId: "g1", socket: "out" }, to: { nodeId: "bd_out", socket: "in" } },
+  ];
+  const withBackdrop = createFlarexComp("bd", "WithBackdrop");
+  const g2 = createFlarexNode("glow", "g1");
+  const backdrop = createFlarexNode("backdrop", "bd1");
+  withBackdrop.nodes[g2.id] = g2;
+  withBackdrop.nodes[backdrop.id] = backdrop;
+  withBackdrop.edges = [
+    { id: "e1", from: { nodeId: "bd_in", socket: "out" }, to: { nodeId: "g1", socket: "in" } },
+    { id: "e2", from: { nodeId: "g1", socket: "out" }, to: { nodeId: "bd_out", socket: "in" } },
+  ];
+  const stripComp = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" ? undefined : val));
+  check(
+    "a stray backdrop never changes lowering output",
+    stripComp(compileFlarexComp(withoutBackdrop, lowerCtx())) === stripComp(compileFlarexComp(withBackdrop, lowerCtx())),
+  );
+  check("backdrop has no sockets (unreachable by construction)", flarexNodeDefs.backdrop.inputs.length === 0 && flarexNodeDefs.backdrop.outputs.length === 0);
+  check(
+    "an edge can never reference a backdrop socket",
+    !isValidFlarexEdge(withBackdrop.nodes, { id: "bad", from: { nodeId: "bd1", socket: "out" }, to: { nodeId: "g1", socket: "in" } }),
+  );
+}
+
+// --- AI intent: mask / matte ops (Sonnet round 3, F4) ------------------------
+{
+  // `mask` wires the shape node into the CURRENT tail's mask input when it has one (blur does).
+  const blurred = nodeGraphIntentSchema.safeParse({
+    ops: [{ op: "blur", sigma: 10 }, { op: "mask", shape: "ellipse", region: { x: 0.5, y: 0.5, w: 0.3, h: 0.3 } }],
+  });
+  check("mask op schema parses", blurred.success);
+  if (blurred.success) {
+    const { comp } = compileNodeGraphIntent(blurred.data as NodeGraphIntent, createFlarexComp("m1", "M"));
+    const blurNode = Object.values(comp.nodes).find((n) => n.type === "blur");
+    const maskNode = Object.values(comp.nodes).find((n) => n.type === "ellipseMask");
+    check("mask op adds an ellipseMask node", Boolean(maskNode));
+    check(
+      "mask op wires the mask node into the blur's mask input",
+      comp.edges.some((e) => e.from.nodeId === maskNode?.id && e.to.nodeId === blurNode?.id && e.to.socket === "mask"),
+    );
+  }
+
+  // `mask` on a tail with NO mask socket (mediaIn, fresh comp) adds the node unwired, never throws.
+  const bareMask = nodeGraphIntentSchema.safeParse({ ops: [{ op: "mask", shape: "rect" }] });
+  check("bare mask op schema parses with defaults", bareMask.success);
+  if (bareMask.success) {
+    let threw = false;
+    let result: ReturnType<typeof compileNodeGraphIntent> | null = null;
+    try {
+      result = compileNodeGraphIntent(bareMask.data as NodeGraphIntent, createFlarexComp("m2", "M2"));
+    } catch {
+      threw = true;
+    }
+    check("mask op on an unmaskable tail never throws", !threw);
+    const maskNode = result ? Object.values(result.comp.nodes).find((n) => n.type === "rectMask") : undefined;
+    check("mask node is still added, just unwired", Boolean(maskNode) && !result!.comp.edges.some((e) => e.from.nodeId === maskNode?.id));
+  }
+
+  // `matte combine` needs 2+ prior mask ops — with only 1, it skips silently (never throws).
+  const insufficientCombine = nodeGraphIntentSchema.safeParse({
+    ops: [{ op: "mask", shape: "ellipse" }, { op: "matte", action: "combine" }],
+  });
+  check("matte combine schema parses", insufficientCombine.success);
+  if (insufficientCombine.success) {
+    let threw = false;
+    let result: ReturnType<typeof compileNodeGraphIntent> | null = null;
+    try {
+      result = compileNodeGraphIntent(insufficientCombine.data as NodeGraphIntent, createFlarexComp("m3", "M3"));
+    } catch {
+      threw = true;
+    }
+    check("matte combine with insufficient history never throws", !threw);
+    check("matte combine with insufficient history adds no matteControl node", !Object.values(result!.comp.nodes).some((n) => n.type === "matteControl"));
+  }
+
+  // `matte combine` with 2 prior masks DOES produce a matteControl wired a/b.
+  const validCombine = nodeGraphIntentSchema.safeParse({
+    ops: [
+      { op: "mask", shape: "ellipse", region: { x: 0.3, y: 0.3, w: 0.2, h: 0.2 } },
+      { op: "mask", shape: "rect", region: { x: 0.7, y: 0.7, w: 0.2, h: 0.2 } },
+      { op: "matte", action: "combine" },
+    ],
+  });
+  check("valid combine schema parses", validCombine.success);
+  if (validCombine.success) {
+    const { comp } = compileNodeGraphIntent(validCombine.data as NodeGraphIntent, createFlarexComp("m4", "M4"));
+    const combineNode = Object.values(comp.nodes).find((n) => n.type === "matteControl");
+    check("matte combine adds a matteControl node", Boolean(combineNode));
+    check("matteControl has both a and b wired", comp.edges.filter((e) => e.to.nodeId === combineNode?.id).length === 2);
+  }
+
+  // `matte invert` refines the last mask (invert=true on a new matteControl wired to it).
+  const invertParsed = nodeGraphIntentSchema.safeParse({ ops: [{ op: "mask", shape: "rect" }, { op: "matte", action: "invert" }] });
+  check("matte invert schema parses", invertParsed.success);
+  if (invertParsed.success) {
+    const { comp } = compileNodeGraphIntent(invertParsed.data as NodeGraphIntent, createFlarexComp("m5", "M5"));
+    const invertNode = Object.values(comp.nodes).find((n) => n.type === "matteControl");
+    check("matte invert adds a matteControl node", invertNode?.params.invert === true);
+  }
+
+  check("intent schema rejects unknown matte action", !nodeGraphIntentSchema.safeParse({ ops: [{ op: "matte", action: "explode" }] }).success);
+  check("intent schema rejects a curves op (intentionally not exposed)", !nodeGraphIntentSchema.safeParse({ ops: [{ op: "curves", points: [] }] }).success);
 }
 
 if (failures > 0) {

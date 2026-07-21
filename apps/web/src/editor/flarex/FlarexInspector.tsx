@@ -13,10 +13,18 @@ import {
   evaluateFlarexNodeParam,
   getFlarexNodeDefinition,
   parseFlarexNodeParams,
+  listFragmentEffects,
+  getFragmentEffect,
+  FLAREX_CHROMA_KEY_ID,
+  FLAREX_LUMA_KEY_ID,
   type FlarexComp,
   type FlarexNode,
+  type FragmentEffectDefinition,
+  type FragmentEffectParam,
 } from "@orreris/shared";
 import { EffectSliderControl } from "../../components/EffectSliderControl";
+import { CurveEditor } from "../../components/CurveEditor";
+import { HueSatCurves } from "../../components/HueSatCurves";
 import { PropertyRow } from "../inspector/controls/PropertyRow";
 import type { KeyframeButtonsProps } from "../inspector/controls/KeyframeButtons";
 import {
@@ -76,6 +84,8 @@ const RANGES: Record<string, [number, number, number]> = {
   "text.fontSize": [1, 400, 1],
   "text.x": [0, 1, 0.01],
   "text.y": [0, 1, 0.01],
+  "backdrop.w": [80, 4000, 1],
+  "backdrop.h": [60, 4000, 1],
 };
 
 const ENUMS: Record<string, readonly string[]> = {
@@ -86,13 +96,71 @@ const ENUMS: Record<string, readonly string[]> = {
   "matteControl.operation": ["add", "subtract", "intersect", "exclude"],
 };
 
-const COLOR_PARAMS = new Set(["chromaKey.color", "text.color"]);
-/** Multiline JSON payload rows — a crude but functional textarea (on-viewer point editing is
- *  explicitly out of scope for Phase 1.5, see FLAREX.md). */
-const MULTILINE_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);
+const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color"]);
+/** polygonMask/bezierMask `points` — a structured row-per-point editor (F3, round 3). FLAREX.md's
+ *  original plan was a full on-viewer SVG drag overlay above `ScenePreviewCanvas`; that touches the
+ *  live viewer's coordinate mapping across preview/export capture paths (a much bigger, riskier
+ *  seam) for marginal gain over a structured list — the plan's own documented fallback when the
+ *  viewer overlay "proves too entangled." Taking the fallback deliberately this round: same crude-
+ *  but-functional spirit as the JSON textarea it replaces, minus the raw-JSON editing. */
+const POINT_LIST_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);
+
+function parsePointsParam(raw: string): Array<[number, number]> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((p): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === "number" && Number.isFinite(n)))
+      .map(([x, y]) => [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))] as [number, number]);
+  } catch {
+    return [];
+  }
+}
 
 const prettyLabel = (key: string): string =>
   key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
+
+/** Fragment-effect registry entries selectable from the `filter` node — excludes the two
+ *  flarex-only keyers (chromaKey/lumaKey have their own dedicated node types) and multi-pass
+ *  stylize graphs (heavy pass-graphs that don't read as a single lightweight chain filter). */
+function listFilterableFragmentEffects(): FragmentEffectDefinition[] {
+  return listFragmentEffects().filter(
+    (def) => !def.passes && def.id !== FLAREX_CHROMA_KEY_ID && def.id !== FLAREX_LUMA_KEY_ID,
+  );
+}
+
+function groupByCategory(defs: FragmentEffectDefinition[]): Array<[string, FragmentEffectDefinition[]]> {
+  const groups = new Map<string, FragmentEffectDefinition[]>();
+  for (const def of defs) {
+    const list = groups.get(def.category) ?? [];
+    list.push(def);
+    groups.set(def.category, list);
+  }
+  return [...groups.entries()];
+}
+
+function parseFilterEffectParams(raw: string): Record<string, number | number[] | boolean> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function rgbToHex(rgb: number[]): string {
+  const clamp = (n: number | undefined) => Math.max(0, Math.min(255, Math.round((n ?? 0) * 255)));
+  return `#${[0, 1, 2].map((i) => clamp(rgb[i]).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function hexToRgb(hex: string): number[] {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return [0, 0, 0];
+  const n = parseInt(m[1]!, 16);
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
 
 const WIDTH_KEY = "flarex.inspectorWidth";
 const MIN_W = 240;
@@ -171,6 +239,101 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
     });
   };
 
+  // Filter node: effectId select + dynamic per-effect param rows (registry-driven, N1).
+  const isFilterNode = node.type === "filter";
+  const filterEffectId = isFilterNode && typeof node.params.effectId === "string" ? (node.params.effectId as string) : "";
+  const filterDef = isFilterNode && filterEffectId ? getFragmentEffect(filterEffectId) : undefined;
+  const filterEffectParams = isFilterNode
+    ? parseFilterEffectParams(typeof node.params.effectParams === "string" ? (node.params.effectParams as string) : "")
+    : {};
+  const onFilterEffectIdChange = (nextId: string) => {
+    onUpdateComp((current) => {
+      const target = current.nodes[node.id];
+      if (!target) return current;
+      return {
+        ...current,
+        nodes: { ...current.nodes, [node.id]: { ...target, params: { ...target.params, effectId: nextId, effectParams: "{}" } } },
+      };
+    });
+  };
+  const setFilterEffectParam = (paramName: string, value: number | number[] | boolean) => {
+    onUpdateComp((current) => {
+      const target = current.nodes[node.id];
+      if (!target) return current;
+      const existing = parseFilterEffectParams(typeof target.params.effectParams === "string" ? (target.params.effectParams as string) : "");
+      const next = { ...existing, [paramName]: value };
+      return {
+        ...current,
+        nodes: { ...current.nodes, [node.id]: { ...target, params: { ...target.params, effectParams: JSON.stringify(next) } } },
+      };
+    });
+  };
+  const renderFilterParamRow = (param: FragmentEffectParam) => {
+    const current = filterEffectParams[param.name];
+    if (param.type === "bool") {
+      const value = typeof current === "boolean" ? current : Boolean(param.default);
+      return (
+        <PropertyRow
+          key={param.name}
+          label={param.label ?? prettyLabel(param.name)}
+          control={<span />}
+          value={<input type="checkbox" checked={value} onChange={(e) => setFilterEffectParam(param.name, e.target.checked)} />}
+        />
+      );
+    }
+    if (param.type === "vec3") {
+      const value = Array.isArray(current) ? current : (param.default as number[]);
+      return (
+        <PropertyRow
+          key={param.name}
+          label={param.label ?? prettyLabel(param.name)}
+          className="flarex-row-color"
+          control={<input type="color" value={rgbToHex(value)} onChange={(e) => setFilterEffectParam(param.name, hexToRgb(e.target.value))} />}
+        />
+      );
+    }
+    if (param.type === "vec2") {
+      const value = Array.isArray(current) ? current : (param.default as number[]);
+      return (
+        <PropertyRow
+          key={param.name}
+          label={param.label ?? prettyLabel(param.name)}
+          control={<span />}
+          value={
+            <span className="flarex-vec2-row">
+              <input
+                className="effect-slider-number"
+                type="number"
+                value={Number.isFinite(value[0]) ? value[0] : 0}
+                onChange={(e) => setFilterEffectParam(param.name, [Number(e.target.value) || 0, value[1] ?? 0])}
+              />
+              <input
+                className="effect-slider-number"
+                type="number"
+                value={Number.isFinite(value[1]) ? value[1] : 0}
+                onChange={(e) => setFilterEffectParam(param.name, [value[0] ?? 0, Number(e.target.value) || 0])}
+              />
+            </span>
+          }
+        />
+      );
+    }
+    // float
+    const value = typeof current === "number" ? current : (param.default as number);
+    return (
+      <EffectSliderControl
+        key={param.name}
+        label={param.label ?? prettyLabel(param.name)}
+        value={value}
+        min={param.min ?? 0}
+        max={param.max ?? 1}
+        step={param.step ?? 0.01}
+        onChange={(next) => setFilterEffectParam(param.name, next)}
+        onReset={() => setFilterEffectParam(param.name, param.default as number)}
+      />
+    );
+  };
+
   return shell(
     <>
       <header className="flarex-inspector-head">
@@ -185,6 +348,50 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
             nodes saved before a def gained new params still show them (value falls back to the
             default until first edited). */}
         {[...Object.keys(defaults), ...Object.keys(node.params).filter((k) => !(k in defaults))].map((key) => {
+          if (isFilterNode && key === "effectId") {
+            const groups = groupByCategory(listFilterableFragmentEffects());
+            return (
+              <PropertyRow
+                key={key}
+                label="Effect"
+                className="flarex-row-select"
+                control={
+                  <select value={filterEffectId} onChange={(e) => onFilterEffectIdChange(e.target.value)}>
+                    <option value="">— none —</option>
+                    {groups.map(([category, defsInGroup]) => (
+                      <optgroup key={category} label={category}>
+                        {defsInGroup.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                }
+              />
+            );
+          }
+          if (isFilterNode && key === "effectParams") {
+            if (!filterDef) return null;
+            return <div key={key} className="flarex-filter-params">{filterDef.params.map(renderFilterParamRow)}</div>;
+          }
+          if (node.type === "colorCurves" && key === "curves") {
+            const curveValue = typeof node.params.curves === "string" ? (node.params.curves as string) : "";
+            return (
+              <div key={key} className="flarex-curve-editor">
+                <CurveEditor value={curveValue} onChange={(json) => setParam("curves", json)} />
+              </div>
+            );
+          }
+          if (node.type === "hueSat" && key === "hueCurves") {
+            const curveValue = typeof node.params.hueCurves === "string" ? (node.params.hueCurves as string) : "";
+            return (
+              <div key={key} className="flarex-curve-editor">
+                <HueSatCurves value={curveValue} onChange={(json) => setParam("hueCurves", json)} />
+              </div>
+            );
+          }
           const value = node.params[key] ?? defaults[key];
           if (value === undefined) return null;
           const metaKey = `${node.type}.${key}`;
@@ -299,17 +506,73 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
               />
             );
           }
-          if (MULTILINE_PARAMS.has(metaKey)) {
+          if (POINT_LIST_PARAMS.has(metaKey)) {
+            const points = parsePointsParam(value);
+            const setPoints = (next: Array<[number, number]>) => setParam(key, JSON.stringify(next));
             return (
-              <label key={key} className="flarex-param-row flarex-param-multiline">
-                <span>{label}</span>
-                <textarea
-                  rows={3}
-                  value={value}
-                  placeholder="[[0.3,0.2],[0.7,0.2],[0.5,0.85]]"
-                  onChange={(e) => setParam(key, e.target.value)}
-                />
-              </label>
+              <div key={key} className="flarex-points-editor">
+                <span className="flarex-points-editor-label">{label} (comp fraction 0..1)</span>
+                {points.map((p, i) => (
+                  <div key={i} className="flarex-points-row">
+                    <span className="flarex-points-index">{i + 1}</span>
+                    <input
+                      className="effect-slider-number"
+                      type="number"
+                      step={0.01}
+                      value={p[0]}
+                      onChange={(e) => {
+                        const next = points.map((pt, idx) => (idx === i ? ([Number(e.target.value) || 0, pt[1]] as [number, number]) : pt));
+                        setPoints(next);
+                      }}
+                    />
+                    <input
+                      className="effect-slider-number"
+                      type="number"
+                      step={0.01}
+                      value={p[1]}
+                      onChange={(e) => {
+                        const next = points.map((pt, idx) => (idx === i ? ([pt[0], Number(e.target.value) || 0] as [number, number]) : pt));
+                        setPoints(next);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      title="Move up"
+                      disabled={i === 0}
+                      onClick={() => {
+                        const next = [...points];
+                        [next[i - 1], next[i]] = [next[i]!, next[i - 1]!];
+                        setPoints(next);
+                      }}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      title="Move down"
+                      disabled={i === points.length - 1}
+                      onClick={() => {
+                        const next = [...points];
+                        [next[i + 1], next[i]] = [next[i]!, next[i + 1]!];
+                        setPoints(next);
+                      }}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      title="Remove point (3 minimum)"
+                      disabled={points.length <= 3}
+                      onClick={() => setPoints(points.filter((_, idx) => idx !== i))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button type="button" className="flarex-points-add" onClick={() => setPoints([...points, [0.5, 0.5]])}>
+                  + Add point
+                </button>
+              </div>
             );
           }
           return (

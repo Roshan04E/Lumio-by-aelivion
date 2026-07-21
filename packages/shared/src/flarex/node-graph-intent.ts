@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import { createFlarexNode } from "./node-defs";
+import { createFlarexNode, findFlarexInputSocket } from "./node-defs";
 import { createFlarexComp } from "./registry";
 import type { FlarexComp, FlarexEdge, FlarexNode, FlarexNodeType } from "./types";
 
@@ -104,6 +104,37 @@ export const nodeGraphIntentSchema = z
               intensity: z.number().min(0).max(1).optional(),
             })
             .strict(),
+          z
+            .object({
+              op: z.literal("mask"),
+              shape: z.enum(["rect", "ellipse"]).default("ellipse"),
+              /** Comp fractions 0..1 (center + size) — same convention as `blurRegion`. */
+              region: z
+                .object({
+                  x: z.number().min(0).max(1).default(0.5),
+                  y: z.number().min(0).max(1).default(0.5),
+                  w: z.number().min(0).max(2).default(0.4),
+                  h: z.number().min(0).max(2).default(0.4),
+                })
+                .strict()
+                .default({ x: 0.5, y: 0.5, w: 0.4, h: 0.4 }),
+              feather: z.number().min(0).max(1).optional(),
+              invert: z.boolean().optional(),
+            })
+            .strict(),
+          z
+            .object({
+              op: z.literal("matte"),
+              // Named "action" (not "op") to avoid colliding with the outer discriminator key.
+              action: z.enum(["combine", "invert", "feather", "choke"]).default("feather"),
+              amount: z.number().min(0).max(1).optional(),
+            })
+            .strict(),
+          // NOTE: curves are intentionally NOT exposed here. `grade` already gives the model a
+          // token-safe, bounded color surface; raw curve control-point authoring is exactly the
+          // kind of unbounded numeric freedom the intent DSL exists to keep away from the model
+          // (FLAREX.md's "compact + bounded" law). If curve-shaped grading is ever needed from AI,
+          // it should ride `grade`'s existing bounded params, not a new curves op.
         ])
       )
       .min(1)
@@ -174,6 +205,10 @@ export function compileNodeGraphIntent(intent: NodeGraphIntent, base?: FlarexCom
     tailId = node.id;
     return node;
   };
+
+  // Mask/matte ops (F4, round 3) chain off the most-recently-created mask node(s) — a small stack
+  // so a later `matte` op can refine ("invert"/"feather"/"choke") or `combine` the last two.
+  const maskHistory: string[] = [];
 
   const compiled: CompiledNodeGraphOp[] = [];
   intent.ops.forEach((op, index) => {
@@ -252,6 +287,71 @@ export function compileNodeGraphIntent(intent: NodeGraphIntent, base?: FlarexCom
       case "filter": {
         const node = chain("filter", index, { effectId: op.effectId, intensity: op.intensity });
         compiled.push({ nodeIds: [node.id], summary: `Filter: ${op.effectId}` });
+        break;
+      }
+      case "mask": {
+        const maskNode = addNode(
+          setParams(createFlarexNode(op.shape === "rect" ? "rectMask" : "ellipseMask", nodeId(index, "m"), placeX, 120), {
+            centerX: op.region.x,
+            centerY: op.region.y,
+            width: op.region.w,
+            height: op.region.h,
+            feather: op.feather,
+            invert: op.invert,
+          })
+        );
+        placeX += 180;
+        maskHistory.push(maskNode.id);
+        // Wire into the CURRENT tail's mask input, if it has one (blur/glow/sharpen/color* do;
+        // chromaKey/lumaKey/mediaIn/mediaOut don't) — never throws when it doesn't, the mask node
+        // is still added (unwired), ready for a later `matte` op or manual wiring.
+        const tailNode = comp.nodes[tailId];
+        const hasMaskSocket = Boolean(tailNode && findFlarexInputSocket(tailNode.type, "mask"));
+        if (hasMaskSocket) {
+          addEdge(maskNode.id, "out", tailId, "mask", index, "m");
+          compiled.push({ nodeIds: [maskNode.id], summary: `Mask (${op.shape}) → ${tailNode!.type}` });
+        } else {
+          compiled.push({ nodeIds: [maskNode.id], summary: `Mask (${op.shape}), unwired (no maskable node in the chain yet)` });
+        }
+        break;
+      }
+      case "matte": {
+        const amount = op.amount ?? 0.2;
+        if (op.action === "combine") {
+          if (maskHistory.length < 2) {
+            // Not enough prior masks to combine — skip silently, never throw.
+            compiled.push({ nodeIds: [], summary: "Matte combine skipped (needs 2+ prior mask ops)" });
+            break;
+          }
+          const b = maskHistory.pop()!;
+          const a = maskHistory.pop()!;
+          const node = addNode(setParams(createFlarexNode("matteControl", nodeId(index), placeX, 120), { operation: "add" }));
+          placeX += 180;
+          addEdge(a, "out", node.id, "a", index, "a");
+          addEdge(b, "out", node.id, "b", index, "b");
+          maskHistory.push(node.id);
+          compiled.push({ nodeIds: [node.id], summary: "Matte combine" });
+          break;
+        }
+        const last = maskHistory[maskHistory.length - 1];
+        if (!last) {
+          compiled.push({ nodeIds: [], summary: `Matte ${op.action} skipped (no prior mask)` });
+          break;
+        }
+        const node = addNode(
+          setParams(createFlarexNode("matteControl", nodeId(index), placeX, 120), {
+            operation: "add",
+            invert: op.action === "invert",
+            // matteControl's `feather` is a 0..1 non-negative fraction — "choke" (erosion) has no
+            // dedicated primitive at the matteControl level, so it best-effort maps to the same
+            // feather control (documented limitation, not a silent wrong answer: the summary says so).
+            feather: op.action === "feather" || op.action === "choke" ? amount : undefined,
+          })
+        );
+        placeX += 180;
+        addEdge(last, "out", node.id, "a", index, "a");
+        maskHistory[maskHistory.length - 1] = node.id;
+        compiled.push({ nodeIds: [node.id], summary: op.action === "choke" ? "Matte feather (choke approximated as feather)" : `Matte ${op.action}` });
         break;
       }
     }

@@ -19,19 +19,34 @@ import {
   stampCompositionRegistry,
   stampFlarexComp,
   type FlarexComp,
+  type FlarexNode,
   type FlarexNodeType,
   type ProjectGraph,
   type TimelineLayer,
 } from "@orreris/shared";
 import { FlarexInspector } from "./FlarexInspector";
-import { FlarexNodeCanvas, flarexPaletteDrag, nextNodePosition } from "./FlarexNodeCanvas";
+import { FlarexNodeCanvas, GROUP_COLORS, flarexPaletteDrag, nextNodePosition } from "./FlarexNodeCanvas";
+import { alignFlarexNodes, type FlarexAlignMode } from "./flarex-canvas-model";
+
+/** F5.2: align/distribute toolbar buttons — pure position math via `alignFlarexNodes`. */
+const ALIGN_BUTTONS: Array<{ mode: FlarexAlignMode; label: string; title: string }> = [
+  { mode: "left", label: "L", title: "Align left" },
+  { mode: "centerH", label: "C↔", title: "Align center (horizontal)" },
+  { mode: "right", label: "R", title: "Align right" },
+  { mode: "top", label: "T", title: "Align top" },
+  { mode: "middleV", label: "C↕", title: "Align middle (vertical)" },
+  { mode: "bottom", label: "B", title: "Align bottom" },
+  { mode: "distributeH", label: "↔ Dist", title: "Distribute horizontally (3+ nodes)" },
+  { mode: "distributeV", label: "↕ Dist", title: "Distribute vertically (3+ nodes)" },
+];
 
 /** Phase-1 palette, grouped Fusion-style (node-defs' `phase` gates what ships). */
 const PALETTE_GROUPS: Array<{ label: string; types: FlarexNodeType[] }> = [
   { label: "Composite", types: ["merge", "transform"] },
-  { label: "Color", types: ["colorCorrect"] },
+  { label: "Color", types: ["colorCorrect", "colorCurves", "hueSat"] },
   { label: "Filter", types: ["blur", "glow", "sharpen", "filter"] },
   { label: "Key/Mask", types: ["chromaKey", "lumaKey", "rectMask", "ellipseMask", "polygonMask", "bezierMask", "matteControl"] },
+  { label: "Layout", types: ["backdrop", "reroute"] },
 ];
 
 export interface FlarexWorkspaceProps {
@@ -87,6 +102,21 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
     });
   };
 
+  /** F5.2: align/distribute the selection. `alignFlarexNodes` is pure; this is the ONE commit. */
+  const handleAlign = (mode: FlarexAlignMode) => {
+    updateComp((current) => {
+      const nodes = selectedNodeIds.map((id) => current.nodes[id]).filter((n): n is FlarexNode => Boolean(n));
+      const positions = alignFlarexNodes(nodes, mode);
+      if (Object.keys(positions).length === 0) return current;
+      const nextNodes = { ...current.nodes };
+      for (const [id, pos] of Object.entries(positions)) {
+        const n = nextNodes[id];
+        if (n) nextNodes[id] = { ...n, ui: pos };
+      }
+      return { ...current, nodes: nextNodes };
+    });
+  };
+
   const handleAddNode = (type: FlarexNodeType) => {
     updateComp((current) => {
       const id = `n_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -119,6 +149,20 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
     );
   }
 
+  // Frame-ruler keyframe ticks (N4): union of keyframe times across every param of the ONE
+  // selected node, deduped (several params can share a time). Comp-local seconds, same space the
+  // ruler already scrubs in.
+  const selectedNodeKeyframeTimes: number[] =
+    selectedNodeIds.length === 1
+      ? Array.from(
+          new Set(
+            comp.animations
+              .filter((kf) => kf.target.scope === "flarexNode" && kf.target.effectId === selectedNodeIds[0])
+              .map((kf) => kf.timeSeconds),
+          ),
+        ).sort((a, b) => a - b)
+      : [];
+
   return (
     <div className="flarex-workspace">
       <div className="flarex-toolbar">
@@ -131,6 +175,7 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
                 key={type}
                 type="button"
                 className="flarex-toolbar-btn"
+                style={{ borderLeft: `3px solid ${GROUP_COLORS[flarexNodeDefs[type].group] ?? "#8a8f98"}` }}
                 title={`Add ${flarexNodeDefs[type].label} (click, or drag onto the canvas / a wire)`}
                 onClick={() => handleAddNode(type)}
                 draggable
@@ -148,6 +193,16 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
             ))}
           </div>
         ))}
+        {selectedNodeIds.length >= 2 ? (
+          <div className="flarex-toolbar-group flarex-align-group">
+            <span className="flarex-toolbar-group-label">Align</span>
+            {ALIGN_BUTTONS.map((b) => (
+              <button key={b.mode} type="button" className="flarex-toolbar-btn flarex-align-btn" title={b.title} onClick={() => handleAlign(b.mode)}>
+                {b.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
       <FlarexFrameRuler
         durationSeconds={layer.durationSeconds}
@@ -155,6 +210,7 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
         layerStart={layerStart}
         fallbackTime={timeSeconds}
         isPlaying={isPlaying}
+        keyframeTimes={selectedNodeKeyframeTimes}
         onSeekCompTime={(t) => onSeek(layerStart + t)}
       />
       <div className="flarex-body">
@@ -221,6 +277,7 @@ function FlarexFrameRuler({
   layerStart,
   fallbackTime,
   isPlaying,
+  keyframeTimes,
   onSeekCompTime,
 }: {
   durationSeconds: number;
@@ -228,6 +285,8 @@ function FlarexFrameRuler({
   layerStart: number;
   fallbackTime: number;
   isPlaying: boolean;
+  /** Comp-local keyframe times (seconds) of the currently-selected node, for the amber tick row. */
+  keyframeTimes: number[];
   onSeekCompTime: (t: number) => void;
 }) {
   const liveTime = usePlaybackClock(fallbackTime, true);
@@ -280,6 +339,24 @@ function FlarexFrameRuler({
           </span>
         ))}
         <div className="flarex-framebar-playhead" style={{ left: `${(clamped / dur) * 100}%` }} />
+        {keyframeTimes
+          .filter((t) => t >= 0 && t <= dur)
+          .map((t) => (
+            <span
+              key={t}
+              className="flarex-framebar-keyframe"
+              title={`Keyframe at frame ${Math.round(t * fps)}`}
+              style={{ left: `${(t / dur) * 100}%` }}
+              onPointerDown={(e) => {
+                // A diamond click seeks exactly to it — never falls through to the ruler's scrub.
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSeekCompTime(t);
+              }}
+            />
+          ))}
       </div>
       <span className="flarex-framebar-readout" title={`Frame ${frame} of ${lastFrame} (${fps} fps)`}>
         {frame}
