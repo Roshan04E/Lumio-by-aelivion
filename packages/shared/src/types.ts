@@ -258,6 +258,13 @@ export interface ProjectGraph {
    */
   flarexComps?: Record<string, import("./flarex/types").FlarexComp> | undefined;
   /**
+   * Notes board registry (plans/notes-sonnet-execution.md): Miro/Milanote-style creative
+   * organizer boards, keyed by id — same first-class-registry pattern as `flarexComps`.
+   */
+  notesBoards?: Record<string, import("./notes/types").NotesBoard> | undefined;
+  /** Id of the board currently open on the Notes editor page. */
+  activeNotesBoardId?: string | undefined;
+  /**
    * Per-project media-library organization (folder tree etc. — see shared/media-manifest.ts).
    * Living inside the graph means it syncs to the cloud with the project through the existing
    * save path, so local and cloud keep the same folder structure. Renderers ignore it.
