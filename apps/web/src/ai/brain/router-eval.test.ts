@@ -699,6 +699,44 @@ async function main(): Promise<void> {
   check("'make it dreamy' (no registered recipe) → escalates", (await semantic("make it dreamy")).kind === "escalate");
   check("'make it kind of cinematic' (not an exact phrase) → escalates", (await semantic("make it kind of cinematic")).kind === "escalate");
 
+  console.log("\nFLAREX keying reflex (green/blue-screen → flarex-comp skill, never the generation tool):");
+  {
+    const result = await semantic("remove the green screen");
+    const step = result.kind === "plan" ? result.plan.steps[0] : undefined;
+    const ops = step ? (step.params as { ops?: Array<{ op?: string; color?: string }> }).ops : undefined;
+    check(
+      "'remove the green screen' → ONE flarex-comp skill step with a chroma key op, free",
+      result.kind === "plan" &&
+        result.plan.steps.length === 1 &&
+        step?.kind === "skill" &&
+        step.skillId === "flarex-comp" &&
+        ops?.[0]?.op === "key" &&
+        result.plan.totalCredits === 0
+    );
+  }
+  {
+    const result = await semantic("key out the green screen and add some glow");
+    const step = result.kind === "plan" ? result.plan.steps[0] : undefined;
+    const ops = step ? (step.params as { ops?: Array<{ op?: string }> }).ops : undefined;
+    check("'key out the green screen and add some glow' → key + glow ops", ops?.length === 2 && ops[1]?.op === "glow");
+  }
+  {
+    const result = await semantic("remove the blue screen");
+    const step = result.kind === "plan" ? result.plan.steps[0] : undefined;
+    const ops = step ? (step.params as { ops?: Array<{ op?: string; color?: string }> }).ops : undefined;
+    check("'remove the blue screen' → chroma key with the blue key color", ops?.[0]?.color === "#0047bb");
+  }
+  check("'can you remove the green screen' (polite imperative) → still a flarex plan", (await semantic("can you remove the green screen")).kind === "plan");
+  check("'key out the greenscreen' (one word) → still fires the chroma reflex", (await semantic("key out the greenscreen")).kind === "plan");
+  check("MUST NOT: 'how do i remove a green screen' (a question) → escalates", (await semantic("how do i remove a green screen")).kind === "escalate");
+  check("MUST NOT: 'remove the background' (no green screen — segmentation territory) → escalates", (await semantic("remove the background")).kind === "escalate");
+  check("MUST NOT: 'the green screen looks bad' (no key verb) → escalates", (await semantic("the green screen looks bad")).kind === "escalate");
+  check("MUST NOT: 'remove the green screen from clip 3' (explicit target — runtime targets selection only) → escalates", (await semantic("remove the green screen from clip 3")).kind === "escalate");
+  // Luma phrasings carry no "green/blue screen" literal, so the chroma-only reflex regex never
+  // matches them — they fall through to the LLM, which owns the full key.kind:"luma" DSL vocabulary.
+  check("MUST NOT: 'key out the bright sky' (luma phrasing, no screen word) → escalates", (await semantic("key out the bright sky")).kind === "escalate");
+  check("MUST NOT: 'remove the overexposed highlights' (luma phrasing, no screen word) → escalates", (await semantic("remove the overexposed highlights")).kind === "escalate");
+
   console.log("\nB6 — learned-phrase WRITE path (LLM resolutions teach tier 2):");
   {
     const { maybeLearnPhrase } = await import("./semantic");

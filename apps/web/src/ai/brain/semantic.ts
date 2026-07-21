@@ -397,6 +397,73 @@ function conceptRecipeResult(prompt: string, normalized: string): BrainRouteResu
   return { kind: "plan", plan, tier: "semantic", ruleId: recipe.ruleId };
 }
 
+// ---------------------------------------------------------------------------
+// Flarex keying reflex (FLAREX.md Part 7). "<key/remove> … green/blue screen" is the one
+// compositing ask with an unambiguous meaning — compile it straight to the flarex-comp skill
+// (REAL editable chroma-key nodes, zero tokens) instead of letting the model reach for the
+// generation-path background-removal tool (observed 2026-07-21: "remove the green screen" →
+// Generate Studio, nothing keyed). Bounded phrasing; anything fuzzier escalates — the LLM owns
+// the full NodeGraphIntent vocabulary. 👎-gated like every brain rule.
+// ---------------------------------------------------------------------------
+
+function flarexKeyResult(prompt: string, normalized: string): BrainRouteResult | null {
+  if (!isRuleTrusted("t2.flarex-key")) {
+    return null;
+  }
+  const screen = normalized.match(/\b(green|blue)\s*-?\s*screen\b/);
+  if (!screen) {
+    return null;
+  }
+  if (!/\b(?:key(?:\s*out)?|remove|erase|knock\s*out|cut\s*out|delete|drop|get\s*rid\s*of)\b/.test(normalized)) {
+    return null;
+  }
+  // "how do i / how to …" is a question, not a command (the question gate philosophy) — but
+  // polite imperatives ("can you remove the green screen") stay edits, same as tier 1.
+  if (/\bhow\b/.test(normalized)) {
+    return null;
+  }
+  // Explicit clip references escalate: the flarex runtime targets selection/playhead only, so
+  // fast-pathing "… from clip 3" could key the WRONG clip (precision contract — never wrong-target).
+  if (/\b(?:clip|layer)\s*#?\d|\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:clip|layer)\b/.test(normalized)) {
+    return null;
+  }
+  const skill = getSkill("flarex-comp");
+  const task = skill ? getSkillTaskKind(skill, "flarex-comp") : undefined;
+  if (!skill || !task) {
+    return null;
+  }
+  const ops: Array<Record<string, unknown>> = [
+    { op: "key", kind: "chroma", ...(screen[1] === "blue" ? { color: "#0047bb" } : {}) },
+  ];
+  if (/\bglow\b/.test(normalized)) {
+    ops.push({ op: "glow", radius: 30 });
+  }
+  const parsed = task.inputSchema.safeParse({ ops });
+  if (!parsed.success) {
+    return null;
+  }
+  const plan: AiPlan = {
+    id: `plan_flarexkey_${Math.random().toString(36).slice(2, 10)}`,
+    prompt,
+    steps: [
+      {
+        id: `flarexkey_${Math.random().toString(36).slice(2, 8)}`,
+        kind: "skill",
+        skillId: skill.id,
+        taskKind: task.id,
+        params: parsed.data,
+        summary: `Key out the ${screen[1]} screen (editable Flarex nodes)${ops.length > 1 ? " + glow" : ""}`,
+        cost: { tier: "browser", credits: 0 }
+      }
+    ],
+    totalCredits: 0,
+    confidence: "Exact",
+    notes: [],
+    provider: "brain"
+  };
+  return { kind: "plan", plan, tier: "semantic", ruleId: "t2.flarex-key" };
+}
+
 function placeholders(template: string): SlotType[] {
   return [...template.matchAll(/<(target|time|color|n)>/g)].map((match) => match[1] as SlotType);
 }
@@ -909,6 +976,12 @@ export async function routePromptSemantic(prompt: string, context: BrainContext)
   const recipe = conceptRecipeResult(prompt, normalized);
   if (recipe) {
     return recipe;
+  }
+
+  // Flarex keying (FLAREX.md): green/blue-screen removal compiles to the flarex-comp skill.
+  const flarexKey = flarexKeyResult(prompt, normalized);
+  if (flarexKey) {
+    return flarexKey;
   }
 
   const { skeleton, slots } = extractSkeleton(normalized);

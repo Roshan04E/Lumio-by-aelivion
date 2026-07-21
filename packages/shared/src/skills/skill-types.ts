@@ -74,9 +74,11 @@ export interface SkillTaskKind {
    * "tool" = existing editor tool bridge; "grade" = a local color-grade intent compiled to an
    * effect stack (no model, no cloud — see color/grade-intent.ts); "analysis" = a local media
    * analysis run in the browser (no model, no cloud — e.g. beat detection), whose result feeds
-   * the agent loop and can optionally apply markers/cuts.
+   * the agent loop and can optionally apply markers/cuts; "flarex" = a local NodeGraphIntent
+   * compiled into the target clip's Flarex node comp (no model, no cloud — see
+   * flarex/node-graph-intent.ts).
    */
-  execution?: "generation" | "tool" | "grade" | "analysis";
+  execution?: "generation" | "tool" | "grade" | "analysis" | "flarex";
   /** Tool tasks only: the `toolCapabilityDefinitions` slug this task maps to. */
   toolSlug?: string;
   /**

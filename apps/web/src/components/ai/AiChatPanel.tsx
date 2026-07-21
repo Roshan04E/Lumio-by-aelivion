@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AudioLines, BarChart3, Brain, Cpu, Ear, ImagePlus, KeyRound, Mic, Plus, SendHorizontal, Settings2, Sparkles, Square, SquarePen, Undo2, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { buildCapabilityIndex, closeColorGrade, getSkill, getSkillTaskKind, logUnsupported, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type SourceAsset } from "@orreris/shared";
+import { buildCapabilityIndex, closeColorGrade, getSkill, getSkillTaskKind, logUnsupported, nodeGraphIntentSchema, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type NodeGraphIntent, type SourceAsset } from "@orreris/shared";
 import { createPlanner } from "../../ai/planner/createPlanner";
 import { createSpeechRecognition, useDictation } from "../../ai/useDictation";
 import { looksLikeSelfEcho } from "../../ai/echo-guard";
@@ -128,6 +128,12 @@ export interface AiChatPanelProps {
   resolveAssetUrl?: ((assetId: string) => string | undefined) | undefined;
   /** Editor command plane: executes tier-0 control commands ("pan mode", "pause") in the host. */
   runEditorCommand?: EditorCommandDispatcher | undefined;
+  /**
+   * Flarex compositor skill (FLAREX.md Part 7): the host applies a validated NodeGraphIntent to the
+   * target clip's node comp (ensuring the comp + graph write live in EditorPage — the panel stays
+   * graph-free, per the host↔panel seam rule). Absent = the skill reports unavailable.
+   */
+  applyFlarexIntent?: ((intent: NodeGraphIntent, target: { layerId: string }) => Promise<ToolStepResult>) | undefined;
 }
 
 
@@ -187,7 +193,7 @@ const STARTER_PROMPTS = [
 // memo: EditorPage re-renders on every discrete edit; with identity-stable props (host wraps the
 // callbacks in useStableHandlers), this keeps the whole panel out of those renders. The token props
 // (focusToken/micToggleToken/voiceToggleToken) are deliberate change-signals and still get through.
-export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId, focusToken, micToggleToken, voiceToggleToken, onVoiceSessionChange, onWakeWordChange, resolveAssetUrl, runEditorCommand }: AiChatPanelProps) {
+export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId, focusToken, micToggleToken, voiceToggleToken, onVoiceSessionChange, onWakeWordChange, resolveAssetUrl, runEditorCommand, applyFlarexIntent }: AiChatPanelProps) {
   const planner = useMemo(() => createPlanner(), []);
   const initialMemory = useMemo(() => loadMemory(), []);
   /** The agent work-log — the panel's single display truth (replaces chat bubbles/plan card/progress).
@@ -1010,6 +1016,26 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         };
       }
 
+      // Flarex compositor (FLAREX.md Part 7) — compiled locally like the grade: a compact
+      // NodeGraphIntent expands into REAL editable nodes in the clip's node comp. The graph
+      // write lives in the host (`applyFlarexIntent`), keeping this panel graph-free.
+      if (task.execution === "flarex") {
+        if (!applyFlarexIntent) {
+          return { applied: false, detail: "Flarex compositing isn't available here." };
+        }
+        const ctx = getContext();
+        const target = resolveTargetLayer(ctx.composition, { selection: ctx.selection, nowSeconds: ctx.nowSeconds });
+        if (!target.layerId) {
+          return { applied: false, detail: "Which clip? Select a clip or move the playhead over one, then retry." };
+        }
+        const parsed = nodeGraphIntentSchema.safeParse(params);
+        if (!parsed.success) {
+          const issue = parsed.error.issues[0];
+          return { applied: false, detail: `Invalid Flarex intent${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}` };
+        }
+        return applyFlarexIntent(parsed.data as NodeGraphIntent, { layerId: target.layerId });
+      }
+
       // Local media analysis (beat detection) — real DSP in the browser, optionally applying
       // markers/cuts in the same step via the registry (one commit, one undo entry).
       if (task.execution === "analysis") {
@@ -1110,7 +1136,7 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         return { applied: false, detail: error instanceof Error ? error.message : "Generation failed" };
       }
     },
-    [onOpenGenerate, onAddAssetToTimeline, projectId, getContext, commitComposition, resolveAssetUrl]
+    [onOpenGenerate, onAddAssetToTimeline, projectId, getContext, commitComposition, resolveAssetUrl, applyFlarexIntent]
   );
 
   /** Run-scoped accumulators (one agent run = possibly several batches). */

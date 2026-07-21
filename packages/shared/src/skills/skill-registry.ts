@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { gradeIntentSchema } from "../color/grade-intent";
+import { nodeGraphIntentSchema } from "../flarex/node-graph-intent";
 import type { Skill, SkillTaskKind } from "./skill-types";
 
 /**
@@ -297,7 +298,7 @@ export const backgroundRemovalSkill: Skill = {
   name: "Remove Background",
   summary: "Separate the subject from its background — transparent matte or green screen.",
   aiSummary:
-    "Removes the background from the selected clip, either as a transparent timeline matte or a green-screen-ready clip. Task kinds: remove-background-transparent, remove-background-greenscreen.",
+    "Segments the SUBJECT out of a real-world background (person extraction): remove-background-transparent = transparent timeline matte; remove-background-greenscreen = REPLACES the background WITH solid green (outputs green-screen-ready footage — it does NOT key green out). To key OUT footage that ALREADY has a green/blue screen, use the flarex-comp skill's chroma key instead.",
   procedure: [
     "1. Take the selected clip with visual media.",
     "2. Run local person segmentation to get a per-frame matte (reuses the extract-person pass).",
@@ -514,6 +515,50 @@ export const audioAnalysisSkill: Skill = {
   taskKinds: audioAnalysisTaskKinds
 };
 
+// ---------------------------------------------------------------------------------------------
+// Flarex compositor skill — the AI compositor (FLAREX.md Part 7). Compiled LOCALLY like the
+// color grade: the planner emits a compact NodeGraphIntent and the web runtime
+// (AiChatPanel.runSkillStep) expands it into REAL editable nodes in the target clip's Flarex
+// comp via flarex/node-graph-intent.ts. No model, no cloud, no tokens for the structure work.
+// ---------------------------------------------------------------------------------------------
+
+const flarexTaskKinds: SkillTaskKind[] = [
+  {
+    id: "flarex-comp",
+    label: "Flarex Composite",
+    modality: "image",
+    inputs: ["text"],
+    inputSchema: nodeGraphIntentSchema,
+    outputArtifact: "timelinePatch",
+    capabilityReq: { modality: "image", inputs: ["text"] },
+    execution: "flarex"
+  }
+];
+
+export const flarexSkill: Skill = {
+  id: "flarex-comp",
+  name: "Flarex Composite",
+  summary: "Build node-based VFX on a clip — keying, glow, region blur, merges — as an editable node graph.",
+  aiSummary:
+    "Authors node-based compositing on the target clip from a compact NodeGraphIntent — { ops: [key|composite|grade|blur|blurRegion|glow|sharpen|transform|filter] } — which the app compiles locally into REAL editable nodes in the clip's Flarex comp (created if missing; appended if it exists). THE way to key OUT existing green/blue-screen footage ('remove the green screen' → chroma key op; never background-removal, whose greenscreen mode outputs green). Also: glow, region/face blur, re-compositing, stylize filters. Task kind: flarex-comp.",
+  procedure: [
+    "Emit ONE skill step { skillId: 'flarex-comp', taskKind: 'flarex-comp', params: { ops: [...] } }. 1–12 ops, applied in order down the clip's node chain.",
+    "Ops:",
+    "  { op:'key', kind:'chroma'|'luma', color?:'#rrggbb', tolerance?:0..1, softness?:0..1, spill?:0..1 } — green/blue-screen removal (chroma default #00b140).",
+    "  { op:'composite', blend:<blend mode>, opacity?:0..1 } — merge the chain-so-far back OVER the clean source (use after a key to re-composite).",
+    "  { op:'grade', exposure?/contrast?/temperature?/tint?: -100..100, saturation?: 0..220 } — color-correct inside the comp.",
+    "  { op:'blur', sigma: 0..200 } and { op:'blurRegion', shape:'rect'|'ellipse', centerX/centerY:0..1, width/height:0..2, sigma, feather? } — whole-frame or region blur (region = 'blur his face' with an ellipse over the face area).",
+    "  { op:'glow', radius:0..200, intensity?:0..2, threshold?:0..1 } · { op:'sharpen', amount:0..2 } · { op:'transform', x?/y?:-100..100 (percent), scale?:0..4, rotation?:-180..180 }.",
+    "  { op:'filter', effectId: radialBlur|directionalBlur|pixelate|chromaticAberration|sketch|oldTv|glitchFx|halftone|posterize, intensity?:0..1 }.",
+    "Examples:",
+    "  'key out the green screen and add some glow' → { ops: [ { op:'key', kind:'chroma' }, { op:'glow', radius:30 } ] }.",
+    "  'blur the center of the frame' → { ops: [ { op:'blurRegion', shape:'ellipse', centerX:0.5, centerY:0.5, width:0.5, height:0.5, sigma:24 } ] }.",
+    "The result is a real node graph on the clip (Flarex page, Shift+F) the user can inspect and edit node by node."
+  ].join("\n"),
+  category: "compositing",
+  taskKinds: flarexTaskKinds
+};
+
 export const skillRegistry: Skill[] = [
   assetGenerationSkill,
   captioningSkill,
@@ -524,7 +569,8 @@ export const skillRegistry: Skill[] = [
   followTextSkill,
   textBehindSkill,
   colorGradeSkill,
-  audioAnalysisSkill
+  audioAnalysisSkill,
+  flarexSkill
 ];
 
 export function getSkill(id: string): Skill | undefined {

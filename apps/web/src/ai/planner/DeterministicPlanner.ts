@@ -530,6 +530,33 @@ export class DeterministicPlanner implements PlannerProvider {
       }
     }
 
+    // --- 4b. Flarex keying (FLAREX.md): unambiguous green/blue-screen removal compiles to the
+    // flarex skill — a REAL editable node graph (chroma key + optional glow), no model, free.
+    // Precision-first: only the "<key/remove> ... green/blue screen" family fast-paths; every other
+    // compositing ask escalates to the LLM planner, which owns the full NodeGraphIntent vocabulary.
+    {
+      const screen = doc.lower.match(/\b(green|blue)\s*-?\s*screen\b/);
+      const keyVerb = /\b(key(\s*out)?|remove|erase|knock\s*out|cut\s*out|delete|drop)\b/.test(doc.lower);
+      if (screen && keyVerb && steps.length === 0) {
+        const target = needsTarget("key out the background");
+        if (target) {
+          const ops: Array<Record<string, unknown>> = [
+            { op: "key", kind: "chroma", ...(screen[1] === "blue" ? { color: "#0047bb" } : {}) },
+          ];
+          if (/\bglow\b/.test(doc.lower)) ops.push({ op: "glow", radius: 30 });
+          steps.push({
+            id: stepId(),
+            kind: "skill",
+            skillId: "flarex-comp",
+            taskKind: "flarex-comp",
+            params: { ops },
+            summary: `Key out the ${screen[1]} screen (Flarex nodes)`,
+            cost: { tier: "browser", credits: 0 }
+          });
+        }
+      }
+    }
+
     // --- 5. Effects (data-driven), applied to the resolved target ---
     const effectType = matchEffectType(doc, index);
     const addedNewLayer = steps.some((step) => step.actionId === "addShape" || step.actionId === "addText");
