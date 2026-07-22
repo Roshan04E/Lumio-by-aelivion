@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AudioLines, BarChart3, Brain, Cpu, Ear, ImagePlus, KeyRound, Mic, Plus, SendHorizontal, Settings2, Sparkles, Square, SquarePen, Undo2, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { buildCapabilityIndex, closeColorGrade, getSkill, getSkillTaskKind, logUnsupported, nodeGraphIntentSchema, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type NodeGraphIntent, type SourceAsset } from "@orreris/shared";
+import { buildCapabilityIndex, closeColorGrade, getSkill, getSkillTaskKind, logUnsupported, nodeGraphIntentSchema, notesIntentSchema, parseClipReference, recordPlanReviewed, resolveTargetLayer, timelineActionRegistry, type NodeGraphIntent, type NotesIntent, type SourceAsset } from "@orreris/shared";
 import { createPlanner } from "../../ai/planner/createPlanner";
 import { createSpeechRecognition, useDictation } from "../../ai/useDictation";
 import { looksLikeSelfEcho } from "../../ai/echo-guard";
@@ -114,6 +114,10 @@ export interface AiChatPanelProps {
   projectId?: string | undefined;
   /** Monotonic token bumped by the host's "/" shortcut to (re)focus the composer input. */
   focusToken?: number | undefined;
+  /** Monotonic token + text: bumping the token submits `submitPromptText` through the normal brain
+   *  path (same as typing it). Used by external prompt entries like the Notes "✦ Generate" box. */
+  submitPromptToken?: number | undefined;
+  submitPromptText?: string | undefined;
   /** Monotonic token bumped by the host's Alt+M shortcut to toggle voice dictation. */
   micToggleToken?: number | undefined;
   /** Host's Alt+L toggle COMMAND (monotonic token — micToggleToken pattern). One-way by
@@ -134,6 +138,12 @@ export interface AiChatPanelProps {
    * graph-free, per the host↔panel seam rule). Absent = the skill reports unavailable.
    */
   applyFlarexIntent?: ((intent: NodeGraphIntent, target: { layerId: string }) => Promise<ToolStepResult>) | undefined;
+  /**
+   * Notes board skill (plans/notes-sonnet-execution-2.md P1): the host compiles a validated
+   * NotesIntent onto the active Notes board (ensuring the board + graph write live in EditorPage,
+   * same panel-stays-graph-free seam as Flarex). Absent = the skill reports unavailable.
+   */
+  applyNotesIntent?: ((intent: NotesIntent) => Promise<ToolStepResult>) | undefined;
 }
 
 
@@ -193,7 +203,7 @@ const STARTER_PROMPTS = [
 // memo: EditorPage re-renders on every discrete edit; with identity-stable props (host wraps the
 // callbacks in useStableHandlers), this keeps the whole panel out of those renders. The token props
 // (focusToken/micToggleToken/voiceToggleToken) are deliberate change-signals and still get through.
-export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId, focusToken, micToggleToken, voiceToggleToken, onVoiceSessionChange, onWakeWordChange, resolveAssetUrl, runEditorCommand, applyFlarexIntent }: AiChatPanelProps) {
+export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposition, openTool, onUndo, onClose, onOpenGenerate, onAddAssetToTimeline, projectId, focusToken, micToggleToken, voiceToggleToken, onVoiceSessionChange, onWakeWordChange, resolveAssetUrl, runEditorCommand, applyFlarexIntent, applyNotesIntent, submitPromptToken, submitPromptText }: AiChatPanelProps) {
   const planner = useMemo(() => createPlanner(), []);
   const initialMemory = useMemo(() => loadMemory(), []);
   /** The agent work-log — the panel's single display truth (replaces chat bubbles/plan card/progress).
@@ -1036,6 +1046,21 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         return applyFlarexIntent(parsed.data as NodeGraphIntent, { layerId: target.layerId });
       }
 
+      // Notes board (plans/notes-sonnet-execution-2.md P1) — compiled locally like Flarex: a
+      // compact NotesIntent expands into REAL editable cards on the active board. No target clip —
+      // it applies to the board, not the timeline. The graph write lives in the host.
+      if (task.execution === "notes") {
+        if (!applyNotesIntent) {
+          return { applied: false, detail: "The Notes board isn't available here." };
+        }
+        const parsed = notesIntentSchema.safeParse(params);
+        if (!parsed.success) {
+          const issue = parsed.error.issues[0];
+          return { applied: false, detail: `Invalid Notes intent${issue ? `: ${issue.path.join(".")} ${issue.message}` : ""}` };
+        }
+        return applyNotesIntent(parsed.data as NotesIntent);
+      }
+
       // Local media analysis (beat detection) — real DSP in the browser, optionally applying
       // markers/cuts in the same step via the registry (one commit, one undo entry).
       if (task.execution === "analysis") {
@@ -1136,7 +1161,7 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
         return { applied: false, detail: error instanceof Error ? error.message : "Generation failed" };
       }
     },
-    [onOpenGenerate, onAddAssetToTimeline, projectId, getContext, commitComposition, resolveAssetUrl, applyFlarexIntent]
+    [onOpenGenerate, onAddAssetToTimeline, projectId, getContext, commitComposition, resolveAssetUrl, applyFlarexIntent, applyNotesIntent]
   );
 
   /** Run-scoped accumulators (one agent run = possibly several batches). */
@@ -1874,6 +1899,16 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
     }
   }, [buildContext, getContext, input, mode, phase, talking, planner, pushMessage, pushItem, executeBatch, requestApproval, askClarify, attachedImage, updateMessage, resolveRoute, cancelDictationEngine, projectId, bestQuality, undoableCommits, commitBrainTurn, runEditorCommand, exitVoiceSession, speakIfVoice]);
   handleSubmitVoiceRef.current = (prompt: string) => void handleSubmit(prompt);
+
+  // External prompt submission (Notes "✦ Generate" box, etc.): a monotonic token bump submits the
+  // supplied text through the same brain path as a typed message. Skips the initial 0/undefined.
+  const lastSubmitTokenRef = useRef(submitPromptToken);
+  useEffect(() => {
+    if (submitPromptToken === undefined || submitPromptToken === lastSubmitTokenRef.current) return;
+    lastSubmitTokenRef.current = submitPromptToken;
+    const text = submitPromptText?.trim();
+    if (text) void handleSubmit(text);
+  }, [submitPromptToken, submitPromptText, handleSubmit]);
 
   // Attach a reference image (downscaled client-side) for the next prompt.
   const handleImagePick = useCallback(async (file: File | undefined) => {

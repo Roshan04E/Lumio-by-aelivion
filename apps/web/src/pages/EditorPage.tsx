@@ -164,6 +164,10 @@ import {
   createFlarexComp,
   stampFlarexComp,
   type NodeGraphIntent,
+  compileNotesIntent,
+  ensureDefaultNotesBoard,
+  stampNotesBoard,
+  type NotesIntent,
   unnestClip,
   wouldCreateCompositionCycle,
   type NestBreadcrumbEntry,
@@ -885,6 +889,8 @@ export function EditorPage() {
     { tool: ToolCapabilityDefinition; layer: TimelineLayer; asset: SourceAsset } | undefined
   >(undefined);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  // Notes "✦ Generate" box → AI: a monotonic token + text submitted through the panel's brain path.
+  const [notesPromptSubmit, setNotesPromptSubmit] = useState<{ token: number; text: string }>({ token: 0, text: "" });
   // Bumped by the "/" shortcut to (re)focus the AI composer — a monotonic token so the panel
   // re-focuses even when it was already open. See the "/" keydown effect and AiChatPanel's focusToken.
   const [aiFocusToken, setAiFocusToken] = useState(0);
@@ -1358,12 +1364,25 @@ export function EditorPage() {
     }
     return ids;
   }, [graph?.notesBoards]);
-  // P1 AI entry point — the deterministic compiler ships this round; real LLM routing through the
-  // brain tier is fenced (Fable). Stub: acknowledge the prompt, do nothing structural.
-  // TODO(fable): route through brain tier (packages/shared/src/notes/notes-intent.ts compiler).
+  // Layers with a Flarex node comp (plans/notes-sonnet-execution-3.md Q2.1) — drives the note
+  // clock-chip's cross-page "open Flarex comp" glyph.
+  const layerFlarexCompIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const track of graph?.composition?.tracks ?? []) {
+      for (const layer of track.layers) {
+        if (layer.flarexCompId) ids.add(layer.id);
+      }
+    }
+    return ids;
+  }, [graph?.composition?.tracks]);
+  // Notes "✦ Generate" box → brain. The prompt is submitted through the same AI path a typed
+  // message uses; the brain routes it to the `notes-board` skill, whose deterministic
+  // `compileNotesIntent` expands it into real cards via `applyNotesIntent` (host, above).
   const handleNotesPrompt = useCallback((text: string) => {
-    console.info("[notes] AI prompt (stub, not yet routed):", text);
-    setNotice("Notes AI coming soon");
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setAiPanelOpen(true);
+    setNotesPromptSubmit((prev) => ({ token: prev.token + 1, text: trimmed }));
   }, []);
   const importedPluginLibrary = useMemo(
     () => {
@@ -7544,6 +7563,20 @@ export function EditorPage() {
       const summary = ops.map((op) => op.summary).join(" → ");
       return { applied: true, detail: `Flarex nodes added: ${summary || "none"} (Shift+F to edit)` };
     },
+    applyNotesIntent: async (intent: NotesIntent) => {
+      const working = project?.projectGraph;
+      if (!working) return { applied: false, detail: "No project loaded." };
+      // Compile onto the active board (auto-creating one on first use), exactly like the Flarex
+      // path stamps a comp — the panel stays graph-free; the write + version bump live here.
+      const ensured = ensureDefaultNotesBoard(working);
+      const baseBoard = ensured.graph.notesBoards?.[ensured.boardId];
+      if (!baseBoard) return { applied: false, detail: "Couldn't open the Notes board." };
+      const { board: compiledBoard, ops } = compileNotesIntent(intent, baseBoard);
+      const stamped = stampNotesBoard({ ...ensured.graph, activeNotesBoardId: ensured.boardId }, compiledBoard);
+      await updateGraph({ ...stamped, version: working.version + 1 });
+      const summary = ops.map((op) => op.summary).join(" · ");
+      return { applied: true, detail: `Added to the Notes board: ${summary || "nothing"} (Notes page)` };
+    },
     onClose: () => setAiPanelOpen(false),
     onOpenGenerate: (prefill?: GenerateStudioPrefill) => {
       setGenerateStudioPrefill(prefill);
@@ -8601,6 +8634,16 @@ export function EditorPage() {
                     onSeek={setEditorCurrentTime}
                     onNotesPrompt={handleNotesPrompt}
                     focusRequest={notesFocusRequest}
+                    layerFlarexCompIds={layerFlarexCompIds}
+                    onOpenFlarexForLayer={(layerId) => {
+                      setSelectedLayerIds([layerId]);
+                      setEditorPage("flarex");
+                    }}
+                    onOpenAssetInSourceMonitor={(assetId) => {
+                      const asset = assets.find((a) => a.id === assetId);
+                      if (asset) stableOpenSourceMonitor(asset);
+                    }}
+                    selectedTimelineLayerId={selectedLayerIds.length === 1 ? selectedLayerIds[0] : null}
                   />
                 )}
               </ColdTime>
@@ -8865,6 +8908,9 @@ export function EditorPage() {
             onUndo={aiPanelHandlers.onUndo}
             runEditorCommand={runEditorCommand}
             applyFlarexIntent={aiPanelHandlers.applyFlarexIntent}
+            applyNotesIntent={aiPanelHandlers.applyNotesIntent}
+            submitPromptToken={notesPromptSubmit.token}
+            submitPromptText={notesPromptSubmit.text}
             onClose={aiPanelHandlers.onClose}
             onOpenGenerate={aiPanelHandlers.onOpenGenerate}
             onAddAssetToTimeline={aiPanelHandlers.onAddAssetToTimeline}

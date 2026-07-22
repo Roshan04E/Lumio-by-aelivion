@@ -78,7 +78,7 @@ export interface SkillTaskKind {
    * compiled into the target clip's Flarex node comp (no model, no cloud — see
    * flarex/node-graph-intent.ts).
    */
-  execution?: "generation" | "tool" | "grade" | "analysis" | "flarex";
+  execution?: "generation" | "tool" | "grade" | "analysis" | "flarex" | "notes";
   /** Tool tasks only: the `toolCapabilityDefinitions` slug this task maps to. */
   toolSlug?: string;
   /**
@@ -97,7 +97,8 @@ export type SkillCategory =
   | "compositing"
   | "object-removal"
   | "motion"
-  | "color";
+  | "color"
+  | "planning";
 
 export interface Skill {
   id: string;

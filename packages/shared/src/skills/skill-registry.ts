@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { gradeIntentSchema } from "../color/grade-intent";
 import { nodeGraphIntentSchema } from "../flarex/node-graph-intent";
+import { notesIntentSchema } from "../notes/notes-intent";
 import type { Skill, SkillTaskKind } from "./skill-types";
 
 /**
@@ -540,7 +541,7 @@ export const flarexSkill: Skill = {
   name: "Flarex Composite",
   summary: "Build node-based VFX on a clip — keying, glow, region blur, merges — as an editable node graph.",
   aiSummary:
-    "Authors node-based compositing on the target clip from a compact NodeGraphIntent — { ops: [key|composite|grade|blur|blurRegion|glow|sharpen|transform|filter] } — which the app compiles locally into REAL editable nodes in the clip's Flarex comp (created if missing; appended if it exists). THE way to key OUT existing green/blue-screen footage ('remove the green screen' → chroma key op; never background-removal, whose greenscreen mode outputs green). Also: glow, region/face blur, re-compositing, stylize filters. Task kind: flarex-comp.",
+    "Authors node-based compositing on the target clip from a compact NodeGraphIntent — { ops: [key|composite|grade|blur|blurRegion|glow|sharpen|transform|filter|mask|matte] } — which the app compiles locally into REAL editable nodes in the clip's Flarex comp (created if missing; appended if it exists). THE way to key OUT existing green/blue-screen footage ('remove the green screen' → chroma key op; never background-removal, whose greenscreen mode outputs green). Also: glow, region/face blur, shape masks, matte combine/feather/choke, re-compositing, stylize filters. Task kind: flarex-comp.",
   procedure: [
     "Emit ONE skill step { skillId: 'flarex-comp', taskKind: 'flarex-comp', params: { ops: [...] } }. 1–12 ops, applied in order down the clip's node chain.",
     "Ops:",
@@ -550,6 +551,8 @@ export const flarexSkill: Skill = {
     "  { op:'blur', sigma: 0..200 } and { op:'blurRegion', shape:'rect'|'ellipse', centerX/centerY:0..1, width/height:0..2, sigma, feather? } — whole-frame or region blur (region = 'blur his face' with an ellipse over the face area).",
     "  { op:'glow', radius:0..200, intensity?:0..2, threshold?:0..1 } · { op:'sharpen', amount:0..2 } · { op:'transform', x?/y?:-100..100 (percent), scale?:0..4, rotation?:-180..180 }.",
     "  { op:'filter', effectId: radialBlur|directionalBlur|pixelate|chromaticAberration|sketch|oldTv|glitchFx|halftone|posterize, intensity?:0..1 }.",
+    "  { op:'mask', shape:'rect'|'ellipse', region:{ x,y,w,h : 0..1 } (center + size, like blurRegion), feather?:0..1, invert?:boolean } — limit the chain-so-far to a shape ('mask an oval over the subject').",
+    "  { op:'matte', action:'combine'|'invert'|'feather'|'choke', amount?:0..1 } — operate on the running matte from a preceding mask/key (feather softens the edge, choke shrinks it, invert flips it).",
     "Examples:",
     "  'key out the green screen and add some glow' → { ops: [ { op:'key', kind:'chroma' }, { op:'glow', radius:30 } ] }.",
     "  'blur the center of the frame' → { ops: [ { op:'blurRegion', shape:'ellipse', centerX:0.5, centerY:0.5, width:0.5, height:0.5, sigma:24 } ] }.",
@@ -557,6 +560,48 @@ export const flarexSkill: Skill = {
   ].join("\n"),
   category: "compositing",
   taskKinds: flarexTaskKinds
+};
+
+// ---------------------------------------------------------------------------------------------
+// Notes board skill (plans/notes-sonnet-execution-2.md P1): "make a mindmap about X", "add a
+// kanban of these tasks" → a compact NotesIntent the web runtime (AiChatPanel.runSkillStep)
+// compiles LOCALLY onto the active Notes board via notes/notes-intent.ts. No model, no cloud, no
+// tokens for the structure work — the LLM only picks the words, the compiler owns the layout.
+// ---------------------------------------------------------------------------------------------
+
+const notesTaskKinds: SkillTaskKind[] = [
+  {
+    id: "notes-board",
+    label: "Notes Board",
+    modality: "image",
+    inputs: ["text"],
+    inputSchema: notesIntentSchema,
+    outputArtifact: "timelinePatch",
+    capabilityReq: { modality: "image", inputs: ["text"] },
+    execution: "notes"
+  }
+];
+
+export const notesSkill: Skill = {
+  id: "notes-board",
+  name: "Notes Board",
+  summary: "Populate the Notes creative board — notes, frames, mindmaps, todos — as real editable cards.",
+  aiSummary:
+    "Builds cards on the Notes board (the Miro/Milanote creative-organizer page) from a compact NotesIntent — { ops: [addNote|addFrame|connect|mindmap|todo] } — which the app compiles LOCALLY into real, editable, connected cards on the active board. Use for 'make a mindmap about X', 'brainstorm ideas for Y', 'add a todo list of Z', 'outline a plan for W'. NOT for timeline/clip edits. Task kind: notes-board.",
+  procedure: [
+    "Emit ONE skill step { skillId: 'notes-board', taskKind: 'notes-board', params: { ops: [...] } }. 1–24 ops.",
+    "Do NOT set pixel coordinates unless the user is explicit — the compiler lays cards out. Prefer 'mindmap' for anything tree/brainstorm shaped.",
+    "Ops:",
+    "  { op:'mindmap', root:'<center idea>', branches:[ '<child>' | { text:'<child>', children:[...] } ] } — the go-to for brainstorms/outlines; compiles to a laid-out tree of connected note cards.",
+    "  { op:'addNote', text:'<card text>', color?:'#rrggbb' } · { op:'addFrame', title:'<group title>' } · { op:'todo', title:'<list title>', items:['<row>', ...] }.",
+    "  { op:'connect', fromRef:<n>, toRef:<n>, label?:'<edge label>' } — refs are 1-based indices into the items created by THIS intent's ops, in order (not board ids).",
+    "Examples:",
+    "  'mind map about photosynthesis' → { ops:[ { op:'mindmap', root:'Photosynthesis', branches:['Light reactions','Calvin cycle',{ text:'Inputs', children:['CO2','Water','Sunlight'] }] } ] }.",
+    "  'todo list for the shoot' → { ops:[ { op:'todo', title:'Shoot', items:['Scout location','Charge batteries','Backup cards'] } ] }.",
+    "The result is real cards on the Notes page the user can drag, edit, and connect."
+  ].join("\n"),
+  category: "planning",
+  taskKinds: notesTaskKinds
 };
 
 export const skillRegistry: Skill[] = [
@@ -570,7 +615,8 @@ export const skillRegistry: Skill[] = [
   textBehindSkill,
   colorGradeSkill,
   audioAnalysisSkill,
-  flarexSkill
+  flarexSkill,
+  notesSkill
 ];
 
 export function getSkill(id: string): Skill | undefined {
