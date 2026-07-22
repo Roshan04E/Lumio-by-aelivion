@@ -105,6 +105,15 @@ function r2(): { client: S3Client; bucket: string } {
       region: "auto", // R2 is region-agnostic
       endpoint: cfg.r2Endpoint,
       forcePathStyle: true,
+      // @aws-sdk/client-s3 >= 3.729 calculates a request checksum and validates a response checksum on
+      // EVERY call by default ("WHEN_SUPPORTED"). Cloudflare R2 (like MinIO/GCS) handles this
+      // inconsistently: it injects x-amz-checksum-mode=ENABLED into presigned GET URLs and can abort or
+      // truncate streamed GetObject responses — surfacing as the worker's "GetObject failed: aborted"
+      // retries and the browser's ERR_CONTENT_LENGTH_MISMATCH on /storage reads. Scoping both to
+      // "WHEN_REQUIRED" restores the pre-3.729 behavior (checksum only when an API explicitly needs it),
+      // which is the documented R2 compatibility fix and keeps presigned URLs clean.
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
       credentials: {
         accessKeyId: cfg.r2AccessKeyId,
         secretAccessKey: cfg.r2SecretAccessKey
