@@ -21,6 +21,7 @@ import { ModelEngineControl } from "../components/ModelEngineControl";
 import { VideoPreview } from "../components/VideoPreview";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import { addEffect, createProject, patchProject } from "../lib/api";
+import { resolveGraphMattes } from "../export/matte-resolve";
 import { getLayerToolEffectHandler } from "../tools/layer-effect-handlers";
 import { assertToolRunnable } from "../tools/useLayerToolEffectRunner";
 
@@ -276,8 +277,11 @@ export function RemoveBackgroundToolPanel({
     setBusy(true);
     try {
       const project = await createProject({ title: `${tool.name} Draft`, sourceAssetId: selectedAsset.id });
-      await addEffect(project.id, tool.moduleType);
-      const graph = project.projectGraph as ProjectGraph;
+      // Use the graph RETURNED by addEffect (current version + any composition it rebuilt), not the
+      // stale createProject graph — patching with the pre-addEffect version left the composition
+      // unchanged (original clip) on the server path.
+      const added = await addEffect(project.id, tool.moduleType);
+      const graph = added.project.projectGraph as ProjectGraph;
       const composition = graph.composition;
       if (!composition) {
         navigate(`/editor/${project.id}`);
@@ -292,14 +296,17 @@ export function RemoveBackgroundToolPanel({
         context: "standalone" as const
       };
       const nextComposition = handler.applyResult(applyArgs);
-      const updated = await patchProject(project.id, {
-        projectGraph: {
-          ...graph,
-          editableFields: { ...graph.editableFields, ...(handler.describeEditableFields?.(applyArgs) ?? {}) },
-          composition: nextComposition,
-          version: graph.version + 1
-        }
-      });
+      const draftGraph: ProjectGraph = {
+        ...graph,
+        editableFields: { ...graph.editableFields, ...(handler.describeEditableFields?.(applyArgs) ?? {}) },
+        composition: nextComposition,
+        version: graph.version + 1
+      };
+      // Guarantee the matte has a durable, fetchable URL before the fresh editor mounts (recovers
+      // blob:/OPFS bytes → uploads). Without it a non-durable matte URI can't load in the new
+      // project, so the subject renders as the plain clip instead of the cutout. No-op when durable.
+      const { graph: resolvedGraph } = await resolveGraphMattes(draftGraph);
+      const updated = await patchProject(project.id, { projectGraph: resolvedGraph });
       navigate(`/editor/${updated.id}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Apply failed.");
