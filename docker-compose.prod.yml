@@ -1,0 +1,111 @@
+# Orreris production stack. Single-host deploy of the three app images + Postgres + Redis.
+#
+#   cp .env.prod.example .env.prod   # fill in secrets (JWT, R2, Postgres password)
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# The `migrate` one-shot applies DB migrations before `api`/`worker` start. All app config comes from
+# .env.prod (injected via env_file) — nothing secret is baked into an image. For MANAGED Postgres/Redis,
+# delete the postgres/redis services below, point DATABASE_URL/REDIS_URL in .env.prod at the managed
+# hosts, and drop those two from each `depends_on`.
+name: orreris
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: [.env.prod] # provides POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: apply Prisma migrations, then exit. api/worker wait for this to succeed. Reuses the api
+  # image (built once, shared via the `image:` tag) so migrations run the exact schema the API ships.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: orreris-api
+    command: ["pnpm", "--filter", "@orreris/api", "prisma:deploy"]
+    env_file: [.env.prod]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: orreris-api
+    restart: unless-stopped
+    env_file: [.env.prod]
+    # Not published to the host — the web nginx proxies /api and /storage to it over the internal
+    # network. Publish "4100:4100" only for a split-host deploy where the SPA calls the API directly.
+    expose:
+      - "4100"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: orreris-worker
+    restart: unless-stopped
+    env_file: [.env.prod] # WORKER_QUEUE=bullmq here makes it consume the Redis queue
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Same-origin: the SPA calls /api and nginx proxies to the api service. For a split-host
+        # deploy, set this to the API's absolute https URL (e.g. https://api.example.com/api).
+        VITE_API_URL: /api
+    image: orreris-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  # No shared media volume: production uses STORAGE_DRIVER=r2, so api and worker exchange media through
+  # R2, not a shared filesystem. If you run STORAGE_DRIVER=local instead, add a volume mounted at
+  # /app/apps/api/storage on BOTH api and worker so the worker's renders are visible to the API.

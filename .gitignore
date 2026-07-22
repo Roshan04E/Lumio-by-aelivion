@@ -3,6 +3,7 @@ dist
 .env
 .env.local
 .env.*.local
+.env.prod
 .DS_Store
 *.log
 # Self-hosted local ML model weights (lazy-fetched on tool interaction, browser-cached).
