@@ -13,18 +13,15 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.69.0
         version: 0.69.0(zod@3.25.76)
-      '@aws-sdk/client-s3':
-        specifier: ^3.1085.0
-        version: 3.1085.0
-      '@aws-sdk/s3-request-presigner':
-        specifier: ^3.1085.0
-        version: 3.1085.0
       '@orreris/render-templates':
         specifier: workspace:*
         version: link:../../packages/render-templates
       '@orreris/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@orreris/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@prisma/client':
         specifier: ^6.14.0
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
@@ -165,6 +162,9 @@ importers:
       '@orreris/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@orreris/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@prisma/client':
         specifier: ^6.14.0
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
@@ -252,6 +252,22 @@ importers:
       tsx:
         specifier: ^4.20.4
         version: 4.22.4
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  packages/storage:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.1085.0
+        version: 3.1085.0
+      '@aws-sdk/s3-request-presigner':
+        specifier: ^3.1085.0
+        version: 3.1085.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.3.0
+        version: 24.13.2
       typescript:
         specifier: ^5.9.2
         version: 5.9.3

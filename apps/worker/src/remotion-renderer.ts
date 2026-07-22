@@ -134,6 +134,12 @@ export async function renderManifestToMp4(input: {
     serveUrl,
     inputProps,
     ...(audioPostMix ? { muted: true } : {}),
+    // Lossless intermediate frames. Remotion defaults to imageFormat "jpeg" at jpegQuality 80, so
+    // EVERY frame is JPEG-compressed before the H.264 encoder even runs — a visible "soft" quality
+    // loss (fine detail/text) stacked on top of the final CRF encode. PNG makes the render → encode
+    // hand-off lossless, so the only compression is the single final H.264 pass — matching the
+    // on-device WebCodecs export, which encodes frames directly with no lossy intermediate.
+    imageFormat: "png",
     // Without this, ffmpeg encodes the sRGB page pixels without converting/tagging for BT.709
     // limited range, and players decode the full-range data as limited → contrast/saturation
     // blowout vs the editor preview (measured up to ±19/255 on grays; see architecture.md

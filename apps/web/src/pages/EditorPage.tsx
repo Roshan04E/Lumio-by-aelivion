@@ -1737,6 +1737,33 @@ export function EditorPage() {
     return () => window.clearInterval(interval);
   }, [activeRenderJob, projectId]);
 
+  // When a final render completes, the worker creates a "Rendered" bin asset (Local tab) pointing at
+  // the exported mp4. Pull it into the live asset list so it appears without a reload. MERGE (never
+  // replace) so in-memory local/proxy state on existing assets is preserved — we only add rows the
+  // list doesn't already have. Keyed on the job id so it runs once per completed export.
+  const renderedAssetSyncedJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!projectId || latestFinalJob?.status !== "completed") return;
+    if (renderedAssetSyncedJobRef.current === latestFinalJob.id) return;
+    renderedAssetSyncedJobRef.current = latestFinalJob.id;
+    let cancelled = false;
+    listProjectAssets(projectId)
+      .then((list) => {
+        if (cancelled) return;
+        setAssets((current) => {
+          const have = new Set(current.map((asset) => asset.id));
+          const additions = list
+            .filter((asset) => !have.has(asset.id))
+            .map((asset) => (asset.proxyUrl?.startsWith("blob:") ? { ...asset, proxyUrl: undefined } : asset));
+          return additions.length ? [...additions, ...current] : current;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, latestFinalJob?.status, latestFinalJob?.id]);
+
   useEffect(() => {
     localStorage.setItem("orreris_preview_quality", previewQuality);
   }, [previewQuality]);

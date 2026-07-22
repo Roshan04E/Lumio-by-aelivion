@@ -1,10 +1,12 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
 import { buildRenderManifest, type RenderManifest } from "@orreris/render-templates";
 import { type ProjectGraph, type SourceAsset } from "@orreris/shared";
+import { persistBytes } from "@orreris/storage";
 import { makeCancelSignal } from "@remotion/renderer";
 import { renderManifestToMp4 } from "./remotion-renderer";
 
@@ -123,12 +125,12 @@ export async function processNextRenderJob() {
       },
       manifest
     };
-    // The manifest/setup steps above are near-instant (DB lookups), so they
-    // only get a small fixed slice (0-15%). The actual frame-by-frame render
-    // is genuinely the slow part and is where Remotion's real per-frame
-    // progress lives - give it almost the entire bar (15-99%) instead of
-    // squeezing it into a narrow band, so the number moves the way the work
-    // actually progresses instead of jumping to a fixed checkpoint and crawling.
+    // The manifest/setup steps above are near-instant (DB lookups), so they only get a small fixed
+    // slice (0-15%). The frame-by-frame render is the slow part with real per-frame progress — give
+    // it the bulk of the bar (15-95%). The final 95-99% band is the R2 upload of the finished mp4,
+    // which persistBytes does in one shot with no sub-progress; reserving a band for it means the
+    // bar visibly advances into an "uploading" phase instead of freezing at 99% during the upload
+    // (see getRenderNotice on the web, which labels >95% as the upload step).
     const outputUrl = await saveRenderArtifact(
       project.id,
       job.type,
@@ -138,7 +140,14 @@ export async function processNextRenderJob() {
         // we never revive a cancelled job. No throwing here — the cancelSignal stops the render.
         await prisma.renderJob.updateMany({
           where: { id: job.id, status: "processing" },
-          data: { progress: Math.max(15, Math.min(99, Math.round(15 + progress * 84))) }
+          data: { progress: Math.max(15, Math.min(95, Math.round(15 + progress * 80))) }
+        });
+      },
+      async () => {
+        // Render done, uploading the mp4 to storage — advance into the reserved upload band.
+        await prisma.renderJob.updateMany({
+          where: { id: job.id, status: "processing" },
+          data: { progress: 97 }
         });
       },
       cancelSignal
@@ -153,6 +162,26 @@ export async function processNextRenderJob() {
         await tx.project.update({
           where: { id: project.id },
           data: { status: "export_ready", finalUrl: outputUrl }
+        });
+        // Surface the finished export in the media bin as a reusable clip: a SourceAsset in the
+        // Local tab under a "Rendered" folder (folder "local/Rendered", source "local"), owned by
+        // this project. Points at the SAME stored mp4 (outputUrl) — no re-upload. Each export adds a
+        // new entry; dimensions/duration come from the manifest so the bin card is correct.
+        await tx.sourceAsset.create({
+          data: {
+            userId: job.userId,
+            fileName: `${project.title || "Export"}.mp4`,
+            originalName: `${project.title || "Export"}.mp4`,
+            fileType: "video/mp4",
+            fileUrl: outputUrl,
+            durationSeconds: manifest.output.durationSeconds,
+            width: manifest.output.width,
+            height: manifest.output.height,
+            status: "ready",
+            source: "local",
+            folder: "local/Rendered",
+            ownerProjectId: project.id
+          }
         });
       });
       return true;
@@ -196,26 +225,32 @@ async function saveRenderArtifact(
   type: string,
   payload: { manifest: Parameters<typeof renderManifestToMp4>[0]["manifest"] },
   onProgress: (progress: number) => Promise<void>,
+  onUploadStart: () => Promise<void>,
   cancelSignal: Parameters<typeof renderManifestToMp4>[0]["cancelSignal"]
 ) {
-  const root = resolveStorageRoot();
+  // Remotion can only write to a LOCAL file path, so render to a throwaway temp dir, then upload the
+  // bytes through the shared storage abstraction (@orreris/storage). Under STORAGE_DRIVER=local this
+  // writes to apps/api/storage/<folder>/… with the same public URL as before; under r2 it uploads to
+  // the bucket — the render worker and API now share ONE storage implementation (no drift, and the
+  // API and worker no longer have to share a filesystem when deployed as separate containers).
   const folder = type === "preview" ? "previews" : "finals";
-  await fs.mkdir(path.join(root, folder), { recursive: true });
   const baseName = `${projectId}-${type}-${Date.now()}`;
-  await fs.writeFile(path.join(root, folder, `${baseName}.json`), JSON.stringify(payload, null, 2));
-  await renderManifestToMp4({
-    manifest: payload.manifest,
-    outputLocation: path.join(root, folder, `${baseName}.mp4`),
-    onProgress,
-    ...(cancelSignal ? { cancelSignal } : {})
-  });
-  return `${process.env.API_PUBLIC_URL ?? "http://localhost:4100"}/storage/${folder}/${baseName}.mp4`;
-}
-
-function resolveStorageRoot() {
-  const workspaceRoot = path.resolve(process.cwd(), "../..");
-  const storageRoot = process.env.STORAGE_ROOT ?? "apps/api/storage";
-  return path.isAbsolute(storageRoot) ? storageRoot : path.resolve(workspaceRoot, storageRoot);
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orreris-render-"));
+  const tmpOut = path.join(tmpDir, `${baseName}.mp4`);
+  try {
+    await renderManifestToMp4({
+      manifest: payload.manifest,
+      outputLocation: tmpOut,
+      onProgress,
+      ...(cancelSignal ? { cancelSignal } : {})
+    });
+    const bytes = await fs.readFile(tmpOut);
+    await onUploadStart();
+    return await persistBytes(`${folder}/${baseName}.mp4`, bytes, "video/mp4");
+  } finally {
+    // Clears the mp4 and any audio-post-mix "<baseName>.mp4.video.mp4" intermediate in one shot.
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
 }
 
 function toSourceAsset(asset: {

@@ -43,9 +43,18 @@ export function createApp() {
         res.status(400).end();
         return;
       }
-      void getObjectStream(key)
-        .then(({ body, contentType, contentLength }) => {
+      // Forward the client's Range so R2 serves partial content. Without this, video seeking (the
+      // export worker's Remotion OffthreadVideo, editor scrubbing) re-downloads the whole file per
+      // frame and renders time out. Advertise Accept-Ranges so clients know seeking is supported.
+      const range = typeof req.headers.range === "string" ? req.headers.range : undefined;
+      void getObjectStream(key, range)
+        .then(({ body, contentType, contentLength, contentRange }) => {
           if (contentType) res.setHeader("Content-Type", contentType);
+          res.setHeader("Accept-Ranges", "bytes");
+          if (contentRange) {
+            res.setHeader("Content-Range", contentRange);
+            res.status(206); // Partial Content — R2 honored the Range
+          }
           if (contentLength !== undefined) res.setHeader("Content-Length", String(contentLength));
           res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
           body.on("error", () => void (res.destroyed || res.status(502).end()));
