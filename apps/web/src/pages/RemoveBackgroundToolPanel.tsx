@@ -207,8 +207,8 @@ export function RemoveBackgroundToolPanel({
         fps: baseComposition?.fps ?? 30,
         composition: liveComposition,
         editableFields,
-        // Range is threaded through now so the UI is the source of truth; the segmenter honouring
-        // `rangeStartSeconds`/`rangeEndSeconds` (to skip unused source) is the next backend step.
+        // The segmenter windows to this range: only [start,end] of the source is sampled, and the
+        // baked matte records `startSeconds` so every renderer re-aligns it to source time.
         options: {
           quality,
           maskSource,
