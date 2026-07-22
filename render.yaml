@@ -1,0 +1,120 @@
+# Orreris on Render — Blueprint. In Render: New → Blueprint → connect this repo. Render reads this file
+# and provisions Postgres + Redis + api + worker + web, wiring DATABASE_URL/REDIS_URL automatically and
+# prompting you for the `sync: false` secrets (R2 keys, your URLs). See the deploy steps in DEPLOY.md.
+#
+# Plans below are sensible starting points — the WORKER needs ~2GB RAM for headless-Chromium video
+# renders (hence `standard`). Adjust any plan in the dashboard later. Region is pinned so the services
+# and databases share Render's private network.
+
+databases:
+  - name: orreris-postgres
+    plan: basic-256mb # persistent managed Postgres; bump to basic-1gb+ as data grows
+    databaseName: orreris
+    user: orreris
+    region: oregon
+
+# Shared config used by BOTH api and worker (so they can't drift). Secrets are `sync: false` — Render
+# prompts for them once at deploy. API_PUBLIC_URL must be the api's PUBLIC https URL (set it after the
+# first deploy assigns the URL — see DEPLOY.md), and it MUST be identical for api and worker.
+envVarGroups:
+  - name: orreris-shared
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: WORKER_QUEUE
+        value: bullmq
+      - key: STORAGE_DRIVER
+        value: r2
+      - key: API_PUBLIC_URL
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_PUBLIC_BASE_URL
+        sync: false
+      # Optional integrations — leave blank to keep the feature off. Fill any you use.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+services:
+  # Managed Redis (Key Value) — the BullMQ render queue. Empty ipAllowList = private (internal) only.
+  - name: orreris-redis
+    type: keyvalue
+    plan: starter
+    region: oregon
+    ipAllowList: []
+    maxmemoryPolicy: noeviction # never evict queued jobs
+
+  # API — Docker web service. Migrations run before each deploy; health-gated on /health.
+  - name: orreris-api
+    type: web
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    preDeployCommand: pnpm --filter @orreris/api prisma:deploy
+    envVars:
+      - fromGroup: orreris-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orreris-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: orreris-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true # Render generates a strong secret
+      - key: WEB_ORIGIN
+        sync: false # the web site's public https URL (set after first deploy)
+
+  # Render worker — headless Chromium renders. Needs the RAM; standard = 2GB.
+  - name: orreris-worker
+    type: worker
+    runtime: docker
+    plan: standard
+    region: oregon
+    dockerfilePath: apps/worker/Dockerfile
+    dockerContext: .
+    envVars:
+      - fromGroup: orreris-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orreris-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: orreris-redis
+          property: connectionString
+
+  # Web — static SPA (Vite build). Split-host: the SPA calls the API's absolute URL, so VITE_API_URL is
+  # the api's public https URL + /api (set after first deploy, then redeploy this service).
+  - name: orreris-web
+    type: web
+    runtime: static
+    buildCommand: corepack enable && corepack prepare pnpm@11.5.1 --activate && pnpm install --frozen-lockfile && pnpm --filter @orreris/web build
+    staticPublishPath: apps/web/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false # = https://<your-api>.onrender.com/api
+      - key: VITE_GOOGLE_CLIENT_ID
+        sync: false # optional (Google sign-in button)

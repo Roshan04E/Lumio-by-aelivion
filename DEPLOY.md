@@ -43,6 +43,32 @@ docker compose -f docker-compose.prod.yml run --rm migrate   # re-run migrations
 
 Health check: `GET /health` on the API returns `{ success: true }`.
 
+## Deploying to Render (managed, via Blueprint)
+
+`render.yaml` provisions everything (Postgres + Redis + api + worker + web) as one Blueprint.
+
+1. Push this repo to GitHub (done).
+2. Render → **New → Blueprint** → connect the repo → Render detects `render.yaml`.
+3. At the prompt, fill the `sync: false` values: `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
+   `R2_SECRET_ACCESS_KEY` (from your `.env`), plus any optional keys (Gemini/Pexels/fal). Leave the
+   three URL vars (`API_PUBLIC_URL`, `WEB_ORIGIN`, `VITE_API_URL`) blank for now.
+4. Apply — Render builds the images (worker/Chromium is the slow one), runs migrations
+   (`preDeployCommand`), and starts everything. Note the assigned URLs, e.g.
+   `https://orreris-api.onrender.com` and `https://orreris-web.onrender.com`.
+5. **Set the URLs** (one-time bootstrap, since the SPA needs the API's address baked in):
+   - `orreris-shared` group → `API_PUBLIC_URL` = the api URL.
+   - `orreris-api` → `WEB_ORIGIN` = the web URL.
+   - `orreris-web` → `VITE_API_URL` = the api URL + `/api`.
+   - Redeploy **web** (and api) so the values take effect.
+6. Seed the demo login (fresh DB): Render → `orreris-api` → **Shell** →
+   `pnpm --filter @orreris/api db:seed`.
+7. Open the web URL, log in, export a clip → it renders on the worker. Done.
+
+Updates: push to the deploy branch → Render auto-builds and redeploys.
+
+Cost note: `orreris-worker` is `standard` (~2GB RAM) because headless-Chromium video renders need it;
+Postgres/Redis/api can start smaller. There is no free tier for a background worker.
+
 ## Managed Postgres / Redis
 
 To use managed services instead of the bundled containers: delete the `postgres` and `redis` services
