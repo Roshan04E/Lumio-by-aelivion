@@ -169,6 +169,80 @@ function item(over: Partial<NoteItem> & Pick<NoteItem, "id" | "type">): NoteItem
   check("shape (pure visual) produces no line", !md.includes("shape"));
 }
 
+// --- duplicateNotesBoard ---------------------------------------------------------
+{
+  const graph = graphFixture();
+  const { graph: g1, boardId } = ensureDefaultNotesBoard(graph);
+  const g2 = stampNotesBoard(g1, {
+    ...g1.notesBoards![boardId]!,
+    items: { n1: item({ id: "n1", type: "note", body: "original" }) },
+    edges: [],
+  });
+  const dup = duplicateNotesBoard(g2, boardId);
+  check("duplicate returns a result", dup !== null);
+  if (dup) {
+    const { graph: g3, boardId: dupId } = dup;
+    check("duplicate gets a fresh board id", dupId !== boardId);
+    check("duplicate is named '... copy'", g3.notesBoards![dupId]!.name.endsWith(" copy"));
+    check("duplicate becomes active", g3.activeNotesBoardId === dupId);
+    const dupItem = Object.values(g3.notesBoards![dupId]!.items)[0];
+    check("duplicate has one remapped item", dupItem !== undefined && dupItem.id !== "n1" && dupItem.body === "original");
+    check("original board untouched", g3.notesBoards![boardId]!.items.n1?.body === "original");
+  }
+  const missing = duplicateNotesBoard(g2, "missing");
+  check("duplicating a missing board returns null", missing === null);
+}
+
+// --- defaultSizeForAsset -----------------------------------------------------------
+{
+  const audio = defaultSizeForAsset("audio");
+  check("audio size is wide-short", audio.w > audio.h);
+  const file = defaultSizeForAsset("file");
+  check("file size is compact", file.w <= 240 && file.h <= 72);
+  const video = defaultSizeForAsset("video", 1920, 1080);
+  check("video derives 16:9 aspect from real dimensions", Math.abs(video.w / video.h - 1920 / 1080) < 0.01);
+  const videoFallback = defaultSizeForAsset("video");
+  check("video falls back without dimensions", videoFallback.w > 0 && videoFallback.h > 0);
+  const image = defaultSizeForAsset("image", 4000, 2000);
+  check("image size is capped, not the full 4000px", image.w <= 320 && image.h <= 320);
+  check("image aspect is preserved after capping", Math.abs(image.w / image.h - 2) < 0.05);
+  const tinyImage = defaultSizeForAsset("image", 40, 40);
+  check("tiny image is grown to the minimum footprint", tinyImage.w >= 160);
+}
+
+// --- markdown-lite parser (Q3.1) ---------------------------------------------------
+{
+  const bold = parseNoteMarkdownInline("hello **world** end");
+  check("bold token extracted", bold.some((t) => t.kind === "bold" && t.value === "world"));
+  check("surrounding text preserved around bold", bold.some((t) => t.kind === "text" && t.value === "hello "));
+
+  const italic = parseNoteMarkdownInline("a *b* c");
+  check("italic token extracted", italic.some((t) => t.kind === "italic" && t.value === "b"));
+
+  const plain = parseNoteMarkdownInline("no markup here");
+  check("plain text round-trips as a single text token", plain.length === 1 && plain[0]?.kind === "text" && plain[0]?.value === "no markup here");
+
+  const blocks = parseNoteMarkdown("# Title\n## Subtitle\n- item one\nplain line");
+  check("h1 detected", blocks[0]?.kind === "heading" && blocks[0].level === 1);
+  check("h2 detected", blocks[1]?.kind === "heading" && blocks[1].level === 2);
+  check("bullet detected", blocks[2]?.kind === "bullet");
+  check("plain line is a paragraph", blocks[3]?.kind === "paragraph");
+
+  const escaped = parseNoteMarkdown("just # not a heading because no space after")[0];
+  check("a bare '#' without a following space is NOT a heading", escaped?.kind === "paragraph");
+}
+
+// --- locked items excluded from frame drag-capture (Q4.3) --------------------------
+{
+  const frame = item({ id: "f2", type: "frame", x: 0, y: 0, w: 300, h: 300 });
+  const locked = item({ id: "lockedMember", type: "note", x: 50, y: 50, w: 20, h: 20, locked: true });
+  const unlocked = item({ id: "freeMember", type: "note", x: 100, y: 100, w: 20, h: 20 });
+  const board: NotesBoard = { id: "b5", name: "Board", items: { f2: frame, lockedMember: locked, freeMember: unlocked }, edges: [], version: 1 };
+  const captured = itemsInsideFrame(board, "f2");
+  check("locked member is excluded from the frame's drag-capture set", !captured.some((it) => it.id === "lockedMember"));
+  check("unlocked member IS captured", captured.some((it) => it.id === "freeMember"));
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

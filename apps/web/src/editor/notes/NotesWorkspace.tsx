@@ -10,6 +10,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   Circle,
+  Copy,
+  Download,
   Frame as FrameIcon,
   Link2,
   ListChecks,
@@ -27,6 +29,7 @@ import {
   compileNotesIntent,
   createNotesBoard,
   deleteNotesBoard,
+  duplicateNotesBoard,
   ensureDefaultNotesBoard,
   renameNotesBoard,
   stampNotesBoard,
@@ -39,6 +42,7 @@ import {
   type SourceAsset,
 } from "@orreris/shared";
 import { NotesBoard } from "./NotesBoard";
+import { NOTE_COLOR_SWATCHES } from "./NotesCards";
 import { clampZoom, fitViewFor, nextZOrder, screenToWorld, zoomAt, type NotesViewState } from "./notes-board-model";
 
 const DEFAULT_SIZE: Record<NoteItemType, { w: number; h: number }> = {
@@ -90,9 +94,30 @@ export interface NotesWorkspaceProps {
   onNotesPrompt?: ((text: string) => void) | undefined;
   /** Reverse-direction jump (P2.3): a clip's note badge was double-clicked. */
   focusRequest?: { layerId: string; nonce: number } | null | undefined;
+  /** Layer ids with a Flarex node comp (Q2.1). */
+  layerFlarexCompIds?: Set<string> | undefined;
+  /** Switches to the Flarex page for a linked clip (Q2.1) — the SAME handler EditorPage already
+   *  wires to the timeline's fx badge. */
+  onOpenFlarexForLayer?: ((layerId: string) => void) | undefined;
+  /** Opens an asset in the Source Monitor (Q2.2). */
+  onOpenAssetInSourceMonitor?: ((assetId: string) => void) | undefined;
+  /** The Edit page's selection when exactly one clip is selected, else null (Q2.3, read-only). */
+  selectedTimelineLayerId?: string | null | undefined;
 }
 
-export function NotesWorkspace({ graph, assets, onUpdateGraph, currentTime, onSeek, onNotesPrompt, focusRequest }: NotesWorkspaceProps) {
+export function NotesWorkspace({
+  graph,
+  assets,
+  onUpdateGraph,
+  currentTime,
+  onSeek,
+  onNotesPrompt,
+  focusRequest,
+  layerFlarexCompIds,
+  onOpenFlarexForLayer,
+  onOpenAssetInSourceMonitor,
+  selectedTimelineLayerId,
+}: NotesWorkspaceProps) {
   const boardId = graph.activeNotesBoardId;
   const board = boardId ? graph.notesBoards?.[boardId] : undefined;
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -242,6 +267,18 @@ export function NotesWorkspace({ graph, assets, onUpdateGraph, currentTime, onSe
     void navigator.clipboard?.writeText(md).catch(() => undefined);
   };
 
+  /** Export board as JSON (Q6.2) — pure `JSON.stringify(board)` blob download, for backup/interchange. */
+  const exportJson = () => {
+    if (!board) return;
+    const blob = new Blob([JSON.stringify(board, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${board.name.replace(/[^a-z0-9-_ ]/gi, "").trim() || "board"}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   if (!board) {
     return <div className="notes-workspace notes-workspace-empty">Loading Notes…</div>;
   }
@@ -284,6 +321,9 @@ export function NotesWorkspace({ graph, assets, onUpdateGraph, currentTime, onSe
           <button type="button" className="notes-toolbar-btn" title="Export outline (Markdown → clipboard)" onClick={exportOutline}>
             Export outline
           </button>
+          <button type="button" className="notes-toolbar-btn" title="Export board as JSON (download)" onClick={exportJson}>
+            <Download size={12} />
+          </button>
           <button type="button" className="notes-toolbar-btn" title="Zoom out" onClick={() => zoomStep(1 / 1.2)}>
             <Minus size={12} />
           </button>
@@ -309,6 +349,12 @@ export function NotesWorkspace({ graph, assets, onUpdateGraph, currentTime, onSe
         currentTime={currentTime}
         onSeek={onSeek}
         focusRequest={focusRequest}
+        layerFlarexCompIds={layerFlarexCompIds}
+        onOpenFlarexForLayer={onOpenFlarexForLayer}
+        onOpenAssetInSourceMonitor={onOpenAssetInSourceMonitor}
+        selectedTimelineLayerId={selectedTimelineLayerId}
+        templateNames={Object.keys(TEMPLATES)}
+        onApplyTemplate={applyTemplate}
       />
     </div>
   );
@@ -346,10 +392,21 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
     onUpdateGraph({ ...stampNotesBoard(graph, created), activeNotesBoardId: created.id, version: graph.version + 1 });
     setOpen(false);
   };
+  const duplicateBoard = (id: string) => {
+    const dup = duplicateNotesBoard(graph, id);
+    if (dup) onUpdateGraph({ ...dup.graph, version: graph.version + 1 });
+    setOpen(false);
+  };
+  const cycleColor = (b: NotesBoardData) => {
+    const idx = NOTE_COLOR_SWATCHES.indexOf(b.color ?? "");
+    const nextColor = idx === -1 ? NOTE_COLOR_SWATCHES[0] : idx === NOTE_COLOR_SWATCHES.length - 1 ? undefined : NOTE_COLOR_SWATCHES[idx + 1];
+    onUpdateGraph(stampNotesBoard(graph, { ...b, color: nextColor }));
+  };
 
   return (
     <div className="notes-board-switcher" ref={rootRef}>
       <button type="button" className="notes-board-switcher-btn" onClick={() => setOpen((v) => !v)}>
+        {active?.color ? <span className="notes-board-dot" style={{ background: active.color }} /> : null}
         <span>{active?.name ?? "Board"}</span>
         <ChevronDown size={12} />
       </button>
@@ -357,6 +414,16 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
         <div className="notes-board-switcher-menu">
           {boards.map((b) => (
             <div key={b.id} className={`notes-board-switcher-row${b.id === activeBoardId ? " is-active" : ""}`}>
+              <button
+                type="button"
+                className="notes-board-dot notes-board-dot-btn"
+                style={{ background: b.color ?? "transparent", borderColor: b.color ?? "rgba(255,255,255,0.3)" }}
+                title="Cycle board color"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  cycleColor(b);
+                }}
+              />
               {renamingId === b.id ? (
                 <input
                   autoFocus
@@ -385,6 +452,9 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
                   {b.name}
                 </button>
               )}
+              <button type="button" className="notes-board-switcher-delete" title="Duplicate board" onClick={() => duplicateBoard(b.id)}>
+                <Copy size={11} />
+              </button>
               {confirmDeleteId === b.id ? (
                 <button
                   type="button"

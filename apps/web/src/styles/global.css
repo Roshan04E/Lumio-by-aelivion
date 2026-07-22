@@ -22610,6 +22610,16 @@ input.scrub-number:focus {
   background-image: radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px);
   background-size: 28px 28px;
 }
+/* Board cover tint (Q4.2): a faint wash of the board's accent color over the dot-grid, so
+   different boards read as visually distinct at a glance. Falls back to fully transparent
+   (no-op) when `--notes-board-tint` isn't set. */
+.notes-viewport::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 30% 15%, color-mix(in srgb, var(--notes-board-tint, transparent) 10%, transparent), transparent 65%);
+}
 
 .notes-world {
   position: absolute;
@@ -22685,10 +22695,37 @@ input.scrub-number:focus {
   left: 50%;
   top: 50%;
   translate: -50% -50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
   color: rgba(230, 236, 244, 0.35);
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
+}
+.notes-empty-hint p {
+  margin: 0;
+}
+.notes-empty-hint-chips {
+  display: flex;
+  gap: 6px;
+  pointer-events: auto;
+}
+.notes-empty-hint-chip {
+  appearance: none;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  background: rgba(38, 42, 50, 0.6);
+  color: rgba(230, 236, 244, 0.6);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 14px;
+  cursor: pointer;
+}
+.notes-empty-hint-chip:hover {
+  color: var(--nle-accent);
+  border-color: color-mix(in srgb, var(--nle-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--nle-accent) 10%, transparent);
 }
 
 /* The card is only a positioning box now (overflow VISIBLE) so connector dots / resize handles /
@@ -23051,45 +23088,46 @@ input.scrub-number:focus {
 }
 
 /* Audio: header (icon + name) → play + tall waveform → time + mute. */
+/* Compact 2-row layout (Q1.2): a fixed-height waveform BAND that never stretches even if the
+   card is resized taller (round-3 fix for the "waveform crammed into a tall box" bug) — the outer
+   card can grow, but `.notes-player-audio-main`'s height stays pinned and centers within it. */
 .notes-player-audio {
-  padding: 10px;
-  gap: 8px;
+  padding: 8px 10px;
+  gap: 6px;
   background: linear-gradient(160deg, color-mix(in srgb, var(--nle-accent) 10%, #1c1f26), #16181d);
+  justify-content: center;
 }
 .notes-player-audio-head {
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--nle-accent);
-  font-size: 11px;
+  font-size: 10px;
   min-height: 0;
   flex: 0 0 auto;
 }
 .notes-player-audio-name {
-  color: rgba(230, 236, 244, 0.9);
+  flex: 1 1 auto;
+  color: rgba(230, 236, 244, 0.85);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .notes-player-audio-main {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
+  height: 32px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 .notes-player-audio-main .notes-wave {
   flex: 1 1 auto;
   height: 100%;
-  min-height: 28px;
 }
-.notes-player-audio-foot {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.notes-player-time-sep {
+  margin: 0 2px;
+  opacity: 0.5;
 }
 
 .notes-player-time {
@@ -23453,6 +23491,109 @@ input.scrub-number:focus {
   stroke-width: 2.5;
 }
 
+/* ── Notes round 3 (plans/notes-sonnet-execution-3.md) ───────────────────────────────────────── */
+
+/* Q2.1: linked-time row now bundles the clock chip + an optional cross-page Flarex jump button. */
+.notes-linked-time-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.notes-linked-flarex-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(20, 23, 28, 0.95);
+  color: var(--nle-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.notes-linked-flarex-btn:hover {
+  background: color-mix(in srgb, var(--nle-accent) 20%, transparent);
+}
+
+/* Q4.3: lock toggle shares the pin button's compact square styling. */
+.notes-lock-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(38, 42, 50, 0.8);
+  color: rgba(230, 236, 244, 0.7);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  margin-left: 3px;
+}
+.notes-lock-btn:hover {
+  color: var(--nle-accent);
+  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
+}
+.notes-card.is-locked .notes-card-surface {
+  outline: 1px dashed rgba(230, 236, 244, 0.25);
+  outline-offset: -1px;
+}
+
+/* Q3.1: markdown-lite note rendering (deterministic parser → real elements, no innerHTML). */
+.notes-note-md-heading {
+  margin: 0 0 2px;
+  font-weight: 700;
+  color: rgba(230, 236, 244, 0.95);
+}
+h1.notes-note-md-heading {
+  font-size: 13.5px;
+}
+h2.notes-note-md-heading {
+  font-size: 12.5px;
+}
+.notes-note-md-paragraph {
+  margin: 0 0 2px;
+}
+.notes-note-md-bullet {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 2px;
+}
+.notes-note-md-bullet-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* Q3.2: link card favicon — same footprint as the round-1 Globe icon it replaces. */
+.notes-link-favicon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 2px;
+}
+
+/* Q4.2: board-color dot in the switcher (both the collapsed button and each menu row). */
+.notes-board-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.notes-board-dot-btn {
+  appearance: none;
+  padding: 0;
+  cursor: pointer;
+}
+
 .flarex-body {
   display: flex;
   flex: 1 1 auto;
@@ -23573,6 +23714,68 @@ input.scrub-number:focus {
   position: relative;
   min-width: 240px;
   max-width: 560px;
+}
+/* Maximized: a full-height column docked at the right edge, ALONGSIDE the viewer — never over it.
+   The layout reserves a strip for it (the `.editor-layout.is-flarex-inspector-max` rules below
+   widen the right column by --flarex-max-w, shrinking the viewer), and this fixed panel fills that
+   strip exactly, so nothing is covered. The main clip inspector stays open to its left. */
+.flarex-inspector--max {
+  position: fixed;
+  /* Align to the padded content box (.editor-layout uses 6px top / 8px right+bottom). */
+  top: calc(var(--nle-topbar-h, 40px) + 6px);
+  right: 8px;
+  bottom: 8px;
+  z-index: 24;
+  border-radius: 6px;
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.45);
+  border-left: 1px solid color-mix(in srgb, var(--nle-accent) 32%, transparent);
+}
+/* Reserve the strip: widen the top-row column grid (on .editor-main) by the maximized width so the
+   1fr viewer shrinks to make room; the main inspector keeps its own width (margin holds the strip on
+   its right), and the bottom-row workspace shrinks by the same width so the node canvas isn't
+   covered either. The fixed panel above fills the reserved strip at the right edge. */
+.editor-layout.is-flarex-inspector-max .editor-main {
+  grid-template-columns:
+    var(--editor-left-pane-width, var(--left-pane-width, 420px)) 8px minmax(0, 1fr) 8px
+    calc(var(--editor-right-pane-width, var(--right-pane-width, 340px)) + var(--flarex-max-w, 300px));
+}
+.editor-layout.is-flarex-inspector-max .editor-inspector {
+  margin-right: var(--flarex-max-w, 300px);
+}
+.editor-layout.is-flarex-inspector-max .timeline-stack {
+  margin-right: var(--flarex-max-w, 300px);
+}
+/* Main inspector collapsed → no clip inspector; just reserve the strip beside the shrunk viewer. */
+.editor-layout.is-flarex-inspector-max.is-inspector-collapsed .editor-main {
+  grid-template-columns:
+    var(--editor-left-pane-width, var(--left-pane-width, 420px)) 8px minmax(0, 1fr) 0
+    var(--flarex-max-w, 300px);
+}
+/* Maximize/restore toggle — matches the main inspector's expand button (.tabbar-icon-button). */
+.flarex-inspector-max-btn {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(230, 236, 244, 0.7);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.flarex-inspector-max-btn:hover {
+  border-color: color-mix(in srgb, var(--nle-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
+  color: var(--nle-accent);
+}
+.flarex-inspector-head {
+  padding-right: 32px; /* clear the absolute maximize button */
 }
 /* Fusion-style frame ruler above the node canvas (clip-local frames on the shared transport). */
 .flarex-framebar {

@@ -10,9 +10,10 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Pin, Search, X } from "lucide-react";
+import { Link2, Pin, Search, X } from "lucide-react";
 import {
   cloneNoteItems,
+  defaultSizeForAsset,
   itemsInsideFrame,
   notesForLayer,
   type NoteEdge,
@@ -24,6 +25,7 @@ import {
   clampZoom,
   edgeCubicPath,
   edgeMidpoint,
+  fitViewFor,
   nextZOrder,
   rectFromPoints,
   rectsIntersect,
@@ -34,20 +36,22 @@ import {
 } from "./notes-board-model";
 import {
   AssetCardBody,
+  assetKind,
   ColorSwatchRow,
   FrameTitleBody,
   ImageCardBody,
   LinkCardBody,
-  LinkedTimeChip,
+  LinkedTimeRow,
+  LockToggleButton,
   NoteCardBody,
   NOTE_COLOR_SWATCHES,
   noteTint,
   ShapeCardBody,
   TodoCardBody,
 } from "./NotesCards";
+import { setNotice } from "../../lib/noticeStore";
 
 const MIN_SIZE = { w: 80, h: 48 };
-const DEFAULT_ASSET_W = 260;
 const MAX_PASTED_IMAGE_BYTES = 2 * 1024 * 1024; // ~2MB guard — small pastes stay inline data URLs in
 // the project graph; anything bigger would bloat every save/sync (no OPFS/cloud storage for these).
 
@@ -85,28 +89,33 @@ type Gesture =
       start: Record<string, { x: number; y: number }>;
       positions: Record<string, { x: number; y: number }>;
     }
-  | { kind: "resize"; itemId: string; handle: string; startRect: NotesRect; aspect: number | null; rect: NotesRect }
+  | { kind: "resize"; itemId: string; handle: string; startRect: NotesRect; aspect: number | null; lockAxis: "height" | null; rect: NotesRect }
   | { kind: "connect"; fromId: string; toX: number; toY: number; targetId: string | null };
 
-function computeResizeRect(start: NotesRect, handle: string, wx: number, wy: number, aspect: number | null): NotesRect {
+function computeResizeRect(start: NotesRect, handle: string, wx: number, wy: number, aspect: number | null, lockAxis: "height" | null): NotesRect {
+  // Height-locked (Q1.3, audio cards): resize width freely, height always snaps back to natural.
+  const effectiveHandle = lockAxis === "height" ? handle.replace(/[ns]/, "") || handle : handle;
+  if (lockAxis === "height" && effectiveHandle === handle && !handle.includes("e") && !handle.includes("w")) {
+    return start; // a pure n/s handle on a height-locked card has nothing left to do
+  }
   const x1 = start.x + start.w;
   const y1 = start.y + start.h;
   let nx = start.x;
   let ny = start.y;
   let nx1 = x1;
   let ny1 = y1;
-  if (handle.includes("w")) nx = wx;
-  if (handle.includes("e")) nx1 = wx;
-  if (handle.includes("n")) ny = wy;
-  if (handle.includes("s")) ny1 = wy;
+  if (effectiveHandle.includes("w")) nx = wx;
+  if (effectiveHandle.includes("e")) nx1 = wx;
+  if (effectiveHandle.includes("n")) ny = wy;
+  if (effectiveHandle.includes("s")) ny1 = wy;
   let w = Math.max(MIN_SIZE.w, nx1 - nx);
-  let h = Math.max(MIN_SIZE.h, ny1 - ny);
+  let h = lockAxis === "height" ? start.h : Math.max(MIN_SIZE.h, ny1 - ny);
   if (aspect) {
     if (w / h > aspect) w = Math.max(MIN_SIZE.w, h * aspect);
     else h = Math.max(MIN_SIZE.h, w / aspect);
   }
-  const x = handle.includes("w") ? nx1 - w : nx;
-  const y = handle.includes("n") ? ny1 - h : ny;
+  const x = effectiveHandle.includes("w") ? nx1 - w : nx;
+  const y = lockAxis === "height" ? start.y : effectiveHandle.includes("n") ? ny1 - h : ny;
   return { x, y, w, h };
 }
 
@@ -161,6 +170,20 @@ export interface NotesBoardProps {
   /** Reverse-direction jump (P2.3): a clip's note badge was double-clicked. Bumping `nonce` (even
    *  for the same layerId) re-triggers the select+center even if you jump to the same clip twice. */
   focusRequest?: { layerId: string; nonce: number } | null | undefined;
+  /** Layer ids that have a Flarex node comp (Q2.1) — drives the clock-chip row's node-glyph button. */
+  layerFlarexCompIds?: Set<string> | undefined;
+  /** Switches to the Flarex page for a linked clip (Q2.1) — same handler EditorPage already wires
+   *  to the timeline's fx badge, reused verbatim (no new seam). */
+  onOpenFlarexForLayer?: ((layerId: string) => void) | undefined;
+  /** Opens an asset in the Source Monitor (Q2.2) — same callback the AssetBin already uses. */
+  onOpenAssetInSourceMonitor?: ((assetId: string) => void) | undefined;
+  /** The Edit page's selection when exactly one clip is selected, else null (Q2.3, read-only —
+   *  Notes never writes timeline selection). Powers "Link to selected clip". */
+  selectedTimelineLayerId?: string | null | undefined;
+  /** Quick-start template chips on the empty-board hint (Q6.1) — same templates the toolbar menu
+   *  offers, reused rather than duplicated. */
+  templateNames?: string[] | undefined;
+  onApplyTemplate?: ((name: string) => void) | undefined;
 }
 
 /** Centers the view on a rect at the CURRENT zoom (unlike `fitViewFor`, never changes zoom). */
@@ -170,7 +193,26 @@ function centerViewOn(view: NotesViewState, rect: NotesRect, vw: number, vh: num
   return { ...view, panX: vw / 2 - cx * view.zoom, panY: vh / 2 - cy * view.zoom };
 }
 
-export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, selectedIds, onSelectIds, viewportRef, onFit, currentTime, onSeek, focusRequest }: NotesBoardProps) {
+export function NotesBoard({
+  board,
+  assets,
+  onUpdateBoard,
+  view,
+  onViewChange,
+  selectedIds,
+  onSelectIds,
+  viewportRef,
+  onFit,
+  currentTime,
+  onSeek,
+  focusRequest,
+  layerFlarexCompIds,
+  onOpenFlarexForLayer,
+  onOpenAssetInSourceMonitor,
+  selectedTimelineLayerId,
+  templateNames,
+  onApplyTemplate,
+}: NotesBoardProps) {
   const [gesture, setGesture] = useState<Gesture>({ kind: "none" });
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [edgeLabelEditId, setEdgeLabelEditId] = useState<string | null>(null);
@@ -279,7 +321,7 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
     }
     if (g.kind === "resize") {
       const [wx, wy] = screenToWorld(stateRef.current.view, sx, sy);
-      const rect = computeResizeRect(g.startRect, g.handle, wx, wy, g.aspect && !e.shiftKey ? g.aspect : null);
+      const rect = computeResizeRect(g.startRect, g.handle, wx, wy, g.aspect && !e.shiftKey ? g.aspect : null, g.lockAxis);
       setGesture({ ...g, rect });
       return;
     }
@@ -380,8 +422,9 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
     const asset = assets.find((a) => a.id === assetId);
     const [sx, sy] = localPoint(e);
     const [wx, wy] = screenToWorld(stateRef.current.view, sx, sy);
-    const w = DEFAULT_ASSET_W;
-    const h = asset && asset.width > 0 && asset.height > 0 ? Math.round(w / (asset.width / asset.height)) : 160;
+    // Q1.1: per-kind default size (audio wide-short, video/image real-aspect, doc compact) — the
+    // generic box only applies when the asset can't be resolved at all.
+    const { w, h } = asset ? defaultSizeForAsset(assetKind(asset), asset.width, asset.height) : { w: 260, h: 160 };
     const id = nextId("item");
     onUpdateBoard((current) => ({
       ...current,
@@ -394,8 +437,10 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
   const onCardPointerDown = (e: React.PointerEvent, item: NoteItem) => {
     const target = e.target as HTMLElement;
     if (target.closest('textarea,input,button,a,[contenteditable="true"],.notes-resize-handle,.notes-connector-dot')) return;
-    if (item.locked && item.type !== "frame") return;
-    if (item.type === "frame" && !target.closest(".notes-frame-titlebar")) return;
+    // An unlocked frame's BACKGROUND (not titlebar) doesn't even select — round-1 design so a
+    // frame never steals clicks meant for the board underneath it. A LOCKED item, though, must
+    // stay selectable (Q4.3) — only the drag-gesture start below is what locking blocks.
+    if (!item.locked && item.type === "frame" && !target.closest(".notes-frame-titlebar")) return;
     e.stopPropagation();
     viewportRef.current?.setPointerCapture(e.pointerId);
     const [sx, sy] = localPoint(e);
@@ -407,6 +452,7 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
     const dragIds = selectedIds.includes(item.id) ? selectedIds : [item.id];
     if (!selectedIds.includes(item.id)) onSelectIds([item.id]);
     setSelectedEdgeId(null);
+    if (item.locked) return; // selected, but locked (Q4.3): no drag gesture starts
     const start: Record<string, { x: number; y: number }> = {};
     for (const id of dragIds) {
       const it = stateRef.current.board.items[id];
@@ -423,8 +469,13 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
   const onHandlePointerDown = (e: React.PointerEvent, item: NoteItem, handle: string) => {
     e.stopPropagation();
     viewportRef.current?.setPointerCapture(e.pointerId);
-    const aspect = item.type === "asset" && handle.length === 2 ? item.w / Math.max(1, item.h) : null;
-    setGesture({ kind: "resize", itemId: item.id, handle, startRect: { x: item.x, y: item.y, w: item.w, h: item.h }, aspect, rect: { x: item.x, y: item.y, w: item.w, h: item.h } });
+    // Q1.3: image/video keep aspect from corner handles (Shift breaks it); audio resizes width
+    // freely but its height stays locked to the natural row height regardless of handle.
+    const resolvedAssetKind = item.type === "asset" && item.assetId ? (() => { const a = assets.find((x) => x.id === item.assetId); return a ? assetKind(a) : null; })() : null;
+    const isAspectKind = (item.type === "asset" && (resolvedAssetKind === "video" || resolvedAssetKind === "image")) || item.type === "image";
+    const aspect = isAspectKind && handle.length === 2 ? item.w / Math.max(1, item.h) : null;
+    const lockAxis: "height" | null = item.type === "asset" && resolvedAssetKind === "audio" ? "height" : null;
+    setGesture({ kind: "resize", itemId: item.id, handle, startRect: { x: item.x, y: item.y, w: item.w, h: item.h }, aspect, lockAxis, rect: { x: item.x, y: item.y, w: item.w, h: item.h } });
   };
 
   const onConnectorDotPointerDown = (e: React.PointerEvent, item: NoteItem) => {
@@ -488,7 +539,9 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      const ids = stateRef.current.selectedIds;
+      // Locked items are excluded (Q4.3: "not deletable until unlocked") — a mixed selection just
+      // deletes the unlocked members and leaves the locked ones in place.
+      const ids = stateRef.current.selectedIds.filter((id) => !stateRef.current.board.items[id]?.locked);
       const edgeId = stateRef.current.selectedEdgeId;
       if (ids.length === 0 && !edgeId) return;
       e.preventDefault();
@@ -518,6 +571,27 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onFit]);
+
+  // ── Ctrl+A select-all / Escape clear (Q4.4) — Escape also closes search + the edge-label editor.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const inField = Boolean(target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable));
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && !inField) {
+        e.preventDefault();
+        onSelectIds(Object.keys(stateRef.current.board.items));
+        return;
+      }
+      if (e.key === "Escape" && !inField) {
+        onSelectIds([]);
+        setSelectedEdgeId(null);
+        setEdgeLabelEditId(null);
+        setSearch(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onSelectIds]);
 
   // ── 1..8 sets the selected cards' color (quick recolor, no toolbar trip) ────
   useEffect(() => {
@@ -618,9 +692,18 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
   // ── Clipboard: Ctrl/Cmd + C / V / D ─────────────────────────────────────────
   useEffect(() => {
     const buildSnapshot = (ids: string[]): { boardId: string; items: NoteItem[]; edges: NoteEdge[] } | null => {
-      if (ids.length === 0) return null;
-      const idSet = new Set(ids);
-      const items = ids.map((id) => stateRef.current.board.items[id]).filter((x): x is NoteItem => Boolean(x));
+      // Q6.3: copying/duplicating a single selected FRAME also brings its contained items along
+      // (offset together via `cloneNoteItems`, same as any multi-item copy).
+      let effectiveIds = ids;
+      if (ids.length === 1) {
+        const only = stateRef.current.board.items[ids[0]!];
+        if (only?.type === "frame") {
+          effectiveIds = [only.id, ...itemsInsideFrame(stateRef.current.board, only.id).map((m) => m.id)];
+        }
+      }
+      if (effectiveIds.length === 0) return null;
+      const idSet = new Set(effectiveIds);
+      const items = effectiveIds.map((id) => stateRef.current.board.items[id]).filter((x): x is NoteItem => Boolean(x));
       const edges = stateRef.current.board.edges.filter((ed) => idSet.has(ed.from) && idSet.has(ed.to));
       return { boardId: stateRef.current.board.id, items, edges };
     };
@@ -674,12 +757,21 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
 
   const draftRectFor = (item: NoteItem): NotesRect => rectOf(item.id) ?? item;
 
+  /** Focus a frame (Q5.1): fit the view to exactly that frame's rect — a fast way to jump between
+   *  board regions, distinct from the toolbar Fit (which fits the whole board or selection). */
+  const focusFrame = (item: NoteItem) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const next = fitViewFor([item], rect.width, rect.height);
+    if (next) onViewChange(next);
+  };
+
   const renderCardBody = (item: NoteItem) => {
     switch (item.type) {
       case "note":
         return <NoteCardBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} autoEdit={autoEditId === item.id} onAutoEditStart={() => setAutoEditId(null)} />;
       case "asset":
-        return <AssetCardBody item={item} assets={assets} />;
+        return <AssetCardBody item={item} assets={assets} onOpenSource={item.assetId && onOpenAssetInSourceMonitor ? () => onOpenAssetInSourceMonitor(item.assetId!) : undefined} />;
       case "link":
         return <LinkCardBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} />;
       case "todo":
@@ -705,6 +797,7 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
     <div
       ref={viewportRef}
       className="notes-viewport"
+      style={board.color ? ({ ["--notes-board-tint" as string]: board.color }) : undefined}
       onPointerDown={onViewportPointerDown}
       onPointerMove={onViewportPointerMove}
       onPointerUp={onViewportPointerUp}
@@ -858,7 +951,12 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
                       className="notes-frame-titlebar"
                       style={item.color ? { background: `color-mix(in srgb, ${item.color} 28%, transparent)` } : undefined}
                     >
-                      <FrameTitleBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} />
+                      <FrameTitleBody
+                        item={item}
+                        selected={selected}
+                        onCommit={(patch) => commitItemPatch(item.id, patch)}
+                        onFocusFrame={() => focusFrame(item)}
+                      />
                     </div>
                   ) : null}
                   {renderCardBody(item)}
@@ -867,7 +965,12 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
 
               {item.linkedTime !== undefined ? (
                 <div className="notes-linked-time-wrap">
-                  <LinkedTimeChip seconds={item.linkedTime} onSeek={() => onSeek(item.linkedTime!)} />
+                  <LinkedTimeRow
+                    seconds={item.linkedTime}
+                    onSeek={() => onSeek(item.linkedTime!)}
+                    hasFlarexComp={Boolean(item.linkedLayerId && layerFlarexCompIds?.has(item.linkedLayerId))}
+                    onOpenFlarex={item.linkedLayerId ? () => onOpenFlarexForLayer?.(item.linkedLayerId!) : undefined}
+                  />
                 </div>
               ) : null}
 
@@ -881,6 +984,23 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
                 >
                   <Pin size={11} />
                 </button>
+                {item.linkedLayerId === undefined ? (
+                  <button
+                    type="button"
+                    className="notes-pin-time-btn"
+                    title="Link to the selected clip"
+                    onClick={() => {
+                      if (!selectedTimelineLayerId) {
+                        setNotice("Select exactly one clip on the Edit page first");
+                        return;
+                      }
+                      commitItemPatch(item.id, { linkedLayerId: selectedTimelineLayerId });
+                    }}
+                  >
+                    <Link2 size={11} />
+                  </button>
+                ) : null}
+                <LockToggleButton locked={Boolean(item.locked)} onToggle={() => commitItemPatch(item.id, { locked: !item.locked })} />
               </div>
 
               {!item.locked || item.type === "frame"
@@ -944,7 +1064,20 @@ export function NotesBoard({ board, assets, onUpdateBoard, view, onViewChange, s
         />
       ) : null}
 
-      {items.length === 0 ? <div className="notes-empty-hint">Double-click to add a note · drag media from the pool</div> : null}
+      {items.length === 0 ? (
+        <div className="notes-empty-hint">
+          <p>Double-click to add a note · drag media from the pool</p>
+          {templateNames && templateNames.length > 0 && onApplyTemplate ? (
+            <div className="notes-empty-hint-chips" onPointerDown={(e) => e.stopPropagation()}>
+              {templateNames.map((name) => (
+                <button key={name} type="button" className="notes-empty-hint-chip" onClick={() => onApplyTemplate(name)}>
+                  ＋ {name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

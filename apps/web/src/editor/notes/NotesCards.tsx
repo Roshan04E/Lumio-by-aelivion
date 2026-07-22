@@ -6,9 +6,9 @@
  * one `updateBoard` write per commit, never per keystroke.
  */
 
-import { useEffect, useRef, useState } from "react";
-import { Clock, FileText, Globe, ImageOff } from "lucide-react";
-import type { NoteItem } from "@orreris/shared";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { Clock, FileText, Globe, ImageOff, Lock, Unlock, Workflow } from "lucide-react";
+import { parseNoteMarkdown, type NoteAssetKind, type NoteItem } from "@orreris/shared";
 import type { SourceAsset } from "@orreris/shared";
 import { NotesMediaPlayer } from "./NotesMediaPlayer";
 
@@ -18,11 +18,38 @@ export function noteTint(color: string | undefined): string | undefined {
   return color ? `color-mix(in srgb, ${color} 18%, var(--nle-panel-2, #1a1d23))` : undefined;
 }
 
-function assetKind(asset: SourceAsset): "video" | "image" | "audio" | "file" {
+export function assetKind(asset: SourceAsset): NoteAssetKind {
   if (asset.fileType?.startsWith("image/")) return "image";
   if (asset.fileType?.startsWith("audio/")) return "audio";
   if (asset.fileType?.startsWith("video/")) return "video";
   return "file";
+}
+
+/** Deterministic markdown-lite renderer (Q3.1) — maps the shared parser's AST to spans/elements.
+ *  No dangerouslySetInnerHTML: every token becomes a real React node. */
+function renderNoteMarkdown(text: string) {
+  return parseNoteMarkdown(text).map((block, i) => {
+    const inline = block.inline.map((tok, j) =>
+      tok.kind === "bold" ? <strong key={j}>{tok.value}</strong> : tok.kind === "italic" ? <em key={j}>{tok.value}</em> : <Fragment key={j}>{tok.value}</Fragment>,
+    );
+    if (block.kind === "heading") {
+      const Tag = block.level === 1 ? "h1" : "h2";
+      return <Tag key={i} className="notes-note-md-heading">{inline}</Tag>;
+    }
+    if (block.kind === "bullet") {
+      return (
+        <div key={i} className="notes-note-md-bullet">
+          <span className="notes-note-md-bullet-dot" />
+          <span>{inline}</span>
+        </div>
+      );
+    }
+    return (
+      <p key={i} className="notes-note-md-paragraph">
+        {inline}
+      </p>
+    );
+  });
 }
 
 /** Shared 8-swatch color picker shown in a card's hover toolbar. */
@@ -42,6 +69,8 @@ export function ColorSwatchRow({ current, onPick }: { current: string | undefine
     </div>
   );
 }
+
+const NOTE_MAX_AUTOGROW_H = 420;
 
 export function NoteCardBody({
   item,
@@ -72,11 +101,25 @@ export function NoteCardBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoEdit]);
 
+  // Auto-grow (Q3.3): the textarea's own height tracks its content while editing (visual only);
+  // the FINAL scrollHeight commits as the card's `h` alongside the text, capped at a sane max.
+  const autoGrow = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(NOTE_MAX_AUTOGROW_H, el.scrollHeight)}px`;
+  };
+  useEffect(() => {
+    if (editing) autoGrow();
+  }, [editing]);
+
   const commitAndClose = () => {
     setEditing(false);
     const patch: Partial<NoteItem> = {};
     if (title !== (item.title ?? "")) patch.title = title;
     if (body !== (item.body ?? "")) patch.body = body;
+    const grown = bodyRef.current ? Math.min(NOTE_MAX_AUTOGROW_H, bodyRef.current.scrollHeight) + 56 : item.h;
+    if (grown > item.h) patch.h = grown;
     if (Object.keys(patch).length > 0) onCommit(patch);
   };
 
@@ -101,7 +144,10 @@ export function NoteCardBody({
           className="notes-note-body-input"
           autoFocus
           value={body}
-          onChange={(e) => setBody(e.target.value)}
+          onChange={(e) => {
+            setBody(e.target.value);
+            autoGrow();
+          }}
           onBlur={commitAndClose}
           onKeyDown={(e) => {
             if (e.key === "Escape") {
@@ -118,13 +164,16 @@ export function NoteCardBody({
   return (
     <div className="notes-card-body notes-note-body" onDoubleClick={() => setEditing(true)}>
       {item.title ? <div className="notes-note-title">{item.title}</div> : null}
-      <div className="notes-note-text">{item.body || <span className="notes-note-placeholder">Double-click to edit…</span>}</div>
+      <div className="notes-note-text">
+        {item.body ? renderNoteMarkdown(item.body) : <span className="notes-note-placeholder">Double-click to edit…</span>}
+      </div>
     </div>
   );
 }
 
-export function AssetCardBody({ item, assets }: { item: NoteItem; assets: SourceAsset[] }) {
+export function AssetCardBody({ item, assets, onOpenSource }: { item: NoteItem; assets: SourceAsset[]; onOpenSource?: (() => void) | undefined }) {
   const asset = item.assetId ? assets.find((a) => a.id === item.assetId) : undefined;
+  const openProps = onOpenSource ? { onDoubleClick: (e: React.MouseEvent) => { e.stopPropagation(); onOpenSource(); } } : {};
 
   if (!asset) {
     return (
@@ -141,7 +190,7 @@ export function AssetCardBody({ item, assets }: { item: NoteItem; assets: Source
 
   if (kind === "image") {
     return (
-      <div className="notes-card-body notes-asset-body">
+      <div className="notes-card-body notes-asset-body" {...openProps}>
         <img src={thumb} alt={name} draggable={false} />
         <div className="notes-asset-name">{name}</div>
       </div>
@@ -149,25 +198,45 @@ export function AssetCardBody({ item, assets }: { item: NoteItem; assets: Source
   }
   if (kind === "video") {
     const src = asset.previewUrl ?? asset.proxyUrl ?? asset.fileUrl;
+    // Poster must be an IMAGE — only thumbnailUrl qualifies. `thumb` falls back to previewUrl/
+    // proxyUrl/fileUrl, all of which are VIDEO urls: as a <video poster> they render black AND
+    // suppress the first-frame nudge. Pass thumbnailUrl only (undefined for local clips → the
+    // player decodes + paints the real first frame instead of a black box).
     return (
-      <div className="notes-card-body notes-asset-body notes-asset-player">
-        <NotesMediaPlayer variant="video" src={src} peaksUrl={asset.fileUrl} poster={thumb} name={name} />
+      <div className="notes-card-body notes-asset-body notes-asset-player" {...openProps}>
+        <NotesMediaPlayer variant="video" src={src} peaksUrl={asset.fileUrl} poster={asset.thumbnailUrl} name={name} />
       </div>
     );
   }
   if (kind === "audio") {
     return (
-      <div className="notes-card-body notes-asset-body notes-asset-player">
+      <div className="notes-card-body notes-asset-body notes-asset-player" {...openProps}>
         <NotesMediaPlayer variant="audio" src={asset.fileUrl} peaksUrl={asset.fileUrl} name={name} />
       </div>
     );
   }
   return (
-    <div className="notes-card-body notes-asset-body notes-asset-file">
+    <div className="notes-card-body notes-asset-body notes-asset-file" {...openProps}>
       <FileText size={20} />
       <span className="notes-asset-name">{name}</span>
     </div>
   );
+}
+
+/** Zero-CORS favicon (Q3.2): `https://<host>/favicon.ico` — no metadata fetch, just an <img> with
+ *  an onError fallback to the plain globe icon. */
+function LinkFavicon({ url }: { url: string | undefined }) {
+  const [failed, setFailed] = useState(false);
+  const host = (() => {
+    if (!url) return null;
+    try {
+      return new URL(url).host;
+    } catch {
+      return null;
+    }
+  })();
+  if (!host || failed) return <Globe size={14} />;
+  return <img className="notes-link-favicon" src={`https://${host}/favicon.ico`} alt="" onError={() => setFailed(true)} />;
 }
 
 export function LinkCardBody({ item, onCommit }: { item: NoteItem; onCommit: (patch: Partial<NoteItem>) => void }) {
@@ -178,7 +247,7 @@ export function LinkCardBody({ item, onCommit }: { item: NoteItem; onCommit: (pa
   return (
     <div className="notes-card-body notes-link-body">
       <div className="notes-link-head">
-        <Globe size={14} />
+        <LinkFavicon url={item.url} />
         {editingTitle ? (
           <input
             className="notes-link-title-input"
@@ -217,7 +286,22 @@ export function LinkCardBody({ item, onCommit }: { item: NoteItem; onCommit: (pa
   );
 }
 
-export function FrameTitleBody({ item, onCommit }: { item: NoteItem; onCommit: (patch: Partial<NoteItem>) => void }) {
+/**
+ * Q5.1 moved the frame title's DOUBLE-click to "focus this frame" (fit the view to it) — rename
+ * now triggers on a SINGLE click while the frame is already selected (the common desktop-icon
+ * rename idiom), so the two affordances never collide on the same gesture.
+ */
+export function FrameTitleBody({
+  item,
+  selected,
+  onCommit,
+  onFocusFrame,
+}: {
+  item: NoteItem;
+  selected: boolean;
+  onCommit: (patch: Partial<NoteItem>) => void;
+  onFocusFrame?: (() => void) | undefined;
+}) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(item.title ?? "Frame");
   useEffect(() => setTitle(item.title ?? "Frame"), [item.id]);
@@ -246,7 +330,18 @@ export function FrameTitleBody({ item, onCommit }: { item: NoteItem; onCommit: (
     );
   }
   return (
-    <span className="notes-frame-title" onDoubleClick={(e) => { e.stopPropagation(); setEditing(true); }}>
+    <span
+      className="notes-frame-title"
+      onClick={(e) => {
+        if (!selected) return;
+        e.stopPropagation();
+        setEditing(true);
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        onFocusFrame?.();
+      }}
+    >
       {item.title || "Frame"}
     </span>
   );
@@ -282,23 +377,62 @@ export function ShapeCardBody({ item }: { item: NoteItem }) {
   );
 }
 
-/** Small clock chip shown when a card is linked to a moment on the transport (P2 NLE link).
- *  Click seeks the playhead there; never steals the card's own drag/select gesture. */
-export function LinkedTimeChip({ seconds, onSeek }: { seconds: number; onSeek: () => void }) {
+/** Clock chip + optional Flarex-jump glyph, shown when a card is linked to a moment on the
+ *  transport (P2 NLE link; Q2.1 extends it with the cross-page Flarex jump). Neither button steals
+ *  the card's own drag/select gesture. */
+export function LinkedTimeRow({
+  seconds,
+  onSeek,
+  hasFlarexComp = false,
+  onOpenFlarex,
+}: {
+  seconds: number;
+  onSeek: () => void;
+  hasFlarexComp?: boolean;
+  onOpenFlarex?: (() => void) | undefined;
+}) {
   const label = `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+  return (
+    <div className="notes-linked-time-row" onPointerDown={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="notes-linked-time-chip"
+        title={`Linked to ${label} on the timeline — click to seek`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSeek();
+        }}
+      >
+        <Clock size={10} />
+        {label}
+      </button>
+      {hasFlarexComp ? (
+        <button
+          type="button"
+          className="notes-linked-flarex-btn"
+          title="Open this clip's Flarex comp"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenFlarex?.();
+          }}
+        >
+          <Workflow size={10} />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** Hover-toolbar lock toggle (Q4.3) — available on ANY item type, not just frames. */
+export function LockToggleButton({ locked, onToggle }: { locked: boolean; onToggle: () => void }) {
   return (
     <button
       type="button"
-      className="notes-linked-time-chip"
-      title={`Linked to ${label} on the timeline — click to seek`}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => {
-        e.stopPropagation();
-        onSeek();
-      }}
+      className="notes-lock-btn"
+      title={locked ? "Unlock" : "Lock (not draggable/resizable/deletable until unlocked)"}
+      onClick={onToggle}
     >
-      <Clock size={10} />
-      {label}
+      {locked ? <Lock size={11} /> : <Unlock size={11} />}
     </button>
   );
 }

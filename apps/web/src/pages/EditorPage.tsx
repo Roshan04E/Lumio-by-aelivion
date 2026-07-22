@@ -8639,10 +8639,16 @@ export function EditorPage() {
                       setSelectedLayerIds([layerId]);
                       setEditorPage("flarex");
                     }}
-                    onOpenAssetInSourceMonitor={(assetId) => {
-                      const asset = assets.find((a) => a.id === assetId);
-                      if (asset) stableOpenSourceMonitor(asset);
-                    }}
+                    onOpenAssetInSourceMonitor={
+                      responsiveLayout.usesOverlayPanels
+                        ? undefined
+                        : (assetId) => {
+                            const asset = assets.find((a) => a.id === assetId);
+                            if (!asset) return;
+                            setEditorPage("edit");
+                            stableOpenSourceMonitor(asset);
+                          }
+                    }
                     selectedTimelineLayerId={selectedLayerIds.length === 1 ? selectedLayerIds[0] : null}
                   />
                 )}
