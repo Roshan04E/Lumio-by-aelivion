@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Loader2, MonitorDown, XCircle } from "lucide-react";
-import { ensureComposition, type SourceAsset } from "@orreris/shared";
+import { ensureComposition, withExportWindow, type ExportRange, type SourceAsset } from "@orreris/shared";
 import { Button } from "../components/Button";
 import { exportLocally, saveExportedFile } from "../export/local-export";
 import type { ExportFormat } from "../export/video-encoder";
@@ -35,6 +35,25 @@ function formatFromQuery(): ExportFormat {
 function fpsFromQuery(): number | undefined {
   const raw = Number(queryParam("fps"));
   return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
+
+/** Optional positive-number query param (bitrate/output-dimension), undefined when absent/invalid. */
+function positiveIntFromQuery(name: string): number | undefined {
+  const raw = Number(queryParam(name));
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : undefined;
+}
+
+function bitrateModeFromQuery(): "vbr" | "cbr" | undefined {
+  const raw = queryParam("brm");
+  return raw === "cbr" || raw === "vbr" ? raw : undefined;
+}
+
+function rangeFromQuery(): ExportRange {
+  return queryParam("range") === "full" ? "full" : "inout";
+}
+
+function trimFromQuery(): boolean {
+  return queryParam("trim") === "1";
 }
 
 function nextFrame(): Promise<void> {
@@ -146,6 +165,13 @@ export function LocalExportPage() {
   const handoffKey = queryParam("handoff");
   const format = useMemo(formatFromQuery, []);
   const fps = useMemo(fpsFromQuery, []);
+  // Granular settings threaded from the export window (bitrate/mode/output size). Absent → defaults.
+  const videoBitrate = useMemo(() => positiveIntFromQuery("vb"), []);
+  const bitrateMode = useMemo(bitrateModeFromQuery, []);
+  const outputWidth = useMemo(() => positiveIntFromQuery("ow"), []);
+  const outputHeight = useMemo(() => positiveIntFromQuery("oh"), []);
+  const range = useMemo(rangeFromQuery, []);
+  const trimTrailingBlack = useMemo(trimFromQuery, []);
   const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [progress, setProgress] = useState(0);
   const [label, setLabel] = useState("Preparing isolated export...");
@@ -190,10 +216,15 @@ export function LocalExportPage() {
       setLabel("Starting export engine...");
       await nextFrame();
       const blob = await exportLocally({
-        composition,
+        // Apply the same export window (Full/In-Out + safe-timeline trim) the main editor would.
+        composition: withExportWindow(composition, { range, trimTrailingBlack }),
         urlForAsset: (id) => resolvedAssets.find((asset) => asset.id === id)?.fileUrl,
         format,
         fps,
+        videoBitrate,
+        bitrateMode,
+        outputWidth,
+        outputHeight,
         transitionManifests,
         lookManifests,
         preferWorker: false,

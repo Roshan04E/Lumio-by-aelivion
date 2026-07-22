@@ -1,5 +1,13 @@
 import { buildRenderManifest, type RenderManifest, type RenderQuality } from "@orreris/render-templates";
-import { type ModuleType, type ProjectGraph, type SourceAsset } from "@orreris/shared";
+import {
+  scaledEvenDimension,
+  toManifestEncodeSettings,
+  withExportWindow,
+  type ExportSettings,
+  type ModuleType,
+  type ProjectGraph,
+  type SourceAsset
+} from "@orreris/shared";
 import { HttpError } from "../lib/http";
 import { asJson, fromJson } from "../lib/json";
 import { prisma } from "../lib/prisma";
@@ -102,7 +110,7 @@ export async function renderPreview(projectId: string, userId: string) {
   return { job, project: updatedProject };
 }
 
-export async function renderFinal(projectId: string, userId: string) {
+export async function renderFinal(projectId: string, userId: string, settings?: ExportSettings) {
   const project = await prisma.project.findFirst({
     where: { id: projectId, userId },
     include: { template: true }
@@ -112,7 +120,10 @@ export async function renderFinal(projectId: string, userId: string) {
     throw new HttpError(404, "Project not found");
   }
 
-  const manifest = await buildProjectRenderManifest(projectId, userId, "final");
+  const manifest = await buildProjectRenderManifest(projectId, userId, "final", settings);
+  if (settings) {
+    applyExportSettingsToManifest(manifest, settings);
+  }
   const job = await prisma.renderJob.create({
     data: {
       projectId,
@@ -134,7 +145,31 @@ export async function renderFinal(projectId: string, userId: string) {
   return { job, project: updatedProject, creditCost: 0 };
 }
 
-export async function buildProjectRenderManifest(projectId: string, userId: string, quality: RenderQuality): Promise<RenderManifest> {
+/**
+ * Fold the export window's settings into a final-quality manifest. Resolution scales the composition
+ * (Remotion reads width/height/fps/durationInFrames from manifest.output via Root.tsx calculateMetadata),
+ * fps re-derives the frame count from the unchanged duration, and encode carries the bitrate/mode the
+ * worker's renderMedia applies. Only "final" exports pass settings; preview is untouched.
+ */
+function applyExportSettingsToManifest(manifest: RenderManifest, settings: ExportSettings) {
+  const out = manifest.output;
+  if (settings.scale && settings.scale > 0 && settings.scale !== 1) {
+    out.width = scaledEvenDimension(out.width, settings.scale);
+    out.height = scaledEvenDimension(out.height, settings.scale);
+  }
+  if (settings.fps && settings.fps > 0 && settings.fps !== out.fps) {
+    out.fps = settings.fps;
+    out.durationInFrames = Math.max(1, Math.round(out.durationSeconds * settings.fps));
+  }
+  out.encode = toManifestEncodeSettings(settings);
+}
+
+export async function buildProjectRenderManifest(
+  projectId: string,
+  userId: string,
+  quality: RenderQuality,
+  windowSettings?: Pick<ExportSettings, "range" | "trimTrailingBlack">
+): Promise<RenderManifest> {
   const project = await prisma.project.findFirst({
     where: { id: projectId, userId }
   });
@@ -143,7 +178,14 @@ export async function buildProjectRenderManifest(projectId: string, userId: stri
     throw new HttpError(404, "Project not found");
   }
 
-  const graph = fromJson<ProjectGraph>(project.projectGraph);
+  const rawGraph = fromJson<ProjectGraph>(project.projectGraph);
+  // Apply the export window (Full vs In/Out + safe-timeline trim) by stamping In/Out onto the
+  // composition BEFORE buildRenderManifest, which clips to those points — so cloud honors the same
+  // range/trim choices as the local export (both read the same in/out machinery).
+  const graph =
+    windowSettings && rawGraph.composition
+      ? { ...rawGraph, composition: withExportWindow(rawGraph.composition, windowSettings) }
+      : rawGraph;
   const assets: SourceAsset[] = (await prisma.sourceAsset.findMany({ where: { userId } })).map((asset) => ({
     id: asset.id,
     userId: asset.userId,

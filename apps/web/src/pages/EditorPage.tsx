@@ -396,7 +396,14 @@ import {
   getCompositionTextRuns,
   graphicToDataUrl,
   DEFAULT_GRAPHIC_FILL,
+  defaultExportSettings,
+  exportWindowDurationSeconds,
+  resolutionPresetsFor,
+  scaledEvenDimension,
+  withExportWindow,
   type BundledGraphic,
+  type ExportDestination,
+  type ExportSettings,
   type LayerGraphic,
   type TemplateDefinition
 } from "@orreris/shared";
@@ -761,10 +768,14 @@ export function EditorPage() {
   const [localExport, setLocalExport] = useState<{ progress: number; label: string } | null>(null);
   const localExportAbortRef = useRef<AbortController | null>(null);
   const [localExportSupported] = useState(() => canExportLocally());
-  // Premiere-style export settings (frame rate + format), chosen at export time.
+  // Unified Premiere-style export window: ONE dialog for both destinations (this device / cloud) with
+  // granular settings (format, resolution, frame rate, VBR/CBR + target/max bitrate). Seeded from the
+  // composition when opened; null while closed.
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  const [exportFps, setExportFps] = useState<number | null>(null); // null → project fps
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
+  const [exportSettings, setExportSettings] = useState<ExportSettings | null>(null);
+  // Last cloud export settings, so a relink-then-retry (RelinkMediaModal.onResolved) re-runs with the
+  // same choices instead of losing them.
+  const lastCloudExportSettingsRef = useRef<ExportSettings | null>(null);
   // Which saved track (if any) the Track modal is currently editing/retracking - undefined id means "new track".
   const [trackModalState, setTrackModalState] = useState<{ editingTrackId?: string | undefined } | undefined>(undefined);
   const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
@@ -2708,17 +2719,9 @@ export function EditorPage() {
         return;
       }
       event.preventDefault();
-      if (event.shiftKey) {
-        // Cloud export (same gate as the Export button).
-        if (busy === "export" || activeRenderJob) return;
-        void renderFinal();
-        return;
-      }
-      // Local export (same gate + setup as the on-device button: opens the fps/format dialog).
-      if (!localExportSupported || localExport || !composition) return;
-      setExportFps(null);
-      setExportFormat("mp4");
-      setExportDialogOpen(true);
+      // Both shortcuts open the ONE export window; ⇧ preselects the Cloud destination, plain = This device.
+      if (localExport || !composition) return;
+      openExportDialog(event.shiftKey ? "cloud" : "local");
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -6678,10 +6681,40 @@ export function EditorPage() {
     }
   }
 
-  async function renderFinal() {
+  /** Open the unified export window, seeded from the composition. Optional destination preselect. */
+  function openExportDialog(destination: ExportDestination = "local") {
+    if (!composition) {
+      setNotice("Open a timeline before exporting");
+      return;
+    }
+    const seed = defaultExportSettings({ width: composition.width, height: composition.height, fps: composition.fps });
+    // Default the range to In/Out when work-area points are set (else Full — the only option).
+    const hasInOut =
+      composition.settings?.timeline.inPointSeconds !== undefined || composition.settings?.timeline.outPointSeconds !== undefined;
+    const withRange: ExportSettings = { ...seed, range: hasInOut ? "inout" : "full" };
+    // Cloud renders MP4/H.264 only — force MP4 when opening straight into the cloud destination.
+    setExportSettings(destination === "cloud" ? { ...withRange, destination, format: "mp4" } : { ...withRange, destination });
+    setExportDialogOpen(true);
+  }
+
+  /** Resolve export-window settings → concrete local-encoder params (output size from scale + bitrate). */
+  function localEncodeParamsFor(settings: ExportSettings) {
+    const base = composition ?? { width: 1080, height: 1920 };
+    return {
+      format: settings.format,
+      fps: settings.fps,
+      videoBitrate: settings.targetBitrate,
+      bitrateMode: settings.bitrateMode,
+      outputWidth: scaledEvenDimension(base.width, settings.scale),
+      outputHeight: scaledEvenDimension(base.height, settings.scale)
+    };
+  }
+
+  async function renderFinal(settings: ExportSettings) {
     if (!project) {
       return;
     }
+    lastCloudExportSettingsRef.current = settings;
     setBusy("export");
     setNotice("Preparing your project for export…");
     try {
@@ -6702,7 +6735,7 @@ export function EditorPage() {
       }
 
       setRelinkNeeds(null);
-      const updated = await exportFinal(serverId);
+      const updated = await exportFinal(serverId, settings);
       setProject(updated);
       const job = updated.renderJobs?.find((item) => item.type === "final" && (item.status === "queued" || item.status === "processing"));
       setNotice(job ? "Export 0% - waiting to start" : updated.finalUrl ? "Export ready" : "Export requested");
@@ -6752,7 +6785,7 @@ export function EditorPage() {
     await promoteProject(project.id);
   }
 
-  async function exportOnDevice(fps: number, format: ExportFormat) {
+  async function exportOnDevice(settings: ExportSettings) {
     if (!project || !composition) {
       return;
     }
@@ -6763,20 +6796,27 @@ export function EditorPage() {
     // Exports own the machine: close the background gate so proxy builds/thumbnails/waveforms
     // never contend with the encode (reopened in finally).
     setBackgroundGate("exporting", true);
+    const params = localEncodeParamsFor(settings);
     try {
       const blob = await exportLocally({
-        composition,
+        // Stamp the chosen export window (Full/In-Out + safe-timeline trim) onto the composition;
+        // exportLocally's clipCompositionToWorkArea then renders exactly that span.
+        composition: withExportWindow(composition, settings),
         compositions: graph?.compositions,
         flarexComps: graph?.flarexComps,
         urlForAsset: (id) => resolvedAssets.find((asset) => asset.id === id)?.fileUrl,
-        format,
-        fps,
+        format: params.format,
+        fps: params.fps,
+        videoBitrate: params.videoBitrate,
+        bitrateMode: params.bitrateMode,
+        outputWidth: params.outputWidth,
+        outputHeight: params.outputHeight,
         transitionManifests: importedPluginLibrary.transitions,
         lookManifests: importedPluginLibrary.looks,
         signal: controller.signal,
         onProgress: (progress, label) => setLocalExport({ progress, label })
       });
-      const ext = format === "webm" ? "webm" : "mp4";
+      const ext = params.format === "webm" ? "webm" : "mp4";
       await saveExportedFile(blob, `${project.title || "orreris"}.${ext}`);
       setNotice("Exported on this device");
     } catch (error) {
@@ -6790,11 +6830,12 @@ export function EditorPage() {
     }
   }
 
-  function openIsolatedDeviceExport(fps: number, format: ExportFormat) {
+  function openIsolatedDeviceExport(settings: ExportSettings) {
     if (!project) {
       return;
     }
     setExportDialogOpen(false);
+    const encode = localEncodeParamsFor(settings);
     const handoffKey = `orreris.localExportHandoff.${project.id}.${Date.now()}`;
     let handoffWritten = false;
     try {
@@ -6805,8 +6846,14 @@ export function EditorPage() {
     }
     const params = new URLSearchParams({
       projectId: project.id,
-      fps: String(fps),
-      format
+      fps: String(encode.fps),
+      format: encode.format,
+      vb: String(encode.videoBitrate),
+      brm: encode.bitrateMode,
+      ow: String(encode.outputWidth),
+      oh: String(encode.outputHeight),
+      range: settings.range,
+      trim: settings.trimTrailingBlack ? "1" : "0"
     });
     if (handoffWritten) {
       params.set("handoff", handoffKey);
@@ -7729,13 +7776,11 @@ export function EditorPage() {
         return { ok: true, say: "" };
       }
       case "openExport": {
-        // Same gate + setup as the on-device Export button / Ctrl+M.
-        if (!localExportSupported || localExport || !composition) {
-          return { ok: false, say: "Local export isn't available right now." };
+        // Opens the unified export window (same as the Export button / Ctrl+M).
+        if (localExport || !composition) {
+          return { ok: false, say: "Export isn't available right now." };
         }
-        setExportFps(null);
-        setExportFormat("mp4");
-        setExportDialogOpen(true);
+        openExportDialog("local");
         return { ok: true, say: "" };
       }
       case "openPanel": {
@@ -7975,22 +8020,14 @@ export function EditorPage() {
             </div>
           </div>
           <span className="editor-actions-divider" aria-hidden="true" />
-          {localExportSupported ? (
-            <Button
-              className="icon-only editor-local-export-button"
-              variant="secondary"
-              icon={<MonitorDown size={16} />}
-              disabled={Boolean(localExport) || !composition}
-              onClick={() => {
-                setExportFps(null);
-                setExportFormat("mp4");
-                setExportDialogOpen(true);
-              }}
-              aria-label={localExport ? "Exporting on this device…" : "Export on this device"}
-              title="Render on this device — choose frame rate & format, no upload"
-            />
-          ) : null}
-          <Button className="editor-final-export-button" icon={<Download size={16} />} disabled={busy === "export" || Boolean(activeRenderJob)} onClick={renderFinal}>
+          {/* ONE export button → the unified export window (this device / cloud + granular settings). */}
+          <Button
+            className="editor-final-export-button"
+            icon={<Download size={16} />}
+            disabled={busy === "export" || Boolean(activeRenderJob) || Boolean(localExport) || !composition}
+            onClick={() => openExportDialog("local")}
+            title="Export — choose this device or cloud, resolution, frame rate & compression"
+          >
             {activeRenderJob?.type === "final" ? "Exporting" : "Export"}
           </Button>
           {activeRenderJob ? (
@@ -8908,13 +8945,7 @@ export function EditorPage() {
             type="button"
             onClick={() => {
               setActiveResponsiveOverlay(null);
-              if (localExportSupported) {
-                setExportFps(null);
-                setExportFormat("mp4");
-                setExportDialogOpen(true);
-              } else {
-                void renderFinal();
-              }
+              openExportDialog("local");
             }}
           >
             <Download size={16} />
@@ -9104,7 +9135,13 @@ export function EditorPage() {
         onClose={() => setRelinkNeeds(null)}
         onResolved={() => {
           setRelinkNeeds(null);
-          void renderFinal();
+          // Retry the cloud export with the same settings that triggered the relink; fall back to
+          // reopening the export window if we somehow lost them.
+          if (lastCloudExportSettingsRef.current) {
+            void renderFinal(lastCloudExportSettingsRef.current);
+          } else {
+            openExportDialog("cloud");
+          }
         }}
       />
       {/* Close (X) keeps the checkpoint and re-offers next open; only Discard deletes it. */}
@@ -9124,11 +9161,44 @@ export function EditorPage() {
           </div>
         </Modal>
       ) : null}
-      {exportDialogOpen && composition
+      {exportDialogOpen && composition && exportSettings
         ? (() => {
+            const settings = exportSettings;
+            const isCloud = settings.destination === "cloud";
+            const update = (patch: Partial<ExportSettings>) => setExportSettings((current) => (current ? { ...current, ...patch } : current));
             const projFps = composition.fps || 30;
-            const choices = Array.from(new Set([projFps, 23.976, 24, 25, 29.97, 30, 50, 60])).sort((a, b) => a - b);
+            const choices = Array.from(new Set([settings.fps, projFps, 23.976, 24, 25, 29.97, 30, 50, 60])).sort((a, b) => a - b);
             const fmtFps = (f: number) => (f % 1 === 0 ? String(f) : f.toFixed(3));
+            const mbps = (bits: number) => Math.round((bits / 1_000_000) * 10) / 10;
+            const fromMbps = (value: number) => Math.max(100_000, Math.round(value * 1_000_000));
+            const presets = resolutionPresetsFor(composition.width, composition.height);
+            const outW = scaledEvenDimension(composition.width, settings.scale);
+            const outH = scaledEvenDimension(composition.height, settings.scale);
+            // In/Out range: offered only when work-area points are set. Compute both spans for labels.
+            const timeline = composition.settings?.timeline;
+            const hasInOut = timeline?.inPointSeconds !== undefined || timeline?.outPointSeconds !== undefined;
+            const clampDur = (value: number) => Math.min(Math.max(value, 0), composition.durationSeconds);
+            const inoutSeconds = Math.max(
+              1 / (composition.fps || 30),
+              clampDur(timeline?.outPointSeconds ?? composition.durationSeconds) - clampDur(timeline?.inPointSeconds ?? 0)
+            );
+            // Estimate uses the RESOLVED window (range + safe-timeline trim), matching what renders.
+            const estDurationSeconds = exportWindowDurationSeconds(composition, settings);
+            // Premiere-style estimate: (video + AAC audio allowance) × window duration. VBR averages ≈
+            // target, so the target bitrate is the right basis. Approximate — a hint, not a guarantee.
+            const AUDIO_BITS = 192_000; // matches the export encoders' AAC/Opus track
+            const estBytes = ((settings.targetBitrate + AUDIO_BITS) * estDurationSeconds) / 8;
+            const formatSize = (bytes: number) =>
+              bytes >= 1_000_000_000 ? `${(bytes / 1_000_000_000).toFixed(2)} GB` : `${Math.max(1, Math.round(bytes / 1_000_000))} MB`;
+            const rangeGroups: ThemedSelectGroup<"full" | "inout">[] = [
+              {
+                label: "Range",
+                options: [
+                  { value: "inout", label: `In to Out (${inoutSeconds.toFixed(1)}s)` },
+                  { value: "full", label: `Full project (${composition.durationSeconds.toFixed(1)}s)` }
+                ]
+              }
+            ];
             // Composition-wide color warning: any video/image source with detected/assumed HDR, wide-gamut,
             // or log color that this Rec.709 SDR milestone can't master exactly. Exact WebGL grading is never
             // blocked on this — surfaced as an informational warning per the plan ("warn, don't block").
@@ -9143,40 +9213,128 @@ export function EditorPage() {
               .flatMap((assetId) => sourceColorWarnings(assets.find((a) => a.id === assetId)?.color))
               .filter((w) => w.severity === "warning");
             const worstCompositionColorWarning = compositionColorWarnings[0];
-            const fpsGroups: ThemedSelectGroup<string>[] = [
+            const destinationGroups: ThemedSelectGroup<ExportDestination>[] = [
+              { label: "Export to", options: [{ value: "local", label: "This device" }, { value: "cloud", label: "Cloud (Remotion)" }] }
+            ];
+            // Cloud is MP4/H.264 only; WebM is a local-only option.
+            const formatGroups: ThemedSelectGroup<ExportFormat>[] = [
               {
-                label: "Frame rate",
-                options: choices.map((f) => ({ value: String(f), label: `${fmtFps(f)} fps${f === projFps ? " · project" : ""}` }))
+                label: "Format",
+                options: isCloud
+                  ? [{ value: "mp4", label: "MP4 (H.264)" }]
+                  : [{ value: "mp4", label: "MP4 (H.264)" }, { value: "webm", label: "WebM (VP9)" }]
               }
             ];
-            const formatGroups: ThemedSelectGroup<ExportFormat>[] = [
-              { label: "Format", options: [{ value: "mp4", label: "MP4 (H.264)" }, { value: "webm", label: "WebM (VP9)" }] }
+            const resolutionGroups: ThemedSelectGroup<string>[] = [
+              { label: "Resolution", options: presets.map((preset) => ({ value: String(preset.scale), label: preset.label })) }
+            ];
+            const fpsGroups: ThemedSelectGroup<string>[] = [
+              { label: "Frame rate", options: choices.map((f) => ({ value: String(f), label: `${fmtFps(f)} fps${f === projFps ? " · project" : ""}` })) }
+            ];
+            const modeGroups: ThemedSelectGroup<"vbr" | "cbr">[] = [
+              { label: "Encoding", options: [{ value: "vbr", label: "VBR (variable)" }, { value: "cbr", label: "CBR (constant)" }] }
             ];
             return (
-              <Modal title="Export on this device" open onClose={() => setExportDialogOpen(false)}>
+              <Modal title="Export" open onClose={() => setExportDialogOpen(false)}>
                 <div className="export-settings">
                   <label className="export-settings-row">
-                    <span>Frame rate</span>
-                    <ThemedSelect ariaLabel="Export frame rate" value={String(exportFps ?? projFps)} groups={fpsGroups} onChange={(v) => setExportFps(Number(v))} />
+                    <span>Export to</span>
+                    <ThemedSelect
+                      ariaLabel="Export destination"
+                      value={settings.destination}
+                      groups={destinationGroups}
+                      onChange={(v) => update(v === "cloud" ? { destination: v, format: "mp4" } : { destination: v })}
+                    />
                   </label>
                   <label className="export-settings-row">
                     <span>Format</span>
-                    <ThemedSelect ariaLabel="Export format" value={exportFormat} groups={formatGroups} onChange={setExportFormat} />
+                    <ThemedSelect ariaLabel="Export format" value={settings.format} groups={formatGroups} onChange={(v) => update({ format: v })} />
                   </label>
+                  <label className="export-settings-row">
+                    <span>Resolution</span>
+                    <ThemedSelect ariaLabel="Export resolution" value={String(settings.scale)} groups={resolutionGroups} onChange={(v) => update({ scale: Number(v) })} />
+                  </label>
+                  <label className="export-settings-row">
+                    <span>Frame rate</span>
+                    <ThemedSelect ariaLabel="Export frame rate" value={String(settings.fps)} groups={fpsGroups} onChange={(v) => update({ fps: Number(v) })} />
+                  </label>
+                  {hasInOut ? (
+                    <label className="export-settings-row">
+                      <span>Range</span>
+                      <ThemedSelect ariaLabel="Export range" value={settings.range} groups={rangeGroups} onChange={(v) => update({ range: v })} />
+                    </label>
+                  ) : null}
+                  <label className="export-settings-row export-settings-check" title="Trim trailing frames with no visual content so the export doesn't end on black (e.g. audio running past the last clip).">
+                    <span>Safe timeline</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.trimTrailingBlack}
+                      aria-label="Trim trailing black frames"
+                      onChange={(event) => update({ trimTrailingBlack: event.target.checked })}
+                    />
+                  </label>
+                  <label className="export-settings-row">
+                    <span>Encoding</span>
+                    <ThemedSelect ariaLabel="Bitrate mode" value={settings.bitrateMode} groups={modeGroups} onChange={(v) => update({ bitrateMode: v })} />
+                  </label>
+                  <label className="export-settings-row">
+                    <span>{settings.bitrateMode === "cbr" ? "Bitrate (Mbps)" : "Target bitrate (Mbps)"}</span>
+                    <input
+                      type="number"
+                      className="export-settings-number"
+                      min={0.1}
+                      step={0.5}
+                      value={mbps(settings.targetBitrate)}
+                      aria-label="Target video bitrate in megabits per second"
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value) && value > 0) update({ targetBitrate: fromMbps(value) });
+                      }}
+                    />
+                  </label>
+                  {settings.bitrateMode === "vbr" ? (
+                    <label className="export-settings-row">
+                      <span>Max bitrate (Mbps)</span>
+                      <input
+                        type="number"
+                        className="export-settings-number"
+                        min={0.1}
+                        step={0.5}
+                        value={mbps(settings.maxBitrate ?? Math.round(settings.targetBitrate * 1.45))}
+                        aria-label="Maximum video bitrate in megabits per second"
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          if (Number.isFinite(value) && value > 0) update({ maxBitrate: fromMbps(value) });
+                        }}
+                      />
+                    </label>
+                  ) : null}
+                  <div className="export-settings-row export-settings-estimate">
+                    <span>Estimated size</span>
+                    <strong>{formatSize(estBytes)}</strong>
+                  </div>
                   {worstCompositionColorWarning ? (
                     <div className="export-color-warning" title={colorWarningsLabel(compositionColorWarnings)}>
                       {worstCompositionColorWarning.message} Export proceeds as Rec.709 SDR.
                     </div>
                   ) : null}
-                  <p className="local-export-hint">Renders on this device (in a background worker). Nothing is uploaded.</p>
+                  <p className="local-export-hint">
+                    Output {outW}×{outH} @ {fmtFps(settings.fps)} fps · {estDurationSeconds.toFixed(1)}s ·{" "}
+                    {isCloud ? "Renders in the cloud (uploads to your storage)." : "Renders on this device — nothing is uploaded."}
+                  </p>
                   <div className="export-settings-actions">
                     <Button variant="secondary" onClick={() => setExportDialogOpen(false)}>
                       Cancel
                     </Button>
-                    <Button variant="secondary" onClick={() => openIsolatedDeviceExport(exportFps ?? projFps, exportFormat)}>
-                      Separate tab
-                    </Button>
-                    <Button icon={<MonitorDown size={16} />} onClick={() => exportOnDevice(exportFps ?? projFps, exportFormat)}>
+                    {!isCloud ? (
+                      <Button variant="secondary" onClick={() => openIsolatedDeviceExport(settings)}>
+                        Separate tab
+                      </Button>
+                    ) : null}
+                    <Button
+                      icon={isCloud ? <Download size={16} /> : <MonitorDown size={16} />}
+                      onClick={() => (isCloud ? void renderFinal(settings) : void exportOnDevice(settings))}
+                    >
                       Export
                     </Button>
                   </div>

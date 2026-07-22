@@ -4071,11 +4071,44 @@ input[type="checkbox"] {
 .export-settings-row .themed-select {
   min-width: 180px;
 }
+.export-settings-number {
+  min-width: 180px;
+  width: 180px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2, var(--surface));
+  color: var(--text);
+  font-size: 0.85rem;
+  text-align: right;
+}
+.export-settings-number:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .export-settings-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+.export-settings-check {
+  cursor: pointer;
+}
+.export-settings-check > input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.export-settings-estimate {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.export-settings-estimate > strong {
+  font-size: 0.9rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Auth page ───────────────────────────────────────────────────────────── */

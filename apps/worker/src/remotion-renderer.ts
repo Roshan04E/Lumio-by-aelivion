@@ -104,6 +104,11 @@ function manifestOutputColorSpace(manifest: RenderManifest): "bt709" {
   return "bt709";
 }
 
+/** bits/s → Remotion `Bitrate` string (must carry a k/K/M unit). Kilobits keeps it integer-clean. */
+function toBitrate(bitsPerSecond: number): `${number}K` {
+  return `${Math.max(1, Math.round(bitsPerSecond / 1000))}K`;
+}
+
 export async function renderManifestToMp4(input: {
   manifest: RenderManifest;
   outputLocation: string;
@@ -128,7 +133,25 @@ export async function renderManifestToMp4(input: {
   const audioPostMix = manifestNeedsAudioPostMix(input.manifest);
   const videoLocation = audioPostMix ? `${input.outputLocation}.video.mp4` : input.outputLocation;
 
+  // Bitrate encode settings chosen in the export window (manifest.output.encode). When a target
+  // bitrate is present we switch H.264 from CRF (Remotion's default) to bitrate mode — videoBitrate =
+  // target; VBR additionally caps with encodingMaxRate (+ a 2× bufsize so ffmpeg actually honors the
+  // cap). `crf: null` is REQUIRED alongside videoBitrate or Remotion rejects "both crf and bitrate".
+  // Absent → keep Remotion's default CRF path (unchanged behavior).
+  const encode = input.manifest.output.encode;
+  const encodeOptions =
+    encode?.videoBitrate && encode.videoBitrate > 0
+      ? {
+          crf: null,
+          videoBitrate: toBitrate(encode.videoBitrate),
+          ...(encode.mode === "vbr" && encode.maxBitrate && encode.maxBitrate > 0
+            ? { encodingMaxRate: toBitrate(encode.maxBitrate), encodingBufferSize: toBitrate(encode.maxBitrate * 2) }
+            : {})
+        }
+      : {};
+
   await renderMedia({
+    ...encodeOptions,
     codec: "h264",
     composition,
     serveUrl,

@@ -40,6 +40,8 @@ export interface MediaEncoderOptions {
   format: ExportFormat;
   /** Video bitrate in bits/s. Defaults to a quality-scaled value from the resolution. */
   videoBitrate?: number;
+  /** Rate control: "vbr" (variable, default) or "cbr" (constant). From the export window. */
+  bitrateMode?: "vbr" | "cbr" | undefined;
   /** Fallback color descriptor for the container tag (default {@link REC709_SDR_LIMITED}). */
   outputColorSpace?: OutputColorSpace | undefined;
   /**
@@ -178,6 +180,9 @@ export class MediaEncoder {
       width: opts.width,
       height: opts.height,
       bitrate: videoBitrate,
+      // CBR holds a steadier bitrate (predictable file size / streaming); VBR (default) spends bits
+      // where the picture needs them at the same average target. Only set when the user chose one.
+      ...(opts.bitrateMode ? { bitrateMode: opts.bitrateMode === "cbr" ? ("constant" as const) : ("variable" as const) } : {}),
       framerate: opts.fps,
       // Keep HARDWARE encode (default) for full quality: SW H.264 encode in the browser is Baseline-profile
       // only, which would downgrade the output. The H.264 decode↔encode contention is resolved on the DECODER

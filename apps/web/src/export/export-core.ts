@@ -75,6 +75,13 @@ export interface ExportCoreInput {
   lookManifests?: PluginLookManifest[] | undefined;
   /** Export frame rate. Defaults to the composition's fps; lets the user export at a different rate. */
   fps?: number | undefined;
+  /** Target video bitrate (bits/s) from the export window. Undefined → resolution-derived default. */
+  videoBitrate?: number | undefined;
+  /** Encoder rate-control mode from the export window. Undefined → the encoder's default (VBR). */
+  bitrateMode?: "vbr" | "cbr" | undefined;
+  /** Encode-output width/height (a resolution downscale). Undefined → composition size (no scaling). */
+  outputWidth?: number | undefined;
+  outputHeight?: number | undefined;
   /**
    * Vestigial scene-only marker (Method 3 Phase 5). The canvas2D "frame" compositor is retired — export ALWAYS
    * uses `SceneFrameCompositor`. Retained as an accepted no-op so the Worker-scene gate page (and probes) that
@@ -358,6 +365,18 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     ...(input.flarexComps && Object.keys(input.flarexComps).length > 0 ? { flarexComps: input.flarexComps } : {}),
   };
   const activeCanvas = new OffscreenCanvas(width, height);
+  // Resolution downscale (export window): composite ALWAYS at full comp res (activeCanvas) so layer
+  // coordinates are untouched, then blit each finished frame into a smaller encode canvas whose size
+  // matches the encoder config (a VideoFrame's size must equal the encoder's configured dimensions).
+  const encodeWidth = Math.max(2, (input.outputWidth ?? width) - ((input.outputWidth ?? width) % 2));
+  const encodeHeight = Math.max(2, (input.outputHeight ?? height) - ((input.outputHeight ?? height) % 2));
+  const downscaleOutput = encodeWidth !== width || encodeHeight !== height;
+  const encodeCanvas = downscaleOutput ? new OffscreenCanvas(encodeWidth, encodeHeight) : activeCanvas;
+  const encodeCtx = downscaleOutput ? encodeCanvas.getContext("2d") : null;
+  if (encodeCtx) {
+    encodeCtx.imageSmoothingEnabled = true;
+    encodeCtx.imageSmoothingQuality = "high";
+  }
   let consecutiveBlackExpectedMediaFrames = 0;
   // SceneFrameCompositor is the ONLY local export compositor (Phase 5). If it can't construct (e.g. no WebGL2
   // in this Worker), the error propagates: a Worker failure routes local-export.ts to the MAIN-THREAD scene
@@ -398,11 +417,13 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   const projectColor = normalizeProjectColorSettings(renderComposition.settings?.color);
   const outputColorSpace = { ...REC709_SDR_LIMITED, fullRange: projectColor.range === "full" };
   const encoder = new MediaEncoder({
-    width,
-    height,
+    width: encodeWidth,
+    height: encodeHeight,
     fps,
     format,
     outputColorSpace,
+    ...(input.videoBitrate && input.videoBitrate > 0 ? { videoBitrate: input.videoBitrate } : {}),
+    ...(input.bitrateMode ? { bitrateMode: input.bitrateMode } : {}),
     audio: audio ? { sampleRate: audioConfig.sampleRate, channels: audio.channels.length } : undefined,
   });
 
@@ -441,7 +462,12 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
         }
       }
       try {
-        await withTimeout(encoder.addVideoFrame(activeCanvas, i), FRAME_TIMEOUT_MS, `encodeFrame ${i + 1}/${totalFrames}`);
+        // Downscale (if any) happens here: blit the full-res composite into the encode-sized canvas
+        // right before encoding, so recovery re-renders (which loop back to this call) also scale.
+        if (encodeCtx) {
+          encodeCtx.drawImage(activeCanvas, 0, 0, encodeWidth, encodeHeight);
+        }
+        await withTimeout(encoder.addVideoFrame(downscaleOutput ? encodeCanvas : activeCanvas, i), FRAME_TIMEOUT_MS, `encodeFrame ${i + 1}/${totalFrames}`);
       } catch (error) {
         if (error instanceof EncoderStallRecoveredError) {
           // The wedged encoder was reset; frames after resumeFrameIndex were queued but never muxed.

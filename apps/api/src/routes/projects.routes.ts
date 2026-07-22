@@ -7,10 +7,12 @@ import {
   createProjectSchema,
   createProjectEffect,
   createDefaultComposition,
+  exportSettingsSchema,
   instantiateTemplateComposition,
   patchProjectSchema,
   resolveModuleInsertions,
   templateDefinitions,
+  type ExportSettings,
   type ProjectGraph
 } from "@orreris/shared";
 import { asyncHandler, getParam, HttpError, ok, validateBody } from "../lib/http";
@@ -293,7 +295,12 @@ projectsRouter.post(
   requireAuth,
   asyncHandler<AuthRequest>(async (req, res) => {
     const id = getParam(req, "id");
-    const data = await renderFinal(id, req.user.id);
+    // Export settings from the unified export window are optional: a missing/invalid body renders at
+    // the project's native resolution/fps with default quality (unchanged legacy behavior). The zod
+    // parse already validated the shape at runtime — the cast only bridges exactOptionalPropertyTypes.
+    const parsed = exportSettingsSchema.safeParse(req.body);
+    const settings = parsed.success ? (parsed.data as ExportSettings) : undefined;
+    const data = await renderFinal(id, req.user.id, settings);
     return ok(res, "Final export generated", data);
   })
 );

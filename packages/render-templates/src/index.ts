@@ -11,6 +11,7 @@ import type {
   LayerContentTransform,
   Mask,
   MatteRef,
+  ManifestEncodeSettings,
   NestedGroupSpec,
   PluginEffectManifest,
   PluginLookManifest,
@@ -226,6 +227,11 @@ export interface RenderManifest {
      * always sets it; optional so older serialized manifests / literals stay valid (consumers default to Rec.709).
      */
     color?: ProjectColorSettings | undefined;
+    /**
+     * Encode settings chosen in the export window (bitrate/mode). Set by the API's renderFinal from
+     * the user's ExportSettings; the worker's renderMedia reads it. Absent → renderer defaults.
+     */
+    encode?: ManifestEncodeSettings | undefined;
   };
   assets: RenderManifestAsset[];
   plugins?: {

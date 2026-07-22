@@ -22,6 +22,7 @@ import {
   type CaptionInterchangeArtifact,
   type CaptionTrackData,
   type CloudTranscriptionLanguage,
+  type ExportSettings,
   type TranscriptArtifactData,
   type TemplateDefinition,
   type ToolDefinition
@@ -1166,9 +1167,12 @@ export async function generatePreview(projectId: string) {
   }
 }
 
-export async function exportFinal(projectId: string) {
+export async function exportFinal(projectId: string, settings?: ExportSettings) {
   try {
-    const data = await apiRequest<{ project: ProjectRecord }>(`/projects/${projectId}/export`, { method: "POST" });
+    const data = await apiRequest<{ project: ProjectRecord }>(`/projects/${projectId}/export`, {
+      method: "POST",
+      ...(settings ? { body: JSON.stringify(settings) } : {})
+    });
     return data.project;
   } catch (error) {
     if (projectId.startsWith("project_local_")) {

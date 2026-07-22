@@ -37,6 +37,13 @@ export interface LocalExportRequest {
   format?: ExportFormat;
   /** Export frame rate (defaults to the composition's fps). */
   fps?: number | undefined;
+  /** Target video bitrate (bits/s) from the export window. Undefined → resolution-derived default. */
+  videoBitrate?: number | undefined;
+  /** Encoder rate-control mode from the export window. Undefined → default (VBR). */
+  bitrateMode?: "vbr" | "cbr" | undefined;
+  /** Encode-output width/height (a resolution downscale). Undefined → composition size. */
+  outputWidth?: number | undefined;
+  outputHeight?: number | undefined;
   transitionManifests?: PluginTransitionManifest[] | undefined;
   lookManifests?: PluginLookManifest[] | undefined;
   preferWorker?: boolean | undefined;
@@ -126,6 +133,10 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
     audio,
     format,
     fps,
+    videoBitrate: request.videoBitrate,
+    bitrateMode: request.bitrateMode,
+    outputWidth: request.outputWidth,
+    outputHeight: request.outputHeight,
     exportSingleContext: singleContext,
     transitionManifests: request.transitionManifests,
     lookManifests: request.lookManifests
