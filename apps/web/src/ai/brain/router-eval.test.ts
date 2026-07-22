@@ -737,6 +737,36 @@ async function main(): Promise<void> {
   check("MUST NOT: 'key out the bright sky' (luma phrasing, no screen word) → escalates", (await semantic("key out the bright sky")).kind === "escalate");
   check("MUST NOT: 'remove the overexposed highlights' (luma phrasing, no screen word) → escalates", (await semantic("remove the overexposed highlights")).kind === "escalate");
 
+  console.log("\nNOTES board reflex (explicit-content note/todo → notes-board skill; generative asks escalate):");
+  {
+    const noteRes = await semantic("add a note saying buy some milk");
+    const noteStep = noteRes.kind === "plan" ? noteRes.plan.steps[0] : undefined;
+    const noteOps = (noteStep?.params as { ops?: Array<Record<string, unknown>> } | undefined)?.ops;
+    check(
+      "'add a note saying buy some milk' → ONE notes-board addNote step, free",
+      noteRes.kind === "plan" &&
+        noteRes.plan.steps.length === 1 &&
+        noteStep?.skillId === "notes-board" &&
+        noteOps?.[0]?.op === "addNote" &&
+        noteOps[0]?.text === "buy some milk" &&
+        noteRes.plan.totalCredits === 0
+    );
+    const todoRes = await semantic("make a todo list: scout location, charge batteries, backup cards");
+    const todoOps = (todoRes.kind === "plan" ? (todoRes.plan.steps[0]?.params as { ops?: Array<Record<string, unknown>> }).ops : undefined);
+    check(
+      "'make a todo list: a, b, c' → notes-board todo op with 3 parsed items",
+      todoRes.kind === "plan" &&
+        todoOps?.[0]?.op === "todo" &&
+        (todoOps[0]?.items as string[] | undefined)?.length === 3
+    );
+    check("'add a sticky note that says call John' → fires (note card)", (await semantic("add a sticky note that says call John")).kind === "plan");
+  }
+  // MUST NOT — the precision contract (generative content needs the LLM; bare/ambiguous escalates):
+  check("MUST NOT: 'make a mind map about photosynthesis' (needs generated branches) → escalates", (await semantic("make a mind map about photosynthesis")).kind === "escalate");
+  check("MUST NOT: 'brainstorm some video ideas' (no content to compile) → escalates", (await semantic("brainstorm some video ideas")).kind === "escalate");
+  check("MUST NOT: 'add a note' (no verbatim content) → escalates", (await semantic("add a note")).kind === "escalate");
+  check("MUST NOT: 'how do i add a note' (question) → escalates", (await semantic("how do i add a note")).kind === "escalate");
+
   console.log("\nB6 — learned-phrase WRITE path (LLM resolutions teach tier 2):");
   {
     const { maybeLearnPhrase } = await import("./semantic");

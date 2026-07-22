@@ -464,6 +464,87 @@ function flarexKeyResult(prompt: string, normalized: string): BrainRouteResult |
   return { kind: "plan", plan, tier: "semantic", ruleId: "t2.flarex-key" };
 }
 
+// ---------------------------------------------------------------------------
+// Notes board reflex (plans/notes-sonnet-execution-2/3.md P1). Precision-first: only fire when the
+// prompt names a note/todo AND carries its content verbatim — those compile to REAL cards at zero
+// tokens. Generative asks ("mind map about X", "brainstorm ideas") carry NO content the reflex can
+// invent, so they fall through to escalate → the LLM planner routes them to the same notes-board
+// skill via its aiSummary. 👎-gated like every brain rule.
+// ---------------------------------------------------------------------------
+
+function notesGenerateResult(prompt: string, normalized: string): BrainRouteResult | null {
+  if (!isRuleTrusted("t2.notes-add")) {
+    return null;
+  }
+  // "how do i add a note" is a question, not a command.
+  if (/\bhow\b/.test(normalized)) {
+    return null;
+  }
+  const skill = getSkill("notes-board");
+  const task = skill ? getSkillTaskKind(skill, "notes-board") : undefined;
+  if (!skill || !task) {
+    return null;
+  }
+
+  let op: Record<string, unknown> | null = null;
+  let summary = "";
+
+  // Todo/checklist WITH enumerated items: "todo list: a, b, c" / "checklist for the shoot with x and y".
+  const todo = /\b(?:to-?do|check-?list)\b/.test(normalized)
+    ? prompt.match(/\b(?:to-?do|check-?list)(?:\s+list)?\b(?:\s+(?:for|of|about)\s+([^:]+?))?\s*(?::|\bwith\b|-)\s+(.+)/i)
+    : null;
+  if (todo && todo[2]) {
+    const title = (todo[1] || "To-do").trim().replace(/[:.]+$/, "");
+    const items = todo[2]
+      .split(/\s*(?:,|;|\band\b|\n|\/)\s*/i)
+      .map((s) => s.trim().replace(/^["'-]+|["']+$/g, ""))
+      .filter(Boolean)
+      .slice(0, 40);
+    if (items.length >= 1) {
+      op = { op: "todo", title: title || "To-do", items };
+      summary = `Add a to-do card (${items.length} item${items.length === 1 ? "" : "s"})`;
+    }
+  }
+
+  // Note card WITH verbatim content: "add a (sticky) note saying/that says/reading <text>".
+  if (!op && /\bnote\b/.test(normalized)) {
+    const note = prompt.match(/\bnote\b.*?\b(?:saying|that\s+says|reading|says|:)\s+(.+)/i);
+    const text = note?.[1]?.trim().replace(/^["']+|["']+$/g, "");
+    if (text) {
+      op = { op: "addNote", text };
+      summary = `Add a note card: “${text.slice(0, 40)}${text.length > 40 ? "…" : ""}”`;
+    }
+  }
+
+  if (!op) {
+    return null;
+  }
+  const parsed = task.inputSchema.safeParse({ ops: [op] });
+  if (!parsed.success) {
+    return null;
+  }
+  const plan: AiPlan = {
+    id: `plan_notes_${Math.random().toString(36).slice(2, 10)}`,
+    prompt,
+    steps: [
+      {
+        id: `notes_${Math.random().toString(36).slice(2, 8)}`,
+        kind: "skill",
+        skillId: skill.id,
+        taskKind: task.id,
+        params: parsed.data,
+        summary,
+        cost: { tier: "browser", credits: 0 }
+      }
+    ],
+    totalCredits: 0,
+    confidence: "Exact",
+    notes: [],
+    provider: "brain"
+  };
+  return { kind: "plan", plan, tier: "semantic", ruleId: "t2.notes-add" };
+}
+
 function placeholders(template: string): SlotType[] {
   return [...template.matchAll(/<(target|time|color|n)>/g)].map((match) => match[1] as SlotType);
 }
@@ -982,6 +1063,12 @@ export async function routePromptSemantic(prompt: string, context: BrainContext)
   const flarexKey = flarexKeyResult(prompt, normalized);
   if (flarexKey) {
     return flarexKey;
+  }
+
+  // Notes board: explicit-content note/todo cards compile to the notes-board skill (zero tokens).
+  const notesAdd = notesGenerateResult(prompt, normalized);
+  if (notesAdd) {
+    return notesAdd;
   }
 
   const { skeleton, slots } = extractSkeleton(normalized);
