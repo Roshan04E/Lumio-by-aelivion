@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { SourceAsset, TimelineComposition, ToolCapabilityDefinition } from "@orreris/shared";
+import type { SourceAsset, TimelineComposition, TimelineLayer, ToolCapabilityDefinition } from "@orreris/shared";
 import { RemoveBackgroundToolPanel } from "../pages/RemoveBackgroundToolPanel";
 import { Modal } from "./Modal";
 
@@ -14,6 +14,7 @@ import { Modal } from "./Modal";
 export function RemoveBackgroundEffectModal({
   tool,
   asset,
+  layer,
   composition,
   editableFields,
   onApplied,
@@ -21,12 +22,21 @@ export function RemoveBackgroundEffectModal({
 }: {
   tool: ToolCapabilityDefinition;
   asset: SourceAsset;
+  /** The selected timeline clip — its trim/in-point drives the "Used in timeline" source range. */
+  layer?: TimelineLayer | undefined;
   composition: TimelineComposition;
   editableFields?: Record<string, unknown> | undefined;
   onApplied: (nextComposition: TimelineComposition, editableFieldsPatch?: Record<string, unknown>) => void;
   onClose: () => void;
 }) {
   const assets = useMemo(() => [asset], [asset]);
+  const clipRange = useMemo(() => {
+    if (!layer) {
+      return undefined;
+    }
+    const speed = layer.speed && layer.speed > 0 ? layer.speed : 1;
+    return { sourceInSeconds: layer.sourceInSeconds ?? 0, usedDurationSeconds: layer.durationSeconds * speed };
+  }, [layer]);
 
   return (
     <Modal title={tool.name} open className="modal-workspace" onClose={onClose}>
@@ -39,6 +49,7 @@ export function RemoveBackgroundEffectModal({
         preselectedAsset={asset}
         liveComposition={composition}
         editableFields={editableFields}
+        {...(clipRange ? { clipRange } : {})}
         onApplyToComposition={onApplied}
         compact
       />

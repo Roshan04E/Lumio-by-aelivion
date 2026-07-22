@@ -8968,6 +8968,7 @@ export function EditorPage() {
           <RemoveBackgroundEffectModal
             tool={activeLayerToolEffect.tool}
             asset={activeLayerToolEffect.asset}
+            layer={activeLayerToolEffect.layer}
             composition={composition}
             editableFields={graph?.editableFields}
             onApplied={(nextComposition, editableFieldsPatch) => {
@@ -9603,6 +9604,13 @@ function getRenderNotice(activeJob: RenderJob | undefined, latestFinalJob: Rende
     if (activeJob.status === "queued") {
       const queuedForMs = Date.now() - new Date(activeJob.createdAt).getTime();
       return queuedForMs > 15000 ? "Export 0% - waiting for renderer" : "Export 0% - waiting to start";
+    }
+
+    // The worker maps the frame render to 15-95% and reserves >95% for the final upload of the mp4
+    // to storage (R2), which has no sub-progress. Labelling that band as "uploading" means the tail
+    // reads as a real step instead of the bar appearing frozen near the end.
+    if (activeJob.progress > 95) {
+      return "Export 97% - uploading";
     }
 
     return `Export ${activeJob.progress}%`;

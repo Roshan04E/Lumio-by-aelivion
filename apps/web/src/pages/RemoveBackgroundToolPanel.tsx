@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
-import { Eraser, PaintBucket, Pause, Play, Sparkles, Upload, WandSparkles } from "lucide-react";
+import { Eraser, PaintBucket, Pause, Play, Sparkles, WandSparkles } from "lucide-react";
 import {
   applyRemoveBackgroundComposition,
   createDefaultComposition,
@@ -47,8 +47,24 @@ export interface RemoveBackgroundToolPanelProps {
     | undefined;
   /** Durable per-project artifacts, so an already-extracted matte is reused instead of re-segmenting. */
   editableFields?: Record<string, unknown> | undefined;
+  /**
+   * The timeline clip's used slice of its source (editor path): `sourceInSeconds` is the in-point,
+   * `usedDurationSeconds` the source seconds actually consumed (duration × speed). Lets the Range
+   * control offer "Used in timeline" so a 10-second cut of a 10-minute source needn't segment the
+   * whole file. Absent on the standalone /tools page (no timeline context).
+   */
+  clipRange?: { sourceInSeconds: number; usedDurationSeconds: number } | undefined;
   /** Compact chrome (no page header/back link) for the modal context. */
   compact?: boolean | undefined;
+}
+
+type RangeMode = "whole" | "used" | "custom";
+
+function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /**
@@ -70,6 +86,7 @@ export function RemoveBackgroundToolPanel({
   liveComposition,
   onApplyToComposition,
   editableFields,
+  clipRange,
   compact
 }: RemoveBackgroundToolPanelProps) {
   const navigate = useNavigate();
@@ -79,6 +96,9 @@ export function RemoveBackgroundToolPanel({
   const [plateColor, setPlateColor] = useState<string>(REMOVE_BACKGROUND_DEFAULT_PLATE);
   const [quality, setQuality] = useState<"fast" | "quality">("fast");
   const [maskSource, setMaskSource] = useState<"auto" | "reanalyze">("auto");
+  const [rangeMode, setRangeMode] = useState<RangeMode>(clipRange ? "used" : "whole");
+  const [customStart, setCustomStart] = useState(0);
+  const [customEnd, setCustomEnd] = useState(0);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [bakedMask, setBakedMask] = useState<MaskSequenceArtifactData | undefined>();
@@ -86,11 +106,43 @@ export function RemoveBackgroundToolPanel({
   const cancelledRef = useRef(false);
   const runIdRef = useRef(0);
 
-  // A fresh clip invalidates the previously baked matte (it belongs to the old source).
+  const sourceDuration = selectedAsset?.durationSeconds ?? 0;
+  const usedRange = useMemo(
+    () =>
+      clipRange
+        ? { start: clipRange.sourceInSeconds, end: Math.min(sourceDuration || Infinity, clipRange.sourceInSeconds + clipRange.usedDurationSeconds) }
+        : undefined,
+    [clipRange, sourceDuration]
+  );
+
+  // A fresh clip invalidates the previously baked matte (it belongs to the old source) and resets the
+  // range to a sensible default (the used slice when known, otherwise the whole clip).
   useEffect(() => {
     setBakedMask(undefined);
     setStatus("");
+    setRangeMode(usedRange ? "used" : "whole");
+    setCustomStart(usedRange?.start ?? 0);
+    setCustomEnd(usedRange?.end ?? sourceDuration);
+    // usedRange/sourceDuration are derived from selectedAsset — keying on the id is what we want.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAsset?.id]);
+
+  const effectiveRange = useMemo(() => {
+    const clampT = (v: number) => Math.min(sourceDuration || v, Math.max(0, v));
+    if (rangeMode === "custom") {
+      const start = clampT(customStart);
+      const end = Math.max(start, clampT(customEnd));
+      return { start, end };
+    }
+    if (rangeMode === "used" && usedRange) {
+      return usedRange;
+    }
+    return { start: 0, end: sourceDuration };
+  }, [rangeMode, customStart, customEnd, usedRange, sourceDuration]);
+
+  const rangeLengthSeconds = Math.max(0, effectiveRange.end - effectiveRange.start);
+  const sampleFps = quality === "quality" ? 30 : 8;
+  const estimatedFrames = Math.max(1, Math.round(rangeLengthSeconds * sampleFps));
 
   const applyOptions = useMemo(
     () => ({ mode: outputMode, ...(outputMode === "greenScreen" ? { plateColor } : {}) }),
@@ -155,7 +207,14 @@ export function RemoveBackgroundToolPanel({
         fps: baseComposition?.fps ?? 30,
         composition: liveComposition,
         editableFields,
-        options: { quality, maskSource },
+        // Range is threaded through now so the UI is the source of truth; the segmenter honouring
+        // `rangeStartSeconds`/`rangeEndSeconds` (to skip unused source) is the next backend step.
+        options: {
+          quality,
+          maskSource,
+          rangeStartSeconds: String(effectiveRange.start),
+          rangeEndSeconds: String(effectiveRange.end)
+        },
         onProgress: (message) => {
           if (!cancelledRef.current && runIdRef.current === runId) {
             setStatus(message);
@@ -349,6 +408,54 @@ export function RemoveBackgroundToolPanel({
             Re-analyze
           </button>
         </div>
+      </div>
+
+      <div className="rbg-field">
+        <span className="rbg-field-label">Source range</span>
+        <div className="ui-seg">
+          <button type="button" className={rangeMode === "whole" ? "is-active" : ""} disabled={busy} onClick={() => setRangeMode("whole")}>
+            Whole clip
+          </button>
+          {usedRange ? (
+            <button type="button" className={rangeMode === "used" ? "is-active" : ""} disabled={busy} onClick={() => setRangeMode("used")}>
+              Used in timeline
+            </button>
+          ) : null}
+          <button type="button" className={rangeMode === "custom" ? "is-active" : ""} disabled={busy} onClick={() => setRangeMode("custom")}>
+            Custom
+          </button>
+        </div>
+        {rangeMode === "custom" ? (
+          <div className="rbg-range-inputs">
+            <label>
+              <span>Start</span>
+              <input
+                type="number"
+                min={0}
+                max={sourceDuration}
+                step={0.1}
+                value={Number(customStart.toFixed(2))}
+                disabled={busy}
+                onChange={(event) => setCustomStart(Number(event.target.value))}
+              />
+            </label>
+            <label>
+              <span>End</span>
+              <input
+                type="number"
+                min={0}
+                max={sourceDuration}
+                step={0.1}
+                value={Number(customEnd.toFixed(2))}
+                disabled={busy}
+                onChange={(event) => setCustomEnd(Number(event.target.value))}
+              />
+            </label>
+          </div>
+        ) : null}
+        <p className="rbg-range-readout">
+          {formatClock(effectiveRange.start)}–{formatClock(effectiveRange.end)} · {formatClock(rangeLengthSeconds)} of {formatClock(sourceDuration)} · ~{estimatedFrames} frames
+        </p>
       </div>
 
       <div className="rbg-actions">
