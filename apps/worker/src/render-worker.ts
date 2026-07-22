@@ -6,7 +6,8 @@ import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
 import { buildRenderManifest, type RenderManifest } from "@orreris/render-templates";
 import { type ProjectGraph, type SourceAsset } from "@orreris/shared";
-import { createPresignedDownload, isR2StorageEnabled, persistBytes, relativeKeyFromUrl } from "@orreris/storage";
+import { persistBytes } from "@orreris/storage";
+import { localizeManifestMedia } from "./asset-localizer";
 import { makeCancelSignal } from "@remotion/renderer";
 import { renderManifestToMp4 } from "./remotion-renderer";
 
@@ -94,6 +95,8 @@ async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.re
   // floods the process with unhandled rejections.
   const { cancelSignal, cancel } = makeCancelSignal();
   let cancelled = false;
+  // Cleanup for localized source media (loopback server + temp downloads); runs in the finally below.
+  let localizedCleanup: (() => Promise<void>) | null = null;
   const cancelPoll = setInterval(() => {
     void prisma.renderJob
       .findUnique({ where: { id: job.id }, select: { status: true } })
@@ -131,11 +134,14 @@ async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.re
 
     await prisma.renderJob.update({ where: { id: job.id }, data: { progress: 15 } });
 
-    // Under the r2 driver, rewrite every /storage-proxy source URL to a presigned R2 GET so Remotion
-    // reads media DIRECTLY from R2 (native Range) instead of through the API's proxy. OffthreadVideo
-    // seeks per-frame via Range, and the double hop (Remotion → API → R2) starved the compositor for a
-    // large clip (frame delayRender never cleared → timeout). No-op for the local driver.
-    const renderManifest = await presignManifestMedia(manifest);
+    // Localize R2-backed source media to local disk and serve it to Remotion from a loopback file
+    // server, so the render never streams from R2 during frame extraction. R2 intermittently severs
+    // long streaming GETs from some networks (proven: a 10.9MB clip truncated mid-stream ~half the time
+    // while small ranged reads were 100% reliable) — one sever aborted the render and orphaned the job.
+    // localizeManifestMedia downloads each source ONCE in ranged chunks with per-chunk retry, then
+    // rewrites the manifest to 127.0.0.1 URLs. No-op for the local driver. Torn down in the finally.
+    const localized = await localizeManifestMedia(manifest);
+    localizedCleanup = localized.cleanup;
 
     const renderPayload = {
       jobId: job.id,
@@ -144,7 +150,7 @@ async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.re
         title: project.title,
         template: project.template?.slug ?? "custom"
       },
-      manifest: renderManifest
+      manifest: localized.manifest
     };
     // The manifest/setup steps above are near-instant (DB lookups), so they only get a small fixed
     // slice (0-15%). The frame-by-frame render is the slow part with real per-frame progress — give
@@ -234,62 +240,14 @@ async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.re
     return true;
   } finally {
     clearInterval(cancelPoll);
+    if (localizedCleanup) {
+      await localizedCleanup();
+    }
   }
 }
 
 export async function disconnectRenderWorker() {
   await prisma.$disconnect();
-}
-
-/**
- * Rewrite every API-`/storage` proxy URL in the manifest to a presigned R2 GET URL so the render reads
- * source media DIRECTLY from R2 (native Range, no API double-hop that starves the per-frame compositor).
- * No-op unless the r2 driver is active. Walks the WHOLE manifest (field-name-agnostic) so nested groups,
- * flarex comps, junction layers, mattes and audio are all covered without enumerating each field; URLs
- * that don't map to an R2 key (remote/AI URLs, file paths, already-public base URLs) are left untouched.
- */
-async function presignManifestMedia(manifest: RenderManifest): Promise<RenderManifest> {
-  if (!isR2StorageEnabled()) {
-    return manifest;
-  }
-  const urls = new Set<string>();
-  const scan = (value: unknown) => {
-    if (typeof value === "string") {
-      if (relativeKeyFromUrl(value)) urls.add(value);
-    } else if (Array.isArray(value)) {
-      for (const item of value) scan(item);
-    } else if (value && typeof value === "object") {
-      for (const item of Object.values(value)) scan(item);
-    }
-  };
-  scan(manifest);
-  if (urls.size === 0) {
-    return manifest;
-  }
-
-  const signed = new Map<string, string>();
-  await Promise.all(
-    [...urls].map(async (url) => {
-      const key = relativeKeyFromUrl(url);
-      if (key) {
-        signed.set(url, await createPresignedDownload(key));
-      }
-    })
-  );
-
-  const rewrite = (value: unknown): unknown => {
-    if (typeof value === "string") {
-      return signed.get(value) ?? value;
-    }
-    if (Array.isArray(value)) {
-      return value.map(rewrite);
-    }
-    if (value && typeof value === "object") {
-      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rewrite(item)]));
-    }
-    return value;
-  };
-  return rewrite(manifest) as RenderManifest;
 }
 
 async function saveRenderArtifact(
