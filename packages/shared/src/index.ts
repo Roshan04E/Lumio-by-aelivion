@@ -33,6 +33,7 @@ export * from "./external-gl-transition-adapter";
 export * from "./external-timeline-adapter";
 export * from "./external-timeline-exporter";
 export * from "./export-settings";
+export * from "./render-queue";
 export * from "./export-stress-fixture";
 export * from "./masks";
 export * from "./nesting";

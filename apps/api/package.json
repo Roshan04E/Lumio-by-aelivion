@@ -21,6 +21,7 @@
     "@orreris/storage": "workspace:*",
     "@prisma/client": "^6.14.0",
     "bcryptjs": "^3.0.2",
+    "bullmq": "^5.58.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",

@@ -189,6 +189,19 @@ export async function createPresignedUpload(relativeKey: string, contentType: st
   return { uploadUrl, publicUrl: getPublicUrl(relativeKey), key: relativeKey };
 }
 
+/**
+ * Mint a presigned GET URL for a stored object so a consumer can read it DIRECTLY from R2 —
+ * bypassing the API's `/storage` proxy. Used by the render worker: fetching source clips through the
+ * proxy (Remotion → API → R2) is a double hop, and OffthreadVideo seeks per-frame via Range, so every
+ * grab pays that hop twice and a large clip starves the compositor (frame delayRender never clears).
+ * A presigned URL goes worker → R2 directly with native Range support, and works for a PRIVATE bucket
+ * (no public base URL needed). `expiresIn` must outlast the whole render (default 2h). r2 driver only.
+ */
+export async function createPresignedDownload(relativeKey: string, expiresIn = 7200): Promise<string> {
+  const { client, bucket } = r2();
+  return getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: relativeKey }), { expiresIn });
+}
+
 export async function deleteAsset(publicUrl: string) {
   const cfg = resolveStorageConfig();
   const key = relativeKeyFromUrl(publicUrl);

@@ -109,6 +109,9 @@ function toBitrate(bitsPerSecond: number): `${number}K` {
   return `${Math.max(1, Math.round(bitsPerSecond / 1000))}K`;
 }
 
+/** delayRender timeout for media fetches — R2-through-proxy source clips need more than the ~28s default. */
+const MEDIA_FETCH_TIMEOUT_MS = 120_000;
+
 export async function renderManifestToMp4(input: {
   manifest: RenderManifest;
   outputLocation: string;
@@ -123,6 +126,11 @@ export async function renderManifestToMp4(input: {
     serveUrl,
     id: compositionId,
     inputProps,
+    // Cloud media lives in R2 and is fetched through the API's /storage proxy (Remotion proxy →
+    // API → R2). A large source clip's first fetch can exceed Remotion's default ~28s delayRender
+    // timeout and abort the render ("Fetching …storage… not cleared after 28000ms"). Give media
+    // fetches real headroom. (Localizing assets to a temp file before render is the robust follow-up.)
+    timeoutInMilliseconds: MEDIA_FETCH_TIMEOUT_MS,
     ...browserExecutableOption(),
     ...cancel
   });
@@ -156,6 +164,9 @@ export async function renderManifestToMp4(input: {
     composition,
     serveUrl,
     inputProps,
+    // See selectComposition above — R2-backed media fetches need more than the ~28s default or the
+    // render aborts mid-way with a delayRender timeout on a slow source-clip fetch.
+    timeoutInMilliseconds: MEDIA_FETCH_TIMEOUT_MS,
     ...(audioPostMix ? { muted: true } : {}),
     // Lossless intermediate frames. Remotion defaults to imageFormat "jpeg" at jpegQuality 80, so
     // EVERY frame is JPEG-compressed before the H.264 encoder even runs — a visible "soft" quality

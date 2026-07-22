@@ -11,6 +11,7 @@ import {
 import { HttpError } from "../lib/http";
 import { asJson, fromJson } from "../lib/json";
 import { prisma } from "../lib/prisma";
+import { enqueueRenderJob } from "../lib/renderQueue";
 import { saveDerivedAsset } from "./storage.service";
 
 export const mockTrackingData = {
@@ -75,6 +76,23 @@ export async function processSourceAsset(input: {
   return derived;
 }
 
+/**
+ * Push a freshly-created render job to the queue (bullmq mode; no-op in mock mode). If the queue is
+ * unreachable, mark the row failed so it isn't left "queued" with no consumer, then rethrow so the
+ * route surfaces the error instead of the export hanging forever.
+ */
+async function dispatchRenderJob(jobId: string) {
+  try {
+    await enqueueRenderJob(jobId);
+  } catch (error) {
+    await prisma.renderJob.updateMany({
+      where: { id: jobId, status: "queued" },
+      data: { status: "failed", errorMessage: "Could not queue render job (queue unavailable)", progress: 0 }
+    });
+    throw error;
+  }
+}
+
 export async function renderPreview(projectId: string, userId: string) {
   const project = await prisma.project.findFirst({
     where: { id: projectId, userId },
@@ -97,6 +115,7 @@ export async function renderPreview(projectId: string, userId: string) {
       manifestVersion: manifest.schemaVersion
     }
   });
+  await dispatchRenderJob(job.id);
 
   const updatedProject = await prisma.project.update({
     where: { id: projectId },
@@ -135,6 +154,7 @@ export async function renderFinal(projectId: string, userId: string, settings?: 
       manifestVersion: manifest.schemaVersion
     }
   });
+  await dispatchRenderJob(job.id);
 
   const updatedProject = await prisma.project.update({
     where: { id: projectId },

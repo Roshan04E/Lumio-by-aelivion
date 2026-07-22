@@ -26,6 +26,10 @@ const envSchema = z.object({
     .min(1)
     .default("postgresql://orreris:orreris@localhost:5432/orreris?schema=public"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
+  // Render dispatch. "mock" = the worker polls Postgres (zero-infra dev default). "bullmq" = the API
+  // pushes each render job onto Redis/BullMQ for a worker fleet to consume. Must match the worker's
+  // own WORKER_QUEUE for the push path to work end to end.
+  WORKER_QUEUE: z.enum(["mock", "bullmq"]).default("mock"),
   JWT_SECRET: z.string().min(16).default("local-dev-secret-change-me"),
   STORAGE_ROOT: z.string().default("apps/api/storage"),
   // Object storage driver. "local" = on-disk (dev default, unchanged). "r2" = Cloudflare R2

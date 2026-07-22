@@ -6,7 +6,7 @@ import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
 import { buildRenderManifest, type RenderManifest } from "@orreris/render-templates";
 import { type ProjectGraph, type SourceAsset } from "@orreris/shared";
-import { persistBytes } from "@orreris/storage";
+import { createPresignedDownload, isR2StorageEnabled, persistBytes, relativeKeyFromUrl } from "@orreris/storage";
 import { makeCancelSignal } from "@remotion/renderer";
 import { renderManifestToMp4 } from "./remotion-renderer";
 
@@ -55,16 +55,31 @@ if (process.env.NODE_ENV !== "production") {
   globalThis.__orrerisWorkerPrisma = prisma;
 }
 
+/** Poller entry (mock / DB-polling mode): claim + render the OLDEST queued job, if any. */
 export async function processNextRenderJob() {
   const job = await prisma.renderJob.findFirst({
     where: { status: "queued", type: { in: ["preview", "final"] } },
     orderBy: { createdAt: "asc" }
   });
-
   if (!job) {
     return false;
   }
+  return runRenderJob(job);
+}
 
+/**
+ * BullMQ entry (push mode): claim + render a SPECIFIC job by id. Returns false (no-op) if the row is
+ * gone or already claimed — the atomic claim in runRenderJob makes a duplicate delivery harmless.
+ */
+export async function processRenderJobById(renderJobId: string) {
+  const job = await prisma.renderJob.findUnique({ where: { id: renderJobId } });
+  if (!job || (job.type !== "preview" && job.type !== "final")) {
+    return false;
+  }
+  return runRenderJob(job);
+}
+
+async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.renderJob.findFirst>>>) {
   const claimed = await prisma.renderJob.updateMany({
     where: { id: job.id, status: "queued" },
     data: { status: "processing", progress: 5 }
@@ -116,6 +131,12 @@ export async function processNextRenderJob() {
 
     await prisma.renderJob.update({ where: { id: job.id }, data: { progress: 15 } });
 
+    // Under the r2 driver, rewrite every /storage-proxy source URL to a presigned R2 GET so Remotion
+    // reads media DIRECTLY from R2 (native Range) instead of through the API's proxy. OffthreadVideo
+    // seeks per-frame via Range, and the double hop (Remotion → API → R2) starved the compositor for a
+    // large clip (frame delayRender never cleared → timeout). No-op for the local driver.
+    const renderManifest = await presignManifestMedia(manifest);
+
     const renderPayload = {
       jobId: job.id,
       project: {
@@ -123,7 +144,7 @@ export async function processNextRenderJob() {
         title: project.title,
         template: project.template?.slug ?? "custom"
       },
-      manifest
+      manifest: renderManifest
     };
     // The manifest/setup steps above are near-instant (DB lookups), so they only get a small fixed
     // slice (0-15%). The frame-by-frame render is the slow part with real per-frame progress — give
@@ -218,6 +239,57 @@ export async function processNextRenderJob() {
 
 export async function disconnectRenderWorker() {
   await prisma.$disconnect();
+}
+
+/**
+ * Rewrite every API-`/storage` proxy URL in the manifest to a presigned R2 GET URL so the render reads
+ * source media DIRECTLY from R2 (native Range, no API double-hop that starves the per-frame compositor).
+ * No-op unless the r2 driver is active. Walks the WHOLE manifest (field-name-agnostic) so nested groups,
+ * flarex comps, junction layers, mattes and audio are all covered without enumerating each field; URLs
+ * that don't map to an R2 key (remote/AI URLs, file paths, already-public base URLs) are left untouched.
+ */
+async function presignManifestMedia(manifest: RenderManifest): Promise<RenderManifest> {
+  if (!isR2StorageEnabled()) {
+    return manifest;
+  }
+  const urls = new Set<string>();
+  const scan = (value: unknown) => {
+    if (typeof value === "string") {
+      if (relativeKeyFromUrl(value)) urls.add(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) scan(item);
+    } else if (value && typeof value === "object") {
+      for (const item of Object.values(value)) scan(item);
+    }
+  };
+  scan(manifest);
+  if (urls.size === 0) {
+    return manifest;
+  }
+
+  const signed = new Map<string, string>();
+  await Promise.all(
+    [...urls].map(async (url) => {
+      const key = relativeKeyFromUrl(url);
+      if (key) {
+        signed.set(url, await createPresignedDownload(key));
+      }
+    })
+  );
+
+  const rewrite = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return signed.get(value) ?? value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(rewrite);
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rewrite(item)]));
+    }
+    return value;
+  };
+  return rewrite(manifest) as RenderManifest;
 }
 
 async function saveRenderArtifact(
