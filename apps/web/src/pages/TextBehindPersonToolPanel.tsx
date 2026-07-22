@@ -16,6 +16,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { ColorControl } from "../components/ColorControl";
 import { CreditBadge } from "../components/CreditBadge";
+import { ModelEngineControl } from "../components/ModelEngineControl";
 import { VideoPreview } from "../components/VideoPreview";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import { addEffect, createProject, patchProject } from "../lib/api";
@@ -446,6 +447,8 @@ export function TextBehindPersonToolPanel({
       </div>
 
       {busy ? <AiActivityIndicator label={status || "Working locally…"} /> : status ? <p className="caption-status-line">{status}</p> : null}
+
+      <ModelEngineControl />
 
       <div className="caption-apply-footer">
         <Button disabled={busy || !bakedMask} onClick={() => void handleApply()}>

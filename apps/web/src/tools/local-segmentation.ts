@@ -1,6 +1,39 @@
 import type { MaskSequenceArtifactData, SubjectBounds, TrackingPathArtifactData } from "@orreris/shared";
 import { smoothTrackingPoints } from "@orreris/shared";
 import type { BrowserToolCapabilities } from "./capabilities";
+import { clearCachedModels, getCachedModel, type ModelFetchProgress } from "./model-cache";
+
+/** Model weights the segmentation engines download — cached in OPFS via model-cache.ts. */
+export const SEGMENTATION_MODEL_URLS = {
+  /** Fast tier: MediaPipe selfie segmenter (~250KB TFLite). */
+  fast: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+  /** Quality tier: Robust Video Matting mobilenetv3 ONNX (~15MB). */
+  quality: "https://huggingface.co/eafish/web-onnx/resolve/main/rvm_mobilenetv3_fp32.onnx"
+} as const;
+
+/** Human-readable download progress line ("Downloading high-quality model… 42%"). */
+function modelProgressLine(label: string, p: ModelFetchProgress): string {
+  if (p.total > 0) {
+    return `Downloading ${label} model… ${Math.round((p.loaded / p.total) * 100)}%`;
+  }
+  return `Downloading ${label} model… ${(p.loaded / 1_000_000).toFixed(1)}MB`;
+}
+
+/**
+ * Re-download every segmentation engine's weights, bypassing the cache (the "Redownload engine"
+ * action). Clears the OPFS cache first, then re-fetches both tiers so the next run uses fresh bytes —
+ * the fix when a partial/corrupt download (flaky network, OS network optimizations) wedged an engine.
+ */
+export async function redownloadSegmentationModels(onProgress?: (message: string) => void): Promise<void> {
+  cachedFastSegmenter = undefined;
+  cachedQualitySession = undefined;
+  await clearCachedModels([SEGMENTATION_MODEL_URLS.fast, SEGMENTATION_MODEL_URLS.quality]);
+  onProgress?.("Re-downloading the fast model…");
+  await getCachedModel(SEGMENTATION_MODEL_URLS.fast, { force: true, onProgress: (p) => onProgress?.(modelProgressLine("fast", p)) });
+  onProgress?.("Re-downloading the high-quality model…");
+  await getCachedModel(SEGMENTATION_MODEL_URLS.quality, { force: true, onProgress: (p) => onProgress?.(modelProgressLine("high-quality", p)) });
+  onProgress?.("Engines re-downloaded and cached.");
+}
 
 /**
  * Device-aware person segmentation. Mirrors the lazy-CDN-import + cached-pipeline
@@ -110,24 +143,18 @@ const onnxRuntimeUrls = [
   "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.mjs",
   "https://esm.sh/onnxruntime-web@1.20.1"
 ];
+// onnxruntime-web resolves its own .wasm/.mjs proxy binaries from this dir. Setting it explicitly
+// (ort.env.wasm.wasmPaths) is what lets the WEBGPU backend initialize reliably — without it the
+// proxy fetch can fail under strict networks, ORT silently drops to the pure-WASM EP, and the RVM
+// graph then hard-errors ("ceil() … not supported for AveragePool"). Pinned to the ORT version above.
+const ortWasmBase = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
 
-// Selfie/landscape segmentation model from the same MediaPipe model family Google
-// Meet ships - small (~250KB), real-time on CPU/WebGL on any device.
-const mediaPipeSelfieModelUrl =
-  "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
-
-// Mobile RVM ONNX export - recurrent video matting, carries hidden state across
-// frames for temporal stability instead of segmenting each frame independently.
-// Hosted on Hugging Face Hub, the same CDN local-transcription.ts already
-// relies on for Whisper - HF Hub is built for exactly this (serving ML model
-// weights cross-origin to browsers, CORS-enabled, globally cached), unlike
-// GitHub release assets which don't send CORS headers at all. This is also
-// the only architecture that scales once this ships beyond local dev: every
-// user's browser fetches the model directly from HF's CDN, so there's no
-// proxy/cache step running through our own app server for every cold start
-// across every user. Verified this exact file resolves to a real download
-// before using it here (an earlier guessed, non-existent HF path 404'd).
-const rvmModelUrl = "https://huggingface.co/eafish/web-onnx/resolve/main/rvm_mobilenetv3_fp32.onnx";
+// Selfie/landscape segmentation model (MediaPipe) and the RVM ONNX matting model. Both are fetched
+// and cached through model-cache.ts (OPFS) and handed to the engines as BYTES, not URLs — so a flaky
+// network can't wedge a download, weights persist across reloads, and "Redownload engine" can refresh
+// them. See SEGMENTATION_MODEL_URLS above (the single source of truth for these URLs).
+const mediaPipeSelfieModelUrl = SEGMENTATION_MODEL_URLS.fast;
+const rvmModelUrl = SEGMENTATION_MODEL_URLS.quality;
 
 interface MediaPipeImageSegmenterResult {
   categoryMask?: { getAsUint8Array: () => Uint8Array } | undefined;
@@ -140,6 +167,7 @@ interface MediaPipeImageSegmenter {
 }
 
 let cachedFastSegmenter: Promise<MediaPipeImageSegmenter> | undefined;
+let cachedQualitySession: Promise<QualitySession> | undefined;
 // segmentForVideo() requires strictly increasing timestamps across every call
 // made to a given segmenter instance. Since the segmenter is cached and reused
 // across separate Extract runs, per-run video time (which restarts near 0)
@@ -154,7 +182,7 @@ let nextFastSegmentTimestampMs = 0;
 export async function segmentVideoFast(options: SegmentVideoOptions): Promise<SegmentVideoResult> {
   assertNotCancelled(options.isCancelled);
   options.onProgress?.("Loading the fast preview segmentation model.");
-  const segmenter = await getFastSegmenter();
+  const segmenter = await getFastSegmenter(options.onProgress);
   assertNotCancelled(options.isCancelled);
 
   // Fast preview stays low-fps for interactivity; the dimensional fix below is
@@ -221,7 +249,7 @@ export async function segmentVideoQuality(
       : "Loading the high-quality matting model (CPU fallback - this will take longer)."
   );
 
-  const session = await getQualitySession(profile);
+  const session = await getQualitySession(profile, options.onProgress);
   assertNotCancelled(options.isCancelled);
 
   // Export-grade matte: sample at the composition fps (capped at 30) so there is
@@ -351,12 +379,16 @@ export async function detectInitialSubjectBox(input: { videoUrl: string; width: 
   return lumaToSubjectBounds(luma, width, height, timeSeconds);
 }
 
-async function getFastSegmenter(): Promise<MediaPipeImageSegmenter> {
-  cachedFastSegmenter ??= loadFastSegmenter();
+async function getFastSegmenter(onProgress?: (message: string) => void): Promise<MediaPipeImageSegmenter> {
+  cachedFastSegmenter ??= loadFastSegmenter(onProgress);
   return cachedFastSegmenter;
 }
 
-async function loadFastSegmenter(): Promise<MediaPipeImageSegmenter> {
+async function loadFastSegmenter(onProgress?: (message: string) => void): Promise<MediaPipeImageSegmenter> {
+  // Weights fetched (and cached) by us, then handed to MediaPipe as a buffer — no internal URL fetch.
+  const modelBuffer = new Uint8Array(
+    await getCachedModel(mediaPipeSelfieModelUrl, { onProgress: (p) => onProgress?.(modelProgressLine("fast", p)) })
+  );
   let lastError: unknown;
   for (const url of mediaPipeUrls) {
     try {
@@ -366,7 +398,7 @@ async function loadFastSegmenter(): Promise<MediaPipeImageSegmenter> {
           createFromOptions: (
             vision: unknown,
             options: {
-              baseOptions: { modelAssetPath: string; delegate: "GPU" | "CPU" };
+              baseOptions: { modelAssetBuffer: Uint8Array; delegate: "GPU" | "CPU" };
               runningMode: "VIDEO";
               outputCategoryMask: boolean;
             }
@@ -383,7 +415,7 @@ async function loadFastSegmenter(): Promise<MediaPipeImageSegmenter> {
       // default is IMAGE mode, which throws "Task is not initialized with
       // video mode" the first time segmentForVideo() is called.
       return await mod.ImageSegmenter.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: mediaPipeSelfieModelUrl, delegate: "GPU" },
+        baseOptions: { modelAssetBuffer: modelBuffer, delegate: "GPU" },
         runningMode: "VIDEO",
         outputCategoryMask: true
       });
@@ -399,24 +431,44 @@ interface QualitySession {
   runFrame: (frame: ImageData, state: unknown) => Promise<{ luma: Uint8ClampedArray; nextState: unknown }>;
 }
 
-async function getQualitySession(profile: SegmentationDeviceProfile): Promise<QualitySession> {
+async function getQualitySession(
+  profile: SegmentationDeviceProfile,
+  onProgress?: (message: string) => void
+): Promise<QualitySession> {
+  cachedQualitySession ??= loadQualitySession(profile, onProgress);
+  return cachedQualitySession;
+}
+
+async function loadQualitySession(
+  profile: SegmentationDeviceProfile,
+  onProgress?: (message: string) => void
+): Promise<QualitySession> {
+  // Fetch the ~15MB RVM weights ONCE through the OPFS cache and pass the bytes to ORT (no internal
+  // URL fetch — the path that was failing under the user's network and silently dropping to WASM).
+  const modelBytes = new Uint8Array(
+    await getCachedModel(rvmModelUrl, { onProgress: (p) => onProgress?.(modelProgressLine("high-quality", p)) })
+  );
+  // When WebGPU is available, list it FIRST with WASM as the per-node fallback. WebGPU runs the RVM
+  // graph (incl. the AveragePool the pure-WASM EP rejects); listing both lets ORT place any node the
+  // GPU can't take on WASM instead of failing the whole session.
+  const executionProviders = profile.executionProvider === "webgpu" ? ["webgpu", "wasm"] : ["wasm"];
+
   let lastError: unknown;
   for (const url of onnxRuntimeUrls) {
     try {
       const ort = (await import(/* @vite-ignore */ url)) as {
-        InferenceSession: { create: (modelUrl: string, options?: Record<string, unknown>) => Promise<unknown> };
+        env: { wasm: { wasmPaths?: string; numThreads?: number } };
+        InferenceSession: { create: (model: Uint8Array, options?: Record<string, unknown>) => Promise<unknown> };
         Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown;
       };
-      const session = await ort.InferenceSession.create(rvmModelUrl, {
-        executionProviders: [profile.executionProvider]
-      });
+      // Point ORT at its proxy binaries so the WebGPU backend can initialize (see ortWasmBase).
+      if (ort.env?.wasm) {
+        ort.env.wasm.wasmPaths = ortWasmBase;
+      }
+      const session = await ort.InferenceSession.create(modelBytes, { executionProviders });
       return wrapRvmSession(session, ort);
     } catch (error) {
       lastError = error;
-      if (profile.executionProvider === "webgpu") {
-        // Retry remaining CDN candidates with WASM before giving up entirely.
-        profile = { ...profile, executionProvider: "wasm" };
-      }
     }
   }
   throw new Error(`Unable to load the quality matting model. ${lastError instanceof Error ? lastError.message : ""}`.trim());

@@ -2424,6 +2424,33 @@ input[type="checkbox"] {
   color: var(--text-muted, rgba(255, 255, 255, 0.6));
 }
 
+.toolws-engine {
+  border-top: 1px solid var(--nle-border);
+  padding-top: 12px;
+}
+
+.toolws-engine-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.toolws-engine-status {
+  font-size: 11px;
+  color: var(--nle-text-muted);
+}
+
+.toolws-spin {
+  animation: toolws-spin 0.9s linear infinite;
+}
+
+@keyframes toolws-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .toolws-textarea {
   width: 100%;
   resize: vertical;
