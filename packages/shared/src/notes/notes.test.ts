@@ -229,7 +229,28 @@ function item(over: Partial<NoteItem> & Pick<NoteItem, "id" | "type">): NoteItem
   check("plain line is a paragraph", blocks[3]?.kind === "paragraph");
 
   const escaped = parseNoteMarkdown("just # not a heading because no space after")[0];
-  check("a bare '#' without a following space is NOT a heading", escaped?.kind === "paragraph");
+  check("a mid-line '#' is NOT a heading", escaped?.kind === "paragraph");
+
+  // Relaxed headings: the space after the hashes is optional (`##Heading` works).
+  const noSpace = parseNoteMarkdown("##little bellintel")[0];
+  check("'##' without a space is still an h2", noSpace?.kind === "heading" && noSpace.level === 2);
+  const noSpaceInline = noSpace?.kind === "heading" ? noSpace.inline.map((t) => t.value).join("") : "";
+  check("no-space heading keeps its full text", noSpaceInline === "little bellintel");
+
+  // Escape hatch: a leading backslash keeps the line literal.
+  const literalHash = parseNoteMarkdown("\\# not a heading")[0];
+  check("leading backslash escapes a heading", literalHash?.kind === "paragraph");
+  check("backslash escape strips only the backslash", literalHash?.kind === "paragraph" && literalHash.inline.map((t) => t.value).join("") === "# not a heading");
+
+  // Inline code, ordered + task blocks (doc card).
+  const code = parseNoteMarkdownInline("run `npm test` now");
+  check("inline code token extracted", code.some((t) => t.kind === "code" && t.value === "npm test"));
+  const ordered = parseNoteMarkdown("1. first")[0];
+  check("ordered item detected", ordered?.kind === "ordered" && ordered.index === 1);
+  const taskDone = parseNoteMarkdown("- [x] done")[0];
+  check("checked task detected", taskDone?.kind === "task" && taskDone.checked === true);
+  const taskOpen = parseNoteMarkdown("- [ ] open")[0];
+  check("open task detected", taskOpen?.kind === "task" && taskOpen.checked === false);
 }
 
 // --- locked items excluded from frame drag-capture (Q4.3) --------------------------

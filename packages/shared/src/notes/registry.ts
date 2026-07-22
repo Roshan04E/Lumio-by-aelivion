@@ -178,6 +178,11 @@ function itemToMarkdown(item: NoteItem): string | null {
   switch (item.type) {
     case "note":
       return `- ${item.title ? `**${item.title}:** ` : ""}${item.body ?? ""}`.trim() || null;
+    case "text":
+      return `- ${item.body ?? item.title ?? ""}`.trim() || null;
+    case "doc":
+      // A doc IS markdown — emit it verbatim (its own headings/lists flow straight into the outline).
+      return item.body?.trim() ? item.body.trim() : null;
     case "todo": {
       const rows = parseTodoRows(item.todosJson);
       const header = `- **${item.title || "Todo"}**`;

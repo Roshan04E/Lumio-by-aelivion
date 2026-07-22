@@ -5,7 +5,7 @@
  * in `ProjectGraph.notesBoards`, keyed by id.
  */
 
-export type NoteItemType = "note" | "asset" | "link" | "frame" | "todo" | "image" | "shape";
+export type NoteItemType = "note" | "text" | "doc" | "asset" | "link" | "frame" | "todo" | "image" | "shape";
 
 export type NoteShapeKind = "rect" | "ellipse" | "arrow";
 
@@ -29,6 +29,9 @@ export interface NoteItem {
   dataUrl?: string | undefined;
   /** type "shape": pure visual organizer (backdrop rect/ellipse, or a styled arrow). */
   shapeKind?: NoteShapeKind | undefined;
+  /** type "text": serialized `TextRun[]` (the same rich-text model the Text-layer inspector edits —
+   *  per-run bold/italic/color/highlight/font/size). `body` mirrors the plain text for search/export. */
+  runsJson?: string | undefined;
   /** NLE link (round 2 P2): this card points at a moment on the main composition's transport. */
   linkedTime?: number | undefined;
   /** NLE link (round 2 P2): this card points at a specific timeline clip. */
