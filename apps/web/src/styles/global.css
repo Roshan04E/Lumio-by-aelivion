@@ -2424,42 +2424,6 @@ input[type="checkbox"] {
   color: var(--text-muted, rgba(255, 255, 255, 0.6));
 }
 
-.rbg-toggle-row {
-  display: flex;
-  gap: 8px;
-}
-
-.rbg-toggle-row button {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 8px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease;
-}
-
-.rbg-toggle-row button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--nle-accent) 50%, var(--border));
-}
-
-.rbg-toggle-row button.is-active {
-  border-color: var(--nle-accent);
-  background: color-mix(in srgb, var(--nle-accent) 16%, transparent);
-  color: var(--text);
-}
-
-.rbg-toggle-row button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
 .rbg-actions {
   display: flex;
   gap: 8px;
@@ -3433,37 +3397,46 @@ input[type="checkbox"] {
    (--nle-accent / -soft / -border) is swappable, which is enough to make the whole app feel
    re-colored since every selection/focus/active state reads from these three vars. "blue" is the
    default (unscoped :root values above); each other option is its own [data-orreris-theme] block. */
-.editor-page[data-orreris-theme="warm"] {
+/* Each accent theme also re-colours portaled dialogs: the Modal stamps the active
+   `data-orreris-theme` on `.modal-backdrop` (it lives on <body>, outside `.editor-page`), so the
+   same accent overrides must match there too — otherwise every dialog renders in the default blue. */
+.editor-page[data-orreris-theme="warm"],
+.modal-backdrop[data-orreris-theme="warm"] {
   --nle-accent: #e0a458;
   --nle-accent-soft: rgba(224, 164, 88, 0.16);
   --nle-accent-border: rgba(224, 164, 88, 0.42);
 }
 
-.editor-page[data-orreris-theme="grey"] {
+.editor-page[data-orreris-theme="grey"],
+.modal-backdrop[data-orreris-theme="grey"] {
   --nle-accent: #9aa4b2;
   --nle-accent-soft: rgba(154, 164, 178, 0.18);
   --nle-accent-border: rgba(154, 164, 178, 0.44);
 }
 
-.editor-page[data-orreris-theme="red"] {
+.editor-page[data-orreris-theme="red"],
+.modal-backdrop[data-orreris-theme="red"] {
   --nle-accent: #e06672;
   --nle-accent-soft: rgba(224, 102, 114, 0.16);
   --nle-accent-border: rgba(224, 102, 114, 0.42);
 }
 
-.editor-page[data-orreris-theme="green"] {
+.editor-page[data-orreris-theme="green"],
+.modal-backdrop[data-orreris-theme="green"] {
   --nle-accent: #6fbf8b;
   --nle-accent-soft: rgba(111, 191, 139, 0.17);
   --nle-accent-border: rgba(111, 191, 139, 0.42);
 }
 
-.editor-page[data-orreris-theme="orange"] {
+.editor-page[data-orreris-theme="orange"],
+.modal-backdrop[data-orreris-theme="orange"] {
   --nle-accent: #e0893c;
   --nle-accent-soft: rgba(224, 137, 60, 0.17);
   --nle-accent-border: rgba(224, 137, 60, 0.42);
 }
 
-.editor-page[data-orreris-theme="neon"] {
+.editor-page[data-orreris-theme="neon"],
+.modal-backdrop[data-orreris-theme="neon"] {
   --nle-accent: #4cf07a;
   --nle-accent-soft: rgba(76, 240, 122, 0.18);
   --nle-accent-border: rgba(76, 240, 122, 0.48);
@@ -17368,6 +17341,144 @@ input.scrub-number:focus {
   position: static;
   min-height: auto;
   max-height: none;
+}
+
+/* ── Editor register for the shared tool workspace dialogs ──────────────────────────
+   The tool windows (Remove Background, Smart Follow Text, …) all mount through `.modal`/
+   `.modal-workspace`, which default to the marketing card tokens (--surface/--border). Re-skin
+   them ONCE here to the editor's dense dark register + theme accent so every tool window reads as
+   part of the editor, not a bolted-on dialog. Scoped to the tool dialogs so unrelated modals
+   (Save Template, Paste Attributes) keep the marketing chrome. */
+.modal-workspace,
+.modal:has(.tool-effect-runner) {
+  padding: 0;
+  border-color: var(--nle-border);
+  border-radius: var(--nle-radius-md);
+  background: var(--nle-panel);
+  color: var(--nle-text);
+}
+
+.modal-workspace .modal-header,
+.modal:has(.tool-effect-runner) .modal-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--nle-border);
+  background: var(--nle-panel);
+}
+
+.modal-workspace .modal-header h2,
+.modal:has(.tool-effect-runner) .modal-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--nle-text);
+}
+
+.modal:has(.tool-effect-runner) .tool-effect-runner {
+  padding: 14px;
+  margin-top: 0;
+}
+
+.modal-workspace .tool-shell {
+  padding: 14px;
+}
+
+.modal-workspace .tool-preview-panel,
+.modal-workspace .tool-results-panel {
+  background: var(--nle-panel-2);
+  border: 1px solid var(--nle-border);
+  border-radius: var(--nle-radius-md);
+}
+
+/* Buttons inside tool dialogs adopt the editor button language (smaller radius, theme accent,
+   no heavy marketing fill). The primary CTA stays a solid accent so Generate/Apply reads clearly. */
+.modal-workspace .button,
+.modal:has(.tool-effect-runner) .button {
+  border-radius: var(--nle-radius-md);
+  border: 1px solid var(--nle-border);
+  font-size: 12px;
+  padding: 7px 12px;
+}
+
+.modal-workspace .button-primary,
+.modal:has(.tool-effect-runner) .button-primary {
+  background: var(--nle-accent);
+  border-color: transparent;
+  color: #0a0d12;
+}
+
+.modal-workspace .button-primary:hover:not(:disabled),
+.modal:has(.tool-effect-runner) .button-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--nle-accent) 86%, #fff);
+}
+
+.modal-workspace .button-secondary,
+.modal:has(.tool-effect-runner) .button-secondary {
+  background: var(--nle-panel-3);
+  color: var(--nle-text);
+}
+
+.modal-workspace .button-ghost,
+.modal:has(.tool-effect-runner) .button-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--nle-text-muted);
+}
+
+.modal-workspace .button-ghost:hover:not(:disabled),
+.modal:has(.tool-effect-runner) .button-ghost:hover:not(:disabled) {
+  background: var(--nle-panel-3);
+  color: var(--nle-text);
+}
+
+.modal-close.ui-btn.ui-btn-icon {
+  width: 26px;
+  height: 26px;
+}
+
+/* Canonical segmented option control — the editor-register replacement for boxy per-tool toggle
+   rows. Reused by every tool window so options read identically (pill group, theme-accent active). */
+.ui-seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--nle-panel-3);
+  border: 1px solid var(--nle-border);
+  border-radius: var(--nle-radius-md);
+}
+
+.ui-seg button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 0;
+  border-radius: calc(var(--nle-radius-md) - 1px);
+  background: transparent;
+  color: var(--nle-text-muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.ui-seg button:hover:not(:disabled) {
+  color: var(--nle-text);
+  background: color-mix(in srgb, var(--nle-text) 7%, transparent);
+}
+
+.ui-seg button.is-active {
+  background: var(--nle-accent-soft);
+  color: var(--nle-text);
+  box-shadow: inset 0 0 0 1px var(--nle-accent-border);
+}
+
+.ui-seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .paste-attributes-modal {

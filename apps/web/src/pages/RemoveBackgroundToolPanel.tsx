@@ -303,7 +303,7 @@ export function RemoveBackgroundToolPanel({
 
       <div className="rbg-field">
         <span className="rbg-field-label">Output</span>
-        <div className="rbg-toggle-row">
+        <div className="ui-seg">
           <button type="button" className={outputMode === "timelineMask" ? "is-active" : ""} onClick={() => setOutputMode("timelineMask")}>
             <Sparkles size={14} /> Transparent
           </button>
@@ -329,7 +329,7 @@ export function RemoveBackgroundToolPanel({
 
       <div className="rbg-field">
         <span className="rbg-field-label">Quality</span>
-        <div className="rbg-toggle-row">
+        <div className="ui-seg">
           <button type="button" className={quality === "fast" ? "is-active" : ""} disabled={busy} onClick={() => setQuality("fast")}>
             Fast preview
           </button>
@@ -341,7 +341,7 @@ export function RemoveBackgroundToolPanel({
 
       <div className="rbg-field">
         <span className="rbg-field-label">Subject mask</span>
-        <div className="rbg-toggle-row">
+        <div className="ui-seg">
           <button type="button" className={maskSource === "auto" ? "is-active" : ""} disabled={busy} onClick={() => setMaskSource("auto")}>
             Reuse if available
           </button>
