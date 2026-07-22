@@ -10,6 +10,13 @@ ENV PNPM_HOME=/pnpm \
     NODE_ENV=production \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable && corepack prepare pnpm@11.5.1 --activate
+
+# Prisma's query engine links against OpenSSL, and node:24-bookworm-slim ships WITHOUT it — without
+# this, `prisma generate` / the engine postinstall warn "Please install openssl" and the client can
+# fail to load at runtime. ca-certificates lets the engine download + HTTPS calls validate.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Whole workspace: apps depend on the workspace:* packages and are executed from source by tsx.

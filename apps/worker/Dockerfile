@@ -17,7 +17,7 @@ RUN corepack enable && corepack prepare pnpm@11.5.1 --activate
 # fonts give emoji + CJK coverage so captions/overlays render correctly headless; ca-certificates so
 # HTTPS fetches (presigned R2 GETs) validate.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates \
+      ca-certificates openssl \
       libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 \
       libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 \
       libpango-1.0-0 libcairo2 libcups2 \
