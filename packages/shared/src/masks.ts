@@ -135,6 +135,12 @@ export interface TextBehindPersonOptions {
   /** Real mask artifact, when available, so the subject layer gets a real MatteRef instead of placeholder metadata. */
   mask?: MaskSequenceArtifactData | undefined;
   sourceAssetId?: string | undefined;
+  /** Behind-text size in composition px. Defaults to a bold display size (118). */
+  fontSize?: number | undefined;
+  /** Behind-text font family. Defaults to Arial. */
+  fontFamily?: string | undefined;
+  /** Behind-text centre position, percent of frame (x right, y down). Defaults to {50,48}. */
+  position?: TimelineVector2 | undefined;
 }
 
 export interface RemoveBackgroundOptions {
@@ -477,7 +483,10 @@ export function applyTextBehindPersonComposition(
     name: "Behind subject text",
     text: options.text,
     color: options.textColor,
-    durationSeconds: duration
+    durationSeconds: duration,
+    ...(options.fontSize ? { fontSize: options.fontSize } : {}),
+    ...(options.fontFamily ? { fontFamily: options.fontFamily } : {}),
+    ...(options.position ? { position: options.position } : {})
   });
   const subjectLayer = createVisualLayer({
     id: `${trackSubjectId}_layer`,
@@ -1283,6 +1292,9 @@ function createTextLayer(input: {
   text: string;
   color: string;
   durationSeconds: number;
+  fontSize?: number | undefined;
+  fontFamily?: string | undefined;
+  position?: TimelineVector2 | undefined;
 }): TimelineLayer {
   return {
     id: input.id,
@@ -1292,8 +1304,8 @@ function createTextLayer(input: {
     text: input.text,
     startSeconds: 0,
     durationSeconds: input.durationSeconds,
-    fontFamily: "Arial",
-    fontSize: 118,
+    fontFamily: input.fontFamily ?? "Arial",
+    fontSize: input.fontSize ?? 118,
     textWidthPercent: 86,
     textAlign: "center",
     color: input.color,
@@ -1304,7 +1316,7 @@ function createTextLayer(input: {
     shadowOffsetX: 0,
     shadowOffsetY: 7,
     transform: {
-      position: { x: 50, y: 48 },
+      position: input.position ?? { x: 50, y: 48 },
       scale: 1,
       rotation: 0,
       opacity: 100

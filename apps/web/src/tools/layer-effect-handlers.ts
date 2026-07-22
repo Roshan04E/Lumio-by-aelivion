@@ -430,20 +430,39 @@ const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArt
 
 const textBehindPersonLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({
   toolSlug: "text-behind-person",
-  optionFields: [maskSourceOptionField],
+  optionFields: [
+    {
+      key: "quality",
+      label: "Quality",
+      defaultValue: "fast",
+      choices: [
+        { value: "fast", label: "Fast preview", description: "Quick, lower-quality edges." },
+        { value: "quality", label: "High quality", description: "Slower, temporally stable edges - recommended before export." }
+      ]
+    },
+    maskSourceOptionField
+  ],
   run: async (args) => runSegmentationMatte(args),
-  applyResult: ({ composition, asset, result, options, context }) =>
-    applyTextBehindPersonComposition(
+  applyResult: ({ composition, asset, result, options, context }) => {
+    const fontSize = Number(options.fontSize);
+    const posX = Number(options.positionX);
+    const posY = Number(options.positionY);
+    const hasPosition = Number.isFinite(posX) && Number.isFinite(posY);
+    return applyTextBehindPersonComposition(
       composition,
       {
         text: options.text || "TEXT",
         textColor: options.textColor || "#FFFFFF",
         maskId: result.id,
         mask: result,
-        sourceAssetId: asset.id
+        sourceAssetId: asset.id,
+        ...(Number.isFinite(fontSize) && fontSize > 0 ? { fontSize } : {}),
+        ...(options.fontFamily ? { fontFamily: options.fontFamily } : {}),
+        ...(hasPosition ? { position: { x: posX, y: posY } } : {})
       },
       context === "standalone" ? "replace" : "insert"
-    ),
+    );
+  },
   describeEditableFields: ({ result, options }) => ({
     maskSequence: result,
     compositingTool: "text-behind-person",

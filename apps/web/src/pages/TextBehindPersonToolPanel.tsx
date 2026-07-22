@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
-import { Eraser, PaintBucket, Pause, Play, Sparkles, WandSparkles } from "lucide-react";
+import { Layers, Pause, Play, Type, WandSparkles } from "lucide-react";
 import {
-  applyRemoveBackgroundComposition,
+  applyTextBehindPersonComposition,
   createDefaultComposition,
-  REMOVE_BACKGROUND_DEFAULT_PLATE,
   type MaskSequenceArtifactData,
   type ProjectGraph,
   type SourceAsset,
@@ -23,38 +22,30 @@ import { addEffect, createProject, patchProject } from "../lib/api";
 import { getLayerToolEffectHandler } from "../tools/layer-effect-handlers";
 import { assertToolRunnable } from "../tools/useLayerToolEffectRunner";
 
-type OutputMode = "timelineMask" | "greenScreen";
+const TEXT_SWATCHES = ["#FFFFFF", "#111111", "#FFD23F", "#4D9FFF", "#FF4D6D"];
+const FONT_OPTIONS = [
+  { value: "Arial", label: "Arial" },
+  { value: "Inter", label: "Inter" },
+  { value: "Impact", label: "Impact" },
+  { value: "Georgia", label: "Georgia" },
+  { value: "Times New Roman", label: "Times" },
+  { value: "Courier New", label: "Courier" }
+];
 
-/** Blue-screen / broadcast-green / common brand-fill plate suggestions for the colour picker. */
-const PLATE_SWATCHES = ["#00B140", "#0047FF", "#000000", "#FFFFFF", "#FF00FF"];
-
-export interface RemoveBackgroundToolPanelProps {
+export interface TextBehindPersonToolPanelProps {
   tool: ToolCapabilityDefinition;
   assets: SourceAsset[];
   selectedAssetId: string;
   onSelectAsset: (id: string) => void;
   onUploadAsset: (file: File | null) => void | Promise<void>;
-  /** Locks the workspace to this clip and hides the picker — the editor modal path. */
   preselectedAsset?: SourceAsset | undefined;
-  /**
-   * When set, Apply merges the removal into this live composition and calls
-   * `onApplyToComposition` instead of creating a new project + navigating. The editor
-   * modal supplies both; the standalone /tools page omits them.
-   */
   liveComposition?: TimelineComposition | undefined;
   onApplyToComposition?:
     | ((nextComposition: TimelineComposition, editableFieldsPatch?: Record<string, unknown>) => void)
     | undefined;
-  /** Durable per-project artifacts, so an already-extracted matte is reused instead of re-segmenting. */
   editableFields?: Record<string, unknown> | undefined;
-  /**
-   * The timeline clip's used slice of its source (editor path): `sourceInSeconds` is the in-point,
-   * `usedDurationSeconds` the source seconds actually consumed (duration × speed). Lets the Range
-   * control offer "Used in timeline" so a 10-second cut of a 10-minute source needn't segment the
-   * whole file. Absent on the standalone /tools page (no timeline context).
-   */
+  /** The timeline clip's used slice of its source (in-point + duration×speed) for the range control. */
   clipRange?: { sourceInSeconds: number; usedDurationSeconds: number } | undefined;
-  /** Compact chrome (no page header/back link) for the modal context. */
   compact?: boolean | undefined;
 }
 
@@ -62,21 +53,18 @@ type RangeMode = "whole" | "used" | "custom";
 
 function formatClock(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
 /**
- * Full Remove Background workspace: pick media, choose the real segmentation quality tier and
- * the output (transparent matte vs a solid colour plate you can recolour), generate a REAL
- * matte in the browser (the same `remove-background` layer-effect handler the editor's one-click
- * flow drives), preview the composited result through the same renderer the editor uses, then
- * Apply. Self-contained so it serves both `/tools/remove-background` and the editor's Effects-tab
- * modal (asset preselected, Apply targets the live composition) with no divergence — the preview
- * is literally `applyRemoveBackgroundComposition`, so it can never drift from what Apply produces.
+ * Full Text Behind Person workspace: type the caption, colour/size/position/font it, choose the real
+ * segmentation quality + source range, generate a REAL subject matte (the same `text-behind-person`
+ * handler the editor one-click flow drives), and preview the composite (text tucked BEHIND the
+ * subject) through the editor's own renderer before Apply. Fixes the long-standing gap where the
+ * text/colour were read by the handler but never surfaced (so it was silently always "TEXT" in
+ * white). Dual-mode: `/tools/text-behind-person` and the editor Effects-tab modal.
  */
-export function RemoveBackgroundToolPanel({
+export function TextBehindPersonToolPanel({
   tool,
   assets,
   selectedAssetId,
@@ -88,12 +76,16 @@ export function RemoveBackgroundToolPanel({
   editableFields,
   clipRange,
   compact
-}: RemoveBackgroundToolPanelProps) {
+}: TextBehindPersonToolPanelProps) {
   const navigate = useNavigate();
   const selectedAsset = preselectedAsset ?? assets.find((asset) => asset.id === selectedAssetId);
 
-  const [outputMode, setOutputMode] = useState<OutputMode>("timelineMask");
-  const [plateColor, setPlateColor] = useState<string>(REMOVE_BACKGROUND_DEFAULT_PLATE);
+  const [text, setText] = useState("NEW DROP");
+  const [textColor, setTextColor] = useState("#FFFFFF");
+  const [fontSize, setFontSize] = useState(118);
+  const [fontFamily, setFontFamily] = useState("Arial");
+  const [posX, setPosX] = useState(50);
+  const [posY, setPosY] = useState(48);
   const [quality, setQuality] = useState<"fast" | "quality">("fast");
   const [maskSource, setMaskSource] = useState<"auto" | "reanalyze">("auto");
   const [rangeMode, setRangeMode] = useState<RangeMode>(clipRange ? "used" : "whole");
@@ -115,15 +107,12 @@ export function RemoveBackgroundToolPanel({
     [clipRange, sourceDuration]
   );
 
-  // A fresh clip invalidates the previously baked matte (it belongs to the old source) and resets the
-  // range to a sensible default (the used slice when known, otherwise the whole clip).
   useEffect(() => {
     setBakedMask(undefined);
     setStatus("");
     setRangeMode(usedRange ? "used" : "whole");
     setCustomStart(usedRange?.start ?? 0);
     setCustomEnd(usedRange?.end ?? sourceDuration);
-    // usedRange/sourceDuration are derived from selectedAsset — keying on the id is what we want.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAsset?.id]);
 
@@ -131,8 +120,7 @@ export function RemoveBackgroundToolPanel({
     const clampT = (v: number) => Math.min(sourceDuration || v, Math.max(0, v));
     if (rangeMode === "custom") {
       const start = clampT(customStart);
-      const end = Math.max(start, clampT(customEnd));
-      return { start, end };
+      return { start, end: Math.max(start, clampT(customEnd)) };
     }
     if (rangeMode === "used" && usedRange) {
       return usedRange;
@@ -141,17 +129,14 @@ export function RemoveBackgroundToolPanel({
   }, [rangeMode, customStart, customEnd, usedRange, sourceDuration]);
 
   const rangeLengthSeconds = Math.max(0, effectiveRange.end - effectiveRange.start);
-  const sampleFps = quality === "quality" ? 30 : 8;
-  const estimatedFrames = Math.max(1, Math.round(rangeLengthSeconds * sampleFps));
+  const estimatedFrames = Math.max(1, Math.round(rangeLengthSeconds * (quality === "quality" ? 30 : 8)));
 
-  const applyOptions = useMemo(
-    () => ({ mode: outputMode, ...(outputMode === "greenScreen" ? { plateColor } : {}) }),
-    [outputMode, plateColor]
+  // Text params shared by the preview builder and Apply, keyed the way the handler reads them.
+  const textOptions = useMemo(
+    () => ({ text, textColor, fontFamily, fontSize: String(fontSize), positionX: String(posX), positionY: String(posY) }),
+    [text, textColor, fontFamily, fontSize, posX, posY]
   );
 
-  // The base the preview (and, in the editor path, Apply) builds onto: the live composition when
-  // embedded, otherwise a throwaway one shaped like the source clip (never the real Apply target
-  // on the tool page — that creates a fresh project instead).
   const baseComposition = useMemo(() => {
     if (liveComposition) {
       return liveComposition;
@@ -160,8 +145,8 @@ export function RemoveBackgroundToolPanel({
       return undefined;
     }
     const base = createDefaultComposition({
-      id: `rbg_preview_${selectedAsset.id}`,
-      name: "Remove Background preview",
+      id: `tbp_preview_${selectedAsset.id}`,
+      name: "Text Behind Person preview",
       durationSeconds: selectedAsset.durationSeconds,
       assetId: selectedAsset.id
     });
@@ -172,12 +157,21 @@ export function RemoveBackgroundToolPanel({
     if (!bakedMask || !baseComposition || !selectedAsset) {
       return undefined;
     }
-    return applyRemoveBackgroundComposition(
+    return applyTextBehindPersonComposition(
       baseComposition,
-      { maskId: bakedMask.id, mask: bakedMask, sourceAssetId: selectedAsset.id, ...applyOptions },
+      {
+        text: text || "TEXT",
+        textColor,
+        fontSize,
+        fontFamily,
+        position: { x: posX, y: posY },
+        maskId: bakedMask.id,
+        mask: bakedMask,
+        sourceAssetId: selectedAsset.id
+      },
       liveComposition ? "insert" : "replace"
     );
-  }, [applyOptions, baseComposition, bakedMask, liveComposition, selectedAsset]);
+  }, [baseComposition, bakedMask, fontFamily, fontSize, liveComposition, posX, posY, selectedAsset, text, textColor]);
 
   async function handleGenerate() {
     if (!selectedAsset?.fileUrl) {
@@ -189,9 +183,9 @@ export function RemoveBackgroundToolPanel({
       setStatus(blocker);
       return;
     }
-    const handler = getLayerToolEffectHandler("remove-background");
+    const handler = getLayerToolEffectHandler("text-behind-person");
     if (!handler) {
-      setStatus("Remove Background runner is unavailable.");
+      setStatus("Text Behind Person runner is unavailable.");
       return;
     }
 
@@ -207,8 +201,6 @@ export function RemoveBackgroundToolPanel({
         fps: baseComposition?.fps ?? 30,
         composition: liveComposition,
         editableFields,
-        // The segmenter windows to this range: only [start,end] of the source is sampled, and the
-        // baked matte records `startSeconds` so every renderer re-aligns it to source time.
         options: {
           quality,
           maskSource,
@@ -226,12 +218,12 @@ export function RemoveBackgroundToolPanel({
         return;
       }
       setBakedMask(mask);
-      setStatus(`Matte ready: ${mask.frames.length} frames. Adjust the output, then Apply.`);
+      setStatus(`Matte ready: ${mask.frames.length} frames. Tune the text, then Apply.`);
     } catch (error) {
       if (cancelledRef.current || runIdRef.current !== runId) {
         return;
       }
-      setStatus(error instanceof Error ? error.message : "Background removal failed.");
+      setStatus(error instanceof Error ? error.message : "Segmentation failed.");
     } finally {
       if (runIdRef.current === runId) {
         runIdRef.current = 0;
@@ -252,26 +244,24 @@ export function RemoveBackgroundToolPanel({
       setStatus("Generate a matte first.");
       return;
     }
-    const handler = getLayerToolEffectHandler("remove-background");
+    const handler = getLayerToolEffectHandler("text-behind-person");
     if (!handler) {
       return;
     }
 
-    // Editor path: merge into the live composition and hand it (plus the durable matte patch) back.
     if (onApplyToComposition && liveComposition) {
       const applyArgs = {
         composition: liveComposition,
         layer: undefined,
         asset: selectedAsset,
         result: bakedMask,
-        options: applyOptions,
+        options: textOptions,
         context: "editor" as const
       };
       onApplyToComposition(handler.applyResult(applyArgs), handler.describeEditableFields?.(applyArgs));
       return;
     }
 
-    // Standalone path: create a fresh draft project and open it in the editor.
     setBusy(true);
     try {
       const project = await createProject({ title: `${tool.name} Draft`, sourceAssetId: selectedAsset.id });
@@ -287,7 +277,7 @@ export function RemoveBackgroundToolPanel({
         layer: undefined,
         asset: selectedAsset,
         result: bakedMask,
-        options: applyOptions,
+        options: textOptions,
         context: "standalone" as const
       };
       const nextComposition = handler.applyResult(applyArgs);
@@ -315,15 +305,15 @@ export function RemoveBackgroundToolPanel({
       </div>
       <div className="tool-preview-canvas">
         {previewComposition && selectedAsset ? (
-          <RemoveBackgroundResultViewer asset={selectedAsset} composition={previewComposition} />
+          <TextBehindResultViewer asset={selectedAsset} composition={previewComposition} />
         ) : (
           <div className="toolws-preview-empty">
-            <Eraser size={34} />
+            <Layers size={34} />
             <h2>{selectedAsset ? "No matte yet" : "No video selected"}</h2>
             <p>
               {selectedAsset
-                ? "Choose your quality and output, then Generate a matte to preview the cut-out."
-                : "Upload or pick a clip to start removing its background."}
+                ? "Type your text and generate a matte to preview it tucked behind the subject."
+                : "Upload or pick a clip to place text behind its subject."}
             </p>
           </div>
         )}
@@ -337,13 +327,7 @@ export function RemoveBackgroundToolPanel({
         <div className="toolws-field">
           <label className="tool-upload-row">
             <span>Upload a clip</span>
-            <input
-              accept="video/*"
-              type="file"
-              onChange={(event) => {
-                void onUploadAsset(event.currentTarget.files?.[0] ?? null);
-              }}
-            />
+            <input accept="video/*" type="file" onChange={(event) => void onUploadAsset(event.currentTarget.files?.[0] ?? null)} />
           </label>
           {assets.length ? (
             <label className="tool-upload-row">
@@ -361,30 +345,38 @@ export function RemoveBackgroundToolPanel({
       ) : null}
 
       <div className="toolws-field">
-        <span className="toolws-field-label">Output</span>
-        <div className="ui-seg">
-          <button type="button" className={outputMode === "timelineMask" ? "is-active" : ""} onClick={() => setOutputMode("timelineMask")}>
-            <Sparkles size={14} /> Transparent
-          </button>
-          <button type="button" className={outputMode === "greenScreen" ? "is-active" : ""} onClick={() => setOutputMode("greenScreen")}>
-            <PaintBucket size={14} /> Colour plate
-          </button>
-        </div>
+        <span className="toolws-field-label">Text</span>
+        <textarea className="toolws-textarea" rows={2} value={text} disabled={busy} onChange={(event) => setText(event.target.value)} placeholder="Behind-subject text" />
       </div>
 
-      {outputMode === "greenScreen" ? (
-        <div className="toolws-field">
-          <span className="toolws-field-label">Plate colour</span>
-          <ColorControl
-            icon={<PaintBucket size={14} />}
-            label="Plate colour"
-            palette={PLATE_SWATCHES}
-            value={plateColor}
-            onReset={plateColor !== REMOVE_BACKGROUND_DEFAULT_PLATE ? () => setPlateColor(REMOVE_BACKGROUND_DEFAULT_PLATE) : undefined}
-            onChange={setPlateColor}
-          />
+      <div className="toolws-field">
+        <span className="toolws-field-label">Colour</span>
+        <ColorControl icon={<Type size={14} />} label="Text colour" palette={TEXT_SWATCHES} value={textColor} onChange={setTextColor} />
+      </div>
+
+      <div className="toolws-field">
+        <span className="toolws-field-label">Font</span>
+        <ThemedSelect ariaLabel="Font family" value={fontFamily} options={FONT_OPTIONS} onChange={setFontFamily} />
+      </div>
+
+      <div className="toolws-field">
+        <span className="toolws-field-label">Size · {fontSize}px</span>
+        <input type="range" min={24} max={320} step={2} value={fontSize} disabled={busy} onChange={(event) => setFontSize(Number(event.target.value))} />
+      </div>
+
+      <div className="toolws-field">
+        <span className="toolws-field-label">Position · {posX}% / {posY}%</span>
+        <div className="toolws-range-inputs">
+          <label>
+            <span>X</span>
+            <input type="range" min={0} max={100} step={1} value={posX} disabled={busy} onChange={(event) => setPosX(Number(event.target.value))} />
+          </label>
+          <label>
+            <span>Y</span>
+            <input type="range" min={0} max={100} step={1} value={posY} disabled={busy} onChange={(event) => setPosY(Number(event.target.value))} />
+          </label>
         </div>
-      ) : null}
+      </div>
 
       <div className="toolws-field">
         <span className="toolws-field-label">Quality</span>
@@ -429,27 +421,11 @@ export function RemoveBackgroundToolPanel({
           <div className="toolws-range-inputs">
             <label>
               <span>Start</span>
-              <input
-                type="number"
-                min={0}
-                max={sourceDuration}
-                step={0.1}
-                value={Number(customStart.toFixed(2))}
-                disabled={busy}
-                onChange={(event) => setCustomStart(Number(event.target.value))}
-              />
+              <input type="number" min={0} max={sourceDuration} step={0.1} value={Number(customStart.toFixed(2))} disabled={busy} onChange={(event) => setCustomStart(Number(event.target.value))} />
             </label>
             <label>
               <span>End</span>
-              <input
-                type="number"
-                min={0}
-                max={sourceDuration}
-                step={0.1}
-                value={Number(customEnd.toFixed(2))}
-                disabled={busy}
-                onChange={(event) => setCustomEnd(Number(event.target.value))}
-              />
+              <input type="number" min={0} max={sourceDuration} step={0.1} value={Number(customEnd.toFixed(2))} disabled={busy} onChange={(event) => setCustomEnd(Number(event.target.value))} />
             </label>
           </div>
         ) : null}
@@ -507,8 +483,8 @@ export function RemoveBackgroundToolPanel({
   );
 }
 
-/** Result preview player — renders the composited removal through the same renderer the editor uses. */
-function RemoveBackgroundResultViewer({ asset, composition }: { asset: SourceAsset; composition: TimelineComposition }) {
+/** Result preview player — renders the text-behind composite through the editor's renderer. */
+function TextBehindResultViewer({ asset, composition }: { asset: SourceAsset; composition: TimelineComposition }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const playbackStartRef = useRef<{ clockMs: number; timeSeconds: number } | null>(null);
@@ -546,7 +522,7 @@ function RemoveBackgroundResultViewer({ asset, composition }: { asset: SourceAss
     return () => window.cancelAnimationFrame(frame);
   }, [isPlaying, composition.durationSeconds]);
 
-  const graph: ProjectGraph = useMemo(() => ({ projectId: "rbg_preview", effects: [], editableFields: {}, version: 1 }), []);
+  const graph: ProjectGraph = useMemo(() => ({ projectId: "tbp_preview", effects: [], editableFields: {}, version: 1 }), []);
   const previewAssets = useMemo(() => [asset], [asset]);
 
   return (

@@ -2408,15 +2408,15 @@ input[type="checkbox"] {
   text-align: right;
 }
 
-/* Remove Background workspace controls */
-.rbg-field {
+/* Shared tool-workspace controls (Remove Background, Text Behind Person, …) */
+.toolws-field {
   display: flex;
   flex-direction: column;
   gap: 8px;
   margin-bottom: 14px;
 }
 
-.rbg-field-label {
+.toolws-field-label {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -2424,18 +2424,35 @@ input[type="checkbox"] {
   color: var(--text-muted, rgba(255, 255, 255, 0.6));
 }
 
-.rbg-actions {
+.toolws-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--nle-border);
+  border-radius: var(--nle-radius-md);
+  background: var(--nle-panel-3);
+  color: var(--nle-text);
+}
+
+.toolws-field > input[type="range"] {
+  width: 100%;
+}
+
+.toolws-actions {
   display: flex;
   gap: 8px;
   margin: 4px 0 10px;
 }
 
-.rbg-range-inputs {
+.toolws-range-inputs {
   display: flex;
   gap: 8px;
 }
 
-.rbg-range-inputs label {
+.toolws-range-inputs label {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -2444,7 +2461,12 @@ input[type="checkbox"] {
   color: var(--nle-text-muted);
 }
 
-.rbg-range-inputs input {
+.toolws-range-inputs input[type="range"] {
+  width: 100%;
+  align-self: center;
+}
+
+.toolws-range-inputs input[type="number"] {
   width: 100%;
   padding: 6px 8px;
   font-size: 12px;
@@ -2454,7 +2476,7 @@ input[type="checkbox"] {
   color: var(--nle-text);
 }
 
-.rbg-range-readout {
+.toolws-range-readout {
   margin: 0;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -2463,37 +2485,37 @@ input[type="checkbox"] {
 
 /* Remove Background: the PREVIEW is the point of the window, so it takes the wide column and the
    compact controls sit in a narrow rail (the opposite of the caption workspace's emphasis). */
-.rbg-shell.tool-shell-captions {
+.toolws-shell.tool-shell-captions {
   grid-template-columns: minmax(440px, 1fr) minmax(280px, 360px);
 }
 
-.rbg-shell .tool-preview-panel {
+.toolws-shell .tool-preview-panel {
   min-height: 0;
 }
 
-.rbg-shell .tool-preview-canvas {
+.toolws-shell .tool-preview-canvas {
   min-height: 460px;
   padding: 10px;
   display: flex;
 }
 
-.rbg-shell .rbg-preview-empty {
+.toolws-shell .toolws-preview-empty {
   margin: auto;
 }
 
 /* A real, large result viewer — no editor tools bleeding in, fills the preview column. */
-.rbg-result-viewer {
+.toolws-result-viewer {
   width: 100%;
   height: 100%;
   min-height: 440px;
   max-height: 68vh;
 }
 
-.rbg-result-viewer .preview-tools {
+.toolws-result-viewer .preview-tools {
   display: none !important;
 }
 
-.modal-workspace .rbg-result-viewer {
+.modal-workspace .toolws-result-viewer {
   max-height: 66vh;
 }
 
@@ -2512,7 +2534,7 @@ input[type="checkbox"] {
   color: var(--nle-text-muted);
 }
 
-.rbg-preview-empty {
+.toolws-preview-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2524,13 +2546,13 @@ input[type="checkbox"] {
   color: var(--text-muted, rgba(255, 255, 255, 0.6));
 }
 
-.rbg-preview-empty h2 {
+.toolws-preview-empty h2 {
   font-size: 15px;
   margin: 0;
   color: var(--text);
 }
 
-.rbg-preview-empty p {
+.toolws-preview-empty p {
   font-size: 12px;
   margin: 0;
   max-width: 280px;

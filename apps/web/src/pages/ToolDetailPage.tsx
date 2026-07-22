@@ -74,6 +74,7 @@ import { AiRotoToolPanel } from "./AiRotoToolPanel";
 import { RemoveBackgroundToolPanel } from "./RemoveBackgroundToolPanel";
 import { RemovePersonToolPanel } from "./RemovePersonToolPanel";
 import { SmartFollowTextToolPanel } from "./SmartFollowTextToolPanel";
+import { TextBehindPersonToolPanel } from "./TextBehindPersonToolPanel";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import { AiActivityIndicator } from "../components/AiActivityIndicator";
 import { Badge } from "../components/Badge";
@@ -1053,6 +1054,18 @@ export function ToolDetailPage() {
   if (isRemoveBackground) {
     return (
       <RemoveBackgroundToolPanel
+        tool={tool}
+        assets={toolAssets}
+        selectedAssetId={selectedAssetId}
+        onSelectAsset={setSelectedAssetId}
+        onUploadAsset={handleToolAssetUpload}
+      />
+    );
+  }
+
+  if (isTextBehindPerson) {
+    return (
+      <TextBehindPersonToolPanel
         tool={tool}
         assets={toolAssets}
         selectedAssetId={selectedAssetId}

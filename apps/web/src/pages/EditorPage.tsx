@@ -494,6 +494,9 @@ const SmartFollowTextEffectModal = lazy(() =>
 const RemoveBackgroundEffectModal = lazy(() =>
   import("../components/RemoveBackgroundEffectModal").then((module) => ({ default: module.RemoveBackgroundEffectModal }))
 );
+const TextBehindPersonEffectModal = lazy(() =>
+  import("../components/TextBehindPersonEffectModal").then((module) => ({ default: module.TextBehindPersonEffectModal }))
+);
 // Tracking workspace pulls the browser ML tracking/segmentation graph — load it only when opened.
 const TrackWorkspaceModal = lazy(() =>
   import("../components/TrackWorkspaceModal").then((module) => ({ default: module.TrackWorkspaceModal }))
@@ -9002,6 +9005,26 @@ export function EditorPage() {
               void applyToolEffectResult(nextComposition, editableFieldsPatch);
               setActiveLayerToolEffect(undefined);
               setNotice("Background removed");
+              resolveToolStep({ applied: true, composition: nextComposition, detail: "Applied" });
+            }}
+            onClose={() => {
+              setActiveLayerToolEffect(undefined);
+              resolveToolStep({ applied: false, detail: "Cancelled" });
+            }}
+          />
+        </Suspense>
+      ) : activeLayerToolEffect && composition && activeLayerToolEffect.tool.slug === "text-behind-person" ? (
+        <Suspense fallback={null}>
+          <TextBehindPersonEffectModal
+            tool={activeLayerToolEffect.tool}
+            asset={activeLayerToolEffect.asset}
+            layer={activeLayerToolEffect.layer}
+            composition={composition}
+            editableFields={graph?.editableFields}
+            onApplied={(nextComposition, editableFieldsPatch) => {
+              void applyToolEffectResult(nextComposition, editableFieldsPatch);
+              setActiveLayerToolEffect(undefined);
+              setNotice("Text placed behind subject");
               resolveToolStep({ applied: true, composition: nextComposition, detail: "Applied" });
             }}
             onClose={() => {
