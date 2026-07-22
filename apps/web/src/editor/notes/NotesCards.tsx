@@ -8,8 +8,10 @@
 
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Clock, FileText, Globe, ImageOff, Lock, Unlock, Workflow } from "lucide-react";
-import { parseNoteMarkdown, type NoteAssetKind, type NoteItem } from "@orreris/shared";
+import { parseNoteMarkdown, type NoteAssetKind, type NoteItem, type TextRun } from "@orreris/shared";
 import type { SourceAsset } from "@orreris/shared";
+import { RichTextEditor } from "../../components/RichTextEditor";
+import { runsToHtml } from "../../components/rich-text-serialize";
 import { NotesMediaPlayer } from "./NotesMediaPlayer";
 
 export const NOTE_COLOR_SWATCHES = ["#e8b04b", "#e0708a", "#69c98a", "#5fb2e6", "#b58fe0", "#d5cf6d", "#8a8f98", "#ffffff"];
@@ -30,16 +32,40 @@ export function assetKind(asset: SourceAsset): NoteAssetKind {
 function renderNoteMarkdown(text: string) {
   return parseNoteMarkdown(text).map((block, i) => {
     const inline = block.inline.map((tok, j) =>
-      tok.kind === "bold" ? <strong key={j}>{tok.value}</strong> : tok.kind === "italic" ? <em key={j}>{tok.value}</em> : <Fragment key={j}>{tok.value}</Fragment>,
+      tok.kind === "bold" ? (
+        <strong key={j}>{tok.value}</strong>
+      ) : tok.kind === "italic" ? (
+        <em key={j}>{tok.value}</em>
+      ) : tok.kind === "code" ? (
+        <code key={j} className="notes-note-md-code">{tok.value}</code>
+      ) : (
+        <Fragment key={j}>{tok.value}</Fragment>
+      ),
     );
     if (block.kind === "heading") {
-      const Tag = block.level === 1 ? "h1" : "h2";
-      return <Tag key={i} className="notes-note-md-heading">{inline}</Tag>;
+      const Tag = block.level === 1 ? "h1" : block.level === 2 ? "h2" : "h3";
+      return <Tag key={i} className={`notes-note-md-heading notes-note-md-h${block.level}`}>{inline}</Tag>;
     }
     if (block.kind === "bullet") {
       return (
         <div key={i} className="notes-note-md-bullet">
           <span className="notes-note-md-bullet-dot" />
+          <span>{inline}</span>
+        </div>
+      );
+    }
+    if (block.kind === "ordered") {
+      return (
+        <div key={i} className="notes-note-md-bullet notes-note-md-ordered">
+          <span className="notes-note-md-ordered-index">{block.index}.</span>
+          <span>{inline}</span>
+        </div>
+      );
+    }
+    if (block.kind === "task") {
+      return (
+        <div key={i} className={`notes-note-md-task${block.checked ? " is-checked" : ""}`}>
+          <span className="notes-note-md-task-box" aria-hidden="true">{block.checked ? "✓" : ""}</span>
           <span>{inline}</span>
         </div>
       );
@@ -70,18 +96,22 @@ export function ColorSwatchRow({ current, onPick }: { current: string | undefine
   );
 }
 
-const NOTE_MAX_AUTOGROW_H = 420;
+const NOTE_MAX_AUTOGROW_H = 2000; // effectively uncapped — the card grows with the text while editing
 
 export function NoteCardBody({
   item,
   onCommit,
   autoEdit = false,
   onAutoEditStart,
+  onEditingChange,
 }: {
   item: NoteItem;
   onCommit: (patch: Partial<NoteItem>) => void;
   autoEdit?: boolean;
   onAutoEditStart?: () => void;
+  /** Reported to the board so it can hide the resize handles / connector dots while this card is
+   *  being edited (they otherwise sit above the inputs and swallow clicks — esp. on the Title). */
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(item.title ?? "");
@@ -100,6 +130,12 @@ export function NoteCardBody({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoEdit]);
+
+  useEffect(() => {
+    onEditingChange?.(editing);
+    return () => onEditingChange?.(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
 
   // Auto-grow (Q3.3): the textarea's own height tracks its content while editing (visual only);
   // the FINAL scrollHeight commits as the card's `h` alongside the text, capped at a sane max.
@@ -124,20 +160,28 @@ export function NoteCardBody({
   };
 
   if (editing) {
+    // Commit only when focus leaves the WHOLE editor — not when it moves between the title and the
+    // body. (A per-field onBlur would end the session the instant you click from body → title,
+    // unmounting the title before it can focus — which made the Title appear "unclickable".)
+    const onContainerBlur = (e: React.FocusEvent<HTMLDivElement>) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      commitAndClose();
+    };
+    const onEscape = (e: React.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setTitle(item.title ?? "");
+        setBody(item.body ?? "");
+        setEditing(false);
+      }
+    };
     return (
-      <div className="notes-card-body notes-note-body is-editing" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="notes-card-body notes-note-body is-editing" onPointerDown={(e) => e.stopPropagation()} onBlur={onContainerBlur}>
         <input
           className="notes-note-title-input"
           placeholder="Title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              setTitle(item.title ?? "");
-              setBody(item.body ?? "");
-              setEditing(false);
-            }
-          }}
+          onKeyDown={onEscape}
         />
         <textarea
           ref={bodyRef}
@@ -148,14 +192,7 @@ export function NoteCardBody({
             setBody(e.target.value);
             autoGrow();
           }}
-          onBlur={commitAndClose}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              setTitle(item.title ?? "");
-              setBody(item.body ?? "");
-              setEditing(false);
-            }
-          }}
+          onKeyDown={onEscape}
         />
       </div>
     );
@@ -166,6 +203,184 @@ export function NoteCardBody({
       {item.title ? <div className="notes-note-title">{item.title}</div> : null}
       <div className="notes-note-text">
         {item.body ? renderNoteMarkdown(item.body) : <span className="notes-note-placeholder">Double-click to edit…</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Parse a text card's stored `TextRun[]` (falling back to a single plain run from `body`). */
+function textRunsOf(item: NoteItem): TextRun[] {
+  if (item.runsJson) {
+    try {
+      const parsed = JSON.parse(item.runsJson);
+      if (Array.isArray(parsed) && parsed.every((r) => typeof r?.text === "string")) return parsed as TextRun[];
+    } catch {
+      /* fall through to the plain body */
+    }
+  }
+  return item.body ? [{ text: item.body }] : [{ text: "" }];
+}
+
+/** Bare rich text on the board — reuses the SAME `RichTextEditor` the Text-layer inspector uses
+ *  (per-selection bold/italic/color/highlight/font/size → shared `TextRun[]`). View mode renders the
+ *  runs (draggable); double-click mounts the editor; a click outside the card (but not on the font
+ *  dropdown portal) commits and exits. `body` mirrors the plain text for search/markdown export. */
+export function TextCardBody({
+  item,
+  onCommit,
+  autoEdit = false,
+  onAutoEditStart,
+  onEditingChange,
+}: {
+  item: NoteItem;
+  onCommit: (patch: Partial<NoteItem>) => void;
+  autoEdit?: boolean;
+  onAutoEditStart?: () => void;
+  onEditingChange?: (editing: boolean) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const runs = textRunsOf(item);
+
+  useEffect(() => {
+    if (autoEdit) {
+      setEditing(true);
+      onAutoEditStart?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoEdit]);
+  useEffect(() => {
+    onEditingChange?.(editing);
+    return () => onEditingChange?.(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  // Persist the grown height so view mode keeps the size the text reached while editing (the card
+  // auto-grew via .is-grow-editing). Grow-only — resize down manually if you want it smaller.
+  const exitEditing = () => {
+    const el = containerRef.current?.querySelector(".rich-text-editor") as HTMLElement | null;
+    if (el) {
+      const grown = Math.round(el.scrollHeight + 28);
+      if (grown > (item.h ?? 0)) onCommit({ h: grown });
+    }
+    setEditing(false);
+  };
+
+  // Exit editing on a pointerdown outside the card — but ignore clicks inside the ThemedSelect font
+  // portal (rendered at document root), so choosing a font doesn't close the editor.
+  useEffect(() => {
+    if (!editing) return undefined;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (containerRef.current?.contains(t)) return;
+      if (t.closest(".themed-select-menu")) return;
+      exitEditing();
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  if (editing) {
+    return (
+      <div ref={containerRef} className="notes-card-body notes-text-body is-editing" onPointerDown={(e) => e.stopPropagation()}>
+        <RichTextEditor
+          layerId={item.id}
+          runs={runs}
+          palette={NOTE_COLOR_SWATCHES}
+          onCommit={(nextRuns, plain) => onCommit({ runsJson: nextRuns ? JSON.stringify(nextRuns) : undefined, body: plain })}
+        />
+      </div>
+    );
+  }
+  const isEmpty = runs.every((r) => !r.text);
+  return (
+    <div className="notes-card-body notes-text-body" style={item.color ? { color: item.color } : undefined} onDoubleClick={() => setEditing(true)}>
+      {isEmpty ? (
+        <span className="notes-note-placeholder">Double-click to edit…</span>
+      ) : (
+        <div className="notes-text-render" dangerouslySetInnerHTML={{ __html: runsToHtml(runs) }} />
+      )}
+    </div>
+  );
+}
+
+/** Markdown document card (Obsidian-style): a reading view of rendered markdown; double-click opens
+ *  a LIVE split editor — raw markdown on the left, rendered preview on the right, updating as you
+ *  type. Supports `#`/`##`/`###`, `**bold**`, `*italic*`, `` `code` ``, `-`/`*` bullets, `1.`
+ *  ordered lists and `- [ ]`/`- [x]` task items (shared markdown-lite parser). */
+export function DocCardBody({
+  item,
+  onCommit,
+  autoEdit = false,
+  onAutoEditStart,
+  onEditingChange,
+}: {
+  item: NoteItem;
+  onCommit: (patch: Partial<NoteItem>) => void;
+  autoEdit?: boolean;
+  onAutoEditStart?: () => void;
+  onEditingChange?: (editing: boolean) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [body, setBody] = useState(item.body ?? "");
+
+  useEffect(() => setBody(item.body ?? ""), [item.id]);
+  useEffect(() => {
+    if (autoEdit) {
+      setEditing(true);
+      onAutoEditStart?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoEdit]);
+  useEffect(() => {
+    onEditingChange?.(editing);
+    return () => onEditingChange?.(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  const commitAndClose = () => {
+    setEditing(false);
+    if (body !== (item.body ?? "")) onCommit({ body });
+  };
+
+  if (editing) {
+    return (
+      <div
+        className="notes-card-body notes-doc-body is-editing"
+        onPointerDown={(e) => e.stopPropagation()}
+        onBlur={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          commitAndClose();
+        }}
+      >
+        <div className="notes-doc-split">
+          <textarea
+            className="notes-doc-input"
+            autoFocus
+            value={body}
+            placeholder={"# Title\n\nWrite **markdown** here…\n\n- a bullet\n- [ ] a task"}
+            spellCheck={false}
+            onChange={(e) => setBody(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setBody(item.body ?? "");
+                setEditing(false);
+              }
+            }}
+          />
+          <div className="notes-doc-preview notes-doc-preview-live">
+            {body.trim() ? renderNoteMarkdown(body) : <span className="notes-note-placeholder">Preview…</span>}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="notes-card-body notes-doc-body" onDoubleClick={() => setEditing(true)}>
+      <div className="notes-doc-preview">
+        {item.body?.trim() ? renderNoteMarkdown(item.body) : <span className="notes-note-placeholder">Double-click to write markdown…</span>}
       </div>
     </div>
   );
@@ -458,23 +673,31 @@ export function TodoCardBody({ item, onCommit }: { item: NoteItem; onCommit: (pa
 
   const writeRows = (next: TodoRow[]) => onCommit({ todosJson: JSON.stringify(next) });
   const done = rows.filter((r) => r.done).length;
+  const pct = rows.length > 0 ? Math.round((done / rows.length) * 100) : 0;
 
   return (
     <div className="notes-card-body notes-todo-body" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="notes-todo-progress">
-        {done}/{rows.length}
+      <div className="notes-todo-head">
+        <div className="notes-todo-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+          <span className="notes-todo-bar-fill" style={{ width: `${pct}%` }} />
+        </div>
+        <span className="notes-todo-count">
+          {done}/{rows.length}
+        </span>
       </div>
       <div className="notes-todo-rows">
         {rows.map((row, i) => (
-          <div className="notes-todo-row" key={i}>
+          <label className={`notes-todo-row${row.done ? " is-done" : ""}`} key={i}>
             <input
               type="checkbox"
+              className="notes-todo-check"
               checked={row.done}
               onChange={() => writeRows(rows.map((r, idx) => (idx === i ? { ...r, done: !r.done } : r)))}
             />
             <input
               className="notes-todo-text-input"
               value={row.text}
+              placeholder="Item"
               onChange={(e) => writeRows(rows.map((r, idx) => (idx === i ? { ...r, text: e.target.value } : r)))}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
@@ -485,23 +708,31 @@ export function TodoCardBody({ item, onCommit }: { item: NoteItem; onCommit: (pa
                     writeRows([...rows.slice(0, i + 1), { text: "", done: false }, ...rows.slice(i + 1)]);
                   }
                 }
+                if (e.key === "Backspace" && row.text === "" && rows.length > 1) {
+                  e.preventDefault();
+                  writeRows(rows.filter((_, idx) => idx !== i));
+                }
               }}
             />
-          </div>
+          </label>
         ))}
+        {rows.length === 0 ? <div className="notes-todo-empty">No items yet</div> : null}
       </div>
-      <input
-        className="notes-todo-new-input"
-        placeholder="Add item…"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && draft.trim()) {
-            writeRows([...rows, { text: draft.trim(), done: false }]);
-            setDraft("");
-          }
-        }}
-      />
+      <div className="notes-todo-add">
+        <span className="notes-todo-add-plus">＋</span>
+        <input
+          className="notes-todo-new-input"
+          placeholder="Add item…"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && draft.trim()) {
+              writeRows([...rows, { text: draft.trim(), done: false }]);
+              setDraft("");
+            }
+          }}
+        />
+      </div>
     </div>
   );
 }

@@ -46,7 +46,9 @@ import {
   NoteCardBody,
   NOTE_COLOR_SWATCHES,
   noteTint,
+  DocCardBody,
   ShapeCardBody,
+  TextCardBody,
   TodoCardBody,
 } from "./NotesCards";
 import { setNotice } from "../../lib/noticeStore";
@@ -184,6 +186,8 @@ export interface NotesBoardProps {
    *  offers, reused rather than duplicated. */
   templateNames?: string[] | undefined;
   onApplyTemplate?: ((name: string) => void) | undefined;
+  /** Bottom-right overview minimap (toggled from the toolbar). */
+  showMinimap?: boolean | undefined;
 }
 
 /** Centers the view on a rect at the CURRENT zoom (unlike `fitViewFor`, never changes zoom). */
@@ -212,11 +216,17 @@ export function NotesBoard({
   selectedTimelineLayerId,
   templateNames,
   onApplyTemplate,
+  showMinimap,
 }: NotesBoardProps) {
   const [gesture, setGesture] = useState<Gesture>({ kind: "none" });
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [edgeLabelEditId, setEdgeLabelEditId] = useState<string | null>(null);
   const [autoEditId, setAutoEditId] = useState<string | null>(null);
+  // Which card is currently in its inline editor — its resize handles / connector dots / hover
+  // toolbar are suppressed so they can't sit over the inputs and swallow clicks (esp. the Title).
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const setItemEditing = (id: string, editing: boolean) =>
+    setEditingId((prev) => (editing ? id : prev === id ? null : prev));
   const [search, setSearch] = useState<{ query: string; activeIndex: number } | null>(null);
   const [oversizeNotice, setOversizeNotice] = useState(false);
   const spaceRef = useRef(false);
@@ -255,10 +265,22 @@ export function NotesBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.layerId, focusRequest?.nonce]);
 
-  // Space-held pan (tracked globally so it works regardless of DOM focus).
+  // Space-held pan (tracked globally so it works regardless of DOM focus). Space ALSO opens the
+  // inline editor when a single note/text card is selected (and you're not already typing) — the
+  // quick "hit space to edit the selected card" shortcut.
   useEffect(() => {
     const onDown = (e: KeyboardEvent) => {
-      if (e.code === "Space") spaceRef.current = true;
+      if (e.code !== "Space") return;
+      spaceRef.current = true;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      const ids = stateRef.current.selectedIds;
+      if (ids.length !== 1) return;
+      const it = stateRef.current.board.items[ids[0]!];
+      if (it && (it.type === "note" || it.type === "text" || it.type === "doc")) {
+        e.preventDefault();
+        setAutoEditId(it.id);
+      }
     };
     const onUp = (e: KeyboardEvent) => {
       if (e.code === "Space") spaceRef.current = false;
@@ -274,6 +296,17 @@ export function NotesBoard({
   const localPoint = (e: { clientX: number; clientY: number }): [number, number] => {
     const rect = viewportRef.current?.getBoundingClientRect();
     return rect ? [e.clientX - rect.left, e.clientY - rect.top] : [0, 0];
+  };
+
+  // Middle-drag / Alt-drag / Space-drag always pans — even when the pointer starts over a card,
+  // a handle or a connector dot. Those initiators call this first so panning never turns into a
+  // card move/resize/connect.
+  const isPanTrigger = (e: React.PointerEvent) => e.button === 1 || e.altKey || spaceRef.current;
+  const startPanFrom = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    viewportRef.current?.setPointerCapture(e.pointerId);
+    const [sx, sy] = localPoint(e);
+    setGesture({ kind: "pan", startX: sx, startY: sy, panX: stateRef.current.view.panX, panY: stateRef.current.view.panY });
   };
 
   const commitItemPatch = (id: string, patch: Partial<NoteItem>) => {
@@ -400,6 +433,15 @@ export function NotesBoard({
     if (e.target !== e.currentTarget) return;
     const [sx, sy] = localPoint(e);
     const [wx, wy] = screenToWorld(stateRef.current.view, sx, sy);
+    // If the double-click lands ON an existing card (e.g. a full-bleed note that captured the
+    // gesture at the viewport level), edit that card instead of stacking a new note on top of it.
+    const hit = hitTestItem(stateRef.current.board, wx, wy);
+    if (hit) {
+      const hitItem = stateRef.current.board.items[hit];
+      onSelectIds([hit]);
+      if (hitItem && (hitItem.type === "note" || hitItem.type === "text" || hitItem.type === "doc")) setAutoEditId(hit);
+      return;
+    }
     const id = nextId("item");
     onUpdateBoard((current) => ({
       ...current,
@@ -409,19 +451,48 @@ export function NotesBoard({
     setAutoEditId(id);
   };
 
-  // ── Asset-bin drop → asset card ────────────────────────────────────────────
+  // ── Asset-bin drop → asset card / toolbar-button drop → new item ────────────
   const onDragOver = (e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes("application/x-orreris-asset")) return;
+    if (!e.dataTransfer.types.includes("application/x-orreris-asset") && !e.dataTransfer.types.includes("application/x-orreris-note-kind")) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
   };
   const onDrop = (e: React.DragEvent) => {
+    const [sx, sy] = localPoint(e);
+    const [wx, wy] = screenToWorld(stateRef.current.view, sx, sy);
+    // A toolbar element dragged onto the board — place that item kind AT the drop point.
+    const kindPayload = e.dataTransfer.getData("application/x-orreris-note-kind");
+    if (kindPayload) {
+      e.preventDefault();
+      let spec: { type: NoteItem["type"]; shapeKind?: NoteItem["shapeKind"]; w: number; h: number };
+      try {
+        spec = JSON.parse(kindPayload);
+      } catch {
+        return;
+      }
+      const id = nextId("item");
+      const isFrameLike = spec.type === "frame" || spec.type === "shape";
+      const item: NoteItem = {
+        id,
+        type: spec.type,
+        x: Math.round(wx - spec.w / 2),
+        y: Math.round(wy - spec.h / 2),
+        w: spec.w,
+        h: spec.h,
+        z: nextZOrder(stateRef.current.board.items, isFrameLike),
+        ...(spec.shapeKind ? { shapeKind: spec.shapeKind, color: "#8a8f98" } : {}),
+        ...(spec.type === "todo" ? { todosJson: "[]" } : {}),
+        ...(spec.type === "link" ? { url: "" } : {}),
+      };
+      onUpdateBoard((current) => ({ ...current, items: { ...current.items, [id]: item } }));
+      onSelectIds([id]);
+      if (spec.type === "note" || spec.type === "text" || spec.type === "doc") setAutoEditId(id);
+      return;
+    }
     const assetId = e.dataTransfer.getData("application/x-orreris-asset");
     if (!assetId) return;
     e.preventDefault();
     const asset = assets.find((a) => a.id === assetId);
-    const [sx, sy] = localPoint(e);
-    const [wx, wy] = screenToWorld(stateRef.current.view, sx, sy);
     // Q1.1: per-kind default size (audio wide-short, video/image real-aspect, doc compact) — the
     // generic box only applies when the asset can't be resolved at all.
     const { w, h } = asset ? defaultSizeForAsset(assetKind(asset), asset.width, asset.height) : { w: 260, h: 160 };
@@ -435,6 +506,8 @@ export function NotesBoard({
 
   // ── Card / handle / connector-dot pointerdown: capture on the VIEWPORT ────
   const onCardPointerDown = (e: React.PointerEvent, item: NoteItem) => {
+    if (isPanTrigger(e)) return startPanFrom(e);
+    if (e.button !== 0) return; // only the left button selects/drags cards
     const target = e.target as HTMLElement;
     if (target.closest('textarea,input,button,a,[contenteditable="true"],.notes-resize-handle,.notes-connector-dot')) return;
     // An unlocked frame's BACKGROUND (not titlebar) doesn't even select — round-1 design so a
@@ -467,6 +540,8 @@ export function NotesBoard({
   };
 
   const onHandlePointerDown = (e: React.PointerEvent, item: NoteItem, handle: string) => {
+    if (isPanTrigger(e)) return startPanFrom(e);
+    if (e.button !== 0) return;
     e.stopPropagation();
     viewportRef.current?.setPointerCapture(e.pointerId);
     // Q1.3: image/video keep aspect from corner handles (Shift breaks it); audio resizes width
@@ -479,6 +554,8 @@ export function NotesBoard({
   };
 
   const onConnectorDotPointerDown = (e: React.PointerEvent, item: NoteItem) => {
+    if (isPanTrigger(e)) return startPanFrom(e);
+    if (e.button !== 0) return;
     e.stopPropagation();
     viewportRef.current?.setPointerCapture(e.pointerId);
     const [sx, sy] = localPoint(e);
@@ -769,7 +846,11 @@ export function NotesBoard({
   const renderCardBody = (item: NoteItem) => {
     switch (item.type) {
       case "note":
-        return <NoteCardBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} autoEdit={autoEditId === item.id} onAutoEditStart={() => setAutoEditId(null)} />;
+        return <NoteCardBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} autoEdit={autoEditId === item.id} onAutoEditStart={() => setAutoEditId(null)} onEditingChange={(ed) => setItemEditing(item.id, ed)} />;
+      case "text":
+        return <TextCardBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} autoEdit={autoEditId === item.id} onAutoEditStart={() => setAutoEditId(null)} onEditingChange={(ed) => setItemEditing(item.id, ed)} />;
+      case "doc":
+        return <DocCardBody item={item} onCommit={(patch) => commitItemPatch(item.id, patch)} autoEdit={autoEditId === item.id} onAutoEditStart={() => setAutoEditId(null)} onEditingChange={(ed) => setItemEditing(item.id, ed)} />;
       case "asset":
         return <AssetCardBody item={item} assets={assets} onOpenSource={item.assetId && onOpenAssetInSourceMonitor ? () => onOpenAssetInSourceMonitor(item.assetId!) : undefined} />;
       case "link":
@@ -787,7 +868,7 @@ export function NotesBoard({
     }
   };
 
-  const showColorRow = (type: NoteItem["type"]) => type === "note" || type === "shape" || type === "image" || type === "frame";
+  const showColorRow = (type: NoteItem["type"]) => type === "note" || type === "text" || type === "shape" || type === "image" || type === "frame";
 
   const items = Object.values(board.items).sort((a, b) => a.z - b.z);
   const isMoving = gesture.kind === "move";
@@ -921,15 +1002,23 @@ export function NotesBoard({
           const selected = selectedIds.includes(item.id);
           const dragging = (isMoving && gesture.kind === "move" && item.id in gesture.positions) || (isResizing && gesture.kind === "resize" && gesture.itemId === item.id);
           const isArrow = item.type === "shape" && item.shapeKind === "arrow";
+          const isEditingThis = editingId === item.id;
+          // Note/Text cards auto-grow with their content WHILE editing (no inner scrollbar): the
+          // card height goes `auto` and the surface flips to in-flow (see .is-grow-editing) so it
+          // sizes to the text; the grown height is persisted on commit for view mode.
+          const growEditing = isEditingThis && (item.type === "note" || item.type === "text");
           const isMatch = search && search.query.trim() ? matchIds.includes(item.id) : false;
           return (
             <div
               key={item.id}
-              className={`notes-card notes-card-${item.type}${item.shapeKind ? ` notes-card-shape-${item.shapeKind}` : ""}${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}${item.locked ? " is-locked" : ""}${isMatch ? " is-search-match" : ""}`}
+              className={`notes-card notes-card-${item.type}${item.shapeKind ? ` notes-card-shape-${item.shapeKind}` : ""}${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}${item.locked ? " is-locked" : ""}${isMatch ? " is-search-match" : ""}${growEditing ? " is-grow-editing" : ""}`}
               style={{
                 transform: `translate(${rect.x}px, ${rect.y}px)`,
                 width: rect.w,
-                height: rect.h,
+                height: growEditing ? "auto" : rect.h,
+                // Floor the growing surface at the card's current height so starting to edit never
+                // shrinks it (it only grows from here).
+                ...(growEditing ? { ["--grow-min" as string]: `${rect.h}px` } : {}),
                 zIndex: dragging ? 100000 : item.z,
               }}
               onPointerDown={(e) => onCardPointerDown(e, item)}
@@ -943,7 +1032,7 @@ export function NotesBoard({
                   className="notes-card-surface"
                   style={{
                     background: item.type === "note" ? noteTint(item.color) : undefined,
-                    borderColor: item.type !== "frame" ? item.color : undefined,
+                    borderColor: item.type !== "frame" && item.type !== "text" ? item.color : undefined,
                   }}
                 >
                   {item.type === "frame" ? (
@@ -974,6 +1063,7 @@ export function NotesBoard({
                 </div>
               ) : null}
 
+              {isEditingThis ? null : (
               <div className="notes-card-hover-toolbar" onPointerDown={(e) => e.stopPropagation()}>
                 {showColorRow(item.type) ? <ColorSwatchRow current={item.color} onPick={(c) => commitItemPatch(item.id, { color: c })} /> : null}
                 <button
@@ -1002,12 +1092,13 @@ export function NotesBoard({
                 ) : null}
                 <LockToggleButton locked={Boolean(item.locked)} onToggle={() => commitItemPatch(item.id, { locked: !item.locked })} />
               </div>
+              )}
 
-              {!item.locked || item.type === "frame"
+              {!isEditingThis && (!item.locked || item.type === "frame")
                 ? SIDES.map((side) => <button key={side} type="button" className={`notes-connector-dot notes-connector-dot-${side}`} onPointerDown={(e) => onConnectorDotPointerDown(e, item)} />)
                 : null}
 
-              {selected && selectedIds.length === 1 && !item.locked
+              {!isEditingThis && selected && selectedIds.length === 1 && !item.locked
                 ? HANDLES.map((h) => (
                     <div
                       key={h}
@@ -1052,6 +1143,8 @@ export function NotesBoard({
 
       {oversizeNotice ? <div className="notes-oversize-notice">Image too large to paste inline (max ~2MB)</div> : null}
 
+      {showMinimap ? <NotesMinimap board={board} view={view} onViewChange={onViewChange} viewportRef={viewportRef} /> : null}
+
       {gesture.kind === "marquee" ? (
         <div
           className="notes-marquee"
@@ -1078,6 +1171,92 @@ export function NotesBoard({
           ) : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Bottom-right overview minimap: every card scaled to fit, plus a rectangle for the current
+ *  viewport. Click or drag anywhere on it to re-center the board there. */
+function NotesMinimap({
+  board,
+  view,
+  onViewChange,
+  viewportRef,
+}: {
+  board: NotesBoardData;
+  view: NotesViewState;
+  onViewChange: (view: NotesViewState) => void;
+  viewportRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const MM_W = 190;
+  const MM_H = 128;
+  const PAD = 8;
+  const items = Object.values(board.items);
+  const vp = viewportRef.current?.getBoundingClientRect();
+  const vw = vp?.width ?? 800;
+  const vh = vp?.height ?? 500;
+  // Current visible world region (so the viewport rect is always inside the framed content).
+  const visX0 = (0 - view.panX) / view.zoom;
+  const visY0 = (0 - view.panY) / view.zoom;
+  const visX1 = (vw - view.panX) / view.zoom;
+  const visY1 = (vh - view.panY) / view.zoom;
+  let x0 = visX0;
+  let y0 = visY0;
+  let x1 = visX1;
+  let y1 = visY1;
+  for (const it of items) {
+    x0 = Math.min(x0, it.x);
+    y0 = Math.min(y0, it.y);
+    x1 = Math.max(x1, it.x + it.w);
+    y1 = Math.max(y1, it.y + it.h);
+  }
+  const scale = Math.min((MM_W - PAD * 2) / Math.max(1, x1 - x0), (MM_H - PAD * 2) / Math.max(1, y1 - y0));
+  const mmX = (wx: number) => PAD + (wx - x0) * scale;
+  const mmY = (wy: number) => PAD + (wy - y0) * scale;
+
+  const centerOn = (clientX: number, clientY: number, el: HTMLElement) => {
+    const rect = el.getBoundingClientRect();
+    const wx = (clientX - rect.left - PAD) / scale + x0;
+    const wy = (clientY - rect.top - PAD) / scale + y0;
+    onViewChange({ ...view, panX: vw / 2 - wx * view.zoom, panY: vh / 2 - wy * view.zoom });
+  };
+
+  return (
+    <div
+      className="notes-minimap"
+      style={{ width: MM_W, height: MM_H }}
+      title="Overview — click or drag to navigate"
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        centerOn(e.clientX, e.clientY, e.currentTarget);
+      }}
+      onPointerMove={(e) => {
+        if (e.buttons !== 1) return;
+        centerOn(e.clientX, e.clientY, e.currentTarget);
+      }}
+    >
+      <svg width={MM_W} height={MM_H}>
+        {items.map((it) => (
+          <rect
+            key={it.id}
+            x={mmX(it.x)}
+            y={mmY(it.y)}
+            width={Math.max(1.5, it.w * scale)}
+            height={Math.max(1.5, it.h * scale)}
+            rx={1.5}
+            className={`notes-minimap-item${it.type === "frame" ? " is-frame" : ""}`}
+            style={it.color && it.type !== "frame" ? { fill: it.color } : undefined}
+          />
+        ))}
+        <rect
+          className="notes-minimap-viewport"
+          x={mmX(visX0)}
+          y={mmY(visY0)}
+          width={Math.max(2, (visX1 - visX0) * scale)}
+          height={Math.max(2, (visY1 - visY0) * scale)}
+        />
+      </svg>
     </div>
   );
 }

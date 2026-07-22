@@ -15,14 +15,17 @@ import {
   Frame as FrameIcon,
   Link2,
   ListChecks,
+  Map as MapIcon,
   Minus,
   MoveUpRight,
   Plus,
+  FileText,
   Search,
   Sparkles,
   Square,
   StickyNote,
   Trash2,
+  Type,
 } from "lucide-react";
 import {
   boardToMarkdown,
@@ -47,6 +50,8 @@ import { clampZoom, fitViewFor, nextZOrder, screenToWorld, zoomAt, type NotesVie
 
 const DEFAULT_SIZE: Record<NoteItemType, { w: number; h: number }> = {
   note: { w: 220, h: 160 },
+  text: { w: 300, h: 110 },
+  doc: { w: 340, h: 300 },
   link: { w: 240, h: 88 },
   frame: { w: 360, h: 260 },
   todo: { w: 240, h: 200 },
@@ -134,6 +139,7 @@ export function NotesWorkspace({
     zoom: clampZoom(board?.view?.zoom ?? 1),
   }));
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showMinimap, setShowMinimap] = useState<boolean>(() => localStorage.getItem("notes.minimap") !== "0");
   const lastBoardIdRef = useRef<string | undefined>(board?.id);
   useEffect(() => {
     if (board && board.id !== lastBoardIdRef.current) {
@@ -288,29 +294,35 @@ export function NotesWorkspace({
       <div className="notes-toolbar">
         <BoardSwitcher graph={graph} activeBoardId={board.id} onUpdateGraph={onUpdateGraph} />
         <div className="notes-toolbar-group">
-          <button type="button" className="notes-toolbar-btn" title="Add Note" onClick={() => addItem("note")}>
+          <ToolButton type="note" title="Add Note (click, or drag onto the board)" onAdd={addItem}>
             <StickyNote size={13} /> Note
-          </button>
-          <button type="button" className="notes-toolbar-btn" title="Add Frame" onClick={() => addItem("frame")}>
+          </ToolButton>
+          <ToolButton type="text" title="Add Text (click, or drag onto the board)" onAdd={addItem}>
+            <Type size={13} /> Text
+          </ToolButton>
+          <ToolButton type="doc" title="Add Doc — live markdown editor (click, or drag onto the board)" onAdd={addItem}>
+            <FileText size={13} /> Doc
+          </ToolButton>
+          <ToolButton type="frame" title="Add Frame (click, or drag onto the board)" onAdd={addItem}>
             <FrameIcon size={13} /> Frame
-          </button>
-          <button type="button" className="notes-toolbar-btn" title="Add Link" onClick={() => addItem("link")}>
+          </ToolButton>
+          <ToolButton type="link" title="Add Link (click, or drag onto the board)" onAdd={addItem}>
             <Link2 size={13} /> Link
-          </button>
-          <button type="button" className="notes-toolbar-btn" title="Add Todo" onClick={() => addItem("todo")}>
+          </ToolButton>
+          <ToolButton type="todo" title="Add Todo (click, or drag onto the board)" onAdd={addItem}>
             <ListChecks size={13} /> Todo
-          </button>
+          </ToolButton>
         </div>
         <div className="notes-toolbar-group">
-          <button type="button" className="notes-toolbar-btn" title="Add Rectangle" onClick={() => addShape("rect")}>
+          <ToolButton type="shape" shapeKind="rect" title="Add Rectangle (click, or drag onto the board)" onAddShape={addShape}>
             <Square size={13} />
-          </button>
-          <button type="button" className="notes-toolbar-btn" title="Add Ellipse" onClick={() => addShape("ellipse")}>
+          </ToolButton>
+          <ToolButton type="shape" shapeKind="ellipse" title="Add Ellipse (click, or drag onto the board)" onAddShape={addShape}>
             <Circle size={13} />
-          </button>
-          <button type="button" className="notes-toolbar-btn" title="Add Arrow" onClick={() => addShape("arrow")}>
+          </ToolButton>
+          <ToolButton type="shape" shapeKind="arrow" title="Add Arrow (click, or drag onto the board)" onAddShape={addShape}>
             <MoveUpRight size={13} />
-          </button>
+          </ToolButton>
           <button type="button" className="notes-toolbar-btn" title="Frame selection" disabled={selectedIds.length === 0} onClick={frameSelection}>
             Frame selection
           </button>
@@ -323,6 +335,21 @@ export function NotesWorkspace({
           </button>
           <button type="button" className="notes-toolbar-btn" title="Export board as JSON (download)" onClick={exportJson}>
             <Download size={12} />
+          </button>
+          <button
+            type="button"
+            className={`notes-toolbar-btn${showMinimap ? " is-active" : ""}`}
+            title="Toggle overview minimap"
+            aria-pressed={showMinimap}
+            onClick={() =>
+              setShowMinimap((v) => {
+                const next = !v;
+                localStorage.setItem("notes.minimap", next ? "1" : "0");
+                return next;
+              })
+            }
+          >
+            <MapIcon size={12} />
           </button>
           <button type="button" className="notes-toolbar-btn" title="Zoom out" onClick={() => zoomStep(1 / 1.2)}>
             <Minus size={12} />
@@ -355,8 +382,48 @@ export function NotesWorkspace({
         selectedTimelineLayerId={selectedTimelineLayerId}
         templateNames={Object.keys(TEMPLATES)}
         onApplyTemplate={applyTemplate}
+        showMinimap={showMinimap}
       />
     </div>
+  );
+}
+
+/** A toolbar add-button that is BOTH click-to-add-at-center AND draggable-to-place-at-drop-point.
+ *  The drag carries `application/x-orreris-note-kind` (JSON `{type, shapeKind?, w, h}`) that
+ *  `NotesBoard.onDrop` reads. Same button, two affordances — no separate palette. */
+function ToolButton({
+  type,
+  shapeKind,
+  title,
+  onAdd,
+  onAddShape,
+  children,
+}: {
+  type: NoteItemType;
+  shapeKind?: NoteShapeKind;
+  title: string;
+  onAdd?: (type: NoteItemType) => void;
+  onAddShape?: (shapeKind: NoteShapeKind) => void;
+  children: React.ReactNode;
+}) {
+  const size = DEFAULT_SIZE[type];
+  return (
+    <button
+      type="button"
+      className="notes-toolbar-btn notes-toolbar-btn-draggable"
+      title={title}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "copy";
+        e.dataTransfer.setData(
+          "application/x-orreris-note-kind",
+          JSON.stringify({ type, ...(shapeKind ? { shapeKind } : {}), w: size.w, h: size.h }),
+        );
+      }}
+      onClick={() => (shapeKind && onAddShape ? onAddShape(shapeKind) : onAdd?.(type))}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -371,6 +438,8 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
   const [renameDraft, setRenameDraft] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const [anchor, setAnchor] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const boards = Object.values(graph.notesBoards ?? {}).sort((a, b) => a.name.localeCompare(b.name));
   const active = graph.notesBoards?.[activeBoardId];
 
@@ -382,6 +451,11 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
     document.addEventListener("mousedown", onDocDown);
     return () => document.removeEventListener("mousedown", onDocDown);
   }, [open]);
+  const toggleOpen = () => {
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (rect) setAnchor({ top: rect.bottom + 4, left: rect.left });
+    setOpen((v) => !v);
+  };
 
   const switchTo = (id: string) => {
     onUpdateGraph({ ...graph, activeNotesBoardId: id, version: graph.version + 1 });
@@ -405,13 +479,13 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
 
   return (
     <div className="notes-board-switcher" ref={rootRef}>
-      <button type="button" className="notes-board-switcher-btn" onClick={() => setOpen((v) => !v)}>
+      <button type="button" className="notes-board-switcher-btn" ref={btnRef} onClick={toggleOpen}>
         {active?.color ? <span className="notes-board-dot" style={{ background: active.color }} /> : null}
         <span>{active?.name ?? "Board"}</span>
         <ChevronDown size={12} />
       </button>
       {open ? (
-        <div className="notes-board-switcher-menu">
+        <div className="notes-board-switcher-menu is-fixed" style={{ top: anchor.top, left: anchor.left }}>
           {boards.map((b) => (
             <div key={b.id} className={`notes-board-switcher-row${b.id === activeBoardId ? " is-active" : ""}`}>
               <button
@@ -483,10 +557,14 @@ function BoardSwitcher({ graph, activeBoardId, onUpdateGraph }: { graph: Project
   );
 }
 
-/** "+ from template" menu (P5.3): stamps a fixed starter layout via the P1 compiler. */
+/** "+ from template" menu (P5.3): stamps a fixed starter layout via the P1 compiler. The popover is
+ *  rendered `position: fixed` anchored to the trigger, so the toolbar's `overflow-x: auto` (a scroll
+ *  container that also clips vertically) can't hide it behind the board. */
 function TemplateMenu({ onApply }: { onApply: (name: string) => void }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const [anchor, setAnchor] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   useEffect(() => {
     if (!open) return undefined;
     const onDocDown = (e: MouseEvent) => {
@@ -495,13 +573,18 @@ function TemplateMenu({ onApply }: { onApply: (name: string) => void }) {
     document.addEventListener("mousedown", onDocDown);
     return () => document.removeEventListener("mousedown", onDocDown);
   }, [open]);
+  const toggle = () => {
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (rect) setAnchor({ top: rect.bottom + 4, left: rect.left });
+    setOpen((v) => !v);
+  };
   return (
     <div className="notes-board-switcher" ref={rootRef}>
-      <button type="button" className="notes-toolbar-btn" onClick={() => setOpen((v) => !v)}>
+      <button type="button" className="notes-toolbar-btn" ref={btnRef} onClick={toggle}>
         ＋ from template
       </button>
       {open ? (
-        <div className="notes-board-switcher-menu">
+        <div className="notes-board-switcher-menu is-fixed" style={{ top: anchor.top, left: anchor.left }}>
           {Object.keys(TEMPLATES).map((name) => (
             <button
               key={name}
