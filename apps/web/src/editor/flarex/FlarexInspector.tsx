@@ -36,58 +36,10 @@ import {
   getNodeParamKeyframes,
   toggleNodeParamKeyframe
 } from "./flarex-keyframes";
-
-/** Slider ranges for numeric params (kept in sync with node-defs' Zod bounds). Fallback = free field. */
-const RANGES: Record<string, [number, number, number]> = {
-  "merge.opacity": [0, 1, 0.01],
-  "transform.x": [-100, 100, 0.5],
-  "transform.y": [-100, 100, 0.5],
-  "transform.scale": [0, 4, 0.01],
-  "transform.rotation": [-180, 180, 1],
-  "transform.anchorX": [0, 1, 0.01],
-  "transform.anchorY": [0, 1, 0.01],
-  "colorCorrect.exposure": [-100, 100, 1],
-  "colorCorrect.contrast": [-100, 100, 1],
-  "colorCorrect.saturation": [0, 220, 1],
-  "colorCorrect.temperature": [-100, 100, 1],
-  "colorCorrect.tint": [-100, 100, 1],
-  "blur.sigma": [0, 200, 1],
-  "glow.radius": [0, 200, 1],
-  "glow.intensity": [0, 2, 0.01],
-  "glow.threshold": [0, 1, 0.01],
-  "sharpen.amount": [0, 2, 0.01],
-  "filter.intensity": [0, 1, 0.01],
-  "chromaKey.tolerance": [0, 1, 0.01],
-  "chromaKey.softness": [0, 1, 0.01],
-  "chromaKey.clipBlack": [0, 1, 0.01],
-  "chromaKey.clipWhite": [0, 1, 0.01],
-  "chromaKey.spillSuppression": [0, 1, 0.01],
-  "chromaKey.edgeSoftness": [0, 20, 0.5],
-  "chromaKey.choke": [-1, 1, 0.01],
-  "chromaKey.decontaminate": [0, 1, 0.01],
-  "lumaKey.low": [0, 1, 0.01],
-  "lumaKey.high": [0, 1, 0.01],
-  "lumaKey.softness": [0, 1, 0.01],
-  "rectMask.centerX": [0, 1, 0.01],
-  "rectMask.centerY": [0, 1, 0.01],
-  "rectMask.width": [0, 2, 0.01],
-  "rectMask.height": [0, 2, 0.01],
-  "rectMask.feather": [0, 1, 0.01],
-  "rectMask.cornerRadius": [0, 1, 0.01],
-  "ellipseMask.centerX": [0, 1, 0.01],
-  "ellipseMask.centerY": [0, 1, 0.01],
-  "ellipseMask.width": [0, 2, 0.01],
-  "ellipseMask.height": [0, 2, 0.01],
-  "ellipseMask.feather": [0, 1, 0.01],
-  "matteControl.feather": [0, 1, 0.01],
-  "polygonMask.feather": [0, 1, 0.01],
-  "bezierMask.feather": [0, 1, 0.01],
-  "text.fontSize": [1, 400, 1],
-  "text.x": [0, 1, 0.01],
-  "text.y": [0, 1, 0.01],
-  "backdrop.w": [80, 4000, 1],
-  "backdrop.h": [60, 4000, 1],
-};
+// Slider ranges live in ONE place (`flarex-param-meta.ts`) so the inspector rows and the graph-editor
+// lanes clamp identically — a lane clamping differently from its inspector row would let one surface
+// author a value the other refuses.
+import { FLAREX_PARAM_RANGES as RANGES } from "./flarex-param-meta";
 
 const ENUMS: Record<string, readonly string[]> = {
   "merge.blend": [
