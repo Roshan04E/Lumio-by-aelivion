@@ -1,0 +1,35 @@
+# Keep the build context small and NEVER bake secrets or build artifacts into an image.
+# All three app images build from the repo root, so this applies to every build.
+
+# Installed deps + generated engines — always reinstalled fresh inside the image.
+node_modules
+**/node_modules
+**/.remotion
+
+# Build outputs — regenerated in the image (web) or unused (api/worker run from source).
+**/dist
+apps/web/dist
+
+# Local runtime data — on-disk storage is never part of an image (uses a volume / R2 in prod).
+apps/api/storage
+
+# Secrets. Env is injected at RUNTIME (compose / orchestrator), never copied into the image.
+.env
+.env.local
+**/.env
+**/.env.local
+
+# VCS + editor + local scratch.
+.git
+.gitignore
+.vscode
+.claude
+scratchpad
+agent
+
+# Docs / planning cruft that has no place in a runtime image.
+MORNING_TODO.md
+plans
+project-tracker
+*.log
+npm-debug.log*
