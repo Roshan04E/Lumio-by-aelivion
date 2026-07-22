@@ -1,0 +1,69 @@
+# Build (and push) the three Orreris container images on GitHub's runners — a stable network that
+# avoids the local Docker/WSL2 build flakiness, and the real validation that the images build clean.
+# Images are published to GitHub Container Registry (ghcr.io/<owner>/orreris-<service>).
+name: build-images
+
+on:
+  push:
+    branches: [main, method-3-gpu-compositor]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR with the automatic GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: apps/api/Dockerfile
+            build_args: ""
+          - service: worker
+            dockerfile: apps/worker/Dockerfile
+            build_args: ""
+          - service: web
+            dockerfile: apps/web/Dockerfile
+            # Same-origin default (the web nginx proxies /api). Override per-deploy for split hosts.
+            build_args: |
+              VITE_API_URL=/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Push everywhere except pull_request builds (forks can't access GITHUB_TOKEN with write scope).
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercases the image name for GHCR and derives tags (branch, sha, and latest on the default branch).
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/orreris-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_args }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache in the GitHub Actions cache so reruns are fast.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
