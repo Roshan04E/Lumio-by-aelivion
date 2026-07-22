@@ -133,7 +133,13 @@ export interface RemoveBackgroundOptions {
   /** Real mask artifact, when available, so the subject layer gets a real MatteRef instead of placeholder metadata. */
   mask?: MaskSequenceArtifactData | undefined;
   sourceAssetId?: string | undefined;
+  /** Plate colour behind the subject in `greenScreen` mode. Defaults to broadcast green (#00B140);
+   *  the Remove Background workspace lets the user pick any solid colour (blue screen, brand fill…). */
+  plateColor?: string | undefined;
 }
+
+/** The broadcast-green default plate colour, used when `greenScreen` mode carries no explicit plateColor. */
+export const REMOVE_BACKGROUND_DEFAULT_PLATE = "#00B140";
 
 /**
  * Per-channel control over which tracked transform properties the follow
@@ -590,8 +596,8 @@ export function applyRemoveBackgroundComposition(
       ? createShapeLayer({
           id: `${trackPlateId}_green`,
           trackId: trackPlateId,
-          name: "Green screen plate",
-          color: "#00B140",
+          name: "Colour plate",
+          color: options.plateColor ?? REMOVE_BACKGROUND_DEFAULT_PLATE,
           durationSeconds: duration
         })
       : createShapeLayer({

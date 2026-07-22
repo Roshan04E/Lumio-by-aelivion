@@ -310,9 +310,12 @@ const smartFollowTextLayerEffect = defineLayerToolEffectHandler<TrackingPathArti
  */
 async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskSequenceArtifactData> {
   const { asset, fps, composition, editableFields, options, onProgress, isCancelled } = args;
+  const wantsQuality = options.quality === "quality";
   if (options.maskSource !== "reanalyze") {
     const reused = findReusableMask({ sourceAssetId: asset.id, asset, composition, editableFields });
-    if (reused) {
+    // A fast-preview request is satisfied by any existing mask; a high-quality bake only reuses an
+    // already-clean matte (otherwise it re-runs the quality segmentation, which is its whole point).
+    if (reused && (!wantsQuality || reused.mask.edgeMode === "clean")) {
       onProgress(
         `Reusing the subject mask already extracted for this clip (${reused.mask.edgeMode === "clean" ? "high quality" : "fast preview"}). Choose "Re-analyze" to regenerate.`
       );
@@ -320,17 +323,22 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
     }
   }
 
-  const result = await segmentVideoFast({
+  const segmentOptions = {
     videoUrl: asset.fileUrl,
     sourceAssetId: asset.id,
     durationSeconds: asset.durationSeconds,
     width: asset.width || 720,
     height: asset.height || 1280,
     targetFps: fps,
-    tier: "fast",
     onProgress,
     isCancelled
-  });
+  };
+  const result = wantsQuality
+    ? await segmentVideoQuality(
+        { ...segmentOptions, tier: "quality" },
+        chooseSegmentationDeviceProfile(detectBrowserToolCapabilities(), asset.durationSeconds)
+      )
+    : await segmentVideoFast({ ...segmentOptions, tier: "fast" });
   onProgress("Saving matte...");
   const store = await createToolArtifactStore();
   const runId = `matte_${Date.now()}`;
@@ -355,7 +363,16 @@ const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArt
       defaultValue: "timelineMask",
       choices: [
         { value: "timelineMask", label: "Transparent", description: "Keeps the subject with a transparent timeline matte." },
-        { value: "greenScreen", label: "Green screen", description: "Composites the subject over a solid green plate." }
+        { value: "greenScreen", label: "Colour plate", description: "Composites the subject over a solid colour plate (green by default)." }
+      ]
+    },
+    {
+      key: "quality",
+      label: "Quality",
+      defaultValue: "fast",
+      choices: [
+        { value: "fast", label: "Fast preview", description: "Quick, lower-quality edges." },
+        { value: "quality", label: "High quality", description: "Slower, temporally stable edges - recommended before export." }
       ]
     },
     maskSourceOptionField
@@ -368,14 +385,16 @@ const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArt
         mode: options.mode === "greenScreen" ? "greenScreen" : "timelineMask",
         maskId: result.id,
         mask: result,
-        sourceAssetId: asset.id
+        sourceAssetId: asset.id,
+        ...(options.plateColor ? { plateColor: options.plateColor } : {})
       },
       context === "standalone" ? "replace" : "insert"
     ),
   describeEditableFields: ({ result, options }) => ({
     maskSequence: result,
     compositingTool: "remove-background",
-    compositingMode: options.mode === "greenScreen" ? "greenScreen" : "timelineMask"
+    compositingMode: options.mode === "greenScreen" ? "greenScreen" : "timelineMask",
+    ...(options.plateColor ? { plateColor: options.plateColor } : {})
   })
 });
 

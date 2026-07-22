@@ -2408,6 +2408,88 @@ input[type="checkbox"] {
   text-align: right;
 }
 
+/* Remove Background workspace controls */
+.rbg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.rbg-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.rbg-toggle-row {
+  display: flex;
+  gap: 8px;
+}
+
+.rbg-toggle-row button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.rbg-toggle-row button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--nle-accent) 50%, var(--border));
+}
+
+.rbg-toggle-row button.is-active {
+  border-color: var(--nle-accent);
+  background: color-mix(in srgb, var(--nle-accent) 16%, transparent);
+  color: var(--text);
+}
+
+.rbg-toggle-row button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.rbg-actions {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+
+.rbg-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  height: 100%;
+  padding: 24px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.6));
+}
+
+.rbg-preview-empty h2 {
+  font-size: 15px;
+  margin: 0;
+  color: var(--text);
+}
+
+.rbg-preview-empty p {
+  font-size: 12px;
+  margin: 0;
+  max-width: 280px;
+}
+
 .track-box-path {
   fill: none;
   stroke: rgba(201, 255, 74, 0.55);

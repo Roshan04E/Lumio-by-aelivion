@@ -491,6 +491,9 @@ const ToolEffectRunnerModal = lazy(() =>
 const SmartFollowTextEffectModal = lazy(() =>
   import("../components/SmartFollowTextEffectModal").then((module) => ({ default: module.SmartFollowTextEffectModal }))
 );
+const RemoveBackgroundEffectModal = lazy(() =>
+  import("../components/RemoveBackgroundEffectModal").then((module) => ({ default: module.RemoveBackgroundEffectModal }))
+);
 // Tracking workspace pulls the browser ML tracking/segmentation graph — load it only when opened.
 const TrackWorkspaceModal = lazy(() =>
   import("../components/TrackWorkspaceModal").then((module) => ({ default: module.TrackWorkspaceModal }))
@@ -8952,6 +8955,25 @@ export function EditorPage() {
             onApplied={(nextComposition, savedTracks) => {
               void applySmartFollowTextResult(nextComposition, savedTracks);
               setActiveLayerToolEffect(undefined);
+              resolveToolStep({ applied: true, composition: nextComposition, detail: "Applied" });
+            }}
+            onClose={() => {
+              setActiveLayerToolEffect(undefined);
+              resolveToolStep({ applied: false, detail: "Cancelled" });
+            }}
+          />
+        </Suspense>
+      ) : activeLayerToolEffect && composition && activeLayerToolEffect.tool.slug === "remove-background" ? (
+        <Suspense fallback={null}>
+          <RemoveBackgroundEffectModal
+            tool={activeLayerToolEffect.tool}
+            asset={activeLayerToolEffect.asset}
+            composition={composition}
+            editableFields={graph?.editableFields}
+            onApplied={(nextComposition, editableFieldsPatch) => {
+              void applyToolEffectResult(nextComposition, editableFieldsPatch);
+              setActiveLayerToolEffect(undefined);
+              setNotice("Background removed");
               resolveToolStep({ applied: true, composition: nextComposition, detail: "Applied" });
             }}
             onClose={() => {
