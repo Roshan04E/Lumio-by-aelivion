@@ -482,7 +482,7 @@ export function RemoveBackgroundToolPanel({
 
   if (compact) {
     return (
-      <div className="tool-shell tool-shell-captions">
+      <div className="tool-shell tool-shell-captions rbg-shell">
         {previewPane}
         {controlsPane}
       </div>
@@ -499,7 +499,7 @@ export function RemoveBackgroundToolPanel({
         </div>
         <CreditBadge value={tool.estimatedCredits ?? 0} />
       </section>
-      <section className="tool-shell tool-shell-captions">
+      <section className="tool-shell tool-shell-captions rbg-shell">
         {previewPane}
         {controlsPane}
       </section>
@@ -551,7 +551,7 @@ function RemoveBackgroundResultViewer({ asset, composition }: { asset: SourceAss
 
   return (
     <div
-      className="follow-result-viewer editor-viewer"
+      className="follow-result-viewer editor-viewer rbg-result-viewer"
       style={{ "--follow-result-aspect": `${composition.width} / ${composition.height}` } as CSSProperties}
     >
       <VideoPreview

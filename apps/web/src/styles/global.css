@@ -2461,6 +2461,57 @@ input[type="checkbox"] {
   color: var(--nle-text-muted);
 }
 
+/* Remove Background: the PREVIEW is the point of the window, so it takes the wide column and the
+   compact controls sit in a narrow rail (the opposite of the caption workspace's emphasis). */
+.rbg-shell.tool-shell-captions {
+  grid-template-columns: minmax(440px, 1fr) minmax(280px, 360px);
+}
+
+.rbg-shell .tool-preview-panel {
+  min-height: 0;
+}
+
+.rbg-shell .tool-preview-canvas {
+  min-height: 460px;
+  padding: 10px;
+  display: flex;
+}
+
+.rbg-shell .rbg-preview-empty {
+  margin: auto;
+}
+
+/* A real, large result viewer — no editor tools bleeding in, fills the preview column. */
+.rbg-result-viewer {
+  width: 100%;
+  height: 100%;
+  min-height: 440px;
+  max-height: 68vh;
+}
+
+.rbg-result-viewer .preview-tools {
+  display: none !important;
+}
+
+.modal-workspace .rbg-result-viewer {
+  max-height: 66vh;
+}
+
+/* Kill the marketing-blue leaks inside tool dialogs: the preview badge + the status/count line both
+   used `--primary` / marketing tokens that never theme-swap. Re-map to the editor's neutral register. */
+.modal-workspace .tool-preview-top > span,
+.modal:has(.tool-effect-runner) .tool-preview-top > span {
+  color: var(--nle-text-muted);
+  font-weight: 700;
+}
+
+.modal-workspace .badge,
+.modal:has(.tool-effect-runner) .badge {
+  border-color: var(--nle-border);
+  background: var(--nle-panel-3);
+  color: var(--nle-text-muted);
+}
+
 .rbg-preview-empty {
   display: flex;
   flex-direction: column;
