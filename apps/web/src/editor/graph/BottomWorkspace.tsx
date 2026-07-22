@@ -47,9 +47,11 @@ export interface BottomWorkspaceProps {
   isPlaying?: boolean | undefined;
   /** Open the Scopes tab initially (e.g. when invoked from the removed Color→Scopes affordance). */
   initialTab?: BottomWorkspaceTab | undefined;
+  /** Flarex: replace the layer-derived graph targets with the selected node's params (bridge). */
+  overrideTargets?: import("../inspector/keyframeUtils").GraphTarget[] | undefined;
 }
 
-export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers, scopeSampler, scopeContainerRef, scopeTick, isPlaying, initialTab }: BottomWorkspaceProps) {
+export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers, scopeSampler, scopeContainerRef, scopeTick, isPlaying, initialTab, overrideTargets }: BottomWorkspaceProps) {
   const [tab, setTab] = useState<BottomWorkspaceTab>(initialTab ?? "graph");
   const [height, setHeight] = useState<number>(() => loadHeight());
   const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
@@ -138,6 +140,7 @@ export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onC
               fps={fps}
               focusTargetKey={focusTargetKey}
               ghostLayers={ghostLayers}
+              overrideTargets={overrideTargets}
             />
           ) : (
             <div className="bottom-workspace-empty">Select a clip to edit its animation curves.</div>

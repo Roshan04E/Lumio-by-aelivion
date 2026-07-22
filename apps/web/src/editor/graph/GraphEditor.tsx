@@ -120,27 +120,31 @@ export interface GraphEditorProps {
   focusTargetKey?: string | undefined;
   /** Other SELECTED clips: their matching curves draw faded (read-only, never hit-tested). */
   ghostLayers?: TimelineLayer[] | undefined;
+  /** When set, REPLACES the layer-derived target list (Flarex: the selected node's params supplied
+   *  as effect-kind targets via the flarex-graph bridge). The layer still drives read/eval/write. */
+  overrideTargets?: GraphTarget[] | undefined;
 }
 
-export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTargetKey, ghostLayers }: GraphEditorProps) {
+export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTargetKey, ghostLayers, overrideTargets }: GraphEditorProps) {
   const { displayLayer, isDrafting, beginDraft, updateDraft, commitDraft } = useDraftLayer(layer, onChange);
   const layerTime = clamp(currentTime - layer.startSeconds, 0, layer.durationSeconds);
 
   const allTargets = useMemo<GraphTarget[]>(
-    () => [
-      ...transformGraphTargets,
-      // Text layers: SOURCE TEXT hold lane + Typewriter reveal curve (both user-visible only
-      // once they carry keys — the default visible set filters to animated targets).
-      ...(layer.type === "text" ? [sourceTextGraphTarget, typewriterGraphTarget] : []),
-      // Video/audio clips with a source asset: the speed-ramp lane (mirrors ClipSpeedControl's gate).
-      ...(((layer.type === "video" || layer.type === "audio") && layer.assetId) ? [speedGraphTarget] : []),
-      // Media clips: content pan/zoom/crop lanes (mirrors ContentPanel's video/image-only gate).
-      ...((layer.type === "video" || layer.type === "image") ? contentGraphTargets : []),
-      // Animated (SMIL) graphics: Progress (cycles) + Duration lanes. Empty for static graphics.
-      ...buildGraphicGraphTargets(layer),
-      ...buildEffectGraphTargets(layer)
-    ],
-    [layer]
+    () =>
+      overrideTargets ?? [
+        ...transformGraphTargets,
+        // Text layers: SOURCE TEXT hold lane + Typewriter reveal curve (both user-visible only
+        // once they carry keys — the default visible set filters to animated targets).
+        ...(layer.type === "text" ? [sourceTextGraphTarget, typewriterGraphTarget] : []),
+        // Video/audio clips with a source asset: the speed-ramp lane (mirrors ClipSpeedControl's gate).
+        ...(((layer.type === "video" || layer.type === "audio") && layer.assetId) ? [speedGraphTarget] : []),
+        // Media clips: content pan/zoom/crop lanes (mirrors ContentPanel's video/image-only gate).
+        ...((layer.type === "video" || layer.type === "image") ? contentGraphTargets : []),
+        // Animated (SMIL) graphics: Progress (cycles) + Duration lanes. Empty for static graphics.
+        ...buildGraphicGraphTargets(layer),
+        ...buildEffectGraphTargets(layer)
+      ],
+    [layer, overrideTargets]
   );
   const colorByKey = useMemo(() => {
     const map = new Map<string, string>();

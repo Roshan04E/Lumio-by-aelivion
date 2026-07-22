@@ -8747,6 +8747,8 @@ export function EditorPage() {
                   timeSeconds={currentTime}
                   onSeek={setEditorCurrentTime}
                   isPlaying={isPlaying}
+                  graphOpen={bottomWorkspaceOpen}
+                  onCloseGraph={() => setBottomWorkspaceOpen(false)}
                 />
               )}
             </ColdTime>

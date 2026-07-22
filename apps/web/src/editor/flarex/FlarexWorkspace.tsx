@@ -11,6 +11,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { usePlaybackClock } from "../../playback/playback-clock";
+import { BottomWorkspace } from "../graph/BottomWorkspace";
+import { applyFlarexGraphLayer, buildFlarexGraphLayer } from "./flarex-graph-bridge";
 import {
   createFlarexComp,
   createFlarexNode,
@@ -61,9 +63,12 @@ export interface FlarexWorkspaceProps {
   onSeek: (seconds: number) => void;
   /** Transport playing state — the frame ruler's resume-glitch latch needs it. */
   isPlaying?: boolean;
+  /** Graph-editor drawer open state (shared with the Edit page's toggle button) + its closer. */
+  graphOpen?: boolean;
+  onCloseGraph?: () => void;
 }
 
-export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSeek, isPlaying = false }: FlarexWorkspaceProps) {
+export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph }: FlarexWorkspaceProps) {
   const comp = layer ? getLayerFlarexComp(graph, layer) : undefined;
   const layerStart = layer?.startSeconds ?? 0;
   const compTime = Math.max(0, timeSeconds - layerStart);
@@ -163,6 +168,20 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
         ).sort((a, b) => a - b)
       : [];
 
+  // Graph drawer (shared GraphEditor via the bridge): the ONE selected node's keyframeable params
+  // become effect-kind targets on a synthetic layer; edits map back to comp.animations.
+  const graphNode = selectedNodeIds.length === 1 ? comp.nodes[selectedNodeIds[0]!] ?? null : null;
+  const graphBridge = graphNode ? buildFlarexGraphLayer(comp, graphNode, layer.durationSeconds, layerStart) : null;
+  // Route the shared GraphEditor's layer-updater back onto the comp: rebuild the synthetic layer
+  // from the CURRENT node (avoids stale closures), apply the updater, translate to comp.animations.
+  const handleGraphChange = (nodeId: string) => (updater: (l: TimelineLayer) => TimelineLayer) =>
+    updateComp((current) => {
+      const node = current.nodes[nodeId];
+      if (!node) return current;
+      const built = buildFlarexGraphLayer(current, node, layer.durationSeconds, layerStart).layer;
+      return applyFlarexGraphLayer(current, node, updater(built));
+    });
+
   return (
     <div className="flarex-workspace">
       <div className="flarex-toolbar">
@@ -223,6 +242,23 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
           onSeekCompTime={(t) => onSeek(layerStart + t)}
         />
       </div>
+      {graphOpen ? (
+        graphBridge && graphNode ? (
+          <BottomWorkspace
+            layer={graphBridge.layer}
+            overrideTargets={graphBridge.targets}
+            onChange={handleGraphChange(graphNode.id)}
+            currentTime={timeSeconds}
+            onSeek={onSeek}
+            fps={graph.composition?.fps ?? 30}
+            onClose={() => onCloseGraph?.()}
+          />
+        ) : (
+          <section className="bottom-workspace bottom-workspace--flarex-hint">
+            <div className="bottom-workspace-empty">Select a single node to edit its animation curves.</div>
+          </section>
+        )
+      ) : null}
     </div>
   );
 }
