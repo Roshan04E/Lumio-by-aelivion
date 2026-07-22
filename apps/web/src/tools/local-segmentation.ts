@@ -33,6 +33,13 @@ export interface SegmentVideoOptions {
   videoUrl: string;
   /** Source asset the video came from — stamped onto the produced artifacts so consumers can find them by asset later. */
   sourceAssetId?: string | undefined;
+  /**
+   * Source in-point (seconds) to begin sampling at. Defaults to 0 (from the source start). Set to a
+   * clip's used in-point so a short cut of a long source only segments the used slice — the produced
+   * matte is 0-based over `[startSeconds, startSeconds + durationSeconds]` and records `startSeconds`
+   * so renderers re-align it to source time. `durationSeconds` is then the SLICE length, not the file's.
+   */
+  startSeconds?: number | undefined;
   durationSeconds: number;
   width: number;
   height: number;
@@ -153,6 +160,9 @@ export async function segmentVideoFast(options: SegmentVideoOptions): Promise<Se
   // Fast preview stays low-fps for interactivity; the dimensional fix below is
   // what keeps it spatially aligned. The quality tier handles temporal locking.
   const sampleFps = 8;
+  // Frame times are 0-based over the requested SLICE; sampling seeks to `startSeconds + t` in the
+  // source, but the matte stays 0-based (its startSeconds records the offset for the renderers).
+  const startSeconds = Math.max(0, options.startSeconds ?? 0);
   const frameTimes = sampleFrameTimes(options.durationSeconds, sampleFps);
   const video = await loadVideoElement(options.videoUrl);
   const dims = withTrueVideoDimensions(options, video);
@@ -170,7 +180,7 @@ export async function segmentVideoFast(options: SegmentVideoOptions): Promise<Se
 
   for (const [index, timeSeconds] of frameTimes.entries()) {
     assertNotCancelled(options.isCancelled);
-    await seekVideo(video, timeSeconds);
+    await seekVideo(video, startSeconds + timeSeconds);
     ctx.drawImage(video, 0, 0, dims.width, dims.height);
 
     nextFastSegmentTimestampMs = Math.max(nextFastSegmentTimestampMs + 1, Math.round(timeSeconds * 1000));
@@ -218,6 +228,7 @@ export async function segmentVideoQuality(
   // one matte frame per output frame and the alpha stays frame-locked to the
   // source RGB - this is what removes the motion ghosting in the final render.
   const sampleFps = Math.min(30, Math.max(profile.sampleFps, options.targetFps ?? profile.sampleFps));
+  const startSeconds = Math.max(0, options.startSeconds ?? 0);
   const frameTimes = sampleFrameTimes(options.durationSeconds, sampleFps);
   const video = await loadVideoElement(options.videoUrl);
   const dims = withTrueVideoDimensions(options, video);
@@ -237,7 +248,7 @@ export async function segmentVideoQuality(
 
   for (const [index, timeSeconds] of frameTimes.entries()) {
     assertNotCancelled(options.isCancelled);
-    await seekVideo(video, timeSeconds);
+    await seekVideo(video, startSeconds + timeSeconds);
     ctx.drawImage(video, 0, 0, dims.width, dims.height);
     const frame = ctx.getImageData(0, 0, dims.width, dims.height);
 
@@ -271,6 +282,9 @@ function buildSegmentResult(
     height: options.height,
     fps,
     durationSeconds: options.durationSeconds,
+    // Record the source in-point so the baked (0-based) matte is re-aligned to source time by the
+    // renderers. Omitted for a full-source bake, keeping those artifacts byte-identical.
+    ...(options.startSeconds ? { startSeconds: options.startSeconds } : {}),
     feather: edgeMode === "clean" ? 4 : 8,
     edgeMode,
     source,

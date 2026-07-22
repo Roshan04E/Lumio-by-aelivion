@@ -696,8 +696,18 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
             Math.round((layer.startSeconds + layer.durationSeconds + outgoingPostrollSeconds(layer, sorted, assetDurationById) - mountSeconds) * fps)
           );
           // The matte reuses the layer's shape but MUST decode `matte.uri` — drop the graphic fields or
-          // ImageGrabber would render the animated graphic as this layer's matte instead.
-          const matteLayer = layer.matte?.uri ? { ...layer, assetUrl: layer.matte.uri, graphic: undefined } : null;
+          // ImageGrabber would render the animated graphic as this layer's matte instead. A windowed
+          // matte (Remove Background "Used in timeline") is 0-based over its slice, so shift the matte
+          // layer's source in-point back by `startSeconds`: the grabber's `sourceIn + local` math then
+          // samples it at `sourceTime − startSeconds`, matching the preview + local-export renderers.
+          const matteLayer = layer.matte?.uri
+            ? {
+                ...layer,
+                assetUrl: layer.matte.uri,
+                sourceInSeconds: Math.max(0, (layer.sourceInSeconds ?? 0) - (layer.matte.startSeconds ?? 0)),
+                graphic: undefined
+              }
+            : null;
           return (
             <Sequence key={layer.id} from={from} durationInFrames={durationInFrames}>
               {layer.type === "video" ? (

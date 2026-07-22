@@ -323,10 +323,15 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
     }
   }
 
+  // Source-range window (Remove Background "Used in timeline"/Custom): segment only the used slice
+  // of a long source. `startSeconds`/`windowSeconds` default to the whole clip when no valid range
+  // is supplied, so callers without a range (one-click, other tools) are unchanged.
+  const { startSeconds, windowSeconds } = resolveSegmentWindow(options, asset.durationSeconds);
   const segmentOptions = {
     videoUrl: asset.fileUrl,
     sourceAssetId: asset.id,
-    durationSeconds: asset.durationSeconds,
+    startSeconds,
+    durationSeconds: windowSeconds,
     width: asset.width || 720,
     height: asset.height || 1280,
     targetFps: fps,
@@ -336,7 +341,7 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
   const result = wantsQuality
     ? await segmentVideoQuality(
         { ...segmentOptions, tier: "quality" },
-        chooseSegmentationDeviceProfile(detectBrowserToolCapabilities(), asset.durationSeconds)
+        chooseSegmentationDeviceProfile(detectBrowserToolCapabilities(), windowSeconds)
       )
     : await segmentVideoFast({ ...segmentOptions, tier: "fast" });
   onProgress("Saving matte...");
@@ -349,9 +354,34 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
     folder: "generated/background-removed",
     onProgress
   });
-  registerMaskForAsset(asset.id, outcome.maskSequence);
-  registerTrackingForAsset(asset.id, result.trackingPath);
+  // Only a FULL-source matte is registered for cross-tool reuse: a windowed matte covers just this
+  // clip's slice, so reusing it for another clip of the same source (different in/out) would
+  // misalign. Windowed runs still return their matte for this apply.
+  if (startSeconds === 0) {
+    registerMaskForAsset(asset.id, outcome.maskSequence);
+    registerTrackingForAsset(asset.id, result.trackingPath);
+  }
   return outcome.maskSequence;
+}
+
+/**
+ * Reads the optional `rangeStartSeconds`/`rangeEndSeconds` run options (set by the Remove Background
+ * source-range control) into a validated [start, length] window inside the source. Falls back to the
+ * whole clip when the range is absent, malformed, or degenerate.
+ */
+function resolveSegmentWindow(
+  options: Record<string, string>,
+  sourceDurationSeconds: number
+): { startSeconds: number; windowSeconds: number } {
+  const rawStart = Number(options.rangeStartSeconds);
+  const rawEnd = Number(options.rangeEndSeconds);
+  const hasRange = Number.isFinite(rawStart) && Number.isFinite(rawEnd) && rawEnd > rawStart;
+  if (!hasRange) {
+    return { startSeconds: 0, windowSeconds: sourceDurationSeconds };
+  }
+  const startSeconds = Math.max(0, Math.min(rawStart, Math.max(0, sourceDurationSeconds - 0.1)));
+  const windowSeconds = Math.min(rawEnd, sourceDurationSeconds) - startSeconds;
+  return windowSeconds > 0.05 ? { startSeconds, windowSeconds } : { startSeconds: 0, windowSeconds: sourceDurationSeconds };
 }
 
 const removeBackgroundLayerEffect = defineLayerToolEffectHandler<MaskSequenceArtifactData>({

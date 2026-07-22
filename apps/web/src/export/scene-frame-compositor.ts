@@ -567,7 +567,10 @@ export class SceneFrameCompositor {
     if (layer.matte?.uri) {
       const matteSource = this.getSource(`matte:${layer.id}`);
       if (matteSource) {
-        const mf = await matteSource.getFrame(sourceTime);
+        // A windowed matte is 0-based over its slice, so read it at `sourceTime − startSeconds`
+        // (0/absent = full-source matte, unchanged). Same offset the preview renderers apply.
+        const matteTime = Math.max(0, sourceTime - (layer.matte.startSeconds ?? 0));
+        const mf = await matteSource.getFrame(matteTime);
         if (mf && matteSource.width > 0) matteFrame = mf;
       }
     }

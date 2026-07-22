@@ -51,13 +51,15 @@ export const MaskedVideoLayer = forwardRef<HTMLVideoElement, {
       return;
     }
     // The matte video is sampled across the source media, so it must use the
-    // same source-aware offset as the source video itself.
+    // same source-aware offset as the source video itself — minus the matte's own
+    // start (a windowed matte is 0-based over its slice; 0/absent = full source).
     setMediaPlaybackRate(matteVideo, speedFactor);
-    const nextTime = sourceInSeconds + Math.max(0, currentTime - layerStartSeconds) * speedFactor;
+    const matteStart = matte?.startSeconds ?? 0;
+    const nextTime = Math.max(0, sourceInSeconds - matteStart + Math.max(0, currentTime - layerStartSeconds) * speedFactor);
     if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08 * Math.max(1, speedFactor)) {
       matteVideo.currentTime = nextTime;
     }
-  }, [currentTime, layerStartSeconds, sourceInSeconds, speedFactor]);
+  }, [currentTime, layerStartSeconds, matte?.startSeconds, sourceInSeconds, speedFactor]);
 
   useEffect(() => {
     const matteVideo = matteVideoRef.current;

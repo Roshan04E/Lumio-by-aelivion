@@ -596,6 +596,14 @@ export interface MatteRef {
   kind: "luma" | "alpha";
   /** Matte playback rate so a frame time can be mapped to a matte sample. */
   fps: number;
+  /**
+   * Source in-point (seconds) the matte's frame 0 corresponds to. 0 (or absent) = the matte covers
+   * the source from its start (the default full-source bake). When a matte was baked over only a
+   * used SLICE of a long source (Remove Background "Used in timeline"), this is the slice's source
+   * start, so every renderer samples the matte at `sourceTime − startSeconds`. Keeping it on the
+   * MatteRef (not implied by clip trim) makes the matte robust to later re-trims of the clip.
+   */
+  startSeconds?: number | undefined;
   /** Edge softness in pixels applied during compositing. */
   feather: number;
   /** Fast = lighter preview matte; clean = higher-quality baked matte. */

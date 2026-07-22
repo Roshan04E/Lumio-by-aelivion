@@ -24,6 +24,13 @@ export interface MaskSequenceArtifactData {
   height: number;
   fps: number;
   durationSeconds: number;
+  /**
+   * Source in-point (seconds) this matte begins at. 0 (or absent) = baked from the source start
+   * (default). Set when the matte covers only a used SLICE of a long source, so the produced
+   * `MatteRef.startSeconds` lets every renderer sample it at `sourceTime − startSeconds`. All the
+   * frame `timeSeconds` below are 0-based (relative to this slice start), not absolute source time.
+   */
+  startSeconds?: number | undefined;
   /** Low-res frames for the inspector scrubber - cheap, not used for final compositing. */
   frames: MaskFrame[];
   /**
@@ -111,6 +118,9 @@ export function createMatteRefFromMaskSequence(
     uri: mask.matteVideoUri,
     kind: "luma",
     fps: mask.fps,
+    // Carry the slice offset so renderers sample this matte at `sourceTime − startSeconds`. Omitted
+    // (not 0) when the matte covers the whole source, keeping full-source MatteRefs byte-identical.
+    ...(mask.startSeconds ? { startSeconds: mask.startSeconds } : {}),
     feather: mask.feather,
     edgeMode: mask.edgeMode,
     invert: overrides?.invert,

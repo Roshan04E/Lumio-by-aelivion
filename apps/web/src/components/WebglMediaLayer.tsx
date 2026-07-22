@@ -996,11 +996,14 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       const matteVideo = matteVideoRef.current;
       if (!matteVideo) return;
       setMediaPlaybackRate(matteVideo, speedFactor);
-      const nextTime = Math.max(0, sourceInSeconds + Math.max(-prerollSeconds, currentTime - layerStartSeconds) * speedFactor);
+      // A windowed matte (Remove Background "Used in timeline") is 0-based over [startSeconds, …] of
+      // the source, so shift the source time by the matte's own start. 0/absent = full-source matte.
+      const matteStart = matte?.startSeconds ?? 0;
+      const nextTime = Math.max(0, sourceInSeconds - matteStart + Math.max(-prerollSeconds, currentTime - layerStartSeconds) * speedFactor);
       if (Number.isFinite(nextTime) && Math.abs(matteVideo.currentTime - nextTime) > 0.08 * Math.max(1, speedFactor)) {
         matteVideo.currentTime = nextTime;
       }
-    }, [currentTime, layerStartSeconds, mediaType, matte?.uri, sourceInSeconds, speedFactor, prerollSeconds]);
+    }, [currentTime, layerStartSeconds, mediaType, matte?.uri, matte?.startSeconds, sourceInSeconds, speedFactor, prerollSeconds]);
 
     // Play/pause the matte video in sync with the source.
     useEffect(() => {
