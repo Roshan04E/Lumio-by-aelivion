@@ -2834,10 +2834,12 @@ export function EditorPage() {
         // Alt) — one-handed panel scheme. E = left panel, R = inspector (ordered left→right to
         // match the panel positions). Was R/T; remapped to E/R on user request 2026-07-11.
         case "KeyE":
+          if (notesPage) break; // no full-height expand on Notes (pool is already full height)
           event.preventDefault();
           setPanelExpanded((value) => !value);
           break;
         case "KeyR":
+          if (notesPage) break;
           event.preventDefault();
           setInspectorExpanded((value) => !value);
           break;
@@ -8066,7 +8068,7 @@ export function EditorPage() {
       ) : null}
 
       <div
-        className={`editor-layout${panelExpanded ? " is-left-expanded" : ""}${inspectorFullHeight ? " is-right-expanded" : ""}${panelExpanded || inspectorFullHeight ? " is-any-expanded" : ""}${inspectorCollapsed ? " is-inspector-collapsed" : ""}${panelCollapsed ? " is-left-collapsed" : ""}${editorPage === "notes" ? " is-notes-page" : ""}`}
+        className={`editor-layout${panelExpanded && editorPage !== "notes" ? " is-left-expanded" : ""}${inspectorFullHeight && editorPage !== "notes" ? " is-right-expanded" : ""}${(panelExpanded || inspectorFullHeight) && editorPage !== "notes" ? " is-any-expanded" : ""}${inspectorCollapsed ? " is-inspector-collapsed" : ""}${panelCollapsed ? " is-left-collapsed" : ""}${editorPage === "notes" ? " is-notes-page" : ""}`}
         data-editor-mode={responsiveLayout.mode}
         data-editor-density={responsiveLayout.density}
         data-overlay={activeResponsiveOverlay ?? "none"}
@@ -8142,17 +8144,19 @@ export function EditorPage() {
                         </span>
                       </button>
                     ) : null}
-                    <button
-                      className={`tabbar-icon-button${panelExpanded ? " is-active" : ""}`}
-                      type="button"
-                      title={`${panelExpanded ? "Restore left panel height" : "Expand left panel — full height, timeline under the viewer"} (${altKeyLabel}+E)`}
-                      aria-label={panelExpanded ? "Restore left panel height" : "Expand left panel to full height"}
-                      aria-keyshortcuts={`${altKeyLabel}+E`}
-                      aria-pressed={panelExpanded}
-                      onClick={() => setPanelExpanded((value) => !value)}
-                    >
-                      {panelExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-                    </button>
+                    {editorPage !== "notes" ? (
+                      <button
+                        className={`tabbar-icon-button${panelExpanded ? " is-active" : ""}`}
+                        type="button"
+                        title={`${panelExpanded ? "Restore left panel height" : "Expand left panel — full height, timeline under the viewer"} (${altKeyLabel}+E)`}
+                        aria-label={panelExpanded ? "Restore left panel height" : "Expand left panel to full height"}
+                        aria-keyshortcuts={`${altKeyLabel}+E`}
+                        aria-pressed={panelExpanded}
+                        onClick={() => setPanelExpanded((value) => !value)}
+                      >
+                        {panelExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               )}
@@ -8768,26 +8772,26 @@ export function EditorPage() {
             )}
           </ColdTime>
         ) : null}
-        {/* DaVinci-style page bar (user ask 2026-07-21): centered page buttons at the BOTTOM of the
-            timeline area — Edit = the timeline; Flarex = the node compositing workspace swapped
-            into the same slot (Shift+F). The viewer above persists. Future pages (Audio, Notes)
-            join this bar. */}
-        <div className="flarex-page-tabs" role="tablist" aria-label="Editor pages">
-          <button type="button" role="tab" aria-selected={editorPage === "edit"} className={editorPage === "edit" ? "is-active" : ""} onClick={() => setEditorPage("edit")}>
-            <Film size={14} aria-hidden="true" />
-            <span>Edit</span>
-          </button>
-          <button type="button" role="tab" aria-selected={editorPage === "flarex"} className={editorPage === "flarex" ? "is-active" : ""} onClick={() => setEditorPage("flarex")}>
-            <Workflow size={14} aria-hidden="true" />
-            <span>Flarex</span>
-          </button>
-          <button type="button" role="tab" aria-selected={editorPage === "notes"} className={editorPage === "notes" ? "is-active" : ""} onClick={() => setEditorPage("notes")}>
-            <StickyNote size={14} aria-hidden="true" />
-            <span>Notes</span>
-          </button>
-        </div>
         </div>
       </div>
+      {/* DaVinci-style page bar — a real app FOOTER (moved out of the timeline stack 2026-07-22).
+          It used to live inside `.timeline-stack` (timeline grid row), so every page/layout swap
+          that hid the timeline (Notes/Flarex) dragged it mid-screen. As a sibling of `.editor-layout`
+          it reserves its own row via `--nle-pagebar-h` and stays pinned to the bottom on every page. */}
+      <footer className="flarex-page-tabs" role="tablist" aria-label="Editor pages">
+        <button type="button" role="tab" aria-selected={editorPage === "edit"} className={editorPage === "edit" ? "is-active" : ""} onClick={() => setEditorPage("edit")}>
+          <Film size={14} aria-hidden="true" />
+          <span>Edit</span>
+        </button>
+        <button type="button" role="tab" aria-selected={editorPage === "flarex"} className={editorPage === "flarex" ? "is-active" : ""} onClick={() => setEditorPage("flarex")}>
+          <Workflow size={14} aria-hidden="true" />
+          <span>Flarex</span>
+        </button>
+        <button type="button" role="tab" aria-selected={editorPage === "notes"} className={editorPage === "notes" ? "is-active" : ""} onClick={() => setEditorPage("notes")}>
+          <StickyNote size={14} aria-hidden="true" />
+          <span>Notes</span>
+        </button>
+      </footer>
       {responsiveLayout.usesOverlayPanels && activeResponsiveOverlay ? (
         <button type="button" className="editor-responsive-backdrop" aria-label="Close panel" onClick={() => setActiveResponsiveOverlay(null)} />
       ) : null}

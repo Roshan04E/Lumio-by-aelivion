@@ -3341,6 +3341,9 @@ input[type="checkbox"] {
   --nle-focus-ring: 0 0 0 1px var(--nle-accent);
   --handle-border-color: var(--nle-accent);
   --handle-accent-soft: var(--nle-accent);
+  /* Height of the page-switcher FOOTER (Edit/Flarex/Notes). Reserved below the editor layout so the
+     footer sits at the true bottom on every page, unaffected by which page's layout is showing. */
+  --nle-pagebar-h: 34px;
 }
 
 /* Accent themes (2026-07-05): the base dark cinematic surfaces (--nle-bg/panel/border/text) stay
@@ -4157,7 +4160,8 @@ input[type="checkbox"] {
   position: relative;
   display: grid;
   grid-template-rows: minmax(var(--editor-viewer-min-height, 260px), 1fr) 8px var(--editor-timeline-height, var(--timeline-height, 270px));
-  height: calc(100vh - var(--nle-topbar-h));
+  /* Leaves the page-switcher footer its own row at the bottom (see --nle-pagebar-h). */
+  height: calc(100vh - var(--nle-topbar-h) - var(--nle-pagebar-h));
   gap: 0;
   padding: 6px 8px 8px;
   align-items: stretch;
@@ -4226,7 +4230,9 @@ input[type="checkbox"] {
   grid-column: 1 / -1;
   grid-row: 3;
 }
-.editor-layout.is-notes-page .timeline-stack > *:not(.flarex-page-tabs) {
+/* The page bar is now an app-level footer (outside the layout), so on Notes the whole timeline
+   stack just hides — the board takes rows 1–2 and row 3 collapses. */
+.editor-layout.is-notes-page .timeline-stack {
   display: none;
 }
 .editor-layout.is-notes-page .notes-workspace {
@@ -22371,7 +22377,13 @@ input.scrub-number:focus {
 
 /* DaVinci-style bottom page bar: centered page buttons under the timeline area. Future pages
    (Audio, Notes) join this row. */
+/* App footer: full-width bar, its own reserved row (--nle-pagebar-h) at the very bottom on every
+   page. No longer nested in the timeline stack, so page/layout swaps never move it. */
 .flarex-page-tabs {
+  flex: 0 0 auto;
+  width: 100%;
+  height: var(--nle-pagebar-h);
+  box-sizing: border-box;
   display: flex;
   gap: 6px;
   justify-content: center;
@@ -22502,21 +22514,7 @@ input.scrub-number:focus {
   padding-right: 2px;
   white-space: nowrap;
 }
-.flarex-toolbar-btn {
-  appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(38, 42, 50, 0.8);
-  color: rgba(230, 236, 244, 0.8);
-  font-size: 10.5px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.flarex-toolbar-btn:hover {
-  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
-  color: var(--nle-accent);
-}
+/* `.flarex-toolbar-btn` styling now lives in the canonical `.ui-btn` grouped rule (Notes page). */
 
 /* ── Notes page (plans/notes-sonnet-execution.md) ────────────────────────────────────────────── */
 
@@ -22570,27 +22568,77 @@ input.scrub-number:focus {
   display: flex;
   align-items: center;
   gap: 3px;
+  padding: 3px;
+  border-radius: var(--nle-radius-sm);
+  background: rgba(255, 255, 255, 0.04);
 }
 .notes-toolbar-zoom {
   margin-left: auto;
+  background: transparent;
+  padding: 0;
 }
-.notes-toolbar-btn {
+/* ── Canonical editor button — SINGLE SOURCE OF TRUTH ───────────────────────────────────────────
+   The flat "media-pool / preview-tools" language (borderless, transparent, muted label; hover →
+   panel-3 fill + white; active → accent tint). ANY new button should use `.ui-btn` — add
+   `.ui-btn-icon` for icon-only squares, `.is-active` when selected, `.ui-btn-group` for the subtle
+   container that wraps a cluster. The bespoke toolbar-btn classes below are grouped INTO this rule
+   (not styled separately) so every page's buttons share one definition — restyle here, all update. */
+.ui-btn,
+.notes-toolbar-btn,
+.flarex-toolbar-btn {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(38, 42, 50, 0.8);
-  color: rgba(230, 236, 244, 0.8);
-  font-size: 10.5px;
-  padding: 3px 9px;
-  border-radius: 4px;
-  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--nle-radius-xs);
+  background: transparent;
+  color: var(--editor-text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
   white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
 }
-.notes-toolbar-btn:hover {
-  border-color: color-mix(in srgb, var(--nle-accent) 50%, transparent);
-  color: var(--nle-accent);
+.ui-btn:hover:not(:disabled):not(.is-active),
+.notes-toolbar-btn:hover:not(:disabled):not(.is-active),
+.flarex-toolbar-btn:hover:not(:disabled):not(.is-active) {
+  background: var(--nle-panel-3);
+  color: #fff;
+}
+.ui-btn.is-active,
+.notes-toolbar-btn.is-active,
+.flarex-toolbar-btn.is-active {
+  background: var(--editor-accent-bg);
+  color: var(--editor-accent);
+}
+.ui-btn:disabled,
+.notes-toolbar-btn:disabled,
+.flarex-toolbar-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ui-btn-icon {
+  padding: 0;
+  width: 26px;
+}
+.ui-btn-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--nle-radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+}
+/* Add-buttons double as drag sources (drag onto the board to place at a point). */
+.notes-toolbar-btn-draggable {
+  cursor: grab;
+}
+.notes-toolbar-btn-draggable:active {
+  cursor: grabbing;
 }
 .notes-zoom-readout {
   font-size: 10px;
@@ -22628,6 +22676,34 @@ input.scrub-number:focus {
   transform-origin: 0 0;
   width: 0;
   height: 0;
+}
+
+/* Overview minimap (bottom-right): scaled snapshot of all cards + a viewport rectangle. */
+.notes-minimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 8;
+  background: rgba(16, 18, 22, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  overflow: hidden;
+  touch-action: none;
+}
+.notes-minimap-item {
+  fill: rgba(230, 236, 244, 0.4);
+}
+.notes-minimap-item.is-frame {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.25);
+  stroke-width: 1;
+}
+.notes-minimap-viewport {
+  fill: color-mix(in srgb, var(--nle-accent) 14%, transparent);
+  stroke: var(--nle-accent);
+  stroke-width: 1.5;
 }
 
 .notes-edges-overlay {
@@ -22749,8 +22825,16 @@ input.scrub-number:focus {
   display: flex;
   flex-direction: column;
 }
+/* Auto-grow while editing: the surface goes in-flow so the card's `height: auto` sizes to the
+   text content (no inner scrollbar) and grows as you type. */
+.notes-card.is-grow-editing .notes-card-surface {
+  position: relative;
+  inset: auto;
+  height: auto;
+  min-height: var(--grow-min, 0px);
+}
 .notes-card.is-selected .notes-card-surface {
-  box-shadow: 0 0 0 2px var(--nle-accent), 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 0 0 calc(2px / var(--notes-zoom, 1)) var(--nle-accent), 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 .notes-card.is-dragging .notes-card-surface {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
@@ -22768,7 +22852,7 @@ input.scrub-number:focus {
   box-shadow: none;
 }
 .notes-card-frame.is-selected .notes-card-surface {
-  box-shadow: 0 0 0 2px var(--nle-accent);
+  box-shadow: 0 0 0 calc(2px / var(--notes-zoom, 1)) var(--nle-accent);
 }
 .notes-frame-titlebar {
   flex: 0 0 auto;
@@ -22796,14 +22880,17 @@ input.scrub-number:focus {
 
 .notes-card-hover-toolbar {
   position: absolute;
-  top: -26px;
+  bottom: 100%;
   left: 0;
+  margin-bottom: 6px;
   display: none;
-  z-index: 2;
+  align-items: center;
+  gap: 4px;
+  z-index: 7;
 }
 .notes-card:hover .notes-card-hover-toolbar,
 .notes-card.is-selected .notes-card-hover-toolbar {
-  display: block;
+  display: flex;
 }
 .notes-swatch-row {
   display: flex;
@@ -22838,23 +22925,37 @@ input.scrub-number:focus {
   gap: 4px;
   cursor: text;
 }
+/* Title is deliberately larger + heavier + brighter than the body, with a hairline divider, so the
+   heading reads as a heading (the two used to be the same 11.5px and blurred together). */
 .notes-note-title,
 .notes-note-title-input {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: rgba(230, 236, 244, 0.9);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.1px;
+  color: #fff;
+  line-height: 1.25;
+}
+.notes-note-title {
+  margin-bottom: 5px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
 }
 .notes-note-title-input {
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 3px;
-  padding: 2px 4px;
-  margin-bottom: 2px;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0;
+  padding: 0 0 4px;
+  margin-bottom: 5px;
+}
+.notes-note-title-input:focus {
+  outline: none;
+  border-bottom-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
 }
 .notes-note-text {
   font-size: 11.5px;
-  line-height: 1.4;
-  color: rgba(230, 236, 244, 0.85);
+  line-height: 1.45;
+  color: rgba(230, 236, 244, 0.8);
   white-space: pre-wrap;
   overflow: auto;
   flex: 1 1 auto;
@@ -22865,6 +22966,10 @@ input.scrub-number:focus {
 .notes-note-body-input {
   flex: 1 1 auto;
   resize: none;
+  /* Auto-grown by JS to fit content (overflow hidden so the measured scrollHeight has no scrollbar
+     baked in); a min-height keeps a fresh note from collapsing to a single line. */
+  min-height: 56px;
+  overflow: hidden;
   background: transparent;
   border: 1px solid color-mix(in srgb, var(--nle-accent) 50%, transparent);
   border-radius: 3px;
@@ -22872,6 +22977,57 @@ input.scrub-number:focus {
   font: inherit;
   padding: 4px;
   outline: none;
+}
+
+/* Bare rich-text card (type "text"): transparent/borderless in view mode — just typography on the
+   board. Editing mounts the shared RichTextEditor, so the surface gets a subtle fill for legibility. */
+.notes-card-text .notes-card-surface {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.notes-text-body {
+  cursor: text;
+  padding: 6px 8px;
+  overflow: auto;
+}
+.notes-text-render {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: rgba(236, 240, 246, 0.95);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Editing: give the card a real surface so the toolbar + caret read against the board. */
+.notes-text-body.is-editing {
+  padding: 0;
+  background: var(--nle-panel-2, #1a1d23);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.notes-text-body .rich-text-control {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.notes-text-body .rich-text-toolbar {
+  flex-wrap: wrap;
+}
+.notes-text-body .rich-text-editor {
+  flex: 1 1 auto;
+  min-height: 40px;
+  /* Grow with content (the card auto-heights while editing) instead of scrolling inside a fixed box:
+     drop the inspector's max-height cap + its own border/fill (the card already provides the box). */
+  max-height: none;
+  overflow: visible;
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 8px 10px;
+  font-size: 15px;
 }
 
 .notes-asset-body {
@@ -22956,45 +23112,110 @@ input.scrub-number:focus {
 }
 
 .notes-todo-body {
-  gap: 4px;
+  gap: 6px;
+  padding: 8px 10px;
 }
-.notes-todo-progress {
+/* Header: a thin progress bar + an "N/total" count, so completion reads at a glance. */
+.notes-todo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.notes-todo-bar {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.notes-todo-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--nle-accent);
+  transition: width 0.15s ease;
+}
+.notes-todo-count {
+  flex: 0 0 auto;
   font-size: 10px;
-  color: rgba(230, 236, 244, 0.45);
-  align-self: flex-end;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.5);
+  font-variant-numeric: tabular-nums;
 }
 .notes-todo-rows {
   flex: 1 1 auto;
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
 }
 .notes-todo-row {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
+  padding: 2px 0;
+  cursor: text;
 }
-.notes-todo-row input[type="checkbox"] {
+.notes-todo-check {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
   accent-color: var(--nle-accent);
+  cursor: pointer;
 }
-.notes-todo-text-input,
+.notes-todo-text-input {
+  flex: 1 1 auto;
+  background: transparent;
+  border: none;
+  color: rgba(230, 236, 244, 0.88);
+  font-size: 11.5px;
+  line-height: 1.3;
+  padding: 1px 0;
+}
+.notes-todo-text-input:focus {
+  outline: none;
+}
+.notes-todo-row.is-done .notes-todo-text-input {
+  color: rgba(230, 236, 244, 0.38);
+  text-decoration: line-through;
+}
+.notes-todo-empty {
+  font-size: 10.5px;
+  color: rgba(230, 236, 244, 0.3);
+  padding: 2px 0;
+}
+/* Add-item row: a leading + glyph and a placeholder input; the whole row is the affordance, with
+   no error-looking underline (the old always-accent border-bottom read as a red error on red themes). */
+.notes-todo-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.notes-todo-add-plus {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  color: rgba(230, 236, 244, 0.4);
+  font-size: 12px;
+  line-height: 1;
+}
 .notes-todo-new-input {
   flex: 1 1 auto;
   background: transparent;
   border: none;
-  border-bottom: 1px solid transparent;
-  color: rgba(230, 236, 244, 0.85);
-  font-size: 11px;
-  padding: 1px 2px;
+  color: rgba(230, 236, 244, 0.8);
+  font-size: 11.5px;
+  padding: 1px 0;
 }
-.notes-todo-text-input:focus,
 .notes-todo-new-input:focus {
   outline: none;
-  border-bottom-color: color-mix(in srgb, var(--nle-accent) 60%, transparent);
 }
-.notes-todo-new-input {
-  color: rgba(230, 236, 244, 0.5);
+.notes-todo-new-input::placeholder {
+  color: rgba(230, 236, 244, 0.35);
 }
 
 /* Connector dots sit fully OUTSIDE the card edge (with a small gap) and are complete circles —
@@ -23002,11 +23223,14 @@ input.scrub-number:focus {
    anchored to an edge midpoint, then pushed entirely past that edge by its own size + a 5px gap. */
 .notes-connector-dot {
   position: absolute;
-  width: 11px;
-  height: 11px;
+  /* Constant on-screen size at any zoom (same rationale as the resize handles). */
+  --dot-size: calc(11px / var(--notes-zoom, 1));
+  --dot-gap: calc(5px / var(--notes-zoom, 1));
+  width: var(--dot-size);
+  height: var(--dot-size);
   border-radius: 50%;
   background: var(--nle-accent);
-  border: 2px solid var(--nle-panel, #14161b);
+  border: calc(2px / var(--notes-zoom, 1)) solid var(--nle-panel, #14161b);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   opacity: 0;
   cursor: crosshair;
@@ -23019,33 +23243,36 @@ input.scrub-number:focus {
 .notes-connector-dot-top {
   left: 50%;
   top: 0;
-  transform: translate(-50%, calc(-100% - 5px));
+  transform: translate(-50%, calc(-100% - var(--dot-gap)));
 }
 .notes-connector-dot-bottom {
   left: 50%;
   top: 100%;
-  transform: translate(-50%, 5px);
+  transform: translate(-50%, var(--dot-gap));
 }
 .notes-connector-dot-left {
   left: 0;
   top: 50%;
-  transform: translate(calc(-100% - 5px), -50%);
+  transform: translate(calc(-100% - var(--dot-gap)), -50%);
 }
 .notes-connector-dot-right {
   left: 100%;
   top: 50%;
-  transform: translate(5px, -50%);
+  transform: translate(var(--dot-gap), -50%);
 }
 
 .notes-resize-handle {
   position: absolute;
-  width: calc(var(--handle-size, 13px) / var(--notes-zoom, 1));
-  height: calc(var(--handle-size, 13px) / var(--notes-zoom, 1));
+  width: var(--handle-size, 10px);
+  height: var(--handle-size, 10px);
   background: var(--handle-fill, #fff);
-  border: var(--handle-border-width, 2px) solid var(--handle-border-color, var(--nle-accent));
+  border: var(--handle-border-width, 1.5px) solid var(--handle-border-color, var(--nle-accent));
   border-radius: var(--handle-radius, 2px);
-  box-shadow: var(--handle-shadow, 0 1px 4px rgba(0, 0, 0, 0.5));
-  transform: translate(-50%, -50%);
+  box-shadow: var(--handle-shadow, 0 1px 3px rgba(0, 0, 0, 0.5));
+  /* Counter-scale the WHOLE handle (size + border + radius + shadow) by the board zoom so it stays
+     a constant on-screen size at any zoom — earlier only width/height counter-scaled, leaving a
+     thick border + heavy shadow ballooning at high zoom. */
+  transform: translate(-50%, -50%) scale(calc(1 / var(--notes-zoom, 1)));
   z-index: 6;
 }
 
@@ -23269,6 +23496,14 @@ input.scrub-number:focus {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+/* Fixed-anchored variant (menus opened from the scrollable toolbar): positioned in viewport
+   coords via inline top/left so the toolbar's `overflow-x: auto` can't clip them. */
+.notes-board-switcher-menu.is-fixed {
+  position: fixed;
+  top: auto;
+  left: auto;
+  z-index: 200;
 }
 .notes-board-switcher-row {
   display: flex;
@@ -23543,18 +23778,109 @@ input.scrub-number:focus {
 
 /* Q3.1: markdown-lite note rendering (deterministic parser → real elements, no innerHTML). */
 .notes-note-md-heading {
-  margin: 0 0 2px;
+  margin: 6px 0 3px;
   font-weight: 700;
-  color: rgba(230, 236, 244, 0.95);
+  color: rgba(230, 236, 244, 0.97);
+  line-height: 1.25;
+}
+.notes-note-md-heading:first-child {
+  margin-top: 0;
 }
 h1.notes-note-md-heading {
-  font-size: 13.5px;
+  font-size: 15px;
 }
 h2.notes-note-md-heading {
-  font-size: 12.5px;
+  font-size: 13px;
+}
+h3.notes-note-md-heading {
+  font-size: 12px;
+  color: rgba(230, 236, 244, 0.85);
 }
 .notes-note-md-paragraph {
   margin: 0 0 2px;
+}
+.notes-note-md-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  padding: 0.5px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--nle-accent);
+}
+.notes-note-md-ordered-index {
+  flex: 0 0 auto;
+  color: rgba(230, 236, 244, 0.5);
+  font-variant-numeric: tabular-nums;
+  min-width: 14px;
+}
+.notes-note-md-task {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0 0 2px;
+}
+.notes-note-md-task-box {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1.5px solid rgba(255, 255, 255, 0.3);
+  font-size: 10px;
+  line-height: 11px;
+  text-align: center;
+  color: transparent;
+  align-self: center;
+}
+.notes-note-md-task.is-checked .notes-note-md-task-box {
+  background: var(--nle-accent);
+  border-color: var(--nle-accent);
+  color: #14161b;
+}
+.notes-note-md-task.is-checked > span:last-child {
+  color: rgba(230, 236, 244, 0.4);
+  text-decoration: line-through;
+}
+
+/* ── Doc card (Obsidian-style live markdown) ─────────────────────────────────────────────────── */
+.notes-doc-body {
+  padding: 0;
+  overflow: hidden;
+}
+.notes-doc-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: rgba(230, 236, 244, 0.85);
+  white-space: normal;
+}
+/* Editing: raw markdown (left) beside a live-updating rendered preview (right). */
+.notes-doc-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.notes-doc-input {
+  min-height: 0;
+  resize: none;
+  border: none;
+  outline: none;
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(230, 236, 244, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+.notes-doc-input::placeholder {
+  color: rgba(230, 236, 244, 0.3);
+}
+.notes-doc-preview-live {
+  padding: 10px 12px;
 }
 .notes-note-md-bullet {
   display: flex;
