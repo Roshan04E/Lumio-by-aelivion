@@ -159,8 +159,19 @@ export function TextBehindPersonToolPanel({
     if (!bakedMask || !baseComposition || !selectedAsset) {
       return undefined;
     }
+    // A windowed matte (custom / used-in-timeline range) covers only a slice of the source, so the
+    // built layers last just that slice. Trim the throwaway standalone preview comp to the matte's
+    // span so the viewer scrubs exactly the produced range instead of going black past the slice.
+    // The editor path (liveComposition) keeps its real duration — the slice inserts at the clip's spot.
+    const previewBase =
+      liveComposition || !bakedMask.durationSeconds
+        ? baseComposition
+        : {
+            ...baseComposition,
+            durationSeconds: Math.min(baseComposition.durationSeconds, bakedMask.durationSeconds)
+          };
     return applyTextBehindPersonComposition(
-      baseComposition,
+      previewBase,
       {
         text: text || "TEXT",
         textColor,

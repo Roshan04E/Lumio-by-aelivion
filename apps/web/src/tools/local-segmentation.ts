@@ -431,6 +431,27 @@ interface QualitySession {
   runFrame: (frame: ImageData, state: unknown) => Promise<{ luma: Uint8ClampedArray; nextState: unknown }>;
 }
 
+/**
+ * ONNX Runtime sessions are NOT reentrant: invoking `run()` while a prior `run()` on the same
+ * session is still in flight throws `kernel "[Concat] Concat_2" is not allowed to be called
+ * recursively`. The RVM quality session is a single cached global shared by EVERY mask tool
+ * (Extract Person, Remove Background, Text Behind Person), so two tool flows whose bakes overlap
+ * would interleave `run()` calls on it and crash. Serialize every `run()` through one promise chain
+ * so the shared session is only ever entered one call at a time. This is correct, not just safe:
+ * RVM's recurrence lives entirely in the r1i..r4i feed tensors (the session is stateless between
+ * calls), so queuing independent clips' frames never corrupts state.
+ */
+let qualityRunChain: Promise<unknown> = Promise.resolve();
+function runQualityExclusive<T>(task: () => Promise<T>): Promise<T> {
+  const result = qualityRunChain.then(task, task);
+  // Keep the chain alive regardless of this task's outcome, without leaking rejections.
+  qualityRunChain = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
 async function getQualitySession(
   profile: SegmentationDeviceProfile,
   onProgress?: (message: string) => void
@@ -495,11 +516,14 @@ function wrapRvmSession(
       const inferenceSession = session as { run: (feeds: Record<string, unknown>) => Promise<Record<string, { data: Float32Array }>> };
       const input = imageDataToNchwTensor(ort, frame);
       const downsampleRatio = new ort.Tensor("float32", new Float32Array([downsampleRatioFor(frame.width, frame.height)]), [1]);
-      const outputs = await inferenceSession.run({
-        src: input,
-        downsample_ratio: downsampleRatio,
-        ...(state as Record<string, unknown>)
-      });
+      // Serialize on the shared session so overlapping tool flows can't enter run() reentrantly.
+      const outputs = await runQualityExclusive(() =>
+        inferenceSession.run({
+          src: input,
+          downsample_ratio: downsampleRatio,
+          ...(state as Record<string, unknown>)
+        })
+      );
       const alpha = outputs.pha?.data;
       if (!alpha) {
         throw new Error("Matting model output missing alpha tensor.");

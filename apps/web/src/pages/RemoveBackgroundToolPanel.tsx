@@ -174,8 +174,20 @@ export function RemoveBackgroundToolPanel({
     if (!bakedMask || !baseComposition || !selectedAsset) {
       return undefined;
     }
+    // A windowed matte (custom / used-in-timeline range) covers only a slice of the source; the built
+    // subject/plate layers last exactly that slice. On the standalone /tools preview the base is a
+    // throwaway comp sized to the WHOLE source, so scrubbing past the slice showed black. Trim the
+    // preview comp to the matte's covered span so the viewer scrubs exactly the produced range. The
+    // editor path (liveComposition) keeps its real duration — the slice inserts at the clip's spot there.
+    const previewBase =
+      liveComposition || !bakedMask.durationSeconds
+        ? baseComposition
+        : {
+            ...baseComposition,
+            durationSeconds: Math.min(baseComposition.durationSeconds, bakedMask.durationSeconds)
+          };
     return applyRemoveBackgroundComposition(
-      baseComposition,
+      previewBase,
       { maskId: bakedMask.id, mask: bakedMask, sourceAssetId: selectedAsset.id, ...applyOptions },
       liveComposition ? "insert" : "replace"
     );
