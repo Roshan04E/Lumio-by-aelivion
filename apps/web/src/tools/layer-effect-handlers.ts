@@ -339,10 +339,7 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
     isCancelled
   };
   const result = wantsQuality
-    ? await segmentVideoQuality(
-        { ...segmentOptions, tier: "quality" },
-        chooseSegmentationDeviceProfile(detectBrowserToolCapabilities(), windowSeconds)
-      )
+    ? await runQualityWithFastFallback(segmentOptions, windowSeconds, isCancelled, onProgress)
     : await segmentVideoFast({ ...segmentOptions, tier: "fast" });
   onProgress("Saving matte...");
   const store = await createToolArtifactStore();
@@ -362,6 +359,33 @@ async function runSegmentationMatte(args: LayerToolEffectRunArgs): Promise<MaskS
     registerTrackingForAsset(asset.id, result.trackingPath);
   }
   return outcome.maskSequence;
+}
+
+/**
+ * Runs the high-quality RVM matte, but degrades to the fast MediaPipe tier instead of failing when
+ * the quality model can't run on this device. The RVM ONNX export uses ops (e.g. AveragePool with
+ * ceil_mode) that some onnxruntime-web execution providers reject ("using ceil() in shape
+ * computation is not yet supported for AveragePool") — on those devices High quality would otherwise
+ * hard-error. A real cancellation is NOT swallowed (re-thrown so the caller can bail).
+ */
+async function runQualityWithFastFallback(
+  segmentOptions: Omit<Parameters<typeof segmentVideoFast>[0], "tier">,
+  windowSeconds: number,
+  isCancelled: () => boolean,
+  onProgress: (message: string) => void
+): Promise<Awaited<ReturnType<typeof segmentVideoQuality>>> {
+  try {
+    return await segmentVideoQuality(
+      { ...segmentOptions, tier: "quality" },
+      chooseSegmentationDeviceProfile(detectBrowserToolCapabilities(), windowSeconds)
+    );
+  } catch (error) {
+    if (isCancelled()) {
+      throw error;
+    }
+    onProgress("High-quality model can't run on this device — using the fast matte instead.");
+    return segmentVideoFast({ ...segmentOptions, tier: "fast" });
+  }
 }
 
 /**

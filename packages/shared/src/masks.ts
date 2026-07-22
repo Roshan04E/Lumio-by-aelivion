@@ -128,6 +128,25 @@ export function createMatteRefFromMaskSequence(
   };
 }
 
+/**
+ * Resolves the composite's duration + source in-point from a (possibly windowed) matte. A matte baked
+ * over only a used SLICE carries `startSeconds` (in-point) and a shorter `durationSeconds`; the built
+ * subject/plate layers must last exactly the slice and play source from its start, or the subject
+ * freezes on the matte's last frame past the window. Full-source mattes (or none) → whole composition.
+ */
+function matteWindow(
+  mask: MaskSequenceArtifactData | undefined,
+  compositionDuration: number
+): { duration: number; sourceInSeconds: number } {
+  if (!mask) {
+    return { duration: compositionDuration, sourceInSeconds: 0 };
+  }
+  const sourceInSeconds = mask.startSeconds ?? 0;
+  // Cap to the matte's covered span so the composite never outlives its matte.
+  const duration = Math.min(compositionDuration, mask.durationSeconds || compositionDuration);
+  return { duration: Math.max(0.1, duration), sourceInSeconds };
+}
+
 export interface TextBehindPersonOptions {
   text: string;
   textColor: string;
@@ -454,7 +473,9 @@ export function applyTextBehindPersonComposition(
   options: TextBehindPersonOptions,
   mode: "insert" | "replace" = "replace"
 ): TimelineComposition {
-  const duration = composition.durationSeconds;
+  // Honour a windowed matte (see matteWindow): the composite lasts exactly the segmented slice and
+  // plays source from its in-point, so nothing freezes past the window. Full-source → whole comp.
+  const { duration, sourceInSeconds: matteIn } = matteWindow(options.mask, composition.durationSeconds);
   const trackBackgroundId = `${composition.id}_tbp_background`;
   const trackTextId = `${composition.id}_tbp_text`;
   const trackSubjectId = `${composition.id}_tbp_subject`;
@@ -465,6 +486,7 @@ export function applyTextBehindPersonComposition(
     name: "Background plate",
     assetId: sourceAssetId,
     durationSeconds: duration,
+    sourceInSeconds: matteIn,
     opacity: 92,
     effects: [
       effect(`${trackBackgroundId}_grade`, "brightnessContrast", "Background depth", 32, {
@@ -494,6 +516,7 @@ export function applyTextBehindPersonComposition(
     name: "Masked subject foreground",
     assetId: sourceAssetId,
     durationSeconds: duration,
+    sourceInSeconds: matteIn,
     opacity: 100,
     effects: [
       effect(`${trackSubjectId}_mask_preview`, "shadow", "Mock mask edge", 28, {
@@ -590,7 +613,10 @@ export function applyRemoveBackgroundComposition(
   options: RemoveBackgroundOptions,
   mode: "insert" | "replace" = "replace"
 ): TimelineComposition {
-  const duration = composition.durationSeconds;
+  // A windowed matte covers only a slice of the source; the composite must play (and last) exactly
+  // that slice, or the subject freezes on the matte's last frame past the window. `matteWindow`
+  // resolves to the whole composition for full-source mattes (unchanged).
+  const { duration, sourceInSeconds: matteIn } = matteWindow(options.mask, composition.durationSeconds);
   const trackSubjectId = `${composition.id}_rbg_subject`;
   const trackPlateId = `${composition.id}_rbg_plate`;
   const sourceAssetId = options.sourceAssetId ?? findFirstVisualAssetId(composition);
@@ -600,6 +626,7 @@ export function applyRemoveBackgroundComposition(
     name: options.mode === "greenScreen" ? "Green-screen subject" : "Transparent subject",
     assetId: sourceAssetId,
     durationSeconds: duration,
+    sourceInSeconds: matteIn,
     opacity: 100,
     effects: [
       effect(`${trackSubjectId}_edge`, "shadow", "Mock matte edge", 18, {
@@ -1262,6 +1289,8 @@ function createVisualLayer(input: {
   assetId?: string | undefined;
   durationSeconds: number;
   opacity: number;
+  /** Source in-point — set when a windowed matte covers only a slice, so the layer plays that slice. */
+  sourceInSeconds?: number | undefined;
   effects?: TimelineEffect[] | undefined;
 }): TimelineLayer {
   return {
@@ -1272,6 +1301,7 @@ function createVisualLayer(input: {
     startSeconds: 0,
     durationSeconds: input.durationSeconds,
     assetId: input.assetId,
+    ...(input.sourceInSeconds ? { sourceInSeconds: input.sourceInSeconds } : {}),
     fit: "cover",
     transform: {
       position: { x: 50, y: 50 },
