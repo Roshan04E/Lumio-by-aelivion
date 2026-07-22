@@ -175,9 +175,11 @@ export function GraphEditor({ layer, onChange, currentTime, onSeek, fps, focusTa
   // delete) drive both, so switching views never loses context. Choice persists per session.
   const [graphView, setGraphView] = useState<"curves" | "lanes">(() => {
     try {
-      return window.localStorage.getItem("orreris.graph.view") === "lanes" ? "lanes" : "curves";
+      // Default to the KEYFRAMES (lanes) view — the dope-sheet is the everyday surface (curves are
+      // opt-in). Only an explicit prior "curves" choice overrides it.
+      return window.localStorage.getItem("orreris.graph.view") === "curves" ? "curves" : "lanes";
     } catch {
-      return "curves";
+      return "lanes";
     }
   });
   useEffect(() => {
