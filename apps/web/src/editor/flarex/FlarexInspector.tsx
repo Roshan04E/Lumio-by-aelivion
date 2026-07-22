@@ -8,7 +8,8 @@
  * The panel is RESIZABLE via the left-edge handle (width persisted per browser).
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import {
   evaluateFlarexNodeParam,
   getFlarexNodeDefinition,
@@ -163,6 +164,7 @@ function hexToRgb(hex: string): number[] {
 }
 
 const WIDTH_KEY = "flarex.inspectorWidth";
+const MAX_KEY = "flarex.inspectorMax";
 const MIN_W = 240;
 const MAX_W = 560;
 
@@ -182,6 +184,36 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
     return Number.isFinite(stored) && stored >= MIN_W && stored <= MAX_W ? stored : 300;
   });
   const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
+  // Maximize: the node inspector is cramped in the workspace corner, so a toggle lifts it to a
+  // full-height column docked immediately LEFT of the main clip inspector (which stays open) — you
+  // can read a node's params and the clip's grade side by side. Persisted like the width.
+  const [maximized, setMaximized] = useState<boolean>(() => window.localStorage.getItem(MAX_KEY) === "1");
+  const toggleMax = () => {
+    setMaximized((m) => {
+      const next = !m;
+      window.localStorage.setItem(MAX_KEY, next ? "1" : "0");
+      return next;
+    });
+  };
+  // Drive the editor layout so a maximized inspector sits ALONGSIDE the viewer (shrinking it),
+  // never on top: widen the right column by the inspector's width via a class + var on
+  // `.editor-layout`, and the fixed panel fills that reserved strip. Self-contained (no prop chain);
+  // cleaned up on restore and on unmount (leaving the Flarex page).
+  useEffect(() => {
+    const layout = document.querySelector<HTMLElement>(".editor-layout");
+    if (!layout) return undefined;
+    if (maximized) {
+      layout.classList.add("is-flarex-inspector-max");
+      layout.style.setProperty("--flarex-max-w", `${width}px`);
+    } else {
+      layout.classList.remove("is-flarex-inspector-max");
+      layout.style.removeProperty("--flarex-max-w");
+    }
+    return () => {
+      layout.classList.remove("is-flarex-inspector-max");
+      layout.style.removeProperty("--flarex-max-w");
+    };
+  }, [maximized, width]);
 
   const onResizeDown = (event: React.PointerEvent) => {
     resizeRef.current = { startX: event.clientX, startW: width };
@@ -200,7 +232,10 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
   };
 
   const shell = (children: React.ReactNode) => (
-    <aside className="flarex-inspector" style={{ flex: `0 0 ${width}px`, width }}>
+    <aside
+      className={`flarex-inspector${maximized ? " flarex-inspector--max" : ""}`}
+      style={{ flex: `0 0 ${width}px`, width }}
+    >
       <div
         className="flarex-inspector-resize"
         title="Drag to resize"
@@ -209,6 +244,15 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
         onPointerUp={onResizeUp}
         onPointerCancel={onResizeUp}
       />
+      <button
+        type="button"
+        className="flarex-inspector-max-btn"
+        title={maximized ? "Restore node inspector" : "Maximize node inspector (full height, beside the main inspector)"}
+        aria-pressed={maximized}
+        onClick={toggleMax}
+      >
+        {maximized ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+      </button>
       {children}
     </aside>
   );
