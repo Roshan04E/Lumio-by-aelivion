@@ -277,6 +277,15 @@ export interface SceneGroupDraw {
   /** Stable per-instance key for the grade renderer/LUT cache (the compound clip id). Required when
    *  `pipeline` is set; falls back to `debugGroupId`. */
   groupKey?: string | undefined;
+  /**
+   * Runtime evaluation identity of the node whose output this group materializes (Flarex evaluation
+   * engine, Slice 1). RUNTIME-ONLY — never serialized, never read from persisted project data, and
+   * distinct from the diagnostic `debugGroupId`. The compositor does NOT read this in Slice 1; it is
+   * the durable seam later slices key on for caching, profiling, GPU-resource ownership, and async
+   * evaluation. Undefined on every group that is not an explicit materialization boundary (i.e. all
+   * groups today) → byte-identical to before this field existed.
+   */
+  evaluationKey?: string | undefined;
 }
 
 /** A compositor draw entry: a normal layer, a folded transition between two full layer draws, or a
