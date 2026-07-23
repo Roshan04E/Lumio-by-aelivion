@@ -12,9 +12,10 @@ decision, what was rejected, the consequences, and whether it is Stable or Provi
 - **Append-only.** Never rewrite an accepted ADR. To change a decision, add a new ADR that
   supersedes it and set the old one's status to `Superseded by ADR-NNN`.
 - **One decision per file.** `NNN-kebab-title.md`.
-- **Status vocabulary:** `Stable` (frozen — change only for a demonstrable architectural flaw),
+- **Status vocabulary:** `Stable` / `Frozen` (change only for a demonstrable architectural flaw),
   `Provisional` (accepted but not yet proven by a production feature — will freeze or fall),
-  `Superseded by ADR-NNN`, `Deprecated`.
+  `Superseded by ADR-NNN`, `Deprecated`. Frozen normative ADRs carry a dependency header
+  (`Depends on:` / `Supersedes:` / `Implemented by:`) so the authoritative document is obvious.
 - **Reuse scorecard.** A change that adds a new inspector control, a new `PropertyField` kind,
   or a renderer branch must cite the ADR it satisfies — or add one. Default answer is "no new
   primitive"; a "yes" is a reviewable event, not a routine one.
@@ -42,3 +43,6 @@ decision, what was rejected, the consequences, and whether it is Stable or Provi
 - [ADR-005 — Inspector Adapter Pattern](005-inspector-adapter-pattern.md) — Stable
 - [ADR-006 — Theme Accent Doctrine](006-theme-accent-doctrine.md) — Stable
 - [ADR-007 — Flarex Compiler Contract (lowering to SceneDraw)](007-flarex-compiler-contract.md) — Stable
+- [ADR-008 — Flarex Evaluation Engine (content-addressed materialization substrate)](008-flarex-evaluation-engine.md) — Frozen
+- [ADR-009 — Content Version Contract (completeness rules)](009-content-version-contract.md) — Frozen (§1–3 normative; §4–8 superseded by ADR-010)
+- [ADR-010 — Node Capability Contract (the evaluator foundation)](010-node-capability-contract.md) — Frozen

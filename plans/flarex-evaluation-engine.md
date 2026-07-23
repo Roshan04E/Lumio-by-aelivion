@@ -1,12 +1,20 @@
 # Flarex Evaluation Engine — Architecture Audit & Roadmap
 
-> Status: design review (no code). Milestone owner doc for the "Flarex evaluation engine" push
-> (see ADR-001 foundation freeze, ADR-007 compiler contract). Audit date: 2026-07-23.
+> Status: **architecture frozen** — implementation phase. The evaluation-engine design is settled
+> in ADR-008/009/010 (frozen 2026-07-23); this doc is the audit that motivated them plus the
+> shippable slice roadmap. Implementation must **satisfy** the frozen contract, not redefine it —
+> if a slice seems to require an architectural change, that is an ADR question, not a plan edit.
+> Audit date: 2026-07-23.
 >
-> Governance: `project-tracker/adr/` (ADR-001..007). Contract that constrains everything below:
-> **ADR-007 parity-by-construction** — the evaluation engine may NOT become a web-only GPU cache
-> that export doesn't share. Anything a node materializes must be either (a) deterministic data
-> all three renderers re-derive identically, or (b) built through the SHARED `SceneCompositor`.
+> Governance: `project-tracker/adr/`.
+> - **ADR-007** — parity-by-construction: the engine may NOT become a web-only GPU cache export
+>   doesn't share; anything materialized is deterministic data all three renderers re-derive, or is
+>   built through the SHARED `SceneCompositor`.
+> - **ADR-008** — the content-addressed materialization substrate (identity ≠ validity; tag-in-place
+>   not wrap; evaluator owns the materialize decision; evaluator/compositor role split).
+> - **ADR-009** — content-version completeness rules R1–R3 + ContractVersion + exclusion list.
+> - **ADR-010** — the node capability contract: dependencies (→ hash) vs capabilities (→ behavior),
+>   closed evaluator interface over open registries. The document every node author reads first.
 
 ## One-sentence finding
 
@@ -116,11 +124,23 @@ nodes that can't fold (distortion, iterative, feedback) and is the prerequisite 
 materialized node deliberately opens a nest, so it must count against the depth budget correctly
 rather than fight the collapser.
 
-### Slice 2 — Node-keyed evaluation cache
-Promote per-call `memo` to a persistent comp-scoped cache keyed by the Slice-1 structural hash.
-Static subgraphs (grade on a still, unkeyframed mask) stop recomputing every frame. Pure
-lowering-side, no compositor change → ship web-first, pixel-verify. *Ships:* measurable playback
-speedup; first reuse-scorecard data point (frame time before/after).
+### Slice 2 — Content-addressed evaluation cache (implements ADR-008/009/010)
+Promote per-call `memo` to a persistent comp-scoped cache. **Key is content, not identity:**
+`(ContractVersion, ContextVersion, NodeContentHash)` per ADR-009 R1–R3 — NOT the Slice-1
+`evaluationKey` (that stays the runtime slot identity for resource ownership/eviction only;
+ADR-008 rule 1, identity ≠ validity). Static subgraphs (grade on a still, unkeyframed mask) stop
+recomputing every frame; a rewire or param edit changes the hash and invalidates automatically.
+Materialize by **tagging** the compiler's existing `SceneGroupDraw` (`__flarexSealed`), never by
+wrapping a second group (ADR-008 rule 2 — one RTT, not two). The materialize decision is
+evaluator-owned (`requiresMaterialization ∨ fanout>1 ∨ budget ∨ debugOverride`), driven by the
+node capability declarations of ADR-010 — no node-type branches in the evaluator. Pure
+lowering-side, no compositor change → ship web-first.
+*Ships:* measurable playback speedup; first reuse-scorecard data point (frame time before/after).
+*Gates (ADR-008 consequences):* (a) `render:compare:pixels` stays at the pixel floor — a
+materialized node matches its folded twin; (b) a cache hit is byte-identical to a cold recompute.
+*Contract debt to retire as declarations land:* the compiler's hardcoded node-id knowledge
+(`brightnessContrast`/`colorCurves`/`sharpen`/chroma/luma) becomes ADR-010 dependency/capability
+declarations — the evaluator must not read node ids.
 
 ### Slice 3 — Async node protocol
 Node needing async work (aiMatte ML seg, tracker solve): return `pending` sentinel + soft-degrade

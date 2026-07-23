@@ -1,6 +1,6 @@
 # ADR-007 — Flarex Compiler Contract (lowering to SceneDraw)
 
-- Status: Stable (the lowering contract); the **evaluation engine** built on top is the next milestone
+- Status: Stable (the lowering contract); the **evaluation engine** built on top is frozen in ADR-008/009/010
 - Date adopted: 2026-07-23 (documenting the Phase 1/2 compiler)
 
 ## Context
