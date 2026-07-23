@@ -43,6 +43,7 @@ import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
 import { computeFlarexContentHashes } from "./content-hash";
+import { frameProfiler } from "../color/frame-profiler";
 import { getFlarexNodeDefinition } from "./node-defs";
 import type { FlarexComp, FlarexNode } from "./types";
 
@@ -182,7 +183,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // NodeContentHash (ADR-009 R1+R3, pure node content — resolution/time NOT folded in), stamped onto
   // sealed groups so the compositor can later key its artifact cache on content, not identity. Unread
   // until commit 3b → output is byte-identical today.
-  const contentHashes = computeFlarexContentHashes(comp, ctx.timeSeconds);
+  const contentHashes = frameProfiler.measure("evaluator.hash", () => computeFlarexContentHashes(comp, ctx.timeSeconds));
 
   /** Does a built draw subtree read a time-varying effect? Reads the effect's DECLARED semantic
    *  dependencies (`pass.def.dependencies`), never GLSL — the registry already derived them. Used to
@@ -253,6 +254,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const materialize = (draw: FlarexImageValue, nodeId: string): FlarexWrapGroup => {
     const wrap = newWrap(draw);
     wrap.__flarexSealed = true;
+    frameProfiler.noteMaterialize();
     wrap.evaluationKey = `flarex_${comp.id}_${nodeId}`;
     // Slice 2, commit 3a: stamp the VALIDITY key (content hash) + semantic dependency DECLARATIONS.
     // Dormant metadata — the compositor ignores both until commit 3b/3c. `evaluationKey` stays the
@@ -381,10 +383,16 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   };
 
   function evalNode(nodeId: string): FlarexValue | null {
-    if (memo.has(nodeId)) return memo.get(nodeId) ?? null;
+    if (memo.has(nodeId)) {
+      // Served from the per-frame memo (shared fan-out) — not re-lowered. Attribute it as skipped.
+      const cachedNode = nodes[nodeId];
+      if (cachedNode) frameProfiler.noteEval(nodeId, cachedNode.type, "skipped");
+      return memo.get(nodeId) ?? null;
+    }
     if (visiting.has(nodeId)) return null; // cycle — degrade, never hang
     const node = nodes[nodeId];
     if (!node) return null;
+    frameProfiler.noteEval(nodeId, node.type, "evaluated");
     visiting.add(nodeId);
     let value = node.enabled ? lowerNode(node) : passthrough(node);
     visiting.delete(nodeId);

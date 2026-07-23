@@ -51,6 +51,7 @@ import {
 import type { BlendMode } from "../types";
 import type { ColorPipeline } from "./types";
 import { MediaWebGLRenderer } from "./media-renderer";
+import { frameProfiler, type CompositorProfilerSnapshot } from "./frame-profiler";
 
 export type ObjectFit = "cover" | "contain" | "fill";
 
@@ -314,6 +315,17 @@ function isTransitionDraw(d: SceneDraw): d is SceneTransitionDraw {
 
 function isGroupDraw(d: SceneDraw): d is SceneGroupDraw {
   return (d as SceneGroupDraw).kind === "group";
+}
+
+/** Profiler-only render-role label for a group draw: a materialized (sealed) node reports its own id
+ *  (the meaningful evaluation boundary — `evaluationKey` = `flarex_<comp>_<nodeId>`), everything else
+ *  is a generic precompose. Purely diagnostic; never affects rendering. */
+function scopeLabelForGroup(draw: SceneGroupDraw): string {
+  if (draw.evaluationKey) {
+    const node = draw.evaluationKey.replace(/^flarex_.*?_/, "");
+    return `group-precompose (${node})`;
+  }
+  return "group-precompose";
 }
 
 export interface SceneFrameSpec {
@@ -980,6 +992,41 @@ export class SceneCompositor {
     };
   }
 
+  /**
+   * Debug-only (frame-profiler): real cache/VRAM state, computed from sizes the compositor already
+   * tracks — no estimation. `renderTargetCount`/VRAM sum every LIVE render target (accumulators, the
+   * lazily-allocated effect/scratch targets, transition sides, and the depth-indexed group/matte/pass
+   * pools); `srcTexture*` covers the persistent per-source texture cache. Cheap: a handful of adds.
+   */
+  profilerSnapshot(): CompositorProfilerSnapshot {
+    const rtBytes = (rt: RenderTarget | null): number => (rt ? rt.width * rt.height * 4 : 0);
+    const rts: (RenderTarget | null)[] = [
+      this.accumA, this.accumB, this.plateRT, this.scratch1, this.scratch2, this.scopeThumb,
+      this.sideA, this.sideAScratch, this.sideB, this.sideBScratch, this.layerNestA, this.layerNestB,
+    ];
+    for (const g of this.groupTargets) { rts.push(g.target, g.scratch); }
+    for (const m of this.matteTargets) { rts.push(m.target, m.scratch); }
+    for (const p of this.passGraphTargets.values()) rts.push(p.rt);
+    let rtCount = 0;
+    let rtVram = 0;
+    for (const rt of rts) {
+      if (!rt) continue;
+      rtCount += 1;
+      rtVram += rtBytes(rt);
+    }
+    let srcVram = 0;
+    for (const entry of this.srcTextures.values()) srcVram += entry.w * entry.h * 4;
+    return {
+      srcTextureEntries: this.srcTextures.size,
+      srcTextureVramBytes: srcVram,
+      renderTargetCount: rtCount,
+      renderTargetVramBytes: rtVram,
+      transitionPrograms: this.transitionPrograms.size,
+      fragmentPrograms: this.fragmentPrograms.size,
+      passGraphTargets: this.passGraphTargets.size,
+    };
+  }
+
   constructor(canvas: AnyCanvas, width: number, height: number) {
     this.canvas = canvas;
     this.width = width;
@@ -988,6 +1035,9 @@ export class SceneCompositor {
     canvas.height = height;
     const gl = createGl(canvas, { kind: "scene-compositor", label: "scene-compositor" });
     this.gl = gl;
+    // Debug-only (flarexProfile flag): patch this context's GL command methods so the frame profiler can
+    // count real draw calls / binds / uploads. No-op when the flag is off; guarded to never change behavior.
+    frameProfiler.instrumentGl(gl);
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
 
     const vs = compileShader(gl, gl.VERTEX_SHADER, COMPOSITE_VS);
@@ -1461,7 +1511,11 @@ export class SceneCompositor {
       else if (param.type === "vec2" && Array.isArray(value)) gl.uniform2f(location, value[0] ?? 0, value[1] ?? 0);
       else if (param.type === "vec3" && Array.isArray(value)) gl.uniform3f(location, value[0] ?? 0, value[1] ?? 0, value[2] ?? 0);
     }
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // Profiler-only nested scope: attribute this draw to the fragment-effect pass by its EXISTING name
+    // (`def.id` — the pass abstraction's own metadata). Generic: every fragment effect flows through this
+    // one choke point, so there is no per-node-type branch and no special-casing of any effect. Inline
+    // blur/glow use a different mechanism and stay at their parent role scope (no pass abstraction to name).
+    frameProfiler.scoped(`pass:${pass.def.id}`, () => gl.drawArrays(gl.TRIANGLES, 0, 3));
     gl.activeTexture(gl.TEXTURE0);
   }
 
@@ -1738,9 +1792,13 @@ export class SceneCompositor {
     entry.lastFrame = this.frameCounter;
     // Unchanged content (a versioned source whose version + size match the last upload) → reuse as-is.
     if (version !== undefined && !needAlloc && entry.version === version) {
+      frameProfiler.noteTextureCache(true);
       if (debug) this.publishUploadDebug({ ...meta, sourceKind: kind, width: sw, height: sh, textureState: "existing", contextLostBefore: false, reason: "reused-unchanged" });
       return entry.tex;
     }
+    // A real (re)upload — the per-source cache could not serve this draw (new source, changed content,
+    // resized, or an unversioned media frame that always re-uploads).
+    frameProfiler.noteTextureCache(false);
 
     const snapshot: UploadDebugSnapshot = {
       ...meta,
@@ -2456,11 +2514,11 @@ export class SceneCompositor {
 
     for (const draw of spec.layers) {
       if (isTransitionDraw(draw)) {
-        this.renderTransition(draw);
+        frameProfiler.scoped("transition", () => this.renderTransition(draw));
       } else if (isGroupDraw(draw)) {
-        this.renderGroupInto(draw, null, 0);
+        frameProfiler.scoped(scopeLabelForGroup(draw), () => this.renderGroupInto(draw, null, 0));
       } else {
-        this.renderLayerInto(draw, null);
+        frameProfiler.scoped("composite", () => this.renderLayerInto(draw, null));
       }
     }
 
@@ -2477,6 +2535,9 @@ export class SceneCompositor {
    * default framebuffer is multisampled, and it was failing silently (transparent canvas).
    */
   private presentFrame(): void {
+    frameProfiler.scoped("present", () => this.presentFrameInner());
+  }
+  private presentFrameInner(): void {
     const gl = this.gl;
     const w = this.width;
     const h = this.height;

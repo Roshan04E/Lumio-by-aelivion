@@ -19,6 +19,7 @@
  * the FNV-1a digest below can be swapped for a cryptographic hash with no contract change.
  */
 import { evaluateFlarexNodeParam } from "../animation";
+import { frameProfiler } from "../color/frame-profiler";
 import { getFlarexNodeDefinition } from "./node-defs";
 import type { FlarexComp, FlarexNode } from "./types";
 
@@ -103,6 +104,9 @@ export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number
       JSON.stringify([FLAREX_CONTENT_HASH_CONTRACT_VERSION, node.type, node.enabled, paramTokens, upstreamTokens]),
     );
     hashes.set(nodeId, digest);
+    // Profiler-only (no-op unless recording): the node's LOCAL token (own content, WITHOUT upstream) lets
+    // the frame report say WHY a hash changed — own params vs. an upstream child's hash propagating down.
+    frameProfiler.noteHashNode(nodeId, node.type, digest, JSON.stringify([node.type, node.enabled, paramTokens]));
     return digest;
   };
 
