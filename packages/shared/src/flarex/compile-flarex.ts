@@ -72,12 +72,13 @@ export interface FlarexLowerCtx {
    */
   resolveSourceDraw?: ((nodeId: string, sourceAssetId: string) => SceneLayerDraw | "ended" | null) | undefined;
   /**
-   * Runtime-only materialization policy (Flarex evaluation engine, Slice 1): node ids whose image
-   * output must be SEALED into its own render-target boundary (an optimization barrier the
-   * wrap-collapser will not fold across), stamped with the node's `evaluationKey`. NEVER serialized
-   * — it lives on the per-frame lower ctx, never on node params or persisted project data. Absent in
-   * production today (only tests set it), so lowering stays byte-identical. Later slices replace
-   * this with the real evaluation policy (caching/profiling/GPU ownership/async).
+   * DEBUG OVERRIDE for the materialization decision (Flarex evaluation engine — ADR-008 rule 3):
+   * force these node ids to SEAL their image output into an isolated render-target boundary (an
+   * optimization barrier the wrap-collapser won't fold across), stamped with the node's
+   * `evaluationKey`. This is only ONE term of the evaluator-owned decision (`materialize =
+   * requiresMaterialization ∨ fanout>1 ∨ budget ∨ debugOverride`) — the evaluator decides the rest
+   * structurally (see `shouldMaterialize`). NEVER serialized: it lives on the per-frame lower ctx,
+   * never on node params or persisted project data. Used by tests and node-preview/debug tooling.
    */
   materializeNodeIds?: ReadonlySet<string> | undefined;
 }
@@ -155,8 +156,13 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
   // to-socket → edge (a socket accepts at most one wire; the healer enforces endpoint validity).
   const edgeInto = new Map<string, string>();
+  // from-node → number of consumer sockets reading its output (fan-out). The structural half of the
+  // evaluator-owned materialize decision (ADR-008): a node feeding 2+ consumers seals ONCE so the
+  // content cache (Slice 2, commit 3) can dedupe it, instead of the current clone-per-consumer.
+  const fanout = new Map<string, number>();
   for (const edge of comp.edges) {
     edgeInto.set(`${edge.to.nodeId}:${edge.to.socket}`, edge.from.nodeId);
+    fanout.set(edge.from.nodeId, (fanout.get(edge.from.nodeId) ?? 0) + 1);
   }
 
   /** Keyframe-aware numeric param (comp-local time). */
@@ -306,6 +312,21 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const memo = new Map<string, FlarexValue | null>();
   const visiting = new Set<string>();
 
+  /**
+   * Evaluator-owned materialization decision (ADR-008 rule 3 / ADR-010 §3): the node contributes an
+   * intrinsic constraint + a cost hint; the EVALUATOR decides — no node-type branch.
+   *   materialize = requiresMaterialization ∨ fanout>1 ∨ budget(estimate) ∨ debugOverride
+   * Live terms today: `fanout>1` (structural) and the debug override. `requiresMaterialization`
+   * (intrinsic) and `budget(estimate)` have no declared inputs until node capabilities land
+   * (ADR-010) — so trivial-cost shared leaves (a MediaIn feeding two consumers) currently
+   * over-materialize into an identity RTT. That is a temporarily-absent COST capability, never a
+   * semantic error: sealing is pixel-neutral by construction (identity nest), so output is
+   * unchanged; only render-target identity is. The fix is a declared cost hint, NOT a node-type
+   * exemption in the evaluator (which would break the node-blind invariant).
+   */
+  const shouldMaterialize = (nodeId: string): boolean =>
+    (ctx.materializeNodeIds?.has(nodeId) ?? false) || (fanout.get(nodeId) ?? 0) > 1;
+
   const inputValue = (node: FlarexNode, socket: string): FlarexValue | null => {
     const from = edgeInto.get(`${node.id}:${socket}`);
     if (!from) return null;
@@ -343,10 +364,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     visiting.add(nodeId);
     let value = node.enabled ? lowerNode(node) : passthrough(node);
     visiting.delete(nodeId);
-    // Materialization boundary (runtime-only): seal an image-producing node's output into its own
-    // RTT when the evaluation policy names it. Mattes stay vector (never rasterized here). No policy
-    // in production → this is inert → byte-identical lowering.
-    if (value?.kind === "image" && ctx.materializeNodeIds?.has(nodeId)) {
+    // Materialization boundary: seal an image-producing node's output into its own RTT when the
+    // evaluator-owned decision says so (fan-out / debug override today). Mattes stay vector (never
+    // rasterized here). Pixel-neutral by construction — sealing inserts only identity nests.
+    if (value?.kind === "image" && shouldMaterialize(nodeId)) {
       value = { kind: "image", draw: materialize(value.draw, nodeId) };
     }
     memo.set(nodeId, value);

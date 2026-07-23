@@ -295,8 +295,13 @@ const isGroupDraw = (d: unknown): d is SceneGroupDraw => (d as SceneGroupDraw)?.
       check("fg blend/opacity applied on its shell", fg.shell.blendMode === "screen" && Math.abs(fg.shell.transform.opacity - 80) < 1e-6);
       check("keyer pass resolves the registered def", fg.shell.fragmentPasses?.[0]?.def.id === "flarex.chromaKey");
     }
+    // c3_in feeds BOTH k1.in and m1.bg (fan-out 2) → the evaluator seals it (ADR-008 fanout>1). bg is
+    // now that sealed identity group (pixel-neutral: identity shell, host layer as its only child).
     const bg = out.children[0]!;
-    check("bg is an untouched host clone", !isGroupDraw(bg) && (bg as SceneLayerDraw).sourceWidth === 1920);
+    check("bg is the fan-out-sealed MediaIn (identity nest over the host)", isGroupDraw(bg) && (bg as SceneGroupDraw).evaluationKey === "flarex_c3_c3_in");
+    if (isGroupDraw(bg)) {
+      check("fan-out seal is an identity nest (host clone as its only child)", bg.children.length === 1 && !isGroupDraw(bg.children[0]!) && (bg.children[0] as SceneLayerDraw).sourceWidth === 1920);
+    }
   }
 }
 
