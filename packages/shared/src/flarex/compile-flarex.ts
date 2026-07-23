@@ -71,6 +71,15 @@ export interface FlarexLowerCtx {
    * caller find that node's virtual layer. Omitted → every MediaIn resolves to the host clip (Phase 1).
    */
   resolveSourceDraw?: ((nodeId: string, sourceAssetId: string) => SceneLayerDraw | "ended" | null) | undefined;
+  /**
+   * Runtime-only materialization policy (Flarex evaluation engine, Slice 1): node ids whose image
+   * output must be SEALED into its own render-target boundary (an optimization barrier the
+   * wrap-collapser will not fold across), stamped with the node's `evaluationKey`. NEVER serialized
+   * — it lives on the per-frame lower ctx, never on node params or persisted project data. Absent in
+   * production today (only tests set it), so lowering stays byte-identical. Later slices replace
+   * this with the real evaluation policy (caching/profiling/GPU ownership/async).
+   */
+  materializeNodeIds?: ReadonlySet<string> | undefined;
 }
 
 type FlarexImageValue = SceneLayerDraw | SceneGroupDraw;
@@ -92,6 +101,11 @@ const STAGE_MASK = 7;
  *  (per-consumer copies) and is invisible to the compositor. */
 interface FlarexWrapGroup extends SceneGroupDraw {
   __flarexStage?: number;
+  /** Materialization boundary (Flarex evaluation engine, Slice 1): a sealed wrap is a TRUE
+   *  optimization barrier — the wrap-collapser (`wrapFor`) never folds an op into it, so it always
+   *  composites as its own render target. Set only by `materialize`, driven runtime-only by
+   *  `ctx.materializeNodeIds`; survives the shallow clone via the object spread in `cloneImage`. */
+  __flarexSealed?: boolean;
 }
 
 function isGroup(draw: FlarexImageValue): draw is SceneGroupDraw {
@@ -183,7 +197,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const wrapFor = (draw: FlarexImageValue, stage: number): FlarexWrapGroup => {
     if (isGroup(draw)) {
       const wrap = draw as FlarexWrapGroup;
-      if (wrap.__flarexStage !== undefined && wrap.__flarexStage <= stage) {
+      // A sealed (materialized) wrap is a hard optimization barrier: never fold an op into it — fall
+      // through to a fresh wrap so the sealed group stays its own render target.
+      if (!wrap.__flarexSealed && wrap.__flarexStage !== undefined && wrap.__flarexStage <= stage) {
         // Same-stage single-use slots (pipeline/transform/blur/glow/mask) must not double-fill.
         const slotFree =
           stage === STAGE_REGION ||
@@ -201,6 +217,18 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     }
     const wrap = newWrap(draw);
     wrap.__flarexStage = stage;
+    return wrap;
+  };
+
+  /** Seal a node's image output into its OWN wrap group (its own RTT at composite time) that the
+   *  collapser will never fold across — a true two-sided optimization barrier — stamped with the
+   *  node's runtime `evaluationKey`. Runtime-only: reached solely via `ctx.materializeNodeIds`,
+   *  never via persisted params. The input `draw` (whatever upstream folded) becomes the sealed
+   *  group's child, so the boundary rasterizes everything up to and including this node's op. */
+  const materialize = (draw: FlarexImageValue, nodeId: string): FlarexWrapGroup => {
+    const wrap = newWrap(draw);
+    wrap.__flarexSealed = true;
+    wrap.evaluationKey = `flarex_${comp.id}_${nodeId}`;
     return wrap;
   };
 
@@ -313,8 +341,14 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     const node = nodes[nodeId];
     if (!node) return null;
     visiting.add(nodeId);
-    const value = node.enabled ? lowerNode(node) : passthrough(node);
+    let value = node.enabled ? lowerNode(node) : passthrough(node);
     visiting.delete(nodeId);
+    // Materialization boundary (runtime-only): seal an image-producing node's output into its own
+    // RTT when the evaluation policy names it. Mattes stay vector (never rasterized here). No policy
+    // in production → this is inert → byte-identical lowering.
+    if (value?.kind === "image" && ctx.materializeNodeIds?.has(nodeId)) {
+      value = { kind: "image", draw: materialize(value.draw, nodeId) };
+    }
     memo.set(nodeId, value);
     return value;
   }
