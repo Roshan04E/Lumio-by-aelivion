@@ -21,8 +21,9 @@ import {
   wouldCreateFlarexCycle,
 } from "./registry";
 import { createFlarexNode, flarexNodeDefs, parseFlarexNodeParams } from "./node-defs";
+import { collectFlarexVirtualLayers, flarexVirtualLayerId } from "./virtual-layers";
 import type { FlarexComp } from "./types";
-import type { Mask, ProjectGraph } from "../types";
+import type { Mask, ProjectGraph, TimelineLayer } from "../types";
 import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 
 let failures = 0;
@@ -148,6 +149,102 @@ const isGroupDraw = (d: unknown): d is SceneGroupDraw => (d as SceneGroupDraw)?.
   check("default comp lowers to a layer draw", Boolean(out) && !isGroupDraw(out));
   check("default comp preserves host source size", (out as SceneLayerDraw).sourceWidth === 1920);
   check("lowering clones (never returns ctx.hostSourceDraw itself)", out !== ctx.hostSourceDraw);
+}
+
+// --- Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model) ------------
+{
+  // A SECOND MediaIn loading an asset ("assetA") merged over the host: the compiler must pull the
+  // loader's draw through `resolveSourceDraw` (called with the node id + asset id) and place it as fg.
+  const comp = createFlarexComp("cmi", "AssetIn");
+  const srcIn = createFlarexNode("mediaIn", "cmi_srcin");
+  srcIn.params = { ...srcIn.params, sourceAssetId: "assetA" };
+  const merge = createFlarexNode("merge", "cmi_merge");
+  comp.nodes[srcIn.id] = srcIn;
+  comp.nodes[merge.id] = merge;
+  comp.edges = [
+    { id: "e1", from: { nodeId: "cmi_in", socket: "out" }, to: { nodeId: "cmi_merge", socket: "bg" } },
+    { id: "e2", from: { nodeId: "cmi_srcin", socket: "out" }, to: { nodeId: "cmi_merge", socket: "fg" } },
+    { id: "e3", from: { nodeId: "cmi_merge", socket: "out" }, to: { nodeId: "cmi_out", socket: "in" } },
+  ];
+  const requested: Array<[string, string]> = [];
+  const source: SceneLayerDraw = { ...hostDraw(), debugLayerId: "assetA", sourceWidth: 640 };
+  const out = compileFlarexComp(comp, {
+    ...lowerCtx(),
+    resolveSourceDraw: (nodeId, assetId) => {
+      requested.push([nodeId, assetId]);
+      return assetId === "assetA" ? source : null;
+    },
+  });
+  check("asset mediaIn: resolver asked with (nodeId, assetId)", requested.some(([n, a]) => n === "cmi_srcin" && a === "assetA"));
+  check("asset mediaIn lowers to a merge group", isGroupDraw(out));
+  if (isGroupDraw(out)) {
+    const bg = out.children[0] as SceneLayerDraw;
+    const fg = out.children[1] as SceneLayerDraw;
+    check("asset mediaIn: bg child is the host draw", bg.debugLayerId === "host");
+    check("asset mediaIn: fg child is the resolved source (cloned)", fg.debugLayerId === "assetA" && fg.sourceWidth === 640 && fg !== source);
+  }
+}
+
+{
+  // A short source that has run past its own end (`resolveSourceDraw` returns "ended", DISTINCT from
+  // null): the MediaIn produces nothing, so the merge drops the fg and only the host bg remains — NOT
+  // a held last frame, and NOT a host fall-back for the ended node.
+  const comp = createFlarexComp("cme2", "AssetEnded");
+  const srcIn = createFlarexNode("mediaIn", "cme2_srcin");
+  srcIn.params = { ...srcIn.params, sourceAssetId: "assetA" };
+  const merge = createFlarexNode("merge", "cme2_merge");
+  comp.nodes[srcIn.id] = srcIn;
+  comp.nodes[merge.id] = merge;
+  comp.edges = [
+    { id: "e1", from: { nodeId: "cme2_in", socket: "out" }, to: { nodeId: "cme2_merge", socket: "bg" } },
+    { id: "e2", from: { nodeId: "cme2_srcin", socket: "out" }, to: { nodeId: "cme2_merge", socket: "fg" } },
+    { id: "e3", from: { nodeId: "cme2_merge", socket: "out" }, to: { nodeId: "cme2_out", socket: "in" } },
+  ];
+  const out = compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: () => "ended" });
+  check("asset mediaIn: ended source drops the fg (bg-only, no group)", !isGroupDraw(out) && (out as SceneLayerDraw).debugLayerId === "host");
+}
+
+{
+  // An unresolved asset (loader not decoded / bad id) soft-degrades to the host draw.
+  const comp = createFlarexComp("cmf", "AssetFallback");
+  const srcIn = createFlarexNode("mediaIn", "cmf_srcin");
+  srcIn.params = { ...srcIn.params, sourceAssetId: "ghost" };
+  comp.nodes[srcIn.id] = srcIn;
+  comp.edges = [{ id: "e1", from: { nodeId: "cmf_srcin", socket: "out" }, to: { nodeId: "cmf_out", socket: "in" } }];
+  const out = compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: () => null });
+  check("asset mediaIn: unresolved asset falls back to host", Boolean(out) && !isGroupDraw(out) && (out as SceneLayerDraw).debugLayerId === "host");
+}
+
+{
+  // An empty sourceAssetId is the host input — the resolver must NOT be consulted for it.
+  const comp = createFlarexComp("cme", "AssetEmpty");
+  let called = false;
+  const out = compileFlarexComp(comp, {
+    ...lowerCtx(),
+    resolveSourceDraw: () => {
+      called = true;
+      return null;
+    },
+  });
+  check("asset mediaIn: empty sourceAssetId never calls the resolver", !called);
+  check("asset mediaIn: empty sourceAssetId lowers to host", !isGroupDraw(out) && (out as SceneLayerDraw).debugLayerId === "host");
+}
+
+// --- Virtual loader helper (collectFlarexVirtualLayers) -----------------------
+{
+  const comp = createFlarexComp("vc", "Virtual");
+  const srcIn = createFlarexNode("mediaIn", "vc_srcin");
+  srcIn.params = { ...srcIn.params, sourceAssetId: "asset_vid", sourceInSeconds: 2 };
+  comp.nodes[srcIn.id] = srcIn;
+  const host: TimelineLayer = { id: "hostclip", trackId: "t", type: "video", name: "Host", startSeconds: 5, durationSeconds: 8, flarexCompId: "vc" } as unknown as TimelineLayer;
+  const virtuals = collectFlarexVirtualLayers([host], { vc: comp }, (id) => (id === "asset_vid" ? { type: "video", durationSeconds: 30 } : null));
+  check("virtual loader: one built for the asset MediaIn", virtuals.length === 1);
+  const v = virtuals[0]!;
+  check("virtual loader: id is comp+node scoped", v.id === flarexVirtualLayerId("vc", "vc_srcin"));
+  check("virtual loader: mirrors host time + carries asset + trim", v.startSeconds === 5 && v.durationSeconds === 8 && v.assetId === "asset_vid" && v.sourceInSeconds === 2 && v.type === "video");
+  // The host MediaIn (empty asset) never produces a loader; an unresolved asset is skipped.
+  const none = collectFlarexVirtualLayers([host], { vc: comp }, () => null);
+  check("virtual loader: unresolved asset produces none", none.length === 0);
 }
 
 {

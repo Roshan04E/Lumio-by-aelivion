@@ -107,7 +107,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-merge-blend"
   | "flarex-transform"
   | "flarex-ellipse-matte"
-  | "flarex-reroute";
+  | "flarex-reroute"
+  | "flarex-multi-in";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -158,7 +159,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-merge-blend",
   "flarex-transform",
   "flarex-ellipse-matte",
-  "flarex-reroute"
+  "flarex-reroute",
+  "flarex-multi-in"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -673,6 +675,34 @@ function buildFlarexRerouteComp(): FlarexComp {
   return comp;
 }
 
+// Multi-clip MediaIn parity (FLAREX.md Phase 2): a SECOND MediaIn pulls a sibling timeline clip
+// (`FLAREX_MULTI_SRC_ID`), scales it down via Transform, and merges it over the host clip. This
+// locks two things across all three renderers at once: (1) the sibling's graded draw is resolved
+// and composited identically in preview / local export / Remotion, and (2) the referenced clip is
+// SUPPRESSED from independent drawing (build-scene-draws), so a broken suppression — which would let
+// the full-frame orange source paint over everything at its own z-slot — shows as a large diff.
+const FLAREX_MULTI_SRC_ID = "fixture_flarex_multi_src";
+function buildFlarexMultiInComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_multi_comp", "Flarex multi-MediaIn fixture");
+  const srcIn = createFlarexNode("mediaIn", "fixture_flarex_multi_srcin");
+  srcIn.params = { ...srcIn.params, sourceClipId: FLAREX_MULTI_SRC_ID };
+  const transform = createFlarexNode("transform", "fixture_flarex_multi_tf");
+  transform.params = { ...transform.params, scale: 0.5, y: -10 };
+  const merge = createFlarexNode("merge", "fixture_flarex_multi_merge");
+  comp.nodes[srcIn.id] = srcIn;
+  comp.nodes[transform.id] = transform;
+  comp.nodes[merge.id] = merge;
+  comp.edges = [
+    // Host MediaIn → merge background.
+    { id: "fixture_flarex_multi_e1", from: { nodeId: "fixture_flarex_multi_comp_in", socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
+    // Sibling MediaIn → Transform → merge foreground.
+    { id: "fixture_flarex_multi_e2", from: { nodeId: srcIn.id, socket: "out" }, to: { nodeId: transform.id, socket: "in" } },
+    { id: "fixture_flarex_multi_e3", from: { nodeId: transform.id, socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
+    { id: "fixture_flarex_multi_e4", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "fixture_flarex_multi_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -716,6 +746,10 @@ interface FixtureVariant {
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
    *  effects array — over a background layer so the keyed-away area is a real composite. */
   flarex?: FlarexComp;
+  /** Multi-clip MediaIn parity (FLAREX.md Phase 2): add the sibling SOURCE clip the comp's second
+   *  MediaIn references. The clip is suppressed from independent drawing and appears only inside the
+   *  comp output — proving both resolution and suppression are renderer-consistent. */
+  flarexMultiSource?: boolean;
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -827,6 +861,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexEllipseMatteComp() };
     case "flarex-reroute":
       return { effects: [], fit: "cover", flarex: buildFlarexRerouteComp() };
+    case "flarex-multi-in":
+      return { effects: [], fit: "cover", flarex: buildFlarexMultiInComp(), flarexMultiSource: true };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
@@ -1001,6 +1037,23 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     startSeconds: 0,
     durationSeconds: 12,
     color: "#1e6091",
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+    effects: [],
+    keyframes: []
+  };
+
+  // Multi-clip MediaIn source (FLAREX.md Phase 2): a full-bleed solid ORANGE shape referenced by the
+  // host comp's second MediaIn. It's added to the video track ABOVE the host, so if suppression breaks
+  // it would paint full-frame over everything (a huge diff); with suppression it appears ONLY as the
+  // comp's scaled-down foreground patch. A solid color is deterministic across renderers.
+  const flarexSourceLayer: TimelineLayer = {
+    id: FLAREX_MULTI_SRC_ID,
+    trackId: "video_track",
+    type: "shape",
+    name: "Flarex source clip",
+    startSeconds: 0,
+    durationSeconds: 12,
+    color: "#e0662a",
     transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
     effects: [],
     keyframes: []
@@ -1291,9 +1344,11 @@ Save this style now`);
                   ? [prerollOutgoing, prerollNestClip]
                   : variant.transition
                     ? [transitionOutgoing, transitionIncoming]
-                    : variant.flarex
-                      ? [flarexBackgroundLayer, imageLayer]
-                      : [imageLayer]
+                    : variant.flarexMultiSource
+                      ? [flarexBackgroundLayer, imageLayer, flarexSourceLayer]
+                      : variant.flarex
+                        ? [flarexBackgroundLayer, imageLayer]
+                        : [imageLayer]
         }
       ]
     },

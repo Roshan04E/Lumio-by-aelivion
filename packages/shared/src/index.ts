@@ -24,6 +24,7 @@ export * from "./flarex/compile-flarex";
 export * from "./flarex/node-graph-intent";
 export * from "./flarex/node-defs";
 export * from "./flarex/registry";
+export * from "./flarex/virtual-layers";
 export * from "./notes/types";
 export * from "./notes/registry";
 export * from "./notes/notes-intent";

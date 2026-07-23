@@ -68,8 +68,16 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
     group: "io",
     inputs: [],
     outputs: OUT,
-    // sourceClipId "" = the host clip; a sibling clip id is the v2 comp-clip form.
-    params: z.object({ sourceClipId: z.string().default("") }).strict(),
+    // Self-contained comp (FLAREX.md Phase 2, Fusion Loader model): `sourceAssetId` "" = the HOST clip
+    // (the clip this comp is attached to). A non-empty asset id loads that media pool asset directly —
+    // decoded independently of the timeline, so nothing is borrowed from / removed from the timeline.
+    //   sourceInSeconds — Trim In: where in the source to start (comp-local sync from there).
+    //   freeze          — Hold: show a single held frame (source-in frame) instead of playing.
+    params: z.object({
+      sourceAssetId: z.string().default(""),
+      sourceInSeconds: num(0, 0),
+      freeze: z.boolean().default(false),
+    }).strict(),
     keyframeable: [],
     phase: 1,
   },

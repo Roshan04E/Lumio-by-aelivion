@@ -34,6 +34,7 @@ import { FRAGMENT_PASS_EFFECT_TYPES, expandLayerEffectRegions, hasRegionColorEff
 import { NEST_ID_SEPARATOR, type NestedGroupSpec } from "../nesting";
 import { fragmentEffectParamsFromStorage, SHADER_MANIFEST_ID_PARAM_KEY } from "../plugin-effect-adapter";
 import { compileFlarexComp } from "../flarex/compile-flarex";
+import { flarexVirtualLayerId } from "../flarex/virtual-layers";
 import type { FlarexComp } from "../flarex/types";
 import type { TimelineEffectParamValue, TimelineLayer, TransitionSpec } from "../types";
 // VALUE import (not type-only): nested-comp masks need their OWN matte-cache instance, sized to the
@@ -143,6 +144,15 @@ export interface BuildSceneDrawsInputs {
    * to before this field existed.
    */
   flarexComps?: Record<string, FlarexComp> | undefined;
+  /**
+   * Asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic off-timeline
+   * media layers — one per MediaIn node that loads a media-pool asset — built by
+   * `collectFlarexVirtualLayers`. The caller must ALSO have decoded/graded them (so `getMediaGraded`
+   * returns each one's canvas by its virtual id); here they are consulted ONLY by the Flarex
+   * compiler's `resolveSourceDraw` to build a source draw, never composited independently. Omitted/
+   * empty = every MediaIn resolves to its host clip (no asset sources), byte-identical to before.
+   */
+  flarexVirtualLayers?: TimelineLayer[] | undefined;
 }
 
 /** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below).
@@ -350,6 +360,11 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       matteSourceIds.add(resolved.layer.id);
     }
   }
+
+  // Asset-source MediaIn virtual loaders (FLAREX.md Phase 2): keyed by virtual layer id, consulted
+  // only by `resolveSourceDraw` below to build a MediaIn's source draw. These NEVER enter the main
+  // composite loop — a comp is self-contained, so nothing is borrowed from / suppressed on the timeline.
+  const flarexVirtualById = new Map((inputs.flarexVirtualLayers ?? []).map((layer) => [layer.id, layer] as const));
 
   // A clip's group as ordered (back-to-front) layer draws: base + its region-expansion layers, dropping any
   // whose source/raster isn't ready. The compositor renders these into the side RTT in order, then mixes.
@@ -709,17 +724,34 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       frameTimeSeconds: t,
       hostSourceDraw: draw,
       matteCache: dims.matteCache,
+      // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
+      // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its
+      // media is provided via `getMediaGraded(virtualId)` exactly like a real clip; an unready/absent
+      // loader → null → MediaIn falls back to the host. Built against the HOST's comp dims.
+      resolveSourceDraw: (nodeId) => {
+        const virtual = flarexVirtualById.get(flarexVirtualLayerId(comp.id, nodeId));
+        if (!virtual) return null;
+        // The loader's `durationSeconds` is clamped to the source's own remaining length
+        // (`collectFlarexVirtualLayers`). Once comp-local time passes it, the source has run out —
+        // signal "ended" so the MediaIn goes transparent (leaving the background) instead of holding
+        // the last frame to the end of the comp. `freeze`/image/unknown loaders never end (Infinity).
+        const localT = Math.max(0, t - layer.startSeconds);
+        if (localT >= virtual.durationSeconds) return "ended";
+        return buildLayerPreFlarexDraw(virtual, dims);
+      },
     });
     return lowered ?? draw;
   };
 
-  /** `buildLayerDraw`, plus the layer's folded region + fragment passes. `dims` threads through to both
-   *  (see `buildLayerDraw`'s doc) — nested children (Task 2) pass their nest's size/matte. A layer with a
-   *  Flarex comp returns the LOWERED graph (possibly a group draw) instead of its plain draw. */
-  function buildLayerDrawWithPasses(
+  /** `buildLayerDraw` + the layer's folded region + fragment passes + track matte, but WITHOUT the Flarex
+   *  hook — the plain, fully-built `SceneLayerDraw` a layer would emit if it had no comp. This is what a
+   *  Flarex MediaIn pulls for a sibling clip (`resolveSourceDraw`, multi-clip MediaIn) — pulling the
+   *  pre-Flarex draw means a referenced clip's OWN comp is never re-entered here, so cross-comp
+   *  references can't recurse. `dims` threads through exactly like `buildLayerDraw`. */
+  function buildLayerPreFlarexDraw(
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
-  ): SceneLayerDraw | SceneGroupDraw | null {
+  ): SceneLayerDraw | null {
     if (!regionPassModel || regionCloneBaseId(layer.id)) {
       const draw = buildLayerDraw(layer, dims);
       if (draw) {
@@ -727,7 +759,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         if (fragmentPasses.length > 0) draw.fragmentPasses = fragmentPasses;
         attachTrackMatte(layer, draw, dims);
       }
-      return applyFlarex(layer, draw, dims);
+      return draw;
     }
     let baseLayer = layer;
     let clones = clonesByBase.get(layer.id) ?? [];
@@ -753,7 +785,18 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         passes: passes.map((pass) => ({ key: pass.effectKey, blurPx: pass.blurPx, hasPipeline: Boolean(pass.pipeline) })),
       };
     }
-    return applyFlarex(layer, draw, dims);
+    return draw;
+  }
+
+  /** The pre-Flarex draw with the Flarex hook applied: a layer with a `flarexCompId` returns the LOWERED
+   *  graph (possibly a group draw) instead of its plain draw; every other layer returns its plain draw
+   *  unchanged. This is the normal per-layer entry point (top-level, transition sides, nested children,
+   *  track-matte sources). */
+  function buildLayerDrawWithPasses(
+    layer: TimelineLayer,
+    dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
+  ): SceneLayerDraw | SceneGroupDraw | null {
+    return applyFlarex(layer, buildLayerPreFlarexDraw(layer, dims), dims);
   }
 
   // ─── Nesting: fold __nest_ children into compound-clip GROUP draws (NESTING.md Phase C) ─────────────

@@ -59,6 +59,18 @@ export interface FlarexLowerCtx {
   hostSourceDraw: SceneLayerDraw;
   /** The caller's comp-sized matte cache; null = shape-mask nodes soft-degrade to no matte. */
   matteCache?: SceneMaskMatteCache | null | undefined;
+  /**
+   * Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): resolve the graded draw for a
+   * MediaIn that loads a media-pool ASSET (`sourceAssetId`), decoded independently of the timeline —
+   * so the comp is self-contained (nothing borrowed from the timeline). The caller backs each such
+   * MediaIn with a VIRTUAL media layer (keyed by comp+node) and returns its plain graded draw here;
+   * a source that isn't decoded/ready yet returns null → MediaIn falls back to `hostSourceDraw`
+   * (soft-degrade, never blank). `"ended"` is DISTINCT from null: the source ran past its own
+   * duration (a short clip in a longer comp), so the MediaIn produces NOTHING (transparent) rather
+   * than the host — downstream merges then drop it and only the background remains. `nodeId` lets the
+   * caller find that node's virtual layer. Omitted → every MediaIn resolves to the host clip (Phase 1).
+   */
+  resolveSourceDraw?: ((nodeId: string, sourceAssetId: string) => SceneLayerDraw | "ended" | null) | undefined;
 }
 
 type FlarexImageValue = SceneLayerDraw | SceneGroupDraw;
@@ -309,9 +321,20 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
   function lowerNode(node: FlarexNode): FlarexValue | null {
     switch (node.type) {
-      case "mediaIn":
-        // Host clip only in Phase 1; `sourceClipId` (comp clips) is Phase 2 (FLAREX.md).
+      case "mediaIn": {
+        // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): a non-empty `sourceAssetId`
+        // loads a media-pool asset (decoded off-timeline by the caller); empty id / unresolved source
+        // / no resolver falls back to the host clip (soft-degrade, never blank).
+        const sourceAssetId = str(node, "sourceAssetId", "");
+        if (sourceAssetId && ctx.resolveSourceDraw) {
+          const resolved = ctx.resolveSourceDraw(node.id, sourceAssetId);
+          // Source ran past its own end (short clip in a longer comp): produce nothing — the node's
+          // output is empty, so a merge downstream keeps only the background. NOT a host fall-back.
+          if (resolved === "ended") return null;
+          if (resolved) return { kind: "image", draw: cloneImage(resolved) };
+        }
         return { kind: "image", draw: cloneImage(ctx.hostSourceDraw) };
+      }
 
       case "mediaOut":
         return inputValue(node, "in");
