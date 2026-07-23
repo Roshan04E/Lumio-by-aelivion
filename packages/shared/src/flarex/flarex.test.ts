@@ -8,6 +8,7 @@
  * param normalization, edge validation, cycle guard, healer behavior.
  */
 import { compileFlarexComp, type FlarexLowerCtx } from "./compile-flarex";
+import { computeFlarexContentHashes } from "./content-hash";
 import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
 import { compileNodeGraphIntent, nodeGraphIntentSchema, type NodeGraphIntent } from "./node-graph-intent";
 import type { SceneDraw, SceneGroupDraw, SceneLayerDraw } from "../color/scene-compositor";
@@ -943,6 +944,145 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
       Boolean(sealed) && !sealed!.pipeline && !s!.mask && !s!.blurPx && !s!.glow && !s!.fragmentPasses && !s!.regionPasses,
     );
   }
+}
+
+// --- Slice 2: node content hashing (ADR-009 R1 + R3) -------------------------
+// NodeContentHash = type + enabled + params RESOLVED to values at t (R1) folded with upstream
+// content hashes in socket order (R3). Pure node content — no render resolution / frame time
+// (that is the separate ContextVersion axis). Identity-free: same content → same hash.
+{
+  const buildTB = (compId: string, tx: number, sigma: number): FlarexComp => {
+    const comp = createFlarexComp(compId, "Hash");
+    const t = createFlarexNode("transform", "t1");
+    t.params = { ...t.params, x: tx };
+    const b = createFlarexNode("blur", "b1");
+    b.params = { ...b.params, sigma };
+    comp.nodes["t1"] = t;
+    comp.nodes["b1"] = b;
+    comp.edges = [
+      { id: "e1", from: { nodeId: `${compId}_in`, socket: "out" }, to: { nodeId: "t1", socket: "in" } },
+      { id: "e2", from: { nodeId: "t1", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+      { id: "e3", from: { nodeId: "b1", socket: "out" }, to: { nodeId: `${compId}_out`, socket: "in" } },
+    ];
+    return comp;
+  };
+
+  const h1 = computeFlarexContentHashes(buildTB("h", 10, 8), 0);
+  const h2 = computeFlarexContentHashes(buildTB("h", 10, 8), 0);
+  check("content hash is deterministic", h1.get("t1") === h2.get("t1") && h1.get("b1") === h2.get("b1"));
+  check("content hash is defined for every node", h1.get("h_in") !== undefined && h1.get("t1") !== undefined && h1.get("b1") !== undefined && h1.get("h_out") !== undefined);
+
+  // R1: a param change rehashes that node AND everything downstream (Merkle), never upstream.
+  const txChanged = computeFlarexContentHashes(buildTB("h", 25, 8), 0);
+  check("R1: changing transform.x rehashes t1", txChanged.get("t1") !== h1.get("t1"));
+  check("R1: downstream blur rehashes (Merkle propagation)", txChanged.get("b1") !== h1.get("b1"));
+  check("R1: unaffected upstream MediaIn hash is stable", txChanged.get("h_in") === h1.get("h_in"));
+  const sigChanged = computeFlarexContentHashes(buildTB("h", 10, 20), 0);
+  check("downstream blur change leaves upstream t1 untouched", sigChanged.get("t1") === h1.get("t1"));
+  check("downstream blur change rehashes b1", sigChanged.get("b1") !== h1.get("b1"));
+
+  // R3: topology is content — a rewire changes the downstream hash even with identical node params.
+  const buildMerge = (bgNode: string, fgNode: string): FlarexComp => {
+    const comp = createFlarexComp("hm", "HashMerge");
+    const t1 = createFlarexNode("transform", "t1");
+    t1.params = { ...t1.params, x: 10 };
+    const t2 = createFlarexNode("transform", "t2");
+    t2.params = { ...t2.params, x: 90 };
+    const m = createFlarexNode("merge", "m1");
+    comp.nodes["t1"] = t1;
+    comp.nodes["t2"] = t2;
+    comp.nodes["m1"] = m;
+    comp.edges = [
+      { id: "e1", from: { nodeId: "hm_in", socket: "out" }, to: { nodeId: "t1", socket: "in" } },
+      { id: "e2", from: { nodeId: "hm_in", socket: "out" }, to: { nodeId: "t2", socket: "in" } },
+      { id: "e3", from: { nodeId: bgNode, socket: "out" }, to: { nodeId: "m1", socket: "bg" } },
+      { id: "e4", from: { nodeId: fgNode, socket: "out" }, to: { nodeId: "m1", socket: "fg" } },
+      { id: "e5", from: { nodeId: "m1", socket: "out" }, to: { nodeId: "hm_out", socket: "in" } },
+    ];
+    return comp;
+  };
+  const straight = computeFlarexContentHashes(buildMerge("t1", "t2"), 0);
+  const swapped = computeFlarexContentHashes(buildMerge("t2", "t1"), 0);
+  check("R3: swapping merge bg/fg upstreams rehashes the merge (fan-in order is content)", straight.get("m1") !== swapped.get("m1"));
+
+  // R1 (resolve drivers to values): a keyframed param hashes by its VALUE at t, so equal values at
+  // different times hash equal (reuse) and differing values hash differently (invalidation).
+  const kf = createFlarexComp("hkf", "HashKF");
+  const kb = createFlarexNode("blur", "b1");
+  kf.nodes["b1"] = kb;
+  kf.edges = [
+    { id: "e1", from: { nodeId: "hkf_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "hkf_out", socket: "in" } },
+  ];
+  kf.animations = [
+    { id: "k0", target: { scope: "flarexNode", effectId: "b1", property: "sigma" }, timeSeconds: 0, value: 0, interpolation: "linear", temporal: {} },
+    { id: "k2", target: { scope: "flarexNode", effectId: "b1", property: "sigma" }, timeSeconds: 2, value: 20, interpolation: "linear", temporal: {} },
+  ];
+  const kfAt0 = computeFlarexContentHashes(kf, 0);
+  const kfAt2 = computeFlarexContentHashes(kf, 2);
+  check("R1: keyframed blur hashes differently at t=0 vs t=2 (resolved value differs)", kfAt0.get("b1") !== kfAt2.get("b1"));
+
+  const constKf = createFlarexComp("hkc", "HashConst");
+  const cb = createFlarexNode("blur", "b1");
+  constKf.nodes["b1"] = cb;
+  constKf.edges = [
+    { id: "e1", from: { nodeId: "hkc_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "hkc_out", socket: "in" } },
+  ];
+  constKf.animations = [
+    { id: "k0", target: { scope: "flarexNode", effectId: "b1", property: "sigma" }, timeSeconds: 0, value: 5, interpolation: "linear", temporal: {} },
+    { id: "k2", target: { scope: "flarexNode", effectId: "b1", property: "sigma" }, timeSeconds: 2, value: 5, interpolation: "linear", temporal: {} },
+  ];
+  check(
+    "R1: a constant-value keyframe hashes equal across time (reuse, not a spurious miss)",
+    computeFlarexContentHashes(constKf, 0.5).get("b1") === computeFlarexContentHashes(constKf, 1.5).get("b1"),
+  );
+
+  // Identity-free: the same content (type/params/upstream) hashes equal regardless of node/comp id.
+  const idA = createFlarexComp("ida", "A");
+  idA.nodes["b1"] = createFlarexNode("blur", "b1");
+  idA.edges = [
+    { id: "e1", from: { nodeId: "ida_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "ida_out", socket: "in" } },
+  ];
+  const idB = createFlarexComp("idb", "B");
+  idB.nodes["bZ"] = createFlarexNode("blur", "bZ");
+  idB.edges = [
+    { id: "e1", from: { nodeId: "idb_in", socket: "out" }, to: { nodeId: "bZ", socket: "in" } },
+    { id: "e2", from: { nodeId: "bZ", socket: "out" }, to: { nodeId: "idb_out", socket: "in" } },
+  ];
+  check(
+    "content hash is identity-free (same type/params/upstream → same hash across ids)",
+    computeFlarexContentHashes(idA, 0).get("b1") === computeFlarexContentHashes(idB, 0).get("bZ"),
+  );
+
+  // Disabled state is content (a disabled node passes through — different output).
+  const enabledComp = buildTB("he", 10, 8);
+  const disabledComp = buildTB("he", 10, 8);
+  disabledComp.nodes["b1"]!.enabled = false;
+  check(
+    "toggling node.enabled rehashes the node (pass-through is different content)",
+    computeFlarexContentHashes(enabledComp, 0).get("b1") !== computeFlarexContentHashes(disabledComp, 0).get("b1"),
+  );
+
+  // Cycle safety: a self/back edge must still produce a defined hash (never hang).
+  const cyc = createFlarexComp("hcy", "Cycle");
+  const cb1 = createFlarexNode("blur", "b1");
+  const cb2 = createFlarexNode("glow", "g1");
+  cyc.nodes["b1"] = cb1;
+  cyc.nodes["g1"] = cb2;
+  cyc.edges = [
+    { id: "e1", from: { nodeId: "g1", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "g1", socket: "in" } },
+  ];
+  let cycThrew = false;
+  let cycHashes: Map<string, string> | null = null;
+  try {
+    cycHashes = computeFlarexContentHashes(cyc, 0);
+  } catch {
+    cycThrew = true;
+  }
+  check("cycle never hangs or throws (stable sentinel)", !cycThrew && cycHashes!.get("b1") !== undefined && cycHashes!.get("g1") !== undefined);
 }
 
 if (failures > 0) {
