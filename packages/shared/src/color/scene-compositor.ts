@@ -303,6 +303,15 @@ export interface SceneGroupDraw {
    * compositor/evaluator never learns the shader language. RUNTIME-ONLY, unread until 3c.
    */
   dependencies?: readonly string[] | undefined;
+  /**
+   * OPAQUE resolved dependency-version payload (ADR-010) — the fold of this artifact's declared
+   * dependency version tokens, already resolved by the compiler (a time-varying artifact carries a
+   * per-frame token here). The compositor incorporates it into the content-cache identity WITHOUT
+   * interpreting it: it never learns a dependency's name or meaning. Together with `contentHash` +
+   * ContextVersion it makes the cache key FULLY determine the produced pixels. Undefined when the
+   * node declares no dynamic dependencies. RUNTIME-ONLY.
+   */
+  dependencyVersions?: string | undefined;
 }
 
 /** A compositor draw entry: a normal layer, a folded transition between two full layer draws, or a
@@ -701,6 +710,62 @@ function fitScale(sw: number, sh: number, cw: number, ch: number, fit: ObjectFit
   return [drawW > 0 ? cw / drawW : 1, drawH > 0 ? ch / drawH : 1];
 }
 
+/** Bump when the MEANING of a cache key changes (a new folded identity component, a key-format
+ *  change) — invalidates every cached artifact at once (ADR-009 ContractVersion). */
+const CONTENT_CACHE_CONTRACT_VERSION = 1;
+/** Bump when the compositor's rasterization path changes (shader/GL revision) so a cached artifact
+ *  from an older revision is never reused. A per-instance constant; today's only ambient axes are
+ *  render dimensions + this revision. */
+const RENDERER_REVISION = 1;
+
+/** One cached render artifact. Today `artifact` is always a texture RTT; the shape is deliberately
+ *  artifact-agnostic (ADR-010 ArtifactKind) so future geometry/tensor/mask kinds reuse this cache. */
+interface ArtifactEntry {
+  artifact: RenderTarget;
+  cacheKey: string;
+  /** OBSERVATION only (Slice 2, commit 3b) — recorded on access, never consulted for lookup/store.
+   *  The retention policy (commit 3c) reads it to evict; nothing in 3b interprets it. */
+  lastAccessFrame: number;
+}
+
+/**
+ * Content-addressed artifact cache (Flarex evaluation engine, Slice 2 — ADR-008). It answers exactly
+ * two questions: "do I already have this artifact?" (`lookup`) and "store this artifact" (`store`).
+ * It makes NO lifetime decisions — no eviction, scoring, retention, or heuristics (commit 3c owns all
+ * of those). Keyed by the caller-supplied OPAQUE identity string (contract × context × content ×
+ * dependency-versions); the underlying map is an implementation detail this abstraction hides so a
+ * future sharded / segmented-LRU / multi-pool implementation needs no caller changes.
+ */
+class ContentArtifactCache {
+  private readonly entries = new Map<string, ArtifactEntry>();
+  constructor(private readonly gl: WebGL2RenderingContext) {}
+
+  lookup(cacheKey: string, frame: number): ArtifactEntry | undefined {
+    const entry = this.entries.get(cacheKey);
+    if (entry) entry.lastAccessFrame = frame; // observation only — never a lifetime decision
+    return entry;
+  }
+
+  /** Get-or-create the entry for a key and return it; the caller renders/blits into `entry.artifact`.
+   *  No eviction: an unseen key always allocates (3c bounds this). */
+  store(cacheKey: string, width: number, height: number, frame: number): ArtifactEntry {
+    let entry = this.entries.get(cacheKey);
+    if (!entry) {
+      entry = { artifact: new RenderTarget(this.gl, Math.max(1, width), Math.max(1, height)), cacheKey, lastAccessFrame: frame };
+      this.entries.set(cacheKey, entry);
+    } else {
+      entry.artifact.resize(width, height);
+      entry.lastAccessFrame = frame;
+    }
+    return entry;
+  }
+
+  dispose(): void {
+    for (const entry of this.entries.values()) entry.artifact.dispose();
+    this.entries.clear();
+  }
+}
+
 export class SceneCompositor {
   readonly canvas: AnyCanvas;
   private readonly gl: WebGL2RenderingContext;
@@ -712,6 +777,9 @@ export class SceneCompositor {
   // texImage2D realloc churn that caused the periodic playback hitch.
   private readonly srcTextures = new Map<TexImageSource, { tex: WebGLTexture; w: number; h: number; version: number; lastFrame: number }>();
   private frameCounter = 0;
+  // Content-addressed artifact cache (Flarex evaluation engine, Slice 2). Lazy — created on first
+  // materialized-group render so a compositor that never renders Flarex pays nothing.
+  private contentArtifactCache: ContentArtifactCache | undefined;
   // 1×1 placeholder bound to the mask sampler when a layer has no mask (the shader won't sample it,
   // but a valid texture must stay bound to the unit).
   private readonly emptyTex: WebGLTexture;
@@ -2331,6 +2399,20 @@ export class SceneCompositor {
     }
   }
 
+  private contentCache(): ContentArtifactCache {
+    return (this.contentArtifactCache ??= new ContentArtifactCache(this.gl));
+  }
+
+  /**
+   * The content-addressed cache identity for a materialized (sealed) group. This is the SINGLE site
+   * that builds the ContextVersion — render dimensions + renderer revision today; new ambient
+   * providers (working space, output transform) fold in HERE without touching lookup/populate. The
+   * `dependencyVersions` payload is OPAQUE: incorporated verbatim, never interpreted (ADR-010).
+   */
+  private contentCacheKey(draw: SceneGroupDraw, nestW: number, nestH: number): string {
+    return `${CONTENT_CACHE_CONTRACT_VERSION}|${nestW}x${nestH}|r${RENDERER_REVISION}|${draw.contentHash}|${draw.dependencyVersions ?? ""}`;
+  }
+
   /** Lazily allocate (and resize-to-fit) the dedicated RTT pair for compound-group nesting depth `depth`. */
   private groupTargetsForDepth(depth: number, width: number, height: number): { target: RenderTarget; scratch: RenderTarget } {
     const gl = this.gl;
@@ -2365,6 +2447,26 @@ export class SceneCompositor {
     const gl = this.gl;
     const nestW = Math.max(1, Math.round(draw.nestWidth));
     const nestH = Math.max(1, Math.round(draw.nestHeight));
+
+    // Content-addressed cache (Slice 2, commit 3b): a materialized group carries a `contentHash`. On a
+    // HIT, composite the cached artifact through the (identity) shell and skip the entire children
+    // render — the win. Sealed groups are the only ones with a contentHash and have an identity shell,
+    // so this is the SAME composite the miss path performs (hit == cold by construction). Ambient
+    // width/height are already PARENT coords here (the nest swap below is skipped on a hit), which is
+    // exactly what the shell composite expects. Serves intra-frame fan-out too: the first occurrence
+    // populates, later clones with the same identity reuse.
+    const contentKey = draw.contentHash !== undefined ? this.contentCacheKey(draw, nestW, nestH) : undefined;
+    if (contentKey !== undefined) {
+      const hit = this.contentCache().lookup(contentKey, this.frameCounter);
+      if (hit) {
+        this.renderLayerInto(
+          { ...draw.shell, source: { texture: hit.artifact.tex, width: nestW, height: nestH }, sourceWidth: nestW, sourceHeight: nestH },
+          dest,
+        );
+        return;
+      }
+    }
+
     const { target, scratch } = this.groupTargetsForDepth(depth, nestW, nestH);
 
     const savedWidth = this.width;
@@ -2394,6 +2496,7 @@ export class SceneCompositor {
       else this.renderLayerInto(child, null);
     }
     let resultTex = this.accumA.tex; // ping-pong leaves the latest result in accumA after each child's swap
+    let resultRT = this.accumA; // the (transient, pooled) RT that owns resultTex — must be copied to persist it
 
     // Nesting Block 4a: the compound clip's own color pipeline grades the finished nest RTT here,
     // in-context (same `regionGradeEntry` machinery as region color passes — no new GL contexts).
@@ -2421,6 +2524,20 @@ export class SceneCompositor {
         target: entry.target,
       });
       resultTex = entry.target.tex;
+      resultRT = entry.target;
+    }
+
+    // Populate on miss (Slice 2, commit 3b): copy the finished nest into a PERSISTENT cache artifact —
+    // the pooled RT that owns `resultTex` is reused by the next group render, so it can't be retained.
+    // A NEAREST, same-size blit is a bit-exact copy, so a later HIT reproduces this frame's pixels
+    // byte-for-byte. Store only — no eviction (commit 3c bounds the cache).
+    if (contentKey !== undefined) {
+      const entry = this.contentCache().store(contentKey, nestW, nestH, this.frameCounter);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, resultRT.fbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, entry.artifact.fbo);
+      gl.blitFramebuffer(0, 0, nestW, nestH, 0, 0, nestW, nestH, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      resultTex = entry.artifact.tex;
     }
 
     this.width = savedWidth;
@@ -2805,6 +2922,8 @@ export class SceneCompositor {
       pair.scratch.dispose();
     }
     this.groupTargets.length = 0;
+    this.contentArtifactCache?.dispose();
+    this.contentArtifactCache = undefined;
     for (const pair of this.matteTargets) {
       pair.target.dispose();
       pair.scratch.dispose();

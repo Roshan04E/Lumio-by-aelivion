@@ -1139,6 +1139,37 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   check("3a: materialized static filter declares no time dependency", isGroupDraw(staticOut) && staticOut.dependencies === undefined);
 }
 
+// --- Slice 2 (commit 3b): opaque dependency-version payload in the cache identity --------------
+// A materialized time-varying artifact folds an OPAQUE resolved dependency token into its identity so
+// the cache key FULLY determines its pixels: same NodeContentHash, but a per-frame dependencyVersions.
+// A static artifact folds nothing → identity stable across frames (cross-frame reuse). The compositor
+// never interprets the payload; these assertions are the compiler side (the GL cache is gated by
+// render:compare:pixels).
+{
+  const mkFilter = (compId: string, effect: string, frameTimeSeconds: number): SceneGroupDraw => {
+    const c = createFlarexComp(compId, "F");
+    const f = createFlarexNode("filter", "flt1");
+    f.params = { ...f.params, effectId: builtinFragmentEffectId(effect), effectParams: "" };
+    c.nodes["flt1"] = f;
+    c.edges = [
+      { id: "e1", from: { nodeId: `${compId}_in`, socket: "out" }, to: { nodeId: "flt1", socket: "in" } },
+      { id: "e2", from: { nodeId: "flt1", socket: "out" }, to: { nodeId: `${compId}_out`, socket: "in" } },
+    ];
+    return compileFlarexComp(c, { ...lowerCtx(), frameTimeSeconds, materializeNodeIds: new Set(["flt1"]) }) as SceneGroupDraw;
+  };
+
+  const timeA = mkFilter("gA", "glitchFx", 3);
+  const timeB = mkFilter("gA", "glitchFx", 5);
+  check("3b: time-varying artifact folds an opaque dependency-version payload", isGroupDraw(timeA) && typeof timeA.dependencyVersions === "string" && timeA.dependencyVersions.length > 0);
+  check("3b: dependency-version payload changes with frame time (per-frame cache identity)", timeA.dependencyVersions !== timeB.dependencyVersions);
+  check("3b: content hash is INVARIANT across frame time (time is a dependency, not content)", Boolean(timeA.contentHash) && timeA.contentHash === timeB.contentHash);
+
+  const staticA = mkFilter("gS", "pixelate", 3);
+  const staticB = mkFilter("gS", "pixelate", 5);
+  check("3b: static artifact folds no dependency-version payload", isGroupDraw(staticA) && staticA.dependencyVersions === undefined);
+  check("3b: static artifact identity is stable across frame time (cross-frame reuse)", Boolean(staticA.contentHash) && staticA.contentHash === staticB.contentHash && staticA.dependencyVersions === staticB.dependencyVersions);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

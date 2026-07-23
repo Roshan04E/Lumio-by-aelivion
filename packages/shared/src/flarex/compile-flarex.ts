@@ -100,6 +100,18 @@ const STAGE_BLUR = 5;
 const STAGE_GLOW = 6;
 const STAGE_MASK = 7;
 
+/**
+ * Resolve a declared SEMANTIC dependency (ADR-010) to its OPAQUE version token for the current frame.
+ * This is the ONLY site that knows what each dependency NAME means (e.g. "time" = the frame time);
+ * the compositor folds the resulting token into the cache identity without ever interpreting the
+ * name. A declared dependency with no resolver here cannot be given a pixel-determining token, so the
+ * artifact is left uncacheable (see `materialize`) rather than risk a stale hit. New dynamic axes add
+ * a resolver entry — the compositor's cache logic never changes.
+ */
+const FLAREX_DEPENDENCY_RESOLVERS: Record<string, (ctx: FlarexLowerCtx) => string> = {
+  time: (ctx) => `t:${ctx.frameTimeSeconds}`,
+};
+
 /** Compiler-created wrap groups carry their collapse stage; the marker survives shallow clones
  *  (per-consumer copies) and is invisible to the compositor. */
 interface FlarexWrapGroup extends SceneGroupDraw {
@@ -185,16 +197,18 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // until commit 3b → output is byte-identical today.
   const contentHashes = frameProfiler.measure("evaluator.hash", () => computeFlarexContentHashes(comp, ctx.timeSeconds));
 
-  /** Does a built draw subtree read a time-varying effect? Reads the effect's DECLARED semantic
-   *  dependencies (`pass.def.dependencies`), never GLSL — the registry already derived them. Used to
-   *  stamp a sealed artifact's retention-relevant declarations (a time artifact rarely reuses across
-   *  frames). Fragment passes live only on group shells (`pushFragmentPass` wraps), so a bare layer
-   *  contributes nothing. */
-  const drawDependsOnTime = (d: SceneDraw): boolean => {
-    if ((d as SceneGroupDraw).kind !== "group") return false;
-    const group = d as SceneGroupDraw;
-    if (group.shell.fragmentPasses?.some((pass) => pass.def.dependencies?.includes("time"))) return true;
-    return group.children.some(drawDependsOnTime);
+  /** Collect the SEMANTIC dependency declarations a built draw subtree reads (ADR-010) — the union of
+   *  its fragment passes' declared `def.dependencies`, read as FACTS (never from GLSL; the registry
+   *  already derived them). Drives the sealed artifact's cache identity (dynamic deps fold into the
+   *  key) and later its retention (3c). Fragment passes live only on group shells (`pushFragmentPass`
+   *  wraps), so a bare layer contributes nothing. */
+  const collectDrawDependencies = (d: SceneDraw, acc: Set<string> = new Set<string>()): Set<string> => {
+    if ((d as SceneGroupDraw).kind === "group") {
+      const group = d as SceneGroupDraw;
+      for (const pass of group.shell.fragmentPasses ?? []) for (const dep of pass.def.dependencies ?? []) acc.add(dep);
+      for (const child of group.children) collectDrawDependencies(child, acc);
+    }
+    return acc;
   };
 
   /** Per-consumer shallow copy so shared subtrees are never mutated through one consumer's wraps. */
@@ -256,11 +270,21 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     wrap.__flarexSealed = true;
     frameProfiler.noteMaterialize();
     wrap.evaluationKey = `flarex_${comp.id}_${nodeId}`;
-    // Slice 2, commit 3a: stamp the VALIDITY key (content hash) + semantic dependency DECLARATIONS.
-    // Dormant metadata — the compositor ignores both until commit 3b/3c. `evaluationKey` stays the
-    // stable slot identity; `contentHash` is what the cache will key on (identity ≠ validity).
-    wrap.contentHash = contentHashes.get(nodeId);
-    if (drawDependsOnTime(draw)) wrap.dependencies = ["time"];
+    // Slice 2: stamp the content-addressed cache identity. `contentHash` = the pure NodeContentHash
+    // (validity); `dependencyVersions` = an OPAQUE fold of this artifact's resolved dynamic-dependency
+    // tokens (ADR-010) so the identity FULLY determines the produced pixels — a time-varying node keys
+    // per frame, a static one keys once. `evaluationKey` stays the stable slot identity (identity ≠
+    // validity). If a declared dependency has NO resolver we cannot complete a pixel-determining key,
+    // so we leave `contentHash` unset → the artifact stays uncacheable rather than risk a stale hit.
+    const deps = [...collectDrawDependencies(draw)].sort();
+    const resolvers = deps.map((dep) => FLAREX_DEPENDENCY_RESOLVERS[dep]);
+    if (!resolvers.some((resolve) => resolve === undefined)) {
+      wrap.contentHash = contentHashes.get(nodeId);
+      if (deps.length) {
+        wrap.dependencies = deps;
+        wrap.dependencyVersions = deps.map((_dep, index) => resolvers[index]!(ctx)).join("|");
+      }
+    }
     return wrap;
   };
 
