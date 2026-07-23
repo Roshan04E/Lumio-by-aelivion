@@ -286,6 +286,22 @@ export interface SceneGroupDraw {
    * groups today) → byte-identical to before this field existed.
    */
   evaluationKey?: string | undefined;
+  /**
+   * VALIDITY key for the content-addressed artifact cache (Flarex evaluation engine, Slice 2 —
+   * ADR-008/009). The node's `NodeContentHash`: what this materialized computation IS, so the cache
+   * keys on content, not identity (`evaluationKey` is the stable slot identity; this changes with the
+   * content). RUNTIME-ONLY — never serialized. The compositor pairs it with a ContextVersion
+   * (render dims + renderer revision) to form the full cache key. Undefined on every non-materialized
+   * group. Commit 3a stamps it; the compositor does not read it until 3b → byte-identical today.
+   */
+  contentHash?: string | undefined;
+  /**
+   * Semantic dependency DECLARATIONS this materialized artifact reads (ADR-010) — e.g. `["time"]`
+   * when its subtree contains a time-varying effect. FACTS only; the retention POLICY (Slice 2,
+   * commit 3c) interprets them into a RetentionEstimate. Kept semantic ("time", never "uTime") so the
+   * compositor/evaluator never learns the shader language. RUNTIME-ONLY, unread until 3c.
+   */
+  dependencies?: readonly string[] | undefined;
 }
 
 /** A compositor draw entry: a normal layer, a folded transition between two full layer draws, or a

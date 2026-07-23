@@ -40,8 +40,9 @@ import {
 registerBuiltinFragmentEffects();
 import { getCompositionColorPipeline } from "../composition-style";
 import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
-import type { SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
+import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
+import { computeFlarexContentHashes } from "./content-hash";
 import { getFlarexNodeDefinition } from "./node-defs";
 import type { FlarexComp, FlarexNode } from "./types";
 
@@ -177,6 +178,24 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const nestW = Math.max(1, Math.round(ctx.compWidth * ctx.renderScale));
   const nestH = Math.max(1, Math.round(ctx.compHeight * ctx.renderScale));
 
+  // Content-addressed evaluation cache metadata (Slice 2, commit 3a — plumbing only). Per-node
+  // NodeContentHash (ADR-009 R1+R3, pure node content — resolution/time NOT folded in), stamped onto
+  // sealed groups so the compositor can later key its artifact cache on content, not identity. Unread
+  // until commit 3b → output is byte-identical today.
+  const contentHashes = computeFlarexContentHashes(comp, ctx.timeSeconds);
+
+  /** Does a built draw subtree read a time-varying effect? Reads the effect's DECLARED semantic
+   *  dependencies (`pass.def.dependencies`), never GLSL — the registry already derived them. Used to
+   *  stamp a sealed artifact's retention-relevant declarations (a time artifact rarely reuses across
+   *  frames). Fragment passes live only on group shells (`pushFragmentPass` wraps), so a bare layer
+   *  contributes nothing. */
+  const drawDependsOnTime = (d: SceneDraw): boolean => {
+    if ((d as SceneGroupDraw).kind !== "group") return false;
+    const group = d as SceneGroupDraw;
+    if (group.shell.fragmentPasses?.some((pass) => pass.def.dependencies?.includes("time"))) return true;
+    return group.children.some(drawDependsOnTime);
+  };
+
   /** Per-consumer shallow copy so shared subtrees are never mutated through one consumer's wraps. */
   const cloneImage = (draw: FlarexImageValue): FlarexImageValue =>
     isGroup(draw)
@@ -235,6 +254,11 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     const wrap = newWrap(draw);
     wrap.__flarexSealed = true;
     wrap.evaluationKey = `flarex_${comp.id}_${nodeId}`;
+    // Slice 2, commit 3a: stamp the VALIDITY key (content hash) + semantic dependency DECLARATIONS.
+    // Dormant metadata — the compositor ignores both until commit 3b/3c. `evaluationKey` stays the
+    // stable slot identity; `contentHash` is what the cache will key on (identity ≠ validity).
+    wrap.contentHash = contentHashes.get(nodeId);
+    if (drawDependsOnTime(draw)) wrap.dependencies = ["time"];
     return wrap;
   };
 

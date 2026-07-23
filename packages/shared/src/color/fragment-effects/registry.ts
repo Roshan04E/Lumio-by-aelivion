@@ -78,7 +78,20 @@ export interface FragmentEffectDefinition {
    * no mask REPLACE the running image instead.
    */
   rewritesAlpha?: boolean;
+  /**
+   * SEMANTIC dependency declarations (ADR-010), DERIVED from the shader at registration — NOT
+   * authored. Kept semantic ("time", never "uTime") so consumers (compiler, evaluation-engine cache)
+   * never learn the shader language: a WGSL/MSL/graph effect that animates differently derives the
+   * same `["time"]` here and nothing above the registry changes. Consumed by the Flarex content cache
+   * to estimate retention (a time-varying artifact has ~zero inter-frame reuse). Any value the caller
+   * sets is overwritten by the registry's derivation.
+   */
+  dependencies?: readonly FragmentEffectDependency[];
 }
+
+/** Semantic environment/data axes an effect's output depends on (ADR-010 dependency declarations).
+ *  Derived from the shader by the registry; kept language-agnostic. Grows as new providers appear. */
+export type FragmentEffectDependency = "time";
 
 const GLSL_TYPE: Record<FragmentParamType, string> = {
   float: "float",
@@ -173,6 +186,16 @@ export function buildFragmentEffectPassShader(def: FragmentEffectDefinition, pas
 
 const registry = new Map<string, FragmentEffectDefinition>();
 
+/** Derive an effect's semantic dependency declarations from its shader source ONCE, at registration
+ *  (ADR-010: the provider derives declarations; the compiler/evaluator only consume them). Today the
+ *  only axis is `time`, detected by a `uTime` reference in the body/pass GLSL — but this scan is the
+ *  ONLY place that knows the token exists; everything upstream sees the semantic `"time"`. */
+function deriveFragmentEffectDependencies(def: FragmentEffectDefinition): FragmentEffectDependency[] {
+  const sources = [def.glsl, ...(def.passes ?? []).map((pass) => pass.glsl)];
+  const usesTime = sources.some((src) => /\buTime\b/.test(src ?? ""));
+  return usesTime ? ["time"] : [];
+}
+
 export function registerFragmentEffect(def: FragmentEffectDefinition, options: { override?: boolean } = {}): boolean {
   if (registry.has(def.id) && !options.override) {
     return false;
@@ -181,7 +204,10 @@ export function registerFragmentEffect(def: FragmentEffectDefinition, options: {
   for (const pass of def.passes ?? []) {
     shaderCache.delete(`${def.id}#${pass.id}`);
   }
-  registry.set(def.id, def);
+  // Store the def with its DERIVED dependency declarations (non-mutating: a shallow copy, so the
+  // caller's object is untouched and the registry is the single source of the derived metadata).
+  const dependencies = deriveFragmentEffectDependencies(def);
+  registry.set(def.id, dependencies.length ? { ...def, dependencies } : def);
   return true;
 }
 

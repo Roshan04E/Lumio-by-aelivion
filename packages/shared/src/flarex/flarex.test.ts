@@ -10,6 +10,7 @@
 import { compileFlarexComp, type FlarexLowerCtx } from "./compile-flarex";
 import { computeFlarexContentHashes } from "./content-hash";
 import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
+import { getFragmentEffect, listFragmentEffects } from "../color/fragment-effects/registry";
 import { compileNodeGraphIntent, nodeGraphIntentSchema, type NodeGraphIntent } from "./node-graph-intent";
 import type { SceneDraw, SceneGroupDraw, SceneLayerDraw } from "../color/scene-compositor";
 import {
@@ -1088,6 +1089,54 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
     cycThrew = true;
   }
   check("cycle never hangs or throws (stable sentinel)", !cycThrew && cycHashes!.get("b1") !== undefined && cycHashes!.get("g1") !== undefined);
+}
+
+// --- Slice 2 (commit 3a): content-cache metadata plumbing (dormant) ----------
+// Registry derives semantic dependsOn(time) from the shader; the compiler stamps contentHash
+// (validity key) + dependency declarations (facts) onto sealed groups. All unread by the
+// compositor until 3b/3c → render output is byte-identical (green by construction).
+{
+  // (a) Registry derivation is exactly the set of effects whose shader references uTime — and the
+  //     declaration is SEMANTIC ("time"), so nothing above the registry ever sees the token.
+  const all = listFragmentEffects();
+  const declaredTime = all.filter((d) => (d.dependencies ?? []).includes("time")).map((d) => d.id).sort();
+  const usesUTime = all
+    .filter((d) => /\buTime\b/.test(d.glsl) || (d.passes ?? []).some((p) => /\buTime\b/.test(p.glsl)))
+    .map((d) => d.id).sort();
+  check("3a registry: dependsOn(time) derived exactly from shader uTime usage", JSON.stringify(declaredTime) === JSON.stringify(usesUTime));
+  check("3a registry: at least one time-varying effect exists", usesUTime.length > 0);
+  check("3a registry: a static effect declares no time dependency", (getFragmentEffect(builtinFragmentEffectId("pixelate"))?.dependencies ?? []).length === 0);
+  check("3a registry: a time-varying effect declares time", (getFragmentEffect(builtinFragmentEffectId("glitchFx"))?.dependencies ?? []).includes("time"));
+
+  // (b) materialize stamps the node's content hash as the sealed group's validity key — distinct
+  //     from the identity evaluationKey (ADR-008: identity ≠ validity).
+  const comp = createFlarexComp("h3a", "Stamp");
+  comp.nodes["b1"] = createFlarexNode("blur", "b1");
+  comp.edges = [
+    { id: "e1", from: { nodeId: "h3a_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "h3a_out", socket: "in" } },
+  ];
+  const out = compileFlarexComp(comp, { ...lowerCtx(), materializeNodeIds: new Set(["b1"]) }) as SceneGroupDraw;
+  const expected = computeFlarexContentHashes(comp, lowerCtx().timeSeconds).get("b1");
+  check("3a: sealed group carries the node's content hash as its validity key", isGroupDraw(out) && out.contentHash === expected && Boolean(expected));
+  check("3a: content hash is distinct from the identity evaluationKey", isGroupDraw(out) && out.contentHash !== out.evaluationKey);
+
+  // (c) A materialized time-varying filter declares dependsOn(time); a static one declares nothing.
+  const mkFilter = (compId: string, effect: string): FlarexComp => {
+    const c = createFlarexComp(compId, "Filter");
+    const f = createFlarexNode("filter", "flt1");
+    f.params = { ...f.params, effectId: builtinFragmentEffectId(effect), effectParams: "" };
+    c.nodes["flt1"] = f;
+    c.edges = [
+      { id: "e1", from: { nodeId: `${compId}_in`, socket: "out" }, to: { nodeId: "flt1", socket: "in" } },
+      { id: "e2", from: { nodeId: "flt1", socket: "out" }, to: { nodeId: `${compId}_out`, socket: "in" } },
+    ];
+    return c;
+  };
+  const timeOut = compileFlarexComp(mkFilter("h3t", "glitchFx"), { ...lowerCtx(), materializeNodeIds: new Set(["flt1"]) }) as SceneGroupDraw;
+  check("3a: materialized time-varying filter declares dependsOn(time)", isGroupDraw(timeOut) && (timeOut.dependencies ?? []).includes("time"));
+  const staticOut = compileFlarexComp(mkFilter("h3s", "pixelate"), { ...lowerCtx(), materializeNodeIds: new Set(["flt1"]) }) as SceneGroupDraw;
+  check("3a: materialized static filter declares no time dependency", isGroupDraw(staticOut) && staticOut.dependencies === undefined);
 }
 
 if (failures > 0) {
