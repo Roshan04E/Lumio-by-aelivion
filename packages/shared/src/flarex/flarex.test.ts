@@ -10,7 +10,7 @@
 import { compileFlarexComp, type FlarexLowerCtx } from "./compile-flarex";
 import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
 import { compileNodeGraphIntent, nodeGraphIntentSchema, type NodeGraphIntent } from "./node-graph-intent";
-import type { SceneGroupDraw, SceneLayerDraw } from "../color/scene-compositor";
+import type { SceneDraw, SceneGroupDraw, SceneLayerDraw } from "../color/scene-compositor";
 import {
   createFlarexComp,
   getFlarexComp,
@@ -834,6 +834,115 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
 
   check("intent schema rejects unknown matte action", !nodeGraphIntentSchema.safeParse({ ops: [{ op: "matte", action: "explode" }] }).success);
   check("intent schema rejects a curves op (intentionally not exposed)", !nodeGraphIntentSchema.safeParse({ ops: [{ op: "curves", points: [] }] }).success);
+}
+
+// --- Slice 1: materialization boundary (runtime node identity) ----------------
+// Runtime-only opt-in (ctx.materializeNodeIds); NO persisted flag. Verifies the sealed wrap is a
+// true two-sided optimization barrier, emits evaluationKey, nests correctly, and is pixel-neutral by
+// construction — and that preserving __flarexSealed through cloneImage adds NO spurious barriers.
+{
+  // A chain: mediaIn -> transform(t1) -> blur(b1) [-> glow(g1)] -> mediaOut.
+  const buildChain = (compId: string, withGlow: boolean): FlarexComp => {
+    const comp = createFlarexComp(compId, "Materialize test");
+    comp.nodes["t1"] = createFlarexNode("transform", "t1");
+    comp.nodes["b1"] = createFlarexNode("blur", "b1");
+    comp.edges = [
+      { id: "e1", from: { nodeId: `${compId}_in`, socket: "out" }, to: { nodeId: "t1", socket: "in" } },
+      { id: "e2", from: { nodeId: "t1", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
+    ];
+    if (withGlow) {
+      comp.nodes["g1"] = createFlarexNode("glow", "g1");
+      comp.edges.push(
+        { id: "e3", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "g1", socket: "in" } },
+        { id: "e4", from: { nodeId: "g1", socket: "out" }, to: { nodeId: `${compId}_out`, socket: "in" } },
+      );
+    } else {
+      comp.edges.push({ id: "e3", from: { nodeId: "b1", socket: "out" }, to: { nodeId: `${compId}_out`, socket: "in" } });
+    }
+    return comp;
+  };
+  const evalKeyOf = (d: SceneDraw | undefined): string | undefined => (d as SceneGroupDraw | undefined)?.evaluationKey;
+  const lowerWith = (compId: string, ids: string[] | null, withGlow = false) =>
+    compileFlarexComp(buildChain(compId, withGlow), ids ? { ...lowerCtx(), materializeNodeIds: new Set(ids) } : lowerCtx());
+
+  // (1) BASELINE REGRESSION: no policy -> transform+blur FOLD into one group, host is the direct
+  // child (no barrier), and no group carries an evaluationKey.
+  {
+    const base = lowerWith("mtz", null);
+    check("baseline: chain lowers to a single folded group", isGroupDraw(base) && base.children.length === 1);
+    if (isGroupDraw(base)) {
+      check("baseline: blur folded onto the wrap shell", base.shell.blurPx === 8);
+      check("baseline: child is the host LAYER (folded, no barrier)", !isGroupDraw(base.children[0]!));
+      check("baseline: no evaluationKey emitted without a policy", base.evaluationKey === undefined && evalKeyOf(base.children[0]) === undefined);
+    }
+  }
+
+  // (2) evaluationKey EMISSION: materialize t1 -> t1's output is a sealed group stamped
+  // flarex_<comp>_<node>; the outer blur wrap is NOT sealed (no leak).
+  {
+    const out = lowerWith("mtz", ["t1"]);
+    check("materialize: output is a group", isGroupDraw(out));
+    if (isGroupDraw(out)) {
+      check("materialize: outer blur wrap is NOT sealed (no evaluationKey)", out.evaluationKey === undefined);
+      check("materialize: t1 output sealed into its own group", isGroupDraw(out.children[0]!));
+      check("materialize: sealed group carries evaluationKey flarex_mtz_t1", evalKeyOf(out.children[0]) === "flarex_mtz_t1");
+    }
+  }
+
+  // (3) FOLD BARRIER BEHAVIOR: the seal is a true optimization barrier at t1 ONLY.
+  //  - downstream of a sealed node does NOT fold into it (child becomes a group, not a layer);
+  //  - the SAME op still folds when the node is not sealed (baseline above);
+  //  - materializing t1 does NOT leak a seal onto b1/g1 -> blur+glow still fold together (the
+  //    converse: no spurious barrier from cloneImage preserving __flarexSealed).
+  {
+    const folded = lowerWith("mtz", null);
+    const barrier = lowerWith("mtz", ["t1"]);
+    check(
+      "barrier: same op folds without a seal but NOT across a sealed node",
+      isGroupDraw(folded) && !isGroupDraw(folded.children[0]!) && isGroupDraw(barrier) && isGroupDraw(barrier.children[0]!),
+    );
+    const converse = lowerWith("mtz2", ["t1"], true);
+    check(
+      "barrier: blur+glow still fold together downstream of a sealed t1 (no spurious barrier)",
+      isGroupDraw(converse) && converse.shell.blurPx === 8 && Boolean(converse.shell.glow) && converse.evaluationKey === undefined,
+    );
+    if (isGroupDraw(converse)) {
+      check("barrier: exactly one barrier — the sealed t1 group", isGroupDraw(converse.children[0]!) && evalKeyOf(converse.children[0]) === "flarex_mtz2_t1");
+    }
+  }
+
+  // (4) NESTED MATERIALIZATION: materialize BOTH t1 and b1 -> b1's sealed group wraps the blur wrap
+  // wraps t1's sealed group (two barriers, correctly ordered).
+  {
+    const out = lowerWith("mtz", ["t1", "b1"]);
+    check("nested: outer group sealed as b1", isGroupDraw(out) && out.evaluationKey === "flarex_mtz_b1");
+    if (isGroupDraw(out)) {
+      const blurWrap = out.children[0];
+      check("nested: middle is the (unsealed) blur wrap", isGroupDraw(blurWrap!) && blurWrap.evaluationKey === undefined && blurWrap.shell.blurPx === 8);
+      if (isGroupDraw(blurWrap!)) {
+        check("nested: inner is t1's sealed group", isGroupDraw(blurWrap.children[0]!) && evalKeyOf(blurWrap.children[0]) === "flarex_mtz_t1");
+      }
+    }
+  }
+
+  // (5) PIXEL-PARITY BY CONSTRUCTION: a sealed group is an IDENTITY nest — identity shell, no
+  // pipeline/mask/blur/glow/passes — so its RTT is a 1:1 copy of its child. Materialization inserts
+  // only identity nests, which the compositor renders pixel-exact (the same invariant the nesting
+  // 0.000% parity gate proves). Structural proof; the rendered gate confirms empirically (step 4).
+  {
+    const out = lowerWith("mtz", ["t1"]);
+    const sealed = isGroupDraw(out) && isGroupDraw(out.children[0]!) ? out.children[0] : null;
+    const s = sealed?.shell;
+    check(
+      "parity: sealed group has an identity shell (fit/blend/transform)",
+      Boolean(s) && s!.fit === "fill" && s!.blendMode === "normal" &&
+        s!.transform.x === 50 && s!.transform.y === 50 && s!.transform.scale === 1 && s!.transform.rotation === 0 && s!.transform.opacity === 100,
+    );
+    check(
+      "parity: sealed group applies NO pixel op (no pipeline/mask/blur/glow/passes)",
+      Boolean(sealed) && !sealed!.pipeline && !s!.mask && !s!.blurPx && !s!.glow && !s!.fragmentPasses && !s!.regionPasses,
+    );
+  }
 }
 
 if (failures > 0) {
