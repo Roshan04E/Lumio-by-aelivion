@@ -153,6 +153,14 @@ export interface BuildSceneDrawsInputs {
    * empty = every MediaIn resolves to its host clip (no asset sources), byte-identical to before.
    */
   flarexVirtualLayers?: TimelineLayer[] | undefined;
+  /**
+   * Runtime-only Flarex materialization policy (Flarex evaluation engine, Slice 1): node ids whose
+   * output the compiler must seal into its own render-target boundary. Forwarded verbatim to
+   * `compileFlarexComp`'s `materializeNodeIds`. NEVER serialized — it is not carried on the graph or
+   * the render manifest; absent in production → byte-identical to before this field existed. Used
+   * only by the parity gate that renders a materialized variant of a comp.
+   */
+  flarexMaterializeNodeIds?: ReadonlySet<string> | undefined;
 }
 
 /** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below).
@@ -724,6 +732,9 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       frameTimeSeconds: t,
       hostSourceDraw: draw,
       matteCache: dims.matteCache,
+      // Runtime-only materialization policy (Slice 1) — undefined in production (dormant); set only
+      // by the parity gate. Never sourced from persisted graph/manifest data.
+      materializeNodeIds: inputs.flarexMaterializeNodeIds,
       // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
       // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its
       // media is provided via `getMediaGraded(virtualId)` exactly like a real clip; an unready/absent
