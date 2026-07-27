@@ -9,10 +9,16 @@
  */
 import { compileFlarexComp, type FlarexLowerCtx } from "./compile-flarex";
 import { computeFlarexContentHashes } from "./content-hash";
-import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
+import {
+  builtinFragmentEffectId,
+  FLAREX_CHANNELS_ID,
+  FLAREX_CROP_ID,
+  FLAREX_GRAIN_ID,
+  FLAREX_VIGNETTE_ID,
+} from "../color/fragment-effects/builtins";
 import { getFragmentEffect, listFragmentEffects } from "../color/fragment-effects/registry";
 import { compileNodeGraphIntent, nodeGraphIntentSchema, type NodeGraphIntent } from "./node-graph-intent";
-import type { SceneDraw, SceneGroupDraw, SceneLayerDraw } from "../color/scene-compositor";
+import { planArtifactEviction, type ArtifactRetentionCandidate, type SceneDraw, type SceneGroupDraw, type SceneLayerDraw } from "../color/scene-compositor";
 import {
   createFlarexComp,
   getFlarexComp,
@@ -23,9 +29,10 @@ import {
   wouldCreateFlarexCycle,
 } from "./registry";
 import { createFlarexNode, flarexNodeDefs, parseFlarexNodeParams } from "./node-defs";
-import { collectFlarexVirtualLayers, flarexVirtualLayerId } from "./virtual-layers";
-import type { FlarexComp } from "./types";
-import type { Mask, ProjectGraph, TimelineLayer } from "../types";
+import { collectFlarexVirtualLayers, flarexVirtualLayerId, isolateFlarexHostComposition } from "./virtual-layers";
+import { CREATIVE_LOOK_NAMES } from "../color/looks";
+import type { FlarexComp, FlarexNodeType } from "./types";
+import type { Mask, ProjectGraph, TimelineComposition, TimelineLayer } from "../types";
 import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 
 let failures = 0;
@@ -119,7 +126,10 @@ function graphFixture(): ProjectGraph {
 }
 
 // --- Lowering compiler (FLAREX.md Part 4) ------------------------------------
-function hostDraw(): SceneLayerDraw {
+/** `sourceVersion` defaults to a stable number so the host raster is DESCRIBED (cacheable). Pass
+ *  `null` — NOT `undefined`, which a JS default parameter would silently replace with the default —
+ *  for the unversioned "content may change every frame" declaration; see the 3c-A block. */
+function hostDraw(sourceVersion: number | null = 7): SceneLayerDraw {
   return {
     debugLayerId: "host",
     source: { texture: {} as WebGLTexture, width: 1920, height: 1080 },
@@ -128,20 +138,51 @@ function hostDraw(): SceneLayerDraw {
     fit: "cover",
     transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
     blendMode: "normal",
+    sourceVersion: sourceVersion ?? undefined,
   };
 }
-function lowerCtx(): FlarexLowerCtx {
+function lowerCtx(host: SceneLayerDraw = hostDraw()): FlarexLowerCtx {
   return {
     compWidth: 1920,
     compHeight: 1080,
     renderScale: 1,
     timeSeconds: 1,
     frameTimeSeconds: 3,
-    hostSourceDraw: hostDraw(),
+    hostSourceDraw: host,
     matteCache: null,
   };
 }
 const isGroupDraw = (d: unknown): d is SceneGroupDraw => (d as SceneGroupDraw)?.kind === "group";
+
+type ChainSpec = [FlarexNodeType, Record<string, string | number | boolean>];
+
+/** Compile `mediaIn → [chain of single-input nodes] → mediaOut`. The workhorse for node-family
+ *  tests: the interesting assertions are about what the chain COLLAPSES to, not about wiring. */
+function chainComp(id: string, specs: ChainSpec[], ctx: FlarexLowerCtx = lowerCtx()) {
+  const comp = createFlarexComp(id, id);
+  comp.edges = [];
+  let prev = `${id}_in`;
+  specs.forEach(([type, params], i) => {
+    const node = createFlarexNode(type, `${id}_n${i}`);
+    node.params = { ...node.params, ...params };
+    comp.nodes[node.id] = node;
+    comp.edges.push({ id: `${id}_e${i}`, from: { nodeId: prev, socket: "out" }, to: { nodeId: node.id, socket: "in" } });
+    prev = node.id;
+  });
+  comp.edges.push({ id: `${id}_eout`, from: { nodeId: prev, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } });
+  return compileFlarexComp(comp, ctx);
+}
+
+/** How many nested groups deep a result is — i.e. how many render targets the compositor allocates. */
+function groupDepth(draw: SceneDraw | null): number {
+  let depth = 0;
+  let cursor = draw;
+  while (cursor && (cursor as SceneGroupDraw).kind === "group") {
+    depth += 1;
+    cursor = (cursor as SceneGroupDraw).children[0] ?? null;
+  }
+  return depth;
+}
 
 {
   // Default comp (mediaIn → mediaOut) lowers to the host draw untouched (a clone, not the same object).
@@ -296,10 +337,12 @@ const isGroupDraw = (d: unknown): d is SceneGroupDraw => (d as SceneGroupDraw)?.
       check("fg blend/opacity applied on its shell", fg.shell.blendMode === "screen" && Math.abs(fg.shell.transform.opacity - 80) < 1e-6);
       check("keyer pass resolves the registered def", fg.shell.fragmentPasses?.[0]?.def.id === "flarex.chromaKey");
     }
-    // c3_in feeds BOTH k1.in and m1.bg (fan-out 2) → the evaluator seals it (ADR-008 fanout>1). bg is
-    // now that sealed identity group (pixel-neutral: identity shell, host layer as its only child).
+    // c3_in feeds BOTH k1.in and m1.bg (fan-out 2), but it is a BARE MediaIn — zero passes, so sealing it
+    // would add an identity RTT that dedupes nothing. The cost term of the materialize decision (ADR-010
+    // §3, added 2026-07-26 after `flarex:perf` measured this shape 37.5% slower + 7.9MB heavier when
+    // fan-out alone forced the seal) leaves it folded. Cheap shared leaves stay layers.
     const bg = out.children[0]!;
-    check("bg is the fan-out-sealed MediaIn (identity nest over the host)", isGroupDraw(bg) && (bg as SceneGroupDraw).evaluationKey === "flarex_c3_c3_in");
+    check("a cheap fanned-out MediaIn is NOT sealed (cost term gates fan-out)", !isGroupDraw(bg));
     if (isGroupDraw(bg)) {
       check("fan-out seal is an identity nest (host clone as its only child)", bg.children.length === 1 && !isGroupDraw(bg.children[0]!) && (bg.children[0] as SceneLayerDraw).sourceWidth === 1920);
     }
@@ -448,6 +491,15 @@ const isGroupDraw = (d: unknown): d is SceneGroupDraw => (d as SceneGroupDraw)?.
   check("dangling view dot falls back to MediaOut", isGroupDraw(fallback) && fallback.shell.blurPx === 10);
   const healed = healFlarexRegistry({ ...graphFixture(), flarexComps: { v1: comp } });
   check("healer clears a dangling previewNodeId", getFlarexComp(healed, "v1")?.previewNodeId === undefined);
+
+  // Slice 4: the RUNTIME re-root that per-node thumbnails compile through. It must win over the
+  // persisted view dot AND leave it untouched, or rendering a thumbnail would move the user's viewer.
+  comp.previewNodeId = "v1_out";
+  const rooted = compileFlarexComp(comp, { ...lowerCtx(), previewRootNodeId: "v1_in" });
+  check("previewRootNodeId re-roots the compile", Boolean(rooted) && !isGroupDraw(rooted));
+  check("previewRootNodeId does not mutate the persisted view dot", comp.previewNodeId === "v1_out");
+  const rootedDangling = compileFlarexComp(comp, { ...lowerCtx(), previewRootNodeId: "nope" });
+  check("a dangling runtime root falls back to MediaOut (a thumbnail pass can't blank the viewer)", isGroupDraw(rootedDangling) && rootedDangling.shell.blurPx === 10);
 }
 
 // --- Keyframed node params (Phase 1.5 S2) ------------------------------------
@@ -659,6 +711,134 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   ];
   const out3 = compileFlarexComp(comp3, lowerCtx());
   check("empty colorCurves payload passes through untouched", Boolean(out3) && !isGroupDraw(out3));
+}
+
+// --- Colour node family + pipeline coalescing (P1) --------------------------
+{
+  const WHEELS = JSON.stringify({
+    shadows: { x: 0, y: 0, master: 0 },
+    midtones: { x: 0.25, y: -0.2, master: 0.15 },
+    highlights: { x: 0, y: 0, master: 0 },
+  });
+  const SECONDARY = JSON.stringify({ hueCenter: 0.35, hueWidth: 0.08, softness: 0.05, satScale: 0 });
+  const CURVES = JSON.stringify({ master: [{ x: 0, y: 0 }, { x: 0.25, y: 0.05 }, { x: 0.75, y: 0.95 }, { x: 1, y: 1 }] });
+
+  const chain = chainComp;
+
+  // THE regression test for the shipped Color Correct default bug: a freshly added node must be a
+  // NO-OP. Its saturation default used to be 1 on a scale where 100 is neutral, so every new Color
+  // Correct node silently desaturated the image to ~1%.
+  const fresh = chain("ccdef", [["colorCorrect", {}]]);
+  check("fresh Color Correct is a no-op (saturation default is on the effect's own scale)", Boolean(fresh) && !isGroupDraw(fresh));
+
+  // …and it still grades when actually dialled in.
+  const graded = chain("ccval", [["colorCorrect", { exposure: 40, saturation: 140 }]]);
+  check("Color Correct with values lowers to a real pipeline", isGroupDraw(graded!) && graded!.pipeline?.identity !== true);
+
+  // Each new table-driven colour node reaches the grade engine with the right effect param key.
+  const wheels = chain("cw", [["colorWheels", { wheels: WHEELS }]]);
+  check("colorWheels node lowers to a pipeline wrap", isGroupDraw(wheels!) && wheels!.pipeline?.identity !== true);
+  const qualifier = chain("hq", [["hslQualifier", { secondary: SECONDARY }]]);
+  check("hslQualifier node lowers to a pipeline wrap", isGroupDraw(qualifier!) && qualifier!.pipeline?.identity !== true);
+  const look = chain("lk", [["look", { look: CREATIVE_LOOK_NAMES[0] ?? "" }]]);
+  check("look node lowers to a pipeline wrap", isGroupDraw(look!) && look!.pipeline?.identity !== true);
+
+  // Unconfigured payloads pass through untouched (never a wrap, never a throw).
+  check("empty wheels payload passes through", !isGroupDraw(chain("cw0", [["colorWheels", {}]])));
+  check("empty qualifier payload passes through", !isGroupDraw(chain("hq0", [["hslQualifier", {}]])));
+  check("empty look passes through", !isGroupDraw(chain("lk0", [["look", {}]])));
+  check("empty LUT passes through", !isGroupDraw(chain("lut0", [["lut", {}]])));
+
+  // P1 — the whole point: four DIFFERENT colour nodes in series must bake into ONE pipeline on ONE
+  // group. Before coalescing this was four nested groups = four RTTs + four full-frame composites,
+  // which is what made a grade chain unusable on an integrated GPU.
+  const coalesced = chain("coal", [
+    ["colorWheels", { wheels: WHEELS }],
+    ["colorCurves", { curves: CURVES }],
+    ["hslQualifier", { secondary: SECONDARY }],
+    ["colorCorrect", { exposure: 25 }],
+  ]);
+  check("P1: a 4-node colour chain coalesces into ONE group", groupDepth(coalesced) === 1);
+  check("P1: the coalesced group carries a real pipeline", isGroupDraw(coalesced!) && coalesced!.pipeline?.identity !== true);
+
+  // Refusals — each must open a fresh nest rather than silently reorder the grade.
+  // (a) Two of the SAME stage: the engine would collapse them, so they must not fold together.
+  const sameStage = chain("same", [["colorCorrect", { exposure: 30 }], ["colorCorrect", { saturation: 150 }]]);
+  check("P1: two Color Corrects do NOT coalesce (one stage cannot hold both)", groupDepth(sameStage) === 2);
+  // (b) A later-stage op already landed on the wrap: the pipeline runs FIRST in shell order, so
+  //     folding in would jump the colour node ahead of the transform the user put before it.
+  const afterTransform = chain("ord", [
+    ["colorWheels", { wheels: WHEELS }],
+    ["transform", { scale: 1.4 }],
+    ["colorCorrect", { exposure: 30 }],
+  ]);
+  check("P1: a colour node after a Transform opens a new nest (order is preserved)", groupDepth(afterTransform) === 2);
+
+  // Determinism (the compiler's core contract) holds for the coalesced path too.
+  const strip = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" ? undefined : val));
+  const detSpecs: ChainSpec[] = [["colorWheels", { wheels: WHEELS }], ["colorCorrect", { exposure: 25 }]];
+  check("P1: coalesced lowering is deterministic", strip(chain("det", detSpecs)) === strip(chain("det", detSpecs)));
+}
+
+// --- Builtin-wrapping filter nodes -----------------------------------------
+{
+  const passesOf = (draw: ReturnType<typeof chainComp>) => (draw && isGroupDraw(draw) ? draw.shell.fragmentPasses ?? [] : []);
+
+  // Each node resolves its builtin and scales its normalized param into the builtin's own range.
+  const dir = passesOf(chainComp("fdb", [["directionalBlur", { amount: 0.5, angle: 45 }]]));
+  check("directionalBlur node resolves its builtin", dir[0]?.def.id === builtinFragmentEffectId("directionalBlur"));
+  check("directionalBlur scales 0..1 amount to the builtin's 0..100", dir[0]?.params.amount === 50 && dir[0]?.params.angle === 45);
+
+  const rad = passesOf(chainComp("frb", [["radialBlur", { amount: 0.25, centerX: 0.25, centerY: 0.75 }]]));
+  check("radialBlur node resolves its builtin", rad[0]?.def.id === builtinFragmentEffectId("radialBlur"));
+  check("radialBlur maps comp-fraction centre to the builtin's percent", rad[0]?.params.centerX === 25 && rad[0]?.params.centerY === 75);
+
+  const pix = passesOf(chainComp("fpx", [["pixelate", { blockSize: 32 }]]));
+  check("pixelate node passes blockSize through in pixels", pix[0]?.def.id === builtinFragmentEffectId("pixelate") && pix[0]?.params.blockSize === 32);
+
+  const pri = passesOf(chainComp("fpr", [["prism", { amount: 0.8 }]]));
+  check("prism node resolves the chromatic-aberration builtin", pri[0]?.def.id === builtinFragmentEffectId("chromaticAberration"));
+  check("prism scales its amount", pri[0]?.params.amount === 80);
+
+  // P3 — the cheapness claim: four filters in series are four passes on ONE shell, not four nests.
+  const stacked = chainComp("fst", [
+    ["directionalBlur", { amount: 0.3 }],
+    ["radialBlur", { amount: 0.3 }],
+    ["pixelate", { blockSize: 8 }],
+    ["prism", { amount: 0.2 }],
+  ]);
+  check("P3: four filter nodes stack on ONE group", groupDepth(stacked) === 1);
+  check("P3: …as four fragment passes in order", passesOf(stacked).length === 4);
+
+  // --- New Flarex GLSL builtins ---------------------------------------------
+  const crop = passesOf(chainComp("fcr", [["crop", { left: 0.1, right: 0.2, top: 0.05, bottom: 0.3, softness: 0.02 }]]));
+  check("crop node resolves the crop builtin", crop[0]?.def.id === FLAREX_CROP_ID);
+  check("crop passes its insets as frame fractions", crop[0]?.params.left === 0.1 && crop[0]?.params.bottom === 0.3);
+  // Crop must REPLACE the running image, not draw over it — otherwise the trimmed pixels stay visible.
+  check("crop rewrites alpha (a cropped pixel is transparent, not composited over)", crop[0]?.def.rewritesAlpha === true);
+
+  const channels = passesOf(chainComp("fch", [["channelBoolean", { red: "luma", green: "black", blue: "white", alpha: "luma", invertRgb: true }]]));
+  check("channelBoolean node resolves the channels builtin", channels[0]?.def.id === FLAREX_CHANNELS_ID);
+  // Named sources map to the shader's index vocabulary by position in `flarexChannelSources`.
+  check("channelBoolean maps names to shader indices", channels[0]?.params.rFrom === 4 && channels[0]?.params.gFrom === 5 && channels[0]?.params.bFrom === 6);
+  check("channelBoolean carries alpha←luma (the matte-from-plate case)", channels[0]?.params.aFrom === 4);
+  check("channelBoolean carries its boolean", channels[0]?.params.invertRgb === true);
+  check("channelBoolean defaults are the identity shuffle", (() => {
+    const identity = passesOf(chainComp("fch0", [["channelBoolean", {}]]))[0];
+    return identity?.params.rFrom === 0 && identity?.params.gFrom === 1 && identity?.params.bFrom === 2 && identity?.params.aFrom === 3;
+  })());
+
+  const vig = passesOf(chainComp("fvg", [["vignette", { amount: 0.5, roundness: 0.25 }]]));
+  check("vignette node resolves the vignette builtin", vig[0]?.def.id === FLAREX_VIGNETTE_ID);
+  check("vignette params stay normalized 0..1", vig[0]?.params.amount === 0.5 && vig[0]?.params.roundness === 0.25);
+
+  const grn = passesOf(chainComp("fgr", [["grain", { amount: 0.4, size: 2 }]]));
+  check("grain node resolves the grain builtin", grn[0]?.def.id === FLAREX_GRAIN_ID);
+  check("grain params pass through", grn[0]?.params.amount === 0.4 && grn[0]?.params.size === 2);
+  // Grain reads uTime, so the registry must have DERIVED a "time" dependency — that is what keeps the
+  // content cache from serving one frozen grain frame forever (ADR-010).
+  check("grain declares a time dependency (derived, not authored)", (grn[0]?.def.dependencies ?? []).includes("time"));
+  check("vignette declares NO dependency (static, so it stays cacheable)", (vig[0]?.def.dependencies ?? []).length === 0);
 }
 
 // --- Filter node registry-driven UI/lowering (Sonnet round 2, N1) -----------
@@ -1166,8 +1346,226 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
 
   const staticA = mkFilter("gS", "pixelate", 3);
   const staticB = mkFilter("gS", "pixelate", 5);
-  check("3b: static artifact folds no dependency-version payload", isGroupDraw(staticA) && staticA.dependencyVersions === undefined);
+  // 3c-A revised this: a static artifact folds no TIME token, but it does fold its source-content
+  // version (that axis is what stops a live raster being served stale). The invariant that matters is
+  // that nothing in its identity varies with frame time — asserted on the next line.
+  check("3b: static artifact folds no time token (only the source-content version)", isGroupDraw(staticA) && staticA.dependencyVersions === "v7");
   check("3b: static artifact identity is stable across frame time (cross-frame reuse)", Boolean(staticA.contentHash) && staticA.contentHash === staticB.contentHash && staticA.dependencyVersions === staticB.dependencyVersions);
+}
+
+// --- Slice 2 (commit 3c-A): SOURCE CONTENT is part of the cache identity ------------------------
+// REGRESSION GUARD for a shipped freeze: dependencies were harvested from fragment passes ONLY, so a
+// subtree whose only dynamic input was a live media raster keyed identically every frame. The
+// compositor's hit path skips the children render outright, so a materialized MediaIn served its first
+// decoded frame FOREVER. An unversioned raster must now make the artifact uncacheable, and a versioned
+// one must fold its version into the identity so a new frame re-keys.
+{
+  const sealed = (host: SceneLayerDraw, nodeIds = ["flt1"]): SceneGroupDraw => {
+    const c = createFlarexComp("srcid", "S");
+    const f = createFlarexNode("filter", "flt1");
+    f.params = { ...f.params, effectId: builtinFragmentEffectId("pixelate"), effectParams: "" };
+    c.nodes["flt1"] = f;
+    c.edges = [
+      { id: "e1", from: { nodeId: "srcid_in", socket: "out" }, to: { nodeId: "flt1", socket: "in" } },
+      { id: "e2", from: { nodeId: "flt1", socket: "out" }, to: { nodeId: "srcid_out", socket: "in" } },
+    ];
+    return compileFlarexComp(c, { ...lowerCtx(host), materializeNodeIds: new Set(nodeIds) }) as SceneGroupDraw;
+  };
+
+  // An UNVERSIONED raster ("always re-upload" — live media) cannot be described by any key we can build.
+  const unversioned = sealed(hostDraw(null));
+  check("3c-A: unversioned source makes the artifact UNCACHEABLE (no stale hit)", isGroupDraw(unversioned) && unversioned.contentHash === undefined);
+  check("3c-A: an uncacheable artifact is still sealed + materialized (only caching is withheld)", isGroupDraw(unversioned) && unversioned.evaluationKey === "flarex_srcid_flt1");
+
+  // A VERSIONED raster stays cacheable, and the version participates in the identity.
+  const v1a = sealed(hostDraw(1));
+  const v1b = sealed(hostDraw(1));
+  const v2 = sealed(hostDraw(2));
+  check("3c-A: versioned source stays cacheable", isGroupDraw(v1a) && Boolean(v1a.contentHash));
+  check("3c-A: identical source version ⇒ identical identity (cross-frame reuse survives)", v1a.contentHash === v1b.contentHash && v1a.dependencyVersions === v1b.dependencyVersions);
+  check("3c-A: a NEW source version re-keys the artifact (the freeze fix)", v1a.dependencyVersions !== v2.dependencyVersions);
+  check("3c-A: source version is a DEPENDENCY, not content (contentHash invariant)", Boolean(v1a.contentHash) && v1a.contentHash === v2.contentHash);
+  check("3c-A: source versions never leak into the declared dependency FACTS", isGroupDraw(v1a) && (v1a.dependencies ?? []).every((d) => d === "time"));
+
+  // The actual shipped-freeze shape. The shared node must be EXPENSIVE enough to clear the cost term
+  // (a bare MediaIn no longer seals — see the cost-hint block), so a filter feeds two merge inputs.
+  // With a live (unversioned) media raster underneath it, the seal must refuse to cache rather than
+  // pin frame 1 forever.
+  const fan = createFlarexComp("fan", "Fan");
+  const fanFx = createFlarexNode("filter", "fan_fx");
+  fanFx.params = { ...fanFx.params, effectId: builtinFragmentEffectId("pixelate"), effectParams: "" };
+  fan.nodes["fan_fx"] = fanFx;
+  fan.nodes["fan_merge"] = createFlarexNode("merge", "fan_merge");
+  fan.edges = [
+    { id: "f0", from: { nodeId: "fan_in", socket: "out" }, to: { nodeId: "fan_fx", socket: "in" } },
+    { id: "f1", from: { nodeId: "fan_fx", socket: "out" }, to: { nodeId: "fan_merge", socket: "bg" } },
+    { id: "f2", from: { nodeId: "fan_fx", socket: "out" }, to: { nodeId: "fan_merge", socket: "fg" } },
+    { id: "f3", from: { nodeId: "fan_merge", socket: "out" }, to: { nodeId: "fan_out", socket: "in" } },
+  ];
+  const collectSealed = (root: SceneDraw): SceneGroupDraw[] => {
+    const found: SceneGroupDraw[] = [];
+    (function walk(d: SceneDraw) {
+      if (!d || (d as SceneGroupDraw).kind !== "group") return;
+      const g = d as SceneGroupDraw;
+      if (g.evaluationKey !== undefined) found.push(g);
+      for (const child of g.children) walk(child);
+    })(root);
+    return found;
+  };
+  const liveSealed = collectSealed(compileFlarexComp(fan, lowerCtx(hostDraw(null))) as SceneDraw);
+  check("3c-A: an EXPENSIVE fanned-out node materializes (fanout > 1 ∧ cost)", liveSealed.length > 0);
+  check("3c-A: …and a LIVE media source is never cached there (no permanently frozen clip)", liveSealed.every((g) => g.contentHash === undefined));
+  const versionedSealed = collectSealed(compileFlarexComp(fan, lowerCtx(hostDraw(4))) as SceneDraw);
+  check("3c-A: …while the same seal on a VERSIONED source stays cacheable", versionedSealed.some((g) => Boolean(g.contentHash)));
+}
+
+// --- Materialization cost hint (ADR-010 §3, measured 2026-07-26) --------------------------------
+// `fanout > 1` alone sealed trivial shared leaves into identity RTTs that dedupe nothing. `flarex:perf`
+// measured that shape 37.5% slower and 7.9MB heavier with the cache on, while a dense comp gained 42%
+// on p95 for 2.0MB. Materialization is now gated on the subtree's structural pass count.
+{
+  const fanTo = (id: string, buildShared: (comp: ReturnType<typeof createFlarexComp>) => string) => {
+    const comp = createFlarexComp(id, "F");
+    const sharedId = buildShared(comp);
+    comp.nodes[`${id}_m`] = createFlarexNode("merge", `${id}_m`);
+    comp.edges.push(
+      { id: "mb", from: { nodeId: sharedId, socket: "out" }, to: { nodeId: `${id}_m`, socket: "bg" } },
+      { id: "mf", from: { nodeId: sharedId, socket: "out" }, to: { nodeId: `${id}_m`, socket: "fg" } },
+    );
+    comp.edges = comp.edges.filter((e) => e.to.nodeId !== `${id}_out`);
+    comp.edges.push({ id: "eo", from: { nodeId: `${id}_m`, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } });
+    const sealed: string[] = [];
+    (function walk(d: SceneDraw) {
+      if (!d || (d as SceneGroupDraw).kind !== "group") return;
+      const g = d as SceneGroupDraw;
+      if (g.evaluationKey !== undefined) sealed.push(g.evaluationKey);
+      for (const child of g.children) walk(child);
+    })(compileFlarexComp(comp, lowerCtx()) as SceneDraw);
+    return sealed;
+  };
+
+  // Cheap shared leaf: a bare MediaIn (zero passes) — sealing it buys nothing.
+  const cheap = fanTo("costA", () => "costA_in");
+  check("cost hint: a zero-pass shared leaf is NOT sealed", cheap.length === 0);
+
+  // Expensive shared subtree: a filter pass — worth an RTT because the dedupe saves real work.
+  const pricey = fanTo("costB", (comp) => {
+    const fx = createFlarexNode("filter", "costB_fx");
+    fx.params = { ...fx.params, effectId: builtinFragmentEffectId("pixelate"), effectParams: "" };
+    comp.nodes["costB_fx"] = fx;
+    comp.edges.push({ id: "fx", from: { nodeId: "costB_in", socket: "out" }, to: { nodeId: "costB_fx", socket: "in" } });
+    return "costB_fx";
+  });
+  check("cost hint: a shared subtree with real GPU work IS sealed", pricey.includes("flarex_costB_costB_fx"));
+
+  // The explicit override must bypass the cost term — node previews (Slice 4) need to materialize
+  // any node on demand, however cheap.
+  const forced = createFlarexComp("costC", "F");
+  const forcedOut = compileFlarexComp(forced, { ...lowerCtx(), materializeNodeIds: new Set(["costC_in"]) });
+  check("cost hint: explicit materializeNodeIds bypasses the cost gate", isGroupDraw(forcedOut) && forcedOut.evaluationKey === "flarex_costC_costC_in");
+}
+
+// --- Slice 2 (commit 3c-B): artifact retention policy ------------------------------------------
+// The cache was unbounded: a per-frame-keyed artifact allocated a fresh ~8MB RTT EVERY frame during
+// playback and nothing was ever freed. These pin the eviction DECISION (pure, GL-free) — the part the
+// "same composition, less memory" claim rests on.
+{
+  const MB = 1024 * 1024;
+  const cand = (cacheKey: string, lastAccessFrame: number, protectedTier = false, bytes = 8 * MB): ArtifactRetentionCandidate =>
+    ({ cacheKey, bytes, lastAccessFrame, protectedTier });
+  const state = (over: Partial<Parameters<typeof planArtifactEviction>[1]> = {}) =>
+    ({ frame: 10, bytes: 40 * MB, entries: 5, budgetBytes: 96 * MB, maxEntries: 64, ...over });
+
+  check("3c-B: under budget evicts nothing", planArtifactEviction([cand("a", 1), cand("b", 2)], state()).length === 0);
+
+  // Rule 1 — an artifact touched THIS frame is load-bearing for intra-frame fan-out.
+  const thisFrame = planArtifactEviction([cand("old", 1), cand("live", 10)], state({ bytes: 200 * MB, entries: 2 }));
+  check("3c-B: never evicts an artifact touched on the current frame", !thisFrame.includes("live"));
+  check("3c-B: does evict an idle artifact when over budget", thisFrame.includes("old"));
+
+  // Rule 2 — the anti-pollution rule: playback churn must not flush proven-reusable artifacts.
+  const tiers = planArtifactEviction(
+    [cand("protected-old", 1, true), cand("probation-new", 9, false)],
+    state({ bytes: 104 * MB, entries: 2 }),
+  );
+  check("3c-B: drains probation before protected (playback churn can't flush reusable artifacts)", tiers[0] === "probation-new");
+
+  // Rule 3 — LRU within a tier.
+  const lru = planArtifactEviction([cand("newer", 8), cand("older", 2)], state({ bytes: 104 * MB, entries: 2 }));
+  check("3c-B: evicts least-recently-used first within a tier", lru[0] === "older");
+
+  // Rule 4 — stop as soon as the budget is met; eviction is not a flush.
+  const minimal = planArtifactEviction(
+    [cand("a", 1), cand("b", 2), cand("c", 3), cand("d", 4)],
+    state({ bytes: 100 * MB, entries: 4 }),
+  );
+  check("3c-B: evicts the MINIMUM needed to fit the budget", minimal.length === 1 && minimal[0] === "a");
+
+  // The entry cap is an independent backstop for many-small-artifact comps.
+  const capped = planArtifactEviction(
+    [cand("a", 1, false, 16), cand("b", 2, false, 16), cand("c", 3, false, 16)],
+    state({ bytes: 48, entries: 3, maxEntries: 2 }),
+  );
+  check("3c-B: entry cap evicts even when far under the byte budget", capped.length === 1 && capped[0] === "a");
+
+  // The leak shape itself: N single-use per-frame artifacts, none reused, must bound to the budget.
+  const churn = Array.from({ length: 40 }, (_, i) => cand(`f${i}`, i));
+  const bounded = planArtifactEviction(churn, { frame: 40, bytes: 40 * 8 * MB, entries: 40, budgetBytes: 96 * MB, maxEntries: 64 });
+  check("3c-B: per-frame churn is bounded to the budget (the shipped leak)", (40 - bounded.length) * 8 * MB <= 96 * MB);
+}
+
+// --- Flarex viewer isolation (user report 2026-07-26) ------------------------------------------
+// The node page reuses the ONE shared viewer, so it was showing the finished timeline composite: a clip
+// stacked above the Flarex host drew over the node output and you were not looking at your comp.
+{
+  const mkLayer = (id: string, type: TimelineLayer["type"], extra: Partial<TimelineLayer> = {}): TimelineLayer =>
+    ({
+      id,
+      trackId: "t1",
+      type,
+      name: id,
+      startSeconds: 0,
+      durationSeconds: 5,
+      transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+      effects: [],
+      keyframes: [],
+      ...extra,
+    }) as TimelineLayer;
+
+  const comp: TimelineComposition = {
+    width: 1920,
+    height: 1080,
+    durationSeconds: 12,
+    backgroundColor: "#000000",
+    tracks: [
+      { id: "t1", name: "V1", layers: [mkLayer("host", "video", { flarexCompId: "cx" }), mkLayer("sibling", "video")] },
+      { id: "t2", name: "V2", layers: [mkLayer("overlay", "text"), mkLayer("music", "audio")] },
+    ],
+  } as unknown as TimelineComposition;
+
+  const isolated = isolateFlarexHostComposition(comp, "host");
+  const idsOf = (c: TimelineComposition) => c.tracks.flatMap((t) => t.layers.map((l) => l.id));
+
+  check("isolation: the Flarex host survives", idsOf(isolated).includes("host"));
+  check("isolation: a clip ABOVE the host is withheld (the reported bug)", !idsOf(isolated).includes("overlay"));
+  check("isolation: a sibling clip on the host's own track is withheld", !idsOf(isolated).includes("sibling"));
+  check("isolation: audio is KEPT (never silently mute the mix)", idsOf(isolated).includes("music"));
+  check("isolation: duration/size are preserved (transport + frame ruler must still line up)", isolated.durationSeconds === 12 && isolated.width === 1920);
+  check("isolation: track structure is preserved (no track is dropped)", isolated.tracks.length === comp.tracks.length);
+  check("isolation: the input composition is not mutated", idsOf(comp).length === 4);
+
+  // The host's asset-source MediaIns must still resolve from the isolated composition — they are
+  // derived from the surviving host layer, so isolation must not starve the comp of its loaders.
+  const fxComp = createFlarexComp("cx", "Cx");
+  const loaderNode = createFlarexNode("mediaIn", "cx_srcin");
+  loaderNode.params = { ...loaderNode.params, sourceAssetId: "assetA" };
+  fxComp.nodes["cx_srcin"] = loaderNode;
+  const virtuals = collectFlarexVirtualLayers(
+    isolated.tracks.flatMap((t) => t.layers),
+    { cx: fxComp },
+    () => ({ type: "video", durationSeconds: 30 })
+  );
+  check("isolation: the host's virtual loaders still resolve", virtuals.some((v) => v.id === flarexVirtualLayerId("cx", "cx_srcin")));
 }
 
 if (failures > 0) {

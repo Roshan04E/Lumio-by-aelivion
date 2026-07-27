@@ -435,6 +435,169 @@ vec4 effect(vec2 uv) {
 `
 };
 
+/**
+ * Flarex Crop — trim the frame's edges, leaving TRANSPARENT outside the box.
+ *
+ * `rewritesAlpha` because that is the whole effect: the default composite-back draws the pass result
+ * OVER the running image, so a cropped-away pixel would still show the original underneath and the
+ * crop would be invisible (the same reason the keyers set it).
+ *
+ * Insets are frame fractions from each edge. Note `uv.y` runs BOTTOM-up here while the params read
+ * top-down (matching `radialBlur`'s `1.0 - centerY`), so top/bottom are mapped, not passed straight.
+ */
+export const FLAREX_CROP_ID = "flarex.crop";
+const FLAREX_CROP: FragmentEffectDefinition = {
+  id: FLAREX_CROP_ID,
+  name: "Crop",
+  category: "Transform",
+  rewritesAlpha: true,
+  params: [
+    { name: "left", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Left" },
+    { name: "right", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Right" },
+    { name: "top", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Top" },
+    { name: "bottom", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Bottom" },
+    { name: "softness", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Soft Edge" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  float l = clamp(left, 0.0, 1.0);
+  float r = 1.0 - clamp(right, 0.0, 1.0);
+  float b = clamp(bottom, 0.0, 1.0);
+  float t = 1.0 - clamp(top, 0.0, 1.0);
+  // Feather half-width in uv units. At softness 0 this collapses to a hard step, so an un-feathered
+  // crop lands exactly on the pixel edge instead of bleeding half a pixel.
+  float f = max(softness, 0.0) * 0.5;
+  float inside;
+  if (f > 0.0) {
+    inside = smoothstep(l - f, l + f, uv.x) * (1.0 - smoothstep(r - f, r + f, uv.x))
+           * smoothstep(b - f, b + f, uv.y) * (1.0 - smoothstep(t - f, t + f, uv.y));
+  } else {
+    inside = step(l, uv.x) * step(uv.x, r) * step(b, uv.y) * step(uv.y, t);
+  }
+  return vec4(c.rgb, c.a * clamp(inside, 0.0, 1.0));
+}
+`
+};
+
+/**
+ * Flarex Channel Boolean — the Splitter/Combiner in ONE node.
+ *
+ * Each output channel is sourced from any input channel (or luma, or a constant), which covers the
+ * channel work people leave the page for: isolating a channel, copying luma into alpha to build a
+ * matte from a plate, swapping/zeroing channels, inverting.
+ *
+ * Sources are float indices because the shader-param vocabulary is float/vec2/vec3/bool; the node
+ * surfaces them as named dropdowns.
+ *   0=Red  1=Green  2=Blue  3=Alpha  4=Luma  5=Black(0)  6=White(1)
+ */
+export const FLAREX_CHANNELS_ID = "flarex.channels";
+const FLAREX_CHANNELS: FragmentEffectDefinition = {
+  id: FLAREX_CHANNELS_ID,
+  name: "Channel Boolean",
+  category: "Channel",
+  rewritesAlpha: true,
+  params: [
+    { name: "rFrom", type: "float", default: 0, min: 0, max: 6, step: 1, label: "Red From" },
+    { name: "gFrom", type: "float", default: 1, min: 0, max: 6, step: 1, label: "Green From" },
+    { name: "bFrom", type: "float", default: 2, min: 0, max: 6, step: 1, label: "Blue From" },
+    { name: "aFrom", type: "float", default: 3, min: 0, max: 6, step: 1, label: "Alpha From" },
+    { name: "invertRgb", type: "bool", default: false, label: "Invert RGB" }
+  ],
+  glsl: `
+float _pickChannel(vec4 c, float src) {
+  int s = int(clamp(src, 0.0, 6.0) + 0.5);
+  if (s == 0) return c.r;
+  if (s == 1) return c.g;
+  if (s == 2) return c.b;
+  if (s == 3) return c.a;
+  if (s == 4) return _luma(c.rgb);
+  if (s == 5) return 0.0;
+  return 1.0;
+}
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  vec4 o = vec4(
+    _pickChannel(c, rFrom),
+    _pickChannel(c, gFrom),
+    _pickChannel(c, bFrom),
+    _pickChannel(c, aFrom)
+  );
+  if (invertRgb) o.rgb = vec3(1.0) - o.rgb;
+  return clamp(o, 0.0, 1.0);
+}
+`
+};
+
+/**
+ * Flarex Vignette / Film Grain — the media shader's two stylize stages, as pass effects.
+ *
+ * They exist here rather than riding a `ColorPipeline` because vignette/grain are NOT pipeline
+ * stages: they live in `MediaEffects`, which the compositor passes as `null` when it grades a group
+ * (`scene-compositor.ts`), so a Flarex node could never reach them that way. As fragment passes they
+ * are also cheaper — passes stack on one shell instead of opening a nest per node.
+ *
+ * The GLSL is ported from `media-shader.ts` so a vignette/grain looks identical whether it is applied
+ * to a clip or built as a node. Params are normalized 0..1 (the `MediaEffects` contract), with the
+ * media path's own 0.25 grain scaling folded in so the node param stays a clean 0..1.
+ */
+export const FLAREX_VIGNETTE_ID = "flarex.vignette";
+const FLAREX_VIGNETTE: FragmentEffectDefinition = {
+  id: FLAREX_VIGNETTE_ID,
+  name: "Vignette",
+  category: "Stylize",
+  params: [
+    { name: "amount", type: "float", default: 0.35, min: 0, max: 1, step: 0.01, label: "Amount" },
+    { name: "size", type: "float", default: 0.58, min: 0, max: 1, step: 0.01, label: "Size" },
+    { name: "feather", type: "float", default: 1, min: 0, max: 1, step: 0.01, label: "Feather" },
+    { name: "roundness", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Roundness" },
+    { name: "highlights", type: "float", default: 0, min: 0, max: 1, step: 0.01, label: "Protect Highlights" }
+  ],
+  glsl: `
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  float aspect = uResolution.x / max(uResolution.y, 1.0);
+  vec2 d = uv - 0.5;
+  d.x *= mix(1.0, aspect, roundness);
+  float corner = length(vec2(0.5 * mix(1.0, aspect, roundness), 0.5));
+  float r = length(d) / corner;                    // 0 centre → 1 corners
+  float start = mix(0.15, 0.95, size);
+  float end = mix(start + 0.02, 1.0, feather);
+  float v = 1.0 - amount * smoothstep(start, end, r);
+  // Protect highlights: bright pixels resist the darkening (filmic vignette, not a flat multiply).
+  v = mix(v, 1.0, highlights * smoothstep(0.6, 1.0, _luma(c.rgb)));
+  return vec4(c.rgb * v, c.a);
+}
+`
+};
+
+export const FLAREX_GRAIN_ID = "flarex.grain";
+const FLAREX_GRAIN: FragmentEffectDefinition = {
+  id: FLAREX_GRAIN_ID,
+  name: "Film Grain",
+  category: "Stylize",
+  params: [
+    { name: "amount", type: "float", default: 0.18, min: 0, max: 1, step: 0.01, label: "Amount" },
+    { name: "size", type: "float", default: 1, min: 0.25, max: 4, step: 0.05, label: "Size" }
+  ],
+  glsl: `
+float _grainHash(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+vec4 effect(vec2 uv) {
+  vec4 c = getSrcColor(uv);
+  // size 1 = the media path's 1280×720 virtual grain grid; >1 = coarser grain. The seed uses a long
+  // non-integer period so the pattern never visibly repeats.
+  vec2 grid = vec2(1280.0, 720.0) / max(size, 0.01);
+  float n = _grainHash(uv * grid + mod(uTime, 61.7) * 97.13);
+  float midWeight = 1.0 - abs(_luma(c.rgb) - 0.5) * 1.4;
+  return vec4(c.rgb + (n - 0.5) * (amount * 0.25) * max(0.0, midWeight), c.a);
+}
+`
+};
+
 const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [
   RADIAL_BLUR,
   DIRECTIONAL_BLUR,
@@ -448,9 +611,13 @@ const BUILTIN_FRAGMENT_EFFECTS: FragmentEffectDefinition[] = [
   POSTERIZE,
   // The stylize pass-graph (multi-pass — plans/stylize-anime-engine.md P1: Painterly).
   STYLIZE_PAINTERLY,
-  // Flarex keyer nodes (FLAREX.md) — id-referenced by the lowering compiler, not TimelineEffectTypes.
+  // Flarex nodes (FLAREX.md) — id-referenced by the lowering compiler, not TimelineEffectTypes.
   FLAREX_CHROMA_KEY,
-  FLAREX_LUMA_KEY
+  FLAREX_LUMA_KEY,
+  FLAREX_CROP,
+  FLAREX_CHANNELS,
+  FLAREX_VIGNETTE,
+  FLAREX_GRAIN
 ];
 
 let registered = false;

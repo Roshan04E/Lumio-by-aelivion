@@ -21,12 +21,24 @@ export type FlarexNodeType =
   | "mediaOut"
   | "merge"
   | "transform"
+  | "crop"
+  | "channelBoolean"
   | "colorCorrect"
   | "colorCurves"
   | "hueSat"
+  | "colorWheels"
+  | "hslQualifier"
+  | "lut"
+  | "look"
+  | "vignette"
+  | "grain"
   | "blur"
+  | "directionalBlur"
+  | "radialBlur"
   | "glow"
   | "sharpen"
+  | "pixelate"
+  | "prism"
   | "filter"
   | "rectMask"
   | "ellipseMask"
@@ -46,12 +58,24 @@ export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "mediaOut",
   "merge",
   "transform",
+  "crop",
+  "channelBoolean",
   "colorCorrect",
   "colorCurves",
   "hueSat",
+  "colorWheels",
+  "hslQualifier",
+  "lut",
+  "look",
+  "vignette",
+  "grain",
   "blur",
+  "directionalBlur",
+  "radialBlur",
   "glow",
   "sharpen",
+  "pixelate",
+  "prism",
   "filter",
   "rectMask",
   "ellipseMask",

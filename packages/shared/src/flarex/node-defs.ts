@@ -21,8 +21,12 @@ export interface FlarexSocketDef {
 export interface FlarexNodeDefinition {
   type: FlarexNodeType;
   label: string;
-  /** Palette grouping (Fusion-style toolbar sections). */
+  /** Palette grouping (Fusion-style toolbar sections) — the top-level CATEGORY, drives accent color. */
   group: "io" | "composite" | "color" | "filter" | "mask" | "generator" | "tracking" | "layout";
+  /** Second-level grouping within the category, for the Add-Node browser's category → subcategory tree
+   *  (Fusion "Add Tool" style). Attached in the registry build below, not per-def, so the taxonomy lives
+   *  in ONE table. Future library nodes carry their own subcategory string. */
+  subcategory: string;
   inputs: FlarexSocketDef[];
   outputs: FlarexSocketDef[];
   /** `.strict()` schema whose defaults define the node's initial params (output must stay
@@ -39,6 +43,10 @@ const image = (id: string, label: string, required = false): FlarexSocketDef => 
 const matte = (id: string, label: string): FlarexSocketDef => ({ id, type: "matte", label });
 const OUT = [image("out", "Output")];
 const MATTE_OUT: FlarexSocketDef[] = [{ id: "out", type: "matte", label: "Matte" }];
+
+/** Channel Boolean sources — what an output channel may be sourced FROM. Order is the shader's own
+ *  index order (`flarex.channels`), so the lowering maps name → index by position. */
+export const flarexChannelSources = ["red", "green", "blue", "alpha", "luma", "black", "white"] as const;
 
 export const flarexBlendModes = [
   "normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn",
@@ -62,7 +70,7 @@ const shapeMaskParams = {
   invert: z.boolean().default(false),
 };
 
-const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
+const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcategory">> = {
   mediaIn: {
     label: "MediaIn",
     group: "io",
@@ -118,19 +126,64 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
     keyframeable: ["x", "y", "scale", "rotation"],
     phase: 1,
   },
+  crop: {
+    label: "Crop",
+    group: "composite",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // Edge insets as frame fractions; outside the box is TRANSPARENT (not black), so a crop composites
+    // over whatever is behind it.
+    params: z.object({
+      left: num(0, 0, 1),
+      right: num(0, 0, 1),
+      top: num(0, 0, 1),
+      bottom: num(0, 0, 1),
+      softness: num(0, 0, 1),
+    }).strict(),
+    keyframeable: ["left", "right", "top", "bottom", "softness"],
+    phase: 1,
+  },
+  channelBoolean: {
+    label: "Channel Boolean",
+    group: "composite",
+    // No matte input: this rewrites channels wholesale, so a partial application is meaningless.
+    inputs: [image("in", "Input", true)],
+    outputs: OUT,
+    // Resolve's Splitter/Combiner in one node — each output channel is sourced from any input channel,
+    // luma, or a constant. "luma → alpha" is the one people reach for most (a matte from a plate).
+    params: z.object({
+      red: z.enum(flarexChannelSources).default("red"),
+      green: z.enum(flarexChannelSources).default("green"),
+      blue: z.enum(flarexChannelSources).default("blue"),
+      alpha: z.enum(flarexChannelSources).default("alpha"),
+      invertRgb: z.boolean().default(false),
+    }).strict(),
+    keyframeable: [],
+    phase: 1,
+  },
   colorCorrect: {
     label: "Color Correct",
     group: "color",
     inputs: [image("in", "Input", true), matte("mask", "Mask")],
     outputs: OUT,
+    // Params are declared in the `brightnessContrast` effect's OWN scale — ±100 sliders, saturation
+    // 0..220 where 100 is NEUTRAL — because the lowering passes them through to that effect verbatim
+    // and the inspector/graph editor already clamp to it (`FLAREX_PARAM_RANGES`). They previously
+    // declared a different scale (±4 / 0..3), so a fresh node's `saturation: 1` reached the grade as
+    // 1% saturation and quietly desaturated the image.
     params: z.object({
-      exposure: num(0, -4, 4),
-      contrast: num(0, -1, 1),
-      saturation: num(1, 0, 3),
-      temperature: num(0, -1, 1),
-      tint: num(0, -1, 1),
+      exposure: num(0, -100, 100),
+      contrast: num(0, -100, 100),
+      highlights: num(0, -100, 100),
+      shadows: num(0, -100, 100),
+      whites: num(0, -100, 100),
+      blacks: num(0, -100, 100),
+      saturation: num(100, 0, 220),
+      vibrance: num(0, -100, 100),
+      temperature: num(0, -100, 100),
+      tint: num(0, -100, 100),
     }).strict(),
-    keyframeable: ["exposure", "contrast", "saturation", "temperature", "tint"],
+    keyframeable: ["exposure", "contrast", "highlights", "shadows", "whites", "blacks", "saturation", "vibrance", "temperature", "tint"],
     phase: 1,
   },
   colorCurves: {
@@ -152,6 +205,76 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
     keyframeable: [],
     phase: 1.5,
   },
+  colorWheels: {
+    label: "Color Wheels",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // JSON payload in the `colorWheels` effect-param convention (lift/gamma/gain/offset) — the same
+    // shape the clip inspector's wheels control already reads and writes.
+    params: z.object({ wheels: z.string().default("") }).strict(),
+    keyframeable: [],
+    phase: 1.5,
+  },
+  hslQualifier: {
+    label: "HSL Qualifier",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // JSON payload in the `hslSecondary` effect-param convention (hue/sat/lum range + softness).
+    params: z.object({ secondary: z.string().default("") }).strict(),
+    keyframeable: [],
+    phase: 1.5,
+  },
+  lut: {
+    label: "LUT",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // `lut` = a base64 .cube payload (the `importedLut` effect's own param convention — the LUT
+    // bytes travel WITH the project, so an export never has to resolve a file path).
+    params: z.object({ lut: z.string().default(""), intensity: num(1, 0, 1) }).strict(),
+    keyframeable: ["intensity"],
+    phase: 1.5,
+  },
+  look: {
+    label: "Look",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // `look` = a creative-look preset NAME from the shared registry; "" = not chosen yet (no-op,
+    // same "unconfigured payload passes through" rule the curve nodes use).
+    params: z.object({ look: z.string().default(""), intensity: num(1, 0, 1) }).strict(),
+    keyframeable: ["intensity"],
+    phase: 1.5,
+  },
+  vignette: {
+    label: "Vignette",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // Mirrors the `flarex.vignette` builtin 1:1 (normalized 0..1, the MediaEffects contract), so a
+    // vignette node and the clip vignette effect look identical.
+    params: z.object({
+      amount: num(0.35, 0, 1),
+      size: num(0.58, 0, 1),
+      feather: num(1, 0, 1),
+      roundness: num(0, 0, 1),
+      highlights: num(0, 0, 1),
+    }).strict(),
+    keyframeable: ["amount", "size", "feather", "roundness", "highlights"],
+    phase: 1,
+  },
+  grain: {
+    label: "Film Grain",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // `size` is a multiplier on the 1280×720 virtual grain grid (1 = the media path's own grid).
+    params: z.object({ amount: num(0.18, 0, 1), size: num(1, 0.25, 4) }).strict(),
+    keyframeable: ["amount", "size"],
+    phase: 1,
+  },
   blur: {
     label: "Blur",
     group: "filter",
@@ -159,6 +282,27 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
     outputs: OUT,
     params: z.object({ sigma: num(8, 0, 200) }).strict(),
     keyframeable: ["sigma"],
+    phase: 1,
+  },
+  directionalBlur: {
+    label: "Directional Blur",
+    group: "filter",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // Normalized 0..1 strength like the rest of the palette; the lowering scales it to the
+    // builtin's own 0..100 range.
+    params: z.object({ amount: num(0.4, 0, 1), angle: num(0, -180, 180) }).strict(),
+    keyframeable: ["amount", "angle"],
+    phase: 1,
+  },
+  radialBlur: {
+    label: "Radial Blur",
+    group: "filter",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // centerX/centerY are comp fractions (0..1), consistent with every other node's coordinates.
+    params: z.object({ amount: num(0.4, 0, 1), centerX: num(0.5, 0, 1), centerY: num(0.5, 0, 1) }).strict(),
+    keyframeable: ["amount", "centerX", "centerY"],
     phase: 1,
   },
   glow: {
@@ -181,6 +325,27 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
     outputs: OUT,
     params: z.object({ amount: num(0.5, 0, 2) }).strict(),
     keyframeable: ["amount"],
+    phase: 1,
+  },
+  pixelate: {
+    label: "Pixelate",
+    group: "filter",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // Block size in comp pixels, passed through verbatim (same convention the clip effect uses, so a
+    // value reads the same on a clip and on a node).
+    params: z.object({ blockSize: num(16, 1, 200) }).strict(),
+    keyframeable: ["blockSize"],
+    phase: 1,
+  },
+  prism: {
+    label: "Prism",
+    group: "filter",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    // Chromatic aberration — the lens artefact, under Fusion's name for it.
+    params: z.object({ amount: num(0.3, 0, 1), angle: num(0, -180, 180) }).strict(),
+    keyframeable: ["amount", "angle"],
     phase: 1,
   },
   filter: {
@@ -363,8 +528,48 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type">> = {
   },
 };
 
+/** Second-level (subcategory) taxonomy — ONE table so category → subcategory grouping stays in sync
+ *  across the toolbar palette and the Add-Node browser. Category = `def.group` (drives accent color). */
+const SUBCATEGORIES: Record<FlarexNodeType, string> = {
+  mediaIn: "Source",
+  mediaOut: "Source",
+  merge: "Combine",
+  transform: "Transform",
+  crop: "Transform",
+  channelBoolean: "Channel",
+  colorCorrect: "Adjust",
+  colorWheels: "Adjust",
+  colorCurves: "Curves",
+  hueSat: "Curves",
+  hslQualifier: "Secondary",
+  lut: "LUT & Looks",
+  look: "LUT & Looks",
+  vignette: "Film",
+  grain: "Film",
+  blur: "Blur",
+  directionalBlur: "Blur",
+  radialBlur: "Blur",
+  glow: "Light",
+  sharpen: "Sharpen",
+  pixelate: "Stylize",
+  prism: "Lens",
+  filter: "Stylize",
+  rectMask: "Shape",
+  ellipseMask: "Shape",
+  polygonMask: "Shape",
+  bezierMask: "Shape",
+  matteControl: "Matte",
+  chromaKey: "Keyer",
+  lumaKey: "Keyer",
+  text: "Text",
+  aiMatte: "AI",
+  tracker: "Track",
+  backdrop: "Layout",
+  reroute: "Layout",
+};
+
 export const flarexNodeDefs: Record<FlarexNodeType, FlarexNodeDefinition> = Object.fromEntries(
-  Object.entries(defs).map(([type, def]) => [type, { type: type as FlarexNodeType, ...def }])
+  Object.entries(defs).map(([type, def]) => [type, { type: type as FlarexNodeType, subcategory: SUBCATEGORIES[type as FlarexNodeType], ...def }])
 ) as Record<FlarexNodeType, FlarexNodeDefinition>;
 
 export function getFlarexNodeDefinition(type: FlarexNodeType): FlarexNodeDefinition {

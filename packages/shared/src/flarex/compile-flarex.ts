@@ -29,8 +29,12 @@ import { createBoxMask, createMask } from "../clip-masks";
 import type { ColorPipeline } from "../color/types";
 import { getFragmentEffect, resolveFragmentEffectParams } from "../color/fragment-effects/registry";
 import {
+  FLAREX_CHANNELS_ID,
   FLAREX_CHROMA_KEY_ID,
+  FLAREX_CROP_ID,
+  FLAREX_GRAIN_ID,
   FLAREX_LUMA_KEY_ID,
+  FLAREX_VIGNETTE_ID,
   builtinFragmentEffectId,
   registerBuiltinFragmentEffects,
 } from "../color/fragment-effects/builtins";
@@ -44,8 +48,8 @@ import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, Scen
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
 import { computeFlarexContentHashes } from "./content-hash";
 import { frameProfiler } from "../color/frame-profiler";
-import { getFlarexNodeDefinition } from "./node-defs";
-import type { FlarexComp, FlarexNode } from "./types";
+import { flarexChannelSources, getFlarexNodeDefinition } from "./node-defs";
+import type { FlarexComp, FlarexNode, FlarexNodeType } from "./types";
 
 export interface FlarexLowerCtx {
   /** Logical comp size (the host composition's — a Flarex comp shares its clip's comp geometry). */
@@ -83,6 +87,17 @@ export interface FlarexLowerCtx {
    * never on node params or persisted project data. Used by tests and node-preview/debug tooling.
    */
   materializeNodeIds?: ReadonlySet<string> | undefined;
+  /**
+   * RUNTIME re-root: compile the graph as if this node were the output, WITHOUT touching the comp's
+   * persisted `previewNodeId` (which is the user's own view-dot selection and must survive a thumbnail
+   * pass untouched). Takes precedence over `previewNodeId` when set.
+   *
+   * This is what makes per-node previews (Slice 4) possible: a thumbnail is just this compile at
+   * thumbnail resolution. Runtime-only — never serialized, never read from persisted project data.
+   * Falls back to MediaOut exactly like `previewNodeId` when the node yields no image (matte-only,
+   * unwired), so a preview pass can never blank the real viewer.
+   */
+  previewRootNodeId?: string | undefined;
 }
 
 type FlarexImageValue = SceneLayerDraw | SceneGroupDraw;
@@ -121,6 +136,11 @@ interface FlarexWrapGroup extends SceneGroupDraw {
    *  composites as its own render target. Set only by `materialize`, driven runtime-only by
    *  `ctx.materializeNodeIds`; survives the shallow clone via the object spread in `cloneImage`. */
   __flarexSealed?: boolean;
+  /** The color effects already folded into this wrap's single `pipeline` slot, in application order
+   *  (P1 — pipeline coalescing, see `lowerColorNode`). Present only on wraps a color node opened.
+   *  Replaced, never mutated in place: `cloneImage` shares the array reference across per-consumer
+   *  clones, so an in-place push would leak one branch's grade into another's. */
+  __flarexColorEffects?: TimelineEffect[];
 }
 
 function isGroup(draw: FlarexImageValue): draw is SceneGroupDraw {
@@ -163,7 +183,194 @@ function parseHexColor(input: string): [number, number, number] {
   return [0, 0.69, 0.25];
 }
 
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+/** A JSON-payload color node's effect params, or null when the payload is empty (= not configured
+ *  yet, so the node passes its input through untouched — the rule the curve nodes always had). */
+const jsonPayload = (value: string, effectParamKey: string): Record<string, string> | null =>
+  value ? { [effectParamKey]: value } : null;
+
+interface FlarexParamReader {
+  num: (key: string, fallback: number) => number;
+  str: (key: string, fallback: string) => string;
+  bool: (key: string) => boolean;
+}
+
+/** A Channel Boolean source NAME → the shader's index vocabulary, by position in the shared list.
+ *  One source of truth for the order: the node def's enum and the GLSL switch are the same list. */
+const channelSourceIndex = (source: string): number => {
+  const index = flarexChannelSources.indexOf(source as (typeof flarexChannelSources)[number]);
+  return index < 0 ? 0 : index;
+};
+
+interface FlarexColorNodeSpec {
+  /** The timeline color effect this node IS, compiled by the same engine every renderer grades with. */
+  effect: TimelineEffect["type"];
+  /** Effect params from the node's params, or null = unconfigured (pass through). */
+  build: (read: FlarexParamReader) => Record<string, number | string> | null;
+}
+
+/**
+ * Color nodes → ONE timeline color effect each.
+ *
+ * Every entry lowers through the same body (`lowerColorNode`), so a new color node is a table row
+ * rather than another `case` — and the pipeline coalescer can treat them uniformly without learning
+ * node types. Only effects in `COLOR_EFFECT_TYPES` (the 3D-LUT pipeline stages) belong here;
+ * vignette/grain live in the media shader, not the pipeline, so they lower as fragment passes.
+ *
+ * Note the node-param key vs. effect-param key mismatches: `colorCurves` effects read `params.curve`
+ * while the node stores `curves`, and `hueSatCurves` effects read `params.curves` while the node
+ * stores `hueCurves`. Both are singular/plural inversions of each other — keep them straight.
+ */
+const FLAREX_COLOR_NODES: Partial<Record<FlarexNodeType, FlarexColorNodeSpec>> = {
+  colorCorrect: {
+    effect: "brightnessContrast",
+    // Node params are already declared in this effect's own scale (see node-defs) — passed through.
+    build: (p) => ({
+      exposure: p.num("exposure", 0),
+      contrast: p.num("contrast", 0),
+      highlights: p.num("highlights", 0),
+      shadows: p.num("shadows", 0),
+      whites: p.num("whites", 0),
+      blacks: p.num("blacks", 0),
+      saturation: p.num("saturation", 100),
+      vibrance: p.num("vibrance", 0),
+      temperature: p.num("temperature", 0),
+      tint: p.num("tint", 0),
+    }),
+  },
+  colorCurves: { effect: "colorCurves", build: (p) => jsonPayload(p.str("curves", ""), "curve") },
+  hueSat: { effect: "hueSatCurves", build: (p) => jsonPayload(p.str("hueCurves", ""), "curves") },
+  colorWheels: { effect: "colorWheels", build: (p) => jsonPayload(p.str("wheels", ""), "wheels") },
+  hslQualifier: { effect: "hslSecondary", build: (p) => jsonPayload(p.str("secondary", ""), "secondary") },
+  lut: {
+    effect: "importedLut",
+    build: (p) => {
+      const lut = p.str("lut", "");
+      return lut ? { lut, intensity: clamp01(p.num("intensity", 1)) * 100 } : null;
+    },
+  },
+  look: {
+    effect: "creativeLook",
+    build: (p) => {
+      const look = p.str("look", "");
+      return look ? { look, intensity: clamp01(p.num("intensity", 1)) * 100 } : null;
+    },
+  },
+};
+
+interface FlarexFilterNodeSpec {
+  /** Registry id of the fragment effect this node wraps. */
+  effect: string;
+  /** Effect params from the node's params, in the EFFECT's own units. */
+  build: (read: FlarexParamReader) => Record<string, number | number[] | boolean>;
+}
+
+/**
+ * Filter nodes → ONE fragment-effect builtin each.
+ *
+ * These are the same shaders the clip effect list has always used, given first-class node identities
+ * so the palette reads like a tool set instead of one "Filter" escape hatch. Cheap by construction:
+ * fragment passes STACK on a single wrap shell (`STAGE_FRAGMENT` accepts many), so four filters in a
+ * row are four passes on one render target — not four nests.
+ *
+ * Node params are normalized 0..1 like the rest of the palette and scaled here to each builtin's own
+ * range; `pixelate.blockSize` is the exception, a real pixel size passed through so a value reads the
+ * same on a clip and on a node.
+ */
+const FLAREX_FILTER_NODES: Partial<Record<FlarexNodeType, FlarexFilterNodeSpec>> = {
+  directionalBlur: {
+    effect: builtinFragmentEffectId("directionalBlur"),
+    build: (p) => ({ amount: clamp01(p.num("amount", 0.4)) * 100, angle: p.num("angle", 0) }),
+  },
+  radialBlur: {
+    effect: builtinFragmentEffectId("radialBlur"),
+    build: (p) => ({
+      amount: clamp01(p.num("amount", 0.4)) * 100,
+      centerX: clamp01(p.num("centerX", 0.5)) * 100,
+      centerY: clamp01(p.num("centerY", 0.5)) * 100,
+    }),
+  },
+  pixelate: {
+    effect: builtinFragmentEffectId("pixelate"),
+    build: (p) => ({ blockSize: Math.max(1, p.num("blockSize", 16)) }),
+  },
+  prism: {
+    effect: builtinFragmentEffectId("chromaticAberration"),
+    build: (p) => ({ amount: clamp01(p.num("amount", 0.3)) * 100, angle: p.num("angle", 0) }),
+  },
+  crop: {
+    effect: FLAREX_CROP_ID,
+    build: (p) => ({
+      left: clamp01(p.num("left", 0)),
+      right: clamp01(p.num("right", 0)),
+      top: clamp01(p.num("top", 0)),
+      bottom: clamp01(p.num("bottom", 0)),
+      softness: clamp01(p.num("softness", 0)),
+    }),
+  },
+  channelBoolean: {
+    effect: FLAREX_CHANNELS_ID,
+    // Named sources → the shader's index vocabulary, by position in `flarexChannelSources`.
+    build: (p) => ({
+      rFrom: channelSourceIndex(p.str("red", "red")),
+      gFrom: channelSourceIndex(p.str("green", "green")),
+      bFrom: channelSourceIndex(p.str("blue", "blue")),
+      aFrom: channelSourceIndex(p.str("alpha", "alpha")),
+      invertRgb: p.bool("invertRgb"),
+    }),
+  },
+  vignette: {
+    effect: FLAREX_VIGNETTE_ID,
+    build: (p) => ({
+      amount: clamp01(p.num("amount", 0.35)),
+      size: clamp01(p.num("size", 0.58)),
+      feather: clamp01(p.num("feather", 1)),
+      roundness: clamp01(p.num("roundness", 0)),
+      highlights: clamp01(p.num("highlights", 0)),
+    }),
+  },
+  grain: {
+    effect: FLAREX_GRAIN_ID,
+    build: (p) => ({
+      amount: clamp01(p.num("amount", 0.18)),
+      size: Math.max(0.25, Math.min(4, p.num("size", 1))),
+    }),
+  },
+};
+
+/** Shared empty animations array for the synthetic grade layer — see `stableColorEffects`: the grade
+ *  pipeline cache compares this by IDENTITY, so a fresh `[]` per frame would defeat it. Node params
+ *  are already keyframe-resolved before they reach the effect, so there is nothing to animate here. */
+const FLAREX_NO_ANIMATIONS: never[] = [];
+
+/**
+ * P2 — make the shared grade-pipeline cache actually hit for Flarex.
+ *
+ * `getCompositionColorPipeline` caches on the effects ARRAY IDENTITY, so the fresh array Flarex built
+ * every frame missed on every frame and re-baked the 3D LUT 60×/s (composition-style.ts calls out this
+ * exact hazard by name). Hand back the SAME array instance whenever the fully-resolved effect list is
+ * unchanged, so a static grade compiles once. The key is the resolved content, so an animated param
+ * still recompiles exactly when its value changes — a stale grade is impossible, only a wasted compile
+ * is avoided. Bounded, and cleared wholesale on overflow (a cheap cache, not an LRU).
+ */
+const FLAREX_EFFECT_LIST_CACHE_MAX = 256;
+const flarexEffectListCache = new Map<string, TimelineEffect[]>();
+
+function stableColorEffects(effects: TimelineEffect[]): TimelineEffect[] {
+  const key = JSON.stringify(effects);
+  const cached = flarexEffectListCache.get(key);
+  if (cached) return cached;
+  if (flarexEffectListCache.size >= FLAREX_EFFECT_LIST_CACHE_MAX) flarexEffectListCache.clear();
+  flarexEffectListCache.set(key, effects);
+  return effects;
+}
+
 export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): FlarexImageValue | null {
+  // Profiler-only: count invocations this frame. `evaluator.compile` (a measure) SUMS across every call,
+  // so browser-vs-Node compile time only compares like-for-like once divided by this (multiple clips /
+  // transition sides / nested / capture all re-enter here). No-op unless profiling.
+  frameProfiler.bump("compile.calls");
   const nodes = comp.nodes;
   const mediaOut = Object.values(nodes).find((node) => node.type === "mediaOut");
   if (!mediaOut) return null;
@@ -174,6 +381,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // evaluator-owned materialize decision (ADR-008): a node feeding 2+ consumers seals ONCE so the
   // content cache (Slice 2, commit 3) can dedupe it, instead of the current clone-per-consumer.
   const fanout = new Map<string, number>();
+  frameProfiler.bump("compile.maps", 2); // edgeInto + fanout (profiler-only temp-collection count)
   for (const edge of comp.edges) {
     edgeInto.set(`${edge.to.nodeId}:${edge.to.socket}`, edge.from.nodeId);
     fanout.set(edge.from.nodeId, (fanout.get(edge.from.nodeId) ?? 0) + 1);
@@ -181,6 +389,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
   /** Keyframe-aware numeric param (comp-local time). */
   const num = (node: FlarexNode, key: string, fallback: number): number => {
+    frameProfiler.bump("compile.paramEvals");
     const base = typeof node.params[key] === "number" ? (node.params[key] as number) : fallback;
     return evaluateFlarexNodeParam({ animations: comp.animations, baseValue: base, nodeId: node.id, paramKey: key, timeSeconds: ctx.timeSeconds });
   };
@@ -211,11 +420,72 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return acc;
   };
 
+  /**
+   * Collect the SOURCE-CONTENT axis of a materialized artifact's identity: the fold of every raster's
+   * declared `sourceVersion` / `maskVersion`. That is the compositor's own long-standing texture-cache
+   * contract, read here as a declared FACT exactly like a fragment pass's `def.dependencies` — the
+   * evaluator still never inspects node types (ADR-010).
+   *
+   * WHY (Slice 2, commit 3c-A): without this axis the identity did not describe the PIXELS. Dependencies
+   * were harvested from fragment passes ONLY, so a subtree whose sole dynamic input is a live media
+   * source — which declares no fragment-pass dependency — produced the SAME key on every frame. The
+   * compositor's hit path composites the cached artifact and skips the children render outright, so a
+   * fanned-out `MediaIn` (materialized by `fanout > 1`) served its first decoded frame forever: a
+   * permanently frozen clip. The single-frame `render:compare:pixels` fixtures cannot see a cross-frame
+   * staleness bug, which is why it shipped (commit 3c-C adds the sequence gate that can).
+   *
+   * `dynamic` = at least one raster is UNVERSIONED (`sourceVersion: undefined`, the documented "always
+   * re-upload, content may change every frame" declaration). Its pixels are then not described by any key
+   * we can build, so the artifact must stay uncacheable — the same fail-safe an unresolvable semantic
+   * dependency already takes. Versioned rasters (media grade stamps, text/shape/still rasters) fold their
+   * version in and REMAIN cacheable, which is where the cross-frame reuse win actually lives.
+   */
+  interface SourceIdentityScan {
+    tokens: string[];
+    dynamic: boolean;
+  }
+  const addRasterVersion = (acc: SourceIdentityScan, raster: unknown, version: number | undefined): void => {
+    if (raster === null || raster === undefined) return; // no raster bound → nothing to describe
+    if (version === undefined) {
+      acc.dynamic = true; // unversioned ⇒ undescribable ⇒ uncacheable
+      return;
+    }
+    acc.tokens.push(`v${version}`);
+  };
+  const scanSourceIdentity = (d: SceneDraw, acc: SourceIdentityScan): SourceIdentityScan => {
+    if (acc.dynamic) return acc; // already uncacheable — the rest of the walk cannot change that
+    const kind = (d as SceneGroupDraw).kind;
+    if (kind === "group") {
+      const group = d as SceneGroupDraw;
+      addRasterVersion(acc, group.shell.mask, group.shell.maskVersion);
+      for (const child of group.children) scanSourceIdentity(child, acc);
+      return acc;
+    }
+    if (kind === "transition") {
+      // A transition mixes on a continuous `progress` that no declared version describes. Flarex emits
+      // none today; treat it as undescribable rather than risk serving a stale mix.
+      acc.dynamic = true;
+      return acc;
+    }
+    const layer = d as SceneLayerDraw;
+    addRasterVersion(acc, layer.source, layer.sourceVersion);
+    addRasterVersion(acc, layer.mask, layer.maskVersion);
+    return acc;
+  };
+
   /** Per-consumer shallow copy so shared subtrees are never mutated through one consumer's wraps. */
-  const cloneImage = (draw: FlarexImageValue): FlarexImageValue =>
-    isGroup(draw)
-      ? ({ ...draw, shell: { ...draw.shell, transform: { ...draw.shell.transform } } } as FlarexWrapGroup)
-      : { ...draw, transform: { ...draw.transform } };
+  const cloneImage = (draw: FlarexImageValue): FlarexImageValue => {
+    // Profiler-only compile breakdown: per-consumer clone = temp objects (group→draw+shell+transform;
+    // layer→draw+transform). No-op unless profiling.
+    frameProfiler.bump("compile.clones");
+    frameProfiler.bump("compile.drawCommands");
+    if (isGroup(draw)) {
+      frameProfiler.bump("compile.objects", 3);
+      return { ...draw, shell: { ...draw.shell, transform: { ...draw.shell.transform } } } as FlarexWrapGroup;
+    }
+    frameProfiler.bump("compile.objects", 2);
+    return { ...draw, transform: { ...draw.transform } };
+  };
 
   const identityShell = (): SceneGroupDraw["shell"] => ({
     fit: "fill",
@@ -223,15 +493,22 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
   });
 
-  const newWrap = (inner: FlarexImageValue): FlarexWrapGroup => ({
-    kind: "group",
-    debugGroupId: `flarex_${comp.id}`,
-    children: [inner],
-    nestWidth: nestW,
-    nestHeight: nestH,
-    shell: identityShell(),
-    __flarexStage: 0,
-  });
+  const newWrap = (inner: FlarexImageValue): FlarexWrapGroup => {
+    // Profiler-only: a fresh nest wrap = group + shell + transform objects + a children array.
+    frameProfiler.bump("compile.wraps");
+    frameProfiler.bump("compile.drawCommands");
+    frameProfiler.bump("compile.objects", 3);
+    frameProfiler.bump("compile.arrays");
+    return {
+      kind: "group",
+      debugGroupId: `flarex_${comp.id}`,
+      children: [inner],
+      nestWidth: nestW,
+      nestHeight: nestH,
+      shell: identityShell(),
+      __flarexStage: 0,
+    };
+  };
 
   /** A wrap whose shell can still accept an op at `stage` (fixed shell order — re-wrap on violation). */
   const wrapFor = (draw: FlarexImageValue, stage: number): FlarexWrapGroup => {
@@ -276,26 +553,39 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     // per frame, a static one keys once. `evaluationKey` stays the stable slot identity (identity ≠
     // validity). If a declared dependency has NO resolver we cannot complete a pixel-determining key,
     // so we leave `contentHash` unset → the artifact stays uncacheable rather than risk a stale hit.
+    //
+    // The identity has TWO axes and needs both, or it does not describe the pixels (3c-A):
+    //   1. semantic dependencies  — ambient inputs the shaders read (`time`), resolved to tokens;
+    //   2. source content         — the declared version of every raster in the subtree.
+    // An undescribable input on EITHER axis leaves the artifact uncacheable.
     const deps = [...collectDrawDependencies(draw)].sort();
     const resolvers = deps.map((dep) => FLAREX_DEPENDENCY_RESOLVERS[dep]);
-    if (!resolvers.some((resolve) => resolve === undefined)) {
+    const sources = scanSourceIdentity(draw, { tokens: [], dynamic: false });
+    if (!resolvers.some((resolve) => resolve === undefined) && !sources.dynamic) {
       wrap.contentHash = contentHashes.get(nodeId);
-      if (deps.length) {
-        wrap.dependencies = deps;
-        wrap.dependencyVersions = deps.map((_dep, index) => resolvers[index]!(ctx)).join("|");
-      }
+      const tokens = deps.map((_dep, index) => resolvers[index]!(ctx));
+      if (deps.length) wrap.dependencies = deps;
+      // Source versions are an OPAQUE identity term, not a semantic dependency name — they fold into
+      // `dependencyVersions` (which the compositor never interprets) but never into `dependencies`
+      // (the declared FACTS the retention policy reads in 3c-B).
+      tokens.push(...sources.tokens);
+      if (tokens.length) wrap.dependencyVersions = tokens.join("|");
     }
     return wrap;
   };
 
   const pushFragmentPass = (draw: FlarexImageValue, pass: SceneFragmentPass): FlarexImageValue => {
     const wrap = wrapFor(draw, STAGE_FRAGMENT);
+    frameProfiler.bump("compile.operations");
+    frameProfiler.bump("compile.arrays");
     wrap.shell.fragmentPasses = [...(wrap.shell.fragmentPasses ?? []), pass];
     return wrap;
   };
 
   const pushRegionPass = (draw: FlarexImageValue, pass: SceneRegionPass): FlarexImageValue => {
     const wrap = wrapFor(draw, STAGE_REGION);
+    frameProfiler.bump("compile.operations");
+    frameProfiler.bump("compile.arrays");
     wrap.shell.regionPasses = [...(wrap.shell.regionPasses ?? []), pass];
     return wrap;
   };
@@ -328,17 +618,130 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return { ...draw, mask: raster.tex, maskVersion: raster.version };
   };
 
-  /** Color pipeline for one synthetic effect via the SAME compiler every renderer grades with. */
-  const pipelineFor = (nodeId: string, type: TimelineEffect["type"], params: Record<string, number | string>): ColorPipeline | null => {
-    const layerLike = {
-      id: `flarex_${comp.id}_${nodeId}`,
-      type: "video",
-      startSeconds: 0,
-      effects: [{ id: nodeId, type, name: type, enabled: true, intensity: 100, params }],
-      animations: [],
-    } as unknown as TimelineLayer;
-    const pipeline = getCompositionColorPipeline(layerLike, { currentTimeSeconds: ctx.timeSeconds });
-    return pipeline && !pipeline.identity ? pipeline : null;
+  /** One synthetic color effect standing in for a color node. */
+  const colorEffectFor = (nodeId: string, type: TimelineEffect["type"], params: Record<string, number | string>): TimelineEffect =>
+    ({ id: nodeId, type, name: type, enabled: true, intensity: 100, params }) as TimelineEffect;
+
+  /** Color pipeline for a LIST of synthetic effects, via the SAME compiler every renderer grades
+   *  with. A list (not a single effect) is the whole point of P1: the engine bakes any number of
+   *  pipeline-stage effects into ONE pipeline, so a coalesced chain costs one grade pass. */
+  const pipelineForEffects = (effects: TimelineEffect[]): ColorPipeline | null => {
+    frameProfiler.bump("compile.effectExpansions");
+    return frameProfiler.measure("compile.effectExpansion", () => {
+      const layerLike = {
+        id: `flarex_${comp.id}`,
+        type: "video",
+        startSeconds: 0,
+        effects: stableColorEffects(effects),
+        animations: FLAREX_NO_ANIMATIONS,
+      } as unknown as TimelineLayer;
+      const pipeline = getCompositionColorPipeline(layerLike, { currentTimeSeconds: ctx.timeSeconds });
+      return pipeline && !pipeline.identity ? pipeline : null;
+    });
+  };
+
+  /**
+   * Lower ANY color node (the `FLAREX_COLOR_NODES` table) — one body for the whole family.
+   *
+   * Masked → a `SceneRegionPass`, the shipped region-grade path, confined to the rasterized matte.
+   * Unmasked → the wrap shell's single `pipeline` slot, COALESCING with the color nodes already
+   * folded into that wrap (P1). Because the grade engine compiles a whole effect LIST into one
+   * pipeline (one 3D LUT, one grade pass), a Wheels → Curves → LUT → Look chain costs what a single
+   * node costs, instead of opening a nest — and an RTT — per node. That is the difference between a
+   * grade chain being usable and being unusable on an integrated GPU.
+   *
+   * Coalescing is only sound while ORDER is the only thing that distinguishes the folded list, which
+   * holds here: every effect in the table is a pipeline stage applied in list order, and appending
+   * preserves that. It is refused when
+   *   - the wrap is SEALED (a materialization boundary is a hard barrier, both directions), or
+   *   - a later-stage op already landed on the wrap (`__flarexStage` past the pipeline slot), since
+   *     the pipeline runs FIRST in shell order and would jump ahead of that op, or
+   *   - the same effect type is already folded in — two of one stage collapse, so it opens a fresh
+   *     wrap and nests, exactly as it did before coalescing existed.
+   */
+  const lowerColorNode = (node: FlarexNode): FlarexValue | null => {
+    const input = imageInput(node, "in");
+    if (!input) return null;
+    const spec = FLAREX_COLOR_NODES[node.type];
+    if (!spec) return { kind: "image", draw: input };
+    const params = spec.build({
+      num: (key, fallback) => num(node, key, fallback),
+      str: (key, fallback) => str(node, key, fallback),
+      bool: (key) => bool(node, key),
+    });
+    if (!params) return { kind: "image", draw: input }; // unconfigured payload → pass through
+    const effect = colorEffectFor(node.id, spec.effect, params);
+
+    const mask = matteInput(node, "mask");
+    if (mask) {
+      const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
+      if (raster) {
+        const pipeline = pipelineForEffects([effect]);
+        if (!pipeline) return { kind: "image", draw: input };
+        return {
+          kind: "image",
+          draw: pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline }),
+        };
+      }
+    }
+
+    const upstream = isGroup(input) ? (input as FlarexWrapGroup) : null;
+    const folded = upstream?.__flarexColorEffects;
+    if (
+      upstream &&
+      folded &&
+      !upstream.__flarexSealed &&
+      upstream.__flarexStage !== undefined &&
+      upstream.__flarexStage <= STAGE_PIPELINE &&
+      !folded.some((existing) => existing.type === effect.type)
+    ) {
+      const effects = [...folded, effect];
+      const pipeline = pipelineForEffects(effects);
+      if (pipeline) {
+        // Keep the wrap's original `groupKey`: it is the grade renderer / LUT cache slot, and it must
+        // stay stable across frames as the chain grows.
+        upstream.__flarexColorEffects = effects;
+        upstream.pipeline = pipeline;
+        frameProfiler.bump("compile.colorCoalesced");
+        return { kind: "image", draw: upstream };
+      }
+    }
+
+    const pipeline = pipelineForEffects([effect]);
+    if (!pipeline) return { kind: "image", draw: input };
+    const wrap = wrapFor(input, STAGE_PIPELINE);
+    wrap.pipeline = pipeline;
+    wrap.groupKey = `flarex_${comp.id}_${node.id}`;
+    wrap.__flarexColorEffects = [effect];
+    return { kind: "image", draw: wrap };
+  };
+
+  /**
+   * Lower ANY filter node (the `FLAREX_FILTER_NODES` table) to a fragment pass on the wrap shell.
+   * A wired matte confines the pass to that region — the pass model's own `mask`, so a masked filter
+   * still costs one pass rather than opening a region nest.
+   */
+  const lowerFilterNode = (node: FlarexNode): FlarexValue | null => {
+    const input = imageInput(node, "in");
+    if (!input) return null;
+    const spec = FLAREX_FILTER_NODES[node.type];
+    if (!spec) return { kind: "image", draw: input };
+    const params = spec.build({
+      num: (key, fallback) => num(node, key, fallback),
+      str: (key, fallback) => str(node, key, fallback),
+      bool: (key) => bool(node, key),
+    });
+    const pass = fragmentPass(node, spec.effect, params);
+    if (!pass) return { kind: "image", draw: input };
+    const mask = matteInput(node, "mask");
+    if (mask) {
+      const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
+      if (raster) {
+        pass.mask = raster.tex;
+        pass.maskVersion = raster.version;
+      }
+    }
+    return { kind: "image", draw: pushFragmentPass(input, pass) };
   };
 
   const fragmentPass = (
@@ -361,21 +764,54 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // ── Node evaluation (memoized backwards DFS; cycles degrade to null) ────────────────────────
   const memo = new Map<string, FlarexValue | null>();
   const visiting = new Set<string>();
+  frameProfiler.bump("compile.maps", 2); // memo + visiting (profiler-only temp-collection count)
+
+  /**
+   * Cost estimate for a built subtree, denominated in FULL-FRAME GPU PASSES — the unit materialization
+   * is paid for in. Structural only: it counts the passes the compositor will actually run (fragment
+   * passes, region passes, and each nested group's own composite), never node types, so it stays
+   * node-blind (ADR-010) and needs no per-node declaration to be useful.
+   */
+  const estimateDrawCost = (d: SceneDraw, depth = 0): number => {
+    if (depth > 8 || (d as SceneGroupDraw).kind !== "group") return 0;
+    const group = d as SceneGroupDraw;
+    let cost = 1; // the group's own composite
+    cost += group.shell.fragmentPasses?.length ?? 0;
+    cost += group.shell.regionPasses?.length ?? 0;
+    for (const child of group.children) cost += estimateDrawCost(child, depth + 1);
+    return cost;
+  };
+
+  /**
+   * Materializing is only a WIN when the work it dedupes exceeds the work it adds. A sealed node costs a
+   * render-target allocation plus an extra full-frame blit/composite, so a subtree cheaper than this
+   * threshold is faster left folded into the shader chain — even though it is shared.
+   *
+   * MEASURED (`flarex:perf`, 2026-07-26), which is why this exists: with `fanout > 1` as the only term, a
+   * light branch-and-merge comp ran **37.5% slower with the cache on and spent 7.9MB** doing it — the
+   * trivial shared leaves (a bare MediaIn feeding several branches) were each sealed into an identity RTT
+   * that bought nothing. The dense 100-node comp, where the deduped subtrees are genuinely expensive,
+   * gained 42% on p95 for 2.0MB. So the discriminator is subtree COST, exactly as ADR-010 §3 specified.
+   */
+  const MATERIALIZE_MIN_PASSES = 2;
 
   /**
    * Evaluator-owned materialization decision (ADR-008 rule 3 / ADR-010 §3): the node contributes an
    * intrinsic constraint + a cost hint; the EVALUATOR decides — no node-type branch.
-   *   materialize = requiresMaterialization ∨ fanout>1 ∨ budget(estimate) ∨ debugOverride
-   * Live terms today: `fanout>1` (structural) and the debug override. `requiresMaterialization`
-   * (intrinsic) and `budget(estimate)` have no declared inputs until node capabilities land
-   * (ADR-010) — so trivial-cost shared leaves (a MediaIn feeding two consumers) currently
-   * over-materialize into an identity RTT. That is a temporarily-absent COST capability, never a
-   * semantic error: sealing is pixel-neutral by construction (identity nest), so output is
-   * unchanged; only render-target identity is. The fix is a declared cost hint, NOT a node-type
-   * exemption in the evaluator (which would break the node-blind invariant).
+   *   materialize = requiresMaterialization ∨ (fanout>1 ∧ budget(estimate)) ∨ debugOverride
+   * Live terms: `fanout>1` (structural), `budget(estimate)` (the structural cost estimate above), and
+   * the debug override. `requiresMaterialization` (intrinsic — distortion/iterative/feedback nodes that
+   * CANNOT fold) still has no declared input and lands with node capabilities; until then such a node
+   * must be forced via `ctx.materializeNodeIds`.
+   *
+   * Note the cost term gates only the FANOUT case. The debug/explicit override deliberately bypasses it,
+   * because node previews (Slice 4) need to materialize a node regardless of how cheap it is.
    */
-  const shouldMaterialize = (nodeId: string): boolean =>
-    (ctx.materializeNodeIds?.has(nodeId) ?? false) || (fanout.get(nodeId) ?? 0) > 1;
+  const shouldMaterialize = (nodeId: string, draw: FlarexImageValue): boolean => {
+    if (ctx.materializeNodeIds?.has(nodeId)) return true;
+    if ((fanout.get(nodeId) ?? 0) <= 1) return false;
+    return estimateDrawCost(draw) >= MATERIALIZE_MIN_PASSES;
+  };
 
   const inputValue = (node: FlarexNode, socket: string): FlarexValue | null => {
     const from = edgeInto.get(`${node.id}:${socket}`);
@@ -407,30 +843,40 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   };
 
   function evalNode(nodeId: string): FlarexValue | null {
-    if (memo.has(nodeId)) {
-      // Served from the per-frame memo (shared fan-out) — not re-lowered. Attribute it as skipped.
-      const cachedNode = nodes[nodeId];
-      if (cachedNode) frameProfiler.noteEval(nodeId, cachedNode.type, "skipped");
-      return memo.get(nodeId) ?? null;
+    // Profiler-only: track recursion depth (peak/avg) so the retained-cache "no recursive descent" win is
+    // measurable. No-op unless profiling is recording.
+    frameProfiler.enterEval();
+    try {
+      if (memo.has(nodeId)) {
+        // Served from the per-frame memo (shared fan-out) — not re-lowered. Attribute it as skipped.
+        const cachedNode = nodes[nodeId];
+        if (cachedNode) frameProfiler.noteEval(nodeId, cachedNode.type, "skipped");
+        return memo.get(nodeId) ?? null;
+      }
+      if (visiting.has(nodeId)) return null; // cycle — degrade, never hang
+      const node = nodes[nodeId];
+      if (!node) return null;
+      frameProfiler.noteEval(nodeId, node.type, "evaluated");
+      visiting.add(nodeId);
+      let value = node.enabled ? lowerNode(node) : passthrough(node);
+      visiting.delete(nodeId);
+      // Materialization boundary: seal an image-producing node's output into its own RTT when the
+      // evaluator-owned decision says so (fan-out / debug override today). Mattes stay vector (never
+      // rasterized here). Pixel-neutral by construction — sealing inserts only identity nests.
+      if (value?.kind === "image" && shouldMaterialize(nodeId, value.draw)) {
+        value = { kind: "image", draw: materialize(value.draw, nodeId) };
+      }
+      memo.set(nodeId, value);
+      return value;
+    } finally {
+      frameProfiler.exitEval();
     }
-    if (visiting.has(nodeId)) return null; // cycle — degrade, never hang
-    const node = nodes[nodeId];
-    if (!node) return null;
-    frameProfiler.noteEval(nodeId, node.type, "evaluated");
-    visiting.add(nodeId);
-    let value = node.enabled ? lowerNode(node) : passthrough(node);
-    visiting.delete(nodeId);
-    // Materialization boundary: seal an image-producing node's output into its own RTT when the
-    // evaluator-owned decision says so (fan-out / debug override today). Mattes stay vector (never
-    // rasterized here). Pixel-neutral by construction — sealing inserts only identity nests.
-    if (value?.kind === "image" && shouldMaterialize(nodeId)) {
-      value = { kind: "image", draw: materialize(value.draw, nodeId) };
-    }
-    memo.set(nodeId, value);
-    return value;
   }
 
   function lowerNode(node: FlarexNode): FlarexValue | null {
+    // Profiler-only, node-blind: count a lowering visit per node type (the report aggregates merge /
+    // transform / effect visits from these). No `switch` on type for profiling — just the label.
+    frameProfiler.bump(`visit.${node.type}`);
     switch (node.type) {
       case "mediaIn": {
         // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): a non-empty `sourceAssetId`
@@ -438,7 +884,12 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         // / no resolver falls back to the host clip (soft-degrade, never blank).
         const sourceAssetId = str(node, "sourceAssetId", "");
         if (sourceAssetId && ctx.resolveSourceDraw) {
-          const resolved = ctx.resolveSourceDraw(node.id, sourceAssetId);
+          // Profiler-only: `resolveSourceDraw` is the browser's asset-source ADAPTER — it builds a full
+          // per-clip draw (grade pipeline, transforms, masks) via buildLayerPreFlarexDraw. This is real
+          // work counted inside `compile.lower` but ABSENT from the Node micro-bench's stub, so it's the
+          // prime suspect for the browser-vs-Node gap. Isolate it.
+          frameProfiler.bump("compile.resolveSourceCalls");
+          const resolved = frameProfiler.measure("compile.resolveSource", () => ctx.resolveSourceDraw!(node.id, sourceAssetId));
           // Source ran past its own end (short clip in a longer comp): produce nothing — the node's
           // output is empty, so a merge downstream keeps only the background. NOT a host fall-back.
           if (resolved === "ended") return null;
@@ -469,6 +920,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           fg.blendMode = blend;
           fg.transform.opacity *= opacity;
         }
+        frameProfiler.bump("compile.operations"); // the merge combine op (fg over bg)
+        frameProfiler.bump("compile.drawCommands");
+        frameProfiler.bump("compile.objects", 3); // group + shell + transform (identityShell)
+        frameProfiler.bump("compile.arrays"); // children [bg, fg]
         const merged: FlarexWrapGroup = {
           kind: "group",
           debugGroupId: `flarex_${comp.id}_${node.id}`,
@@ -485,6 +940,8 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         const input = imageInput(node, "in");
         if (!input) return null;
         const wrap = wrapFor(input, STAGE_TRANSFORM);
+        frameProfiler.bump("compile.operations"); // transform op on the shell
+        frameProfiler.bump("compile.objects"); // new transform object
         // x/y are PERCENT offsets from center (timeline-transform units: anchor comp position 0..100).
         wrap.shell.transform = {
           x: 50 + num(node, "x", 0),
@@ -498,62 +955,27 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         return { kind: "image", draw: wrap };
       }
 
-      case "colorCorrect": {
-        const input = imageInput(node, "in");
-        if (!input) return null;
-        const pipeline = pipelineFor(node.id, "brightnessContrast", {
-          exposure: num(node, "exposure", 0),
-          contrast: num(node, "contrast", 0),
-          saturation: num(node, "saturation", 100),
-          temperature: num(node, "temperature", 0),
-          tint: num(node, "tint", 0),
-        });
-        if (!pipeline) return { kind: "image", draw: input };
-        const mask = matteInput(node, "mask");
-        if (mask) {
-          const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
-          if (raster) {
-            return {
-              kind: "image",
-              draw: pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline }),
-            };
-          }
-        }
-        const wrap = wrapFor(input, STAGE_PIPELINE);
-        wrap.pipeline = pipeline;
-        wrap.groupKey = `flarex_${comp.id}_${node.id}`;
-        return { kind: "image", draw: wrap };
-      }
-
+      // Every color node lowers through ONE body (see `lowerColorNode` / `FLAREX_COLOR_NODES`), so
+      // adding a color node is a table row, not a case.
+      case "colorCorrect":
       case "colorCurves":
-      case "hueSat": {
-        const input = imageInput(node, "in");
-        if (!input) return null;
-        // Node storage key vs. the effect-registry's own param key differ (composition-style.ts
-        // reads `colorCurves` effects via `params.curve` and `hueSatCurves` via `params.curves`,
-        // both singular/plural mismatches from the node's own param name — keep both straight).
-        const nodeParamKey = node.type === "colorCurves" ? "curves" : "hueCurves";
-        const effectParamKey = node.type === "colorCurves" ? "curve" : "curves";
-        const payload = str(node, nodeParamKey, "");
-        if (!payload) return { kind: "image", draw: input };
-        const effectType = node.type === "colorCurves" ? "colorCurves" : "hueSatCurves";
-        const pipeline = pipelineFor(node.id, effectType, { [effectParamKey]: payload });
-        if (!pipeline) return { kind: "image", draw: input };
-        const mask = matteInput(node, "mask");
-        if (mask) {
-          const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
-          if (raster) {
-            return {
-              kind: "image",
-              draw: pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline }),
-            };
-          }
-        }
-        const wrap = wrapFor(input, STAGE_PIPELINE);
-        wrap.pipeline = pipeline;
-        wrap.groupKey = `flarex_${comp.id}_${node.id}`;
-        return { kind: "image", draw: wrap };
-      }
+      case "hueSat":
+      case "colorWheels":
+      case "hslQualifier":
+      case "lut":
+      case "look":
+        return lowerColorNode(node);
+
+      // Likewise every builtin-wrapping filter node (see `FLAREX_FILTER_NODES`).
+      case "directionalBlur":
+      case "radialBlur":
+      case "pixelate":
+      case "prism":
+      case "crop":
+      case "channelBoolean":
+      case "vignette":
+      case "grain":
+        return lowerFilterNode(node);
 
       case "blur": {
         const input = imageInput(node, "in");
@@ -727,12 +1149,17 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
   // View-any-node (Fusion view dot): root at the previewed node when set; a preview that yields
   // no image (matte-only node, unwired) falls back to MediaOut so the frame never goes blank.
-  const previewNode = comp.previewNodeId ? nodes[comp.previewNodeId] : undefined;
+  // `ctx.previewRootNodeId` is the RUNTIME override (node thumbnails) and wins over the persisted
+  // view-dot selection, so a thumbnail pass never disturbs what the user is viewing.
+  const previewRootId = ctx.previewRootNodeId ?? comp.previewNodeId;
+  const previewNode = previewRootId ? nodes[previewRootId] : undefined;
   if (previewNode && previewNode.type !== "mediaOut") {
     const previewed = evalNode(previewNode.id);
     if (previewed?.kind === "image") return previewed.draw;
   }
-  const result = evalNode(mediaOut.id);
+  // Profiler-only: time the whole recursive lowering (traversal + emission) as the "lower" phase —
+  // compile total ≈ setup + hashing + lower. No-op unless profiling.
+  const result = frameProfiler.measure("compile.lower", () => evalNode(mediaOut.id));
   if (result?.kind === "image") return result.draw;
   // An UNWIRED MediaOut is an intentional "no output" (the Fusion contract: nothing reaches the
   // viewer) — render transparent, don't leak the source. Every OTHER failure (cycle, dangling
