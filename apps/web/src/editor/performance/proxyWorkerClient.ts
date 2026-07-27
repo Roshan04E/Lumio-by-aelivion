@@ -13,8 +13,8 @@
  * so a proxy is a faithful low-bitrate stand-in for live preview.
  */
 
-import { clipCompositionToWorkArea, isGlBudgetOverTarget, isGlGovernorEnabled, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@orreris/shared";
-import { Aborted, buildSourceUrlMap, runExportCore, type ExportCoreInput } from "../../export/export-core";
+import { clipCompositionToWorkArea, isGlBudgetOverTarget, isGlGovernorEnabled, type FlarexComp, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@orreris/shared";
+import { Aborted, buildSourceUrlMap, runExportCore, type ExportCoreInput, type FlarexSourceAssetMap } from "../../export/export-core";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "../../export/export-worker-protocol";
 
 /** Proxies are visual-only and bitrate-capped, so full resolution is fine and stays pixel-aligned. */
@@ -24,6 +24,19 @@ export interface GenerateSpanProxyInput {
   spanEndSeconds: number;
   fps: number;
   urlForAsset: (assetId: string) => string | undefined;
+  /**
+   * Flarex node comps (`ProjectGraph.flarexComps`) for any `flarexCompId` clip in the span. Omitted by
+   * the timeline span-proxy caller — its spans are whole-timeline slices where a comp'd clip renders
+   * plain, which is what it has always done. Supplied by the COMP proxy (plans/flarex-comp-proxy.md),
+   * where lowering the graph is the entire point.
+   */
+  flarexComps?: Record<string, FlarexComp> | undefined;
+  /**
+   * Media kind + duration for every asset-source `MediaIn` those comps load. REQUIRED alongside
+   * `flarexComps`: those assets are off-timeline, so `buildSourceUrlMap` cannot discover them by
+   * walking tracks and every loader would soft-degrade to the host clip in the rendered file.
+   */
+  flarexSourceAssets?: FlarexSourceAssetMap | undefined;
   transitionManifests?: PluginTransitionManifest[] | undefined;
   lookManifests?: PluginLookManifest[] | undefined;
   signal: AbortSignal;
@@ -89,13 +102,13 @@ function spanComposition(composition: TimelineComposition, startSeconds: number,
  * playable preview source can still become a real proxy instead of painting every span failed.
  */
 export async function generateSpanProxy(input: GenerateSpanProxyInput): Promise<Blob> {
-  const { composition, spanStartSeconds, spanEndSeconds, fps, urlForAsset, transitionManifests, lookManifests, signal, onProgress, onDiagnostic } = input;
+  const { composition, spanStartSeconds, spanEndSeconds, fps, urlForAsset, flarexComps, flarexSourceAssets, transitionManifests, lookManifests, signal, onProgress, onDiagnostic } = input;
   if (signal.aborted) {
     throw new ProxyGenerationAborted();
   }
 
   const clipped = spanComposition(composition, spanStartSeconds, spanEndSeconds);
-  const urlMap = buildSourceUrlMap(clipped, urlForAsset);
+  const urlMap = buildSourceUrlMap(clipped, urlForAsset, flarexSourceAssets);
   // Sample a handful of frames across the (clipped, in-point→0) span for the black-frame guard: a WebCodecs
   // decode that silently emits BLACK (no error) would otherwise seal a black "ready" proxy that plays instead
   // of the correct live picture. The guard trips only when media is expected AND the composite is near-black,
@@ -106,6 +119,8 @@ export async function generateSpanProxy(input: GenerateSpanProxyInput): Promise<
   const sampleTimes = Array.from({ length: sampleCount }, (_, index) => (spanDurationSeconds * (index + 0.5)) / sampleCount);
   const coreInput: ExportCoreInput = {
     composition: clipped,
+    flarexComps,
+    flarexSourceAssets,
     urlMap,
     audio: null, // visual proxy only
     format: "webm",
