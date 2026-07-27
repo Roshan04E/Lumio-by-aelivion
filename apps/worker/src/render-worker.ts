@@ -132,7 +132,12 @@ async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.re
             quality: job.type === "preview" ? "preview" : "final"
           });
 
-    await prisma.renderJob.update({ where: { id: job.id }, data: { progress: 15 } });
+    // 0-15% is the PREP band. It used to jump straight to 15 here on the assumption that everything
+    // before frame rendering was "near-instant DB lookups" — true when that comment was written, but
+    // media localization was added after it and downloads the sources, which took 30-40s with the bar
+    // frozen at 15% and no indication anything was happening (user report 2026-07-27). Move in step
+    // with the actual work instead: 2% accepted → 2-14% downloading → 15% renderer starting.
+    await prisma.renderJob.update({ where: { id: job.id }, data: { progress: 2 } });
 
     // Localize R2-backed source media to local disk and serve it to Remotion from a loopback file
     // server, so the render never streams from R2 during frame extraction. R2 intermittently severs
@@ -140,8 +145,17 @@ async function runRenderJob(job: NonNullable<Awaited<ReturnType<typeof prisma.re
     // while small ranged reads were 100% reliable) — one sever aborted the render and orphaned the job.
     // localizeManifestMedia downloads each source ONCE in ranged chunks with per-chunk retry, then
     // rewrites the manifest to 127.0.0.1 URLs. No-op for the local driver. Torn down in the finally.
-    const localized = await localizeManifestMedia(manifest);
+    let lastLocalizeProgress = 2;
+    const localized = await localizeManifestMedia(manifest, (done, total) => {
+      // Fire-and-forget: a progress write must never delay or fail the download loop.
+      const next = total > 0 ? Math.min(14, 2 + Math.round((done / total) * 12)) : 14;
+      if (next <= lastLocalizeProgress) return; // monotonic — the bar must never step backwards
+      lastLocalizeProgress = next;
+      void prisma.renderJob.update({ where: { id: job.id }, data: { progress: next } }).catch(() => undefined);
+    });
     localizedCleanup = localized.cleanup;
+    // Media is on local disk; everything after this is bundling + browser launch, then frames at 15%+.
+    await prisma.renderJob.update({ where: { id: job.id }, data: { progress: 15 } });
 
     const renderPayload = {
       jobId: job.id,

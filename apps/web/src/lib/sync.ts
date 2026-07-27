@@ -22,6 +22,7 @@
  */
 
 import type { ProjectGraph, SourceAsset } from "@orreris/shared";
+import { collectFlarexSourceAssetIds, remapFlarexSourceAssetIds } from "@orreris/shared";
 import {
   apiRequest,
   AuthRequiredError,
@@ -309,6 +310,10 @@ function collectAssetIds(graph: ProjectGraph): Set<string> {
       if (layer.assetId) ids.add(layer.assetId);
     }
   }
+  // Flarex asset-source MediaIns load media-pool assets that are NOT on any track, so the walk above
+  // cannot see them. They were therefore never uploaded on export and the render worker 404'd on them
+  // (user report 2026-07-27). This set drives BOTH the upload and the relink check, so both were blind.
+  for (const assetId of collectFlarexSourceAssetIds(graph.flarexComps)) ids.add(assetId);
   return ids;
 }
 
@@ -320,6 +325,9 @@ function remapGraph(graph: ProjectGraph, map: Record<string, string>): ProjectGr
       if (layer.assetId && map[layer.assetId]) layer.assetId = map[layer.assetId];
     }
   }
+  // ...and the same remap inside Flarex comps, or the promoted graph keeps LOCAL ids in its MediaIn
+  // nodes while the timeline points at server ones — the worker then 404s on the local id.
+  remapFlarexSourceAssetIds(clone.flarexComps, map);
   return clone;
 }
 
@@ -707,7 +715,16 @@ export async function ensureExportReady(projectId: string): Promise<{ projectId:
   // Verify no local asset ids slipped through (e.g. the call above coalesced onto an inflight
   // BACKGROUND sync, which doesn't upload) — one uploading retry closes that race.
   const serverProject = result.status === "promoted" ? result.project : await serverGetProject(serverId);
-  const remaining = [...collectAssetIds(serverProject.projectGraph)].filter((id) => id.startsWith(LOCAL_ASSET_PREFIX));
+  const allIds = [...collectAssetIds(serverProject.projectGraph)];
+  const remaining = allIds.filter((id) => id.startsWith(LOCAL_ASSET_PREFIX));
+  // What the export believes it needs, and what is still local. `collectAssetIds` now includes Flarex
+  // asset-source MediaIns (they are off-timeline); logging it makes an asset that was never uploaded
+  // visible HERE rather than as a bare 404 in the render worker minutes later (2026-07-27).
+  console.info("[export] assets required by this project:", {
+    all: allIds,
+    flarexSources: collectFlarexSourceAssetIds(serverProject.projectGraph.flarexComps),
+    stillLocal: remaining,
+  });
   if (remaining.length > 0) {
     const retry = await syncProject(projectId, serverProject.projectGraph, serverProject.durationSeconds, { uploadAssets: true });
     if (retry.status === "needs-relink") throw new RelinkRequiredError(retry.assets);

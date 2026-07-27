@@ -16,6 +16,7 @@ import {
   buildSourceUrlMap,
   runExportCore,
   type ExportCoreInput,
+  type FlarexSourceAssetMap,
   type SourceUrlMap,
 } from "./export-core";
 import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
@@ -32,6 +33,14 @@ export interface LocalExportRequest {
   compositions?: Record<string, TimelineComposition> | undefined;
   /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md). Undefined = comp'd clips render plain. */
   flarexComps?: Record<string, FlarexComp> | undefined;
+  /**
+   * Media kind + duration for every asset a Flarex asset-source `MediaIn` loads (`sourceAssetId`).
+   * REQUIRED for those sources to appear in the export: they are off-timeline (the comp loads them
+   * itself), so `buildSourceUrlMap` cannot discover them by walking tracks and they get no decoder —
+   * the compiler then soft-degrades every one of them to the HOST clip, which is exactly what the
+   * rendered file showed on 2026-07-27. Undefined = asset-source MediaIns render as the host clip.
+   */
+  flarexSourceAssets?: FlarexSourceAssetMap | undefined;
   /** Resolve a timeline asset id to a playable URL (object URL / OPFS-resolved). */
   urlForAsset: (assetId: string) => string | undefined;
   format?: ExportFormat;
@@ -103,7 +112,9 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   // expandNestedCompositions is cheap/pure, so doing it twice per export is an acceptable cost for keeping
   // buildSourceUrlMap/collectAudioLayers's own signatures untouched.
   const expandedForSourceResolution = expandNestedCompositions(composition, request.compositions).composition;
-  const urlMap = buildSourceUrlMap(expandedForSourceResolution, urlForAsset);
+  // Flarex asset-source assets are passed EXPLICITLY: they are off-timeline, so no amount of walking
+  // `expandedForSourceResolution` can find them (see LocalExportRequest.flarexSourceAssets).
+  const urlMap = buildSourceUrlMap(expandedForSourceResolution, urlForAsset, request.flarexSourceAssets);
   // Vector-graphic layers resolve to inline SVG data URLs, but the export decoder runs in a Worker
   // where createImageBitmap can't rasterize SVG (no layout engine) — pre-rasterize to PNG here on the
   // main thread (Window APIs available) so the Worker path decodes a plain bitmap instead of failing
@@ -129,6 +140,7 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
     composition,
     compositions: request.compositions,
     flarexComps: request.flarexComps,
+    flarexSourceAssets: request.flarexSourceAssets,
     urlMap,
     audio,
     format,

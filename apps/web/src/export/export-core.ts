@@ -23,6 +23,7 @@ import {
   registerTransitionManifests,
   type PluginLookManifest,
   type PluginTransitionManifest,
+  collectFlarexVirtualLayers,
   type FlarexComp,
   type TimelineComposition,
   type TimelineLayer
@@ -64,6 +65,13 @@ export interface ExportCoreInput {
   /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md) — clips with `flarexCompId` lower
    *  through the shared compiler in buildSceneDraws. Undefined = comp'd clips render plain. */
   flarexComps?: Record<string, FlarexComp> | undefined;
+  /**
+   * Media kind + duration for every asset a Flarex asset-source `MediaIn` loads. These assets are NOT on
+   * the timeline (the Fusion Loader model — the comp loads them itself), so nothing derived from
+   * `composition.tracks` can supply them. Without this the loaders get no decoder and every asset-source
+   * MediaIn falls back to the host clip in the rendered file (user report 2026-07-27).
+   */
+  flarexSourceAssets?: FlarexSourceAssetMap | undefined;
   /** Every visual source the timeline references, pre-resolved to fetchable URLs. */
   urlMap: SourceUrlMap;
   /** Pre-mixed audio PCM (null when the timeline is silent). */
@@ -172,10 +180,22 @@ function mediaSourceKey(layer: TimelineLayer): string | null {
   return layer.type === "video" ? clipSourceKey(layer.id, layer.assetId) : layer.assetId;
 }
 
-function buildProviderUrlMap(composition: TimelineComposition, urlMap: SourceUrlMap): SourceUrlMap {
+function buildProviderUrlMap(
+  composition: TimelineComposition,
+  urlMap: SourceUrlMap,
+  /** Flarex asset-source loaders. They are OFF-TIMELINE, so the track walk below cannot reach them and
+   *  they would get no decoder at all — the export-renders-the-host-clip bug. */
+  flarexVirtualLayers: readonly TimelineLayer[] = []
+): SourceUrlMap {
   const map: SourceUrlMap = {};
   for (const [key, source] of Object.entries(urlMap)) {
     if (key.startsWith("matte:") || source.kind === "image") map[key] = source;
+  }
+  for (const virtual of flarexVirtualLayers) {
+    if (!virtual.assetId) continue;
+    const source = urlMap[virtual.assetId];
+    const key = mediaSourceKey(virtual);
+    if (source && key) map[key] = { url: source.url, kind: virtual.type as "video" | "image" };
   }
   for (const track of composition.tracks) {
     for (const layer of track.layers) {
@@ -240,7 +260,23 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
         : { ...nestExpansion.composition, width, height }
     )
   );
-  const providerUrlMap = buildProviderUrlMap(renderComposition, urlMap);
+  // Flarex asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): synthetic OFF-TIMELINE layers,
+  // one per `sourceAssetId` MediaIn. The preview builds these in VideoPreview; export never did, so every
+  // asset-source MediaIn soft-degraded to the host clip in the rendered file while the editor showed the
+  // real sources (user report 2026-07-27). Built from the SAME shared helper so the two agree by
+  // construction. `durationSeconds` matters: it is what makes a source SHORTER than its host go
+  // transparent at its end rather than hold a frozen last frame.
+  const flarexVirtualLayers = collectFlarexVirtualLayers(
+    renderComposition.tracks.flatMap((track) => track.layers),
+    input.flarexComps,
+    (assetId) => {
+      const info = input.flarexSourceAssets?.[assetId];
+      if (info) return { type: info.type, durationSeconds: info.durationSeconds };
+      const source = urlMap[assetId];
+      return source ? { type: source.kind } : null;
+    }
+  );
+  const providerUrlMap = buildProviderUrlMap(renderComposition, urlMap, flarexVirtualLayers);
 
   const trackEndPostroll = (layer: TimelineLayer, track: { layers: TimelineLayer[] }): number => {
     const end = layer.startSeconds + layer.durationSeconds;
@@ -262,6 +298,14 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
 
   const activeSourceKeysAt = (t: number): string[] => {
     const keys = new Set<string>();
+    // Flarex loaders are active for their own (host-mirrored, source-clamped) span — keep their decoders
+    // resident exactly like a timeline clip's, or the comp renders a hole where the source should be.
+    for (const virtual of flarexVirtualLayers) {
+      const key = mediaSourceKey(virtual);
+      if (!key) continue;
+      if (t < virtual.startSeconds || t >= virtual.startSeconds + virtual.durationSeconds) continue;
+      keys.add(key);
+    }
     for (const track of renderComposition.tracks) {
       for (const layer of track.layers) {
         if (regionPasses && layer.id.includes("__rfx_")) continue;
@@ -363,6 +407,10 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
       : {}),
     // Flarex node comps (FLAREX.md) — only when at least one exists, keeping non-Flarex exports identical.
     ...(input.flarexComps && Object.keys(input.flarexComps).length > 0 ? { flarexComps: input.flarexComps } : {}),
+    // Asset-source MediaIn loaders: the compositor must GRADE these (they are off-timeline, so its own
+    // active-layer scan cannot find them) and hand them to buildSceneDraws, or every one falls back to
+    // the host clip. Empty = unchanged behavior for comps without asset sources.
+    ...(flarexVirtualLayers.length > 0 ? { flarexVirtualLayers } : {}),
   };
   const activeCanvas = new OffscreenCanvas(width, height);
   // Resolution downscale (export window): composite ALWAYS at full comp res (activeCanvas) so layer
@@ -508,12 +556,33 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
   }
 }
 
+/**
+ * Every media-pool asset loaded by a Flarex asset-source `MediaIn` (`sourceAssetId`), across all comps.
+ *
+ * These are NOT timeline layers — a Flarex comp loads them directly (the Fusion Loader model), so nothing
+ * that walks `composition.tracks` can see them. Missing this is why export rendered the HOST clip in place
+ * of every asset-source `MediaIn`: with no provider the compiler's `resolveSourceDraw` returns null and
+ * `MediaIn` soft-degrades to the host (user report 2026-07-27).
+ */
+export type FlarexSourceAssetMap = Record<string, { type: "video" | "image"; durationSeconds?: number | undefined }>;
+
+// Single definition, in shared — the upload/remap path (lib/sync.ts) needs the SAME answer, and the two
+// silently disagreeing is precisely how the 404 shipped. Re-exported so existing importers are unchanged.
+export { collectFlarexSourceAssetIds } from "@orreris/shared";
+
 /** Build the resolved source URL map (visual layers + per-clip luma mattes) for the pipeline. */
 export function buildSourceUrlMap(
   composition: TimelineComposition,
-  urlForAsset: (assetId: string) => string | undefined
+  urlForAsset: (assetId: string) => string | undefined,
+  /** Media kind + duration for every Flarex asset-source `MediaIn` asset (off-timeline — see above).
+   *  The kind must be the REAL one: an image decoded through a video provider is not the same thing. */
+  flarexSourceAssets?: FlarexSourceAssetMap | undefined
 ): SourceUrlMap {
   const map: SourceUrlMap = {};
+  for (const [assetId, info] of Object.entries(flarexSourceAssets ?? {})) {
+    const url = urlForAsset(assetId);
+    if (url && !map[assetId]) map[assetId] = { url, kind: info.type };
+  }
   for (const track of composition.tracks) {
     for (const layer of track.layers) {
       if (layer.type === "image" && layer.graphic) {

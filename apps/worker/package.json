@@ -18,6 +18,8 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "render:compare": "tsx src/render-comparison-test.ts",
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
+    "flarex:cache-gate": "tsx src/flarex-cache-gate.ts",
+    "flarex:perf": "tsx src/flarex-perf-scorecard.ts",
     "remotion:scene-compare": "tsx src/remotion-scene-compare.ts",
     "color:compare": "tsx src/color-engine-compare.ts",
     "scene:compare": "tsx src/scene-compositor-compare.ts",

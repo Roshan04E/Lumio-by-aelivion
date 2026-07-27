@@ -1,4 +1,4 @@
-import { REGION_PASS_MODEL_DEFAULT, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@orreris/shared";
+import { REGION_PASS_MODEL_DEFAULT, collectFlarexSourceAssetIds, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@orreris/shared";
 
 /** Manifest field that lets the renderer PLAY a SMIL-animated graphic (see `RenderManifestLayer.graphic`).
  *  Static/absent graphics contribute nothing, so the settled `assetUrl` stays the source. */
@@ -519,6 +519,19 @@ export function buildRenderManifest(input: {
 
   const outputFps = input.quality === "preview" ? Math.min(24, composition.fps) : composition.fps;
 
+  // Assets this render REFERENCES (see `assets` below). Built from the layers actually emitted above —
+  // not from the source composition — so nest-expanded children, region-mask clones, frame borders and
+  // work-area clipping are all reflected. A layer whose asset is missing from `input.assets` simply has
+  // nothing to add here; filtering can only ever drop assets that NO emitted layer names.
+  const referencedAssetIds = new Set<string>();
+  for (const layer of layers) {
+    if (layer.assetId) referencedAssetIds.add(layer.assetId);
+  }
+  if (input.graph.sourceAssetId) referencedAssetIds.add(input.graph.sourceAssetId);
+  // Flarex asset-source MediaIns load media-pool assets directly (the Fusion Loader model): they are on
+  // NO track, so the loop above cannot see them and they would be filtered out of their own render.
+  for (const assetId of collectFlarexSourceAssetIds(input.graph.flarexComps)) referencedAssetIds.add(assetId);
+
   return {
     id: `render_${input.projectId}_${input.quality}_${Date.now()}`,
     schemaVersion: 1,
@@ -534,16 +547,26 @@ export function buildRenderManifest(input: {
       format: "mp4",
       color: normalizeProjectColorSettings(composition.settings?.color)
     },
-    assets: input.assets.map((asset) => ({
-      id: asset.id,
-      fileName: asset.fileName,
-      fileType: asset.fileType,
-      fileUrl: asset.fileUrl,
-      durationSeconds: asset.durationSeconds,
-      width: asset.width,
-      height: asset.height,
-      ...(asset.color ? { color: asset.color } : {})
-    })),
+    // Only assets this render actually REFERENCES. `input.assets` is the project's whole media LIBRARY,
+    // and emitting it wholesale made the render worker localize every one of them before frame 1: a
+    // 3-asset project pulled 19 files (a dozen orphaned `mask_browser_*.webm` tool artifacts plus
+    // unrelated library media). Two real consequences, both observed 2026-07-27: minutes of needless
+    // transfer per cloud export, and ANY stale/broken library asset hard-failing an export that does not
+    // use it (a legacy pre-R2 key 404'd and killed the job). Referenced = every emitted layer's assetId
+    // + the project's own source asset + every Flarex asset-source MediaIn (off-timeline, so no layer
+    // walk can see them). Audio/matte/graphic layers are all in `layers`, so all are covered.
+    assets: input.assets
+      .filter((asset) => referencedAssetIds.has(asset.id))
+      .map((asset) => ({
+        id: asset.id,
+        fileName: asset.fileName,
+        fileType: asset.fileType,
+        fileUrl: asset.fileUrl,
+        durationSeconds: asset.durationSeconds,
+        width: asset.width,
+        height: asset.height,
+        ...(asset.color ? { color: asset.color } : {})
+      })),
     plugins: input.graph.plugins,
     layers,
     regionPassModel: REGION_PASS_MODEL_DEFAULT,

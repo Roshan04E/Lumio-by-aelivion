@@ -65,11 +65,17 @@ projectsRouter.post(
     // Priority: a template's own length → the real footage length (never truncated) → a goal
     // preset's target duration (footage-less drafts) → a short default.
     let timelineDurationSeconds = template?.durationSeconds ?? input.durationSeconds ?? 12;
-    if (!template && input.sourceAssetId) {
+    // A local-first asset (imported on-device, not uploaded) has no SourceAsset row on the server, so
+    // the FK column must NOT reference it or `project.create` throws P2003. Look it up once: use it for
+    // the duration AND to decide whether the DB FK link is set. Either way the composition JSON still
+    // carries the (possibly local) asset id, which the client resolves against its on-device store.
+    let sourceAssetExists = false;
+    if (input.sourceAssetId) {
       const sourceAsset = await prisma.sourceAsset.findFirst({
         where: { id: input.sourceAssetId, userId: req.user.id }
       });
-      if (sourceAsset) {
+      sourceAssetExists = Boolean(sourceAsset);
+      if (!template && sourceAsset) {
         timelineDurationSeconds = sourceAsset.durationSeconds + 1;
       }
     }
@@ -104,7 +110,7 @@ projectsRouter.post(
         userId: req.user.id,
         ...(resolvedTemplate.dbId ? { templateId: resolvedTemplate.dbId } : {}),
         title: input.title ?? "Untitled reel",
-        ...(input.sourceAssetId ? { sourceAssetId: input.sourceAssetId } : {}),
+        ...(input.sourceAssetId && sourceAssetExists ? { sourceAssetId: input.sourceAssetId } : {}),
         projectGraph: asJson(graph),
         durationSeconds: timelineDurationSeconds
       },

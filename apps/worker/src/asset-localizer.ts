@@ -36,7 +36,12 @@ function passthrough(manifest: RenderManifest): LocalizedManifest {
   return { manifest, cleanup: async () => undefined };
 }
 
-export async function localizeManifestMedia(manifest: RenderManifest): Promise<LocalizedManifest> {
+export async function localizeManifestMedia(
+  manifest: RenderManifest,
+  /** Reports download progress (`done` of `total` assets). This phase can run for tens of seconds on a
+   *  media-heavy project, and without it the job sat at a single frozen percentage the whole time. */
+  onProgress?: (done: number, total: number) => void
+): Promise<LocalizedManifest> {
   if (!isR2StorageEnabled()) {
     return passthrough(manifest);
   }
@@ -60,6 +65,11 @@ export async function localizeManifestMedia(manifest: RenderManifest): Promise<L
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orreris-assets-"));
   const urlToFile = new Map<string, string>();
+  // The localization PLAN. A failure here reports one status code with no context, so without this you
+  // cannot tell WHICH asset is missing, nor whether the manifest even referenced the one you expected —
+  // the 404 that stalled cloud export for several rounds (2026-07-27).
+  console.info(`[asset-localizer] localizing ${urls.size} asset(s) from the manifest:`);
+  for (const url of urls) console.info(`[asset-localizer]   ${relativeKeyFromUrl(url) ?? "(unparseable)"}  ←  ${url}`);
   try {
     let index = 0;
     for (const url of urls) {
@@ -71,8 +81,29 @@ export async function localizeManifestMedia(manifest: RenderManifest): Promise<L
       const fileName = `${index++}${ext}`;
       const dest = path.join(tmpDir, fileName);
       const signedUrl = await createPresignedDownload(key);
-      await downloadRangedToFile(signedUrl, dest);
+      try {
+        await downloadRangedToFile(signedUrl, dest);
+      } catch (r2Error) {
+        // PRE-R2 MEDIA (2026-07-27). Not every storage URL is an R2 object: the API's /storage route
+        // serves R2 first and falls through to `express.static` for media uploaded before the R2
+        // migration — legacy flat `uploads/...` keys, as opposed to today's `u_<user>/video/...`. The
+        // browser therefore plays them fine, but the worker presigns R2 DIRECTLY and got a hard 404,
+        // failing the whole export over one old asset. Retry through the API URL, which owns that
+        // fallback, so the worker resolves exactly what every other consumer resolves.
+        console.warn(`[asset-localizer] R2 miss for "${key}" — retrying via the API (pre-R2 media?): ${String(r2Error)}`);
+        try {
+          await downloadRangedToFile(url, dest);
+          console.info(`[asset-localizer] recovered "${key}" from the API's local-disk fallback`);
+        } catch (apiError) {
+          // Name the asset that actually failed, and BOTH causes. `urls` is a Set with no ordering
+          // guarantee, so "the 6th attempt failed" told you nothing about which object is missing.
+          throw new Error(
+            `[asset-localizer] FAILED on key "${key}" (manifest url: ${url}) — R2: ${String(r2Error)} | API fallback: ${String(apiError)}`
+          );
+        }
+      }
       urlToFile.set(url, fileName);
+      onProgress?.(urlToFile.size, urls.size);
     }
 
     const server = await startLoopbackFileServer(tmpDir);
@@ -131,6 +162,9 @@ async function downloadRangedToFile(url: string, dest: string): Promise<void> {
   }
 }
 
+/** A permanently-failed fetch (404/403/401): retrying cannot change the outcome, so don't burn attempts. */
+class FatalFetchError extends Error {}
+
 /** Fetch a single byte range with retry + timeout. Returns the bytes and (from Content-Range) the total size. */
 async function fetchChunk(
   url: string,
@@ -144,7 +178,14 @@ async function fetchChunk(
     try {
       const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal: controller.signal });
       if (res.status !== 206 && res.status !== 200) {
-        throw new Error(`unexpected status ${res.status}`);
+        // The URL is the whole diagnosis for a 4xx — "unexpected status 404" with no URL cost several
+        // rounds (2026-07-27), because it cannot distinguish a missing upload from a bad id from a bad
+        // host. A 404/403 is also DETERMINISTIC: retrying it 6× just delays the same answer, so fail fast.
+        const detail = `unexpected status ${res.status} for ${url}`;
+        if (res.status === 404 || res.status === 403 || res.status === 401) {
+          throw new FatalFetchError(detail);
+        }
+        throw new Error(detail);
       }
       const buf = Buffer.from(await res.arrayBuffer());
       const contentRange = res.headers.get("content-range"); // "bytes 0-4194303/10941526"
@@ -153,6 +194,17 @@ async function fetchChunk(
       return { bytes: buf, parsedTotal, isFullBody: res.status === 200 };
     } catch (error) {
       lastError = error;
+      // A missing/forbidden object will never appear by retrying — surface it immediately, with the URL.
+      if (error instanceof FatalFetchError) {
+        throw new Error(`asset download failed (not retryable): ${error.message}`);
+      }
+      // Log EVERY failed attempt. The thrown message is the only thing that reaches the UI, where it is
+      // truncated to a badge — so when a render dies here the actual cause (timeout vs truncated body vs
+      // status code) was invisible unless you hovered it. Six identical lines also distinguish a
+      // deterministic failure from genuine flakiness at a glance.
+      console.warn(
+        `[asset-localizer] chunk ${start}-${end} attempt ${attempt}/${CHUNK_ATTEMPTS} failed: ${String(error)}`
+      );
       if (attempt < CHUNK_ATTEMPTS) {
         await new Promise((r) => setTimeout(r, 200 * attempt)); // linear backoff
       }
