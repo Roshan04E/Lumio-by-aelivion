@@ -98,6 +98,9 @@ const PAYLOAD_EDITORS: Record<string, (value: string, onChange: (json: string) =
   "hslQualifier.secondary": (value, onChange) => <HslSecondary value={value} onChange={onChange} />,
 };
 
+/** Params the CANVAS owns, not the inspector — structural payloads with no meaningful text editor. */
+const STRUCTURAL_PARAMS = new Set(["group.members"]);
+
 const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color", "background.color"]);
 /** polygonMask/bezierMask `points` — a structured row-per-point editor (the documented fallback for the
  *  on-viewer SVG overlay), rendered as a custom field just like the clip-effect schema's curve editors. */
@@ -371,6 +374,10 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
   // a param still show it (value falls back to the default until first edited).
   for (const key of [...Object.keys(defaults), ...Object.keys(node.params).filter((k) => !(k in defaults))]) {
     if (consumedByGroup.has(key)) continue;
+    // Structural payloads the CANVAS owns (a Group's member list): editing a raw id array by hand is
+    // not a property edit, so it gets no row. Title/collapsed still render through PropertyFieldList
+    // like any other property.
+    if (STRUCTURAL_PARAMS.has(`${node.type}.${key}`)) continue;
     const vec2Group = vec2Groups.find((g) => g.x === key);
     if (vec2Group) {
       fields.push(vec2Descriptor(vec2Group));

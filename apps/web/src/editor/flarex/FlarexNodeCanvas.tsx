@@ -23,17 +23,24 @@ import {
   type FlarexSocketType,
 } from "@orreris/shared";
 import {
+  GROUP_TITLEBAR_H,
   NODE_W,
   SOCKET_R,
   backdropSize,
   clampZoom,
   cloneFlarexNodes,
+  collapsedMemberOwners,
+  expandGroupDragSet,
+  groupIsCollapsed,
+  groupMembers,
+  groupRect,
   hitTest,
   hitTestWire,
   nodeHeight,
   nodeWidth,
   nodeSockets,
   screenToWorld,
+  socketAnchor,
   wirePath,
   worldToScreen,
   zoomAt,
@@ -248,19 +255,20 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     const draftBackdropSize = (node: FlarexNode): { w: number; h: number } =>
       gesture.kind === "backdropResize" && gesture.nodeId === node.id ? { w: gesture.curW, h: gesture.curH } : backdropSize(node);
 
+    // Members of a COLLAPSED group are off-screen; their wires re-anchor onto the group's box.
+    const collapsedOwners = collapsedMemberOwners(comp);
+    const isHidden = (node: FlarexNode): boolean => collapsedOwners.has(node.id);
+
     const socketScreen = (
       nodeId: string,
       socketId: string,
       kind: "input" | "output",
     ): { x: number; y: number; dir: 1 | -1; type: FlarexSocketType } | null => {
-      const node = comp.nodes[nodeId];
-      if (!node) return null;
-      // `comp` → sockets adopt their facing side (Auto left/right flip).
-      const ref = nodeSockets(node, comp).find((s) => s.socket === socketId && s.kind === kind);
+      // `socketAnchor` applies the auto left/right flip, the live-move draft position, AND the
+      // collapsed-group re-anchor in one place, so wires and hit-testing can never disagree.
+      const ref = socketAnchor(comp, collapsedOwners, nodeId, socketId, kind, draftPos);
       if (!ref) return null;
-      // Live-move preview: dragged nodes' sockets follow the draft positions.
-      const pos = draftPos(node);
-      const [x, y] = worldToScreen(view, ref.x + (pos.x - node.ui.x), ref.y + (pos.y - node.ui.y));
+      const [x, y] = worldToScreen(view, ref.x, ref.y);
       return { x, y, dir: ref.dir, type: ref.def.type };
     };
 
@@ -306,6 +314,49 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       g.stroke();
     }
 
+    // Groups: same LOW z-order as backdrops (behind wires and nodes). An expanded group draws as a
+    // frame auto-fitted around its members; a collapsed one as a title chip with a member count, since
+    // its contents are hidden. Neutral chrome — accent is reserved for selection.
+    for (const node of Object.values(comp.nodes)) {
+      if (node.type !== "group") continue;
+      const rect = groupRect(comp, node, draftPos);
+      const [x, y] = worldToScreen(view, rect.x, rect.y);
+      const w = rect.w * view.zoom;
+      const h = rect.h * view.zoom;
+      const selected = selectedNodeIds.includes(node.id);
+      const collapsed = groupIsCollapsed(node);
+      const titleH = Math.min(h, GROUP_TITLEBAR_H * view.zoom);
+      g.beginPath();
+      g.roundRect(x, y, w, h, 7 * view.zoom);
+      g.fillStyle = `rgba(${pal.mutedRgb},0.10)`;
+      g.fill();
+      g.lineWidth = selected ? 2 : 1;
+      g.strokeStyle = selected ? accentHex : `rgba(${pal.mutedRgb},0.45)`;
+      if (!selected && !collapsed) g.setLineDash([4, 3]);
+      g.stroke();
+      g.setLineDash([]);
+      // Titlebar — the only band that takes clicks (see hitTest), so it reads as the grab handle.
+      g.beginPath();
+      g.roundRect(x, y, w, titleH, collapsed ? 7 * view.zoom : [7 * view.zoom, 7 * view.zoom, 0, 0]);
+      g.fillStyle = `rgba(${pal.mutedRgb},0.22)`;
+      g.fill();
+      if (view.zoom > 0.35) {
+        // Disclosure caret: ▸ collapsed, ▾ expanded — the affordance for the double-click toggle.
+        const title = typeof node.params.title === "string" ? node.params.title : "Group";
+        const count = groupMembers(node).length;
+        g.fillStyle = `rgba(${pal.textRgb},0.85)`;
+        g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
+        g.textBaseline = "middle";
+        g.fillText(`${collapsed ? "▸" : "▾"} ${title}`, x + 8 * view.zoom, y + titleH / 2, w - 46 * view.zoom);
+        if (collapsed) {
+          g.fillStyle = `rgba(${pal.mutedRgb},0.9)`;
+          g.textAlign = "right";
+          g.fillText(String(count), x + w - 8 * view.zoom, y + titleH / 2);
+          g.textAlign = "left";
+        }
+      }
+    }
+
     // Wires under nodes. The splice-target wire (node or palette drag hovering it) draws amber.
     const spliceHoverId = paletteHover?.edgeId ?? (gesture.kind === "moveNodes" ? gesture.hoverEdgeId : null);
     for (const edge of comp.edges) {
@@ -345,8 +396,9 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
 
     // Nodes.
     for (const node of Object.values(comp.nodes)) {
-      // Backdrop already got its own LOW-z-order pass above; skip its generic box here.
-      if (node.type === "backdrop") continue;
+      // Backdrop and Group already got their own LOW-z-order passes above; skip their generic boxes.
+      // Members of a collapsed group aren't drawn at all — their wires already re-anchor to its box.
+      if (node.type === "backdrop" || node.type === "group" || isHidden(node)) continue;
       const def = getFlarexNodeDefinition(node.type);
       const pos = draftPos(node);
       const [x, y] = worldToScreen(view, pos.x, pos.y);
@@ -653,8 +705,11 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     }
     // Dragging a node that is already part of a multi-selection moves the WHOLE selection;
     // otherwise the click re-selects just this node.
-    const dragIds = selectedNodeIds.includes(hit.nodeId) ? selectedNodeIds : [hit.nodeId];
+    const selectedIds = selectedNodeIds.includes(hit.nodeId) ? selectedNodeIds : [hit.nodeId];
     if (!selectedNodeIds.includes(hit.nodeId)) onSelectNodes([hit.nodeId]);
+    // A Group carries its members: dragging the box moves everything inside it, which is what makes it
+    // a container rather than a floating label.
+    const dragIds = expandGroupDragSet(comp, selectedIds);
     const [wx, wy] = screenToWorld(view, sx, sy);
     const start: Record<string, { x: number; y: number }> = {};
     for (const id of dragIds) {
@@ -792,6 +847,18 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     if (hit.kind !== "node") return;
     const node = stateRef.current.comp.nodes[hit.nodeId];
     if (!node || node.type === "mediaOut") return;
+    // A Group has no output to view, so its double-click is the collapse/expand toggle instead.
+    if (node.type === "group") {
+      onUpdateComp((current) => {
+        const target = current.nodes[hit.nodeId];
+        if (!target) return current;
+        return {
+          ...current,
+          nodes: { ...current.nodes, [hit.nodeId]: { ...target, params: { ...target.params, collapsed: target.params.collapsed !== true } } },
+        };
+      });
+      return;
+    }
     onUpdateComp((current) => ({
       ...current,
       previewNodeId: current.previewNodeId === hit.nodeId ? undefined : hit.nodeId,

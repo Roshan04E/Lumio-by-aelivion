@@ -9,7 +9,21 @@
  */
 
 import { createFlarexNode } from "@orreris/shared";
-import { alignFlarexNodes, backdropSize, hitTest, nodeWidth, type FlarexViewState } from "./flarex-canvas-model";
+import {
+  GROUP_COLLAPSED_W,
+  GROUP_PADDING,
+  GROUP_TITLEBAR_H,
+  alignFlarexNodes,
+  backdropSize,
+  collapsedMemberOwners,
+  expandGroupDragSet,
+  groupMembers,
+  groupRect,
+  hitTest,
+  nodeWidth,
+  socketAnchor,
+  type FlarexViewState,
+} from "./flarex-canvas-model";
 
 let failures = 0;
 function check(name: string, condition: boolean): void {
@@ -74,6 +88,61 @@ function check(name: string, condition: boolean): void {
   check("click in the backdrop BODY (not titlebar) is background", hitTest(comp, view, 200, 200).kind === "background");
   check("click in the backdrop TITLEBAR is a node hit (move)", hitTest(comp, view, 50, 5).kind === "node");
   check("click on the backdrop RESIZE HANDLE is a dedicated hit", hitTest(comp, view, 396, 296).kind === "backdropResize");
+}
+
+// --- Group / Compound geometry ---------------------------------------------
+{
+  const a = createFlarexNode("blur", "a", 100, 100);
+  const b = createFlarexNode("glow", "b", 300, 180);
+  const grp = createFlarexNode("group", "g1", 0, 0);
+  grp.params = { ...grp.params, members: JSON.stringify(["a", "b"]) };
+  const comp = { id: "c1", name: "C", nodes: { a, b, g1: grp }, edges: [], animations: [], version: 1 };
+  const view: FlarexViewState = { panX: 0, panY: 0, zoom: 1 };
+
+  // The box AUTO-FITS its members, so nothing stored can drift away from where they actually are.
+  const rect = groupRect(comp, grp);
+  check("group box wraps its members (left/top padded, titlebar above)",
+    rect.x === 100 - GROUP_PADDING && rect.y === 100 - GROUP_PADDING - GROUP_TITLEBAR_H);
+  check("group box spans to the far member's right/bottom edge",
+    rect.w === 300 + nodeWidth(b, comp) - 100 + GROUP_PADDING * 2);
+  // Move a member → the box follows, with no stored size to update.
+  const moved = { ...comp, nodes: { ...comp.nodes, b: { ...b, ui: { x: 500, y: 180 } } } };
+  check("group box follows a member that moves", groupRect(moved, moved.nodes.g1!).w > rect.w);
+
+  check("group members parse from the JSON payload", groupMembers(grp).join(",") === "a,b");
+  check("a malformed member payload degrades to empty, never throws",
+    groupMembers({ ...grp, params: { ...grp.params, members: "{oops" } }).length === 0);
+
+  // Dragging the group carries its contents.
+  const dragSet = expandGroupDragSet(comp, ["g1"]).sort();
+  check("dragging a group drags its members", dragSet.join(",") === "a,b,g1");
+  check("expanding a plain node's drag set is just itself", expandGroupDragSet(comp, ["a"]).join(",") === "a");
+
+  // Only the titlebar takes clicks — the body must stay marquee-selectable, like Backdrop.
+  check("click in the group BODY is background (marquee is never swallowed)",
+    hitTest(comp, view, 250, 200).kind === "background");
+  check("click in the group TITLEBAR is a node hit (move)",
+    hitTest(comp, view, rect.x + 10, rect.y + 4).kind === "node");
+
+  // Collapsed: members are hidden from hit-testing, and the box becomes a fixed title chip.
+  const collapsed = { ...comp, nodes: { ...comp.nodes, g1: { ...grp, params: { ...grp.params, collapsed: true } } } };
+  check("a collapsed group is a fixed-size title chip", groupRect(collapsed, collapsed.nodes.g1!).w === GROUP_COLLAPSED_W);
+  check("collapsed members are hidden from hit-testing", hitTest(collapsed, view, 110, 110).kind !== "node");
+  check("collapsed membership resolves each member to its owner",
+    collapsedMemberOwners(collapsed).get("a") === "g1" && collapsedMemberOwners(collapsed).get("b") === "g1");
+
+  // …and their wires re-anchor onto the group box rather than vanishing.
+  const owners = collapsedMemberOwners(collapsed);
+  const anchor = socketAnchor(collapsed, owners, "a", "out", "output");
+  const box = groupRect(collapsed, collapsed.nodes.g1!);
+  check("a hidden member's output anchors on the group's RIGHT edge",
+    anchor !== null && anchor.x === box.x + box.w && anchor.dir === 1);
+  const inAnchor = socketAnchor(collapsed, owners, "b", "in", "input");
+  check("a hidden member's input anchors on the group's LEFT edge",
+    inAnchor !== null && inAnchor.x === box.x && inAnchor.dir === -1);
+  // Expanded, the same socket resolves to the node itself.
+  check("an expanded member's socket is its own, not the group's",
+    socketAnchor(comp, collapsedMemberOwners(comp), "a", "out", "output")?.x !== box.x + box.w);
 }
 
 if (failures > 0) {

@@ -149,6 +149,31 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
     });
   };
 
+  /**
+   * Nodes the Group button would actually collect: the selection minus the comp's fixed endpoints and
+   * any layout node. MediaIn/MediaOut are the graph's anchors and Backdrops/Groups are chrome — folding
+   * either into a collapsible container would hide something the user can never get back to by wiring.
+   */
+  const groupableNodeIds = selectedNodeIds.filter((id) => {
+    const node = comp?.nodes[id];
+    return Boolean(node) && node!.type !== "mediaIn" && node!.type !== "mediaOut" && node!.type !== "backdrop" && node!.type !== "group";
+  });
+
+  /** Collapse the selection into a Group, placed at the selection's top-left (its box auto-fits). */
+  const handleGroupSelection = () => {
+    updateComp((current) => {
+      const members = groupableNodeIds.filter((id) => current.nodes[id]);
+      if (members.length < 2) return current;
+      const id = `g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      const xs = members.map((m) => current.nodes[m]!.ui.x);
+      const ys = members.map((m) => current.nodes[m]!.ui.y);
+      const node = createFlarexNode("group", id, Math.min(...xs), Math.min(...ys));
+      node.params = { ...node.params, members: JSON.stringify(members) };
+      setSelectedNodeIds([id]);
+      return { ...current, nodes: { ...current.nodes, [id]: node } };
+    });
+  };
+
   const handleAddNode = (type: FlarexNodeType) => {
     updateComp((current) => {
       const id = `n_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -273,6 +298,15 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
               />
             </div>
           </>
+        ) : null}
+        {/* Group must come BEFORE the proxy cluster — that cluster is pushed right with margin-left:auto,
+            so anything after it lands on the far side of the gap. */}
+        {groupableNodeIds.length >= 2 ? (
+          <div className="flarex-toolbar-group">
+            <button type="button" className="flarex-toolbar-btn" title="Group the selected nodes (collapse with a double-click)" onClick={handleGroupSelection}>
+              Group
+            </button>
+          </div>
         ) : null}
         <FlarexProxyButton composition={graph.composition} comp={comp} layer={layer} assets={assets} />
         {selectedNodeIds.length >= 2 ? (

@@ -523,6 +523,24 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     keyframeable: [],
     phase: 1.5,
   },
+  group: {
+    label: "Group",
+    group: "layout",
+    // No sockets — like Backdrop, it is pure canvas organization and the compiler can never reach it
+    // (nothing can wire FROM a node with no outputs). Collapsing a Group therefore cannot change a
+    // single pixel: the graph stays flat and the lowering is identical either way.
+    inputs: [],
+    outputs: [],
+    params: z.object({
+      title: z.string().default("Group"),
+      // JSON array of member node ids. The group's RECT is derived from where those members are, so
+      // there is no stored size to drift out of sync with them.
+      members: z.string().default("[]"),
+      collapsed: z.boolean().default(false),
+    }).strict(),
+    keyframeable: [],
+    phase: 1.5,
+  },
   reroute: {
     label: "Reroute",
     group: "layout",
@@ -583,6 +601,7 @@ const SUBCATEGORIES: Record<FlarexNodeType, string> = {
   aiMatte: "AI",
   tracker: "Track",
   backdrop: "Layout",
+  group: "Layout",
   reroute: "Layout",
 };
 

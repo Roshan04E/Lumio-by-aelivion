@@ -253,6 +253,14 @@ const GLYPHS: Record<FlarexNodeType, ReactElement> = {
 
   // ── Layout ───────────────────────────────────────────────────────────────
   backdrop: <rect x="2.5" y="2.5" width="11" height="11" rx="1" strokeDasharray="2 1.6" />,
+  // A container framing two nodes — the collapse-a-selection block.
+  group: (
+    <>
+      <rect x="1.8" y="3.2" width="12.4" height="9.6" rx="1.4" strokeDasharray="2.4 1.8" />
+      <rect x="4" y="6" width="3.4" height="4" rx="0.6" />
+      <rect x="8.6" y="6" width="3.4" height="4" rx="0.6" />
+    </>
+  ),
   reroute: (
     <>
       <path d="M2.5 8h11" opacity="0.6" />

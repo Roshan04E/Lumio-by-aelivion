@@ -52,6 +52,7 @@ export type FlarexNodeType =
   | "aiMatte"
   | "tracker"
   | "backdrop"
+  | "group"
   | "reroute";
 
 export const flarexNodeTypes: readonly FlarexNodeType[] = [
@@ -90,6 +91,7 @@ export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "aiMatte",
   "tracker",
   "backdrop",
+  "group",
   "reroute",
 ] as const;
 

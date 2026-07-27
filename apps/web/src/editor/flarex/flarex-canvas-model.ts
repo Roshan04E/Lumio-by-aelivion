@@ -11,12 +11,12 @@ import { flarexNodeDefs, flarexNodeTypes, getFlarexNodeDefinition, type FlarexNo
 import type { FlarexComp, FlarexEdge, FlarexNode } from "@orreris/shared";
 
 /** Node types the user can ADD (via palette, drag, or the F1 Tab search menu) — excludes the fixed
- *  comp OUTPUT (mediaOut; a comp has exactly one) and the three Fable-fenced types whose `lower()`
- *  stays unwired this round (text, aiMatte, tracker; see plans/flarex-sonnet-execution-3.md FENCE).
- *  MediaIn IS addable (multi-clip MediaIn, FLAREX.md Phase 2): each extra MediaIn pulls another
- *  timeline clip via its `sourceClipId`. One canonical list so the palette and the search menu can
- *  never drift apart. */
-const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "text", "aiMatte", "tracker"]);
+ *  comp OUTPUT (mediaOut; a comp has exactly one) and the types whose `lower()` is still unwired
+ *  (aiMatte, tracker). `text` left this list once Text+ gained a real lowering (it is backed by a
+ *  virtual text layer now, so it renders); an unlowered node in the palette is a node that silently
+ *  does nothing. MediaIn IS addable (multi-clip MediaIn, FLAREX.md Phase 2). One canonical list so the
+ *  palette and the search menu can never drift apart. */
+const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "aiMatte", "tracker"]);
 export const flarexAddableNodeTypes: FlarexNodeType[] = flarexNodeTypes.filter((t) => !NOT_ADDABLE.has(t));
 
 // Node categories are a purely LOGICAL grouping (labels + order below). They deliberately carry NO
@@ -140,10 +140,90 @@ export function backdropSize(node: FlarexNode): { w: number; h: number } {
   return { w, h };
 }
 
-/** Per-node body width — reroute and backdrop deviate from the standard `NODE_W` box. */
-export function nodeWidth(node: FlarexNode): number {
+/** Group titlebar height + the padding its auto-fit box leaves around its members. */
+export const GROUP_TITLEBAR_H = 22;
+export const GROUP_PADDING = 18;
+/** A collapsed Group is a fixed-size title chip — its members are hidden, so there is nothing to fit. */
+export const GROUP_COLLAPSED_W = 168;
+export const GROUP_COLLAPSED_H = GROUP_TITLEBAR_H;
+
+/** Member node ids of a Group (JSON id array). Soft-fails to none — a malformed payload must never
+ *  throw mid-draw; the group just renders empty. */
+export function groupMembers(node: FlarexNode): string[] {
+  const raw = typeof node.params.members === "string" ? node.params.members : "";
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function groupIsCollapsed(node: FlarexNode): boolean {
+  return node.params.collapsed === true;
+}
+
+/**
+ * A Group's world rect. Expanded, it AUTO-FITS its members (plus padding and a titlebar), so there is
+ * no stored size that can drift away from where the members actually are — move a member and the box
+ * follows. Collapsed, it is a fixed title chip anchored at the group's own `ui` position.
+ *
+ * `posOf` lets the caller substitute in-flight drag positions so the box tracks a live move.
+ */
+export function groupRect(
+  comp: FlarexComp,
+  node: FlarexNode,
+  posOf: (n: FlarexNode) => { x: number; y: number } = (n) => n.ui,
+): { x: number; y: number; w: number; h: number } {
+  const self = posOf(node);
+  if (groupIsCollapsed(node)) return { x: self.x, y: self.y, w: GROUP_COLLAPSED_W, h: GROUP_COLLAPSED_H };
+  const members = groupMembers(node)
+    .map((id) => comp.nodes[id])
+    .filter((n): n is FlarexNode => Boolean(n) && n!.type !== "group");
+  if (members.length === 0) return { x: self.x, y: self.y, w: GROUP_COLLAPSED_W, h: GROUP_COLLAPSED_H + GROUP_PADDING };
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const member of members) {
+    const pos = posOf(member);
+    minX = Math.min(minX, pos.x);
+    minY = Math.min(minY, pos.y);
+    maxX = Math.max(maxX, pos.x + nodeWidth(member, comp));
+    maxY = Math.max(maxY, pos.y + nodeHeight(member, comp));
+  }
+  return {
+    x: minX - GROUP_PADDING,
+    y: minY - GROUP_PADDING - GROUP_TITLEBAR_H,
+    w: maxX - minX + GROUP_PADDING * 2,
+    h: maxY - minY + GROUP_PADDING * 2 + GROUP_TITLEBAR_H,
+  };
+}
+
+/**
+ * Node id → the id of the COLLAPSED group hiding it. Hidden nodes are skipped by hit-testing and the
+ * draw pass, and their wires re-anchor onto the group's box (see `socketAnchor`) so a collapsed group
+ * still shows what flows in and out of it.
+ *
+ * A node listed by several groups belongs to the first that claims it — membership is a set, not a
+ * hierarchy, and this keeps the resolution total and order-stable.
+ */
+export function collapsedMemberOwners(comp: FlarexComp): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const node of Object.values(comp.nodes)) {
+    if (node.type !== "group" || !groupIsCollapsed(node)) continue;
+    for (const id of groupMembers(node)) if (!owners.has(id)) owners.set(id, node.id);
+  }
+  return owners;
+}
+
+/** Per-node body width — reroute, backdrop and group deviate from the standard `NODE_W` box.
+ *  `comp` is only needed for a Group (its box is derived from its members). */
+export function nodeWidth(node: FlarexNode, comp?: FlarexComp): number {
   if (node.type === "reroute") return REROUTE_SIZE;
   if (node.type === "backdrop") return backdropSize(node).w;
+  if (node.type === "group") return comp ? groupRect(comp, node).w : GROUP_COLLAPSED_W;
   return NODE_W;
 }
 
@@ -215,11 +295,12 @@ export function nodeSockets(node: FlarexNode, comp?: FlarexComp): SocketRef[] {
   return refs;
 }
 
-/** Node body height grows with its socket count so wires never overlap the box edge. Reroute and
- *  backdrop deviate from the standard socket-count-driven formula. */
-export function nodeHeight(node: FlarexNode): number {
+/** Node body height grows with its socket count so wires never overlap the box edge. Reroute,
+ *  backdrop and group deviate from the standard socket-count-driven formula. */
+export function nodeHeight(node: FlarexNode, comp?: FlarexComp): number {
   if (node.type === "reroute") return REROUTE_SIZE;
   if (node.type === "backdrop") return backdropSize(node).h;
+  if (node.type === "group") return comp ? groupRect(comp, node).h : GROUP_COLLAPSED_H;
   const def = getFlarexNodeDefinition(node.type);
   const rows = Math.max(def.inputs.length, def.outputs.length, 1);
   return Math.max(NODE_H, 10 + rows * SOCKET_GAP);
@@ -252,6 +333,25 @@ export function cloneFlarexNodes(
       to: { nodeId: idMap.get(e.to.nodeId)!, socket: e.to.socket },
     }));
   return { nodes: clonedNodes, edges: clonedEdges };
+}
+
+/**
+ * The nodes a drag of `ids` should actually move: the ids themselves, plus the members of any Group
+ * among them. Dragging a group has to carry its contents — that is what makes it a container rather
+ * than a floating label. Transitively closed (a group listing another group moves that one's members
+ * too) and de-duplicated, so overlapping membership can't move a node twice.
+ */
+export function expandGroupDragSet(comp: FlarexComp, ids: string[]): string[] {
+  const out = new Set<string>();
+  const queue = [...ids];
+  while (queue.length > 0) {
+    const id = queue.pop()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    const node = comp.nodes[id];
+    if (node?.type === "group") for (const member of groupMembers(node)) if (!out.has(member)) queue.push(member);
+  }
+  return [...out];
 }
 
 export type FlarexAlignMode = "left" | "centerH" | "right" | "top" | "middleV" | "bottom" | "distributeH" | "distributeV";
@@ -342,16 +442,25 @@ export type FlarexHit =
 export function hitTest(comp: FlarexComp, view: FlarexViewState, sx: number, sy: number): FlarexHit {
   const [wx, wy] = screenToWorld(view, sx, sy);
   const socketHitR = (SOCKET_R + 4) / view.zoom + 4;
+  // Nodes inside a COLLAPSED group are not on screen, so they must not be clickable either — their
+  // wires re-anchor onto the group box (see `socketAnchor`) and the group itself takes the clicks.
+  const hidden = collapsedMemberOwners(comp);
+  const visible = (n: FlarexNode): boolean => !hidden.has(n.id);
   // Socket centers sit ON the node's left/right edges, so the generous grab radius reaches into the
   // body — a click on the label would start a wire instead of selecting. Inside a body, only the
   // socket disc itself wins; the generous radius applies outside (where wires are aimed).
   const insideBody = (x: number, y: number): boolean =>
     Object.values(comp.nodes).some(
-      (n) => n.type !== "backdrop" && x >= n.ui.x && x <= n.ui.x + nodeWidth(n) && y >= n.ui.y && y <= n.ui.y + nodeHeight(n),
+      (n) =>
+        n.type !== "backdrop" &&
+        n.type !== "group" &&
+        visible(n) &&
+        x >= n.ui.x && x <= n.ui.x + nodeWidth(n, comp) && y >= n.ui.y && y <= n.ui.y + nodeHeight(n, comp),
     );
   const hitR = insideBody(wx, wy) ? Math.max(SOCKET_R, SOCKET_R / view.zoom) : socketHitR;
   const nodes = Object.values(comp.nodes);
   for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    if (!visible(nodes[i]!)) continue;
     for (const socket of nodeSockets(nodes[i]!, comp)) {
       const dx = wx - socket.x;
       const dy = wy - socket.y;
@@ -360,8 +469,18 @@ export function hitTest(comp: FlarexComp, view: FlarexViewState, sx: number, sy:
   }
   for (let i = nodes.length - 1; i >= 0; i -= 1) {
     const node = nodes[i]!;
-    if (node.type === "backdrop") continue;
-    if (wx >= node.ui.x && wx <= node.ui.x + nodeWidth(node) && wy >= node.ui.y && wy <= node.ui.y + nodeHeight(node)) {
+    if (node.type === "backdrop" || node.type === "group" || !visible(node)) continue;
+    if (wx >= node.ui.x && wx <= node.ui.x + nodeWidth(node, comp) && wy >= node.ui.y && wy <= node.ui.y + nodeHeight(node, comp)) {
+      return { kind: "node", nodeId: node.id };
+    }
+  }
+  // Groups: like Backdrop, only the TITLEBAR takes clicks, so the (possibly large) body never swallows
+  // marquee-select or clicks meant for the members drawn inside it. A COLLAPSED group is all titlebar.
+  for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    const node = nodes[i]!;
+    if (node.type !== "group") continue;
+    const rect = groupRect(comp, node);
+    if (wx >= rect.x && wx <= rect.x + rect.w && wy >= rect.y && wy <= rect.y + GROUP_TITLEBAR_H) {
       return { kind: "node", nodeId: node.id };
     }
   }
@@ -395,6 +514,40 @@ export function wirePath(
   return [x0, y0, x0 + dir0 * dx, y0, x1 + dir1 * dx, y1, x1, y1];
 }
 
+/**
+ * Where a socket's wire actually attaches, in world space.
+ *
+ * Normally that is the socket itself. But when the owning node is hidden inside a COLLAPSED group, the
+ * wire attaches to the group's box instead — outputs on its right edge, inputs on its left — so a
+ * collapsed group still shows everything flowing in and out of it rather than dropping those wires.
+ * That is the whole difference between a Compound node and a box that merely hides things.
+ *
+ * `owners` is passed in (not recomputed) because the draw pass resolves every endpoint on every frame.
+ */
+export function socketAnchor(
+  comp: FlarexComp,
+  owners: Map<string, string>,
+  nodeId: string,
+  socketId: string,
+  kind: "input" | "output",
+  posOf: (n: FlarexNode) => { x: number; y: number } = (n) => n.ui,
+): { x: number; y: number; dir: 1 | -1; def: FlarexSocketDef } | null {
+  const node = comp.nodes[nodeId];
+  if (!node) return null;
+  const ref = nodeSockets(node, comp).find((s) => s.socket === socketId && s.kind === kind);
+  if (!ref) return null;
+  const ownerId = owners.get(nodeId);
+  const owner = ownerId ? comp.nodes[ownerId] : undefined;
+  if (owner) {
+    const rect = groupRect(comp, owner, posOf);
+    const dir: 1 | -1 = kind === "output" ? 1 : -1;
+    return { x: dir === 1 ? rect.x + rect.w : rect.x, y: rect.y + rect.h / 2, dir, def: ref.def };
+  }
+  // Live-move preview: a dragged node's sockets follow its draft position.
+  const pos = posOf(node);
+  return { x: ref.x + (pos.x - node.ui.x), y: ref.y + (pos.y - node.ui.y), dir: ref.dir, def: ref.def };
+}
+
 /** The screen-space cubic of one edge (same geometry the draw pass strokes), or null if an
  *  endpoint doesn't resolve. */
 function edgeScreenCubic(
@@ -402,11 +555,9 @@ function edgeScreenCubic(
   view: FlarexViewState,
   edge: { from: { nodeId: string; socket: string }; to: { nodeId: string; socket: string } },
 ): [number, number, number, number, number, number, number, number] | null {
-  const fromNode = comp.nodes[edge.from.nodeId];
-  const toNode = comp.nodes[edge.to.nodeId];
-  if (!fromNode || !toNode) return null;
-  const a = nodeSockets(fromNode, comp).find((s) => s.kind === "output" && s.socket === edge.from.socket);
-  const b = nodeSockets(toNode, comp).find((s) => s.kind === "input" && s.socket === edge.to.socket);
+  const owners = collapsedMemberOwners(comp);
+  const a = socketAnchor(comp, owners, edge.from.nodeId, edge.from.socket, "output");
+  const b = socketAnchor(comp, owners, edge.to.nodeId, edge.to.socket, "input");
   if (!a || !b) return null;
   const [x0, y0] = worldToScreen(view, a.x, a.y);
   const [x1, y1] = worldToScreen(view, b.x, b.y);
