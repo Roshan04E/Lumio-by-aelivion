@@ -51,6 +51,47 @@ interface ActiveProxy {
   busy: boolean;
   /** Bumped per presented frame so the compositor can skip an unchanged texture upload. */
   version: number;
+  /**
+   * OUR clone of the presented frame, owned by us and closed when the next one replaces it.
+   *
+   * `getFrame` returns a frame the PROVIDER owns and closes on its next call. Holding that reference and
+   * then requesting the next frame hands the compositor a closed VideoFrame to upload — which is why the
+   * proxy ran at ~40fps while the identical file imported as an ordinary clip ran at 60, with the
+   * profiler reporting only ~2ms GPU: nothing was slow, frames were being thrown away. Every other
+   * consumer here clones for exactly this reason (see WebglMediaLayer's presentFrame).
+   */
+  held: VideoFrame | null;
+}
+
+/**
+ * `window.__rfFlarexProxy` — which decode path each comp proxy actually got, and how it is doing.
+ *
+ * `__rfWcMode` only covers layers that go through `WebglMediaLayer`, so a comp proxy was invisible to
+ * every existing probe. That blind spot cost two wrong diagnoses: a webm proxy silently fell back to a
+ * seek-per-frame `<video>` and nothing anywhere said so. `mode` is read from the provider itself —
+ * `__wcDecodeCalls` exists only on the WebCodecs provider, so `element` here means the mp4box demux
+ * failed and `createFrameProvider` fell through.
+ */
+function recordProxyStat(compId: string, patch: Record<string, unknown>): void {
+  if (typeof window === "undefined") return;
+  const w = window as unknown as { __rfFlarexProxy?: Record<string, Record<string, unknown>> };
+  const stats = (w.__rfFlarexProxy ??= {});
+  stats[compId] = { ...(stats[compId] ?? {}), ...patch };
+}
+
+/** Per-comp decode/null tallies backing `__rfFlarexProxy` (module-scoped: telemetry, not state). */
+const proxyDecodes = new Map<string, number>();
+const proxyNulls = new Map<string, number>();
+
+/** Close a held clone if it is one. Frames from an `<video>`/image provider are not VideoFrames. */
+function closeHeld(active: { held: VideoFrame | null }): void {
+  if (!active.held) return;
+  try {
+    active.held.close();
+  } catch {
+    /* already closed */
+  }
+  active.held = null;
 }
 
 export interface UseFlarexCompProxiesInput {
@@ -149,6 +190,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       if (next && next.key === active.key) continue;
       activeRef.current.delete(compId);
       delete framesRef.current[compId];
+      closeHeld(active);
       // Loaders must come back BEFORE the proxy stops drawing, or the comp has no sources for a frame.
       setServing(compId, false);
       active.lease.release();
@@ -182,6 +224,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           provider: null,
           busy: false,
           version: 0,
+          held: null,
         };
         activeRef.current.set(entry.compId, active);
         const provider = await lease.ready;
@@ -191,11 +234,22 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           // re-attempt this exact file (see failedKeysRef).
           failedKeysRef.current.add(entry.key);
           activeRef.current.delete(entry.compId);
+          closeHeld(active);
           lease.release();
           URL.revokeObjectURL(objectUrl);
           return;
         }
         active.provider = provider;
+        // `__wcDecodeCalls` is defined only on the WebCodecs provider — its absence means mp4box could
+        // not demux this file and `createFrameProvider` fell through to a seek-per-frame <video>.
+        recordProxyStat(entry.compId, {
+          mode: "__wcDecodeCalls" in (provider as object) ? "webcodecs" : "element",
+          mime: stored.blob.type,
+          bytes: stored.blob.size,
+          size: `${provider.width}x${provider.height}`,
+          decodes: 0,
+          nulls: 0,
+        });
         requestRedraw();
       })();
     }
@@ -209,6 +263,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
   useEffect(
     () => () => {
       for (const active of activeRef.current.values()) {
+        closeHeld(active);
         active.lease.release();
         URL.revokeObjectURL(active.objectUrl);
       }
@@ -229,6 +284,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       if (localT < 0 || localT >= active.hostDurationSeconds) {
         if (framesRef.current[active.compId]) {
           delete framesRef.current[active.compId];
+          closeHeld(active);
           active.version = 0; // next re-entry counts as a first frame again
           setServing(active.compId, false);
           requestRedraw();
@@ -240,10 +296,31 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         .getFrame(localT)
         .then((frame) => {
           active.busy = false;
-          if (!frame || activeRef.current.get(active.compId) !== active) return;
+          if (activeRef.current.get(active.compId) !== active) return;
+          if (!frame) {
+            proxyNulls.set(active.compId, (proxyNulls.get(active.compId) ?? 0) + 1);
+            recordProxyStat(active.compId, { nulls: proxyNulls.get(active.compId) });
+            return;
+          }
+          proxyDecodes.set(active.compId, (proxyDecodes.get(active.compId) ?? 0) + 1);
+          recordProxyStat(active.compId, { decodes: proxyDecodes.get(active.compId) });
+          // Clone before holding — the provider closes its original on the NEXT getFrame, which we are
+          // about to issue. Close the previous clone in the same step so exactly one frame per comp is
+          // ever outstanding (an unclosed VideoFrame also back-pressures the decoder).
+          let held: FlarexCompProxyFrame["source"] = frame as FlarexCompProxyFrame["source"];
+          if (typeof VideoFrame !== "undefined" && frame instanceof VideoFrame) {
+            try {
+              const clone = frame.clone();
+              closeHeld(active);
+              active.held = clone;
+              held = clone;
+            } catch {
+              held = frame as FlarexCompProxyFrame["source"]; // clone failed — better a stale ref than none
+            }
+          }
           active.version += 1;
           framesRef.current[active.compId] = {
-            source: frame as FlarexCompProxyFrame["source"],
+            source: held,
             sourceWidth: provider.width,
             sourceHeight: provider.height,
             sourceVersion: active.version,
