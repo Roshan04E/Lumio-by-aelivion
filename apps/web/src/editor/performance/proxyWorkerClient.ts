@@ -15,6 +15,7 @@
 
 import { clipCompositionToWorkArea, isGlBudgetOverTarget, isGlGovernorEnabled, type FlarexComp, type PluginLookManifest, type PluginTransitionManifest, type TimelineComposition } from "@orreris/shared";
 import { Aborted, buildSourceUrlMap, runExportCore, type ExportCoreInput, type FlarexSourceAssetMap } from "../../export/export-core";
+import type { ExportFormat } from "../../export/video-encoder";
 import type { ExportWorkerRequest, ExportWorkerResponse } from "../../export/export-worker-protocol";
 
 /** Proxies are visual-only and bitrate-capped, so full resolution is fine and stays pixel-aligned. */
@@ -37,6 +38,16 @@ export interface GenerateSpanProxyInput {
    * walking tracks and every loader would soft-degrade to the host clip in the rendered file.
    */
   flarexSourceAssets?: FlarexSourceAssetMap | undefined;
+  /**
+   * Container/codec. Defaults to "webm" (VP9) — right for the TIMELINE span proxy, which
+   * `ProxyPlaybackLayer` plays as a continuously-playing `<video>` overlay the browser decodes itself.
+   *
+   * Anything that samples the result PER FRAME must pass "mp4". The preview frame pool decodes through
+   * `webcodecs-decoder`, which demuxes with mp4box and cannot parse Matroska — a webm handed to it
+   * fails `createWebCodecsVideoSource` and silently falls back to a seek-per-frame `<video>`, which is
+   * the slow path the pool exists to avoid (measured: 75fps → 35-40fps for the Flarex comp proxy).
+   */
+  format?: ExportFormat | undefined;
   transitionManifests?: PluginTransitionManifest[] | undefined;
   lookManifests?: PluginLookManifest[] | undefined;
   signal: AbortSignal;
@@ -102,7 +113,7 @@ function spanComposition(composition: TimelineComposition, startSeconds: number,
  * playable preview source can still become a real proxy instead of painting every span failed.
  */
 export async function generateSpanProxy(input: GenerateSpanProxyInput): Promise<Blob> {
-  const { composition, spanStartSeconds, spanEndSeconds, fps, urlForAsset, flarexComps, flarexSourceAssets, transitionManifests, lookManifests, signal, onProgress, onDiagnostic } = input;
+  const { composition, spanStartSeconds, spanEndSeconds, fps, urlForAsset, flarexComps, flarexSourceAssets, format = "webm", transitionManifests, lookManifests, signal, onProgress, onDiagnostic } = input;
   if (signal.aborted) {
     throw new ProxyGenerationAborted();
   }
@@ -123,7 +134,7 @@ export async function generateSpanProxy(input: GenerateSpanProxyInput): Promise<
     flarexSourceAssets,
     urlMap,
     audio: null, // visual proxy only
-    format: "webm",
+    format,
     fps,
     transitionManifests,
     lookManifests,

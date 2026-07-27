@@ -96,6 +96,17 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
 
+  /**
+   * Keys whose proxy could not be turned into a decoder (missing blob, pool full, init failed). Retried
+   * only when the KEY changes, i.e. after a re-render of the proxy.
+   *
+   * Without this, a failing key is re-attempted on every eligibility recompute: acquire a pooled session,
+   * fail init, release, repeat — burning one of only 4 sessions in a loop while the comp's real sources
+   * compete for the rest. Bounded here rather than in the pool, because "this exact file can't be served"
+   * is knowledge only this caller has.
+   */
+  const failedKeysRef = useRef<Set<string>>(new Set());
+
   const setServing = useCallback((compId: string, serving: boolean) => {
     setServingCompIds((current) => {
       const has = current.includes(compId);
@@ -145,15 +156,19 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
     }
 
     for (const entry of eligible) {
-      if (activeRef.current.has(entry.compId)) continue;
+      if (activeRef.current.has(entry.compId) || failedKeysRef.current.has(entry.key)) continue;
       void (async () => {
         const stored = await getFlarexCompProxy(entry.compId, entry.key);
         // No proxy under this key — the comp was edited since it was built, or never had one. Live.
-        if (!stored || cancelled) return;
+        if (!stored || cancelled) {
+          if (!stored) failedKeysRef.current.add(entry.key);
+          return;
+        }
         const objectUrl = URL.createObjectURL(stored.blob);
         const lease = acquirePreviewFrameProvider(objectUrl, { priority: "playhead" });
         if (!lease) {
           // Pool is full. The comp's own sources will take those slots instead — no worse than today.
+          failedKeysRef.current.add(entry.key);
           URL.revokeObjectURL(objectUrl);
           return;
         }
@@ -172,7 +187,9 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         const provider = await lease.ready;
         if (cancelled || activeRef.current.get(entry.compId) !== active) return;
         if (!provider) {
-          // Decoder init failed — drop back to live evaluation rather than showing nothing.
+          // Decoder init failed — drop back to live evaluation rather than showing nothing, and don't
+          // re-attempt this exact file (see failedKeysRef).
+          failedKeysRef.current.add(entry.key);
           activeRef.current.delete(entry.compId);
           lease.release();
           URL.revokeObjectURL(objectUrl);

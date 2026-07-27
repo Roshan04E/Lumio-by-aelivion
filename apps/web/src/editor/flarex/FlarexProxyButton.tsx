@@ -102,7 +102,7 @@ export function FlarexProxyButton({
       setState({ status: "unbuilt" });
       return;
     }
-    await saveExportedFile(stored.blob, `${comp.name || comp.id}-proxy.webm`);
+    await saveExportedFile(stored.blob, `${comp.name || comp.id}-proxy.${stored.blob.type === "video/webm" ? "webm" : "mp4"}`);
   };
 
   const clear = async () => {

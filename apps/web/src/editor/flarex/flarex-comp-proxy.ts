@@ -73,8 +73,23 @@ function hostLayerSignature(layer: TimelineLayer): string {
   return digest(JSON.stringify(rest));
 }
 
+/**
+ * Container/codec the comp proxy is rendered in, and part of its KEY.
+ *
+ * MP4/H.264, not the webm the timeline span proxy uses. The preview frame pool decodes through
+ * `webcodecs-decoder`, which demuxes with mp4box and cannot parse Matroska: a webm silently failed
+ * `createWebCodecsVideoSource` and fell through to a seek-per-frame `<video>` — the slow path the pool
+ * exists to avoid, and it still consumed one of the 4 pooled sessions, so the comp's own sources were
+ * left contending for 3 (measured: 75fps → 35-40fps, i.e. proxying was slower than not proxying).
+ *
+ * In the key so the webm proxies already on disk MISS instead of quietly taking that path again. Bump
+ * it if the container/codec ever changes for the same reason.
+ */
+const PROXY_FORMAT = "mp4" as const;
+
 export function flarexCompProxyKey(identity: FlarexCompProxyIdentity): string {
   return [
+    PROXY_FORMAT,
     identity.compId,
     `v${identity.compVersion}`,
     identity.hostLayerId,
@@ -210,6 +225,9 @@ export async function renderFlarexCompProxy(input: RenderFlarexCompProxyInput): 
     urlForAsset: (assetId) => assets.find((asset) => asset.id === assetId)?.fileUrl,
     flarexComps: { [comp.id]: comp },
     flarexSourceAssets: flarexSourceAssetsFor(comp, assets),
+    // MP4/H.264 — see PROXY_FORMAT. Playback samples this file per frame, so it MUST be a container
+    // the WebCodecs preview decoder can demux; webm silently degrades to a seek-per-frame <video>.
+    format: PROXY_FORMAT,
     signal,
     onProgress,
   });
