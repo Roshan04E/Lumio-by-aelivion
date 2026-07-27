@@ -217,3 +217,66 @@ pre-existing on this branch (WIP diffs already present in `fragment-effects/buil
 work per git log) — unrelated to any Flarex change. Left alone per the plan's fence (stylize/
 scene-compositor tuning is out of scope for the Flarex work); flag for whoever owns the stylize
 P5 landing.
+
+## v9 — Colour wheels: four polish passes rendered nowhere (radial-gradient sizing), plus the size-dependence rule (2026-07-27)
+
+**The bug behind the whole series.** Commits 46efdcf / 7632b5b / 59195c6 / 8625b3f / 92be97b each
+described a layered trackball — groove, rim shade, luminance step, vivid outer ring — in careful
+comments. **None of it was on screen.** A bare `radial-gradient(circle at center, …)` on a SQUARE
+element sizes FARTHEST-CORNER, so its 100% is `r·√2`, not `r`. Structure authored at 86% / 89.2% /
+90.4% was painted at 1.22r / 1.26r / 1.28r — outside the disc entirely; the disc edge sits at 70.7%
+of the gradient scale. Measured, not inferred (`getBoundingClientRect` + the computed mask string).
+
+Consequences worth remembering:
+- The ring was not dim, it was **absent**. Successive passes made it more vivid, which could never
+  have worked, and each pass then "fixed" the wrong thing (bezel colour, scrim alpha, label weight).
+- The chroma scrim's r² curve was compressed into the inner 70% of its intended range, so the field
+  never reached full chroma and the centre was a muddy olive rather than neutral.
+- **Every radial-gradient in a circular control must be `closest-side`.** That makes 100% the disc
+  radius and makes authored percentages mean what they say.
+
+**Prevention:** geometry now lives in one `GEO` object in `ColorWheels.tsx`, and the ring's mask, the
+grain's mask and the field's falloff are all *generated* from it. The original drift was exactly this
+class — the mask was authored in one radius scale and the groove in another, in two different files.
+
+**Verification method (reusable).** There is no browser in the test scripts for this, so: esbuild the
+real component + the real `global.css` into a static page, screenshot with Playwright (`channel:
+"chrome"`, `deviceScaleFactor: 2`) at panel scale and at 2.6× zoom. Two things this caught that
+reasoning did not:
+1. A *flat grey* ring substituted for the hue conic proved the band is geometrically uniform — the
+   apparent thickness variation was pure hue perception (bright yellow/green vs dark blue against a
+   dark bezel), not a defect. Isolate the variable before chasing it.
+2. esbuild strips types without checking, so a dangling `GEO.grooveIn` after a refactor produced
+   `NaN%`, which silently invalidated the whole `background` shorthand and blanked the field. The
+   harness is not a substitute for `pnpm --filter @orreris/web typecheck`.
+
+**The rule this pass actually established — SIZE DEPENDENCE.** The wheels ship at ~42px radius (three
+columns in a ~332px inspector), not at the 144px the CSS comments assumed. At that size:
+- A dark groove between field and ring — however thin — is a **sub-pixel black circle**. It cannot
+  resolve as a machined seam; it resolves as a ragged dark halo and reads as noise. Removed. What
+  separates the two parts now is the **luminance step alone** (field ~0.58 value → ring full value
+  across a hard mask edge). A discontinuity in brightness is a parting line; it need not be dark.
+- Same finding killed the ring's dark inner seat and forced the rim vignette late (0.82) and shallow
+  (0.30): the eye does not see groove + seat + vignette, it sees **one black frame whose width is
+  their sum**.
+- Noise has constant amplitude, so its visibility is set by what it lies on. The grain layer vanished
+  into the mid-tone centre it exists to dither but was the highest-contrast thing on the near-black
+  rim. It is now its own masked element confined to the interior, not a background layer over
+  everything.
+- A **directional light key across a circular band** makes the band's apparent thickness vary with
+  angle (contrast against the bezel sets perceived width). Removed from the ring; the light-from-
+  above cue lives on the housing, a wide annulus where it reads correctly. Housing brightness was
+  then pulled to just above panel value — on a thin annulus, bright reads as *emitting*, i.e. a glow.
+
+**Other structural changes:** hue conic is luminance-normalised (`v · (0.45/luma)^0.35`, floor 0.62)
+so the ring reads as one band instead of an HSV sweep with a glaring yellow arc — the angle→hue map
+(`90 − φ`) is untouched, so grading behaviour is identical. Bezel is a real element
+(`.color-wheel-housing`) because a box-shadow spread ring is uniform by construction and can only
+ever be a flat donut. Accent focus-halo → 3px modified tick (a glow ring is a web focus idiom, and it
+put a saturated colour against the one element whose colour must read as true). Added a display-only
+tabular readout per wheel — no interaction change, but a grading control that will not state its own
+value cannot be used to match a shot.
+
+**Pre-existing, not touched:** `apps/worker/src/flarex-proxy-parity-gate.ts:160` fails typecheck
+(`ImageData` / `SharedArrayBuffer` overload). Untouched file, no uncommitted changes; unrelated to
+this work. `apps/web` typechecks clean.

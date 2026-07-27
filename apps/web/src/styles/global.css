@@ -17463,10 +17463,11 @@ input.scrub-number:focus {
      between the wheels and the surface comes from the wheels' own recessed bevel, not from a card
      around them. (An earlier pass added a faint tint here for "three layers"; a tint plus a radius is
      a card, which is the dashboard aesthetic this is specifically avoiding.) */
-  /* Horizontal padding clears the outer wheels' 6px bezel, which is box-shadow spread and so lives
-     outside the layout box. */
+  /* The bezel is a real element now (.color-wheel-housing) rather than box-shadow spread, so it is
+     inside the layout box and no longer needs horizontal padding reserved for it. Reclaiming that
+     goes straight into wheel diameter, which is where this panel's weight belongs. */
   gap: 0;
-  padding: 2px 8px 6px;
+  padding: 2px 2px 5px;
   border: 0;
   border-radius: 0;
   background: none;
@@ -17474,10 +17475,10 @@ input.scrub-number:focus {
 }
 
 .color-wheels .curve-editor-toolbar {
-  padding: 0 2px 9px;
+  padding: 0 2px 7px;
   /* A hairline instead of a card edge — the only separator this panel needs. */
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  margin-bottom: 15px;
+  margin-bottom: 10px;
 }
 
 .color-wheels .color-wheels-title {
@@ -17495,9 +17496,8 @@ input.scrub-number:focus {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   /* DENSITY. Every reference tool packs its controls tightly — density is itself a professional cue,
-     and the airy spacing an earlier pass introduced is what reads as a web settings panel. Just wide
-     enough to clear two 6px bezels and separate the columns. */
-  gap: 14px;
+     and airy spacing is what reads as a web settings panel. Just enough to separate the columns. */
+  gap: 9px;
 }
 
 .color-wheel {
@@ -17505,175 +17505,201 @@ input.scrub-number:focus {
   flex-direction: column;
   align-items: center;
   /* Vertical rhythm: label sits CLOSE to its wheel, the slider hangs further below — so each column
-     reads as one titled instrument rather than three evenly-spaced rows. Per-gap overrides below. */
+     reads as one titled instrument rather than four evenly-spaced rows. Per-gap overrides below. */
   gap: 0;
   min-width: 0;
+}
+
+/* ── HOUSING ────────────────────────────────────────────────────────────────────────────────────
+   The bezel is its own PART, not a box-shadow spread ring. A box-shadow ring is uniform by
+   construction, so it can only ever be a flat dark donut — and a flat donut is exactly what reads as
+   a drawn circle rather than machined metal. A recess lit from above has a DIRECTIONAL signature:
+   the near (top) wall faces away from the light and goes dark, the far (bottom) wall catches it and
+   goes bright. That single asymmetry is most of what makes the reference controls look milled.
+
+   Inert to pointers, and the pad keeps its own box, so the drag math is unchanged. */
+.color-wheel-housing {
+  position: relative;
+  width: 100%;
+  max-width: 152px;
+  padding: 5px;
+  border-radius: 999px;
+  /* The lit wall is kept only just above the panel value. Brightness on a thin annulus stops reading
+     as a REFLECTING surface and starts reading as an EMITTING one — a halo — and a glow around a
+     control is the web idiom this whole control is trying not to be. The asymmetry has to be present
+     enough to say "recess" and quiet enough that you never notice it as light. */
+  background: linear-gradient(180deg, #0d1015 0%, #14181f 48%, #1c212a 82%, #212734 100%);
+  box-shadow:
+    /* the surface reads as cut, so the outer edge is a hard line, never a soft shadow */
+    0 0 0 1px rgba(0, 0, 0, 0.7),
+    inset 0 1px 1px rgba(0, 0, 0, 0.45);
+  transition: background 0.18s cubic-bezier(0.2, 0, 0.2, 1);
 }
 
 .color-wheel-pad {
   position: relative;
   width: 100%;
-  /* The trackball dominates the column; everything else in this panel is annotation. The housing is
-     gone (the colour ring IS the border now), so the disc gets that space back. At this size the
-     unscrimmed outer band past 92% lands at ~5px — the ring thickness. */
-  max-width: 144px;
   aspect-ratio: 1 / 1;
   border-radius: 999px;
   cursor: crosshair;
   touch-action: none;
-  /* `background` is the 6-layer composite generated in ColorWheels.tsx (grain / ambient / separator /
-     vignette / chroma scrim / hue source) from the engine's own hue math, so the ring colour matches
-     the tint a drag actually applies.
+  /* `background` is the 5-layer composite generated in ColorWheels.tsx (grain / groove / vignette /
+     chroma scrim / hue source) from the engine's own hue math, so the ring colour matches the tint a
+     drag actually applies. All of it is `closest-side`, i.e. 100% IS the disc radius — see the GEO
+     block there for why that is load-bearing rather than incidental.
 
-     The bevel here is RECESSED, not raised — the control sits IN the surface. That is the shared
-     language across Resolve, Baselight, Nuke and Flame, and it is why a drop shadow (which would make
-     the disc hover ABOVE the panel, the web-component read) is deliberately absent:
-       1. inset dark cap at the top     — the near wall of the recess catching no light
-       2. inset light lip at the bottom — the far wall catching it
-       3. hairline inner stroke         — the machined inner edge
-       4. hairline outer stroke, dark   — where the disc meets the surface
-
-     THE BORDER IS THE COLOUR RING. The ~5px band at the disc's edge is full-chroma conic (layer 6,
-     unscrimmed past 92%) — the vivid ring is the border, exactly as in the reference. A previous pass
-     put a 9px near-black housing here instead, which inverted the whole idea: the heaviest, highest-
-     contrast element on the control became a black slab, and the colour it was supposed to frame was
-     the quietest thing on screen. There is no housing now — just a 1px line where the disc ends. */
+     Only two shadows here, and both are hard: the disc is seated IN the housing, so it gets a dark
+     contact line where the two parts meet and a shadow cast onto its top edge by the near wall.
+     There is deliberately no outer drop shadow — that would float the disc ABOVE the panel, which is
+     the web-component read. */
   box-shadow:
-    inset 0 2px 3px -1px rgba(0, 0, 0, 0.5),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    0 0 0 1px rgba(0, 0, 0, 0.6),
-    /* 5px BEZEL, dark grey rather than black — it is what the vivid ring reads against. Black made it
-       the loudest element on the control; a grey a step below the surface frames without shouting. */
-    0 0 0 5px #171a20,
-    0 0 0 6px rgba(255, 255, 255, 0.05);
-  transition: box-shadow 0.18s cubic-bezier(0.2, 0, 0.2, 1);
+    inset 0 2px 3px -2px rgba(0, 0, 0, 0.85),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.55);
 }
 
-/* (No mask-image on the pad: it would clip the element's own box-shadows, taking the bevel strokes
+/* (No mask-image on the pad: it would clip the element's own box-shadows, taking the seating strokes
    with them. `border-radius` already anti-aliases the disc edge.) */
 
-/* The vivid outer ring. Its own element because it needs FULL brightness while the field underneath
-   stays dark and saturated — one conic cannot be both, and greying a bright one down is what produced
-   the pastel colour-picker look. Masked to the outer ~5px band; no box-shadow here, so the mask is
-   free to clip (unlike on the pad, where it would eat the bevel). */
+/* The colour ring. Its own element because it needs FULL brightness while the field underneath stays
+   dark and saturated — one conic cannot be both, and greying a bright one down is what produced the
+   pastel colour-picker look. Background AND mask are both generated in ColorWheels.tsx from the same
+   GEO constant as the field's groove, so the two sides of that seam cannot drift apart (they had:
+   the mask was authored in one radius scale and the groove in another, and the ring rendered
+   entirely outside the disc as a result). */
 .color-wheel-ring {
   position: absolute;
   inset: 0;
   border-radius: 999px;
   pointer-events: none;
-  /* Band starts right at the gap's outer edge (90.4% in the field's layer stack) and runs to the
-     disc edge — a solid ~6px of full-chroma, full-value hue. The 1.2% ramp is anti-aliasing for the
-     inner edge only; the outer edge is clipped by border-radius, which is already anti-aliased. */
-  -webkit-mask-image: radial-gradient(circle at center, transparent 0 90.4%, #000 91.6%, #000 100%);
-  mask-image: radial-gradient(circle at center, transparent 0 90.4%, #000 91.6%, #000 100%);
 }
 
-/* Crosshair — the balance datum, ENGRAVED rather than drawn. A single light line reads as an SVG
-   stroke laid on top; a dark groove with a 1px light lower lip reads as cut INTO the surface, the
-   same two-tone trick as the rim bevel at 1px. Stops at the separator (87%) so it never crosses the
-   ring — an axis that runs over the ring makes the ring look like a drawn circle rather than an
-   object. Low contrast on purpose: it guides, it does not compete. */
+/* Dither, as its own part rather than a background layer of the field. Noise has constant amplitude,
+   so its visibility is decided by what it lies on: it disappears into the mid-tone centre it exists
+   to dither, but against the near-black rim it becomes the highest-contrast thing there and reads as
+   a ragged, speckled edge around the ball. Masked to the interior so it only covers the region that
+   actually bands. */
+.color-wheel-grain {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background-repeat: repeat;
+  background-size: 90px 90px;
+  pointer-events: none;
+}
+
+/* Crosshair — the balance datum, ENGRAVED rather than drawn, and deliberately close to invisible.
+   In the reference tools this axis is barely present: it is a registration mark for the eye, not
+   information, and it is competing for attention with the one thing on the control that matters.
+   Ours was the second-brightest element on the wheel at 0.36 alpha, full width, with visibly
+   floating endpoints — an SVG cross laid on top of a disc.
+
+   Two changes: alpha drops to where it reads as a scratch in the surface rather than a stroke, and
+   the lines stop well short of the groove so the ring stays an uninterrupted object. A datum that
+   runs over the ring turns the ring back into a drawn circle. */
 .color-wheel-pad::before,
 .color-wheel-pad::after {
   content: "";
   position: absolute;
-  /* LIGHT line with a dark under-shadow. A dark groove is the right idea on a light surface, but this
-     field is dark — a dark line simply disappeared into it. Light-over-dark still reads as engraved
-     and is actually visible, which is what a datum has to be. */
-  background: rgba(226, 232, 240, 0.36);
+  /* LIGHT line over a dark under-shadow. A dark groove is the right idea on a light surface, but
+     this field is dark — a dark line simply disappears. Light-over-dark still reads as cut in. */
+  background: rgba(226, 232, 240, 0.15);
   pointer-events: none;
 }
 
 .color-wheel-pad::before {
-  left: 8%;
-  right: 8%;
+  left: 21%;
+  right: 21%;
   top: 50%;
   height: 1px;
   transform: translateY(-0.5px);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
 }
 
 .color-wheel-pad::after {
-  top: 8%;
-  bottom: 8%;
+  top: 21%;
+  bottom: 21%;
   left: 50%;
   width: 1px;
   transform: translateX(-0.5px);
-  box-shadow: 1px 0 0 rgba(0, 0, 0, 0.35);
+  box-shadow: 1px 0 0 rgba(0, 0, 0, 0.3);
 }
 
-/* Hover brightens the machined inner edge only — nothing resizes, so nothing shifts mid-drag. */
-.color-wheel-pad:hover {
-  box-shadow:
-    inset 0 2px 3px -1px rgba(0, 0, 0, 0.5),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
-    0 0 0 1px rgba(0, 0, 0, 0.6),
-    0 0 0 5px #171a20,
-    0 0 0 6px rgba(255, 255, 255, 0.13);
+/* Hover lifts the housing's lit wall a step. Nothing resizes and nothing changes colour, so nothing
+   shifts or recolours mid-drag — the wheel must stay chromatically trustworthy while in use. */
+.color-wheel-housing:hover {
+  background: linear-gradient(180deg, #11141b 0%, #191e26 48%, #232935 82%, #2a313f 100%);
 }
 
-/* Edited: an accent ring OUTSIDE the disc, clear of the colour band — tinting the disc's own edge
-   would fight the chroma ring, which is the one thing on this control that must stay true. */
-.color-wheel-pad.is-edited {
-  box-shadow:
-    inset 0 2px 3px -1px rgba(0, 0, 0, 0.5),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    0 0 0 1px rgba(0, 0, 0, 0.6),
-    0 0 0 5px #171a20,
-    0 0 0 6px color-mix(in srgb, var(--nle-accent) 80%, transparent);
-}
+/* ── PUCK ───────────────────────────────────────────────────────────────────────────────────────
+   The marker has one job: state a coordinate exactly. So it is built as an instrument marker, not a
+   drag handle — a machined cap with an ENGRAVED CENTRE DOT that is the actual datum. The dot is what
+   makes it readable to a pixel: a plain filled disc only tells you where its centre roughly is, and
+   at 7px the eye cannot resolve that against a saturated field.
 
-/* Puck: a small crisp white disc with a thin grey edge and a soft drop shadow, so it reads as a
-   physical object lying ON the ball. Sized for precision — it sits on a near-black interior, so it
-   does not need bulk to stay visible. */
+   It does not grow on hover any more. A marker that changes size when the pointer nears it is
+   reporting the pointer, not the value, and it moves the perceived datum while you are reading it. */
 .color-wheel-handle {
   position: absolute;
-  /* SMALL — in the reference this is a dot, not a knob. It marks a coordinate, so anything larger
-     occludes the very region it is pointing at and reads as a drag affordance instead of a readout.
-     7px is about the smallest that still catches a soft shadow cleanly. */
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 999px;
-  /* Lit from above to agree with the ball's ambient; a hairline grey edge holds it against any hue
-     underneath, and a tight shadow seats it rather than floating it. */
-  background: linear-gradient(180deg, #ffffff 0%, #eef1f5 60%, #dbe0e8 100%);
-  border: 1px solid rgba(88, 96, 110, 0.9);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  background:
+    /* engraved centre — the datum itself */
+    radial-gradient(circle closest-side at 50% 50%, rgba(10, 12, 16, 0.9) 0 24%, rgba(10, 12, 16, 0) 30%),
+    /* machined cap, lit from above to agree with the housing */
+    linear-gradient(180deg, #ffffff 0%, #e9edf3 55%, #c6cdd8 100%);
+  /* A hard dark hairline, not a grey one: it has to hold the puck against a full-chroma ring as well
+     as against a near-black centre, and only a near-black edge survives both. */
+  border: 1px solid rgba(8, 10, 14, 0.9);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 1px 2px rgba(0, 0, 0, 0.7);
   /* Transform ONLY — never the position. `left`/`top` carry the drag, and transitioning them would
      put the puck behind the cursor. */
   transform: translate(-50%, -50%);
-  transition: transform 0.16s cubic-bezier(0.2, 0, 0.2, 1), box-shadow 0.16s ease;
   pointer-events: none;
 }
 
-.color-wheel-pad:hover .color-wheel-handle {
-  transform: translate(-50%, -50%) scale(1.25);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+/* Label: quiet. It names a column that is already unmistakable by position, so it sits low in the
+   hierarchy — it should be legible on a glance you are not spending. */
+.color-wheel-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  font-size: 0.55rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: color-mix(in srgb, var(--nle-text, #e8e8e8) 46%, transparent);
 }
 
-/* Label: small and wide-tracked, but SCANNABLE — it has to name the wheel from across the panel.
-   At 72% muted it was so faint the three columns lost their identities. */
-.color-wheel-label {
-  margin-bottom: 8px;
-  font-size: 0.585rem;
-  font-weight: 750;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: color-mix(in srgb, var(--nle-text, #e8e8e8) 62%, transparent);
+/* MODIFIED tick — a hard 3px square, on or off. Replaces an accent halo drawn around the whole disc:
+   a glow ring around a control is a web focus idiom, and it put a saturated colour immediately
+   against the chroma ring, which is the one element here whose colour must be read as true. State
+   belongs in the annotation layer, not painted onto the instrument. */
+.color-wheel-mod {
+  width: 3px;
+  height: 3px;
+  border-radius: 0;
+  /* Nothing at all when clean. An empty outlined box on every column is three pieces of permanent
+     furniture reporting "no news" — status indicators earn their pixels only when they have some. */
+  background: transparent;
+}
+
+.color-wheel-mod.is-on {
+  background: var(--nle-accent, #4d9fff);
+  box-shadow: none;
 }
 
 /* Level slider — the lowest tier of the hierarchy. A recessed groove and a small dark puck, sized so
    it reads as an adjustment under the wheel rather than a control beside it. The previous 11px ringed
    thumb on a bright 2px track was the second-heaviest thing in the panel after the trackball. */
 .color-wheel-master {
-  width: 86%;
-  height: 12px;
+  width: 88%;
+  height: 13px;
   min-width: 0;
-  /* Clears the pad's 6px bezel (box-shadow spread, outside the layout box) and no more. */
-  margin-top: 13px;
+  margin-top: 9px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -17681,60 +17707,121 @@ input.scrub-number:focus {
   appearance: none;
 }
 
-/* Machined strip, not a UI track. Every reference tool renders its level controls as a RIBBED,
-   recessed metal strip — that texture is a large part of why they read as hardware, and it costs one
-   repeating-gradient. Layers: fine ribbing, a top lip, a dark channel. */
+/* ── LEVEL STRIP ────────────────────────────────────────────────────────────────────────────────
+   A recessed channel, not a UI track. Two things carry the hardware read:
+
+   · a CENTRE DETENT. This control is bipolar and its zero is meaningful, so the strip must show
+     where zero is. Every reference tool marks the neutral position on a bipolar control; a plain
+     track that gives no clue where unity lies is a web slider.
+   · SUBTLE ribbing. The previous 3px-period ribbing at 0.075/0.16 dazzled at this size — a moiré
+     strip reads as texture-for-its-own-sake. At a 4px period and roughly half the amplitude it
+     reads as a machined surface without drawing the eye off the wheel.
+
+   Corner radius is 1px, not 2: hard corners are a consistent signal across all the reference apps
+   and the single cheapest way to stop a small element reading as a web pill. */
 .color-wheel-master::-webkit-slider-runnable-track {
-  height: 6px;
-  border-radius: 2px;
+  height: 7px;
+  border-radius: 1px;
   background:
-    repeating-linear-gradient(
+    linear-gradient(
       90deg,
-      rgba(255, 255, 255, 0.075) 0 1px,
-      rgba(0, 0, 0, 0.16) 1px 3px
+      transparent calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.34) calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.34) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
     ),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.015) 55%),
-    rgba(0, 0, 0, 0.52);
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.04) 0 1px, rgba(0, 0, 0, 0.1) 1px 4px),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.55), rgba(255, 255, 255, 0.04) 85%),
+    #0c0f14;
   box-shadow:
-    inset 0 1px 1.5px rgba(0, 0, 0, 0.7),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+    inset 0 1px 1.5px rgba(0, 0, 0, 0.8),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
 }
 
+/* RECTANGULAR indicator. A round knob is the single most web-native shape in a UI kit; every
+   reference tool uses a rectangular milled tab for a linear control, because a rectangle has a
+   readable EDGE and therefore states a position exactly — which is the whole job. The 1px light
+   line down its face is the engraved index mark that names the position. */
 .color-wheel-master::-webkit-slider-thumb {
-  width: 11px;
-  height: 11px;
-  margin-top: -2.5px;
-  border: 1px solid rgba(178, 186, 199, 0.9);
-  border-radius: 999px;
-  background: linear-gradient(180deg, #454b56, #2c313a);
+  width: 7px;
+  height: 13px;
+  margin-top: -3px;
+  border: 1px solid rgba(8, 10, 14, 0.9);
+  border-radius: 1px;
+  background:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.5) calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.5) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    ),
+    linear-gradient(180deg, #7d8695 0%, #5d6675 45%, #3d444f 100%);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 1px 3px rgba(0, 0, 0, 0.7);
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.75);
   appearance: none;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: background 0.15s ease;
 }
 
 .color-wheel-master:hover::-webkit-slider-thumb {
-  border-color: rgba(225, 231, 240, 1);
-  background: linear-gradient(180deg, #525966, #363c46);
+  background:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.7) calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.7) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    ),
+    linear-gradient(180deg, #939cab 0%, #6e7887 45%, #4a515d 100%);
 }
 
 .color-wheel-master::-moz-range-track {
-  height: 6px;
-  border-radius: 2px;
+  height: 7px;
+  border-radius: 1px;
   background:
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.075) 0 1px, rgba(0, 0, 0, 0.16) 1px 3px),
-    rgba(0, 0, 0, 0.52);
-  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.7);
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.34) calc(50% - 0.5px),
+      rgba(255, 255, 255, 0.34) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    ),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.04) 0 1px, rgba(0, 0, 0, 0.1) 1px 4px),
+    #0c0f14;
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.8);
 }
 
 .color-wheel-master::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
-  border: 1px solid rgba(178, 186, 199, 0.9);
-  border-radius: 999px;
-  background: linear-gradient(180deg, #454b56, #2c313a);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  width: 7px;
+  height: 13px;
+  border: 1px solid rgba(8, 10, 14, 0.9);
+  border-radius: 1px;
+  background: linear-gradient(180deg, #7d8695 0%, #5d6675 45%, #3d444f 100%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
+/* ── READOUT ────────────────────────────────────────────────────────────────────────────────────
+   Display-only. Every reference application puts a number under every grading control, and a wheel
+   with no value on it cannot be used to match a shot or to undo by eye — a control that will not
+   tell you its own state reads as a toy no matter how well it is drawn.
+
+   Tabular figures and an always-present sign, so the digits sit in fixed columns and the three
+   readouts stay comparable at a glance instead of jittering as values cross zero. Dim at rest,
+   normal when non-zero: at neutral it is confirming nothing is happening. */
+.color-wheel-readout {
+  margin-top: 6px;
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  color: color-mix(in srgb, var(--nle-text, #e8e8e8) 30%, transparent);
+}
+
+.color-wheel-readout.is-on {
+  color: color-mix(in srgb, var(--nle-text, #e8e8e8) 72%, transparent);
 }
 
 .graph-editor-svg {

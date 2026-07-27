@@ -28,7 +28,7 @@ const NEUTRAL: ColorWheel = { x: 0, y: 0, master: 0 };
  * at screen direction (x=sin φ, y=cos φ) → `hue = atan2(cos φ, sin φ) = 90° − φ`. So the
  * rim color at φ must be `hsv(90 − φ)`.
  */
-function hsvCss(h: number, s: number, v: number): string {
+function hsvRgb(h: number, s: number, v: number): [number, number, number] {
   const c = v * s;
   const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
   const m = v - c;
@@ -41,7 +41,40 @@ function hsvCss(h: number, s: number, v: number): string {
   else if (h < 240) [r, g, b] = [0, x, c];
   else if (h < 300) [r, g, b] = [x, 0, c];
   else [r, g, b] = [c, 0, x];
-  return `rgb(${Math.round((r + m) * 255)}, ${Math.round((g + m) * 255)}, ${Math.round((b + m) * 255)})`;
+  return [r + m, g + m, b + m];
+}
+
+function hsvCss(h: number, s: number, v: number): string {
+  const [r, g, b] = hsvRgb(h, s, v);
+  return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+}
+
+/**
+ * LUMINANCE NORMALISATION — why the ring is not a raw HSV sweep.
+ *
+ * Full-value HSV hues differ in Rec.709 luma by more than 12:1 (yellow 0.928, blue 0.072). Painted
+ * at constant `v` the ring therefore has a glaring yellow arc and a nearly black blue arc, and that
+ * uneven brightness is one of the strongest "this is an HSV colour picker" signals there is — a
+ * manufactured band would not vary in brightness around its circumference. Reference wheels read as
+ * an object precisely because their perceived brightness is roughly constant around the ring.
+ *
+ * Full flattening is impossible in sRGB (nothing can make blue as bright as yellow without
+ * desaturating it, and desaturating is what produced the pastel look before), so this COMPRESSES
+ * rather than equalises: v is scaled by (target / luma)^k. With k = 0.35 the 12.8:1 luma spread
+ * closes to about 2.4:1 — enough that the ring reads as one band, not enough to grey any hue out.
+ * The floor stops the brightest hues from being pushed so dark they lose chroma.
+ *
+ * This changes only how a hue is PAINTED. The angle→hue map (`90 − φ`) is untouched, so what a drag
+ * at a given angle does to the image is exactly as before.
+ */
+const HUE_LUMA_TARGET = 0.45;
+const HUE_LUMA_K = 0.35;
+const HUE_VALUE_FLOOR = 0.62;
+
+function hueValueScale(h: number): number {
+  const [r, g, b] = hsvRgb(h, 1, 1);
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return Math.min(1, Math.max(HUE_VALUE_FLOOR, (HUE_LUMA_TARGET / luma) ** HUE_LUMA_K));
 }
 
 /**
@@ -49,6 +82,12 @@ function hsvCss(h: number, s: number, v: number): string {
  * quantize badly across a large low-chroma dark field, and the banding rings that produces are the
  * loudest "this is a web gradient" artefact on the wheel. A few percent of monochrome noise dithers
  * them away — the same reason grading UIs look dense rather than posterized.
+ *
+ * It is confined to the FIELD INTERIOR (see WHEEL_GRAIN_MASK) rather than run across the whole disc.
+ * Noise is a constant-amplitude signal, so its visibility is set by what it sits on: at 5.5% it
+ * vanishes into the mid-tone centre it exists to dither, but against the near-black groove it is the
+ * highest-contrast thing there and reads as a ragged, speckled edge around the ball. Dither belongs
+ * only where there is banding to dither.
  */
 const WHEEL_GRAIN = (() => {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="90"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter><rect width="90" height="90" filter="url(#n)" opacity="0.055"/></svg>`;
@@ -56,114 +95,138 @@ const WHEEL_GRAIN = (() => {
 })();
 
 /**
- * The trackball is composited from an explicit LAYER STACK, listed here top-most first (CSS paints
- * background layers in that order). Each layer has one job; the design lives in their interaction,
- * not in any single gradient.
+ * GEOMETRY — one source of truth, in fractions of the disc RADIUS.
  *
- *   1 GRAIN            dither, kills gradient banding (see WHEEL_GRAIN)
- *   2 AMBIENT          broad soft light from above — NOT a point specular
- *   3 RIM SEPARATOR    dark annulus dividing the colour field from the outer ring
- *   4 EDGE VIGNETTE    field darkening toward its own rim; gives the disc volume
- *   5 CHROMA SCRIM     saturation compression + luminance falloff (the important one)
- *   6 HUE SOURCE       one full-saturation conic — the field AND the ring both read from it
+ * Every earlier attempt at the ring failed for the same mechanical reason, and it is worth stating
+ * plainly so it is not reintroduced: a bare `radial-gradient(circle at center, …)` on a SQUARE
+ * element sizes itself FARTHEST-CORNER, so its 100% is r·√2, not r. Structure authored at "86%" and
+ * "90.4%" was therefore being painted at 1.22r and 1.28r — outside the disc entirely. The groove,
+ * the rim shade and the whole ring rendered nowhere, which is why making the ring more vivid never
+ * helped: it was not dim, it was absent. Every gradient here is `closest-side`, which makes 100%
+ * exactly the disc radius and makes these numbers mean what they say.
  *
- * The two decisions that separate an instrument from a colour picker:
- *
- * SATURATION IS COMPRESSED, AND RISES WITH THE SQUARE OF RADIUS. A picker shows the gamut, so it
- * runs full chroma everywhere. A balance control shows DEVIATION FROM NEUTRAL, so its field must be
- * near-neutral through the middle and gain chroma slowly — which is also what makes small corrections
- * readable, since the interesting range is near the centre. Layer 5's alpha follows ~r², so the field
- * never approaches full HSV; only the ring does.
- *
- * THE RING IS AN OBJECT, NOT A BRIGHTER EDGE. Layer 3 puts a dark gap between field and ring, so the
- * ring reads as a machined band AROUND the ball rather than the point where a gradient got vivid.
- * Without that gap there is no ring at all — just a hot edge.
+ * The field's groove and the ring element's mask are both generated from these constants, so the two
+ * halves of the seam cannot drift apart the way hand-copied percentages did.
  */
+const GEO = {
+  /** Chroma scrim is fully gone by here: beyond it the field is at its own full strength. */
+  scrimClear: 0.76,
+  /** Field falls off slightly toward the ring. LATE and SHALLOW, and that is the load-bearing part.
+   *
+   *  There is NO dark groove between field and ring. The design originally had one, on the reasoning
+   *  that a ring needs a parting line or it is just the place a gradient got brighter — but at the
+   *  size this actually ships at (~42px radius on a 1080p panel) any dark separator, however thin, is
+   *  a sub-pixel black circle. It cannot resolve as a machined seam; it resolves as a ragged dark
+   *  halo, and it reads as noise. Removed on that evidence.
+   *
+   *  What separates the two parts instead is the LUMINANCE STEP alone: the field arrives at ~0.58
+   *  value and the ring starts at full value, across a hard mask edge. A discontinuity in brightness
+   *  is a parting line — it does not have to be dark to be a line. This falloff exists only to make
+   *  that step consistent around the circumference, not to draw a band. */
+  vignetteIn: 0.82,
+  /** Ring band runs from here to the disc edge (~12% of the radius ≈ 5px at the shipped size). */
+  ringIn: 0.876
+} as const;
+
+const pct = (t: number) => `${(t * 100).toFixed(2)}%`;
+
 /**
- * Hue conic at a given saturation/value. 96 stops — at full chroma the seams between fewer are
- * plainly visible, and this is the element a colorist actually stares at. Built once per variant.
+ * Hue conic. 128 stops — at full chroma the seams between fewer are plainly visible, and this is the
+ * element a colorist actually stares at. `scale` applies the luminance normalisation above; the field
+ * passes a reduced `v` on top of it.
  *
  * Hue ORIENTATION (`90 − φ`) is the engine's tint math, NOT a style choice: it is what makes dragging
  * toward a colour actually push that colour into the image. Matching another application's wheel
  * orientation would require changing the engine's mapping, i.e. changing what a drag does.
  */
-function hueConic(s: number, v: number): string {
-  const steps = 96;
+function hueConic(s: number, v: number, normalise = true): string {
+  const steps = 128;
   const stops: string[] = [];
   for (let i = 0; i <= steps; i += 1) {
     const phi = (i / steps) * 360;
     const hue = (90 - phi + 360) % 360;
-    stops.push(`${hsvCss(hue, s, v)} ${phi.toFixed(2)}deg`);
+    const value = normalise ? v * hueValueScale(hue) : v;
+    stops.push(`${hsvCss(hue, s, value)} ${phi.toFixed(2)}deg`);
   }
   return `conic-gradient(from 0deg, ${stops.join(", ")})`;
 }
 
 /**
- * OUTER RING — full brightness, full saturation. Rendered on its own element (masked to the outer
- * band) rather than as a background layer of the field, because the ring and the field need
- * DIFFERENT hsv values and one conic cannot be both. That was the structural error behind every
- * earlier attempt: scrimming a single bright conic desaturates it but leaves it BRIGHT, which is
- * exactly the pastel colour-picker look. The reference has a dark saturated field with a separate
- * vivid ring.
+ * THE COLOUR RING — a manufactured collar, not a brighter edge.
+ *
+ * Two layers, top-most first. A flat band of hue reads as PRINTED; a band shaded across its own
+ * WIDTH reads as a physical part with a curved surface. That is the difference between the reference
+ * tools' rings and a conic-gradient border.
+ *
+ *   1 SEAT     Darkens the collar's OUTER edge only, where it meets the bezel — the far side of a
+ *              rounded band turning away from the light. There is deliberately nothing on the inner
+ *              edge: a dark inner stop is a black circle drawn between the ring and the field, which
+ *              at this size cannot resolve and reads as a ragged halo (same finding as the groove,
+ *              see GEO.vignetteIn). The inner edge is defined by the luminance step alone.
+ *   2 HUE      Full chroma, luminance-normalised (see hueValueScale).
+ *
+ * There is deliberately NO vertical light key on the ring, though the housing has one. A directional
+ * gradient across a circular band brightens one arc and darkens the opposite one, and since a band's
+ * apparent thickness is set by its contrast against the bezel, that makes the collar look THICKER at
+ * the bottom than at the top — measurably concentric, visibly not. Hue-dependent luminance amplifies
+ * it further. Constant apparent thickness is the whole point of a machined collar, so the shading
+ * here follows the ring's own geometry only. The light-from-above cue lives on the housing, which is
+ * a wide annulus where it reads correctly, and on the puck.
  */
-export const WHEEL_RING = hueConic(1, 1);
+export const WHEEL_RING = [
+  `radial-gradient(circle closest-side at center,
+     rgba(0,0,0,0) 0 96%,
+     rgba(0,0,0,0.42) 100%)`.replace(/\s+/g, " "),
+  hueConic(1, 1)
+].join(", ");
+
+/** Mask for the ring element — generated from the SAME constant the field's falloff ends on. */
+export const WHEEL_RING_MASK =
+  `radial-gradient(circle closest-side at center, transparent 0 ${pct(GEO.ringIn - 0.008)}, #000 ${pct(GEO.ringIn)}, #000 100%)`;
+
+/** Grain is faded out well before the vignette darkens, so it never lands on the near-black rim. */
+export const WHEEL_GRAIN_MASK =
+  `radial-gradient(circle closest-side at center, #000 0 ${pct(GEO.vignetteIn - 0.16)}, transparent ${pct(GEO.vignetteIn + 0.02)})`;
 
 /**
  * THE FIELD — the disc inside the ring. Layers, top-most first. Each exists for one reason:
  *
- *   1 GRAIN      Dither. CSS gradients quantize across a large dark low-chroma area and the banding
- *                rings that produces are the loudest "web gradient" artefact on the control.
- *   2 GAP        A dark groove at the field's edge. Without a break, a ring is just the place a
- *                gradient got brighter; with one, it is an object sitting around the disc.
- *   3 RIM SHADE  Darkens the field's outer fifth. The ring reads as a ring because of the LUMINANCE
- *                STEP at its inner edge — so the field must arrive at the gap DARK. Without this the
- *                field was already bright by the time it met the ring and the step was invisible,
- *                which is why the ring kept failing to register no matter how vivid it was made.
- *   4 SCRIM      Neutral toward the centre: chroma rises with radius, so small corrections near
- *                neutral stay readable and the wheel reads as deviation-from-neutral, not as a gamut.
- *   5 HUE        Conic at REDUCED VALUE — dark but saturated (deep red, deep green). This is the
- *                structural point: dark-and-saturated is a low-value conic. Greying down a bright
- *                conic desaturates it while leaving it bright, which is pastel — a colour picker.
+ *   1 VIGNETTE   A slight falloff toward the rim, so the field meets the ring at a consistent value
+ *                and the luminance step that separates them is even around the circumference.
+ *   2 SCRIM      Neutral toward the centre: chroma rises with the SQUARE of radius, so small
+ *                corrections near neutral stay readable and the wheel reads as deviation-from-
+ *                neutral, not as a gamut. A picker shows the gamut; a balance control does not.
+ *   3 HUE        Conic at REDUCED VALUE — dark but saturated (deep red, deep green). Dark-and-
+ *                saturated is a LOW-VALUE conic; greying a bright conic down desaturates it while
+ *                leaving it bright, which is pastel — a colour picker.
  *
- * The ring is a SEPARATE element at full value (see WHEEL_RING); one conic cannot be both.
+ * Grain is NOT in this stack — it is a separate masked element, for the reason given at WHEEL_GRAIN.
  */
 const WHEEL_BACKGROUND = (() => {
-  const SCRIM = "42, 45, 52";
-  const scrim = [
-    `rgba(${SCRIM}, 0.9) 0%`,
-    `rgba(${SCRIM}, 0.84) 12%`,
-    `rgba(${SCRIM}, 0.72) 24%`,
-    `rgba(${SCRIM}, 0.58) 37%`,
-    `rgba(${SCRIM}, 0.43) 50%`,
-    `rgba(${SCRIM}, 0.29) 63%`,
-    `rgba(${SCRIM}, 0.17) 75%`,
-    `rgba(${SCRIM}, 0.08) 85%`,
-    `rgba(${SCRIM}, 0) 92%`,
-  ].join(", ");
+  // 4 · SCRIM — alpha ∝ 1 − (t/clear)², sampled rather than hand-placed so the curve is the stated
+  // function and not a list of tuned numbers.
+  const SCRIM = "34, 37, 44";
+  const scrimStops: string[] = [];
+  for (let i = 0; i <= 14; i += 1) {
+    const t = (i / 14) * GEO.scrimClear;
+    const a = 0.94 * (1 - (t / GEO.scrimClear) ** 2);
+    scrimStops.push(`rgba(${SCRIM}, ${a.toFixed(3)}) ${pct(t)}`);
+  }
+  scrimStops.push(`rgba(${SCRIM}, 0) ${pct(GEO.scrimClear)}`);
 
-  // 3 · RIM SHADE — the luminance step the ring is read against.
-  const rimShade = [
-    "transparent 0 62%",
-    "rgba(8, 9, 12, 0.16) 76%",
-    "rgba(8, 9, 12, 0.4) 86%",
-    "rgba(8, 9, 12, 0.46) 89%",
-    "transparent 91.5%",
-  ].join(", ");
-
-  // 2 · GAP — the groove, immediately inside where the ring element begins.
-  const gap = [
-    "transparent 0 87.5%",
-    "rgba(5, 6, 8, 0.88) 89.2%",
-    "rgba(5, 6, 8, 0.88) 90.4%",
-    "transparent 91.5%",
-  ].join(", ");
+  // 3 · VIGNETTE — smoothstep from vignetteIn to the groove.
+  const vigStops: string[] = [];
+  for (let i = 0; i <= 8; i += 1) {
+    const u = i / 8;
+    const t = GEO.vignetteIn + u * (GEO.ringIn - GEO.vignetteIn);
+    const a = 0.3 * (u * u * (3 - 2 * u));
+    vigStops.push(`rgba(6, 7, 10, ${a.toFixed(3)}) ${pct(t)}`);
+  }
 
   return [
-    `${WHEEL_GRAIN} 0 0 / 90px 90px repeat`,
-    `radial-gradient(circle at center, ${gap})`,
-    `radial-gradient(circle at center, ${rimShade})`,
-    `radial-gradient(circle at center, ${scrim})`,
-    hueConic(0.95, 0.62),
+    `radial-gradient(circle closest-side at center, ${vigStops.join(", ")})`,
+    `radial-gradient(circle closest-side at center, ${scrimStops.join(", ")})`,
+    hueConic(1, 0.58)
   ].join(", ");
 })();
 
@@ -327,28 +390,53 @@ function Wheel({
   const handleLeft = `${50 + wheel.x * 50}%`;
   const handleTop = `${50 - wheel.y * 50}%`;
 
-  // Column order is LABEL → WHEEL → SLIDER: the name titles the control it belongs to instead of
-  // floating between a wheel and the slider under it, which is what made three columns read as one
-  // undifferentiated block. The wheel is the visual anchor between them.
+  // Column order is LABEL → WHEEL → SLIDER → READOUT: the name titles the control it belongs to
+  // instead of floating between a wheel and the slider under it, and the value closes the column.
+  // The wheel is the visual anchor between them.
   return (
     <div className="color-wheel">
-      <span className="color-wheel-label">{label}</span>
-      <div
-        ref={padRef}
-        className={`color-wheel-pad ${edited ? "is-edited" : ""}`}
-        style={{ background: WHEEL_BACKGROUND }}
-        onPointerDown={handleDown}
-        onPointerMove={handleMove}
-        onPointerUp={handleUp}
-        onPointerCancel={handleUp}
-        onDoubleClick={onReset}
-        title={`${label} color balance — drag to push color; double-click to reset`}
-      >
-        {/* The vivid outer ring, on its own element so it can carry FULL value while the field stays
-            dark and saturated (see WHEEL_RING). Masked to the outer band; inert to pointers, so it
-            changes nothing about how the pad is dragged. */}
-        <span className="color-wheel-ring" style={{ background: WHEEL_RING }} />
-        <span className="color-wheel-handle" style={{ left: handleLeft, top: handleTop }} />
+      <span className="color-wheel-label">
+        {label}
+        {/* MODIFIED indicator. A hard 3px tick against the label, replacing the accent halo that used
+            to be drawn around the whole disc: a glowing ring around a control is a web focus-state
+            idiom, and it also put a saturated colour directly against the chroma ring — the one
+            element on this control whose colour has to be trusted. */}
+        <i className={`color-wheel-mod ${edited ? "is-on" : ""}`} aria-hidden="true" />
+      </span>
+      {/* HOUSING — a separate part, not a box-shadow. The bezel has to be lit DIRECTIONALLY (dark
+          where the recess wall faces the light, bright where it faces away) and a box-shadow ring is
+          uniform by construction, so the old one read as a flat dark donut. It is inert to pointers
+          and the pad still owns its own box, so the drag math is untouched. */}
+      <div className="color-wheel-housing">
+        <div
+          ref={padRef}
+          className="color-wheel-pad"
+          style={{ background: WHEEL_BACKGROUND }}
+          onPointerDown={handleDown}
+          onPointerMove={handleMove}
+          onPointerUp={handleUp}
+          onPointerCancel={handleUp}
+          onDoubleClick={onReset}
+          title={`${label} color balance — drag to push color; double-click to reset`}
+        >
+          {/* Dither, confined to the field interior — see WHEEL_GRAIN. */}
+          <span
+            className="color-wheel-grain"
+            style={{
+              backgroundImage: WHEEL_GRAIN,
+              WebkitMaskImage: WHEEL_GRAIN_MASK,
+              maskImage: WHEEL_GRAIN_MASK
+            }}
+          />
+          {/* The vivid outer ring, on its own element so it can carry FULL value while the field
+              stays dark and saturated (see WHEEL_RING). Masked to the outer band from the same
+              constant the field's groove uses; inert to pointers. */}
+          <span
+            className="color-wheel-ring"
+            style={{ background: WHEEL_RING, WebkitMaskImage: WHEEL_RING_MASK, maskImage: WHEEL_RING_MASK }}
+          />
+          <span className="color-wheel-handle" style={{ left: handleLeft, top: handleTop }} />
+        </div>
       </div>
       <input
         className="color-wheel-master"
@@ -361,6 +449,13 @@ function Wheel({
         onChange={(event) => onMaster(Number(event.target.value))}
         title={`${label} level`}
       />
+      {/* Engraved readout. Display-only — it adds no interaction, but every reference application
+          shows a number under every grading control, and a wheel with no value on it cannot be used
+          to match a shot. Tabular figures with a fixed sign column so the digits do not shuffle as
+          the value crosses zero. */}
+      <span className={`color-wheel-readout ${wheel.master !== 0 ? "is-on" : ""}`}>
+        {(wheel.master < 0 ? "−" : "+") + Math.abs(wheel.master).toFixed(2)}
+      </span>
     </div>
   );
 }
