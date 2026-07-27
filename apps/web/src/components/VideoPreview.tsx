@@ -1212,12 +1212,25 @@ function VideoPreviewImpl({
     );
   }, [graph.flarexComps, renderedLayerEntries, resolvedAssets]);
 
+  /**
+   * Loaders for comps currently PLAYED FROM A PROXY are dropped — this is what makes the proxy a win.
+   * Short-circuiting the compiler does not stop these decoders: without this, a substituted comp decodes
+   * every MediaIn source PLUS the proxy, which is strictly more work than not proxying at all (user
+   * report: 75fps → 35-40fps). Keyed off `flarexVirtualLayerId`'s `flarexsrc:<compId>:<nodeId>` form.
+   * Identity-stable when nothing is served, so the non-proxy path allocates nothing new.
+   */
+  const activeFlarexVirtualLayers = useMemo(() => {
+    if (proxyServedCompIds.length === 0) return flarexVirtualLayers;
+    const served = new Set(proxyServedCompIds);
+    return flarexVirtualLayers.filter((vlayer) => !served.has(vlayer.id.split(":")[1] ?? ""));
+  }, [flarexVirtualLayers, proxyServedCompIds]);
+
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
   // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
   // just wired to the same z-ordered layer list the draw builder consumes and to the scene redraw.
   const requestSceneRedraw = useCallback(() => sceneRedrawRef.current?.(), []);
   const flarexProxyLayers = useMemo(() => renderedLayerEntries.map((entry) => entry.layer), [renderedLayerEntries]);
-  const { framesRef: flarexCompProxyFramesRef, requestFrames: requestFlarexProxyFrames } = useFlarexCompProxies({
+  const { framesRef: flarexCompProxyFramesRef, servingCompIds: proxyServedCompIds, requestFrames: requestFlarexProxyFrames } = useFlarexCompProxies({
     composition,
     flarexComps: graph.flarexComps,
     zOrderedLayers: flarexProxyLayers,
@@ -1743,7 +1756,7 @@ function VideoPreviewImpl({
                   mediaSourceAlias={sceneSharedMediaClones}
                   nestedGroups={nestExpansion.groups}
                   flarexComps={graph.flarexComps}
-                  flarexVirtualLayers={flarexVirtualLayers}
+                  flarexVirtualLayers={activeFlarexVirtualLayers}
                   flarexCompProxiesRef={flarexCompProxyFramesRef}
                   captureRef={proxyCaptureRef}
                   prewarmTransitionIds={prewarmTransitionIds}
@@ -1867,7 +1880,7 @@ function VideoPreviewImpl({
               {/* Generator loaders (Text+ / Background) are rasterized inside buildSceneDraws, so they
                   get NO media mount here — only decoded sources do. */}
               {sceneEnabled
-                ? flarexVirtualLayers.filter((vlayer) => !isFlarexGeneratorVirtualLayer(vlayer)).map((vlayer) => {
+                ? activeFlarexVirtualLayers.filter((vlayer) => !isFlarexGeneratorVirtualLayer(vlayer)).map((vlayer) => {
                     // Fusion Loader "hold last frame": the virtual loader mirrors the HOST clip's span,
                     // but the source asset can be SHORTER than the host. Clamp the DECODE time so the
                     // source never seeks past its available media — free-running past EOF made the tail

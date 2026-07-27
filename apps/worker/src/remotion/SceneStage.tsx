@@ -30,6 +30,8 @@ import {
   getCompositionVolume,
   getTrackAudioGainAt,
   graphicAnimationBakeTime,
+  collectFlarexVirtualLayers,
+  isFlarexGeneratorVirtualLayer,
   graphicAnimationFrameAt,
   graphicToAnimatedDataUrl,
   resolveGraphicAnimation,
@@ -288,9 +290,13 @@ class SceneController {
     rawById: Map<string, RawFrame>,
     matteById: Map<string, RawFrame>,
     transitions: ScenePreviewTransition[],
-    t: number
+    t: number,
+    /** Flarex asset-source loaders live at this time (off-timeline — see `flarexVirtualLayers`). */
+    activeFlarexLoaders: RenderManifestLayer[] = []
   ): Promise<boolean> {
     const activeMediaIds = new Set(activeLayers.filter(isMedia).map((l) => l.id));
+    // Loaders keep their grade renderer too, or it is disposed and rebuilt every single frame.
+    for (const loader of activeFlarexLoaders) activeMediaIds.add(loader.id);
     this.pruneRenderers(activeMediaIds);
 
     // Every active media layer must have its decoded frame before we can build a complete composite.
@@ -308,8 +314,22 @@ class SceneController {
       gradedById.set(layer.id, this.gradeMedia(layer, raw, matte, t));
     }
 
+    // Grade the Flarex loaders exactly like a real clip, keyed by the VIRTUAL layer id — which is what
+    // `resolveSourceDraw` looks up inside the compiler. Same "wait for the frame" contract as above: a
+    // missing loader frame must retry rather than composite a hole (or fall back to the host).
+    for (const loader of activeFlarexLoaders) {
+      // GENERATOR loaders (Text+ / Background) are rasterized below, not decoded — they have no media
+      // and will never produce a raw frame, so waiting on one here blocks the frame forever.
+      if (isFlarexGeneratorVirtualLayer(loader as unknown as TimelineLayer)) continue;
+      const raw = rawById.get(loader.id);
+      if (!raw || raw.width === 0 || raw.height === 0) return false;
+      gradedById.set(loader.id, this.gradeMedia(loader, raw, null, t));
+    }
+
     await Promise.all(
-      activeLayers
+      // Generator loaders rasterize through the SAME shared rasterizer as timeline text/shape clips —
+      // that identity is what makes a node's text render the same here as in the editor.
+      [...activeLayers, ...activeFlarexLoaders]
         .filter((layer) => layer.type === "text" || layer.type === "shape")
         .map(async (layer) => {
           const fx = getCompositionFilterEffects(layer as unknown as TimelineLayer, { currentTimeSeconds: t });
@@ -337,7 +357,10 @@ class SceneController {
       regionPassModel: this.regionPassModel,
       nestedGroups: this.nestedGroups,
       nestMatteCaches: this.nestMatteCaches,
-      flarexComps: this.flarexComps
+      flarexComps: this.flarexComps,
+      ...(activeFlarexLoaders.length > 0
+        ? { flarexVirtualLayers: activeFlarexLoaders as unknown as TimelineLayer[] }
+        : {})
     });
 
     const spec: SceneFrameSpec = {
@@ -530,6 +553,33 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     const byId = new Map(manifest.assets.map((asset) => [asset.id, asset.durationSeconds]));
     return (assetId: string | undefined) => (assetId != null ? byId.get(assetId) : undefined);
   }, [manifest.assets]);
+  /**
+   * Flarex asset-source `MediaIn` loaders (FLAREX.md Phase 2). These load media-pool assets directly, so
+   * they are on NO track and `manifest.layers` cannot contain them. Without them the compiler's
+   * `resolveSourceDraw` finds nothing and EVERY asset-source MediaIn soft-degrades to the host clip —
+   * the cloud render drew the host three times where the preview showed three different sources
+   * (user report 2026-07-27). Built from the SAME shared helper the preview and local export use, so all
+   * three renderers agree by construction; `manifest.assets` already carries the url/kind/duration, so
+   * no manifest change is needed. `assetUrl` is attached here because the grabbers decode by url.
+   */
+  const flarexVirtualLayers = useMemo(() => {
+    if (!manifest.flarexComps) return [] as RenderManifestLayer[];
+    const assetById = new Map(manifest.assets.map((asset) => [asset.id, asset]));
+    const built = collectFlarexVirtualLayers(sorted as unknown as TimelineLayer[], manifest.flarexComps, (assetId) => {
+      const asset = assetById.get(assetId);
+      if (!asset) return null; // unresolvable → the compiler's documented host soft-degrade still applies
+      return {
+        // The REAL kind: an image decoded through the video grabber yields nothing.
+        type: asset.fileType.startsWith("image/") ? "image" : "video",
+        durationSeconds: asset.durationSeconds
+      };
+    });
+    return built.map((layer) => ({
+      ...(layer as unknown as RenderManifestLayer),
+      assetUrl: layer.assetId ? assetById.get(layer.assetId)?.fileUrl : undefined
+    }));
+  }, [sorted, manifest.flarexComps, manifest.assets]);
+
   const adjustments = useMemo(() => sorted.filter((l) => l.type === "adjustment"), [sorted]);
   const audioLayers = useMemo(() => sorted.filter((l) => l.type === "audio" && l.assetUrl), [sorted]);
   // Media layers carry their own Sequence (with post-roll) so OffthreadVideo gets the correct source time and
@@ -643,7 +693,10 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     void (async () => {
       let complete = false;
       try {
-        complete = await controller.composite(merged, rawRef.current, matteRef.current, transitions, t);
+        const activeFlarexLoaders = flarexVirtualLayers.filter(
+          (loader) => t >= loader.startSeconds && t < loader.startSeconds + loader.durationSeconds
+        );
+        complete = await controller.composite(merged, rawRef.current, matteRef.current, transitions, t, activeFlarexLoaders);
       } catch (error) {
         console.error("SceneStage: composite failed", error);
         complete = true;
@@ -660,7 +713,7 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
       }
     })();
     // `mediaTick` re-runs this when a media frame arrives; `t`/`frame` cover the timeline advancing.
-  }, [frame, t, sorted, adjustments, mediaTick, assetDurationById]);
+  }, [frame, t, sorted, adjustments, mediaTick, assetDurationById, flarexVirtualLayers]);
 
   // Continue any outstanding handle on unmount so a teardown mid-frame can't hang the render.
   useEffect(() => {
@@ -722,6 +775,25 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
                   <ImageGrabber layer={matteLayer} onFrame={onMatteFrame} leadSeconds={leadSeconds} />
                 )
               ) : null}
+            </Sequence>
+          );
+        })}
+        {/* Flarex asset-source loaders. Off-timeline, so they are absent from `mediaLayers` above and
+            got no decoder at all — the cloud render then drew the HOST clip for every MediaIn. They
+            mirror the host clip's span (comp-local sync), clamped to their own source length by
+            `collectFlarexVirtualLayers`, so a plain Sequence over that span is the right mount: no
+            transitions/pre-roll apply to a loader (it feeds a node graph, it is never a timeline clip). */}
+        {flarexVirtualLayers.map((loader) => {
+          const from = Math.max(0, Math.round(loader.startSeconds * fps));
+          const durationInFrames = Math.max(1, Math.round(loader.durationSeconds * fps));
+          if (!loader.assetUrl) return null; // unresolved asset → compiler soft-degrades to the host
+          return (
+            <Sequence key={loader.id} from={from} durationInFrames={durationInFrames}>
+              {loader.type === "video" ? (
+                <VideoGrabber layer={loader} onFrame={onFrame} leadSeconds={0} />
+              ) : (
+                <ImageGrabber layer={loader} onFrame={onFrame} leadSeconds={0} />
+              )}
             </Sequence>
           );
         })}

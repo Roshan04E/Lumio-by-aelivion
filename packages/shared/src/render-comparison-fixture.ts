@@ -108,7 +108,10 @@ export type RenderComparisonFixtureKey =
   | "flarex-transform"
   | "flarex-ellipse-matte"
   | "flarex-reroute"
-  | "flarex-multi-in";
+  | "flarex-multi-in"
+  | "flarex-color-chain"
+  | "flarex-filter-stack"
+  | "flarex-generators";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -160,7 +163,10 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-transform",
   "flarex-ellipse-matte",
   "flarex-reroute",
-  "flarex-multi-in"
+  "flarex-multi-in",
+  "flarex-color-chain",
+  "flarex-filter-stack",
+  "flarex-generators"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -603,6 +609,114 @@ function buildFlarexKeyframedBlurComp(): FlarexComp {
 // F6 (plans/flarex-sonnet-execution-3.md): merge with a NON-NORMAL blend mode. MediaIn feeds both
 // merge inputs — bg unchanged, fg pushed through ColorCorrect first — so `multiply` at partial
 // opacity produces a real, renderer-comparable composite (no keyer/asset dependency needed).
+/**
+ * FOUR colour nodes in series — the pipeline-coalescing path.
+ *
+ * The compiler now bakes a consecutive colour chain into ONE ColorPipeline instead of one nested
+ * render target per node. That is a structural change to what the renderers receive, so it needs a
+ * pixel gate: the coalesced result must match across preview, local export and Remotion, and must be
+ * the same picture the four separate grades produced. Deliberately mixes all three payload shapes
+ * (wheels JSON, curve JSON, qualifier JSON) with a scalar node, since they take different paths into
+ * the grade compiler.
+ */
+function buildFlarexColorChainComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_chain_comp", "Flarex colour chain fixture");
+  const wheels = createFlarexNode("colorWheels", "fixture_flarex_chain_wheels");
+  wheels.params = {
+    ...wheels.params,
+    wheels: JSON.stringify({
+      shadows: { x: -0.12, y: 0.08, master: -0.05 },
+      midtones: { x: 0.18, y: -0.14, master: 0.1 },
+      highlights: { x: 0.06, y: 0.04, master: 0.08 }
+    })
+  };
+  const curves = createFlarexNode("colorCurves", "fixture_flarex_chain_curves");
+  curves.params = {
+    ...curves.params,
+    curves: JSON.stringify({ master: [{ x: 0, y: 0 }, { x: 0.3, y: 0.22 }, { x: 0.7, y: 0.8 }, { x: 1, y: 1 }] })
+  };
+  const qualifier = createFlarexNode("hslQualifier", "fixture_flarex_chain_qual");
+  qualifier.params = {
+    ...qualifier.params,
+    secondary: JSON.stringify({ hueCenter: 0.36, hueWidth: 0.14, softness: 0.08, satScale: 0.45, lumScale: 1.1 })
+  };
+  const correct = createFlarexNode("colorCorrect", "fixture_flarex_chain_cc");
+  correct.params = { ...correct.params, exposure: 18, contrast: 12, saturation: 128, temperature: -14 };
+  for (const node of [wheels, curves, qualifier, correct]) comp.nodes[node.id] = node;
+  comp.edges = [
+    { id: "fixture_flarex_chain_e1", from: { nodeId: "fixture_flarex_chain_comp_in", socket: "out" }, to: { nodeId: wheels.id, socket: "in" } },
+    { id: "fixture_flarex_chain_e2", from: { nodeId: wheels.id, socket: "out" }, to: { nodeId: curves.id, socket: "in" } },
+    { id: "fixture_flarex_chain_e3", from: { nodeId: curves.id, socket: "out" }, to: { nodeId: qualifier.id, socket: "in" } },
+    { id: "fixture_flarex_chain_e4", from: { nodeId: qualifier.id, socket: "out" }, to: { nodeId: correct.id, socket: "in" } },
+    { id: "fixture_flarex_chain_e5", from: { nodeId: correct.id, socket: "out" }, to: { nodeId: "fixture_flarex_chain_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
+ * The new fragment builtins stacked on ONE shell: Crop → Pixelate → Prism → Vignette.
+ *
+ * Crop and Channel-Boolean-class effects REWRITE alpha, so this also gates that the composite-back
+ * replaces the running image rather than drawing over it (a cropped pixel must be transparent, not the
+ * original pixel). Film Grain is deliberately absent: it reads `uTime`, and a time-varying pattern is
+ * not something a single-frame parity gate can hold the three renderers to.
+ */
+function buildFlarexFilterStackComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_stack_comp", "Flarex filter stack fixture");
+  const crop = createFlarexNode("crop", "fixture_flarex_stack_crop");
+  crop.params = { ...crop.params, left: 0.08, right: 0.12, top: 0.05, bottom: 0.1, softness: 0.03 };
+  const pixelate = createFlarexNode("pixelate", "fixture_flarex_stack_pix");
+  pixelate.params = { ...pixelate.params, blockSize: 14 };
+  const prism = createFlarexNode("prism", "fixture_flarex_stack_prism");
+  prism.params = { ...prism.params, amount: 0.45, angle: 22 };
+  const vignette = createFlarexNode("vignette", "fixture_flarex_stack_vig");
+  vignette.params = { ...vignette.params, amount: 0.55, size: 0.5, feather: 0.9, roundness: 0.4, highlights: 0.2 };
+  for (const node of [crop, pixelate, prism, vignette]) comp.nodes[node.id] = node;
+  comp.edges = [
+    { id: "fixture_flarex_stack_e1", from: { nodeId: "fixture_flarex_stack_comp_in", socket: "out" }, to: { nodeId: crop.id, socket: "in" } },
+    { id: "fixture_flarex_stack_e2", from: { nodeId: crop.id, socket: "out" }, to: { nodeId: pixelate.id, socket: "in" } },
+    { id: "fixture_flarex_stack_e3", from: { nodeId: pixelate.id, socket: "out" }, to: { nodeId: prism.id, socket: "in" } },
+    { id: "fixture_flarex_stack_e4", from: { nodeId: prism.id, socket: "out" }, to: { nodeId: vignette.id, socket: "in" } },
+    { id: "fixture_flarex_stack_e5", from: { nodeId: vignette.id, socket: "out" }, to: { nodeId: "fixture_flarex_stack_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
+ * Text+ over Background — the generator nodes, and the highest parity risk in the batch.
+ *
+ * Both are backed by virtual `text`/`shape` layers that each renderer RASTERIZES with its own canvas,
+ * rather than by a decoded source. Font rasterization is exactly where three renderers are most likely
+ * to disagree, so this gate is the one that says the Loader-style generator path really does produce
+ * one picture everywhere. The MediaIn is left unwired on purpose: the comp is entirely synthetic, so a
+ * failure here can only be the generators.
+ */
+function buildFlarexGeneratorsComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_gen_comp", "Flarex generators fixture");
+  const background = createFlarexNode("background", "fixture_flarex_gen_bg");
+  background.params = { ...background.params, color: "#1d3b6e", opacity: 1 };
+  const text = createFlarexNode("text", "fixture_flarex_gen_text");
+  text.params = {
+    ...text.params,
+    content: "FLAREX",
+    fontFamily: "Inter",
+    fontSize: 140,
+    fontWeight: 700,
+    color: "#ffd166",
+    align: "center",
+    x: 0.5,
+    y: 0.5
+  };
+  const merge = createFlarexNode("merge", "fixture_flarex_gen_merge");
+  for (const node of [background, text, merge]) comp.nodes[node.id] = node;
+  comp.edges = [
+    { id: "fixture_flarex_gen_e1", from: { nodeId: background.id, socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
+    { id: "fixture_flarex_gen_e2", from: { nodeId: text.id, socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
+    { id: "fixture_flarex_gen_e3", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "fixture_flarex_gen_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
 function buildFlarexMergeBlendComp(): FlarexComp {
   const comp = createFlarexComp("fixture_flarex_blend_comp", "Flarex merge blend fixture");
   const grade = createFlarexNode("colorCorrect", "fixture_flarex_blend_grade");
@@ -863,6 +977,12 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexRerouteComp() };
     case "flarex-multi-in":
       return { effects: [], fit: "cover", flarex: buildFlarexMultiInComp(), flarexMultiSource: true };
+    case "flarex-color-chain":
+      return { effects: [], fit: "cover", flarex: buildFlarexColorChainComp() };
+    case "flarex-filter-stack":
+      return { effects: [], fit: "cover", flarex: buildFlarexFilterStackComp() };
+    case "flarex-generators":
+      return { effects: [], fit: "cover", flarex: buildFlarexGeneratorsComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone

@@ -50,6 +50,7 @@ import {
   layerSourceTimeSeconds,
   resolveTransitionWindowSides,
   type ColorPipeline,
+  isFlarexGeneratorVirtualLayer,
   type FlarexComp,
   type NestedGroupSpec,
   type SceneCompositorDebugSnapshot,
@@ -126,6 +127,8 @@ export class SceneFrameCompositor {
   private readonly nestedGroups: ReadonlyMap<string, NestedGroupSpec> | undefined;
   // Flarex node comps (FLAREX.md) — threaded into buildSceneDraws so exports lower comp'd clips.
   private readonly flarexComps: Record<string, FlarexComp> | undefined;
+  /** Off-timeline Flarex asset-source loaders (see the constructor option). */
+  private readonly flarexVirtualLayers: readonly TimelineLayer[];
   // Per-nested-composition matte caches — mirrors `this.matteCache` but sized per nest, not the export
   // frame. See `nestMatteCaches` doc on `BuildSceneDrawsInputs`.
   private readonly nestMatteCaches = new Map<string, SceneMaskMatteCache>();
@@ -148,6 +151,13 @@ export class SceneFrameCompositor {
       /** Flarex node comps (FLAREX.md) — `buildSceneDraws` lowers `flarexCompId` clips through the
        *  shared compiler, identical to the preview/worker paths. */
       flarexComps?: Record<string, FlarexComp>;
+      /**
+       * Asset-source `MediaIn` loaders (FLAREX.md Phase 2) — synthetic OFF-TIMELINE media layers. They
+       * are graded alongside the active timeline layers and passed to `buildSceneDraws`, exactly as the
+       * editor preview does. Without them the compiler's `resolveSourceDraw` finds nothing and every
+       * asset-source MediaIn soft-degrades to the host clip (user report 2026-07-27).
+       */
+      flarexVirtualLayers?: readonly TimelineLayer[];
     }
   ) {
     this.width = composition.width;
@@ -165,6 +175,7 @@ export class SceneFrameCompositor {
     this.nestedGroups = options?.nestedGroups;
     this.rawJunctionLayers = options?.rawJunctionLayers ?? [];
     this.flarexComps = options?.flarexComps;
+    this.flarexVirtualLayers = options?.flarexVirtualLayers ?? [];
 
     const flat: FlatLayer[] = [];
     this.composition.tracks.forEach((track, trackIndex) => {
@@ -727,10 +738,30 @@ export class SceneFrameCompositor {
         })
     );
 
+    // (1b) Grade the Flarex asset-source loaders. They are OFF-TIMELINE, so `activeItems` above (a scan of
+    // composition tracks) can never contain them — which is exactly why export used to render the HOST clip
+    // in place of every asset-source MediaIn. Same grade path as a real clip, keyed by the VIRTUAL layer id,
+    // which is what `resolveSourceDraw` looks up. Only loaders live at this time are decoded.
+    const liveVirtualLayers = this.flarexVirtualLayers.filter(
+      (virtual) => t >= virtual.startSeconds && t < virtual.startSeconds + virtual.durationSeconds
+    );
+    await Promise.all(
+      liveVirtualLayers
+        // GENERATOR loaders (Text+ / Background) have no media to grade — they are rasterized in (2).
+        .filter((virtual) => !isFlarexGeneratorVirtualLayer(virtual))
+        .map(async (virtual) => {
+          const graded = await this.gradeMediaLayer({ layer: virtual, trackIndex: 0, layerIndex: 0 }, t);
+          if (graded && graded.width > 0 && graded.height > 0) gradedById.set(virtual.id, graded);
+        })
+    );
+
     // (2) Pre-warm every text/shape raster so the fire-and-forget get() inside buildSceneDraws hits cache.
     // boxMode MUST match buildSceneDraws' own computation (no blur/glow → tight element-box raster).
+    // Flarex GENERATOR loaders are pre-warmed here too: they are off-timeline, so the `layers` scan
+    // cannot reach them, and without a warmed raster the fire-and-forget get() inside buildSceneDraws
+    // misses and the node renders nothing on the frames that matter.
     await Promise.all(
-      layers
+      [...layers, ...liveVirtualLayers]
         .filter((layer) => layer.type === "text" || layer.type === "shape")
         .map(async (layer) => {
           const fx = getCompositionFilterEffects(layer, { currentTimeSeconds: t });
@@ -761,6 +792,7 @@ export class SceneFrameCompositor {
       nestedGroups: this.nestedGroups,
       nestMatteCaches: this.nestMatteCaches,
       flarexComps: this.flarexComps,
+      ...(this.flarexVirtualLayers.length > 0 ? { flarexVirtualLayers: [...this.flarexVirtualLayers] } : {}),
     });
 
     if (this.stageProbe && this.shouldProbe(t)) {
