@@ -82,7 +82,7 @@ scope.onmessage = (event) => {
 async function build(
   payload: SourceProxyWorkerPayload
 ): Promise<{ buffer: ArrayBuffer; mime: string; encodedFrames: number; fps: number; decodableEndSeconds: number | undefined }> {
-  const { sourceUrl, width, height, durationSeconds, maxFps, keyFrameIntervalSeconds, bitsPerPixelFrame, audio } = payload;
+  const { sourceUrl, width, height, durationSeconds, maxFps, keyFrameEveryNFrames, bitsPerPixelFrame, audio } = payload;
   // Software decode: never steal a hardware session from live playback (proxy playback keeps running
   // on the main thread while we build here). Throws WEBCODECS_REQUIRED_NO_DOM for sources the
   // WebCodecs path can't open — the engine falls back to the main thread for those.
@@ -91,6 +91,19 @@ async function build(
   // duplicated every 4th frame — a visible judder the user caught by eye (2026-07-04). Unknown
   // cadence assumes 30, NOT the cap — a 60 grid would duplicate every frame of 30fps footage.
   const fps = Math.min(maxFps, provider.nominalFps ?? 30);
+  // FRAME-BASED GOP (2026-07-25): keyframe every N FRAMES, converted to the encoder's seconds interval
+  // using the FINAL fps. A fixed-seconds GOP (old 1s) put the keyframe fps×1 frames back, so catch-up
+  // decode in the WebCodecs preview pool scaled with fps and froze 60/120fps proxy playback (the
+  // decoder can't grind 60 inter-frames/s in realtime). Frames-based keeps the nearest keyframe ≤ N
+  // frames away at ANY fps → catch-up cost is flat → high-fps proxies play (frame-dropped) without
+  // freezing, while the file keeps every frame for export/slow-mo.
+  const keyFrameIntervalSeconds = keyFrameEveryNFrames / fps;
+  // DIAGNOSTIC (2026-07-24): a stock proxy came back ~8fps stop-motion off a real 30fps source. This
+  // one line exposes the detected source cadence vs the encode cadence so a "Rebuild proxy" from the
+  // Source Viewer shows whether nominalFps under-read (detection bug) or the encode is the culprit.
+  console.info(
+    `[proxy] nominalFps=${provider.nominalFps ?? "undef"} → encode @ ${fps} fps · ${width}×${height} · GOP=${keyFrameEveryNFrames}f/${keyFrameIntervalSeconds.toFixed(3)}s · dur=${durationSeconds.toFixed(2)}s · decodableEnd=${provider.decodableEndSeconds?.toFixed(2) ?? "undef"}s`
+  );
   const encoder = new MediaEncoder({
     width,
     height,

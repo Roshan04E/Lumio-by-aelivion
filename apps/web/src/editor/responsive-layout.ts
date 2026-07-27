@@ -24,7 +24,7 @@ export const EDITOR_RESPONSIVE_LAYOUT = {
     left: { min: 240, preferred: 340, max: 560 },
     right: { min: 256, preferred: 300, max: 500 },
     viewer: { min: 360, dualMin: 720 },
-    timeline: { min: 180, preferred: 260, max: 480 },
+    timeline: { min: 180, preferred: 260, max: 760 },
     audioStrip: { minVisibleWidth: 1180, width: 46 },
     mixer: { minVisibleWidth: 1320, width: 280 }
   },
@@ -100,7 +100,7 @@ export function getEditorPaneResizeBounds(width: number) {
     },
     timeline: {
       min: EDITOR_RESPONSIVE_LAYOUT.panes.timeline.min,
-      max: Math.min(EDITOR_RESPONSIVE_LAYOUT.panes.timeline.max, Math.max(EDITOR_RESPONSIVE_LAYOUT.panes.timeline.min, Math.floor((window.innerHeight || 720) * 0.55)))
+      max: Math.min(EDITOR_RESPONSIVE_LAYOUT.panes.timeline.max, Math.max(EDITOR_RESPONSIVE_LAYOUT.panes.timeline.min, Math.floor((window.innerHeight || 720) * 0.78)))
     }
   };
 }

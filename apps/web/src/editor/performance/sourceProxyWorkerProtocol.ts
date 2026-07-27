@@ -17,7 +17,13 @@ export interface SourceProxyWorkerPayload {
   durationSeconds: number;
   /** Cap for the proxy frame rate; the worker samples at min(cap, source nominal fps). */
   maxFps: number;
-  keyFrameIntervalSeconds: number;
+  /**
+   * Keyframe cadence in FRAMES, not seconds. The worker converts to `intervalSeconds = N / fps` once it
+   * knows the final encode fps — so the GOP is a fixed frame count at ANY source fps (30/60/120). A
+   * fixed-SECONDS GOP made catch-up decode scale with fps (a 1s GOP = 60 frames at 60fps to grind), which
+   * froze high-fps proxy playback in the WebCodecs preview pool. Frames-based keeps catch-up cost flat.
+   */
+  keyFrameEveryNFrames: number;
   bitsPerPixelFrame: number;
   /** Pre-decoded PCM (planes transferred). Null = video-only proxy. */
   audio: { sampleRate: number; channels: number; frames: number; planes: ArrayBuffer[] } | null;

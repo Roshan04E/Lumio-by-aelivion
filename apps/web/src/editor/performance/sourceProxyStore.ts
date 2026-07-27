@@ -52,7 +52,20 @@ export interface SourceProxyRecord {
 // v7 (2026-07-19): motion parity — PROXY_FPS cap 30 → 60 (60fps footage played at HALF rate on
 // ½/¼/Auto quality; Premiere proxies drop resolution, never motion) + sublinear fps bitrate law.
 // 24/30fps sources re-encode identically; the rebuild exists to catch every >30fps proxy.
-export const SOURCE_PROXY_VERSION = 7;
+// v8 (2026-07-24): nominalFps B-frame reorder fix. The source-cadence detector took a median of
+// adjacent DECODE-ORDER cts deltas, which a B-frame pyramid fools into ~¼ rate (a 30fps stock clip
+// resampled to a ~8fps stop-motion proxy while the untouched original played smooth — confirmed via
+// the Source Viewer's decoded-fps meter + the [nominalFps] cross-check log). Detection is now
+// count-based (samples ÷ cts span, reorder-invariant). Rebuild every proxy encoded from B-frame
+// footage (i.e. most H.264/HEVC sources) at its true frame rate.
+// v9 (2026-07-25): frame-based GOP. v8 finally produced true 60fps proxies (v7's intent), which then
+// FROZE in the WebCodecs preview pool: a 1-second GOP is 60 frames at 60fps, and the seek-on-demand
+// decoder can only catch up by grinding a whole GOP — it can't decode 60 inter-frames/s in realtime, so
+// the served frame fell past the 0.35s hold cutoff and the canvas held (froze). Keyframe cadence is now
+// a fixed FRAME COUNT (PROXY_KEYFRAME_EVERY_N_FRAMES=12 → interval N/fps), so max catch-up is ~12 frames
+// at ANY fps (30/60/120) → high-fps proxies play frame-dropped-but-smooth. Rebuild everything with the
+// long-GOP recipe (bigger files: ~2–3× more keyframes, the standard edit-proxy tradeoff).
+export const SOURCE_PROXY_VERSION = 9;
 
 const OPFS_DIR = "orreris-source-proxies";
 const INDEX_FILE = "index.json";
@@ -150,6 +163,29 @@ export async function getSourceProxy(
     const remaining = records.filter((item) => item.assetId !== assetId);
     recordsPromise = Promise.resolve(remaining);
     await writeIndex(handle.dir, remaining).catch(() => undefined);
+    return null;
+  }
+}
+
+/**
+ * DIAGNOSTIC: the proxy blob URL for an asset if one exists on disk, WITHOUT the byte-size/version
+ * guard `getSourceProxy` enforces — for the Source Viewer, which just wants to PLAY whatever proxy is
+ * persisted so a user can A/B it against the original (a stale/mismatched proxy is still worth seeing).
+ * Returns null when no proxy blob is stored. Never used by the render path.
+ */
+export async function getSourceProxyBlobUrl(assetId: string): Promise<{ url: string; record: SourceProxyRecord | null } | null> {
+  const handle = await getHandle();
+  if (!handle) return null;
+  const cached = urlCache.get(assetId);
+  const record = (await loadRecords(handle.dir)).find((item) => item.assetId === assetId) ?? null;
+  if (cached) return { url: cached, record };
+  try {
+    const fileHandle = await handle.dir.getFileHandle(blobName(assetId));
+    const file = await fileHandle.getFile();
+    const url = URL.createObjectURL(file);
+    urlCache.set(assetId, url);
+    return { url, record };
+  } catch {
     return null;
   }
 }

@@ -22,7 +22,7 @@ import { getAssetBlobStore } from "../../lib/asset-blob-store";
 import { createFrameProvider } from "../../export/source-decoder";
 import { MediaEncoder } from "../../export/video-encoder";
 import { markHotSpot } from "../../lib/perfDiagnostics";
-import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable } from "./sourceProxyStore";
+import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable, removeSourceProxy } from "./sourceProxyStore";
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 import type { SourceAsset } from "@orreris/shared";
 
@@ -37,7 +37,13 @@ import type { SourceAsset } from "@orreris/shared";
 // Bump SOURCE_PROXY_VERSION when touching ANY of these constants.
 const PROXY_LONG_EDGE = 1280;
 const PROXY_FPS = 60;
-const PROXY_KEYFRAME_S = 1;
+// Keyframe every N FRAMES (not seconds). The preview's WebCodecs pool decodes seek-on-demand and, when
+// it falls behind, can only "reset its lag" by jumping to a keyframe — so the max catch-up decode is one
+// GOP. A frame-count GOP keeps that ≤ N frames at ANY fps (30/60/120); the old 1-second GOP made it
+// fps × 1 frames (60 at 60fps), which the decoder couldn't grind in realtime → high-fps proxies froze.
+// 12 → keyframe every 0.4s@30 / 0.2s@60 / 0.1s@120; ~2–3× more keyframes than the 1s GOP (bigger file,
+// the standard edit-proxy tradeoff), catch-up stays a few ms so lag never reaches the 0.35s hold cutoff.
+const PROXY_KEYFRAME_EVERY_N_FRAMES = 12;
 const PROXY_BITS_PER_PIXEL_FRAME = 0.18;
 /** Below this the original is already cheap to decode — don't spend a transcode on it. */
 const MIN_SOURCE_BYTES = 12 * 1024 * 1024;
@@ -172,6 +178,58 @@ const inQueue = new Set<string>();
 const queue: Array<{ asset: SourceAsset; onReady: ReadyCallback }> = [];
 let draining = false;
 
+// Truncated / flaky remote downloads (notably the R2 `/storage` proxy cutting a stream short —
+// ERR_CONTENT_LENGTH_MISMATCH) are TRANSIENT. Surfaced as this error, drainQueue re-queues the asset
+// with backoff instead of settling it as a permanent "skipped" (which stranded the whole queue on flaky
+// media — the "queued 28, sources play heavy originals, playback freezes" report). After the cap it
+// settles as "failed" so the asset stops looping and the UI can show a real failure.
+class RetryableProxyFetchError extends Error {}
+const PROXY_FETCH_MAX_RETRIES = 3;
+const PROXY_FETCH_RETRY_BACKOFF_MS = 2000;
+const fetchRetries = new Map<string, number>();
+
+export type SourceProxyState = "building" | "queued" | "built" | "failed" | "skipped" | "none";
+
+/**
+ * Per-asset proxy state — the data primitive for UI feedback (a badge on the asset/clip tile telling
+ * the user a source is still building / failed / incomplete, so a frozen preview reads as "proxy not
+ * ready" instead of a silent hang) and for the frame-profiler's media-supply report. Derived purely
+ * from the live sets the engine already maintains — no new bookkeeping.
+ *   building — this asset is the active transcode right now.
+ *   queued   — waiting behind the active build.
+ *   built/failed/skipped — settled; the most-recent recorded outcome for this asset.
+ *   none     — never queued (small enough / not a video / not yet requested).
+ */
+export function getSourceProxyState(assetId: string): SourceProxyState {
+  const s = stats();
+  if (s.active === assetId) return "building";
+  if (inQueue.has(assetId)) return "queued";
+  if (settled.has(assetId)) {
+    for (let i = s.recent.length - 1; i >= 0; i -= 1) {
+      if (s.recent[i]!.assetId === assetId) return s.recent[i]!.outcome;
+    }
+    return "built";
+  }
+  return "none";
+}
+
+/**
+ * DIAGNOSTIC: force a fresh rebuild of one asset's proxy. Deletes the persisted blob and clears the
+ * per-session guards (`settled`/`inQueue`/`fetchRetries` + the recent record) so `ensureSourceProxy`
+ * treats the asset as brand new and re-transcodes it — used by the Source Viewer's "Rebuild proxy"
+ * control to re-run the recipe (and print the build log) for an asset whose proxy looks degraded.
+ * `onReady` fires once on success with the new proxy URL. Not used by any automatic path.
+ */
+export async function rebuildSourceProxy(asset: SourceAsset, onReady: ReadyCallback = () => undefined): Promise<void> {
+  await removeSourceProxy(asset.id).catch(() => undefined);
+  settled.delete(asset.id);
+  inQueue.delete(asset.id);
+  fetchRetries.delete(asset.id);
+  const s = stats();
+  s.recent = s.recent.filter((r) => r.assetId !== asset.id);
+  ensureSourceProxy(asset, onReady);
+}
+
 /**
  * Make sure `asset` has an ingest proxy: resolves an existing one immediately, otherwise queues a
  * background transcode. `onReady` fires at most once, only on success. Safe to call repeatedly
@@ -227,17 +285,40 @@ async function drainQueue(): Promise<void> {
       progressAssetId = item.asset.id;
       progressLastStep = -1;
       const started = performance.now();
+      let requeued = false;
       try {
         const url = await buildOne(item.asset);
         if (url) {
           record(item.asset.id, "built", performance.now() - started);
+          fetchRetries.delete(item.asset.id);
           item.onReady(item.asset.id, url);
         }
       } catch (error) {
-        record(item.asset.id, "failed", performance.now() - started, error instanceof Error ? error.message : String(error));
+        const attempts = (fetchRetries.get(item.asset.id) ?? 0) + 1;
+        if (error instanceof RetryableProxyFetchError && attempts <= PROXY_FETCH_MAX_RETRIES) {
+          // Transient (truncated download) — keep it inQueue (dedupes external re-requests) but out of
+          // the array until the backoff elapses, then re-add and restart the drain.
+          fetchRetries.set(item.asset.id, attempts);
+          record(item.asset.id, "failed", performance.now() - started, `${error.message} — retry ${attempts}/${PROXY_FETCH_MAX_RETRIES}`);
+          requeued = true;
+          setTimeout(() => {
+            if (settled.has(item.asset.id)) return; // superseded (e.g. built from local bytes since)
+            queue.push(item);
+            stats().queued = queue.length;
+            if (!draining) {
+              draining = true;
+              void drainQueue();
+            }
+          }, PROXY_FETCH_RETRY_BACKOFF_MS * attempts);
+        } else {
+          record(item.asset.id, "failed", performance.now() - started, error instanceof Error ? error.message : String(error));
+          fetchRetries.delete(item.asset.id);
+        }
       } finally {
-        settled.add(item.asset.id);
-        inQueue.delete(item.asset.id);
+        if (!requeued) {
+          settled.add(item.asset.id);
+          inQueue.delete(item.asset.id);
+        }
         stats().active = null;
         progressAssetId = null;
         if (queue.length === 0) {
@@ -277,8 +358,9 @@ async function buildOne(asset: SourceAsset): Promise<string | null> {
       if (!response.ok) throw new Error(`fetch ${response.status}`);
       blob = await response.blob();
     } catch (error) {
-      record(asset.id, "skipped", 0, `fetch failed: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
+      // A truncated / flaky download is transient — surface it as RETRYABLE so drainQueue re-queues it
+      // (with backoff) rather than permanently skipping the asset and stranding it on the heavy original.
+      throw new RetryableProxyFetchError(`fetch failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     sourceUrl = URL.createObjectURL(blob);
     revokeSourceUrl = true;
@@ -458,7 +540,7 @@ function transcodeInWorker(
           height,
           durationSeconds,
           maxFps: PROXY_FPS,
-          keyFrameIntervalSeconds: PROXY_KEYFRAME_S,
+          keyFrameEveryNFrames: PROXY_KEYFRAME_EVERY_N_FRAMES,
           bitsPerPixelFrame: PROXY_BITS_PER_PIXEL_FRAME,
           audio: audioPayload,
           suspended: buildSuspended,
@@ -492,7 +574,9 @@ async function transcodeOnMainThread(
     format: "mp4",
     // Sublinear fps scaling — same law as the worker path (recipe v7): 60fps ≈ √2× the 30fps size.
     videoBitrate: Math.round(width * height * fps * PROXY_BITS_PER_PIXEL_FRAME * Math.min(1, Math.sqrt(30 / fps))),
-    keyFrameIntervalSeconds: PROXY_KEYFRAME_S,
+    // Frame-based GOP (keep in sync with the worker path): N frames → N/fps seconds, so the keyframe
+    // cadence is fps-independent and high-fps proxies don't freeze the preview decoder.
+    keyFrameIntervalSeconds: PROXY_KEYFRAME_EVERY_N_FRAMES / fps,
     audio: audio ? { sampleRate: audio.sampleRate, channels: audio.channels } : undefined,
   });
   try {
