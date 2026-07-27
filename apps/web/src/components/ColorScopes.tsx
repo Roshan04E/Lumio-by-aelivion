@@ -31,10 +31,28 @@ export type ScopeLayout = "single" | "two" | "grid" | "column";
  * Trustworthy frame source: returns a top-origin RGBA downsample of the final composited frame at
  * (about) the requested size, or null when the compositor output isn't available this frame.
  */
+/**
+ * A frame source for the scopes. Returns null when it cannot produce a picture this instant, which
+ * is a normal condition, not an error: the isolating sources refuse to render while playing (the
+ * shared compositor belongs to playback then) and before the first composited frame.
+ *
+ * `label` names what was ACTUALLY measured. It is returned per-sample rather than passed in as a
+ * prop because the answer is only known at sample time — when an isolated source declines, the
+ * sampler falls back to the programme output, and a header still reading "Node: Blur1" over output
+ * pixels would be a scope lying about its own source. That is the one thing a measurement
+ * instrument may never do.
+ */
 export type ScopeFrameSampler = (
   targetW: number,
   targetH: number
-) => { data: Uint8ClampedArray; width: number; height: number } | null;
+) => {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+  label?: string;
+  /** True when the requested isolated source declined and this is the programme output instead. */
+  fellBack?: boolean;
+} | null;
 
 interface Props {
   /**
@@ -577,6 +595,8 @@ export function ColorScopes({
     loadStored(`orreris.scopes.${storageKey}.mode2`, ALL_MODES, "vectorscope")
   );
   const [approx, setApprox] = useState(false);
+  /** What the last sample actually measured, straight from the sampler — never inferred. */
+  const [source, setSource] = useState<{ label: string; fellBack: boolean } | null>(null);
   // Shared frame: sampled ONCE per tick and drawn by every pane (1–4 canvases).
   const frameRef = useRef<Frame | null>(null);
   const [frameVersion, setFrameVersion] = useState(0);
@@ -590,7 +610,10 @@ export function ColorScopes({
       let usedFallback = false;
       if (sampleSource) {
         const s = sampleSource(dims.w, dims.h);
-        if (s) frame = { data: s.data, w: s.width, h: s.height };
+        if (s) {
+          frame = { data: s.data, w: s.width, h: s.height };
+          setSource(s.label ? { label: s.label, fellBack: s.fellBack === true } : null);
+        }
       }
       if (!frame) {
         const container = containerRef.current;
@@ -696,6 +719,22 @@ export function ColorScopes({
         )}
       </div>
       <div className="color-scopes-footer">
+        {/* WHAT IS BEING MEASURED, always stated. Scopes that isolate a node look identical to scopes
+            reading the programme output — the numbers are the whole content — so the source has to be
+            on screen or the reading is unattributable. Marked when an isolated source declined and
+            this is output instead (it declines during playback by design). */}
+        {source ? (
+          <span
+            className={`color-scopes-source ${source.fellBack ? "is-fallback" : ""}`}
+            title={
+              source.fellBack
+                ? "The selected node cannot be isolated right now (it does not render during playback) — showing the programme output instead."
+                : `Measuring ${source.label}`
+            }
+          >
+            {source.label}
+          </span>
+        ) : null}
         <span className="color-scopes-label">Rec.709 SDR</span>
         {approx ? (
           <span className="color-scopes-approx" title="Sampling the DOM preview element, not the scene compositor output — values are approximate.">

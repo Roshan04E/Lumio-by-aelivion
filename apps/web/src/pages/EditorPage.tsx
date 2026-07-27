@@ -969,6 +969,15 @@ export function EditorPage() {
   // DOM `querySelector("canvas")`). Returns null when the scene compositor isn't active → ColorScopes
   // falls back to sampling the DOM preview element and flags itself "approx".
   const scopeSampleBufferRef = useRef<Uint8Array | null>(null);
+  /**
+   * AUTO-FOLLOW scope target, reported one-way by FlarexWorkspace when exactly one node is selected.
+   * A ref as well as state: the sampler is a stable `useCallback` driven by timers inside ColorScopes,
+   * so it must read the CURRENT target rather than close over the one that existed when it was built.
+   */
+  const [flarexScopeTarget, setFlarexScopeTarget] = useState<{ nodeId: string; label: string } | null>(null);
+  const flarexScopeTargetRef = useRef<{ nodeId: string; label: string } | null>(null);
+  flarexScopeTargetRef.current = flarexScopeTarget;
+  const scopeHostLayerIdRef = useRef<string | null>(null);
   const sampleScopeFrame = useCallback<ScopeFrameSampler>((w, h) => {
     const handle = proxyCaptureRef.current;
     if (!handle) return null;
@@ -976,13 +985,42 @@ export function EditorPage() {
     if (!scopeSampleBufferRef.current || scopeSampleBufferRef.current.byteLength < need) {
       scopeSampleBufferRef.current = new Uint8Array(need);
     }
-    const res = handle.readCompositeThumbnail(w, h, scopeSampleBufferRef.current);
-    if (!res) return null;
-    return {
+    const buffer = scopeSampleBufferRef.current;
+    const toFrame = (
+      res: { pixels: Uint8Array; width: number; height: number },
+      label: string,
+      fellBack: boolean
+    ) => ({
       data: new Uint8ClampedArray(res.pixels.buffer, res.pixels.byteOffset, res.width * res.height * 4),
       width: res.width,
-      height: res.height
-    };
+      height: res.height,
+      label,
+      fellBack
+    });
+
+    // ISOLATED NODE first, when the graph has a single node selected. This re-roots the comp at that
+    // node WITHOUT mutating the user's persisted view dot (renderFlarexNodeThumbnail's own contract),
+    // so measuring a node never moves what the viewer is showing.
+    const target = flarexScopeTargetRef.current;
+    const hostLayerId = scopeHostLayerIdRef.current;
+    if (target && hostLayerId) {
+      const node = handle.renderFlarexNodeThumbnail({
+        hostLayerId,
+        nodeId: target.nodeId,
+        targetWidth: w,
+        targetHeight: h,
+        buffer
+      });
+      if (node) return toFrame(node, `Node: ${target.label}`, false);
+      // Declined — it refuses while playing, before the first composited frame, and when the host
+      // clip is not on screen at the playhead. Fall back to the programme output and SAY SO rather
+      // than freezing on a stale node frame that would still be labelled as the node.
+      const out = handle.readCompositeThumbnail(w, h, buffer);
+      return out ? toFrame(out, "Output", true) : null;
+    }
+
+    const res = handle.readCompositeThumbnail(w, h, buffer);
+    return res ? toFrame(res, "Output", false) : null;
   }, []);
   const proxyGenLastReadyRef = useRef<{ id: string; ms: number; bytes: number } | null>(null);
   const proxyGenLastErrorRef = useRef<string | null>(null);
@@ -1567,6 +1605,8 @@ export function EditorPage() {
   // stay put after deselecting). Falls back to empty if that layer is gone.
   const inspectorLayer =
     selectedLayer ?? multiSelectPrimaryLayer ?? (selectedLayerIds.length === 0 ? layers.find((layer) => layer.id === lastInspectedLayerId) : undefined);
+  // The clip whose Flarex comp the node scopes isolate through — same layer FlarexWorkspace edits.
+  scopeHostLayerIdRef.current = inspectorLayer?.id ?? null;
   // Graph editor ghost curves: the OTHER selected clips (read-only, drawn faded under the primary).
   const graphGhostLayers = useMemo(
     () =>
@@ -8979,6 +9019,7 @@ export function EditorPage() {
                   onUpdateGraph={(nextGraph) => {
                     void updateGraph(nextGraph);
                   }}
+                  onScopeTargetChange={setFlarexScopeTarget}
                   timeSeconds={currentTime}
                   onSeek={setEditorCurrentTime}
                   isPlaying={isPlaying}

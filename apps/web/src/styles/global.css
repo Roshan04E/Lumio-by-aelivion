@@ -21625,6 +21625,32 @@ input.scrub-number:focus {
   color: rgba(255, 255, 255, 0.4);
 }
 
+/* What the scopes are measuring. Reads as a quiet identifier at rest — it is confirming the normal
+   case (the programme output) and should not compete with the trace. It goes amber only when an
+   isolated source was requested and could not be produced, because then the label and the user's
+   expectation disagree, and that is the one state they must notice. */
+.color-scopes-source {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 2px;
+  color: var(--nle-text-muted, #9fa6b2);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  max-width: 15ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+.color-scopes-source.is-fallback {
+  color: #ffcf87;
+  background: rgba(255, 190, 90, 0.14);
+  border-color: rgba(255, 190, 90, 0.3);
+}
+
 .color-scopes-approx {
   font-size: 9px;
   font-weight: 600;
