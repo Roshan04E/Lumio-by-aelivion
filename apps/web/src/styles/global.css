@@ -5959,6 +5959,13 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+/* Icon slot with no icon: keeps its grid column (so the dot/count/reset stay right-aligned — see
+   InspectorSection) while costing no width, by cancelling the header's own gap. */
+.editor-section-icon--empty {
+  width: 0;
+  margin-right: -7px;
+}
+
 .editor-section-dot {
   width: 6px;
   height: 6px;
@@ -17471,36 +17478,39 @@ input.scrub-number:focus {
   border-radius: 999px;
   cursor: crosshair;
   touch-action: none;
-  /* `background` (a desaturated hue ring → neutral center) is generated inline in
-     ColorWheels.tsx from the engine's hue math so the rim color matches the actual tint. */
+  /* `background` (a full-chroma hue ring masked to a near-black centre) is generated inline in
+     ColorWheels.tsx from the engine's hue math so the rim colour matches the actual tint.
+     No inner highlight/vignette here: the trackball reads as a flat disc with a dark bezel around
+     it, like Resolve's — the old inset glow + bottom shading is what made it look domed and washed. */
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-    inset 0 1px 1px rgba(255, 255, 255, 0.08),
-    inset 0 -8px 16px rgba(0, 0, 0, 0.45),
-    0 1px 3px rgba(0, 0, 0, 0.5);
+    0 0 0 1px rgba(0, 0, 0, 0.85),
+    0 0 0 2px rgba(255, 255, 255, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.55);
   transition: box-shadow 0.15s ease;
 }
 
-/* Faint crosshair so the pad reads as a balance reticle. */
+/* Full-diameter crosshair — the balance reticle you aim against. Spans nearly edge to edge (Resolve
+   draws it right across the ball); the old 14% inset made it read as a small cross floating in the
+   middle rather than as an axis. */
 .color-wheel-pad::before,
 .color-wheel-pad::after {
   content: "";
   position: absolute;
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.22);
   pointer-events: none;
 }
 
 .color-wheel-pad::before {
-  left: 14%;
-  right: 14%;
+  left: 6%;
+  right: 6%;
   top: 50%;
   height: 1px;
   transform: translateY(-0.5px);
 }
 
 .color-wheel-pad::after {
-  top: 14%;
-  bottom: 14%;
+  top: 6%;
+  bottom: 6%;
   left: 50%;
   width: 1px;
   transform: translateX(-0.5px);
@@ -17508,31 +17518,29 @@ input.scrub-number:focus {
 
 .color-wheel-pad:hover {
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
-    inset 0 1px 1px rgba(255, 255, 255, 0.1),
-    inset 0 -8px 16px rgba(0, 0, 0, 0.45),
-    0 1px 3px rgba(0, 0, 0, 0.5);
+    0 0 0 1px rgba(0, 0, 0, 0.85),
+    0 0 0 2px rgba(255, 255, 255, 0.14),
+    0 2px 8px rgba(0, 0, 0, 0.6);
 }
 
 .color-wheel-pad.is-edited {
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--nle-accent) 55%, transparent),
-    inset 0 -8px 16px rgba(0, 0, 0, 0.45),
-    0 0 0 1px color-mix(in srgb, var(--nle-accent) 25%, transparent),
-    0 1px 4px rgba(0, 0, 0, 0.5);
+    0 0 0 1px rgba(0, 0, 0, 0.85),
+    0 0 0 2px color-mix(in srgb, var(--nle-accent) 70%, transparent),
+    0 2px 8px rgba(0, 0, 0, 0.6);
 }
 
-/* Reticle handle: a white ring with a translucent core so the color shows through. */
+/* Handle: a small SOLID white dot, like Resolve's. It sits on a near-black interior now, so it no
+   longer needs to be a big translucent ring to stay visible — and a smaller handle is more precise. */
 .color-wheel-handle {
   position: absolute;
-  width: 15px;
-  height: 15px;
+  width: 9px;
+  height: 9px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-  border: 2px solid #ffffff;
+  background: #ffffff;
   box-shadow:
-    0 0 0 1.5px rgba(0, 0, 0, 0.65),
-    0 1px 4px rgba(0, 0, 0, 0.7);
+    0 0 0 1.5px rgba(0, 0, 0, 0.7),
+    0 1px 3px rgba(0, 0, 0, 0.8);
   transform: translate(-50%, -50%);
   pointer-events: none;
 }

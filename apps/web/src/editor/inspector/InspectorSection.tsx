@@ -49,7 +49,12 @@ export function InspectorSection({
         ) : (
           <span className="editor-section-chevron-spacer" aria-hidden="true" />
         )}
-        {icon ? <span className="editor-section-icon">{icon}</span> : null}
+        {/* The icon slot is ALWAYS rendered, empty or not. The header is a fixed grid
+            (`14px auto minmax(0,1fr) repeat(3,auto)`), so omitting the element shifted every later
+            child one column left — the label took the `auto` column and the "has edits" dot landed in
+            the flexible one, hugging the label instead of sitting top-right with the reset control.
+            Sections that pass an icon were unaffected, which is why it only showed on icon-less ones. */}
+        <span className={`editor-section-icon${icon ? "" : " editor-section-icon--empty"}`}>{icon}</span>
         <span className="editor-section-label">{title}</span>
         {active ? <span className="editor-section-dot" title="Has edits" /> : null}
         {typeof count === "number" ? <span className="editor-section-count">{count}</span> : null}

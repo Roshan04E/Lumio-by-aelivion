@@ -142,7 +142,11 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
         {sections.map((section) => (
           <InspectorSection
             key={section.id}
-            title={section.active ? `${section.label} ●` : section.label}
+            title={section.label}
+            // The shared "has edits" dot — top-right beside the reset, exactly as the clip inspector's
+            // Color sections show it. (It was appended to the TITLE string before, which put it next to
+            // the label and made the two panels disagree.)
+            active={section.active}
             collapsible
             defaultOpen={section.defaultOpen}
           >

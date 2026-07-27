@@ -45,15 +45,31 @@ function hsvCss(h: number, s: number, v: number): string {
 }
 
 const WHEEL_BACKGROUND = (() => {
-  const steps = 24;
+  // 48 stops, not 24: at full chroma the banding between stops is visible, and this is the one
+  // element in the panel a colorist stares at.
+  const steps = 48;
   const stops: string[] = [];
   for (let i = 0; i <= steps; i += 1) {
     const phi = (i / steps) * 360;
+    // Hue ORIENTATION is the engine's tint math, not a style choice — it is what makes dragging
+    // toward a color actually push that color. Only the chroma/falloff below is cosmetic.
     const hue = (90 - phi + 360) % 360;
-    stops.push(`${hsvCss(hue, 0.55, 0.82)} ${phi.toFixed(1)}deg`);
+    stops.push(`${hsvCss(hue, 1, 1)} ${phi.toFixed(1)}deg`);
   }
-  // Desaturated hue ring fading to a neutral center (matches the engine's tint hue).
-  return `radial-gradient(circle at center, #26272c 0%, rgba(38, 39, 44, 0.92) 26%, rgba(38, 39, 44, 0) 70%), conic-gradient(from 0deg, ${stops.join(", ")})`;
+  // FULL-chroma hue ring, revealed only near the rim by a dark radial mask over it — the Resolve
+  // trackball look: a near-black interior you can read a small handle against, with saturated colour
+  // banded at the outer edge where you actually aim. The previous version desaturated the ring itself
+  // (s=0.55, v=0.82) AND washed it out from 26%, which is what made the wheels look faded.
+  const mask = [
+    "#14161a 0%",
+    "#14161a 40%",
+    "rgba(20, 22, 26, 0.94) 58%",
+    "rgba(20, 22, 26, 0.72) 72%",
+    "rgba(20, 22, 26, 0.34) 85%",
+    "rgba(20, 22, 26, 0.06) 95%",
+    "rgba(20, 22, 26, 0) 100%",
+  ].join(", ");
+  return `radial-gradient(circle at center, ${mask}), conic-gradient(from 0deg, ${stops.join(", ")})`;
 })();
 
 function neutralWheels(): ColorWheelsValue {

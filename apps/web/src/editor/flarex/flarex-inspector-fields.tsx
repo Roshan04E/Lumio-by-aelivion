@@ -52,6 +52,7 @@ import {
 } from "@orreris/shared";
 import { ColorWheels } from "../../components/ColorWheels";
 import { CurveEditor } from "../../components/CurveEditor";
+import { effectSliderTone } from "../../components/effectSliderTone";
 import { HslSecondary } from "../../components/HslSecondary";
 import { HueSatCurves } from "../../components/HueSatCurves";
 import { LutFileImport } from "../../components/LutFileImport";
@@ -145,6 +146,23 @@ const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color",
 const POINT_LIST_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);
 
 const prettyLabel = (key: string): string => key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * Tone-lookup key for a node param. `effectSliderTone` is keyed on the EFFECT's own param names
+ * (`temperature`, `saturation`, …), which the atomic nodes already use verbatim; the unified Color
+ * node prefixes its sectioned params (`vignetteAmount`), so strip a known section prefix to reach the
+ * same name. Unprefixed keys pass straight through.
+ */
+const TONE_SECTION_PREFIXES = ["vignette", "grain", "lut", "look"];
+function sliderToneKey(key: string): string {
+  for (const prefix of TONE_SECTION_PREFIXES) {
+    if (key.startsWith(prefix) && key.length > prefix.length) {
+      const rest = key.slice(prefix.length);
+      return rest.charAt(0).toLowerCase() + rest.slice(1);
+    }
+  }
+  return key;
+}
 
 /** Leading label icon per param, so node rows read like the main inspector's Transform rows. Matched
  *  loosely by key substring with a neutral fallback so every row gets one. */
@@ -326,6 +344,13 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
       max,
       step,
       slider,
+      // Tonal track color — the SAME mapping the clip inspector's Color tab uses, so Temperature is a
+      // blue→amber ramp and Tint a green→magenta one on a node exactly as it is on a clip. It was
+      // missing here, which is the only reason node sliders read as plain grey next to the main
+      // panel's: `PropertyFieldList` has always routed a toned field to `EffectSliderControl`, the
+      // node adapter just never supplied a tone. Keys are shared (`exposure`, `saturation`, …)
+      // because the unified Color node deliberately reuses the effect's own param names.
+      tone: slider ? effectSliderTone(sliderToneKey(key)) : undefined,
       keyframe: f.keyframeFull,
       defaultValue: f.defaultValue,
       onChange: f.writeParam,
@@ -457,7 +482,9 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
       });
       continue;
     }
-    if (node.type === "lut" && key === "lut") {
+    // Gated on the PARAM, not just the node type: the unified Color node carries `lut`/`look` under the
+    // same names, and matching only the atomic node left it rendering a base64 blob in a text box.
+    if ((node.type === "lut" || node.type === "color") && key === "lut") {
       // Same .cube importer the clip inspector uses: the parsed LUT is stored base64 IN the param,
       // so the comp carries its own LUT bytes and an export never has to resolve a file path.
       const current = typeof node.params.lut === "string" ? (node.params.lut as string) : "";
@@ -470,7 +497,7 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
       });
       continue;
     }
-    if (node.type === "look" && key === "look") {
+    if ((node.type === "look" || node.type === "color") && key === "look") {
       const current = typeof node.params.look === "string" ? (node.params.look as string) : "";
       fields.push({
         kind: "enum",
@@ -641,9 +668,13 @@ export function buildFlarexColorNodeSections(args: BuildFlarexNodeFieldsArgs): F
       fields,
     });
   }
+  // Everything the stage sections did not claim — Enabled, the node label, and any param added to the
+  // def later — goes FIRST, not last. `__enabled` is pushed as the first field for every other node
+  // type, and partitioning it into a trailing bucket was what left it stranded at the bottom of the
+  // Color node while sitting at the top of every other one.
   const rest = all.filter((f) => !claimed.has(f.key));
   if (rest.length) {
-    sections.push({ id: "other", label: "Other", active: false, defaultOpen: true, fields: rest });
+    sections.unshift({ id: "node", label: "Node", active: false, defaultOpen: true, fields: rest });
   }
   return sections;
 }
