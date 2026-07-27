@@ -20,7 +20,7 @@
  *   4. `?flarexProxy=0` kill switch, matching the `?wcDecode=0|1` doctrine.
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FlarexCompProxyFrame, FlarexComp, TimelineComposition, TimelineLayer } from "@orreris/shared";
 import { acquirePreviewFrameProvider, type PreviewFrameLease } from "../../playback/preview-frame-pool";
 import { getLivePlaybackTime } from "../../playback/playback-clock";
@@ -69,8 +69,20 @@ export interface UseFlarexCompProxiesInput {
 export interface UseFlarexCompProxiesResult {
   /** Read live by the draw loop; empty when nothing is substituted. */
   framesRef: React.MutableRefObject<Record<string, FlarexCompProxyFrame>>;
-  /** Comp ids currently played from a proxy — for the clip badge (S3) and diagnostics. */
-  activeCompIds: string[];
+  /**
+   * Comps actually PRESENTING proxy frames right now — reactive, so the caller can stop mounting their
+   * asset-source loaders.
+   *
+   * This is load-bearing, not diagnostics. Short-circuiting the compiler does NOT stop the comp's
+   * MediaIn decoders: the virtual loaders are still built and still mount a decoder each, so a
+   * substituted comp decodes N source streams PLUS the proxy — strictly more work than not proxying at
+   * all (user report: 75fps → 35-40fps). The whole win depends on those loaders going away.
+   *
+   * Deliberately flipped by the FIRST PRESENTED FRAME rather than by eligibility: between acquiring a
+   * decoder and its first frame there is nothing to draw, and unmounting the loaders early would make
+   * every MediaIn soft-degrade to the host clip for that window — a visible wrong picture.
+   */
+  servingCompIds: readonly string[];
   /** Pump the decoders for `timeSeconds`. Call once per preview frame. */
   requestFrames: (timeSeconds: number) => void;
 }
@@ -79,7 +91,18 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
   const { composition, flarexComps, zOrderedLayers, enabled, isPlaying, requestRedraw } = input;
   const framesRef = useRef<Record<string, FlarexCompProxyFrame>>({});
   const activeRef = useRef<Map<string, ActiveProxy>>(new Map());
-  const activeIdsRef = useRef<string[]>([]);
+  const [servingCompIds, setServingCompIds] = useState<readonly string[]>([]);
+  // `requestFrames` is ref-frozen at mount, so transport state has to reach it through a ref.
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+
+  const setServing = useCallback((compId: string, serving: boolean) => {
+    setServingCompIds((current) => {
+      const has = current.includes(compId);
+      if (has === serving) return current; // identity-stable: no re-render, no loader churn
+      return serving ? [...current, compId] : current.filter((id) => id !== compId);
+    });
+  }, []);
 
   // Which comps are ELIGIBLE right now, and under which key. Recomputed whenever the comps, the
   // timeline or the composition change — which is exactly when a key can go stale, so a dirty comp
@@ -115,6 +138,8 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       if (next && next.key === active.key) continue;
       activeRef.current.delete(compId);
       delete framesRef.current[compId];
+      // Loaders must come back BEFORE the proxy stops drawing, or the comp has no sources for a frame.
+      setServing(compId, false);
       active.lease.release();
       URL.revokeObjectURL(active.objectUrl);
     }
@@ -158,11 +183,10 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       })();
     }
 
-    activeIdsRef.current = eligible.map((entry) => entry.compId);
     return () => {
       cancelled = true;
     };
-  }, [eligible, requestRedraw]);
+  }, [eligible, requestRedraw, setServing]);
 
   // Full teardown on unmount — leases pin real decoder sessions and object URLs pin the blobs.
   useEffect(
@@ -173,6 +197,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       }
       activeRef.current.clear();
       framesRef.current = {};
+      setServingCompIds([]);
     },
     []
   );
@@ -187,6 +212,8 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       if (localT < 0 || localT >= active.hostDurationSeconds) {
         if (framesRef.current[active.compId]) {
           delete framesRef.current[active.compId];
+          active.version = 0; // next re-entry counts as a first frame again
+          setServing(active.compId, false);
           requestRedraw();
         }
         continue;
@@ -204,7 +231,12 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
             sourceHeight: provider.height,
             sourceVersion: active.version,
           };
-          requestRedraw();
+          // First frame for this comp → its asset-source loaders can stop decoding (see servingCompIds).
+          if (active.version === 1) setServing(active.compId, true);
+          // While PLAYING the scene already recomposites every frame, so asking for another one here is
+          // a duplicate composite per decoded frame — real GPU cost on exactly the path we are trying to
+          // make cheaper. Paused, this redraw IS what puts the frame on screen.
+          if (!isPlayingRef.current) requestRedraw();
         })
         .catch(() => {
           active.busy = false;
@@ -236,5 +268,5 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
     return () => window.cancelAnimationFrame(raf);
   }, [isPlaying, eligible, requestFrames]);
 
-  return { framesRef, activeCompIds: activeIdsRef.current, requestFrames };
+  return { framesRef, servingCompIds, requestFrames };
 }

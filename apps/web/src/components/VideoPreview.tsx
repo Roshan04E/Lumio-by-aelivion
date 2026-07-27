@@ -1212,18 +1212,6 @@ function VideoPreviewImpl({
     );
   }, [graph.flarexComps, renderedLayerEntries, resolvedAssets]);
 
-  /**
-   * Loaders for comps currently PLAYED FROM A PROXY are dropped — this is what makes the proxy a win.
-   * Short-circuiting the compiler does not stop these decoders: without this, a substituted comp decodes
-   * every MediaIn source PLUS the proxy, which is strictly more work than not proxying at all (user
-   * report: 75fps → 35-40fps). Keyed off `flarexVirtualLayerId`'s `flarexsrc:<compId>:<nodeId>` form.
-   * Identity-stable when nothing is served, so the non-proxy path allocates nothing new.
-   */
-  const activeFlarexVirtualLayers = useMemo(() => {
-    if (proxyServedCompIds.length === 0) return flarexVirtualLayers;
-    const served = new Set(proxyServedCompIds);
-    return flarexVirtualLayers.filter((vlayer) => !served.has(vlayer.id.split(":")[1] ?? ""));
-  }, [flarexVirtualLayers, proxyServedCompIds]);
 
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
   // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
@@ -1246,6 +1234,19 @@ function VideoPreviewImpl({
     if (isPlaying) return;
     requestFlarexProxyFrames(currentTime);
   }, [requestFlarexProxyFrames, currentTime, isPlaying]);
+
+  /**
+   * Loaders for comps currently PLAYED FROM A PROXY are dropped — this is what makes the proxy a win.
+   * Short-circuiting the compiler does NOT stop these decoders: without this a substituted comp decodes
+   * every MediaIn source PLUS the proxy, which is strictly more work than not proxying at all (user
+   * report: 75fps → 35-40fps). Keyed off `flarexVirtualLayerId`'s `flarexsrc:<compId>:<nodeId>` form.
+   * Identity-stable when nothing is served, so the non-proxy path allocates nothing new.
+   */
+  const activeFlarexVirtualLayers = useMemo(() => {
+    if (proxyServedCompIds.length === 0) return flarexVirtualLayers;
+    const served = new Set(proxyServedCompIds);
+    return flarexVirtualLayers.filter((vlayer) => !served.has(vlayer.id.split(":")[1] ?? ""));
+  }, [flarexVirtualLayers, proxyServedCompIds]);
 
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm
