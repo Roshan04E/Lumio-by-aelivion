@@ -898,6 +898,34 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         return { kind: "image", draw: cloneImage(ctx.hostSourceDraw) };
       }
 
+      // Generators (Text+ / Background) — backed by a virtual TEXT/SHAPE layer that the renderers
+      // rasterize, pulled through the SAME `resolveSourceDraw` seam as an asset-source MediaIn (see
+      // `virtual-layers.ts`). No resolver / no backing layer ⇒ the node produces NOTHING (transparent),
+      // so a downstream merge simply keeps its background rather than showing a stand-in.
+      //
+      // The virtual layer is built NEUTRAL (centred, opaque) and placement is applied HERE, because
+      // this is the only place with a time to sample: `num()` is keyframe-aware, so Text x/y and
+      // Background opacity animate. Writing straight onto the resolved layer draw's own transform
+      // costs no extra nest — the generator is always a bare `SceneLayerDraw`.
+      case "text":
+      case "background": {
+        if (!ctx.resolveSourceDraw) return null;
+        frameProfiler.bump("compile.resolveSourceCalls");
+        const resolved = frameProfiler.measure("compile.resolveSource", () => ctx.resolveSourceDraw!(node.id, ""));
+        if (!resolved || resolved === "ended") return null;
+        const draw = cloneImage(resolved);
+        if (!isGroup(draw)) {
+          const opacity = node.type === "background" ? clamp01(num(node, "opacity", 1)) * 100 : draw.transform.opacity;
+          draw.transform = {
+            ...draw.transform,
+            // Node x/y are comp FRACTIONS; the composite transform takes percent-of-comp.
+            ...(node.type === "text" ? { x: clamp01(num(node, "x", 0.5)) * 100, y: clamp01(num(node, "y", 0.5)) * 100 } : {}),
+            opacity,
+          };
+        }
+        return { kind: "image", draw };
+      }
+
       case "mediaOut":
         return inputValue(node, "in");
 
@@ -1138,7 +1166,6 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       // yet lowered — they pass through so a saved graph containing them still renders.
       case "aiMatte":
         return null;
-      case "text":
       case "tracker":
         return passthrough(node);
 

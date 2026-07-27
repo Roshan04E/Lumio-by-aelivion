@@ -48,6 +48,7 @@ export type FlarexNodeType =
   | "chromaKey"
   | "lumaKey"
   | "text"
+  | "background"
   | "aiMatte"
   | "tracker"
   | "backdrop"
@@ -85,6 +86,7 @@ export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "chromaKey",
   "lumaKey",
   "text",
+  "background",
   "aiMatte",
   "tracker",
   "backdrop",

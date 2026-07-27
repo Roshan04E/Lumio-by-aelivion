@@ -227,6 +227,13 @@ const GLYPHS: Record<FlarexNodeType, ReactElement> = {
 
   // ── Generator ────────────────────────────────────────────────────────────
   text: <path d="M3.5 4h9M3.5 4V6M12.5 4V6M8 4v9M6.2 13h3.6" />,
+  // A filled plate — the solid a comp is built on top of.
+  background: (
+    <>
+      <rect x="2.5" y="3" width="11" height="10" rx="1" fill="currentColor" stroke="none" opacity="0.55" />
+      <rect x="2.5" y="3" width="11" height="10" rx="1" />
+    </>
+  ),
 
   // ── AI / tracking ────────────────────────────────────────────────────────
   aiMatte: (

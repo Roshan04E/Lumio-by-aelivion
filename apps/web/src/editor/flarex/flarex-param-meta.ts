@@ -86,8 +86,10 @@ export const FLAREX_PARAM_RANGES: Record<string, [number, number, number]> = {
   "polygonMask.feather": [0, 1, 0.01],
   "bezierMask.feather": [0, 1, 0.01],
   "text.fontSize": [1, 400, 1],
+  "text.fontWeight": [100, 900, 100],
   "text.x": [0, 1, 0.01],
   "text.y": [0, 1, 0.01],
+  "background.opacity": [0, 1, 0.01],
   "backdrop.w": [80, 4000, 1],
   "backdrop.h": [60, 4000, 1],
 };

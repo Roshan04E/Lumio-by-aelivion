@@ -82,6 +82,7 @@ const ENUMS: Record<string, readonly string[]> = {
   "channelBoolean.green": flarexChannelSources,
   "channelBoolean.blue": flarexChannelSources,
   "channelBoolean.alpha": flarexChannelSources,
+  "text.align": ["left", "center", "right"],
 };
 
 /**
@@ -97,7 +98,7 @@ const PAYLOAD_EDITORS: Record<string, (value: string, onChange: (json: string) =
   "hslQualifier.secondary": (value, onChange) => <HslSecondary value={value} onChange={onChange} />,
 };
 
-const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color"]);
+const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color", "background.color"]);
 /** polygonMask/bezierMask `points` — a structured row-per-point editor (the documented fallback for the
  *  on-viewer SVG overlay), rendered as a custom field just like the clip-effect schema's curve editors. */
 const POINT_LIST_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);

@@ -29,7 +29,12 @@ import {
   wouldCreateFlarexCycle,
 } from "./registry";
 import { createFlarexNode, flarexNodeDefs, parseFlarexNodeParams } from "./node-defs";
-import { collectFlarexVirtualLayers, flarexVirtualLayerId, isolateFlarexHostComposition } from "./virtual-layers";
+import {
+  collectFlarexVirtualLayers,
+  flarexVirtualLayerId,
+  isFlarexGeneratorVirtualLayer,
+  isolateFlarexHostComposition,
+} from "./virtual-layers";
 import { CREATIVE_LOOK_NAMES } from "../color/looks";
 import type { FlarexComp, FlarexNodeType } from "./types";
 import type { Mask, ProjectGraph, TimelineComposition, TimelineLayer } from "../types";
@@ -778,6 +783,79 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   const strip = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" ? undefined : val));
   const detSpecs: ChainSpec[] = [["colorWheels", { wheels: WHEELS }], ["colorCorrect", { exposure: 25 }]];
   check("P1: coalesced lowering is deterministic", strip(chain("det", detSpecs)) === strip(chain("det", detSpecs)));
+}
+
+// --- Generator nodes (Text+ / Background) ----------------------------------
+{
+  // A generator is backed by a virtual TEXT/SHAPE layer that the renderers rasterize, pulled through
+  // the SAME `resolveSourceDraw` seam as an asset-source MediaIn.
+  const host: TimelineLayer = {
+    id: "host", trackId: "t1", type: "video", name: "host", startSeconds: 4, durationSeconds: 6,
+    assetId: "asset_vid", flarexCompId: "gc",
+  } as unknown as TimelineLayer;
+
+  const comp = createFlarexComp("gc", "Generators");
+  const text = createFlarexNode("text", "txt");
+  text.params = { ...text.params, content: "Hello", fontSize: 120, color: "#ff0000", align: "left", x: 0.25, y: 0.75 };
+  const bg = createFlarexNode("background", "bgn");
+  bg.params = { ...bg.params, color: "#123456", opacity: 0.5 };
+  comp.nodes[text.id] = text;
+  comp.nodes[bg.id] = bg;
+
+  const virtuals = collectFlarexVirtualLayers([host], { gc: comp }, () => null);
+  check("generators produce virtual layers with no asset lookup", virtuals.length === 2);
+  const textLayer = virtuals.find((l) => l.id === flarexVirtualLayerId("gc", "txt"));
+  const bgLayer = virtuals.find((l) => l.id === flarexVirtualLayerId("gc", "bgn"));
+  check("Text+ is backed by a TEXT layer carrying its content", textLayer?.type === "text" && textLayer?.text === "Hello");
+  check("Text+ carries font + colour + align to the rasterizer", textLayer?.fontSize === 120 && textLayer?.color === "#ff0000" && textLayer?.textAlign === "left");
+  check("Background is backed by a comp-filling SHAPE layer", bgLayer?.type === "shape" && bgLayer?.widthPercent === 100 && bgLayer?.heightPercent === 100 && bgLayer?.color === "#123456");
+  // Placement/opacity must NOT be baked onto the layer — the compiler applies them, keyframe-aware.
+  check("generator layers stay transform-neutral (placement is the compiler's job)",
+    textLayer?.transform?.position.x === 50 && textLayer?.transform?.position.y === 50 && bgLayer?.transform?.opacity === 100);
+  // A generator has no media of its own, so it spans the whole host clip and never "ends".
+  check("generator layers span the host clip", textLayer?.startSeconds === 4 && textLayer?.durationSeconds === 6);
+  // The mount guard: callers that attach decoders must skip these.
+  check("generator layers are flagged as rasterized, not decoded",
+    isFlarexGeneratorVirtualLayer(textLayer!) && isFlarexGeneratorVirtualLayer(bgLayer!));
+
+  // Lowering: Background under Text through a Merge, with the generators resolved.
+  const merge = createFlarexNode("merge", "mrg");
+  comp.nodes[merge.id] = merge;
+  comp.edges = [
+    { id: "e1", from: { nodeId: "bgn", socket: "out" }, to: { nodeId: "mrg", socket: "bg" } },
+    { id: "e2", from: { nodeId: "txt", socket: "out" }, to: { nodeId: "mrg", socket: "fg" } },
+    { id: "e3", from: { nodeId: "mrg", socket: "out" }, to: { nodeId: "gc_out", socket: "in" } },
+  ];
+  const resolved = compileFlarexComp(comp, {
+    ...lowerCtx(),
+    resolveSourceDraw: (nodeId) => ({ ...hostDraw(), debugLayerId: nodeId }),
+  });
+  check("Text+ over Background lowers to a merge group", isGroupDraw(resolved!) && resolved!.children.length === 2);
+  if (isGroupDraw(resolved)) {
+    const bgDraw = resolved.children[0] as SceneLayerDraw;
+    const txtDraw = resolved.children[1] as SceneLayerDraw;
+    check("each generator pulls ITS OWN virtual layer", bgDraw.debugLayerId === "bgn" && txtDraw.debugLayerId === "txt");
+    // x/y are comp fractions; the composite quad takes percent.
+    check("Text+ placement is applied to the composite quad", txtDraw.transform.x === 25 && txtDraw.transform.y === 75);
+    check("Background opacity is applied to the composite quad", bgDraw.transform.opacity === 50);
+    // Free by construction: the generator is a bare layer draw, so placement opens no nest.
+    check("generator placement costs no extra nest", groupDepth(resolved) === 1);
+  }
+
+  // An unresolved generator produces NOTHING — it must never fall back to the host clip the way an
+  // asset-source MediaIn does (a Text node that showed the footage instead of the text would be worse
+  // than a missing title). With only the Background resolving, the merge keeps just the background.
+  const halfResolved = compileFlarexComp(comp, {
+    ...lowerCtx(),
+    resolveSourceDraw: (nodeId) => (nodeId === "bgn" ? { ...hostDraw(), debugLayerId: "bgn" } : null),
+  });
+  check("an unresolved generator drops out of the merge (never the host clip)",
+    Boolean(halfResolved) && !isGroupDraw(halfResolved) && (halfResolved as SceneLayerDraw).debugLayerId === "bgn");
+
+  // With NOTHING resolvable the graph yields no image at all → null, the compiler's documented
+  // soft-degrade (the caller then draws the plain clip, so a broken comp never blacks out an export).
+  check("a wholly unresolved generator comp degrades to null, not to a host draw",
+    compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: () => null }) === null);
 }
 
 // --- Builtin-wrapping filter nodes -----------------------------------------

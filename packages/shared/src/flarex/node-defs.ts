@@ -469,11 +469,28 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
       content: z.string().default("Text"),
       fontFamily: z.string().default("Inter"),
       fontSize: num(96, 1, 800),
+      fontWeight: num(700, 100, 900),
       color: z.string().default("#ffffff"),
+      align: z.enum(["left", "center", "right"]).default("center"),
       x: num(0.5, 0, 1),
       y: num(0.5, 0, 1),
     }).strict(),
-    keyframeable: ["fontSize", "x", "y"],
+    // Only PLACEMENT animates. x/y are applied by the compiler onto the composite quad, so they
+    // animate for free; `fontSize` cannot — it changes the rasterized glyphs, and the raster is built
+    // once per content change (not per frame) by the shared text rasterizer.
+    keyframeable: ["x", "y"],
+    phase: 1,
+  },
+  background: {
+    label: "Background",
+    group: "generator",
+    inputs: [],
+    outputs: OUT,
+    // A comp-filling solid, backed by a virtual `shape` layer — so it rasterizes ONCE and is reused by
+    // version (a static background never re-uploads). SOLID only: the shared shape rasterizer fills
+    // with a plain colour and has no gradient path.
+    params: z.object({ color: z.string().default("#000000"), opacity: num(1, 0, 1) }).strict(),
+    keyframeable: ["opacity"],
     phase: 1,
   },
   aiMatte: {
@@ -562,6 +579,7 @@ const SUBCATEGORIES: Record<FlarexNodeType, string> = {
   chromaKey: "Keyer",
   lumaKey: "Keyer",
   text: "Text",
+  background: "Solid",
   aiMatte: "AI",
   tracker: "Track",
   backdrop: "Layout",
