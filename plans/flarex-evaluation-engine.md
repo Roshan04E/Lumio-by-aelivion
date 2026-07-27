@@ -142,6 +142,20 @@ materialized node matches its folded twin; (b) a cache hit is byte-identical to 
 (`brightnessContrast`/`colorCurves`/`sharpen`/chroma/luma) becomes ADR-010 dependency/capability
 declarations — the evaluator must not read node ids.
 
+> **Slice 2 STATUS: COMPLETE (2026-07-26).** Commits 1, 2, 3a, 3b, 3c. See architecture.md for the full
+> write-up. Two defects were found in the already-committed 3b while closing it: a stale-artifact bug
+> (the cache identity had no source-content term → a fanned-out `MediaIn` froze permanently) and the
+> known unbounded VRAM growth. Both fixed in 3c.
+>
+> **VERIFICATION DOCTRINE — applies to every remaining slice.** `render:compare:pixels` renders ONE
+> frame per fixture. It is structurally incapable of validating anything stateful across frames, which
+> is exactly what a cache, an RTT pool, or an async node's result memo is. That blindness is why 3b's
+> staleness shipped past all 8 Flarex fixtures. **Any slice that adds cross-frame state must extend
+> `flarex:cache-gate` (warm-vs-cold sequence comparison), not just add another single-frame fixture.**
+> And a reuse mechanism must assert that it actually reuses — a cache that never hits is trivially
+> parity-clean and completely worthless, so parity alone is not a passing bar. Slice 3's `node+inputsHash`
+> memo and Slice 4's thumbnail RTTs both land squarely in this category.
+
 ### Slice 3 — Async node protocol
 Node needing async work (aiMatte ML seg, tracker solve): return `pending` sentinel + soft-degrade
 (MediaIn pattern), schedule keyed by `node+inputsHash` via existing `tool-runner`/`artifact-store`,
@@ -149,6 +163,38 @@ cache result as **deterministic artifact data** (`MaskSequenceArtifactData`,
 `TrackingPathArtifactData` already in `shared/masks.ts`), re-lower when ready. Result is data that
 lowers to existing primitives → export re-derives it → parity preserved. *Ships:* aiMatte + tracker
 produce real output end-to-end.
+
+> **Slice 4 STATUS (2026-07-27): steps 1–1.5 landed; step 2 BLOCKED ON A DESIGN DECISION.**
+> `previewRootNodeId` on `FlarexLowerCtx` is the enabling primitive — a RUNTIME re-root that wins over the
+> persisted view dot without mutating it, so a thumbnail pass can never move the user's viewer (3 assertions
+> incl. the dangling-root fallback). It is now also plumbed through `buildSceneDraws` as
+> `flarexPreviewRootNodeId`, so a thumbnail pass can drive the real draw-build path.
+>
+> **⚠️ The original plan's "own small offscreen compositor" is IMPOSSIBLE — verified, not assumed.**
+> Single-context preview (default since 2026-07-07) grades each media layer into a `RenderTarget` **on the
+> scene compositor's own WebGL2 context** (`ScenePreviewCanvas` `gradeMediaInContext`, ~L571) and hands it
+> to `buildSceneDraws` as a `SceneTextureSource`. A GL texture cannot be sampled by a second context, so a
+> standalone thumbnail compositor would have no media to draw — it would render empty comps.
+>
+> **Therefore thumbnails MUST render on `ScenePreviewCanvas`'s existing compositor**, which is the
+> performance-critical path with a long flicker/black-frame regression history (tracker playback-preview
+> v19–v28 are almost entirely that). That raises the risk profile enough that it should not be built
+> unsupervised. Recommended shape when picked up: an ADDITIVE `SceneCompositor` method that renders a spec
+> into an internal `RenderTarget` at thumbnail size and reads it back — never touching `renderFrameCore`'s
+> canvas/present path, so the visible frame cannot be disturbed. Do NOT resize the visible canvas per
+> thumbnail (backing-store thrash + flicker risk).
+>
+> *Step 3 — canvas UI*: `FlarexNodeCanvas` is a 2D canvas, so drawing a thumbnail is one `drawImage` into
+> the node body (see the label/view-dot block ~L390). That half is genuinely easy.
+>
+> **Non-negotiable constraints — this feature is the most likely thing to break the resource claim.**
+> N visible nodes means N extra compiles + renders. Therefore: (a) **never run while playing** — thumbnails
+> are a paused-authoring affordance, and competing with playback is exactly the trade this product exists to
+> refuse; (b) idle-scheduled, at most one node per tick, so a refresh never lands inside a frame budget;
+> (c) only VISIBLE nodes; (d) bounded bitmap cache, keyed on `comp.version + node + time`, bitmaps closed on
+> evict. Force materialization via `materializeNodeIds` (it bypasses the cost gate by design) so thumbnails
+> reuse the content cache instead of re-rendering subtrees. **Measure with `flarex:perf` before and after —
+> that harness now exists precisely so this feature cannot regress playback unnoticed.**
 
 ### Slice 4 — Node previews (roadmap "viewer overlays")
 With 1–2, per-node thumbnail is cheap: root compile at each visible node, render its materialized
