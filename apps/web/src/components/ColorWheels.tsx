@@ -109,20 +109,25 @@ function hueConic(s: number, v: number): string {
 export const WHEEL_RING = hueConic(1, 1);
 
 /**
- * THE FIELD — the disc inside the ring. Layers, top-most first:
+ * THE FIELD — the disc inside the ring. Layers, top-most first. Each exists for one reason:
  *
- *   1 grain     dither; CSS gradients band badly across a large dark low-chroma area
- *   2 gap       the dark groove that divides field from ring, so the ring is an OBJECT
- *   3 scrim     neutral fade toward the centre — chroma rises with radius
- *   4 hue       conic at REDUCED VALUE: dark but still saturated
+ *   1 GRAIN      Dither. CSS gradients quantize across a large dark low-chroma area and the banding
+ *                rings that produces are the loudest "web gradient" artefact on the control.
+ *   2 GAP        A dark groove at the field's edge. Without a break, a ring is just the place a
+ *                gradient got brighter; with one, it is an object sitting around the disc.
+ *   3 RIM SHADE  Darkens the field's outer fifth. The ring reads as a ring because of the LUMINANCE
+ *                STEP at its inner edge — so the field must arrive at the gap DARK. Without this the
+ *                field was already bright by the time it met the ring and the step was invisible,
+ *                which is why the ring kept failing to register no matter how vivid it was made.
+ *   4 SCRIM      Neutral toward the centre: chroma rises with radius, so small corrections near
+ *                neutral stay readable and the wheel reads as deviation-from-neutral, not as a gamut.
+ *   5 HUE        Conic at REDUCED VALUE — dark but saturated (deep red, deep green). This is the
+ *                structural point: dark-and-saturated is a low-value conic. Greying down a bright
+ *                conic desaturates it while leaving it bright, which is pastel — a colour picker.
  *
- * Layer 4 is the fix. The field's hues must be dark AND saturated (deep red, deep green), which is a
- * low-VALUE conic — not a bright conic greyed down, which is what produces pastel. The ring keeps
- * full value on its own element, so the two can differ.
+ * The ring is a SEPARATE element at full value (see WHEEL_RING); one conic cannot be both.
  */
 const WHEEL_BACKGROUND = (() => {
-  // Neutral centre → chroma toward the edge. Only lightly opaque at the rim, so the field arrives at
-  // the gap already saturated and the ring is a step up in BRIGHTNESS rather than in colour.
   const SCRIM = "42, 45, 52";
   const scrim = [
     `rgba(${SCRIM}, 0.9) 0%`,
@@ -136,19 +141,28 @@ const WHEEL_BACKGROUND = (() => {
     `rgba(${SCRIM}, 0) 92%`,
   ].join(", ");
 
-  // The groove. Thin and dark, sitting just inside where the ring element begins.
+  // 3 · RIM SHADE — the luminance step the ring is read against.
+  const rimShade = [
+    "transparent 0 62%",
+    "rgba(8, 9, 12, 0.16) 76%",
+    "rgba(8, 9, 12, 0.4) 86%",
+    "rgba(8, 9, 12, 0.46) 89%",
+    "transparent 91.5%",
+  ].join(", ");
+
+  // 2 · GAP — the groove, immediately inside where the ring element begins.
   const gap = [
-    "transparent 0 87%",
-    "rgba(7, 8, 10, 0.66) 89%",
-    "rgba(7, 8, 10, 0.66) 90.5%",
-    "transparent 92%",
+    "transparent 0 87.5%",
+    "rgba(5, 6, 8, 0.88) 89.2%",
+    "rgba(5, 6, 8, 0.88) 90.4%",
+    "transparent 91.5%",
   ].join(", ");
 
   return [
     `${WHEEL_GRAIN} 0 0 / 90px 90px repeat`,
     `radial-gradient(circle at center, ${gap})`,
+    `radial-gradient(circle at center, ${rimShade})`,
     `radial-gradient(circle at center, ${scrim})`,
-    // Dark, saturated — NOT bright-and-greyed.
     hueConic(0.95, 0.62),
   ].join(", ");
 })();

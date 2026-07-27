@@ -147,6 +147,9 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
             // Color sections show it. (It was appended to the TITLE string before, which put it next to
             // the label and made the two panels disagree.)
             active={section.active}
+            // Per-stage reset, beside the dot — the same affordance and the same position as the clip
+            // inspector's Colour sections. Its absence here was the last place the two panels disagreed.
+            onReset={section.onReset}
             collapsible
             defaultOpen={section.defaultOpen}
           >

@@ -637,6 +637,10 @@ export interface FlarexColorSection {
   active: boolean;
   defaultOpen: boolean;
   fields: PropertyField[];
+  /** Reset this stage's params to their schema defaults — the twin of the clip inspector's per-section
+   *  reset, which sits beside the dot in the header. Absent on the identity group (Enabled/Label are
+   *  not a "stage" and resetting them is not what that control means). */
+  onReset?: (() => void) | undefined;
 }
 
 /**
@@ -653,9 +657,24 @@ export interface FlarexColorSection {
  */
 export function buildFlarexColorNodeSections(args: BuildFlarexNodeFieldsArgs): FlarexColorSection[] {
   const all = buildFlarexNodeFields(args);
-  const params = args.node.params;
+  const { node, onUpdateComp } = args;
+  const params = node.params;
+  const defaults = parseFlarexNodeParams(node.type, {});
   const claimed = new Set<string>();
   const sections: FlarexColorSection[] = [];
+  // Reset a stage: every param in it back to its SCHEMA default, in one commit (one undo step for
+  // "reset Curves", not one per param). Keyframes on those params are deliberately left alone —
+  // clearing an animation is a bigger action than resetting a value, and the keyframe row owns it.
+  const resetParams = (keys: string[]) => () =>
+    onUpdateComp((current) => {
+      const target = current.nodes[node.id];
+      if (!target) return current;
+      const nextParams = { ...target.params };
+      for (const key of keys) {
+        if (key in defaults) nextParams[key] = defaults[key] as string | number | boolean;
+      }
+      return { ...current, nodes: { ...current.nodes, [node.id]: { ...target, params: nextParams } } };
+    });
   for (const spec of COLOR_NODE_SECTIONS) {
     const fields = spec.params.map((key) => all.find((f) => f.key === key)).filter((f): f is PropertyField => Boolean(f));
     for (const field of fields) claimed.add(field.key);
@@ -666,6 +685,7 @@ export function buildFlarexColorNodeSections(args: BuildFlarexNodeFieldsArgs): F
       active: colorSectionActive(params, spec.params),
       defaultOpen: spec.open ?? false,
       fields,
+      onReset: resetParams(spec.params),
     });
   }
   // Everything the stage sections did not claim — Enabled, the node label, and any param added to the

@@ -17494,9 +17494,10 @@ input.scrub-number:focus {
 .color-wheels-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  /* The wheels are the only objects here, so the gap is what groups them. Back down now that the
-     housing (which drew outside the layout box and needed clearance) is gone. */
-  gap: 16px;
+  /* DENSITY. Every reference tool packs its controls tightly — density is itself a professional cue,
+     and the airy spacing an earlier pass introduced is what reads as a web settings panel. Just wide
+     enough to clear two 6px bezels and separate the columns. */
+  gap: 14px;
 }
 
 .color-wheel {
@@ -17561,8 +17562,11 @@ input.scrub-number:focus {
   inset: 0;
   border-radius: 999px;
   pointer-events: none;
-  -webkit-mask-image: radial-gradient(circle at center, transparent 0 90.5%, #000 92.5%, #000 100%);
-  mask-image: radial-gradient(circle at center, transparent 0 90.5%, #000 92.5%, #000 100%);
+  /* Band starts right at the gap's outer edge (90.4% in the field's layer stack) and runs to the
+     disc edge — a solid ~6px of full-chroma, full-value hue. The 1.2% ramp is anti-aliasing for the
+     inner edge only; the outer edge is clipped by border-radius, which is already anti-aliased. */
+  -webkit-mask-image: radial-gradient(circle at center, transparent 0 90.4%, #000 91.6%, #000 100%);
+  mask-image: radial-gradient(circle at center, transparent 0 90.4%, #000 91.6%, #000 100%);
 }
 
 /* Crosshair — the balance datum, ENGRAVED rather than drawn. A single light line reads as an SVG
@@ -17653,7 +17657,7 @@ input.scrub-number:focus {
 /* Label: small and wide-tracked, but SCANNABLE — it has to name the wheel from across the panel.
    At 72% muted it was so faint the three columns lost their identities. */
 .color-wheel-label {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   font-size: 0.585rem;
   font-weight: 750;
   text-transform: uppercase;
@@ -17665,11 +17669,11 @@ input.scrub-number:focus {
    it reads as an adjustment under the wheel rather than a control beside it. The previous 11px ringed
    thumb on a bright 2px track was the second-heaviest thing in the panel after the trackball. */
 .color-wheel-master {
-  width: 84%;
+  width: 86%;
   height: 12px;
   min-width: 0;
-  /* Clears the housing's 10px bottom spread (see .color-wheel-pad). */
-  margin-top: 21px;
+  /* Clears the pad's 6px bezel (box-shadow spread, outside the layout box) and no more. */
+  margin-top: 13px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -17677,21 +17681,29 @@ input.scrub-number:focus {
   appearance: none;
 }
 
+/* Machined strip, not a UI track. Every reference tool renders its level controls as a RIBBED,
+   recessed metal strip — that texture is a large part of why they read as hardware, and it costs one
+   repeating-gradient. Layers: fine ribbing, a top lip, a dark channel. */
 .color-wheel-master::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  /* Groove: dark channel + a light top edge = incised, not painted on. The lip is what makes it
-     legible — a pure dark line on a dark panel reads as nothing at all. */
+  height: 6px;
+  border-radius: 2px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02) 60%),
-    rgba(0, 0, 0, 0.5);
-  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.65);
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.075) 0 1px,
+      rgba(0, 0, 0, 0.16) 1px 3px
+    ),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.015) 55%),
+    rgba(0, 0, 0, 0.52);
+  box-shadow:
+    inset 0 1px 1.5px rgba(0, 0, 0, 0.7),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .color-wheel-master::-webkit-slider-thumb {
   width: 11px;
   height: 11px;
-  margin-top: -3.5px;
+  margin-top: -2.5px;
   border: 1px solid rgba(178, 186, 199, 0.9);
   border-radius: 999px;
   background: linear-gradient(180deg, #454b56, #2c313a);
@@ -17708,10 +17720,12 @@ input.scrub-number:focus {
 }
 
 .color-wheel-master::-moz-range-track {
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.5);
-  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.65);
+  height: 6px;
+  border-radius: 2px;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.075) 0 1px, rgba(0, 0, 0, 0.16) 1px 3px),
+    rgba(0, 0, 0, 0.52);
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.7);
 }
 
 .color-wheel-master::-moz-range-thumb {
