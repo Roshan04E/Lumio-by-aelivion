@@ -8474,6 +8474,7 @@ export function EditorPage() {
                           containerRef={previewFrameRef}
                           sampleSource={sampleScopeFrame}
                           tick={Math.round(currentTime * 30)}
+                          changeKey={composition}
                           isPlaying={isPlaying}
                           storageKey="left-panel"
                           defaultLayout="column"
@@ -8827,6 +8828,7 @@ export function EditorPage() {
                   scopeSampler={sampleScopeFrame}
                   scopeContainerRef={previewFrameRef}
                   scopeIsPlaying={isPlaying}
+                  scopeChangeKey={composition}
                   onOpenScopesPanel={openScopesLeftPanel}
                 />
                   )}
@@ -9004,6 +9006,7 @@ export function EditorPage() {
                 scopeSampler={sampleScopeFrame}
                 scopeContainerRef={previewFrameRef}
                 scopeTick={Math.round(currentTime * 30)}
+                scopeChangeKey={composition}
                 isPlaying={isPlaying}
                 onClose={() => setBottomWorkspaceOpen(false)}
               />
@@ -13672,6 +13675,7 @@ function LayerInspectorImpl({
   scopeSampler,
   scopeContainerRef,
   scopeIsPlaying,
+  scopeChangeKey,
   onOpenScopesPanel
 }: {
   assets: SourceAsset[];
@@ -13733,6 +13737,8 @@ function LayerInspectorImpl({
   scopeSampler?: ScopeFrameSampler | undefined;
   scopeContainerRef?: React.RefObject<HTMLElement | null> | undefined;
   scopeIsPlaying?: boolean | undefined;
+  /** Identity changes when the picture may have changed for a reason other than time (grade edits). */
+  scopeChangeKey?: unknown;
   /** Pop the scopes out to the full-height left-panel view. */
   onOpenScopesPanel?: (() => void) | undefined;
 }) {
@@ -14101,6 +14107,7 @@ function LayerInspectorImpl({
                   containerRef={scopeContainerRef}
                   sampleSource={scopeSampler}
                   tick={Math.round(currentTime * 30)}
+                  changeKey={scopeChangeKey}
                   isPlaying={scopeIsPlaying ?? false}
                   storageKey="inspector"
                   defaultLayout="single"

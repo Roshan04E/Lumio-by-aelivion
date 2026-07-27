@@ -44,6 +44,8 @@ export interface BottomWorkspaceProps {
   scopeContainerRef?: React.RefObject<HTMLElement | null> | undefined;
   /** Frame tick (re-samples the scopes) + transport state (coarser sampling while playing). */
   scopeTick?: number | undefined;
+  /** Identity changes when the picture may have changed for a reason other than time (grade edits). */
+  scopeChangeKey?: unknown;
   isPlaying?: boolean | undefined;
   /** Open the Scopes tab initially (e.g. when invoked from the removed Color→Scopes affordance). */
   initialTab?: BottomWorkspaceTab | undefined;
@@ -51,7 +53,7 @@ export interface BottomWorkspaceProps {
   overrideTargets?: import("../inspector/keyframeUtils").GraphTarget[] | undefined;
 }
 
-export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers, scopeSampler, scopeContainerRef, scopeTick, isPlaying, initialTab, overrideTargets }: BottomWorkspaceProps) {
+export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onClose, focusTargetKey, ghostLayers, scopeSampler, scopeContainerRef, scopeTick, scopeChangeKey, isPlaying, initialTab, overrideTargets }: BottomWorkspaceProps) {
   const [tab, setTab] = useState<BottomWorkspaceTab>(initialTab ?? "graph");
   const [height, setHeight] = useState<number>(() => loadHeight());
   const resizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
@@ -154,6 +156,7 @@ export function BottomWorkspace({ layer, onChange, currentTime, onSeek, fps, onC
                 containerRef={scopeContainerRef}
                 sampleSource={scopeSampler}
                 tick={scopeTick ?? 0}
+                changeKey={scopeChangeKey}
                 isPlaying={isPlaying ?? false}
                 storageKey="drawer"
                 defaultLayout="two"

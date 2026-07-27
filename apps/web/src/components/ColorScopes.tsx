@@ -46,6 +46,20 @@ interface Props {
   sampleSource?: ScopeFrameSampler | undefined;
   /** Increment to trigger a re-sample (tie to frame tick / playback). */
   tick?: number;
+  /**
+   * Any value whose IDENTITY changes when the picture might have changed for a reason other than
+   * time — a grade edit, an effect toggle, a layer change. Hosts pass the composition object itself.
+   *
+   * This exists because `tick` is derived from the playhead, so while paused nothing re-sampled when
+   * a colorist moved a colour wheel: the scopes sat on the frame from the last seek. Scopes that only
+   * update when the playhead moves cannot be used to grade, which is the one job they have.
+   *
+   * It cannot be handled by simply re-sampling on the React update, either. The compositor redraws
+   * ASYNCHRONOUSLY and keeps compositing for a settle window (~600ms) after any change, so a sample
+   * taken during the render that observed the edit reads the PREVIOUS retained composite. That is
+   * why the change opens a short watch window instead (see the effect below).
+   */
+  changeKey?: unknown;
   /** While playing, sample at a coarser resolution to stay light; full detail when paused. */
   isPlaying?: boolean;
   mode?: ScopeMode;
@@ -411,6 +425,20 @@ function drawClipMarkers(
 /** While playing the scopes re-sample themselves at this cadence (see the live-loop effect below). */
 const PLAYING_RESAMPLE_MS = 100;
 
+/**
+ * PAUSED EDIT WATCH. On a `changeKey` identity change the picture is not ready yet — the compositor
+ * redraws asynchronously and keeps compositing for its settle window. So a change opens a watch:
+ * re-sample at this cadence for this long, then stop dead.
+ *
+ * Deliberately a bounded window rather than a permanent paused poll: idle scopes must cost nothing,
+ * and a continuous drag simply keeps re-opening the window, which yields live feedback for exactly as
+ * long as the user is actually changing something. The duration tracks ScenePreviewCanvas's
+ * SCENE_SETTLE_MS (600ms) with margin — it has to outlast the compositor's own settle or the last
+ * sample lands before the final frame and the scopes end up one edit stale.
+ */
+const EDIT_RESAMPLE_MS = 90;
+const EDIT_WATCH_MS = 800;
+
 const SCOPE_LABELS: Record<ScopeMode, string> = {
   waveform: "Waveform",
   parade: "Parade",
@@ -531,6 +559,7 @@ export function ColorScopes({
   containerRef,
   sampleSource,
   tick,
+  changeKey,
   isPlaying,
   mode = "waveform",
   storageKey = "default",
@@ -580,14 +609,28 @@ export function ColorScopes({
     };
 
     sample();
-    if (!isPlaying) return;
+    if (!isPlaying) {
+      // PAUSED EDIT WATCH — see EDIT_WATCH_MS. `changeKey` is in this effect's deps, so a grade edit
+      // re-runs it: sample once now (cheap, usually still the old frame) and then keep sampling
+      // across the compositor's settle window so the graded result actually lands in the scopes.
+      // Stops on its own; an idle paused editor runs no loop at all.
+      const started = Date.now();
+      const watch = window.setInterval(() => {
+        if (Date.now() - started >= EDIT_WATCH_MS) {
+          window.clearInterval(watch);
+          return;
+        }
+        sample();
+      }, EDIT_RESAMPLE_MS);
+      return () => window.clearInterval(watch);
+    }
     // LIVE loop: the cold playhead clock (our `tick` prop) is deliberately SUSPENDED during
     // playback so the heavy cold panels never compete with playback smoothness — which froze the
     // scopes on the pre-play frame. Instead of un-suspending that clock (doctrine: don't), the
     // scopes drive their own low-rate resample here, at the coarse SAMPLE_FAST resolution.
     const interval = window.setInterval(sample, PLAYING_RESAMPLE_MS);
     return () => window.clearInterval(interval);
-  }, [containerRef, sampleSource, tick, isPlaying]);
+  }, [containerRef, sampleSource, tick, isPlaying, changeKey]);
 
   const selectLayout = (next: ScopeLayout) => {
     setLayout(next);
