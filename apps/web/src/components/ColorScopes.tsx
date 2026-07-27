@@ -86,6 +86,19 @@ interface Props {
   defaultLayout?: ScopeLayout | undefined;
   /** Hide the layout switcher (compact hosts that fix a single layout). */
   showLayoutPicker?: boolean | undefined;
+  /**
+   * Name of the clip the scopes CAN isolate, or absent when there is nothing to isolate. Presence
+   * alone drives the Isolate toggle's visibility — the host decides what is isolatable, the scopes
+   * only decide whether the user has asked for it.
+   */
+  isolateLabel?: string | undefined;
+  /**
+   * Isolate state — CONTROLLED by the host, not owned per panel. Two scope panels can be open at
+   * once (inspector + left panel) while feeding ONE sampler, so a per-panel switch would let them
+   * disagree about what is being measured while the measurement itself is global.
+   */
+  isolate?: boolean | undefined;
+  onIsolateChange?: ((isolate: boolean) => void) | undefined;
   /** Optional extra header control (e.g. the inspector's "open in left panel" button). */
   headerAction?: ReactNode;
 }
@@ -583,6 +596,9 @@ export function ColorScopes({
   storageKey = "default",
   defaultLayout = "single",
   showLayoutPicker = true,
+  isolateLabel,
+  isolate = false,
+  onIsolateChange,
   headerAction
 }: Props) {
   const [layout, setLayout] = useState<ScopeLayout>(() =>
@@ -734,6 +750,25 @@ export function ColorScopes({
           >
             {source.label}
           </span>
+        ) : null}
+        {/* ISOLATE is an explicit toggle, unlike the Flarex node source which auto-follows selection.
+            Selecting a node is a deliberate act; having a clip selected is the resting state of the
+            editor, so auto-isolating on clip selection would silently flip the default away from the
+            programme output for everyone and quietly hide every layer stacked above. */}
+        {isolateLabel ? (
+          <button
+            type="button"
+            className={`color-scopes-isolate${isolate ? " is-on" : ""}`}
+            title={
+              isolate
+                ? `Measuring ${isolateLabel} alone — click to measure the full programme output`
+                : `Measure ${isolateLabel} alone, ignoring everything composited above it`
+            }
+            aria-pressed={isolate}
+            onClick={() => onIsolateChange?.(!isolate)}
+          >
+            Isolate
+          </button>
         ) : null}
         <span className="color-scopes-label">Rec.709 SDR</span>
         {approx ? (

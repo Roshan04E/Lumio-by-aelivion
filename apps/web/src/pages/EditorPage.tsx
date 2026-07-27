@@ -978,6 +978,12 @@ export function EditorPage() {
   const flarexScopeTargetRef = useRef<{ nodeId: string; label: string } | null>(null);
   flarexScopeTargetRef.current = flarexScopeTarget;
   const scopeHostLayerIdRef = useRef<string | null>(null);
+  /** Isolate-clip toggle. Host-owned so every open scope panel agrees; mirrored into a ref because
+   *  the sampler is a stable callback driven by timers and must read the CURRENT value. */
+  const [scopeIsolate, setScopeIsolate] = useState(false);
+  const scopeIsolateRef = useRef(false);
+  scopeIsolateRef.current = scopeIsolate;
+  const scopeIsolateLayerRef = useRef<{ id: string; label: string } | null>(null);
   const sampleScopeFrame = useCallback<ScopeFrameSampler>((w, h) => {
     const handle = proxyCaptureRef.current;
     if (!handle) return null;
@@ -1015,6 +1021,22 @@ export function EditorPage() {
       // Declined — it refuses while playing, before the first composited frame, and when the host
       // clip is not on screen at the playhead. Fall back to the programme output and SAY SO rather
       // than freezing on a stale node frame that would still be labelled as the node.
+      const out = handle.readCompositeThumbnail(w, h, buffer);
+      return out ? toFrame(out, "Output", true) : null;
+    }
+
+    // ISOLATED CLIP — explicit toggle, not selection-following: having a clip selected is the resting
+    // state of the editor, so isolating on selection alone would silently flip the default away from
+    // the programme output and hide everything composited above the clip.
+    const isolate = scopeIsolateRef.current ? scopeIsolateLayerRef.current : null;
+    if (isolate) {
+      const only = handle.renderLayerIsolated({
+        layerId: isolate.id,
+        targetWidth: w,
+        targetHeight: h,
+        buffer
+      });
+      if (only) return toFrame(only, `Clip: ${isolate.label}`, false);
       const out = handle.readCompositeThumbnail(w, h, buffer);
       return out ? toFrame(out, "Output", true) : null;
     }
@@ -1607,6 +1629,13 @@ export function EditorPage() {
     selectedLayer ?? multiSelectPrimaryLayer ?? (selectedLayerIds.length === 0 ? layers.find((layer) => layer.id === lastInspectedLayerId) : undefined);
   // The clip whose Flarex comp the node scopes isolate through — same layer FlarexWorkspace edits.
   scopeHostLayerIdRef.current = inspectorLayer?.id ?? null;
+  // ...and the clip the Isolate toggle would measure alone. Media/text/shape only: isolating an audio
+  // layer would measure a black frame, which is a reading, not a picture.
+  const scopeIsolateLayer =
+    inspectorLayer && inspectorLayer.type !== "audio"
+      ? { id: inspectorLayer.id, label: inspectorLayer.name || inspectorLayer.type.toUpperCase() }
+      : null;
+  scopeIsolateLayerRef.current = scopeIsolateLayer;
   // Graph editor ghost curves: the OTHER selected clips (read-only, drawn faded under the primary).
   const graphGhostLayers = useMemo(
     () =>
@@ -8514,6 +8543,9 @@ export function EditorPage() {
                           containerRef={previewFrameRef}
                           sampleSource={sampleScopeFrame}
                           tick={Math.round(currentTime * 30)}
+                          isolateLabel={scopeIsolateLayer?.label}
+                          isolate={scopeIsolate}
+                          onIsolateChange={setScopeIsolate}
                           changeKey={composition}
                           isPlaying={isPlaying}
                           storageKey="left-panel"
@@ -8869,6 +8901,9 @@ export function EditorPage() {
                   scopeContainerRef={previewFrameRef}
                   scopeIsPlaying={isPlaying}
                   scopeChangeKey={composition}
+                  scopeIsolateLabel={scopeIsolateLayer?.label}
+                  scopeIsolate={scopeIsolate}
+                  onScopeIsolateChange={setScopeIsolate}
                   onOpenScopesPanel={openScopesLeftPanel}
                 />
                   )}
@@ -9048,6 +9083,9 @@ export function EditorPage() {
                 scopeContainerRef={previewFrameRef}
                 scopeTick={Math.round(currentTime * 30)}
                 scopeChangeKey={composition}
+                scopeIsolateLabel={scopeIsolateLayer?.label}
+                scopeIsolate={scopeIsolate}
+                onScopeIsolateChange={setScopeIsolate}
                 isPlaying={isPlaying}
                 onClose={() => setBottomWorkspaceOpen(false)}
               />
@@ -13717,6 +13755,9 @@ function LayerInspectorImpl({
   scopeContainerRef,
   scopeIsPlaying,
   scopeChangeKey,
+  scopeIsolateLabel,
+  scopeIsolate,
+  onScopeIsolateChange,
   onOpenScopesPanel
 }: {
   assets: SourceAsset[];
@@ -13780,6 +13821,9 @@ function LayerInspectorImpl({
   scopeIsPlaying?: boolean | undefined;
   /** Identity changes when the picture may have changed for a reason other than time (grade edits). */
   scopeChangeKey?: unknown;
+  scopeIsolateLabel?: string | undefined;
+  scopeIsolate?: boolean | undefined;
+  onScopeIsolateChange?: ((isolate: boolean) => void) | undefined;
   /** Pop the scopes out to the full-height left-panel view. */
   onOpenScopesPanel?: (() => void) | undefined;
 }) {
@@ -14149,6 +14193,9 @@ function LayerInspectorImpl({
                   sampleSource={scopeSampler}
                   tick={Math.round(currentTime * 30)}
                   changeKey={scopeChangeKey}
+                  isolateLabel={scopeIsolateLabel}
+                  isolate={scopeIsolate ?? false}
+                  onIsolateChange={onScopeIsolateChange}
                   isPlaying={scopeIsPlaying ?? false}
                   storageKey="inspector"
                   defaultLayout="single"

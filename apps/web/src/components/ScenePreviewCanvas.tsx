@@ -106,6 +106,18 @@ export interface SceneViewerCaptureHandle {
     buffer?: Uint8Array | undefined;
   }): { pixels: Uint8Array; width: number; height: number } | null;
   /**
+   * Composite ONE timeline clip alone and read it back — the isolated scope source, so a colorist can
+   * measure a single clip instead of whatever the timeline stacks on top of it. Same mechanism and
+   * same limits as `renderFlarexNodeThumbnail` (they share an implementation): null while playing,
+   * before the first composited frame, and when the clip is not among the viewer's current layers.
+   */
+  renderLayerIsolated(input: {
+    layerId: string;
+    targetWidth: number;
+    targetHeight: number;
+    buffer?: Uint8Array | undefined;
+  }): { pixels: Uint8Array; width: number; height: number } | null;
+  /**
    * Downsample the RETAINED composite (last presented frame) into a small top-origin RGBA thumbnail
    * for the color scopes — no re-composite, no dependence on the on-screen canvas. Null when the
    * compositor is unavailable this frame (caller falls back to a DOM-element sample).
@@ -923,9 +935,10 @@ export function ScenePreviewCanvas({
     if (!captureRef) return undefined;
     const releaseCaptureResources = () => {
       for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
-        // "thumb:" is the node-thumbnail pool (Slice 6) — same lifetime rule as the capture pool: both
-        // are scratch, both are rebuilt on demand, and neither may outlive the handle.
-        if (!id.startsWith("capture:") && !id.startsWith("thumb:")) continue;
+        // "thumb:" is the node-thumbnail pool (Slice 6) and "isolate:" the isolated-clip scope pool —
+        // same lifetime rule as the capture pool: all are scratch, all are rebuilt on demand, and
+        // none may outlive the handle.
+        if (!id.startsWith("capture:") && !id.startsWith("thumb:") && !id.startsWith("isolate:")) continue;
         try {
           renderer.dispose();
         } catch {
@@ -939,6 +952,95 @@ export function ScenePreviewCanvas({
         sharedGradeRenderersRef.current.delete(id);
       }
     };
+    /**
+     * Composite ONE layer of the live scene through this viewer's own compositor, caches and graded
+     * textures, and read it back. Backs both the Flarex node thumbnails and the isolated-clip scope
+     * source; `rootNodeId` re-roots the clip's comp at a node when present.
+     *
+     * Synchronous because it reuses `liveMediaGradedRef` — the media the live frame already decoded
+     * and graded. That is the whole reason this is cheap and the reason it can be called from a
+     * synchronous sampler: resolving media itself (seek, decode, grade) is async and is what the
+     * proxy-capture path has to do.
+     */
+    const renderIsolated = (
+      layerId: string,
+      rootNodeId: string | undefined,
+      targetWidth: number,
+      targetHeight: number,
+      buffer: Uint8Array | undefined,
+      overlayScope: string
+    ) => {
+      const compositor = compositorRef.current;
+      if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return null;
+      // Same rule as renderOffscreen (v24 capture race): playback owns this compositor. These are
+      // idle-only affordances, so this is a hard gate, not a best-effort skip.
+      if (inputsRef.current.isPlaying) return null;
+      const getMediaGraded = liveMediaGradedRef.current;
+      // No frame has composited yet — there are no graded textures to sample, and grading a set of
+      // our own is exactly the cost this path exists to avoid.
+      if (!getMediaGraded) return null;
+      const { layers: ls, width: w, height: h, renderScale: rScale, nestedGroups: nestGroups } = inputsRef.current;
+      const host = ls.find((layer) => layer.id === layerId);
+      if (!host) return null;
+      try {
+        const draws = buildSceneDraws({
+          // The clip ALONE: this shows what this layer (or node) OUTPUTS, not what the timeline
+          // composites around it. Transitions are dropped for the same reason.
+          layers: [host],
+          width: w,
+          height: h,
+          currentTime: inputsRef.current.currentTime,
+          renderScale: rScale,
+          transitions: [],
+          rasterizer: rasterizerRef.current,
+          matteCache: matteCacheRef.current,
+          gradeRenderers: gradeRenderersRef.current,
+          getMediaGraded,
+          gradeOverlay: makeGradeOverlayRef.current(compositor, overlayScope),
+          createCanvas: () => document.createElement("canvas"),
+          regionPassModel: getRegionPassesEnabled(),
+          nestedGroups: nestGroups,
+          nestMatteCaches: nestMatteCachesRef.current,
+          flarexComps: inputsRef.current.flarexComps,
+          flarexVirtualLayers: inputsRef.current.flarexVirtualLayers,
+          flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
+          // Re-root at this node when asked. Deliberately WITHOUT `flarexCompProxies`: a comp proxy
+          // replaces the whole lowering with one pre-rendered frame, so every node would render
+          // identically as the comp's final output — the one input that would make this silently wrong.
+          ...(rootNodeId ? { flarexPreviewRootNodeId: rootNodeId } : {}),
+        });
+        // CONTAIN the project aspect inside the requested box: the readback is a straight blit of the
+        // whole frame, so asking for a 16:9 target on a 9:16 project would squash it. The caller gets
+        // the size actually used and letterboxes with it.
+        const aspect = w / Math.max(1, h);
+        const boxAspect = targetWidth / Math.max(1, targetHeight);
+        const outW = boxAspect > aspect ? Math.max(1, Math.round(targetHeight * aspect)) : targetWidth;
+        const outH = boxAspect > aspect ? targetHeight : Math.max(1, Math.round(targetWidth / aspect));
+        const rendered = compositor.renderFrameThumbnail(
+          {
+            width: Math.max(1, Math.round(w * rScale)),
+            height: Math.max(1, Math.round(h * rScale)),
+            // A frame is always cleared OPAQUE (`renderFrameCore`) — that is the render contract every
+            // renderer shares. So a keyed/cropped region reads as this color rather than as
+            // transparency; black is both the honest answer (it is what the viewer shows) and a
+            // neutral backing.
+            backgroundColor: "#000000",
+            layers: draws,
+            debugFrameTime: inputsRef.current.currentTime,
+          },
+          outW,
+          outH,
+          buffer
+        );
+        // renderFrameThumbnail leaves OUR frame in the retained composite, which is what the color
+        // scopes sample. Re-arm the settle window so the live frame is re-composited over it.
+        requestDraw();
+        return rendered;
+      } catch {
+        return null;
+      }
+    };
+
     const handle: SceneViewerCaptureHandle = {
       getSharedGl() {
         const compositor = compositorRef.current;
@@ -1007,75 +1109,15 @@ export function ScenePreviewCanvas({
         }
       },
       renderFlarexNodeThumbnail({ hostLayerId, nodeId, targetWidth, targetHeight, buffer }) {
-        const compositor = compositorRef.current;
-        if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return null;
-        // Same rule as renderOffscreen (v24 capture race): playback owns this compositor. Thumbnails are
-        // an idle-only affordance, so this is a hard gate, not a best-effort skip.
-        if (inputsRef.current.isPlaying) return null;
-        const getMediaGraded = liveMediaGradedRef.current;
-        // No frame has composited yet — there are no graded textures to sample, and grading a set of our
-        // own is exactly the cost this path exists to avoid.
-        if (!getMediaGraded) return null;
-        const { layers: ls, width: w, height: h, renderScale: rScale, nestedGroups: nestGroups } = inputsRef.current;
-        const host = ls.find((layer) => layer.id === hostLayerId);
-        if (!host) return null;
-        try {
-          const draws = buildSceneDraws({
-            // The host clip ALONE: a thumbnail shows what this NODE outputs, not what the timeline
-            // composites around it. Transitions are dropped for the same reason.
-            layers: [host],
-            width: w,
-            height: h,
-            currentTime: inputsRef.current.currentTime,
-            renderScale: rScale,
-            transitions: [],
-            rasterizer: rasterizerRef.current,
-            matteCache: matteCacheRef.current,
-            gradeRenderers: gradeRenderersRef.current,
-            getMediaGraded,
-            gradeOverlay: makeGradeOverlayRef.current(compositor, "thumb:"),
-            createCanvas: () => document.createElement("canvas"),
-            regionPassModel: getRegionPassesEnabled(),
-            nestedGroups: nestGroups,
-            nestMatteCaches: nestMatteCachesRef.current,
-            flarexComps: inputsRef.current.flarexComps,
-            flarexVirtualLayers: inputsRef.current.flarexVirtualLayers,
-            flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
-            // Re-root at this node. Deliberately WITHOUT `flarexCompProxies`: a comp proxy replaces the
-            // whole lowering with one pre-rendered frame, so every node would thumbnail identically as
-            // the comp's final output — the one input that would make this silently wrong.
-            flarexPreviewRootNodeId: nodeId,
-          });
-          // CONTAIN the comp's aspect inside the requested box: the readback is a straight blit of the
-          // whole frame, so asking for a 16:9 target on a 9:16 project would squash it. The caller gets
-          // the size actually used and letterboxes with it.
-          const aspect = w / Math.max(1, h);
-          const boxAspect = targetWidth / Math.max(1, targetHeight);
-          const outW = boxAspect > aspect ? Math.max(1, Math.round(targetHeight * aspect)) : targetWidth;
-          const outH = boxAspect > aspect ? targetHeight : Math.max(1, Math.round(targetWidth / aspect));
-          const rendered = compositor.renderFrameThumbnail(
-            {
-              width: Math.max(1, Math.round(w * rScale)),
-              height: Math.max(1, Math.round(h * rScale)),
-              // A frame is always cleared OPAQUE (`renderFrameCore`) — that is the render contract every
-              // renderer shares, not something a thumbnail may bend. So a keyed/cropped region reads as
-              // this color rather than as transparency; black is both the honest answer (it is what the
-              // viewer shows for the same node) and a neutral backing for the node body.
-              backgroundColor: "#000000",
-              layers: draws,
-              debugFrameTime: inputsRef.current.currentTime,
-            },
-            outW,
-            outH,
-            buffer
-          );
-          // renderFrameThumbnail leaves OUR frame in the retained composite, which is what the color
-          // scopes sample. Re-arm the settle window so the live frame is re-composited over it.
-          requestDraw();
-          return rendered;
-        } catch {
-          return null;
-        }
+        return renderIsolated(hostLayerId, nodeId, targetWidth, targetHeight, buffer, "thumb:");
+      },
+      renderLayerIsolated({ layerId, targetWidth, targetHeight, buffer }) {
+        // Same machinery as the node thumbnail, minus the re-root: composite this ONE clip through
+        // the viewer's own caches and graded textures. Sharing the implementation is deliberate —
+        // the subtleties here (playing gate, live-media requirement, aspect containment, and the
+        // fact that the readback CLOBBERS the retained composite) are exactly the things that go
+        // wrong when a second copy of this drifts.
+        return renderIsolated(layerId, undefined, targetWidth, targetHeight, buffer, "isolate:");
       },
       readCompositeThumbnail(targetW, targetH, buffer) {
         const compositor = compositorRef.current;
