@@ -1,4 +1,6 @@
 import express from "express";
+import type { Response } from "express";
+import type { Readable } from "node:stream";
 import cors from "cors";
 import { env } from "./config/env";
 import { getObjectStream, isR2Storage, storagePaths } from "./services/storage.service";
@@ -15,6 +17,131 @@ import { aiRouter } from "./routes/ai.routes";
 import { generateRouter } from "./routes/generate.routes";
 import { memoryRouter } from "./routes/memory.routes";
 import { errorHandler, notFound } from "./middleware/error";
+
+// The R2 object stream (`getObjectStream` → `out.Body`) intermittently truncates — it ends BEFORE the
+// advertised Content-Length, which the browser reports as ERR_CONTENT_LENGTH_MISMATCH. A single flaky
+// read then black-holes both the editor's `<video>` playback (a stalled decoder → frozen preview) and
+// the ingest-proxy full-file download (a failed build → the source stuck on its heavy original). This
+// resumes the read: it counts bytes delivered and, on a premature end/error, re-issues a ranged GET
+// from the next byte into the SAME response, capped so a genuinely-broken object can't loop forever.
+const R2_MAX_RESUME = 5;
+
+function parseRangeStart(range: string | undefined): number {
+  const m = /bytes=(\d+)-/.exec(range ?? "");
+  return m ? Number(m[1]) : 0;
+}
+
+async function streamFromR2WithResume(
+  key: string,
+  range: string | undefined,
+  headOnly: boolean,
+  res: Response
+): Promise<void> {
+  const first = await getObjectStream(key, range);
+  if (first.contentType) res.setHeader("Content-Type", first.contentType);
+  res.setHeader("Accept-Ranges", "bytes");
+  if (first.contentRange) {
+    res.setHeader("Content-Range", first.contentRange);
+    res.status(206); // Partial Content — R2 honored the Range
+  }
+  if (first.contentLength !== undefined) res.setHeader("Content-Length", String(first.contentLength));
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+
+  if (headOnly) {
+    (first.body as Readable).destroy();
+    res.end();
+    return;
+  }
+
+  const startByte = parseRangeStart(range); // absolute offset of this response within the object
+  const expected = first.contentLength; // bytes to deliver in THIS response
+  const endByte = expected !== undefined ? startByte + expected - 1 : undefined;
+
+  await new Promise<void>((resolve, reject) => {
+    let sent = 0;
+    let attempt = 0;
+    /** `sent` at the last resume — used to tell a progressing reconnect from a stuck one. */
+    let lastResumeSent = 0;
+    let aborted = false;
+    let current: Readable | null = null;
+
+    const onClientGone = () => {
+      // Client cancelled (e.g. a <video> seek abandons its Range request) — benign, never a truncation.
+      aborted = true;
+      current?.destroy();
+      resolve();
+    };
+    res.on("close", onClientGone);
+    const finish = (fn: () => void) => {
+      res.off("close", onClientGone);
+      fn();
+    };
+
+    const resume = async () => {
+      // The cap must bound FUTILE retries, not total ones. Counting every resume killed transfers that
+      // were succeeding: a large object over a flaky link legitimately needs more than R2_MAX_RESUME
+      // reconnects, each delivering real bytes, and the 6th was rejected → the socket was destroyed →
+      // the browser reported ERR_CONTENT_LENGTH_MISMATCH anyway (the exact failure this exists to stop,
+      // user report 2026-07-27). Forward progress resets the budget; only consecutive no-progress
+      // attempts count, so a genuinely dead object still can't loop forever.
+      if (sent > lastResumeSent) {
+        attempt = 0;
+        lastResumeSent = sent;
+      }
+      attempt += 1;
+      if (attempt > R2_MAX_RESUME) {
+        current?.destroy();
+        finish(() => reject(new Error("r2 resume cap exceeded")));
+        return;
+      }
+      try {
+        const part = await getObjectStream(key, `bytes=${startByte + sent}-${endByte !== undefined ? endByte : ""}`);
+        if (aborted) {
+          (part.body as Readable).destroy();
+          return;
+        }
+        attach(part.body as Readable);
+      } catch {
+        finish(() => reject(new Error("r2 resume fetch failed")));
+      }
+    };
+
+    const attach = (stream: Readable) => {
+      current = stream;
+      stream.on("data", (chunk: Buffer) => {
+        sent += chunk.length;
+      });
+      stream.pipe(res, { end: false });
+      stream.on("end", () => {
+        if (aborted) return;
+        if (expected === undefined || sent >= expected) {
+          finish(() => {
+            res.end();
+            resolve();
+          });
+        } else {
+          void resume(); // stream cut short of Content-Length — pick up where it stopped
+        }
+      });
+      stream.on("error", () => {
+        if (aborted) return;
+        // Everything was already delivered — an error on the tail of a complete body is not a failure.
+        if (expected !== undefined && sent >= expected) {
+          finish(() => {
+            res.end();
+            resolve();
+          });
+          return;
+        }
+        // Otherwise resume, and let `resume` apply the (progress-aware) cap — this used to carry its own
+        // stricter `attempt < R2_MAX_RESUME` test, so the two gates disagreed about when to give up.
+        void resume();
+      });
+    };
+
+    attach(first.body as Readable);
+  });
+}
 
 export function createApp() {
   const app = express();
@@ -46,21 +173,15 @@ export function createApp() {
       // Forward the client's Range so R2 serves partial content. Without this, video seeking (the
       // export worker's Remotion OffthreadVideo, editor scrubbing) re-downloads the whole file per
       // frame and renders time out. Advertise Accept-Ranges so clients know seeking is supported.
+      // `streamFromR2WithResume` resumes flaky/truncated R2 reads (ERR_CONTENT_LENGTH_MISMATCH) so a
+      // single short stream no longer freezes playback or fails an ingest-proxy build.
       const range = typeof req.headers.range === "string" ? req.headers.range : undefined;
-      void getObjectStream(key, range)
-        .then(({ body, contentType, contentLength, contentRange }) => {
-          if (contentType) res.setHeader("Content-Type", contentType);
-          res.setHeader("Accept-Ranges", "bytes");
-          if (contentRange) {
-            res.setHeader("Content-Range", contentRange);
-            res.status(206); // Partial Content — R2 honored the Range
-          }
-          if (contentLength !== undefined) res.setHeader("Content-Length", String(contentLength));
-          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-          body.on("error", () => void (res.destroyed || res.status(502).end()));
-          body.pipe(res);
-        })
-        .catch(() => next());
+      void streamFromR2WithResume(key, range, req.method === "HEAD", res).catch(() => {
+        // Nothing delivered yet → fall through to the on-disk static handler (pre-R2 media). Once bytes
+        // (and headers) are on the wire, resumes are exhausted — just drop the socket.
+        if (!res.headersSent) next();
+        else if (!res.destroyed) res.destroy();
+      });
     });
   }
   // Local disk: the primary store for the local driver, and the read-through fallback for
