@@ -46,7 +46,7 @@ import {
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
-import { getRegionPassesEnabled } from "../color/render-engine";
+import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
 import type { ScenePreviewMediaSource } from "./scene-media-source";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
@@ -440,7 +440,12 @@ export function ScenePreviewCanvas({
     try {
       failedRef.current = false;
       contextLostRef.current = false;
-      compositorRef.current = new SceneCompositor(canvas, width, height);
+      // Stage 0 (plans/log-raw-source-color.md): the app owns the flag; `packages/shared` never reads
+      // `window`, so precision is passed IN — the same shape as `regionPassModel`, which is what lets
+      // the cloud renderer flip in lockstep instead of drifting from the preview.
+      compositorRef.current = new SceneCompositor(canvas, width, height, {
+        precision: getHdrPipelineEnabled() ? "rgba16f" : "rgba8",
+      });
       matteCacheRef.current = new SceneMaskMatteCache(width, height);
       // A late async raster (text/font) re-arms the settle window so it lands on screen even when idle.
       rasterizerRef.current = new SceneTextRasterizer(requestDraw);

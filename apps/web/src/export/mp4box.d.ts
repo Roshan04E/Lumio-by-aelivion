@@ -52,9 +52,19 @@ declare module "mp4box" {
     /** nclx only: 1 = full range, 0 = limited/studio range. */
     full_range_flag?: number;
   }
+  /** `hvcC` (HEVC decoder config). mp4box parses the full record; we only need the bit depth. */
+  interface HvcCBox extends BoxWritable {
+    /** Luma bit depth is this + 8 — the field that identifies 10-bit sources. */
+    bit_depth_luma_minus8?: number;
+  }
+  /** `avcC` (AVC decoder config). H.264 carries bit depth in the SPS, not here, but the profile
+   *  indication distinguishes the 10-bit profiles (110 = High 10, 122 = High 4:2:2, 244 = High 4:4:4). */
+  interface AvcCBox extends BoxWritable {
+    AVCProfileIndication?: number;
+  }
   interface SampleEntry {
-    avcC?: BoxWritable;
-    hvcC?: BoxWritable;
+    avcC?: AvcCBox;
+    hvcC?: HvcCBox;
     vpcC?: BoxWritable;
     av1C?: BoxWritable;
     colr?: ColrBox;

@@ -8,7 +8,7 @@
  * large to probe — the caller then falls back to `ASSUMED_REC709_SOURCE_METADATA` ("Assumed Rec.709").
  */
 
-import { createFile, type ColrBox, type MP4File, type MP4Info } from "mp4box";
+import { createFile, type ColrBox, type MP4File, type MP4Info, type SampleEntry } from "mp4box";
 import type { ColorMatrix, ColorPrimaries, ColorTransfer, SourceColorMetadata } from "@orreris/shared";
 import { normalizeSourceColorMetadata } from "@orreris/shared";
 
@@ -71,12 +71,36 @@ function mapMatrix(code: number | undefined): ColorMatrix {
   }
 }
 
-function colrToMetadata(colr: ColrBox): SourceColorMetadata | null {
+/**
+ * REAL bit depth, read from the codec configuration rather than guessed from the transfer
+ * (plans/log-raw-source-color.md, Stage 1).
+ *
+ * This matters more than it looks. Bit depth was inferred as `pq || hlg ? 10 : 8`, which is right for
+ * broadcast HDR and wrong for exactly the footage this work is about: Apple Log records **HEVC 10-bit**
+ * and is not tagged with an HDR transfer, so every 10-bit log clip reported itself as 8-bit. Bit depth
+ * is the field that identifies a 10-bit source, drives the HDR warning, and decides whether the frame
+ * deserves a half-float upload — inferring it from a different field cannot answer any of those.
+ *
+ * HEVC states it directly (`bit_depth_luma_minus8`). H.264 carries it in the SPS, not in `avcC`, so
+ * the profile indication is the honest proxy: 110 = High 10, 122 = High 4:2:2, 244 = High 4:4:4, all
+ * of which are ≥10-bit capable. Undefined when nothing says — never a guess dressed as a reading.
+ */
+function readBitDepth(entry: SampleEntry | undefined): number | undefined {
+  const hvc = entry?.hvcC?.bit_depth_luma_minus8;
+  if (typeof hvc === "number" && Number.isFinite(hvc)) return hvc + 8;
+  const profile = entry?.avcC?.AVCProfileIndication;
+  if (profile === 110 || profile === 122 || profile === 244) return 10;
+  if (typeof profile === "number") return 8;
+  return undefined;
+}
+
+function colrToMetadata(colr: ColrBox, entry: SampleEntry | undefined): SourceColorMetadata | null {
   // Only nclx/nclc carry the numeric color codes; ICC-profile variants aren't mapped here.
   if (colr.colour_type !== "nclx" && colr.colour_type !== "nclc") return null;
   const transfer = mapTransfer(colr.transfer_characteristics);
-  // HDR transfers imply ≥10-bit; surface that so `sourceColorWarnings` flags the HDR downcast.
-  const bitDepth = transfer === "pq" || transfer === "hlg" ? 10 : 8;
+  // Read it if the codec config says; otherwise fall back to the old inference (HDR transfers imply
+  // ≥10-bit) so this can only ever be MORE accurate than before, never less.
+  const bitDepth = readBitDepth(entry) ?? (transfer === "pq" || transfer === "hlg" ? 10 : 8);
   return normalizeSourceColorMetadata({
     primaries: mapPrimaries(colr.colour_primaries),
     transfer,
@@ -84,7 +108,9 @@ function colrToMetadata(colr: ColrBox): SourceColorMetadata | null {
     fullRange: colr.full_range_flag === 1,
     bitDepth,
     detectedFrom: "detected",
-    confidence: "high"
+    // `high` only when the codec config actually stated the depth. A read and an inference must not
+    // claim the same confidence — Stage 3's manual override exists precisely for the weaker case.
+    confidence: readBitDepth(entry) === undefined ? "medium" : "high"
   } satisfies Partial<SourceColorMetadata>);
 }
 
@@ -94,7 +120,7 @@ function readColrFromInfo(file: MP4File, info: MP4Info): SourceColorMetadata | n
   if (trackId == null) return null;
   const entry = file.getTrackById(trackId)?.mdia?.minf?.stbl?.stsd?.entries?.[0];
   const colr = entry?.colr;
-  return colr ? colrToMetadata(colr) : null;
+  return colr ? colrToMetadata(colr, entry) : null;
 }
 
 export type SourceRotation = 0 | 90 | 180 | 270;

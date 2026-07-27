@@ -25,6 +25,9 @@ import { BLEND_GLSL, blendModeIndex } from "./blend";
 import {
   FULLSCREEN_TRI_VS,
   RenderTarget,
+  bytesPerPixel,
+  supportsHalfFloatRenderTarget,
+  type RenderTargetPrecision,
   compileShader,
   createFullscreenVao,
   createGl,
@@ -361,6 +364,15 @@ export interface SceneFrameSpec {
 export interface SceneCompositorOptions {
   contentCache?: boolean | undefined;
   contentCacheBudgetBytes?: number | undefined;
+  /**
+   * Render-target precision (plans/log-raw-source-color.md, Stage 0). Passed IN rather than read from
+   * a flag here — `packages/shared` never reads `window`, so the app owns the flag and the cloud
+   * renderer can flip in lockstep, exactly like `regionPassModel`.
+   *
+   * Requested, not guaranteed: a context without half-float colour buffers falls back to RGBA8 and
+   * says so through `RenderTarget.precision`.
+   */
+  precision?: RenderTargetPrecision | undefined;
 }
 
 export const SCENE_COMPOSITOR_CONTEXT_LOST = "SCENE_COMPOSITOR_CONTEXT_LOST";
@@ -803,7 +815,9 @@ interface ArtifactEntry {
   lastAccessFrame: number;
   /** Frame this entry was stored on. A hit on a LATER frame is what proves CROSS-frame reuse. */
   storedFrame: number;
-  /** GPU bytes this artifact pins (w × h × 4, RGBA8) — the quantity the budget is denominated in. */
+  /** GPU bytes this artifact pins (w × h × bytesPerPixel) — the quantity the budget is denominated in.
+   *  Precision-aware: a half-float target pins TWICE what an RGBA8 one does, and a budget that assumed
+   *  4 bytes would silently over-commit by 2× on exactly the integrated GPUs it exists to protect. */
   bytes: number;
   /**
    * Segmented-LRU tier. `false` = probation (stored, never yet reused on a later frame); `true` =
@@ -850,6 +864,7 @@ class ContentArtifactCache {
   constructor(
     private readonly gl: WebGL2RenderingContext,
     private readonly budgetBytes: number = CONTENT_CACHE_BUDGET_BYTES,
+    private readonly precision: RenderTargetPrecision = "rgba8",
   ) {}
 
   lookup(cacheKey: string, frame: number): ArtifactEntry | undefined {
@@ -876,11 +891,11 @@ class ContentArtifactCache {
     let entry = this.entries.get(cacheKey);
     if (!entry) {
       entry = {
-        artifact: new RenderTarget(this.gl, w, h),
+        artifact: new RenderTarget(this.gl, w, h, this.precision),
         cacheKey,
         lastAccessFrame: frame,
         storedFrame: frame,
-        bytes: w * h * 4,
+        bytes: w * h * bytesPerPixel(this.precision),
         protectedTier: false,
       };
       this.entries.set(cacheKey, entry);
@@ -888,7 +903,7 @@ class ContentArtifactCache {
     } else {
       entry.artifact.resize(w, h);
       this.bytes -= entry.bytes;
-      entry.bytes = w * h * 4;
+      entry.bytes = w * h * bytesPerPixel(entry.artifact.precision);
       this.bytes += entry.bytes;
       entry.lastAccessFrame = frame;
     }
@@ -958,6 +973,8 @@ export class SceneCompositor {
   /** Kill switch (see SceneCompositorOptions): sealed groups render normally, they just never cache. */
   private readonly contentCacheDisabled: boolean = false;
   private readonly contentCacheBudgetBytes: number = CONTENT_CACHE_BUDGET_BYTES;
+  /** Resolved render-target precision for every target this compositor owns (see the constructor). */
+  private readonly precision: RenderTargetPrecision;
   // 1×1 placeholder bound to the mask sampler when a layer has no mask (the shader won't sample it,
   // but a valid texture must stay bound to the unit).
   private readonly emptyTex: WebGLTexture;
@@ -1283,6 +1300,10 @@ export class SceneCompositor {
     canvas.height = height;
     const gl = createGl(canvas, { kind: "scene-compositor", label: "scene-compositor" });
     this.gl = gl;
+    // Requested precision is resolved ONCE, against this context's actual capability, so every target
+    // this compositor owns agrees. Mixed precision across the ping-pong accumulators would be a
+    // silent correctness bug, not a perf one.
+    this.precision = options?.precision === "rgba16f" && supportsHalfFloatRenderTarget(gl) ? "rgba16f" : "rgba8";
     // Debug-only (flarexProfile flag): patch this context's GL command methods so the frame profiler can
     // count real draw calls / binds / uploads. No-op when the flag is off; guarded to never change behavior.
     frameProfiler.instrumentGl(gl);
@@ -1335,8 +1356,8 @@ export class SceneCompositor {
       },
       sceneGlDebugEnabled(),
     );
-    this.accumA = new RenderTarget(gl, width, height);
-    this.accumB = new RenderTarget(gl, width, height);
+    this.accumA = new RenderTarget(gl, width, height, this.precision);
+    this.accumB = new RenderTarget(gl, width, height, this.precision);
 
     this.presentProgram = linkProgram(gl, FULLSCREEN_TRI_VS, PRESENT_FS);
     this.presentVao = createFullscreenVao(gl);
@@ -1447,9 +1468,9 @@ export class SceneCompositor {
   private effectTargets(): { plate: RenderTarget; s1: RenderTarget; s2: RenderTarget } {
     const gl = this.gl;
     this.ensureEffectPrograms(); // programs + targets are always needed together — one choke point
-    this.plateRT ??= new RenderTarget(gl, this.width, this.height);
-    this.scratch1 ??= new RenderTarget(gl, this.width, this.height);
-    this.scratch2 ??= new RenderTarget(gl, this.width, this.height);
+    this.plateRT ??= new RenderTarget(gl, this.width, this.height, this.precision);
+    this.scratch1 ??= new RenderTarget(gl, this.width, this.height, this.precision);
+    this.scratch2 ??= new RenderTarget(gl, this.width, this.height, this.precision);
     this.plateRT.resize(this.width, this.height);
     this.scratch1.resize(this.width, this.height);
     this.scratch2.resize(this.width, this.height);
@@ -1467,7 +1488,7 @@ export class SceneCompositor {
     if (!entry) {
       entry = {
         renderer: new MediaWebGLRenderer({ sharedGl: this.gl }, { label: `scene-region-grade:${effectKey}` }),
-        target: new RenderTarget(this.gl, Math.max(1, this.width), Math.max(1, this.height)),
+        target: new RenderTarget(this.gl, Math.max(1, this.width), Math.max(1, this.height), this.precision),
         pipelineKey: "",
         lastFrame: this.frameCounter,
       };
@@ -1493,10 +1514,10 @@ export class SceneCompositor {
    *  its sides at the NEST's dims). */
   private transitionTargets(): { sideA: RenderTarget; sideAScratch: RenderTarget; sideB: RenderTarget; sideBScratch: RenderTarget } {
     const gl = this.gl;
-    this.sideAScratch ??= new RenderTarget(gl, this.width, this.height);
-    this.sideBScratch ??= new RenderTarget(gl, this.width, this.height);
-    this.sideA ??= new RenderTarget(gl, this.width, this.height);
-    this.sideB ??= new RenderTarget(gl, this.width, this.height);
+    this.sideAScratch ??= new RenderTarget(gl, this.width, this.height, this.precision);
+    this.sideBScratch ??= new RenderTarget(gl, this.width, this.height, this.precision);
+    this.sideA ??= new RenderTarget(gl, this.width, this.height, this.precision);
+    this.sideB ??= new RenderTarget(gl, this.width, this.height, this.precision);
     this.sideAScratch.resize(this.width, this.height);
     this.sideBScratch.resize(this.width, this.height);
     this.sideA.resize(this.width, this.height);
@@ -1703,7 +1724,7 @@ export class SceneCompositor {
   private passGraphTarget(key: string, width: number, height: number): RenderTarget {
     let entry = this.passGraphTargets.get(key);
     if (!entry) {
-      entry = { rt: new RenderTarget(this.gl, width, height), lastFrame: this.frameCounter };
+      entry = { rt: new RenderTarget(this.gl, width, height, this.precision), lastFrame: this.frameCounter };
       this.passGraphTargets.set(key, entry);
     }
     entry.rt.resize(width, height);
@@ -2364,8 +2385,8 @@ export class SceneCompositor {
     const gl = this.gl;
     const passes = layer.regionPasses ?? [];
     const fragmentPasses = layer.fragmentPasses ?? [];
-    this.layerNestA ??= new RenderTarget(gl, this.width, this.height);
-    this.layerNestB ??= new RenderTarget(gl, this.width, this.height);
+    this.layerNestA ??= new RenderTarget(gl, this.width, this.height, this.precision);
+    this.layerNestB ??= new RenderTarget(gl, this.width, this.height, this.precision);
     const savedA = this.accumA;
     const savedB = this.accumB;
     const savedNest = this.nestMode;
@@ -2555,8 +2576,8 @@ export class SceneCompositor {
     try {
       while (this.matteTargets.length <= depth) {
         this.matteTargets.push({
-          target: new RenderTarget(gl, Math.max(1, this.width), Math.max(1, this.height)),
-          scratch: new RenderTarget(gl, Math.max(1, this.width), Math.max(1, this.height)),
+          target: new RenderTarget(gl, Math.max(1, this.width), Math.max(1, this.height), this.precision),
+          scratch: new RenderTarget(gl, Math.max(1, this.width), Math.max(1, this.height), this.precision),
         });
       }
       const pair = this.matteTargets[depth]!;
@@ -2580,7 +2601,7 @@ export class SceneCompositor {
   }
 
   private contentCache(): ContentArtifactCache {
-    return (this.contentArtifactCache ??= new ContentArtifactCache(this.gl, this.contentCacheBudgetBytes));
+    return (this.contentArtifactCache ??= new ContentArtifactCache(this.gl, this.contentCacheBudgetBytes, this.precision));
   }
 
   /**
@@ -2609,8 +2630,8 @@ export class SceneCompositor {
     const gl = this.gl;
     while (this.groupTargets.length <= depth) {
       this.groupTargets.push({
-        target: new RenderTarget(gl, Math.max(1, width), Math.max(1, height)),
-        scratch: new RenderTarget(gl, Math.max(1, width), Math.max(1, height)),
+        target: new RenderTarget(gl, Math.max(1, width), Math.max(1, height), this.precision),
+        scratch: new RenderTarget(gl, Math.max(1, width), Math.max(1, height), this.precision),
       });
     }
     const pair = this.groupTargets[depth]!;
@@ -2967,6 +2988,9 @@ export class SceneCompositor {
     const w = Math.max(1, Math.min(targetW | 0, this.width));
     const h = Math.max(1, Math.min(targetH | 0, this.height));
     const gl = this.gl;
+    // RGBA8 ON PURPOSE, never this.precision: this target is read back with
+    // readPixels(..., UNSIGNED_BYTE) for the scopes, and the readback format has to match what is
+    // attached. The scopes are 8-bit Rec.709 by contract; precision belongs upstream of them.
     if (!this.scopeThumb) this.scopeThumb = new RenderTarget(gl, w, h);
     else this.scopeThumb.resize(w, h);
     try {

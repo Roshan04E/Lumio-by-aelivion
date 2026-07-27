@@ -419,19 +419,82 @@ export function make2dTexture(gl: WebGL2RenderingContext): WebGLTexture {
 }
 
 /**
- * A render-to-texture target: an RGBA8 color texture backed by a framebuffer. The compositor keeps
- * two of these as a ping-pong accumulator so it can blend each layer against the previous result
- * without read/write feedback (read target A as a texture while drawing into target B).
+ * Render-target precision (plans/log-raw-source-color.md, Stage 0).
+ *
+ * `rgba8` is the shipped path and stays the default everywhere. `rgba16f` exists because log footage
+ * is DESIGNED to be stretched in the grade, and stretching it through 8-bit intermediates bands
+ * visibly — so log support on an 8-bit pipeline would technically work and look bad, which is worse
+ * than the honest "not transformed yet" warning we show today. This is a prerequisite for the input
+ * transforms, not an optimisation.
+ */
+export type RenderTargetPrecision = "rgba8" | "rgba16f";
+
+/** `window.__rfHdrPipeline` — always recorded, flag or no flag, so engagement is provable before any
+ *  flip (the `__rfSingleCtxPreview` doctrine: telemetry is never gated, only ENFORCEMENT is). */
+function noteHdrPipeline(kind: "targets" | "halfFloat" | "fallbacks"): void {
+  if (typeof globalThis === "undefined") return;
+  const w = globalThis as { __rfHdrPipeline?: { targets: number; halfFloat: number; fallbacks: number } };
+  const s = (w.__rfHdrPipeline ??= { targets: 0, halfFloat: 0, fallbacks: 0 });
+  s[kind] += 1;
+}
+
+const halfFloatColorBufferCache = new WeakMap<WebGL2RenderingContext, boolean>();
+
+/**
+ * Can this context actually RENDER to a half-float texture?
+ *
+ * WebGL2 exposes RGBA16F as a texture format unconditionally, but colour-buffer *attachment* needs
+ * `EXT_color_buffer_half_float` (or `EXT_color_buffer_float`). Asking the extension registry is the
+ * whole check — allocating and probing FRAMEBUFFER_COMPLETE would cost an alloc per context on a
+ * path that runs during preview setup.
+ */
+export function supportsHalfFloatRenderTarget(gl: WebGL2RenderingContext): boolean {
+  const cached = halfFloatColorBufferCache.get(gl);
+  if (cached !== undefined) return cached;
+  let ok = false;
+  try {
+    ok = Boolean(gl.getExtension("EXT_color_buffer_half_float") ?? gl.getExtension("EXT_color_buffer_float"));
+  } catch {
+    ok = false;
+  }
+  halfFloatColorBufferCache.set(gl, ok);
+  return ok;
+}
+
+/** Bytes per pixel a target of this precision pins — the unit the compositor's GPU budget counts in. */
+export function bytesPerPixel(precision: RenderTargetPrecision): number {
+  return precision === "rgba16f" ? 8 : 4;
+}
+
+/**
+ * A render-to-texture colour texture backed by a framebuffer. The compositor keeps two of these as a
+ * ping-pong accumulator so it can blend each layer against the previous result without read/write
+ * feedback (read target A as a texture while drawing into target B).
+ *
+ * Precision is requested, not guaranteed: an unsupported context silently falls back to RGBA8 and
+ * records it. A half-float target that failed to attach would leave an INCOMPLETE framebuffer and
+ * render nothing, so falling back is the only safe answer — and `precision` reports what was actually
+ * allocated, never what was asked for.
  */
 export class RenderTarget {
   readonly tex: WebGLTexture;
   readonly fbo: WebGLFramebuffer;
+  /** What this target ACTUALLY is, after the capability fallback. */
+  readonly precision: RenderTargetPrecision;
   private disposed = false;
 
-  constructor(private readonly gl: WebGL2RenderingContext, public width: number, public height: number) {
+  constructor(
+    private readonly gl: WebGL2RenderingContext,
+    public width: number,
+    public height: number,
+    requested: RenderTargetPrecision = "rgba8"
+  ) {
+    const half = requested === "rgba16f" && supportsHalfFloatRenderTarget(gl);
+    if (requested === "rgba16f" && !half) noteHdrPipeline("fallbacks");
+    this.precision = half ? "rgba16f" : "rgba8";
     const tex = make2dTexture(gl);
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    this.allocate(tex, width, height);
     const fbo = gl.createFramebuffer();
     if (!fbo) throw new Error("gl-context: framebuffer alloc failed");
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
@@ -439,7 +502,19 @@ export class RenderTarget {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.tex = tex;
     this.fbo = fbo;
+    noteHdrPipeline("targets");
+    if (this.precision === "rgba16f") noteHdrPipeline("halfFloat");
     frameProfiler.noteRttAlloc();
+  }
+
+  private allocate(tex: WebGLTexture, width: number, height: number): void {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (this.precision === "rgba16f") {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      return;
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
   /** Resize the backing texture if the composition size changed. */
@@ -448,8 +523,7 @@ export class RenderTarget {
     frameProfiler.noteRttResize();
     this.width = width;
     this.height = height;
-    this.gl.bindTexture(this.gl.TEXTURE_2D, this.tex);
-    this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, width, height, 0, this.gl.RGBA, this.gl.UNSIGNED_BYTE, null);
+    this.allocate(this.tex, width, height);
   }
 
   dispose(): void {

@@ -323,6 +323,39 @@ export function getSingleCtxPreviewEnabled(): boolean {
  *
  * Resolution order: `?glGovernor=0|1` → localStorage `orreris.glGovernor` → `VITE_GL_GOVERNOR` → true.
  */
+/**
+ * HDR / 10-bit pipeline (plans/log-raw-source-color.md, Stage 0) — allocate compositor render targets
+ * at RGBA16F instead of RGBA8.
+ *
+ * DEFAULT OFF. This is the prerequisite for log input transforms (Stage 2): log footage is designed
+ * to be stretched in the grade, and an 8-bit intermediate bands visibly when you do that. It is off
+ * because half-float DOUBLES GPU bytes per target, and the compositor's artifact budget is sized for
+ * the integrated-GPU target (Iris Xe class) this product aims at — so it needs the same flip ladder
+ * every other pipeline flag got: `render:compare:pixels` 23/23 at 0.000% in BOTH states, a non-zero
+ * engagement probe (`window.__rfHdrPipeline.halfFloat`) on and untouched off, then a user soak.
+ *
+ * Telemetry is NOT gated by this flag (see noteHdrPipeline) — only allocation is.
+ *
+ * Resolution order: `?hdrPipeline=0|1` → localStorage `orreris.hdrPipeline` → `VITE_HDR_PIPELINE` →
+ * false.
+ */
+export function getHdrPipelineEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("hdrPipeline")) {
+        return truthy(new URLSearchParams(window.location.search).get("hdrPipeline"));
+      }
+      const stored = window.localStorage?.getItem("orreris.hdrPipeline");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_HDR_PIPELINE;
+  return env == null ? false : truthy(env);
+}
+
 export function getGlGovernorEnabled(): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
   if (typeof window !== "undefined") {
