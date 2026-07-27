@@ -173,12 +173,57 @@ function hueConic(s: number, v: number, normalise = true): string {
  * here follows the ring's own geometry only. The light-from-above cue lives on the housing, which is
  * a wide annulus where it reads correctly, and on the puck.
  */
-export const WHEEL_RING = [
+/**
+ * MASTER GAIN — the wheel renders its own level, instead of being a fixed picture with a slider
+ * bolted under it.
+ *
+ * The level slider was purely a value the engine read; the disc above it never changed, so nothing on
+ * the control showed what the correction was doing. A grading wheel is a readout as much as an input:
+ * lifting the level should visibly lift the wheel, crushing it should visibly crush it, so the three
+ * columns can be compared at a glance without reading three numbers.
+ *
+ * Bounded well inside black and clipping — this is an indication of level, not a simulation of the
+ * image. At the extremes the hues must still be identifiable, because the ring is also what you aim
+ * the puck at.
+ */
+function masterGain(master: number): number {
+  const m = master < -1 ? -1 : master > 1 ? 1 : master;
+  return 1 + m * 0.42;
+}
+
+/**
+ * Quantized so the conic strings are built a bounded number of times.
+ *
+ * These are 128-stop gradient strings; rebuilding two per wheel on every pointermove of a drag would
+ * be real work on the interaction path. At 1/20 steps there are at most 21 distinct variants per
+ * wheel, each built once and reused for the life of the page.
+ */
+const RING_CACHE = new Map<number, string>();
+const FIELD_CACHE = new Map<number, string>();
+const quantizeMaster = (master: number): number => Math.round(masterGain(master) * 20) / 20;
+
+export const WHEEL_RING_BASE = [
   `radial-gradient(circle closest-side at center,
      rgba(0,0,0,0) 0 96%,
      rgba(0,0,0,0.42) 100%)`.replace(/\s+/g, " "),
   hueConic(1, 1)
 ].join(", ");
+
+/** Ring at a given master level (see masterGain). Cached per quantized gain. */
+export function wheelRing(master: number): string {
+  const gain = quantizeMaster(master);
+  let cached = RING_CACHE.get(gain);
+  if (cached === undefined) {
+    cached = [
+      `radial-gradient(circle closest-side at center,
+         rgba(0,0,0,0) 0 96%,
+         rgba(0,0,0,0.42) 100%)`.replace(/\s+/g, " "),
+      hueConic(1, Math.min(1, gain))
+    ].join(", ");
+    RING_CACHE.set(gain, cached);
+  }
+  return cached;
+}
 
 /** Mask for the ring element — generated from the SAME constant the field's falloff ends on. */
 export const WHEEL_RING_MASK =
@@ -202,7 +247,7 @@ export const WHEEL_GRAIN_MASK =
  *
  * Grain is NOT in this stack — it is a separate masked element, for the reason given at WHEEL_GRAIN.
  */
-const WHEEL_BACKGROUND = (() => {
+const buildWheelBackground = (gain: number): string => {
   // 4 · SCRIM — alpha ∝ 1 − (t/clear)², sampled rather than hand-placed so the curve is the stated
   // function and not a list of tuned numbers.
   const SCRIM = "34, 37, 44";
@@ -226,9 +271,20 @@ const WHEEL_BACKGROUND = (() => {
   return [
     `radial-gradient(circle closest-side at center, ${vigStops.join(", ")})`,
     `radial-gradient(circle closest-side at center, ${scrimStops.join(", ")})`,
-    hueConic(1, 0.58)
+    hueConic(1, Math.min(1, 0.58 * gain))
   ].join(", ");
-})();
+};
+
+/** Field at a given master level (see masterGain). Cached per quantized gain. */
+function wheelBackground(master: number): string {
+  const gain = quantizeMaster(master);
+  let cached = FIELD_CACHE.get(gain);
+  if (cached === undefined) {
+    cached = buildWheelBackground(gain);
+    FIELD_CACHE.set(gain, cached);
+  }
+  return cached;
+}
 
 function neutralWheels(): ColorWheelsValue {
   return { shadows: { ...NEUTRAL }, midtones: { ...NEUTRAL }, highlights: { ...NEUTRAL } };
@@ -411,7 +467,7 @@ function Wheel({
         <div
           ref={padRef}
           className="color-wheel-pad"
-          style={{ background: WHEEL_BACKGROUND }}
+          style={{ background: wheelBackground(wheel.master) }}
           onPointerDown={handleDown}
           onPointerMove={handleMove}
           onPointerUp={handleUp}
@@ -429,11 +485,11 @@ function Wheel({
             }}
           />
           {/* The vivid outer ring, on its own element so it can carry FULL value while the field
-              stays dark and saturated (see WHEEL_RING). Masked to the outer band from the same
+              stays dark and saturated (see wheelRing). Masked to the outer band from the same
               constant the field's groove uses; inert to pointers. */}
           <span
             className="color-wheel-ring"
-            style={{ background: WHEEL_RING, WebkitMaskImage: WHEEL_RING_MASK, maskImage: WHEEL_RING_MASK }}
+            style={{ background: wheelRing(wheel.master), WebkitMaskImage: WHEEL_RING_MASK, maskImage: WHEEL_RING_MASK }}
           />
           <span className="color-wheel-handle" style={{ left: handleLeft, top: handleTop }} />
         </div>

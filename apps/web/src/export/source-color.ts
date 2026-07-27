@@ -166,6 +166,30 @@ export interface SourceProbeResult {
  * render loop). Resolves with `{ color, rotationDegrees }`; color is null and rotation is 0 when they
  * can't be determined (unsupported container, no signalling, too large, or a parse error). Never throws.
  */
+/**
+ * `window.__rfSourceColor` — what was detected for each probed file, newest last.
+ *
+ * Detection is otherwise invisible: its only user-facing surface is an export-dialog warning, so
+ * there was no way to confirm a clip was READ as 10-bit rather than assumed 8-bit. Follows the `__rf*`
+ * convention — always recorded, never gated.
+ */
+function recordSourceColor(name: string, color: SourceColorMetadata | null): void {
+  if (typeof globalThis === "undefined") return;
+  const w = globalThis as { __rfSourceColor?: Array<Record<string, unknown>> };
+  const log = (w.__rfSourceColor ??= []);
+  log.push({
+    file: name,
+    detected: color !== null,
+    bitDepth: color?.bitDepth,
+    transfer: color?.transfer,
+    primaries: color?.primaries,
+    matrix: color?.matrix,
+    fullRange: color?.fullRange,
+    confidence: color?.confidence
+  });
+  if (log.length > 50) log.shift();
+}
+
 export async function detectSourceMetadataFromFile(file: Blob): Promise<SourceProbeResult> {
   const empty: SourceProbeResult = { color: null, rotationDegrees: 0 };
   if (file.size > MAX_PROBE_BYTES) return empty;
@@ -197,6 +221,7 @@ export async function detectSourceMetadataFromFile(file: Blob): Promise<SourcePr
         tick();
       });
     }
+    recordSourceColor((file as File).name ?? "(blob)", result.color);
     return result;
   } catch {
     return empty;
