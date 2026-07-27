@@ -1,4 +1,5 @@
 import { evaluateAnimatedValue, evaluateTimelineEffectParam, evaluateTimelineTransform } from "./animation";
+import { frameProfiler } from "./color/frame-profiler";
 import { COLOR_EFFECT_TYPES, compileColorPipeline, DEFAULT_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
@@ -128,6 +129,7 @@ export function getCompositionTransform(
   layer: Pick<CompositionLayerStyleInput, "startSeconds" | "transform" | "keyframes" | "animations"> | undefined,
   options: CompositionStyleOptions = {}
 ): CompositionTransform {
+  frameProfiler.bump("grade.transform.calls"); // pure (no cache): allocates + evaluates keyframes every call
   const transform = asRecord(layer?.transform);
   const position = asRecord(transform.position);
 
@@ -1211,8 +1213,10 @@ export function getCompositionColorPipeline(
   layer: CompositionLayerStyleInput | TimelineLayer,
   options: CompositionStyleOptions = {}
 ): ColorPipeline | null {
+  frameProfiler.bump("grade.pipeline.calls");
   const effects = (layer as { effects?: unknown[] | undefined }).effects;
   if (!effects?.length) {
+    frameProfiler.bump("grade.pipeline.noEffects");
     return null;
   }
   const animations = layer.animations as TimelineKeyframeV2[] | undefined;
@@ -1230,8 +1234,13 @@ export function getCompositionColorPipeline(
     // frame time exactly like the uncached path (no quantization, zero pixel risk).
     (!cached.animated || cached.timeKey === layerTimeSeconds)
   ) {
+    frameProfiler.bump("grade.pipeline.hits");
     return cached.result;
   }
+  // Cache MISS → full pipeline rebuild (stage allocation + tone-curve bakes) below. A fresh `effects`
+  // array each frame (e.g. Flarex `pipelineFor`) misses here EVERY frame — the "rebuilding grade
+  // pipelines" signal the profiler is checking for.
+  frameProfiler.bump("grade.pipeline.misses");
 
   const inputs: ColorEffectInput[] = [];
   for (const rawEffect of effects) {

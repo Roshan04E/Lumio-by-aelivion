@@ -347,6 +347,22 @@ export interface SceneFrameSpec {
   debugFrameTime?: number | undefined;
 }
 
+/**
+ * Construction-time knobs for the content-addressed artifact cache (Flarex evaluation engine, Slice 2).
+ *
+ * `contentCache: false` is a KILL SWITCH, in the same spirit as the repo's other engine flags
+ * (`?wcDecode=0|1`, `?singleCtxPreview=0`): the cache is a pure optimization, so it must be possible to
+ * turn off without a deploy if it ever misbehaves — and the perf scorecard needs exactly this A/B to
+ * answer "does the cache actually pay for its memory?" rather than assuming it does.
+ *
+ * `contentCacheBudgetBytes` lowers the GPU budget for memory-constrained devices (the product target is
+ * integrated GPUs, where trading reuse for headroom is sometimes the right call).
+ */
+export interface SceneCompositorOptions {
+  contentCache?: boolean | undefined;
+  contentCacheBudgetBytes?: number | undefined;
+}
+
 export const SCENE_COMPOSITOR_CONTEXT_LOST = "SCENE_COMPOSITOR_CONTEXT_LOST";
 
 export interface SceneCompositorDebugSnapshot {
@@ -718,14 +734,102 @@ const CONTENT_CACHE_CONTRACT_VERSION = 1;
  *  render dimensions + this revision. */
 const RENDERER_REVISION = 1;
 
+/**
+ * GPU budget for the content-addressed artifact cache (Slice 2, commit 3c-B). Sized for the
+ * integrated-GPU target (Iris Xe class) this product is aimed at: ~12 artifacts at 1080p RGBA8
+ * (8.3 MB each), alongside the compositor's own accumulators, depth pools and source textures.
+ * Without a budget the cache was unbounded — a per-frame-keyed artifact allocated ~8 MB EVERY frame
+ * during playback (~500 MB/s at 60fps) until the context was lost.
+ */
+const CONTENT_CACHE_BUDGET_BYTES = 96 * 1024 * 1024;
+/** Backstop for many-small-artifact comps, where the byte budget alone would allow unbounded entries. */
+const CONTENT_CACHE_MAX_ENTRIES = 64;
+
+/** The retention-relevant facts about one cached artifact — everything the policy is allowed to see.
+ *  Deliberately GL-free so the policy is a pure function (see {@link planArtifactEviction}). */
+export interface ArtifactRetentionCandidate {
+  cacheKey: string;
+  bytes: number;
+  lastAccessFrame: number;
+  protectedTier: boolean;
+}
+
+/**
+ * Pure retention policy for the content-addressed artifact cache (Slice 2, commit 3c-B): given every
+ * cached artifact's facts and the current budget state, decide WHICH keys to evict and in what order.
+ *
+ * Split out from the cache itself so the decision — the part that determines whether this product's
+ * "same comp, less memory" claim actually holds — is testable without a WebGL context.
+ *
+ * Rules, in order:
+ *  1. Never evict an artifact touched on the CURRENT frame. The caller composites from a handed-out
+ *     `entry.artifact` synchronously and a later group in the same frame may hit the same key.
+ *  2. Drain probation before protected, so a stream of single-use per-frame artifacts cannot flush the
+ *     artifacts with proven cross-frame reuse (cache pollution — the failure mode that would make this
+ *     cache cost memory while returning nothing).
+ *  3. Within a tier, least-recently-used first.
+ *  4. Stop as soon as BOTH the byte budget and the entry cap are satisfied.
+ */
+export function planArtifactEviction(
+  candidates: readonly ArtifactRetentionCandidate[],
+  state: { frame: number; bytes: number; entries: number; budgetBytes: number; maxEntries: number },
+): string[] {
+  let { bytes, entries } = state;
+  if (bytes <= state.budgetBytes && entries <= state.maxEntries) return [];
+  const evictable = candidates
+    .filter((candidate) => candidate.lastAccessFrame < state.frame) // rule 1
+    .sort((a, b) =>
+      a.protectedTier !== b.protectedTier
+        ? Number(a.protectedTier) - Number(b.protectedTier) // rule 2: probation (false) first
+        : a.lastAccessFrame - b.lastAccessFrame, // rule 3
+    );
+  const evict: string[] = [];
+  for (const candidate of evictable) {
+    if (bytes <= state.budgetBytes && entries <= state.maxEntries) break; // rule 4
+    evict.push(candidate.cacheKey);
+    bytes -= candidate.bytes;
+    entries -= 1;
+  }
+  return evict;
+}
+
 /** One cached render artifact. Today `artifact` is always a texture RTT; the shape is deliberately
  *  artifact-agnostic (ADR-010 ArtifactKind) so future geometry/tensor/mask kinds reuse this cache. */
 interface ArtifactEntry {
   artifact: RenderTarget;
   cacheKey: string;
-  /** OBSERVATION only (Slice 2, commit 3b) — recorded on access, never consulted for lookup/store.
-   *  The retention policy (commit 3c) reads it to evict; nothing in 3b interprets it. */
+  /** Drives LRU eviction (commit 3c-B). Also the "touched this frame" fence: an entry accessed on the
+   *  CURRENT frame is never evicted, because intra-frame fan-out may still read it. */
   lastAccessFrame: number;
+  /** Frame this entry was stored on. A hit on a LATER frame is what proves CROSS-frame reuse. */
+  storedFrame: number;
+  /** GPU bytes this artifact pins (w × h × 4, RGBA8) — the quantity the budget is denominated in. */
+  bytes: number;
+  /**
+   * Segmented-LRU tier. `false` = probation (stored, never yet reused on a later frame); `true` =
+   * protected (proven cross-frame reuse). Eviction drains probation first.
+   *
+   * This is what keeps the cache USEFUL under playback instead of merely bounded. A time-varying
+   * artifact re-keys every frame, so it is never hit on a later frame and stays in probation — plain
+   * LRU would let that stream of single-use artifacts flush the genuinely reusable static ones (classic
+   * cache pollution) and the cache would cost memory while returning nothing. Note this also resolves
+   * the ADR-010 tension cleanly: retention distinguishes volatile from durable artifacts EMPIRICALLY
+   * (was it actually reused?) rather than by interpreting a dependency's name, so the compositor still
+   * never learns what "time" means.
+   */
+  protectedTier: boolean;
+}
+
+/** Observability for the reuse scorecard (Slice 2's stated deliverable) and the perf harness. */
+export interface ContentArtifactCacheStats {
+  entries: number;
+  bytes: number;
+  budgetBytes: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  /** Entries promoted to the protected tier = artifacts that genuinely paid for themselves. */
+  promotions: number;
 }
 
 /**
@@ -738,31 +842,102 @@ interface ArtifactEntry {
  */
 class ContentArtifactCache {
   private readonly entries = new Map<string, ArtifactEntry>();
-  constructor(private readonly gl: WebGL2RenderingContext) {}
+  private bytes = 0;
+  private hits = 0;
+  private misses = 0;
+  private evictions = 0;
+  private promotions = 0;
+  constructor(
+    private readonly gl: WebGL2RenderingContext,
+    private readonly budgetBytes: number = CONTENT_CACHE_BUDGET_BYTES,
+  ) {}
 
   lookup(cacheKey: string, frame: number): ArtifactEntry | undefined {
     const entry = this.entries.get(cacheKey);
-    if (entry) entry.lastAccessFrame = frame; // observation only — never a lifetime decision
+    if (!entry) {
+      this.misses += 1;
+      return undefined;
+    }
+    this.hits += 1;
+    // Reuse on a LATER frame than the one that stored it = this artifact earned its memory. Promote it
+    // out of probation so playback churn can't flush it (see `protectedTier`).
+    if (!entry.protectedTier && frame > entry.storedFrame) {
+      entry.protectedTier = true;
+      this.promotions += 1;
+    }
+    entry.lastAccessFrame = frame;
     return entry;
   }
 
-  /** Get-or-create the entry for a key and return it; the caller renders/blits into `entry.artifact`.
-   *  No eviction: an unseen key always allocates (3c bounds this). */
+  /** Get-or-create the entry for a key and return it; the caller renders/blits into `entry.artifact`. */
   store(cacheKey: string, width: number, height: number, frame: number): ArtifactEntry {
+    const w = Math.max(1, width);
+    const h = Math.max(1, height);
     let entry = this.entries.get(cacheKey);
     if (!entry) {
-      entry = { artifact: new RenderTarget(this.gl, Math.max(1, width), Math.max(1, height)), cacheKey, lastAccessFrame: frame };
+      entry = {
+        artifact: new RenderTarget(this.gl, w, h),
+        cacheKey,
+        lastAccessFrame: frame,
+        storedFrame: frame,
+        bytes: w * h * 4,
+        protectedTier: false,
+      };
       this.entries.set(cacheKey, entry);
+      this.bytes += entry.bytes;
     } else {
-      entry.artifact.resize(width, height);
+      entry.artifact.resize(w, h);
+      this.bytes -= entry.bytes;
+      entry.bytes = w * h * 4;
+      this.bytes += entry.bytes;
       entry.lastAccessFrame = frame;
     }
     return entry;
   }
 
+  /**
+   * Enforce the budget. Called once per frame AFTER every draw, so anything still needed for this
+   * frame's intra-frame fan-out has already been read.
+   *
+   * Entries touched on `frame` are never evicted: `renderGroupInto` hands out `entry.artifact` and the
+   * caller composites from it synchronously, and a later group this same frame may hit the same key.
+   * Eviction drains probation (LRU) before protected (LRU), so single-use per-frame artifacts are
+   * reclaimed before ones with proven cross-frame reuse.
+   */
+  evictToBudget(frame: number): void {
+    const doomed = planArtifactEviction([...this.entries.values()], {
+      frame,
+      bytes: this.bytes,
+      entries: this.entries.size,
+      budgetBytes: this.budgetBytes,
+      maxEntries: CONTENT_CACHE_MAX_ENTRIES,
+    });
+    for (const cacheKey of doomed) {
+      const entry = this.entries.get(cacheKey);
+      if (!entry) continue;
+      this.entries.delete(cacheKey);
+      this.bytes -= entry.bytes;
+      this.evictions += 1;
+      entry.artifact.dispose();
+    }
+  }
+
+  stats(): ContentArtifactCacheStats {
+    return {
+      entries: this.entries.size,
+      bytes: this.bytes,
+      budgetBytes: this.budgetBytes,
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions,
+      promotions: this.promotions,
+    };
+  }
+
   dispose(): void {
     for (const entry of this.entries.values()) entry.artifact.dispose();
     this.entries.clear();
+    this.bytes = 0;
   }
 }
 
@@ -780,6 +955,9 @@ export class SceneCompositor {
   // Content-addressed artifact cache (Flarex evaluation engine, Slice 2). Lazy — created on first
   // materialized-group render so a compositor that never renders Flarex pays nothing.
   private contentArtifactCache: ContentArtifactCache | undefined;
+  /** Kill switch (see SceneCompositorOptions): sealed groups render normally, they just never cache. */
+  private readonly contentCacheDisabled: boolean = false;
+  private readonly contentCacheBudgetBytes: number = CONTENT_CACHE_BUDGET_BYTES;
   // 1×1 placeholder bound to the mask sampler when a layer has no mask (the shader won't sample it,
   // but a valid texture must stay bound to the unit).
   private readonly emptyTex: WebGLTexture;
@@ -1095,10 +1273,12 @@ export class SceneCompositor {
     };
   }
 
-  constructor(canvas: AnyCanvas, width: number, height: number) {
+  constructor(canvas: AnyCanvas, width: number, height: number, options?: SceneCompositorOptions) {
     this.canvas = canvas;
     this.width = width;
     this.height = height;
+    if (options?.contentCache === false) this.contentCacheDisabled = true;
+    if (options?.contentCacheBudgetBytes !== undefined) this.contentCacheBudgetBytes = options.contentCacheBudgetBytes;
     canvas.width = width;
     canvas.height = height;
     const gl = createGl(canvas, { kind: "scene-compositor", label: "scene-compositor" });
@@ -2400,7 +2580,18 @@ export class SceneCompositor {
   }
 
   private contentCache(): ContentArtifactCache {
-    return (this.contentArtifactCache ??= new ContentArtifactCache(this.gl));
+    return (this.contentArtifactCache ??= new ContentArtifactCache(this.gl, this.contentCacheBudgetBytes));
+  }
+
+  /**
+   * Reuse scorecard for the content-addressed artifact cache (Slice 2's stated deliverable). Null until
+   * a materialized group has rendered, so a compositor that never touches Flarex reports nothing.
+   * Read by the perf harness + `?flarexProfile=1` to answer "is the cache paying for its memory?" —
+   * `hits` vs `misses` is the reuse rate, `promotions` counts artifacts with real CROSS-frame reuse,
+   * and `bytes` vs `budgetBytes` is the resource claim this product is built on.
+   */
+  contentCacheStats(): ContentArtifactCacheStats | null {
+    return this.contentArtifactCache?.stats() ?? null;
   }
 
   /**
@@ -2455,7 +2646,8 @@ export class SceneCompositor {
     // width/height are already PARENT coords here (the nest swap below is skipped on a hit), which is
     // exactly what the shell composite expects. Serves intra-frame fan-out too: the first occurrence
     // populates, later clones with the same identity reuse.
-    const contentKey = draw.contentHash !== undefined ? this.contentCacheKey(draw, nestW, nestH) : undefined;
+    const contentKey =
+      draw.contentHash !== undefined && !this.contentCacheDisabled ? this.contentCacheKey(draw, nestW, nestH) : undefined;
     if (contentKey !== undefined) {
       const hit = this.contentCache().lookup(contentKey, this.frameCounter);
       if (hit) {
@@ -2642,6 +2834,9 @@ export class SceneCompositor {
     this.pruneTextures();
     this.pruneRegionGradeRenderers();
     this.pruneFragmentPrograms();
+    // Content-cache retention (Slice 2, commit 3c-B). AFTER every draw: intra-frame fan-out has had its
+    // chance to hit, so anything untouched this frame is genuinely idle and safe to reclaim.
+    this.contentArtifactCache?.evictToBudget(this.frameCounter);
     gl.bindVertexArray(null);
     return true;
   }
@@ -2717,6 +2912,42 @@ export class SceneCompositor {
       pixels.set(tmp, bottom);
     }
     return { pixels, width: w, height: h };
+  }
+
+  /**
+   * Composite `spec` offscreen and read it back DOWNSAMPLED — `renderFrameOffscreen`'s cheap sibling,
+   * for the Flarex node thumbnails (one small picture per node, many per pass).
+   *
+   * The difference that matters is the readback, not the composite. `renderFrameOffscreen` reads the
+   * full frame: at 4K that is a 33 MB `readPixels` — a synchronous GPU drain — per call, which is
+   * exactly the cost a per-node thumbnail pass cannot pay. Here the finished frame is linear-blit down
+   * to `targetW×targetH` on the GPU first (the `readCompositeThumbnail` path) so only ~20 KB crosses
+   * the bus. The composite itself still runs at the compositor's own size: `renderFrameOffscreen`'s
+   * size contract applies unchanged (see its docstring — `ensureSize` would resize the VISIBLE canvas),
+   * so callers keep this off the playback path and treat null as not-ready.
+   *
+   * CAVEAT the caller owns: this OVERWRITES the retained composite in `accumA`, which is what the color
+   * scopes sample via `readCompositeThumbnail`. A caller that renders thumbnails while scopes are live
+   * must re-composite the viewer frame afterwards (ScenePreviewCanvas re-arms its settle window).
+   */
+  renderFrameThumbnail(
+    spec: SceneFrameSpec,
+    targetW: number,
+    targetH: number,
+    buffer?: Uint8Array
+  ): { pixels: Uint8Array; width: number; height: number } | null {
+    if (spec.width !== this.width || spec.height !== this.height) return null;
+    let drawn = false;
+    try {
+      drawn = this.renderFrameCore(spec);
+    } catch (error) {
+      if (error instanceof Error && error.message === SCENE_COMPOSITOR_CONTEXT_LOST) {
+        this.contextLost = true;
+      }
+      throw error;
+    }
+    if (!drawn) return null;
+    return this.readCompositeThumbnail(targetW, targetH, buffer);
   }
 
   /**

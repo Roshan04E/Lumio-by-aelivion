@@ -13,6 +13,8 @@
  * sameness is what keeps the unified pass pixel-aligned with the per-clip path it replaces.
  */
 
+import { frameProfiler } from "./frame-profiler";
+
 /** A 2D off-screen canvas (DOM `<canvas>` on the main thread, `OffscreenCanvas` in a worker). */
 export type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
 
@@ -437,11 +439,13 @@ export class RenderTarget {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.tex = tex;
     this.fbo = fbo;
+    frameProfiler.noteRttAlloc();
   }
 
   /** Resize the backing texture if the composition size changed. */
   resize(width: number, height: number): void {
     if (this.disposed || (this.width === width && this.height === height)) return;
+    frameProfiler.noteRttResize();
     this.width = width;
     this.height = height;
     this.gl.bindTexture(this.gl.TEXTURE_2D, this.tex);

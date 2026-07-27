@@ -23,6 +23,7 @@ export * from "./transition-compositor";
 export * from "./fragment-effects/registry";
 export * from "./fragment-effects/builtins";
 export * from "./gl-context";
+export * from "./frame-profiler";
 export * from "./blend";
 export * from "./scene-compositor";
 export * from "./cube-parser";
