@@ -219,3 +219,6 @@ export async function renderFlarexCompProxy(input: RenderFlarexCompProxyInput): 
 }
 
 export { ProxyGenerationAborted };
+// The playback-substitution rule lives in its own dependency-free module so it can be tested outside
+// a browser; re-exported here so callers have one import for the proxy surface.
+export { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
