@@ -970,13 +970,20 @@ export function EditorPage() {
   // falls back to sampling the DOM preview element and flags itself "approx".
   const scopeSampleBufferRef = useRef<Uint8Array | null>(null);
   /**
-   * AUTO-FOLLOW scope target, reported one-way by FlarexWorkspace when exactly one node is selected.
-   * A ref as well as state: the sampler is a stable `useCallback` driven by timers inside ColorScopes,
-   * so it must read the CURRENT target rather than close over the one that existed when it was built.
+   * The Flarex VIEW DOT currently in effect, for labelling only.
+   *
+   * Scopes measure what the viewer shows — that is the whole rule, and here it comes for free: a view
+   * dot (`comp.previewNodeId`) re-roots the LIVE compile (compile-flarex.ts), so when one is set the
+   * retained composite the scopes already sample IS that node's output. Nothing needs isolating; the
+   * only thing missing was saying so.
+   *
+   * An earlier pass had the scopes isolate the SELECTED node instead. That was wrong twice over: it
+   * re-rendered a picture the viewer had already drawn, and it made the scopes disagree with the
+   * viewer whenever selection and view dot differed — which is most of the time, because selecting a
+   * node to edit its parameters is not the same act as choosing to look at its output. Fusion keeps
+   * those two separate deliberately, and this app already had the same separation.
    */
-  const [flarexScopeTarget, setFlarexScopeTarget] = useState<{ nodeId: string; label: string } | null>(null);
-  const flarexScopeTargetRef = useRef<{ nodeId: string; label: string } | null>(null);
-  flarexScopeTargetRef.current = flarexScopeTarget;
+  const scopeViewDotRef = useRef<{ nodeId: string; label: string } | null>(null);
   const scopeHostLayerIdRef = useRef<string | null>(null);
   /** Isolate-clip toggle. Host-owned so every open scope panel agrees; mirrored into a ref because
    *  the sampler is a stable callback driven by timers and must read the CURRENT value. */
@@ -1004,27 +1011,6 @@ export function EditorPage() {
       fellBack
     });
 
-    // ISOLATED NODE first, when the graph has a single node selected. This re-roots the comp at that
-    // node WITHOUT mutating the user's persisted view dot (renderFlarexNodeThumbnail's own contract),
-    // so measuring a node never moves what the viewer is showing.
-    const target = flarexScopeTargetRef.current;
-    const hostLayerId = scopeHostLayerIdRef.current;
-    if (target && hostLayerId) {
-      const node = handle.renderFlarexNodeThumbnail({
-        hostLayerId,
-        nodeId: target.nodeId,
-        targetWidth: w,
-        targetHeight: h,
-        buffer
-      });
-      if (node) return toFrame(node, `Node: ${target.label}`, false);
-      // Declined — it refuses while playing, before the first composited frame, and when the host
-      // clip is not on screen at the playhead. Fall back to the programme output and SAY SO rather
-      // than freezing on a stale node frame that would still be labelled as the node.
-      const out = handle.readCompositeThumbnail(w, h, buffer);
-      return out ? toFrame(out, "Output", true) : null;
-    }
-
     // ISOLATED CLIP — explicit toggle, not selection-following: having a clip selected is the resting
     // state of the editor, so isolating on selection alone would silently flip the default away from
     // the programme output and hide everything composited above the clip.
@@ -1041,8 +1027,13 @@ export function EditorPage() {
       return out ? toFrame(out, "Output", true) : null;
     }
 
+    // The retained composite — already re-rooted at the view dot when one is set, so this single read
+    // covers both cases and stays correct DURING PLAYBACK too (the viewer is re-rooted regardless of
+    // play state, unlike anything that has to re-render offscreen).
     const res = handle.readCompositeThumbnail(w, h, buffer);
-    return res ? toFrame(res, "Output", false) : null;
+    if (!res) return null;
+    const viewDot = scopeViewDotRef.current;
+    return toFrame(res, viewDot ? `Node: ${viewDot.label}` : "Output", false);
   }, []);
   const proxyGenLastReadyRef = useRef<{ id: string; ms: number; bytes: number } | null>(null);
   const proxyGenLastErrorRef = useRef<string | null>(null);
@@ -1665,6 +1656,14 @@ export function EditorPage() {
    */
   const flarexIsolatedHostId =
     editorPage === "flarex" && graph && inspectorLayer && getLayerFlarexComp(graph, inspectorLayer) ? inspectorLayer.id : null;
+  // The view dot in effect on the clip being inspected — purely to LABEL the scopes, since the live
+  // compile already re-roots the viewer there (see scopeViewDotRef).
+  const scopeViewComp = graph && inspectorLayer ? getLayerFlarexComp(graph, inspectorLayer) : undefined;
+  const scopeViewNode = scopeViewComp?.previewNodeId ? scopeViewComp.nodes[scopeViewComp.previewNodeId] : undefined;
+  scopeViewDotRef.current =
+    scopeViewComp?.previewNodeId && scopeViewNode
+      ? { nodeId: scopeViewComp.previewNodeId, label: scopeViewNode.label || scopeViewNode.type }
+      : null;
   const previewComposition = useMemo(
     () => (composition && flarexIsolatedHostId ? isolateFlarexHostComposition(composition, flarexIsolatedHostId) : composition),
     [composition, flarexIsolatedHostId]
@@ -9054,7 +9053,6 @@ export function EditorPage() {
                   onUpdateGraph={(nextGraph) => {
                     void updateGraph(nextGraph);
                   }}
-                  onScopeTargetChange={setFlarexScopeTarget}
                   timeSeconds={currentTime}
                   onSeek={setEditorCurrentTime}
                   isPlaying={isPlaying}

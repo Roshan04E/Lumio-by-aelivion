@@ -72,14 +72,6 @@ export interface FlarexWorkspaceProps {
   /** The main viewer's capture handle — node thumbnails render through the preview's own compositor
    *  (Slice 6). Absent ⇒ nodes render without pictures and nothing is scheduled. */
   viewerCaptureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
-  /**
-   * REPORT (one-way) of what the colour scopes should measure: the single selected node, or null for
-   * "nothing isolated, use the programme output". Host↔panel doctrine — the panel owns its selection
-   * and reports it; the host never reaches in, and this report must never round-trip back as a
-   * command. Only fires for a SINGLE selection, matching the inspector's own rule: with two nodes
-   * selected there is no one output to measure.
-   */
-  onScopeTargetChange?: ((target: { nodeId: string; label: string } | null) => void) | undefined;
 }
 
 /** Node-thumbnail view mode, remembered across sessions. Defaults ON — it is the Fusion/Resolve
@@ -94,7 +86,7 @@ function readThumbnailPref(): boolean {
   }
 }
 
-export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph, viewerCaptureRef, onScopeTargetChange }: FlarexWorkspaceProps) {
+export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph, viewerCaptureRef }: FlarexWorkspaceProps) {
   const comp = layer ? getLayerFlarexComp(graph, layer) : undefined;
   const layerStart = layer?.startSeconds ?? 0;
   const compTime = Math.max(0, timeSeconds - layerStart);
@@ -133,33 +125,7 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
     setSelectedNodeIds([]);
   }, [comp?.id]);
 
-  // Publish the scope target (see onScopeTargetChange). Reported from the node's own label so the
-  // scopes name what a user actually sees on the canvas, not an opaque id.
-  const reportedScopeTargetRef = useRef<{ nodeId: string; label: string } | null>(null);
-  useEffect(() => {
-    if (!onScopeTargetChange) return;
-    const only = selectedNodeIds.length === 1 ? selectedNodeIds[0] : undefined;
-    const node = only && comp ? comp.nodes[only] : undefined;
-    const next = node && only ? { nodeId: only, label: node.label || node.type } : null;
-    // Report only on a real change. `comp` is in the deps (the label lives on the node, so a rename
-    // must republish), and its identity changes on EVERY graph edit — reporting each time would push
-    // a fresh object into the host on every parameter drag and re-render the editor for nothing.
-    const prev = reportedScopeTargetRef.current;
-    if (prev?.nodeId === next?.nodeId && prev?.label === next?.label) return;
-    reportedScopeTargetRef.current = next;
-    onScopeTargetChange(next);
-  }, [selectedNodeIds, comp, onScopeTargetChange]);
 
-  // Retract on unmount: leaving the Flarex page must not leave the scopes isolating a node that is no
-  // longer selectable. Separate from the effect above so it fires on unmount ONLY, not on every
-  // selection change. A panel that reports state owns retracting it.
-  useEffect(
-    () => () => {
-      reportedScopeTargetRef.current = null;
-      onScopeTargetChange?.(null);
-    },
-    [onScopeTargetChange]
-  );
 
   const updateComp = (updater: (comp: FlarexComp) => FlarexComp) => {
     if (!comp) return;

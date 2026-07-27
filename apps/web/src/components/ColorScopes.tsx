@@ -744,7 +744,7 @@ export function ColorScopes({
             className={`color-scopes-source ${source.fellBack ? "is-fallback" : ""}`}
             title={
               source.fellBack
-                ? "The selected node cannot be isolated right now (it does not render during playback) — showing the programme output instead."
+                ? "That clip cannot be isolated right now (isolation does not render during playback) — measuring the programme output instead."
                 : `Measuring ${source.label}`
             }
           >
