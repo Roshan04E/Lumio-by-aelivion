@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Pipette, RotateCcw, Spline, Undo2 } from "lucide-react";
 import { sampleHueSatCurve, type CurvePoint } from "@orreris/shared";
+import { hasNativeEyeDropper, pickColorFromScreen } from "../lib/colorPalette";
 
 /**
  * Professional Color System (Phase 3, 13C.3) — Lumetri Hue/Sat curve editor.
@@ -211,6 +212,62 @@ export function HueSatCurves({ value, onChange }: { value: string; onChange: (js
     [curves, commit]
   );
 
+  /**
+   * Pick a colour off the image and drop a control point at its position on this graph.
+   *
+   * ONE STEP. This used to be a hidden `<input type="color">` behind the pipette, which opened the
+   * OS colour dialog — so targeting a colour that is *in the picture* meant opening a dialog, finding
+   * ITS eyedropper, and only then sampling. The dialog is the wrong tool entirely: the colour being
+   * targeted always already exists on screen, so the pipette should sample the screen directly.
+   *
+   * The failure is also reported now. `domainPositionOfColor` returns null for a neutral pixel on the
+   * hue graphs — grey genuinely has no hue to target — and the old code did `if (x !== null)`, so
+   * picking a desaturated pixel silently did nothing at all: no point, no message, no clue why. A
+   * control that can decline has to say when it declines.
+   */
+  const [picking, setPicking] = useState<CurveKey | null>(null);
+  const [pickNote, setPickNote] = useState<string | null>(null);
+  /** Fallback target when no screen picker exists (insecure context) — see pickFor. */
+  const fallbackInputRef = useRef<HTMLInputElement | null>(null);
+  const armedRef = useRef<{ key: CurveKey; domain: Domain } | null>(null);
+
+  const applyPick = useCallback(
+    (key: CurveKey, domain: Domain, hex: string) => {
+      const x = domainPositionOfColor(domain, hex);
+      if (x === null) {
+        setPickNote("That pixel is neutral — it has no hue to target. Pick a colored pixel.");
+        return;
+      }
+      addPointAt(key, x);
+    },
+    [addPointAt]
+  );
+
+  const pickFor = useCallback(
+    async (key: CurveKey, domain: Domain) => {
+      setPickNote(null);
+      armedRef.current = { key, domain };
+      // Screen picking needs either the native EyeDropper or getDisplayMedia; on an insecure context
+      // there is neither, and the OS dialog is then the only way to name a colour at all. Same
+      // fallback shape ColorControl already uses — the dialog is the last resort, never the first.
+      const canScreenPick =
+        hasNativeEyeDropper() || Boolean(typeof navigator !== "undefined" && navigator.mediaDevices?.getDisplayMedia);
+      if (!canScreenPick) {
+        fallbackInputRef.current?.click();
+        return;
+      }
+      setPicking(key);
+      try {
+        const hex = await pickColorFromScreen();
+        if (!hex) return; // cancelled — not an error, say nothing
+        applyPick(key, domain, hex);
+      } finally {
+        setPicking(null);
+      }
+    },
+    [applyPick]
+  );
+
   const handlePointDown = (key: CurveKey, index: number) => (event: ReactPointerEvent<SVGCircleElement>) => {
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -312,17 +369,15 @@ export function HueSatCurves({ value, onChange }: { value: string; onChange: (js
                 {def.label}
                 {edited ? <span className="curve-editor-tab-edited" aria-hidden="true" /> : null}
               </span>
-              <label className="hue-sat-graph-picker" title="Pick a color to add a control point at its position on this graph">
+              <button
+                type="button"
+                className={`hue-sat-graph-picker${picking === def.key ? " is-picking" : ""}`}
+                aria-label={`Add ${def.label} point from a color picked off the image`}
+                title="Pick a color straight off the image to add a control point at its position on this graph"
+                onClick={() => void pickFor(def.key, def.domain)}
+              >
                 <Pipette size={12} aria-hidden="true" />
-                <input
-                  type="color"
-                  aria-label={`Add ${def.label} point from color`}
-                  onChange={(event) => {
-                    const x = domainPositionOfColor(def.domain, event.target.value);
-                    if (x !== null) addPointAt(def.key, x);
-                  }}
-                />
-              </label>
+              </button>
               <button
                 type="button"
                 className="curve-editor-undo"
@@ -385,8 +440,21 @@ export function HueSatCurves({ value, onChange }: { value: string; onChange: (js
           </div>
         );
       })}
+      {/* Fallback only — never shown, clicked programmatically when no screen picker exists. */}
+      <input
+        ref={fallbackInputRef}
+        type="color"
+        className="hue-sat-picker-fallback"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => {
+          const armed = armedRef.current;
+          if (armed) applyPick(armed.key, armed.domain, event.target.value);
+        }}
+      />
+      {pickNote ? <p className="curve-editor-hint is-warning">{pickNote}</p> : null}
       <p className="curve-editor-hint">
-        Click a graph to add a point · drag up/down to push/pull · double-click a point to remove · pick a color (🖊) to target it ·{" "}
+        Click a graph to add a point · drag up/down to push/pull · double-click a point to remove · pick a color (🖊) off the image to target it ·{" "}
         {smooth ? "Smooth on" : "turn on Smooth (⤴) for fine control"}
       </p>
     </div>
