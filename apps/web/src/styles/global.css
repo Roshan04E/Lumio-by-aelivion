@@ -53,12 +53,11 @@
   --nle-green: #39d98a;
   --nle-yellow: #f6c85f;
   --nle-red: #ff5f6d;
-  /* Flarex socket / wire colors keyed by DATA TYPE (functional signal — the one place the node canvas
-     carries color beyond the accent). Node bodies stay neutral; selection/hover/marquee use the accent.
-     These are theme-independent (they encode data type, not brand), so they live outside the accent set. */
-  --flarex-socket-image: #5b9dff;
-  --flarex-socket-matte: #3fbf8f;
-  --flarex-socket-number: #e0a44e;
+  /* (removed 2026-07-27) --flarex-socket-image/matte/number: fixed per-DATA-TYPE hues for sockets and
+     wires. They were theme-independent by design, which is exactly what made the node graph look
+     off-brand — it stayed blue/green/amber through every accent change. The canvas now draws every
+     socket and wire in the accent and encodes the data type as TREATMENT instead (solid disc / hollow
+     ring / small dot — see SOCKET_STYLE in FlarexNodeCanvas.tsx). */
   --nle-radius-xs: 2px;
   --nle-radius-sm: 4px;
   --nle-radius-md: 6px;

@@ -13,14 +13,25 @@ import {
   GROUP_COLLAPSED_W,
   GROUP_PADDING,
   GROUP_TITLEBAR_H,
+  NODE_FOOTER_H,
+  NODE_THUMB_H,
+  NODE_W,
   alignFlarexNodes,
   backdropSize,
   collapsedMemberOwners,
   expandGroupDragSet,
+  flarexNodeIndices,
+  flarexNodeThumbnailsEnabled,
   groupMembers,
   groupRect,
   hitTest,
+  nodeFooterRect,
+  nodeHasThumbnail,
+  nodeHeight,
+  nodeSockets,
+  nodeThumbRect,
   nodeWidth,
+  setFlarexNodeThumbnails,
   socketAnchor,
   type FlarexViewState,
 } from "./flarex-canvas-model";
@@ -143,6 +154,78 @@ function check(name: string, condition: boolean): void {
   // Expanded, the same socket resolves to the node itself.
   check("an expanded member's socket is its own, not the group's",
     socketAnchor(comp, collapsedMemberOwners(comp), "a", "out", "output")?.x !== box.x + box.w);
+}
+
+// --- Node tile layout, thumbnails on (Slice 6) ------------------------------
+// The picture node is a FIXED TILE — [picture | footer] — with the name drawn outside above it, per
+// the Resolve reference. The load-bearing property is that sockets stay inside the PICTURE band: a
+// socket that drifted into the footer would put wires on the index/glyph strip, and one that drifted
+// past the tile would detach wires from the body entirely.
+{
+  const blur = createFlarexNode("blur", "n1", 100, 100);
+  const merge = createFlarexNode("merge", "n2", 400, 100);
+  const backdrop = createFlarexNode("backdrop", "bd", 0, 0);
+  const reroute = createFlarexNode("reroute", "rr", 0, 0);
+  const grp = createFlarexNode("group", "g1", 0, 0);
+  grp.params = { ...grp.params, members: JSON.stringify(["n1"]) };
+  const comp = { id: "c1", name: "C", nodes: { n1: blur, n2: merge, bd: backdrop, rr: reroute, g1: grp }, edges: [], animations: [], version: 1 };
+  const view: FlarexViewState = { panX: 0, panY: 0, zoom: 1 };
+
+  const before = nodeHeight(blur);
+  const groupBefore = groupRect(comp, grp).h;
+  check("thumbnails default to OFF in the model (the canvas sets the mode)", !flarexNodeThumbnailsEnabled());
+  check("no thumbnail rect while the mode is off", nodeThumbRect(blur) === null);
+  check("no footer rect while the mode is off", nodeFooterRect(blur) === null);
+
+  setFlarexNodeThumbnails(true);
+  try {
+    check("thumbnails enabled is observable", flarexNodeThumbnailsEnabled());
+    check("a picture node is a fixed tile: picture + footer", nodeHeight(blur) === NODE_THUMB_H + NODE_FOOTER_H);
+    check("node width is unchanged", nodeWidth(blur) === NODE_W);
+
+    const pic = nodeThumbRect(blur);
+    const foot = nodeFooterRect(blur);
+    check("the picture is the TOP band", pic !== null && pic.y === blur.ui.y && pic.h === NODE_THUMB_H && pic.x === blur.ui.x);
+    check("the footer sits directly under the picture, filling the tile",
+      foot !== null && pic !== null && foot.y === pic.y + pic.h && foot.h === NODE_FOOTER_H && foot.y + foot.h === blur.ui.y + nodeHeight(blur));
+
+    // Sockets: inside the picture band, and each bank centred on its own count.
+    for (const node of [blur, merge]) {
+      const band = nodeThumbRect(node)!;
+      const sockets = nodeSockets(node, comp);
+      check(`${node.type}: every socket sits inside the PICTURE band, never the footer`,
+        sockets.every((s) => s.y >= band.y && s.y <= band.y + band.h));
+    }
+    const blurOut = nodeSockets(blur, comp).filter((s) => s.kind === "output");
+    check("a lone output is centred on the picture band",
+      blurOut.length === 1 && Math.abs(blurOut[0]!.y - (blur.ui.y + NODE_THUMB_H / 2)) < 0.001);
+    const mergeIn = nodeSockets(merge, comp).filter((s) => s.kind === "input").map((s) => s.y);
+    check("a multi-input bank is centred as a group on the picture band",
+      Math.abs((Math.min(...mergeIn) + Math.max(...mergeIn)) / 2 - (merge.ui.y + NODE_THUMB_H / 2)) < 0.001);
+
+    check("a click inside the picture hits the node", hitTest(comp, view, 110, blur.ui.y + 20).kind === "node");
+    check("a click inside the footer hits the node", hitTest(comp, view, 110, blur.ui.y + NODE_THUMB_H + 5).kind === "node");
+
+    // Chrome has no output to preview, so it stays compact (a Group that grew with its members would
+    // also grow itself, recursively).
+    check("backdrop has no thumbnail", !nodeHasThumbnail(backdrop) && nodeThumbRect(backdrop) === null);
+    check("group has no thumbnail", !nodeHasThumbnail(grp) && nodeThumbRect(grp) === null);
+    check("reroute has no thumbnail", !nodeHasThumbnail(reroute) && nodeThumbRect(reroute) === null);
+    check("reroute keeps its small fixed height", nodeHeight(reroute) < 40);
+    check("a group's box grows with its member's tile height",
+      groupRect(comp, grp).h === groupBefore + (NODE_THUMB_H + NODE_FOOTER_H) - before);
+
+    // Footer numbering: creation order, 1-based, picture nodes only.
+    const indices = flarexNodeIndices(comp);
+    check("footer numbers are 1-based creation order", indices.get("n1") === 1 && indices.get("n2") === 2);
+    check("chrome nodes are not numbered",
+      !indices.has("bd") && !indices.has("g1") && !indices.has("rr"));
+  } finally {
+    setFlarexNodeThumbnails(false);
+  }
+  check("turning the mode off restores the compact height", nodeHeight(blur) === before);
+  check("compact mode centres a lone output on the body",
+    Math.abs(nodeSockets(blur, comp).filter((s) => s.kind === "output")[0]!.y - (blur.ui.y + before / 2)) < 0.001);
 }
 
 if (failures > 0) {

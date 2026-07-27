@@ -85,6 +85,27 @@ export interface SceneViewerCaptureHandle {
     buffer?: Uint8Array | undefined;
   }): { pixels: Uint8Array; width: number; height: number } | null;
   /**
+   * Render ONE Flarex node's output as a small thumbnail (Slice 6), through this viewer's own
+   * compositor, caches and media textures — the same "the preview IS the renderer" mechanism the comp
+   * proxy uses, so no second GL context is allocated and the context governor sees no new pressure.
+   *
+   * The comp is re-rooted at `nodeId` via `flarexPreviewRootNodeId`, which takes precedence over the
+   * comp's persisted view dot WITHOUT mutating it — rendering thumbnails can never move the user's own
+   * view-dot selection.
+   *
+   * Returns null (caller: "not ready, try later") whenever the picture would be wrong or the cost would
+   * land in the wrong place — while PLAYING, before the first frame has composited, or when the host
+   * clip is not among the layers currently on screen.
+   */
+  renderFlarexNodeThumbnail(input: {
+    /** The clip carrying the comp. Must be one of the viewer's current layers. */
+    hostLayerId: string;
+    nodeId: string;
+    targetWidth: number;
+    targetHeight: number;
+    buffer?: Uint8Array | undefined;
+  }): { pixels: Uint8Array; width: number; height: number } | null;
+  /**
    * Downsample the RETAINED composite (last presented frame) into a small top-origin RGBA thumbnail
    * for the color scopes — no re-composite, no dependence on the on-screen canvas. Null when the
    * compositor is unavailable this frame (caller falls back to a DOM-element sample).
@@ -532,6 +553,16 @@ export function ScenePreviewCanvas({
     };
   });
 
+  /**
+   * The media resolver the LAST composited frame used, republished here each frame so the capture
+   * handle can reuse it (Flarex node thumbnails). It is the same function either path builds below —
+   * `getMediaGradedSource` (graded-canvas lookup) or `getMediaSingleCtx` (in-context grade) — and both
+   * are safe to call again while idle: the canvas lookup is pure, and the single-ctx grade short-circuits
+   * on an unchanged `frameVersion`, so a thumbnail pass re-uses the textures already on the GPU instead
+   * of decoding or grading anything of its own. Null until the first frame composites.
+   */
+  const liveMediaGradedRef = useRef<((id: string) => HTMLCanvasElement | SceneTextureSource | null) | null>(null);
+
   // The latest draw closure, kept in a ref so the persistent rAF loop always runs current logic
   // without re-subscribing. Reads live values from `inputsRef` / `gradedRef` (both stable refs).
   const drawRef = useRef<() => void>(() => {});
@@ -684,6 +715,10 @@ export function ScenePreviewCanvas({
       return gradeMediaInContext(resolvedId, src);
     };
 
+    const liveMediaGraded = singleCtxMedia ? getMediaSingleCtx : getMediaGradedSource;
+    // Republish for the capture handle (node thumbnails) — see `liveMediaGradedRef`.
+    liveMediaGradedRef.current = liveMediaGraded;
+
     const gradeOverlay = makeGradeOverlayRef.current(compositor, "");
     // The draw-list build is shared with the local export (`SceneFrameCompositor`) — see build-scene-draws.
     // The only editor-specific input is the media graded canvas, read here from the hidden WebglMediaLayers.
@@ -703,7 +738,7 @@ export function ScenePreviewCanvas({
       gradeRenderers: gradeRenderersRef.current,
       // Single-ctx: grade the layer's raw frame in-context (SceneTextureSource); otherwise read its graded
       // canvas. A region-blur clone aliases to its base in BOTH paths (no own decoder/context) — see mediaSourceAlias.
-        getMediaGraded: singleCtxMedia ? getMediaSingleCtx : getMediaGradedSource,
+        getMediaGraded: liveMediaGraded,
       gradeOverlay,
       createCanvas: () => document.createElement("canvas"),
       regionPassModel: getRegionPassesEnabled(),
@@ -888,7 +923,9 @@ export function ScenePreviewCanvas({
     if (!captureRef) return undefined;
     const releaseCaptureResources = () => {
       for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
-        if (!id.startsWith("capture:")) continue;
+        // "thumb:" is the node-thumbnail pool (Slice 6) — same lifetime rule as the capture pool: both
+        // are scratch, both are rebuilt on demand, and neither may outlive the handle.
+        if (!id.startsWith("capture:") && !id.startsWith("thumb:")) continue;
         try {
           renderer.dispose();
         } catch {
@@ -966,6 +1003,77 @@ export function ScenePreviewCanvas({
           );
         } catch {
           // A lost context is detected/recovered by the render loop; the capture caller just retries/fails.
+          return null;
+        }
+      },
+      renderFlarexNodeThumbnail({ hostLayerId, nodeId, targetWidth, targetHeight, buffer }) {
+        const compositor = compositorRef.current;
+        if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return null;
+        // Same rule as renderOffscreen (v24 capture race): playback owns this compositor. Thumbnails are
+        // an idle-only affordance, so this is a hard gate, not a best-effort skip.
+        if (inputsRef.current.isPlaying) return null;
+        const getMediaGraded = liveMediaGradedRef.current;
+        // No frame has composited yet — there are no graded textures to sample, and grading a set of our
+        // own is exactly the cost this path exists to avoid.
+        if (!getMediaGraded) return null;
+        const { layers: ls, width: w, height: h, renderScale: rScale, nestedGroups: nestGroups } = inputsRef.current;
+        const host = ls.find((layer) => layer.id === hostLayerId);
+        if (!host) return null;
+        try {
+          const draws = buildSceneDraws({
+            // The host clip ALONE: a thumbnail shows what this NODE outputs, not what the timeline
+            // composites around it. Transitions are dropped for the same reason.
+            layers: [host],
+            width: w,
+            height: h,
+            currentTime: inputsRef.current.currentTime,
+            renderScale: rScale,
+            transitions: [],
+            rasterizer: rasterizerRef.current,
+            matteCache: matteCacheRef.current,
+            gradeRenderers: gradeRenderersRef.current,
+            getMediaGraded,
+            gradeOverlay: makeGradeOverlayRef.current(compositor, "thumb:"),
+            createCanvas: () => document.createElement("canvas"),
+            regionPassModel: getRegionPassesEnabled(),
+            nestedGroups: nestGroups,
+            nestMatteCaches: nestMatteCachesRef.current,
+            flarexComps: inputsRef.current.flarexComps,
+            flarexVirtualLayers: inputsRef.current.flarexVirtualLayers,
+            flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
+            // Re-root at this node. Deliberately WITHOUT `flarexCompProxies`: a comp proxy replaces the
+            // whole lowering with one pre-rendered frame, so every node would thumbnail identically as
+            // the comp's final output — the one input that would make this silently wrong.
+            flarexPreviewRootNodeId: nodeId,
+          });
+          // CONTAIN the comp's aspect inside the requested box: the readback is a straight blit of the
+          // whole frame, so asking for a 16:9 target on a 9:16 project would squash it. The caller gets
+          // the size actually used and letterboxes with it.
+          const aspect = w / Math.max(1, h);
+          const boxAspect = targetWidth / Math.max(1, targetHeight);
+          const outW = boxAspect > aspect ? Math.max(1, Math.round(targetHeight * aspect)) : targetWidth;
+          const outH = boxAspect > aspect ? targetHeight : Math.max(1, Math.round(targetWidth / aspect));
+          const rendered = compositor.renderFrameThumbnail(
+            {
+              width: Math.max(1, Math.round(w * rScale)),
+              height: Math.max(1, Math.round(h * rScale)),
+              // A frame is always cleared OPAQUE (`renderFrameCore`) — that is the render contract every
+              // renderer shares, not something a thumbnail may bend. So a keyed/cropped region reads as
+              // this color rather than as transparency; black is both the honest answer (it is what the
+              // viewer shows for the same node) and a neutral backing for the node body.
+              backgroundColor: "#000000",
+              layers: draws,
+              debugFrameTime: inputsRef.current.currentTime,
+            },
+            outW,
+            outH,
+            buffer
+          );
+          // renderFrameThumbnail leaves OUR frame in the retained composite, which is what the color
+          // scopes sample. Re-arm the settle window so the live frame is re-composited over it.
+          requestDraw();
+          return rendered;
+        } catch {
           return null;
         }
       },

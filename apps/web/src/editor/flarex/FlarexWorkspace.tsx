@@ -27,6 +27,7 @@ import {
   type SourceAsset,
   type TimelineLayer,
 } from "@orreris/shared";
+import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 import { FlarexInspector } from "./FlarexInspector";
 import { FlarexSourceViewer } from "./FlarexSourceViewer";
 import { rebuildSourceProxy } from "../performance/sourceProxyEngine";
@@ -68,9 +69,24 @@ export interface FlarexWorkspaceProps {
   /** Graph-editor drawer open state (shared with the Edit page's toggle button) + its closer. */
   graphOpen?: boolean;
   onCloseGraph?: () => void;
+  /** The main viewer's capture handle — node thumbnails render through the preview's own compositor
+   *  (Slice 6). Absent ⇒ nodes render without pictures and nothing is scheduled. */
+  viewerCaptureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
 }
 
-export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph }: FlarexWorkspaceProps) {
+/** Node-thumbnail view mode, remembered across sessions. Defaults ON — it is the Fusion/Resolve
+ *  default and the whole point of the feature — but it is a real switch because the honest answer to
+ *  "does this cost anything?" on a weak GPU is "a little, on idle". */
+const THUMBNAILS_KEY = "orreris.flarex.nodeThumbnails";
+function readThumbnailPref(): boolean {
+  try {
+    return window.localStorage.getItem(THUMBNAILS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph, viewerCaptureRef }: FlarexWorkspaceProps) {
   const comp = layer ? getLayerFlarexComp(graph, layer) : undefined;
   const layerStart = layer?.startSeconds ?? 0;
   const compTime = Math.max(0, timeSeconds - layerStart);
@@ -101,6 +117,8 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
   // with position:fixed off the button rect because the toolbar clips overflow (overflow-x:auto).
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browsePos, setBrowsePos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  // Node thumbnails (Slice 6) — a view mode, persisted like a preference, not project data.
+  const [thumbnails, setThumbnails] = useState(readThumbnailPref);
 
   // Selection resets when the active comp changes (a different clip's graph).
   useEffect(() => {
@@ -299,8 +317,27 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
             </div>
           </>
         ) : null}
-        {/* Group must come BEFORE the proxy cluster — that cluster is pushed right with margin-left:auto,
-            so anything after it lands on the far side of the gap. */}
+        {/* Group and Thumbnails must come BEFORE the proxy cluster — that cluster is pushed right with
+            margin-left:auto, so anything after it lands on the far side of the gap. */}
+        <div className="flarex-toolbar-group">
+          <button
+            type="button"
+            className={`flarex-toolbar-btn${thumbnails ? " is-active" : ""}`}
+            title={thumbnails ? "Hide node thumbnails" : "Show node thumbnails (rendered only while idle)"}
+            aria-pressed={thumbnails}
+            onClick={() => {
+              const next = !thumbnails;
+              setThumbnails(next);
+              try {
+                window.localStorage.setItem(THUMBNAILS_KEY, next ? "1" : "0");
+              } catch {
+                /* private mode / storage disabled — the session-local toggle still works */
+              }
+            }}
+          >
+            Thumbs
+          </button>
+        </div>
         {groupableNodeIds.length >= 2 ? (
           <div className="flarex-toolbar-group">
             <button type="button" className="flarex-toolbar-btn" title="Group the selected nodes (collapse with a double-click)" onClick={handleGroupSelection}>
@@ -330,7 +367,18 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
         onSeekCompTime={(t) => onSeek(layerStart + t)}
       />
       <div className="flarex-body">
-        <FlarexNodeCanvas comp={comp} selectedNodeIds={selectedNodeIds} onSelectNodes={setSelectedNodeIds} onUpdateComp={updateComp} sourceAssets={sourceAssets} />
+        <FlarexNodeCanvas
+          comp={comp}
+          selectedNodeIds={selectedNodeIds}
+          onSelectNodes={setSelectedNodeIds}
+          onUpdateComp={updateComp}
+          sourceAssets={sourceAssets}
+          thumbnails={thumbnails}
+          thumbnailCapture={viewerCaptureRef}
+          hostLayerId={layer.id}
+          compTime={compTime}
+          isPlaying={isPlaying}
+        />
         <FlarexInspector
           comp={comp}
           node={selectedNodeIds.length === 1 ? comp.nodes[selectedNodeIds[0]!] ?? null : null}

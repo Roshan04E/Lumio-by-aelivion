@@ -24,6 +24,10 @@ import {
 } from "@orreris/shared";
 import {
   GROUP_TITLEBAR_H,
+  NODE_BEZEL,
+  NODE_FOOTER_H,
+  NODE_LABEL_GAP,
+  NODE_THUMB_H,
   NODE_W,
   SOCKET_R,
   backdropSize,
@@ -36,10 +40,15 @@ import {
   groupRect,
   hitTest,
   hitTestWire,
+  flarexNodeIndices,
+  flarexNodeThumbnailsEnabled,
+  nodeHasThumbnail,
   nodeHeight,
   nodeWidth,
   nodeSockets,
+  nodeThumbRect,
   screenToWorld,
+  setFlarexNodeThumbnails,
   socketAnchor,
   wirePath,
   worldToScreen,
@@ -48,6 +57,8 @@ import {
   type SocketRef,
 } from "./flarex-canvas-model";
 import { FlarexNodeBrowser } from "./FlarexNodeBrowser";
+import { clearFlarexThumbnails, getFlarexThumbnail, requestFlarexThumbnails } from "./flarex-node-thumbnails";
+import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 
 /** Module-level clipboard (not the system clipboard — a plain in-memory snapshot, same idiom as
  *  `flarexPaletteDrag`). Cross-comp paste is out of scope for v1: cleared whenever the active comp
@@ -98,11 +109,23 @@ interface CanvasPalette {
   borderRgb: string;
   panelRgb: string;
   bgRgb: string;
-  /** Socket/wire colors keyed by the connection's DATA TYPE (functional, NOT decorative — the one place
-   *  the canvas carries color beyond the accent). Node bodies/stripes stay neutral; interaction is
-   *  accent. Resolved from `--flarex-socket-*` tokens so the scheme lives in the design system. */
-  socketRgb: Record<FlarexSocketType, string>;
 }
+
+/**
+ * How a socket of each DATA TYPE is drawn. Every socket is the app ACCENT — the node editor is a
+ * consumer of the one accent/theme source, so nothing here may hard-code a hue (the old
+ * `--flarex-socket-*` blue/green/amber scheme stayed fixed through every theme change, which is what
+ * made the graph look off-brand).
+ *
+ * The type is carried by TREATMENT instead of hue, which survives theming and stays legible at low
+ * zoom: image (the picture path, and the common case) is a solid disc; matte is a hollow ring; number
+ * is a small solid dot. Same circular geometry throughout.
+ */
+const SOCKET_STYLE: Record<FlarexSocketType, { fill: number; radius: number; hollow: boolean }> = {
+  image: { fill: 1, radius: 1, hollow: false },
+  matte: { fill: 0.9, radius: 1, hollow: true },
+  number: { fill: 0.85, radius: 0.66, hollow: false },
+};
 function resolveCanvasPalette(el: Element): CanvasPalette {
   const cs = getComputedStyle(el);
   const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
@@ -117,11 +140,6 @@ function resolveCanvasPalette(el: Element): CanvasPalette {
     borderRgb: hexToRgbTriplet(v("--nle-border", "#262b35")),
     panelRgb: hexToRgbTriplet(v("--nle-panel-2", "#1a1f29")),
     bgRgb: hexToRgbTriplet(v("--nle-bg", "#0b0d10")),
-    socketRgb: {
-      image: hexToRgbTriplet(v("--flarex-socket-image", "#5b9dff")),
-      matte: hexToRgbTriplet(v("--flarex-socket-matte", "#3fbf8f")),
-      number: hexToRgbTriplet(v("--flarex-socket-number", "#e0a44e")),
-    },
   };
 }
 
@@ -136,6 +154,19 @@ export interface FlarexNodeCanvasProps {
   /** Media-pool assets (id → name) so an asset dragged from the bin onto the canvas creates a MediaIn
    *  node loading it (asset-source MediaIn, FLAREX.md Phase 2), labeled with the asset name. */
   sourceAssets?: Array<{ id: string; name: string }>;
+  /**
+   * Node thumbnails (Slice 6). All four are needed for a thumbnail pass; ANY of them missing (no
+   * capture handle, no host clip, mode off) simply means nodes render at their classic size with no
+   * picture and no work scheduled — the feature is entirely additive.
+   */
+  thumbnails?: boolean;
+  /** The viewer's capture handle — thumbnails render through the preview's own compositor. */
+  thumbnailCapture?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
+  /** The clip carrying this comp, and the playhead in comp-local seconds (part of the cache key). */
+  hostLayerId?: string | undefined;
+  compTime?: number;
+  /** Transport state — a hard gate on scheduling: playback must never contend for the compositor. */
+  isPlaying?: boolean;
 }
 
 type Gesture =
@@ -155,7 +186,18 @@ type Gesture =
   | { kind: "wire"; from: SocketRef; toX: number; toY: number; target: SocketRef | null }
   | { kind: "backdropResize"; nodeId: string; startX: number; startY: number; startW: number; startH: number; curW: number; curH: number };
 
-export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdateComp, sourceAssets }: FlarexNodeCanvasProps) {
+export function FlarexNodeCanvas({
+  comp,
+  selectedNodeIds,
+  onSelectNodes,
+  onUpdateComp,
+  sourceAssets,
+  thumbnails = false,
+  thumbnailCapture,
+  hostLayerId,
+  compTime = 0,
+  isPlaying = false,
+}: FlarexNodeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [view, setView] = useState<FlarexViewState>(() => ({
@@ -180,6 +222,21 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
   // Last known pointer position (updated on every hover, not just mid-gesture) — Tab needs it to
   // anchor the search menu at the cursor even though hovering alone doesn't start a gesture.
   const lastPointerRef = useRef<{ sx: number; sy: number }>({ sx: 0, sy: 0 });
+
+  /** Bumped when a thumbnail lands, to repaint the nodes that now have a picture. */
+  const [thumbTick, setThumbTick] = useState(0);
+
+  // The thumbnail view mode is module-scoped in the canvas model (see `setFlarexNodeThumbnails`) so a
+  // node's height, sockets, hit box and group box can never disagree about it. Writing it during render
+  // — not in an effect — is what guarantees the geometry is already consistent by the time this frame's
+  // draw pass and pointer handlers read it. Idempotent and derived purely from the prop.
+  setFlarexNodeThumbnails(thumbnails);
+
+  // A different comp's cached pictures are dead weight (and its node ids may collide conceptually with
+  // what the user is now looking at). Thumbnails are pure derived data, so dropping them is always safe.
+  useEffect(() => {
+    clearFlarexThumbnails();
+  }, [comp.id]);
 
   // Latest values in refs so pointer handlers + the draw pass never rebind.
   const stateRef = useRef({ comp, view, gesture, selectedNodeIds, size, selectedEdgeId });
@@ -258,6 +315,37 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     // Members of a COLLAPSED group are off-screen; their wires re-anchor onto the group's box.
     const collapsedOwners = collapsedMemberOwners(comp);
     const isHidden = (node: FlarexNode): boolean => collapsedOwners.has(node.id);
+
+    /** One socket disc. Accent-toned always; the DATA TYPE is the treatment (see SOCKET_STYLE), so a
+     *  theme change re-tints the whole graph and nothing here is a fixed hue. */
+    const drawSocket = (sxp: number, syp: number, type: FlarexSocketType, isTarget: boolean, enabled: boolean): void => {
+      const style = SOCKET_STYLE[type];
+      const r = Math.max(2.5, SOCKET_R * view.zoom) * style.radius;
+      const alpha = (isTarget ? 1 : style.fill) * (enabled ? 1 : 0.45);
+      g.beginPath();
+      g.arc(sxp, syp, r, 0, Math.PI * 2);
+      if (style.hollow && !isTarget) {
+        // Filled with the canvas background first, so a wire routed underneath doesn't show through
+        // the middle of the ring and read as a third socket state.
+        g.fillStyle = `rgba(${pal.bgRgb},1)`;
+        g.fill();
+        g.lineWidth = Math.max(1.5, 2 * view.zoom);
+        g.strokeStyle = `rgba(${accentRgb},${alpha})`;
+        g.stroke();
+        return;
+      }
+      g.fillStyle = `rgba(${accentRgb},${alpha})`;
+      g.fill();
+      g.lineWidth = isTarget ? 2 : 1;
+      g.strokeStyle = isTarget ? `rgba(${accentRgb},0.95)` : `rgba(${pal.bgRgb},0.85)`;
+      g.stroke();
+    };
+
+    // Footer data, computed ONCE per draw rather than per node (both are whole-comp scans).
+    const nodeIndices = flarexNodeIndices(comp);
+    const nodeAnimated = new Set(
+      comp.animations.filter((kf) => kf.target.scope === "flarexNode" && kf.target.effectId).map((kf) => kf.target.effectId as string),
+    );
 
     const socketScreen = (
       nodeId: string,
@@ -367,10 +455,14 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       const isSpliceTarget = edge.id === spliceHoverId;
       const isSelected = edge.id === selectedEdgeId;
       g.lineWidth = Math.max(1.25, (isSpliceTarget || isSelected ? 2.5 : 1.5) * view.zoom);
-      // Selection + splice = accent (the ONLY interaction color); a resting wire carries the DATA-TYPE
-      // color of the output it flows from (functional: you read what's traveling the wire).
+      // ACCENT-DRIVEN, at two strengths: a resting wire is the accent held well back, selection/splice
+      // is the accent at full strength. It used to paint the resting wire in the output's DATA-TYPE
+      // color, which broke the node editor's own rule — it is a consumer of the app's single accent
+      // source (see flarex-canvas-model), so a theme change left every thread the same fixed blue. The
+      // data type is still readable where it belongs: on the socket the wire lands in, which is exactly
+      // how Resolve does it (colored sockets, neutral threads).
       g.strokeStyle =
-        isSpliceTarget || isSelected ? `rgba(${accentRgb},0.95)` : `rgba(${pal.socketRgb[a.type]},0.75)`;
+        isSpliceTarget || isSelected ? `rgba(${accentRgb},0.95)` : `rgba(${accentRgb},0.42)`;
       g.beginPath();
       g.moveTo(x0, y0);
       g.bezierCurveTo(c0x, c0y, c1x, c1y, x1, y1);
@@ -383,8 +475,9 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
         // The free end faces back toward the cursor so the lead line curves naturally either way.
         const freeDir: 1 | -1 = gesture.toX >= a.x ? -1 : 1;
         const [x0, y0, c0x, c0y, c1x, c1y, x1, y1] = wirePath(a.x, a.y, gesture.toX, gesture.toY, a.dir, freeDir);
-        // Snapped-to-a-valid-target = accent; otherwise the source socket's data-type color, dashed.
-        g.strokeStyle = gesture.target ? `rgba(${accentRgb},0.9)` : `rgba(${pal.socketRgb[a.type]},0.85)`;
+        // Same two accent strengths as a resting wire: snapped to a valid target = full, searching = held
+        // back. Dashed either way, which is what marks it as not-yet-connected.
+        g.strokeStyle = gesture.target ? `rgba(${accentRgb},0.9)` : `rgba(${accentRgb},0.5)`;
         g.setLineDash([5, 4]);
         g.beginPath();
         g.moveTo(x0, y0);
@@ -417,46 +510,139 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
         g.stroke();
         for (const socket of nodeSockets(node, comp)) {
           const [sxp, syp] = worldToScreen(view, socket.x + (pos.x - node.ui.x), socket.y + (pos.y - node.ui.y));
-          const r = Math.max(2.5, SOCKET_R * view.zoom);
-          g.beginPath();
-          g.arc(sxp, syp, r, 0, Math.PI * 2);
-          g.fillStyle = `rgba(${pal.socketRgb[socket.def.type]},1)`;
-          g.fill();
-          g.lineWidth = 1;
-          g.strokeStyle = `rgba(${pal.bgRgb},0.8)`;
-          g.stroke();
+          drawSocket(sxp, syp, socket.def.type, false, node.enabled);
         }
         continue;
       }
+      // ── Node tile ────────────────────────────────────────────────────────────
+      // Two presentations, both taken from the references: with a picture the tile IS the image in a
+      // thin bezel with an index/status footer, and the NAME sits outside above it (Resolve); without
+      // one it stays the compact Fusion box with the name inside. `showThumb` picks between them.
+      const showThumb = flarexNodeThumbnailsEnabled() && nodeHasThumbnail(node);
+      const label = node.label ?? def.label;
+      const labelVisible = view.zoom > 0.45;
+      const dimText = node.enabled ? 0.92 : 0.45;
+
+      if (showThumb && labelVisible) {
+        // Name ABOVE the tile. Left-aligned to the node's edge so a column of nodes reads as a list.
+        g.fillStyle = `rgba(${pal.textRgb},${node.enabled ? 0.8 : 0.4})`;
+        g.font = `${Math.max(8, 10 * view.zoom)}px Inter, system-ui, sans-serif`;
+        g.textBaseline = "alphabetic";
+        g.fillText(label, x + 1, y - NODE_LABEL_GAP * view.zoom, w);
+      }
+
       g.beginPath();
-      g.roundRect(x, y, w, h, 5 * view.zoom);
+      g.roundRect(x, y, w, h, (showThumb ? 3 : 5) * view.zoom);
       // Node body = the app panel token; border neutral, or accent when selected (accent-only selection).
       g.fillStyle = node.enabled ? `rgba(${pal.panelRgb},0.96)` : `rgba(${pal.panelRgb},0.55)`;
       g.fill();
       g.lineWidth = selected ? 2 : 1;
       g.strokeStyle = selected ? accentHex : `rgba(${pal.borderRgb},1)`;
       g.stroke();
-      // Left edge strip — a NEUTRAL affordance (category no longer paints a color); accent when selected.
-      g.fillStyle = selected ? `rgba(${accentRgb},1)` : `rgba(${pal.dimRgb},1)`;
-      g.globalAlpha = node.enabled ? 0.9 : 0.4;
-      g.fillRect(x, y, Math.max(2, 3 * view.zoom), h);
-      g.globalAlpha = 1;
-      // Label.
-      if (view.zoom > 0.45) {
-        g.fillStyle = node.enabled ? `rgba(${pal.textRgb},0.92)` : `rgba(${pal.textRgb},0.45)`;
-        g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
-        g.textBaseline = "middle";
-        g.fillText(node.label ?? def.label, x + 9 * view.zoom, y + h / 2, w - 14 * view.zoom);
-      }
-      // Fusion view dot: this node's output is what the viewer shows (double-click toggles) — accent.
-      if (comp.previewNodeId === node.id) {
+
+      if (showThumb) {
+        // ── Picture ──
+        // Draw-time is a pure cache LOOKUP — rendering is scheduled on idle by `requestFlarexThumbnails`
+        // below, never from here, so a repaint can never trigger GPU work.
+        const bezel = NODE_BEZEL * view.zoom;
+        const ix = x + bezel;
+        const iy = y + bezel;
+        const iw = Math.max(1, w - bezel * 2);
+        const ih = Math.max(1, NODE_THUMB_H * view.zoom - bezel * 2);
+        g.save();
         g.beginPath();
-        g.arc(x + 10 * view.zoom, y + h - 7 * view.zoom, Math.max(2.5, 3.5 * view.zoom), 0, Math.PI * 2);
-        g.fillStyle = accentHex;
-        g.fill();
+        g.rect(ix, iy, iw, ih);
+        g.clip();
+        // Backing tone — what an as-yet-unrendered node shows. The picture itself is OPAQUE (a frame is
+        // always cleared opaque, see the capture handle), so this is never blended with a rendered one.
+        g.fillStyle = `rgba(${pal.bgRgb},1)`;
+        g.fillRect(ix, iy, iw, ih);
+        const picture = getFlarexThumbnail(comp.id, node.id);
+        if (picture) {
+          // CONTAIN: the render already preserves the comp's aspect (the capture handle fits it into
+          // the requested box), so a vertical project letterboxes inside the tile instead of being
+          // cropped to a 16:9 slice of itself.
+          const scale = Math.min(iw / picture.width, ih / picture.height);
+          const dw = picture.width * scale;
+          const dh = picture.height * scale;
+          g.globalAlpha = node.enabled ? 1 : 0.4;
+          g.drawImage(picture, ix + (iw - dw) / 2, iy + (ih - dh) / 2, dw, dh);
+          g.globalAlpha = 1;
+        }
+        g.restore();
+
+        // ── Footer: index (left) + status glyphs (right) ──
+        const fy = y + NODE_THUMB_H * view.zoom;
+        const fh = NODE_FOOTER_H * view.zoom;
+        g.beginPath();
+        g.moveTo(x, fy);
+        g.lineTo(x + w, fy);
         g.lineWidth = 1;
-        g.strokeStyle = `rgba(${pal.bgRgb},0.9)`;
+        g.strokeStyle = `rgba(${pal.borderRgb},1)`;
         g.stroke();
+        if (labelVisible) {
+          const index = nodeIndices.get(node.id);
+          if (index !== undefined) {
+            g.fillStyle = `rgba(${pal.dimRgb},${node.enabled ? 1 : 0.5})`;
+            g.font = `${Math.max(8, 9.5 * view.zoom)}px Inter, system-ui, sans-serif`;
+            g.textBaseline = "middle";
+            g.fillText(String(index).padStart(2, "0"), x + 6 * view.zoom, fy + fh / 2);
+          }
+          // Glyphs, right-to-left. The view dot moved here from the body: on a picture node it was
+          // sitting ON the image, which is exactly the noise the redesign is removing.
+          let gx = x + w - 8 * view.zoom;
+          if (comp.previewNodeId === node.id) {
+            g.beginPath();
+            g.arc(gx, fy + fh / 2, Math.max(2.5, 3.5 * view.zoom), 0, Math.PI * 2);
+            g.fillStyle = accentHex;
+            g.fill();
+            gx -= 10 * view.zoom;
+          }
+          if (nodeAnimated.has(node.id)) {
+            // Keyframed — a small diamond, the same affordance the timeline uses for a keyframe.
+            const r = Math.max(2.5, 3.2 * view.zoom);
+            g.beginPath();
+            g.moveTo(gx, fy + fh / 2 - r);
+            g.lineTo(gx + r, fy + fh / 2);
+            g.lineTo(gx, fy + fh / 2 + r);
+            g.lineTo(gx - r, fy + fh / 2);
+            g.closePath();
+            g.fillStyle = `rgba(${pal.textRgb},0.75)`;
+            g.fill();
+            gx -= 10 * view.zoom;
+          }
+          if (!node.enabled) {
+            // Disabled — a struck-through bar, readable at a glance next to a dimmed picture.
+            g.beginPath();
+            g.moveTo(gx - 4 * view.zoom, fy + fh / 2);
+            g.lineTo(gx + 4 * view.zoom, fy + fh / 2);
+            g.lineWidth = Math.max(1.5, 2 * view.zoom);
+            g.strokeStyle = `rgba(${pal.textRgb},0.5)`;
+            g.stroke();
+          }
+        }
+      } else {
+        // Compact form: left edge strip + the name inside, as before.
+        g.fillStyle = selected ? `rgba(${accentRgb},1)` : `rgba(${pal.dimRgb},1)`;
+        g.globalAlpha = node.enabled ? 0.9 : 0.4;
+        g.fillRect(x, y, Math.max(2, 3 * view.zoom), h);
+        g.globalAlpha = 1;
+        if (labelVisible) {
+          g.fillStyle = `rgba(${pal.textRgb},${dimText})`;
+          g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
+          g.textBaseline = "middle";
+          g.fillText(label, x + 9 * view.zoom, y + h / 2, w - 14 * view.zoom);
+        }
+        // Fusion view dot: this node's output is what the viewer shows (double-click toggles) — accent.
+        if (comp.previewNodeId === node.id) {
+          g.beginPath();
+          g.arc(x + 10 * view.zoom, y + h - 7 * view.zoom, Math.max(2.5, 3.5 * view.zoom), 0, Math.PI * 2);
+          g.fillStyle = accentHex;
+          g.fill();
+          g.lineWidth = 1;
+          g.strokeStyle = `rgba(${pal.bgRgb},0.9)`;
+          g.stroke();
+        }
       }
       // Sockets. While dragging a wire, every type-compatible candidate (opposite kind, matching
       // socket type, not the source node) gets a low-alpha halo ring so the drop targets are
@@ -478,15 +664,7 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
           g.lineWidth = 1.5;
           g.stroke();
         }
-        g.beginPath();
-        g.arc(sxp, syp, r, 0, Math.PI * 2);
-        // Socket color = the DATA TYPE flowing through it (image/matte/number). Accent marks ONLY the
-        // active drop target (interaction), never the resting palette.
-        g.fillStyle = isDirectTarget ? `rgba(${accentRgb},1)` : `rgba(${pal.socketRgb[socket.def.type]},1)`;
-        g.fill();
-        g.lineWidth = isDirectTarget ? 2 : 1;
-        g.strokeStyle = isDirectTarget ? `rgba(${accentRgb},0.95)` : `rgba(${pal.bgRgb},0.85)`;
-        g.stroke();
+        drawSocket(sxp, syp, socket.def.type, isDirectTarget, node.enabled);
       }
     }
 
@@ -528,7 +706,39 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       g.strokeRect(x + 0.5, y + 0.5, w, h);
       g.setLineDash([]);
     }
-  }, [comp, view, gesture, selectedNodeIds, size, paletteHover, selectedEdgeId, themeTick]);
+
+    // ── Thumbnail pass (Slice 6) ────────────────────────────────────────────────
+    // Scheduled from the END of the draw, so the node list is exactly what was just painted. Every
+    // condition that must NOT cost anything resolves to an empty request, which cancels queued work:
+    // mode off, no capture handle, no host clip, mid-gesture (drag/marquee/wire), or PLAYING.
+    const idle = !isPlaying && gesture.kind === "none";
+    const visibleForThumbs =
+      thumbnails && idle && thumbnailCapture && hostLayerId
+        ? Object.values(comp.nodes)
+            .filter((n) => nodeHasThumbnail(n) && !isHidden(n))
+            // Viewport cull in SCREEN space — what is painted is what is worth rendering.
+            .map((n) => {
+              const [nx, ny] = worldToScreen(view, n.ui.x, n.ui.y);
+              return { node: n, nx, ny, w: nodeWidth(n) * view.zoom, h: nodeHeight(n) * view.zoom };
+            })
+            .filter((e) => e.nx + e.w >= 0 && e.nx <= size.w && e.ny + e.h >= 0 && e.ny <= size.h)
+            // Centre-out priority: the nodes the user is looking at fill in first on a cold cache.
+            .sort(
+              (a, b) =>
+                Math.hypot(a.nx + a.w / 2 - size.w / 2, a.ny + a.h / 2 - size.h / 2) -
+                Math.hypot(b.nx + b.w / 2 - size.w / 2, b.ny + b.h / 2 - size.h / 2),
+            )
+            .map((e) => e.node.id)
+        : [];
+    requestFlarexThumbnails({
+      hostLayerId: hostLayerId ?? "",
+      comp,
+      timeSeconds: compTime,
+      nodeIds: visibleForThumbs,
+      capture: thumbnailCapture?.current ?? null,
+      onUpdated: () => setThumbTick((t) => t + 1),
+    });
+  }, [comp, view, gesture, selectedNodeIds, size, paletteHover, selectedEdgeId, themeTick, thumbTick, thumbnails, thumbnailCapture, hostLayerId, compTime, isPlaying]);
 
   // ── Fit view (open + F key): the graph must NEVER open half-cut off-screen ──
   const fitView = () => {
@@ -541,7 +751,9 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     let y1 = -Infinity;
     for (const n of nodes) {
       x0 = Math.min(x0, n.ui.x);
-      y0 = Math.min(y0, n.ui.y);
+      // A picture node's NAME is drawn above its top edge, so the bounds need that headroom or the
+      // topmost row of labels lands outside the fitted view.
+      y0 = Math.min(y0, nodeThumbRect(n) ? n.ui.y - NODE_LABEL_GAP - 8 : n.ui.y);
       x1 = Math.max(x1, n.ui.x + nodeWidth(n));
       y1 = Math.max(y1, n.ui.y + nodeHeight(n));
     }

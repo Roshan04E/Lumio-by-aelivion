@@ -218,6 +218,52 @@ export function collapsedMemberOwners(comp: FlarexComp): Map<string, string> {
   return owners;
 }
 
+/**
+ * Node layout with thumbnails on (Slice 6, redesigned to the Resolve/Fusion idiom):
+ *
+ *        Color Wheels          ← label OUTSIDE, above the box (Resolve puts the name above the tile)
+ *      ┌──────────────┐
+ *      │▸  [picture] ▪│        ← the body IS the picture, in a thin bezel; sockets centred on it
+ *      ├──────────────┤
+ *      │ 03        ◆ ●│        ← footer: node index + status glyphs
+ *      └──────────────┘
+ *
+ * With thumbnails OFF the node keeps the compact Fusion form (label INSIDE, socket-count-driven
+ * height) — the same rule both references follow: the name lives outside only when a picture needs
+ * the whole tile.
+ */
+export const NODE_THUMB_H = 74;
+/** Footer strip under the picture: node index (left) + status glyphs (right). */
+export const NODE_FOOTER_H = 17;
+/** Inset between the node border and the picture, so the image reads as framed, not bled to the edge. */
+export const NODE_BEZEL = 3;
+/** Baseline offset of the outside label above the node's top edge. */
+export const NODE_LABEL_GAP = 6;
+
+/**
+ * Whether nodes currently render a thumbnail strip — a VIEW MODE, in the same category as pan/zoom,
+ * which is why it lives in the view model rather than in project data (a preview preference must not
+ * be a graph mutation, and it must not travel between machines with the file).
+ *
+ * Module-scoped rather than threaded through every geometry call deliberately: `nodeHeight` feeds
+ * `nodeSockets`, `groupRect`, `hitTest` and `socketAnchor`, and a parameter missed at ONE of those
+ * sites would put a node's wires somewhere its body is not. One switch, read in one place, cannot
+ * disagree with itself. `FlarexNodeCanvas` owns the setter; tests must restore the previous value.
+ */
+let thumbnailsOn = false;
+export function setFlarexNodeThumbnails(on: boolean): void {
+  thumbnailsOn = on;
+}
+export function flarexNodeThumbnailsEnabled(): boolean {
+  return thumbnailsOn;
+}
+
+/** Whether this node type shows a picture. Layout chrome (backdrop/group) and the reroute dot have no
+ *  output of their own to preview; every other type lowers to something renderable. */
+export function nodeHasThumbnail(node: FlarexNode): boolean {
+  return node.type !== "backdrop" && node.type !== "group" && node.type !== "reroute";
+}
+
 /** Per-node body width — reroute, backdrop and group deviate from the standard `NODE_W` box.
  *  `comp` is only needed for a Group (its box is derived from its members). */
 export function nodeWidth(node: FlarexNode, comp?: FlarexComp): number {
@@ -275,22 +321,38 @@ function socketSides(node: FlarexNode, comp?: FlarexComp): { input: 1 | -1; outp
   return { input, output };
 }
 
-/** Socket world positions. Inputs/outputs stack top→bottom at a fixed vertical order; each BANK sits on
- *  the horizontal side facing its connections (see `socketSides`) — pass `comp` to enable the flip. */
+/**
+ * The vertical band sockets are laid out in: the PICTURE area when a node has one (so the dots line up
+ * with the image, as in Resolve, instead of bunching against the top edge above it), otherwise the
+ * whole compact body. Never the footer — a wire must never appear to land on the index/glyph strip.
+ */
+function socketBand(node: FlarexNode): { top: number; h: number } {
+  if (thumbnailsOn && nodeHasThumbnail(node)) return { top: node.ui.y, h: NODE_THUMB_H };
+  return { top: node.ui.y, h: nodeHeight(node) };
+}
+
+/** Socket world positions. Each BANK is CENTRED in the socket band (so a lone output sits exactly at
+ *  mid-height) and stacks top→bottom at a fixed vertical order; each bank sits on the horizontal side
+ *  facing its connections (see `socketSides`) — pass `comp` to enable the flip. */
 export function nodeSockets(node: FlarexNode, comp?: FlarexComp): SocketRef[] {
   const def = getFlarexNodeDefinition(node.type);
   const refs: SocketRef[] = [];
   const w = nodeWidth(node);
   const sides = socketSides(node, comp);
   const visualOrder = INPUT_SOCKET_VISUAL_ORDER[node.type];
+  const band = socketBand(node);
+  // Each bank centres on its OWN count, so a 1-in/1-out node has both dots on the centre line.
+  const bankTop = (count: number): number => band.top + Math.max(6, (band.h - Math.max(0, count - 1) * SOCKET_GAP) / 2);
+  const inTop = bankTop(def.inputs.length);
+  const outTop = bankTop(def.outputs.length);
   def.inputs.forEach((socket, i) => {
     const slot = visualOrder ? (visualOrder.indexOf(socket.id) >= 0 ? visualOrder.indexOf(socket.id) : i) : i;
     const x = sides.input === 1 ? node.ui.x + w : node.ui.x;
-    refs.push({ nodeId: node.id, socket: socket.id, kind: "input", def: socket, x, y: node.ui.y + 12 + slot * SOCKET_GAP, dir: sides.input });
+    refs.push({ nodeId: node.id, socket: socket.id, kind: "input", def: socket, x, y: inTop + slot * SOCKET_GAP, dir: sides.input });
   });
   def.outputs.forEach((socket, i) => {
     const x = sides.output === 1 ? node.ui.x + w : node.ui.x;
-    refs.push({ nodeId: node.id, socket: socket.id, kind: "output", def: socket, x, y: node.ui.y + 12 + i * SOCKET_GAP, dir: sides.output });
+    refs.push({ nodeId: node.id, socket: socket.id, kind: "output", def: socket, x, y: outTop + i * SOCKET_GAP, dir: sides.output });
   });
   return refs;
 }
@@ -301,9 +363,42 @@ export function nodeHeight(node: FlarexNode, comp?: FlarexComp): number {
   if (node.type === "reroute") return REROUTE_SIZE;
   if (node.type === "backdrop") return backdropSize(node).h;
   if (node.type === "group") return comp ? groupRect(comp, node).h : GROUP_COLLAPSED_H;
+  // Picture nodes are [picture | footer] — a fixed tile, like Resolve. The socket count no longer
+  // drives the height because the picture band is already taller than any bank of sockets.
+  if (thumbnailsOn && nodeHasThumbnail(node)) return NODE_THUMB_H + NODE_FOOTER_H;
   const def = getFlarexNodeDefinition(node.type);
   const rows = Math.max(def.inputs.length, def.outputs.length, 1);
   return Math.max(NODE_H, 10 + rows * SOCKET_GAP);
+}
+
+/** The node's picture area in world space, or null when it has none (mode off / not a picture node). */
+export function nodeThumbRect(node: FlarexNode): { x: number; y: number; w: number; h: number } | null {
+  if (!thumbnailsOn || !nodeHasThumbnail(node)) return null;
+  return { x: node.ui.x, y: node.ui.y, w: nodeWidth(node), h: NODE_THUMB_H };
+}
+
+/** The footer strip (index + status glyphs) under the picture, or null when the node has no picture. */
+export function nodeFooterRect(node: FlarexNode): { x: number; y: number; w: number; h: number } | null {
+  if (!thumbnailsOn || !nodeHasThumbnail(node)) return null;
+  return { x: node.ui.x, y: node.ui.y + NODE_THUMB_H, w: nodeWidth(node), h: NODE_FOOTER_H };
+}
+
+/**
+ * Display index per picture node ("01", "02", …) for the footer, in CREATION order — which is the
+ * object's own key order, since every node is added by spreading the previous map. Resolve numbers its
+ * nodes the same way, and a stable number is what lets people talk about "node 4" at all; deriving it
+ * from POSITION instead would renumber the graph every time someone tidied the layout.
+ */
+export function flarexNodeIndices(comp: FlarexComp): Map<string, number> {
+  const indices = new Map<string, number>();
+  let n = 0;
+  for (const id of Object.keys(comp.nodes)) {
+    const node = comp.nodes[id];
+    if (!node || !nodeHasThumbnail(node)) continue;
+    n += 1;
+    indices.set(id, n);
+  }
+  return indices;
 }
 
 /**

@@ -8982,6 +8982,9 @@ export function EditorPage() {
                   isPlaying={isPlaying}
                   graphOpen={bottomWorkspaceOpen}
                   onCloseGraph={() => setBottomWorkspaceOpen(false)}
+                  // Node thumbnails render through the VIEWER's compositor — the same handle the
+                  // background proxy capture uses, so no second GL context is created (Slice 6).
+                  viewerCaptureRef={proxyCaptureRef}
                 />
               )}
             </ColdTime>
