@@ -53,6 +53,17 @@ interface ActiveProxy {
   /** Bumped per presented frame so the compositor can skip an unchanged texture upload. */
   version: number;
   /**
+   * Latest time requested while a decode was already in flight, replayed when it lands.
+   *
+   * Without this the request was simply DROPPED, and a single-shot seek could leave the comp on a
+   * stale frame forever: a ruler CLICK pumps `requestFrames` exactly once, so if that one call arrived
+   * while the decoder was busy there was no second attempt and nothing else to retrigger it. Dragging
+   * hid the bug — a scrub pumps continuously, so a later call always got through — which is why this
+   * read as "seeking updates the media but clicking does not", and only for comp proxies (every other
+   * media layer is clock-driven and never queues behind a decode).
+   */
+  pendingTime: number | null;
+  /**
    * OUR clone of the presented frame, owned by us and closed when the next one replaces it.
    *
    * `getFrame` returns a frame the PROVIDER owns and closes on its next call. Holding that reference and
@@ -224,6 +235,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           lease,
           provider: null,
           busy: false,
+          pendingTime: null,
           version: 0,
           held: null,
         };
@@ -282,10 +294,22 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
     []
   );
 
-  const requestFrames = useRef((timeSeconds: number) => {
-    for (const active of activeRef.current.values()) {
+  /** Replay the newest time that arrived mid-decode — this is what makes "latest time wins" true. */
+  const drainPending = useRef((active: ActiveProxy) => {
+    const next = active.pendingTime;
+    if (next === null) return;
+    active.pendingTime = null;
+    pumpOne.current(active, next);
+  }).current;
+
+  const pumpOne = useRef((active: ActiveProxy, timeSeconds: number) => {
       const provider = active.provider;
-      if (!provider || active.busy) continue; // one in-flight decode per comp, latest time wins
+      if (!provider) return;
+      // One in-flight decode per comp, LATEST TIME WINS — remembered, not discarded.
+      if (active.busy) {
+        active.pendingTime = timeSeconds;
+        return;
+      }
       const localT = timeSeconds - active.hostStartSeconds;
       // Outside the host clip's span the comp is not on screen; drop the frame so a stale one can't be
       // drawn if the clip comes back into range.
@@ -297,17 +321,19 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           setServing(active.compId, false);
           requestRedraw();
         }
-        continue;
+        return;
       }
       active.busy = true;
       void provider
         .getFrame(localT)
         .then((frame) => {
           active.busy = false;
+          // Stale entry (comp swapped out mid-decode) — do NOT drain: this active is finished with.
           if (activeRef.current.get(active.compId) !== active) return;
           if (!frame) {
             proxyNulls.set(active.compId, (proxyNulls.get(active.compId) ?? 0) + 1);
             recordProxyStat(active.compId, { nulls: proxyNulls.get(active.compId) });
+            drainPending(active);
             return;
           }
           proxyDecodes.set(active.compId, (proxyDecodes.get(active.compId) ?? 0) + 1);
@@ -339,11 +365,16 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           // a duplicate composite per decoded frame — real GPU cost on exactly the path we are trying to
           // make cheaper. Paused, this redraw IS what puts the frame on screen.
           if (!isPlayingRef.current) requestRedraw();
+          drainPending(active);
         })
         .catch(() => {
           active.busy = false;
+          if (activeRef.current.get(active.compId) === active) drainPending(active);
         });
-    }
+  });
+
+  const requestFrames = useRef((timeSeconds: number) => {
+    for (const active of activeRef.current.values()) pumpOne.current(active, timeSeconds);
   }).current;
 
   /**
