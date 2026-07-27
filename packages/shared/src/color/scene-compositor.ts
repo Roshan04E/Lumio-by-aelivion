@@ -2894,10 +2894,18 @@ export class SceneCompositor {
       gl.blitFramebuffer(0, 0, srcW, srcH, 0, 0, destW, destH, gl.COLOR_BUFFER_BIT, filter);
       return;
     }
-    // A blit ignores blend/scissor; a draw does not. This can be called at arbitrary times (the scope
-    // readback is not tied to a compositing pass), so the state is forced and restored rather than
-    // assumed — otherwise the copy would silently blend into, or be clipped against, whatever the last
-    // caller left behind.
+    // A blit ignores BLENDING; a draw does not. So the draw path forces blend off and restores it —
+    // this can be called at arbitrary times (the scope readback is not tied to a compositing pass), so
+    // whatever the last caller left would otherwise blend into the copy.
+    //
+    // Scissor is NOT a difference between the two, contrary to what this comment used to claim: a blit
+    // IS subject to the scissor test (ES 3.0 §4.3.3 — pixel ownership, scissor and sRGB conversion all
+    // apply). So the blit branch above is equally vulnerable to a stray enabled scissor, and disabling
+    // it here protects only half the function. That is latent rather than live: the only scissor user
+    // in the repo is WaveformGLRenderer, on its own context, and it disables it again. Left as-is
+    // deliberately — the blit branch is the shipped 8-bit path and is not worth changing for a hazard
+    // nothing currently triggers. If a scissor user ever appears on THIS context, hoist the
+    // disable/restore to cover both branches.
     const prevViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
     const prevBlend = gl.isEnabled(gl.BLEND);
     const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
