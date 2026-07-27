@@ -13,6 +13,12 @@ export const READY_TOOL_SLUGS: readonly string[] = [
   "smart-3d-follow-text",
   "remove-background",
   "text-behind-person",
-  "ai-roto",
-  "remove-person"
+  "ai-roto"
 ];
+
+/**
+ * Tool slugs hidden from BOTH the /tools page and the editor Effects-tab AI tools. Use this to pull a
+ * tool out of the product surface without deleting its code (its handler/panel stay in the tree).
+ * Remove Person is disabled pending a real inpainting engine (its result is still mock/placeholder).
+ */
+export const DISABLED_TOOL_SLUGS: readonly string[] = ["remove-person"];

@@ -7,8 +7,11 @@ import { clearCachedModels, getCachedModel, type ModelFetchProgress } from "./mo
 export const SEGMENTATION_MODEL_URLS = {
   /** Fast tier: MediaPipe selfie segmenter (~250KB TFLite). */
   fast: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-  /** Quality tier: Robust Video Matting mobilenetv3 ONNX (~15MB). */
-  quality: "https://huggingface.co/eafish/web-onnx/resolve/main/rvm_mobilenetv3_fp32.onnx"
+  /** Quality tier, fp32 RVM (~15MB) — CORRECT on the WASM EP (non-WebGPU devices). ORT's WebGPU EP
+   *  miscomputes this fp32 graph (proven: matte collapses to max≈0.72), so WebGPU uses the fp16 build. */
+  quality: "https://huggingface.co/eafish/web-onnx/resolve/main/rvm_mobilenetv3_fp32.onnx",
+  /** Quality tier, fp16 RVM (~7.5MB) — WebGPU's native precision; correct + fast on the WebGPU EP. */
+  qualityFp16: "https://huggingface.co/eafish/web-onnx/resolve/main/rvm_mobilenetv3_fp16.onnx"
 } as const;
 
 /** Human-readable download progress line ("Downloading high-quality model… 42%"). */
@@ -26,12 +29,12 @@ function modelProgressLine(label: string, p: ModelFetchProgress): string {
  */
 export async function redownloadSegmentationModels(onProgress?: (message: string) => void): Promise<void> {
   cachedFastSegmenter = undefined;
-  cachedQualitySession = undefined;
-  await clearCachedModels([SEGMENTATION_MODEL_URLS.fast, SEGMENTATION_MODEL_URLS.quality]);
+  resetQualityWorker();
+  await clearCachedModels([SEGMENTATION_MODEL_URLS.fast, SEGMENTATION_MODEL_URLS.quality, SEGMENTATION_MODEL_URLS.qualityFp16]);
   onProgress?.("Re-downloading the fast model…");
   await getCachedModel(SEGMENTATION_MODEL_URLS.fast, { force: true, onProgress: (p) => onProgress?.(modelProgressLine("fast", p)) });
   onProgress?.("Re-downloading the high-quality model…");
-  await getCachedModel(SEGMENTATION_MODEL_URLS.quality, { force: true, onProgress: (p) => onProgress?.(modelProgressLine("high-quality", p)) });
+  await getCachedModel(SEGMENTATION_MODEL_URLS.qualityFp16, { force: true, onProgress: (p) => onProgress?.(modelProgressLine("high-quality", p)) });
   onProgress?.("Engines re-downloaded and cached.");
 }
 
@@ -139,22 +142,27 @@ const mediaPipeUrls = [
   "https://esm.sh/@mediapipe/tasks-vision@0.10.21"
 ];
 
+// onnxruntime-web >= 1.22.0 is REQUIRED: the RVM graph has an AveragePool with ceil_mode=1, and the
+// WebGPU kernel only implements ceil_mode as of microsoft/onnxruntime PR #24270 (merged 2025-04-02,
+// shipped in the 1.22.x line). On the old 1.20.1 pin every session.run() threw
+// "using ceil() in shape computation is not yet supported for AveragePool". 1.22–1.27 all contain the
+// fix; keep the ESM import, the esm.sh fallback, and wasmPaths below on the SAME version (the wasm
+// binaries are version-locked to the JS).
+const ORT_VERSION = "1.27.0";
 const onnxRuntimeUrls = [
-  "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.mjs",
-  "https://esm.sh/onnxruntime-web@1.20.1"
+  `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/ort.webgpu.min.mjs`,
+  `https://esm.sh/onnxruntime-web@${ORT_VERSION}`
 ];
 // onnxruntime-web resolves its own .wasm/.mjs proxy binaries from this dir. Setting it explicitly
 // (ort.env.wasm.wasmPaths) is what lets the WEBGPU backend initialize reliably — without it the
-// proxy fetch can fail under strict networks, ORT silently drops to the pure-WASM EP, and the RVM
-// graph then hard-errors ("ceil() … not supported for AveragePool"). Pinned to the ORT version above.
-const ortWasmBase = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+// proxy fetch can fail under strict networks. MUST match ORT_VERSION above.
+const ortWasmBase = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 
 // Selfie/landscape segmentation model (MediaPipe) and the RVM ONNX matting model. Both are fetched
 // and cached through model-cache.ts (OPFS) and handed to the engines as BYTES, not URLs — so a flaky
 // network can't wedge a download, weights persist across reloads, and "Redownload engine" can refresh
 // them. See SEGMENTATION_MODEL_URLS above (the single source of truth for these URLs).
 const mediaPipeSelfieModelUrl = SEGMENTATION_MODEL_URLS.fast;
-const rvmModelUrl = SEGMENTATION_MODEL_URLS.quality;
 
 interface MediaPipeImageSegmenterResult {
   categoryMask?: { getAsUint8Array: () => Uint8Array } | undefined;
@@ -167,7 +175,6 @@ interface MediaPipeImageSegmenter {
 }
 
 let cachedFastSegmenter: Promise<MediaPipeImageSegmenter> | undefined;
-let cachedQualitySession: Promise<QualitySession> | undefined;
 // segmentForVideo() requires strictly increasing timestamps across every call
 // made to a given segmenter instance. Since the segmenter is cached and reused
 // across separate Extract runs, per-run video time (which restarts near 0)
@@ -249,50 +256,101 @@ export async function segmentVideoQuality(
       : "Loading the high-quality matting model (CPU fallback - this will take longer)."
   );
 
-  const session = await getQualitySession(profile, options.onProgress);
+  // The RVM session + every session.run() live in a worker (segmentation.worker.ts) so a long/large
+  // bake can never freeze the page — the main thread here only decodes frames and streams them in.
+  await warmQualityWorker(profile, options.onProgress);
   assertNotCancelled(options.isCancelled);
 
-  // Export-grade matte: sample at the composition fps (capped at 30) so there is
-  // one matte frame per output frame and the alpha stays frame-locked to the
-  // source RGB - this is what removes the motion ghosting in the final render.
-  const sampleFps = Math.min(30, Math.max(profile.sampleFps, options.targetFps ?? profile.sampleFps));
-  const startSeconds = Math.max(0, options.startSeconds ?? 0);
-  const frameTimes = sampleFrameTimes(options.durationSeconds, sampleFps);
-  const video = await loadVideoElement(options.videoUrl);
-  const dims = withTrueVideoDimensions(options, video);
-  const canvas = document.createElement("canvas");
-  canvas.width = dims.width;
-  canvas.height = dims.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("Canvas 2D context unavailable for segmentation.");
-  }
-
-  const matteFrames: SegmentVideoResult["matteFrames"] = [];
-  const bounds: SubjectBounds[] = [];
-  // RVM carries recurrent state (r1-r4) across calls for temporal stability;
-  // reset at the start of each clip.
-  let recurrentState = session.createInitialState();
-
-  for (const [index, timeSeconds] of frameTimes.entries()) {
+  // Serialize the whole bake: the worker holds ONE RVM recurrent state, so two concurrent bakes
+  // (e.g. Extract Person still finishing when Remove Background starts on the same clip) must not
+  // interleave frames through it. Queuing is correct — each clip's frames run contiguously against a
+  // freshly reset state, and each waits its turn instead of crashing/corrupting.
+  return runQualityBakeExclusive(async () => {
     assertNotCancelled(options.isCancelled);
-    await seekVideo(video, startSeconds + timeSeconds);
-    ctx.drawImage(video, 0, 0, dims.width, dims.height);
-    const frame = ctx.getImageData(0, 0, dims.width, dims.height);
+    beginQualityClip();
 
-    const { luma, nextState } = await session.runFrame(frame, recurrentState);
-    recurrentState = nextState;
-    matteFrames.push({ timeSeconds, luma });
-    bounds.push(lumaToSubjectBounds(luma, dims.width, dims.height, timeSeconds));
+    // Export-grade matte: sample at the composition fps (capped at 30) so there is
+    // one matte frame per output frame and the alpha stays frame-locked to the
+    // source RGB - this is what removes the motion ghosting in the final render.
+    const sampleFps = Math.min(30, Math.max(profile.sampleFps, options.targetFps ?? profile.sampleFps));
+    const startSeconds = Math.max(0, options.startSeconds ?? 0);
+    const frameTimes = sampleFrameTimes(options.durationSeconds, sampleFps);
+    const video = await loadVideoElement(options.videoUrl);
+    // Cap the working resolution: RVM downsamples internally anyway and a soft luma matte upsamples
+    // cleanly, so feeding a 4K/2K frame at native size just burns CPU/GPU/transfer for no matte gain
+    // (and is what makes a big clip crawl). The matte is stored at these capped dims; renderers sample
+    // it normalized, so it still locks to the full-res source.
+    const dims = cappedWorkingDims(withTrueVideoDimensions(options, video));
+    const canvas = document.createElement("canvas");
+    canvas.width = dims.width;
+    canvas.height = dims.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      throw new Error("Canvas 2D context unavailable for segmentation.");
+    }
 
-    options.onProgress?.(`Baked frame ${index + 1} of ${frameTimes.length}.`);
+    const matteFrames: SegmentVideoResult["matteFrames"] = [];
+    const bounds: SubjectBounds[] = [];
+
+    const bakeStart = Date.now();
+    console.log(`[seg-client] baking ${frameTimes.length} frames at ${dims.width}x${dims.height} (source ${withTrueVideoDimensions(options, video).width}x${withTrueVideoDimensions(options, video).height}), sampleFps=${sampleFps}`);
+    for (const [index, timeSeconds] of frameTimes.entries()) {
+      assertNotCancelled(options.isCancelled);
+      await seekVideo(video, startSeconds + timeSeconds);
+      ctx.drawImage(video, 0, 0, dims.width, dims.height);
+      const frame = ctx.getImageData(0, 0, dims.width, dims.height);
+
+      // Hand the frame bytes to the worker (transferred, zero-copy) and get the alpha-luma back.
+      // Inference is off-thread, so the event loop stays free between frames — no "page not responding".
+      const luma = await runQualityFrame(frame.data, dims.width, dims.height);
+      matteFrames.push({ timeSeconds, luma });
+      bounds.push(lumaToSubjectBounds(luma, dims.width, dims.height, timeSeconds));
+
+      const done = index + 1;
+      if (index === 0 || done % 20 === 0 || index === frameTimes.length - 1) {
+        console.log(`[seg-client] baked frame ${done}/${frameTimes.length} (${Math.round((Date.now() - bakeStart) / done)}ms/frame avg)`);
+      }
+      // Frame-locked (one matte frame per output frame) for max quality; long clips can be many
+      // frames, so give an ETA from the running average instead of a bare counter.
+      const msPerFrame = (Date.now() - bakeStart) / done;
+      const remaining = frameTimes.length - done;
+      options.onProgress?.(
+        remaining > 0
+          ? `Baked ${done} of ${frameTimes.length} frames · ~${formatEta(remaining * msPerFrame)} left`
+          : `Baked ${done} of ${frameTimes.length} frames.`
+      );
+    }
+    console.log(`[seg-client] bake complete: ${matteFrames.length} frames in ${Date.now() - bakeStart}ms`);
+
+    if (!matteFrames.length) {
+      throw new Error("Quality matting produced no usable frames.");
+    }
+
+    return buildSegmentResult(dims, matteFrames, bounds, sampleFps, "clean", "browser");
+  });
+}
+
+/** "~2 min" / "~45 sec" from a millisecond estimate, for the bake progress line. */
+function formatEta(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 90) {
+    return `${seconds} sec`;
   }
+  return `${Math.round(seconds / 60)} min`;
+}
 
-  if (!matteFrames.length) {
-    throw new Error("Quality matting produced no usable frames.");
+/** Long-side cap for the quality bake's working resolution (see segmentVideoQuality). */
+const QUALITY_MAX_LONG_SIDE = 1280;
+
+/** Caps the sampled frame to QUALITY_MAX_LONG_SIDE on its long side (even dims), preserving aspect. */
+function cappedWorkingDims(options: SegmentVideoOptions): SegmentVideoOptions {
+  const longSide = Math.max(options.width, options.height);
+  if (longSide <= QUALITY_MAX_LONG_SIDE) {
+    return options;
   }
-
-  return buildSegmentResult(dims, matteFrames, bounds, sampleFps, "clean", "browser");
+  const scale = QUALITY_MAX_LONG_SIDE / longSide;
+  const even = (value: number) => Math.max(2, Math.round((value * scale) / 2) * 2);
+  return { ...options, width: even(options.width), height: even(options.height) };
 }
 
 function buildSegmentResult(
@@ -426,156 +484,163 @@ async function loadFastSegmenter(onProgress?: (message: string) => void): Promis
   throw new Error(`Unable to load the fast segmentation model. ${lastError instanceof Error ? lastError.message : ""}`.trim());
 }
 
-interface QualitySession {
-  createInitialState: () => unknown;
-  runFrame: (frame: ImageData, state: unknown) => Promise<{ luma: Uint8ClampedArray; nextState: unknown }>;
+// ── High-quality matting worker client ───────────────────────────────────────────────────────────
+// The RVM session and every session.run() live in segmentation.worker.ts. This client owns the
+// worker lifecycle (a single cached instance shared by all mask tools), warms it, resets the
+// recurrent state per clip, and round-trips one frame at a time. Because inference is off-thread the
+// main-thread bake loop never blocks — no "page not responding" — and the worker serializes its own
+// runs, so overlapping tool flows can't enter the non-reentrant session concurrently.
+import type { SegBeginRequest, SegFrameRequest, SegWarmRequest, SegWorkerResponse } from "./segmentation.worker";
+
+let segWorker: Worker | undefined;
+let segReady: Promise<void> | undefined;
+let segFrameId = 0;
+let segOnProgress: ((message: string) => void) | undefined;
+const segPending = new Map<number, { resolve: (luma: Uint8ClampedArray) => void; reject: (error: Error) => void }>();
+
+/** Tears the worker down (on load failure or "Redownload engine") so the next bake starts clean. */
+function resetQualityWorker(): void {
+  segWorker?.terminate();
+  segWorker = undefined;
+  segReady = undefined;
+  for (const pending of segPending.values()) {
+    pending.reject(new Error("Segmentation worker reset."));
+  }
+  segPending.clear();
 }
 
-/**
- * ONNX Runtime sessions are NOT reentrant: invoking `run()` while a prior `run()` on the same
- * session is still in flight throws `kernel "[Concat] Concat_2" is not allowed to be called
- * recursively`. The RVM quality session is a single cached global shared by EVERY mask tool
- * (Extract Person, Remove Background, Text Behind Person), so two tool flows whose bakes overlap
- * would interleave `run()` calls on it and crash. Serialize every `run()` through one promise chain
- * so the shared session is only ever entered one call at a time. This is correct, not just safe:
- * RVM's recurrence lives entirely in the r1i..r4i feed tensors (the session is stateless between
- * calls), so queuing independent clips' frames never corrupts state.
- */
-let qualityRunChain: Promise<unknown> = Promise.resolve();
-function runQualityExclusive<T>(task: () => Promise<T>): Promise<T> {
-  const result = qualityRunChain.then(task, task);
-  // Keep the chain alive regardless of this task's outcome, without leaking rejections.
-  qualityRunChain = result.then(
+/** Hard cap on model load + WebGPU session init before we stop waiting and surface where it stalled. */
+const WARM_TIMEOUT_MS = 90_000;
+
+/** Boots + warms the matting worker once (cached). Rejects with a real reason if the model can't load. */
+function warmQualityWorker(profile: SegmentationDeviceProfile, onProgress?: (message: string) => void): Promise<void> {
+  segOnProgress = onProgress;
+  if (segReady) {
+    return segReady;
+  }
+  console.log(`[seg-client] warmQualityWorker() — ORT ${ORT_VERSION} — profile:`, profile);
+  segReady = new Promise<void>((resolve, reject) => {
+    // Track the last phase so a timeout can say WHERE it stalled (download vs. WebGPU session init).
+    let lastPhase = "starting the matting engine";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        console.error(`[seg-client] warm TIMEOUT after ${WARM_TIMEOUT_MS}ms — stalled at: "${lastPhase}"`);
+        reject(
+          new Error(
+            `The high-quality matting engine stalled while "${lastPhase}". This is usually the WebGPU ` +
+              `runtime failing to fetch its binaries under a restrictive network. Try "Redownload engine", ` +
+              `or switch this bake to Fast.`
+          )
+        );
+      }
+    }, WARM_TIMEOUT_MS);
+    const finish = (fn: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    try {
+      console.log("[seg-client] creating worker…");
+      const worker = new Worker(new URL("./segmentation.worker.ts", import.meta.url), { type: "module" });
+      segWorker = worker;
+      worker.onmessage = (event: MessageEvent<SegWorkerResponse>) => {
+        const message = event.data;
+        switch (message.type) {
+          case "progress":
+            lastPhase = "downloading the model";
+            segOnProgress?.(modelProgressLine("high-quality", { loaded: message.loaded, total: message.total }));
+            break;
+          case "status":
+            lastPhase = message.message;
+            console.log("[seg-client] worker status:", message.message);
+            segOnProgress?.(message.message);
+            break;
+          case "ready":
+            console.log("[seg-client] worker READY");
+            finish(resolve);
+            break;
+          case "load-error":
+            console.error("[seg-client] worker load-error:", message.message);
+            finish(() => reject(new Error(message.message)));
+            break;
+          case "frame": {
+            const pending = segPending.get(message.id);
+            if (!pending) {
+              break;
+            }
+            segPending.delete(message.id);
+            if (message.ok) {
+              pending.resolve(new Uint8ClampedArray(message.luma));
+            } else {
+              pending.reject(new Error(message.message));
+            }
+            break;
+          }
+        }
+      };
+      worker.onerror = (event) => {
+        console.error("[seg-client] worker onerror:", event.message, event);
+        finish(() => reject(new Error(event.message || "segmentation worker crashed")));
+      };
+      // ORT's WebGPU EP miscomputes the fp32 RVM graph (proven: matte collapses to max≈0.72 on both
+      // ["webgpu","wasm"] and ["webgpu"]), while pure WASM fp32 is correct (max=1.0) but slow. So:
+      //   WebGPU device → fp16 model on WebGPU (fp16 is WebGPU's native precision → correct + fast).
+      //   No WebGPU     → fp32 model on WASM (correct).
+      const useWebgpu = profile.executionProvider === "webgpu";
+      const executionProviders = useWebgpu ? ["webgpu", "wasm"] : ["wasm"];
+      worker.postMessage({
+        type: "warm",
+        modelUrl: useWebgpu ? SEGMENTATION_MODEL_URLS.qualityFp16 : SEGMENTATION_MODEL_URLS.quality,
+        ortUrls: onnxRuntimeUrls,
+        ortWasmBase,
+        executionProviders,
+        precision: useWebgpu ? "fp16" : "fp32"
+      } satisfies SegWarmRequest);
+    } catch (error) {
+      finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+    }
+  });
+  // A failed warm must not wedge every future attempt — drop the cached promise so a retry re-boots.
+  segReady.catch(() => resetQualityWorker());
+  return segReady;
+}
+
+/** Resets the worker's RVM recurrent state for a fresh clip. */
+function beginQualityClip(): void {
+  segWorker?.postMessage({ type: "begin" } satisfies SegBeginRequest);
+}
+
+// One RVM recurrent state lives in the worker, so whole bakes must run one at a time — never
+// interleave two clips' frames. Queue each bake; the next starts (with a fresh state) when the
+// previous finishes or fails.
+let qualityBakeChain: Promise<unknown> = Promise.resolve();
+function runQualityBakeExclusive<T>(task: () => Promise<T>): Promise<T> {
+  const result = qualityBakeChain.then(task, task);
+  qualityBakeChain = result.then(
     () => undefined,
     () => undefined
   );
   return result;
 }
 
-async function getQualitySession(
-  profile: SegmentationDeviceProfile,
-  onProgress?: (message: string) => void
-): Promise<QualitySession> {
-  cachedQualitySession ??= loadQualitySession(profile, onProgress);
-  return cachedQualitySession;
-}
-
-async function loadQualitySession(
-  profile: SegmentationDeviceProfile,
-  onProgress?: (message: string) => void
-): Promise<QualitySession> {
-  // Fetch the ~15MB RVM weights ONCE through the OPFS cache and pass the bytes to ORT (no internal
-  // URL fetch — the path that was failing under the user's network and silently dropping to WASM).
-  const modelBytes = new Uint8Array(
-    await getCachedModel(rvmModelUrl, { onProgress: (p) => onProgress?.(modelProgressLine("high-quality", p)) })
-  );
-  // When WebGPU is available, list it FIRST with WASM as the per-node fallback. WebGPU runs the RVM
-  // graph (incl. the AveragePool the pure-WASM EP rejects); listing both lets ORT place any node the
-  // GPU can't take on WASM instead of failing the whole session.
-  const executionProviders = profile.executionProvider === "webgpu" ? ["webgpu", "wasm"] : ["wasm"];
-
-  let lastError: unknown;
-  for (const url of onnxRuntimeUrls) {
-    try {
-      const ort = (await import(/* @vite-ignore */ url)) as {
-        env: { wasm: { wasmPaths?: string; numThreads?: number } };
-        InferenceSession: { create: (model: Uint8Array, options?: Record<string, unknown>) => Promise<unknown> };
-        Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown;
-      };
-      // Point ORT at its proxy binaries so the WebGPU backend can initialize (see ortWasmBase).
-      if (ort.env?.wasm) {
-        ort.env.wasm.wasmPaths = ortWasmBase;
-      }
-      const session = await ort.InferenceSession.create(modelBytes, { executionProviders });
-      return wrapRvmSession(session, ort);
-    } catch (error) {
-      lastError = error;
-    }
+/** Streams one (downscaled) RGBA frame to the worker and resolves with its alpha-luma matte frame. */
+function runQualityFrame(rgba: Uint8ClampedArray, width: number, height: number): Promise<Uint8ClampedArray> {
+  const worker = segWorker;
+  if (!worker) {
+    return Promise.reject(new Error("Segmentation worker not ready."));
   }
-  throw new Error(`Unable to load the quality matting model. ${lastError instanceof Error ? lastError.message : ""}`.trim());
-}
-
-function wrapRvmSession(
-  session: unknown,
-  ort: { Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown }
-): QualitySession {
-  // Verified against the official RVM ONNX inference docs
-  // (github.com/PeterL1n/RobustVideoMatting/blob/master/documentation/inference.md):
-  // inputs are src, r1i, r2i, r3i, r4i, downsample_ratio; outputs are
-  // fgr, pha, r1o, r2o, r3o, r4o. An earlier version guessed plain r1-r4 and
-  // omitted downsample_ratio entirely, which onnxruntime rejected outright
-  // ("input 'r1i' is missing in 'feeds'") - don't re-guess these names.
-  return {
-    createInitialState: () => ({
-      r1i: zeroTensor(ort, 1),
-      r2i: zeroTensor(ort, 1),
-      r3i: zeroTensor(ort, 1),
-      r4i: zeroTensor(ort, 1)
-    }),
-    runFrame: async (frame, state) => {
-      const inferenceSession = session as { run: (feeds: Record<string, unknown>) => Promise<Record<string, { data: Float32Array }>> };
-      const input = imageDataToNchwTensor(ort, frame);
-      const downsampleRatio = new ort.Tensor("float32", new Float32Array([downsampleRatioFor(frame.width, frame.height)]), [1]);
-      // Serialize on the shared session so overlapping tool flows can't enter run() reentrantly.
-      const outputs = await runQualityExclusive(() =>
-        inferenceSession.run({
-          src: input,
-          downsample_ratio: downsampleRatio,
-          ...(state as Record<string, unknown>)
-        })
-      );
-      const alpha = outputs.pha?.data;
-      if (!alpha) {
-        throw new Error("Matting model output missing alpha tensor.");
-      }
-      return {
-        luma: alphaTensorToLuma(alpha, frame.width, frame.height),
-        nextState: { r1i: outputs.r1o, r2i: outputs.r2o, r3i: outputs.r3o, r4i: outputs.r4o }
-      };
-    }
-  };
-}
-
-function zeroTensor(ort: { Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown }, size: number) {
-  return new ort.Tensor("float32", new Float32Array(size), [1, 1, 1, 1]);
-}
-
-/**
- * RVM's own guidance: pick downsample_ratio so the downsampled short side
- * lands between 256-512px (384 is the midpoint) - too low loses matte detail,
- * too high wastes compute without quality gain. Never upsamples past the
- * frame's native resolution.
- */
-function downsampleRatioFor(width: number, height: number): number {
-  const shortSide = Math.min(width, height);
-  return Math.min(1, 384 / shortSide);
-}
-
-function imageDataToNchwTensor(
-  ort: { Tensor: new (type: string, data: Float32Array, dims: number[]) => unknown },
-  frame: ImageData
-) {
-  const { width, height, data } = frame;
-  const channelSize = width * height;
-  const planar = new Float32Array(channelSize * 3);
-  for (let i = 0; i < channelSize; i += 1) {
-    planar[i] = (data[i * 4] ?? 0) / 255;
-    planar[channelSize + i] = (data[i * 4 + 1] ?? 0) / 255;
-    planar[channelSize * 2 + i] = (data[i * 4 + 2] ?? 0) / 255;
-  }
-  return new ort.Tensor("float32", planar, [1, 3, height, width]);
-}
-
-function alphaTensorToLuma(alpha: Float32Array, width: number, height: number): Uint8ClampedArray {
-  const luma = new Uint8ClampedArray(width * height * 4);
-  for (let i = 0; i < width * height; i += 1) {
-    const value = Math.round(Math.min(1, Math.max(0, alpha[i] ?? 0)) * 255);
-    luma[i * 4] = value;
-    luma[i * 4 + 1] = value;
-    luma[i * 4 + 2] = value;
-    luma[i * 4 + 3] = 255;
-  }
-  return luma;
+  segFrameId += 1;
+  const id = segFrameId;
+  return new Promise<Uint8ClampedArray>((resolve, reject) => {
+    segPending.set(id, { resolve, reject });
+    // getImageData hands back a fresh buffer each call, so transfer it directly (zero-copy).
+    const buffer = rgba.buffer as ArrayBuffer;
+    worker.postMessage({ type: "frame", id, width, height, rgba: buffer } satisfies SegFrameRequest, [buffer]);
+  });
 }
 
 function categoryMaskToLuma(categoryMask: Uint8Array): Uint8ClampedArray {

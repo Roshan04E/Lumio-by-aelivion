@@ -22,6 +22,7 @@ import { VideoPreview } from "../components/VideoPreview";
 import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import { addEffect, createProject, patchProject } from "../lib/api";
 import { resolveGraphMattes } from "../export/matte-resolve";
+import { setPlaybackClock } from "../playback/playback-clock";
 import { getLayerToolEffectHandler } from "../tools/layer-effect-handlers";
 import { assertToolRunnable } from "../tools/useLayerToolEffectRunner";
 
@@ -549,6 +550,9 @@ function RemoveBackgroundResultViewer({ asset, composition }: { asset: SourceAss
     }
     const started = { clockMs: performance.now(), timeSeconds: currentTimeRef.current };
     playbackStartRef.current = started;
+    // Drive the shared playback clock so VideoPreview (isPlaying) plays natively and stays in sync —
+    // seeking every frame instead lags badly.
+    setPlaybackClock(started.timeSeconds);
     let frame = 0;
     const tick = (clockMs: number) => {
       const start = playbackStartRef.current;
@@ -557,10 +561,12 @@ function RemoveBackgroundResultViewer({ asset, composition }: { asset: SourceAss
       }
       const nextTime = start.timeSeconds + (clockMs - start.clockMs) / 1000;
       if (nextTime >= composition.durationSeconds) {
+        setPlaybackClock(composition.durationSeconds);
         setCurrentTime(composition.durationSeconds);
         setIsPlaying(false);
         return;
       }
+      setPlaybackClock(nextTime);
       setCurrentTime(nextTime);
       frame = window.requestAnimationFrame(tick);
     };
@@ -581,6 +587,7 @@ function RemoveBackgroundResultViewer({ asset, composition }: { asset: SourceAss
         composition={composition}
         currentTime={Math.min(currentTime, composition.durationSeconds)}
         graph={graph}
+        // Native playback while playing; our rAF drives the shared clock it reads. Paused → seeks to prop.
         isPlaying={isPlaying}
         previewQuality="quality"
         sourceAsset={asset}

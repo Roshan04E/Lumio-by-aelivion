@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Captions, Eraser, Layers, Scissors, Move3d, Wrench, type LucideIcon } from "lucide-react";
 import { stageLabel, toolCapabilityDefinitions, type ToolCapabilityDefinition, type ToolIconKey } from "@orreris/shared";
+import { DISABLED_TOOL_SLUGS } from "../tools/ready-tool-slugs";
 
 /** Single seam between the registry's icon keys and web's glyph set.
  *  A new tool declares `icon` in packages/shared; add its key here (or it falls back to the wrench). */
@@ -38,7 +39,9 @@ export function ToolsPage() {
       <section className="mkt-section" style={{ paddingTop: 40 }}>
         <div className="mkt-wrap">
           <div className="mkt-tool-grid">
-            {toolCapabilityDefinitions.map((tool) => {
+            {toolCapabilityDefinitions
+              .filter((tool) => !DISABLED_TOOL_SLUGS.includes(tool.slug))
+              .map((tool) => {
               const Icon = toolIcon(tool);
               const credits = tool.estimatedCredits ?? 0;
               return (

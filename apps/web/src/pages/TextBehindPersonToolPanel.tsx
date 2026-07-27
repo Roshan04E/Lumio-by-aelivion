@@ -22,6 +22,7 @@ import { ThemedSelect } from "../editor/inspector/controls/ThemedSelect";
 import { addEffect, createProject, patchProject } from "../lib/api";
 import { resolveGraphMattes } from "../export/matte-resolve";
 import { getLayerToolEffectHandler } from "../tools/layer-effect-handlers";
+import { setPlaybackClock } from "../playback/playback-clock";
 import { assertToolRunnable } from "../tools/useLayerToolEffectRunner";
 
 const TEXT_SWATCHES = ["#FFFFFF", "#111111", "#FFD23F", "#4D9FFF", "#FF4D6D"];
@@ -522,6 +523,8 @@ function TextBehindResultViewer({ asset, composition }: { asset: SourceAsset; co
     }
     const started = { clockMs: performance.now(), timeSeconds: currentTimeRef.current };
     playbackStartRef.current = started;
+    // Drive the shared playback clock so VideoPreview plays natively in sync (seeking per frame lags).
+    setPlaybackClock(started.timeSeconds);
     let frame = 0;
     const tick = (clockMs: number) => {
       const start = playbackStartRef.current;
@@ -530,10 +533,12 @@ function TextBehindResultViewer({ asset, composition }: { asset: SourceAsset; co
       }
       const nextTime = start.timeSeconds + (clockMs - start.clockMs) / 1000;
       if (nextTime >= composition.durationSeconds) {
+        setPlaybackClock(composition.durationSeconds);
         setCurrentTime(composition.durationSeconds);
         setIsPlaying(false);
         return;
       }
+      setPlaybackClock(nextTime);
       setCurrentTime(nextTime);
       frame = window.requestAnimationFrame(tick);
     };
@@ -554,6 +559,7 @@ function TextBehindResultViewer({ asset, composition }: { asset: SourceAsset; co
         composition={composition}
         currentTime={Math.min(currentTime, composition.durationSeconds)}
         graph={graph}
+        // Native playback while playing; our rAF drives the shared clock it reads. Paused → seeks to prop.
         isPlaying={isPlaying}
         previewQuality="quality"
         sourceAsset={asset}

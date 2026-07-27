@@ -70,7 +70,9 @@ import {
   type ToolRun,
   type TranscriptSegment,
 } from "@orreris/shared";
+import { DISABLED_TOOL_SLUGS } from "../tools/ready-tool-slugs";
 import { AiRotoToolPanel } from "./AiRotoToolPanel";
+import { ExtractPersonToolPanel } from "./ExtractPersonToolPanel";
 import { RemoveBackgroundToolPanel } from "./RemoveBackgroundToolPanel";
 import { RemovePersonToolPanel } from "./RemovePersonToolPanel";
 import { SmartFollowTextToolPanel } from "./SmartFollowTextToolPanel";
@@ -244,7 +246,9 @@ export function ToolDetailPage() {
     };
   }, [tool.id]);
 
-  if (!foundTool || !run) {
+  // A disabled tool (e.g. Remove Person, pending a real engine) is hidden everywhere — bounce a
+  // direct /tools/:slug hit back to the index instead of rendering its workspace.
+  if (!foundTool || !run || DISABLED_TOOL_SLUGS.includes(tool.slug)) {
     return <Navigate to="/tools" replace />;
   }
 
@@ -1042,6 +1046,18 @@ export function ToolDetailPage() {
   if (isAiRoto) {
     return (
       <AiRotoToolPanel
+        tool={tool}
+        assets={toolAssets}
+        selectedAssetId={selectedAssetId}
+        onSelectAsset={setSelectedAssetId}
+        onUploadAsset={handleToolAssetUpload}
+      />
+    );
+  }
+
+  if (isExtractPerson) {
+    return (
+      <ExtractPersonToolPanel
         tool={tool}
         assets={toolAssets}
         selectedAssetId={selectedAssetId}
