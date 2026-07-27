@@ -25371,6 +25371,20 @@ h3.notes-note-md-heading {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
+/* Playing from a prepared proxy (plans/flarex-comp-proxy.md): a wand right of the `fx` text. Only the
+   PROXIED state grows the badge — live comps keep the exact badge they had, so the wand's presence is
+   the whole signal and there is nothing new to read when nothing is cached. */
+.timeline-editor .timeline-clip .clip-flarex-badge.is-proxied {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 2px;
+}
+.timeline-editor .timeline-clip .clip-flarex-proxy-wand {
+  /* Slightly recessed against the accent fill so `fx` stays the primary read. */
+  opacity: 0.85;
+}
+
 /* Notes clip badge (plans/notes-sonnet-execution-2.md P2.3): same corner-badge idiom as the fx
    badge, offset right of it so both can show at once. UNLIKE the fx badge, this one keeps pointer
    events (its double-click is the whole point of the affordance). */

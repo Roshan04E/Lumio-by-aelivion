@@ -28,6 +28,7 @@ import type { FrameProvider } from "../../export/source-decoder";
 import { flarexCompProxyIdentity, flarexCompProxyKey } from "./flarex-comp-proxy";
 import { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
 import { getFlarexCompProxy } from "./flarex-comp-proxy-store";
+import { setFlarexProxyServing } from "./flarex-proxy-status";
 
 /** `?flarexProxy=0` disables playback substitution outright (proxies can still be rendered/stored). */
 function proxyPlaybackEnabled(): boolean {
@@ -258,6 +259,13 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       cancelled = true;
     };
   }, [eligible, requestRedraw, setServing]);
+
+  // Publish for the timeline's clip badge. `servingCompIds` is identity-stable unless it really
+  // changed (see setServing), so this is a no-op on ordinary renders.
+  useEffect(() => {
+    setFlarexProxyServing(servingCompIds);
+  }, [servingCompIds]);
+  useEffect(() => () => setFlarexProxyServing([]), []);
 
   // Full teardown on unmount — leases pin real decoder sessions and object URLs pin the blobs.
   useEffect(

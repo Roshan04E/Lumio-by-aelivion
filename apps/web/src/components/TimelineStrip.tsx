@@ -1,5 +1,5 @@
-import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, StickyNote, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, X, Zap } from "lucide-react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
+import { AlignHorizontalJustifyStart, Aperture, ChevronLeft, ChevronRight, ChevronsRight, Circle, Contrast, Copy, Diamond, Eye, EyeOff, Film, Flag, GripVertical, Hand, Image, Info, Keyboard, Link2, Lock, Magnet, Map as MapIcon, Maximize2, Minus, MousePointer2, MoveHorizontal, Music, Pentagon, PenTool, Redo2, RefreshCw, Scissors, Shapes, SlidersHorizontal, SplitSquareHorizontal, Square, StickyNote, Trash2, Triangle, Type, Undo2, UnfoldHorizontal, Unlink2, Unlock, Volume2, VolumeX, Wand2, X, Zap } from "lucide-react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { computeLayerOrdinals, computeSnapTargets, DEFAULT_CROSS_DISSOLVE_SECONDS, effectiveTransitionDuration, getCompositionVolume, getLayerAnimations, getTimelineEffectDefinition, getTransition, resolveEdgeTrim, resolveGroupMove, resolveTransitionWindowSides, rollEditLimits, slideLayerLimits, snapValue, TIMELINE_MARKER_COLORS, TRANSITION_MARKER, type PluginTransitionManifest, type ShapeKind, type SourceAsset, type TimelineComposition, type TimelineEffectType, type TimelineKeyframeV2, type TimelineLayer, type TimelineLayerType, type TimelineMarker, type TimelineToolMode, type TimelineTrack, type TransitionKind, type TransitionSpec } from "@orreris/shared";
 import { getAudioPeaks, getCachedPyramid, sampleWaveformWindow, type Pyramid } from "../lib/audioPeaks";
@@ -33,6 +33,7 @@ import { loadFavourites } from "../editor/effects/favourites";
 import { ThemedSelect, type ThemedSelectOption } from "../editor/inspector/controls/ThemedSelect";
 import type { PreviewCacheRulerSegment, ProxyCacheStatus } from "../editor/performance/renderCache";
 import { resolveSelectMode, type LayerSelectMode } from "../editor/selectionMode";
+import { getFlarexProxyServing, subscribeFlarexProxyServing } from "../editor/flarex/flarex-proxy-status";
 
 type LayerCollectionSelectMode = "replace" | "add" | "toggle";
 /** A source-monitor drag carries its own mode + marked in/out range — see SourceMonitor.tsx. */
@@ -5067,6 +5068,38 @@ const AudioVolumeEnvelope = memo(function AudioVolumeEnvelope({
 // loading/ready so the ResizeObserver stays attached.
 const FILMSTRIP_DEFAULT_ASPECT = 16 / 9;
 
+/**
+ * The clip's `fx` badge, plus a wand when that comp is currently PLAYING FROM ITS PROXY.
+ *
+ * Its own component so the store subscription exists only on clips that actually have a comp — every
+ * other clip keeps exactly the render cost it had before. Wand present = you are watching a cached
+ * render; absent = the graph is being evaluated live. Nothing is shown for "a proxy exists but is not
+ * being used", because what matters is what you are looking at, not what is on disk.
+ */
+const FlarexClipBadge = memo(function FlarexClipBadge({ compId, onOpen }: { compId: string; onOpen: () => void }) {
+  const serving = useSyncExternalStore(subscribeFlarexProxyServing, getFlarexProxyServing, getFlarexProxyServing);
+  const fromProxy = serving.includes(compId);
+  return (
+    <span
+      className={`clip-flarex-badge${fromProxy ? " is-proxied" : ""}`}
+      title={
+        fromProxy
+          ? "Playing from a prepared proxy (cached render) — double-click to open (Shift+F)"
+          : "Has a Flarex node comp — double-click to open (Shift+F)"
+      }
+      onDoubleClick={(event) => {
+        // Single-click falls through to the clip's normal select/seek behavior; only the
+        // double-click navigates, so the badge never steals a plain click.
+        event.stopPropagation();
+        onOpen();
+      }}
+    >
+      fx
+      {fromProxy ? <Wand2 size={9} className="clip-flarex-proxy-wand" aria-label="playing from proxy" /> : null}
+    </span>
+  );
+});
+
 const Filmstrip = memo(function Filmstrip({ url }: { url?: string | undefined }) {
   const thumbs = useVideoThumbnails(url);
   const hostRef = useRef<HTMLSpanElement | null>(null);
@@ -5535,18 +5568,10 @@ const TimelineClip = memo(function TimelineClip({
           A DIRECT child of the clip (like .clip-number), NOT inside .clip-label — the label bar
           is display:none on video clips at S/XS row heights, which would hide the badge. */}
       {layer.flarexCompId ? (
-        <span
-          className="clip-flarex-badge"
-          title="Has a Flarex node comp — double-click to open (Shift+F)"
-          onDoubleClick={(event) => {
-            // Single-click falls through to the clip's normal select/seek behavior; only the
-            // double-click navigates, so the badge never steals a plain click.
-            event.stopPropagation();
-            onOpenFlarexForClip?.(layer.id);
-          }}
-        >
-          fx
-        </span>
+        <FlarexClipBadge
+          compId={layer.flarexCompId}
+          onOpen={() => onOpenFlarexForClip?.(layer.id)}
+        />
       ) : null}
       {/* Notes badge (P2.3): same idiom as the fx badge — a DIRECT child of the clip, never inside
           .clip-label (display:none at S/XS row heights). */}
