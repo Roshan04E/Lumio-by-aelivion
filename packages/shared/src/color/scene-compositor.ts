@@ -1262,7 +1262,13 @@ export class SceneCompositor {
    * pools); `srcTexture*` covers the persistent per-source texture cache. Cheap: a handful of adds.
    */
   profilerSnapshot(): CompositorProfilerSnapshot {
-    const rtBytes = (rt: RenderTarget | null): number => (rt ? rt.width * rt.height * 4 : 0);
+    // Per-pixel size comes from what the target ACTUALLY is, not a constant 4. A half-float target
+    // (HDR pipeline, Stage 0) costs 8 bytes per pixel, and this figure existed precisely to answer
+    // "what does that precision cost" — hardcoding 4 made it report an identical total in both flag
+    // states, i.e. the one question it is consulted for was the one question it could not answer.
+    // A debug instrument that silently reports the wrong quantity is worse than no instrument.
+    const rtBytes = (rt: RenderTarget | null): number =>
+      rt ? rt.width * rt.height * bytesPerPixel(rt.precision) : 0;
     const rts: (RenderTarget | null)[] = [
       this.accumA, this.accumB, this.plateRT, this.scratch1, this.scratch2, this.scopeThumb,
       this.sideA, this.sideAScratch, this.sideB, this.sideBScratch, this.layerNestA, this.layerNestB,
