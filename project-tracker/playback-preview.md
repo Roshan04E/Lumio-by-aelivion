@@ -728,3 +728,216 @@ __rfVideoSeeks recorder (VideoPreview), __rfMediaHoles counters + __rfPlayStart 
 held-texture serves, v23/v25 behind-demotion + forward-only servo + non-negative clock, v24
 capture-race fences (gesture abort, seek guards, renderOffscreen playing/size guards), v26/v26.1
 needle init + monotonic floor, v27 bridged live marks.
+
+## v29 — Flarex multi-source freeze: a memo froze the layer CLOCK, not the decoder (2026-07-26)
+
+**Report (recurring, 2 sessions / 4 shipped fixes):** in a Flarex comp with a host clip + asset-source
+`MediaIn`s, the host plays smoothly but every asset-source loader freezes. Originally read as an
+fps ceiling (60fps froze, 30fps didn't), then as WebCodecs session contention. Neither was it: the
+SAME 30fps asset plays fine as the host and freezes as a virtual loader.
+
+**Why 4 fixes missed it (methodology).** Every measurement used GLOBAL counters — `__rfWcPool`,
+`__rfWcHeals`, `__rfWcDecoder` — which cannot attribute behavior to one frozen source. The reading
+`{hardReset:7, forwardSkip:5}` over 634 frames was taken as proof the decoder was starved; it is
+actually the *signature of the real bug* (see below). Each round then changed enough to invalidate
+the previous measurement. The per-source signal that would have named it in one run already existed:
+`frameProfiler.noteMediaSource` → `?flarexProfile=1` Media section (`media STALLED: <id>`).
+
+**Root cause — `arePreviewLayerPropsEqual` (VideoPreview.tsx), Playback Jank Patch 1.** The memo
+skips the `currentTime` compare when `isPlaying && !selected && hideVisual`. Its doc comment says
+"Media is deliberately NOT skipped", but the guard only tested `hideVisual` — never the layer type.
+Timeline layers get `hideVisual` only for text/shape (`sceneOverlayIds`), so the host was exempt by
+accident; Flarex Phase 2 virtual loaders pass a BARE `hideVisual`, opting VIDEO layers into it. Their
+other props are identity-stable during playback (`useStableList`, the same jank patch), so nothing
+else busts the memo → the loader's `PreviewLayer` never re-renders while playing → its `currentTime`
+prop is pinned at the last pre-play render.
+
+`requestWcFrame` then rides `getLivePlaybackTime()` only while it agrees with that prop within
+`WC_LIVE_CLOCK_MAX_DIVERGENCE_S` (0.35s). Past that the live clock is REJECTED and the stale prop is
+used → one constant `sourceTime` forever → the same frame decodes forever.
+
+**Why it was invisible to every self-heal:** `lastFrameLagSeconds = max(0, requested − served)`, and
+the decoder serves exactly the frozen request ⇒ lag ≈ 0. No catch-up hold, no `WC_DIVERGE`/sustained
+bail, no `busyWedge` (decode is instant), no `nullFrames`, no `__rfLiveFreeze` entry (watchdog
+`behind` IS that lag), and a constant time crosses no GOP ⇒ no `resetTo` — hence the flat reset
+counters that were misread as starvation. It also explains "played once then froze forever" (≈0.35s
+of motion) and "on pause it catches up at higher quality" (pause ⇒ memo compares time again ⇒
+re-render + full-res settle).
+
+**Fix:** `canIgnoreTime` additionally requires `layer.type !== "video" && !== "image"` — the type
+test, not `hideVisual`, is what keeps media out. Text/shape overlays keep the jank patch.
+
+**Hardening shipped with it:**
+- `recordWcStaleTime(src)` → `window.__rfWcStaleTime` counts live-clock REJECTIONS per source. The
+  guard's behavior is unchanged (rejecting a foreign playhead is correct on tool pages/fixtures);
+  this only makes a stale-clock freeze a one-console-read diagnosis instead of a two-session hunt.
+- `wcBailedSources` is module-global and keyed by media URL, so a host clip's bail poisoned any
+  virtual loader on the same asset (comps routinely load one file as both host and MediaIn source) and
+  sent it to a native `<video>` → the ~16-context cap → permanent freeze. `tolerateLag` layers now
+  ignore the bail list.
+
+**Kept, unproven:** `tolerateLag` + the `busyWedge`/`nullFrames` native-bail guards (independently
+justified — comp sources must never take a native element). `preferSoftwareDecode` for virtual loaders
+was shipped on the disproved contention theory and costs a CPU H.264 decode each; re-evaluate against
+the profiler now that the real cause is out.
+
+**Rule:** a freeze whose lag reads ~0 is a CLOCK bug, not a decode bug. Check whether the layer's
+`currentTime` prop is still advancing before touching the decoder.
+
+---
+
+## v30 — 2026-07-27: the HOST froze and the loaders played (the exact inverse of v29)
+
+**Symptom (user):** "now the host dont play rest play.. host even dont update when paused."
+
+**Why the "even when paused" clause is the whole diagnosis.** A stalled *clock* (v29) still updates on
+scrub, because pausing re-enables the memo's time compare. A source that does not update while PAUSED
+is not lagging — its decode is dead. That single word ruled out the entire v29 class on sight and sent
+this straight at the decoder pool instead of costing another four rounds.
+
+**Root cause — mode-blind warm reuse in `preview-frame-pool.ts`.** Parked providers were matched by URL
+alone:
+
+```ts
+const idleIndex = idle.findIndex((entry) => entry.url === url);   // ← no decode mode
+```
+
+A Flarex comp routinely loads ONE file as both the host clip and a MediaIn source. The loader creates a
+**software** decoder for that URL (`preferSoftware`, v29's contention fix), parks it on release, and the
+**host** — same URL — warm-reused it. The host is lag-INtolerant by design, so a software decode of a
+full-res source blew past `WC_HOLD_LAG_S` → freeze-hold → sustained-hold bail → `wcBailedSources` →
+native `<video>` for the rest of the session. The mirror leak is just as bad: a loader inheriting the
+host's hardware provider lands back on the contended block `preferSoftware` exists to avoid.
+
+**Second, structural cause — software sessions charged to the hardware cap.** `MAX_WC_SESSIONS = 3` is
+documented as "≈ the hardware decode sessions an integrated GPU has", but software decoders run on CPU
+threads and occupy none of them. A host + 2 loaders filled all 3 slots, so whichever source acquired
+last was refused and fell to a native element. Loaders are immune to that fallback (`tolerateLag`,
+never freeze-hold, never bail), so **the loser was structurally guaranteed to be the host.** v29 made
+the loaders unstarvable without giving the host any protection at all.
+
+**Fix:**
+- Warm reuse matches `(url, software)`. Lifted to an exported pure `findWarmIdleIndex` so it is testable
+  — a mode-mismatched reuse is otherwise invisible: it counts as a healthy cache HIT.
+- Hardware and software sessions get separate counts, caps (`MAX_WC_SESSIONS` 3 / `MAX_WC_SOFTWARE_SESSIONS`
+  4), idle pools, eviction and preemption victims. No number of loaders can now refuse the host a slot.
+- `window.__rfWcMode` — per source, which path it ACTUALLY took (`wc-hw` / `wc-sw` / `element`). Both
+  multi-source freezes were mis-diagnosed for rounds because this was unanswerable from the console.
+- `__rfWcPool` gained `activeSoftware`; `capMisses` is now read against the mode that ran out.
+
+**Gate:** `pnpm --filter @orreris/web wcpool:test` — 22 assertions, mutation-verified (reverting the
+predicate to a URL-only match fails exactly the 3 mode-mismatch assertions and nothing else).
+
+**Rule (generalises v29's):** when a fix makes one class of source unstarvable, ask which source is now
+guaranteed to lose. Immunity is not free — it is redistributed. Both of these freezes were one side of a
+contention model where only the other side had an escape hatch.
+
+### v30a — same day: the mode split silently raised the ceiling 3 → 7
+
+**Symptom (user):** the loaders DID come back ("initially it was showing multiple mediain in the
+previewer"), then rigorous scrubbing on the edit page turned the whole browser window **white**, after
+which no asset-source MediaIn appeared at all — only the host clip, everywhere.
+
+**Cause — my own fix.** Splitting hardware/software into two independent caps (3 and 4) fixed the
+starvation but raised total concurrency to **seven** live decoders. Each pins a decoder plus a GOP
+window of encoded samples; scrubbing makes all of them reset and re-buffer at once. The renderer died
+(white page), and once the GPU process is gone the loaders can never re-acquire a provider — so
+`resolveSourceDraw` returns null and every MediaIn takes its documented soft-degrade to the host. That
+is why the failure LOOKED like the original bug returning.
+
+**Fix:** the real resource is total sessions, so that is what is capped. `MAX_WC_TOTAL_SESSIONS = 4`
+across both modes, plus `HARDWARE_RESERVED_SLOTS = 1` that software leases may never occupy — the
+reservation, not a bigger software pool, is what actually guarantees the host a slot. Admission is now
+one `reserveSession(software, priority)` that enforces the mode ceiling AND the total, freeing idle
+parks (other mode first — this mode's parks may still be warm-reused) then preempting preload shells.
+`parkOrDispose` enforces the total too, since a lease released mid-init stops counting as active
+immediately but still parks a real decoder when its init resolves.
+
+**Rule:** two caps that merely SUM are not a budget. When splitting a shared limit, the aggregate is the
+invariant to assert — `wcpool:test` now asserts exactly that (`sessionCap(false) + sessionCap(true) >
+MAX_TOTAL`, i.e. the per-mode caps oversubscribe on their own, so the total is what bounds concurrency).
+
+### 2026-07-27 — cloud export: local↔cloud asset resolution is not coordinated (OPEN)
+
+Three defects found while chasing "cloud export does nothing". Two fixed, two structural ones open.
+
+**Fixed.** (1) `collectAssetIds` (lib/sync.ts) walked only `composition.tracks`, so Flarex asset-source
+`MediaIn` assets were never uploaded and never remapped local→server — the worker then 404'd on a local
+id. Canonical `collectFlarexSourceAssetIds` / `remapFlarexSourceAssetIds` now live in
+`packages/shared/flarex/virtual-layers.ts`; export-core's private duplicate re-exports them (two
+definitions silently disagreeing is how it shipped). Confirmed by china_view appearing in the worker's
+manifest list. (2) The worker presigned R2 DIRECTLY and had no read-through fallback, unlike the API's
+`/storage` route — so a legacy pre-R2 key (`uploads/<file>`, flat, local-disk only) was a hard 404 that
+failed the whole export. It now retries via the API URL and reports both causes.
+
+**OPEN — the real issue.** `manifest.assets` is built from EVERY project asset
+(`render-templates/src/index.ts:537`), not the ones the render actually references. A 3-asset project
+localized **19** assets: a dozen orphaned `mask_browser_*.webm` tool artifacts plus unrelated library
+media, each downloaded in full before frame 1. Consequences: every cloud export pays minutes of
+unnecessary transfer, and ANY stale/broken library asset fails an export that does not use it. The media
+pool is a LIBRARY; the manifest treats it as the render input set. These need separating — the manifest
+should carry only assets reachable from the composition + its Flarex comps (the collectors above already
+compute exactly that set).
+
+**Also open:** THREE coexisting storage key conventions (`uploads/<file>` flat = local disk only;
+`uploads/u_<user>/…` = R2; `u_<user>/video/…` = R2 current). The R2 migration moved the newer two and
+left the flat ones behind, so local and cloud disagree about where an old asset lives. The worker
+fallback masks this; it does not resolve it. A migration or a canonical resolver is the real fix.
+
+**Open (correctness):** Remotion still has no asset-source `MediaIn` support — `SceneStage` passes
+`flarexComps` but never `flarexVirtualLayers`, so a cloud render draws the HOST clip where the preview
+and local export draw the real source. Design is settled and needs no manifest change: `manifest.assets`
+already carries id → fileUrl/fileType/durationSeconds, so SceneStage can build the loaders with the
+shared `collectFlarexVirtualLayers`, mount a VideoGrabber/ImageGrabber per active loader (keyed by the
+virtual id), grade them like any clip, and pass `flarexVirtualLayers` + their graded frames into
+`buildSceneDraws`. This is the last thing making cloud export render a DIFFERENT PICTURE than preview.
+
+### v31 (2026-07-27) — fast scrub froze the editor: the decode time-box was off exactly when it was needed
+
+**Symptom (user):** scrubbing fast froze the page for 3–4s, sometimes long enough for Chrome's
+"page isn't responding" dialog. Self-recovered. Predates Flarex — Flarex only makes it easier to hit
+(a comp puts several sources through the same path and adds compile cost per frame).
+
+**Ruled out first**, all already solved and worth not re-litigating: React re-render storm (clock
+notifies React subscribers once per rAF, and the timeline playhead is imperative — zero renders per
+seek); unbounded in-flight requests (one `getFrame` per layer, latest-wins); decoder over-concurrency
+(that was v30a's white page, capped since at `MAX_WC_TOTAL_SESSIONS`).
+
+**Cause 1 — the budget's own precondition.** `getFrame`'s catch-up loop breaks on `frameBudgetMs`,
+but only `if (current || queue.length)` — "never applied while there is nothing to show". `resetTo()`
+closes `current` and empties the queue, so **immediately after a seek the guard is false and the loop
+is unbounded**. A fast scrub calls `resetTo` on nearly every tick in BOTH directions (backward jump;
+forward past the current GOP), so the budget was off for the entire gesture. The loop yields per round
+via MessageChannel, so it is not one long task — it is an unbounded chain of yield-tasks, which starves
+input and paint just as effectively. Worst case is in the decoder's own comment: a rewind on a
+sparse-keyframe source (4 keys / 935 frames) re-decodes hundreds of chunks. The shuttle cache that
+would absorb it arms only after **two consecutive** backward jumps, and erratic scrubbing — the actual
+gesture — never builds it.
+
+**Cause 2 — a zero-delay retry (self-inflicted, same day, commit 4d58fe1).** The `tolerateLag`
+stale-bail set `wcRerequestRef`, which the SAME `.then()` consumes ~90 lines later and acts on
+synchronously. That is a recursion, not a retry: paused, on a source that cannot converge, it spins.
+The null branch had the same shape at a flat 150ms forever.
+
+**Fix.** `resetTo` retires `current` to `staleHold` instead of closing it, and `staleHold` counts as
+"something to show" — the seek returns the previous frame with its real lag and the next call continues
+the catch-up. That is the contract `getFrame` already documented for the mid-GOP case; it simply could
+not reach it after a reset. `staleHold` is served ONLY on budget expiry, so warmup bail / drain-flush /
+decode failure still return null and the null-count → `<video>` escape is unchanged. Retries go through
+`scheduleTolerantRetry()` — 100ms doubling to a 1s ceiling, reset when a frame presents.
+
+**Export is unaffected by construction:** `staleHold` is populated only when `frameBudgetMs` is set,
+and `preview-frame-pool.ts` is its only caller. Export blocks until decoded and must return null on
+failure so the caller can fall back — handing it a pre-seek frame would silently render the wrong
+picture, so it keeps closing.
+
+**Rule:** a resource guard whose PRECONDITION is destroyed by the very event it guards against is not a
+guard. `(current || queue.length)` read as "don't return nothing" but functioned as "switch off on every
+seek". When a budget has an eligibility condition, ask which code path clears that condition — the
+answer is usually the exact path that needs the budget most.
+
+**Status:** committed, typecheck clean, wcpool:test 22/22. NOT yet browser-verified — `getFrame` needs a
+real `VideoDecoder`, so there is no automated gate. Confirm by scrubbing with `__rfWcDecoder` open:
+`hardReset` should still climb with scrub speed, the stall should not. If it does not improve, next
+suspects are the per-reset `decoder.reset()`+`configure()` IPC cost and the shuttle cache's
+two-consecutive-jumps arming condition.
