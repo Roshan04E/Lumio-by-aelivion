@@ -113,7 +113,7 @@ setGlGovernorEnabled(getGlGovernorEnabled());
 // scrolled-past clips) with real headroom before the browser acts. Live layers are never evicted —
 // they're touched every frame.
 setGlContextBudget(8, 12);
-import { getLivePlaybackTime, getPlaybackClock, usePlaybackClock } from "../playback/playback-clock";
+import { getLivePlaybackTime, getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
 import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
@@ -1226,14 +1226,29 @@ function VideoPreviewImpl({
     isPlaying,
     requestRedraw: requestSceneRedraw,
   });
-  // PAUSED pump: seeks/scrubs are discrete, so the committed clock is the truth here. While PLAYING the
-  // hook runs its own rAF loop on the live clock instead — pumping on `currentTime` there would cap the
-  // proxy at the commit cadence (16/40/90ms by quality tier) and make the comp stutter on its own.
-  // `requestFlarexProxyFrames` is ref-stable, so this fires on time changes only.
+  /**
+   * PAUSED pump: seeks are discrete, so a seek must pump exactly once — but it has to be driven by the
+   * CLOCK STORE, not by the `currentTime` prop.
+   *
+   * The prop is `currentTimeRef.current`, read during EditorPage's render, and EditorPage deliberately
+   * does not re-render on a seek at all (that is the whole point of its clock-store design). So on a
+   * ruler CLICK the prop never changed, this effect never re-ran, and the comp proxy was never asked
+   * for a frame — the clip sat on its old picture. Dragging appeared to "work but slowly" only because
+   * something else eventually re-rendered EditorPage and dragged the stale prop along with it.
+   *
+   * Subscribing to the store instead makes a seek pump synchronously, click and drag alike. Cheap by
+   * construction: the request is a no-op unless a proxy is active, and a decode already in flight
+   * coalesces to the newest time rather than queueing.
+   *
+   * While PLAYING the hook runs its own rAF loop on the live clock — pumping on the committed clock
+   * there would cap the proxy at the commit cadence (16/40/90ms by quality tier) and make the comp
+   * stutter on its own.
+   */
   useEffect(() => {
-    if (isPlaying) return;
-    requestFlarexProxyFrames(currentTime);
-  }, [requestFlarexProxyFrames, currentTime, isPlaying]);
+    if (isPlaying) return undefined;
+    requestFlarexProxyFrames(getPlaybackClock());
+    return subscribePlaybackClock(() => requestFlarexProxyFrames(getPlaybackClock()));
+  }, [requestFlarexProxyFrames, isPlaying]);
 
   /**
    * Loaders for comps currently PLAYED FROM A PROXY are dropped — this is what makes the proxy a win.

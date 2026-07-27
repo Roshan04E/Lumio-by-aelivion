@@ -1493,6 +1493,18 @@ export function EditorPage() {
   );
   const compositionRef = useRef(composition);
   compositionRef.current = composition;
+  /**
+   * Scope re-sample signal. Identity changes when the picture may have changed for a reason other
+   * than time.
+   *
+   * It has to watch BOTH, and `composition` alone is not enough: `ensureComposition` returns
+   * `graph.composition` by reference (dedupeLayerIds only clones when it actually heals something),
+   * and a Flarex node edit calls `stampFlarexComp`, which replaces `graph.flarexComps` while leaving
+   * `graph.composition` the exact same object. So grading a node on the Flarex page changed the
+   * picture without changing `composition` at all, and the scopes never re-sampled there — they only
+   * ever updated for timeline-clip edits on the Edit page.
+   */
+  const scopeChangeKey = useMemo(() => ({ composition, graph }), [composition, graph]);
   // Timelines media-pool TAB (nesting Block 3): every registry comp, Main first, with per-comp
   // instance counts (how many compound clips reference it anywhere — 0 shows an "Unused" badge).
   // The active comp is unioned in because updateGraph's write-through mirrors it on the NEXT write.
@@ -8536,7 +8548,7 @@ export function EditorPage() {
                           containerRef={previewFrameRef}
                           sampleSource={sampleScopeFrame}
                           tick={Math.round(currentTime * 30)}
-                          changeKey={composition}
+                          changeKey={scopeChangeKey}
                           isPlaying={isPlaying}
                           storageKey="left-panel"
                           defaultLayout="column"
@@ -8911,7 +8923,7 @@ export function EditorPage() {
                   scopeSampler={sampleScopeFrame}
                   scopeContainerRef={previewFrameRef}
                   scopeIsPlaying={isPlaying}
-                  scopeChangeKey={composition}
+                  scopeChangeKey={scopeChangeKey}
                   onOpenScopesPanel={openScopesLeftPanel}
                 />
                   )}
@@ -9089,7 +9101,7 @@ export function EditorPage() {
                 scopeSampler={sampleScopeFrame}
                 scopeContainerRef={previewFrameRef}
                 scopeTick={Math.round(currentTime * 30)}
-                scopeChangeKey={composition}
+                scopeChangeKey={scopeChangeKey}
                 isPlaying={isPlaying}
                 onClose={() => setBottomWorkspaceOpen(false)}
               />
