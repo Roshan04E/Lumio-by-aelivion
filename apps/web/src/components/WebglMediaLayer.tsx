@@ -79,6 +79,19 @@ const WC_BUSY_WEDGE_MS = 3000;
 // fixtures) run their own transport, and the editor's module-global clock would be a foreign
 // playhead there. One commit interval (90ms) + a couple of frames of grace.
 const WC_LIVE_CLOCK_MAX_DIVERGENCE_S = 0.35;
+// SUSTAINED-HOLD BAIL (2026-07-25): a WC provider held continuously (> WC_HOLD_LAG_S behind) for this long
+// while PLAYING is not converging — a HIGH-FPS proxy the seek-on-demand pool can't sustain sits at ~0.35–1s
+// lag forever, which the 3s/10s WC_DIVERGE bail never catches, so the canvas holds = the frozen-clip bug.
+// Hand off to the native <video> element (continuous hardware decode plays any fps, exactly what a paused
+// settle already does). The hold streak (`wcHoldStartRef`) resets the instant lag drops below WC_HOLD_LAG_S,
+// so a genuinely converging catch-up never trips this — only a non-converging hold does. 1.2s bounds the
+// visible hitch while staying above a transient GPU hiccup.
+const WC_SUSTAINED_HOLD_BAIL_MS = 1200;
+// Sources this session that already proved unservable by the WC preview pool (sustained-hold bail while
+// playing). Checked at ACQUISITION so a re-mount (scrub between clips / replay after the layer unmounts)
+// skips WC and goes straight to the native element — no repeated 1.2s hitch. Session-scoped; a proxy's
+// object URL is stable per asset per session. NOT persisted: a reload re-probes (hardware/flags may differ).
+const wcBailedSources = new Set<string>();
 
 // ── LIVE RE-PRIME BUS (2026-07-06) ──────────────────────────────────────────
 // ProxyPlaybackLayer coverage-exit events fan out here: while the proxy overlay covers the picture,
@@ -103,6 +116,43 @@ function recordWcHeal(kind: "initTimeout" | "noSource" | "busyWedge" | "divergen
   } catch {
     /* storage unavailable — counter still recorded */
   }
+}
+
+/**
+ * STALE-CLOCK PROBE (2026-07-26). A layer whose `currentTime` prop stops updating while the transport
+ * plays keeps requesting ONE constant source time, so the decoder serves the same frame forever — the
+ * picture freezes with `lastFrameLagSeconds` ≈ 0, which is invisible to EVERY heal here (they are all
+ * lag- or failure-driven). That is exactly how the multi-source Flarex freeze hid behind four rounds of
+ * decode-side fixes (a memo skipped the virtual loaders' re-renders — see arePreviewLayerPropsEqual).
+ * The live-clock divergence guard rejecting the module clock is the one observable symptom, so count it
+ * per source. Diagnostic ONLY — the guard's behavior is unchanged, because rejecting a foreign playhead
+ * is legitimate on tool pages / fixtures that mount their own VideoPreview transport.
+ */
+function recordWcStaleTime(src: string) {
+  if (typeof window === "undefined") return;
+  const w = window as unknown as { __rfWcStaleTime?: Record<string, number> };
+  const stats = (w.__rfWcStaleTime ??= {});
+  const key = src.length > 48 ? `…${src.slice(-48)}` : src;
+  stats[key] = (stats[key] ?? 0) + 1;
+}
+
+/**
+ * DECODE-PATH PROBE (2026-07-27). Which path each source actually ended up on:
+ *   `wc-hw`   pooled WebCodecs on the GPU video block  — what a host/timeline clip wants;
+ *   `wc-sw`   pooled WebCodecs in software (CPU thread) — what a Flarex virtual loader wants;
+ *   `element` native `<video>` fallback — for a comp source this is the ~16-context cap and a
+ *             permanent freeze, and for the host it means it lost a pool slot or got bailed.
+ *
+ * Added because "which decoder is this layer on?" was unanswerable from the console, and the two
+ * multi-source freezes (loaders frozen, then the HOST frozen) were both mis-diagnosed for rounds on
+ * end without it. Pure telemetry — keyed per source, like `recordWcHeal`/`recordWcStaleTime`.
+ */
+function recordWcMode(src: string, mode: "wc-hw" | "wc-sw" | "element") {
+  if (typeof window === "undefined") return;
+  const w = window as unknown as { __rfWcMode?: Record<string, string> };
+  const stats = (w.__rfWcMode ??= {});
+  const key = src.length > 48 ? `…${src.slice(-48)}` : src;
+  stats[key] = mode;
 }
 
 /** Preview raster edge for baked animation frames — smaller than the 1024px export bake to bound GPU
@@ -288,6 +338,27 @@ interface VideoProps extends BaseProps {
    * clips get this — single clips keep the smooth, correction-free element path.
    */
   strictSourceSync?: boolean | undefined;
+  /**
+   * Lag-tolerant decode (Flarex virtual loaders / in-sync composited sources). Normally a WC provider
+   * lagging the transport by > WC_HOLD_LAG_S HOLDS the canvas (freezes) to avoid showing a stale frame
+   * mid-seek. But a Flarex comp composites MANY sources at once, and the ~3 hardware seek-on-demand
+   * decoders can't all keep up — the non-winners then freeze permanently. When this is set, the layer
+   * NEVER freeze-holds: it presents the latest advancing frame and keeps pulling, so an overloaded source
+   * degrades to smooth-but-slightly-behind instead of frozen. Graceful degradation that scales to many
+   * sources (3 → smooth, 1000 → each advances as fast as the GPU allows, none frozen).
+   */
+  tolerateLag?: boolean | undefined;
+  /**
+   * Decode this source in SOFTWARE (CPU) instead of on the GPU's hardware video block. The integrated
+   * GPU exposes only one H.264 decode block; ~3 concurrent SEEK-ON-DEMAND streams (host + Flarex virtual
+   * loaders) serialize on it and the non-primary streams STARVE — their frames stop advancing → frozen
+   * (measured: host smooth, asset-source loaders frozen, `__rfWcDecoder` reset counts near-zero = they
+   * weren't even decoding). Routing the virtual loaders to software decode takes them OFF the contended
+   * hardware block onto their own CPU threads (WebCodecs software decode runs off-main-thread, so it stays
+   * off the DOM — no `<video>` 16-context cap), leaving the hardware block for the host/timeline. Paired
+   * with `tolerateLag`, a slightly-slower software stream presents advancing frames instead of freezing.
+   */
+  preferSoftwareDecode?: boolean | undefined;
   onLoadedMetadata?: ((event: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
 }
 
@@ -513,13 +584,24 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // the same <video> fallback they'd have used on a cap miss).
       // ORIGINAL-bytes sources skip WC entirely (see preferNativeDecode): the pooled decoder is for
       // keyframe-dense proxies — a sparse-GOP original grinds whole GOPs per catch-up and freezes.
-      const wcLease = (mediaType === "video" && props.preferNativeDecode)
+      // `wcBailedSources` is keyed by media URL and module-global, so a HOST clip that bailed poisons
+      // every other layer on the same asset — including a Flarex virtual loader (a comp routinely loads
+      // the same file as both host and MediaIn source). Sending a loader to a native <video> is the
+      // ~16-context cap → permanent freeze this whole path exists to avoid, so `tolerateLag` layers
+      // ignore the bail list; their own heals never add to it either (see requestWcFrame).
+      const wcLease = (mediaType === "video" && (props.preferNativeDecode || (wcBailedSources.has(src) && !props.tolerateLag)))
         ? null
         : acquirePreviewFrameProvider(src, {
             priority: hiddenAtMountRef.current ? "preload" : "playhead",
             onPreempted: () => wcFallbackRef.current(),
+            // Virtual loaders decode in SOFTWARE so they don't contend with the host for the one
+            // hardware H.264 block (the confirmed multi-source freeze cause — see preferSoftwareDecode).
+            preferSoftware: props.preferSoftwareDecode,
           });
       wcLeaseRef.current = wcLease;
+      if (mediaType === "video") {
+        recordWcMode(src, !wcLease ? "element" : props.preferSoftwareDecode ? "wc-sw" : "wc-hw");
+      }
       if (!wcLease) {
         useVideoElement(false);
       } else {
@@ -536,6 +618,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           setWcHeldFrame(null);
           wcLeaseRef.current?.release();
           wcLeaseRef.current = null;
+          recordWcMode(src, "element");
           useVideoElement(true);
         };
         // Init-hang net: `lease.ready` has no timeout of its own — a wedged decoder init or a
@@ -1253,7 +1336,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           wcBusyRef.current = false; // the hung promise is fenced by the provider-identity check
           wcInFlightSinceMsRef.current = null;
           recordWcHeal("busyWedge");
-          wcFallbackRef.current();
+          // Virtual loaders (tolerateLag) must NEVER take the <video> path: a comp composites many
+          // sources at once, and native elements blow the browser's ~16 hardware-decode-context cap —
+          // which is the very freeze we're fixing. A wedge here is a SLOW decode (contended / software),
+          // not a permanent hang (the decode loop is guard-bounded and its flush races a 5s timeout), so
+          // just clear the stuck-busy flag and let the rAF loop re-request on WC. The slow decode drains
+          // and the picture advances at a lower frame rate instead of freezing on a dead native element.
+          if (!props.tolerateLag) wcFallbackRef.current();
           return;
         }
 
@@ -1361,8 +1450,12 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             wcBusyRef.current = false;
             wcInFlightSinceMsRef.current = null;
             recordWcHeal("busyWedge");
-            wcFallbackRef.current();
-            return;
+            // Virtual loaders never go native (16-context cap → freeze) — clear the wedge and re-request
+            // on WC below instead of bailing. See the watchdog's busyWedge heal for the full rationale.
+            if (!props.tolerateLag) {
+              wcFallbackRef.current();
+              return;
+            }
           }
           requestWcFrameRef.current();
           return;
@@ -1526,6 +1619,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       if (tp.isPlaying) {
         const live = getLivePlaybackTime();
         if (Math.abs(live - tp.currentTime) < WC_LIVE_CLOCK_MAX_DIVERGENCE_S) timelineTime = live;
+        else recordWcStaleTime(src);
       }
       const sourceTime = mapSourceTime(tp, timelineTime);
       void provider
@@ -1560,12 +1654,25 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             if (wcHoldStartRef.current !== null) {
               const streakMs = nowMs - wcHoldStartRef.current;
               const stalled = tp.isPlaying
-                ? lag > WC_DIVERGE_LAG_S && streakMs > WC_DIVERGE_MAX_MS
+                ? // Catastrophic divergence (3s behind / 10s), OR a SUSTAINED moderate hold: a high-fps
+                  // proxy the pool can't sustain never reaches 3s but sits > WC_HOLD_LAG_S for seconds.
+                  (lag > WC_DIVERGE_LAG_S && streakMs > WC_DIVERGE_MAX_MS) ||
+                  (lag > WC_HOLD_LAG_S && streakMs > WC_SUSTAINED_HOLD_BAIL_MS)
                 : lag > WC_PAUSED_STALE_LAG_S && streakMs > WC_PAUSED_STALE_MAX_MS;
               if (stalled) {
-                // This source can't be served by WebCodecs here (diverging while playing, or unable
-                // to close a fixed gap while paused) — hand the layer to the element path.
+                // This source can't be served by WebCodecs here (diverging / non-converging hold while
+                // playing, or unable to close a fixed gap while paused) — hand the layer to the element
+                // path. Remember it (playing case) so a re-mount skips WC and avoids repeating the hitch.
                 recordWcHeal(tp.isPlaying ? "divergence" : "pausedStall");
+                // Virtual loaders never go native (the ~16-context cap = the permanent freeze this whole
+                // path exists to avoid). Now that a PAUSED loader can reach this branch (see the hold
+                // scoping above), the guard matters here too: keep probing WC so it converges on its own
+                // instead of being handed a <video> element it may not even be able to allocate.
+                if (props.tolerateLag) {
+                  wcRerequestRef.current = true;
+                  return;
+                }
+                if (tp.isPlaying) wcBailedSources.add(src);
                 wcFallbackRef.current();
                 return;
               }
@@ -1579,7 +1686,24 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               setWcHeldFrame({ source: held, width: provider.width, height: provider.height });
               drawVideoFrameRef.current();
             };
-            if (lag > WC_HOLD_LAG_S && !reversedPlayback) {
+            // PAUSED = COHERENT, PLAYING = SMOOTH (2026-07-27). `tolerateLag` exists to survive PLAYBACK
+            // contention: many comp sources share ~3 decoders, so a loader that freeze-holds never
+            // recovers. Paused, that race does not exist — every loader can converge on the exact
+            // requested time. Presenting intermediate frames there produced visible staggered updates
+            // while scrubbing (source A at t, source B still at t−0.1): a compositor was showing a frame
+            // that is not a real frame of the comp. So the never-hold rule is now scoped to playback;
+            // paused, loaders fall through to the normal hold path and present only once converged.
+            // Both export paths already enforce exactly this barrier, so this closes a preview/export gap.
+            if (lag > WC_HOLD_LAG_S && !reversedPlayback && props.tolerateLag && tp.isPlaying) {
+              // LAG-TOLERANT (Flarex virtual loader): NEVER freeze-hold. A comp composites many sources
+              // and the ~3 hardware decoders can't all keep up; holding = a permanent freeze on the
+              // non-winners. Present the latest advancing frame and keep pulling — the source degrades to
+              // smooth-but-slightly-behind, in sync "enough", and scales (none freeze). No hold streak, so
+              // the sustained-hold native bail above never fires for these either.
+              wcHoldStartRef.current = null;
+              wcRerequestRef.current = true;
+              presentFrame();
+            } else if (lag > WC_HOLD_LAG_S && !reversedPlayback) {
               // The hold STREAK ends only when lag actually recovers (below), never on a present:
               // the old logic reset the streak after the window expired and one frame presented, so
               // sustained divergence re-armed a fresh 5s freeze per frame — "picture pauses in live
@@ -1610,7 +1734,18 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           } else {
             // Repeated nulls = this source can't be served by WebCodecs here → <video> fallback.
             wcNullCountRef.current += 1;
-            if (wcNullCountRef.current >= 8) {
+            if (props.tolerateLag) {
+              // Virtual loaders never go native (16-context cap → freeze). A null is a transient "no frame
+              // decoded yet" (cold start / mid-catch-up), not a dead source — keep probing WC forever so
+              // the loader recovers on its own thread instead of falling to a native element that can't be
+              // allocated. Re-arm the retry timer (covers the paused case where the rAF loop is idle).
+              if (wcNullRetryTimerRef.current === null) {
+                wcNullRetryTimerRef.current = window.setTimeout(() => {
+                  wcNullRetryTimerRef.current = null;
+                  if (wcProviderRef.current) requestWcFrameRef.current();
+                }, 150);
+              }
+            } else if (wcNullCountRef.current >= 8) {
               recordWcHeal("nullFrames");
               wcFallbackRef.current();
             } else if (wcNullRetryTimerRef.current === null) {

@@ -41,6 +41,9 @@ import {
   expandEffectRegionMasks,
   expandNestedCompositions,
   buildRegionBlurCloneAliases,
+  collectFlarexVirtualLayers,
+  isFlarexGeneratorVirtualLayer,
+  isFlarexVirtualLayerId,
   effectsWithLayerRegionMask,
   isWebgl2ColorSupported,
   getCompositionMediaStyle,
@@ -1179,6 +1182,27 @@ function VideoPreviewImpl({
     [sceneLayers, transitionSourceIds]
   );
 
+  // Flarex asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic
+  // off-timeline media layers, one per MediaIn that loads a media-pool asset. They are decoded by
+  // their own hidden PreviewLayers (below) into the SAME graded-canvas / single-ctx maps under their
+  // virtual ids, and passed to ScenePreviewCanvas so the Flarex compiler can pull each MediaIn's
+  // source. They never enter `sceneLayers`, so they never composite on the timeline themselves.
+  const flarexVirtualLayers = useMemo(() => {
+    if (!graph.flarexComps) return [];
+    return collectFlarexVirtualLayers(
+      renderedLayerEntries.map((entry) => entry.layer),
+      graph.flarexComps,
+      (assetId) => {
+        const asset = resolvedAssets.find((item) => item.id === assetId);
+        if (!asset) return null;
+        return {
+          type: (asset.fileType ?? "").startsWith("video") ? "video" : "image",
+          durationSeconds: asset.durationSeconds,
+        };
+      },
+    );
+  }, [graph.flarexComps, renderedLayerEntries, resolvedAssets]);
+
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm
   // when they mount (active or ~1.2s pending), and posters are cached per url@in-point.
@@ -1688,6 +1712,7 @@ function VideoPreviewImpl({
                   mediaSourceAlias={sceneSharedMediaClones}
                   nestedGroups={nestExpansion.groups}
                   flarexComps={graph.flarexComps}
+                  flarexVirtualLayers={flarexVirtualLayers}
                   captureRef={proxyCaptureRef}
                   prewarmTransitionIds={prewarmTransitionIds}
                   singleCtxMedia={sceneEnabled && singleCtxPreview}
@@ -1803,6 +1828,68 @@ function VideoPreviewImpl({
                 </Fragment>
               )
               ))}
+              {/* Flarex asset-source MediaIn (FLAREX.md Phase 2): hidden decoder per virtual loader. It
+                  reuses the full media path (proxy/decode/grade/sink) but is non-interactive and never
+                  composites on the timeline — it only publishes its graded source into the scene maps
+                  under its virtual id, which ScenePreviewCanvas hands to the Flarex compiler. */}
+              {/* Generator loaders (Text+ / Background) are rasterized inside buildSceneDraws, so they
+                  get NO media mount here — only decoded sources do. */}
+              {sceneEnabled
+                ? flarexVirtualLayers.filter((vlayer) => !isFlarexGeneratorVirtualLayer(vlayer)).map((vlayer) => {
+                    // Fusion Loader "hold last frame": the virtual loader mirrors the HOST clip's span,
+                    // but the source asset can be SHORTER than the host. Clamp the DECODE time so the
+                    // source never seeks past its available media — free-running past EOF made the tail
+                    // ping-pong (a drift corrector yanking the element back and forth) and stormed the
+                    // decoder with seeks (the "hang"). Clamping the input time (not the decoder) fixes
+                    // every decode path (video element / single-ctx sink / proxy) identically, and the
+                    // held time is constant past the end so no re-seek fires — the last frame just holds.
+                    // Unknown-duration sources keep the raw time (nothing to clamp on).
+                    const srcDur = resolvedAssets.find((item) => item.id === vlayer.assetId)?.durationSeconds;
+                    const sourceIn = vlayer.sourceInSeconds ?? 0;
+                    const holdEnd =
+                      vlayer.type === "video" && srcDur != null && Number.isFinite(srcDur)
+                        ? vlayer.startSeconds + Math.max(0, srcDur - sourceIn) - 1 / 240
+                        : Infinity;
+                    const vTime = Math.min(currentTime, holdEnd);
+                    return (
+                    <PreviewLayer
+                      key={vlayer.id}
+                      currentTime={vTime}
+                      isPlaying={isPlaying}
+                      layer={vlayer}
+                      pending={false}
+                      assets={resolvedAssets}
+                      sourceAsset={sourceAsset}
+                      frameAspect={composition.width / composition.height}
+                      interactive={false}
+                      selected={false}
+                      sceneComposited
+                      hideVisual
+                      bakeOpacity={false}
+                      onGradedFrame={
+                        singleCtxPreview
+                          ? undefined
+                          : (canvas) => {
+                              gradedCanvasesRef.current[vlayer.id] = canvas;
+                              sceneRedrawRef.current?.();
+                            }
+                      }
+                      sceneMediaSink={singleCtxPreview ? getSceneMediaSink(vlayer.id) : undefined}
+                      onMoveLayer={NOOP}
+                      onMovePositionKeyframe={NOOP}
+                      onMoveSpatialHandle={NOOP}
+                      onResizeShapeLayer={NOOP}
+                      onResizeFrameLayer={NOOP}
+                      onContentTransformLayer={NOOP}
+                      onRequestFillFrame={NOOP}
+                      onRotateLayer={NOOP}
+                      onScaleLayer={NOOP}
+                      onCropLayer={NOOP}
+                      onSelectLayer={NOOP}
+                    />
+                    );
+                  })
+                : null}
               <PreviewGuides mode={gridMode} rotate={spiralRotate} width={composition.width} height={composition.height} />
               {showSafeArea ? (
                 <div className="preview-overlay preview-safe-area" aria-hidden="true">
@@ -1950,11 +2037,27 @@ type PreviewTransformHud = {
  * need to track it. Media is deliberately NOT skipped: a keyframed color grade flows through its
  * `pipeline` prop, so it must re-render each tick. Paused scrubbing, DOM-mode animation, and selected
  * layers all fall through to a full compare → byte-identical behavior to before.
+ *
+ * MEDIA EXCLUSION IS LOAD-BEARING (2026-07-26, the multi-source Flarex freeze): `hideVisual` alone
+ * used to select the skip, and when Flarex Phase 2 added asset-source virtual loaders they pass a
+ * BARE `hideVisual` — so video/image layers silently opted into a memo documented as media-exempt.
+ * A skipped media layer never re-renders while playing, so its `currentTime` prop freezes at the last
+ * pre-play render; WebglMediaLayer then rides `getLivePlaybackTime()` only while it agrees with that
+ * prop within WC_LIVE_CLOCK_MAX_DIVERGENCE_S (0.35s), after which it falls back to the STALE prop and
+ * requests one constant source time forever — the clip freezes ~0.35s into playback with a perfectly
+ * healthy decoder. It is invisible to every WC self-heal (served frame matches the frozen request, so
+ * `lastFrameLagSeconds` ≈ 0: no hold, no divergence bail, no wedge, no nulls, no reset churn), which
+ * is why four decode-side fixes missed it. The type test — not `hideVisual` — is what keeps media out.
  */
 function arePreviewLayerPropsEqual(prev: PreviewLayerProps, next: PreviewLayerProps): boolean {
   const keys = Object.keys(next) as (keyof PreviewLayerProps)[];
   if (keys.length !== Object.keys(prev).length) return false;
-  const canIgnoreTime = next.isPlaying && !next.selected && Boolean(next.hideVisual);
+  const canIgnoreTime =
+    next.isPlaying &&
+    !next.selected &&
+    Boolean(next.hideVisual) &&
+    next.layer.type !== "video" &&
+    next.layer.type !== "image";
   for (const key of keys) {
     // onGradedFrame is a fresh closure each render but captures only stable refs + layer.id, so its
     // identity is not meaningful — compare by presence (guards a future text-layer onGradedFrame too).
@@ -1973,6 +2076,10 @@ function arePreviewLayerPropsEqual(prev: PreviewLayerProps, next: PreviewLayerPr
   }
   return true;
 }
+
+/** Stable no-op for the Flarex virtual-loader decoders' interaction handlers (never fired —
+ *  those PreviewLayers are non-interactive; a module const keeps PreviewLayer's memo from busting). */
+const NOOP = () => {};
 
 const PreviewLayer = memo(function PreviewLayer({
   currentTime,
@@ -3149,6 +3256,16 @@ const PreviewLayer = memo(function PreviewLayer({
             onWebglFailed={() => setWebglMediaFailed(true)}
             poster={videoPoster ?? undefined}
             strictSourceSync={strictSourceSync}
+            // Flarex virtual loaders (asset-source MediaIns) never freeze-hold: a comp composites many
+            // sources and the ~3 hardware decoders can't all keep up, so the non-winners would freeze.
+            // Presenting the latest advancing frame degrades gracefully (smooth-but-slightly-behind) and
+            // scales to many sources. The host clip keeps the normal hold path.
+            tolerateLag={isFlarexVirtualLayerId(layer.id)}
+            // ...and decode in SOFTWARE so they don't contend with the host for the one hardware H.264
+            // block. That contention (not reset churn) is the confirmed multi-source freeze: with 3
+            // seek-on-demand streams the host wins the block and the loaders starve. Software decode runs
+            // them on CPU threads in parallel; the host keeps hardware. See preferSoftwareDecode.
+            preferSoftwareDecode={isFlarexVirtualLayerId(layer.id)}
             hidden={pending || (hideForTransition && !sceneComposited)}
             interactiveHidden={sceneComposited && !pending}
             // Scene-composited media carries no per-clip reveal (junctions fold in-compositor) — null it for
