@@ -23,6 +23,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { FlarexCompProxyFrame, FlarexComp, TimelineComposition, TimelineLayer } from "@orreris/shared";
 import { acquirePreviewFrameProvider, type PreviewFrameLease } from "../../playback/preview-frame-pool";
+import { getLivePlaybackTime } from "../../playback/playback-clock";
 import type { FrameProvider } from "../../export/source-decoder";
 import { flarexCompProxyIdentity, flarexCompProxyKey } from "./flarex-comp-proxy";
 import { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
@@ -59,6 +60,8 @@ export interface UseFlarexCompProxiesInput {
   zOrderedLayers: readonly TimelineLayer[];
   /** False on the Flarex page: building a comp must always show the live graph. */
   enabled: boolean;
+  /** Transport state. While playing the decoder is pumped from the LIVE clock, not the committed one. */
+  isPlaying: boolean;
   /** Ask the scene canvas to repaint once a newly decoded frame has been published. */
   requestRedraw: () => void;
 }
@@ -73,7 +76,7 @@ export interface UseFlarexCompProxiesResult {
 }
 
 export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlarexCompProxiesResult {
-  const { composition, flarexComps, zOrderedLayers, enabled, requestRedraw } = input;
+  const { composition, flarexComps, zOrderedLayers, enabled, isPlaying, requestRedraw } = input;
   const framesRef = useRef<Record<string, FlarexCompProxyFrame>>({});
   const activeRef = useRef<Map<string, ActiveProxy>>(new Map());
   const activeIdsRef = useRef<string[]>([]);
@@ -208,6 +211,30 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         });
     }
   }).current;
+
+  /**
+   * PLAYBACK PUMP. While playing, drive the decoder from its own rAF loop reading
+   * `getLivePlaybackTime()` — NOT from the `currentTime` prop.
+   *
+   * `currentTime` is the COMMITTED clock, advanced once per `playbackCommitIntervalMs` (16/40/90ms by
+   * preview quality). Requesting frames on it caps the proxy at the commit rate — ~11Hz on the
+   * performance tier — so the comp visibly stutters while every other layer runs smooth. This is the
+   * same trap the Flarex frame ruler fell into (2026-07-26) and the reason every media layer rides the
+   * live, anchor-derived clock during playback.
+   *
+   * Paused, the committed clock IS the truth (seeks are discrete), so the `currentTime` effect in the
+   * caller covers scrubbing and this loop stays off.
+   */
+  useEffect(() => {
+    if (!isPlaying || activeRef.current.size === 0) return undefined;
+    let raf = 0;
+    const tick = () => {
+      requestFrames(getLivePlaybackTime());
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [isPlaying, eligible, requestFrames]);
 
   return { framesRef, activeCompIds: activeIdsRef.current, requestFrames };
 }

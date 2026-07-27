@@ -1222,14 +1222,17 @@ function VideoPreviewImpl({
     flarexComps: graph.flarexComps,
     zOrderedLayers: flarexProxyLayers,
     enabled: flarexProxyPlayback,
+    isPlaying,
     requestRedraw: requestSceneRedraw,
   });
-  // Pump the proxy decoders on every committed playhead change (playing AND paused/scrubbing). One
-  // in-flight decode per comp, latest time wins — the same shape as every other preview media source.
+  // PAUSED pump: seeks/scrubs are discrete, so the committed clock is the truth here. While PLAYING the
+  // hook runs its own rAF loop on the live clock instead — pumping on `currentTime` there would cap the
+  // proxy at the commit cadence (16/40/90ms by quality tier) and make the comp stutter on its own.
   // `requestFlarexProxyFrames` is ref-stable, so this fires on time changes only.
   useEffect(() => {
+    if (isPlaying) return;
     requestFlarexProxyFrames(currentTime);
-  }, [requestFlarexProxyFrames, currentTime]);
+  }, [requestFlarexProxyFrames, currentTime, isPlaying]);
 
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm
