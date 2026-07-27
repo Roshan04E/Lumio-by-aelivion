@@ -280,3 +280,74 @@ value cannot be used to match a shot.
 **Pre-existing, not touched:** `apps/worker/src/flarex-proxy-parity-gate.ts:160` fails typecheck
 (`ImageData` / `SharedArrayBuffer` overload). Untouched file, no uncommitted changes; unrelated to
 this work. `apps/web` typechecks clean.
+
+## v10 — Grading felt 1–1.5s behind: the spline was re-solved 180,000 times per slider tick (2026-07-27)
+
+**Problem:** dragging a colour control (tint) updated the scopes, but ~1–1.5s late; `perfDiagnostics`
+reported `MAIN THREAD BLOCKED` stalls of 1.0s / 1.7s / 1.9s / 3.9s. Sampled culprits named
+`evaluateHermite ← evaluatePeriodicCurve ← evalCurveAt ← applyHueSatCurves ← applyDisplayStage`
+alongside React re-renders of `EditorPage` / `TimelineStripImpl` / `AssetBinImpl`.
+
+**Root cause — measured, not inferred.** Every grade tick re-bakes the whole pipeline into a 3D LUT
+(`setPipeline` → `bakePipelineToLut3d`), which is 33³ = **35,937 CPU pixel evaluations**. Each of
+those hit up to five hue/sat curves, and `evaluateCurve` / `evaluatePeriodicCurve` re-derived the
+**entire spline per sample**: sanitize (sort + dedupe + allocate), tile three periods for the periodic
+hue path, solve all Fritsch–Carlson tangents, then linear-scan for the segment. ~180,000 full spline
+solves and ~1M array allocations per tick, all synchronous on the main thread. Benchmarked
+(`tmp/bench/bakebench.ts`, 5 runs each):
+
+| pipeline | before | after |
+|---|---|---|
+| controls only, no hue/sat curves | 37.2 ms | 30.1 ms |
+| + 1 hue/sat curve | 163.0 ms | 42.9 ms |
+| + all 5 hue/sat curves | 389.8 ms | 50.7 ms |
+
+**Fix.** Split solve from evaluate in `packages/shared/src/color/curve.ts`: `buildHermite()` produces a
+`HermiteSpline` (typed arrays) once, `evalHermite()` samples it with a binary search. Solved splines are
+memoized in a `WeakMap` keyed on the control-point array's identity **plus a value snapshot** — identity
+alone would go stale if a caller mutated a point in place (a curve editor dragging `point.y` is exactly
+such a caller), and a stale grade is a far worse bug than a slow one. Re-verifying 2n floats is free next
+to re-solving, so the cache can only be skipped, never wrong.
+
+Two second-order fixes in `ColorScopes.tsx`. Scope canvases now take `willReadFrequently` (Chrome was
+warning about the `paintAccum` readback unprompted). And the paused edit-watch was rebuilt: it re-ran on
+every tick of a drag and sampled synchronously on each one, unbounded, where a sample is a GPU readback
+plus a full-frame accumulation and a getImageData/putImageData round trip **per open pane**.
+
+**A first attempt at that second fix was wrong and is worth recording.** Adding a rate floor to the
+immediate sample looked sufficient, but the watch `setInterval` was owned by the effect — so a drag tore
+it down and recreated it every ~16ms, faster than its own 90ms period, meaning **it could never fire at
+all**. The loop only ever worked because the effect also sampled unconditionally on every tick; the rate
+floor removed that cover and would have frozen the scopes mid-drag. The timer now lives outside the
+effect and each change EXTENDS a deadline ref it reads, giving a steady 90ms cadence regardless of tick
+rate, with unmount as the one owner of teardown and a `sampleRef` so the long-lived timer can't close
+over a stale sampler.
+
+**Verify.** Bit-identity is the load-bearing claim, since `curve.ts` backs `render:compare:pixels`.
+`tmp/bench/equiv.ts` compares the new evaluator against a verbatim copy of the old one over **419,544
+samples** across 51 curves — decreasing, flat-segment (`delta === 0`), near-duplicate x, unsorted,
+out-of-range, single-point, empty, and tangent-limiter-triggering — sampling 4097 points plus **every
+control-point x** (the boundaries where a binary search could legitimately pick a different segment) and
+x±1e-12. Result: exact `Object.is` match on every sample, plus an in-place-mutation check proving the
+cache is not stale. `color:test`, `flarex:test`, `editor:test` pass; `shared` + `web` typecheck clean.
+
+`render:compare:pixels`: every colour-path fixture at 0.000% — `nested-grade`, `flarex-curves`,
+`flarex-color-chain`, `flarex-unified-color`, `flarex-filter-stack`. The run still ends non-zero on the
+two PRE-EXISTING stylize failures (`stylize-ink` 7.857%, `stylize-subject` 8.014%, first recorded in v8),
+whose percentages are unchanged to three decimals from the baseline run taken before this work — which is
+itself the evidence they are untouched. **Note for whoever runs this next:** piping the gate through
+`tail` reports exit 0 even when pnpm exits 1. Read the output, not the exit code.
+
+**Rule:** when a per-pixel function takes a *description* of a function (control points, matrices,
+kernels) rather than the solved form, check whether it re-solves per call. The cost is invisible in the
+code — it looks like one call — and only shows up multiplied by the pixel count. The general shape of the
+fix is to hoist the solve, and memoise it on the input's identity *with* a value check, never identity
+alone.
+
+**Left alone deliberately:** `TimelineStrip` and `AssetBin` are already `memo()`-wrapped, so their
+re-renders in the stall trace mean props genuinely changed (composition identity changes per tick) —
+that is the timeline perf architecture, which is under a standing do-not-touch directive.
+Also spotted but NOT changed (flagging, per the same directive): `scene-compositor.ts:2419` and `:2721`
+key their re-bake on a raw `JSON.stringify(pipeline)` **every frame**, while `pipeline.ts:314`
+`colorPipelineCacheKey` exists specifically to memoize that byte-identically. Same bug class, already
+diagnosed once in this repo.

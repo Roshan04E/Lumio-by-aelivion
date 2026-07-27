@@ -15,7 +15,7 @@
  * (limited 16–235) and clipping markers are drawn so grading decisions are trustworthy.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Columns2, LayoutGrid, Rows3, Square } from "lucide-react";
 
 export type ScopeMode = "waveform" | "parade" | "vectorscope" | "histogram";
@@ -105,6 +105,18 @@ interface Frame {
 }
 
 /**
+ * Every scope draw ends in `paintAccum`, which reads the canvas back with `getImageData` to add the
+ * trace over the graticule it just drew. Without this hint Chrome keeps the surface GPU-resident and
+ * each readback pulls it back across the bus — it says so unprompted ("Multiple readback operations
+ * using getImageData are faster with the willReadFrequently attribute set to true"). Up to four panes
+ * redraw per sample, so the hint has to be on the FIRST getContext for a canvas: later calls with
+ * different attributes return the already-configured context and are silently ignored.
+ */
+function scope2d(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
+  return canvas.getContext("2d", { willReadFrequently: true })!;
+}
+
+/**
  * Broadcast scopes read TRACE DENSITY as brightness: where many source pixels land on the same graph
  * cell, the trace glows. These helpers accumulate a per-cell hit count into a Float buffer, then map
  * density → brightness with a perceptual curve (√), the way a real WFM/vectorscope's phosphor/graph
@@ -160,7 +172,7 @@ function paintAccum(ctx: CanvasRenderingContext2D, accum: Accum, gain: number): 
 function sampleFromElement(source: CanvasImageSource, w: number, h: number): Frame | null {
   try {
     const canvas = new OffscreenCanvas(w, h);
-    const ctx = canvas.getContext("2d")!;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(source, 0, 0, w, h);
     const img = ctx.getImageData(0, 0, w, h);
     return { data: img.data, w, h };
@@ -194,7 +206,7 @@ function drawLevelGrid(ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingC
 }
 
 function drawWaveform(canvas: HTMLCanvasElement, frame: Frame, rgb: boolean) {
-  const ctx = canvas.getContext("2d")!;
+  const ctx = scope2d(canvas);
   const w = canvas.width;
   const h = canvas.height;
   const { data, w: sw, h: sh } = frame;
@@ -236,7 +248,7 @@ function drawWaveform(canvas: HTMLCanvasElement, frame: Frame, rgb: boolean) {
 }
 
 function drawParade(canvas: HTMLCanvasElement, frame: Frame) {
-  const ctx = canvas.getContext("2d")!;
+  const ctx = scope2d(canvas);
   const w = canvas.width;
   const h = canvas.height;
   const { data, w: sw, h: sh } = frame;
@@ -285,7 +297,7 @@ const VECTOR_TARGETS: { label: string; angleDeg: number; radius: number; color: 
 ];
 
 function drawVectorscope(canvas: HTMLCanvasElement, frame: Frame) {
-  const ctx = canvas.getContext("2d")!;
+  const ctx = scope2d(canvas);
   const w = canvas.width;
   const h = canvas.height;
   const { data } = frame;
@@ -356,7 +368,7 @@ function drawVectorscope(canvas: HTMLCanvasElement, frame: Frame) {
 }
 
 function drawHistogram(canvas: HTMLCanvasElement, frame: Frame) {
-  const ctx = canvas.getContext("2d")!;
+  const ctx = scope2d(canvas);
   const w = canvas.width;
   const h = canvas.height;
   const { data } = frame;
@@ -592,60 +604,106 @@ export function ColorScopes({
   // Shared frame: sampled ONCE per tick and drawn by every pane (1–4 canvases).
   const frameRef = useRef<Frame | null>(null);
   const [frameVersion, setFrameVersion] = useState(0);
+  /**
+   * When the last sample ran, across effect re-runs — the rate floor for the immediate sample below.
+   * A ref, not state, precisely because observing it must not itself cause a render.
+   */
+  const lastSampleAtRef = useRef(0);
+
+  /** Deadline the paused watch runs to; each change EXTENDS it rather than restarting a timer. */
+  const watchUntilRef = useRef(0);
+  const watchTimerRef = useRef<number | null>(null);
+
+  const sample = useCallback(() => {
+    lastSampleAtRef.current = Date.now();
+    const dims = isPlaying ? SAMPLE_FAST : SAMPLE_DETAIL;
+
+    // Prefer the trustworthy scene-compositor readback.
+    let frame: Frame | null = null;
+    let usedFallback = false;
+    if (sampleSource) {
+      const s = sampleSource(dims.w, dims.h);
+      if (s) {
+        frame = { data: s.data, w: s.width, h: s.height };
+        setSource(s.label ?? null);
+      }
+    }
+    if (!frame) {
+      const container = containerRef.current;
+      const el =
+        (container?.querySelector("canvas") as HTMLCanvasElement | null) ??
+        (container?.querySelector("video") as HTMLVideoElement | null);
+      if (el) {
+        frame = sampleFromElement(el as CanvasImageSource, dims.w, dims.h);
+        usedFallback = true;
+      }
+    }
+    setApprox(usedFallback);
+    if (!frame) return;
+    frameRef.current = frame;
+    setFrameVersion((version) => version + 1);
+  }, [containerRef, sampleSource, isPlaying]);
+
+  // The watch timer below outlives the effect run that created it, so it must not close over that
+  // run's `sample`. Reading the latest through a ref keeps it correct if the sampler is ever
+  // reidentified mid-watch, without making the timer's lifetime depend on the sampler's.
+  const sampleRef = useRef(sample);
+  useEffect(() => {
+    sampleRef.current = sample;
+  }, [sample]);
 
   useEffect(() => {
-    const sample = () => {
-      const dims = isPlaying ? SAMPLE_FAST : SAMPLE_DETAIL;
+    if (isPlaying) {
+      // Playback owns the cadence from here; retire any paused watch still counting down, or the two
+      // loops would sample concurrently at different resolutions.
+      if (watchTimerRef.current !== null) window.clearInterval(watchTimerRef.current);
+      watchTimerRef.current = null;
+      // LIVE loop: the cold playhead clock (our `tick` prop) is deliberately SUSPENDED during
+      // playback so the heavy cold panels never compete with playback smoothness — which froze the
+      // scopes on the pre-play frame. Instead of un-suspending that clock (doctrine: don't), the
+      // scopes drive their own low-rate resample here, at the coarse SAMPLE_FAST resolution.
+      sample();
+      const interval = window.setInterval(sample, PLAYING_RESAMPLE_MS);
+      return () => window.clearInterval(interval);
+    }
 
-      // Prefer the trustworthy scene-compositor readback.
-      let frame: Frame | null = null;
-      let usedFallback = false;
-      if (sampleSource) {
-        const s = sampleSource(dims.w, dims.h);
-        if (s) {
-          frame = { data: s.data, w: s.width, h: s.height };
-          setSource(s.label ?? null);
-        }
-      }
-      if (!frame) {
-        const container = containerRef.current;
-        const el =
-          (container?.querySelector("canvas") as HTMLCanvasElement | null) ??
-          (container?.querySelector("video") as HTMLVideoElement | null);
-        if (el) {
-          frame = sampleFromElement(el as CanvasImageSource, dims.w, dims.h);
-          usedFallback = true;
-        }
-      }
-      setApprox(usedFallback);
-      if (!frame) return;
-      frameRef.current = frame;
-      setFrameVersion((version) => version + 1);
-    };
-
-    sample();
-    if (!isPlaying) {
-      // PAUSED EDIT WATCH — see EDIT_WATCH_MS. `changeKey` is in this effect's deps, so a grade edit
-      // re-runs it: sample once now (cheap, usually still the old frame) and then keep sampling
-      // across the compositor's settle window so the graded result actually lands in the scopes.
-      // Stops on its own; an idle paused editor runs no loop at all.
-      const started = Date.now();
-      const watch = window.setInterval(() => {
-        if (Date.now() - started >= EDIT_WATCH_MS) {
-          window.clearInterval(watch);
+    // PAUSED EDIT WATCH — see EDIT_WATCH_MS. `changeKey` is in this effect's deps, so a grade edit
+    // re-runs it and pushes the deadline out; the watch keeps sampling across the compositor's settle
+    // window so the graded result actually lands in the scopes. It stops on its own, so an idle paused
+    // editor runs no loop at all.
+    //
+    // The timer is deliberately NOT owned by this effect. A drag changes `changeKey` every tick, and an
+    // effect-owned interval was therefore torn down and recreated faster than its own 90ms period — it
+    // could never fire, and the loop only worked because the effect ALSO sampled unconditionally on
+    // every tick. That is the expensive shape: a sample is a GPU readback plus, for each open pane, a
+    // full-frame accumulation and a getImageData/putImageData round trip, so the sample rate was pinned
+    // to the event rate at exactly the moment the user needs the main thread free. Extending a deadline
+    // that one long-lived timer reads keeps the cadence at a steady 90ms no matter how fast the ticks
+    // arrive; the immediate sample below is then only for a discrete edit landing after a quiet period.
+    watchUntilRef.current = Date.now() + EDIT_WATCH_MS;
+    if (Date.now() - lastSampleAtRef.current >= EDIT_RESAMPLE_MS) sample();
+    if (watchTimerRef.current === null) {
+      watchTimerRef.current = window.setInterval(() => {
+        if (Date.now() >= watchUntilRef.current) {
+          if (watchTimerRef.current !== null) window.clearInterval(watchTimerRef.current);
+          watchTimerRef.current = null;
           return;
         }
-        sample();
+        sampleRef.current();
       }, EDIT_RESAMPLE_MS);
-      return () => window.clearInterval(watch);
     }
-    // LIVE loop: the cold playhead clock (our `tick` prop) is deliberately SUSPENDED during
-    // playback so the heavy cold panels never compete with playback smoothness — which froze the
-    // scopes on the pre-play frame. Instead of un-suspending that clock (doctrine: don't), the
-    // scopes drive their own low-rate resample here, at the coarse SAMPLE_FAST resolution.
-    const interval = window.setInterval(sample, PLAYING_RESAMPLE_MS);
-    return () => window.clearInterval(interval);
-  }, [containerRef, sampleSource, tick, isPlaying, changeKey]);
+    return undefined;
+  }, [tick, isPlaying, changeKey, sample]);
+
+  // The watch timer outlives individual effect runs by design, so unmount is the one place that must
+  // stop it — otherwise it keeps sampling a torn-down component's compositor.
+  useEffect(
+    () => () => {
+      if (watchTimerRef.current !== null) window.clearInterval(watchTimerRef.current);
+      watchTimerRef.current = null;
+    },
+    []
+  );
 
   const selectLayout = (next: ScopeLayout) => {
     setLayout(next);
