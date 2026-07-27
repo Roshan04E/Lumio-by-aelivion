@@ -30,6 +30,21 @@ const SOURCE_BLOB_CACHE_MAX = 12;
 /** Which demux path providers took this session — asserted by the wc-decoder gate + soak telemetry. */
 export const wcDecoderStats = { streaming: 0, fragmented: 0 };
 
+/**
+ * Decoder-internal reset telemetry (`window.__rfWcDecoder`). A hardware `decoder.reset()+configure()`
+ * tears down the decode session; `hardReset` counts every such reset (backward seeks/shuttle, forward
+ * GOP crossings past the fed cursor, export). A high count during steady forward playback signals the
+ * session is thrashing rather than streaming. Observational only — never gates behavior.
+ */
+export const wcDecoderResetStats = { hardReset: 0 };
+if (typeof window !== "undefined") {
+  try {
+    Object.defineProperty(window, "__rfWcDecoder", { configurable: true, get: () => wcDecoderResetStats });
+  } catch {
+    /* read-only window in some embeds — telemetry is best-effort */
+  }
+}
+
 /** One demuxed sample-table entry — metadata only, bytes stay in the Blob until windowed in. */
 interface SampleIndexEntry {
   offset: number;
@@ -563,6 +578,14 @@ export async function createWebCodecsVideoSource(
   let current: VideoFrame | null = null;
   // True when `current` is a CLONE of a reverse-cache frame (close it, never re-cache it).
   let currentIsClone = false;
+  /**
+   * The last presentable frame, retired by a seek (`resetTo`) rather than closed — preview only.
+   * Returned, with its real lag, when the frame budget expires before the new position has decoded,
+   * so a seek shows the previous picture and catches up progressively instead of blocking. Consumed
+   * (or closed) by the end of the getFrame that set it up; never survives a call that produced a real
+   * frame. See the retirement in `resetTo` for why export deliberately does not do this.
+   */
+  let staleHold: VideoFrame | null = null;
   let lastMicros = -1;
   let decodeCalls = 0;
 
@@ -664,6 +687,7 @@ export async function createWebCodecsVideoSource(
   };
 
   function resetTo(chunkIndex: number) {
+    wcDecoderResetStats.hardReset += 1;
     try {
       decoder.reset();
       configure();
@@ -673,7 +697,24 @@ export async function createWebCodecsVideoSource(
     for (const frame of queue) frame.close();
     queue.length = 0;
     if (current) {
-      current.close();
+      // PREVIEW: retire the presentable frame to `staleHold` instead of closing it (2026-07-27).
+      // The frame budget below only engages once there is SOMETHING to show — and a reset used to
+      // destroy exactly that, so every seek that lands outside the current GOP ran the catch-up loop
+      // with NO time bound. Fast scrubbing resets on essentially every tick, in both directions, so
+      // the budget was off for the whole gesture and the loop starved input for seconds (user report:
+      // "scrub very fast → page isn't responding", and a 3-4s stall that self-recovers). Holding the
+      // frame restores the documented contract — return it stale with its real lag and let the next
+      // call continue the catch-up — for the seek case, not just mid-GOP.
+      //
+      // EXPORT (no frameBudgetMs) keeps closing it. Export must never present a frame from before a
+      // seek: it blocks until decoded and returns null on a genuine failure so the caller can fall
+      // back to <video>. Handing it a stale frame there would silently render the WRONG picture.
+      if (opts.frameBudgetMs) {
+        staleHold?.close();
+        staleHold = current;
+      } else {
+        current.close();
+      }
       current = null;
       currentIsClone = false;
     }
@@ -804,6 +845,8 @@ export async function createWebCodecsVideoSource(
     let keyRetries = 0;
     let retryProgressMark = "";
     let guard = 0;
+    /** The loop ran out of time budget (vs. bailing on a stall/failure) — only then may `staleHold` be served. */
+    let budgetExpired = false;
     let stalledRounds = 0;
     let lastProgress = -1;
     let lastProgressAt = Date.now();
@@ -817,7 +860,12 @@ export async function createWebCodecsVideoSource(
       // catch-up (fed/queue/lastMicros persist), so the clip pans forward progressively instead of
       // freezing. Never applied while there is nothing to show (warmup / just-reset) or for the
       // export (no budget → blocking-until-decoded).
-      if (opts.frameBudgetMs && (current || queue.length) && Date.now() - startedAt > opts.frameBudgetMs) break;
+      // `staleHold` counts as "something to show": after a seek it IS the only thing to show, and that
+      // is precisely the case this budget has to cover (see resetTo).
+      if (opts.frameBudgetMs && (current || queue.length || staleHold) && Date.now() - startedAt > opts.frameBudgetMs) {
+        budgetExpired = true;
+        break;
+      }
       const MAX = outputCount === 0 ? WARMUP_MAX : OUTPUT_MAX;
       if (fed >= chunkCount) {
         try {
@@ -929,6 +977,23 @@ export async function createWebCodecsVideoSource(
       current = queue.shift()!;
       currentIsClone = false;
     }
+    // Resolve the retired frame. It is served ONLY when the budget expired mid-catch-up — every other
+    // exit (warmup bail, drain-flush yielded nothing, decode failure) must still return null so the
+    // caller's null-count → <video> escape and the probe path keep working exactly as before. A real
+    // frame always wins.
+    if (staleHold) {
+      if (current) {
+        staleHold.close();
+        staleHold = null;
+      } else if (budgetExpired) {
+        current = staleHold;
+        currentIsClone = false;
+        staleHold = null;
+      } else {
+        staleHold.close();
+        staleHold = null;
+      }
+    }
     // Presentation-lag telemetry (FrameProvider.lastFrameLagSeconds): how far the served frame
     // trails THIS request. Non-zero only on the time-sliced preview path (budget expired mid
     // catch-up → stale frame returned); export blocks until decoded so it stays 0 there.
@@ -977,16 +1042,24 @@ export async function createWebCodecsVideoSource(
   // first ~120 samples (median is robust to B-frame reorder and a stray VFR outlier). Consumers that
   // RESAMPLE the source (the ingest-proxy transcode) use this to sample at the source's own cadence —
   // a hardcoded 30fps grid over 24fps content duplicated every 4th frame (visible judder, 2026-07-04).
+  // COUNT-BASED cadence: total samples across the composition-time (cts) span. Do NOT use a median of
+  // adjacent *decode-order* cts deltas — that is fooled by B-frame reorder: a 30fps B-pyramid source
+  // decodes as forward cts jumps of 2 and 5 frames with negative jumps between (the B-frames), so the
+  // positive-delta median lands on ~4 frames and reports ~7.5fps. The proxy transcode then RESAMPLED to
+  // that bogus rate → a ~8fps stop-motion proxy off clean 30fps footage (2026-07-24). Using min/max cts
+  // over the whole index is reorder-invariant: for CFR it is the exact rate; for VFR it is the average,
+  // which is what the uniform-grid proxy resample wants (frameCount ≈ source sample count, 1:1 mapping).
   let nominalFps: number | undefined;
   {
-    const deltas: number[] = [];
-    for (let i = 1; i < Math.min(index.length, 121); i += 1) {
-      const delta = index[i]!.timestamp - index[i - 1]!.timestamp;
-      if (delta > 0) deltas.push(delta);
+    let minCts = Infinity;
+    let maxCts = -Infinity;
+    for (const entry of index) {
+      if (entry.timestamp < minCts) minCts = entry.timestamp;
+      if (entry.timestamp > maxCts) maxCts = entry.timestamp;
     }
-    if (deltas.length >= 4) {
-      deltas.sort((a, b) => a - b);
-      const fps = 1_000_000 / deltas[deltas.length >> 1]!;
+    const spanSec = (maxCts - minCts) / 1_000_000;
+    if (index.length >= 4 && spanSec > 0) {
+      const fps = (index.length - 1) / spanSec; // (N-1) intervals between first and last presentation ts
       if (Number.isFinite(fps) && fps >= 5 && fps <= 240) nominalFps = fps;
     }
   }
@@ -1056,6 +1129,8 @@ export async function createWebCodecsVideoSource(
         current.close();
         current = null;
       }
+      staleHold?.close();
+      staleHold = null;
       clearReverseCache();
       try {
         decoder.close();

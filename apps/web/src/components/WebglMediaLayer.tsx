@@ -501,6 +501,20 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const wcInFlightSinceMsRef = useRef<number | null>(null);
     // Pending retry timer for the paused null-frame march (see the null branch in requestWcFrame).
     const wcNullRetryTimerRef = useRef<number | null>(null);
+    /**
+     * Consecutive backed-off retries on a `tolerateLag` layer that can neither converge nor bail.
+     *
+     * Those layers must never take the <video> path (the ~16-context cap = the permanent freeze), so
+     * their stale-bail and null branches re-probe WebCodecs forever instead of falling back. That is
+     * right, but both were unpaced: the stale-bail set `wcRerequestRef`, which the SAME `.then()`
+     * consumes a few lines later and re-requests synchronously — a zero-delay recursion, not a retry.
+     * Paused, on a source that cannot converge, it spins the main thread indefinitely; combined with a
+     * fast scrub (which resets the decoder on nearly every tick) that is a large share of the "page
+     * isn't responding" stall. Retries now back off geometrically and reset the moment a frame
+     * actually presents, so a source that recovers pays nothing and one that never does costs ~1/s.
+     */
+    const wcTolerateRetryRef = useRef(0);
+    const wcTolerateRetryTimerRef = useRef<number | null>(null);
     // Consecutive watchdog samples with NO source at all (neither provider nor element).
     const wcNoneSamplesRef = useRef(0);
     // Consecutive rewind-catch-up frames HELD (not drawn) — see requestWcFrame. Bounded so a source
@@ -636,6 +650,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             window.clearTimeout(wcNullRetryTimerRef.current);
             wcNullRetryTimerRef.current = null;
           }
+          if (wcTolerateRetryTimerRef.current !== null) {
+            window.clearTimeout(wcTolerateRetryTimerRef.current);
+            wcTolerateRetryTimerRef.current = null;
+          }
+          wcTolerateRetryRef.current = 0;
           wcProviderRef.current = null;
           setWcHeldFrame(null);
           wcLeaseRef.current = null;
@@ -1600,6 +1619,23 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // Keep the loop's draw reference current so playback reads live opacity/transform every frame.
     drawVideoFrameRef.current = drawVideoFrame;
 
+    /**
+     * Re-probe WebCodecs after a geometric delay, for the `tolerateLag` paths that must never fall back
+     * to a <video> element (see wcTolerateRetryRef). 100ms doubling to a 1s ceiling: a source that is
+     * one slow decode away recovers on the first retry, and one that never converges settles at about
+     * one probe per second instead of spinning. Idempotent — a pending timer is never stacked.
+     */
+    function scheduleTolerantRetry() {
+      if (wcTolerateRetryTimerRef.current !== null) return;
+      const attempt = wcTolerateRetryRef.current;
+      wcTolerateRetryRef.current = Math.min(attempt + 1, 4);
+      const delayMs = Math.min(1000, 100 * 2 ** attempt);
+      wcTolerateRetryTimerRef.current = window.setTimeout(() => {
+        wcTolerateRetryTimerRef.current = null;
+        if (wcProviderRef.current) requestWcFrameRef.current();
+      }, delayMs);
+    }
+
     // WebCodecs frame request (stage 2): single in-flight decode, latest transport time wins.
     // A resolved frame belongs to the provider (valid until its NEXT getFrame), so we draw it
     // immediately and keep it referenced for paused repaints (pipeline/effect changes).
@@ -1669,7 +1705,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
                 // scoping above), the guard matters here too: keep probing WC so it converges on its own
                 // instead of being handed a <video> element it may not even be able to allocate.
                 if (props.tolerateLag) {
-                  wcRerequestRef.current = true;
+                  scheduleTolerantRetry();
                   return;
                 }
                 if (tp.isPlaying) wcBailedSources.add(src);
@@ -1678,6 +1714,9 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               }
             }
             const presentFrame = () => {
+              // A frame reached the canvas: whatever the layer was retrying for is over, so the backoff
+              // starts clean next time. Without this a source that recovers keeps its old (long) delay.
+              wcTolerateRetryRef.current = 0;
               // Clone before holding: our copy survives the provider closing its original.
               let held: CanvasImageSource = frame;
               if (typeof VideoFrame !== "undefined" && frame instanceof VideoFrame) {
@@ -1738,13 +1777,9 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               // Virtual loaders never go native (16-context cap → freeze). A null is a transient "no frame
               // decoded yet" (cold start / mid-catch-up), not a dead source — keep probing WC forever so
               // the loader recovers on its own thread instead of falling to a native element that can't be
-              // allocated. Re-arm the retry timer (covers the paused case where the rAF loop is idle).
-              if (wcNullRetryTimerRef.current === null) {
-                wcNullRetryTimerRef.current = window.setTimeout(() => {
-                  wcNullRetryTimerRef.current = null;
-                  if (wcProviderRef.current) requestWcFrameRef.current();
-                }, 150);
-              }
+              // allocated. Backed off (see wcTolerateRetryRef): a source that never yields a frame used to
+              // re-probe at a flat 150ms indefinitely, which is a real cost when several loaders do it.
+              scheduleTolerantRetry();
             } else if (wcNullCountRef.current >= 8) {
               recordWcHeal("nullFrames");
               wcFallbackRef.current();
