@@ -15,7 +15,7 @@ import { getFlarexNodeDefinition, type FlarexComp, type FlarexNode } from "@orre
 import { InspectorSection } from "../inspector/InspectorSection";
 import { PropertyFieldList } from "../inspector/PropertyFieldList";
 import { FlarexNodeIcon } from "./flarex-node-icons";
-import { buildFlarexNodeFields } from "./flarex-inspector-fields";
+import { buildFlarexColorNodeSections, buildFlarexNodeFields } from "./flarex-inspector-fields";
 import type { FlarexSourceAssetOption } from "./FlarexSourcePicker";
 
 const WIDTH_KEY = "flarex.inspectorWidth";
@@ -129,7 +129,33 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
   const def = getFlarexNodeDefinition(node.type);
   // The WHOLE Flarex-specific step: node definition → shared inspector schema. Everything below renders
   // through the same InspectorSection + `.effect-controls` container + shared controls as the Edit page.
-  const fields = buildFlarexNodeFields({ comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource });
+  const builderArgs = { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource };
+
+  // The unified Color node carries the whole grade toolset (~25 params), so it renders as collapsible
+  // stages in PIPELINE ORDER instead of one wall of sliders — a section header's dot says whether that
+  // stage is doing anything, which is what lets you read a collapsed node at a glance. Still the same
+  // PropertyFieldList underneath: sections are layout around the sole renderer, not a new field kind.
+  if (node.type === "color") {
+    const sections = buildFlarexColorNodeSections(builderArgs);
+    return shell(
+      <div className="inspector-panel">
+        {sections.map((section) => (
+          <InspectorSection
+            key={section.id}
+            title={section.active ? `${section.label} ●` : section.label}
+            collapsible
+            defaultOpen={section.defaultOpen}
+          >
+            <div className="effect-controls">
+              <PropertyFieldList fields={section.fields} />
+            </div>
+          </InspectorSection>
+        ))}
+      </div>,
+    );
+  }
+
+  const fields = buildFlarexNodeFields(builderArgs);
 
   return shell(
     <div className="inspector-panel">

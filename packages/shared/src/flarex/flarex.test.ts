@@ -727,6 +727,7 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   });
   const SECONDARY = JSON.stringify({ hueCenter: 0.35, hueWidth: 0.08, softness: 0.05, satScale: 0 });
   const CURVES = JSON.stringify({ master: [{ x: 0, y: 0 }, { x: 0.25, y: 0.05 }, { x: 0.75, y: 0.95 }, { x: 1, y: 1 }] });
+  const HUE_CURVES = JSON.stringify({ hueVsSat: [{ x: 0, y: 0.5 }, { x: 0.35, y: 0.8 }, { x: 1, y: 0.5 }] });
 
   const chain = chainComp;
 
@@ -783,6 +784,61 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   const strip = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" ? undefined : val));
   const detSpecs: ChainSpec[] = [["colorWheels", { wheels: WHEELS }], ["colorCorrect", { exposure: 25 }]];
   check("P1: coalesced lowering is deterministic", strip(chain("det", detSpecs)) === strip(chain("det", detSpecs)));
+
+  // ── The unified `color` node ───────────────────────────────────────────────
+  // THE gate for the whole idea: one Color node carrying every stage must lower to the SAME grade as
+  // the equivalent chain of atomic nodes. If this holds, the unified node is a new UI over the same
+  // math — not a second colour implementation that can drift from the first.
+  const unified = chain("uni", [[
+    "color",
+    {
+      exposure: 25, saturation: 140,
+      wheels: WHEELS, curves: CURVES, hueCurves: HUE_CURVES, secondary: SECONDARY,
+      look: CREATIVE_LOOK_NAMES[0] ?? "",
+    },
+  ]]);
+  // The atoms, wired in the order `buildUnifiedColorEffects` declares (primary → wheels → curves →
+  // hue/sat → qualifier → LUT → look). That order IS the contract this pins.
+  const equivalent = chain("eqv", [
+    ["colorCorrect", { exposure: 25, saturation: 140 }],
+    ["colorWheels", { wheels: WHEELS }],
+    ["colorCurves", { curves: CURVES }],
+    ["hueSat", { hueCurves: HUE_CURVES }],
+    ["hslQualifier", { secondary: SECONDARY }],
+    ["look", { look: CREATIVE_LOOK_NAMES[0] ?? "" }],
+  ]);
+  const pipelineOf = (d: SceneDraw | null) => (d && isGroupDraw(d) ? JSON.stringify(d.pipeline) : null);
+  check("unified Color node lowers to ONE group (every stage in one pipeline)", groupDepth(unified) === 1);
+  check("the equivalent 6-node chain also coalesces to one group", groupDepth(equivalent) === 1);
+  check("UNIFIED == CHAIN: identical compiled pipeline", pipelineOf(unified) !== null && pipelineOf(unified) === pipelineOf(equivalent));
+
+  // A fresh Color node must be a true pass-through — not an identity grade pass. It is the state
+  // every newly-added node is in, and an RTT for "I haven't decided yet" is exactly the cost the
+  // low-end target cannot afford.
+  check("a fresh Color node is a no-op (no wrap at all)", !isGroupDraw(chain("uni0", [["color", {}]])));
+  check("a Color node with only a neutral saturation is still a no-op",
+    !isGroupDraw(chain("uni1", [["color", { saturation: 100 }]])));
+
+  // Film stages ride as FRAGMENT PASSES (a group grade compiles with mediaEffects: null, so they can
+  // never be pipeline stages) — and must not drag in a grade pipeline when they are the only thing set.
+  const filmOnly = chain("unif", [["color", { vignetteAmount: 0.5, grainAmount: 0.2 }]]);
+  check("film-only Color node emits fragment passes", isGroupDraw(filmOnly!) && (filmOnly!.shell.fragmentPasses ?? []).length === 2);
+  check("film-only Color node has NO grade pipeline", isGroupDraw(filmOnly!) && !filmOnly!.pipeline);
+  check("film passes get distinct effect keys",
+    isGroupDraw(filmOnly!) &&
+      new Set((filmOnly!.shell.fragmentPasses ?? []).map((p) => p.effectKey)).size === 2);
+  check("grade + film share ONE group (film does not open a nest)",
+    groupDepth(chain("unig", [["color", { exposure: 20, vignetteAmount: 0.4 }]])) === 1);
+
+  // It coalesces with atoms too — the two families are one pipeline, in wiring order.
+  check("a unified node and an atom downstream still make one group",
+    groupDepth(chain("unic", [["color", { exposure: 10 }], ["colorCurves", { curves: CURVES }]])) === 1);
+  // …and refuses when a stage type would repeat, exactly like the atoms do.
+  check("a unified node followed by a REPEATED stage opens a nest",
+    groupDepth(chain("unir", [["color", { wheels: WHEELS }], ["colorWheels", { wheels: WHEELS }]])) === 2);
+
+  check("unified lowering is deterministic",
+    strip(chain("unid", [["color", { exposure: 25, wheels: WHEELS }]])) === strip(chain("unid", [["color", { exposure: 25, wheels: WHEELS }]])));
 }
 
 // --- Generator nodes (Text+ / Background) ----------------------------------

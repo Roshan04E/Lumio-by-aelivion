@@ -23,6 +23,7 @@ export type FlarexNodeType =
   | "transform"
   | "crop"
   | "channelBoolean"
+  | "color"
   | "colorCorrect"
   | "colorCurves"
   | "hueSat"
@@ -62,6 +63,7 @@ export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "transform",
   "crop",
   "channelBoolean",
+  "color",
   "colorCorrect",
   "colorCurves",
   "hueSat",

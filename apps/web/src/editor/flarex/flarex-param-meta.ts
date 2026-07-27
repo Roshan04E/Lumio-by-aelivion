@@ -22,6 +22,27 @@ export const FLAREX_PARAM_RANGES: Record<string, [number, number, number]> = {
   "transform.anchorY": [0, 1, 0.01],
   // The `brightnessContrast` effect's own scales (saturation 100 = neutral) — the node schema now
   // declares the same bounds, so slider, graph lane, and Zod all agree.
+  // Unified Color node — same scales as the atomic nodes it subsumes (a slider must read identically
+  // whichever node you reach it through; the lowering passes both through the same effects).
+  "color.exposure": [-100, 100, 1],
+  "color.contrast": [-100, 100, 1],
+  "color.highlights": [-100, 100, 1],
+  "color.shadows": [-100, 100, 1],
+  "color.whites": [-100, 100, 1],
+  "color.blacks": [-100, 100, 1],
+  "color.saturation": [0, 220, 1],
+  "color.vibrance": [-100, 100, 1],
+  "color.temperature": [-100, 100, 1],
+  "color.tint": [-100, 100, 1],
+  "color.lutIntensity": [0, 1, 0.01],
+  "color.lookIntensity": [0, 1, 0.01],
+  "color.vignetteAmount": [0, 1, 0.01],
+  "color.vignetteSize": [0, 1, 0.01],
+  "color.vignetteFeather": [0, 1, 0.01],
+  "color.vignetteRoundness": [0, 1, 0.01],
+  "color.vignetteHighlights": [0, 1, 0.01],
+  "color.grainAmount": [0, 1, 0.01],
+  "color.grainSize": [0.25, 4, 0.05],
   "colorCorrect.exposure": [-100, 100, 1],
   "colorCorrect.contrast": [-100, 100, 1],
   "colorCorrect.highlights": [-100, 100, 1],

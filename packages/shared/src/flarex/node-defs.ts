@@ -161,6 +161,70 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     keyframeable: [],
     phase: 1,
   },
+  color: {
+    label: "Color",
+    group: "color",
+    inputs: [image("in", "Input", true), matte("mask", "Mask")],
+    outputs: OUT,
+    /**
+     * THE grade node — the Resolve color-page model, where one node carries the whole toolset and you
+     * chain nodes when you need a different MASK, not a different tool. The seven atomic color nodes
+     * remain for precise Fusion-style graphs; this is the default.
+     *
+     * It is not a convenience wrapper: it is strictly cheaper than the equivalent chain. The grade
+     * engine bakes an effect LIST into ONE pipeline (one 3D LUT, one pass), so every stage here costs
+     * what a single stage costs — and unlike a chain of atoms it cannot hit the coalescing refusals
+     * (`lowerColorNode`), which open a nested render target whenever a stage type REPEATS. Wheels →
+     * Curves → Wheels is two nests as three nodes and one pipeline as one node.
+     *
+     * Param conventions are deliberately IDENTICAL to the atomic nodes (same names, same scales, same
+     * JSON payload shapes) so both families feed one lowering path and one set of inspector editors —
+     * there is no second color implementation to keep in sync. The parity gate asserts it: this node
+     * and the equivalent chain must render byte-identical.
+     *
+     * `vignette`/`grain` are the exception and ride as FRAGMENT PASSES, not pipeline stages: a group
+     * pipeline is compiled with `mediaEffects: null` (scene-compositor), so they can never be baked
+     * into the LUT — the same constraint that made them fragment builtins in the first place.
+     */
+    params: z.object({
+      // Primary correction — the `brightnessContrast` effect's own scale (saturation 100 = neutral).
+      exposure: num(0, -100, 100),
+      contrast: num(0, -100, 100),
+      highlights: num(0, -100, 100),
+      shadows: num(0, -100, 100),
+      whites: num(0, -100, 100),
+      blacks: num(0, -100, 100),
+      saturation: num(100, 0, 220),
+      vibrance: num(0, -100, 100),
+      temperature: num(0, -100, 100),
+      tint: num(0, -100, 100),
+      // JSON payloads, same conventions as the atomic nodes (curve/wheel/qualifier editors reuse).
+      wheels: z.string().default(""),
+      curves: z.string().default(""),
+      hueCurves: z.string().default(""),
+      secondary: z.string().default(""),
+      // LUT + creative look, each with its own intensity ("" = unconfigured, a no-op).
+      lut: z.string().default(""),
+      lutIntensity: num(1, 0, 1),
+      look: z.string().default(""),
+      lookIntensity: num(1, 0, 1),
+      // Film — fragment passes, not pipeline stages (see above). Amount 0 = the pass is not emitted.
+      vignetteAmount: num(0, 0, 1),
+      vignetteSize: num(0.58, 0, 1),
+      vignetteFeather: num(1, 0, 1),
+      vignetteRoundness: num(0, 0, 1),
+      vignetteHighlights: num(0, 0, 1),
+      grainAmount: num(0, 0, 1),
+      grainSize: num(1, 0.25, 4),
+    }).strict(),
+    keyframeable: [
+      "exposure", "contrast", "highlights", "shadows", "whites", "blacks", "saturation", "vibrance", "temperature", "tint",
+      "lutIntensity", "lookIntensity",
+      "vignetteAmount", "vignetteSize", "vignetteFeather", "vignetteRoundness", "vignetteHighlights",
+      "grainAmount", "grainSize",
+    ],
+    phase: 1,
+  },
   colorCorrect: {
     label: "Color Correct",
     group: "color",
@@ -572,6 +636,7 @@ const SUBCATEGORIES: Record<FlarexNodeType, string> = {
   transform: "Transform",
   crop: "Transform",
   channelBoolean: "Channel",
+  color: "Grade",
   colorCorrect: "Adjust",
   colorWheels: "Adjust",
   colorCurves: "Curves",

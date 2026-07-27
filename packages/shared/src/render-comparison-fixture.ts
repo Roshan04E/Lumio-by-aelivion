@@ -110,6 +110,7 @@ export type RenderComparisonFixtureKey =
   | "flarex-reroute"
   | "flarex-multi-in"
   | "flarex-color-chain"
+  | "flarex-unified-color"
   | "flarex-filter-stack"
   | "flarex-generators";
 
@@ -165,6 +166,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-reroute",
   "flarex-multi-in",
   "flarex-color-chain",
+  "flarex-unified-color",
   "flarex-filter-stack",
   "flarex-generators"
 ];
@@ -654,6 +656,46 @@ function buildFlarexColorChainComp(): FlarexComp {
 }
 
 /**
+ * The UNIFIED `color` node carrying the same grade the 4-node chain above builds, plus a vignette.
+ *
+ * This is the fixture that proves the node across all three renderers. The unit test already asserts
+ * that one Color node and the equivalent chain compile to an IDENTICAL pipeline; this asserts that
+ * what comes out the other end is identical in the web preview, the local export and Remotion — i.e.
+ * that the many-params-in-one-node shape did not introduce a renderer-specific path.
+ *
+ * Grain is deliberately absent for the same reason as the filter-stack fixture: it reads `uTime`, and
+ * a time-varying pattern is not something a single-frame parity gate can hold three renderers to.
+ */
+function buildFlarexUnifiedColorComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_unified_comp", "Flarex unified colour node fixture");
+  const grade = createFlarexNode("color", "fixture_flarex_unified_grade");
+  grade.params = {
+    ...grade.params,
+    exposure: 18,
+    contrast: 12,
+    saturation: 128,
+    temperature: -14,
+    wheels: JSON.stringify({
+      shadows: { x: -0.12, y: 0.08, master: -0.05 },
+      midtones: { x: 0.18, y: -0.14, master: 0.1 },
+      highlights: { x: 0.06, y: 0.04, master: 0.08 }
+    }),
+    curves: JSON.stringify({ master: [{ x: 0, y: 0 }, { x: 0.3, y: 0.22 }, { x: 0.7, y: 0.8 }, { x: 1, y: 1 }] }),
+    secondary: JSON.stringify({ hueCenter: 0.36, hueWidth: 0.14, softness: 0.08, satScale: 0.45, lumScale: 1.1 }),
+    // Film section — a fragment pass on the SAME shell, not a pipeline stage.
+    vignetteAmount: 0.42,
+    vignetteSize: 0.55,
+    vignetteFeather: 0.9
+  };
+  comp.nodes[grade.id] = grade;
+  comp.edges = [
+    { id: "fixture_flarex_unified_e1", from: { nodeId: "fixture_flarex_unified_comp_in", socket: "out" }, to: { nodeId: grade.id, socket: "in" } },
+    { id: "fixture_flarex_unified_e2", from: { nodeId: grade.id, socket: "out" }, to: { nodeId: "fixture_flarex_unified_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
  * The new fragment builtins stacked on ONE shell: Crop → Pixelate → Prism → Vignette.
  *
  * Crop and Channel-Boolean-class effects REWRITE alpha, so this also gates that the composite-back
@@ -979,6 +1021,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexMultiInComp(), flarexMultiSource: true };
     case "flarex-color-chain":
       return { effects: [], fit: "cover", flarex: buildFlarexColorChainComp() };
+    case "flarex-unified-color":
+      return { effects: [], fit: "cover", flarex: buildFlarexUnifiedColorComp() };
     case "flarex-filter-stack":
       return { effects: [], fit: "cover", flarex: buildFlarexFilterStackComp() };
     case "flarex-generators":

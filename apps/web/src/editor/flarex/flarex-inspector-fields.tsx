@@ -96,7 +96,45 @@ const PAYLOAD_EDITORS: Record<string, (value: string, onChange: (json: string) =
   "hueSat.hueCurves": (value, onChange) => <HueSatCurves value={value} onChange={onChange} />,
   "colorWheels.wheels": (value, onChange) => <ColorWheels value={value} onChange={onChange} />,
   "hslQualifier.secondary": (value, onChange) => <HslSecondary value={value} onChange={onChange} />,
+  // The unified Color node reuses the SAME editors under the same param names — one control per
+  // payload shape, whether it is reached through an atomic node or the grade node.
+  "color.curves": (value, onChange) => <CurveEditor value={value} onChange={onChange} />,
+  "color.hueCurves": (value, onChange) => <HueSatCurves value={value} onChange={onChange} />,
+  "color.wheels": (value, onChange) => <ColorWheels value={value} onChange={onChange} />,
+  "color.secondary": (value, onChange) => <HslSecondary value={value} onChange={onChange} />,
 };
+
+/**
+ * Section layout for the unified Color node (Resolve's corrector, one node = the whole toolset).
+ * Order matches `buildUnifiedColorEffects`' pipeline order, so what you read top-to-bottom is the
+ * order the grade is actually applied in. Any param not listed here falls through to the flat list,
+ * so adding a param can never make it invisible.
+ */
+const COLOR_NODE_SECTIONS: Array<{ id: string; label: string; params: string[]; open?: boolean }> = [
+  { id: "primary", label: "Primary", open: true, params: ["exposure", "contrast", "highlights", "shadows", "whites", "blacks", "saturation", "vibrance", "temperature", "tint"] },
+  { id: "wheels", label: "Color Wheels", params: ["wheels"] },
+  { id: "curves", label: "Curves", params: ["curves"] },
+  { id: "hueSat", label: "Hue / Sat", params: ["hueCurves"] },
+  { id: "qualifier", label: "Qualifier", params: ["secondary"] },
+  { id: "lut", label: "LUT", params: ["lut", "lutIntensity"] },
+  { id: "look", label: "Look", params: ["look", "lookIntensity"] },
+  { id: "film", label: "Film", params: ["vignetteAmount", "vignetteSize", "vignetteFeather", "vignetteRoundness", "vignetteHighlights", "grainAmount", "grainSize"] },
+];
+
+/** Whether a Color node section is doing anything — drives the dot on its header, so a collapsed
+ *  section still tells you the node is grading through it. Mirrors the lowering's own neutrality
+ *  rule (`buildUnifiedColorEffects`): saturation is neutral at 100, everything else at 0/"". */
+function colorSectionActive(params: Record<string, unknown>, keys: string[]): boolean {
+  return keys.some((key) => {
+    const value = params[key];
+    if (typeof value === "string") return value.trim().length > 0;
+    if (typeof value !== "number") return false;
+    if (key === "saturation") return value !== 100;
+    if (key === "lutIntensity" || key === "lookIntensity" || key === "grainSize") return false; // intensities alone mean nothing
+    if (key === "vignetteSize" || key === "vignetteFeather" || key === "vignetteRoundness" || key === "vignetteHighlights") return false;
+    return value !== 0;
+  });
+}
 
 /** Params the CANVAS owns, not the inspector — structural payloads with no meaningful text editor. */
 const STRUCTURAL_PARAMS = new Set(["group.members"]);
@@ -562,4 +600,50 @@ function FlarexPointsEditor({ label, points, onChange }: { label: string; points
       </button>
     </div>
   );
+}
+
+/** One collapsible group of the unified Color node's inspector. */
+export interface FlarexColorSection {
+  id: string;
+  label: string;
+  /** This stage is doing something — drives the header dot, so a COLLAPSED section still reports it. */
+  active: boolean;
+  defaultOpen: boolean;
+  fields: PropertyField[];
+}
+
+/**
+ * Split the unified Color node's fields into Resolve-order sections (Primary → Wheels → Curves →
+ * Hue/Sat → Qualifier → LUT → Look → Film).
+ *
+ * Built by PARTITIONING the ordinary field list rather than by a separate builder, so every param
+ * keeps the exact binding it would have on an atomic node — keyframes, ranges, payload editors and
+ * the animated-edit write rule all come from one place. Anything not claimed by a section falls into
+ * a trailing "Other" group, so a param added to the node can never become invisible.
+ *
+ * Empty sections are dropped. The caller renders each through the shared `InspectorSection` +
+ * `PropertyFieldList` — this returns data, not markup, and adds no new field kind.
+ */
+export function buildFlarexColorNodeSections(args: BuildFlarexNodeFieldsArgs): FlarexColorSection[] {
+  const all = buildFlarexNodeFields(args);
+  const params = args.node.params;
+  const claimed = new Set<string>();
+  const sections: FlarexColorSection[] = [];
+  for (const spec of COLOR_NODE_SECTIONS) {
+    const fields = spec.params.map((key) => all.find((f) => f.key === key)).filter((f): f is PropertyField => Boolean(f));
+    for (const field of fields) claimed.add(field.key);
+    if (!fields.length) continue;
+    sections.push({
+      id: spec.id,
+      label: spec.label,
+      active: colorSectionActive(params, spec.params),
+      defaultOpen: spec.open ?? false,
+      fields,
+    });
+  }
+  const rest = all.filter((f) => !claimed.has(f.key));
+  if (rest.length) {
+    sections.push({ id: "other", label: "Other", active: false, defaultOpen: true, fields: rest });
+  }
+  return sections;
 }

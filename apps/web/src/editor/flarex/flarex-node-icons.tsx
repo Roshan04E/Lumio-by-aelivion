@@ -76,6 +76,15 @@ const GLYPHS: Record<FlarexNodeType, ReactElement> = {
   ),
 
   // ── Color ────────────────────────────────────────────────────────────────
+  // The unified grade node: a trackball with a tone curve through it — the two halves of the toolset
+  // it carries, and distinct from `colorWheels` (three balls) and `colorCurves` (a framed curve).
+  color: (
+    <>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M3.6 11.6C6 11.6 6.6 4.4 12.4 4.4" />
+      <circle cx="8" cy="8" r="1" fill="currentColor" stroke="none" />
+    </>
+  ),
   colorCorrect: (
     <>
       <circle cx="8" cy="8" r="5.5" />

@@ -45,7 +45,9 @@ const CATEGORY_ORDER: FlarexNodeDefinition["group"][] = [
 export const FLAREX_PINNED_NODES: FlarexNodeType[] = [
   "mediaIn",
   "merge", "transform",
-  "colorCorrect", "colorCurves",
+  // `color` is THE grade node (all stages in one, Resolve's corrector) and leads the colour group;
+  // the atoms behind it stay pinned for precise Fusion-style graphs.
+  "color", "colorCorrect", "colorCurves",
   "blur", "glow", "sharpen",
   "chromaKey", "lumaKey",
   "rectMask", "ellipseMask", "polygonMask", "bezierMask", "matteControl",

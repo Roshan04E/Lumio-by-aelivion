@@ -259,6 +259,58 @@ const FLAREX_COLOR_NODES: Partial<Record<FlarexNodeType, FlarexColorNodeSpec>> =
   },
 };
 
+/**
+ * The unified `color` node's pipeline stages, in the order they enter the grade.
+ *
+ * ORDER IS THE CONTRACT — `compileColorPipeline` preserves effect order, so this list decides what the
+ * node does. Correction first, creative last (primary → wheels → curves → hue/sat → qualifier → LUT →
+ * look), which is the order a colorist would build the equivalent chain in and the order the clip
+ * inspector's Color tab already presents. The parity test pins it against exactly that chain.
+ *
+ * A stage is OMITTED when it is still neutral, which is what makes a freshly-added Color node a true
+ * pass-through rather than an identity grade: the payload stages use the same "unconfigured payload →
+ * nothing" rule as the atomic nodes, and the primary correction is compared against its own defaults.
+ */
+function buildUnifiedColorEffects(
+  nodeId: string,
+  p: FlarexParamReader,
+  make: (nodeId: string, type: TimelineEffect["type"], params: Record<string, number | string>) => TimelineEffect
+): TimelineEffect[] {
+  const effects: TimelineEffect[] = [];
+  const primary = {
+    exposure: p.num("exposure", 0),
+    contrast: p.num("contrast", 0),
+    highlights: p.num("highlights", 0),
+    shadows: p.num("shadows", 0),
+    whites: p.num("whites", 0),
+    blacks: p.num("blacks", 0),
+    saturation: p.num("saturation", 100),
+    vibrance: p.num("vibrance", 0),
+    temperature: p.num("temperature", 0),
+    tint: p.num("tint", 0),
+  };
+  // Saturation is the one non-zero neutral (100 = unchanged) — the same scale trap that shipped a
+  // desaturating Color Correct node before it was fixed.
+  const primaryTouched = Object.entries(primary).some(([key, value]) => (key === "saturation" ? value !== 100 : value !== 0));
+  // Distinct effect ids per stage: they share one node, but the pipeline treats them as separate
+  // effects and an id collision would let one stage's cache entry answer for another.
+  if (primaryTouched) effects.push(make(`${nodeId}:primary`, "brightnessContrast", primary));
+
+  const wheels = p.str("wheels", "");
+  if (wheels) effects.push(make(`${nodeId}:wheels`, "colorWheels", { wheels }));
+  const curves = p.str("curves", "");
+  if (curves) effects.push(make(`${nodeId}:curves`, "colorCurves", { curve: curves }));
+  const hueCurves = p.str("hueCurves", "");
+  if (hueCurves) effects.push(make(`${nodeId}:hueSat`, "hueSatCurves", { curves: hueCurves }));
+  const secondary = p.str("secondary", "");
+  if (secondary) effects.push(make(`${nodeId}:qualifier`, "hslSecondary", { secondary }));
+  const lut = p.str("lut", "");
+  if (lut) effects.push(make(`${nodeId}:lut`, "importedLut", { lut, intensity: clamp01(p.num("lutIntensity", 1)) * 100 }));
+  const look = p.str("look", "");
+  if (look) effects.push(make(`${nodeId}:look`, "creativeLook", { look, intensity: clamp01(p.num("lookIntensity", 1)) * 100 }));
+  return effects;
+}
+
 interface FlarexFilterNodeSpec {
   /** Registry id of the fragment effect this node wraps. */
   effect: string;
@@ -662,58 +714,91 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const lowerColorNode = (node: FlarexNode): FlarexValue | null => {
     const input = imageInput(node, "in");
     if (!input) return null;
-    const spec = FLAREX_COLOR_NODES[node.type];
-    if (!spec) return { kind: "image", draw: input };
-    const params = spec.build({
+    const read: FlarexParamReader = {
       num: (key, fallback) => num(node, key, fallback),
       str: (key, fallback) => str(node, key, fallback),
       bool: (key) => bool(node, key),
-    });
-    if (!params) return { kind: "image", draw: input }; // unconfigured payload → pass through
-    const effect = colorEffectFor(node.id, spec.effect, params);
+    };
+    // One node contributes a LIST of pipeline stages: exactly one for an atomic color node, up to
+    // seven for the unified `color` node. Everything below is written against the list, so both
+    // families share one lowering — there is no second color path to keep in sync.
+    let effects: TimelineEffect[];
+    if (node.type === "color") {
+      effects = buildUnifiedColorEffects(node.id, read, colorEffectFor);
+    } else {
+      const spec = FLAREX_COLOR_NODES[node.type];
+      if (!spec) return { kind: "image", draw: input };
+      const params = spec.build(read);
+      if (!params) return { kind: "image", draw: input }; // unconfigured payload → pass through
+      effects = [colorEffectFor(node.id, spec.effect, params)];
+    }
+
+    // A Color node whose every stage is still neutral must be a true no-op, not an identity grade
+    // pass: it is the state a freshly-added node is in, and dropping an RTT on the graph for it would
+    // make "add a node, then decide what to do with it" cost a render target.
+    const film = node.type === "color" ? buildUnifiedColorPasses(node, read) : [];
+    if (effects.length === 0 && film.length === 0) return { kind: "image", draw: input };
 
     const mask = matteInput(node, "mask");
     if (mask) {
       const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
       if (raster) {
-        const pipeline = pipelineForEffects([effect]);
-        if (!pipeline) return { kind: "image", draw: input };
-        return {
-          kind: "image",
-          draw: pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline }),
-        };
+        const pipeline = effects.length ? pipelineForEffects(effects) : null;
+        let draw = input;
+        if (pipeline) {
+          draw = pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline });
+        }
+        // Film passes are fragment passes, so they take the pass model's OWN mask — same region, one
+        // pass, no second nest.
+        for (const pass of film) {
+          pass.mask = raster.tex;
+          pass.maskVersion = raster.version;
+          draw = pushFragmentPass(draw, pass);
+        }
+        return { kind: "image", draw };
       }
     }
 
-    const upstream = isGroup(input) ? (input as FlarexWrapGroup) : null;
-    const folded = upstream?.__flarexColorEffects;
-    if (
-      upstream &&
-      folded &&
-      !upstream.__flarexSealed &&
-      upstream.__flarexStage !== undefined &&
-      upstream.__flarexStage <= STAGE_PIPELINE &&
-      !folded.some((existing) => existing.type === effect.type)
-    ) {
-      const effects = [...folded, effect];
-      const pipeline = pipelineForEffects(effects);
-      if (pipeline) {
-        // Keep the wrap's original `groupKey`: it is the grade renderer / LUT cache slot, and it must
-        // stay stable across frames as the chain grows.
-        upstream.__flarexColorEffects = effects;
-        upstream.pipeline = pipeline;
-        frameProfiler.bump("compile.colorCoalesced");
-        return { kind: "image", draw: upstream };
+    let out = input;
+    if (effects.length) {
+      const upstream = isGroup(input) ? (input as FlarexWrapGroup) : null;
+      const folded = upstream?.__flarexColorEffects;
+      const coalescable =
+        upstream &&
+        folded &&
+        !upstream.__flarexSealed &&
+        upstream.__flarexStage !== undefined &&
+        upstream.__flarexStage <= STAGE_PIPELINE &&
+        // No stage type may appear twice in one pipeline — two of a kind collapse. A unified node
+        // contributes several types at once, so every one of them has to be free.
+        !effects.some((next) => folded.some((existing) => existing.type === next.type));
+      let placed = false;
+      if (coalescable) {
+        const merged = [...folded!, ...effects];
+        const pipeline = pipelineForEffects(merged);
+        if (pipeline) {
+          // Keep the wrap's original `groupKey`: it is the grade renderer / LUT cache slot, and it must
+          // stay stable across frames as the chain grows.
+          upstream!.__flarexColorEffects = merged;
+          upstream!.pipeline = pipeline;
+          frameProfiler.bump("compile.colorCoalesced");
+          out = upstream!;
+          placed = true;
+        }
+      }
+      if (!placed) {
+        const pipeline = pipelineForEffects(effects);
+        if (pipeline) {
+          const wrap = wrapFor(input, STAGE_PIPELINE);
+          wrap.pipeline = pipeline;
+          wrap.groupKey = `flarex_${comp.id}_${node.id}`;
+          wrap.__flarexColorEffects = effects;
+          out = wrap;
+        }
       }
     }
-
-    const pipeline = pipelineForEffects([effect]);
-    if (!pipeline) return { kind: "image", draw: input };
-    const wrap = wrapFor(input, STAGE_PIPELINE);
-    wrap.pipeline = pipeline;
-    wrap.groupKey = `flarex_${comp.id}_${node.id}`;
-    wrap.__flarexColorEffects = [effect];
-    return { kind: "image", draw: wrap };
+    for (const pass of film) out = pushFragmentPass(out, pass);
+    return { kind: "image", draw: out };
   };
 
   /**
@@ -759,6 +844,37 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       intensity,
       timeSeconds: ctx.frameTimeSeconds,
     };
+  };
+
+  /**
+   * The unified Color node's FILM stages (vignette, grain). These cannot join the pipeline bake: a
+   * group's grade is compiled with `mediaEffects: null` (scene-compositor), which is the same
+   * constraint that made them fragment builtins rather than pipeline stages in the first place. So
+   * they ride as fragment passes on the same shell — still one shell, no extra nest.
+   *
+   * Emitted only at a non-zero amount, so the film section costs nothing until it is used. Each pass
+   * gets its own `effectKey` suffix: they come from one node, and a shared key would let one pass's
+   * cached state answer for the other.
+   */
+  const buildUnifiedColorPasses = (node: FlarexNode, p: FlarexParamReader): SceneFragmentPass[] => {
+    const passes: SceneFragmentPass[] = [];
+    const vignetteAmount = clamp01(p.num("vignetteAmount", 0));
+    if (vignetteAmount > 0) {
+      const pass = fragmentPass(node, FLAREX_VIGNETTE_ID, {
+        amount: vignetteAmount,
+        size: clamp01(p.num("vignetteSize", 0.58)),
+        feather: clamp01(p.num("vignetteFeather", 1)),
+        roundness: clamp01(p.num("vignetteRoundness", 0)),
+        highlights: clamp01(p.num("vignetteHighlights", 0)),
+      });
+      if (pass) passes.push({ ...pass, effectKey: `${pass.effectKey}_vignette` });
+    }
+    const grainAmount = clamp01(p.num("grainAmount", 0));
+    if (grainAmount > 0) {
+      const pass = fragmentPass(node, FLAREX_GRAIN_ID, { amount: grainAmount, size: p.num("grainSize", 1) });
+      if (pass) passes.push({ ...pass, effectKey: `${pass.effectKey}_grain` });
+    }
+    return passes;
   };
 
   // ── Node evaluation (memoized backwards DFS; cycles degrade to null) ────────────────────────
@@ -985,6 +1101,8 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       // Every color node lowers through ONE body (see `lowerColorNode` / `FLAREX_COLOR_NODES`), so
       // adding a color node is a table row, not a case.
+      // `color` is the unified grade node (all stages in one); the rest are the atomic ones. Same body.
+      case "color":
       case "colorCorrect":
       case "colorCurves":
       case "hueSat":
