@@ -79,72 +79,77 @@ const WHEEL_GRAIN = (() => {
  * ring reads as a machined band AROUND the ball rather than the point where a gradient got vivid.
  * Without that gap there is no ring at all — just a hot edge.
  */
-const WHEEL_BACKGROUND = (() => {
-  // 96 stops. At full chroma the seams between conic stops are plainly visible, and this is the one
-  // element in the panel a colorist actually stares at — the cost is a static string built once.
+/**
+ * Hue conic at a given saturation/value. 96 stops — at full chroma the seams between fewer are
+ * plainly visible, and this is the element a colorist actually stares at. Built once per variant.
+ *
+ * Hue ORIENTATION (`90 − φ`) is the engine's tint math, NOT a style choice: it is what makes dragging
+ * toward a colour actually push that colour into the image. Matching another application's wheel
+ * orientation would require changing the engine's mapping, i.e. changing what a drag does.
+ */
+function hueConic(s: number, v: number): string {
   const steps = 96;
   const stops: string[] = [];
   for (let i = 0; i <= steps; i += 1) {
     const phi = (i / steps) * 360;
-    // Hue ORIENTATION is the engine's tint math, not a style choice — it is what makes dragging
-    // toward a colour actually push that colour. Only the chroma/falloff below is cosmetic.
     const hue = (90 - phi + 360) % 360;
-    stops.push(`${hsvCss(hue, 1, 1)} ${phi.toFixed(2)}deg`);
+    stops.push(`${hsvCss(hue, s, v)} ${phi.toFixed(2)}deg`);
   }
-  // ── 5 · CHROMA SCRIM ────────────────────────────────────────────────────────────────────────
-  // A neutral scrim whose OPACITY is the saturation control. Alpha ≈ 1 − r² (hand-placed), so chroma
-  // rises quadratically: the middle stays close to neutral and colour only asserts itself out near
-  // the field edge. Grey, never black — fading chroma to black crushes it into a dark disc.
-  // It clears completely at 90.5%, handing the last tenth of the radius to the ring at full strength.
-  const SCRIM = "44, 48, 56";
+  return `conic-gradient(from 0deg, ${stops.join(", ")})`;
+}
+
+/**
+ * OUTER RING — full brightness, full saturation. Rendered on its own element (masked to the outer
+ * band) rather than as a background layer of the field, because the ring and the field need
+ * DIFFERENT hsv values and one conic cannot be both. That was the structural error behind every
+ * earlier attempt: scrimming a single bright conic desaturates it but leaves it BRIGHT, which is
+ * exactly the pastel colour-picker look. The reference has a dark saturated field with a separate
+ * vivid ring.
+ */
+export const WHEEL_RING = hueConic(1, 1);
+
+/**
+ * THE FIELD — the disc inside the ring. Layers, top-most first:
+ *
+ *   1 grain     dither; CSS gradients band badly across a large dark low-chroma area
+ *   2 gap       the dark groove that divides field from ring, so the ring is an OBJECT
+ *   3 scrim     neutral fade toward the centre — chroma rises with radius
+ *   4 hue       conic at REDUCED VALUE: dark but still saturated
+ *
+ * Layer 4 is the fix. The field's hues must be dark AND saturated (deep red, deep green), which is a
+ * low-VALUE conic — not a bright conic greyed down, which is what produces pastel. The ring keeps
+ * full value on its own element, so the two can differ.
+ */
+const WHEEL_BACKGROUND = (() => {
+  // Neutral centre → chroma toward the edge. Only lightly opaque at the rim, so the field arrives at
+  // the gap already saturated and the ring is a step up in BRIGHTNESS rather than in colour.
+  const SCRIM = "42, 45, 52";
   const scrim = [
-    `rgba(${SCRIM}, 0.995) 0%`,
-    `rgba(${SCRIM}, 0.99) 14%`,
-    `rgba(${SCRIM}, 0.975) 26%`,
-    `rgba(${SCRIM}, 0.95) 38%`,
-    `rgba(${SCRIM}, 0.91) 48%`,
-    `rgba(${SCRIM}, 0.85) 57%`,
-    `rgba(${SCRIM}, 0.77) 65%`,
-    `rgba(${SCRIM}, 0.66) 72%`,
-    `rgba(${SCRIM}, 0.52) 79%`,
-    `rgba(${SCRIM}, 0.34) 85%`,
-    `rgba(${SCRIM}, 0.12) 89%`,
-    `rgba(${SCRIM}, 0) 90.5%`,
+    `rgba(${SCRIM}, 0.9) 0%`,
+    `rgba(${SCRIM}, 0.84) 12%`,
+    `rgba(${SCRIM}, 0.72) 24%`,
+    `rgba(${SCRIM}, 0.58) 37%`,
+    `rgba(${SCRIM}, 0.43) 50%`,
+    `rgba(${SCRIM}, 0.29) 63%`,
+    `rgba(${SCRIM}, 0.17) 75%`,
+    `rgba(${SCRIM}, 0.08) 85%`,
+    `rgba(${SCRIM}, 0) 92%`,
   ].join(", ");
 
-  // ── 4 · EDGE VIGNETTE ───────────────────────────────────────────────────────────────────────
-  // Darkens the field toward its own edge so the disc reads as having volume. Stops before the ring:
-  // the ring must remain the brightest thing on the control.
-  const vignette = [
-    "transparent 0 52%",
-    "rgba(9, 10, 13, 0.18) 70%",
-    "rgba(9, 10, 13, 0.42) 82%",
-    "rgba(9, 10, 13, 0.5) 86%",
-    "transparent 89%",
+  // The groove. Thin and dark, sitting just inside where the ring element begins.
+  const gap = [
+    "transparent 0 87%",
+    "rgba(7, 8, 10, 0.66) 89%",
+    "rgba(7, 8, 10, 0.66) 90.5%",
+    "transparent 92%",
   ].join(", ");
-
-  // ── 3 · RIM SEPARATOR ───────────────────────────────────────────────────────────────────────
-  // The dark gap that turns a bright edge into a RING. This is the single layer that most decides
-  // whether the control reads as machined hardware or as a gradient that got vivid.
-  const separator = [
-    "transparent 0 86.5%",
-    "rgba(6, 7, 9, 0.72) 88.5%",
-    "rgba(6, 7, 9, 0.8) 90%",
-    "transparent 91.5%",
-  ].join(", ");
-
-  // ── 2 · AMBIENT ─────────────────────────────────────────────────────────────────────────────
-  // Broad soft light from above. Deliberately NOT a point specular: a highlight reads as a glossy
-  // sphere, and every reference tool renders these as flat, recessed discs.
-  const ambient = "radial-gradient(120% 95% at 50% -12%, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.016) 45%, transparent 72%)";
 
   return [
     `${WHEEL_GRAIN} 0 0 / 90px 90px repeat`,
-    ambient,
-    `radial-gradient(circle at center, ${separator})`,
-    `radial-gradient(circle at center, ${vignette})`,
+    `radial-gradient(circle at center, ${gap})`,
     `radial-gradient(circle at center, ${scrim})`,
-    `conic-gradient(from 0deg, ${stops.join(", ")})`,
+    // Dark, saturated — NOT bright-and-greyed.
+    hueConic(0.95, 0.62),
   ].join(", ");
 })();
 
@@ -325,6 +330,10 @@ function Wheel({
         onDoubleClick={onReset}
         title={`${label} color balance — drag to push color; double-click to reset`}
       >
+        {/* The vivid outer ring, on its own element so it can carry FULL value while the field stays
+            dark and saturated (see WHEEL_RING). Masked to the outer band; inert to pointers, so it
+            changes nothing about how the pad is dragged. */}
+        <span className="color-wheel-ring" style={{ background: WHEEL_RING }} />
         <span className="color-wheel-handle" style={{ left: handleLeft, top: handleTop }} />
       </div>
       <input

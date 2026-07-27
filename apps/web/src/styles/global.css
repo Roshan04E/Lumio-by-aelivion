@@ -17463,10 +17463,10 @@ input.scrub-number:focus {
      between the wheels and the surface comes from the wheels' own recessed bevel, not from a card
      around them. (An earlier pass added a faint tint here for "three layers"; a tint plus a radius is
      a card, which is the dashboard aesthetic this is specifically avoiding.) */
-  /* Horizontal padding is clearance for the outer wheels' 9px housings, which are box-shadow spread
-     and therefore live OUTSIDE the layout box — with zero padding they clip against the panel edge. */
+  /* Horizontal padding clears the outer wheels' 6px bezel, which is box-shadow spread and so lives
+     outside the layout box. */
   gap: 0;
-  padding: 2px 11px 6px;
+  padding: 2px 8px 6px;
   border: 0;
   border-radius: 0;
   background: none;
@@ -17494,9 +17494,9 @@ input.scrub-number:focus {
 .color-wheels-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  /* Must clear TWO 10px housings (one per neighbour) plus breathing room — the housings are drawn
-     outside the layout box, so a gap under ~22px lets adjacent bezels touch. */
-  gap: 27px;
+  /* The wheels are the only objects here, so the gap is what groups them. Back down now that the
+     housing (which drew outside the layout box and needed clearance) is gone. */
+  gap: 16px;
 }
 
 .color-wheel {
@@ -17512,10 +17512,10 @@ input.scrub-number:focus {
 .color-wheel-pad {
   position: relative;
   width: 100%;
-  /* The trackball dominates the column; everything else in this panel is annotation. Sized so the
-     disc PLUS its 9px housing (drawn as box-shadow spread below, which sits outside the layout box)
-     still fits the column — hence 130 here rather than the bare 146 the disc alone would take. */
-  max-width: 130px;
+  /* The trackball dominates the column; everything else in this panel is annotation. The housing is
+     gone (the colour ring IS the border now), so the disc gets that space back. At this size the
+     unscrimmed outer band past 92% lands at ~5px — the ring thickness. */
+  max-width: 144px;
   aspect-ratio: 1 / 1;
   border-radius: 999px;
   cursor: crosshair;
@@ -17529,24 +17529,41 @@ input.scrub-number:focus {
      the disc hover ABOVE the panel, the web-component read) is deliberately absent:
        1. inset dark cap at the top     — the near wall of the recess catching no light
        2. inset light lip at the bottom — the far wall catching it
-       3. hairline inner stroke         — the machined inner edge of the ring
-       4. hairline outer stroke, dark   — where the recess meets the surface
-       5. the 9px HOUSING — a near-black bezel the disc is seated into. This is what gives the chroma
-          ring something to be contrasty AGAINST: on a mid-grey panel the ring's own brightness had
-          nothing to read against, and the disc read as a sticker rather than a seated part.
-       6. hairline light edge on the housing's outside, so the bezel itself has a defined boundary */
+       3. hairline inner stroke         — the machined inner edge
+       4. hairline outer stroke, dark   — where the disc meets the surface
+
+     THE BORDER IS THE COLOUR RING. The ~5px band at the disc's edge is full-chroma conic (layer 6,
+     unscrimmed past 92%) — the vivid ring is the border, exactly as in the reference. A previous pass
+     put a 9px near-black housing here instead, which inverted the whole idea: the heaviest, highest-
+     contrast element on the control became a black slab, and the colour it was supposed to frame was
+     the quietest thing on screen. There is no housing now — just a 1px line where the disc ends. */
   box-shadow:
-    inset 0 2px 3px -1px rgba(0, 0, 0, 0.55),
+    inset 0 2px 3px -1px rgba(0, 0, 0, 0.5),
     inset 0 -1px 0 rgba(255, 255, 255, 0.06),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 0 0 1px rgba(0, 0, 0, 0.5),
-    0 0 0 9px #0a0c0f,
-    0 0 0 10px rgba(255, 255, 255, 0.075);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 0 0 1px rgba(0, 0, 0, 0.6),
+    /* 5px BEZEL, dark grey rather than black — it is what the vivid ring reads against. Black made it
+       the loudest element on the control; a grey a step below the surface frames without shouting. */
+    0 0 0 5px #171a20,
+    0 0 0 6px rgba(255, 255, 255, 0.05);
   transition: box-shadow 0.18s cubic-bezier(0.2, 0, 0.2, 1);
 }
 
 /* (No mask-image on the pad: it would clip the element's own box-shadows, taking the bevel strokes
    with them. `border-radius` already anti-aliases the disc edge.) */
+
+/* The vivid outer ring. Its own element because it needs FULL brightness while the field underneath
+   stays dark and saturated — one conic cannot be both, and greying a bright one down is what produced
+   the pastel colour-picker look. Masked to the outer ~5px band; no box-shadow here, so the mask is
+   free to clip (unlike on the pad, where it would eat the bevel). */
+.color-wheel-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  -webkit-mask-image: radial-gradient(circle at center, transparent 0 90.5%, #000 92.5%, #000 100%);
+  mask-image: radial-gradient(circle at center, transparent 0 90.5%, #000 92.5%, #000 100%);
+}
 
 /* Crosshair — the balance datum, ENGRAVED rather than drawn. A single light line reads as an SVG
    stroke laid on top; a dark groove with a 1px light lower lip reads as cut INTO the surface, the
@@ -17557,49 +17574,52 @@ input.scrub-number:focus {
 .color-wheel-pad::after {
   content: "";
   position: absolute;
-  background: rgba(0, 0, 0, 0.34);
+  /* LIGHT line with a dark under-shadow. A dark groove is the right idea on a light surface, but this
+     field is dark — a dark line simply disappeared into it. Light-over-dark still reads as engraved
+     and is actually visible, which is what a datum has to be. */
+  background: rgba(226, 232, 240, 0.36);
   pointer-events: none;
 }
 
 .color-wheel-pad::before {
-  left: 13%;
-  right: 13%;
+  left: 8%;
+  right: 8%;
   top: 50%;
   height: 1px;
   transform: translateY(-0.5px);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.055);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
 }
 
 .color-wheel-pad::after {
-  top: 13%;
-  bottom: 13%;
+  top: 8%;
+  bottom: 8%;
   left: 50%;
   width: 1px;
   transform: translateX(-0.5px);
-  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.055);
+  box-shadow: 1px 0 0 rgba(0, 0, 0, 0.35);
 }
 
-/* Hover brightens the machined inner edge and the housing's outer boundary — the recess itself and
-   the bezel thickness never move, so nothing shifts under the cursor mid-drag. */
+/* Hover brightens the machined inner edge only — nothing resizes, so nothing shifts mid-drag. */
 .color-wheel-pad:hover {
   box-shadow:
-    inset 0 2px 3px -1px rgba(0, 0, 0, 0.55),
+    inset 0 2px 3px -1px rgba(0, 0, 0, 0.5),
     inset 0 -1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.11),
-    0 0 0 1px rgba(0, 0, 0, 0.5),
-    0 0 0 9px #0a0c0f,
-    0 0 0 10px rgba(255, 255, 255, 0.15);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+    0 0 0 1px rgba(0, 0, 0, 0.6),
+    0 0 0 5px #171a20,
+    0 0 0 6px rgba(255, 255, 255, 0.13);
 }
 
-/* Edited: the housing's outer edge picks up the accent — the wheel is "live". One stroke, no halo. */
+/* Edited: an accent ring OUTSIDE the disc, clear of the colour band — tinting the disc's own edge
+   would fight the chroma ring, which is the one thing on this control that must stay true. */
 .color-wheel-pad.is-edited {
   box-shadow:
-    inset 0 2px 3px -1px rgba(0, 0, 0, 0.55),
+    inset 0 2px 3px -1px rgba(0, 0, 0, 0.5),
     inset 0 -1px 0 rgba(255, 255, 255, 0.06),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 0 0 1px rgba(0, 0, 0, 0.5),
-    0 0 0 9px #0a0c0f,
-    0 0 0 10px color-mix(in srgb, var(--nle-accent) 82%, transparent);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 0 0 1px rgba(0, 0, 0, 0.6),
+    0 0 0 5px #171a20,
+    0 0 0 6px color-mix(in srgb, var(--nle-accent) 80%, transparent);
 }
 
 /* Puck: a small crisp white disc with a thin grey edge and a soft drop shadow, so it reads as a
@@ -17607,17 +17627,17 @@ input.scrub-number:focus {
    does not need bulk to stay visible. */
 .color-wheel-handle {
   position: absolute;
-  width: 12px;
-  height: 12px;
+  /* SMALL — in the reference this is a dot, not a knob. It marks a coordinate, so anything larger
+     occludes the very region it is pointing at and reads as a drag affordance instead of a readout.
+     7px is about the smallest that still catches a soft shadow cleanly. */
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
-  /* A precision control, not a marker dot: lit from above like the ball's ambient (so the two agree),
-     a 1px grey border to hold its edge against any hue underneath, and a tight shadow that seats it
-     on the surface rather than floating it. Small — it must never occlude what it is pointing at. */
-  background: linear-gradient(180deg, #fbfcfd 0%, #e9edf2 52%, #cdd3dc 100%);
-  border: 1px solid rgba(96, 104, 117, 0.95);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 1px 2px rgba(0, 0, 0, 0.55);
+  /* Lit from above to agree with the ball's ambient; a hairline grey edge holds it against any hue
+     underneath, and a tight shadow seats it rather than floating it. */
+  background: linear-gradient(180deg, #ffffff 0%, #eef1f5 60%, #dbe0e8 100%);
+  border: 1px solid rgba(88, 96, 110, 0.9);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   /* Transform ONLY — never the position. `left`/`top` carry the drag, and transitioning them would
      put the puck behind the cursor. */
   transform: translate(-50%, -50%);
@@ -17626,17 +17646,14 @@ input.scrub-number:focus {
 }
 
 .color-wheel-pad:hover .color-wheel-handle {
-  transform: translate(-50%, -50%) scale(1.12);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 1px 3px rgba(0, 0, 0, 0.65);
+  transform: translate(-50%, -50%) scale(1.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
 /* Label: small and wide-tracked, but SCANNABLE — it has to name the wheel from across the panel.
    At 72% muted it was so faint the three columns lost their identities. */
 .color-wheel-label {
-  /* Clears the housing's 10px top spread, so the label never sits on the bezel. */
-  margin-bottom: 17px;
+  margin-bottom: 10px;
   font-size: 0.585rem;
   font-weight: 750;
   text-transform: uppercase;
