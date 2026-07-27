@@ -21654,11 +21654,6 @@ input.scrub-number:focus {
   cursor: help;
 }
 
-.color-scopes-source.is-fallback {
-  color: #ffcf87;
-  background: rgba(255, 190, 90, 0.14);
-  border-color: rgba(255, 190, 90, 0.3);
-}
 
 .color-scopes-approx {
   font-size: 9px;
@@ -25694,29 +25689,26 @@ h3.notes-note-md-heading {
   pointer-events: none;
 }
 
-/* Isolate toggle in the scopes footer. Off it is furniture; on it is a STATE the reading depends on,
-   so it takes the accent — a scope measuring one clip while looking identical to one measuring the
-   whole programme is the failure mode this exists to prevent. */
-.color-scopes-isolate {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 2px;
-  color: var(--nle-text-muted, #9fa6b2);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  cursor: pointer;
-}
 
-.color-scopes-isolate:hover {
-  color: var(--nle-text, #e8e8e8);
-  border-color: rgba(255, 255, 255, 0.2);
-}
-
-.color-scopes-isolate.is-on {
+/* Solo: show this clip alone in the viewer — the timeline's equivalent of the Flarex view dot. Off it
+   is a quiet header action; on it is ACCENT, because a soloed viewer looks like a perfectly normal
+   composite that happens to be missing every other layer, and the scopes are measuring it. A mode you
+   cannot tell you are in is the failure this guards against. */
+.inspector-solo-toggle.is-on {
   color: var(--nle-accent, #4d9fff);
-  background: color-mix(in srgb, var(--nle-accent, #4d9fff) 18%, transparent);
   border-color: color-mix(in srgb, var(--nle-accent, #4d9fff) 60%, transparent);
+  background: color-mix(in srgb, var(--nle-accent, #4d9fff) 18%, transparent);
+}
+
+.inspector-solo-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* A DIFFERENT clip is soloed. Solo persists across selection (After Effects behaviour — it is a view
+   state, not a property of whatever you happen to have clicked), so without this you could inspect one
+   clip while the viewer and scopes showed another, with nothing on screen saying so. */
+.inspector-solo-toggle.is-other {
+  color: color-mix(in srgb, var(--nle-accent, #4d9fff) 55%, transparent);
+  border-color: color-mix(in srgb, var(--nle-accent, #4d9fff) 25%, transparent);
 }

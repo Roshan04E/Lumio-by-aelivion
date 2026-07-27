@@ -37,12 +37,12 @@ const VIRTUAL_PREFIX = "flarexsrc:";
  * from the comp registry plus the surviving host layer by {@link collectFlarexVirtualLayers}, so keeping
  * the host keeps every loader alive.
  */
-export function isolateFlarexHostComposition(composition: TimelineComposition, hostLayerId: string): TimelineComposition {
+export function soloLayerComposition(composition: TimelineComposition, soloLayerId: string): TimelineComposition {
   return {
     ...composition,
     tracks: composition.tracks.map((track) => ({
       ...track,
-      layers: track.layers.filter((layer) => layer.type === "audio" || layer.id === hostLayerId),
+      layers: track.layers.filter((layer) => layer.type === "audio" || layer.id === soloLayerId),
     })),
   };
 }

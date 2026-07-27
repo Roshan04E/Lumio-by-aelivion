@@ -28,19 +28,13 @@ export type ScopeMode = "waveform" | "parade" | "vectorscope" | "histogram";
 export type ScopeLayout = "single" | "two" | "grid" | "column";
 
 /**
- * Trustworthy frame source: returns a top-origin RGBA downsample of the final composited frame at
- * (about) the requested size, or null when the compositor output isn't available this frame.
- */
-/**
- * A frame source for the scopes. Returns null when it cannot produce a picture this instant, which
- * is a normal condition, not an error: the isolating sources refuse to render while playing (the
- * shared compositor belongs to playback then) and before the first composited frame.
+ * A frame source for the scopes: a top-origin RGBA downsample of the composited frame, or null when
+ * the compositor output is not available this instant.
  *
- * `label` names what was ACTUALLY measured. It is returned per-sample rather than passed in as a
- * prop because the answer is only known at sample time — when an isolated source declines, the
- * sampler falls back to the programme output, and a header still reading "Node: Blur1" over output
- * pixels would be a scope lying about its own source. That is the one thing a measurement
- * instrument may never do.
+ * `label` names WHAT was measured — "Output", or the Flarex node / soloed clip the viewer is showing.
+ * It is returned per-sample rather than passed as a prop because the sampler is what knows: the scopes
+ * measure whatever the viewer is currently rooted at, and a footer naming something else would be a
+ * measurement instrument lying about its own source.
  */
 export type ScopeFrameSampler = (
   targetW: number,
@@ -50,8 +44,6 @@ export type ScopeFrameSampler = (
   width: number;
   height: number;
   label?: string;
-  /** True when the requested isolated source declined and this is the programme output instead. */
-  fellBack?: boolean;
 } | null;
 
 interface Props {
@@ -86,19 +78,6 @@ interface Props {
   defaultLayout?: ScopeLayout | undefined;
   /** Hide the layout switcher (compact hosts that fix a single layout). */
   showLayoutPicker?: boolean | undefined;
-  /**
-   * Name of the clip the scopes CAN isolate, or absent when there is nothing to isolate. Presence
-   * alone drives the Isolate toggle's visibility — the host decides what is isolatable, the scopes
-   * only decide whether the user has asked for it.
-   */
-  isolateLabel?: string | undefined;
-  /**
-   * Isolate state — CONTROLLED by the host, not owned per panel. Two scope panels can be open at
-   * once (inspector + left panel) while feeding ONE sampler, so a per-panel switch would let them
-   * disagree about what is being measured while the measurement itself is global.
-   */
-  isolate?: boolean | undefined;
-  onIsolateChange?: ((isolate: boolean) => void) | undefined;
   /** Optional extra header control (e.g. the inspector's "open in left panel" button). */
   headerAction?: ReactNode;
 }
@@ -596,9 +575,6 @@ export function ColorScopes({
   storageKey = "default",
   defaultLayout = "single",
   showLayoutPicker = true,
-  isolateLabel,
-  isolate = false,
-  onIsolateChange,
   headerAction
 }: Props) {
   const [layout, setLayout] = useState<ScopeLayout>(() =>
@@ -612,7 +588,7 @@ export function ColorScopes({
   );
   const [approx, setApprox] = useState(false);
   /** What the last sample actually measured, straight from the sampler — never inferred. */
-  const [source, setSource] = useState<{ label: string; fellBack: boolean } | null>(null);
+  const [source, setSource] = useState<string | null>(null);
   // Shared frame: sampled ONCE per tick and drawn by every pane (1–4 canvases).
   const frameRef = useRef<Frame | null>(null);
   const [frameVersion, setFrameVersion] = useState(0);
@@ -628,7 +604,7 @@ export function ColorScopes({
         const s = sampleSource(dims.w, dims.h);
         if (s) {
           frame = { data: s.data, w: s.width, h: s.height };
-          setSource(s.label ? { label: s.label, fellBack: s.fellBack === true } : null);
+          setSource(s.label ?? null);
         }
       }
       if (!frame) {
@@ -740,35 +716,9 @@ export function ColorScopes({
             on screen or the reading is unattributable. Marked when an isolated source declined and
             this is output instead (it declines during playback by design). */}
         {source ? (
-          <span
-            className={`color-scopes-source ${source.fellBack ? "is-fallback" : ""}`}
-            title={
-              source.fellBack
-                ? "That clip cannot be isolated right now (isolation does not render during playback) — measuring the programme output instead."
-                : `Measuring ${source.label}`
-            }
-          >
-            {source.label}
+          <span className="color-scopes-source" title={`Measuring ${source}`}>
+            {source}
           </span>
-        ) : null}
-        {/* ISOLATE is an explicit toggle, unlike the Flarex node source which auto-follows selection.
-            Selecting a node is a deliberate act; having a clip selected is the resting state of the
-            editor, so auto-isolating on clip selection would silently flip the default away from the
-            programme output for everyone and quietly hide every layer stacked above. */}
-        {isolateLabel ? (
-          <button
-            type="button"
-            className={`color-scopes-isolate${isolate ? " is-on" : ""}`}
-            title={
-              isolate
-                ? `Measuring ${isolateLabel} alone — click to measure the full programme output`
-                : `Measure ${isolateLabel} alone, ignoring everything composited above it`
-            }
-            aria-pressed={isolate}
-            onClick={() => onIsolateChange?.(!isolate)}
-          >
-            Isolate
-          </button>
         ) : null}
         <span className="color-scopes-label">Rec.709 SDR</span>
         {approx ? (

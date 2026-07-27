@@ -106,18 +106,6 @@ export interface SceneViewerCaptureHandle {
     buffer?: Uint8Array | undefined;
   }): { pixels: Uint8Array; width: number; height: number } | null;
   /**
-   * Composite ONE timeline clip alone and read it back — the isolated scope source, so a colorist can
-   * measure a single clip instead of whatever the timeline stacks on top of it. Same mechanism and
-   * same limits as `renderFlarexNodeThumbnail` (they share an implementation): null while playing,
-   * before the first composited frame, and when the clip is not among the viewer's current layers.
-   */
-  renderLayerIsolated(input: {
-    layerId: string;
-    targetWidth: number;
-    targetHeight: number;
-    buffer?: Uint8Array | undefined;
-  }): { pixels: Uint8Array; width: number; height: number } | null;
-  /**
    * Downsample the RETAINED composite (last presented frame) into a small top-origin RGBA thumbnail
    * for the color scopes — no re-composite, no dependence on the on-screen canvas. Null when the
    * compositor is unavailable this frame (caller falls back to a DOM-element sample).
@@ -935,10 +923,9 @@ export function ScenePreviewCanvas({
     if (!captureRef) return undefined;
     const releaseCaptureResources = () => {
       for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
-        // "thumb:" is the node-thumbnail pool (Slice 6) and "isolate:" the isolated-clip scope pool —
-        // same lifetime rule as the capture pool: all are scratch, all are rebuilt on demand, and
-        // none may outlive the handle.
-        if (!id.startsWith("capture:") && !id.startsWith("thumb:") && !id.startsWith("isolate:")) continue;
+        // "thumb:" is the node-thumbnail pool (Slice 6) — same lifetime rule as the capture pool: both
+        // are scratch, both are rebuilt on demand, and neither may outlive the handle.
+        if (!id.startsWith("capture:") && !id.startsWith("thumb:")) continue;
         try {
           renderer.dispose();
         } catch {
@@ -1110,14 +1097,6 @@ export function ScenePreviewCanvas({
       },
       renderFlarexNodeThumbnail({ hostLayerId, nodeId, targetWidth, targetHeight, buffer }) {
         return renderIsolated(hostLayerId, nodeId, targetWidth, targetHeight, buffer, "thumb:");
-      },
-      renderLayerIsolated({ layerId, targetWidth, targetHeight, buffer }) {
-        // Same machinery as the node thumbnail, minus the re-root: composite this ONE clip through
-        // the viewer's own caches and graded textures. Sharing the implementation is deliberate —
-        // the subtleties here (playing gate, live-media requirement, aspect containment, and the
-        // fact that the readback CLOBBERS the retained composite) are exactly the things that go
-        // wrong when a second copy of this drifts.
-        return renderIsolated(layerId, undefined, targetWidth, targetHeight, buffer, "isolate:");
       },
       readCompositeThumbnail(targetW, targetH, buffer) {
         const compositor = compositorRef.current;

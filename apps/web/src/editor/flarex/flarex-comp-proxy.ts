@@ -122,7 +122,7 @@ export function flarexCompProxyIdentity(
 /**
  * The composition a proxy renders: the host clip ALONE, shifted to t=0, for exactly its own duration.
  *
- * Not `isolateFlarexHostComposition` + a work-area clip, though that is the same shape — this is built
+ * Not `soloLayerComposition` + a work-area clip, though that is the same shape — this is built
  * directly because the proxy must capture precisely what the flarex hook returns for this one layer:
  *
  *  - other tracks are dropped (a clip stacked above is composited AFTER the hook, so baking it in would

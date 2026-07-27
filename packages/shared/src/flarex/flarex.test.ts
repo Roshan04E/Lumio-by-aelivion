@@ -33,7 +33,7 @@ import {
   collectFlarexVirtualLayers,
   flarexVirtualLayerId,
   isFlarexGeneratorVirtualLayer,
-  isolateFlarexHostComposition,
+  soloLayerComposition,
 } from "./virtual-layers";
 import { CREATIVE_LOOK_NAMES } from "../color/looks";
 import type { FlarexComp, FlarexNodeType } from "./types";
@@ -1677,7 +1677,7 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
     ],
   } as unknown as TimelineComposition;
 
-  const isolated = isolateFlarexHostComposition(comp, "host");
+  const isolated = soloLayerComposition(comp, "host");
   const idsOf = (c: TimelineComposition) => c.tracks.flatMap((t) => t.layers.map((l) => l.id));
 
   check("isolation: the Flarex host survives", idsOf(isolated).includes("host"));
