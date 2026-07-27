@@ -13,6 +13,7 @@
  */
 
 import { getTexImageSourceProducerInfo } from "../color/gl-context";
+import { frameProfiler } from "../color/frame-profiler";
 import { MediaWebGLRenderer } from "../color/media-renderer";
 import { colorPipelineCacheKey } from "../color/pipeline";
 import type { ColorPipeline } from "../color/types";
@@ -35,6 +36,7 @@ import { NEST_ID_SEPARATOR, type NestedGroupSpec } from "../nesting";
 import { fragmentEffectParamsFromStorage, SHADER_MANIFEST_ID_PARAM_KEY } from "../plugin-effect-adapter";
 import { compileFlarexComp } from "../flarex/compile-flarex";
 import { flarexVirtualLayerId } from "../flarex/virtual-layers";
+import { FlarexSourceDrawCache } from "../flarex/source-draw-cache";
 import type { FlarexComp } from "../flarex/types";
 import type { TimelineEffectParamValue, TimelineLayer, TransitionSpec } from "../types";
 // VALUE import (not type-only): nested-comp masks need their OWN matte-cache instance, sized to the
@@ -145,6 +147,20 @@ export interface BuildSceneDrawsInputs {
    */
   flarexComps?: Record<string, FlarexComp> | undefined;
   /**
+   * Pre-rendered comp frames, by comp id (plans/flarex-comp-proxy.md, S2). When a `flarexCompId` layer
+   * has an entry, the lowered graph is REPLACED by this image and `compileFlarexComp` never runs — the
+   * playback win. The caller owns validity: it must only pass a frame whose stored key still matches the
+   * comp's current identity, and only where an OPAQUE stand-in is safe (`canSubstituteFlarexProxy` —
+   * rendered proxies bake the composition background, so a comp with anything drawn below it must keep
+   * evaluating live).
+   *
+   * PLAYBACK ONLY. Export must always re-render from the graph — the render manifest is the product
+   * contract and a cached frame is a lossy derivative — so `export-core` never sets this, and the
+   * Remotion path never sets it either. Absent ⇒ byte-identical to before this field existed, which is
+   * what keeps an export with a proxy on disk identical to one without.
+   */
+  flarexCompProxies?: Record<string, { source: TexImageSource | SceneTextureSource; sourceWidth: number; sourceHeight: number; sourceVersion?: number | undefined }> | undefined;
+  /**
    * Asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic off-timeline
    * media layers — one per MediaIn node that loads a media-pool asset — built by
    * `collectFlarexVirtualLayers`. The caller must ALSO have decoded/graded them (so `getMediaGraded`
@@ -161,6 +177,24 @@ export interface BuildSceneDrawsInputs {
    * only by the parity gate that renders a materialized variant of a comp.
    */
   flarexMaterializeNodeIds?: ReadonlySet<string> | undefined;
+  /**
+   * Runtime re-root for a Flarex compile (Slice 4, node previews): compile the comp as if this node were
+   * the output. Forwarded verbatim to `compileFlarexComp`'s `previewRootNodeId`, which takes precedence
+   * over the comp's persisted `previewNodeId` WITHOUT mutating it — so rendering a node thumbnail can
+   * never move the user's own view-dot selection. NEVER serialized (not on the graph or the render
+   * manifest); absent in production → byte-identical to before this field existed. A thumbnail pass
+   * renders one comp at a time, so a single id is sufficient.
+   */
+  flarexPreviewRootNodeId?: string | undefined;
+  /**
+   * Cross-frame cache for Flarex asset-source draws (perf: `resolveSourceDraw` rebuilt a full per-clip
+   * draw every frame, ~54% of compile time — profiler-measured). A BARE virtual loader's draw structure
+   * is time-invariant, so on a hit the cached immutable template is reused and only the live media handle
+   * (`source`/`sourceVersion`/size) is rebound. Owned + persisted across frames by the caller (like
+   * `matteCache`); omitted (export/Remotion/tests) = every source draw is rebuilt fresh, byte-identical to
+   * before this field existed. Output is byte-identical either way (parity gate).
+   */
+  flarexSourceDrawCache?: FlarexSourceDrawCache | undefined;
 }
 
 /** Effect types that route through the builtin fragment-shader harness (`buildFragmentPasses` below).
@@ -503,6 +537,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
   ): SceneLayerDraw | null => {
+    frameProfiler.bump("build.layerDraw.calls"); // pure: rebuilds the SceneLayerDraw structure every call
     if (layer.type === "text" || layer.type === "shape") {
       // Text/shape: the raster is transform- AND grade-INDEPENDENT (4.1b), so the composite quad applies
       // position/scale/rotation/opacity while the grade/mask/3D fold in below (4.1c) — one cached raster is
@@ -661,6 +696,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
    * records `window.__rfFragmentEffects` telemetry in dev.
    */
   const buildFragmentPasses = (layer: TimelineLayer, mc: SceneMaskMatteCache | null = matteCache): SceneFragmentPass[] => {
+    frameProfiler.bump("build.fragmentPasses.calls"); // pure: no cache, rebuilds the pass list every call
     const passes: SceneFragmentPass[] = [];
     const layerTimeSeconds = Math.max(0, t - layer.startSeconds);
     for (const effect of layer.effects) {
@@ -711,6 +747,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         maskVersion: mask && mc ? mc.versionOf(effect.id) : undefined,
       });
     }
+    if (passes.length) frameProfiler.bump("build.fragmentPasses.emitted", passes.length);
     return passes;
   };
 
@@ -724,7 +761,28 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     if (!draw || !layer.flarexCompId) return draw;
     const comp = inputs.flarexComps?.[layer.flarexCompId];
     if (!comp) return draw;
-    const lowered = compileFlarexComp(comp, {
+    // COMP PROXY (plans/flarex-comp-proxy.md, S2): a pre-rendered frame of this comp replaces the whole
+    // lowering. Built FRESH rather than spread from `draw` — the host's transform, opacity, blend, masks
+    // and passes are all already baked into the proxy (this hook runs at the END of the layer's draw
+    // build, so they fed the comp's MediaIn), and carrying them over would apply every one of them a
+    // second time. Full-frame identity quad: the proxy IS the finished comp frame.
+    const proxy = inputs.flarexCompProxies?.[layer.flarexCompId];
+    if (proxy) {
+      frameProfiler.bump("evaluator.proxyHits");
+      return {
+        debugLayerId: `${layer.id}__flarexproxy`,
+        source: proxy.source,
+        sourceWidth: proxy.sourceWidth,
+        sourceHeight: proxy.sourceHeight,
+        fit: "fill",
+        transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+        blendMode: "normal",
+        ...(proxy.sourceVersion === undefined ? {} : { sourceVersion: proxy.sourceVersion }),
+      };
+    }
+    // Profiler-only: isolate compile-only time from the rest of buildSceneDraws (the gate metric — is the
+    // Flarex evaluator actually the cost, or is the 3–5 ms generic build overhead?). No-op when disabled.
+    const lowered = frameProfiler.measure("evaluator.compile", () => compileFlarexComp(comp, {
       compWidth: dims.w,
       compHeight: dims.h,
       renderScale: rScale,
@@ -735,6 +793,9 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // Runtime-only materialization policy (Slice 1) — undefined in production (dormant); set only
       // by the parity gate. Never sourced from persisted graph/manifest data.
       materializeNodeIds: inputs.flarexMaterializeNodeIds,
+      // Node previews (Slice 4): re-root this compile at an arbitrary node without disturbing the
+      // comp's persisted view dot. Undefined in normal rendering.
+      previewRootNodeId: inputs.flarexPreviewRootNodeId,
       // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
       // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its
       // media is provided via `getMediaGraded(virtualId)` exactly like a real clip; an unready/absent
@@ -748,9 +809,9 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         // the last frame to the end of the comp. `freeze`/image/unknown loaders never end (Infinity).
         const localT = Math.max(0, t - layer.startSeconds);
         if (localT >= virtual.durationSeconds) return "ended";
-        return buildLayerPreFlarexDraw(virtual, dims);
+        return cachedPreFlarexDraw(virtual, dims, comp.version ?? 0);
       },
-    });
+    }));
     return lowered ?? draw;
   };
 
@@ -763,6 +824,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     layer: TimelineLayer,
     dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null } = { w, h, matteCache }
   ): SceneLayerDraw | null {
+    frameProfiler.bump("build.preFlarex.calls"); // the Flarex source ADAPTER; time = compile.resolveSource
     if (!regionPassModel || regionCloneBaseId(layer.id)) {
       const draw = buildLayerDraw(layer, dims);
       if (draw) {
@@ -798,6 +860,58 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     }
     return draw;
   }
+
+  /**
+   * Cross-frame-cached `buildLayerPreFlarexDraw` for Flarex asset-source loaders. A BARE loader (identity
+   * transform, no effects/masks/animation — every `collectFlarexVirtualLayers` output) has a time-invariant
+   * draw STRUCTURE, so on a cache hit we reuse the immutable template and REBIND only the live media handle
+   * (`source`/`sourceVersion`/size), skipping the full rebuild (`buildLayerDraw` + `getCompositionTransform`
+   * + `buildFragmentPasses`). Byte-identical to the uncached path: the rebound media fields are exactly what
+   * a fresh build would compute this frame. Not bare, or no cache supplied → full rebuild (unchanged path).
+   */
+  const cachedPreFlarexDraw = (
+    virtual: TimelineLayer,
+    dims: { w: number; h: number; matteCache: SceneMaskMatteCache | null },
+    compVersion: number
+  ): SceneLayerDraw | null => {
+    const cache = inputs.flarexSourceDrawCache;
+    const bare =
+      (virtual.effects?.length ?? 0) === 0 &&
+      (virtual.animations?.length ?? 0) === 0 &&
+      (virtual.keyframes?.length ?? 0) === 0 &&
+      (virtual.masks?.length ?? 0) === 0;
+    if (!cache || !bare) {
+      frameProfiler.bump("sourceDraw.uncached");
+      return buildLayerPreFlarexDraw(virtual, dims);
+    }
+    const key = FlarexSourceDrawCache.key(virtual.id, compVersion, rScale);
+    const template = cache.get(key);
+    if (template) {
+      // HIT: skip the rebuild; rebind only the per-frame-volatile media handle. If the source isn't ready
+      // this frame, hold (return null → the same not-ready path a fresh build would take).
+      const src = getMediaGraded(virtual.id);
+      if (!src || src.width === 0 || src.height === 0) {
+        onLayerNotReady?.(virtual.id);
+        frameProfiler.bump("sourceDraw.hitNotReady");
+        return null;
+      }
+      frameProfiler.bump("sourceDraw.hits");
+      return {
+        ...template,
+        source: src,
+        sourceWidth: src.width,
+        sourceHeight: src.height,
+        sourceVersion: getTexImageSourceProducerInfo(src as unknown as TexImageSource)?.updatedAt,
+      };
+    }
+    // MISS: full build (already carries this frame's media), then cache the shallow-frozen template. The
+    // built draw is returned directly; the Flarex compiler clones it (cloneImage) before any mutation, so
+    // the cached template is never mutated in place.
+    frameProfiler.bump("sourceDraw.misses");
+    const built = buildLayerPreFlarexDraw(virtual, dims);
+    if (built) cache.set(key, Object.freeze(built) as SceneLayerDraw);
+    return built;
+  };
 
   /** The pre-Flarex draw with the Flarex hook applied: a layer with a `flarexCompId` returns the LOWERED
    *  graph (possibly a group draw) instead of its plain draw; every other layer returns its plain draw
