@@ -2863,6 +2863,64 @@ export class SceneCompositor {
   }
 
   /**
+   * Copy one render target into another, choosing the only legal mechanism for the pair.
+   *
+   * `blitFramebuffer` CANNOT cross numeric formats: "if the read buffer contains fixed-point values,
+   * the draw buffer must as well". With the HDR pipeline on, the accumulators are RGBA16F while the
+   * scope/thumbnail readback target is deliberately RGBA8 (readPixels there is UNSIGNED_BYTE), so
+   * every such blit became GL_INVALID_OPERATION and silently produced nothing — blank scopes and
+   * black node thumbnails, since both funnel through readCompositeThumbnail.
+   *
+   * A textured fullscreen draw has no such restriction and converts float → fixed-point on write.
+   * This is the same substitution `presentFrame` already makes for the same reason (a blit to a
+   * multisampled default framebuffer is equally illegal, and equally silent).
+   *
+   * When the formats DO match this still blits — the shipped 8-bit path keeps its exact previous
+   * behaviour rather than being rerouted through a shader on the strength of a flag that is off.
+   */
+  private copyTarget(
+    src: RenderTarget,
+    dest: RenderTarget,
+    srcW: number,
+    srcH: number,
+    destW: number,
+    destH: number,
+    filter: number
+  ): void {
+    const gl = this.gl;
+    if (src.precision === dest.precision) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src.fbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dest.fbo);
+      gl.blitFramebuffer(0, 0, srcW, srcH, 0, 0, destW, destH, gl.COLOR_BUFFER_BIT, filter);
+      return;
+    }
+    // A blit ignores blend/scissor; a draw does not. This can be called at arbitrary times (the scope
+    // readback is not tied to a compositing pass), so the state is forced and restored rather than
+    // assumed — otherwise the copy would silently blend into, or be clipped against, whatever the last
+    // caller left behind.
+    const prevViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
+    const prevBlend = gl.isEnabled(gl.BLEND);
+    const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dest.fbo);
+    gl.viewport(0, 0, destW, destH);
+    gl.useProgram(this.presentProgram);
+    gl.bindVertexArray(this.presentVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    const mode = filter === gl.LINEAR ? gl.LINEAR : gl.NEAREST;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mode);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mode);
+    gl.uniform1i(this.uPresentTex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
+    gl.viewport(prevViewport[0] ?? 0, prevViewport[1] ?? 0, prevViewport[2] ?? destW, prevViewport[3] ?? destH);
+    if (prevBlend) gl.enable(gl.BLEND);
+    if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+  }
+
+  /**
    * Present: draw the final accumulator A onto the output canvas (default framebuffer) with a
    * textured fullscreen triangle. NOT blitFramebuffer-to-default — that is an illegal blit when the
    * default framebuffer is multisampled, and it was failing silently (transparent canvas).
@@ -2994,9 +3052,7 @@ export class SceneCompositor {
     if (!this.scopeThumb) this.scopeThumb = new RenderTarget(gl, w, h);
     else this.scopeThumb.resize(w, h);
     try {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.accumA.fbo);
-      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.scopeThumb.fbo);
-      gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      this.copyTarget(this.accumA, this.scopeThumb, this.width, this.height, w, h, gl.LINEAR);
       const size = w * h * 4;
       const pixels = buffer && buffer.byteLength >= size ? buffer : new Uint8Array(size);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeThumb.fbo);
@@ -3080,9 +3136,7 @@ export class SceneCompositor {
       if (!this.scopeFence) {
         if (!this.scopeThumb) this.scopeThumb = new RenderTarget(gl, w, h);
         else this.scopeThumb.resize(w, h);
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.accumA.fbo);
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.scopeThumb.fbo);
-        gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+        this.copyTarget(this.accumA, this.scopeThumb, this.width, this.height, w, h, gl.LINEAR);
         const size = w * h * 4;
         if (!this.scopePbo) this.scopePbo = gl.createBuffer();
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.scopePbo);
