@@ -44,6 +44,41 @@ function hsvCss(h: number, s: number, v: number): string {
   return `rgb(${Math.round((r + m) * 255)}, ${Math.round((g + m) * 255)}, ${Math.round((b + m) * 255)})`;
 }
 
+/**
+ * Neutral film grain, tiled. Present for a functional reason, not a decorative one: CSS gradients
+ * quantize badly across a large low-chroma dark field, and the banding rings that produces are the
+ * loudest "this is a web gradient" artefact on the wheel. A few percent of monochrome noise dithers
+ * them away — the same reason grading UIs look dense rather than posterized.
+ */
+const WHEEL_GRAIN = (() => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="90"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter><rect width="90" height="90" filter="url(#n)" opacity="0.055"/></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+})();
+
+/**
+ * The trackball is composited from an explicit LAYER STACK, listed here top-most first (CSS paints
+ * background layers in that order). Each layer has one job; the design lives in their interaction,
+ * not in any single gradient.
+ *
+ *   1 GRAIN            dither, kills gradient banding (see WHEEL_GRAIN)
+ *   2 AMBIENT          broad soft light from above — NOT a point specular
+ *   3 RIM SEPARATOR    dark annulus dividing the colour field from the outer ring
+ *   4 EDGE VIGNETTE    field darkening toward its own rim; gives the disc volume
+ *   5 CHROMA SCRIM     saturation compression + luminance falloff (the important one)
+ *   6 HUE SOURCE       one full-saturation conic — the field AND the ring both read from it
+ *
+ * The two decisions that separate an instrument from a colour picker:
+ *
+ * SATURATION IS COMPRESSED, AND RISES WITH THE SQUARE OF RADIUS. A picker shows the gamut, so it
+ * runs full chroma everywhere. A balance control shows DEVIATION FROM NEUTRAL, so its field must be
+ * near-neutral through the middle and gain chroma slowly — which is also what makes small corrections
+ * readable, since the interesting range is near the centre. Layer 5's alpha follows ~r², so the field
+ * never approaches full HSV; only the ring does.
+ *
+ * THE RING IS AN OBJECT, NOT A BRIGHTER EDGE. Layer 3 puts a dark gap between field and ring, so the
+ * ring reads as a machined band AROUND the ball rather than the point where a gradient got vivid.
+ * Without that gap there is no ring at all — just a hot edge.
+ */
 const WHEEL_BACKGROUND = (() => {
   // 96 stops. At full chroma the seams between conic stops are plainly visible, and this is the one
   // element in the panel a colorist actually stares at — the cost is a static string built once.
@@ -56,35 +91,61 @@ const WHEEL_BACKGROUND = (() => {
     const hue = (90 - phi + 360) % 360;
     stops.push(`${hsvCss(hue, 1, 1)} ${phi.toFixed(2)}deg`);
   }
-  // The hue ring is revealed by a radial scrim over it. Two properties of that scrim decide whether
-  // the wheel looks alive or washed out, and both were wrong before:
-  //
-  //  · its COLOUR is a dark GREY, not black. Fading chroma to black crushes it — the colour dies
-  //    before it reaches the middle and the whole ball reads as a dark disc with a coloured edge.
-  //    Fading to grey keeps the hue legible all the way in, which is what makes Resolve's wheels
-  //    readable at a glance.
-  //  · its FALLOFF clears early. Alpha reaches 0 at 88%, so the outer ~12% is UNTOUCHED full-chroma
-  //    conic — a thick, vivid rim rather than a hairline that dissolves into the panel.
-  //
-  // Eased rather than linear (a linear ramp leaves a visible edge where the colour "starts" — the
-  // biggest tell of a CSS-gradient wheel).
-  const SCRIM = "49, 54, 63";
-  const mask = [
-    `rgba(${SCRIM}, 0.96) 0%`,
-    `rgba(${SCRIM}, 0.94) 16%`,
-    `rgba(${SCRIM}, 0.87) 30%`,
-    `rgba(${SCRIM}, 0.76) 42%`,
-    `rgba(${SCRIM}, 0.62) 53%`,
-    `rgba(${SCRIM}, 0.45) 64%`,
-    `rgba(${SCRIM}, 0.28) 73%`,
-    `rgba(${SCRIM}, 0.13) 81%`,
-    `rgba(${SCRIM}, 0.03) 86%`,
-    `rgba(${SCRIM}, 0) 88%`,
+  // ── 5 · CHROMA SCRIM ────────────────────────────────────────────────────────────────────────
+  // A neutral scrim whose OPACITY is the saturation control. Alpha ≈ 1 − r² (hand-placed), so chroma
+  // rises quadratically: the middle stays close to neutral and colour only asserts itself out near
+  // the field edge. Grey, never black — fading chroma to black crushes it into a dark disc.
+  // It clears completely at 90.5%, handing the last tenth of the radius to the ring at full strength.
+  const SCRIM = "44, 48, 56";
+  const scrim = [
+    `rgba(${SCRIM}, 0.995) 0%`,
+    `rgba(${SCRIM}, 0.99) 14%`,
+    `rgba(${SCRIM}, 0.975) 26%`,
+    `rgba(${SCRIM}, 0.95) 38%`,
+    `rgba(${SCRIM}, 0.91) 48%`,
+    `rgba(${SCRIM}, 0.85) 57%`,
+    `rgba(${SCRIM}, 0.77) 65%`,
+    `rgba(${SCRIM}, 0.66) 72%`,
+    `rgba(${SCRIM}, 0.52) 79%`,
+    `rgba(${SCRIM}, 0.34) 85%`,
+    `rgba(${SCRIM}, 0.12) 89%`,
+    `rgba(${SCRIM}, 0) 90.5%`,
   ].join(", ");
-  // Specular: a faint off-centre highlight, topmost, so the ball looks machined rather than drawn.
-  // Kept under 10% — any stronger and it reads as a glossy plastic button.
-  const specular = "radial-gradient(circle at 34% 27%, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03) 32%, transparent 58%)";
-  return `${specular}, radial-gradient(circle at center, ${mask}), conic-gradient(from 0deg, ${stops.join(", ")})`;
+
+  // ── 4 · EDGE VIGNETTE ───────────────────────────────────────────────────────────────────────
+  // Darkens the field toward its own edge so the disc reads as having volume. Stops before the ring:
+  // the ring must remain the brightest thing on the control.
+  const vignette = [
+    "transparent 0 52%",
+    "rgba(9, 10, 13, 0.18) 70%",
+    "rgba(9, 10, 13, 0.42) 82%",
+    "rgba(9, 10, 13, 0.5) 86%",
+    "transparent 89%",
+  ].join(", ");
+
+  // ── 3 · RIM SEPARATOR ───────────────────────────────────────────────────────────────────────
+  // The dark gap that turns a bright edge into a RING. This is the single layer that most decides
+  // whether the control reads as machined hardware or as a gradient that got vivid.
+  const separator = [
+    "transparent 0 86.5%",
+    "rgba(6, 7, 9, 0.72) 88.5%",
+    "rgba(6, 7, 9, 0.8) 90%",
+    "transparent 91.5%",
+  ].join(", ");
+
+  // ── 2 · AMBIENT ─────────────────────────────────────────────────────────────────────────────
+  // Broad soft light from above. Deliberately NOT a point specular: a highlight reads as a glossy
+  // sphere, and every reference tool renders these as flat, recessed discs.
+  const ambient = "radial-gradient(120% 95% at 50% -12%, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.016) 45%, transparent 72%)";
+
+  return [
+    `${WHEEL_GRAIN} 0 0 / 90px 90px repeat`,
+    ambient,
+    `radial-gradient(circle at center, ${separator})`,
+    `radial-gradient(circle at center, ${vignette})`,
+    `radial-gradient(circle at center, ${scrim})`,
+    `conic-gradient(from 0deg, ${stops.join(", ")})`,
+  ].join(", ");
 })();
 
 function neutralWheels(): ColorWheelsValue {
