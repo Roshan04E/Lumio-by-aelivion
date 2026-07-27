@@ -7,6 +7,7 @@
  * in global.css.
  */
 
+import type { ReactNode } from "react";
 import { clamp } from "../editor/inspector/keyframeUtils";
 import type { KeyframeButtonsProps } from "../editor/inspector/controls/KeyframeButtons";
 import { PropertyRow } from "../editor/inspector/controls/PropertyRow";
@@ -18,6 +19,7 @@ export type { SliderTone };
 export function EffectSliderControl({
   keyframe,
   label,
+  icon,
   value,
   min,
   max,
@@ -28,6 +30,8 @@ export function EffectSliderControl({
 }: {
   keyframe?: Omit<KeyframeButtonsProps, "label"> | undefined;
   label: string;
+  /** Optional leading label icon (forwarded to PropertyRow) — parity with NumberControl rows. */
+  icon?: ReactNode;
   value: number;
   min: number;
   max: number;
@@ -49,6 +53,7 @@ export function EffectSliderControl({
     <PropertyRow
       keyframe={keyframe}
       label={label}
+      icon={icon}
       sliderPercent={percent}
       tone={tone}
       onReset={onReset}

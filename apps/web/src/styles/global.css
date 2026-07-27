@@ -53,6 +53,12 @@
   --nle-green: #39d98a;
   --nle-yellow: #f6c85f;
   --nle-red: #ff5f6d;
+  /* Flarex socket / wire colors keyed by DATA TYPE (functional signal — the one place the node canvas
+     carries color beyond the accent). Node bodies stay neutral; selection/hover/marquee use the accent.
+     These are theme-independent (they encode data type, not brand), so they live outside the accent set. */
+  --flarex-socket-image: #5b9dff;
+  --flarex-socket-matte: #3fbf8f;
+  --flarex-socket-number: #e0a44e;
   --nle-radius-xs: 2px;
   --nle-radius-sm: 4px;
   --nle-radius-md: 6px;
@@ -2585,6 +2591,501 @@ input[type="checkbox"] {
   max-width: 280px;
 }
 
+/* ── Extract Person — step-based creative workspace (dominant viewer + workflow panel) ─────────── */
+.xtract-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px 24px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.xtract-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.xtract-header-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: var(--nle-accent-soft);
+  color: var(--nle-accent);
+  flex: none;
+}
+.xtract-header h1 {
+  margin: 0;
+  font: 600 24px/1.15 var(--nle-font-ui);
+  color: var(--nle-text);
+}
+.xtract-header p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--nle-text-muted);
+  max-width: 560px;
+}
+
+/* 70 / 30 split: dominant viewer, step workflow. */
+.xtract-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(300px, 3fr);
+  gap: 18px;
+  align-items: start;
+}
+
+/* Viewer — height is bounded to the viewport so a PORTRAIT clip pillarboxes inside a fixed frame
+   instead of growing tall enough to push past the screen. Landscape letterboxes in the same frame. */
+.xtract-viewer {
+  position: relative;
+  background: var(--nle-bg);
+  border-radius: 18px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  height: clamp(360px, calc(100vh - 210px), 760px);
+}
+.modal-workspace .xtract-viewer {
+  height: clamp(340px, 68vh, 640px);
+}
+.xtract-viewer-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--nle-text-muted);
+}
+.xtract-viewer-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  background: var(--nle-panel-2);
+  color: var(--nle-text-dim);
+}
+.xtract-viewer-empty p {
+  margin: 0;
+  font-size: 14px;
+}
+.xtract-player {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.xtract-player.is-checker {
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.06) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.06) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.06) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.06) 75%);
+  background-size: 22px 22px;
+  background-position: 0 0, 0 11px, 11px -11px, -11px 0;
+}
+.xtract-player .editor-viewer,
+.xtract-player > div:not(.xtract-player-controls) {
+  flex: 1;
+  min-height: 0;
+}
+.xtract-player .preview-tools {
+  display: none !important;
+}
+.xtract-player-badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 3;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(6px);
+}
+.xtract-player-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.55));
+}
+.xtract-player-controls button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  cursor: pointer;
+  flex: none;
+}
+.xtract-player-controls input[type="range"] {
+  flex: 1;
+  accent-color: var(--nle-accent);
+}
+.xtract-player-controls span {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* Workflow panel */
+.xtract-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.xtract-step {
+  background: var(--nle-panel);
+  border-radius: 16px;
+  padding: 16px 16px 18px;
+  transition: opacity 0.18s ease;
+}
+.xtract-step.is-pending {
+  opacity: 0.5;
+}
+.xtract-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.xtract-step-num {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--nle-panel-3);
+  color: var(--nle-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  flex: none;
+}
+.xtract-step.is-active .xtract-step-num {
+  background: var(--nle-accent);
+  color: #fff;
+}
+.xtract-step.is-done .xtract-step-num {
+  background: var(--nle-green, #3fbf6f);
+  color: #fff;
+}
+.xtract-step-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--nle-text);
+}
+
+/* Source card */
+.xtract-source-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.xtract-source-thumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--nle-bg);
+  flex: none;
+}
+.xtract-source-thumb img,
+.xtract-source-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.xtract-source-meta {
+  flex: 1;
+  min-width: 0;
+}
+.xtract-source-meta strong {
+  display: block;
+  font-size: 13px;
+  color: var(--nle-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xtract-source-meta span {
+  font-size: 11.5px;
+  color: var(--nle-text-muted);
+}
+.xtract-change {
+  font-size: 12px;
+  color: var(--nle-accent);
+  cursor: pointer;
+  flex: none;
+}
+.xtract-change input {
+  display: none;
+}
+.xtract-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 26px 16px;
+  border-radius: 14px;
+  border: 1.5px dashed var(--nle-border);
+  color: var(--nle-text-muted);
+  cursor: pointer;
+  text-align: center;
+}
+.xtract-drop:hover {
+  border-color: var(--nle-accent);
+  color: var(--nle-text);
+}
+.xtract-drop strong {
+  font-size: 14px;
+  color: var(--nle-text);
+}
+.xtract-drop span {
+  font-size: 12px;
+}
+.xtract-drop input {
+  display: none;
+}
+.xtract-existing {
+  width: 100%;
+  margin-top: 10px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--nle-border);
+  background: var(--nle-bg);
+  color: var(--nle-text);
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+/* Quality toggle + primary action */
+.xtract-quality {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  background: var(--nle-bg);
+  border-radius: 11px;
+  margin-bottom: 12px;
+}
+.xtract-quality button {
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--nle-text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.xtract-quality button.is-active {
+  background: var(--nle-panel-3);
+  color: var(--nle-text);
+}
+.xtract-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 46px;
+  border: none;
+  border-radius: 12px;
+  background: var(--nle-accent);
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+.xtract-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.xtract-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.xtract-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--nle-text-muted);
+}
+.xtract-muted {
+  color: var(--nle-text-dim);
+}
+
+/* Progress + checklist */
+.xtract-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.xtract-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.xtract-progress-head strong {
+  font-size: 14px;
+  color: var(--nle-text);
+}
+.xtract-progress-head span {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--nle-accent);
+  font-weight: 600;
+}
+.xtract-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--nle-bg);
+  overflow: hidden;
+}
+.xtract-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--nle-accent);
+  transition: width 0.3s ease;
+}
+.xtract-bar-fill.is-indeterminate {
+  width: 35%;
+  animation: xtract-indeterminate 1.1s ease-in-out infinite;
+}
+@keyframes xtract-indeterminate {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+.xtract-eta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--nle-text-muted);
+}
+.xtract-checklist {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.xtract-checklist li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--nle-text-dim);
+}
+.xtract-checklist li.is-active {
+  color: var(--nle-text);
+  font-weight: 500;
+}
+.xtract-checklist li.is-done {
+  color: var(--nle-text-muted);
+}
+.xtract-dot {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--nle-border);
+  color: #fff;
+  flex: none;
+}
+.xtract-checklist li.is-active .xtract-dot {
+  border-color: var(--nle-accent);
+  background: var(--nle-accent);
+  animation: xtract-pulse 1.2s ease-in-out infinite;
+}
+.xtract-checklist li.is-done .xtract-dot {
+  border-color: var(--nle-green, #3fbf6f);
+  background: var(--nle-green, #3fbf6f);
+}
+@keyframes xtract-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--nle-accent-soft); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+.xtract-cancel {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 7px 14px;
+  border: 1px solid var(--nle-border);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--nle-text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.xtract-cancel:hover {
+  color: var(--nle-text);
+  border-color: var(--nle-text-muted);
+}
+
+/* Completion / guided next steps */
+.xtract-done {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.xtract-done-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--nle-green, #3fbf6f);
+}
+.xtract-next {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.xtract-next button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--nle-border);
+  border-radius: 11px;
+  background: var(--nle-bg);
+  color: var(--nle-text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.xtract-next button:hover {
+  border-color: var(--nle-accent);
+}
+.xtract-next button svg {
+  color: var(--nle-accent);
+  flex: none;
+}
+
+@media (max-width: 860px) {
+  .xtract-shell {
+    grid-template-columns: 1fr;
+  }
+  .xtract-viewer {
+    min-height: 300px;
+  }
+}
+
 .track-box-path {
   fill: none;
   stroke: rgba(201, 255, 74, 0.55);
@@ -3800,6 +4301,31 @@ input[type="checkbox"] {
   align-items: center;
   min-height: 26px;
   flex-shrink: 0;
+}
+
+/* A failed export lives in the same slot as the sync badge, so it has to read as a FAILURE at a glance
+   — the whole bug was a dead render being mistaken for a finished one. Clickable (re-opens the export
+   window); truncated rather than wrapped, since the worker's message can be long. */
+.editor-status-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+  color: var(--danger, #e5484d);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.editor-status-failed:hover {
+  background: color-mix(in srgb, var(--danger, #e5484d) 20%, transparent);
 }
 
 /* 14"-laptop overflow guard: the shared .credit-badge (global.css:438) sets
@@ -9361,21 +9887,27 @@ input[type="checkbox"] {
   font-size: 0.68rem;
 }
 
-/* Shared color row (ColorControl — PropertyRow shell): a compact swatch + its hex readout. */
-.color-row-input {
-  justify-self: start;
-  width: 34px;
-  height: 16px;
-  padding: 0;
+/* Shared text row (a plain text field on the PropertyRow shell) — themed like every other inspector
+   input so any panel can render a text property without bespoke styling. Spans control+value cells. */
+.text-row .text-row-input {
+  grid-column: 2 / -1;
+  width: 100%;
+  min-width: 0;
+  height: var(--nle-ctl-h, 24px);
+  padding: 0 7px;
+  background: var(--editor-input-bg);
   border: 1px solid var(--editor-border);
-  border-radius: var(--editor-radius-sm, 4px);
-  background: transparent;
-  cursor: pointer;
+  border-radius: var(--editor-radius-md, 4px);
+  color: var(--editor-text);
+  font-size: 0.72rem;
 }
-
-.color-row-hex {
+.text-row .text-row-input:focus {
+  outline: none;
+  border-color: var(--editor-accent-border);
+  box-shadow: var(--nle-focus-ring);
+}
+.text-row .text-row-input::placeholder {
   color: var(--editor-text-dim);
-  font-size: 0.65rem;
 }
 
 /* Frames section in the Graphics search panel — tiles preview the shape (unit-box SVG path). */
@@ -16425,52 +16957,6 @@ input.scrub-number:focus {
   white-space: nowrap;
 }
 
-/* Select/toggle effect params sit on the SAME label-left 24px row grid as the sliders —
-   previously stacked (label above a 38px control) which made a dropdown param ~1.5× taller
-   than the numeric row beside it (density pass 2026-07-12). */
-.effect-toggle-control,
-.effect-select-control {
-  display: grid;
-  grid-template-columns: minmax(76px, 0.5fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  min-height: var(--insp-row-h);
-  color: var(--muted);
-}
-
-.effect-toggle-control > span,
-.effect-select-control > span {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 0.7rem;
-  font-weight: 750;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.effect-toggle-control input {
-  justify-self: start;
-  width: 15px;
-  height: 15px;
-  accent-color: var(--primary);
-}
-
-.effect-select-control select {
-  width: 100%;
-  height: var(--insp-row-h);
-  min-width: 0;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #fff;
-  font: inherit;
-  font-size: 0.76rem;
-}
-
 .keyframe-row {
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
@@ -22785,7 +23271,9 @@ input.scrub-number:focus {
   flex-direction: column;
   min-height: 260px;
   height: 100%;
-  background: #14161b;
+  /* Share the app's bluish panel tokens (not a flat neutral gray) so the node editor reads as the
+     same surface family as the rest of the editor (user 2026-07-23). */
+  background: var(--nle-panel);
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   overflow: hidden;
 }
@@ -22823,10 +23311,12 @@ input.scrub-number:focus {
 .flarex-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 4px 10px;
+  gap: 10px;
+  /* No vertical padding — the icon-only palette needs no breathing room and the node canvas wants
+     every vertical pixel it can get (user 2026-07-22/23). Bar height = the 24px buttons. */
+  padding: 0 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(20, 23, 28, 0.95);
+  background: var(--nle-panel);
   overflow-x: auto;
   flex: 0 0 auto;
 }
@@ -22872,6 +23362,54 @@ input.scrub-number:focus {
   white-space: nowrap;
 }
 /* `.flarex-toolbar-btn` styling now lives in the canonical `.ui-btn` grouped rule (Notes page). */
+
+/* Comp proxy (render cache) cluster — pushed to the far end of the strip: it acts on the WHOLE comp,
+   not on the node selection, so it must not read as part of the palette. */
+.flarex-proxy-group {
+  margin-left: auto;
+  padding-left: 8px;
+}
+.flarex-proxy-btn.is-ready {
+  color: var(--nle-accent);
+  background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
+}
+.flarex-proxy-btn.is-busy {
+  color: var(--editor-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.flarex-proxy-error {
+  font-size: 0.68rem;
+  color: var(--nle-danger, #ff6b6b);
+  white-space: nowrap;
+}
+
+/* Palette node buttons: custom glyph anchors identity, label rides along as a quiet caption so the
+   strip declutters as the palette grows. Icon inherits the button's muted/hover/active color. */
+.flarex-node-btn {
+  padding-left: 6px;
+  padding-right: 8px;
+  gap: 5px;
+}
+.flarex-node-btn svg {
+  flex: 0 0 auto;
+  /* Icon inherits the button's own color (muted at rest → accent/white on hover/active) — no
+     per-node color; the single accent source drives every interactive state. */
+  color: currentColor;
+  opacity: 0.92;
+}
+.flarex-node-btn:hover:not(:disabled):not(.is-active) svg,
+.flarex-node-btn.is-active svg {
+  opacity: 1;
+}
+.flarex-node-btn-label {
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--editor-text-muted);
+}
+.flarex-node-btn:hover:not(:disabled):not(.is-active) .flarex-node-btn-label {
+  color: #fff;
+}
 
 /* ── Notes page (plans/notes-sonnet-execution.md) ────────────────────────────────────────────── */
 
@@ -22948,7 +23486,7 @@ input.scrub-number:focus {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 26px;
+  height: 24px;
   padding: 0 8px;
   border: none;
   border-radius: var(--nle-radius-xs);
@@ -24286,7 +24824,9 @@ h3.notes-note-md-heading {
   flex: 1 1 auto;
   min-width: 0;
   position: relative;
-  background: #101216;
+  /* Node-graph backdrop = the app's darkest bluish surface (the canvas clearRects to transparent, so
+     this shows through as the graph background). */
+  background: var(--nle-bg-2);
 }
 .flarex-canvas {
   display: block;
@@ -24304,7 +24844,7 @@ h3.notes-note-md-heading {
   z-index: 41;
   min-width: 200px;
   max-width: 260px;
-  background: rgba(24, 27, 33, 0.98);
+  background: var(--nle-panel-2);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -24321,6 +24861,10 @@ h3.notes-note-md-heading {
   padding: 5px 8px;
   font-size: 12px;
   outline: none;
+}
+.flarex-node-menu-input:focus {
+  border-color: var(--nle-accent-border);
+  box-shadow: 0 0 0 2px var(--nle-accent-soft);
 }
 .flarex-node-menu-list {
   max-height: 260px;
@@ -24348,15 +24892,221 @@ h3.notes-note-md-heading {
   text-align: left;
   cursor: pointer;
 }
-.flarex-node-menu-item:hover,
+.flarex-node-menu-item:hover {
+  background: var(--nle-accent-soft);
+}
 .flarex-node-menu-item.is-active {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--nle-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--nle-accent-border);
 }
 .flarex-node-menu-group {
   font-size: 10px;
   color: rgba(230, 236, 244, 0.4);
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  flex: 0 0 auto;
+}
+/* Add-Node browser: a category → subcategory tree (empty query) or a flat fuzzy list (searching),
+   shared by the canvas Tab menu and the toolbar Browse popover. */
+.flarex-node-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 232px;
+}
+.flarex-node-browser-list {
+  max-height: 340px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.flarex-node-browser-cat + .flarex-node-browser-cat {
+  margin-top: 6px;
+}
+.flarex-node-browser-cat-head {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 4px 6px 2px;
+  opacity: 0.9;
+}
+.flarex-node-browser-sub-head {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(230, 236, 244, 0.38);
+  padding: 3px 6px 1px 10px;
+}
+.flarex-node-menu-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.flarex-node-menu-name svg {
+  flex: 0 0 auto;
+  color: currentColor;
+  opacity: 0.85;
+}
+
+/* ── Icon-only toolbar palette (Phase 1: labels removed, bigger glyphs, category dividers) ─────── */
+.flarex-palette {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.flarex-palette-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 3px 4px;
+  background: rgba(255, 255, 255, 0.1);
+  flex: 0 0 auto;
+}
+.flarex-palette-btn {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.flarex-palette-btn svg {
+  /* Neutral at rest; the button's shared hover/active rules (single accent source) recolor it. */
+  color: currentColor;
+  opacity: 0.9;
+}
+.flarex-palette-btn:hover:not(:disabled):not(.is-active) svg,
+.flarex-palette-btn.is-active svg {
+  opacity: 1;
+}
+.flarex-palette-btn:hover:not(:disabled):not(.is-active) {
+  background: var(--nle-accent-soft);
+}
+.flarex-palette-browse {
+  gap: 4px;
+  padding: 0 9px;
+  height: 24px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(230, 236, 244, 0.72);
+  flex: 0 0 auto;
+}
+.flarex-palette-browse:hover:not(.is-active) {
+  background: var(--nle-accent-soft);
+  color: #fff;
+}
+.flarex-palette-browse.is-active {
+  background: var(--nle-accent-soft);
+  border-color: var(--nle-accent-border);
+  color: #fff;
+}
+.flarex-palette-browse.is-active .flarex-palette-browse-plus {
+  color: var(--nle-accent);
+}
+.flarex-palette-browse-plus {
+  font-size: 13px;
+  line-height: 1;
+  color: var(--nle-accent);
+}
+.flarex-palette-browse-label {
+  letter-spacing: 0.01em;
+}
+.flarex-menu-backdrop--fixed {
+  position: fixed;
+  z-index: 60;
+}
+.flarex-palette-browse-pop {
+  position: fixed;
+  z-index: 61;
+}
+
+/* ── MediaIn source control (asset-source MediaIn, FLAREX.md Phase 2) ─────────────────────────────────
+   No embedded list — the trigger opens the REAL media pool in pick-one mode (the "Replace asset" flow),
+   so the source is always chosen by clicking a real pool tile. */
+.flarex-source-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+.flarex-source-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  background: rgba(10, 12, 16, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  color: #e8ecf3;
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.flarex-source-trigger:hover:not(:disabled) {
+  border-color: var(--nle-accent-border);
+  background: var(--nle-accent-soft);
+}
+.flarex-source-trigger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.flarex-source-thumb {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 20px;
+  border-radius: 3px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.05);
+}
+.flarex-source-thumb--host {
+  display: inline-block;
+  background: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.09) 3px, transparent 3px, transparent 6px);
+}
+.flarex-source-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flarex-source-badge {
+  flex: 0 0 auto;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: rgba(230, 236, 244, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.flarex-source-clear {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: rgba(10, 12, 16, 0.6);
+  color: rgba(230, 236, 244, 0.6);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.flarex-source-clear:hover {
+  color: #fff;
+  border-color: var(--nle-accent-border);
+  background: var(--nle-accent-soft);
 }
 .flarex-node-context-menu {
   min-width: 130px;
@@ -24378,8 +25128,8 @@ h3.notes-note-md-heading {
 .flarex-node-rename-input {
   position: absolute;
   z-index: 42;
-  background: rgba(10, 12, 16, 0.95);
-  border: 1.5px solid var(--nle-accent, #e8b04b);
+  background: var(--nle-bg);
+  border: 1.5px solid var(--nle-accent);
   border-radius: 4px;
   color: #e8ecf3;
   font-size: 11px;
@@ -24388,14 +25138,14 @@ h3.notes-note-md-heading {
 }
 
 .flarex-inspector {
-  flex: 0 0 240px; /* overridden inline by the resizable width */
+  flex: 0 0 280px; /* overridden inline by the resizable width */
   border-left: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(20, 23, 28, 0.95);
+  background: var(--nle-panel-2);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
   position: relative;
-  min-width: 240px;
+  min-width: 280px;
   max-width: 560px;
 }
 /* Maximized: a full-height column docked at the right edge, ALONGSIDE the viewer — never over it.
@@ -24457,8 +25207,9 @@ h3.notes-note-md-heading {
   background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
   color: var(--nle-accent);
 }
-.flarex-inspector-head {
-  padding-right: 32px; /* clear the absolute maximize button */
+/* Keep the shared inspector body clear of the absolutely-positioned maximize button (top-right). */
+.flarex-inspector .inspector-panel {
+  padding-top: 6px;
 }
 /* Fusion-style frame ruler above the node canvas (clip-local frames on the shared transport). */
 .flarex-framebar {
@@ -24541,126 +25292,11 @@ h3.notes-note-md-heading {
 .flarex-inspector-resize:hover {
   background: color-mix(in srgb, var(--nle-accent) 35%, transparent);
 }
-/* Main-inspector rows inside the flarex panel: same shells, slightly tightened gutters. */
-.flarex-inspector-body .effect-slider-control {
-  min-width: 0;
-}
-.flarex-row-select select,
-.flarex-row-text input[type="text"] {
-  width: 100%;
-  min-width: 0;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  color: rgba(230, 236, 244, 0.85);
-  font-size: 10.5px;
-  padding: 2px 6px;
-}
-.flarex-row-color input[type="color"] {
-  width: 100%;
-  height: 18px;
-  border: none;
-  background: none;
-  padding: 0;
-}
-.flarex-inspector-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
-.flarex-inspector-title {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: rgba(230, 236, 244, 0.9);
-}
-.flarex-inspector-enable {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10px;
-  color: rgba(230, 236, 244, 0.6);
-  cursor: pointer;
-}
-.flarex-inspector-body {
-  padding: 6px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.flarex-inspector-empty {
-  padding: 18px 10px;
-  font-size: 11px;
-  color: rgba(230, 236, 244, 0.4);
-  text-align: center;
-}
-.flarex-param-row {
-  display: grid;
-  grid-template-columns: 82px 1fr 56px;
-  align-items: center;
-  gap: 6px;
-  font-size: 10.5px;
-  color: rgba(230, 236, 244, 0.7);
-}
-.flarex-param-row > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.flarex-param-row input[type="range"] {
-  width: 100%;
-  height: 14px;
-  accent-color: var(--nle-accent);
-}
-.flarex-param-row input[type="text"],
-.flarex-param-row select,
-.flarex-param-num {
-  grid-column: 2 / 4;
-  background: rgba(12, 14, 18, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  color: rgba(230, 236, 244, 0.85);
-  font-size: 10.5px;
-  padding: 2px 6px;
-  min-width: 0;
-}
-.flarex-param-row input[type="range"] + .flarex-param-num {
-  grid-column: 3 / 4;
-}
-.flarex-param-row input[type="color"] {
-  grid-column: 2 / 4;
-  width: 100%;
-  height: 20px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  background: transparent;
-  padding: 0;
-}
-.flarex-param-bool {
-  grid-template-columns: 82px 1fr;
-}
-.flarex-param-bool input {
-  justify-self: start;
-  accent-color: var(--nle-accent);
-}
-.flarex-param-multiline {
-  grid-template-columns: 1fr;
-  align-items: start;
-  gap: 3px;
-}
-.flarex-param-multiline textarea {
-  grid-column: 1 / -1;
-  background: rgba(12, 14, 18, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  color: rgba(230, 236, 244, 0.85);
-  font-size: 10px;
-  font-family: monospace;
-  padding: 4px 6px;
-  resize: vertical;
-  min-width: 0;
-}
+/* The node inspector body is the shared `.inspector-panel` + InspectorSection + `.control-grid` +
+   shared control widgets — it owns NO row/label/header/spacing CSS. The former bespoke rules here
+   (`.flarex-inspector-body`/`-head`/`-title`/`-enable`/`-empty`, `.flarex-param-*`, `.flarex-row-*`)
+   were deleted 2026-07-23 so node params render byte-identically to the Edit-page inspector. Only the
+   docking frame (`.flarex-inspector` + resize/maximize, above) and the points editor (below) remain. */
 
 /* F3 (round 3): structured point-list editor for polygonMask/bezierMask, replacing the raw JSON
    textarea — a row per point (x/y comp-fraction fields + reorder/remove). */

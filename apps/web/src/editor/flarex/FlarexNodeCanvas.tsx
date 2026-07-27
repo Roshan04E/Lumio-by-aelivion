@@ -20,6 +20,7 @@ import {
   type FlarexEdge,
   type FlarexNode,
   type FlarexNodeType,
+  type FlarexSocketType,
 } from "@orreris/shared";
 import {
   NODE_W,
@@ -27,7 +28,6 @@ import {
   backdropSize,
   clampZoom,
   cloneFlarexNodes,
-  flarexAddableNodeTypes,
   hitTest,
   hitTestWire,
   nodeHeight,
@@ -40,6 +40,7 @@ import {
   type FlarexViewState,
   type SocketRef,
 } from "./flarex-canvas-model";
+import { FlarexNodeBrowser } from "./FlarexNodeBrowser";
 
 /** Module-level clipboard (not the system clipboard — a plain in-memory snapshot, same idiom as
  *  `flarexPaletteDrag`). Cross-comp paste is out of scope for v1: cleared whenever the active comp
@@ -53,10 +54,9 @@ export const flarexPaletteDrag: { current: FlarexNodeType | null } = { current: 
 
 /** Last node type inserted via the F1 search menu (any tab) — shown first in the menu next time,
  *  a small memory that saves re-typing the same query repeatedly (F6.3). Session-lifetime only. */
-const lastUsedNodeType: { current: FlarexNodeType | null } = { current: null };
 
-/** "#rrggbb" / "#rgb" → "r,g,b" for rgba() template strings; non-hex values fall back to the
- *  default amber so a malformed theme var can never produce an invalid canvas color. */
+/** "#rrggbb" / "#rgb" → "r,g,b" for rgba() template strings; non-hex values fall back to a neutral
+ *  text tone so a malformed theme var can never produce an invalid canvas color. */
 function hexToRgbTriplet(hex: string): string {
   const m6 = /^#([0-9a-f]{6})$/i.exec(hex);
   if (m6) {
@@ -71,28 +71,64 @@ function hexToRgbTriplet(hex: string): string {
     const b = v & 0xf;
     return `${r * 17},${g * 17},${b * 17}`;
   }
-  return "232,176,75";
+  return "142,150,166"; // --nle-text-muted fallback (never the old amber default)
+}
+
+/**
+ * The Node Editor canvas is the ONE surface that can't consume CSS custom properties directly
+ * (Canvas2D takes literal color strings), so it reads the application's design tokens off the DOM
+ * once per draw and paints from THOSE — it stays a consumer of the single theme/accent source rather
+ * than defining its own palette. Every value here traces to a `--nle-*` token; there are no literal
+ * UI colors and no per-category color palette (selection/interaction is accent-only).
+ */
+interface CanvasPalette {
+  accent: string;
+  accentRgb: string;
+  text: string;
+  textRgb: string;
+  mutedRgb: string;
+  dimRgb: string;
+  borderRgb: string;
+  panelRgb: string;
+  bgRgb: string;
+  /** Socket/wire colors keyed by the connection's DATA TYPE (functional, NOT decorative — the one place
+   *  the canvas carries color beyond the accent). Node bodies/stripes stay neutral; interaction is
+   *  accent. Resolved from `--flarex-socket-*` tokens so the scheme lives in the design system. */
+  socketRgb: Record<FlarexSocketType, string>;
+}
+function resolveCanvasPalette(el: Element): CanvasPalette {
+  const cs = getComputedStyle(el);
+  const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
+  const accent = v("--nle-accent", "#4f9cff");
+  return {
+    accent,
+    accentRgb: hexToRgbTriplet(accent),
+    text: v("--nle-text", "#d7dce5"),
+    textRgb: hexToRgbTriplet(v("--nle-text", "#d7dce5")),
+    mutedRgb: hexToRgbTriplet(v("--nle-text-muted", "#8e96a6")),
+    dimRgb: hexToRgbTriplet(v("--nle-text-dim", "#626b7a")),
+    borderRgb: hexToRgbTriplet(v("--nle-border", "#262b35")),
+    panelRgb: hexToRgbTriplet(v("--nle-panel-2", "#1a1f29")),
+    bgRgb: hexToRgbTriplet(v("--nle-bg", "#0b0d10")),
+    socketRgb: {
+      image: hexToRgbTriplet(v("--flarex-socket-image", "#5b9dff")),
+      matte: hexToRgbTriplet(v("--flarex-socket-matte", "#3fbf8f")),
+      number: hexToRgbTriplet(v("--flarex-socket-number", "#e0a44e")),
+    },
+  };
 }
 
 /** Group accent colors — also used by the toolbar palette buttons (left border strip, N6) so the
  *  canvas and palette read as one system. */
-export const GROUP_COLORS: Record<string, string> = {
-  io: "#8a8f98",
-  composite: "#e8b04b",
-  color: "#5fb2e6",
-  filter: "#b58fe0",
-  mask: "#69c98a",
-  generator: "#e0708a",
-  tracking: "#d5cf6d",
-  layout: "#7a8290",
-};
-
 export interface FlarexNodeCanvasProps {
   comp: FlarexComp;
   selectedNodeIds: string[];
   onSelectNodes: (nodeIds: string[]) => void;
   /** ONE call per finished gesture (move/connect/delete) — the caller stamps + persists. */
   onUpdateComp: (updater: (comp: FlarexComp) => FlarexComp) => void;
+  /** Media-pool assets (id → name) so an asset dragged from the bin onto the canvas creates a MediaIn
+   *  node loading it (asset-source MediaIn, FLAREX.md Phase 2), labeled with the asset name. */
+  sourceAssets?: Array<{ id: string; name: string }>;
 }
 
 type Gesture =
@@ -112,7 +148,7 @@ type Gesture =
   | { kind: "wire"; from: SocketRef; toX: number; toY: number; target: SocketRef | null }
   | { kind: "backdropResize"; nodeId: string; startX: number; startY: number; startW: number; startH: number; curW: number; curH: number };
 
-export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdateComp }: FlarexNodeCanvasProps) {
+export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdateComp, sourceAssets }: FlarexNodeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [view, setView] = useState<FlarexViewState>(() => ({
@@ -176,11 +212,11 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, size.w, size.h);
 
-    // Theme accent (the Theme selector swaps --nle-accent per theme): Canvas2D can't consume CSS
-    // vars, so every highlight color (selection, splice wire, marquee, view dot, drop ghost) is
-    // resolved here per draw pass instead of hardcoding the amber default.
-    const accentHex = getComputedStyle(canvas).getPropertyValue("--nle-accent").trim() || "#e8b04b";
-    const accentRgb = hexToRgbTriplet(accentHex);
+    // Resolve the application's theme tokens once per draw (the Theme selector swaps --nle-accent and
+    // friends per theme). Everything below paints from `pal` — one accent source, no literal colors.
+    const pal = resolveCanvasPalette(canvas);
+    const accentHex = pal.accent;
+    const accentRgb = pal.accentRgb;
 
     // World-locked line grid — very subtle minor lines with slightly firmer major lines every 5th.
     const step = 28 * view.zoom;
@@ -188,7 +224,7 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       const gridPass = (spacing: number, alpha: number) => {
         const ox = ((-view.panX * view.zoom) % spacing + spacing) % spacing;
         const oy = ((-view.panY * view.zoom) % spacing + spacing) % spacing;
-        g.strokeStyle = `rgba(255,255,255,${alpha})`;
+        g.strokeStyle = `rgba(${pal.textRgb},${alpha})`;
         g.lineWidth = 1;
         g.beginPath();
         for (let x = ox; x < size.w; x += spacing) {
@@ -212,14 +248,20 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     const draftBackdropSize = (node: FlarexNode): { w: number; h: number } =>
       gesture.kind === "backdropResize" && gesture.nodeId === node.id ? { w: gesture.curW, h: gesture.curH } : backdropSize(node);
 
-    const socketPos = (nodeId: string, socketId: string, kind: "input" | "output"): [number, number] | null => {
+    const socketScreen = (
+      nodeId: string,
+      socketId: string,
+      kind: "input" | "output",
+    ): { x: number; y: number; dir: 1 | -1; type: FlarexSocketType } | null => {
       const node = comp.nodes[nodeId];
       if (!node) return null;
-      const ref = nodeSockets(node).find((s) => s.socket === socketId && s.kind === kind);
+      // `comp` → sockets adopt their facing side (Auto left/right flip).
+      const ref = nodeSockets(node, comp).find((s) => s.socket === socketId && s.kind === kind);
       if (!ref) return null;
       // Live-move preview: dragged nodes' sockets follow the draft positions.
       const pos = draftPos(node);
-      return worldToScreen(view, ref.x + (pos.x - node.ui.x), ref.y + (pos.y - node.ui.y));
+      const [x, y] = worldToScreen(view, ref.x + (pos.x - node.ui.x), ref.y + (pos.y - node.ui.y));
+      return { x, y, dir: ref.dir, type: ref.def.type };
     };
 
     // Backdrops (F2, round 3): LOW z-order — drawn before wires/nodes so they always sit behind
@@ -247,14 +289,14 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       g.fillStyle = `rgba(${hexToRgbTriplet(color)},0.5)`;
       g.fill();
       if (view.zoom > 0.35) {
-        g.fillStyle = "rgba(235,240,247,0.85)";
+        g.fillStyle = `rgba(${pal.textRgb},0.85)`;
         g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
         g.textBaseline = "middle";
         g.fillText(typeof node.params.title === "string" ? node.params.title : "Backdrop", x + 8 * view.zoom, y + titleH / 2, w - 16 * view.zoom);
       }
       // Resize handle glyph (bottom-right corner).
       const handle = 10 * view.zoom;
-      g.strokeStyle = "rgba(255,255,255,0.35)";
+      g.strokeStyle = `rgba(${pal.mutedRgb},0.6)`;
       g.lineWidth = 1;
       g.beginPath();
       g.moveTo(x + w - handle, y + h - 2);
@@ -267,14 +309,17 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     // Wires under nodes. The splice-target wire (node or palette drag hovering it) draws amber.
     const spliceHoverId = paletteHover?.edgeId ?? (gesture.kind === "moveNodes" ? gesture.hoverEdgeId : null);
     for (const edge of comp.edges) {
-      const a = socketPos(edge.from.nodeId, edge.from.socket, "output");
-      const b = socketPos(edge.to.nodeId, edge.to.socket, "input");
+      const a = socketScreen(edge.from.nodeId, edge.from.socket, "output");
+      const b = socketScreen(edge.to.nodeId, edge.to.socket, "input");
       if (!a || !b) continue;
-      const [x0, y0, c0x, c0y, c1x, c1y, x1, y1] = wirePath(a[0], a[1], b[0], b[1]);
+      const [x0, y0, c0x, c0y, c1x, c1y, x1, y1] = wirePath(a.x, a.y, b.x, b.y, a.dir, b.dir);
       const isSpliceTarget = edge.id === spliceHoverId;
       const isSelected = edge.id === selectedEdgeId;
       g.lineWidth = Math.max(1.25, (isSpliceTarget || isSelected ? 2.5 : 1.5) * view.zoom);
-      g.strokeStyle = isSpliceTarget ? `rgba(${accentRgb},0.95)` : isSelected ? "rgba(120,190,255,0.95)" : "rgba(190,200,215,0.55)";
+      // Selection + splice = accent (the ONLY interaction color); a resting wire carries the DATA-TYPE
+      // color of the output it flows from (functional: you read what's traveling the wire).
+      g.strokeStyle =
+        isSpliceTarget || isSelected ? `rgba(${accentRgb},0.95)` : `rgba(${pal.socketRgb[a.type]},0.75)`;
       g.beginPath();
       g.moveTo(x0, y0);
       g.bezierCurveTo(c0x, c0y, c1x, c1y, x1, y1);
@@ -282,10 +327,13 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     }
     // In-progress wire.
     if (gesture.kind === "wire") {
-      const a = socketPos(gesture.from.nodeId, gesture.from.socket, gesture.from.kind);
+      const a = socketScreen(gesture.from.nodeId, gesture.from.socket, gesture.from.kind);
       if (a) {
-        const [x0, y0, c0x, c0y, c1x, c1y, x1, y1] = wirePath(a[0], a[1], gesture.toX, gesture.toY);
-        g.strokeStyle = gesture.target ? "rgba(120,220,150,0.9)" : "rgba(190,200,215,0.8)";
+        // The free end faces back toward the cursor so the lead line curves naturally either way.
+        const freeDir: 1 | -1 = gesture.toX >= a.x ? -1 : 1;
+        const [x0, y0, c0x, c0y, c1x, c1y, x1, y1] = wirePath(a.x, a.y, gesture.toX, gesture.toY, a.dir, freeDir);
+        // Snapped-to-a-valid-target = accent; otherwise the source socket's data-type color, dashed.
+        g.strokeStyle = gesture.target ? `rgba(${accentRgb},0.9)` : `rgba(${pal.socketRgb[a.type]},0.85)`;
         g.setLineDash([5, 4]);
         g.beginPath();
         g.moveTo(x0, y0);
@@ -306,63 +354,63 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       const w = nodeWidth(node) * view.zoom;
       const h = nodeHeight(node) * view.zoom;
       const selected = selectedNodeIds.includes(node.id);
-      const accent = GROUP_COLORS[def.group] ?? "#8a8f98";
       // Reroute renders as a small dot — no body box, no label, no accent strip, no view dot.
       if (isReroute) {
         g.beginPath();
         g.arc(x + w / 2, y + h / 2, Math.max(3, (w / 2) * 0.9), 0, Math.PI * 2);
-        g.fillStyle = node.enabled ? "rgba(138,143,152,0.9)" : "rgba(138,143,152,0.4)";
+        g.fillStyle = node.enabled ? `rgba(${pal.mutedRgb},0.9)` : `rgba(${pal.mutedRgb},0.4)`;
         g.fill();
         g.lineWidth = selected ? 2 : 1;
-        g.strokeStyle = selected ? accentHex : "rgba(255,255,255,0.25)";
+        g.strokeStyle = selected ? accentHex : `rgba(${pal.borderRgb},1)`;
         g.stroke();
-        for (const socket of nodeSockets(node)) {
+        for (const socket of nodeSockets(node, comp)) {
           const [sxp, syp] = worldToScreen(view, socket.x + (pos.x - node.ui.x), socket.y + (pos.y - node.ui.y));
           const r = Math.max(2.5, SOCKET_R * view.zoom);
           g.beginPath();
           g.arc(sxp, syp, r, 0, Math.PI * 2);
-          g.fillStyle = "#5fb2e6";
+          g.fillStyle = `rgba(${pal.socketRgb[socket.def.type]},1)`;
           g.fill();
           g.lineWidth = 1;
-          g.strokeStyle = "rgba(10,12,16,0.8)";
+          g.strokeStyle = `rgba(${pal.bgRgb},0.8)`;
           g.stroke();
         }
         continue;
       }
       g.beginPath();
       g.roundRect(x, y, w, h, 5 * view.zoom);
-      g.fillStyle = node.enabled ? "rgba(38,42,50,0.96)" : "rgba(38,42,50,0.55)";
+      // Node body = the app panel token; border neutral, or accent when selected (accent-only selection).
+      g.fillStyle = node.enabled ? `rgba(${pal.panelRgb},0.96)` : `rgba(${pal.panelRgb},0.55)`;
       g.fill();
       g.lineWidth = selected ? 2 : 1;
-      g.strokeStyle = selected ? accentHex : "rgba(255,255,255,0.16)";
+      g.strokeStyle = selected ? accentHex : `rgba(${pal.borderRgb},1)`;
       g.stroke();
-      // Group accent strip.
-      g.fillStyle = accent;
+      // Left edge strip — a NEUTRAL affordance (category no longer paints a color); accent when selected.
+      g.fillStyle = selected ? `rgba(${accentRgb},1)` : `rgba(${pal.dimRgb},1)`;
       g.globalAlpha = node.enabled ? 0.9 : 0.4;
       g.fillRect(x, y, Math.max(2, 3 * view.zoom), h);
       g.globalAlpha = 1;
       // Label.
       if (view.zoom > 0.45) {
-        g.fillStyle = node.enabled ? "rgba(235,240,247,0.92)" : "rgba(235,240,247,0.45)";
+        g.fillStyle = node.enabled ? `rgba(${pal.textRgb},0.92)` : `rgba(${pal.textRgb},0.45)`;
         g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
         g.textBaseline = "middle";
         g.fillText(node.label ?? def.label, x + 9 * view.zoom, y + h / 2, w - 14 * view.zoom);
       }
-      // Fusion view dot: this node's output is what the viewer shows (double-click toggles).
+      // Fusion view dot: this node's output is what the viewer shows (double-click toggles) — accent.
       if (comp.previewNodeId === node.id) {
         g.beginPath();
         g.arc(x + 10 * view.zoom, y + h - 7 * view.zoom, Math.max(2.5, 3.5 * view.zoom), 0, Math.PI * 2);
         g.fillStyle = accentHex;
         g.fill();
         g.lineWidth = 1;
-        g.strokeStyle = "rgba(10,12,16,0.9)";
+        g.strokeStyle = `rgba(${pal.bgRgb},0.9)`;
         g.stroke();
       }
       // Sockets. While dragging a wire, every type-compatible candidate (opposite kind, matching
       // socket type, not the source node) gets a low-alpha halo ring so the drop targets are
       // visible before the cursor is even over them — the direct hover target gets its own
       // brighter ring (drawn separately below).
-      for (const socket of nodeSockets(node)) {
+      for (const socket of nodeSockets(node, comp)) {
         const [sxp, syp] = worldToScreen(view, socket.x + (pos.x - node.ui.x), socket.y + (pos.y - node.ui.y));
         const r = Math.max(2.5, SOCKET_R * view.zoom);
         const isCandidate =
@@ -374,16 +422,18 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
         if (isCandidate && !isDirectTarget) {
           g.beginPath();
           g.arc(sxp, syp, r + 3.5 * view.zoom, 0, Math.PI * 2);
-          g.strokeStyle = "rgba(120,220,150,0.35)";
+          g.strokeStyle = `rgba(${accentRgb},0.35)`;
           g.lineWidth = 1.5;
           g.stroke();
         }
         g.beginPath();
         g.arc(sxp, syp, r, 0, Math.PI * 2);
-        g.fillStyle = socket.def.type === "matte" ? "#69c98a" : socket.def.type === "number" ? "#d5cf6d" : "#5fb2e6";
+        // Socket color = the DATA TYPE flowing through it (image/matte/number). Accent marks ONLY the
+        // active drop target (interaction), never the resting palette.
+        g.fillStyle = isDirectTarget ? `rgba(${accentRgb},1)` : `rgba(${pal.socketRgb[socket.def.type]},1)`;
         g.fill();
         g.lineWidth = isDirectTarget ? 2 : 1;
-        g.strokeStyle = isDirectTarget ? "rgba(120,220,150,0.95)" : "rgba(10,12,16,0.8)";
+        g.strokeStyle = isDirectTarget ? `rgba(${accentRgb},0.95)` : `rgba(${pal.bgRgb},0.85)`;
         g.stroke();
       }
     }
@@ -405,7 +455,7 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       g.stroke();
       g.setLineDash([]);
       if (view.zoom > 0.45) {
-        g.fillStyle = "rgba(235,240,247,0.7)";
+        g.fillStyle = `rgba(${pal.textRgb},0.7)`;
         g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
         g.textBaseline = "middle";
         g.fillText(def.label, x + 9 * view.zoom, y + h / 2, w - 14 * view.zoom);
@@ -770,23 +820,6 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     setNodeContextMenu(null);
   };
 
-  // F1: fuzzy-filter the addable node types by label/group; empty query floats the last-used type
-  // to the top (F6.3) so re-adding the same thing repeatedly needs no typing at all.
-  const nodeMenuItems = useMemo(() => {
-    if (!nodeMenu) return [];
-    const q = nodeMenu.query.trim().toLowerCase();
-    const defs = flarexAddableNodeTypes.map((t) => getFlarexNodeDefinition(t));
-    const filtered = q ? defs.filter((d) => `${d.label} ${d.group}`.toLowerCase().includes(q)) : defs.slice();
-    if (!q && lastUsedNodeType.current) {
-      const idx = filtered.findIndex((d) => d.type === lastUsedNodeType.current);
-      if (idx > 0) {
-        const [item] = filtered.splice(idx, 1);
-        filtered.unshift(item!);
-      }
-    }
-    return filtered;
-  }, [nodeMenu]);
-
   /** Insert the chosen type at the menu's world position. If exactly one node is selected, auto-
    *  wire its first compatible output into the new node's first compatible input (Fusion "insert
    *  after selected") — skipped silently when no socket types match. ONE commit. */
@@ -821,7 +854,6 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
       return next;
     });
     onSelectNodes([id]);
-    lastUsedNodeType.current = type;
     setNodeMenu(null);
   };
 
@@ -838,12 +870,19 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     });
   };
 
-  // ── Palette drag-and-drop (toolbar → canvas; drop on a wire splices into it) ─
+  // ── Drag-and-drop (toolbar palette → canvas splices into a wire; media-pool asset → MediaIn node) ─
+  const ASSET_DRAG_MIME = "application/x-orreris-asset";
   const onDragOver = (event: React.DragEvent) => {
     const type = flarexPaletteDrag.current;
-    if (!type) return;
+    const isAsset = event.dataTransfer.types.includes(ASSET_DRAG_MIME);
+    if (!type && !isAsset) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
+    // An asset drop makes a MediaIn (no inputs → can't splice into a wire) — just allow the drop.
+    if (!type) {
+      setPaletteHover(null);
+      return;
+    }
     const [sx, sy] = localPoint(event);
     const { comp: c, view: v } = stateRef.current;
     // Would the wire under the cursor accept this node type? Trial-splice with a phantom node.
@@ -860,12 +899,28 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
   const onDrop = (event: React.DragEvent) => {
     const type = flarexPaletteDrag.current;
     setPaletteHover(null);
-    if (!type) return;
+    const assetId = type ? "" : event.dataTransfer.getData(ASSET_DRAG_MIME);
+    if (!type && !assetId) return;
     event.preventDefault();
     const [sx, sy] = localPoint(event);
     const { comp: c, view: v } = stateRef.current;
     const [wx, wy] = screenToWorld(v, sx, sy);
     const id = `n_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+    // Media-pool asset dropped: create a MediaIn loading that asset (asset-source MediaIn, Phase 2),
+    // labeled with the asset name so the node reads as the source at a glance.
+    if (!type) {
+      const name = sourceAssets?.find((a) => a.id === assetId)?.name;
+      onUpdateComp((current) => {
+        const node = createFlarexNode("mediaIn", id, Math.round(wx - NODE_W / 2), Math.round(wy - 18));
+        node.params = { ...node.params, sourceAssetId: assetId };
+        if (name) node.label = name;
+        return { ...current, nodes: { ...current.nodes, [id]: node } };
+      });
+      onSelectNodes([id]);
+      return;
+    }
+
     const edgeId = hitTestWire(c, v, sx, sy);
     onUpdateComp((current) => {
       const node = createFlarexNode(type, id, Math.round(wx - NODE_W / 2), Math.round(wy - 18));
@@ -964,15 +1019,20 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onSelectNodes, onUpdateComp]);
 
-  // Delete the selection (guard MediaIn/Out — the graph's fixed endpoints).
+  // Delete the selection. MediaOut is always protected (the fixed output). MediaIn is deletable when
+  // the comp has MORE THAN ONE (multi-clip MediaIn, FLAREX.md Phase 2) — the last MediaIn stays put so
+  // the graph keeps its default source; extra source inputs added from the palette can be removed.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Delete" && event.key !== "Backspace") return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      const mediaInCount = Object.values(stateRef.current.comp.nodes).filter((n) => n.type === "mediaIn").length;
       const ids = stateRef.current.selectedNodeIds.filter((id) => {
         const node = stateRef.current.comp.nodes[id];
-        return node && node.type !== "mediaIn" && node.type !== "mediaOut";
+        if (!node || node.type === "mediaOut") return false;
+        if (node.type === "mediaIn") return mediaInCount > 1;
+        return true;
       });
       const edgeId = stateRef.current.selectedEdgeId;
       if (ids.length === 0 && !edgeId) return;
@@ -1046,54 +1106,10 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
           }}
         />
       ) : null}
-      {/* F1: add-node search menu. */}
+      {/* F1: add-node browser (categorized + searchable), anchored at the cursor. */}
       {nodeMenu ? (
         <div className="flarex-node-menu" style={{ left: nodeMenu.sx, top: nodeMenu.sy }}>
-          <input
-            className="flarex-node-menu-input"
-            autoFocus
-            placeholder="Add node…"
-            value={nodeMenu.query}
-            onChange={(e) => setNodeMenu((m) => (m ? { ...m, query: e.target.value, activeIndex: 0 } : m))}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.stopPropagation();
-                setNodeMenu(null);
-                return;
-              }
-              if (e.key === "ArrowDown") {
-                e.preventDefault();
-                setNodeMenu((m) => (m ? { ...m, activeIndex: Math.min(nodeMenuItems.length - 1, m.activeIndex + 1) } : m));
-                return;
-              }
-              if (e.key === "ArrowUp") {
-                e.preventDefault();
-                setNodeMenu((m) => (m ? { ...m, activeIndex: Math.max(0, m.activeIndex - 1) } : m));
-                return;
-              }
-              if (e.key === "Enter") {
-                e.preventDefault();
-                const item = nodeMenuItems[nodeMenu.activeIndex];
-                if (item) insertNodeFromMenu(item.type);
-              }
-            }}
-          />
-          <div className="flarex-node-menu-list">
-            {nodeMenuItems.length === 0 ? <div className="flarex-node-menu-empty">No matches</div> : null}
-            {nodeMenuItems.map((def, index) => (
-              <button
-                key={def.type}
-                type="button"
-                className={`flarex-node-menu-item${index === nodeMenu.activeIndex ? " is-active" : ""}`}
-                style={{ borderLeft: `3px solid ${GROUP_COLORS[def.group] ?? "#8a8f98"}` }}
-                onPointerDown={(e) => e.preventDefault()}
-                onClick={() => insertNodeFromMenu(def.type)}
-              >
-                <span>{def.label}</span>
-                <span className="flarex-node-menu-group">{def.group}</span>
-              </button>
-            ))}
-          </div>
+          <FlarexNodeBrowser onPick={insertNodeFromMenu} onClose={() => setNodeMenu(null)} />
         </div>
       ) : null}
       {/* F1.3: minimal node context menu. */}
@@ -1150,7 +1166,11 @@ export function FlarexNodeCanvas({ comp, selectedNodeIds, onSelectNodes, onUpdat
               {comp.previewNodeId === contextMenuNode.id ? "Clear view" : "View"}
             </button>
           ) : null}
-          {contextMenuNode.type !== "mediaIn" && contextMenuNode.type !== "mediaOut" ? (
+          {/* MediaOut never deletable; a MediaIn is deletable only when the comp has more than one
+              (the last MediaIn stays as the default source — multi-clip MediaIn, FLAREX.md Phase 2). */}
+          {contextMenuNode.type !== "mediaOut" &&
+          (contextMenuNode.type !== "mediaIn" ||
+            Object.values(comp.nodes).filter((n) => n.type === "mediaIn").length > 1) ? (
             <button
               type="button"
               onClick={() => {

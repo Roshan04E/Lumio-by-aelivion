@@ -16,7 +16,7 @@ import {
   type TimelineLayer
 } from "@orreris/shared";
 import { BooleanControl } from "./controls/BooleanControl";
-import { ColorControl } from "./controls/ColorControl";
+import { ColorControl } from "../../components/ColorControl";
 import { NumberControl } from "./controls/NumberControl";
 import { SelectControl } from "./controls/SelectControl";
 

@@ -3,17 +3,23 @@ import { Pipette } from "lucide-react";
 import { pickColorFromScreen, toInputColor } from "../lib/colorPalette";
 import { ResetButton } from "./ResetButton";
 
+/**
+ * The application's ONE canonical color picker (preview + hex + screen eyedropper + palette swatches +
+ * reset). Consumed directly by tool panels / graphics, and through `PropertyField.color` by every
+ * schema-driven inspector (clip effects, Flarex nodes, Frames chrome). `icon` and `palette` are optional
+ * so a bare inspector row (no suggested colors) uses the same widget as a rich tool-panel picker.
+ */
 export function ColorControl({
   icon,
   label,
-  palette,
+  palette = [],
   value,
   onReset,
   onChange
 }: {
-  icon: ReactNode;
+  icon?: ReactNode | undefined;
   label: string;
-  palette: string[];
+  palette?: string[] | undefined;
   value: string;
   onReset?: (() => void) | undefined;
   onChange: (value: string) => void;

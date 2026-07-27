@@ -7,15 +7,81 @@
  * pan (world px) + zoom.
  */
 
-import { flarexNodeTypes, getFlarexNodeDefinition, type FlarexNodeType, type FlarexSocketDef } from "@orreris/shared";
+import { flarexNodeDefs, flarexNodeTypes, getFlarexNodeDefinition, type FlarexNodeDefinition, type FlarexNodeType, type FlarexSocketDef } from "@orreris/shared";
 import type { FlarexComp, FlarexEdge, FlarexNode } from "@orreris/shared";
 
-/** Node types the user can ADD (via palette, drag, or the F1 Tab search menu) — excludes the two
- *  fixed comp endpoints (mediaIn/mediaOut) and the three Fable-fenced types whose `lower()` stays
- *  unwired this round (text, aiMatte, tracker; see plans/flarex-sonnet-execution-3.md FENCE). One
- *  canonical list so the palette and the search menu can never drift apart. */
-const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaIn", "mediaOut", "text", "aiMatte", "tracker"]);
+/** Node types the user can ADD (via palette, drag, or the F1 Tab search menu) — excludes the fixed
+ *  comp OUTPUT (mediaOut; a comp has exactly one) and the three Fable-fenced types whose `lower()`
+ *  stays unwired this round (text, aiMatte, tracker; see plans/flarex-sonnet-execution-3.md FENCE).
+ *  MediaIn IS addable (multi-clip MediaIn, FLAREX.md Phase 2): each extra MediaIn pulls another
+ *  timeline clip via its `sourceClipId`. One canonical list so the palette and the search menu can
+ *  never drift apart. */
+const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "text", "aiMatte", "tracker"]);
 export const flarexAddableNodeTypes: FlarexNodeType[] = flarexNodeTypes.filter((t) => !NOT_ADDABLE.has(t));
+
+// Node categories are a purely LOGICAL grouping (labels + order below). They deliberately carry NO
+// color palette: the Node Editor is a consumer of the application's single accent/theme source, so
+// selection and interaction are accent-only and everything else is neutral (removed the former
+// per-category `GROUP_COLORS` rainbow, 2026-07-23).
+
+/** Human labels + display order for the top-level categories (= node-def `group`). */
+export const FLAREX_CATEGORY_LABELS: Record<FlarexNodeDefinition["group"], string> = {
+  io: "Input / Output",
+  generator: "Generator",
+  composite: "Composite",
+  color: "Color",
+  filter: "Filter",
+  mask: "Mask & Key",
+  tracking: "Tracking",
+  layout: "Layout",
+};
+const CATEGORY_ORDER: FlarexNodeDefinition["group"][] = [
+  "io", "generator", "composite", "color", "filter", "mask", "tracking", "layout",
+];
+
+/** A curated set of "pinned" nodes for the icon-only toolbar strip — the everyday commons. Everything
+ *  else (and, later, the whole node library) is reached through the Add-Node browser / search. Order
+ *  here is the strip order; grouping/dividers come from each node's category. */
+export const FLAREX_PINNED_NODES: FlarexNodeType[] = [
+  "mediaIn",
+  "merge", "transform",
+  "colorCorrect", "colorCurves",
+  "blur", "glow", "sharpen",
+  "chromaKey", "lumaKey",
+  "rectMask", "ellipseMask", "polygonMask", "bezierMask", "matteControl",
+];
+
+export interface FlarexCatalogSub { subcategory: string; defs: FlarexNodeDefinition[]; }
+export interface FlarexCatalogCategory { group: FlarexNodeDefinition["group"]; label: string; subs: FlarexCatalogSub[]; }
+
+/** Build the category → subcategory → nodes tree for the Add-Node browser, over the given addable
+ *  types (defaults to `flarexAddableNodeTypes`). Ordered by CATEGORY_ORDER, then type order within. */
+export function buildFlarexCatalog(types: FlarexNodeType[] = flarexAddableNodeTypes): FlarexCatalogCategory[] {
+  const byCat = new Map<string, Map<string, FlarexNodeDefinition[]>>();
+  for (const t of types) {
+    const def = flarexNodeDefs[t];
+    const subs = byCat.get(def.group) ?? new Map<string, FlarexNodeDefinition[]>();
+    const list = subs.get(def.subcategory) ?? [];
+    list.push(def);
+    subs.set(def.subcategory, list);
+    byCat.set(def.group, subs);
+  }
+  const cats: FlarexCatalogCategory[] = [];
+  for (const group of CATEGORY_ORDER) {
+    const subs = byCat.get(group);
+    if (!subs) continue;
+    cats.push({ group, label: FLAREX_CATEGORY_LABELS[group], subs: [...subs.entries()].map(([subcategory, defs]) => ({ subcategory, defs })) });
+  }
+  return cats;
+}
+
+/** Flat fuzzy match for the browser's search mode — matches label / category / subcategory / type. */
+export function searchFlarexNodes(query: string, types: FlarexNodeType[] = flarexAddableNodeTypes): FlarexNodeDefinition[] {
+  const defs = types.map((t) => flarexNodeDefs[t]);
+  const q = query.trim().toLowerCase();
+  if (!q) return defs;
+  return defs.filter((d) => `${d.label} ${d.group} ${d.subcategory} ${d.type}`.toLowerCase().includes(q));
+}
 
 export interface FlarexViewState {
   panX: number;
@@ -60,6 +126,10 @@ export interface SocketRef {
   /** World position of the socket center. */
   x: number;
   y: number;
+  /** Outward normal along X: +1 = socket sits on the node's RIGHT edge (wire leaves/arrives from the
+   *  right), -1 = LEFT edge. Drives the wire's control-point direction so a flipped socket curves the
+   *  right way. Canonical layout = inputs -1 (left), outputs +1 (right). */
+  dir: 1 | -1;
 }
 
 /** Backdrop's own size lives in its params (w/h), not `ui` — `ui` stays the generic top-left
@@ -77,15 +147,70 @@ export function nodeWidth(node: FlarexNode): number {
   return NODE_W;
 }
 
-/** Socket world positions: inputs down the left edge, outputs down the right edge. */
-export function nodeSockets(node: FlarexNode): SocketRef[] {
+/** Per-type VISUAL vertical order of input sockets (top → bottom), overriding declaration order.
+ *  Merge: foreground sits ABOVE background so the stack reads like a layer list (fg over bg), which
+ *  is what users expect — the def order stays bg,fg,mask (bg is still the primary/auto-wire input),
+ *  this ONLY moves the dots. Any socket id not listed falls back to its declaration index. */
+const INPUT_SOCKET_VISUAL_ORDER: Partial<Record<FlarexNodeType, string[]>> = {
+  merge: ["fg", "bg", "mask"],
+};
+
+/**
+ * Which horizontal side each socket bank sits on ("Auto left/right flip"): an OUTPUT hops to the side
+ * facing its destination(s), an INPUT to the side facing its source(s). ONLY horizontal — sockets never
+ * move to top/bottom, and their vertical ORDER is preserved. A full node-width dead zone (the flip
+ * fires only when the other node clears this node's opposite edge) keeps the dot from jittering while
+ * nodes overlap horizontally — stable hit-testing, no moving target during small nudges. No `comp` (or
+ * no connections) → the canonical layout (inputs left, outputs right).
+ */
+function socketSides(node: FlarexNode, comp?: FlarexComp): { input: 1 | -1; output: 1 | -1 } {
+  if (!comp) return { input: -1, output: 1 };
+  const left = node.ui.x;
+  const right = node.ui.x + nodeWidth(node);
+  const centerOf = (n: FlarexNode) => n.ui.x + nodeWidth(n) / 2;
+  let destSum = 0;
+  let destN = 0;
+  let srcSum = 0;
+  let srcN = 0;
+  for (const e of comp.edges) {
+    if (e.from.nodeId === node.id) {
+      const d = comp.nodes[e.to.nodeId];
+      if (d) {
+        destSum += centerOf(d);
+        destN += 1;
+      }
+    }
+    if (e.to.nodeId === node.id) {
+      const s = comp.nodes[e.from.nodeId];
+      if (s) {
+        srcSum += centerOf(s);
+        srcN += 1;
+      }
+    }
+  }
+  // Output flips LEFT only when every destination (on average) clears this node's left edge; input flips
+  // RIGHT only when the sources clear the right edge. Otherwise stay canonical.
+  const output: 1 | -1 = destN > 0 && destSum / destN < left ? -1 : 1;
+  const input: 1 | -1 = srcN > 0 && srcSum / srcN > right ? 1 : -1;
+  return { input, output };
+}
+
+/** Socket world positions. Inputs/outputs stack top→bottom at a fixed vertical order; each BANK sits on
+ *  the horizontal side facing its connections (see `socketSides`) — pass `comp` to enable the flip. */
+export function nodeSockets(node: FlarexNode, comp?: FlarexComp): SocketRef[] {
   const def = getFlarexNodeDefinition(node.type);
   const refs: SocketRef[] = [];
+  const w = nodeWidth(node);
+  const sides = socketSides(node, comp);
+  const visualOrder = INPUT_SOCKET_VISUAL_ORDER[node.type];
   def.inputs.forEach((socket, i) => {
-    refs.push({ nodeId: node.id, socket: socket.id, kind: "input", def: socket, x: node.ui.x, y: node.ui.y + 12 + i * SOCKET_GAP });
+    const slot = visualOrder ? (visualOrder.indexOf(socket.id) >= 0 ? visualOrder.indexOf(socket.id) : i) : i;
+    const x = sides.input === 1 ? node.ui.x + w : node.ui.x;
+    refs.push({ nodeId: node.id, socket: socket.id, kind: "input", def: socket, x, y: node.ui.y + 12 + slot * SOCKET_GAP, dir: sides.input });
   });
   def.outputs.forEach((socket, i) => {
-    refs.push({ nodeId: node.id, socket: socket.id, kind: "output", def: socket, x: node.ui.x + nodeWidth(node), y: node.ui.y + 12 + i * SOCKET_GAP });
+    const x = sides.output === 1 ? node.ui.x + w : node.ui.x;
+    refs.push({ nodeId: node.id, socket: socket.id, kind: "output", def: socket, x, y: node.ui.y + 12 + i * SOCKET_GAP, dir: sides.output });
   });
   return refs;
 }
@@ -227,7 +352,7 @@ export function hitTest(comp: FlarexComp, view: FlarexViewState, sx: number, sy:
   const hitR = insideBody(wx, wy) ? Math.max(SOCKET_R, SOCKET_R / view.zoom) : socketHitR;
   const nodes = Object.values(comp.nodes);
   for (let i = nodes.length - 1; i >= 0; i -= 1) {
-    for (const socket of nodeSockets(nodes[i]!)) {
+    for (const socket of nodeSockets(nodes[i]!, comp)) {
       const dx = wx - socket.x;
       const dy = wy - socket.y;
       if (dx * dx + dy * dy <= hitR * hitR) return { kind: "socket", socket };
@@ -254,10 +379,20 @@ export function hitTest(comp: FlarexComp, view: FlarexViewState, sx: number, sy:
   return { kind: "background" };
 }
 
-/** Horizontal-bias cubic between two socket points (the Resolve/Fusion wire look). */
-export function wirePath(x0: number, y0: number, x1: number, y1: number): [number, number, number, number, number, number, number, number] {
+/** Horizontal-bias cubic between two socket points (the Resolve/Fusion wire look). `dir0`/`dir1` are the
+ *  endpoints' outward-normal X (+1 right edge, -1 left edge, from `SocketRef.dir`): the control point
+ *  leaves each socket along its facing side, so a flipped output/input still curves outward instead of
+ *  cutting back through the node. Defaults reproduce the canonical output-right → input-left curve. */
+export function wirePath(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  dir0: 1 | -1 = 1,
+  dir1: 1 | -1 = -1,
+): [number, number, number, number, number, number, number, number] {
   const dx = Math.max(24, Math.abs(x1 - x0) * 0.5);
-  return [x0, y0, x0 + dx, y0, x1 - dx, y1, x1, y1];
+  return [x0, y0, x0 + dir0 * dx, y0, x1 + dir1 * dx, y1, x1, y1];
 }
 
 /** The screen-space cubic of one edge (same geometry the draw pass strokes), or null if an
@@ -270,12 +405,12 @@ function edgeScreenCubic(
   const fromNode = comp.nodes[edge.from.nodeId];
   const toNode = comp.nodes[edge.to.nodeId];
   if (!fromNode || !toNode) return null;
-  const a = nodeSockets(fromNode).find((s) => s.kind === "output" && s.socket === edge.from.socket);
-  const b = nodeSockets(toNode).find((s) => s.kind === "input" && s.socket === edge.to.socket);
+  const a = nodeSockets(fromNode, comp).find((s) => s.kind === "output" && s.socket === edge.from.socket);
+  const b = nodeSockets(toNode, comp).find((s) => s.kind === "input" && s.socket === edge.to.socket);
   if (!a || !b) return null;
   const [x0, y0] = worldToScreen(view, a.x, a.y);
   const [x1, y1] = worldToScreen(view, b.x, b.y);
-  return wirePath(x0, y0, x1, y1);
+  return wirePath(x0, y0, x1, y1, a.dir, b.dir);
 }
 
 function distToSegmentSq(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {

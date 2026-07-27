@@ -8,7 +8,7 @@
  * the single `updateComp` → `stampFlarexComp` write seam (one gesture = one undo step).
  */
 
-import type { FlarexComp, FlarexNode, TimelineKeyframeV2 } from "@orreris/shared";
+import type { FlarexComp, FlarexNode, KeyframeInterpolation, TimelineKeyframeV2 } from "@orreris/shared";
 import { clamp, findKeyframeIn, isKeyframeAt, mintKeyframeId } from "../inspector/keyframeUtils";
 
 /** Every keyframe for one (node, param), sorted by comp-local time. */
@@ -67,6 +67,28 @@ export function toggleNodeParamKeyframe(
   return {
     ...comp,
     animations: [...comp.animations, keyframe].sort((a, b) => a.timeSeconds - b.timeSeconds)
+  };
+}
+
+/** Set the interpolation of the keyframe at `compTime` (mirrors `setEffectParamInterpolation`) — the
+ *  handler the shared NumberControl's keyframe menu calls. No-op when no keyframe sits at the time. */
+export function setNodeParamInterpolation(
+  comp: FlarexComp,
+  nodeId: string,
+  paramKey: string,
+  compTime: number,
+  interpolation: KeyframeInterpolation
+): FlarexComp {
+  return {
+    ...comp,
+    animations: comp.animations.map((kf) =>
+      kf.target.scope === "flarexNode" &&
+      kf.target.effectId === nodeId &&
+      kf.target.property === paramKey &&
+      isKeyframeAt(kf.timeSeconds, compTime)
+        ? { ...kf, interpolation }
+        : kf
+    )
   };
 }
 

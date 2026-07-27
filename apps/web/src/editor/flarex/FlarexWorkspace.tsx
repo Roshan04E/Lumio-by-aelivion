@@ -9,8 +9,8 @@
  * lives in this subtree.
  */
 
-import { useEffect, useRef, useState } from "react";
-import { usePlaybackClock } from "../../playback/playback-clock";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { getLivePlaybackTime, usePlaybackClock } from "../../playback/playback-clock";
 import { BottomWorkspace } from "../graph/BottomWorkspace";
 import { applyFlarexGraphLayer, buildFlarexGraphLayer } from "./flarex-graph-bridge";
 import {
@@ -24,11 +24,17 @@ import {
   type FlarexNode,
   type FlarexNodeType,
   type ProjectGraph,
+  type SourceAsset,
   type TimelineLayer,
 } from "@orreris/shared";
 import { FlarexInspector } from "./FlarexInspector";
-import { FlarexNodeCanvas, GROUP_COLORS, flarexPaletteDrag, nextNodePosition } from "./FlarexNodeCanvas";
-import { alignFlarexNodes, type FlarexAlignMode } from "./flarex-canvas-model";
+import { FlarexSourceViewer } from "./FlarexSourceViewer";
+import { rebuildSourceProxy } from "../performance/sourceProxyEngine";
+import { FlarexNodeIcon } from "./flarex-node-icons";
+import { FlarexNodeBrowser } from "./FlarexNodeBrowser";
+import { FlarexProxyButton } from "./FlarexProxyButton";
+import { FlarexNodeCanvas, flarexPaletteDrag, nextNodePosition } from "./FlarexNodeCanvas";
+import { FLAREX_PINNED_NODES, alignFlarexNodes, type FlarexAlignMode } from "./flarex-canvas-model";
 
 /** F5.2: align/distribute toolbar buttons — pure position math via `alignFlarexNodes`. */
 const ALIGN_BUTTONS: Array<{ mode: FlarexAlignMode; label: string; title: string }> = [
@@ -42,19 +48,15 @@ const ALIGN_BUTTONS: Array<{ mode: FlarexAlignMode; label: string; title: string
   { mode: "distributeV", label: "↕ Dist", title: "Distribute vertically (3+ nodes)" },
 ];
 
-/** Phase-1 palette, grouped Fusion-style (node-defs' `phase` gates what ships). */
-const PALETTE_GROUPS: Array<{ label: string; types: FlarexNodeType[] }> = [
-  { label: "Composite", types: ["merge", "transform"] },
-  { label: "Color", types: ["colorCorrect", "colorCurves", "hueSat"] },
-  { label: "Filter", types: ["blur", "glow", "sharpen", "filter"] },
-  { label: "Key/Mask", types: ["chromaKey", "lumaKey", "rectMask", "ellipseMask", "polygonMask", "bezierMask", "matteControl"] },
-  { label: "Layout", types: ["backdrop", "reroute"] },
-];
-
 export interface FlarexWorkspaceProps {
   graph: ProjectGraph;
   /** The active clip (Edit-page selection; falls back to the last inspected clip). */
   layer: TimelineLayer | null;
+  /** The media-pool assets a MediaIn node may load (asset-source MediaIn, FLAREX.md Phase 2). */
+  assets?: SourceAsset[];
+  /** Enter media-pool "pick one" mode for a MediaIn node's source (reuses the timeline's Replace-asset
+   *  flow — the user clicks a real media-pool tile, EditorPage writes the node's `sourceAssetId`). */
+  onPickSource?: (compId: string, nodeId: string) => void;
   /** The single write path — receives the full next graph (EditorPage stamps history/persistence). */
   onUpdateGraph: (nextGraph: ProjectGraph) => void;
   /** Shared transport playhead (seconds); comp-local time = timeSeconds − layer.startSeconds. */
@@ -68,12 +70,37 @@ export interface FlarexWorkspaceProps {
   onCloseGraph?: () => void;
 }
 
-export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph }: FlarexWorkspaceProps) {
+export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph }: FlarexWorkspaceProps) {
   const comp = layer ? getLayerFlarexComp(graph, layer) : undefined;
   const layerStart = layer?.startSeconds ?? 0;
   const compTime = Math.max(0, timeSeconds - layerStart);
+
+  // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): the media-pool assets a MediaIn may
+  // load. Self-contained — the comp loads the asset directly, so nothing is borrowed from the timeline.
+  // Only visual media (image/video); audio has no picture.
+  const sourceAssets = assets
+    .filter((asset) => {
+      const mime = asset.fileType ?? "";
+      return mime.startsWith("image") || mime.startsWith("video");
+    })
+    .map((asset) => ({
+      id: asset.id,
+      name: asset.fileName || asset.id,
+      thumbnailUrl: asset.thumbnailUrl,
+      type: (asset.fileType ?? "").startsWith("video") ? ("video" as const) : ("image" as const),
+    }));
   // Multi-select (marquee/shift-click); the inspector shows the node only when exactly one is selected.
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  // Source Viewer (proxy vs original A/B) — opened from a MediaIn's source row to verify which stream plays.
+  const [inspectAssetId, setInspectAssetId] = useState<string | null>(null);
+  const inspectAsset = inspectAssetId
+    ? (assets.find((a) => a.id === inspectAssetId) as (SourceAsset & { previewUrl?: string }) | undefined) ?? null
+    : null;
+  // Toolbar "Browse" popover (the full categorized/searchable node library — the twin of the canvas
+  // Tab menu). Icon-only pins cover the commons; this is the everything-else entry point. Positioned
+  // with position:fixed off the button rect because the toolbar clips overflow (overflow-x:auto).
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browsePos, setBrowsePos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Selection resets when the active comp changes (a different clip's graph).
   useEffect(() => {
@@ -186,32 +213,68 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
     <div className="flarex-workspace">
       <div className="flarex-toolbar">
         <FlarexCompNameField comp={comp} onUpdateComp={updateComp} />
-        {PALETTE_GROUPS.map((group) => (
-          <div key={group.label} className="flarex-toolbar-group">
-            <span className="flarex-toolbar-group-label">{group.label}</span>
-            {group.types.map((type) => (
-              <button
-                key={type}
-                type="button"
-                className="flarex-toolbar-btn"
-                style={{ borderLeft: `3px solid ${GROUP_COLORS[flarexNodeDefs[type].group] ?? "#8a8f98"}` }}
-                title={`Add ${flarexNodeDefs[type].label} (click, or drag onto the canvas / a wire)`}
-                onClick={() => handleAddNode(type)}
-                draggable
-                onDragStart={(e) => {
-                  flarexPaletteDrag.current = type;
-                  e.dataTransfer.setData("text/plain", type); // required by some browsers to start a drag
-                  e.dataTransfer.effectAllowed = "copy";
+        {/* Icon-only pinned commons (labels removed — they overflowed the strip; the glyph + tooltip
+            carry identity). A thin divider marks each category change. Everything else (and the future
+            node library) is reached via the Browse popover / the canvas Tab menu. */}
+        <div className="flarex-palette">
+          {FLAREX_PINNED_NODES.map((type, index) => {
+            const def = flarexNodeDefs[type];
+            const prevGroup = index > 0 ? flarexNodeDefs[FLAREX_PINNED_NODES[index - 1]!].group : def.group;
+            return (
+              <Fragment key={type}>
+                {index > 0 && def.group !== prevGroup ? <span className="flarex-palette-divider" aria-hidden /> : null}
+                <button
+                  type="button"
+                  className="flarex-toolbar-btn flarex-palette-btn"
+                  title={`Add ${def.label} (click, or drag onto the canvas / a wire)`}
+                  aria-label={`Add ${def.label}`}
+                  onClick={() => handleAddNode(type)}
+                  draggable
+                  onDragStart={(e) => {
+                    flarexPaletteDrag.current = type;
+                    e.dataTransfer.setData("text/plain", type); // required by some browsers to start a drag
+                    e.dataTransfer.effectAllowed = "copy";
+                  }}
+                  onDragEnd={() => {
+                    flarexPaletteDrag.current = null;
+                  }}
+                >
+                  <FlarexNodeIcon type={type} size={18} />
+                </button>
+              </Fragment>
+            );
+          })}
+          <span className="flarex-palette-divider" aria-hidden />
+          <button
+            type="button"
+            className={`flarex-toolbar-btn flarex-palette-browse${browseOpen ? " is-active" : ""}`}
+            title="Browse all nodes (search / categories) — or press Tab on the canvas"
+            aria-expanded={browseOpen}
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setBrowsePos({ x: Math.min(r.left, window.innerWidth - 280), y: r.bottom + 4 });
+              setBrowseOpen((v) => !v);
+            }}
+          >
+            <span className="flarex-palette-browse-plus">＋</span>
+            <span className="flarex-palette-browse-label">Nodes</span>
+          </button>
+        </div>
+        {browseOpen ? (
+          <>
+            <div className="flarex-menu-backdrop flarex-menu-backdrop--fixed" onPointerDown={() => setBrowseOpen(false)} />
+            <div className="flarex-node-menu flarex-palette-browse-pop" style={{ left: browsePos.x, top: browsePos.y }}>
+              <FlarexNodeBrowser
+                onPick={(type) => {
+                  handleAddNode(type);
+                  setBrowseOpen(false);
                 }}
-                onDragEnd={() => {
-                  flarexPaletteDrag.current = null;
-                }}
-              >
-                {flarexNodeDefs[type].label}
-              </button>
-            ))}
-          </div>
-        ))}
+                onClose={() => setBrowseOpen(false)}
+              />
+            </div>
+          </>
+        ) : null}
+        <FlarexProxyButton composition={graph.composition} comp={comp} layer={layer} assets={assets} />
         {selectedNodeIds.length >= 2 ? (
           <div className="flarex-toolbar-group flarex-align-group">
             <span className="flarex-toolbar-group-label">Align</span>
@@ -233,15 +296,27 @@ export function FlarexWorkspace({ graph, layer, onUpdateGraph, timeSeconds, onSe
         onSeekCompTime={(t) => onSeek(layerStart + t)}
       />
       <div className="flarex-body">
-        <FlarexNodeCanvas comp={comp} selectedNodeIds={selectedNodeIds} onSelectNodes={setSelectedNodeIds} onUpdateComp={updateComp} />
+        <FlarexNodeCanvas comp={comp} selectedNodeIds={selectedNodeIds} onSelectNodes={setSelectedNodeIds} onUpdateComp={updateComp} sourceAssets={sourceAssets} />
         <FlarexInspector
           comp={comp}
           node={selectedNodeIds.length === 1 ? comp.nodes[selectedNodeIds[0]!] ?? null : null}
           onUpdateComp={updateComp}
           compTime={compTime}
           onSeekCompTime={(t) => onSeek(layerStart + t)}
+          sourceAssets={sourceAssets}
+          onPickSource={onPickSource ? (nodeId) => onPickSource(comp.id, nodeId) : undefined}
+          onInspectSource={(assetId) => setInspectAssetId(assetId)}
         />
       </div>
+      {inspectAsset ? (
+        <FlarexSourceViewer
+          assetId={inspectAsset.id}
+          name={inspectAsset.fileName || inspectAsset.id}
+          originalUrl={inspectAsset.fileUrl ?? inspectAsset.previewUrl}
+          onRebuild={() => rebuildSourceProxy(inspectAsset)}
+          onClose={() => setInspectAssetId(null)}
+        />
+      ) : null}
       {graphOpen ? (
         graphBridge && graphNode ? (
           <BottomWorkspace
@@ -301,11 +376,18 @@ function FlarexCompNameField({ comp, onUpdateComp }: { comp: FlarexComp; onUpdat
  * transport (scrub = seek the one viewer). Ticks every second, amber playhead, current-frame
  * readout (frames, like Fusion — not timecode).
  *
- * Live playhead: subscribes to the HIGH-FREQUENCY playback clock directly (the
- * PlayheadTimeReadout pattern) so the line moves smoothly during playback while only THIS tiny
- * component re-renders — never the workspace tree (clock-tier doctrine; the workspace itself
- * stays on ColdTime). Scrubs are FRAME-QUANTIZED and deduped, so a drag issues at most one seek
- * per crossed frame instead of one per pointer event (the "laggy drag" fix).
+ * Live playhead: while PLAYING the needle is driven by its own rAF loop writing the position
+ * IMPERATIVELY — the same writer the main timeline playhead uses — never by a React re-render.
+ *
+ * It used to follow `PlayheadTimeReadout` (`usePlaybackClock`), which was wrong for a moving line:
+ * that store is the COMMITTED clock, advanced only once per `playbackCommitIntervalMs` (16/40/90ms by
+ * preview quality). A text readout at 11Hz is fine; a needle at 11Hz is visible stop-motion, which is
+ * exactly what it looked like on the balanced/performance tiers (user report 2026-07-26). Re-rendering
+ * per rAF would not have fixed it either, since the value itself only changes at the commit tier — the
+ * needle has to read `getLivePlaybackTime()` (anchor-derived, sub-commit truth) on its own clock.
+ *
+ * Paused, React rendering still owns the position (scrubs/seeks are discrete and cheap). Scrubs are
+ * FRAME-QUANTIZED and deduped, so a drag issues at most one seek per crossed frame (the "laggy drag" fix).
  */
 function FlarexFrameRuler({
   durationSeconds,
@@ -342,6 +424,34 @@ function FlarexFrameRuler({
   const frame = Math.round(clamped * fps);
   const lastFrame = Math.max(1, Math.round(dur * fps));
   const lastSentFrameRef = useRef<number | null>(null);
+
+  // ── LIVE NEEDLE (imperative, playback only) ──────────────────────────────────────────────────
+  // See the component docstring: the committed clock steps at 16/40/90ms, so the needle reads the
+  // anchor-derived live time on its own rAF and writes the DOM directly. The frame readout is written
+  // here too — it is the same value, and letting it lag at the commit tier while the line runs smooth
+  // would just move the stutter into the number.
+  const playheadElRef = useRef<HTMLDivElement | null>(null);
+  const readoutElRef = useRef<HTMLSpanElement | null>(null);
+  const liveFloorRef = useRef(0);
+  useEffect(() => {
+    if (!isPlaying) return undefined;
+    liveFloorRef.current = Math.max(0, Math.min(getLivePlaybackTime() - layerStart, dur));
+    let raf = 0;
+    const tick = () => {
+      const local = Math.max(0, Math.min(getLivePlaybackTime() - layerStart, dur));
+      // Same monotonic guard the React path applies: the audio anchor can nudge a few ms backward at
+      // play start, and the needle must never visibly step back. A real seek/loop (>0.35s) passes.
+      const next = local < liveFloorRef.current && liveFloorRef.current - local < 0.35 ? liveFloorRef.current : local;
+      liveFloorRef.current = next;
+      const el = playheadElRef.current;
+      if (el) el.style.left = `${(next / dur) * 100}%`;
+      const readout = readoutElRef.current;
+      if (readout) readout.textContent = String(Math.round(next * fps));
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [isPlaying, layerStart, dur, fps]);
   const scrub = (event: React.PointerEvent) => {
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const frac = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
@@ -374,7 +484,7 @@ function FlarexFrameRuler({
             {Math.round(s * fps)}
           </span>
         ))}
-        <div className="flarex-framebar-playhead" style={{ left: `${(clamped / dur) * 100}%` }} />
+        <div ref={playheadElRef} className="flarex-framebar-playhead" style={{ left: `${(clamped / dur) * 100}%` }} />
         {keyframeTimes
           .filter((t) => t >= 0 && t <= dur)
           .map((t) => (
@@ -394,7 +504,7 @@ function FlarexFrameRuler({
             />
           ))}
       </div>
-      <span className="flarex-framebar-readout" title={`Frame ${frame} of ${lastFrame} (${fps} fps)`}>
+      <span ref={readoutElRef} className="flarex-framebar-readout" title={`Frame ${frame} of ${lastFrame} (${fps} fps)`}>
         {frame}
       </span>
     </div>
