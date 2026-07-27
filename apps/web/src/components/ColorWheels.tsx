@@ -45,29 +45,34 @@ function hsvCss(h: number, s: number, v: number): string {
 }
 
 const WHEEL_BACKGROUND = (() => {
-  // 48 stops, not 24: at full chroma the banding between stops is visible, and this is the one
-  // element in the panel a colorist stares at.
-  const steps = 48;
+  // 96 stops. At full chroma the seams between conic stops are plainly visible, and this is the one
+  // element in the panel a colorist actually stares at — the cost is a static string built once.
+  const steps = 96;
   const stops: string[] = [];
   for (let i = 0; i <= steps; i += 1) {
     const phi = (i / steps) * 360;
     // Hue ORIENTATION is the engine's tint math, not a style choice — it is what makes dragging
-    // toward a color actually push that color. Only the chroma/falloff below is cosmetic.
+    // toward a colour actually push that colour. Only the chroma/falloff below is cosmetic.
     const hue = (90 - phi + 360) % 360;
-    stops.push(`${hsvCss(hue, 1, 1)} ${phi.toFixed(1)}deg`);
+    stops.push(`${hsvCss(hue, 1, 1)} ${phi.toFixed(2)}deg`);
   }
-  // FULL-chroma hue ring, revealed only near the rim by a dark radial mask over it — the Resolve
-  // trackball look: a near-black interior you can read a small handle against, with saturated colour
-  // banded at the outer edge where you actually aim. The previous version desaturated the ring itself
-  // (s=0.55, v=0.82) AND washed it out from 26%, which is what made the wheels look faded.
+  // Full-chroma hue ring revealed only toward the rim by a dark radial mask — the trackball look: a
+  // near-black interior you can read a small handle against, chroma banded where you aim.
+  //
+  // The falloff is EASED (a hand-placed curve, dense near the rim) rather than linear: a linear mask
+  // produces a visible hard edge where the colour "starts", which is the single biggest tell of a
+  // CSS-gradient wheel. Nine stops buy a transition that reads as a smooth luminance ramp.
   const mask = [
-    "#14161a 0%",
-    "#14161a 40%",
-    "rgba(20, 22, 26, 0.94) 58%",
-    "rgba(20, 22, 26, 0.72) 72%",
-    "rgba(20, 22, 26, 0.34) 85%",
-    "rgba(20, 22, 26, 0.06) 95%",
-    "rgba(20, 22, 26, 0) 100%",
+    "#101216 0%",
+    "#101216 34%",
+    "rgba(16, 18, 22, 0.985) 48%",
+    "rgba(16, 18, 22, 0.94) 60%",
+    "rgba(16, 18, 22, 0.85) 69%",
+    "rgba(16, 18, 22, 0.7) 77%",
+    "rgba(16, 18, 22, 0.48) 85%",
+    "rgba(16, 18, 22, 0.24) 92%",
+    "rgba(16, 18, 22, 0.07) 97%",
+    "rgba(16, 18, 22, 0) 100%",
   ].join(", ");
   return `radial-gradient(circle at center, ${mask}), conic-gradient(from 0deg, ${stops.join(", ")})`;
 })();
@@ -232,8 +237,12 @@ function Wheel({
   const handleLeft = `${50 + wheel.x * 50}%`;
   const handleTop = `${50 - wheel.y * 50}%`;
 
+  // Column order is LABEL → WHEEL → SLIDER: the name titles the control it belongs to instead of
+  // floating between a wheel and the slider under it, which is what made three columns read as one
+  // undifferentiated block. The wheel is the visual anchor between them.
   return (
     <div className="color-wheel">
+      <span className="color-wheel-label">{label}</span>
       <div
         ref={padRef}
         className={`color-wheel-pad ${edited ? "is-edited" : ""}`}
@@ -247,7 +256,6 @@ function Wheel({
       >
         <span className="color-wheel-handle" style={{ left: handleLeft, top: handleTop }} />
       </div>
-      <span className="color-wheel-label">{label}</span>
       <input
         className="color-wheel-master"
         type="range"
