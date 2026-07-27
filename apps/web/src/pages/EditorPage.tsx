@@ -162,6 +162,8 @@ import {
   stampCompositionRegistry,
   compileNodeGraphIntent,
   createFlarexComp,
+  getLayerFlarexComp,
+  isolateFlarexHostComposition,
   stampFlarexComp,
   type NodeGraphIntent,
   compileNotesIntent,
@@ -307,6 +309,7 @@ import { ColorWheels } from "../components/ColorWheels";
 import { CurveEditor } from "../components/CurveEditor";
 import { ScrubNumberInput } from "../components/ScrubNumberInput";
 import { EffectSliderControl } from "../components/EffectSliderControl";
+import { PropertyFieldView, type PropertyField } from "../editor/inspector/PropertyFieldList";
 import { EffectPresetRow } from "../components/EffectPresetRow";
 import { effectSliderTone } from "../components/effectSliderTone";
 import { HueSatCurves } from "../components/HueSatCurves";
@@ -435,6 +438,7 @@ import { discardRecoveryCheckpoint, readRecoveryCheckpoint, type RecoveryCheckpo
 import { SyncBadge } from "../components/SyncBadge";
 import { RelinkMediaModal } from "../components/RelinkMediaModal";
 import { canExportLocally, exportLocally, saveExportedFile } from "../export/local-export";
+import { collectFlarexSourceAssetIds, type FlarexSourceAssetMap } from "../export/export-core";
 import type { ExportFormat } from "../export/video-encoder";
 import { detectSourceMetadataFromFile } from "../export/source-color";
 import { probeDecodableEndSeconds } from "../export/webcodecs-decoder";
@@ -890,6 +894,10 @@ export function EditorPage() {
   // When set, the asset bin is in "pick a replacement" mode for this layer; tile
   // clicks swap the clip's asset instead of adding a new layer.
   const [assetPickerForLayerId, setAssetPickerForLayerId] = useState<string | null>(null);
+  // Flarex MediaIn source pick (mirrors the layer-replace flow, but targets a node's `sourceAssetId`):
+  // when set, the media pool is in "pick one" mode and a tile click routes to the Flarex comp node
+  // instead of the timeline. Reuses the SAME media pool UI the user knows from "Replace asset".
+  const [flarexSourcePick, setFlarexSourcePick] = useState<{ compId: string; nodeId: string } | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [pasteAttributesModalOpen, setPasteAttributesModalOpen] = useState(false);
   const [pendingExternalTimelineImport, setPendingExternalTimelineImport] = useState<ImportedExternalTimeline | null>(null);
@@ -1283,9 +1291,28 @@ export function EditorPage() {
     setAssets((current) => current.map((asset) => (patches.has(asset.id) ? { ...asset, proxyUrl: patches.get(asset.id) } : asset)));
   }, []);
   useEffect(() => {
+    // SCOPE (2026-07-24): only proxy assets the OPEN project actually USES — timeline layers (incl.
+    // nested comps, via collectGraphAssetIds) + Flarex MediaIn sources. The media BIN (library pool AND
+    // this project's own un-placed uploads) can hold hundreds of assets; eagerly transcoding all of them
+    // on every project open flooded the build queue and starved playback (the "+22 queued" storm that
+    // competes with the transport). Ownership is NOT the test — an unused project import is as skippable
+    // as an unused library asset; only PLACEMENT in the graph counts. Assets proxy LAZILY: placing one
+    // mutates the graph, this effect re-runs (projectGraph dep), and only THEN does it queue.
+    const graph = project?.projectGraph;
+    const usedAssetIds = graph ? collectGraphAssetIds(graph) : new Set<string>();
+    for (const comp of Object.values(graph?.flarexComps ?? {})) {
+      for (const node of Object.values(comp.nodes)) {
+        if (node.type !== "mediaIn") continue;
+        const src = node.params.sourceAssetId;
+        if (typeof src === "string" && src) usedAssetIds.add(src);
+      }
+    }
     for (const asset of assets) {
       if (asset.proxyUrl) {
         continue; // already proxied (or server-side proxy) — ensureSourceProxy is also idempotent
+      }
+      if (!usedAssetIds.has(asset.id)) {
+        continue; // not placed in this project — don't pre-transcode; it proxies when added to the graph
       }
       ensureSourceProxy(asset, (assetId, url) => {
         pendingProxyUrlsRef.current.set(assetId, url);
@@ -1294,7 +1321,7 @@ export function EditorPage() {
         }
       });
     }
-  }, [assets, applySourceProxyPatches]);
+  }, [assets, project?.projectGraph, applySourceProxyPatches]);
   useEffect(() => {
     if (!isPlaying) {
       applySourceProxyPatches();
@@ -1478,7 +1505,10 @@ export function EditorPage() {
   const stableAddGraphic = useStableHandler(handleAddGraphic);
   const stableApplyFrame = useStableHandler(handleApplyFrame);
   const stablePickReplacement = useStableHandler(handlePickReplacement);
-  const stableCancelReplace = useStableHandler(() => setAssetPickerForLayerId(null));
+  const stableCancelReplace = useStableHandler(() => {
+    setAssetPickerForLayerId(null);
+    setFlarexSourcePick(null);
+  });
   const stableDeleteAsset = useStableHandler(handleDeleteAsset);
   const stableFocusAssetUse = useStableHandler((assetId: string) => focusAssetUse(assetId, layers));
   const stableUploadAsset = useStableHandler(handleUploadAsset);
@@ -1549,10 +1579,36 @@ export function EditorPage() {
     const selectedAsset = selectedLayer?.assetId ? resolvedAssets.find((asset) => asset.id === selectedLayer.assetId) : undefined;
     return selectedAsset ?? project?.sourceAsset ?? resolvedAssets.find((asset) => asset.fileType.startsWith("image/") || asset.fileType.startsWith("video/"));
   }, [project?.sourceAsset, resolvedAssets, selectedLayer?.assetId]);
+  /**
+   * FLAREX VIEWER ISOLATION (user report 2026-07-26). The Flarex page reuses the one shared viewer
+   * ("one viewer across pages", the Resolve model) — but a comp viewer must show THE COMP, not the
+   * finished timeline composite. Any clip stacked above the Flarex host on a higher track was being
+   * drawn over the node output, so what you saw while building the comp was not the comp.
+   *
+   * Resolve behaves the same way: on the Fusion page the viewer shows that clip's node output alone.
+   * So while the Flarex page is open on a clip that HAS a comp, the preview composition is narrowed to
+   * just the host layer. Everything else is untouched — same duration/size/transport (so the ruler,
+   * seeking and the frame math all still line up), only the other layers are withheld.
+   *
+   * Deliberately NOT filtered: the host layer's own Flarex virtual loaders. They are derived from
+   * `graph.flarexComps` + the surviving layer inside VideoPreview, so keeping the host is enough to
+   * keep every asset-source MediaIn alive.
+   */
+  const flarexIsolatedHostId =
+    editorPage === "flarex" && graph && inspectorLayer && getLayerFlarexComp(graph, inspectorLayer) ? inspectorLayer.id : null;
+  const previewComposition = useMemo(
+    () => (composition && flarexIsolatedHostId ? isolateFlarexHostComposition(composition, flarexIsolatedHostId) : composition),
+    [composition, flarexIsolatedHostId]
+  );
+
   const renderJobs = project?.renderJobs ?? [];
   const activeRenderJob = renderJobs.find((job) => job.status === "queued" || job.status === "processing");
   const latestFinalJob = findLatestRenderJob(renderJobs, "final");
   const finalDownloadUrl = project?.finalUrl ?? (latestFinalJob?.status === "completed" ? latestFinalJob.outputUrl : undefined);
+  // A final render that FAILED. Outlives the job (nothing is queued/processing any more), so the status
+  // slot must show it explicitly — see the topbar. `latestFinalJob` is the most recent by createdAt, so
+  // a successful re-export clears this on its own.
+  const failedFinalJob = latestFinalJob?.status === "failed" ? latestFinalJob : undefined;
   // Non-reactive fallback read: when an active job exists (the only time renderNotice is shown),
   // getRenderNotice never reaches the fallback, so a subscription here would only add renders.
   const renderNotice = getRenderNotice(activeRenderJob, latestFinalJob, getNotice());
@@ -1750,6 +1806,21 @@ export function EditorPage() {
     }, 1500);
     return () => window.clearInterval(interval);
   }, [activeRenderJob, projectId]);
+
+  // Announce a final render that FAILED, once per job. The poll above adopts the failed status and then
+  // stops (no active job left), so without this the only trace was a status slot that had already
+  // reverted to the sync badge — a dead export looked like a finished one.
+  const announcedFailedJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!failedFinalJob || announcedFailedJobRef.current === failedFinalJob.id) return;
+    announcedFailedJobRef.current = failedFinalJob.id;
+    setNotice(`Export failed: ${failedFinalJob.errorMessage ?? "the render worker did not finish this job"}`);
+    console.error("[export] final render job failed", {
+      id: failedFinalJob.id,
+      progress: failedFinalJob.progress,
+      error: failedFinalJob.errorMessage,
+    });
+  }, [failedFinalJob]);
 
   // When a final render completes, the worker creates a "Rendered" bin asset (Local tab) pointing at
   // the exported mp4. Pull it into the live asset list so it appears without a reload. MERGE (never
@@ -5295,6 +5366,11 @@ export function EditorPage() {
   }
 
   async function handlePickReplacement(asset: SourceAsset) {
+    // Flarex MediaIn source pick takes precedence: route the tile click to the comp node, not the timeline.
+    if (flarexSourcePick) {
+      handleFlarexPickSource(asset);
+      return;
+    }
     const layerId = assetPickerForLayerId;
     if (!composition || !layerId) {
       return;
@@ -5306,6 +5382,25 @@ export function EditorPage() {
     }
     await handleDropAsset(asset.id, layer.trackId, layer.startSeconds, layerId);
     setNotice(`Replaced clip with ${asset.fileName}`);
+  }
+
+  // Set a Flarex MediaIn node's `sourceAssetId` from a media-pool tile click (the shared write path
+  // is `updateGraph`; `stampFlarexComp` bumps the comp's render dirty key).
+  function handleFlarexPickSource(asset: SourceAsset) {
+    const pick = flarexSourcePick;
+    setFlarexSourcePick(null);
+    if (!graph || !pick) {
+      return;
+    }
+    const comp = graph.flarexComps?.[pick.compId];
+    const node = comp?.nodes[pick.nodeId];
+    if (!comp || !node) {
+      return;
+    }
+    const nextNode = { ...node, params: { ...node.params, sourceAssetId: asset.id } };
+    const nextComp = { ...comp, nodes: { ...comp.nodes, [pick.nodeId]: nextNode } };
+    void updateGraph({ ...stampFlarexComp(graph, nextComp), version: graph.version + 1 });
+    setNotice(`MediaIn source: ${asset.fileName}`);
   }
 
   function handleCopyLayer(layerId: string) {
@@ -6712,6 +6807,9 @@ export function EditorPage() {
 
   async function renderFinal(settings: ExportSettings) {
     if (!project) {
+      // Was a SILENT return: the Export button did nothing at all, with no notice and no console line —
+      // indistinguishable from a broken backend from the user's side (report 2026-07-27).
+      setNotice("No project loaded — open or create a project before exporting");
       return;
     }
     lastCloudExportSettingsRef.current = settings;
@@ -6738,7 +6836,25 @@ export function EditorPage() {
       const updated = await exportFinal(serverId, settings);
       setProject(updated);
       const job = updated.renderJobs?.find((item) => item.type === "final" && (item.status === "queued" || item.status === "processing"));
-      setNotice(job ? "Export 0% - waiting to start" : updated.finalUrl ? "Export ready" : "Export requested");
+      if (job) {
+        setNotice("Export 0% - waiting to start");
+      } else {
+        // NO live job came back for a render we just requested. The old code reported "Export ready" here
+        // whenever the project carried ANY `finalUrl` — but that URL is from a PREVIOUS render, so a
+        // request that never queued (or that the inline worker already failed) announced success and left
+        // the user with a stale file: the "click export, it just says export ready, nothing exports"
+        // report (2026-07-27). Name the real outcome instead, and surface the failure when there is one.
+        const failed = updated.renderJobs?.find((item) => item.type === "final" && item.status === "failed");
+        if (failed) {
+          setNotice(`Export failed: ${failed.errorMessage ?? "the render worker rejected the job"}`);
+        } else {
+          setNotice("Export was accepted but no render job is running — is the worker up?");
+        }
+        console.warn("[export] no queued/processing final job returned", {
+          jobs: updated.renderJobs?.map((item) => ({ type: item.type, status: item.status, error: item.errorMessage })),
+          finalUrl: updated.finalUrl,
+        });
+      }
     } catch (error) {
       if (error instanceof AuthRequiredError) {
         setNotice("Sign in to export.");
@@ -6797,6 +6913,21 @@ export function EditorPage() {
     // never contend with the encode (reopened in finally).
     setBackgroundGate("exporting", true);
     const params = localEncodeParamsFor(settings);
+    // Flarex asset-source `MediaIn`s load media-pool assets directly (the Fusion Loader model), so they
+    // are NOT on any track and the export's own source resolution cannot discover them. Resolve their
+    // real media kind + duration here; without this every asset-source MediaIn soft-degrades to the HOST
+    // clip in the rendered file while the editor preview shows the right sources (user report 2026-07-27).
+    const flarexSourceAssets: FlarexSourceAssetMap = {};
+    for (const assetId of collectFlarexSourceAssetIds(graph?.flarexComps)) {
+      const asset = resolvedAssets.find((item) => item.id === assetId);
+      if (!asset) continue; // unresolvable → the compiler's documented host soft-degrade still applies
+      flarexSourceAssets[assetId] = {
+        // The kind must be the REAL one — an image decoded through a video provider yields nothing.
+        type: asset.fileType.startsWith("image/") ? "image" : "video",
+        // Drives the "source shorter than its host goes transparent" rule rather than a frozen last frame.
+        durationSeconds: asset.durationSeconds,
+      };
+    }
     try {
       const blob = await exportLocally({
         // Stamp the chosen export window (Full/In-Out + safe-timeline trim) onto the composition;
@@ -6804,6 +6935,7 @@ export function EditorPage() {
         composition: withExportWindow(composition, settings),
         compositions: graph?.compositions,
         flarexComps: graph?.flarexComps,
+        flarexSourceAssets,
         urlForAsset: (id) => resolvedAssets.find((asset) => asset.id === id)?.fileUrl,
         format: params.format,
         fps: params.fps,
@@ -7925,9 +8057,28 @@ export function EditorPage() {
           </span>
         </div>
         <div className="topbar-right">
-          {/* Single status slot: render progress while a job runs, otherwise the one save/sync badge. */}
+          {/* Single status slot: render progress while a job runs, a FAILED export (which outlives the
+              job and must not be silently swallowed), otherwise the one save/sync badge. */}
           <div className="editor-status">
-            {activeRenderJob ? <AiActivityIndicator label={renderNotice} /> : <SyncBadge projectId={project?.id} onRetry={retrySync} />}
+            {activeRenderJob ? (
+              <AiActivityIndicator label={renderNotice} />
+            ) : failedFinalJob ? (
+              // A failed export used to vanish the instant the job left queued/processing: this slot fell
+              // straight back to SyncBadge, whose label is ALSO "Export ready" — but that means "this
+              // project is ready TO BE exported", not "your export finished". So a render that died at
+              // 15% read as a completed export (user report 2026-07-27). Now the failure persists here
+              // with the worker's own message, and clicking re-opens the export window to retry.
+              <button
+                type="button"
+                className="editor-status-failed"
+                title={failedFinalJob.errorMessage ?? "The render worker did not finish this export"}
+                onClick={() => openExportDialog("cloud")}
+              >
+                Export failed{failedFinalJob.errorMessage ? ` — ${failedFinalJob.errorMessage}` : ""}
+              </button>
+            ) : (
+              <SyncBadge projectId={project?.id} onRetry={retrySync} />
+            )}
           </div>
           <CreditBadge value={creditEstimate} />
           {/* Document actions — icon-only with tooltips to keep the bar compact. */}
@@ -8244,7 +8395,8 @@ export function EditorPage() {
                   onApplyTemplate={editorPage === "notes" ? undefined : stableApplyTemplate}
                   selectedAssetId={selectedLayer?.assetId}
                   usedCounts={assetUseCounts}
-                  replaceActive={assetPickerForLayerId !== null}
+                  replaceActive={assetPickerForLayerId !== null || flarexSourcePick !== null}
+                  replaceLabel={flarexSourcePick ? "Pick an asset for the MediaIn node" : undefined}
                   onAssignAsset={stableAssignAsset}
                   onAddAssetToTimeline={stableAddAssetToTimeline}
                   disableTimelineAdd={editorPage === "notes"}
@@ -8420,10 +8572,13 @@ export function EditorPage() {
             >
             <VideoPreview
               graph={graph}
-              composition={composition}
+              composition={previewComposition ?? composition}
               currentTime={currentTimeRef.current}
               isPlaying={isPlaying}
               clockDriven
+              // Comp proxies play back on the EDIT page only — on the Flarex page you must always see
+              // the live graph you are building, never a cached render of it.
+              flarexProxyPlayback={editorPage !== "flarex"}
               previewQuality={previewQuality}
               viewMode={responsiveLayout.usesPhoneShell && timelineTool !== "hand" ? "fit" : viewMode}
               manualScale={manualScale}
@@ -8561,8 +8716,8 @@ export function EditorPage() {
                     value={viewMode === "fit" ? `fit:${Math.round(fitScale * 100)}` : String(manualScale)}
                   options={[
                     ...(viewMode === "fit" ? [{ value: `fit:${Math.round(fitScale * 100)}`, label: `${Math.round(fitScale * 100)}%` }] : []),
-                    ...[0.25, 0.5, 0.75, 1, 1.5, 2, 4].map((scale) => ({ value: String(scale), label: `${Math.round(scale * 100)}%` })),
-                    ...(viewMode === "manual" && ![0.25, 0.5, 0.75, 1, 1.5, 2, 4].some((s) => Math.abs(manualScale - s) < 0.005)
+                    ...[0.15, 0.25, 0.5, 0.75, 1, 1.5, 2, 4].map((scale) => ({ value: String(scale), label: `${Math.round(scale * 100)}%` })),
+                    ...(viewMode === "manual" && ![0.15, 0.25, 0.5, 0.75, 1, 1.5, 2, 4].some((s) => Math.abs(manualScale - s) < 0.005)
                       ? [{ value: String(manualScale), label: `${Math.round(manualScale * 100)}%` }]
                       : [])
                   ]}
@@ -8811,6 +8966,14 @@ export function EditorPage() {
                 <FlarexWorkspace
                   graph={graph}
                   layer={inspectorLayer ?? null}
+                  assets={assets}
+                  onPickSource={(compId, nodeId) => {
+                    // Enter media-pool pick mode for this MediaIn node (reuses the "Replace asset" UI).
+                    setAssetPickerForLayerId(null);
+                    setFlarexSourcePick({ compId, nodeId });
+                    setPanelTab("assets");
+                    setNotice("Pick an asset for the MediaIn node");
+                  }}
                   onUpdateGraph={(nextGraph) => {
                     void updateGraph(nextGraph);
                   }}
@@ -9814,6 +9977,16 @@ function getRenderNotice(activeJob: RenderJob | undefined, latestFinalJob: Rende
       return queuedForMs > 15000 ? "Export 0% - waiting for renderer" : "Export 0% - waiting to start";
     }
 
+    // 0-15% is the worker's PREP band, and it is not instant: it downloads every source the render
+    // references before frame 1 (tens of seconds on a media-heavy project). Naming the phase means the
+    // wait reads as real work rather than a stuck bar — the "15% for 30-40s with no status" report.
+    if (activeJob.progress < 15) {
+      return activeJob.progress <= 2 ? "Export - preparing…" : `Export ${activeJob.progress}% - downloading media`;
+    }
+    if (activeJob.progress === 15) {
+      return "Export 15% - starting renderer";
+    }
+
     // The worker maps the frame render to 15-95% and reserves >95% for the final upload of the mp4
     // to storage (R2), which has no sub-progress. Labelling that band as "uploading" means the tail
     // reads as a real step instead of the bar appearing frozen near the end.
@@ -10591,7 +10764,24 @@ const ASSET_SOURCE_BADGE: Record<AssetSource, string> = {
   brand: "Brand"
 };
 
+/**
+ * Internal render artifacts (luma mattes / roto masks the tools bake) — NOT user media. They're
+ * created as durable library rows so the composition and export can fetch their bytes, but a
+ * user-level library row means they'd otherwise pile up in the media pool of EVERY project (a
+ * background-removal/extract-person Apply adds one each time). Distinguished by folder so genuinely
+ * user-facing generated media (freeze frames, person-removed clips) stays visible.
+ */
+const INTERNAL_ARTIFACT_FOLDERS = ["generated/mattes", "generated/background-removed", "generated/roto"];
+function isInternalArtifactAsset(asset: SourceAsset): boolean {
+  const folder = normalizeAssetFolder(asset.folder);
+  return INTERNAL_ARTIFACT_FOLDERS.some((prefix) => folder === prefix || folder.startsWith(`${prefix}/`));
+}
+
 function matchesAssetTab(asset: SourceAsset, tab: AssetSourceTab, used: boolean): boolean {
+  // Internal matte/roto artifacts never belong in any user-facing bin.
+  if (isInternalArtifactAsset(asset)) {
+    return false;
+  }
   const source = assetSourceOf(asset);
   switch (tab) {
     case "local":
@@ -11176,6 +11366,7 @@ function AssetBinImpl({
   selectedAssetId,
   usedCounts = {},
   replaceActive = false,
+  replaceLabel,
   clickAssigns = false,
   onAssignAsset,
   onAddAssetToTimeline,
@@ -11217,6 +11408,9 @@ function AssetBinImpl({
   selectedAssetId?: string | undefined;
   usedCounts?: Record<string, number>;
   replaceActive?: boolean;
+  /** Banner copy while `replaceActive` — defaults to the clip-replace wording; overridden for other
+   *  pick flows (e.g. the Flarex MediaIn source pick). */
+  replaceLabel?: string | undefined;
   /** True only in the inspector's picker, where clicking an asset is EXPLICITLY "use this". */
   clickAssigns?: boolean;
   onAssignAsset: (asset: SourceAsset) => void;
@@ -12347,7 +12541,7 @@ function AssetBinImpl({
       {binTabs}
       {replaceActive ? (
         <div className="asset-replace-banner">
-          <span>Pick an asset to replace the selected clip</span>
+          <span>{replaceLabel ?? "Pick an asset to replace the selected clip"}</span>
           <button type="button" onClick={() => onCancelReplace?.()}>
             Cancel
           </button>
@@ -14892,139 +15086,161 @@ function EffectParamControl({
     const activeKeyframe = getActiveEffectParamKeyframe(layer, effect.id, param.key, layerTime);
     const nextKeyframe = param.keyframeable ? findEffectParamKeyframe(layer, effect.id, param.key, layerTime, 1) : undefined;
     const previousKeyframe = param.keyframeable ? findEffectParamKeyframe(layer, effect.id, param.key, layerTime, -1) : undefined;
-    return (
-      <EffectSliderControl
-        keyframe={
-          param.keyframeable
-            ? {
-                active: Boolean(activeKeyframe),
-                hasAny: getEffectParamKeyframes(layer, effect.id, param.key).length > 0,
-                hasNext: Boolean(nextKeyframe),
-                hasPrevious: Boolean(previousKeyframe),
-                interpolation: activeKeyframe?.interpolation,
-                onChangeInterpolation: (interpolation) =>
-                  onChangeLayer((item) => {
-                    const resolved = resolveItemEffect(item);
-                    return resolved ? setEffectParamInterpolation(item, resolved.effectId, param.key, resolved.timeSeconds, interpolation) : item;
-                  }),
-                onClearAll: () =>
-                  onChangeLayer((item) => {
-                    const resolved = resolveItemEffect(item);
-                    return resolved ? clearEffectParamKeyframes(item, resolved.effectId, param.key) : item;
-                  }),
-                onNext: () => {
-                  if (nextKeyframe) onSeek?.(layer.startSeconds + nextKeyframe.timeSeconds);
-                },
-                onPrevious: () => {
-                  if (previousKeyframe) onSeek?.(layer.startSeconds + previousKeyframe.timeSeconds);
-                },
-                onToggle: () =>
-                  onChangeLayer((item) => {
-                    const resolved = resolveItemEffect(item);
-                    if (!resolved) return item;
-                    const itemEffect = item.effects.find((candidate) => candidate.id === resolved.effectId);
-                    const itemRaw = itemEffect?.params?.[param.key];
-                    const itemBase = typeof itemRaw === "number" ? itemRaw : Number(param.defaultValue);
-                    const itemValue = evaluateTimelineEffectParam({
-                      animations: item.animations,
-                      baseValue: itemBase,
-                      effectId: resolved.effectId,
-                      paramKey: param.key,
-                      timeSeconds: resolved.timeSeconds
-                    });
-                    return toggleEffectParamKeyframe(item, resolved.effectId, param.key, resolved.timeSeconds, itemValue);
-                  })
-              }
-            : undefined
-        }
-        label={param.unit ? `${param.label} ${param.unit}` : param.label}
-        max={param.max}
-        min={param.min}
-        tone={effectSliderTone(param.key)}
-        step={param.step}
-        value={animatedValue}
-        onReset={() =>
-          onChangeLayer((item) => {
-            const resolved = resolveItemEffect(item);
-            return resolved ? updateEffectParamAtTime(item, resolved.effectId, param.key, resolved.timeSeconds, param.defaultValue) : item;
-          })
-        }
-        onChange={(nextValue) =>
-          onChangeLayer((item) => {
-            const resolved = resolveItemEffect(item);
-            return resolved ? applyEffectParamValueAtTime(item, resolved.effectId, param.key, resolved.timeSeconds, nextValue, { autoKeyframe }) : item;
-          })
-        }
-      />
-    );
+    // Adapter → shared renderer: this branch now only BUILDS a PropertyField (value + the broadcast-safe
+    // keyframe/change/reset closures, unchanged); `PropertyFieldView` owns the rendering (the tonal
+    // `EffectSliderControl`). Same widget, same handlers — pure convergence onto the one renderer.
+    const numberField: PropertyField = {
+      kind: "number",
+      key: param.key,
+      label: param.unit ? `${param.label} ${param.unit}` : param.label,
+      min: param.min,
+      max: param.max,
+      step: param.step,
+      tone: effectSliderTone(param.key),
+      value: animatedValue,
+      keyframe: param.keyframeable
+        ? {
+            active: Boolean(activeKeyframe),
+            hasAny: getEffectParamKeyframes(layer, effect.id, param.key).length > 0,
+            hasNext: Boolean(nextKeyframe),
+            hasPrevious: Boolean(previousKeyframe),
+            interpolation: activeKeyframe?.interpolation,
+            onChangeInterpolation: (interpolation) =>
+              onChangeLayer((item) => {
+                const resolved = resolveItemEffect(item);
+                return resolved ? setEffectParamInterpolation(item, resolved.effectId, param.key, resolved.timeSeconds, interpolation) : item;
+              }),
+            onClearAll: () =>
+              onChangeLayer((item) => {
+                const resolved = resolveItemEffect(item);
+                return resolved ? clearEffectParamKeyframes(item, resolved.effectId, param.key) : item;
+              }),
+            onNext: () => {
+              if (nextKeyframe) onSeek?.(layer.startSeconds + nextKeyframe.timeSeconds);
+            },
+            onPrevious: () => {
+              if (previousKeyframe) onSeek?.(layer.startSeconds + previousKeyframe.timeSeconds);
+            },
+            onToggle: () =>
+              onChangeLayer((item) => {
+                const resolved = resolveItemEffect(item);
+                if (!resolved) return item;
+                const itemEffect = item.effects.find((candidate) => candidate.id === resolved.effectId);
+                const itemRaw = itemEffect?.params?.[param.key];
+                const itemBase = typeof itemRaw === "number" ? itemRaw : Number(param.defaultValue);
+                const itemValue = evaluateTimelineEffectParam({
+                  animations: item.animations,
+                  baseValue: itemBase,
+                  effectId: resolved.effectId,
+                  paramKey: param.key,
+                  timeSeconds: resolved.timeSeconds
+                });
+                return toggleEffectParamKeyframe(item, resolved.effectId, param.key, resolved.timeSeconds, itemValue);
+              })
+          }
+        : undefined,
+      onReset: () =>
+        onChangeLayer((item) => {
+          const resolved = resolveItemEffect(item);
+          return resolved ? updateEffectParamAtTime(item, resolved.effectId, param.key, resolved.timeSeconds, param.defaultValue) : item;
+        }),
+      onChange: (nextValue) =>
+        onChangeLayer((item) => {
+          const resolved = resolveItemEffect(item);
+          return resolved ? applyEffectParamValueAtTime(item, resolved.effectId, param.key, resolved.timeSeconds, nextValue, { autoKeyframe }) : item;
+        })
+    };
+    return <PropertyFieldView field={numberField} />;
   }
 
   if (param.type === "color") {
-    return (
-      <ColorControl
-        icon={<PaintBucket size={14} />}
-        label={param.label}
-        palette={palette}
-        value={typeof value === "string" ? value : param.defaultValue}
-        onReset={() => onChange(param.defaultValue)}
-        onChange={onChange}
-      />
-    );
+    const field: PropertyField = {
+      kind: "color",
+      key: param.key,
+      label: param.label,
+      icon: <PaintBucket size={14} />,
+      value: typeof value === "string" ? value : param.defaultValue,
+      palette,
+      onReset: () => onChange(param.defaultValue),
+      onChange
+    };
+    return <PropertyFieldView field={field} />;
   }
 
   if (param.type === "boolean") {
-    return (
-      <label className="effect-toggle-control" title={param.label}>
-        <span>{param.label}</span>
-        <input checked={Boolean(value)} type="checkbox" onChange={(event) => onChange(event.target.checked)} />
-      </label>
-    );
+    const field: PropertyField = {
+      kind: "boolean",
+      key: param.key,
+      label: param.label,
+      value: Boolean(value),
+      onChange: (next) => onChange(next)
+    };
+    return <PropertyFieldView field={field} />;
   }
 
+  // Specialized data editors stay exactly as they are — hosted through PropertyField.custom, not rewritten.
   if (param.type === "curve") {
-    return (
-      <div className="effect-curve-control">
-        <CurveEditor value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
-      </div>
-    );
+    const field: PropertyField = {
+      kind: "custom",
+      key: param.key,
+      node: (
+        <div className="effect-curve-control">
+          <CurveEditor value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
+        </div>
+      )
+    };
+    return <PropertyFieldView field={field} />;
   }
 
   if (param.type === "wheels") {
-    return (
-      <div className="effect-curve-control">
-        <ColorWheels value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
-      </div>
-    );
+    const field: PropertyField = {
+      kind: "custom",
+      key: param.key,
+      node: (
+        <div className="effect-curve-control">
+          <ColorWheels value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
+        </div>
+      )
+    };
+    return <PropertyFieldView field={field} />;
   }
 
   if (param.type === "hueCurves") {
-    return (
-      <div className="effect-curve-control">
-        <HueSatCurves value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
-      </div>
-    );
+    const field: PropertyField = {
+      kind: "custom",
+      key: param.key,
+      node: (
+        <div className="effect-curve-control">
+          <HueSatCurves value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
+        </div>
+      )
+    };
+    return <PropertyFieldView field={field} />;
   }
 
   if (param.type === "secondary") {
-    return (
-      <div className="effect-curve-control">
-        <HslSecondary value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
-      </div>
-    );
+    const field: PropertyField = {
+      kind: "custom",
+      key: param.key,
+      node: (
+        <div className="effect-curve-control">
+          <HslSecondary value={typeof value === "string" ? value : param.defaultValue} onChange={onChange} />
+        </div>
+      )
+    };
+    return <PropertyFieldView field={field} />;
   }
 
   if (param.type === "look") {
-    return (
-      <label className="effect-select-control" title={param.label}>
-        <span>{param.label}</span>
-        <ThemedSelect
-          ariaLabel={param.label}
-          value={typeof value === "string" ? value : param.defaultValue}
-          options={param.options.map((option) => ({ value: option.value, label: option.label }))}
-          onChange={(next) => onChange(next)}
-        />
-      </label>
-    );
+    const field: PropertyField = {
+      kind: "enum",
+      key: param.key,
+      label: param.label,
+      value: typeof value === "string" ? value : param.defaultValue,
+      options: param.options.map((option) => ({ value: option.value, label: option.label })),
+      onChange: (next) => onChange(next)
+    };
+    return <PropertyFieldView field={field} />;
   }
 
   if (param.type === "lut") {
@@ -15034,28 +15250,31 @@ function EffectParamControl({
         : effect.name !== "LUT"
           ? effect.name
           : undefined;
-    return (
-      <div className="effect-lut-control">
-        <LutFileImport
-          label={lutLabel}
-          value={typeof value === "string" ? value : param.defaultValue}
-          onChange={(next, name) => onChange(next, name !== undefined ? { lutName: name } : undefined)}
-        />
-      </div>
-    );
+    const field: PropertyField = {
+      kind: "custom",
+      key: param.key,
+      node: (
+        <div className="effect-lut-control">
+          <LutFileImport
+            label={lutLabel}
+            value={typeof value === "string" ? value : param.defaultValue}
+            onChange={(next, name) => onChange(next, name !== undefined ? { lutName: name } : undefined)}
+          />
+        </div>
+      )
+    };
+    return <PropertyFieldView field={field} />;
   }
 
-  return (
-    <label className="effect-select-control" title={param.label}>
-      <span>{param.label}</span>
-      <ThemedSelect
-        ariaLabel={param.label}
-        value={typeof value === "string" ? value : param.defaultValue}
-        options={param.options.map((option) => ({ value: option.value, label: option.label }))}
-        onChange={(next) => onChange(next)}
-      />
-    </label>
-  );
+  const selectField: PropertyField = {
+    kind: "enum",
+    key: param.key,
+    label: param.label,
+    value: typeof value === "string" ? value : param.defaultValue,
+    options: param.options.map((option) => ({ value: option.value, label: option.label })),
+    onChange: (next) => onChange(next)
+  };
+  return <PropertyFieldView field={selectField} />;
 }
 
 function AlignmentControl({

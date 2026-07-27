@@ -32,6 +32,9 @@ import {
   SceneMaskMatteCache,
   SceneTextRasterizer,
   buildSceneDraws,
+  type FlarexCompProxyFrame,
+  frameProfiler,
+  FlarexSourceDrawCache,
   colorPipelineCacheKey,
   type ColorPipeline,
   type FlarexComp,
@@ -178,6 +181,19 @@ export interface ScenePreviewCanvasProps {
   /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md) — buildSceneDraws lowers `flarexCompId`
    *  clips through the shared compiler. Undefined = comp'd clips render plain. */
   flarexComps?: Record<string, FlarexComp> | undefined;
+  /** Flarex asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic
+   *  off-timeline media layers whose graded canvases the caller ALSO publishes into `gradedRef`
+   *  (by virtual id), consulted only by the Flarex compiler's `resolveSourceDraw`. Undefined = no
+   *  asset-source MediaIns; every MediaIn resolves to its host clip. */
+  flarexVirtualLayers?: TimelineLayer[] | undefined;
+  /**
+   * Pre-rendered comp frames by comp id (plans/flarex-comp-proxy.md, S2). A comp with an entry draws
+   * that frame instead of lowering its graph — the playback win. A REF, not a prop value: the frames
+   * are refreshed by their own decoder between renders, and the draw loop must read the latest.
+   * The owner (`useFlarexCompProxies`) is responsible for only publishing frames whose stored key still
+   * matches the comp, and only for comps where an opaque stand-in is safe.
+   */
+  flarexCompProxiesRef?: React.MutableRefObject<Record<string, FlarexCompProxyFrame>> | undefined;
   /** Populated with the viewer-capture handle (background proxy generation renders through THIS preview). */
   captureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
   /**
@@ -203,11 +219,16 @@ export function ScenePreviewCanvas({
   mediaSourceAlias,
   nestedGroups,
   flarexComps,
+  flarexVirtualLayers,
+  flarexCompProxiesRef,
   captureRef,
   prewarmTransitionIds,
   singleCtxMedia = false,
   mediaSourcesRef,
 }: ScenePreviewCanvasProps) {
+  // Frame profiler (debug-only, flarexProfile flag): count this component's React renders so the report
+  // can confirm the viewer updates via rAF, not React re-render, during playback. No-op when disabled.
+  frameProfiler.notePreviewRender();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const compositorRef = useRef<SceneCompositor | null>(null);
   const matteCacheRef = useRef<SceneMaskMatteCache | null>(null);
@@ -215,6 +236,11 @@ export function ScenePreviewCanvas({
   // `nestMatteCaches` doc on `BuildSceneDrawsInputs`. Lives independently of `matteCacheRef` (which is
   // fixed to the PARENT comp's size); disposed alongside it on unmount/rebuild.
   const nestMatteCachesRef = useRef<Map<string, SceneMaskMatteCache>>(new Map());
+  // Cross-frame cache for Flarex asset-source draws (perf): a bare loader's draw structure is
+  // time-invariant, so a hit reuses the immutable template and rebinds only the live media handle,
+  // skipping the per-frame `buildLayerPreFlarexDraw` rebuild. Persists across frames like `matteCache`;
+  // shared by the live + capture build paths. Plain JS (no GPU resources) → cleared, not disposed.
+  const flarexSourceDrawCacheRef = useRef<FlarexSourceDrawCache>(new FlarexSourceDrawCache());
   const rasterizerRef = useRef<SceneTextRasterizer | null>(null);
   // R1 fix: first-blocked timestamp per currently-unready layer id (escape-hatch timer for the
   // hold-previous-frame gate in `drawRef.current` — see `NOT_READY_HOLD_MS`).
@@ -270,6 +296,9 @@ export function ScenePreviewCanvas({
       }
     }
     nestMatteCachesRef.current.clear();
+    // Flarex source-draw cache holds only plain JS templates (no GPU resources) — clear so a rebuild
+    // starts cold rather than reusing draws keyed against a torn-down comp.
+    flarexSourceDrawCacheRef.current.clear();
     try {
       rasterizerRef.current?.dispose();
     } catch {
@@ -354,8 +383,8 @@ export function ScenePreviewCanvas({
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
-  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps });
-  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps };
+  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexVirtualLayers });
+  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexVirtualLayers };
   // Event-driven redraw: composite while playing, or for a settle window after any input change /
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
@@ -506,10 +535,10 @@ export function ScenePreviewCanvas({
   // The latest draw closure, kept in a ref so the persistent rAF loop always runs current logic
   // without re-subscribing. Reads live values from `inputsRef` / `gradedRef` (both stable refs).
   const drawRef = useRef<() => void>(() => {});
-  drawRef.current = () => {
+  const drawFrameImpl = () => {
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
-    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps } = inputsRef.current;
+    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexVirtualLayers: fxVirtual } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
@@ -554,6 +583,9 @@ export function ScenePreviewCanvas({
     const liveMediaSourceIds = new Set<string>();
     const gradeMediaInContext = (resolvedId: string, source: ScenePreviewMediaSource): SceneTextureSource | null => {
       const snap = source.snapshot();
+      // Media-supply probe: record this source's frame-delivery state (advancing vs held/stalled) BEFORE
+      // the re-grade skip, so a frozen decoder is named per source. Inert unless ?flarexProfile=1.
+      frameProfiler.noteMediaSource(resolvedId, snap.frameVersion, !!snap.frame && snap.frame.width > 0 && snap.frame.height > 0);
       let entry = sharedMediaRenderersRef.current.get(resolvedId);
       if (!snap.frame || snap.frame.width <= 0 || snap.frame.height <= 0) {
         // Transiently source-less: an element mid-seek drops readyState<2 for a few frames, a WC decode
@@ -658,7 +690,8 @@ export function ScenePreviewCanvas({
     let draws: SceneFrameSpec["layers"];
     const notReadyIds: string[] = [];
     try {
-      draws = buildSceneDraws({
+      // Profiler times the whole draw-list build (includes the Flarex evaluator + content hashing).
+      draws = frameProfiler.measure("evaluator.build", () => buildSceneDraws({
       layers: ls,
       width: w,
       height: h,
@@ -677,8 +710,14 @@ export function ScenePreviewCanvas({
       nestedGroups: nestGroups,
       nestMatteCaches: nestMatteCachesRef.current,
       flarexComps: fxComps,
+      flarexVirtualLayers: fxVirtual,
+      // Comp proxies (plans/flarex-comp-proxy.md, S2) — read LIVE off the ref at draw time, exactly like
+      // `gradedRef`: the frame for each proxied comp is refreshed asynchronously by its decoder, and a
+      // prop snapshot would draw the previous one. Undefined/empty ⇒ every comp lowers live as before.
+      flarexCompProxies: flarexCompProxiesRef?.current,
+      flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
       onLayerNotReady: (id) => notReadyIds.push(id),
-      });
+      }));
     } catch (error) {
       fail("build draw list", error);
       return;
@@ -739,12 +778,31 @@ export function ScenePreviewCanvas({
 
     const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t };
     try {
-      compositor.renderFrame(spec);
+      frameProfiler.measure("compositor.render", () => compositor.renderFrame(spec));
       if (playing) {
         frameRendered?.(t);
       }
     } catch (error) {
       fail("render", error);
+    }
+  };
+
+  // Debug-only profiling wrapper (flarexProfile flag): brackets ONE playback frame so the profiler can
+  // reset counters, open/close the GPU timer query, time total CPU, and print the report. When disabled
+  // every call short-circuits and this is byte-for-byte the same as calling `drawFrameImpl` directly.
+  drawRef.current = () => {
+    const profiling = frameProfiler.enabled() && inputsRef.current.isPlaying;
+    if (!profiling) {
+      drawFrameImpl();
+      return;
+    }
+    frameProfiler.beginFrame();
+    const t0 = performance.now();
+    try {
+      drawFrameImpl();
+    } finally {
+      frameProfiler.time("frame.cpu", performance.now() - t0);
+      frameProfiler.endFrame(compositorRef.current?.profilerSnapshot());
     }
   };
 
@@ -899,6 +957,8 @@ export function ScenePreviewCanvas({
             nestedGroups: nestGroups,
             nestMatteCaches: nestMatteCachesRef.current,
             flarexComps: inputsRef.current.flarexComps,
+            flarexVirtualLayers: inputsRef.current.flarexVirtualLayers,
+            flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
           });
           return compositor.renderFrameOffscreen(
             { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t },

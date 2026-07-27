@@ -119,6 +119,7 @@ import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
 import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../playback/audio-fx-worklet";
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
+import { useFlarexCompProxies } from "../editor/flarex/useFlarexCompProxies";
 import { notePlaybackActive, noteRenderScale } from "../editor/performance/frame-stats";
 import { ensureAdaptiveQualityStarted, getAdaptiveScaleCap, subscribeAdaptiveScaleCap } from "../editor/performance/adaptive-quality";
 import { PreviewStatsOverlay } from "./PreviewStatsOverlay";
@@ -475,9 +476,17 @@ function VideoPreviewImpl({
   maskEffectId,
   onPreviewFrameRendered,
   resolveProxyPlayback,
-  proxyCaptureRef
+  proxyCaptureRef,
+  flarexProxyPlayback = false
 }: {
   graph: ProjectGraph;
+  /**
+   * Allow a Flarex comp with a valid pre-rendered proxy to be PLAYED from it instead of evaluating its
+   * node graph (plans/flarex-comp-proxy.md, S2). Off by default so every other host of this component
+   * (tool panels, fixtures, the Flarex page itself) keeps evaluating live. EditorPage turns it on for
+   * the Edit page only — on the node page you must always see the real graph you are building.
+   */
+  flarexProxyPlayback?: boolean | undefined;
   composition: TimelineComposition;
   currentTime: number;
   isPlaying: boolean;
@@ -1203,6 +1212,25 @@ function VideoPreviewImpl({
     );
   }, [graph.flarexComps, renderedLayerEntries, resolvedAssets]);
 
+  // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
+  // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
+  // just wired to the same z-ordered layer list the draw builder consumes and to the scene redraw.
+  const requestSceneRedraw = useCallback(() => sceneRedrawRef.current?.(), []);
+  const flarexProxyLayers = useMemo(() => renderedLayerEntries.map((entry) => entry.layer), [renderedLayerEntries]);
+  const { framesRef: flarexCompProxyFramesRef, requestFrames: requestFlarexProxyFrames } = useFlarexCompProxies({
+    composition,
+    flarexComps: graph.flarexComps,
+    zOrderedLayers: flarexProxyLayers,
+    enabled: flarexProxyPlayback,
+    requestRedraw: requestSceneRedraw,
+  });
+  // Pump the proxy decoders on every committed playhead change (playing AND paused/scrubbing). One
+  // in-flight decode per comp, latest time wins — the same shape as every other preview media source.
+  // `requestFlarexProxyFrames` is ref-stable, so this fires on time changes only.
+  useEffect(() => {
+    requestFlarexProxyFrames(currentTime);
+  }, [requestFlarexProxyFrames, currentTime]);
+
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm
   // when they mount (active or ~1.2s pending), and posters are cached per url@in-point.
@@ -1713,6 +1741,7 @@ function VideoPreviewImpl({
                   nestedGroups={nestExpansion.groups}
                   flarexComps={graph.flarexComps}
                   flarexVirtualLayers={flarexVirtualLayers}
+                  flarexCompProxiesRef={flarexCompProxyFramesRef}
                   captureRef={proxyCaptureRef}
                   prewarmTransitionIds={prewarmTransitionIds}
                   singleCtxMedia={sceneEnabled && singleCtxPreview}

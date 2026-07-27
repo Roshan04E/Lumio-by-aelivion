@@ -74,6 +74,18 @@ export interface ScenePreviewTransition {
   toFit: "cover" | "contain" | "fill";
 }
 
+/**
+ * One pre-rendered frame of a Flarex comp (plans/flarex-comp-proxy.md, S2) — the whole comp output,
+ * full-frame, at the current time. `sourceVersion` lets the compositor skip a redundant texture upload
+ * when the decoder has not advanced.
+ */
+export interface FlarexCompProxyFrame {
+  source: TexImageSource | SceneTextureSource;
+  sourceWidth: number;
+  sourceHeight: number;
+  sourceVersion?: number | undefined;
+}
+
 export interface BuildSceneDrawsInputs {
   /** ALL scene-eligible visual layers (media + text/shape) in back-to-front (z) order, incl. transition pairs. */
   layers: TimelineLayer[];
@@ -159,7 +171,7 @@ export interface BuildSceneDrawsInputs {
    * Remotion path never sets it either. Absent ⇒ byte-identical to before this field existed, which is
    * what keeps an export with a proxy on disk identical to one without.
    */
-  flarexCompProxies?: Record<string, { source: TexImageSource | SceneTextureSource; sourceWidth: number; sourceHeight: number; sourceVersion?: number | undefined }> | undefined;
+  flarexCompProxies?: Record<string, FlarexCompProxyFrame> | undefined;
   /**
    * Asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic off-timeline
    * media layers — one per MediaIn node that loads a media-pool asset — built by
@@ -880,7 +892,14 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       (virtual.animations?.length ?? 0) === 0 &&
       (virtual.keyframes?.length ?? 0) === 0 &&
       (virtual.masks?.length ?? 0) === 0;
-    if (!cache || !bare) {
+    // The cache's hit path rebinds the live MEDIA handle (`getMediaGraded`), so it only describes a
+    // loader whose source IS decoded media. A GENERATOR loader (Text+/Background) is sourced from a
+    // RASTER instead: it has no graded media, so a hit would rebind `null` and the node would vanish
+    // after its first frame. It also gains nothing from the cache — the rasterizer already returns a
+    // version-cached canvas, which is the same saving one level down. This is precisely the
+    // "future non-bare loader falls back to a full rebuild" escape the cache documents.
+    const mediaBacked = virtual.type === "video" || virtual.type === "image";
+    if (!cache || !bare || !mediaBacked) {
       frameProfiler.bump("sourceDraw.uncached");
       return buildLayerPreFlarexDraw(virtual, dims);
     }
