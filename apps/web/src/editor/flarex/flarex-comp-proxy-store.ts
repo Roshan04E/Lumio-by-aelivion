@@ -32,6 +32,17 @@ interface ProxySidecar {
 
 const DIRECTORY_NAME = "orreris-flarex-comp-proxies";
 
+/**
+ * Total bytes of stored proxies before the oldest are evicted.
+ *
+ * A comp proxy is a full-resolution render of a clip's whole span, so these are the largest artifacts
+ * the editor writes — a handful of comps on a long timeline reaches gigabytes, and nothing was ever
+ * deleting them. Eviction is safe precisely because a proxy is never authoritative: a discarded one
+ * costs a re-render, never data. Oldest-first by render time, which approximates least-recently-useful
+ * without needing access tracking.
+ */
+const PROXY_BUDGET_BYTES = 1_500_000_000;
+
 /** Memory fallback — same contract, lost on reload. Used when OPFS is unavailable or throws. */
 const memoryProxies = new Map<string, StoredFlarexCompProxy>();
 
@@ -69,6 +80,85 @@ async function writeFile(directory: FileSystemDirectoryHandle, name: string, dat
   await writable.close();
 }
 
+/** What is stored for a comp, without reading the blob back. */
+export interface FlarexCompProxyInfo {
+  key: string;
+  renderedAt: number;
+  bytes: number;
+}
+
+/** OPFS directory iteration isn't in the TS lib yet. */
+type IterableDirectory = FileSystemDirectoryHandle & { entries?: () => AsyncIterableIterator<[string, FileSystemHandle]> };
+
+/**
+ * Everything currently stored, newest first. Best-effort: an unreadable or torn record is skipped
+ * rather than failing the sweep — this feeds eviction, and a record we cannot parse is one we also
+ * cannot safely keep accounting for.
+ */
+async function listStoredProxies(directory: FileSystemDirectoryHandle): Promise<Array<FlarexCompProxyInfo & { compId: string }>> {
+  const entries = (directory as IterableDirectory).entries;
+  if (!entries) return [];
+  const out: Array<FlarexCompProxyInfo & { compId: string }> = [];
+  try {
+    for await (const [name] of entries.call(directory)) {
+      if (!name.endsWith(".json")) continue;
+      const compId = decodeURIComponent(name.slice(0, -".json".length));
+      try {
+        const sidecar = JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text()) as ProxySidecar;
+        let bytes = 0;
+        try {
+          bytes = (await (await directory.getFileHandle(blobFileName(compId))).getFile()).size;
+        } catch {
+          // Sidecar without a blob — a torn write. Size 0 makes it the cheapest thing to evict.
+        }
+        out.push({ compId, key: sidecar.key, renderedAt: sidecar.renderedAt, bytes });
+      } catch {
+        /* unparseable — skip */
+      }
+    }
+  } catch {
+    return [];
+  }
+  return out.sort((a, b) => b.renderedAt - a.renderedAt);
+}
+
+/**
+ * Evict oldest-first until the total is within budget. `keepCompId` is never evicted — it is the proxy
+ * that was just written, and dropping it would make "Prepare proxy" silently do nothing on a machine
+ * already at budget.
+ */
+async function enforceBudget(directory: FileSystemDirectoryHandle, keepCompId: string): Promise<void> {
+  const stored = await listStoredProxies(directory);
+  let total = stored.reduce((sum, entry) => sum + entry.bytes, 0);
+  if (total <= PROXY_BUDGET_BYTES) return;
+  for (const entry of [...stored].reverse()) {
+    if (total <= PROXY_BUDGET_BYTES) break;
+    if (entry.compId === keepCompId) continue;
+    await removeFlarexCompProxy(entry.compId);
+    total -= entry.bytes;
+  }
+}
+
+/** The stored record for `compId` whatever its key — the basis for "a proxy exists but is stale". */
+export async function peekFlarexCompProxy(compId: string): Promise<FlarexCompProxyInfo | undefined> {
+  const inMemory = memoryProxies.get(compId);
+  if (inMemory) return { key: inMemory.key, renderedAt: inMemory.renderedAt, bytes: inMemory.blob.size };
+  const directory = await proxyDirectory();
+  if (!directory) return undefined;
+  try {
+    const sidecar = JSON.parse(await (await (await directory.getFileHandle(sidecarFileName(compId))).getFile()).text()) as ProxySidecar;
+    let bytes = 0;
+    try {
+      bytes = (await (await directory.getFileHandle(blobFileName(compId))).getFile()).size;
+    } catch {
+      /* torn write — reported as 0 bytes */
+    }
+    return { key: sidecar.key, renderedAt: sidecar.renderedAt, bytes };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Store the proxy for `compId`, replacing any previous one. Writes the BLOB first and the sidecar
  * second: a crash between the two leaves a blob with a stale/absent key, which reads as "no proxy" —
@@ -85,6 +175,9 @@ export async function putFlarexCompProxy(compId: string, key: string, blob: Blob
     await writeFile(directory, blobFileName(compId), blob);
     const sidecar: ProxySidecar = { key, renderedAt: record.renderedAt, mime: blob.type || "video/webm" };
     await writeFile(directory, sidecarFileName(compId), JSON.stringify(sidecar));
+    // Sweep AFTER publishing, so a machine already at budget still gets the proxy it just asked for.
+    // Never fatal: failing to evict costs disk, failing to store costs the feature.
+    await enforceBudget(directory, compId).catch(() => undefined);
   } catch {
     // OPFS quota/permission failure — keep the render usable for this session rather than losing it.
     memoryProxies.set(compId, record);

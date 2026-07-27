@@ -17445,58 +17445,96 @@ input.scrub-number:focus {
   cursor: pointer;
 }
 
-/* Color Wheels (Phase 3 color, 13C.2) */
+/* ── Color Wheels (Phase 3 color, 13C.2) ─────────────────────────────────────────────────────────
+   Visual hierarchy is the whole design here. The trackballs are the instrument; the title, labels
+   and level sliders are annotation around them. Earlier this read as "a settings card with three
+   circles in it" because the container chrome (card background, border, radius) and the label/slider
+   rows carried as much visual weight as the wheels themselves. The fixes are structural:
+
+     · the CARD is dissolved — no panel background, no border, no radius. Separation comes from
+       spacing and a single hairline rule, which is how grading apps group controls.
+     · the WHEEL grows ~35% and is the only element with real presence.
+     · everything else is pushed down the hierarchy: dimmer text, thinner strokes, less contrast.
+
+   Weight budget the rest of this block implements: wheel ~75%, spacing ~10%, slider ~10%, label ~5%. */
+.color-wheels.graph-editor {
+  /* Dissolve the `.graph-editor` card entirely — its border, radius, fill AND its grid gap, so the
+     rhythm below is set in one place (the toolbar's own margin) instead of accumulating. */
+  gap: 0;
+  padding: 2px 0 4px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.color-wheels .curve-editor-toolbar {
+  padding: 0 2px 9px;
+  /* A hairline instead of a card edge — the only separator this panel needs. */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 15px;
+}
+
 .color-wheels .color-wheels-title {
   flex: 1;
-  font-size: 0.62rem;
-  font-weight: 900;
+  font-size: 0.6rem;
+  /* 900 shouted over the wheels; 700 with open tracking reads as a quiet section title. */
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
+  letter-spacing: 0.13em;
+  color: color-mix(in srgb, var(--nle-text-muted, #9fa6b2) 78%, transparent);
   align-self: center;
 }
 
 .color-wheels-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  /* Generous, because the columns are no longer separated by any border. */
+  gap: 18px;
 }
 
 .color-wheel {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  /* Vertical rhythm: label sits CLOSE to its wheel, the slider hangs further below — so each column
+     reads as one titled instrument rather than three evenly-spaced rows. Per-gap overrides below. */
+  gap: 0;
   min-width: 0;
 }
 
 .color-wheel-pad {
   position: relative;
   width: 100%;
-  max-width: 108px;
+  /* +35%: the trackball must dominate the column. Everything else in this panel is annotation. */
+  max-width: 146px;
   aspect-ratio: 1 / 1;
   border-radius: 999px;
   cursor: crosshair;
   touch-action: none;
   /* `background` (a full-chroma hue ring masked to a near-black centre) is generated inline in
      ColorWheels.tsx from the engine's hue math so the rim colour matches the actual tint.
-     No inner highlight/vignette here: the trackball reads as a flat disc with a dark bezel around
-     it, like Resolve's — the old inset glow + bottom shading is what made it look domed and washed. */
+
+     Depth comes from ONE inner shadow and a hairline rim, nothing else. The disc is otherwise flat:
+     the old inset highlight + bottom vignette made it look like a domed plastic button, and stacked
+     outlines are exactly the visual noise that reads as "component library". */
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.85),
-    0 0 0 2px rgba(255, 255, 255, 0.06),
-    0 2px 6px rgba(0, 0, 0, 0.55);
-  transition: box-shadow 0.15s ease;
+    inset 0 0 12px 2px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 4px 14px rgba(0, 0, 0, 0.45);
+  transition: box-shadow 0.18s cubic-bezier(0.2, 0, 0.2, 1);
 }
 
-/* Full-diameter crosshair — the balance reticle you aim against. Spans nearly edge to edge (Resolve
-   draws it right across the ball); the old 14% inset made it read as a small cross floating in the
-   middle rather than as an axis. */
+/* (No mask-image on the pad: it would clip the element's own box-shadows, taking the rim hairline and
+   drop shadow with them. `border-radius` already anti-aliases the disc edge.) */
+
+/* Full-diameter crosshair — the balance reticle you aim against. Deliberately SECONDARY: a soft grey
+   hairline, well under the chroma of the ring, so the colour dominates and the axis merely guides. */
 .color-wheel-pad::before,
 .color-wheel-pad::after {
   content: "";
   position: absolute;
-  background: rgba(255, 255, 255, 0.22);
+  background: rgba(226, 232, 240, 0.13);
   pointer-events: none;
 }
 
@@ -17518,46 +17556,61 @@ input.scrub-number:focus {
 
 .color-wheel-pad:hover {
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.85),
-    0 0 0 2px rgba(255, 255, 255, 0.14),
-    0 2px 8px rgba(0, 0, 0, 0.6);
+    inset 0 0 12px 2px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.16),
+    0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
+/* Edited: the rim hairline picks up the accent. NOT a second ring — an edited wheel should read as
+   "this one is live", not as a highlighted card. */
 .color-wheel-pad.is-edited {
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.85),
-    0 0 0 2px color-mix(in srgb, var(--nle-accent) 70%, transparent),
-    0 2px 8px rgba(0, 0, 0, 0.6);
+    inset 0 0 12px 2px rgba(0, 0, 0, 0.55),
+    0 0 0 1px color-mix(in srgb, var(--nle-accent) 75%, transparent),
+    0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
-/* Handle: a small SOLID white dot, like Resolve's. It sits on a near-black interior now, so it no
-   longer needs to be a big translucent ring to stay visible — and a smaller handle is more precise. */
+/* Puck: a small crisp white disc with a thin grey edge and a soft drop shadow, so it reads as a
+   physical object lying ON the ball. Sized for precision — it sits on a near-black interior, so it
+   does not need bulk to stay visible. */
 .color-wheel-handle {
   position: absolute;
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
   border-radius: 999px;
-  background: #ffffff;
-  box-shadow:
-    0 0 0 1.5px rgba(0, 0, 0, 0.7),
-    0 1px 3px rgba(0, 0, 0, 0.8);
+  background: #f2f4f7;
+  border: 1px solid rgba(120, 128, 140, 0.9);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.75);
+  /* Transform ONLY — never the position. `left`/`top` carry the drag, and transitioning them would
+     put the puck behind the cursor. */
   transform: translate(-50%, -50%);
+  transition: transform 0.16s cubic-bezier(0.2, 0, 0.2, 1), box-shadow 0.16s ease;
   pointer-events: none;
 }
 
-.color-wheel-label {
-  font-size: 0.6rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--muted);
+.color-wheel-pad:hover .color-wheel-handle {
+  transform: translate(-50%, -50%) scale(1.18);
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.8);
 }
 
-/* Match the effect-slider track/thumb look (thin track, small ringed thumb). */
+/* Label: small, quiet, wide-tracked. It titles the wheel — it must not compete with it. */
+.color-wheel-label {
+  margin-bottom: 9px;
+  font-size: 0.575rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: color-mix(in srgb, var(--nle-text-muted, #9fa6b2) 72%, transparent);
+}
+
+/* Level slider — the lowest tier of the hierarchy. A recessed groove and a small dark puck, sized so
+   it reads as an adjustment under the wheel rather than a control beside it. The previous 11px ringed
+   thumb on a bright 2px track was the second-heaviest thing in the panel after the trackball. */
 .color-wheel-master {
-  width: 100%;
-  height: 14px;
+  width: 84%;
+  height: 12px;
   min-width: 0;
+  margin-top: 13px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -17566,34 +17619,46 @@ input.scrub-number:focus {
 }
 
 .color-wheel-master::-webkit-slider-runnable-track {
-  height: 2px;
+  height: 3px;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.2)) 0 50% / 100% 3px no-repeat;
+  /* Groove: dark channel + a 1px light top edge = incised, not painted on. */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 55%),
+    rgba(0, 0, 0, 0.45);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.6);
 }
 
 .color-wheel-master::-webkit-slider-thumb {
-  width: 11px;
-  height: 11px;
-  margin-top: -4.5px;
-  border: 2px solid #9b9b9f;
+  width: 9px;
+  height: 9px;
+  margin-top: -3px;
+  border: 1px solid rgba(150, 158, 170, 0.75);
   border-radius: 999px;
-  background: #3b3c43;
-  box-shadow: 0 0 0 2px #3b3c43;
+  background: #2a2e35;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
   appearance: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.color-wheel-master:hover::-webkit-slider-thumb {
+  border-color: rgba(190, 198, 210, 0.9);
+  background: #333842;
 }
 
 .color-wheel-master::-moz-range-track {
-  height: 2px;
+  height: 3px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.45);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.6);
 }
 
 .color-wheel-master::-moz-range-thumb {
-  width: 8px;
-  height: 8px;
-  border: 2px solid #9b9b9f;
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgba(150, 158, 170, 0.75);
   border-radius: 999px;
-  background: #3b3c43;
+  background: #2a2e35;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
 }
 
 .graph-editor-svg {
@@ -23379,6 +23444,12 @@ input.scrub-number:focus {
 .flarex-proxy-btn.is-ready {
   color: var(--nle-accent);
   background: color-mix(in srgb, var(--nle-accent) 12%, transparent);
+}
+/* A proxy exists but no longer matches the comp — playback has already fallen back to live. Amber, not
+   red: nothing is broken, there is just a cheaper option going unused until it is rebuilt. */
+.flarex-proxy-btn.is-stale {
+  color: #e0a341;
+  background: rgba(224, 163, 65, 0.12);
 }
 .flarex-proxy-btn.is-busy {
   color: var(--editor-text);

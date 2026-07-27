@@ -1,14 +1,18 @@
 /**
- * "Prepare proxy" — the Flarex comp render cache's entry point (plans/flarex-comp-proxy.md, S1).
+ * "Prepare proxy" — the Flarex comp render cache's control (plans/flarex-comp-proxy.md).
  *
- * Renders the active comp over its host clip's span and stores the result. NOTHING about playback
- * changes yet: S1 exists so the render + store + invalidation key can be proven correct on their own,
- * and so a half-built cache can never be reached by the compositor. "Save…" writes the rendered file
- * out so it can be played by hand — that is the S1 verification.
+ * Renders the active comp over its host clip's span and stores it; the EDIT page then plays that file
+ * instead of evaluating the node graph every frame (the Flarex page always shows the live graph). A wand
+ * on the clip's `fx` badge marks a clip currently being played from its proxy.
  *
- * Status is derived from the store, keyed on the CURRENT identity, so any graph or clip edit flips a
- * ready proxy back to "not built" the moment it lands — there is no separate invalidation path to keep
- * in sync.
+ * Every state here is DERIVED from the store against the comp's current identity — there is no
+ * invalidation path for anyone to keep in sync, and no way to present a proxy that no longer matches:
+ *   ready    a proxy exists under exactly this key; the Edit page is using it.
+ *   stale    a proxy exists under a DIFFERENT key — the comp or clip changed since it was built, so
+ *            playback has already fallen back to live evaluation.
+ *   unbuilt  no proxy at all.
+ *
+ * "Save…" writes the rendered file out, which is how the render itself gets eyeballed.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -20,13 +24,30 @@ import {
   renderFlarexCompProxy,
   ProxyGenerationAborted,
 } from "./flarex-comp-proxy";
-import { getFlarexCompProxy, hasFlarexCompProxy, removeFlarexCompProxy } from "./flarex-comp-proxy-store";
+import { getFlarexCompProxy, peekFlarexCompProxy, removeFlarexCompProxy } from "./flarex-comp-proxy-store";
 
+/**
+ * `stale` is the state that matters. Before it existed, editing a comp after preparing a proxy silently
+ * dropped playback back to live evaluation — correct (the key cannot match, so stale pixels can never be
+ * shown) but mute: the button still read "Prepare proxy", identical to never having built one, so the
+ * one action worth offering — re-render it — looked like a first-time build.
+ */
 type ProxyState =
   | { status: "unbuilt" }
+  | { status: "stale"; renderedAt: number }
   | { status: "rendering"; fraction: number }
   | { status: "ready" }
   | { status: "error"; message: string };
+
+/** "4 min ago" — enough to judge whether a stale proxy is worth rebuilding. */
+function agoLabel(renderedAt: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - renderedAt) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `${hours} h ago` : `${Math.round(hours / 24)} d ago`;
+}
 
 export function FlarexProxyButton({
   composition,
@@ -55,10 +76,16 @@ export function FlarexProxyButton({
   useEffect(() => {
     if (!key) return undefined;
     let cancelled = false;
-    void hasFlarexCompProxy(comp.id, key).then((ready) => {
+    // One read answers both questions: whether a proxy exists at all, and whether it is the CURRENT
+    // one. Asking `has(key)` alone cannot distinguish "never built" from "built, then edited".
+    void peekFlarexCompProxy(comp.id).then((stored) => {
       if (cancelled) return;
       // Never stomp a render in flight — it is about to write the record this check just missed.
-      setState((current) => (current.status === "rendering" ? current : ready ? { status: "ready" } : { status: "unbuilt" }));
+      setState((current) => {
+        if (current.status === "rendering") return current;
+        if (!stored) return { status: "unbuilt" };
+        return stored.key === key ? { status: "ready" } : { status: "stale", renderedAt: stored.renderedAt };
+      });
     });
     return () => {
       cancelled = true;
@@ -125,26 +152,30 @@ export function FlarexProxyButton({
       ) : (
         <button
           type="button"
-          className={`flarex-toolbar-btn flarex-proxy-btn${state.status === "ready" ? " is-ready" : ""}`}
+          className={`flarex-toolbar-btn flarex-proxy-btn${state.status === "ready" ? " is-ready" : ""}${state.status === "stale" ? " is-stale" : ""}`}
           title={
             state.status === "ready"
-              ? "This comp is cached for its clip's span. Re-render to rebuild it."
-              : "Render this comp over its clip's span and cache the result (playback still evaluates the graph live — that swap is the next slice)."
+              ? "The Edit page is playing this comp from its cached render. Click to rebuild it."
+              : state.status === "stale"
+                ? `This comp changed since its proxy was built (${agoLabel(state.renderedAt)}), so the Edit page is evaluating the graph live again. Click to re-render.`
+                : "Render this comp over its clip's span so the Edit page can play it back instead of evaluating the graph every frame."
           }
           onClick={() => void prepare()}
         >
-          {state.status === "ready" ? "Proxy ready" : "Prepare proxy"}
+          {state.status === "ready" ? "Proxy ready" : state.status === "stale" ? "Proxy out of date" : "Prepare proxy"}
         </button>
       )}
       {state.status === "ready" ? (
-        <>
-          <button type="button" className="flarex-toolbar-btn flarex-proxy-btn" title="Save the rendered proxy to disk to check it" onClick={() => void save()}>
-            Save…
-          </button>
-          <button type="button" className="flarex-toolbar-btn flarex-proxy-btn" title="Delete the cached proxy" onClick={() => void clear()}>
-            Clear
-          </button>
-        </>
+        <button type="button" className="flarex-toolbar-btn flarex-proxy-btn" title="Save the rendered proxy to disk to check it" onClick={() => void save()}>
+          Save…
+        </button>
+      ) : null}
+      {/* Clear is offered for STALE too: an out-of-date proxy is dead weight on disk, and reclaiming it
+          shouldn't require rendering a new one first. */}
+      {state.status === "ready" || state.status === "stale" ? (
+        <button type="button" className="flarex-toolbar-btn flarex-proxy-btn" title="Delete the cached proxy" onClick={() => void clear()}>
+          Clear
+        </button>
       ) : null}
       {state.status === "error" ? (
         <span className="flarex-proxy-error" title={state.message}>
