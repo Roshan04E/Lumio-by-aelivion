@@ -17458,13 +17458,15 @@ input.scrub-number:focus {
 
    Weight budget the rest of this block implements: wheel ~75%, spacing ~10%, slider ~10%, label ~5%. */
 .color-wheels.graph-editor {
-  /* Dissolve the `.graph-editor` card entirely — its border, radius, fill AND its grid gap, so the
-     rhythm below is set in one place (the toolbar's own margin) instead of accumulating. */
+  /* Drop the `.graph-editor` card's border and grid gap, but keep a faint fill. Three distinct
+     layers, each a step lighter — surface < panel < wheel — is what gives the panel depth; with the
+     fill removed entirely everything sat on one flat grey and the wheels had nothing to sit ON.
+     A tint with no border reads as a surface, not as a card. */
   gap: 0;
-  padding: 2px 0 4px;
+  padding: 11px 13px 13px;
   border: 0;
-  border-radius: 0;
-  background: none;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.025);
   box-shadow: none;
 }
 
@@ -17482,7 +17484,7 @@ input.scrub-number:focus {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.13em;
-  color: color-mix(in srgb, var(--nle-text-muted, #9fa6b2) 78%, transparent);
+  color: color-mix(in srgb, var(--nle-text-muted, #9fa6b2) 92%, transparent);
   align-self: center;
 }
 
@@ -17512,16 +17514,22 @@ input.scrub-number:focus {
   border-radius: 999px;
   cursor: crosshair;
   touch-action: none;
-  /* `background` (a full-chroma hue ring masked to a near-black centre) is generated inline in
-     ColorWheels.tsx from the engine's hue math so the rim colour matches the actual tint.
+  /* `background` (a full-chroma hue ring, scrimmed toward dark grey, plus a specular) is generated
+     inline in ColorWheels.tsx from the engine's hue math so the rim colour matches the actual tint.
 
-     Depth comes from ONE inner shadow and a hairline rim, nothing else. The disc is otherwise flat:
-     the old inset highlight + bottom vignette made it look like a domed plastic button, and stacked
-     outlines are exactly the visual noise that reads as "component library". */
+     MACHINED RIM — the edge should look turned, not cut off. Read outward:
+       1. inset top highlight — light catching the near lip
+       2. inset shadow hugging the edge only (small spread, so it shapes the rim without dimming the
+          vivid outer band the scrim deliberately leaves untouched)
+       3. inner stroke, 4. outer stroke — a two-tone bevel
+       5. a very faint halo, then the drop shadow that lifts the ball off the panel */
   box-shadow:
-    inset 0 0 12px 2px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 255, 255, 0.07),
-    0 4px 14px rgba(0, 0, 0, 0.45);
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 0 9px -1px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 0 8px rgba(255, 255, 255, 0.045),
+    0 5px 16px rgba(0, 0, 0, 0.5);
   transition: box-shadow 0.18s cubic-bezier(0.2, 0, 0.2, 1);
 }
 
@@ -17534,7 +17542,8 @@ input.scrub-number:focus {
 .color-wheel-pad::after {
   content: "";
   position: absolute;
-  background: rgba(226, 232, 240, 0.13);
+  /* Readable, still secondary. At 0.13 it vanished against the now-brighter interior. */
+  background: rgba(226, 232, 240, 0.3);
   pointer-events: none;
 }
 
@@ -17556,18 +17565,24 @@ input.scrub-number:focus {
 
 .color-wheel-pad:hover {
   box-shadow:
-    inset 0 0 12px 2px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 255, 255, 0.16),
-    0 4px 16px rgba(0, 0, 0, 0.5);
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 9px -1px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.13),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 0 10px rgba(255, 255, 255, 0.07),
+    0 5px 18px rgba(0, 0, 0, 0.55);
 }
 
-/* Edited: the rim hairline picks up the accent. NOT a second ring — an edited wheel should read as
+/* Edited: the outer stroke picks up the accent. NOT an extra ring — an edited wheel should read as
    "this one is live", not as a highlighted card. */
 .color-wheel-pad.is-edited {
   box-shadow:
-    inset 0 0 12px 2px rgba(0, 0, 0, 0.55),
-    0 0 0 1px color-mix(in srgb, var(--nle-accent) 75%, transparent),
-    0 4px 16px rgba(0, 0, 0, 0.5);
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 0 9px -1px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 0 0 1px color-mix(in srgb, var(--nle-accent) 80%, transparent),
+    0 0 9px color-mix(in srgb, var(--nle-accent) 22%, transparent),
+    0 5px 16px rgba(0, 0, 0, 0.5);
 }
 
 /* Puck: a small crisp white disc with a thin grey edge and a soft drop shadow, so it reads as a
@@ -17575,12 +17590,17 @@ input.scrub-number:focus {
    does not need bulk to stay visible. */
 .color-wheel-handle {
   position: absolute;
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
-  background: #f2f4f7;
-  border: 1px solid rgba(120, 128, 140, 0.9);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.75);
+  /* Lit from the same direction as the ball's specular (top-left), so it reads as a physical puck
+     resting ON the wheel rather than a flat dot pasted over it. */
+  background: linear-gradient(160deg, #ffffff 0%, #eef1f5 45%, #ccd2db 100%);
+  border: 1px solid rgba(108, 116, 129, 0.95);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 1px 1px rgba(0, 0, 0, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.6);
   /* Transform ONLY — never the position. `left`/`top` carry the drag, and transitioning them would
      put the puck behind the cursor. */
   transform: translate(-50%, -50%);
@@ -17589,18 +17609,22 @@ input.scrub-number:focus {
 }
 
 .color-wheel-pad:hover .color-wheel-handle {
-  transform: translate(-50%, -50%) scale(1.18);
-  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.8);
+  transform: translate(-50%, -50%) scale(1.15);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 3px 9px rgba(0, 0, 0, 0.65);
 }
 
-/* Label: small, quiet, wide-tracked. It titles the wheel — it must not compete with it. */
+/* Label: small and wide-tracked, but SCANNABLE — it has to name the wheel from across the panel.
+   At 72% muted it was so faint the three columns lost their identities. */
 .color-wheel-label {
   margin-bottom: 9px;
-  font-size: 0.575rem;
-  font-weight: 650;
+  font-size: 0.585rem;
+  font-weight: 750;
   text-transform: uppercase;
-  letter-spacing: 0.11em;
-  color: color-mix(in srgb, var(--nle-text-muted, #9fa6b2) 72%, transparent);
+  letter-spacing: 0.14em;
+  color: color-mix(in srgb, var(--nle-text, #e8e8e8) 62%, transparent);
 }
 
 /* Level slider — the lowest tier of the hierarchy. A recessed groove and a small dark puck, sized so
@@ -17619,46 +17643,49 @@ input.scrub-number:focus {
 }
 
 .color-wheel-master::-webkit-slider-runnable-track {
-  height: 3px;
+  height: 4px;
   border-radius: 999px;
-  /* Groove: dark channel + a 1px light top edge = incised, not painted on. */
+  /* Groove: dark channel + a light top edge = incised, not painted on. The lip is what makes it
+     legible — a pure dark line on a dark panel reads as nothing at all. */
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 55%),
-    rgba(0, 0, 0, 0.45);
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.6);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02) 60%),
+    rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.65);
 }
 
 .color-wheel-master::-webkit-slider-thumb {
-  width: 9px;
-  height: 9px;
-  margin-top: -3px;
-  border: 1px solid rgba(150, 158, 170, 0.75);
+  width: 11px;
+  height: 11px;
+  margin-top: -3.5px;
+  border: 1px solid rgba(178, 186, 199, 0.9);
   border-radius: 999px;
-  background: #2a2e35;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+  background: linear-gradient(180deg, #454b56, #2c313a);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 1px 3px rgba(0, 0, 0, 0.7);
   appearance: none;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .color-wheel-master:hover::-webkit-slider-thumb {
-  border-color: rgba(190, 198, 210, 0.9);
-  background: #333842;
+  border-color: rgba(225, 231, 240, 1);
+  background: linear-gradient(180deg, #525966, #363c46);
 }
 
 .color-wheel-master::-moz-range-track {
-  height: 3px;
+  height: 4px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.45);
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.65);
 }
 
 .color-wheel-master::-moz-range-thumb {
-  width: 9px;
-  height: 9px;
-  border: 1px solid rgba(150, 158, 170, 0.75);
+  width: 11px;
+  height: 11px;
+  border: 1px solid rgba(178, 186, 199, 0.9);
   border-radius: 999px;
-  background: #2a2e35;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+  background: linear-gradient(180deg, #454b56, #2c313a);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
 .graph-editor-svg {

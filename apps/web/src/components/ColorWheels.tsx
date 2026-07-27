@@ -56,25 +56,35 @@ const WHEEL_BACKGROUND = (() => {
     const hue = (90 - phi + 360) % 360;
     stops.push(`${hsvCss(hue, 1, 1)} ${phi.toFixed(2)}deg`);
   }
-  // Full-chroma hue ring revealed only toward the rim by a dark radial mask — the trackball look: a
-  // near-black interior you can read a small handle against, chroma banded where you aim.
+  // The hue ring is revealed by a radial scrim over it. Two properties of that scrim decide whether
+  // the wheel looks alive or washed out, and both were wrong before:
   //
-  // The falloff is EASED (a hand-placed curve, dense near the rim) rather than linear: a linear mask
-  // produces a visible hard edge where the colour "starts", which is the single biggest tell of a
-  // CSS-gradient wheel. Nine stops buy a transition that reads as a smooth luminance ramp.
+  //  · its COLOUR is a dark GREY, not black. Fading chroma to black crushes it — the colour dies
+  //    before it reaches the middle and the whole ball reads as a dark disc with a coloured edge.
+  //    Fading to grey keeps the hue legible all the way in, which is what makes Resolve's wheels
+  //    readable at a glance.
+  //  · its FALLOFF clears early. Alpha reaches 0 at 88%, so the outer ~12% is UNTOUCHED full-chroma
+  //    conic — a thick, vivid rim rather than a hairline that dissolves into the panel.
+  //
+  // Eased rather than linear (a linear ramp leaves a visible edge where the colour "starts" — the
+  // biggest tell of a CSS-gradient wheel).
+  const SCRIM = "49, 54, 63";
   const mask = [
-    "#101216 0%",
-    "#101216 34%",
-    "rgba(16, 18, 22, 0.985) 48%",
-    "rgba(16, 18, 22, 0.94) 60%",
-    "rgba(16, 18, 22, 0.85) 69%",
-    "rgba(16, 18, 22, 0.7) 77%",
-    "rgba(16, 18, 22, 0.48) 85%",
-    "rgba(16, 18, 22, 0.24) 92%",
-    "rgba(16, 18, 22, 0.07) 97%",
-    "rgba(16, 18, 22, 0) 100%",
+    `rgba(${SCRIM}, 0.96) 0%`,
+    `rgba(${SCRIM}, 0.94) 16%`,
+    `rgba(${SCRIM}, 0.87) 30%`,
+    `rgba(${SCRIM}, 0.76) 42%`,
+    `rgba(${SCRIM}, 0.62) 53%`,
+    `rgba(${SCRIM}, 0.45) 64%`,
+    `rgba(${SCRIM}, 0.28) 73%`,
+    `rgba(${SCRIM}, 0.13) 81%`,
+    `rgba(${SCRIM}, 0.03) 86%`,
+    `rgba(${SCRIM}, 0) 88%`,
   ].join(", ");
-  return `radial-gradient(circle at center, ${mask}), conic-gradient(from 0deg, ${stops.join(", ")})`;
+  // Specular: a faint off-centre highlight, topmost, so the ball looks machined rather than drawn.
+  // Kept under 10% — any stronger and it reads as a glossy plastic button.
+  const specular = "radial-gradient(circle at 34% 27%, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03) 32%, transparent 58%)";
+  return `${specular}, radial-gradient(circle at center, ${mask}), conic-gradient(from 0deg, ${stops.join(", ")})`;
 })();
 
 function neutralWheels(): ColorWheelsValue {
