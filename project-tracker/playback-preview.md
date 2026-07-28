@@ -1657,3 +1657,55 @@ verify the decision.*
 A third reading was lost to a stale bundle — `'shared' in __rfWcPool` was false, i.e. the running
 build predated the change. Same lesson as the react-dom.development episode: check the build IS the
 build before interpreting a measurement, and prefer a presence test for a symbol the new code adds.
+
+## v32m — the pixel gate has no baselines: it proves parity, never correctness (2026-07-28)
+
+**Task.** v32i shipped unverified at pixel level, on the belief that the `flarex-merge-blend` artifacts
+in `tmp/render-comparison/` predated the fix and therefore "baselined the bug" — a fixture that would
+pass on wrong output and fail once someone fixed it. Re-baselining was queued as the next job.
+
+**The premise was wrong, and wrong in the direction that matters.** `render:compare:pixels` is not a
+golden-image gate. Every run renders BOTH sides fresh — the Remotion still via `renderManifestStill`,
+then the web preview through Playwright — and diffs them against each other. The PNGs are outputs of
+the last run; nothing ever reads them back. There was no baseline to be stale, and no way for the
+fixture to fail because someone fixed the renderer.
+
+**What was actually true is worse.** The v32i fix lives entirely in `packages/shared`
+(`scene-compositor.ts` `preserveChildBlend`, set by `compile-flarex.ts`) — the compositor BOTH
+renderers consume. So the bug was symmetric: preview and Remotion agreed perfectly on `normal` where
+the comp said `multiply`, the diff read 0.000%, and the gate was green on wrong output. Re-running it
+after the fix also reads 0.000%. Neither number says anything about correctness.
+
+**Rule.** *A gate that renders both sides from one shared implementation can only detect DIVERGENCE,
+never ERROR.* Its silence about a bug in `packages/shared` is structural, not a gap to be tightened
+away. To verify a fix in shared code, diff ONE renderer ACROSS the change — the fixture's own history,
+not its two halves against each other.
+
+**Applied.** Pre-fix PNGs preserved, sweep re-run, then same-renderer pre/post diff at the gate's own
+threshold: web preview **1.433%** changed (29708/2073600), Remotion still **1.457%** (30204/2073600).
+Both moved, by near-identical amounts — the signature of a shared-compositor change, and itself
+corroboration that the fix reached both paths. Visual check confirms the intent: the fixture is
+`merge{blend: multiply, opacity: 0.7}` over `colorCorrect(exposure 1.5, contrast 0.3)` of the same
+plate; pre-fix rendered lifted and washed (a 70% lerp toward the brightened grade — i.e. `normal`),
+post-fix reads darker and more saturated. That is multiply.
+
+**Sensitivity finding, OPEN.** The entire visual footprint of the merge-blend fix is 1.43% against
+`PIXEL_MAX_DIFF_RATIO = 0.035`. Had the fix landed in only ONE renderer, the fixture would have read
+1.43% < 3.5% and PASSED. This fixture cannot presently catch the asymmetric form of the exact bug it
+exists to catch. Tightening the bar for the Flarex fixtures is a change to a shipped gate — deferred
+to the user, not done here.
+
+**Full sweep.** 53/53 pass. Closest to the bar is `advanced-transition` at 3.131% — 89% of the budget
+spent, pre-existing, worth watching before anything else raises it. `flarex-generators` 0.691%, the
+stylize family 0.049–0.068%, everything else at or near zero.
+
+**The web-preview capture is not byte-deterministic.** A full sweep rewrites ~55 tracked PNGs, but the
+Remotion stills are stable (only `remotion-flarex-merge-blend.png` changed). Measured on the `default`
+fixture, two runs of the same unchanged code differ by 233642 channel samples with a max delta of
+8/255 — real GPU raster/AA jitter, below pixelmatch's perceptual threshold, so the cross-renderer diff
+still reads 0.000%. Consequence for review: a diffstat on `tmp/render-comparison/` after a sweep
+carries almost no signal. Read `summary.json` and the same-renderer pre/post comparison instead.
+
+**Harness bug, OPEN.** A scoped `PIXEL_FIXTURES=<one>` run REPLACES `summary.json` with only the
+fixtures it ran rather than merging into the existing results — one scoped run silently discards the
+other 52 entries. Cost one such loss this session.

@@ -223,9 +223,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 19,
+      "diffPixels": 0,
       "totalPixels": 2073600,
-      "diffRatio": 0.000009162808641975309
+      "diffRatio": 0
     },
     {
       "fixture": "scaled-text",
@@ -335,9 +335,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 62509,
+      "diffPixels": 64926,
       "totalPixels": 2073600,
-      "diffRatio": 0.030145158179012345
+      "diffRatio": 0.03131076388888889
     },
     {
       "fixture": "plugin-shader",
@@ -377,9 +377,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 162930,
+      "diffPixels": 1418,
       "totalPixels": 2073600,
-      "diffRatio": 0.07857349537037037
+      "diffRatio": 0.0006838348765432099
     },
     {
       "fixture": "stylize-print",
@@ -391,9 +391,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 67625,
+      "diffPixels": 1023,
       "totalPixels": 2073600,
-      "diffRatio": 0.032612364969135804
+      "diffRatio": 0.0004933449074074074
     },
     {
       "fixture": "stylize-subject",
@@ -405,9 +405,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 166179,
+      "diffPixels": 1419,
       "totalPixels": 2073600,
-      "diffRatio": 0.08014033564814815
+      "diffRatio": 0.0006843171296296297
     },
     {
       "fixture": "vignette",
@@ -433,9 +433,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 16,
+      "diffPixels": 14,
       "totalPixels": 2073600,
-      "diffRatio": 0.00000771604938271605
+      "diffRatio": 0.000006751543209876544
     },
     {
       "fixture": "chroma-key",
@@ -643,9 +643,9 @@
       "frameSeconds": 0.45,
       "threshold": 0.16,
       "maxDiffRatio": 0.035,
-      "diffPixels": 14,
+      "diffPixels": 0,
       "totalPixels": 2073600,
-      "diffRatio": 0.000006751543209876544
+      "diffRatio": 0
     },
     {
       "fixture": "flarex-ellipse-matte",
@@ -674,6 +674,76 @@
       "diffPixels": 0,
       "totalPixels": 2073600,
       "diffRatio": 0
+    },
+    {
+      "fixture": "flarex-multi-in",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-flarex-multi-in.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-flarex-multi-in.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-flarex-multi-in.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "flarex-color-chain",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-flarex-color-chain.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-flarex-color-chain.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-flarex-color-chain.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "flarex-unified-color",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-flarex-unified-color.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-flarex-unified-color.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-flarex-unified-color.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "flarex-filter-stack",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-flarex-filter-stack.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-flarex-filter-stack.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-flarex-filter-stack.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 0,
+      "totalPixels": 2073600,
+      "diffRatio": 0
+    },
+    {
+      "fixture": "flarex-generators",
+      "renderFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\remotion-flarex-generators.png",
+      "previewFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\web-preview-flarex-generators.png",
+      "diffFramePath": "C:\\Users\\rosha\\Documents\\Web\\trendcut\\tmp\\render-comparison\\diff-flarex-generators.png",
+      "width": 1080,
+      "height": 1920,
+      "frameSeconds": 0.45,
+      "threshold": 0.16,
+      "maxDiffRatio": 0.035,
+      "diffPixels": 14320,
+      "totalPixels": 2073600,
+      "diffRatio": 0.006905864197530864
     }
   ]
 }
