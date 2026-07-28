@@ -3352,6 +3352,8 @@ const PreviewLayer = memo(function PreviewLayer({
               mediaUrl !== (asset as (typeof asset & { proxyUrl?: string }) | undefined)?.proxyUrl &&
               !hasMeasuredDenseGop(asset?.id)
             }
+            // The diagnostic tables key on this; the url tail degrades to an opaque blob UUID.
+            assetLabel={asset?.fileName ?? asset?.id}
             matte={layer.matte}
             pipeline={videoColorPipeline}
             mediaEffects={videoMediaEffects}

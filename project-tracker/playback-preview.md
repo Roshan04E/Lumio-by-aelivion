@@ -1844,3 +1844,39 @@ proxy span is invalidated and export output is unchanged.
 measurement; the reference comp builds all 6, so it never exercises the new branch. Someone should
 confirm with a small keyframe-dense clip that `__rfSourceMap` shows `wc-*` rather than `element` for a
 skipped source.
+
+## v32q — instruments that outlive what they describe (2026-07-28)
+
+**`__rfWcMode` was write-only.** Keyed by source URL, never pruned. One asset legitimately changes url
+mid-session — the original plays until its ingest proxy lands, then `mediaUrl` becomes the proxy blob
+and the layer remounts — so the ORIGINAL's row stayed in the table beside the proxy's, both reading as
+current. One asset, two rows, one of them describing a decoder that no longer exists. It had already
+produced one wrong diagnosis: the dead `element` row read as a live source stuck on the fallback path.
+
+Now refcounted. Refcounted rather than delete-on-unmount because two layers can legitimately share one
+url (the same clip twice on the timeline) and the last one out must clear it. `__rfSourceMap`'s half of
+this was fixed in `7a5efb4`; this was the other half.
+
+**`__rfSourceMap.asset` was never an asset.** `sourceLabel` is the tail of the media url — a FILENAME
+for a library asset, but an opaque `createObjectURL` UUID for anything OPFS-backed, regenerated every
+page load and joinable to nothing. For a project whose sources are all proxied blobs, the column shows
+a completely fresh set of meaningless ids on every reload.
+
+That cost a round THIS SESSION: the changing ids were read as assets being re-created per session,
+which would have meant no proxy could ever survive a reload — a far more serious bug than anything
+actually present, and entirely an artifact of the column's name. `assetLabel` now carries the real
+`fileName`, with the url tail as fallback.
+
+**Rule.** *A column named for a thing must contain that thing.* `asset` holding a url tail was
+defensible when every source was a library file with a filename in its path; it became a lie the moment
+sources were blobs, and it went on being read as an asset id because that is what it is called. The
+failure mode is not that the value is wrong — it is that the NAME is a promise the value stops keeping,
+silently, when the surrounding system changes.
+
+Both are the same family as v32l (a column reporting the request instead of the session) and v32o (a
+build check testing a neighbouring symbol): the instrument answered a question adjacent to the one
+asked, and read identically to one that answered correctly.
+
+**Gates.** `wcpool` 59/59, `coherence` 5666/5666, `fullres` 203/203, `gop` 26/26, typecheck clean.
+Telemetry only — no decode, playback or render behaviour is touched, and no file here is in
+`RENDER_FINGERPRINT_SOURCES`.

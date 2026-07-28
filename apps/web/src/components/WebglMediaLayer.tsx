@@ -150,12 +150,50 @@ function recordWcStaleTime(src: string) {
  * multi-source freezes (loaders frozen, then the HOST frozen) were both mis-diagnosed for rounds on
  * end without it. Pure telemetry — keyed per source, like `recordWcHeal`/`recordWcStaleTime`.
  */
+function wcModeKey(src: string): string {
+  return src.length > 48 ? `…${src.slice(-48)}` : src;
+}
+
+/**
+ * LIVENESS (2026-07-28). The table is keyed by source URL and used to be write-only, so entries
+ * outlived the layers that wrote them. One asset legitimately changes url mid-session — the original
+ * plays until its ingest proxy lands, then `mediaUrl` becomes the proxy blob and the layer remounts —
+ * which left the ORIGINAL's row sitting next to the proxy's, both reading as current. One asset,
+ * two rows, one of them describing a decoder that no longer exists. That already caused one wrong
+ * diagnosis: the dead `element` row was read as a live source stuck on the fallback path.
+ *
+ * Refcounted rather than "delete on unmount": two layers can legitimately share one url (the same
+ * clip twice on the timeline), and the last one out must be the one that clears it.
+ *
+ * Rule (same as v32l's decode column, and v32o's build check): an instrument must not present dead
+ * state as live. A stale row is worse than a missing one — a missing row prompts a question, a stale
+ * row answers it wrongly.
+ */
+const wcModeLive = new Map<string, number>();
+
 function recordWcMode(src: string, mode: "wc-hw" | "wc-sw" | "element") {
   if (typeof window === "undefined") return;
   const w = window as unknown as { __rfWcMode?: Record<string, string> };
   const stats = (w.__rfWcMode ??= {});
-  const key = src.length > 48 ? `…${src.slice(-48)}` : src;
-  stats[key] = mode;
+  stats[wcModeKey(src)] = mode;
+}
+
+function retainWcMode(src: string): void {
+  const key = wcModeKey(src);
+  wcModeLive.set(key, (wcModeLive.get(key) ?? 0) + 1);
+}
+
+function releaseWcMode(src: string): void {
+  if (typeof window === "undefined") return;
+  const key = wcModeKey(src);
+  const next = (wcModeLive.get(key) ?? 0) - 1;
+  if (next > 0) {
+    wcModeLive.set(key, next);
+    return;
+  }
+  wcModeLive.delete(key);
+  const w = window as unknown as { __rfWcMode?: Record<string, string> };
+  if (w.__rfWcMode) delete w.__rfWcMode[key];
 }
 
 /** Preview raster edge for baked animation frames — smaller than the 1024px export bake to bound GPU
@@ -214,6 +252,14 @@ async function bakeAnimatedGraphicFrames(
 }
 
 interface BaseProps {
+  /**
+   * Human-resolvable name for the diagnostic tables (`__rfSourceMap.asset`). Falls back to the url
+   * tail, which is a FILENAME for a library asset but an opaque `createObjectURL` UUID for anything
+   * OPFS-backed — regenerated every page load, joinable to nothing. A whole project of proxied
+   * sources therefore reported a fresh set of meaningless ids on each reload, which read as assets
+   * being re-created per session and sent one investigation down the wrong path (2026-07-28).
+   */
+  assetLabel?: string | undefined;
   pipeline: ColorPipeline | null;
   /** Pro stylize effects (vignette/grain/chroma) applied in the same shader pass. */
   mediaEffects?: MediaEffects | null;
@@ -707,6 +753,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         // hardware session asked for software and got hardware; reporting the request made a share
         // invisible in the exact table you would read to see one (2026-07-28).
         wcModeRef.current = !wcLease ? "element" : wcLease.session.software ? "wc-sw" : "wc-hw";
+        retainWcMode(src);
+        cleanups.push(() => releaseWcMode(src));
         recordWcMode(src, wcModeRef.current);
       }
       if (!wcLease) {
@@ -2081,9 +2129,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             // alone at that instant, so a mount-time value would report 0 for the very lease that
             // ends up sharing.
             decodeSharedWith: wcLeaseRef.current?.session.sharedWith ?? 0,
-            // Tail only: blob URLs are opaque UUIDs, but a library asset ends in its filename, which
-            // is the one part a person can match against what they see on screen.
-            sourceLabel: typeof src === "string" ? (src.split("?")[0] ?? src).split("/").pop() ?? null : null,
+            // A real asset name when the caller knows one; url tail otherwise (a filename for a
+            // library asset, an opaque per-session UUID for a blob — see `assetLabel`).
+            sourceLabel:
+              props.assetLabel ??
+              (typeof src === "string" ? (src.split("?")[0] ?? src).split("/").pop() ?? null : null),
           };
         },
       };
