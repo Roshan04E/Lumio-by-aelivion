@@ -34,6 +34,14 @@
  */
 
 import { createFrameProvider, type FrameProvider } from "../export/source-decoder";
+import {
+  traceAliasProvider,
+  traceAsset,
+  traceDispose,
+  traceEvent,
+  traceGetFrame,
+  type ProviderTraceReason,
+} from "./provider-lifecycle-trace";
 
 /** Hard cap ≈ the hardware decode sessions an integrated GPU actually has. */
 const MAX_WC_SESSIONS = 3;
@@ -149,7 +157,7 @@ let preemptions = 0;
  * decoder throws "a key frame is required" (seen in the 2026-07-03 soak). Each layer already
  * serializes its OWN calls; this chain serializes across owners of the same pooled provider.
  */
-function serializeFrameProvider(provider: FrameProvider): FrameProvider {
+function serializeFrameProvider(provider: FrameProvider, traceUrl = ""): FrameProvider {
   let chain: Promise<unknown> = Promise.resolve();
   return {
     get width() {
@@ -159,8 +167,13 @@ function serializeFrameProvider(provider: FrameProvider): FrameProvider {
       return provider.height;
     },
     getFrame(sourceTimeSeconds: number) {
+      // TRACE ONLY: brackets the call so the trace knows what is in flight on this provider when it is
+      // disposed, and whether a call resolved after its decoder was closed. `done()` is a no-op when
+      // the flag is off, and the returned promise is untouched either way.
+      const done = traceGetFrame(provider, traceAsset(traceUrl), sourceTimeSeconds);
       const run = chain.then(() => provider.getFrame(sourceTimeSeconds));
       chain = run.catch(() => null);
+      void run.then(done, done);
       return run;
     },
     // MUST forward: the presenter's catch-up hold reads this after every getFrame. This wrapper
@@ -170,10 +183,26 @@ function serializeFrameProvider(provider: FrameProvider): FrameProvider {
     get lastFrameLagSeconds() {
       return provider.lastFrameLagSeconds ?? 0;
     },
+    // Same rule (2026-07-28): the temporal-coherence gate divides `lastFrameLagSeconds` into the
+    // part that is normal frame quantization and the part that is real staleness, and it needs the
+    // source's frame PERIOD to do it. Erased here, every source would look stale by up to a frame
+    // and the paused present gate would hold on correctly-served media.
+    get nominalFps() {
+      return provider.nominalFps;
+    },
+    get decodableEndSeconds() {
+      return provider.decodableEndSeconds;
+    },
     dispose() {
       provider.dispose();
     },
   };
+}
+
+/** Trace-only wrapper: records WHY a decoder is being closed and whether work was still in flight. */
+function disposeTraced(provider: FrameProvider, url: string, reason: ProviderTraceReason) {
+  traceDispose(provider, traceAsset(url), reason);
+  disposeQuietly(provider);
 }
 
 function disposeQuietly(provider: FrameProvider) {
@@ -233,7 +262,8 @@ function reserveSession(software: boolean, priority: WcLeasePriority): boolean {
     if (priority === "preload") return false;
     const evictIndex = idle.findIndex((entry) => entry.software === software);
     if (evictIndex !== -1) {
-      disposeQuietly(idle.splice(evictIndex, 1)[0]!.provider);
+      const evicted = idle.splice(evictIndex, 1)[0]!;
+      disposeTraced(evicted.provider, evicted.url, "pool-evict-mode-cap");
       continue;
     }
     const victim = oldestPreloadLease(software);
@@ -246,7 +276,8 @@ function reserveSession(software: boolean, priority: WcLeasePriority): boolean {
     let evictIndex = idle.findIndex((entry) => entry.software !== software);
     if (evictIndex === -1) evictIndex = idle.findIndex((entry) => entry.software === software);
     if (evictIndex !== -1) {
-      disposeQuietly(idle.splice(evictIndex, 1)[0]!.provider);
+      const evicted = idle.splice(evictIndex, 1)[0]!;
+      disposeTraced(evicted.provider, evicted.url, "pool-evict-total-cap");
       continue;
     }
     const victim = oldestPreloadLease(software) ?? oldestPreloadLease(!software);
@@ -289,10 +320,19 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   if (idleIndex !== -1) {
     warm = idle.splice(idleIndex, 1)[0]!.provider;
     reused += 1;
+    traceEvent({ event: "warm-reuse", provider: warm, asset: traceAsset(url), reason: "explicit" });
   } else if (!reserveSession(software, priority)) {
     capMisses += 1;
+    traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
     return null;
   }
+  traceEvent({
+    event: "acquire",
+    provider: warm,
+    asset: traceAsset(url),
+    reason: "explicit",
+    note: `${warm ? "warm" : "cold"} software=${software} priority=${priority}`,
+  });
   bumpActive(software, 1);
 
   let released = false;
@@ -312,7 +352,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
       activeLeases.delete(record);
       if (liveProvider) {
         // The session must actually free NOW (that's the point of preemption) — dispose, don't park.
-        disposeQuietly(liveProvider);
+        disposeTraced(liveProvider, url, "preempt");
         liveProvider = null;
       }
       try {
@@ -331,16 +371,19 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
       // creates its providers WITHOUT a budget and keeps blocking-until-decoded semantics.
       createFrameProvider(url, "video", { frameBudgetMs: 24, preferSoftware: options.preferSoftware ?? false })
         .then((raw) => {
-          const provider = serializeFrameProvider(raw);
+          const provider = serializeFrameProvider(raw, url);
+          traceAliasProvider(raw, provider);
           created += 1;
+          traceEvent({ event: "create", provider, asset: traceAsset(url), reason: "explicit", note: `software=${software}` });
           if (options.preferSoftware) createdSoftware += 1;
           if (preempted) {
             // Preempted while initializing — the session is already re-spent; drop the decoder.
-            disposeQuietly(provider);
+            disposeTraced(provider, url, "preempt-during-init");
             return null;
           }
           if (released) {
             // Released while initializing — park it warm instead of wasting the work.
+            traceEvent({ event: "release", provider, asset: traceAsset(url), reason: "released-during-init" });
             parkOrDispose(url, provider, software);
             return null;
           }
@@ -349,6 +392,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
         })
         .catch(() => {
           initFailures += 1;
+          traceEvent({ event: "create", asset: traceAsset(url), reason: "init-failed" });
           if (!released) {
             released = true;
             bumpActive(software, -1);
@@ -361,6 +405,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
     ready,
     release() {
       if (released) return;
+      traceEvent({ event: "release", provider: liveProvider, asset: traceAsset(url), reason: "explicit" });
       released = true;
       bumpActive(software, -1);
       activeLeases.delete(record);
@@ -378,23 +423,29 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
 }
 
 function parkOrDispose(url: string, provider: FrameProvider, software: boolean) {
+  traceEvent({ event: "park", provider, asset: traceAsset(url), reason: "explicit" });
   idle.push({ url, provider, software });
   // Enforce the GLOBAL session cap here too, not just the idle-cache size: a lease released while
   // its init was still in flight stops counting toward its active count immediately, but its decoder
   // parks here when the init resolves — without this check that path pinned active+idle = 5 real
   // sessions (seen in the 2026-07-03 smoke stats) on hardware that has ~3.
-  while (idle.length > MAX_IDLE) disposeQuietly(idle.shift()!.provider);
+  while (idle.length > MAX_IDLE) {
+    const evicted = idle.shift()!;
+    disposeTraced(evicted.provider, evicted.url, "pool-evict-idle-cap");
+  }
   // ...the per-mode cap, dropping only parks of the OVERSUBSCRIBED mode: a parked software loader must
   // never be evicted to make room for hardware sessions it does not compete with (and vice versa).
   while (activeOf(software) + idleCountOf(software) > sessionCap(software)) {
     const evictIndex = idle.findIndex((entry) => entry.software === software);
     if (evictIndex === -1) break;
-    disposeQuietly(idle.splice(evictIndex, 1)[0]!.provider);
+    const evicted = idle.splice(evictIndex, 1)[0]!;
+    disposeTraced(evicted.provider, evicted.url, "pool-evict-mode-cap");
   }
   // ...and the TOTAL ceiling, which a park can push over on its own (a lease released mid-init stops
   // counting as active immediately but still parks a real decoder when the init resolves).
   while (totalSessions() > MAX_WC_TOTAL_SESSIONS && idle.length > 0) {
-    disposeQuietly(idle.shift()!.provider);
+    const evicted = idle.shift()!;
+    disposeTraced(evicted.provider, evicted.url, "pool-evict-total-cap");
   }
 }
 

@@ -195,6 +195,26 @@ export function installPerfDiagnostics(): void {
     }
   };
   armProfiler();
+
+  /**
+   * HEAP RING (2026-07-28). A stall with NO JS samples is the hardest kind to attribute: the main
+   * thread was blocked while not running JS, which means GC, layout/style, or a synchronous browser
+   * API — and the JS self-profiler is blind to all three by construction. Sampling the heap on the
+   * same heartbeat gives the one discriminator available from inside the page: a major GC shows up as
+   * a large DROP in `usedJSHeapSize` across the blocked window, and memory pressure shows up as usage
+   * sitting near the limit. Neither proves GC on its own, but "heap fell 400MB during the freeze" and
+   * "heap unchanged" send the investigation to completely different places.
+   *
+   * `performance.memory` is Chromium-only and quantized; absent elsewhere, in which case the report
+   * simply says so rather than guessing.
+   */
+  const heapSamples: { t: number; used: number }[] = [];
+  const readHeap = (): { used: number; total: number; limit: number } | null => {
+    const m = (performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
+    return m ? { used: m.usedJSHeapSize, total: m.totalJSHeapSize, limit: m.jsHeapSizeLimit } : null;
+  };
+  const mb = (bytes: number) => `${(bytes / 1048576).toFixed(0)}MB`;
+
   const reportStall = async (stallStart: number, stallEnd: number, blockedMs: number) => {
     const active = profiler;
     profiler = null;
@@ -232,13 +252,60 @@ export function installPerfDiagnostics(): void {
         console.warn(`[perf] STALL ${Math.round(blockedMs)}ms — sampled culprits:`);
         for (const entry of top) console.warn(`  ${String(entry.samples).padStart(4)}×  ${entry.where}`);
       } else {
+        // No JS ran, so name what CAN be measured instead of restating the category list.
+        const now = readHeap();
+        const before = heapSamples.filter((s) => s.t <= stallStart).pop() ?? heapSamples[0];
         console.warn(`[perf] STALL ${Math.round(blockedMs)}ms — no JS samples in window (GC / layout / synchronous browser API).`);
+        if (now && before) {
+          const delta = now.used - before.used;
+          const pressure = (now.used / now.limit) * 100;
+          console.warn(
+            `  heap ${mb(before.used)} → ${mb(now.used)} (${delta >= 0 ? "+" : ""}${mb(delta)}) · ` +
+              `${pressure.toFixed(0)}% of ${mb(now.limit)} limit`
+          );
+          // A major GC is the one cause that RECLAIMS during the freeze; the others leave the heap
+          // flat or growing. This is a strong hint, not a verdict — confirm in DevTools Performance.
+          if (delta < -8 * 1048576) console.warn("  ↳ heap FELL during the freeze — consistent with a major GC");
+          else if (pressure > 80) console.warn("  ↳ heap near the limit — memory pressure is the first thing to chase");
+          else console.warn("  ↳ heap flat — GC is UNLIKELY; look at layout/style or a synchronous browser API (DevTools Performance)");
+        } else if (!now) {
+          console.warn("  heap unavailable (performance.memory is Chromium-only) — use DevTools Performance");
+        }
       }
     } catch {
       /* profiler already stopped (buffer-full race) */
     } finally {
       armProfiler();
     }
+  };
+
+  /**
+   * VISIBILITY GATE (2026-07-28). A late timer means one of TWO things, and this watchdog reported
+   * them identically for its whole life: the main thread was blocked, or the timer was THROTTLED.
+   * Chrome clamps timers in a hidden tab to ~1/s and, after a few minutes, to ~1/MINUTE — so a
+   * backgrounded tab produces a textbook "MAIN THREAD BLOCKED ~59.5s" with no JS samples and a flat
+   * heap, which is exactly what a real non-JS freeze looks like here. Three consecutive ~59.5s
+   * reports (59500 / 59498 / 59493 ms) are the giveaway: a genuine freeze does not land on the same
+   * duration three times, a 60s timer clamp does.
+   *
+   * Overlap the blocked window against recorded hidden intervals and say which one it was.
+   */
+  const hiddenIntervals: { start: number; end: number }[] = [];
+  let hiddenSince: number | null = document.visibilityState === "hidden" ? performance.now() : null;
+  document.addEventListener("visibilitychange", () => {
+    const t = performance.now();
+    if (document.visibilityState === "hidden") {
+      hiddenSince = t;
+    } else if (hiddenSince !== null) {
+      hiddenIntervals.push({ start: hiddenSince, end: t });
+      hiddenSince = null;
+      if (hiddenIntervals.length > 50) hiddenIntervals.shift();
+    }
+  });
+  /** Was the page hidden at any point in [start, end]? Includes a still-open hidden interval. */
+  const wasHiddenDuring = (start: number, end: number): boolean => {
+    if (hiddenSince !== null && hiddenSince <= end) return true;
+    return hiddenIntervals.some((iv) => iv.start <= end && iv.end >= start);
   };
 
   // 3. Event-loop heartbeat: how late a 500ms timer fires. A ≥1s lag is a freeze — trigger the
@@ -248,12 +315,31 @@ export function installPerfDiagnostics(): void {
     const now = performance.now();
     const lag = Math.max(0, now - expected);
     expected = now + 500;
+    // Sample BEFORE the stall check, so the ring already holds a pre-freeze reading to compare against.
+    const heap = readHeap();
+    if (heap) {
+      heapSamples.push({ t: now, used: heap.used });
+      if (heapSamples.length > 240) heapSamples.shift(); // ~2 minutes at 500ms
+    }
     stats.loopLag.maxMs = Math.max(stats.loopLag.maxMs, Math.round(lag));
     stats.loopLag.avgMs = Math.round((stats.loopLag.avgMs * stats.loopLag.samples + lag) / (stats.loopLag.samples + 1));
     stats.loopLag.samples += 1;
     if (lag >= 1000) {
+      const windowStart = now - lag - 500;
+      // Throttled ≠ blocked. Attributing a hidden-tab clamp as a freeze sent this investigation
+      // chasing a phantom 59.5s stall; keep the two labelled apart at the source.
+      if (wasHiddenDuring(windowStart, now)) {
+        console.warn(
+          `[perf] timer late ~${(lag / 1000).toFixed(1)}s while the tab was HIDDEN — background throttling, not a freeze (ignored)`
+        );
+        // Re-arm so the profiler buffer does not carry the throttled window into the next report.
+        void profiler?.stop().catch(() => undefined);
+        profiler = null;
+        armProfiler();
+        return;
+      }
       console.warn(`[perf] MAIN THREAD BLOCKED ~${(lag / 1000).toFixed(1)}s`);
-      void reportStall(now - lag - 500, now, lag);
+      void reportStall(windowStart, now, lag);
     }
   }, 500);
 }
