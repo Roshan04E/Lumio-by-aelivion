@@ -24,6 +24,8 @@
     "continuity:test": "tsx src/ai/planner/continuity.test.ts",
     "memory:test": "tsx src/ai/memory.test.ts",
     "wcpool:test": "tsx src/playback/preview-frame-pool.test.ts",
+    "coherence:test": "tsx src/playback/temporal-coherence.test.ts",
+    "fullres:test": "tsx src/playback/full-res-rendezvous.test.ts",
     "flarexproxy:test": "tsx src/editor/flarex/flarex-proxy-eligibility.test.ts",
     "flarex:clipboard:test": "tsx src/editor/flarex/flarex-clipboard.test.ts",
     "flarex:align:test": "tsx src/editor/flarex/flarex-align.test.ts"

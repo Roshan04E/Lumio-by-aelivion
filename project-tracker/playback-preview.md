@@ -941,3 +941,472 @@ real `VideoDecoder`, so there is no automated gate. Confirm by scrubbing with `_
 `hardReset` should still climb with scrub speed, the stall should not. If it does not improve, next
 suspects are the per-reset `decoder.reset()`+`configure()` IPC cost and the shuttle cache's
 two-consecutive-jumps arming condition.
+
+## v31 — 2026-07-28: a Flarex comp's sources "filled in" one at a time (temporal coherence)
+**Problem:** On a low-end machine, a Flarex comp with three `MediaIn` loaders visibly updated one
+source at a time — media 1, then ~200ms later media 2, then ~200–300ms later media 3. Reported as a
+scheduling problem: "can we update all in a single go, like the timeline's scene compositor?"
+
+**What the diagnosis was NOT.** The proposed cause — nodes presenting independently, no frame
+barrier — was already false. A decoded frame never draws: `publishSceneFrame()` → `onFrame()` →
+`requestDraw()` only sets a dirty timestamp, and one persistent rAF loop does a single
+`buildSceneDraws` → `compileFlarexComp` → `renderFrame` → `presentFrame()`. The present is atomic and
+a hold gate already existed. Three rounds of "there is a barrier" vs "I can SEE them stagger" were
+both correct, because they were about different properties.
+
+**Root cause — presentation BATCHING is not temporal SYNCHRONIZATION.** The barrier's readiness
+predicate was existence-only: `!mediaSource || width === 0 || height === 0` (`build-scene-draws.ts`,
+the only two `onLayerNotReady` sites). And `gradeMediaInContext` deliberately HOLDS a source's last
+graded texture when its frame hasn't landed — the 2026-07-07 black-flicker fix, still correct. So a
+source that had decoded ONCE was "ready" forever however stale, and the gate could never fire on
+staleness. `ScenePreviewMediaSnapshot` carried `frameVersion` (a counter) and **no time at all**; the
+real PTS existed one layer down (`webcodecs-decoder.ts` reduces it to `lastServedLagSeconds`) and was
+never forwarded. A property that is never checked is not guaranteed: the composite mixed source A at
+t with source B at t−0.2, which is not a real frame of the comp.
+
+**Fix.** Snapshots now carry `stalenessSeconds` — how far the held frame is from the one the live
+playhead asks for, in TIMELINE seconds. Stale sources join the existing hold gate, which withholds
+the whole present. Pure decision logic lives in `playback/temporal-coherence.ts` (framework-free, so
+it can move to the evaluation engine when ADR-008 scheduling lands, rather than being reimplemented).
+
+**Scoped to paused/scrubbing.** The transport clock is wall-clock servoed to audio and advances
+regardless of render completion, so under playback the target keeps MOVING while you wait for the
+slowest source — a strict barrier there starves rather than synchronizes. Coherent playback means
+gating the transport, a separate decision about the playback model. Playing stays byte-identical:
+`tolerateLag` keeps owning it.
+
+**Two traps, both found by the gate rather than by review:**
+
+1. **The tolerance was measuring frame rate, not staleness.** `getFrame` serves the frame whose
+   interval CONTAINS the request (`consumeDecodedUpTo` walks to the last sample with
+   `timestamp <= requested`), so raw lag is uniformly [0, framePeriod) — 0…41.7ms on 24fps — even on
+   perfect delivery. The first tolerance (half a frame at 24fps) would have marked correct 24fps media
+   stale about half the time: holding constantly, falling through the escape hatch on every scrub,
+   adding latency while fixing nothing. Staleness now subtracts one source frame period, so 0 means
+   "showing the correct frame" at any rate and sources of different rates are comparable — which
+   matters because a comp routinely mixes 24/30/60fps. Needed `nominalFps`, which
+   `serializeFrameProvider` was silently erasing — the exact failure its own comment warns about.
+2. **One escape hatch is not enough; the two failure modes are mutually exclusive.** Per-source
+   budgets bound nothing (staggered onsets chain: A's window expires while B's is open and C just
+   started — the 5-source stress ran an episode to 1652ms against a 1500ms cap). An episode cap alone
+   strands a permanently starved source (59 presents vs 3941 holds — a viewer updating once every
+   1.5s, forever). Both now apply: a source stale past its own budget is written off, AND the
+   contiguous episode is capped.
+
+**Rule:** "is it ready?" and "is it ready FOR THE FRAME I AM PRESENTING?" are different questions, and
+a readiness flag can only answer the first. When a gate holds a value across time, the value needs a
+timestamp or the gate is asserting something it cannot see. Corollary: the same reasoning applies to
+any future async node (ADR-010's `schedulingMode`) — a result cached without the time it was computed
+for is indistinguishable from a fresh one.
+
+**Verification:** new `pnpm --filter @orreris/web coherence:test` — 5652 assertions, including a
+randomized 3/4/5-source scrub storm with CPU-starved decoders asserting that no present ever contains
+mixed generations except through a declared hatch, that the barrier both engages and releases, and
+that the viewer stays responsive (>33% of composites present) with a permanently dead source.
+Measurement probe: `window.__flarexCoherence` (paused-capable, unlike `frameProfiler`).
+
+**Status:** Track A (correctness) complete. Track B (convergence latency — re-measure
+`preferSoftwareDecode`, comp proxies while paused on the Flarex page, decoder budget) not started;
+Track A makes the update atomic, not fast, so the ~300ms convergence is still there — it now happens
+all at once. NOT yet browser-verified on the low-end machine.
+
+### v31a — 2026-07-28: the coherence barrier was correct and useless (browser verification)
+First browser run of v31 on the low-end machine, 3-`MediaIn` comp, 33 scrubs. **The barrier did not
+remove the symptom and it cost half a second per scrub.** Recorded numbers: avg hold 518.2ms, worst
+1509.9ms (pinned at the ceiling), 957/2769 composites withheld, **47 escape-hatch activations of which
+44 were per-source WRITE-OFFS**, worst staleness **24 300ms**. Sources still filled in one at a time.
+
+**Why.** v31 was built on v30's "PAUSED = COHERENT" finding — paused, the race does not exist, every
+loader can converge on the exact requested time. That is false on this machine. Sources routinely
+never converged inside their 1.5s budget, and one was 24.3 SECONDS adrift. The barrier therefore
+withholds, times out, writes the slow source off — and a written-off source stops blocking, so the
+remaining sources resume presenting as they arrive and the stagger returns. It converted the first
+1.5s into a freeze and then reproduced the original behaviour.
+
+The same session named the real bottleneck, which no amount of presentation policy can fix:
+`[perf] MAIN THREAD BLOCKED ~2.6s`, sampled `77× getFrame < requestWcFrame`. The host clip also
+appeared in `offenders` (702 holds), which it never should — the host is lag-intolerant by design.
+
+**Fix:** hold gated behind `?flarexCoherence=1` (default OFF). Staleness is still computed and
+reported to `window.__flarexCoherence` with the flag off — losing that would make Track B unmeasurable.
+
+**Rule:** a barrier is only worth building when the thing it waits for reliably arrives. Verify the
+CONVERGENCE assumption before building a synchronization mechanism on top of it — "the race does not
+exist while paused" (v30) was true of the race it was describing and false as a general claim about
+convergence time, and nothing in the design caught the difference because the unit tests model
+convergence as an input. A gate that passes 5655 assertions can still rest on a false premise: the
+tests validated the DECISION, and the premise lives in the DATA.
+
+**Corollary for Track B:** the target is not the assumed 200–300ms stagger. It is multi-second
+non-convergence plus a 2.6s main-thread block in `getFrame`/`requestWcFrame`. B1 (`preferSoftwareDecode`)
+and B2 (paused comp proxies) may be too small to matter against that.
+
+## v32 — Flarex staggered media: the stall is React DEV shipped in the production build (2026-07-28)
+
+**Problem.** Flarex comps with 3 `MediaIn` sources fill in one source at a time on a low-end machine.
+Four diagnoses were built and falsified in sequence (frozen-tail overshoot: 13 ms against a 350 ms
+threshold; idle provider churn: nothing moves at rest; element-path staleness ≈ 0: measured 20596.7 ms;
+provider use-after-dispose: zero in the build trace). Track A (temporal coherence barrier) shipped,
+passed 5655 assertions, and did **not** fix the symptom — 332/1039 composites withheld, 49 escape
+hatches. See v31/v31a.
+
+**Root cause.** `vite.config.ts` sets `envDir: repoRoot` so one `.env` serves web+api+worker. Root
+`.env` line 1 is `NODE_ENV=development`. Vite promotes `NODE_ENV` out of env files into
+`process.env.NODE_ENV` when the shell has not set it, so `pnpm build` builds with
+`isProduction = false` and bundles `react-dom.development.js`. Proven by control build
+(`NODE_ENV=production npx vite build`): `react.dev/errors` 0→1, `createTask` 3→0,
+`react_stack_bottom_frame` 4→0, `Invalid hook call` 3→0, index chunk −21%, EditorPage chunk −29%.
+
+A DEV React commits with the passive-effect subtree bailout defeated under `ProfileMode`
+(`recursivelyTraversePassiveMountEffects` continues when `actualDuration !== 0`). 29 of ~62 samples in
+a 3152 ms stall were that traversal; 12 more were React DevTools mirroring the tree and forcing layout
+via `get scrollX`. Multi-second commit blocks freeze every `<video>` and decoder, sources drift seconds
+apart, and they reconverge at different wall times. **The stagger is downstream of the stall.**
+
+**Instrument that finally worked.** Four `markHotSpot` probes in the live single-context draw path
+(`ScenePreviewCanvas.tsx`: `scene-draw-build` / `scene-media-grade` / `scene-composite` /
+`scene-draw-total`). Whole session: 7 events, worst 309 ms, none coincident with a stall. The draw
+pipeline was exonerated by measurement rather than argument.
+
+**Rules.**
+1. *Verify the build is the build before trusting any build-mode measurement.* Chunk size and one
+   DEV-only string cost seconds to check. Every number in this investigation was taken against an
+   instrumented React while being treated as the control.
+2. *A diagnostic that has never fired is not evidence of health.* `__rfHotSpots` read `undefined`
+   because all three probes sat behind the `singleCtx` early return, dead since the 2026-07-07 flip
+   (v?? single-ctx default). Absence of an instrument reads identically to absence of a problem.
+3. *`envDir: repoRoot` makes `NODE_ENV` in `.env` a build-mode override, not documentation.* Any env
+   file Vite reads must not contain `NODE_ENV` unless the build genuinely wants that mode.
+
+**Left open.** Rebuild with a real production React and re-measure the symptom before starting Track B
+— B1/B2 target decode contention, which the evidence no longer supports as the constraint. Track A's
+hold remains gated OFF behind `?flarexCoherence=1`; its staleness measurement stays on as the
+instrument. Unexplained side-finding: remount storms of all three layers, 3× in 61 s, `mediaType` the
+only dep that explains the `layer:effect · unknown` re-run — plausibly StrictMode, which a correct
+build will settle.
+
+**Fix applied (same day).** `NODE_ENV` removed from root `.env` and `.env.local`; a build-mode
+assertion added to `apps/web/vite.config.ts` that throws when `command === "build" && mode ===
+"production" && !isProduction`. `pnpm --filter @orreris/web build` now emits bytes identical to a
+forced `NODE_ENV=production` control (`index` 999,228 → 787,555 B; `EditorPage` 1,018,160 → 725,224 B).
+
+**Rule 4 — assert the property, not the cause; the assertion finds the causes you missed.** The guard
+fired on the very first build after `.env` was cleaned: `.env.local` (gitignored, therefore invisible
+to `git grep` and absent on every other machine) *also* began `NODE_ENV=development`, and vite reads it
+at higher precedence. Fixing the cause I had proven would have left the bug fully intact while
+appearing resolved — and the next measurement would have been another confounded run. A fix that
+cannot detect its own incompleteness is not a fix.
+
+## v32a — after the build fix: two stall classes, and a broken staleness measurement (2026-07-28)
+
+**Symptom now.** User: "it got faster than before, but they take time for every clip is different i can
+see the difference." Improved, not gone.
+
+**Two distinct stall classes, only one of which v32 fixed.**
+- *Class 1 — sampled, React commit.* A 3152 ms stall resolved to `commitPassiveMountOnFiber` /
+  `recursivelyTraversePassiveMountEffects` plus React DevTools' tree walk. **Gone** with the
+  production build.
+- *Class 2 — unsampled.* `STALL 8502ms — no JS samples in window`, and a 7493 ms one before the fix.
+  **Still present.** No JS ran, so it is GC, layout/style, or a synchronous browser API — all three
+  invisible to the JS self-profiler by construction. Hot spots stay quiet through it (worst 119 ms),
+  so it is not in build/grade/composite either.
+
+**The staleness instrument was measuring the wrong thing.** With attribution fixed to run on the
+non-held path, the offenders came back as *every* source at once — both Flarex `MediaIn` nodes, the
+host layer, and an unrelated timeline layer, 11–19 s each. Four simultaneous decoder deaths were never
+plausible. Cause: `WebglMediaLayer::mapSourceTime` clamps the LOW end (0, −preroll) but has no
+ceiling, so once the playhead passes a clip's material the requested source time climbs forever while
+the decoder correctly serves the last decodable frame. The difference was reported as staleness.
+
+Fixed by clamping the request to `FrameProvider.decodableEndSeconds` (or the element's `duration`) —
+the same value `scene-frame-compositor.ts` already treats as the asset's media end. Absent end skips
+the clamp, so no path is made worse. Gated: `coherence:test` 5655 → 5665.
+
+**Rule.** *A clamped mapping must be clamped at BOTH ends before a difference against it means
+anything.* The module's own doc comment argued that comparing in source space is safe **because** the
+mapping clamps — true of the low end, false of the high end, and the asymmetry went unnoticed because
+the low end was the one with a comment explaining it.
+
+**Instrument added.** The stall watchdog now samples `performance.memory` on its 500 ms heartbeat and,
+on a no-JS-samples stall, reports the heap delta across the blocked window: a fall of >8 MB is
+consistent with a major GC, >80 % of the limit points at memory pressure, and a flat heap rules GC out
+and sends the investigation to layout or a synchronous browser API. This is the fifth instrument this
+investigation has had to repair before it could be believed.
+
+## v32b — the paused stagger is the full-res SETTLE swap, not decoder starvation (2026-07-28)
+
+**User observation that resolved it:** "the media updates instantly when playback is on; it only
+updates with a time difference when paused — and it reminded me that pause always shows full quality."
+
+Correct, and it names the mechanism. The FULL-RES SETTLE FRAME path (`WebglMediaLayer.tsx`, user rule
+2026-07-05):
+
+- runs **paused only** — `if (isPlaying || hidden || !fullResSrc ...) return`, so playback is proxy-fed
+  and coordinated, which is why playback updates in one go;
+- waits a **300ms debounce** after the transport settles;
+- then leases the **ORIGINAL** bytes (not the ingest proxy) from the element pool and does a **native
+  seek per source**, presenting on `seeked`;
+- each `present()` calls `drawVideoFrameRef.current()` → bumps `frameVersion` → `requestDraw` → its
+  own composite.
+
+Seek latency on original media is a function of GOP structure, resolution and codec, so it differs
+**per clip** — exactly the "every clip is different" the user reports. The path's own comment already
+predicted the magnitude: *"a sparse-GOP 4K original may take 1–3s to sharpen in."* Telemetry:
+`window.__rfSettleSwaps`.
+
+**Why Track A could never have fixed this.** The coherence barrier gates TIME. Both the proxy frame
+and the settled full-res frame represent the SAME requested time — the swap is a QUALITY change, and
+staleness reads ~0 on both sides of it. The barrier is invisible to the thing the user is watching.
+That is the real reason the 2026-07-28 verification failed, and it is a stronger falsification than
+the latency argument recorded in v31a: the barrier was not too slow, it was measuring a different
+axis.
+
+**Rule.** *Match the barrier's axis to the axis of the symptom.* "Sources appear at different times"
+was read as a temporal-coherence problem for the whole investigation. It was a progressive-enhancement
+problem: N independent best-effort upgrades, each presenting the moment it lands. A time barrier
+cannot serialize a quality transition.
+
+**Proposed (NOT implemented — the settle path is deliberate shipped behaviour under a user rule).**
+Coordinate the swap: hold each source's settle present until every participating source in the same
+viewer has its full-res frame ready, then swap them in one composite. Paused-only, already best-effort,
+and delay only postpones sharpening — no transport or playback impact. Needs the same escape hatch
+doctrine as every other hold here (a source whose original never seeks must not block the others).
+
+**Still open — the more serious one.** Scrubbing vigorously WHILE PLAYING freezes the tab
+(unresponsive, no Chrome unresponsive prompt); scrubbing while paused is smooth. Class-2 stalls
+(`no JS samples`, 7493ms / 8502ms) are unattributed pending the new heap readout.
+
+## v32c — the playback-scrub freeze: getFrame duty cycle, not getFrame cost (2026-07-28)
+
+**Reproduction (user):** scrubbing while PAUSED is smooth; scrubbing vigorously while PLAYING freezes
+the tab — unresponsive, with no Chrome unresponsive prompt.
+
+**First sampled evidence, from a correct production build.** `STALL 2641ms — sampled culprits`:
+
+```
+88×  getFrame (preview-frame-pool) < u (VideoPreview:47)
+60×  u (VideoPreview:47)
+10×  (anonymous/native)
+ 2×  dt (source-decoder)
+```
+
+`u` is `requestWcFrame`. ~163 samples at 10ms ≈ 1.6s of JS inside a 2.6s window, almost all of it
+`getFrame`. This is JS, on the main thread, and it is the block.
+
+**Mechanism — the budget bounds ONE CALL, not the DUTY CYCLE.** `preview-frame-pool.ts` creates
+preview providers with `frameBudgetMs: 24` so no single `getFrame` blocks for seconds. But
+`WebglMediaLayer.tsx` re-enters immediately from inside the resolved promise:
+
+```ts
+if (wcRerequestRef.current) { wcRerequestRef.current = false; requestWcFrameRef.current(); }
+```
+
+A scrub tick arriving while a request is in flight sets `wcRerequestRef`; the `.then()` consumes it
+and re-requests across a MICROTASK, so the next ≤24ms decode starts without the event loop getting a
+turn. Back-to-back 24ms decodes across 3–4 concurrent sources is ~100% main-thread occupancy — the
+timer heartbeat starves and reports "MAIN THREAD BLOCKED" while every individual call is inside
+budget.
+
+The file already documents this exact failure and fixed it for TWO branches only — the `tolerateLag`
+stale-bail and the null-frame march both back off geometrically, with a comment naming
+"a zero-delay recursion, not a retry" as "a large share of the 'page isn't responding' stall". The
+general `wcRerequestRef` consumption at the end of the same `.then()` was left unpaced.
+
+**Rule.** *A per-call budget is not a rate limit.* Time-boxing one unit of work bounds latency, not
+occupancy; a system that re-enters on completion needs a YIELD between units (`yieldTask()` already
+exists in this codebase), otherwise N sources × budget = the whole thread. Read a "we already
+time-boxed this" comment as a claim about one call, and check what re-enters it.
+
+**Explains the asymmetry.** Paused scrubbing runs the settle path — one native `<video>` seek per
+source, decoded off the main thread — so it stays smooth. Playing + scrubbing drives continuous
+`getFrame` on every source AND sets `wcRerequestRef` on nearly every tick.
+
+**Not implemented — awaiting a call.** The fix is to route the re-request through a yield instead of a
+microtask. That is shipped playback behaviour with real history attached (v29/v30 lineage), so it is
+proposed, not applied.
+
+**Still unattributed.** A separate class remains: `STALL 5010ms` / `17510ms`, **no JS samples, heap
+FLAT at 23–24MB (1% of a 4192MB limit)**. GC and memory pressure are both excluded by measurement.
+Layout/style or a synchronous browser API; DevTools Performance is the only remaining instrument.
+
+**Instrument fix (sixth this investigation).** Three consecutive stalls of 59500/59498/59493ms were
+BACKGROUND TAB THROTTLING, not freezes — Chrome clamps hidden-tab timers to ~1/minute, which is
+indistinguishable from a non-JS freeze in this watchdog (no JS samples, flat heap). A genuine freeze
+does not land on the same duration three times. The watchdog now tracks `visibilitychange` and reports
+those as "timer late while the tab was HIDDEN — background throttling, not a freeze (ignored)".
+
+**Fix applied (v32c).** `apps/web/src/playback/yield-task.ts` (new; a local MessageChannel macrotask
+yield — deliberately NOT imported from `export/webcodecs-decoder.ts`, which is listed in
+`RENDER_FINGERPRINT_SOURCES` and would invalidate every cached proxy span for a change that alters no
+pixels). `WebglMediaLayer::requestWcFrame` now re-arms via `scheduleWcRerequest()`, which yields one
+macrotask and coalesces behind a pending flag so several re-request sources produce ONE follow-up
+rather than a queue. Coalescing loses nothing: `requestWcFrame` reads the LIVE playhead when it runs,
+so the single follow-up asks for the newest time — which is what a scrub wants anyway.
+
+Gates: `typecheck` clean, `wcpool:test` 22/22, `coherence:test` 5665/5665, `flarexproxy:test` pass.
+Awaiting the low-end re-measure; the prediction to falsify is that `STALL … 88× getFrame` disappears
+while playback fps is unchanged.
+
+**Verified (2026-07-28, low-end machine).** 3-`MediaIn` Flarex comp + 10 timeline layers, playback with
+vigorous scrubbing: **smooth, no freeze, no `[perf] STALL` output at all** — on a heavier scene than
+the one that originally wedged the tab. The `88× getFrame < requestWcFrame` signature is gone and
+playback fps is unaffected, which is the prediction that was put up to be falsified. One macrotask
+between decodes was the whole difference between "inside budget" and "the loop never idles".
+
+## v32d — ATOMIC FULL-RES SWAP: the original symptom, actually fixed (2026-07-28)
+
+**The invariant restored:** a paused viewer sharpens ALL of its media sources in one composite, or
+none of them. This is the "preview should present one frame after every MediaIn has decoded" rule the
+whole investigation started from.
+
+**Change of ownership, not of mechanism.** The settle path is unchanged — it still leases the original
+bytes and native-seeks them per source. What changed is who decides when the result goes on screen:
+
+- `ScenePreviewMediaSnapshot` gains `fullResFrame` (the upgrade, OFFERED) and `fullResPending` (an
+  upgrade is expected but has not landed). `frame` stays the always-safe proxy/WC frame.
+- `WebglMediaLayer::selectVideoDrawSource(includeSettle)` — the legacy own-canvas path passes `true`
+  and keeps applying its own settle frame; the single-context path passes `false` and publishes the
+  settle frame separately, because there the swap is a viewer-wide decision.
+- `ScenePreviewCanvas` tallies pending/ready across the participating set and commits via
+  `decideFullResRendezvous` (`playback/full-res-rendezvous.ts`, pure + gated, transportable to the
+  ADR-008 engine like `temporal-coherence.ts` beside it).
+
+**Three details that would each have been a bug:**
+1. *The cache key must carry the choice.* The proxy and full-res frames can share a `frameVersion` —
+   the swap is the COMPOSITOR's decision, not a new publish — so the re-grade skip key gained `|frN`.
+   Without it the cached proxy-graded texture would be reused forever and the upgrade would never
+   appear.
+2. *Withdrawal must be as atomic as the swap.* A one-way latch would leave stale full-res pixels from
+   the old playhead on screen after a scrub. Any source going pending withdraws the commit for all.
+3. *The decision is made one frame late, deliberately.* `gradeMediaInContext` is invoked lazily by
+   `buildSceneDraws` as it walks layers, so no point before the draw has seen every participant.
+   Deciding after the draw and re-arming costs one composite and is genuinely atomic; deciding
+   mid-walk could not be.
+
+**Why this one ships ON while the coherence hold ships OFF:** nothing is ever WITHHELD. The proxy
+frame is on screen throughout, so waiting costs only staying soft slightly longer — no held present,
+no frozen viewer, no added latency. The coherence hold withholds frames, which is why it stayed
+flagged.
+
+Escape hatch `FULL_RES_RENDEZVOUS_MAX_MS = 3000`, sized from the settle path's own documented worst
+case ("a sparse-GOP 4K original may take 1–3s to sharpen in"): a shorter budget would routinely hatch
+on exactly the heavy material the rendezvous exists to keep in step.
+
+Gates: new `pnpm --filter @orreris/web fullres:test` 203/203 (asserts the swap happens ONCE, not once
+per source; both give-up paths; that withdrawal is atomic; that a new episode does not inherit the old
+budget), `typecheck` clean, `coherence:test` 5665/5665, `wcpool:test` 22/22, `flarexproxy:test` pass.
+Telemetry: `__rfSingleCtxPreview.fullResSwaps` / `.fullResHatch`.
+
+## v32e — the coherence barrier WORKS once its environment is fixed (2026-07-28)
+
+**User confirmation:** "yes all are landing late but simultaneously now." The invariant holds — a
+paused/scrubbed Flarex comp presents one frame across every MediaIn, or none.
+
+**v31a's falsification was environmental, not architectural.** The barrier was gated OFF because
+measurement showed sources routinely never converging (669ms avg, 47 write-offs, 24.3s staleness). All
+three inputs to that verdict were broken at the time: DEV React caused multi-second commit stalls
+(v32), the `getFrame` duty cycle saturated the main thread (v32c), and staleness had no tail clamp so
+it reported 15-25s of fake lag (v32a). Re-measured after those fixes, armed:
+
+```
+composites 2100 (392 withheld) · convergence 16 · avg 339.2ms · worst 1513.0ms
+escape hatches 144 (3 episode-cap, 141 write-off)
+```
+
+**Rule.** *Do not retire a mechanism on a measurement taken in a broken environment.* The barrier was
+correct the whole time; three unrelated defects made its premise look false. When a design fails
+verification, establish that the test rig is sound before concluding the design is wrong — the cost
+here was treating a working correctness fix as a dead end for the length of the investigation.
+
+**The correct-but-different fix stays.** v32d's atomic full-res swap addressed a REAL second stagger
+(quality upgrades landing per-source) but not the reported symptom — the screenshots showed different
+IMAGES, not soft vs sharp, i.e. base frames arriving at different times. Two staggers on two axes;
+both now closed.
+
+**Track B has a real target for the first time.** 141 of 144 hatches are per-source WRITE-OFFS, so the
+"late" the user reports is the barrier timing out at `STALE_HOLD_MAX_MS` rather than converging: most
+scrubs converge in ~339ms, a minority never do inside 1.5s. Worst staleness stays ~21s on the host
+layer and the first flarex source despite the tail clamp, which points at the ELEMENT FALLBACK in
+`selectVideoDrawSource` (settle → WC → element): when no WC frame exists the layer draws a pooled
+`<video>` parked wherever it was last left, which can be tens of seconds away. That is a genuinely
+stale picture, not a measurement artifact, and it is what the barrier is withholding on.
+
+**Open question for Track B (measure before changing):** is the right fix to make the WC frame arrive
+faster, or to stop falling back to an element that is arbitrarily far from the requested time? The
+second is cheap to test — treat a wildly-stale element as NOT READY rather than as a frame — but it
+trades a stale picture for a held one, so it needs the before/after numbers the user asked for.
+
+## v32f — coherence hold DEFAULT ON + stale fallback-element refusal (2026-07-28)
+
+**1. The hold defaults ON** (`?flarexCoherence=0` is the escape hatch; localStorage
+`orreris.flarexCoherence` still overrides). It shipped OFF for one day on a verdict produced by three
+unrelated defects, none of them the barrier — see v32e. Re-measured after those fixes: 339ms average
+convergence, 1513ms worst, and the user-visible invariant holds. Pinned by
+`coherence:test` (5666) so the default cannot drift back silently.
+
+**2. Stale fallback elements are refused.** `selectVideoDrawSource` picks settle → WC → element. A
+pooled `<video>` sits wherever its last owner left it, and when a WC provider exists that element is
+only a stopgap — yet it was being drawn while 21.0s from the requested time. That is not "slightly
+behind", it is a different shot, and it produced **141 of the 144 per-source write-offs**: the barrier
+correctly refused to call it coherent, waited the full 1.5s budget, and gave up. Refusing the frame
+routes it to the not-ready path instead, which HOLDS the last graded texture (2026-07-07 anti-flicker
+behaviour) and is something the barrier can wait on productively.
+
+Bound is `ELEMENT_FALLBACK_MAX_LAG_S = 1` — deliberately loose. This is a "clearly the wrong shot"
+test, not a coherence test; coherence is decided by `stalenessSeconds`, which subtracts a frame period
+and tolerates only float noise. A tight bound would reject frames during ordinary seek transients,
+when the element is the nearest thing to correct available, converting brief softness into a brief
+hole. Applied ONLY when a WC provider exists: with no provider the element IS the primary decode path
+(`wcDecode` off remains the default) and refusing its frames would blank the layer permanently.
+
+**Prediction to falsify on the next run:** `escape hatches` should fall sharply from 144 (141
+write-offs) and `worst staleness` should drop from ~21s toward the sub-second range, because the
+21-second readings were the refused frames. If write-offs stay high, the stale element was not their
+cause and the next suspect is WC frame arrival itself (B1/B2).
+
+Gates: `typecheck` clean, `coherence:test` 5666/5666, `fullres:test` 203/203, `wcpool:test` 22/22,
+`flarexproxy:test` pass.
+
+## v32g — the residual stagger: a source that is neither stale NOR not-ready (2026-07-28)
+
+**Found by tracing ONE ruler click**, not by inference. `__flarexCoherence.trace()` records every media
+source per composite — including the coherent ones — plus which gate withheld the frame.
+
+The trace exonerated the barrier completely. Click 1: 8 composites HELD (`coherence`) while sources
+read 4433/4433/4450ms, converging one at a time, then `shown` at **117ms** with all three at 0.
+Click 2 the same shape at **82ms**. **Every `shown` row had staleness 0** — no mixed-generation frame
+ever reached the screen. Convergence latency is fine and the hold is doing its job.
+
+The signal was in a column that read `—`: source `n_mrzusqg4_99w3` had NULL staleness across those
+same composites.
+
+**The gap.** `stalenessSeconds` is null when a source cannot say where it is, and null NEVER gates a
+present — correct for a still or a generator, which are right at every playhead. A video with no
+decoded frame is the opposite case: it is definitely NOT showing the requested moment. And
+`gradeMediaInContext` returns that layer's CACHED PREVIOUS texture (the 2026-07-07 anti-flicker hold)
+instead of null, so it does not register as not-ready either.
+
+Neither stale nor not-ready → invisible to both gates → the composite presents with that one source
+still showing the PREVIOUS playhead's picture, then updates alone when its decode lands. That is the
+residual "one clip changes, then the other".
+
+**Fix:** `ScenePreviewMediaSnapshot.awaitingFrame` — true when a VIDEO source has no frame for the
+requested time. The compositor treats it as stale (it gates) but keeps it out of the staleness
+statistics (it does not measure — there is no served time to difference against, and those numbers are
+the Track B latency instrument). Bounded by the same `STALE_HOLD_MAX_MS` write-off as any stale
+source, so a decoder that never delivers degrades rather than freezing the viewer.
+
+**Rule.** *"Cannot answer" and "the answer is no" are different, and collapsing them into one null is
+how a gate acquires a blind spot.* The null was documented as safe on the grounds that a frameless
+source "is already covered by the existing not-ready path" — it was not, because the anti-flicker hold
+had quietly made that path unreachable for exactly this case. Two correct mechanisms, each assuming
+the other was covering.
+
+**Also revised:** v32f's stale-element refusal (`ELEMENT_FALLBACK_MAX_LAG_S`) did NOT reduce write-offs
+— they rose 144 → 271 with worst staleness unchanged at ~21s, so that prediction is falsified and
+recorded as such. It is kept because it is now load-bearing in a way it was not before: refusing a
+21s-off element produces `awaitingFrame`, which now GATES, where previously it produced exactly the
+invisible hole described above.
+
+Gates: `typecheck` clean, `coherence:test` 5666/5666, `fullres:test` 203/203, `wcpool:test` 22/22.
+Trace now prints `WAIT` for an awaiting video, distinct from `—` for a time-invariant source.

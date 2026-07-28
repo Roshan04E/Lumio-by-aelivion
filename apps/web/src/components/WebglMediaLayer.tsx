@@ -17,6 +17,9 @@ import { recordMediaFrame } from "../editor/performance/frame-stats";
 import { acquirePreviewFrameProvider } from "../playback/preview-frame-pool";
 import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
+import { ELEMENT_FALLBACK_MAX_LAG_S, sourceFramePeriodSeconds, stalenessSeconds } from "../playback/temporal-coherence";
+import { yieldTask } from "../playback/yield-task";
+import { traceAsset, traceEvent, type ProviderTraceReason } from "../playback/provider-lifecycle-trace";
 import type { FrameProvider } from "../export/source-decoder";
 import type { SceneMediaSink, ScenePreviewMediaFrame, ScenePreviewMediaSource } from "./scene-media-source";
 
@@ -482,6 +485,23 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const wcProviderRef = useRef<FrameProvider | null>(null);
     const wcLeaseRef = useRef<ReturnType<typeof acquirePreviewFrameProvider>>(null);
     const wcFrameRef = useRef<{ source: CanvasImageSource; width: number; height: number } | null>(null);
+    /**
+     * TEMPORAL COHERENCE (2026-07-28): the source-media time the CURRENTLY HELD WC frame represents.
+     * Null until the first frame is presented.
+     *
+     * Derived at PRESENT time as `requestedSourceTime − lastFrameLagSeconds`, not read at snapshot time.
+     * That matters: `lastFrameLagSeconds` describes how far the served frame trailed the request that
+     * produced it, so reading it later would answer "how stale was that frame when it arrived", not
+     * "how stale is what I'm showing now". Recording it at present time means a request still IN FLIGHT
+     * for a newer playhead leaves this pinned at the older served time — which is exactly the staleness
+     * the present gate has to see. Reading the lag lazily would silently understate it to zero.
+     */
+    const servedSourceTimeRef = useRef<number | null>(null);
+    // TRACE ONLY: previous lease-effect inputs, so a re-run can be classified (mount / src-change /
+    // epoch-bump). Never read by any decision.
+    const leaseRunRef = useRef(0);
+    const leaseSrcRef = useRef<string | null>(null);
+    const leaseEpochRef = useRef(-1);
     // The provider owns the frame it serves — valid only until its NEXT getFrame (or a cache
     // eviction). Paused repaints (grade/opacity/effect edits) redraw wcFrameRef long after that,
     // racing the closure — the "can't texture a closed VideoFrame" console spam (2026-07-04 soak).
@@ -492,6 +512,9 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         try { prev.source.close(); } catch { /* already closed */ }
       }
       wcFrameRef.current = next;
+      // Drop the served-time stamp with the frame it described, so a cleared/re-leased provider can
+      // never leave a stale time attached to whatever frame arrives next. Set on present (below).
+      if (!next) servedSourceTimeRef.current = null;
     }
     const wcBusyRef = useRef(false);
     const wcRerequestRef = useRef(false);
@@ -556,6 +579,31 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const mapSourceTime = (tp: { currentTime: number; start: number; sourceIn: number; speed: number; preroll: number }, timelineTime = tp.currentTime) =>
       Math.max(0, tp.sourceIn + Math.max(-tp.preroll, timelineTime - tp.start) * tp.speed);
 
+    /**
+     * TEMPORAL COHERENCE (2026-07-28): how far the held frame is from the one the LIVE playhead asks
+     * for, in TIMELINE seconds — the signal `ScenePreviewMediaSnapshot.stalenessSeconds` carries to
+     * the present gate. The math (and the reasoning behind subtracting a frame period) lives in
+     * `playback/temporal-coherence.ts` so it stays pure and testable; this only supplies the inputs
+     * this layer owns: the request mapping, the playback rate, and the provider's own frame rate.
+     */
+    const computeStalenessSeconds = (servedSourceTime: number | null): number | null => {
+      const tp = wcTimeRef.current;
+      // Media end for the tail clamp. The provider's demuxed `decodableEndSeconds` is the TRUE last
+      // decodable sample (the same value `scene-frame-compositor` treats as the asset's media end);
+      // the element's `duration` is the fallback when no provider exists. Either may be absent, and
+      // absent simply skips the clamp.
+      const el = sourceVideoRef.current;
+      const elDuration = el && Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+      const mediaEndSeconds = wcProviderRef.current?.decodableEndSeconds ?? elDuration;
+      return stalenessSeconds({
+        requestedSourceTime: mapSourceTime(tp),
+        servedSourceTime,
+        framePeriodSeconds: sourceFramePeriodSeconds(wcProviderRef.current?.nominalFps),
+        speed: tp.speed,
+        mediaEndSeconds,
+      });
+    };
+
     // ── DECODER POOL (P0, stage 1) ───────────────────────────────────────────
     // The hidden source/matte <video> elements come from the shared element pool instead of being
     // React-rendered: a lease per mount (the caller keys this component by src, so src never changes
@@ -568,6 +616,47 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       if (mediaType !== "video") return undefined;
       const cleanups: (() => void)[] = [];
       let disposed = false;
+      // TRACE ONLY (2026-07-28): classify WHY this lease effect is running. It is the ONLY place a
+      // preview decoder lease is taken, so its reason IS the initiator of a provider acquire/release
+      // cycle — which is the one thing the measurements so far could not name.
+      //
+      // Deps are [mediaType, src] (NOT wcEpoch — that drives the element-bound effects below), and
+      // `src` is this component's React `key` upstream (`key={mediaUrl}` in VideoPreview). So a URL
+      // change tears the instance down and builds a new one: it shows up as a fresh "mount", not a
+      // "src-change" re-run. Reading the timeline:
+      //   repeated "mount" for one asset  → the layer is being REMOUNTED under a changing mediaUrl
+      //                                     (the proxy↔original swap hypothesis)
+      //   "src-change"                    → a re-run without a remount, i.e. some path is NOT keyed
+      //   pool evict/preempt with no      → the POOL is initiating, not React
+      //     layer event nearby
+      // `wcEpoch` is carried in the note so a bump that does NOT re-run this effect is still visible.
+      const leaseReason: ProviderTraceReason =
+        leaseRunRef.current === 0
+          ? "mount"
+          : leaseSrcRef.current !== src
+            ? "src-change"
+            : leaseEpochRef.current !== wcEpoch
+              ? "epoch-bump"
+              : "unknown";
+      leaseRunRef.current += 1;
+      leaseSrcRef.current = src;
+      leaseEpochRef.current = wcEpoch;
+      traceEvent({
+        event: "layer:effect",
+        asset: traceAsset(src),
+        reason: leaseReason,
+        currentTime: wcTimeRef.current.currentTime,
+        note: `run#${leaseRunRef.current} epoch=${wcEpoch}`,
+      });
+      cleanups.push(() =>
+        traceEvent({
+          event: "layer:cleanup",
+          asset: traceAsset(src),
+          reason: disposed ? "unmount" : "unknown",
+          currentTime: wcTimeRef.current.currentTime,
+          note: `run#${leaseRunRef.current}`,
+        })
+      );
 
       const useVideoElement = (lateFallback: boolean) => {
         const lease = acquireVideo(src);
@@ -1133,6 +1222,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const settleLeaseRef = useRef<ReturnType<typeof acquireVideo> | null>(null);
     const settleSourceRef = useRef<{ source: CanvasImageSource; width: number; height: number } | null>(null);
     const settleTokenRef = useRef(0);
+    /** Can this layer ever produce a full-res settle frame? See the assignment in the singleCtx block. */
+    const settleCapableRef = useRef(false);
     const fullResSrc = mediaType === "video" ? props.fullResSrc : undefined;
     useEffect(() => {
       if (mediaType !== "video") return undefined;
@@ -1539,8 +1630,23 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
      * readiness guards `drawVideoFrame` used inline. Shared by the own-canvas draw AND the single-context
      * `snapshot()` (which computes the source at COMPOSITE time, so it's never stale/closed). Returns null
      * when nothing is decoded yet (the layer draws nothing this frame).
+     *
+     * `servedSourceTime` is the source-media time the returned frame actually represents (null when the
+     * path can't know) — the temporal-coherence signal the scene snapshot forwards to the present gate.
+     * It is per-BRANCH because each source knows its own time differently: the settle/element paths park
+     * a real `<video>` whose `currentTime` IS the served time, while the WC path has to derive it from
+     * the request that produced the held frame (see `servedSourceTimeRef`).
      */
-    function selectVideoDrawSource(): { source: CanvasImageSource; width: number; height: number } | null {
+    function selectVideoDrawSource(
+      /**
+       * ATOMIC FULL-RES SWAP (2026-07-28). The legacy own-canvas path passes true and keeps the
+       * original behaviour: this layer applies its own settle frame as soon as it lands. The
+       * single-context path passes FALSE and publishes the settle frame separately as
+       * `fullResFrame`, because there the swap is a viewer-wide decision — several MediaIn sources
+       * must sharpen in ONE composite, and only `ScenePreviewCanvas` knows the participating set.
+       */
+      includeSettle = true
+    ): { source: CanvasImageSource; width: number; height: number; servedSourceTime: number | null } | null {
       const wcFrame = wcFrameRef.current;
       // Belt-and-braces: a closed VideoFrame reports format:null — never hand it to texImage2D.
       const wcFrameClosed =
@@ -1548,16 +1654,32 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // Source selection order: full-res settle frame (paused only) → WC frame → element. The settle
       // ref is cleared synchronously on any transport movement (see the settle effect), so the paused
       // check is belt-and-braces against a draw racing the play flip.
-      const settle = settleSourceRef.current;
+      const settle = includeSettle ? settleSourceRef.current : null;
       if (settle && !wcTimeRef.current.isPlaying && settle.width > 0 && settle.height > 0) {
-        return { source: settle.source, width: settle.width, height: settle.height };
+        // The settle source IS a pooled <video> parked on the requested frame by an exact native seek,
+        // so its own currentTime is the served time — no derivation needed.
+        const el = settle.source as HTMLVideoElement;
+        const served = typeof el.currentTime === "number" ? el.currentTime : null;
+        return { source: settle.source, width: settle.width, height: settle.height, servedSourceTime: served };
       }
       if (wcFrame && !wcFrameClosed && wcFrame.width > 0 && wcFrame.height > 0) {
-        return { source: wcFrame.source, width: wcFrame.width, height: wcFrame.height };
+        return { source: wcFrame.source, width: wcFrame.width, height: wcFrame.height, servedSourceTime: servedSourceTimeRef.current };
       }
       const video = sourceVideoRef.current;
       if (!video || video.readyState < 2 || video.videoWidth === 0) return null;
-      return { source: video, width: video.videoWidth, height: video.videoHeight };
+      // STALE FALLBACK ELEMENT (2026-07-28). A pooled element sits wherever its last owner left it.
+      // When a WC provider exists this element is only a stopgap, and drawing it while it is seconds
+      // from the requested time paints a different shot entirely — measured 21.0s out, and the cause
+      // of 141 of 144 per-source write-offs (the barrier refused to call it coherent, then timed out).
+      // Refusing it hands the not-ready path a HOLD instead, which keeps the last graded texture
+      // rather than painting the wrong one. See ELEMENT_FALLBACK_MAX_LAG_S for why the bound is loose.
+      if (wcProviderRef.current) {
+        const requested = mapSourceTime(wcTimeRef.current);
+        if (Number.isFinite(requested) && Math.abs(video.currentTime - requested) > ELEMENT_FALLBACK_MAX_LAG_S) {
+          return null;
+        }
+      }
+      return { source: video, width: video.videoWidth, height: video.videoHeight, servedSourceTime: video.currentTime };
     }
 
     function drawVideoFrame() {
@@ -1639,6 +1761,28 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // WebCodecs frame request (stage 2): single in-flight decode, latest transport time wins.
     // A resolved frame belongs to the provider (valid until its NEXT getFrame), so we draw it
     // immediately and keep it referenced for paused repaints (pipeline/effect changes).
+    /**
+     * Re-arm the frame request after a macrotask, instead of synchronously inside the `.then()`.
+     *
+     * Coalescing is the point of the pending flag: several sources of a re-request (scrub tick,
+     * paused hold, stale bail) can all fire before the yield lands, and they must produce ONE
+     * follow-up request, not a queue of them — a queue would restore the occupancy this fixes.
+     * `requestWcFrame` reads the LIVE playhead when it runs, so a coalesced re-request is not a
+     * dropped one: the single follow-up asks for the newest time, which is what the viewer wants
+     * anyway during a scrub.
+     */
+    const wcRerequestPendingRef = useRef(false);
+    function scheduleWcRerequest() {
+      if (wcRerequestPendingRef.current) return;
+      wcRerequestPendingRef.current = true;
+      void yieldTask().then(() => {
+        wcRerequestPendingRef.current = false;
+        // The provider can be disposed across the yield (unmount, src change, pool eviction); the
+        // null check is the same guard the null-frame retry timer already uses.
+        if (wcProviderRef.current) requestWcFrameRef.current();
+      });
+    }
+
     function requestWcFrame() {
       const provider = wcProviderRef.current;
       if (!provider || mediaType !== "video") return;
@@ -1717,6 +1861,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               // A frame reached the canvas: whatever the layer was retrying for is over, so the backoff
               // starts clean next time. Without this a source that recovers keeps its old (long) delay.
               wcTolerateRetryRef.current = 0;
+              // Stamp the served time of the frame we are about to hold (see `servedSourceTimeRef`).
+              // `sourceTime` is the target THIS request asked for and `lag` is how far the provider's
+              // answer trailed it, so their difference is the time actually on screen.
+              servedSourceTimeRef.current = sourceTime - lag;
               // Clone before holding: our copy survives the provider closing its original.
               let held: CanvasImageSource = frame;
               if (typeof VideoFrame !== "undefined" && frame instanceof VideoFrame) {
@@ -1796,7 +1944,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           }
           if (wcRerequestRef.current) {
             wcRerequestRef.current = false;
-            requestWcFrameRef.current();
+            // PACED RE-ENTRY (2026-07-28). This used to call straight back into requestWcFrame from
+            // inside the resolved promise — a microtask, so the next ≤24ms decode began before the
+            // event loop got a turn. Per-call budgets bound latency, not occupancy: 3–4 sources
+            // re-entering like this is ~100% main-thread occupancy and the tab stops responding
+            // (measured: STALL 2641ms, 88× getFrame < requestWcFrame). One macrotask yield between
+            // decodes costs a fraction of the budget and hands the loop back. See playback/yield-task.
+            scheduleWcRerequest();
           }
         })
         .catch(() => {
@@ -1813,6 +1967,12 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // sources → baked). The compositor produces a byte-identical RenderTarget, only the output surface
     // differs (shared-context RTT vs own canvas) — the proven single-context export equivalence.
     if (singleCtx) {
+      // ATOMIC FULL-RES SWAP: is a settle upgrade EXPECTED for this layer at all? Mirrors the settle
+      // effect's own bail conditions exactly — a layer whose proxy IS its original, a still, a
+      // pre-roll shell or a hidden layer never produces one, and the compositor must not wait on it.
+      // Refreshed per render because `snapshot()` is created once (deps [singleCtx, mediaType]) and
+      // would otherwise close over stale props.
+      settleCapableRef.current = mediaType === "video" && !!fullResSrc && fullResSrc !== src && !hidden;
       const matteVideo = matteVideoRef.current;
       gradeInputsRef.current = {
         pipeline,
@@ -1841,9 +2001,38 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           // index) so the compositor re-uploads on frame change AND after a recolor re-bake, but skips
           // within a held frame. Falls back to the decoded still.
           let animatedVersion: number | null = null;
+          // TEMPORAL COHERENCE: video layers report how far the held frame is from the one the live
+          // playhead asks for. Non-video (still / generator raster) leaves it null — time-invariant,
+          // so it is coherent at every playhead and must never gate a present.
+          let stalenessSeconds: number | null = null;
+          // ATOMIC FULL-RES SWAP: offered to the compositor, never applied here — see the field docs
+          // on `fullResFrame`. `paused` gates both halves so a play flip can never leave a stale
+          // full-res frame on offer.
+          let fullResFrame: ScenePreviewMediaFrame | null = null;
+          let fullResPending = false;
+          // See `awaitingFrame`: a VIDEO with no frame for this time is definitely not showing the
+          // requested moment, and the compositor would otherwise hold its previous texture silently.
+          let awaitingFrame = false;
           if (mediaType === "video") {
-            const picked = selectVideoDrawSource();
-            if (picked) frame = { source: picked.source as TexImageSource, width: picked.width, height: picked.height };
+            // false: exclude the settle frame from the base pick. The base is what this layer shows
+            // until the whole viewer agrees to upgrade.
+            const picked = selectVideoDrawSource(false);
+            if (picked) {
+              frame = { source: picked.source as TexImageSource, width: picked.width, height: picked.height };
+              stalenessSeconds = computeStalenessSeconds(picked.servedSourceTime);
+            } else {
+              // No settle, no WC frame, no usable element — the decode for this time has not landed.
+              awaitingFrame = true;
+            }
+            const paused = !wcTimeRef.current.isPlaying;
+            const settle = settleSourceRef.current;
+            if (paused && settle && settle.width > 0 && settle.height > 0) {
+              fullResFrame = { source: settle.source as TexImageSource, width: settle.width, height: settle.height };
+            } else if (paused && settleCapableRef.current) {
+              // Expected but not landed: the 300ms debounce is running, or the native seek is in
+              // flight. This is what the compositor waits on.
+              fullResPending = true;
+            }
           } else {
             const sel = selectGraphicFrame();
             if (sel) {
@@ -1868,6 +2057,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             matte: gi.hasMatte && matteVideo ? { source: matteVideo as TexImageSource, invert: gi.matteInvert, opacity: gi.matteOpacity } : null,
             transition: gi.transition,
             transitionKey: gi.transitionKey,
+            stalenessSeconds,
+            fullResFrame,
+            fullResPending,
+            awaitingFrame,
           };
         },
       };

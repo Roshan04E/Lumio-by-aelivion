@@ -51,6 +51,73 @@ export interface ScenePreviewMediaSnapshot {
   /** Legacy per-clip reveal (wipe/iris/dip) — null in scene mode (junctions fold in-compositor). */
   transition: MediaTransition | null;
   transitionKey: string;
+  /**
+   * TEMPORAL COHERENCE (2026-07-28): how far the frame in `frame` is from the one the LIVE playhead
+   * asks for, in TIMELINE seconds. 0 = showing exactly the requested frame. This is the question
+   * `frameVersion` (a monotonic counter) structurally cannot answer: "is this texture the one for
+   * the frame I am about to present?"
+   *
+   * Why it exists: a Flarex comp composites several MediaIn loaders, each decoding independently.
+   * `gradeMediaInContext` deliberately HOLDS a source's last graded texture when its current frame
+   * hasn't landed (the 2026-07-07 black-flicker fix), so a source that has decoded ONCE reads as
+   * "ready" forever no matter how stale. The presented composite could therefore mix source A at t
+   * with source B at t−0.2 — visible as a comp's sources "filling in" one at a time on a low-end
+   * machine. The held pixels are unchanged by this field; it is only what lets the present gate tell
+   * "held and correct" from "held and stale".
+   *
+   * Reported in TIMELINE seconds, not source seconds, so every source is directly comparable to
+   * every other regardless of its own speed/in-point — the producer owns `speed`, `preroll` and the
+   * mapping clamps, so it is the only layer that can convert without re-deriving them.
+   *
+   * Null = unknowable or time-invariant, and NEVER gates a present: a still image / generator raster
+   * is coherent at every playhead, and a source that has never served a frame is already covered by
+   * the existing not-ready path. Null is always the safe answer for a path that cannot know.
+   */
+  stalenessSeconds: number | null;
+  /**
+   * ATOMIC FULL-RES SWAP (2026-07-28) — the layer's full-res settle frame, OFFERED, not applied.
+   *
+   * The full-res settle path (user rule 2026-07-05) leases the ORIGINAL bytes ~300ms after the
+   * transport parks and native-seeks them, so a paused viewer shows real pixels instead of ~854px
+   * proxy pixels. Each source did that independently and swapped itself in the moment its own
+   * `seeked` fired — and seek latency on original media is a function of GOP structure, resolution
+   * and codec, so a 3-MediaIn comp visibly sharpened one clip at a time, each at a different moment.
+   * That is the "fills in one at a time" symptom, and it is NOT a temporal-coherence problem: both
+   * the proxy frame and the settled frame represent the same requested time, so `stalenessSeconds`
+   * reads ~0 on both sides of the swap and no time-based barrier can see it.
+   *
+   * The fix is a change of ownership, not of mechanism. The producer publishes its upgrade here and
+   * keeps serving `frame` meanwhile; `ScenePreviewCanvas` — the only thing that knows the whole
+   * participating set — decides when every source has one and swaps them all in a single composite.
+   * Null when there is no upgrade available (still decoding, playing, no separate original).
+   */
+  fullResFrame: ScenePreviewMediaFrame | null;
+  /**
+   * True when an upgrade is EXPECTED but not yet ready (paused, a distinct original exists, the
+   * debounce/seek has not landed). This is what makes the rendezvous terminate: the compositor waits
+   * while any participant is pending and commits when none is, so it never waits on a source that was
+   * never going to produce one (a still, a generator, a clip whose proxy IS its original).
+   */
+  fullResPending: boolean;
+  /**
+   * AWAITING FRAME (2026-07-28) — this VIDEO source has no decoded frame for the requested time.
+   *
+   * The gap this closes, found by tracing one ruler click. `stalenessSeconds` is null when a source
+   * cannot say where it is, and null never gates a present — justified for a still or a generator,
+   * which are correct at every playhead. But a video with no frame yet is the opposite case: it is
+   * definitely NOT showing the requested moment. Worse, `gradeMediaInContext` hands back that layer's
+   * CACHED PREVIOUS texture (the 2026-07-07 anti-flicker hold) rather than nothing, so the layer also
+   * fails to register as not-ready.
+   *
+   * Neither stale nor not-ready, therefore invisible to both gates: the composite presents with that
+   * one source still showing the PREVIOUS playhead's picture, and updates again on its own when the
+   * decode lands. That is the residual "one clip changes, then the other" — the trace shows every
+   * `shown` row at staleness 0 while one column reads `—`, which is exactly this.
+   *
+   * True here means "hold for me", bounded by the same `STALE_HOLD_MAX_MS` write-off as any other
+   * stale source, so a decoder that never delivers degrades instead of freezing the viewer.
+   */
+  awaitingFrame: boolean;
 }
 
 /** Registered by `WebglMediaLayer`; polled by `ScenePreviewCanvas` at composite time. */

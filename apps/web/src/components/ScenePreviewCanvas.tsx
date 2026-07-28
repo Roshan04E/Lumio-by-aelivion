@@ -46,19 +46,269 @@ import {
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
+import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
 import type { ScenePreviewMediaSource } from "./scene-media-source";
+import {
+  STALE_HOLD_MAX_MS,
+  getCoherenceHoldEnabled,
+  isStale,
+  shouldHoldForCoherence,
+} from "../playback/temporal-coherence";
+import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
 
 /** Soak telemetry (__rf* convention) for the single-ctx preview: `grades` = in-context media grades that
  *  actually ran, `skips` = frames a media layer's cached RenderTarget was reused (unchanged frame + grade).
  *  A nonzero `grades` proves the GPU-first path is engaged (window.__rfSingleCtxPreview). */
-function recordSingleCtx(kind: "grades" | "skips"): void {
+function recordSingleCtx(kind: "grades" | "skips" | "fullResSwaps" | "fullResHatch"): void {
   if (typeof window === "undefined") return;
-  const w = window as { __rfSingleCtxPreview?: { grades: number; skips: number } };
-  const s = (w.__rfSingleCtxPreview ??= { grades: 0, skips: 0 });
-  s[kind] += 1;
+  const w = window as { __rfSingleCtxPreview?: Record<string, number> };
+  const s = (w.__rfSingleCtxPreview ??= { grades: 0, skips: 0, fullResSwaps: 0, fullResHatch: 0 });
+  s[kind] = (s[kind] ?? 0) + 1;
+}
+
+
+/**
+ * TEMPORAL-COHERENCE probe (`window.__flarexCoherence`, the `__rf` / `__flarex` debug-global convention).
+ *
+ * Separate from `frameProfiler` on purpose: the profiler records only while the transport is PLAYING
+ * (see FLAREX_PROFILER.md), and every number this work is judged on — time to a coherent frame after a
+ * scrub, average and worst-case convergence latency — is a PAUSED measurement. Always on, because it is
+ * a handful of numbers per composite with no allocation on the coherent path; the per-composite sample
+ * ring is only kept when `?flarexProfile=1` is set.
+ *
+ * Read it with `__flarexCoherence.report()` for a formatted summary, or inspect the object directly.
+ * `holdStreaks` counts CONVERGENCE EVENTS (one per scrub that had to wait), so `avgHoldMs` is
+ * per-scrub, not per-frame.
+ *
+ * The number to watch is `escapeHatches`. A coherent frame that arrived by WAITING is the mechanism
+ * working; one that arrived because a hatch fired is a mixed-generation frame that reached the screen
+ * anyway. A healthy session has escapeHatches ≈ 0 — if it climbs, the barrier is being overridden and
+ * the staleness is a real convergence failure, not a scheduling artifact.
+ */
+interface CoherenceStats {
+  /** Composites that reached the gate. */
+  composites: number;
+  /** Composites withheld because a source was showing the wrong time. */
+  heldComposites: number;
+  /** Distinct hold episodes (a scrub that had to wait for convergence). */
+  holdStreaks: number;
+  /** Wall ms the most recent episode spent waiting — "time to coherent frame after a scrub". */
+  lastHoldMs: number;
+  maxHoldMs: number;
+  avgHoldMs: number;
+  /** Worst single-source staleness observed, seconds. */
+  maxStalenessSeconds: number;
+  /**
+   * Composites in which each source read stale. Accumulated whether or not the frame was HELD —
+   * with the hold flag off nothing ever holds, and attributing only held frames left the instrument
+   * naming no source at all on exactly the runs it exists to explain (2026-07-28).
+   */
+  offenders: Record<string, number>;
+  /** Worst staleness per source, ms. Distinguishes "a few frames behind" from "not decoding at all". */
+  staleWorstMs: Record<string, number>;
+  /** Presents that went out WITH stale sources — the barrier overridden. Should stay ~0. */
+  escapeHatches: number;
+  /** ...of which: the contiguous hold hit STALE_HOLD_MAX_MS (sources were still converging). */
+  escapeHatchEpisode: number;
+  /** ...of which: every stale source was written off (something is not converging at all). */
+  escapeHatchWriteOff: number;
+  samples?: { t: number; staleIds: string[]; maxStalenessSeconds: number; heldMs: number }[];
+  /**
+   * PER-COMPOSITE TRACE (2026-07-28). The aggregate counters above answer "how often" and cannot
+   * answer "what happened across ONE ruler click" — which is the remaining question: the viewer shows
+   * one picture, then a second, correct one. Arm with `__flarexCoherence.trace()`, click once, then
+   * `__flarexCoherence.traceReport()`.
+   *
+   * Records EVERY media source each composite, not just the stale ones, because the interesting row
+   * is the one that reads coherent while showing the wrong picture — a source missing from the stale
+   * list is evidence, not noise.
+   */
+  traceFrames?: { t: number; held: boolean; reason: string; staleness: Record<string, number | null> }[];
+  traceRemaining?: number;
+  /** Arm the per-composite trace for the next `frames` composites. */
+  trace(frames?: number): void;
+  /** Print the armed trace as a timeline. */
+  traceReport(): void;
+  /** Formatted console summary — the manual-verification readout. */
+  report(): void;
+  /** Zero the counters (call before each measured scrub run). */
+  reset(): void;
+}
+function createCoherenceStats(): CoherenceStats {
+  const s: CoherenceStats = {
+    composites: 0,
+    heldComposites: 0,
+    holdStreaks: 0,
+    lastHoldMs: 0,
+    maxHoldMs: 0,
+    avgHoldMs: 0,
+    maxStalenessSeconds: 0,
+    offenders: {},
+    staleWorstMs: {},
+    escapeHatches: 0,
+    escapeHatchEpisode: 0,
+    escapeHatchWriteOff: 0,
+    trace(frames = 150) {
+      s.traceFrames = [];
+      s.traceRemaining = frames;
+      console.log(`[coherence] tracing the next ${frames} composites — click the ruler ONCE, then __flarexCoherence.traceReport()`);
+    },
+    traceReport() {
+      const rows = s.traceFrames ?? [];
+      if (rows.length === 0) {
+        console.warn("[coherence] nothing traced — call __flarexCoherence.trace() first, then interact");
+        return;
+      }
+      const ids = [...new Set(rows.flatMap((r) => Object.keys(r.staleness)))];
+      const t0 = rows[0]!.t;
+      console.group(`%c[coherence] ${rows.length} composites over ${Math.round(rows[rows.length - 1]!.t - t0)}ms`, "font-weight:bold");
+      console.table(
+        rows.map((r) => {
+          const row: Record<string, string | number> = { ms: Math.round(r.t - t0), present: r.held ? "HELD" : "shown", why: r.reason };
+          for (const id of ids) {
+            const v = r.staleness[id];
+            // Short tail of the id: the long flarex source keys are unreadable in a table.
+            // "—" = time-invariant (still/generator). "WAIT" = a video with no decode for this time,
+            // which is the case that used to read "—" and silently present the previous picture.
+            row[id.slice(-14)] = v == null ? "—" : !Number.isFinite(v) ? "WAIT" : Number((v * 1000).toFixed(0));
+          }
+          return row;
+        })
+      );
+      console.log("staleness in ms; '—' = time-invariant; 'WAIT' = video with no decode yet. A 'shown' row with a large number or WAIT is a wrong-picture present.");
+      console.groupEnd();
+    },
+    reset() {
+      Object.assign(s, {
+        composites: 0,
+        heldComposites: 0,
+        holdStreaks: 0,
+        lastHoldMs: 0,
+        maxHoldMs: 0,
+        avgHoldMs: 0,
+        maxStalenessSeconds: 0,
+        offenders: {},
+        staleWorstMs: {},
+        escapeHatches: 0,
+        escapeHatchEpisode: 0,
+        escapeHatchWriteOff: 0,
+      });
+      if (s.samples) s.samples.length = 0;
+      console.log("[coherence] counters reset — scrub now, then call __flarexCoherence.report()");
+    },
+    report() {
+      const ms = (n: number) => `${n.toFixed(1)}ms`;
+      console.group("%c[coherence] temporal coherence", "font-weight:bold");
+      console.log(`composites          ${s.composites}  (${s.heldComposites} withheld)`);
+      console.log(`convergence events  ${s.holdStreaks}   ← one per scrub that had to wait`);
+      console.log(`time to coherent    last ${ms(s.lastHoldMs)} · avg ${ms(s.avgHoldMs)} · worst ${ms(s.maxHoldMs)}`);
+      console.log(`worst staleness     ${(s.maxStalenessSeconds * 1000).toFixed(1)}ms beyond one frame`);
+      // The SAME counter means two different things depending on whether the barrier was armed, and
+      // reporting it as "barrier overridden" with the flag off was actively misleading (2026-07-28:
+      // 1174 "escape hatches" in a run where nothing could ever hold). With the hold disabled this is
+      // simply the incoherent-frame RATE — the Track B baseline, not a failure of anything.
+      const armed = getCoherenceHoldEnabled();
+      const pct = s.composites > 0 ? ((s.escapeHatches / s.composites) * 100).toFixed(1) : "0.0";
+      if (s.escapeHatches === 0) {
+        console.log("%cincoherent frames   0  ✓ every presented frame was temporally coherent", "color:#3c3");
+      } else if (armed) {
+        console.log(
+          `%cescape hatches      ${s.escapeHatches}  ✗ mixed-generation frames reached the screen ` +
+            `(${s.escapeHatchEpisode} episode-cap, ${s.escapeHatchWriteOff} write-off)`,
+          "color:#e55"
+        );
+      } else {
+        console.log(
+          `%cincoherent frames   ${s.escapeHatches} of ${s.composites} (${pct}%)  — barrier DISABLED, ` +
+            "this is the baseline rate, not an override (?flarexCoherence=1 to arm it)",
+          "color:#e90"
+        );
+      }
+      const offenders = Object.entries(s.offenders).sort((a, b) => b[1] - a[1]);
+      if (offenders.length > 0) {
+        console.log(armed ? "stale sources (most first):" : "stale sources — worst offender is the one to chase:");
+        for (const [id, n] of offenders.slice(0, 8)) {
+          const worst = s.staleWorstMs[id] ?? 0;
+          // Seconds of staleness is the tell: a few frames behind is latency, 20s+ is a source that
+          // is not decoding at all and will never converge on its own.
+          const verdict = worst >= 5000 ? "  ← NOT CONVERGING" : worst >= 500 ? "  ← lagging" : "";
+          console.log(`   ${n.toString().padStart(5)}  ${id}   worst ${worst.toFixed(0)}ms${verdict}`);
+        }
+      }
+      console.groupEnd();
+    },
+  };
+  return s;
+}
+
+/**
+ * SCOPE: the hold clock is passed in by the caller, never held here, because coherence is scoped to
+ * ONE viewer's present. A present is atomic per canvas, so the barrier's unit is the graph that canvas
+ * evaluated; independent viewers (tool pages, fixtures, proxy capture) each mount their own
+ * `ScenePreviewCanvas` with their own transport and must never be able to block each other. Only the
+ * aggregate counters below are process-wide, and those are read-only telemetry.
+ */
+function noteCoherence(
+  holdStart: { current: number | null },
+  t: number,
+  staleIds: string[],
+  maxStalenessSeconds: number,
+  held: boolean,
+  staleBySource: Record<string, number>,
+  allStaleness: Record<string, number | null>,
+  reason: string
+): void {
+  if (typeof window === "undefined") return;
+  const w = window as { __flarexCoherence?: CoherenceStats };
+  const s = (w.__flarexCoherence ??= createCoherenceStats());
+  s.composites += 1;
+  if (s.traceRemaining && s.traceRemaining > 0) {
+    s.traceRemaining -= 1;
+    (s.traceFrames ??= []).push({ t: performance.now(), held, reason, staleness: { ...allStaleness } });
+  }
+  if (maxStalenessSeconds > s.maxStalenessSeconds) s.maxStalenessSeconds = maxStalenessSeconds;
+  // Attribution runs on BOTH paths: with the barrier disabled no frame is ever held, and attributing
+  // only held frames left `offenders` empty on precisely the runs that needed explaining.
+  for (const id of staleIds) {
+    s.offenders[id] = (s.offenders[id] ?? 0) + 1;
+    const ms = (staleBySource[id] ?? 0) * 1000;
+    if (ms > (s.staleWorstMs[id] ?? 0)) s.staleWorstMs[id] = ms;
+  }
+  const now = performance.now();
+  if (held) {
+    s.heldComposites += 1;
+    if (holdStart.current === null) {
+      holdStart.current = now;
+      s.holdStreaks += 1;
+    }
+    return;
+  }
+  // Presenting WITH stale sources means a hatch fired — the barrier was overridden and a
+  // mixed-generation frame is going to the screen. Attribute it, because the two hatches mean
+  // different things for Track B: an episode-cap hit says sources were still converging and just ran
+  // out of time (a LATENCY problem), while a write-off says something is not converging at all (a
+  // decoder problem — check `offenders` and `__rfWcMode` for that source).
+  if (staleIds.length > 0) {
+    s.escapeHatches += 1;
+    const episodeExpired = holdStart.current !== null && now - holdStart.current >= STALE_HOLD_MAX_MS;
+    if (episodeExpired) s.escapeHatchEpisode += 1;
+    else s.escapeHatchWriteOff += 1;
+  }
+  // A present after a hold CLOSES the episode: this wall delta is the convergence latency.
+  if (holdStart.current !== null) {
+    const heldMs = now - holdStart.current;
+    holdStart.current = null;
+    s.lastHoldMs = heldMs;
+    if (heldMs > s.maxHoldMs) s.maxHoldMs = heldMs;
+    s.avgHoldMs = s.avgHoldMs + (heldMs - s.avgHoldMs) / Math.max(1, s.holdStreaks);
+    if (frameProfiler.enabled()) {
+      (s.samples ??= []).push({ t, staleIds: [...staleIds], maxStalenessSeconds, heldMs });
+      if (s.samples.length > 240) s.samples.shift();
+    }
+  }
 }
 
 /**
@@ -133,6 +383,10 @@ const NOT_READY_HOLD_MS = 300;
 // freeze, never black, like every pro NLE — while text/shape keep the short cap (a mid-typing
 // raster must not freeze the viewer for 1.5s).
 const NOT_READY_HOLD_MEDIA_MS = 1500;
+
+// TEMPORAL COHERENCE (2026-07-28): the not-ready gate above asks "does this layer have a texture",
+// which is presentation BATCHING, not temporal synchronization — see `playback/temporal-coherence.ts`
+// for the invariant, the reasoning, and the (pure, testable) decision functions this file drives.
 
 // Bounded GPU recovery. On a WebGL context loss the preview used to latch PERMANENTLY to the DOM path — which
 // is NOT pixel-identical to the scene compositor, so a transient GPU eviction meant a lasting fidelity + quality
@@ -266,6 +520,26 @@ export function ScenePreviewCanvas({
   // R1 fix: first-blocked timestamp per currently-unready layer id (escape-hatch timer for the
   // hold-previous-frame gate in `drawRef.current` — see `NOT_READY_HOLD_MS`).
   const notReadySinceRef = useRef<Map<string, number>>(new Map());
+  // Wall time this viewer's current coherence hold began (null = not holding). Per-instance, not
+  // module-level: see the SCOPE note on `noteCoherence`.
+  const coherenceHoldStartRef = useRef<number | null>(null);
+  /**
+   * ATOMIC FULL-RES SWAP (2026-07-28). Has this viewer committed to its sources' full-res settle
+   * frames? False = everyone shows their proxy frame; true = everyone who has an upgrade uses it.
+   * Because it is one flag for the whole viewer, sources cannot sharpen at different moments —
+   * which is the entire point. Per-instance: two viewers of the same media must never be able to
+   * force each other's swap.
+   */
+  const fullResCommittedRef = useRef(false);
+  /** Wall time the current "waiting for upgrades" episode began (null = nobody pending). */
+  const fullResPendingSinceRef = useRef<number | null>(null);
+  // Wall time each currently-stale source was first seen stale — the per-source write-off clock.
+  // Kept SEPARATE from `notReadySinceRef` even though both are "how long has this blocked": that map
+  // is pruned against `notReadyIds` and its caps are chosen per layer TYPE, while this one is pruned
+  // against `staleIds` and is uniform. Sharing one map would couple two independent hold policies.
+  const staleSinceRef = useRef<Map<string, number>>(new Map());
+  // Read once per mount (flag convention: reload to change), like every other engine flag.
+  const coherenceHoldEnabledRef = useRef(getCoherenceHoldEnabled());
   const rafRef = useRef<number>(0);
   const disposedRef = useRef(false);
   const contextLostRef = useRef(false);
@@ -572,6 +846,7 @@ export function ScenePreviewCanvas({
   // without re-subscribing. Reads live values from `inputsRef` / `gradedRef` (both stable refs).
   const drawRef = useRef<() => void>(() => {});
   const drawFrameImpl = () => {
+    const drawStart = performance.now();
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
     const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexVirtualLayers: fxVirtual } = inputsRef.current;
@@ -617,13 +892,57 @@ export function ScenePreviewCanvas({
     // RenderTarget on THIS compositor's WebGL2 context, returning the RTT as a SceneTextureSource the
     // compositor samples directly (no cross-context upload) — the proven single-context export path.
     const liveMediaSourceIds = new Set<string>();
+    // TEMPORAL COHERENCE: ids whose held texture is for a DIFFERENT time than the frame being built.
+    // Collected here rather than through `buildSceneDraws`'s `onLayerNotReady` on purpose — that hook is
+    // documented as "purely an observability out-channel, it never changes what buildSceneDraws returns",
+    // and export/worker must stay byte-identical. Only the single-ctx path reports staleness (the legacy
+    // per-clip-GL path has no snapshot to ask); that path has been the default since 2026-07-07.
+    const staleIds: string[] = [];
+    const staleBySource: Record<string, number> = {};
+    // EVERY media source's staleness, coherent ones included — the trace needs the rows that read
+    // clean, because "showed the wrong picture while reporting coherent" is a different bug from
+    // "showed the wrong picture while reporting stale", and only this can tell them apart.
+    const allStaleness: Record<string, number | null> = {};
+    let maxStalenessSeconds = 0;
+    // ATOMIC FULL-RES SWAP: tallies for this composite. The DECISION for this composite was made from
+    // the previous one (`fullResCommittedRef`, resolved after the draw below) — deliberately, because
+    // `gradeMediaInContext` is invoked lazily by `buildSceneDraws` as it walks the layers, so there is
+    // no point before the draw at which every participant has been seen. Deciding one frame late costs
+    // a single extra composite and keeps the swap atomic; deciding mid-walk could not be atomic at all.
+    let fullResPendingCount = 0;
+    let fullResReadyCount = 0;
+    const useFullRes = fullResCommittedRef.current;
     const gradeMediaInContext = (resolvedId: string, source: ScenePreviewMediaSource): SceneTextureSource | null => {
       const snap = source.snapshot();
       // Media-supply probe: record this source's frame-delivery state (advancing vs held/stalled) BEFORE
       // the re-grade skip, so a frozen decoder is named per source. Inert unless ?flarexProfile=1.
       frameProfiler.noteMediaSource(resolvedId, snap.frameVersion, !!snap.frame && snap.frame.width > 0 && snap.frame.height > 0);
+      // Is this source showing the frame this composite is FOR? Null staleness = time-invariant or
+      // unknowable → coherent by definition. The texture returned below is unchanged either way; this
+      // only tells the present gate whether the frame it is about to assemble is a real one.
+      // A video still waiting on its decode counts as stale: it is definitely not showing the
+      // requested moment, and the held-texture path below would otherwise let it present the previous
+      // playhead's picture without either gate noticing. See `awaitingFrame` in scene-media-source.
+      const awaiting = snap.awaitingFrame;
+      allStaleness[resolvedId] = awaiting ? Number.POSITIVE_INFINITY : snap.stalenessSeconds;
+      if (awaiting || isStale(snap.stalenessSeconds)) {
+        staleIds.push(resolvedId);
+        // `awaiting` has no measurable distance — there is no served time to compare — so it must not
+        // enter the staleness statistics, which are a Track B latency instrument. It gates, it does
+        // not measure.
+        if (!awaiting) {
+          staleBySource[resolvedId] = snap.stalenessSeconds!;
+          if (snap.stalenessSeconds! > maxStalenessSeconds) maxStalenessSeconds = snap.stalenessSeconds!;
+        }
+      }
+      // ATOMIC FULL-RES SWAP: tally this participant, then use its upgrade only if the viewer has
+      // already committed. `frame` stays the fallback whenever no upgrade exists, so a source that
+      // never produces one is unaffected.
+      if (snap.fullResPending) fullResPendingCount += 1;
+      if (snap.fullResFrame) fullResReadyCount += 1;
+      const chosenFrame = useFullRes && snap.fullResFrame ? snap.fullResFrame : snap.frame;
       let entry = sharedMediaRenderersRef.current.get(resolvedId);
-      if (!snap.frame || snap.frame.width <= 0 || snap.frame.height <= 0) {
+      if (!chosenFrame || chosenFrame.width <= 0 || chosenFrame.height <= 0) {
         // Transiently source-less: an element mid-seek drops readyState<2 for a few frames, a WC decode
         // is still in flight, a still is decoding. HOLD the last graded frame — the own-canvas path did
         // this implicitly (the graded canvas kept its last pixels through a seek); returning null here
@@ -640,11 +959,15 @@ export function ScenePreviewCanvas({
         entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0 };
         sharedMediaRenderersRef.current.set(resolvedId, entry);
       }
-      const w0 = snap.frame.width;
-      const h0 = snap.frame.height;
+      const w0 = chosenFrame.width;
+      const h0 = chosenFrame.height;
       // Re-grade skip: unchanged frame version + grade keys → reuse the cached target (no upload/grade).
       // A matte is a live <video> whose pixels change with no versioned signal → never skip when present.
-      const key = `${snap.frameVersion}|${snap.pipelineKey}|${snap.mediaEffectsKey}|${snap.amount}|${snap.bakedOpacity}|${snap.transitionKey}`;
+      //
+      // `fr` is load-bearing: the proxy and full-res frames can share a `frameVersion` (the swap is the
+      // COMPOSITOR's decision, not a new publish by the producer), so without it the skip would serve
+      // the cached proxy-graded texture forever and the upgrade would never appear on screen.
+      const key = `${snap.frameVersion}|${snap.pipelineKey}|${snap.mediaEffectsKey}|${snap.amount}|${snap.bakedOpacity}|${snap.transitionKey}|fr${chosenFrame === snap.fullResFrame ? 1 : 0}`;
       if (!snap.matte && entry.lastKey === key && entry.target.width === w0 && entry.target.height === h0) {
         recordSingleCtx("skips");
         return { texture: entry.target.tex, width: w0, height: h0 };
@@ -653,8 +976,15 @@ export function ScenePreviewCanvas({
         entry.renderer.setPipeline(snap.pipeline);
         entry.pipelineKey = snap.pipelineKey;
       }
+      // HOT SPOT (2026-07-28): this upload+grade is where a `texImage2D` of a live 1080p video frame
+      // can block on a GPU sync — and until now it was NOT instrumented. The three existing
+      // `markHotSpot` probes (`webgl-draw`, `webgl-renderer-init`, `lut-bake`) all sit in
+      // `WebglMediaLayer`'s own-context path, AFTER its `if (singleCtx) return`, so none has fired
+      // since single-context preview became the default (2026-07-07). `__rfHotSpots` read as
+      // "undefined" — absence of an instrument, not absence of stalls.
+      const gradeStart = performance.now();
       entry.renderer.draw({
-        source: snap.frame.source,
+        source: chosenFrame.source,
         sourceWidth: w0,
         sourceHeight: h0,
         matte: snap.matte?.source ?? null,
@@ -667,6 +997,7 @@ export function ScenePreviewCanvas({
         transition: snap.transition,
         target: entry.target,
       });
+      markHotSpot("scene-media-grade", gradeStart, `${resolvedId} ${w0}x${h0}`);
       entry.lastKey = snap.matte ? "" : key; // matte present → force a re-grade next frame
       entry.lastW = w0;
       entry.lastH = h0;
@@ -729,6 +1060,10 @@ export function ScenePreviewCanvas({
     // The only editor-specific input is the media graded canvas, read here from the hidden WebglMediaLayers.
     let draws: SceneFrameSpec["layers"];
     const notReadyIds: string[] = [];
+    // Timed separately from `scene-draw-total` because BOTH hold paths return before that probe: a
+    // withheld frame still pays for its build (Flarex compile + rasterizer + source-draw resolve), and
+    // a withheld frame is precisely when the stalls under investigation occur.
+    const buildStart = performance.now();
     try {
       // Profiler times the whole draw-list build (includes the Flarex evaluator + content hashing).
       draws = frameProfiler.measure("evaluator.build", () => buildSceneDraws({
@@ -762,6 +1097,7 @@ export function ScenePreviewCanvas({
       fail("build draw list", error);
       return;
     }
+    markHotSpot("scene-draw-build", buildStart, `layers=${ls.length}`);
 
     // R1 fix: mirror the worker's delayRender gate — while PLAYING, a stacked layer whose source hasn't
     // landed yet must not composite a hole that lets the layer(s) below show through for a frame. Hold the
@@ -775,6 +1111,42 @@ export function ScenePreviewCanvas({
     }
     for (const id of blockedSince.keys()) {
       if (!notReadyIds.includes(id)) blockedSince.delete(id);
+    }
+    // ── ATOMIC FULL-RES SWAP: resolve the rendezvous now that every participant has been seen ──────
+    //
+    // The invariant: a paused viewer sharpens ALL of its sources in one composite, or none of them.
+    // Commit when nobody is still waiting for an upgrade and at least one exists; withdraw the moment
+    // anyone goes pending again (transport moved → every settle frame was just invalidated).
+    //
+    // ESCAPE HATCH, same doctrine as every other hold here: a source whose original never seeks —
+    // wedged element, sparse-GOP 4K, renamed asset — must not keep the whole viewer soft forever.
+    // Past the budget we commit with whatever is ready and degrade to the old per-source behaviour.
+    {
+      const wasCommitted = fullResCommittedRef.current;
+      const decision = decideFullResRendezvous({
+        pendingCount: fullResPendingCount,
+        readyCount: fullResReadyCount,
+        pendingSinceMs: fullResPendingSinceRef.current,
+        nowMs: now,
+      });
+      fullResPendingSinceRef.current = decision.pendingSinceMs;
+      if (decision.commit !== wasCommitted) {
+        fullResCommittedRef.current = decision.commit;
+        // The decision is made AFTER this composite was assembled, so it applies to the next one.
+        // Without this the swap would wait for an unrelated redraw and could sit soft indefinitely
+        // while paused (there is no rAF pump when the transport is parked).
+        requestDraw();
+        if (decision.commit) recordSingleCtx(decision.viaHatch ? "fullResHatch" : "fullResSwaps");
+      }
+    }
+    // Per-source staleness clock (temporal coherence). A source that converges drops out of `staleIds`
+    // and its clock is cleared, so a later stall gets a fresh budget rather than inheriting an old one.
+    const staleSince = staleSinceRef.current;
+    for (const id of staleIds) {
+      if (!staleSince.has(id)) staleSince.set(id, now);
+    }
+    for (const id of staleSince.keys()) {
+      if (!staleIds.includes(id)) staleSince.delete(id);
     }
     // v21 (play-start black-flicker lineage): at the play flip a composite can run BEFORE the
     // playing flag propagates, exactly while the media element re-primes (settle/WC → element
@@ -792,10 +1164,55 @@ export function ScenePreviewCanvas({
     if (
       heldIds.some(
         (id) => now - (blockedSince.get(id) ?? now) < (isMediaLayerId(id) ? NOT_READY_HOLD_MEDIA_MS : NOT_READY_HOLD_MS)
-      )
+      ) ||
+      // TEMPORAL COHERENCE (2026-07-28): at a FIXED playhead every media source must represent the
+      // same requested time or the frame is not presented — see `playback/temporal-coherence.ts`.
+      // The episode clock is `coherenceHoldStartRef`, read here and advanced by `noteCoherence` below,
+      // so the gate and the probe agree on what one hold episode is by construction.
+      shouldHoldForCoherence({
+        playing,
+        staleIds,
+        staleSince,
+        holdStartedMs: coherenceHoldStartRef.current,
+        nowMs: now,
+        enabled: coherenceHoldEnabledRef.current,
+      })
     ) {
+      noteCoherence(
+        coherenceHoldStartRef,
+        t,
+        staleIds,
+        maxStalenessSeconds,
+        true,
+        staleBySource,
+        allStaleness,
+        // Which gate actually withheld this frame. The two are routinely confused in the aggregate
+        // counters: a not-ready hold means a source has NO frame, a coherence hold means it has the
+        // WRONG one, and they call for opposite fixes.
+        staleIds.length > 0 ? "coherence" : "not-ready"
+      );
+      // Keep the settle window open for the duration of a COHERENCE hold. Paused there is no rAF
+      // pump, so the loop only composites while `activeUntilRef` is in the future — and re-arming is
+      // normally the arriving frame's job (`onFrame` → `requestDraw`). A source that stops delivering
+      // mid-hold (bailed to <video>, wedged decoder) would therefore let the window lapse with the
+      // frame still withheld, and STALE_HOLD_MAX_MS could never fire because no composite would run
+      // to evaluate it — a stall on the previous picture instead of a bounded degrade.
+      //
+      // Not busy work: each composite during a hold IS the convergence re-check (it re-reads every
+      // source's snapshot), and it is bounded by STALE_HOLD_MAX_MS, after which we present regardless.
+      if (!playing && staleIds.length > 0) requestDraw();
       return;
     }
+    noteCoherence(
+      coherenceHoldStartRef,
+      t,
+      staleIds,
+      maxStalenessSeconds,
+      false,
+      staleBySource,
+      allStaleness,
+      staleIds.length === 0 ? "coherent" : "hatch"
+    );
     const liveLayerIds = new Set(ls.map((layer) => layer.id));
     for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
       // "capture:"-prefixed entries belong to the viewer-capture run (arbitrary times / layers) — its own
@@ -818,13 +1235,23 @@ export function ScenePreviewCanvas({
 
     const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t };
     try {
+      // HOT SPOT: composite + present (renderFrame ends in presentFrame). Unlike `frameProfiler`,
+      // which only records while the transport is PLAYING, this fires whenever the call exceeds 40ms —
+      // and the stalls being chased are paused/scrub-time.
+      const compositeStart = performance.now();
       frameProfiler.measure("compositor.render", () => compositor.renderFrame(spec));
+      markHotSpot("scene-composite", compositeStart, `${renderW}x${renderH} draws=${draws.length}`);
       if (playing) {
         frameRendered?.(t);
       }
     } catch (error) {
       fail("render", error);
     }
+    // Whole-frame envelope. If this reports ~7500ms while grade+composite are small, the time is in
+    // the draw-list build (Flarex compile / rasterizer) — and if ALL THREE stay quiet through a stall,
+    // the block is outside our JS entirely (GC / browser-internal), which is what the self-profiler's
+    // "no JS samples in window" already suggested and what would send this to DevTools Performance.
+    markHotSpot("scene-draw-total", drawStart, `layers=${ls.length}`);
   };
 
   // Debug-only profiling wrapper (flarexProfile flag): brackets ONE playback frame so the profiler can
