@@ -224,6 +224,20 @@ function flarexSwDecodeOverride(): boolean | null {
     } catch {
       flarexSwDecodeFlag = null;
     }
+    // BUILD PRESENCE TEST. Published unconditionally — including when the param is absent — because
+    // its job is to prove THIS code is in the running bundle, and a symbol that only appears once the
+    // flag is set cannot distinguish "flag off" from "build predates the flag". That exact confusion
+    // voided a full A/B round: the build was verified with `'shared' in __rfWcPool`, which tested the
+    // PREVIOUS commit, so a bundle without the toggle passed the check and `?flarexSwDecode=0` read as
+    // a null result instead of an absent feature.
+    //
+    // Rule: a build check must test the symbol the measurement depends on, not a neighbouring one.
+    try {
+      (window as unknown as { __rfFlarexSwDecode?: boolean | null }).__rfFlarexSwDecode =
+        flarexSwDecodeFlag;
+    } catch {
+      /* ignore */
+    }
   }
   return flarexSwDecodeFlag;
 }
