@@ -33,6 +33,7 @@ import { FlarexSourceViewer } from "./FlarexSourceViewer";
 import { rebuildSourceProxy } from "../performance/sourceProxyEngine";
 import { FlarexNodeIcon } from "./flarex-node-icons";
 import { FlarexNodeBrowser } from "./FlarexNodeBrowser";
+import { installFlarexDragTrace } from "./flarex-drag-trace";
 import { FlarexProxyButton } from "./FlarexProxyButton";
 import { FlarexNodeCanvas, flarexPaletteDrag, flarexTraceDragStart, nextNodePosition } from "./FlarexNodeCanvas";
 import { FLAREX_PINNED_NODES, alignFlarexNodes, type FlarexAlignMode } from "./flarex-canvas-model";
@@ -136,6 +137,10 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
   useEffect(() => {
     setSelectedNodeIds([]);
   }, [comp?.id]);
+
+  // Full document-level drag trace while the Flarex page is mounted (`window.__rfFlarexDragLog`).
+  // Debug-only; see flarex-drag-trace.ts for why handler-level instrumentation was not enough.
+  useEffect(() => installFlarexDragTrace(), []);
 
 
 
