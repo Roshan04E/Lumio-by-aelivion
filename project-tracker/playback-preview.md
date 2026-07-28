@@ -2044,3 +2044,30 @@ NOT verified in a browser: this is a UI/behaviour change and needs a human to dr
 smooth than before". The freeze was the element-path cap, not render cost — resolution was never the
 expensive part of "full quality", which is why every previous attempt to explain the lag in terms of
 GPU load went nowhere.
+
+## v32v — the paused stagger closed as a SIDE EFFECT of the quality split (2026-07-28)
+
+**User, unprompted, after v32u:** "frames now update simultaneously.. no lag.. i mean it takes little
+bit of time like 700-900ms to update sometimes but they do all at once it feels one frame now."
+
+**The stagger is gone, and it was never its own bug.** This file has chased "different media update at
+different times when paused" across v32a–v32h — the coherence barrier, the write-off clocks, the
+hidden-tab confound, the atomic full-res swap. All of that was real and all of it shipped. But the
+symptom kept coming back for one reason nobody connected: at fixed full quality every source was on the
+`<video>` element path, where each element seeks on its own schedule and no barrier can make them
+arrive together. The barrier was working; it was being handed sources it could not synchronise.
+
+The USER made this connection, not the instruments: *"maybe fixing that fixes our broken frames for
+different media that updates in different time when paused."* It did.
+
+**Rule.** *When a symptom survives every fix aimed at it, suspect the environment the fix runs in.*
+Four correct fixes to the coherence machinery could not close this, because the machinery was never the
+problem — the media path underneath it was. A fix that is right and does not help is evidence about
+where you are looking, not about the fix.
+
+**New, smaller, open.** 700–900ms to settle after a pause. That is the barrier doing its job — holding
+until every source converges, then presenting one coherent frame — but the convergence itself is slow.
+Now that the sources are pooled rather than element-driven, this is a decode-latency question
+(first-frame seek cost per source at the paused position), not a synchronisation one. It is a
+materially better problem than the one it replaced: a uniform wait reads as "loading", where a stagger
+read as "broken".
