@@ -3380,6 +3380,12 @@ const PreviewLayer = memo(function PreviewLayer({
             // them on CPU threads in parallel; the host keeps hardware. See preferSoftwareDecode.
             // `?flarexSwDecode=0/1` overrides for the keep-or-revert measurement; absent, unchanged.
             preferSoftwareDecode={(flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id)}
+            // A RETIMED loader (TimeSpeed, ADR-011) must decode alone. It usually carries the HOST's own
+            // url — a promoted host MediaIn always does — and by construction asks for a different time
+            // than the host, which is the one case session sharing cannot serve: neither member ever hits
+            // `pending`/`lastServed`, so both pay a seek per frame until the divergence detector gives up.
+            // Un-retimed loaders share exactly as before.
+            exclusiveDecode={isFlarexVirtualLayerId(layer.id) && (layer.speed !== undefined && layer.speed !== 1 || (layer.speedKeyframes?.length ?? 0) > 0)}
             hidden={pending || (hideForTransition && !sceneComposited)}
             interactiveHidden={sceneComposited && !pending}
             // Scene-composited media carries no per-clip reveal (junctions fold in-compositor) — null it for

@@ -2071,3 +2071,44 @@ Now that the sources are pooled rather than element-driven, this is a decode-lat
 (first-frame seek cost per source at the paused position), not a synchronisation one. It is a
 materially better problem than the one it replaced: a uniform wait reads as "loading", where a stagger
 read as "broken".
+
+## v32w — a retimed loader is the one consumer session sharing cannot serve (2026-07-29)
+
+**Reported:** "its lagging so much while timespeed is added."
+
+**Mechanism, known by construction rather than found by measurement.** A promoted host MediaIn
+(v-TimeSpeed, see editor-ui) reads the HOST'S OWN url — `resolvePlaybackUrl` keys off the asset, so
+host and loader resolve byte-identically, including the same ingest proxy. Same url, same session key.
+The pool therefore attaches them: `canAttachToSession(hardware, wantsSoftware) === true`, which is
+correct and deliberate for an un-retimed loader (v32l — one decode feeding two consumers).
+
+Under a retime it inverts. The two members ask for `t` and `t·S + O`, which are seconds apart. Neither
+`session.pending` nor `session.lastServed` can match for either of them, so BOTH fall to the else
+branch and force a fresh `getFrame` on ONE decoder — a seek, and at far-apart timestamps a seek is a
+whole GOP. Two full seeks per frame, on the shared hardware session, with the host on it.
+
+`noteDivergence` does catch this: four consecutive diverged frames and the later joiner is detached.
+But four frames of double-seeking is already a visible stall, and the toll is paid AGAIN every time the
+session is rebuilt — seek, preempt, quality change, remount — which under scrubbing is continuous.
+
+**Fix: declare it.** `AcquireOptions.exclusive` skips `findAttachableSession` and marks the created
+session `shareable = false`. Both directions, because skipping the join only stops this consumer taking
+someone else's session — leaving its own shareable would let the host attach from the far side and
+reproduce the identical divergence. Set by `VideoPreview` for a virtual loader with a non-unit
+`speed`/`speedKeyframes`; un-retimed loaders share exactly as before.
+
+*Rule: when a runtime detector exists for a condition you can know statically, declare the condition —
+do not let it be discovered.* `noteDivergence` is a good backstop for a divergence that EMERGES. A
+0.5× loader of the host's own file is not emergent: it asks for `t/2` precisely because the host asks
+for `t`, and that is knowable before the first frame is decoded. Paying four frames of thrash per
+session lifetime to rediscover a fact the graph already states is a design error, not a tuning problem.
+
+**Gated.** `wcpool:test` 75/75 (+4): an exclusive acquisition never joins, nothing attaches TO it, and —
+the guard against over-correcting — an UN-retimed loader still shares one decode with its host.
+
+**Not yet measured, and stated plainly:** this removes a collision that is certain from the code. The
+OTHER cost of promotion is inherent and unmeasured — a retimed host MediaIn decodes and grades the
+clip a second time (the copy carries the host's effects deliberately: a retime must not strip the
+shot's grade). If lag survives this fix, that doubling is the next suspect and `?flarexProfile=1` plus
+`__rfWcPool` is what distinguishes them. Shipping the feature without measuring its cost was the
+mistake; the fix for that is a measurement, not another guess.

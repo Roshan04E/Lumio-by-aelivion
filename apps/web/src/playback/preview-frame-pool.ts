@@ -163,6 +163,24 @@ export interface AcquireOptions {
    * and the loaders advance in parallel. Warm same-URL reuse ignores this (a parked provider is taken as-is).
    */
   preferSoftware?: boolean | undefined;
+  /**
+   * This consumer reads the URL at a time NOTHING ELSE will ask for, so it must never share a session
+   * — neither by joining one nor by being joined.
+   *
+   * Sharing is only ever a win when the members want the SAME time: they await one `pending` promise or
+   * hit `lastServed`. Two members at different times each force a fresh `getFrame` on one decoder,
+   * which for far-apart timestamps is a seek (a whole GOP) per member per frame. `noteDivergence`
+   * already detects that and detaches the later joiner — but only after `SHARE_DIVERGENCE_STRIKES`
+   * frames of it, and it pays that toll again every time the session is rebuilt (seek, preempt,
+   * quality change), which under scrubbing is constantly.
+   *
+   * Set by a RETIMED Flarex loader (TimeSpeed, ADR-011), where the divergence is not a runtime
+   * accident to be discovered but a fact known before the first frame: a 0.5× loader of the host's own
+   * file is asking for `t/2` precisely because the host is asking for `t`. Declaring it skips the
+   * discovery entirely. Un-retimed loaders still share with their host, which is the whole point of
+   * v32l and stays untouched.
+   */
+  exclusive?: boolean | undefined;
 }
 
 interface IdleEntry {
@@ -903,7 +921,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
     // over spending a new slot. A session still INITIALIZING is attachable too, and deliberately so:
     // two layers mounting in the same tick is the single most common real case, and without it the
     // dedupe would miss the exact scenario it exists for.
-    const existing = getWcSessionShareEnabled() ? findAttachableSession(url, software) : null;
+    const existing = getWcSessionShareEnabled() && !options.exclusive ? findAttachableSession(url, software) : null;
     if (existing) {
       shared += 1;
       traceEvent({
@@ -931,7 +949,12 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   });
   bumpActive(software, 1);
 
-  return attachMember(createSession(url, software, priority, warm), options);
+  const session = createSession(url, software, priority, warm);
+  // Unshareable in BOTH directions: skipping the join above only stops this consumer taking someone
+  // else's session, and would leave the host free to attach to THIS one on its next acquire — the same
+  // divergence, arrived at from the other side.
+  if (options.exclusive) session.shareable = false;
+  return attachMember(session, options);
 }
 
 function parkOrDispose(url: string, provider: FrameProvider, software: boolean) {

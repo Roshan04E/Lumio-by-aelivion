@@ -408,6 +408,12 @@ interface VideoProps extends BaseProps {
    * with `tolerateLag`, a slightly-slower software stream presents advancing frames instead of freezing.
    */
   preferSoftwareDecode?: boolean | undefined;
+  /**
+   * Never share a decode session for this source — this layer reads it at a time no other consumer
+   * will ask for. Set by RETIMED Flarex loaders, whose whole purpose is to read the host's own file at
+   * a different `t`; see `AcquireOptions.exclusive`.
+   */
+  exclusiveDecode?: boolean | undefined;
   onLoadedMetadata?: ((event: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
 }
 
@@ -762,6 +768,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             // Virtual loaders decode in SOFTWARE so they don't contend with the host for the one
             // hardware H.264 block (the confirmed multi-source freeze cause — see preferSoftwareDecode).
             preferSoftware: props.preferSoftwareDecode,
+            // A retimed loader shares the host's URL and by construction never its time.
+            exclusive: props.exclusiveDecode,
           });
       wcLeaseRef.current = wcLease;
       if (mediaType === "video") {

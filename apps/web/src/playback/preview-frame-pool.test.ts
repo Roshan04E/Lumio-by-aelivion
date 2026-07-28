@@ -317,6 +317,55 @@ async function run(): Promise<void> {
     released?.(); // let the abandoned promise finish so node's event loop stays clean
     __setWedgeTimeoutForTests(null);
   }
+
+  // EXCLUSIVE leases (TimeSpeed's retimed loaders, 2026-07-29). A consumer that reads the same URL at
+  // a DIFFERENT time is the one case sharing cannot serve: neither member ever hits `pending` or
+  // `lastServed`, so one decoder pays a seek per member per frame. `noteDivergence` finds that after
+  // four frames and re-finds it every time the session is rebuilt; `exclusive` declares it up front.
+  {
+    const URL_X = "blob:retimed.mp4";
+    providersCreated = 0;
+    const host = acquirePreviewFrameProvider(URL_X, { priority: "playhead" });
+    const retimed = acquirePreviewFrameProvider(URL_X, { priority: "playhead", preferSoftware: true, exclusive: true });
+    assert(host != null && retimed != null, "both the host and its retimed loader get a lease");
+    await Promise.all([host!.ready, retimed!.ready]);
+    eq(providersCreated, 2, "an EXCLUSIVE acquisition never joins the host's session");
+    eq(getWcPoolStats().sharedActive, 0, "…so nothing is shared");
+
+    host!.release();
+    retimed!.release();
+  }
+
+  // The other direction matters just as much: skipping the join only stops the exclusive consumer
+  // taking someone else's session. If its OWN session stayed shareable, the next ordinary acquire
+  // would attach to it and reintroduce the identical divergence from the far side. Ordered
+  // exclusive-first so there is no other session to explain the result.
+  {
+    const URL_Z = "blob:retimed-first.mp4";
+    providersCreated = 0;
+    const retimed = acquirePreviewFrameProvider(URL_Z, { priority: "playhead", exclusive: true });
+    await retimed!.ready;
+    const host = acquirePreviewFrameProvider(URL_Z, { priority: "playhead" });
+    await host!.ready;
+    eq(providersCreated, 2, "a later consumer cannot attach TO an exclusive session either");
+    eq(getWcPoolStats().sharedActive, 0, "…nothing is shared in either direction");
+    retimed!.release();
+    host!.release();
+  }
+
+  // …and the un-retimed loader must still share. `exclusive` is a declaration about one consumer, not
+  // a retreat from v32l — a comp whose MediaIn loads the host's own file at the host's own time is
+  // exactly the case sharing exists for, and it has to stay a share.
+  {
+    const URL_Y = "blob:not-retimed.mp4";
+    providersCreated = 0;
+    const host = acquirePreviewFrameProvider(URL_Y, { priority: "playhead" });
+    const loader = acquirePreviewFrameProvider(URL_Y, { priority: "playhead", preferSoftware: true });
+    await Promise.all([host!.ready, loader!.ready]);
+    eq(providersCreated, 1, "an un-retimed loader still shares one decode with its host");
+    host!.release();
+    loader!.release();
+  }
 }
 
 await run();
