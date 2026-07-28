@@ -23,6 +23,7 @@ import { createFrameProvider } from "../../export/source-decoder";
 import { MediaEncoder } from "../../export/video-encoder";
 import { markHotSpot } from "../../lib/perfDiagnostics";
 import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable, removeSourceProxy } from "./sourceProxyStore";
+import { probeGopProfile, needsProxyForDecodeCost, describeGopProfile, type GopProfile } from "./gop-probe";
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 import type { SourceAsset } from "@orreris/shared";
 
@@ -107,6 +108,17 @@ function record(assetId: string, outcome: "built" | "failed" | "skipped", ms: nu
   try {
     if (localStorage.getItem("orreris.perfLog") === "1") {
       console.info(`[source-proxy] ${assetId}: ${outcome}${note ? ` (${note})` : ""} in ${Math.round(ms)}ms`);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Note a non-settling decision (why a build is happening) without recording an outcome. */
+function logProxy(assetId: string, note: string): void {
+  try {
+    if (localStorage.getItem("orreris.perfLog") === "1") {
+      console.info(`[source-proxy] ${assetId}: ${note}`);
     }
   } catch {
     /* ignore */
@@ -379,9 +391,27 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     record(asset.id, "built", 0, "rehydrated");
     return existing.url;
   }
+  // DECODE COST, NOT FILE SIZE (2026-07-28). Both size gates below used to conclude "small ⇒ cheap to
+  // decode" and skip. That inference inverts on low-frequency footage (smoke/fog/gradients): the encoder
+  // wins its small size with long GOPs, so the file is small BECAUSE seeking it is expensive. And a skip
+  // is not a soft loss — no `proxyUrl` means `preferNativeDecode`, which means the `<video>` element path,
+  // which for a Flarex loader is a freeze. Measure the actual seek cost before skipping on size.
+  // Probed lazily and once: files past the size gate transcode regardless, so they never pay for it.
+  let gopProfile: GopProfile | null | undefined;
+  const gop = async (): Promise<GopProfile | null> => {
+    if (gopProfile === undefined) gopProfile = await probeGopProfile(blob);
+    return gopProfile;
+  };
+
   if (blob.size < MIN_SOURCE_BYTES) {
-    record(asset.id, "skipped", 0, "source small enough");
-    return null;
+    const profile = await gop();
+    if (!needsProxyForDecodeCost(profile)) {
+      record(asset.id, "skipped", 0, `source small enough (${describeGopProfile(profile)})`);
+      return null;
+    }
+    // Falls through to a real build. Deliberately NOT `record`ed — that would settle the asset as
+    // "skipped" in the stats and the UI badge while the transcode is still running.
+    logProxy(asset.id, `small but sparse GOP — building anyway (${describeGopProfile(profile)})`);
   }
   if (!sourceUrl) {
     record(asset.id, "skipped", 0, "no object url");
@@ -399,9 +429,15 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   }
   const scale = Math.min(1, PROXY_LONG_EDGE / Math.max(meta.width, meta.height));
   if (scale >= 1 && blob.size < MIN_SOURCE_BYTES * 2) {
-    // Already at/below proxy resolution and not huge — the original decodes fine.
-    record(asset.id, "skipped", 0, "already proxy-sized");
-    return null;
+    // Already at/below proxy resolution and not huge — the original decodes fine, UNLESS its GOPs are
+    // sparse. Resolution is only half of decode cost; a 720p source with 5-second GOPs still grinds a
+    // whole GOP per seek. The transcode is worth it for the keyframe density alone even at scale 1.
+    const profile = await gop();
+    if (!needsProxyForDecodeCost(profile)) {
+      record(asset.id, "skipped", 0, `already proxy-sized (${describeGopProfile(profile)})`);
+      return null;
+    }
+    logProxy(asset.id, `proxy-sized but sparse GOP — rebuilding for keyframe density (${describeGopProfile(profile)})`);
   }
   const width = Math.max(2, Math.round((meta.width * scale) / 2) * 2);
   const height = Math.max(2, Math.round((meta.height * scale) / 2) * 2);

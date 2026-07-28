@@ -26,6 +26,7 @@
     "wcpool:test": "tsx src/playback/preview-frame-pool.test.ts",
     "coherence:test": "tsx src/playback/temporal-coherence.test.ts",
     "fullres:test": "tsx src/playback/full-res-rendezvous.test.ts",
+    "gop:test": "tsx src/editor/performance/gop-probe.test.ts",
     "flarexproxy:test": "tsx src/editor/flarex/flarex-proxy-eligibility.test.ts",
     "flarex:clipboard:test": "tsx src/editor/flarex/flarex-clipboard.test.ts",
     "flarex:align:test": "tsx src/editor/flarex/flarex-align.test.ts"

@@ -1464,3 +1464,55 @@ thrown away downstream. NOT verified at pixel level here: `render:compare:pixels
 channel, and the `flarex-merge-blend` fixture PNGs in `tmp/render-comparison/` were regenerated while
 this bug was live, so they may encode the broken output and need re-baselining before that gate means
 anything.
+
+## v32j — the ingest proxy that was never built: file size is not decode cost (2026-07-28)
+
+**Symptom.** In a 4-source Flarex comp, one `MediaIn` (a 45s 1080p smoke overlay) freeze-played during
+playback while every sibling ran clean. `__rfSourceMap` — the node-id ↔ asset ↔ decode-path join built
+for this hunt — showed it was the ONLY source on `decode: 'element'`; the others were `wc-hw`/`wc-sw`.
+`__rfWcPool` read `capMisses: 0, initFailures: 0`, i.e. it had never even asked for a decoder session.
+
+**Chain, all in code.** `VideoPreview.tsx` sets `preferNativeDecode = mediaUrl !== asset.proxyUrl` —
+true exactly when the asset has NO ingest proxy. `WebglMediaLayer` then refuses a pooled WebCodecs
+lease outright for such a source, so it falls to the `<video>` element path, which the code comment
+immediately above that line already names as a freeze for a virtual loader. The Source Viewer badge
+read `proxy: skipped` — a SETTLED outcome, distinct from `failed` and from `none`. So the engine had
+queued the asset (`EditorPage` scoping does include Flarex `mediaIn` sources — that part was fine),
+looked at it, and deliberately declined.
+
+**Cause.** `buildFromBlob`'s first gate: `blob.size < MIN_SOURCE_BYTES (12MB)` → skip "source small
+enough", justified by the constant's own comment, *"below this the original is already cheap to
+decode"*. That is an INFERENCE of decode cost from file size, and for low-frequency footage — smoke,
+fog, light leaks, gradient overlays — it inverts. That content compresses enormously, and the encoder
+buys the compression with long GOPs and heavy inter-frame prediction. The file is small BECAUSE
+seeking it is expensive. The same flaw sat in the second gate (`already proxy-sized`), which reads
+resolution and size but never keyframe density.
+
+**Fix.** `apps/web/src/editor/performance/gop-probe.ts`: read the first video track's sync flags from
+the MP4 sample table (metadata only, nothing decoded) and compute keyframe-to-keyframe distances in
+FRAMES — frames, not seconds, for the same reason `PROXY_KEYFRAME_EVERY_N_FRAMES` is a frame count
+(v7: 1-second GOPs froze 60fps proxies). Both size gates now consult it before skipping. The threshold
+`MAX_TOLERABLE_GOP_FRAMES = 24` is anchored to the recipe's own numbers: 2× what we ourselves write
+(12), well under the 60 the v7 note records as un-grindable. The decision metric is p95, not max, so a
+single tail run or scene-cut GOP cannot conscript a healthy source. Probed lazily — files past the
+size gate build regardless and never pay for it. `SOURCE_PROXY_VERSION` deliberately NOT bumped: the
+recipe is unchanged, only which sources qualify, and a bump would invalidate every existing proxy.
+
+**Fails closed.** `null` (unparseable container, no `stss`, oversized) → do NOT build. Per ISO
+14496-12 an absent sync-sample table means every sample IS a sync sample, so all-false flags are the
+opposite of sparse; reading them as "sparse" would rebuild the world. The regression being guarded is
+v29's "+22 queued" storm, where over-eager building starved playback.
+
+**Rule.** *A cheap proxy for an expensive property is only safe while the correlation holds — and the
+skip path must not be silently load-bearing.* Size stood in for decode cost, which is defensible; what
+made it a freeze rather than a soft loss is that "no proxy" ALSO silently selected the element decode
+path, with nothing checking whether a skipped source was actually safe there. Two independent
+decisions, one implicit dependency.
+
+**Gate.** `pnpm --filter @orreris/web gop:test` — 26 assertions, both directions asserted (missing a
+sparse source = the freeze; over-triggering = the build storm), plus the boundary, the p95-vs-max
+outlier case, and the recipe's own 12-frame cadence (re-proxying our own output would be a loop).
+
+**Open.** The element-path hand-off itself is untouched: an asset whose GOP probe returns `null` and
+is genuinely sparse still lands there. Now that seek cost is actually measured, `preferNativeDecode`
+could consult it instead of inferring from `proxyUrl` — deferred, not attempted here.
