@@ -1548,3 +1548,88 @@ still delivering frames — exactly the case a proxied-but-starved decoder produ
 source genuinely served no new version for ~360ms. Diagnosis of that continues; this entry is only
 about the instrument that was making it unreadable. Not fingerprint-affecting —
 `frame-profiler.ts` is not in `RENDER_FINGERPRINT_SOURCES`, so no proxy is invalidated.
+
+## v32l — one file, two doors, two decoders: shared decoder sessions (2026-07-28)
+
+**Symptom.** The stall v32k made readable. `console.table(__rfSourceMap)` on a 4-source Flarex comp:
+asset `65ff9c00` (`forest_1080p_30fps.mp4`) appeared TWICE — host clip `layer_…_1_1` as `wc-hw` at
+staleness 427ms, and node `n_mrzuss81_mszw` as `wc-sw` at 394ms. The other two sources, each owning
+its own asset, sat at staleness 0. Both forest nodes read `Source In Seconds 0.0`, `Freeze: Off`.
+
+**Cause.** A Flarex comp reads one file through two doors: the host clip's `MediaIn` (empty
+`sourceAssetId` → the host timeline layer) and a pool-asset `MediaIn` pointing at the same file. The
+pool keyed providers by `(url, software)` and matched only for WARM PARK reuse, so two LIVE
+consumers of one file always meant two decoder sessions. Identical file, identical timestamp,
+identical pixels — one read, decoded twice.
+
+Nothing registered as a cap miss (`capMisses: 0`) because four consumers fit `MAX_WC_TOTAL_SESSIONS
+= 4` EXACTLY. That is the trap: the budget was not exceeded, it was fully spent, and one of the four
+slots was pure duplication. A pool statistic cannot report waste that fits.
+
+**Why the obvious version does nothing.** A URL-keyed share refuses exactly this case: the host is
+`wc-hw` and the loader `wc-sw`, and v30's mode-matching rule (the 2026-07-27 "host frozen, loaders
+playing" bug) forbids the match. Sharing had to cross the mode boundary to be worth building.
+
+**Fix.** Crossing it is safe in ONE direction, and that asymmetry is the whole design. The 2026-07-27
+rule exists because N sessions contend for one hardware block; a single SHARED session is not
+contention, it is one decode feeding two consumers. So `canAttachToSession(sessionSoftware,
+wantSoftware) = sessionSoftware === false || wantSoftware === true`: a hardware session accepts
+anyone, a software session accepts only a consumer that ASKED for software. The host's guarantee is
+preserved byte-for-byte.
+
+Acquisition order is warm reuse → attach → reserve. Sessions initializing are attachable, which is
+the point: two layers mounting in the same tick is the common case, and without it the dedupe misses
+the exact scenario it exists for.
+
+**The constraint that shaped it.** `FrameProvider.getFrame` returns a frame "provider-owned, valid
+until the next call/dispose". With two consumers on one provider, B's call silently invalidates the
+frame A is still holding. So the contract is reproduced PER LEASE: each attached lease gets a thin
+wrapper owning exactly one outstanding clone (`VideoFrame.clone()` — refcounted, no pixel copy, the
+trick `WebglMediaLayer.setWcHeldFrame` already used), closed when the next call supersedes it. Every
+consumer sees precisely the semantics it saw before.
+
+**Invariant, and everything is a consequence of it.** *Exactly one `SharedSession` owns a
+`FrameProvider`. Every lease merely leases access.* Disposal, `bumpActive`, parking and preemption
+are the owner's business alone; a lease may close only the clones it made.
+
+**Divergence.** Two decoders thrash far less than one decoder dragged between two playheads, so a
+share can give up: after `SHARE_DIVERGENCE_STRIKES` consecutive diverged frames the later-joined
+lease is detached and notified exactly like a preemption. Tolerance is `SHARE_DIVERGENCE_FRAMES /
+nominalFps` — a FRAME count, because a fixed 100ms is ~2.4 frames at 24fps and ~12 at 120fps, the
+same lesson that made `PROXY_KEYFRAME_EVERY_N_FRAMES` a frame count. A detached session is marked
+unshareable for good, so the split consumer cannot re-attach and oscillate.
+
+**Ordering is contract, not implementation.** On preemption every member's `onPreempted` fires
+BEFORE the shared provider is disposed. Notify-then-dispose: a member reacting synchronously must
+never observe a half-torn session.
+
+**Bug found by the gate, not by review.** `joinedAt` was `Date.now()`. Two layers mounting in the
+same tick attach in the same millisecond, so the "later joiner" comparison tied and the divergence
+detach picked whichever the `Set` iterated first — the HOST. The exact detach-the-wrong-one inversion
+this file keeps relearning. Now a monotonic sequence.
+
+**Telemetry.** `__rfWcPool` gains `shared` / `sharedActive` / `shareDetaches` / `sharedFramesServed`
+/ `sharedFrameHits`. The first three say sharing EXISTS; only `sharedFrameHits / sharedFramesServed`
+says it saves work — a share whose members never land on the same timestamp is bookkeeping with no
+payoff and would look identical without the ratio. Same lesson as the mode-mismatched warm reuse that
+"looks like a perfectly healthy cache HIT". `__rfSourceMap` should now show both forest rows on ONE
+mode instead of `wc-hw` + `wc-sw`.
+
+**Gate.** `pnpm --filter @orreris/web wcpool:test` — 59 assertions. The load-bearing ones: the
+software→hardware refusal (the 2026-07-27 bug gets an explicit test, not a code comment); the
+INITIALIZATION RACE (two acquisitions in one tick → exactly one provider created, one session
+reserved, `sharedActive === 1`) which a sequential-only test would pass through a regression;
+`decodes === 1` for both concurrent and sequential same-timestamp pairs, because a dedupe that never
+collapses a call is trivially correct and worthless; and re-acquire-after-detach creating its own
+session. Needed a narrow `__setFrameProviderFactoryForTests` seam — node has no WebCodecs.
+
+**Risk.** This is the file that killed the renderer once (concurrency 3 → 7). Sharing can only ever
+LOWER the session count; the caps are untouched. Kill switch `?wcShare=0` restores the previous
+behaviour exactly (the lease is handed the serialized provider unwrapped). No `packages/shared`
+change, and `preview-frame-pool.ts` is not in `RENDER_FINGERPRINT_SOURCES` — no cached proxy is
+invalidated, export/worker output byte-identical.
+
+**Open.** Upgrading an existing software session to hardware when a host arrives LATER is out of
+scope: if a software loader mounts first, the hardware consumer creates its own session, which is
+the status quo and no regression. In practice the host mounts first. Plan:
+`plans/decoder-session-sharing.md`.

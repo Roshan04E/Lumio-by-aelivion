@@ -20,6 +20,13 @@
  * Blob and windows encoded chunks in on demand (`webcodecs-decoder.ts`) — peak RAM is one GOP
  * window, not the whole file, on the UI thread and in the export Worker alike.
  *
+ * Session SHARING (2026-07-28): a Flarex comp routinely reads one file through two doors (the host
+ * clip's MediaIn and a pool-asset MediaIn pointing at the same file), and that was decoding it
+ * twice — a whole slot out of four spent on a duplicate. Leases for the same decoder identity now
+ * ATTACH to one session, each getting a per-consumer view that clones the frame it is handed, so
+ * neither can invalidate the other's. Sharing can only ever LOWER the session count; the caps below
+ * are untouched. Kill switch: `?wcShare=0`. See `plans/decoder-session-sharing.md`.
+ *
  * Session prioritization (flip blocker 2): leases carry a priority — `"playhead"` (a clip the
  * viewer is actually showing) vs `"preload"` (pending/pre-roll shells warming for an upcoming
  * cut). Preload may only use a warm same-URL parked provider or a slot that leaves one free;
@@ -97,6 +104,27 @@ export function getWcPreviewDecodeEnabled(): boolean {
   return env == null ? true : truthy(env);
 }
 
+/**
+ * Kill switch for decoder-session SHARING (below), matching the `wcDecode` convention:
+ * `?wcShare=0` → localStorage `orreris.wcShare` → ON. Off restores the pre-sharing behaviour
+ * exactly: one session per lease, provider handed to the consumer unwrapped.
+ */
+export function getWcSessionShareEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("wcShare")) {
+        return truthy(new URLSearchParams(window.location.search).get("wcShare"));
+      }
+      const stored = window.localStorage?.getItem("orreris.wcShare");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return true;
+}
+
 export interface PreviewFrameLease {
   /** Resolves to the provider, or null when init/probe failed (caller → `<video>` fallback). */
   readonly ready: Promise<FrameProvider | null>;
@@ -149,6 +177,10 @@ let createdSoftware = 0;
 let capMisses = 0;
 let initFailures = 0;
 let preemptions = 0;
+let shared = 0;
+let shareDetaches = 0;
+let sharedFramesServed = 0;
+let sharedFrameHits = 0;
 
 /**
  * Serialize getFrame across lease owners. release() parks a provider immediately, so a newly
@@ -228,6 +260,449 @@ export function findWarmIdleIndex(
   return entries.findIndex((entry) => entry.url === url && entry.software === software);
 }
 
+// ── Shared decoder sessions ─────────────────────────────────────────────────
+//
+// THE INVARIANT, stated once and relied on everywhere below:
+//
+//   *** Exactly one SharedSession owns a FrameProvider. Every lease merely LEASES access. ***
+//
+// Disposal, session accounting (`bumpActive`), parking and preemption are the owner's business
+// alone. A lease may close only the clones it made. Every rule in this section is a consequence.
+//
+// WHY IT EXISTS. A Flarex comp can read one file through two doors — the host clip's MediaIn (empty
+// `sourceAssetId`) and a pool-asset MediaIn pointing at the same file. Confirmed live 2026-07-28:
+// asset `65ff9c00` decoded twice (`wc-hw` host + `wc-sw` loader) and those two were the ONLY stale
+// sources in the comp, while the sources that owned their asset sat at staleness 0. Nothing showed
+// up as a cap miss (`capMisses: 0`) because four consumers fit a 4-slot budget EXACTLY — there was
+// simply no headroom, and one of the four slots was pure duplication.
+
+/** Frames of skew two consumers may request before the share is considered broken. */
+const SHARE_DIVERGENCE_FRAMES = 2;
+/** Consecutive diverged frames before the later-joined lease is detached. Hysteresis: one stray
+ *  sample during a seek must never split a healthy share. */
+const SHARE_DIVERGENCE_STRIKES = 4;
+
+/**
+ * May a consumer wanting `wantSoftware` attach to a session that IS `sessionSoftware`? PURE
+ * (exported for `wcpool:test`) — this one function is the entire 2026-07-27 guarantee, which is why
+ * it is asserted directly rather than left buried in `acquire`.
+ *
+ * The asymmetry is the whole design. That rule exists because N sessions contend for one hardware
+ * block; a single SHARED session is not contention, it is one decode feeding two consumers. So a
+ * HARDWARE session accepts anyone (total sessions drop by one, everybody gets hardware frames),
+ * while a SOFTWARE session accepts only a consumer that ASKED for software — a lag-intolerant
+ * consumer can never be handed a software decode it did not request. That was the bug; it stays fixed.
+ */
+export function canAttachToSession(sessionSoftware: boolean, wantSoftware: boolean): boolean {
+  return sessionSoftware === false || wantSoftware === true;
+}
+
+/**
+ * Divergence tolerance in SECONDS, derived from a FRAME count. PURE (exported for `wcpool:test`).
+ *
+ * A fixed millisecond budget would be ~2.4 frames at 24fps and ~12 at 120fps — strict on one source
+ * and meaningless on another, while the question being asked ("are these two consumers on the same
+ * picture?") is inherently a frame-count question. Same reasoning that made
+ * `PROXY_KEYFRAME_EVERY_N_FRAMES` a frame count after 1-second GOPs froze 60fps proxies. The `|| 30`
+ * covers providers that cannot report a rate.
+ */
+export function divergenceToleranceSeconds(nominalFps?: number | undefined): number {
+  return SHARE_DIVERGENCE_FRAMES / (nominalFps && nominalFps > 0 ? nominalFps : 30);
+}
+
+/** True when the spread of requested times exceeds the tolerance. PURE (exported for `wcpool:test`). */
+export function isDiverged(requestedTimes: readonly number[], nominalFps?: number | undefined): boolean {
+  if (requestedTimes.length < 2) return false;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const t of requestedTimes) {
+    // A member that has never asked for a frame cannot diverge from anything.
+    if (!Number.isFinite(t)) return false;
+    if (t < min) min = t;
+    if (t > max) max = t;
+  }
+  return max - min > divergenceToleranceSeconds(nominalFps);
+}
+
+interface SharedMember {
+  priority: WcLeasePriority;
+  /**
+   * Monotonic JOIN ORDER, deliberately not a `Date.now()` timestamp. Two layers mounting in the
+   * same tick attach in the same millisecond, so a clock ties — and the divergence detach picks the
+   * later joiner by this field. Under a tie it picked whichever the Set iterated first, which is the
+   * HOST: the exact "detach the wrong one" inversion this whole file keeps relearning.
+   */
+  joinedAt: number;
+  /** Last time this lease asked for, for divergence. NaN until its first `getFrame`. */
+  requestedTime: number;
+  strikes: number;
+  /** THIS lease's outstanding clone — the only frame it is allowed to close. */
+  held: CanvasImageSource | null;
+  dead: boolean;
+  onPreempted?: (() => void) | undefined;
+}
+
+interface SharedSession {
+  /**
+   * DECODER IDENTITY — not merely a URL.
+   *
+   * Today a decoder is fully described by its URL, so the key IS the url. It is named `key` rather
+   * than `url` because that equivalence is a property of today's `createFrameProvider` options, not
+   * a law: the moment a consumer can ask for a different colour space, alpha mode, bit depth or
+   * rotation handling, two consumers of one URL stop being interchangeable and this key must grow to
+   * include those. Sharing incompatible sessions would be silent and would look like a cache hit.
+   */
+  key: string;
+  /** What the session ACTUALLY is, not what any member asked for. */
+  software: boolean;
+  /** Null while initializing and after teardown. The owned provider — see the invariant. */
+  provider: FrameProvider | null;
+  ready: Promise<FrameProvider | null>;
+  refCount: number;
+  members: Set<SharedMember>;
+  /**
+   * DUPLICATE-CALL ELIMINATOR — NOT a frame cache. Exactly one entry, deliberately.
+   *
+   * Its only job is to collapse two consumers asking for the SAME timestamp in the same frame into
+   * one decode. It must never grow into a seek cache: every retained entry pins a `VideoFrame`,
+   * which is a hard-limited resource, and a decoder starved of frame slots stalls outright. Real
+   * caching would be a different mechanism with a different budget — not this field with a bigger
+   * number.
+   */
+  lastServed: { time: number; frame: CanvasImageSource | null } | null;
+  /** In-flight equivalent of `lastServed`: the common case is two layers requesting the same
+   *  timestamp in one rAF tick, BOTH before either resolves. Without this the memo never hits and
+   *  the share saves a session but not a single decode. */
+  pending: { time: number; promise: Promise<CanvasImageSource | null> } | null;
+  /** Cleared for good after a divergence detach, so the detached consumer cannot re-attach to the
+   *  session it just split from and oscillate. */
+  shareable: boolean;
+  torn: null | "release" | "preempt";
+  record: LeaseRecord;
+}
+
+const sharedSessions = new Set<SharedSession>();
+let memberJoinSeq = 0;
+
+/**
+ * TEST SEAM (`wcpool:test`), not referenced by app code. Node has neither WebCodecs nor a real file
+ * to demux, so the gate this design most needs — two acquisitions in ONE tick must produce exactly
+ * ONE provider — cannot be run against the real decoder. Passing null restores the real factory.
+ */
+let frameProviderFactory: typeof createFrameProvider = createFrameProvider;
+export function __setFrameProviderFactoryForTests(factory: typeof createFrameProvider | null): void {
+  frameProviderFactory = factory ?? createFrameProvider;
+}
+
+function isVideoFrame(frame: CanvasImageSource | null): boolean {
+  return frame != null && typeof VideoFrame !== "undefined" && frame instanceof VideoFrame;
+}
+
+/** Refcounted handle, no pixel copy — the same trick `WebglMediaLayer.setWcHeldFrame` already uses.
+ *  Non-`VideoFrame` sources (element/canvas/ImageBitmap fallbacks) are not consumed by drawing and
+ *  pass through untouched. */
+function cloneForConsumer(frame: CanvasImageSource | null): CanvasImageSource | null {
+  if (!isVideoFrame(frame)) return frame;
+  try {
+    return (frame as VideoFrame).clone();
+  } catch {
+    return frame;
+  }
+}
+
+function releaseMemberClone(member: SharedMember): void {
+  const held = member.held;
+  member.held = null;
+  if (!isVideoFrame(held)) return;
+  try {
+    (held as VideoFrame).close();
+  } catch {
+    /* a dying frame must never throw into UI code */
+  }
+}
+
+function recomputeSessionPriority(session: SharedSession): void {
+  let priority: WcLeasePriority = "preload";
+  for (const member of session.members) {
+    if (member.priority === "playhead") {
+      priority = "playhead";
+      break;
+    }
+  }
+  session.record.priority = priority;
+}
+
+function findAttachableSession(key: string, software: boolean): SharedSession | null {
+  for (const session of sharedSessions) {
+    if (session.torn || !session.shareable) continue;
+    if (session.key !== key) continue;
+    if (!canAttachToSession(session.software, software)) continue;
+    return session;
+  }
+  return null;
+}
+
+/**
+ * End a session and free its slot. `mode` decides the provider's fate exactly as the pre-sharing
+ * code did: a preemption must actually free the decoder NOW (dispose), a release may park it warm.
+ *
+ * ORDERING IS PART OF THE CONTRACT: on preemption every member's callback fires BEFORE the shared
+ * provider is disposed. Notify-then-dispose, never dispose-then-notify — a member reacting
+ * synchronously (switching to `<video>`, clearing a held frame) must never be able to observe a
+ * half-torn session, and disposing first would make that ordering an accident of implementation.
+ */
+function tearDownSession(session: SharedSession, mode: "release" | "preempt"): void {
+  if (session.torn) return;
+  session.torn = mode;
+  session.shareable = false;
+  sharedSessions.delete(session);
+  activeLeases.delete(session.record);
+  bumpActive(session.software, -1);
+
+  if (mode === "preempt") {
+    for (const member of session.members) {
+      member.dead = true;
+      try {
+        member.onPreempted?.();
+      } catch {
+        /* victim callback must not break the acquiring path */
+      }
+    }
+  }
+  for (const member of session.members) {
+    member.dead = true;
+    releaseMemberClone(member);
+  }
+  session.members.clear();
+  session.refCount = 0;
+
+  const provider = session.provider;
+  session.provider = null;
+  session.lastServed = null;
+  session.pending = null;
+  if (!provider) return; // still initializing — the init `.then` reads `session.torn` and finishes the job
+  if (mode === "preempt") disposeTraced(provider, session.key, "preempt");
+  else parkOrDispose(session.key, provider, session.software);
+}
+
+function releaseMember(session: SharedSession, member: SharedMember): void {
+  if (member.dead) return;
+  member.dead = true;
+  releaseMemberClone(member);
+  session.members.delete(member);
+  session.refCount -= 1;
+  if (session.refCount <= 0) tearDownSession(session, "release");
+  else recomputeSessionPriority(session);
+}
+
+/**
+ * Two decoders thrash far less than one decoder dragged between two playheads, so a share must be
+ * able to give up. When the members' requested times stay apart for `SHARE_DIVERGENCE_STRIKES`
+ * consecutive frames, detach the LATER-joined one: it is notified exactly like a preemption and
+ * re-acquires its own session (or falls back to `<video>` if the pool is full — the same path it
+ * takes today when refused).
+ */
+function noteDivergence(session: SharedSession): void {
+  if (session.members.size < 2) return;
+  const times: number[] = [];
+  for (const member of session.members) times.push(member.requestedTime);
+  if (!isDiverged(times, session.provider?.nominalFps)) {
+    for (const member of session.members) member.strikes = 0;
+    return;
+  }
+  let latest: SharedMember | null = null;
+  for (const member of session.members) {
+    if (!latest || member.joinedAt > latest.joinedAt) latest = member;
+  }
+  if (!latest) return;
+  latest.strikes += 1;
+  if (latest.strikes < SHARE_DIVERGENCE_STRIKES) return;
+
+  shareDetaches += 1;
+  session.shareable = false;
+  const notify = latest.onPreempted;
+  releaseMember(session, latest);
+  try {
+    notify?.();
+  } catch {
+    /* victim callback must not break the serving path */
+  }
+}
+
+/**
+ * The per-consumer view of a shared provider. Reproduces the documented `FrameProvider` contract —
+ * "provider-owned, valid until the next call/dispose" — PER LEASE rather than per provider, so
+ * consumer B's call can never invalidate the frame consumer A is still holding. That silent
+ * cross-invalidation is the failure mode that would make this whole change look fine and corrupt
+ * playback intermittently.
+ */
+function memberProvider(session: SharedSession, member: SharedMember): FrameProvider {
+  return {
+    get width() {
+      return session.provider?.width ?? 0;
+    },
+    get height() {
+      return session.provider?.height ?? 0;
+    },
+    async getFrame(sourceTimeSeconds: number): Promise<CanvasImageSource | null> {
+      const provider = session.provider;
+      if (!provider || member.dead) return null;
+      member.requestedTime = sourceTimeSeconds;
+      const counts = session.refCount > 1; // only a REAL share tells us anything about sharing
+      if (counts) sharedFramesServed += 1;
+      const halfPeriod = 0.5 / (provider.nominalFps && provider.nominalFps > 0 ? provider.nominalFps : 30);
+
+      let frame: CanvasImageSource | null;
+      const pending = session.pending;
+      const memo = session.lastServed;
+      if (pending && Math.abs(pending.time - sourceTimeSeconds) < halfPeriod) {
+        if (counts) sharedFrameHits += 1;
+        frame = await pending.promise;
+      } else if (memo && Math.abs(memo.time - sourceTimeSeconds) < halfPeriod) {
+        if (counts) sharedFrameHits += 1;
+        frame = memo.frame;
+      } else {
+        const run = provider.getFrame(sourceTimeSeconds);
+        session.pending = { time: sourceTimeSeconds, promise: run };
+        frame = await run;
+        if (session.pending?.promise === run) session.pending = null;
+        if (session.provider === provider) session.lastServed = { time: sourceTimeSeconds, frame };
+      }
+      // Torn down (or superseded) while we awaited: the frame we are holding belongs to a decoder
+      // that no longer exists. Never hand it out.
+      if (member.dead || session.provider !== provider) return null;
+
+      releaseMemberClone(member);
+      member.held = cloneForConsumer(frame);
+      noteDivergence(session);
+      return member.held;
+    },
+    // MUST forward, all three — the file already warns twice that a wrapper dropping a field is a
+    // silent, expensive bug (`lastFrameLagSeconds` made the catch-up hold never engage;
+    // `nominalFps` would make every source read stale to the coherence gate).
+    get lastFrameLagSeconds() {
+      return session.provider?.lastFrameLagSeconds ?? 0;
+    },
+    get nominalFps() {
+      return session.provider?.nominalFps;
+    },
+    get decodableEndSeconds() {
+      return session.provider?.decodableEndSeconds;
+    },
+    /** Closes only THIS lease's clone. Disposing the shared provider is the session's business. */
+    dispose() {
+      releaseMemberClone(member);
+    },
+  };
+}
+
+function attachMember(session: SharedSession, options: AcquireOptions): PreviewFrameLease {
+  const member: SharedMember = {
+    priority: options.priority ?? "playhead",
+    joinedAt: (memberJoinSeq += 1),
+    requestedTime: Number.NaN,
+    strikes: 0,
+    held: null,
+    dead: false,
+    onPreempted: options.onPreempted,
+  };
+  session.members.add(member);
+  session.refCount += 1;
+  recomputeSessionPriority(session);
+
+  const wrap = getWcSessionShareEnabled();
+  const ready = session.ready.then((provider) => {
+    if (!provider || member.dead) return null;
+    // Flag OFF: hand back the serialized provider unwrapped — byte-identical to pre-sharing.
+    return wrap ? memberProvider(session, member) : provider;
+  });
+
+  return {
+    ready,
+    release() {
+      if (member.dead) return;
+      traceEvent({ event: "release", provider: session.provider, asset: traceAsset(session.key), reason: "explicit" });
+      releaseMember(session, member);
+    },
+    setPriority(next: WcLeasePriority) {
+      member.priority = next;
+      if (!member.dead) recomputeSessionPriority(session);
+    },
+  };
+}
+
+function createSession(
+  key: string,
+  software: boolean,
+  priority: WcLeasePriority,
+  warm: FrameProvider | null
+): SharedSession {
+  // `record.preempt` and the init `.then` both close over `session`, so those two fields can only be
+  // assigned after the object exists. The cast buys that one cycle and nothing else.
+  const session = {
+    key,
+    software,
+    provider: warm,
+    refCount: 0,
+    members: new Set<SharedMember>(),
+    lastServed: null,
+    pending: null,
+    shareable: true,
+    torn: null,
+  } as unknown as SharedSession;
+
+  session.record = {
+    url: key,
+    priority,
+    acquiredAt: Date.now(),
+    software,
+    preempt() {
+      if (session.torn) return;
+      preemptions += 1;
+      tearDownSession(session, "preempt");
+    },
+  };
+  activeLeases.add(session.record);
+  sharedSessions.add(session);
+
+  session.ready = warm
+    ? Promise.resolve(warm)
+    : // frameBudgetMs: preview must never block a frame request for seconds while a sparse-keyframe
+      // source catches up after a rewind — return the stale frame and continue next call. The export
+      // creates its providers WITHOUT a budget and keeps blocking-until-decoded semantics.
+      frameProviderFactory(key, "video", { frameBudgetMs: 24, preferSoftware: software })
+        .then((raw) => {
+          const provider = serializeFrameProvider(raw, key);
+          traceAliasProvider(raw, provider);
+          created += 1;
+          traceEvent({ event: "create", provider, asset: traceAsset(key), reason: "explicit", note: `software=${software}` });
+          if (software) createdSoftware += 1;
+          if (session.torn === "preempt") {
+            // Preempted while initializing — the session is already re-spent; drop the decoder.
+            disposeTraced(provider, key, "preempt-during-init");
+            return null;
+          }
+          if (session.torn === "release") {
+            // Every member released while initializing — park it warm instead of wasting the work.
+            traceEvent({ event: "release", provider, asset: traceAsset(key), reason: "released-during-init" });
+            parkOrDispose(key, provider, software);
+            return null;
+          }
+          session.provider = provider;
+          return provider;
+        })
+        .catch(() => {
+          initFailures += 1;
+          traceEvent({ event: "create", asset: traceAsset(key), reason: "init-failed" });
+          // Unwinds the accounting and evicts the session from the registry, so nothing can attach
+          // to a decoder that never existed. `provider` is null, so nothing is parked or disposed.
+          tearDownSession(session, "release");
+          return null;
+        });
+
+  return session;
+}
+
 // ── Per-decode-mode session accounting ──────────────────────────────────────
 // Hardware and software decoders draw on DIFFERENT physical resources (the GPU's video block vs CPU
 // threads), so they get their own caps, their own idle pools and their own preemption victims. A
@@ -303,7 +778,7 @@ function oldestPreloadLease(software: boolean): LeaseRecord | null {
  */
 export function acquirePreviewFrameProvider(url: string, options: AcquireOptions = {}): PreviewFrameLease | null {
   if (!getWcPreviewDecodeEnabled()) return null;
-  let priority: WcLeasePriority = options.priority ?? "playhead";
+  const priority: WcLeasePriority = options.priority ?? "playhead";
   const software = options.preferSoftware ?? false;
   // Warm same-URL reuse first (does not change the session count: idle providers hold sessions).
   //
@@ -321,10 +796,31 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
     warm = idle.splice(idleIndex, 1)[0]!.provider;
     reused += 1;
     traceEvent({ event: "warm-reuse", provider: warm, asset: traceAsset(url), reason: "explicit" });
-  } else if (!reserveSession(software, priority)) {
-    capMisses += 1;
-    traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
-    return null;
+  } else {
+    // ATTACH before RESERVING. Order is warm reuse → attach → reserve: a warm park is an
+    // already-paid-for session with no sharing complexity (taking it leaves the total unchanged —
+    // idle-1, active+1), so it wins; only when there is no park do we prefer sharing a live session
+    // over spending a new slot. A session still INITIALIZING is attachable too, and deliberately so:
+    // two layers mounting in the same tick is the single most common real case, and without it the
+    // dedupe would miss the exact scenario it exists for.
+    const existing = getWcSessionShareEnabled() ? findAttachableSession(url, software) : null;
+    if (existing) {
+      shared += 1;
+      traceEvent({
+        event: "acquire",
+        provider: existing.provider,
+        asset: traceAsset(url),
+        reason: "explicit",
+        note: `shared software=${existing.software} priority=${priority}`,
+      });
+      // No `reserveSession`, no `bumpActive` — the session is already counted, and that is the point.
+      return attachMember(existing, options);
+    }
+    if (!reserveSession(software, priority)) {
+      capMisses += 1;
+      traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
+      return null;
+    }
   }
   traceEvent({
     event: "acquire",
@@ -335,91 +831,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   });
   bumpActive(software, 1);
 
-  let released = false;
-  let preempted = false;
-  let liveProvider: FrameProvider | null = warm;
-  const record: LeaseRecord = {
-    url,
-    priority,
-    acquiredAt: Date.now(),
-    software,
-    preempt() {
-      if (released) return;
-      released = true;
-      preempted = true;
-      preemptions += 1;
-      bumpActive(software, -1);
-      activeLeases.delete(record);
-      if (liveProvider) {
-        // The session must actually free NOW (that's the point of preemption) — dispose, don't park.
-        disposeTraced(liveProvider, url, "preempt");
-        liveProvider = null;
-      }
-      try {
-        options.onPreempted?.();
-      } catch {
-        /* victim callback must not break the acquiring path */
-      }
-    },
-  };
-  activeLeases.add(record);
-
-  const ready: Promise<FrameProvider | null> = warm
-    ? Promise.resolve(warm)
-    : // frameBudgetMs: preview must never block a frame request for seconds while a sparse-keyframe
-      // source catches up after a rewind — return the stale frame and continue next call. The export
-      // creates its providers WITHOUT a budget and keeps blocking-until-decoded semantics.
-      createFrameProvider(url, "video", { frameBudgetMs: 24, preferSoftware: options.preferSoftware ?? false })
-        .then((raw) => {
-          const provider = serializeFrameProvider(raw, url);
-          traceAliasProvider(raw, provider);
-          created += 1;
-          traceEvent({ event: "create", provider, asset: traceAsset(url), reason: "explicit", note: `software=${software}` });
-          if (options.preferSoftware) createdSoftware += 1;
-          if (preempted) {
-            // Preempted while initializing — the session is already re-spent; drop the decoder.
-            disposeTraced(provider, url, "preempt-during-init");
-            return null;
-          }
-          if (released) {
-            // Released while initializing — park it warm instead of wasting the work.
-            traceEvent({ event: "release", provider, asset: traceAsset(url), reason: "released-during-init" });
-            parkOrDispose(url, provider, software);
-            return null;
-          }
-          liveProvider = provider;
-          return provider;
-        })
-        .catch(() => {
-          initFailures += 1;
-          traceEvent({ event: "create", asset: traceAsset(url), reason: "init-failed" });
-          if (!released) {
-            released = true;
-            bumpActive(software, -1);
-            activeLeases.delete(record);
-          }
-          return null;
-        });
-
-  return {
-    ready,
-    release() {
-      if (released) return;
-      traceEvent({ event: "release", provider: liveProvider, asset: traceAsset(url), reason: "explicit" });
-      released = true;
-      bumpActive(software, -1);
-      activeLeases.delete(record);
-      if (liveProvider) {
-        parkOrDispose(url, liveProvider, software);
-        liveProvider = null;
-      }
-      // Init still in flight: the .then above sees `released` and parks the provider itself.
-    },
-    setPriority(next: WcLeasePriority) {
-      priority = next;
-      record.priority = next;
-    },
-  };
+  return attachMember(createSession(url, software, priority, warm), options);
 }
 
 function parkOrDispose(url: string, provider: FrameProvider, software: boolean) {
@@ -468,6 +880,21 @@ export interface WcPoolStats {
   initFailures: number;
   preemptions: number;
   activePreload: number;
+  /** Acquisitions that ATTACHED to a live session instead of spending a new slot. */
+  shared: number;
+  /** Sessions currently serving more than one lease. */
+  sharedActive: number;
+  /** Shares split because their members' requested times diverged. */
+  shareDetaches: number;
+  /**
+   * `getFrame` calls served through a session with >1 lease, and how many of those were answered
+   * without a decode. The first three counters say sharing EXISTS; only this ratio says whether it
+   * SAVES WORK — a share whose members never land on the same timestamp costs bookkeeping and
+   * returns nothing, and would be indistinguishable from a healthy one without it. Same lesson as
+   * the mode-mismatched warm reuse that "looks like a perfectly healthy cache HIT".
+   */
+  sharedFramesServed: number;
+  sharedFrameHits: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -475,7 +902,16 @@ export function getWcPoolStats(): WcPoolStats {
   for (const record of activeLeases) {
     if (record.priority === "preload") activePreload += 1;
   }
+  let sharedActive = 0;
+  for (const session of sharedSessions) {
+    if (session.refCount > 1) sharedActive += 1;
+  }
   return {
+    shared,
+    sharedActive,
+    shareDetaches,
+    sharedFramesServed,
+    sharedFrameHits,
     active: activeSessions,
     activeSoftware: activeSoftwareSessions,
     idle: idle.length,
