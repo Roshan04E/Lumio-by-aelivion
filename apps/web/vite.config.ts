@@ -54,11 +54,44 @@ function renderPipelineFingerprint(): string {
   return hash.digest("hex").slice(0, 16);
 }
 
+/**
+ * BUILD-MODE ASSERTION (2026-07-28). `envDir: repoRoot` means vite reads the shared root `.env`, and
+ * vite promotes a `NODE_ENV` found there into `process.env` when the shell has not set one. That
+ * silently flipped `vite build` to `isProduction = false` and shipped `react-dom.development.js`:
+ * DEV React commits walk the whole fiber tree (the passive-effect subtree bailout is defeated under
+ * ProfileMode) which cost multi-second main-thread blocks, froze every decoder, and read downstream
+ * as Flarex media "filling in one source at a time". It survived because a DEV bundle looks and runs
+ * exactly like a slow production bundle — see project-tracker/playback-preview.md v32.
+ *
+ * Assert the PROPERTY rather than any one of its causes, so a re-added `.env` line, an exported shell
+ * var, or a future env file all fail loudly at build time instead of shipping.
+ */
+function assertProductionBuild() {
+  return {
+    name: "orreris:assert-production-build",
+    configResolved(config: { command: string; isProduction: boolean; mode: string }) {
+      // The inconsistency IS the bug signature: an env-file leak leaves mode "production" while
+      // flipping isProduction false. An intentional `vite build --mode development` moves both
+      // together and is left alone.
+      if (config.command === "build" && config.mode === "production" && !config.isProduction) {
+        throw new Error(
+          `Refusing to build: mode="${config.mode}", isProduction=false. This bundles ` +
+            "react-dom.development.js into the shipped assets (~20-30% larger chunks, multi-second " +
+            "React commit stalls). The cause is almost always NODE_ENV=development reaching vite: the " +
+            "root .env must not contain NODE_ENV, and the shell must not export it. To build a " +
+            "development bundle on purpose, run `vite build --mode development`."
+        );
+      }
+    }
+  };
+}
+
 export default defineConfig({
   define: {
     __ORRERIS_RENDER_FINGERPRINT__: JSON.stringify(renderPipelineFingerprint())
   },
   plugins: [
+    assertProductionBuild(),
     react(),
     // Durable chunk cache without eager precaching — we do NOT precache *.js; only the small
     // shell (html/css/fonts) is precached.
