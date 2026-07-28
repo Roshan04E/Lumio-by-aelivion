@@ -3,6 +3,9 @@
 - Status: Frozen
 - Normative: Yes
 - Date adopted: 2026-07-23
+- Extended by: ADR-011 (2026-07-28) — adds ONE question, `inputContextTransform()`, to the §5 closed set.
+  The clause in §5 that permits this ("the only thing that reopens ADR-010 is a genuinely new
+  evaluator question") is working as designed; ADR-010 is otherwise unchanged and remains Frozen.
 
 ```
 Depends on:

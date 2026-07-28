@@ -46,3 +46,4 @@ decision, what was rejected, the consequences, and whether it is Stable or Provi
 - [ADR-008 — Flarex Evaluation Engine (content-addressed materialization substrate)](008-flarex-evaluation-engine.md) — Frozen
 - [ADR-009 — Content Version Contract (completeness rules)](009-content-version-contract.md) — Frozen (§1–3 normative; §4–8 superseded by ADR-010)
 - [ADR-010 — Node Capability Contract (the evaluator foundation)](010-node-capability-contract.md) — Frozen
+- [ADR-011 — Evaluation Context Transform (the fourth evaluator question)](011-evaluation-context-transform.md) — Provisional (extends ADR-010 §5 by ONE question)

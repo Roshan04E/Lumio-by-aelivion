@@ -1,6 +1,6 @@
 # TimeSpeed and Tracker — design note before code
 
-- Status: **proposal, awaiting review.** No code written.
+- Status: **DECIDED 2026-07-28.** Option A (reopen ADR-010) chosen — see ADR-011. Tracker v1 unchanged.
 - Date: 2026-07-28
 - Governing: ADR-007 (parity by construction), ADR-008 (materialization substrate),
   ADR-009 (completeness rules R1–R3), **ADR-010 (node capability contract)**
@@ -106,10 +106,14 @@ subtree re-evaluated at `t'`, which is option A.
 **named and documented for what it is** (source retime), and the inspector must say so. A node that
 silently ignores animated upstream parameters is worse than no node.
 
-### Recommendation
+### Recommendation — SUPERSEDED BY THE DECISION
 
-Ship **C** now, with the limitation stated in the UI, and treat **A** as the trigger for the first
-deliberate ADR-010 reopen when a real case demands it. Do not ship B.
+I recommended **C**. The founder's criterion was *"choose whichever favours a professional NLE"*, and
+that criterion selects **A**. In Fusion a TimeSpeed above a noise generator slows the noise and above
+an animated blur slows the animation; a node that retimed video sources while ignoring animated
+parameters would read as broken, not limited. **A** it is — ADR-011.
+
+The reasoning below is kept because it is why A is expensive and why B stays rejected.
 
 I want a decision on this before writing code, because C and A have different node names, different
 inspector copy, and different socket shapes — C is not a subset of A that can be quietly widened
