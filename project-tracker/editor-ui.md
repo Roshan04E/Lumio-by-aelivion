@@ -552,3 +552,47 @@ The gap was the whole answer, and no amount of reading the source would have pro
 *Rule: when a fix targets the mechanism, check it also removed the act.* "Do it without re-rendering"
 and "do not do it during dragstart" are different fixes; I shipped the first believing it was the
 second.
+
+## TimeSpeed — the ADR-011 substrate, node held back (2026-07-28)
+
+**Implements ADR-011's one new evaluator question.** `evalNode` now carries an evaluation TIME, and
+`timeSpeed` is the first node that transforms the time handed to its inputs
+(`t_input = t_output * speed + offset`).
+
+**Memo identity had to change first.** The per-frame memo was keyed by node id alone; under a transform
+the same node at two different times is different content, and one shared entry would serve a frame
+computed at the wrong `t` — the stale-cache failure ADR-009 §6 calls unforgivable. Key is now
+`nodeId@time`, rounded to microseconds so float noise cannot manufacture a miss on an untransformed
+graph (where every key must collapse identically or the memo stops working at all).
+
+**Time is a mutable cursor, not a parameter.** `num`/`str`/`lowerNode` and the colour table all read
+the current time; threading an argument through each would be a wide change with many chances to miss
+one — and a missed one is SILENT, evaluating a param at the wrong time with no error. Set around
+`lowerNode`, restored in `finally`, so a sibling branch is unaffected by a transform on this one.
+
+**Its own params read its own time**, deliberately. Reading `speed` at the transformed time would make
+a keyframed speed self-referential: the speed at t would depend on the time computed from the speed at t.
+
+**Gated.** `flarex:test` +8: identity at speed 1, half/double, offset, negative speed (backwards —
+deliberately not clamped), a static subtree being unaffected, and the load-bearing one — ONE upstream
+under TWO different TimeSpeeds yields two different results rather than a shared memo entry.
+
+**HELD BACK from the palette, on purpose.** The substrate retimes everything the compiler evaluates:
+animated params, generators, nested graphs. It does NOT yet retime VIDEO — `hostSourceDraw` and
+`resolveSourceDraw` are built by the caller at the timeline playhead. Shipping now would mean "TimeSpeed
+does not slow down video", the single most expected use, and exactly the partial-but-implied-general
+shape ADR-011 rejected when it turned down option C. A node that silently ignores the thing you pointed
+it at is worse than no node.
+
+**The media half is smaller than it looked — the founder pointed at the answer.** "We already have
+proven speed ramp in inspector." A Flarex `MediaIn`'s virtual loader IS a `TimelineLayer`
+(`collectFlarexVirtualLayers`), and `TimelineLayer` already carries `speed`/`speedKeyframes` served by
+`getLayerSpeedAt` → `mapSourceTime` — the shipped, proven retime path. So media retiming is not new
+machinery: it is composing the TimeSpeed multipliers between a MediaIn and the output and writing the
+result onto that loader's `speed`, plus extending its active duration (a 0.5× source lasts twice as
+long). Open question for that slice: a MediaIn feeding two paths with DIFFERENT retimes needs two
+loaders, since one layer carries one speed.
+
+*Rule: before building a second mechanism for a thing the app already does, ask whoever has been using
+it.* The compiler-side answer was invented from the ADR; the media-side answer already existed in the
+inspector, and would have been a duplicate retime implementation had it been written blind.

@@ -466,7 +466,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   const num = (node: FlarexNode, key: string, fallback: number): number => {
     frameProfiler.bump("compile.paramEvals");
     const base = typeof node.params[key] === "number" ? (node.params[key] as number) : fallback;
-    return evaluateFlarexNodeParam({ animations: comp.animations, baseValue: base, nodeId: node.id, paramKey: key, timeSeconds: ctx.timeSeconds });
+    return evaluateFlarexNodeParam({ animations: comp.animations, baseValue: base, nodeId: node.id, paramKey: key, timeSeconds: activeTimeSeconds });
   };
   const str = (node: FlarexNode, key: string, fallback: string): string =>
     typeof node.params[key] === "string" ? (node.params[key] as string) : fallback;
@@ -903,6 +903,27 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   // ── Node evaluation (memoized backwards DFS; cycles degrade to null) ────────────────────────
   const memo = new Map<string, FlarexValue | null>();
   const visiting = new Set<string>();
+
+  /**
+   * EVALUATION CONTEXT TIME (ADR-011). The time the node currently being lowered is evaluated AT.
+   * Equal to `ctx.timeSeconds` everywhere except inside a subtree under a TimeSpeed, which hands its
+   * inputs a transformed time.
+   *
+   * A mutable cursor rather than a parameter on every helper: `num`/`str`/`lowerNode` and the colour
+   * table all read the current time, and threading an argument through each would be a wide change
+   * with many chances to miss one — and a MISSED one is silent, evaluating a param at the wrong time
+   * with no error. Set immediately around `lowerNode`, restored in `finally`.
+   */
+  let activeTimeSeconds = ctx.timeSeconds;
+
+  /**
+   * Memo identity MUST include the evaluation time (ADR-011 §2): the same node under two different
+   * transforms is different content, and sharing one entry between them would serve a frame computed
+   * at the wrong `t` — the stale-cache failure ADR-009 §6 calls unforgivable. Rounded to microseconds
+   * so float noise cannot manufacture a miss on an untransformed graph, where every key must collapse
+   * to the same string or the memo stops working at all.
+   */
+  const evalKey = (nodeId: string, timeSeconds: number): string => `${nodeId}@${timeSeconds.toFixed(6)}`;
   frameProfiler.bump("compile.maps", 2); // memo + visiting (profiler-only temp-collection count)
 
   /**
@@ -952,10 +973,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return estimateDrawCost(draw) >= MATERIALIZE_MIN_PASSES;
   };
 
-  const inputValue = (node: FlarexNode, socket: string): FlarexValue | null => {
+  const inputValue = (node: FlarexNode, socket: string, timeSeconds = activeTimeSeconds): FlarexValue | null => {
     const from = edgeInto.get(`${node.id}:${socket}`);
     if (!from) return null;
-    const value = evalNode(from);
+    const value = evalNode(from, timeSeconds);
     if (!value) return null;
     // Per-consumer clone: wraps applied downstream must never mutate the shared memoized subtree.
     return value.kind === "image" ? { kind: "image", draw: cloneImage(value.draw) } : { kind: "matte", matte: { masks: value.matte.masks } };
@@ -981,31 +1002,41 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return null;
   };
 
-  function evalNode(nodeId: string): FlarexValue | null {
+  function evalNode(nodeId: string, timeSeconds = ctx.timeSeconds): FlarexValue | null {
+    const key = evalKey(nodeId, timeSeconds);
     // Profiler-only: track recursion depth (peak/avg) so the retained-cache "no recursive descent" win is
     // measurable. No-op unless profiling is recording.
     frameProfiler.enterEval();
     try {
-      if (memo.has(nodeId)) {
+      if (memo.has(key)) {
         // Served from the per-frame memo (shared fan-out) — not re-lowered. Attribute it as skipped.
         const cachedNode = nodes[nodeId];
         if (cachedNode) frameProfiler.noteEval(nodeId, cachedNode.type, "skipped");
-        return memo.get(nodeId) ?? null;
+        return memo.get(key) ?? null;
       }
-      if (visiting.has(nodeId)) return null; // cycle — degrade, never hang
+      if (visiting.has(key)) return null; // cycle — degrade, never hang
       const node = nodes[nodeId];
       if (!node) return null;
       frameProfiler.noteEval(nodeId, node.type, "evaluated");
-      visiting.add(nodeId);
-      let value = node.enabled ? lowerNode(node) : passthrough(node);
-      visiting.delete(nodeId);
+      visiting.add(key);
+      // The cursor moves for the duration of this node's lowering and is restored after, so a sibling
+      // branch evaluated later is unaffected by a transform applied on this one.
+      const outerTime = activeTimeSeconds;
+      activeTimeSeconds = timeSeconds;
+      let value: FlarexValue | null;
+      try {
+        value = node.enabled ? lowerNode(node) : passthrough(node);
+      } finally {
+        activeTimeSeconds = outerTime;
+      }
+      visiting.delete(key);
       // Materialization boundary: seal an image-producing node's output into its own RTT when the
       // evaluator-owned decision says so (fan-out / debug override today). Mattes stay vector (never
       // rasterized here). Pixel-neutral by construction — sealing inserts only identity nests.
       if (value?.kind === "image" && shouldMaterialize(nodeId, value.draw)) {
         value = { kind: "image", draw: materialize(value.draw, nodeId) };
       }
-      memo.set(nodeId, value);
+      memo.set(key, value);
       return value;
     } finally {
       frameProfiler.exitEval();
@@ -1310,6 +1341,26 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       // Phase 1.5+ nodes (FLAREX.md): declared in node-defs for the palette/AI surface, but not
       // yet lowered — they pass through so a saved graph containing them still renders.
+      /**
+       * TIMESPEED (ADR-011) — the first, and so far only, node that transforms the evaluation context
+       * handed to its inputs.
+       *
+       * `t_input = t_output * speed + offset`. Its OWN params are read at its own time (so `speed`
+       * itself can be keyframed on the timeline the user sees), and only the subtree above it moves.
+       * That direction matters: reading its params at the transformed time would make a keyframed speed
+       * self-referential — the speed at t depends on the time computed from the speed at t.
+       *
+       * Everything upstream retimes, not just video: animated params, generators, nested graphs. That
+       * generality is the whole reason this needed a new evaluator question instead of a compile-time
+       * rewrite of source sampling (see ADR-011 "Alternatives considered").
+       */
+      case "timeSpeed": {
+        const speed = num(node, "speed", 1);
+        const offset = num(node, "offset", 0);
+        const inner = inputValue(node, "in", activeTimeSeconds * speed + offset);
+        return inner?.kind === "image" ? { kind: "image", draw: inner.draw } : inner;
+      }
+
       case "aiMatte":
         return null;
 

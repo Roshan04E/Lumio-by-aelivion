@@ -260,6 +260,15 @@ const GLYPHS: Record<FlarexNodeType, ReactElement> = {
     </>
   ),
 
+  // A clock face with a fast-forward chevron — retime, not playback.
+  timeSpeed: (
+    <>
+      <circle cx="6.5" cy="8" r="5" />
+      <path d="M6.5 5v3l2 1.4" />
+      <path d="M11.5 5.5L14.5 8l-3 2.5" />
+    </>
+  ),
+
   // ── Layout ───────────────────────────────────────────────────────────────
   backdrop: <rect x="2.5" y="2.5" width="11" height="11" rx="1" strokeDasharray="2 1.6" />,
   // A container framing two nodes — the collapse-a-selection block.

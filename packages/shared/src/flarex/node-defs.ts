@@ -615,6 +615,27 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     keyframeable: [],
     phase: 1.5,
   },
+  timeSpeed: {
+    label: "Time Speed",
+    group: "layout",
+    inputs: [image("in", "Input", true)],
+    outputs: OUT,
+    /**
+     * RETIME (ADR-011). `speed` 0.5 plays the upstream at half rate, 2 at double; `offset` shifts it in
+     * seconds. Applies to EVERYTHING above this node — animated params, generators, nested graphs — not
+     * just video, which is why it needed a new evaluator question rather than a compile-time rewrite of
+     * source sampling. See ADR-011 and plans/flarex-timespeed-tracker.md.
+     *
+     * Speed is not clamped to positive: a negative value runs the subtree backwards, which is a
+     * legitimate retime and costs nothing extra here (the upstream is a pure function of time).
+     */
+    params: z.object({
+      speed: num(1),
+      offset: num(0),
+    }).strict(),
+    keyframeable: ["speed", "offset"],
+    phase: 1.5,
+  },
   tracker: {
     label: "Tracker",
     group: "tracking",
@@ -685,6 +706,7 @@ const SUBCATEGORIES: Record<FlarexNodeType, string> = {
   background: "Solid",
   aiMatte: "AI",
   tracker: "Track",
+  timeSpeed: "Time",
   backdrop: "Layout",
   group: "Layout",
   reroute: "Layout",

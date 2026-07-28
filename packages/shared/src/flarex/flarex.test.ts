@@ -1781,6 +1781,100 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   check("corrupt track data passes through instead of throwing", corrupt !== null && !isGroupDraw(corrupt));
 }
 
+// ── TimeSpeed (ADR-011): a node that transforms its inputs' evaluation context ──
+{
+  // A keyframed blur upstream is the point of ADR-011: option C (compile-time source retime) could
+  // not have moved this, because nothing here is a media sample.
+  const build = (speed: number, offset = 0): FlarexComp => {
+    const comp = createFlarexComp("ts", "TimeSpeed fixture");
+    const ts = createFlarexNode("timeSpeed", "ts1");
+    ts.params = { ...ts.params, speed, offset };
+    const blur = createFlarexNode("blur", "tsblur");
+    blur.params = { ...blur.params, sigma: 0 };
+    comp.nodes[ts.id] = ts;
+    comp.nodes[blur.id] = blur;
+    comp.animations = [
+      { id: "tsk0", target: { scope: "flarexNode", effectId: "tsblur", property: "sigma" }, timeSeconds: 0, value: 0, interpolation: "linear", temporal: {} },
+      { id: "tsk4", target: { scope: "flarexNode", effectId: "tsblur", property: "sigma" }, timeSeconds: 4, value: 40, interpolation: "linear", temporal: {} },
+    ];
+    comp.edges = [
+      { id: "ts_e1", from: { nodeId: "ts_in", socket: "out" }, to: { nodeId: "tsblur", socket: "in" } },
+      { id: "ts_e2", from: { nodeId: "tsblur", socket: "out" }, to: { nodeId: "ts1", socket: "in" } },
+      { id: "ts_e3", from: { nodeId: "ts1", socket: "out" }, to: { nodeId: "ts_out", socket: "in" } },
+    ];
+    return comp;
+  };
+  // A blur lowers to `shell.blurPx` on a wrap group (see the keyframed-blur checks above).
+  const sigmaOf = (d: unknown): number => (d as { shell?: { blurPx?: number } })?.shell?.blurPx ?? -1;
+
+  const at2 = compileFlarexComp(build(1), { ...lowerCtx(), timeSeconds: 2 });
+  check("speed 1 is identity — the keyframe reads its own time", Math.abs(sigmaOf(at2) - 20) < 0.001);
+
+  // HALF speed: at output t=2 the upstream is evaluated at t=1, so the ramp has only reached 10.
+  const half = compileFlarexComp(build(0.5), { ...lowerCtx(), timeSeconds: 2 });
+  check("speed 0.5 evaluates the subtree at HALF the time", Math.abs(sigmaOf(half) - 10) < 0.001);
+
+  const double = compileFlarexComp(build(2), { ...lowerCtx(), timeSeconds: 1 });
+  check("speed 2 evaluates it at DOUBLE", Math.abs(sigmaOf(double) - 20) < 0.001);
+
+  const shifted = compileFlarexComp(build(1, 1), { ...lowerCtx(), timeSeconds: 1 });
+  check("offset shifts the subtree in seconds", Math.abs(sigmaOf(shifted) - 20) < 0.001);
+
+  // Negative speed runs the subtree backwards — a legitimate retime, deliberately not clamped.
+  const reverse = compileFlarexComp(build(-1), { ...lowerCtx(), timeSeconds: -2 });
+  check("negative speed runs the subtree backwards", Math.abs(sigmaOf(reverse) - 20) < 0.001);
+
+  // ADR-011 §2: the transform is part of identity. Two TimeSpeeds over ONE shared upstream must not
+  // share a memo entry — that is the stale-cache failure ADR-009 calls unforgivable.
+  {
+    const comp = createFlarexComp("tsx", "shared upstream");
+    const blur = createFlarexNode("blur", "sblur");
+    blur.params = { ...blur.params, sigma: 0 };
+    const a = createFlarexNode("timeSpeed", "sa");
+    a.params = { ...a.params, speed: 0.5 };
+    const b = createFlarexNode("timeSpeed", "sb");
+    b.params = { ...b.params, speed: 2 };
+    const merge = createFlarexNode("merge", "smerge");
+    for (const n of [blur, a, b, merge]) comp.nodes[n.id] = n;
+    comp.animations = [
+      { id: "sk0", target: { scope: "flarexNode", effectId: "sblur", property: "sigma" }, timeSeconds: 0, value: 0, interpolation: "linear", temporal: {} },
+      { id: "sk4", target: { scope: "flarexNode", effectId: "sblur", property: "sigma" }, timeSeconds: 4, value: 40, interpolation: "linear", temporal: {} },
+    ];
+    comp.edges = [
+      { id: "x1", from: { nodeId: "tsx_in", socket: "out" }, to: { nodeId: "sblur", socket: "in" } },
+      { id: "x2", from: { nodeId: "sblur", socket: "out" }, to: { nodeId: "sa", socket: "in" } },
+      { id: "x3", from: { nodeId: "sblur", socket: "out" }, to: { nodeId: "sb", socket: "in" } },
+      { id: "x4", from: { nodeId: "sa", socket: "out" }, to: { nodeId: "smerge", socket: "bg" } },
+      { id: "x5", from: { nodeId: "sb", socket: "out" }, to: { nodeId: "smerge", socket: "fg" } },
+      { id: "x6", from: { nodeId: "smerge", socket: "out" }, to: { nodeId: "tsx_out", socket: "in" } },
+    ];
+    const out = compileFlarexComp(comp, { ...lowerCtx(), timeSeconds: 2 });
+    const kids = isGroupDraw(out) ? out.children : [];
+    const sigmas = kids.map((k) => sigmaOf(k)).sort((p, q) => p - q);
+    check("one upstream under TWO transforms yields TWO different results, not a shared memo entry",
+      kids.length === 2 && Math.abs(sigmas[0]! - 10) < 0.001 && Math.abs(sigmas[1]! - 40) < 0.001);
+  }
+
+  // A retime with nothing time-varying above it must be pixel-identical to no retime at all.
+  const staticComp = (speed: number): FlarexComp => {
+    const comp = createFlarexComp("tss", "static upstream");
+    const ts = createFlarexNode("timeSpeed", "s1");
+    ts.params = { ...ts.params, speed };
+    const blur = createFlarexNode("blur", "sb1");
+    blur.params = { ...blur.params, sigma: 12 };
+    comp.nodes[ts.id] = ts;
+    comp.nodes[blur.id] = blur;
+    comp.edges = [
+      { id: "s_e1", from: { nodeId: "tss_in", socket: "out" }, to: { nodeId: "sb1", socket: "in" } },
+      { id: "s_e2", from: { nodeId: "sb1", socket: "out" }, to: { nodeId: "s1", socket: "in" } },
+      { id: "s_e3", from: { nodeId: "s1", socket: "out" }, to: { nodeId: "tss_out", socket: "in" } },
+    ];
+    return comp;
+  };
+  check("a retime over a STATIC subtree changes nothing",
+    Math.abs(sigmaOf(compileFlarexComp(staticComp(0.25), lowerCtx())) - sigmaOf(compileFlarexComp(staticComp(1), lowerCtx()))) < 1e-9);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

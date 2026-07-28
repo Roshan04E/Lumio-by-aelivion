@@ -52,6 +52,7 @@ export type FlarexNodeType =
   | "background"
   | "aiMatte"
   | "tracker"
+  | "timeSpeed"
   | "backdrop"
   | "group"
   | "reroute";
@@ -92,6 +93,7 @@ export const flarexNodeTypes: readonly FlarexNodeType[] = [
   "background",
   "aiMatte",
   "tracker",
+  "timeSpeed",
   "backdrop",
   "group",
   "reroute",
