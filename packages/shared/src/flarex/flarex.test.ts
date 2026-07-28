@@ -36,6 +36,7 @@ import {
   isFlarexGeneratorVirtualLayer,
   soloLayerComposition,
 } from "./virtual-layers";
+import { composeFlarexTimeTransform, isIdentityFlarexTimeTransform, resolveFlarexMediaInRetimes } from "./time-transform";
 import { CREATIVE_LOOK_NAMES } from "../color/looks";
 import type { FlarexComp, FlarexNodeType } from "./types";
 import type { Mask, ProjectGraph, TimelineComposition, TimelineLayer } from "../types";
@@ -249,7 +250,10 @@ function groupDepth(draw: SceneDraw | null): number {
     { id: "e2", from: { nodeId: "cme2_srcin", socket: "out" }, to: { nodeId: "cme2_merge", socket: "fg" } },
     { id: "e3", from: { nodeId: "cme2_merge", socket: "out" }, to: { nodeId: "cme2_out", socket: "in" } },
   ];
-  const out = compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: () => "ended" });
+  // Scoped to the ASSET node: since TimeSpeed's media half (ADR-011) a host MediaIn also consults the
+  // resolver, so a blanket "ended" would end the bg too — which the real resolver never does unless
+  // that host has a promoted, retimed loader that genuinely ran out.
+  const out = compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: (nodeId) => (nodeId === "cme2_srcin" ? "ended" : null) });
   check("asset mediaIn: ended source drops the fg (bg-only, no group)", !isGroupDraw(out) && (out as SceneLayerDraw).debugLayerId === "host");
 }
 
@@ -265,18 +269,25 @@ function groupDepth(draw: SceneDraw | null): number {
 }
 
 {
-  // An empty sourceAssetId is the host input — the resolver must NOT be consulted for it.
+  // An empty sourceAssetId is the HOST input. Until TimeSpeed's media half (ADR-011) the resolver was
+  // skipped for it entirely; it is now asked first, because a host MediaIn under a retime IS backed by
+  // a loader (`promoteHostMediaInLoader`). The load-bearing half of that change is the fall-through:
+  // no loader ⇒ null ⇒ the host draw, byte-for-byte what every comp without a TimeSpeed did before.
   const comp = createFlarexComp("cme", "AssetEmpty");
-  let called = false;
+  const asked: Array<[string, string]> = [];
   const out = compileFlarexComp(comp, {
     ...lowerCtx(),
-    resolveSourceDraw: () => {
-      called = true;
+    resolveSourceDraw: (nodeId, assetId) => {
+      asked.push([nodeId, assetId]);
       return null;
     },
   });
-  check("asset mediaIn: empty sourceAssetId never calls the resolver", !called);
+  check("asset mediaIn: a host MediaIn asks the resolver with an EMPTY assetId", asked.some(([n, a]) => n === "cme_in" && a === ""));
   check("asset mediaIn: empty sourceAssetId lowers to host", !isGroupDraw(out) && (out as SceneLayerDraw).debugLayerId === "host");
+
+  // …and with no resolver at all (the Phase-1 caller) it still lowers to the host.
+  const bare = compileFlarexComp(createFlarexComp("cme3", "AssetEmptyBare"), lowerCtx());
+  check("asset mediaIn: no resolver still lowers a host MediaIn to the host", !isGroupDraw(bare) && (bare as SceneLayerDraw).debugLayerId === "host");
 }
 
 // --- Virtual loader helper (collectFlarexVirtualLayers) -----------------------
@@ -1873,6 +1884,138 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   };
   check("a retime over a STATIC subtree changes nothing",
     Math.abs(sigmaOf(compileFlarexComp(staticComp(0.25), lowerCtx())) - sigmaOf(compileFlarexComp(staticComp(1), lowerCtx()))) < 1e-9);
+}
+
+// ── TimeSpeed, media half: the retime a MediaIn's LOADER carries (ADR-011) ──
+{
+  // `retimed(speed, offset, wire)` — a comp whose default host MediaIn (`mh_in`) reaches the output
+  // through one TimeSpeed, plus whatever extra nodes `wire` adds.
+  const retimed = (speed: number, offset = 0): FlarexComp => {
+    const comp = createFlarexComp("mh", "Media half");
+    const ts = createFlarexNode("timeSpeed", "mh_ts");
+    ts.params = { ...ts.params, speed, offset };
+    comp.nodes[ts.id] = ts;
+    comp.edges = [
+      { id: "m1", from: { nodeId: "mh_in", socket: "out" }, to: { nodeId: "mh_ts", socket: "in" } },
+      { id: "m2", from: { nodeId: "mh_ts", socket: "out" }, to: { nodeId: "mh_out", socket: "in" } },
+    ];
+    return comp;
+  };
+
+  check("no TimeSpeed ⇒ every MediaIn resolves to identity",
+    [...resolveFlarexMediaInRetimes(createFlarexComp("mh0", "None")).values()].every((r) => isIdentityFlarexTimeTransform(r.transform)));
+
+  const half = resolveFlarexMediaInRetimes(retimed(0.5, 1));
+  check("a MediaIn under a TimeSpeed picks up its (speed, offset)",
+    half.get("mh_in")?.transform.speed === 0.5 && half.get("mh_in")?.transform.offset === 1);
+
+  // Composition is NOT symmetric: the outer offset picks up the INNER speed.
+  check("nested transforms compose affinely, inner speed scaling the outer offset",
+    composeFlarexTimeTransform({ speed: 2, offset: 3 }, { speed: 0.5, offset: 1 }).speed === 1 &&
+    composeFlarexTimeTransform({ speed: 2, offset: 3 }, { speed: 0.5, offset: 1 }).offset === 2.5);
+
+  {
+    const comp = retimed(0.5);
+    comp.nodes["mh_ts"]!.enabled = false;
+    check("a DISABLED TimeSpeed retimes nothing (it is a pass-through everywhere else too)",
+      resolveFlarexMediaInRetimes(comp).get("mh_in")?.transform.speed === 1);
+  }
+
+  {
+    // One MediaIn, two paths, two rates. A loader carries ONE rate, so this is a compromise the flag
+    // makes legible rather than a frame that is quietly wrong.
+    const comp = retimed(0.5);
+    const merge = createFlarexNode("merge", "mh_merge");
+    comp.nodes[merge.id] = merge;
+    comp.edges = [
+      { id: "c1", from: { nodeId: "mh_in", socket: "out" }, to: { nodeId: "mh_ts", socket: "in" } },
+      { id: "c2", from: { nodeId: "mh_ts", socket: "out" }, to: { nodeId: "mh_merge", socket: "fg" } },
+      { id: "c3", from: { nodeId: "mh_in", socket: "out" }, to: { nodeId: "mh_merge", socket: "bg" } },
+      { id: "c4", from: { nodeId: "mh_merge", socket: "out" }, to: { nodeId: "mh_out", socket: "in" } },
+    ];
+    check("a MediaIn reached at two different rates is flagged conflicting",
+      resolveFlarexMediaInRetimes(comp).get("mh_in")?.conflicting === true);
+  }
+
+  // --- The loader the retime is actually written onto ---
+  const hostLayer = (extra: Partial<TimelineLayer> = {}): TimelineLayer =>
+    ({
+      id: "mhhost", trackId: "t", type: "video", name: "Host", startSeconds: 0, durationSeconds: 20,
+      assetId: "asset_vid", sourceInSeconds: 0, flarexCompId: "mh",
+      effects: [{ id: "grade1", type: "colorCorrect", params: {} }],
+      ...extra,
+    }) as unknown as TimelineLayer;
+  const lookup = () => ({ type: "video" as const, durationSeconds: 30 });
+  const loaders = (comp: FlarexComp, host = hostLayer()) => collectFlarexVirtualLayers([host], { mh: comp }, lookup);
+
+  check("no TimeSpeed ⇒ the host MediaIn still gets NO loader (shipped behaviour)",
+    loaders(createFlarexComp("mh", "None")).length === 0);
+
+  {
+    const [loader] = loaders(retimed(0.5));
+    check("a retimed host MediaIn is promoted to its own loader", Boolean(loader) && loader!.id === flarexVirtualLayerId("mh", "mh_in"));
+    check("the loader carries the composed rate", loader?.speed === 0.5);
+    // 30s of source at half rate would run 60s, but the clip is 20s — the clamp, not the runway, wins.
+    check("a slowed source stays active for the whole clip", loader?.durationSeconds === 20);
+    // The un-retimed host MediaIn resolves to the host's FULL draw; promotion must not silently strip
+    // the clip's grade on the way to a loader.
+    check("the promoted loader keeps the host's effects", (loader?.effects?.length ?? 0) === 1);
+    check("the promoted loader drops flarexCompId (or it would re-enter this same comp)", loader?.flarexCompId === undefined);
+  }
+
+  {
+    // 4× through 30s of source runs out after 7.5 comp-seconds, well inside the 20s clip. Leaving the
+    // runway un-retimed would keep the MediaIn alive over footage that no longer exists.
+    const [loader] = loaders(retimed(4));
+    check("a sped-up source ends when its media runs out", Math.abs((loader?.durationSeconds ?? 0) - 7.5) < 1e-9);
+  }
+
+  {
+    const [loader] = loaders(retimed(1, 3));
+    check("offset shifts the loader's in-point, not its rate", loader?.sourceInSeconds === 3 && loader?.speed === 1);
+  }
+
+  {
+    // Composition with the clip's OWN speed: 2× clip under a 0.5× retime is 1× — and the offset is
+    // measured in the retimed subtree's seconds, so it scales by the host rate.
+    const [loader] = loaders(retimed(0.5, 2), hostLayer({ speed: 2, sourceInSeconds: 1 }));
+    check("the retime composes with the clip's own speed", loader?.speed === 1 && loader?.sourceInSeconds === 5);
+  }
+
+  {
+    // A host that already carries the inspector's speed RAMP: the composition is still exact, but the
+    // result is a ramp rather than a rate — host breakpoint τ lands at (τ − O)/S with value v·S.
+    const ramp = [
+      { id: "r0", timeSeconds: 0, value: 1 },
+      { id: "r1", timeSeconds: 4, value: 3 },
+    ];
+    const [loader] = loaders(retimed(0.5), hostLayer({ speedKeyframes: ramp }));
+    const composed = loader?.speedKeyframes ?? [];
+    check("a ramped host composes into a ramped loader, anchored at 0",
+      composed.length === 2 && composed[0]!.timeSeconds === 0 && Math.abs(composed[0]!.value - 0.5) < 1e-9);
+    check("the ramp's breakpoint moves to (τ − O)/S with value v·S",
+      Math.abs((composed[1]?.timeSeconds ?? 0) - 8) < 1e-9 && Math.abs((composed[1]?.value ?? 0) - 1.5) < 1e-9);
+
+    // Reversing an already-ramped clip flips every segment's handles; declined rather than approximated.
+    check("a REVERSE retime over a ramped host is declined, not approximated",
+      loaders(retimed(-1), hostLayer({ speedKeyframes: ramp })).length === 0);
+  }
+
+  {
+    // The asset-source MediaIn (a bare loader) takes the same rate through the same helper.
+    const comp = retimed(0.5);
+    const src = createFlarexNode("mediaIn", "mh_src");
+    src.params = { ...src.params, sourceAssetId: "asset_vid", sourceInSeconds: 4 };
+    comp.nodes[src.id] = src;
+    comp.edges = [
+      { id: "a1", from: { nodeId: "mh_src", socket: "out" }, to: { nodeId: "mh_ts", socket: "in" } },
+      { id: "a2", from: { nodeId: "mh_ts", socket: "out" }, to: { nodeId: "mh_out", socket: "in" } },
+    ];
+    const loader = loaders(comp).find((l) => l.id === flarexVirtualLayerId("mh", "mh_src"));
+    check("an asset-source loader takes the rate too, keeping its own trim", loader?.speed === 0.5 && loader?.sourceInSeconds === 4);
+    // (30 − 4) / 0.5 = 52s of runway, so the 20s clip clamps it.
+    check("its runway is retimed as well", loader?.durationSeconds === 20);
+  }
 }
 
 if (failures > 0) {

@@ -1052,8 +1052,13 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): a non-empty `sourceAssetId`
         // loads a media-pool asset (decoded off-timeline by the caller); empty id / unresolved source
         // / no resolver falls back to the host clip (soft-degrade, never blank).
+        //
+        // A HOST MediaIn (empty id) also asks the resolver first, because a TimeSpeed above it makes
+        // the host's own playhead-locked draw the wrong picture: `virtual-layers.ts` promotes it to an
+        // independently decoded loader at the retimed rate (ADR-011). No promotion — every comp
+        // without a TimeSpeed — resolves to null and falls through to the host exactly as before.
         const sourceAssetId = str(node, "sourceAssetId", "");
-        if (sourceAssetId && ctx.resolveSourceDraw) {
+        if (ctx.resolveSourceDraw) {
           // Profiler-only: `resolveSourceDraw` is the browser's asset-source ADAPTER — it builds a full
           // per-clip draw (grade pipeline, transforms, masks) via buildLayerPreFlarexDraw. This is real
           // work counted inside `compile.lower` but ABSENT from the Node micro-bench's stub, so it's the
@@ -1345,14 +1350,18 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        * TIMESPEED (ADR-011) — the first, and so far only, node that transforms the evaluation context
        * handed to its inputs.
        *
-       * `t_input = t_output * speed + offset`. Its OWN params are read at its own time (so `speed`
-       * itself can be keyframed on the timeline the user sees), and only the subtree above it moves.
-       * That direction matters: reading its params at the transformed time would make a keyframed speed
-       * self-referential — the speed at t depends on the time computed from the speed at t.
+       * `t_input = t_output * speed + offset`. Its OWN params are read at its own time, not the
+       * transformed one — reading them at the transformed time would be self-referential (the time
+       * depends on the speed, which would depend on the time).
        *
        * Everything upstream retimes, not just video: animated params, generators, nested graphs. That
        * generality is the whole reason this needed a new evaluator question instead of a compile-time
        * rewrite of source sampling (see ADR-011 "Alternatives considered").
+       *
+       * VIDEO is the exception to "everything the compiler evaluates", because the compiler does not
+       * evaluate it — a MediaIn's picture arrives already decoded through `resolveSourceDraw`, at the
+       * playhead. That half is resolved statically by `time-transform.ts` and applied to the node's
+       * virtual loader as a rate, which is why `speed`/`offset` are constants (see node-defs).
        */
       case "timeSpeed": {
         const speed = num(node, "speed", 1);

@@ -18,17 +18,11 @@ import type { FlarexComp, FlarexEdge, FlarexNode } from "@orreris/shared";
  *  palette and the search menu can never drift apart. */
 // `tracker` became addable 2026-07-28 (match-move v1 lowers for real); `aiMatte` is still un-lowered.
 //
-// `timeSpeed` is DELIBERATELY held back (2026-07-28). Its evaluator substrate is complete and gated —
-// a retime moves every animated param, generator and nested graph above it (ADR-011). What it does NOT
-// yet move is VIDEO: `hostSourceDraw` and `resolveSourceDraw` are built by the caller at the timeline
-// playhead, so retiming a media sample needs the loader to seek elsewhere, which is media-pipeline work
-// beyond the compiler.
-//
-// Shipping it now would mean "TimeSpeed does not slow down video" — the single most expected use, and
-// exactly the partial-but-implied-general shape ADR-011 rejected when it turned down option C. A node
-// that silently ignores the thing you pointed it at is worse than no node. Un-gate when media sampling
-// honours the transform.
-const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "aiMatte", "timeSpeed"]);
+// `timeSpeed` was held back for one day (2026-07-28) while it retimed every animated param, generator
+// and nested graph above it but NOT video — the single most expected use, and exactly the
+// partial-but-implied-general shape ADR-011 rejected. Un-gated once the media half landed: each MediaIn
+// under a retime is now backed by a loader carrying the composed rate (`time-transform.ts`).
+const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "aiMatte"]);
 export const flarexAddableNodeTypes: FlarexNodeType[] = flarexNodeTypes.filter((t) => !NOT_ADDABLE.has(t));
 
 // Node categories are a purely LOGICAL grouping (labels + order below). They deliberately carry NO

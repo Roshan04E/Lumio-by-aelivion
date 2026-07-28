@@ -15,7 +15,16 @@
  * node in hand), not here — this module only assembles the decode-shaped layers.
  */
 
+import { getLayerSpeed, getSpeedRamp } from "../timeline";
 import type { TimelineComposition, TimelineLayer } from "../types";
+import {
+  applyRetimeToLoaderTiming,
+  composeRetimeWithSpeedRamp,
+  isIdentityFlarexTimeTransform,
+  resolveFlarexMediaInRetimes,
+  FLAREX_IDENTITY_TIME_TRANSFORM,
+  type FlarexTimeTransform,
+} from "./time-transform";
 import type { FlarexComp, FlarexNode } from "./types";
 
 const VIRTUAL_PREFIX = "flarexsrc:";
@@ -177,6 +186,61 @@ function buildFlarexGeneratorLayer(
   };
 }
 
+/**
+ * The virtual loader for a HOST MediaIn that sits under a TimeSpeed — an independently decoded second
+ * read of the host clip's own media, at the retimed rate.
+ *
+ * Why a second decode rather than asking for the host draw at another time: the host clip's decoder is
+ * positioned by the timeline playhead and serves the clip itself. "The same media at a different t" is
+ * a different decode, full stop — which is exactly what a loader is. This is the same Fusion Loader
+ * trick an asset-source MediaIn already uses, pointed at the host's asset.
+ *
+ * The layer is a COPY of the host rather than the bare loader an asset-source MediaIn gets, because an
+ * un-retimed host MediaIn resolves to the host's FULL draw (grade, transform, masks, passes). Building
+ * a bare loader instead would strip the clip's grade the moment a TimeSpeed was added — a retime is not
+ * licence to change how the shot looks. The composition fields that would make the copy re-enter the
+ * pipeline or double up are stripped: `flarexCompId` (infinite recursion — this comp again), and the
+ * transitions/linking/track-matte that belong to the clip's place on the timeline, not to a source read.
+ *
+ * Returns null (leaving the MediaIn on the un-retimed host draw) when the host is not a plain media
+ * clip, or when it carries a speed ramp that this retime cannot compose with — see
+ * `composeRetimeWithSpeedRamp`.
+ */
+function promoteHostMediaInLoader(
+  comp: FlarexComp,
+  node: FlarexNode,
+  host: TimelineLayer,
+  retime: FlarexTimeTransform,
+  lookupAsset: (assetId: string) => FlarexSourceAssetInfo | null
+): TimelineLayer | null {
+  if (host.type !== "video" && host.type !== "image") return null;
+  if (!host.assetId || host.nestedCompositionId) return null;
+  const asset = lookupAsset(host.assetId);
+  if (!asset) return null;
+  const hostIn = host.sourceInSeconds ?? 0;
+  const endless = asset.type !== "video" || asset.durationSeconds == null || !Number.isFinite(asset.durationSeconds);
+  const sourceDuration = endless ? undefined : asset.durationSeconds;
+
+  const ramped = getSpeedRamp(host) ? composeRetimeWithSpeedRamp(host, retime) : null;
+  if (getSpeedRamp(host) && !ramped) return null; // reverse retime over a ramp — declined, not approximated
+  const timing = applyRetimeToLoaderTiming(hostIn, getLayerSpeed(host), retime, sourceDuration);
+  // A composed ramp has no single rate, so its runway can't be divided out of the source length. It
+  // plays for as long as the clip does; a ramp that outruns its media was already the host's problem.
+  const remaining = ramped ? Infinity : timing.remainingSeconds;
+
+  const { flarexCompId: _comp, transitionIn: _tIn, linkedGroupId: _linked, trackMatte: _matte, ...rest } = host;
+  return {
+    ...rest,
+    id: flarexVirtualLayerId(comp.id, node.id),
+    trackId: "__flarex_virtual",
+    name: `${node.label ?? "MediaIn"} host`,
+    startSeconds: host.startSeconds,
+    durationSeconds: Math.min(host.durationSeconds, remaining),
+    sourceInSeconds: ramped ? ramped.sourceInSeconds : timing.sourceInSeconds,
+    ...(ramped ? { speedKeyframes: ramped.speedKeyframes } : { speed: timing.speed, speedKeyframes: undefined }),
+  };
+}
+
 /** Stable id for the virtual loader backing one comp's MediaIn node. */
 export function flarexVirtualLayerId(compId: string, nodeId: string): string {
   return `${VIRTUAL_PREFIX}${compId}:${nodeId}`;
@@ -209,6 +273,9 @@ export function collectFlarexVirtualLayers(
     if (!host.flarexCompId) continue;
     const comp = flarexComps[host.flarexCompId];
     if (!comp) continue;
+    // TimeSpeed's media half (ADR-011): the retime each MediaIn sits under, resolved once per comp
+    // from static params. Empty for every comp without a TimeSpeed, which is the shipped behaviour.
+    const retimes = resolveFlarexMediaInRetimes(comp);
     for (const node of Object.values(comp.nodes)) {
       // Generator nodes (Text / Background) are backed by a RASTERIZED virtual layer — no asset to
       // resolve, so they short-circuit the media path below entirely.
@@ -219,21 +286,34 @@ export function collectFlarexVirtualLayers(
       }
       if (node.type !== "mediaIn") continue;
       const assetId = typeof node.params.sourceAssetId === "string" ? node.params.sourceAssetId : "";
-      if (!assetId) continue; // empty = the host clip, not a virtual loader
+      const retime = retimes.get(node.id)?.transform ?? FLAREX_IDENTITY_TIME_TRANSFORM;
+      if (!assetId) {
+        // Empty id = the HOST clip. Normally no loader at all — the compiler hands that MediaIn the
+        // host's own finished draw. Under a retime it needs one, because the host's picture comes from
+        // the timeline's decoder, which sits at the playhead and cannot also be somewhere else. See
+        // `promoteHostMediaInLoader`.
+        const promoted = isIdentityFlarexTimeTransform(retime)
+          ? null
+          : promoteHostMediaInLoader(comp, node, host, retime, lookupAsset);
+        if (promoted) out.push(promoted);
+        continue;
+      }
       const asset = lookupAsset(assetId);
       if (!asset) continue;
-      const sourceInSeconds = typeof node.params.sourceInSeconds === "number" ? node.params.sourceInSeconds : 0;
+      const declaredIn = typeof node.params.sourceInSeconds === "number" ? node.params.sourceInSeconds : 0;
       const freeze = node.params.freeze === true;
       // How long this loader is ACTIVE (comp-local). A video source that's shorter than the host clip
       // ENDS at its own duration — past that the MediaIn produces nothing (self-contained-clip
       // semantics), so downstream merges drop it and only the background remains (NOT a held last
       // frame). `freeze` (Hold a still), images (no timeline), and unknown-duration sources have no
       // natural end, so they mirror the host span and stay active for the whole comp.
-      const sourceRemain =
-        asset.type === "video" && !freeze && asset.durationSeconds != null && Number.isFinite(asset.durationSeconds)
-          ? Math.max(0, asset.durationSeconds - sourceInSeconds)
-          : Infinity;
-      const activeSeconds = Math.min(host.durationSeconds, sourceRemain);
+      //
+      // A retime rewrites BOTH the rate and this runway: a 0.5× source lasts twice as long in comp
+      // seconds, and leaving the runway un-retimed would end the loader — blanking the MediaIn — with
+      // half the footage unplayed.
+      const endless = asset.type !== "video" || freeze || asset.durationSeconds == null || !Number.isFinite(asset.durationSeconds);
+      const timing = applyRetimeToLoaderTiming(declaredIn, 1, retime, endless ? undefined : asset.durationSeconds);
+      const activeSeconds = Math.min(host.durationSeconds, timing.remainingSeconds);
       out.push({
         id: flarexVirtualLayerId(comp.id, node.id),
         trackId: "__flarex_virtual",
@@ -245,7 +325,8 @@ export function collectFlarexVirtualLayers(
         startSeconds: host.startSeconds,
         durationSeconds: activeSeconds,
         assetId,
-        sourceInSeconds,
+        sourceInSeconds: timing.sourceInSeconds,
+        ...(timing.speed === 1 ? {} : { speed: timing.speed }),
         fit: "fill",
         transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
         effects: [],

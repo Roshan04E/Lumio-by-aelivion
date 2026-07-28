@@ -628,12 +628,19 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
      *
      * Speed is not clamped to positive: a negative value runs the subtree backwards, which is a
      * legitimate retime and costs nothing extra here (the upstream is a pure function of time).
+     *
+     * NOT KEYFRAMEABLE, deliberately. The two halves of a retime resolve at different moments: the
+     * parameters retime in the compiler, per frame; the PICTURE retimes on the MediaIn's loader, whose
+     * rate is resolved once before any frame is drawn (`time-transform.ts`). A constant holds those
+     * two in exact agreement. An animated one would not — grade and picture would slide apart, silently.
+     * A ramped retime belongs on the same `speedKeyframes` substrate the inspector's speed ramp already
+     * uses, so both halves integrate one curve; that is a later slice, not a checkbox here.
      */
     params: z.object({
       speed: num(1),
       offset: num(0),
     }).strict(),
-    keyframeable: ["speed", "offset"],
+    keyframeable: [],
     phase: 1.5,
   },
   tracker: {

@@ -129,3 +129,24 @@ the node graph are two dialects of one retime, not two implementations of it.
    TimeSpeed ships and a second axis or a second transforming node confirms the shape generalises. If
    the first implementation finds the transform wants to be a function rather than data, this ADR falls
    rather than bends.
+
+## Implementation note (2026-07-28) — TimeSpeed shipped
+
+Both halves landed; the node is in the palette. The first implementation did **not** find the transform
+wanting to be a function. The opposite: §1's declared-data shape turned out to be load-bearing twice
+over, in a way the ADR did not anticipate.
+
+`{ scale, offset }` is **affine**, and an affine map is exactly what a media loader can carry — one
+`speed` plus a shifted in-point. So the media half (§5) needed no retime of its own; it composes the
+declared values statically and hands the result to the timeline's existing
+`getLayerSpeed`/`layerSourceTimeSeconds`. Had the transform been a callback, that composition would
+have been unavailable and the picture would have needed a second, parallel retime implementation —
+the ADR-007 divergence §1 predicted, arrived at from an unexpected direction.
+
+The same shape also decided the parameter surface: `speed`/`offset` are **not keyframeable**, because a
+curve is not expressible in an affine transform. That reads as a limit but is the contract being
+honest — and it keeps the two halves (per-frame params, once-resolved loader rate) in exact agreement.
+A ramped retime is a real extension, and it must extend the *declared value* (a curve both halves
+integrate identically), not the mechanism.
+
+Still Provisional: one axis, one transforming node. Freezing awaits the second.

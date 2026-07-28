@@ -25,6 +25,7 @@ export * from "./flarex/node-graph-intent";
 export * from "./flarex/node-defs";
 export * from "./flarex/registry";
 export * from "./flarex/virtual-layers";
+export * from "./flarex/time-transform";
 export * from "./flarex/source-draw-cache";
 // Node content hashing (ADR-009) — the editor's node thumbnails key their cache on it.
 export * from "./flarex/content-hash";

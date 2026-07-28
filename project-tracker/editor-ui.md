@@ -596,3 +596,62 @@ loaders, since one layer carries one speed.
 *Rule: before building a second mechanism for a thing the app already does, ask whoever has been using
 it.* The compiler-side answer was invented from the ADR; the media-side answer already existed in the
 inspector, and would have been a duplicate retime implementation had it been written blind.
+
+## TimeSpeed — the media half, node un-gated (2026-07-28)
+
+**What it took: no new retime.** The compiler retimes everything it *evaluates*. Video it does not
+evaluate — a MediaIn's picture arrives already decoded through `resolveSourceDraw`, positioned at the
+timeline playhead. "The same media at a different t" is a different DECODE, decided before compiling
+starts, so the media half could never have lived in the compiler at all.
+
+It lives in `time-transform.ts`: walk backwards from the comp's output, compose each TimeSpeed's
+`(speed, offset)` affinely, and write the result onto the MediaIn's virtual loader as a plain `speed` +
+shifted `sourceInSeconds`. From there it is the inspector's own shipped path — `getLayerSpeed` →
+`layerSourceTimeSeconds` — which preview, local export and the Remotion worker all already run. One
+retime implementation, three renderers, parity by construction (ADR-007), and ADR-011 §5 satisfied
+literally: *"two dialects of one retime, not two implementations of it."*
+
+**The host MediaIn had to be promoted to a loader.** The obvious slice — retime asset-source MediaIns —
+would have missed the ordinary case: a comp attached to a clip, MediaIn = that clip. That MediaIn
+resolves to the host's playhead-locked draw, which under a retime is simply the wrong picture, and no
+amount of compiler work fixes it because the clip's decoder serves the clip. So a host MediaIn under a
+non-identity transform is now backed by its own independently decoded loader — the same Fusion Loader
+trick, pointed at the host's asset.
+
+That loader is a COPY of the host layer, not the bare loader an asset-source MediaIn gets. An
+un-retimed host MediaIn resolves to the host's FULL draw (grade, transform, masks, passes); building a
+bare one would strip the clip's grade the moment you added a TimeSpeed. *A retime is not licence to
+change how the shot looks.* `flarexCompId` is stripped or the copy re-enters this same comp forever.
+
+**Shipped-behaviour change, deliberate:** a host MediaIn now consults `resolveSourceDraw` (with an
+empty assetId) before falling back to the host. Every comp without a TimeSpeed has no promoted loader,
+so the resolver returns null and the fall-through is byte-identical to before — that fall-through, not
+the promotion, is the load-bearing part and is gated as such. It cost one over-broad test stub: a
+blanket `() => "ended"` resolver now ends the host bg too, which the real resolver never does.
+
+**`speed`/`offset` are NOT keyframeable, and that is the ADR's own shape rather than a shortcut.**
+ADR-011 §1 defines `ContextTransform` as declared data — `{ axis, scale, offset }` — which is affine,
+full stop. A curve is not expressible in it. And the two halves resolve at different moments: params
+retime in the compiler per frame, the picture retimes on a loader whose rate is resolved once before
+any frame is drawn. A constant holds those two in exact agreement; an animated one would slide grade
+and picture apart, silently. A ramped retime belongs on `speedKeyframes` with both halves integrating
+one curve — a later slice, not a checkbox.
+
+**Honest limits, all gated rather than discovered later:**
+- A MediaIn reached at two different rates keeps one (a loader carries one rate) and sets `conflicting`.
+- A host that already carries an inspector speed RAMP composes exactly for forward retimes (host
+  breakpoint τ → `(τ − O)/S`, value `v·S`; handles are fractions of span and delta, so they scale
+  together and survive). A REVERSE retime over a ramp flips every segment's handles — declined, not
+  approximated.
+- `ctx.previewRootNodeId` (runtime node thumbnails) is not resolved into the loaders: it is chosen
+  after they exist. Thumbnails only; the viewer and both exports are exact, because the persisted view
+  dot IS resolved.
+
+**Gated.** `flarex:test` +20 (rate, retimed runway both directions, offset→in-point, composition with
+the clip's own speed, ramp composition, the declined reverse-over-ramp, the conflict flag, promotion
+keeping the host's effects and dropping `flarexCompId`, and "no TimeSpeed ⇒ still no host loader").
+`render:compare:pixels`: all 12 flarex fixtures 0.000%.
+
+*Rule: when a mechanism can't reach the case, check whether the case can be moved to the mechanism.*
+The compiler cannot retime a decode. Rather than teaching it to, the host MediaIn was turned into the
+thing that already retimes — a loader. The feature landed as composition, not as new pipeline.
