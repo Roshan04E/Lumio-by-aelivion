@@ -1937,3 +1937,49 @@ wedge in two runs printed `26c6cf60…` and `49ded0d0…`, which read as two unr
 may well be one. v32q fixed this column in `__rfSourceMap` and missed the watchdog line; it now uses
 `assetLabel` too. *Fixing an instrument means fixing every place it reports, not the one you were
 looking at.*
+
+## v32t — the one unbounded link: a getFrame that never settles (2026-07-28)
+
+**Not an observed bug.** Every wedge in the v32s readings drained on its own (`busyWedge` stayed at 1
+rather than climbing, which is what a permanently stuck chain would produce). This closes a latent
+hazard found while tracing that intermittent freeze, and the honest status is: never seen in the wild.
+
+**Why it was worth closing anyway.** Every bound in the playback path sits ABOVE the decode and cannot
+interrupt one already in flight — `WC_INIT_TIMEOUT_MS` 4000 covers init, `WC_BUSY_WEDGE_MS` 3000
+DETECTS a stuck call, the catch-up hold caps at 5000, the decoder's flush races a 5s timeout.
+`serializeFrameProvider` then chains every later call behind the stuck one. So a single non-settling
+promise blocks that provider forever, and the `busyWedge` heal cannot recover it: the re-request it
+issues queues behind the very call that is stuck. The counter increments, the layer clears its busy
+flag, and the picture stays dead — **a freeze that reports itself as handled**, which is the same
+disease as the three instrument failures this file recorded this week, except the user is looking at it.
+
+**v32l widened the blast radius, uncosted at the time.** Members of a shared session await the same
+`session.pending` promise. One wedged decode therefore takes the host clip and the Flarex loader
+together — the whole comp, not one node. Sharing was a clear win and remains one; this is the part of
+its cost nobody priced.
+
+**Fix.** `guardWedge` bounds one decode at 10s and resolves `null` (never rejects — every caller
+already handles a null frame, and a rejection would surface as an unhandled error in the rAF loop).
+The GUARDED promise is what goes into `session.pending`, so bounding it bounds every sharer at once;
+storing the raw promise would protect the one member who tripped it and leave the joiners hanging,
+which is worse than no backstop because the pool would still read healthy.
+
+On timeout the session is torn down as a PREEMPTION, reusing the one teardown that already gets
+ordering right (notify-then-dispose). A decoder that has not answered in 10s is broken, not slow —
+parking it warm would hand the next lease the same wedged decoder.
+
+**10s is deliberately far above every bound above it.** This must fire only when all of them have had
+their chance and failed. A >3s decode that later recovered has been observed in the wild; firing on
+merely-slow media would tear down healthy sessions to fix nothing. It is a last resort, not a latency
+control.
+
+**Rule.** *A retry that queues behind the thing it is retrying is not a recovery.* The `busyWedge`
+heal was written as one and counted itself as one for a month. Any self-heal must be checked against
+the question "can this run while the fault is active?" — if it shares a lock, a chain or a queue with
+the stuck work, it is a counter, not a cure.
+
+**Gates.** `wcpool:test` 59 → **69** assertions: the timeout resolves null rather than hanging, the
+SHARER awaiting the same pending promise also comes back, the count is per session not per member,
+every member is notified, the dead decoder is disposed rather than parked, and a re-acquire builds a
+fresh working session. `coherence` 5666/5666, `fullres` 203/203, typecheck clean. New counter
+`__rfWcPool.wedgeTimeouts`, expected 0 forever — a non-zero reading is the interesting one.

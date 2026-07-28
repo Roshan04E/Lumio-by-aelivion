@@ -21,6 +21,7 @@
 import type { FrameProvider } from "../export/source-decoder";
 import {
   __setFrameProviderFactoryForTests,
+  __setWedgeTimeoutForTests,
   acquirePreviewFrameProvider,
   canAttachToSession,
   divergenceToleranceSeconds,
@@ -253,6 +254,68 @@ async function run(): Promise<void> {
     rejoin!.release();
     host!.release();
     loader!.release(); // already detached — must be a no-op, not a double release
+  }
+
+  // ── 6. THE WEDGE BACKSTOP: a decode that never settles ────────────────────
+  // Every other bound in the playback path sits ABOVE the decode and cannot interrupt one already in
+  // flight, and `serializeFrameProvider` chains later calls behind it — so without this, ONE hung
+  // promise blocks a provider forever while `busyWedge` reports the freeze as healed. Sharing made it
+  // worse: members await the same `session.pending`, so one wedged decode takes the whole comp.
+  {
+    __setWedgeTimeoutForTests(60);
+    const URL_W = "blob:wedged.mp4";
+    let released: (() => void) | null = null;
+    __setFrameProviderFactoryForTests(async (url: string) => {
+      providersCreated += 1;
+      return {
+        width: 1920,
+        height: 1080,
+        nominalFps: 30,
+        lastFrameLagSeconds: 0,
+        decodableEndSeconds: 10,
+        // Never settles until the test lets it — the exact shape of the failure being guarded.
+        getFrame: () => new Promise<CanvasImageSource | null>((resolve) => {
+          released = () => resolve(null);
+        }),
+        dispose() {
+          disposed.push(url);
+        },
+      } satisfies FrameProvider;
+    });
+
+    const wedgedBefore = getWcPoolStats().wedgeTimeouts;
+    let hostPreempted = false;
+    let joinerPreempted = false;
+    const a = acquirePreviewFrameProvider(URL_W, { onPreempted: () => { hostPreempted = true; } });
+    const b = acquirePreviewFrameProvider(URL_W, { onPreempted: () => { joinerPreempted = true; } });
+    const providerA = await a!.ready;
+    const providerB = await b!.ready;
+    eq(getWcPoolStats().sharedActive, 1, "both leases share one session before the wedge");
+
+    // BOTH members must come back. A backstop that frees only the caller who happened to trip it
+    // leaves every sharer hanging on a call the owner already gave up on — and the pool would read
+    // healthy while the comp is frozen, which is worse than no backstop at all.
+    const [frameA, frameB] = await Promise.all([providerA!.getFrame(1), providerB!.getFrame(1)]);
+    eq(frameA, null, "a decode that never settles resolves null at the deadline rather than hanging");
+    eq(frameB, null, "…and so does the SHARER awaiting the same pending promise");
+    eq(getWcPoolStats().wedgeTimeouts, wedgedBefore + 1, "the timeout is counted once for the session, not once per member");
+    eq(hostPreempted, true, "the wedge tears the session down as a preemption, so members are notified");
+    eq(joinerPreempted, true, "…every member, not just the one that tripped it");
+    assert(disposed.includes(URL_W), "a decoder that stopped answering is DISPOSED, never parked warm for the next lease");
+    eq(getWcPoolStats().sharedActive, 0, "the wedged session is gone from the pool");
+
+    // Recovery is the whole point: a re-acquire must build a fresh session, not inherit the dead one.
+    providersCreated = 0;
+    __setFrameProviderFactoryForTests(async (url: string) => stubProvider(url));
+    const fresh = acquirePreviewFrameProvider(URL_W, {});
+    const freshProvider = await fresh!.ready;
+    eq(providersCreated, 1, "re-acquiring after a wedge creates a NEW provider");
+    assert((await freshProvider!.getFrame(1)) !== null, "…and it serves frames again");
+    fresh!.release();
+    a!.release();
+    b!.release();
+    released?.(); // let the abandoned promise finish so node's event loop stays clean
+    __setWedgeTimeoutForTests(null);
   }
 }
 

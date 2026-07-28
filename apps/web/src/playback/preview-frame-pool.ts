@@ -192,6 +192,76 @@ let initFailures = 0;
 let preemptions = 0;
 let shared = 0;
 let shareDetaches = 0;
+let wedgeTimeouts = 0;
+
+/**
+ * BACKSTOP for a `getFrame` that never settles (2026-07-28).
+ *
+ * Every other bound in this path sits ABOVE the decode and cannot interrupt it:
+ * `WC_INIT_TIMEOUT_MS` 4000 covers init, `WC_BUSY_WEDGE_MS` 3000 DETECTS a stuck call, the catch-up
+ * hold caps at `WC_HOLD_MAX_MS` 5000, and the decoder's own flush races a 5s timeout. None of them can
+ * end a decode already in flight. `serializeFrameProvider` then chains every later call behind it, so
+ * one non-settling promise blocks the provider forever — and the `busyWedge` heal cannot recover it,
+ * because the re-request it issues queues behind the very call that is stuck. The heal counter
+ * increments, the layer clears its busy flag, and the picture stays dead: a freeze that reports itself
+ * as handled.
+ *
+ * v32l widened the blast radius. Members of a shared session await the SAME `session.pending` promise,
+ * so one wedged decode now takes the host clip and the Flarex loader together — the whole comp rather
+ * than one node. That cost was not accounted for when sharing shipped.
+ *
+ * 10s, deliberately far above every bound listed above: this must fire only when all of them have
+ * already had their chance and failed. It is a last resort, not a latency control — a slow decode is
+ * the layer-level wedge heal's business, and a >3s decode that later recovered has been observed in
+ * the wild. Firing this on merely-slow media would tear down healthy sessions to fix nothing.
+ */
+let getFrameWedgeTimeoutMs = 10_000;
+
+/**
+ * TEST SEAM (`wcpool:test`). The gate has to prove the backstop fires and that the session recovers,
+ * and it cannot spend 10s per assertion doing it. Passing null restores the production value.
+ */
+export function __setWedgeTimeoutForTests(ms: number | null): void {
+  getFrameWedgeTimeoutMs = ms ?? 10_000;
+}
+
+/**
+ * Bound one decode. Resolves `null` at the deadline — never rejects, because every caller already
+ * handles a null frame (that is the decoder-bailed path) and a rejection here would surface as an
+ * unhandled error in the rAF loop.
+ *
+ * On timeout the session is torn down as a PREEMPTION, reusing the one teardown that already gets
+ * ordering right (notify-then-dispose, every member's `onPreempted` before the provider dies). A
+ * decoder that has not answered in 10s is not slow, it is broken; parking it warm for reuse would
+ * hand the next lease the same wedged decoder. Members fall back or re-acquire and get a fresh one.
+ *
+ * The raw promise is deliberately left running. It cannot be cancelled, and attaching to it after the
+ * fact only risks resolving a frame from a decoder that has since been disposed — which the member
+ * path already guards with its `session.provider !== provider` identity check.
+ */
+function guardWedge(session: SharedSession, raw: Promise<CanvasImageSource | null>): Promise<CanvasImageSource | null> {
+  return new Promise<CanvasImageSource | null>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      wedgeTimeouts += 1;
+      try {
+        tearDownSession(session, "preempt");
+      } catch {
+        /* teardown must never turn a stalled frame into a thrown one */
+      }
+      resolve(null);
+    }, getFrameWedgeTimeoutMs);
+    const finish = (frame: CanvasImageSource | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(frame);
+    };
+    raw.then(finish, () => finish(null));
+  });
+}
 let sharedFramesServed = 0;
 let sharedFrameHits = 0;
 
@@ -575,7 +645,12 @@ function memberProvider(session: SharedSession, member: SharedMember): FrameProv
         if (counts) sharedFrameHits += 1;
         frame = memo.frame;
       } else {
-        const run = provider.getFrame(sourceTimeSeconds);
+        // The GUARDED promise is what goes in `pending`, not the raw one: a second member that hits
+        // the pending path awaits this same object, so bounding it here bounds every sharer at once.
+        // Storing the raw promise would leave joiners hanging on a call the owner had already given
+        // up on — the one member protected, the rest wedged, which is worse than nobody protected
+        // because the pool would look healthy.
+        const run = guardWedge(session, provider.getFrame(sourceTimeSeconds));
         session.pending = { time: sourceTimeSeconds, promise: run };
         frame = await run;
         if (session.pending?.promise === run) session.pending = null;
@@ -920,6 +995,13 @@ export interface WcPoolStats {
    */
   sharedFramesServed: number;
   sharedFrameHits: number;
+  /**
+   * Decodes killed by `GET_FRAME_WEDGE_TIMEOUT_MS`. Expected to be 0 forever — this is the backstop
+   * for a case never yet observed in the wild. A NON-zero value is the interesting reading: it means
+   * a decoder genuinely stopped answering, which is the permanent-freeze scenario the timeout exists
+   * to convert into a recoverable one. Distinct from `preemptions`, which counts slot pressure.
+   */
+  wedgeTimeouts: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -937,6 +1019,7 @@ export function getWcPoolStats(): WcPoolStats {
     shareDetaches,
     sharedFramesServed,
     sharedFrameHits,
+    wedgeTimeouts,
     active: activeSessions,
     activeSoftware: activeSoftwareSessions,
     idle: idle.length,
