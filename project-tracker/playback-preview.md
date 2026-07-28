@@ -1516,3 +1516,35 @@ outlier case, and the recipe's own 12-frame cadence (re-proxying our own output 
 **Open.** The element-path hand-off itself is untouched: an asset whose GOP probe returns `null` and
 is genuinely sparse still lands there. Now that seek cost is actually measured, `preferNativeDecode`
 could consult it instead of inferring from `proxyUrl` — deferred, not attempted here.
+
+## v32k — one latch for two stall types: RECOVERED/STALLED alternating every frame (2026-07-28)
+
+**Symptom.** With `?flarexProfile=1` during playback, the console filled with `media RECOVERED` /
+`media STALLED` pairs for the same source on consecutive frames, each carrying a `heldFrames` count
+that kept CLIMBING (20f → 21f → 22f). GPU 1.3ms / CPU 3.3ms throughout — the frame itself was fast.
+
+**Cause.** `noteMediaSource` warns about two different stall types and latched both on ONE
+`stallWarned` flag. Their end conditions are not the same:
+
+  - version-HELD stall — the decoder delivers frames but the same `frameVersion`. Ends when the
+    version advances.
+  - NO-FRAME stall (`LOST SOURCE`) — the decoder delivers nothing. Ends when a frame arrives.
+
+The recovery branch sat under `if (hasFrame)` and cleared the shared latch. But `hasFrame` is TRUE
+for the entire duration of a version-held stall — that is what distinguishes it from the no-frame
+case — so every frame it un-latched a stall that had not ended, and the re-warn fired ~15 lines
+later in the SAME invocation, since `heldFrames` was never reset. A self-sustaining log loop.
+
+**Fix.** Two latches. `stallWarned` recovers where the version-held run actually ends — the
+`frameVersion !== lastVersion` branch, which already resets `heldFrames`. `lostWarned` recovers on
+`hasFrame`, gated on `noFrameFrames > 0` so it can only speak about a no-frame run.
+
+**Rule.** *A latch belongs to the condition that ends it, not to the code that noticed it.* One flag
+serving two predicates is safe only while the predicates share a terminator; these never did, and
+the failure was invisible until a source stalled long enough to cross the 20-frame threshold while
+still delivering frames — exactly the case a proxied-but-starved decoder produces.
+
+**Note.** The underlying stall this exposed is REAL and separate: `heldFrames` climbing means a
+source genuinely served no new version for ~360ms. Diagnosis of that continues; this entry is only
+about the instrument that was making it unreadable. Not fingerprint-affecting —
+`frame-profiler.ts` is not in `RENDER_FINGERPRINT_SOURCES`, so no proxy is invalidated.

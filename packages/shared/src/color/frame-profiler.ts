@@ -131,7 +131,12 @@ class FrameProfiler {
   // ── Media-supply attribution (per source frame delivery) ─────────────────────────────────────────
   /** Cross-frame per-source decode state — persists across `beginFrame` resets (like `prevHashes`).
    *  A freeze IS a source whose `frameVersion` stops advancing while the clock (recording) runs. */
-  private mediaState = new Map<string, { lastVersion: number; lastAdvanceAt: number; heldFrames: number; noFrameFrames: number; noFrameStartAt: number; everAdvanced: boolean; everHadFrame: boolean; stallWarned: boolean }>();
+  // TWO latches, not one (2026-07-28). A single `stallWarned` served both warn types, and their end
+  // conditions are different: a version-HELD stall ends when the version advances, a NO-FRAME stall
+  // ends when a frame arrives. Clearing the shared latch on `hasFrame` therefore un-latched an active
+  // version-held stall that had not ended, and the re-warn fired in the same call — RECOVERED and
+  // STALLED alternating every frame with `heldFrames` still climbing. See project-tracker v32k.
+  private mediaState = new Map<string, { lastVersion: number; lastAdvanceAt: number; heldFrames: number; noFrameFrames: number; noFrameStartAt: number; everAdvanced: boolean; everHadFrame: boolean; stallWarned: boolean; lostWarned: boolean }>();
   /** Sources observed THIS frame (reset each frame) — snapshot of their delivery state for the report. */
   private mediaSeen: { id: string; version: number; hasFrame: boolean; heldFrames: number; heldMs: number; everAdvanced: boolean }[] = [];
 
@@ -276,9 +281,16 @@ class FrameProfiler {
     const t = now();
     let st = this.mediaState.get(id);
     if (!st) {
-      st = { lastVersion: frameVersion, lastAdvanceAt: t, heldFrames: 0, noFrameFrames: 0, noFrameStartAt: 0, everAdvanced: false, everHadFrame: hasFrame, stallWarned: false };
+      st = { lastVersion: frameVersion, lastAdvanceAt: t, heldFrames: 0, noFrameFrames: 0, noFrameStartAt: 0, everAdvanced: false, everHadFrame: hasFrame, stallWarned: false, lostWarned: false };
       this.mediaState.set(id, st);
     } else if (frameVersion !== st.lastVersion) {
+      // A NEW frame version IS the end of a version-held stall — the only thing that is. Recovery is
+      // announced here, where the run actually ends, rather than from the `hasFrame` branch below
+      // (which stays true throughout a held stall and so can never mark its end).
+      if (st.stallWarned) {
+        this.warnEdge(`media RECOVERED: ${this.shortId(id)} — after ${st.heldFrames}f / ${Math.round(t - st.lastAdvanceAt)}ms held`);
+        st.stallWarned = false;
+      }
       st.lastVersion = frameVersion;
       st.lastAdvanceAt = t;
       st.heldFrames = 0;
@@ -292,10 +304,14 @@ class FrameProfiler {
     // real freeze, so LOST SOURCE only fires past the threshold (no more false alarms on seeks).
     if (hasFrame) {
       st.everHadFrame = true;
-      if (st.noFrameFrames > 0 || st.stallWarned) {
-        if (st.stallWarned) this.warnEdge(`media RECOVERED: ${this.shortId(id)} — after ${st.noFrameFrames > 0 ? `${st.noFrameFrames}f / ${Math.round(t - st.noFrameStartAt)}ms no-frame` : "stall"}`);
+      if (st.noFrameFrames > 0) {
+        // A frame arriving ends a NO-FRAME run, and only that. It says nothing about whether the
+        // version is advancing, so it must not touch `stallWarned`.
+        if (st.lostWarned) {
+          this.warnEdge(`media RECOVERED: ${this.shortId(id)} — after ${st.noFrameFrames}f / ${Math.round(t - st.noFrameStartAt)}ms no-frame`);
+          st.lostWarned = false;
+        }
         st.noFrameFrames = 0;
-        st.stallWarned = false;
       }
     } else {
       if (st.noFrameFrames === 0) st.noFrameStartAt = t;
@@ -314,8 +330,8 @@ class FrameProfiler {
     } else if (!hasFrame && st.everHadFrame && st.noFrameFrames >= LOST_FRAMES) {
       // Delivered NO frame for a perceptible span — the decoder was dropped/preempted (mode:"none" lane).
       this.bump("media.lostSource");
-      if (!st.stallWarned) {
-        st.stallWarned = true;
+      if (!st.lostWarned) {
+        st.lostWarned = true;
         this.warnEdge(`media LOST SOURCE: ${this.shortId(id)} — no frame for ${st.noFrameFrames}f / ${Math.round(t - st.noFrameStartAt)}ms (decoder dropped/preempted)`);
       }
     } else if (hasFrame && !st.everAdvanced && st.heldFrames >= 20) {
