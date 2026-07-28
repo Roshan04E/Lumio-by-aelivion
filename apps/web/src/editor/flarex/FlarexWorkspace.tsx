@@ -34,7 +34,7 @@ import { rebuildSourceProxy } from "../performance/sourceProxyEngine";
 import { FlarexNodeIcon } from "./flarex-node-icons";
 import { FlarexNodeBrowser } from "./FlarexNodeBrowser";
 import { FlarexProxyButton } from "./FlarexProxyButton";
-import { FlarexNodeCanvas, flarexPaletteDrag, nextNodePosition } from "./FlarexNodeCanvas";
+import { FlarexNodeCanvas, flarexPaletteDrag, flarexTraceDragStart, nextNodePosition } from "./FlarexNodeCanvas";
 import { FLAREX_PINNED_NODES, alignFlarexNodes, type FlarexAlignMode } from "./flarex-canvas-model";
 
 /** F5.2: align/distribute toolbar buttons — pure position math via `alignFlarexNodes`. */
@@ -280,6 +280,7 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
                   draggable
                   onDragStart={(e) => {
                     flarexPaletteDrag.current = type;
+                    flarexTraceDragStart(type);
                     e.dataTransfer.setData("text/plain", type); // required by some browsers to start a drag
                     e.dataTransfer.effectAllowed = "copy";
                   }}
@@ -337,6 +338,7 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
                 // drags and splices identically to one that happened to earn a toolbar icon.
                 onDragStartType={(type) => {
                   flarexPaletteDrag.current = type;
+                  flarexTraceDragStart(type);
                   setBrowseDragging(true);
                 }}
                 onDragEndType={() => {

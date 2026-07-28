@@ -71,6 +71,46 @@ const flarexClipboard: { current: { compId: string; nodes: FlarexNode[]; edges: 
  *  it on dragstart and clears it on dragend. */
 export const flarexPaletteDrag: { current: FlarexNodeType | null } = { current: null };
 
+/**
+ * DRAG PATH INSTRUMENT (`window.__rfFlarexDrag`). Drag-from-menu failed twice, and both diagnoses were
+ * reasoning about the code rather than watching it — a backdrop nobody could see, then an unmount that
+ * cancelled the drag. The stages are independent and each one fails silently, so counting them says
+ * which link is broken instead of which link seems suspicious:
+ *
+ *   start 0            → the drag never began (source element, CSS, or a preventDefault on pointerdown)
+ *   start>0, over 0    → the canvas never saw it (something above it owns the pointer)
+ *   over>0, drop 0     → dragover ran but did not ALLOW the drop (missing preventDefault / dropEffect)
+ *   drop>0, inserted 0 → the drop landed and the insertion logic rejected it
+ *
+ * Published unconditionally so its presence also proves the running bundle contains this code — the
+ * check that was missing when a stale build voided a full measurement round earlier today.
+ */
+export interface FlarexDragTrace {
+  start: number;
+  over: number;
+  drop: number;
+  inserted: number;
+  lastType: string | null;
+  lastStage: string;
+}
+/** Exported so the toolbar palette and Browse popover report into the same counters — comparing a
+ *  WORKING drag source against a broken one is the whole point of the instrument. */
+export function flarexTraceDragStart(type: string): void {
+  traceDrag("start", type);
+}
+function traceDrag(stage: keyof Omit<FlarexDragTrace, "lastType" | "lastStage">, type?: string | null): void {
+  if (typeof window === "undefined") return;
+  const w = window as unknown as { __rfFlarexDrag?: FlarexDragTrace };
+  const t = (w.__rfFlarexDrag ??= { start: 0, over: 0, drop: 0, inserted: 0, lastType: null, lastStage: "none" });
+  t[stage] += 1;
+  t.lastStage = stage;
+  if (type !== undefined) t.lastType = type;
+}
+if (typeof window !== "undefined") {
+  const w = window as unknown as { __rfFlarexDrag?: FlarexDragTrace };
+  w.__rfFlarexDrag ??= { start: 0, over: 0, drop: 0, inserted: 0, lastType: null, lastStage: "none" };
+}
+
 /** Last node type inserted via the F1 search menu (any tab) — shown first in the menu next time,
  *  a small memory that saves re-typing the same query repeatedly (F6.3). Session-lifetime only. */
 
@@ -1171,6 +1211,7 @@ export function FlarexNodeCanvas({
   const onDragOver = (event: React.DragEvent) => {
     const type = flarexPaletteDrag.current;
     const isAsset = event.dataTransfer.types.includes(ASSET_DRAG_MIME);
+    traceDrag("over", type);
     if (!type && !isAsset) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
@@ -1194,6 +1235,7 @@ export function FlarexNodeCanvas({
 
   const onDrop = (event: React.DragEvent) => {
     const type = flarexPaletteDrag.current;
+    traceDrag("drop", type);
     setPaletteHover(null);
     const assetId = type ? "" : event.dataTransfer.getData(ASSET_DRAG_MIME);
     if (!type && !assetId) return;
@@ -1218,6 +1260,7 @@ export function FlarexNodeCanvas({
     }
 
     const edgeId = hitTestWire(c, v, sx, sy);
+    traceDrag("inserted", type);
     onUpdateComp((current) => {
       const node = createFlarexNode(type, id, Math.round(wx - NODE_W / 2), Math.round(wy - 18));
       const withNode: FlarexComp = { ...current, nodes: { ...current.nodes, [id]: node } };
@@ -1429,6 +1472,7 @@ export function FlarexNodeCanvas({
             // (drop, or splice when released on a wire).
             onDragStartType={(type) => {
               flarexPaletteDrag.current = type;
+              traceDrag("start", type);
               setMenuDragging(true);
             }}
             onDragEndType={() => {
