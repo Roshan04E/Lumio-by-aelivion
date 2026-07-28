@@ -1410,3 +1410,57 @@ invisible hole described above.
 
 Gates: `typecheck` clean, `coherence:test` 5666/5666, `fullres:test` 203/203, `wcpool:test` 22/22.
 Trace now prints `WAIT` for an awaiting video, distinct from `—` for a time-invariant source.
+
+## v32h — hidden-tab confound in the coherence stats + hold clocks (2026-07-28)
+
+A soak report showed 6170 escape hatches (6153 write-offs) over 14713 composites, alongside three
+`tab was HIDDEN` throttle notices, one of 29.7s. A background tab has its media decode suspended, so
+no source CAN converge while hidden — those write-offs were inevitable and measured nothing about the
+barrier. Same class of error the stall watchdog had hours earlier, in a different instrument (the
+seventh this investigation).
+
+Not only a reporting bug. The per-source write-off clocks and the episode clock kept running across
+the hidden stretch, so the first composite after returning found every budget already spent, fired the
+hatch immediately, and presented the sources independently — the exact symptom the barrier exists to
+prevent, reappearing precisely when the user looks at the tab again. That matches the reported
+"after ~5 minutes it starts presenting independently".
+
+Fix: `noteCoherence` skips composites while `document.visibilityState === "hidden"`, and a
+`visibilitychange` listener clears `staleSince` / `notReadySince` / the coherence episode clock / the
+full-res pending clock on becoming visible. **Elapsed wall time is only a fair budget when it was time
+the source could have used.**
+
+**Decoder churn is EXCLUDED as a cause** of the soak degradation, by measurement: after five minutes of
+hard scrubbing `__rfWcPool` read `created: 14, reused: 32, initFailures: 0, preemptions: 0,
+capMisses: 2`. A degraded-session trace of a single ruler click was still fully coherent (5 composites
+HELD, then `shown` at 61ms with every source at 0), so the residual write-offs belong to CONTINUOUS
+rapid scrubbing — where the playhead keeps moving and the hatch firing is the designed degradation —
+not to a broken gate.
+
+## v32i — Flarex merge blend modes were silently discarded (2026-07-28)
+
+**Symptom (user):** a `screen` merge over a black smoke plate drew an opaque black rectangle; no blend
+mode had any effect.
+
+**Cause.** `SceneCompositor.renderGroupInto` sets `nestMode = true` before rendering a group's
+children, and `nestMode`'s only effect is forcing every child to `blendMode: "normal"`. That is the
+PRECOMPOSE model and it is correct for a compound clip — a nested clip's blend describes how the
+finished nest meets the OUTER scene, not how its own layers meet each other. A Flarex `merge` compiles
+to exactly the same shape (`group{ children: [bg, fg] }` with the blend on `fg`), but there the blend
+IS the node's operation between its two inputs, so suppressing it degraded every merge to `normal`.
+
+**Fix.** `SceneGroupDraw.preserveChildBlend`, set only by the Flarex compiler on merge groups;
+`renderGroupInto` uses `nestMode = !draw.preserveChildBlend`. Timeline nests, transition precompose
+and the per-layer pass nests all keep precompose semantics, so export output is unchanged everywhere
+except Flarex merges — which were wrong.
+
+**Rule.** *Two constructs sharing a lowering shape do not share its semantics.* Reusing
+`SceneGroupDraw` for both a precomposed nest and a merge was right; inheriting the nest's blend policy
+with it was not. When one IR node serves two intents, the intent has to travel with it.
+
+**Gate.** `flarex:test` now asserts `out.preserveChildBlend === true` on a merge group — the opt-out
+itself, not just the blend value it protects, since the value was already being set correctly and
+thrown away downstream. NOT verified at pixel level here: `render:compare:pixels` needs a browser
+channel, and the `flarex-merge-blend` fixture PNGs in `tmp/render-comparison/` were regenerated while
+this bug was live, so they may encode the broken output and need re-baselining before that gate means
+anything.

@@ -335,6 +335,11 @@ function groupDepth(draw: SceneDraw | null): number {
   ];
   const out = compileFlarexComp(comp, lowerCtx());
   check("merge lowers to a group with 2 children", isGroupDraw(out) && out.children.length === 2);
+  // Setting the blend on `fg` is NOT sufficient: the compositor's precompose rule renders every child
+  // of a group as NORMAL, which silently degraded every merge mode to `normal` (a `screen` over a
+  // black smoke plate drew an opaque black rectangle). The blend is only carried out if the group
+  // ALSO opts out of that rule, so assert the opt-out, not just the value it protects.
+  check("merge group preserves child blend", isGroupDraw(out) && out.preserveChildBlend === true);
   if (isGroupDraw(out)) {
     const fg = out.children[1]!;
     check("fg carries the keyer fragment pass", isGroupDraw(fg) && (fg.shell.fragmentPasses?.length ?? 0) === 1);

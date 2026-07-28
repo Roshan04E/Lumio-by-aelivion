@@ -1075,6 +1075,11 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           nestWidth: nestW,
           nestHeight: nestH,
           shell: identityShell(),
+          // The blend set on `fg` above IS this node's operation, so it must survive into the group's
+          // RTT. Without this the compositor applies the precompose rule (everything NORMAL inside a
+          // nest) and every merge mode silently degrades to `normal` — `screen` over a black smoke
+          // plate drew an opaque black rectangle. Correct for a compound clip, wrong for a merge.
+          preserveChildBlend: true,
           __flarexStage: 0,
         };
         return { kind: "image", draw: merged };

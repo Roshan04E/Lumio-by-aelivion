@@ -282,6 +282,23 @@ export interface SceneGroupDraw {
    *  `pipeline` is set; falls back to `debugGroupId`. */
   groupKey?: string | undefined;
   /**
+   * Do this group's CHILDREN keep their own blend modes? (2026-07-28)
+   *
+   * Default (undefined/false) is the PRECOMPOSE model: inside a nest every layer composites NORMAL,
+   * because a nested clip's blend mode describes how the finished nest meets the OUTER scene, not how
+   * the clip's own layers meet each other. That is right for a compound clip and for the per-layer
+   * pass nests.
+   *
+   * It is wrong for a Flarex `merge`, which compiles to exactly the same shape — a group of
+   * `[bg, fg]` where `fg` carries the blend — but where the blend IS the operation the node performs
+   * between its two inputs. Suppressing it made every merge composite NORMAL: `screen` over a black
+   * smoke plate drew an opaque black rectangle instead of keying the smoke out.
+   *
+   * Set only by the Flarex compiler on merge groups. Everything else keeps precompose semantics, so
+   * timeline nests and export output are byte-identical to before this field existed.
+   */
+  preserveChildBlend?: boolean | undefined;
+  /**
    * Runtime evaluation identity of the node whose output this group materializes (Flarex evaluation
    * engine, Slice 1). RUNTIME-ONLY — never serialized, never read from persisted project data, and
    * distinct from the diagnostic `debugGroupId`. The compositor does NOT read this in Slice 1; it is
@@ -2702,7 +2719,10 @@ export class SceneCompositor {
     this.height = nestH;
     this.accumA = target;
     this.accumB = scratch;
-    this.nestMode = true;
+    // `nestMode`'s ONLY effect is suppressing child blend modes (see its read sites). The precompose
+    // model is right for a compound clip, and wrong for a Flarex merge whose children's blend IS the
+    // node's operation — so a merge group opts out. See `preserveChildBlend`.
+    this.nestMode = !draw.preserveChildBlend;
     for (const rt of [target, scratch]) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
       gl.viewport(0, 0, nestW, nestH);

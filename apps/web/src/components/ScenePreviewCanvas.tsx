@@ -264,6 +264,12 @@ function noteCoherence(
   if (typeof window === "undefined") return;
   const w = window as { __flarexCoherence?: CoherenceStats };
   const s = (w.__flarexCoherence ??= createCoherenceStats());
+  // HIDDEN TAB (2026-07-28). The browser suspends media decode in a background tab, so no source can
+  // converge and every composite would score as a write-off — measured 6153 of them across a session
+  // containing a 29.7s hidden stretch. Counting that is not a measurement of the barrier, it is a
+  // measurement of the tab being in the background. Same error the stall watchdog had; different
+  // instrument.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
   s.composites += 1;
   if (s.traceRemaining && s.traceRemaining > 0) {
     s.traceRemaining -= 1;
@@ -533,6 +539,29 @@ export function ScenePreviewCanvas({
   const fullResCommittedRef = useRef(false);
   /** Wall time the current "waiting for upgrades" episode began (null = nobody pending). */
   const fullResPendingSinceRef = useRef<number | null>(null);
+  /**
+   * RETURNING FROM A HIDDEN TAB (2026-07-28) — restart every hold clock, do not resume them.
+   *
+   * A background tab has its media decode suspended, so time spent hidden is time in which no source
+   * COULD converge. Left alone, the per-source write-off clocks and the episode clock keep running
+   * across it, so the first composite after you come back finds every budget already spent, fires the
+   * escape hatch immediately, and presents the sources independently — the exact symptom the barrier
+   * exists to prevent, reappearing precisely when the user looks at the tab again.
+   *
+   * Elapsed wall time is only a fair budget when it was time the source could have used.
+   */
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      staleSinceRef.current.clear();
+      notReadySinceRef.current.clear();
+      coherenceHoldStartRef.current = null;
+      fullResPendingSinceRef.current = null;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
   // Wall time each currently-stale source was first seen stale — the per-source write-off clock.
   // Kept SEPARATE from `notReadySinceRef` even though both are "how long has this blocked": that map
   // is pruned against `notReadyIds` and its caps are chosen per layer TYPE, while this one is pruned
