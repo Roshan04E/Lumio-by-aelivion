@@ -1633,3 +1633,27 @@ invalidated, export/worker output byte-identical.
 scope: if a software loader mounts first, the hardware consumer creates its own session, which is
 the status quo and no regression. In practice the host mounts first. Plan:
 `plans/decoder-session-sharing.md`.
+
+**Verified live (2026-07-28).** Both rows of the duplicated asset read `wc-hw` / `shared: 1` /
+`staleMs 0` — the loader asked for software, attached to the host's hardware session, and got
+hardware frames. `created: 3` where it was 4, `shareDetaches: 0`. Over 20s of playback:
+`sharedFramesServed: 12568`, `sharedFrameHits: 11816` → **752 real decodes**, i.e. ~one decode per
+source frame (30fps × 20s ≈ 600, plus seek catch-up) feeding two consumers.
+
+The 94% hit rate is far above the (N−1)/N = 50% ceiling predicted from "one call per member per
+timestamp" — that model was wrong. The rAF loop and the coherence gate RE-POLL the same timestamp
+while a frame is held, so a member issues several calls per presented frame and every repeat is a
+hit. The memo therefore absorbs ~11.8k redundant provider calls per 20s on top of freeing the slot,
+which was not the stated goal and is the larger share of the win.
+
+**Instrument that had to be fixed first.** Two readings were taken before this could be judged, and
+neither could answer the question: `__rfWcMode`/`__rfSourceMap` derived `decode` from
+`preferSoftwareDecode` — the REQUEST. A loader attached to a hardware session asks for software and
+gets hardware, so a working share still printed `wc-hw` + `wc-sw`, identical to a broken one. A
+consumer cannot know its own decode mode; it asks, the pool decides. The lease now exposes the real
+session live, plus `sharedWith`. *Rule: an instrument that reports the input to a decision cannot
+verify the decision.*
+
+A third reading was lost to a stale bundle — `'shared' in __rfWcPool` was false, i.e. the running
+build predated the change. Same lesson as the react-dom.development episode: check the build IS the
+build before interpreting a measurement, and prefer a presence test for a symbol the new code adds.
