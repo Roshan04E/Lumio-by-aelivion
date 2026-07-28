@@ -24,6 +24,42 @@ const diffSummaryPath = path.join(artifactDir, "summary.json");
 const diffThreshold = Number(process.env.PIXEL_DIFF_THRESHOLD ?? 0.16);
 const maxDiffRatio = Number(process.env.PIXEL_MAX_DIFF_RATIO ?? 0.035);
 
+// PER-FIXTURE BARS (2026-07-28). One global 3.5% has to be sized for the LOOSEST fixture in the
+// sweep, which leaves it meaningless for the tight ones. Measured: the whole visual footprint of the
+// v32i merge-blend fix was 1.43%, so the ASYMMETRIC form of that bug — the fix reaching one renderer
+// and not the other — would have read 1.43% < 3.5% and PASSED on the very fixture built to catch it.
+// A fixture's bar should reflect what that fixture actually achieves, not the worst case anywhere.
+//
+// Values are set from an observed full sweep with real headroom, never just above the reading: every
+// entry here measured 0.000% (0-3 pixels of 2073600), so 0.5% leaves ~10000 pixels of slack. The
+// web-preview capture is not byte-deterministic run to run (see v32m: max channel delta 8/255), but
+// that jitter sits under pixelmatch's perceptual `threshold` and contributes ~0 differing pixels.
+//
+// Deliberately NOT listed: `flarex-generators` (0.691% — procedural generator noise is genuinely
+// non-deterministic across renderers) and `advanced-transition` (3.131%, already at 89% of the global
+// budget). Both keep the loose global bar until someone investigates why they need it.
+//
+// An explicit PIXEL_MAX_DIFF_RATIO overrides every per-fixture bar — the escape hatch for a machine
+// whose GPU rasterizes differently enough to make the tight bars flaky.
+const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> = {
+  "flarex-key-glow": 0.005,
+  "flarex-curves": 0.005,
+  "flarex-keyframed-blur": 0.005,
+  "flarex-merge-blend": 0.005,
+  "flarex-transform": 0.005,
+  "flarex-ellipse-matte": 0.005,
+  "flarex-reroute": 0.005,
+  "flarex-multi-in": 0.005,
+  "flarex-color-chain": 0.005,
+  "flarex-unified-color": 0.005,
+  "flarex-filter-stack": 0.005
+};
+
+function barFor(key: RenderComparisonFixtureKey): number {
+  if (process.env.PIXEL_MAX_DIFF_RATIO) return maxDiffRatio;
+  return fixtureMaxDiffRatio[key] ?? maxDiffRatio;
+}
+
 // Which render path the harness exercises (default: the unified WebGL path — the one this
 // comparison was built to verify). `legacy` re-checks the pre-WebGL DOM path for regressions.
 const rendererMode: "legacy" | "webgl" = process.env.RENDERER_MODE === "legacy" ? "legacy" : "webgl";
@@ -96,18 +132,34 @@ async function main() {
     const renderFramePath = stills.get(key)!;
     const previewFramePath = previews.get(key)!;
     const diffFramePath = path.join(artifactDir, `diff-${key}.png`);
-    const summary = comparePngs(renderFramePath, previewFramePath, diffFramePath);
+    const bar = barFor(key);
+    const summary = comparePngs(renderFramePath, previewFramePath, diffFramePath, bar);
     results.push({ fixture: key, renderFramePath, previewFramePath, diffFramePath, ...summary });
     const pct = (summary.diffRatio * 100).toFixed(3);
     console.log(`[${key}] diff ${pct}% (${summary.diffPixels}/${summary.totalPixels}) → ${diffFramePath}`);
-    if (summary.diffRatio > maxDiffRatio) {
-      failures.push(`${key}: ${pct}% > ${(maxDiffRatio * 100).toFixed(3)}%`);
+    if (summary.diffRatio > bar) {
+      failures.push(`${key}: ${pct}% > ${(bar * 100).toFixed(3)}%`);
     }
   }
 
+  // MERGE, don't replace. `PIXEL_FIXTURES=<one>` used to rewrite the summary with only the fixture it
+  // ran, silently discarding the other 52 entries — a scoped run is a narrower question about the
+  // same sweep, not a new sweep. Entries this run re-measured win; entries it did not touch survive.
+  // A `rendererMode` change DOES invalidate the rest, since the old results describe a different
+  // render path, so that case starts clean.
+  const previous = readPreviousResults();
+  const merged = new Map<string, FixtureResult>();
+  for (const result of previous) merged.set(result.fixture, result);
+  for (const result of results) merged.set(result.fixture, result);
+  const mergedResults = [...merged.values()];
+
   fs.writeFileSync(
     diffSummaryPath,
-    `${JSON.stringify({ rendererMode, maxDiffRatio, threshold: diffThreshold, results }, null, 2)}\n`
+    `${JSON.stringify(
+      { rendererMode, maxDiffRatio, threshold: diffThreshold, results: mergedResults },
+      null,
+      2
+    )}\n`
   );
 
   if (failures.length) {
@@ -179,7 +231,24 @@ async function capturePreviewFrame(url: string, outputPath: string) {
   }
 }
 
-function comparePngs(renderPath: string, previewPath: string, diffPath: string) {
+// Reads the results of the previous sweep so a scoped run can merge into them rather than replace
+// them. Any unreadable/malformed/foreign-rendererMode summary yields [] — a broken file must not fail
+// the gate, it just means this run starts from nothing.
+function readPreviousResults(): FixtureResult[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(diffSummaryPath, "utf8")) as {
+      rendererMode?: string;
+      results?: FixtureResult[];
+    };
+    if (parsed.rendererMode !== rendererMode) return [];
+    if (!Array.isArray(parsed.results)) return [];
+    return parsed.results.filter((result) => typeof result?.fixture === "string");
+  } catch {
+    return [];
+  }
+}
+
+function comparePngs(renderPath: string, previewPath: string, diffPath: string, bar: number) {
   const render = PNG.sync.read(fs.readFileSync(renderPath));
   const preview = PNG.sync.read(fs.readFileSync(previewPath));
 
@@ -198,7 +267,9 @@ function comparePngs(renderPath: string, previewPath: string, diffPath: string) 
     height: render.height,
     frameSeconds: renderComparisonFrameSeconds,
     threshold: diffThreshold,
-    maxDiffRatio,
+    // The bar this fixture was actually judged against, not the global default — otherwise the
+    // summary reports a number the gate never used.
+    maxDiffRatio: bar,
     diffPixels,
     totalPixels,
     diffRatio: diffPixels / totalPixels

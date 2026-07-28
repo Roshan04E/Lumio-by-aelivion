@@ -1709,3 +1709,40 @@ carries almost no signal. Read `summary.json` and the same-renderer pre/post com
 **Harness bug, OPEN.** A scoped `PIXEL_FIXTURES=<one>` run REPLACES `summary.json` with only the
 fixtures it ran rather than merging into the existing results — one scoped run silently discards the
 other 52 entries. Cost one such loss this session.
+
+## v32n — closing v32m's two open items: per-fixture bars, and a summary that merges (2026-07-28)
+
+**1. The bar was sized for the worst fixture, so it protected none of the good ones.** One global
+`PIXEL_MAX_DIFF_RATIO = 0.035` has to accommodate `advanced-transition` (3.131%) and
+`flarex-generators` (0.691%), which leaves 3.5% of slack in front of fixtures that actually measure
+0.000%. v32m quantified what that costs: the merge-blend fix's whole footprint is 1.43%, so the
+ASYMMETRIC form of that bug — the fix reaching one renderer and not the other — sails under the bar
+on the very fixture built to catch it.
+
+`fixtureMaxDiffRatio` now gives the eleven Flarex fixtures that measure 0.000% a 0.5% bar; everything
+else keeps the global default. Bars are set from an observed sweep WITH headroom, never just above the
+reading — 0.5% against 0–3 differing pixels is ~10000 pixels of slack, so the non-deterministic
+web-preview capture (v32m: max channel delta 8/255, below pixelmatch's perceptual threshold) cannot
+make it flaky. `flarex-generators` and `advanced-transition` are deliberately left loose rather than
+quietly exempted: they need the slack for reasons nobody has investigated, and that debt should stay
+visible. An explicit `PIXEL_MAX_DIFF_RATIO` still overrides everything, for a machine whose GPU
+rasterizes differently enough to need it.
+
+**Proved against real pixels, not arithmetic.** Diffing the PRE-fix web preview against the POST-fix
+Remotion still reconstructs exactly the asymmetric regression: **1.644%** — over the new 0.5% bar
+(caught), under the old 3.5% one (missed). The gate now fails on the bug it was written for.
+
+**Rule.** *A tolerance sized for the loosest case is not a tolerance.* When one bar covers a whole
+sweep, its value is set by the worst fixture and every other fixture silently inherits slack it never
+needed. Per-fixture bars cost a table; a shared bar costs the gate's entire purpose on the tight ones.
+
+**2. A scoped run discarded the sweep it was narrowing.** `PIXEL_FIXTURES=<one>` rewrote
+`summary.json` with only the fixtures it ran, dropping the other 52 entries — and it looked exactly
+like a legitimate summary afterward, just a much shorter one. The write now merges: entries this run
+re-measured win, entries it never touched survive. A `rendererMode` change still starts clean, since
+old results describe a different render path and merging them would be a lie. Any unreadable or
+malformed summary yields `[]` rather than failing the gate.
+
+**Verified.** Scoped `PIXEL_FIXTURES=flarex-merge-blend` run: passes at the tight bar, `summary.json`
+still holds all 53 entries, and the entry records `maxDiffRatio: 0.005` — the bar actually applied,
+not the global default it was previously reporting regardless.

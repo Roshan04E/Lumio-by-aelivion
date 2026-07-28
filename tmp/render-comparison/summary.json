@@ -628,7 +628,7 @@
       "height": 1920,
       "frameSeconds": 0.45,
       "threshold": 0.16,
-      "maxDiffRatio": 0.035,
+      "maxDiffRatio": 0.005,
       "diffPixels": 0,
       "totalPixels": 2073600,
       "diffRatio": 0
