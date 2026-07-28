@@ -208,6 +208,16 @@ const inQueue = new Set<string>();
  */
 const measuredDenseGop = new Set<string>();
 
+// Declared eagerly so `'__rfDenseGop' in window` answers "is this build current?" rather than "has
+// anything been measured yet?". A presence test that only becomes true once the feature fires cannot
+// tell an absent feature from an idle one — the failure that voided the first flarexSwDecode A/B.
+try {
+  const w = window as unknown as { __rfDenseGop?: Array<{ assetId: string; gop: string }> };
+  w.__rfDenseGop ??= [];
+} catch {
+  /* SSR / non-browser */
+}
+
 /**
  * True only if this asset's GOP was measured and found dense. False for unprobed, unmeasurable and
  * sparse sources alike — callers must treat it as "known cheap", never as "not known expensive".
@@ -226,6 +236,17 @@ export function setSourceProxyDenseGopListener(listener: ((assetId: string) => v
 function noteMeasuredDense(assetId: string, profile: GopProfile | null): void {
   if (!profile || measuredDenseGop.has(assetId)) return;
   measuredDenseGop.add(assetId);
+  // Published for diagnosis AND as this change's build-presence test. The end-to-end signal for the
+  // dense-GOP path is `__rfSourceMap` reading `wc-*` instead of `element` — but a bundle that predates
+  // the change also reads `element`, so the observable outcome cannot distinguish "not working" from
+  // "not present". Declared unconditionally at module scope below so the symbol exists even when
+  // nothing has been measured yet; an empty array and a missing global must not look alike.
+  try {
+    const w = window as unknown as { __rfDenseGop?: Array<{ assetId: string; gop: string }> };
+    (w.__rfDenseGop ??= []).push({ assetId, gop: describeGopProfile(profile) });
+  } catch {
+    /* ignore */
+  }
   try {
     denseGopListener?.(assetId);
   } catch {
