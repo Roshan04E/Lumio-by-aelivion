@@ -122,12 +122,20 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
    *  source and Chrome cancels the drag (start 3, over 0). Refs, mutated directly. */
   const browseElRef = useRef<HTMLDivElement | null>(null);
   const browseBackdropElRef = useRef<HTMLDivElement | null>(null);
+  const browsePassthroughRafRef = useRef(0);
+  /** Deferred by one frame — writing `pointer-events: none` onto the drag source's ANCESTOR during
+   *  `dragstart` cancels the drag in Chrome (measured: dragstart→dragend in 2ms, zero dragovers). */
   const setBrowseDragPassthrough = (on: boolean) => {
-    for (const el of [browseElRef.current, browseBackdropElRef.current]) {
-      if (!el) continue;
-      el.style.pointerEvents = on ? "none" : "";
-    }
-    if (browseElRef.current) browseElRef.current.style.opacity = on ? "0.35" : "";
+    cancelAnimationFrame(browsePassthroughRafRef.current);
+    const apply = () => {
+      for (const el of [browseElRef.current, browseBackdropElRef.current]) {
+        if (!el) continue;
+        el.style.pointerEvents = on ? "none" : "";
+      }
+      if (browseElRef.current) browseElRef.current.style.opacity = on ? "0.35" : "";
+    };
+    if (!on) apply();
+    else browsePassthroughRafRef.current = requestAnimationFrame(apply);
   };
   const [browsePos, setBrowsePos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   // Node thumbnails (Slice 6) — a view mode, persisted like a preference, not project data.

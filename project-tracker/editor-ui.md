@@ -519,3 +519,36 @@ of a drag. Reach for a ref.
 first two fixes were correct code changes that did not fix the reported problem, which is evidence
 about the diagnosis, not the code. Four counters found in one reading what two rounds of reading the
 source could not.
+
+**Fourth attempt, and the document-level trace named it in one reading (2026-07-28).**
+
+```
+t=15990  dragstart  button.flarex-node-menu-item "Crop"
+t=15992  dragend    button.flarex-node-menu-item "Crop"
+counts: dragstart 1 · dragend 1 · drag 0 · dragover 0 · drop 0
+lastNoisyTarget: {}
+```
+
+Two milliseconds, and **zero** `drag`/`dragover` events anywhere in the document. The drag was cancelled
+at birth, which retroactively made every earlier theory irrelevant: nothing ever got far enough to need
+a drop target, so the backdrop could not have been the live cause and neither could re-render timing.
+
+**Cause: writing `pointer-events: none` onto the drag source's ANCESTOR, synchronously, inside
+`dragstart`.** That makes the source non-hit-testable while Chrome is still establishing the drag, and
+Chrome drops it. The third fix — swapping `setState` for a ref — addressed the *mechanism* (React
+reconciliation) while preserving the *act* (mutating the source's ancestor mid-`dragstart`). It made
+the harmful write faster, not safer.
+
+Now deferred one frame via `requestAnimationFrame`. By then `dragstart` has returned and the drag is
+live, so the menu can step aside without the source mattering. Restoring is still immediate — only the
+ENABLE races the drag's birth.
+
+*Rule: the handler-level instrument can only confirm the theory you already hold.* Three rounds of
+counters on my own callbacks said "the canvas got no dragover", which is true and useless — it cannot
+distinguish "something is intercepting" from "the drag is already dead". One document-level capture
+listener, recording real targets and TIMESTAMPS, made a 2ms gap visible and the diagnosis immediate.
+The gap was the whole answer, and no amount of reading the source would have produced it.
+
+*Rule: when a fix targets the mechanism, check it also removed the act.* "Do it without re-rendering"
+and "do not do it during dragstart" are different fixes; I shipped the first believing it was the
+second.

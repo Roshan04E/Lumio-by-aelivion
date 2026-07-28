@@ -268,12 +268,33 @@ export function FlarexNodeCanvas({
    */
   const menuElRef = useRef<HTMLDivElement | null>(null);
   const backdropElRef = useRef<HTMLDivElement | null>(null);
+  const dragPassthroughRafRef = useRef(0);
+  /**
+   * MEASURED CAUSE (2026-07-28, `__rfFlarexDragLog`): `dragstart` at t=15990 followed by `dragend` at
+   * t=15992 — two milliseconds, with zero `drag`/`dragover` events anywhere in the document. The drag
+   * was cancelled at birth, so every theory about backdrops and drop targets was moot.
+   *
+   * The cause was this function, called synchronously from `dragstart`. It sets `pointer-events: none`
+   * on the menu, which is an ANCESTOR of the button being dragged; that makes the drag source
+   * non-hit-testable while Chrome is still establishing the drag, and Chrome cancels it. Moving from
+   * `setState` to a ref made the harmful write faster, not safer — the previous fix addressed the
+   * mechanism (re-render) and not the actual act (mutating the source's ancestor mid-dragstart).
+   *
+   * Deferred to the next frame: by then `dragstart` has returned, the drag is live, and the menu can
+   * step out of the way without the source mattering any more.
+   */
   const setMenuDragPassthrough = (on: boolean) => {
-    for (const el of [menuElRef.current, backdropElRef.current]) {
-      if (!el) continue;
-      el.style.pointerEvents = on ? "none" : "";
-    }
-    if (menuElRef.current) menuElRef.current.style.opacity = on ? "0.35" : "";
+    cancelAnimationFrame(dragPassthroughRafRef.current);
+    const apply = () => {
+      for (const el of [menuElRef.current, backdropElRef.current]) {
+        if (!el) continue;
+        el.style.pointerEvents = on ? "none" : "";
+      }
+      if (menuElRef.current) menuElRef.current.style.opacity = on ? "0.35" : "";
+    };
+    // Restoring is safe to do immediately; only the ENABLE races the drag's birth.
+    if (!on) apply();
+    else dragPassthroughRafRef.current = requestAnimationFrame(apply);
   };
   /** F1.3: minimal right-click-on-node context menu (Rename/Enable-Disable/Delete/View). */
   const [nodeContextMenu, setNodeContextMenu] = useState<{ sx: number; sy: number; nodeId: string } | null>(null);
