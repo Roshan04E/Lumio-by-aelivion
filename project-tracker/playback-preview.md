@@ -1880,3 +1880,28 @@ asked, and read identically to one that answered correctly.
 **Gates.** `wcpool` 59/59, `coherence` 5666/5666, `fullres` 203/203, `gop` 26/26, typecheck clean.
 Telemetry only — no decode, playback or render behaviour is touched, and no file here is in
 `RENDER_FINGERPRINT_SOURCES`.
+
+## v32r — v32p/v32q verified live (2026-07-28)
+
+**Method.** The reference comp builds all six proxies and so never reaches the dense-GOP branch. Built
+a fixture instead: 10s 1280x720 `testsrc2`, `-g 12 -keyint_min 12 -sc_threshold 0`, 3.7 MB — under the
+12 MB size gate and denser than `MAX_TOLERABLE_GOP_FRAMES`. Confirmed against the real probe before
+handing it over rather than assuming the encoder honoured the flags: `sampleCount 300, keyframeCount
+25, maxGapFrames 12, p95GapFrames 12, needsProxy false`.
+
+**v32p result.** `dense-gop-test.mp4` reads **`wc-hw`**. Pre-fix that clip has no `proxyUrl`, so
+`preferNativeDecode` would have forced the `<video>` element path; it is now on the pooled decoder
+because the probe measured it cheap. `__rfDenseGop` carries `gop p95 12f / max 12f over 300f`.
+
+**v32q result.** The table now reads `forest_1080p_30fps.mp4` / `china_view_1080p_60fps.mp4` /
+`smoke.mp4` / `dense-gop-test.mp4` where it previously showed rotating `createObjectURL` UUIDs.
+
+**The presence test earned itself.** `__rfDenseGop` read `[]` before the import and `[{…}]` after —
+proving the build was current BEFORE any measurement existed. Without that, an `element` reading would
+have been ambiguous between "fix not working" and "fix not present", which is precisely how the first
+`flarexSwDecode` A/B was lost. Third instrument in three days whose value was in distinguishing absent
+from idle.
+
+**Open.** `dense-gop-test.mp4` read `state: stale, staleMs: 415` while every other source read `ok / 0`
+— the only stale row, and it is the clip on the new path. Plausibly a just-added clip off the playhead
+with a warming decoder, but unconfirmed. Follow-up: does it settle to `ok` under sustained playback?
