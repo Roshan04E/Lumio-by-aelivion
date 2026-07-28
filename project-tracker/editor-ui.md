@@ -351,3 +351,61 @@ Also spotted but NOT changed (flagging, per the same directive): `scene-composit
 key their re-bake on a raw `JSON.stringify(pipeline)` **every frame**, while `pipeline.ts:314`
 `colorPipelineCacheKey` exists specifically to memoize that byte-identically. Same bug class, already
 diagnosed once in this repo.
+
+## Flarex node insertion: placement and drag-to-place (2026-07-28)
+
+**Two gaps, both user-reported.** `insertNodeFromMenu` always placed the new node at the MENU
+position — the cursor. For a keyboard-driven add (Tab, type a name, Enter) that dropped it wherever
+the pointer happened to be resting, frequently on top of existing nodes and rarely near the node it
+had just been auto-wired to. And the searchable browser was click-only, while the toolbar palette
+beside it had been draggable since it shipped.
+
+**Placement.** `placeAfterNode` puts the node to the RIGHT of a single selected node — the direction
+the graph reads and the direction the auto-wire already runs (source output → new input). Priority is
+explicit drop point → right-of-selection → cursor, so a deliberate drop still wins and the old
+behaviour survives as the fallback when nothing is selected.
+
+Occupied slots step DOWN, not right: several nodes added off one source is a fan-out, and a fan reads
+as a column — stepping right would draw a chain the graph does not have. Overlap is judged on the node
+BODY rather than its origin, so a near-miss counts as occupied instead of stacking two nodes while
+reporting the slot free.
+
+**Drag.** Browser entries route through the SAME `flarexPaletteDrag` channel the toolbar palette
+already uses, rather than a second drag protocol with its own MIME. The canvas resolves that channel
+into a drop AND a wire-splice when released over an edge, so a node found by SEARCH now splices
+exactly like one that happened to earn a toolbar icon — inherited rather than reimplemented, and
+therefore unable to drift out of sync with it.
+
+*Rule: before adding a second mechanism, check whether the first one already reaches where you need
+it.* The first draft here invented a custom drag MIME and a parallel drop handler; the canvas already
+had both, plus splice-on-wire behaviour the new path would have lacked.
+
+**Gate.** `placeAfterNode` is pure, so the placement rule is tested without a canvas —
+`flarex:align:test` +6 assertions covering direction, level-with-source, the downward step, near-miss
+overlap, non-interference from distant nodes, and a null for an unknown source id.
+
+## TimeSpeed + Tracker: design note before code (2026-07-28)
+
+`plans/flarex-timespeed-tracker.md`. The evaluation engine is frozen (ADR-008/009/010) and reviews ask
+"does this satisfy ADR-010?", so both nodes were analysed against the closed question set BEFORE any
+code. They land on opposite sides of it, which is the useful finding:
+
+- **Tracker satisfies ADR-010 as it stands.** `TrackingData` is already in the ArtifactKind registry
+  and ADR-010 already names `tracker` among the types the evaluator must not know about. v1 CONSUMES
+  the `TrackingPathArtifactData` the person-extraction path already produces rather than computing a
+  new track — a declaration exercise, buildable now, and the natural consumer of a real analyser's
+  baked output later.
+- **TimeSpeed does not, in the general case.** It does not read time, it rewrites the time its upstream
+  subtree is evaluated at — and no question in the closed set lets a node say "evaluate my inputs at a
+  different t". That is a new evaluator DECISION, which is exactly and only what reopens ADR-010.
+
+Recommended: lower TimeSpeed at compile time scoped to MediaIn source sampling (no new question, covers
+"play this clip at 50%", which is what the node usually means), name it honestly for that limit, and
+save the ADR reopen for a case that genuinely needs whole-subtree retiming. Explicitly rejected:
+declaring it `stateful` to borrow the temporal lane — retiming is pure, the declaration would be a lie,
+and using §7 as a general escape hatch is how a frozen contract rots.
+
+**Awaiting a decision before code.** The two options are not nested: they differ in node name, socket
+shape and inspector copy, so the narrow one cannot be quietly widened later. Shipping the narrow one
+while letting people believe they have the general one is the v32i merge-blend mistake again — two
+constructs sharing a lowering shape do not share its semantics.
