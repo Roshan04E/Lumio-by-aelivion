@@ -1453,7 +1453,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     useEffect(() => {
       if (mediaType !== "video" || hidden) return undefined;
       const FREEZE_BEHIND_S = 1.0;
-      const srcTail = src.length > 48 ? `…${src.slice(-48)}` : src;
+      // Same defect v32q fixed in `__rfSourceMap`: a url tail is a filename for a library asset and an
+      // opaque per-session blob UUID for anything OPFS-backed, so the ONE line that names a frozen
+      // source named nothing. Two reproductions of the same wedge printed two unrelated-looking ids.
+      const srcTail = props.assetLabel ?? (src.length > 48 ? `…${src.slice(-48)}` : src);
       const report = (behind: number, timelineS: number, detail: Record<string, unknown>) => {
         const w = window as unknown as {
           __rfLiveFreeze?: { count: number; worstBehindS: number; recent: Record<string, unknown>[] };

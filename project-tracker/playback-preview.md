@@ -1905,3 +1905,35 @@ from idle.
 **Open.** `dense-gop-test.mp4` read `state: stale, staleMs: 415` while every other source read `ok / 0`
 — the only stale row, and it is the clip on the new path. Plausibly a just-added clip off the playhead
 with a warming decoder, but unconfirmed. Follow-up: does it settle to `ok` under sustained playback?
+
+## v32s — preferSoftwareDecode CLOSED at n=3, and two details the confirmation exposed (2026-07-28)
+
+**Closed.** Two further `?flarexSwDecode=0` runs plus the user's direct report ("its lagging very much
+in this gate"). Every hardware-only arm reproduced the wedge; no software arm ever has. v32o's n=1
+caveat is discharged — this flag is not to be revisited without new evidence.
+
+```
+run 2: Live-freeze watchdog 1 · ∞ (no-source) behind @ t=16.15s · playing=FALSE
+       busyWedge 1 · StaleDrawKicks 3 · WcHolds 5260
+run 1: same wedge @ t=16.15s · playing=TRUE
+```
+
+**Detail 1 — the second wedge happened while PAUSED.** `playing=false`. The keep decision does not
+depend on the mechanism, and the ON arm never wedges either way, so the conclusion stands. But
+"hardware-block contention between playing streams" does not explain a wedge with nothing playing, and
+the tracker already carries the rule that *frozen while PAUSED is a dead decode, not a stale clock*.
+The flag is doing something real; the STORY attached to it since v30 may still be wrong. Recorded so
+nobody later cites this entry as proof of the contention theory — it is proof of the effect only.
+
+**Detail 2 — both wedges fired at t=16.15s exactly.** Two runs, two sessions, identical timeline
+position to the centisecond. Stochastic decoder contention does not repeat to that precision. That
+points at something content-addressed — a specific GOP boundary, a seek target, a clip edge at that
+position — and it is a far more tractable lead than "contention" because it is reproducible on demand.
+NOT chased here.
+
+**Instrument gap this exposed, fixed.** The watchdog's one job is naming the frozen source, and it
+printed `r.src` — a url tail, i.e. an opaque per-session blob UUID for anything OPFS-backed. The same
+wedge in two runs printed `26c6cf60…` and `49ded0d0…`, which read as two unrelated sources when they
+may well be one. v32q fixed this column in `__rfSourceMap` and missed the watchdog line; it now uses
+`assetLabel` too. *Fixing an instrument means fixing every place it reports, not the one you were
+looking at.*
