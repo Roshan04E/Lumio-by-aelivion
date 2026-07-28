@@ -57,8 +57,22 @@ export interface FlarexDragTraceState {
   installedAt: number;
 }
 
+/**
+ * OFF by default (2026-07-28). This found a bug three rounds of handler-level counters could not, so it
+ * is kept rather than deleted — but it installs eleven capture-phase document listeners, and `drag`
+ * fires continuously for the whole of every drag in the app. That is a real cost to carry permanently
+ * for a fixed bug. Enable with `?flarexDragTrace=1` when a drag misbehaves again.
+ */
+function traceEnabled(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get("flarexDragTrace") === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function installFlarexDragTrace(): () => void {
-  if (typeof document === "undefined") return () => undefined;
+  if (typeof document === "undefined" || !traceEnabled()) return () => undefined;
   const w = window as unknown as { __rfFlarexDragLog?: FlarexDragTraceState };
   const state: FlarexDragTraceState = {
     log: [],
