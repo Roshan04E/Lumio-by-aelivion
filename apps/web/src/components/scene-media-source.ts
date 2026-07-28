@@ -118,6 +118,28 @@ export interface ScenePreviewMediaSnapshot {
    * stale source, so a decoder that never delivers degrades instead of freezing the viewer.
    */
   awaitingFrame: boolean;
+  /**
+   * DIAGNOSTIC JOIN (2026-07-28) — this source's live decode path and a human-readable asset name.
+   *
+   * `__rfWcMode` already recorded the decode path, but keyed by SOURCE URL, while the frame profiler
+   * names a stalled source by its NODE id (`flarexsrc:<layer>:<nodeId>`). Nothing joined the two, and
+   * the node id is not surfaced in the graph UI either — so "which decode path is the source that is
+   * stalling on?" was unanswerable from both ends simultaneously. Carrying both here lets the
+   * consumer, which already knows the node id, key everything by one identity.
+   *
+   * Null for non-video sources (a still has no decoder).
+   */
+  decodeMode: "wc-hw" | "wc-sw" | "element" | null;
+  /**
+   * Other layers decoding through this source's SAME decoder session right now (0 = sole owner).
+   *
+   * The duplicate-decode bug this exists to surface — one file read through the host clip AND a
+   * pool-asset MediaIn — is invisible in `decodeMode` alone: two rows on one asset look identical
+   * whether they share a session or burn two. See `plans/decoder-session-sharing.md`.
+   */
+  decodeSharedWith: number;
+  /** Filename tail of the source URL — what a person can actually recognise in a console dump. */
+  sourceLabel: string | null;
 }
 
 /** Registered by `WebglMediaLayer`; polled by `ScenePreviewCanvas` at composite time. */

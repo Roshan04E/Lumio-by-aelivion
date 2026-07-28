@@ -953,6 +953,22 @@ export function ScenePreviewCanvas({
       // requested moment, and the held-texture path below would otherwise let it present the previous
       // playhead's picture without either gate noticing. See `awaitingFrame` in scene-media-source.
       const awaiting = snap.awaitingFrame;
+      // SOURCE MAP (2026-07-28): node id → asset name + decode path + live supply state. The one
+      // lookup that answers "the profiler says node X stalled — what IS X, and which decoder is it
+      // on?", which previously required joining two globals keyed on different identities plus a
+      // node id the graph UI does not display.
+      if (typeof window !== "undefined") {
+        const w = window as { __rfSourceMap?: Record<string, unknown> };
+        (w.__rfSourceMap ??= {})[resolvedId] = {
+          asset: snap.sourceLabel ?? "-",
+          decode: snap.decodeMode ?? "-",
+          // 0 = this source owns its decoder outright. Two rows on one asset both reading 0 is the
+          // duplicate-decode signature; `1` on both means they share one session.
+          shared: snap.decodeSharedWith,
+          state: snap.awaitingFrame ? "AWAITING" : isStale(snap.stalenessSeconds) ? "stale" : "ok",
+          staleMs: snap.stalenessSeconds == null ? null : Math.round(snap.stalenessSeconds * 1000),
+        };
+      }
       allStaleness[resolvedId] = awaiting ? Number.POSITIVE_INFINITY : snap.stalenessSeconds;
       if (awaiting || isStale(snap.stalenessSeconds)) {
         staleIds.push(resolvedId);

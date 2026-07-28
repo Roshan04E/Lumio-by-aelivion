@@ -132,6 +132,19 @@ export interface PreviewFrameLease {
   release(): void;
   /** Update pending/pre-roll ↔ live status so preemption picks the right victims. */
   setPriority(priority: WcLeasePriority): void;
+  /**
+   * What this lease ACTUALLY got, read live — as distinct from what it asked for.
+   *
+   * `__rfWcMode` / `__rfSourceMap` reported `preferSoftware` (the request), so a loader that attached
+   * to the host's HARDWARE session still read `wc-sw` and a share was invisible in the one table you
+   * would look at to see it. A consumer cannot know its own decode mode: it asks, the pool decides.
+   */
+  readonly session: {
+    /** The session's REAL decoder, which may differ from `preferSoftware` when attached. */
+    readonly software: boolean;
+    /** Other leases on this same session right now. > 0 means this decode is being shared. */
+    readonly sharedWith: number;
+  };
 }
 
 export interface AcquireOptions {
@@ -617,8 +630,20 @@ function attachMember(session: SharedSession, options: AcquireOptions): PreviewF
     return wrap ? memberProvider(session, member) : provider;
   });
 
+  const view = {
+    get software() {
+      return session.software;
+    },
+    get sharedWith() {
+      // Read live: the host acquires FIRST and is alone at that instant — a value snapshotted at
+      // mount would report "not shared" for the very lease that ends up sharing.
+      return member.dead ? 0 : Math.max(0, session.refCount - 1);
+    },
+  };
+
   return {
     ready,
+    session: view,
     release() {
       if (member.dead) return;
       traceEvent({ event: "release", provider: session.provider, asset: traceAsset(session.key), reason: "explicit" });

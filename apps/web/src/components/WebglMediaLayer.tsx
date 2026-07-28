@@ -703,7 +703,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           });
       wcLeaseRef.current = wcLease;
       if (mediaType === "video") {
-        recordWcMode(src, !wcLease ? "element" : props.preferSoftwareDecode ? "wc-sw" : "wc-hw");
+        // The SESSION's mode, not `preferSoftwareDecode`. A loader that attached to the host's
+        // hardware session asked for software and got hardware; reporting the request made a share
+        // invisible in the exact table you would read to see one (2026-07-28).
+        wcModeRef.current = !wcLease ? "element" : wcLease.session.software ? "wc-sw" : "wc-hw";
+        recordWcMode(src, wcModeRef.current);
       }
       if (!wcLease) {
         useVideoElement(false);
@@ -721,6 +725,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           setWcHeldFrame(null);
           wcLeaseRef.current?.release();
           wcLeaseRef.current = null;
+          wcModeRef.current = "element";
           recordWcMode(src, "element");
           useVideoElement(true);
         };
@@ -1224,6 +1229,16 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const settleTokenRef = useRef(0);
     /** Can this layer ever produce a full-res settle frame? See the assignment in the singleCtx block. */
     const settleCapableRef = useRef(false);
+    /**
+     * This layer's live decode path, mirrored onto the scene snapshot (2026-07-28).
+     *
+     * `__rfWcMode` records the same value keyed by SOURCE URL, while the frame profiler names a
+     * stalled source by its NODE id — and nothing joined the two, so "which decode path is the
+     * stalling node on?" could not be answered from the console at all. The node id is not visible in
+     * the graph UI either, so the question was unanswerable from both ends at once. Carrying the mode
+     * on the snapshot lets the consumer key it by the same id it already uses for everything else.
+     */
+    const wcModeRef = useRef<"wc-hw" | "wc-sw" | "element" | null>(null);
     const fullResSrc = mediaType === "video" ? props.fullResSrc : undefined;
     useEffect(() => {
       if (mediaType !== "video") return undefined;
@@ -2061,6 +2076,14 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             fullResFrame,
             fullResPending,
             awaitingFrame,
+            decodeMode: mediaType === "video" ? wcModeRef.current : null,
+            // Read live from the lease, not snapshotted at mount: the host acquires FIRST and is
+            // alone at that instant, so a mount-time value would report 0 for the very lease that
+            // ends up sharing.
+            decodeSharedWith: wcLeaseRef.current?.session.sharedWith ?? 0,
+            // Tail only: blob URLs are opaque UUIDs, but a library asset ends in its filename, which
+            // is the one part a person can match against what they see on screen.
+            sourceLabel: typeof src === "string" ? (src.split("?")[0] ?? src).split("/").pop() ?? null : null,
           };
         },
       };
