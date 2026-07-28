@@ -950,6 +950,23 @@ export function EditorPage() {
   const [previewQuality, setPreviewQuality] = useState<"performance" | "balanced" | "quality">(() =>
     readStoredChoice("orreris_preview_quality", "balanced", ["performance", "balanced", "quality"] as const)
   );
+  // ORIGINAL MEDIA — its own axis (2026-07-28). Playback resolution and media substitution answer two
+  // different questions: resolution is "how much GPU per frame", original-media is "am I looking at
+  // true pixels". Premiere, Resolve and Avid all keep them separate (Playback Resolution vs Toggle
+  // Proxies; Timeline Proxy Mode vs Prefer Optimized Media; Video Quality vs Dynamic Relink) because
+  // the useful combinations are diagonal — a colorist checking grain wants Full WITH originals, an
+  // editor on a 12-source comp wants Full WITH proxies, and bundling them can express neither.
+  //
+  // They were one control here, and the cost was not merely ergonomic: selecting "1" swapped every
+  // `mediaUrl` to the original, which made `preferNativeDecode` true everywhere, which put every
+  // source in a Flarex comp on the <video> element path at once — through the browser's ~16
+  // hardware-decode-context cap. "Full quality" was a freeze switch for comps.
+  //
+  // Defaults OFF for everyone, including users whose stored quality is "quality": the point is that
+  // Full stops being a trap. Anyone who genuinely wants original pixels now asks for exactly that.
+  const [originalMediaOn, setOriginalMediaOn] = useState(
+    () => readStoredChoice("orreris_preview_original_media", "off", ["off", "on"] as const) === "on"
+  );
   const previewCacheControllerRef = useRef<PreviewCacheController | null>(null);
   const previewCacheRenderStateRef = useRef<{ signature: string; renderScale: number; fps: number; durationSeconds: number } | null>(null);
   const [proxyCacheSegments, setProxyCacheSegments] = useState<PreviewCacheRulerSegment[]>([]);
@@ -1041,7 +1058,11 @@ export function EditorPage() {
   // no playback substitution, and no reconcile at scale 1 (which would DELETE every softer ½/¼ span —
   // see updateProxyCacheRuler). The softer spans stay cached so returning to ½/¼ replays them instantly
   // instead of regenerating. User rule 2026-07-05.
-  const fullQualityPlayback = previewQuality === "quality" && !adaptiveResOn;
+  // Was `previewQuality === "quality" && !adaptiveResOn` — i.e. the resolution control secretly also
+  // meant "bypass proxies". Now it means only what it says. Everything downstream of this flag
+  // (proxy-gen suspension, the dormant span cache, `setIngestProxyPlaybackEnabled`) keeps its exact
+  // semantics: it always asked "are we playing ORIGINALS?", which is now a question with its own answer.
+  const fullQualityPlayback = originalMediaOn;
   const proxyGenActive = proxyGenSupported && !livePlaybackMode && !fullQualityPlayback;
   // Bumped to (re)kick background generation when nothing else in the dep list changed — e.g. after a
   // manual In/Out regenerate, which marks spans dirty without altering the composition reference.
@@ -1941,6 +1962,9 @@ export function EditorPage() {
   useEffect(() => {
     localStorage.setItem("orreris_preview_quality", previewQuality);
   }, [previewQuality]);
+  useEffect(() => {
+    localStorage.setItem("orreris_preview_original_media", originalMediaOn ? "on" : "off");
+  }, [originalMediaOn]);
 
   // FULL-QUALITY PLAYBACK (pro ask, 2026-07-05): fixed "1" (quality, Auto off) also bypasses the
   // ingest proxies, so playback AND the paused frame show ORIGINAL pixels — "at full quality it's
@@ -8725,11 +8749,7 @@ export function EditorPage() {
                     className={!adaptiveResOn && previewQuality === quality ? "is-active" : ""}
                     key={quality}
                     type="button"
-                    title={
-                      quality === "quality"
-                        ? "Full quality — plays ORIGINAL media (proxies bypassed), fixed resolution, turns Auto off"
-                        : `${previewQualityLabel(quality)} playback resolution (proxy media — fixed, turns Auto off)`
-                    }
+                    title={`${previewQualityLabel(quality)} playback resolution — fixed, turns Auto off. Media source is the separate "Orig" toggle.`}
                     onClick={() => {
                       setPreviewQuality(quality);
                       if (adaptiveResOn) {
@@ -8753,6 +8773,23 @@ export function EditorPage() {
                   }}
                 >
                   A
+                </button>
+              </div>
+              {/* Media source — the OTHER axis, deliberately its own control rather than a fourth
+                  resolution button. Off = proxies (smooth); on = original files (true pixels, heavy).
+                  Independent of ¼/½/1/A, so every combination the pros allow is expressible here. */}
+              <div className="preview-quality-control" aria-label="Media source">
+                <button
+                  className={originalMediaOn ? "is-active" : ""}
+                  type="button"
+                  title={
+                    originalMediaOn
+                      ? "Original media — true pixels, no proxy substitution. Heavy: many sources at once (a Flarex comp) will play rough. Click for proxy media."
+                      : "Proxy media — smooth playback from ingest proxies. Click to play the ORIGINAL files instead (true pixels, much heavier)."
+                  }
+                  onClick={() => setOriginalMediaOn((on) => !on)}
+                >
+                  Orig
                 </button>
               </div>
               <div className="viewer-transport-control" aria-label="Transport controls">

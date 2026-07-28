@@ -738,7 +738,23 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // the same file as both host and MediaIn source). Sending a loader to a native <video> is the
       // ~16-context cap → permanent freeze this whole path exists to avoid, so `tolerateLag` layers
       // ignore the bail list; their own heals never add to it either (see requestWcFrame).
-      const wcLease = (mediaType === "video" && (props.preferNativeDecode || (wcBailedSources.has(src) && !props.tolerateLag)))
+      // `tolerateLag` marks a Flarex virtual loader, and the rule stated forty lines below — "virtual
+      // loaders must NEVER take the <video> path" — was enforced on the BAILED branch only. The
+      // `preferNativeDecode` branch bypassed it, so any condition setting that flag put every loader in
+      // a comp onto native elements at once, straight through the browser's ~16 hardware-decode-context
+      // cap. Full-quality playback is exactly such a condition: it swaps `mediaUrl` to the original, and
+      // `preferNativeDecode` is `mediaUrl !== proxyUrl`, so selecting "1" moved EVERY source in the comp
+      // to the element path in one step (2026-07-28).
+      //
+      // For a loader the choice is not element-vs-pool, it is which failure: a sparse-GOP original on the
+      // pool seeks slowly, but `tolerateLag` is built for exactly that and presents advancing frames. The
+      // element path has no such degradation — it hits a hard cap and freezes. A slow source is a
+      // degradation; a capped one is an outage.
+      const forceElementPath =
+        mediaType === "video" &&
+        !props.tolerateLag &&
+        (props.preferNativeDecode || wcBailedSources.has(src));
+      const wcLease = forceElementPath
         ? null
         : acquirePreviewFrameProvider(src, {
             priority: hiddenAtMountRef.current ? "preload" : "playhead",

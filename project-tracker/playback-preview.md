@@ -1983,3 +1983,59 @@ SHARER awaiting the same pending promise also comes back, the count is per sessi
 every member is notified, the dead decoder is disposed rather than parked, and a re-acquire builds a
 fresh working session. `coherence` 5666/5666, `fullres` 203/203, typecheck clean. New counter
 `__rfWcPool.wedgeTimeouts`, expected 0 forever — a non-zero reading is the interesting one.
+
+## v32u — "Full quality" was a freeze switch for comps (2026-07-28)
+
+**User report.** "full quality preview as 1, 1/2 or 1/4 — in 1, that is different from 1/2 or 1/4
+right... for flarex its very laggy. check how professional NLEs do that."
+
+**Correct, and the difference is not resolution.** `1` did two unrelated things. `resolutionScale` is
+the honest half (render surface scale during playback; paused is always 1 regardless). The other half:
+`fullQualityPlayback = previewQuality === "quality" && !adaptiveResOn` flipped
+`setIngestProxyPlaybackEnabled(false)`, so `resolvePlaybackUrl` returned the ORIGINAL `fileUrl` instead
+of `proxyUrl`.
+
+**The chain that made it a freeze.** `preferNativeDecode` is `mediaUrl !== asset.proxyUrl`. Once
+`mediaUrl` is the original that is true for EVERY source, and `preferNativeDecode` skips
+`acquirePreviewFrameProvider` outright — no pooled lease at all. So selecting "1" moved every source in
+a Flarex comp onto the `<video>` element path in one step, through the browser's ~16
+hardware-decode-context cap.
+
+`WebglMediaLayer` states the invariant forty lines below that gate: *virtual loaders must NEVER take the
+`<video>` path* — but enforced it as `!props.tolerateLag` on the BAILED branch only. The
+`preferNativeDecode` branch had no such guard. The rule was written down, tested by nothing, and
+bypassed by the control most likely to trip it.
+
+**Fix 1 — the invariant, enforced where it was stated.** `forceElementPath` now requires
+`!props.tolerateLag` for BOTH conditions. For a loader the choice was never element-vs-pool but which
+failure: a sparse-GOP original on the pool seeks slowly, and `tolerateLag` exists precisely to present
+advancing frames through that. The element path has no degradation mode — it hits a cap and freezes.
+*A slow source is a degradation; a capped one is an outage.*
+
+**Fix 2 — split the axes, as every pro NLE does.** Premiere: Playback Resolution (¼/½/Full, plus a
+separate PAUSED resolution) vs the Toggle Proxies button. Resolve: Timeline Proxy Mode vs Prefer
+Optimized Media. Avid: Video Quality vs Dynamic Relink. All three keep them orthogonal because the
+useful combinations are diagonal — a colorist checking grain wants Full WITH originals; an editor on a
+12-source comp wants Full WITH proxies. One bundled control can express neither.
+
+`1/½/¼/A` is now purely resolution. Media source is its own `Orig` toggle, persisted, default OFF for
+everyone including users whose stored quality was `quality` — the point is that Full stops being a
+trap, and anyone who wants original pixels can now ask for exactly that.
+
+**Also removed:** `PreviewQualityProfile.useProxy`, false on `quality`. Never read by anything — the
+real substitution went through `setIngestProxyPlaybackEnabled` — so it was pure documentation of a
+coupling that no longer exists. *A field describing a policy nobody consults is a future reader's false
+lead.*
+
+**Rule.** *A control that silently changes a second variable will eventually be blamed for the wrong
+thing.* Users reported "full quality is laggy" and every instinct pointed at resolution cost, which was
+innocent; the damage came from a media swap the label never mentioned. Bundle two axes into one control
+and you lose the ability to attribute the failure, not just the ability to express the combination.
+
+**Open — likely the same root.** The user's guess that this connects to "broken frames for different
+media that update at different times when paused" is plausible and untested: on the element path every
+source seeks independently, and v32b already traced the paused stagger to the full-res settle swap,
+which is dormant under fixed full quality. Worth re-checking now that Full no longer forces elements.
+
+**Gates.** `wcpool` 69/69, `coherence` 5666/5666, `fullres` 203/203, `gop` 26/26, typecheck clean.
+NOT verified in a browser: this is a UI/behaviour change and needs a human to drive it.
