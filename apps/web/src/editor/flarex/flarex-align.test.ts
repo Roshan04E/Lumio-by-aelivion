@@ -10,6 +10,9 @@
 
 import { createFlarexNode } from "@orreris/shared";
 import {
+  placeAfterNode,
+  NODE_PLACE_GAP_X,
+  NODE_PLACE_STEP_Y,
   GROUP_COLLAPSED_W,
   GROUP_PADDING,
   GROUP_TITLEBAR_H,
@@ -226,6 +229,36 @@ function check(name: string, condition: boolean): void {
   check("turning the mode off restores the compact height", nodeHeight(blur) === before);
   check("compact mode centres a lone output on the body",
     Math.abs(nodeSockets(blur, comp).filter((s) => s.kind === "output")[0]!.y - (blur.ui.y + before / 2)) < 0.001);
+}
+
+// ── Auto-placement: where a node added "after" another one lands ────────────
+{
+  const at = (x: number, y: number) => ({ ui: { x, y } });
+
+  // The direction the graph READS and the direction the auto-wire runs. Placing at the cursor (the
+  // old rule) dropped a keyboard-driven add wherever the pointer happened to rest.
+  const solo = placeAfterNode({ a: at(100, 200) }, "a")!;
+  check("placed to the RIGHT of the source", solo.x === 100 + NODE_W + NODE_PLACE_GAP_X);
+  check("…and vertically level with it", solo.y === 200);
+
+  // Occupied slots step DOWN, not right: several nodes off one source is a fan-out, and a fan reads
+  // as a column. Stepping right would draw a chain the graph does not have.
+  const nodes = { a: at(100, 200), b: at(100 + NODE_W + NODE_PLACE_GAP_X, 200) };
+  const second = placeAfterNode(nodes, "a")!;
+  check("an occupied slot steps DOWN, not right", second.x === solo.x && second.y > solo.y);
+
+  // Overlap is judged on the BODY. A near-miss must count as occupied, or nodes stack visually while
+  // the slot reports free.
+  const nearMiss = { a: at(100, 200), b: { ui: { x: solo.x + 4, y: 200 + 4 } } };
+  check("a near-miss counts as occupied, not just an exact hit",
+    placeAfterNode(nearMiss, "a")!.y > solo.y);
+
+  // A node clear of the slot must not push it: only real overlap costs a step.
+  const farBelow = { a: at(100, 200), b: at(solo.x, 200 + NODE_PLACE_STEP_Y * 4) };
+  check("a distant node does not displace the placement", placeAfterNode(farBelow, "a")!.y === 200);
+
+  check("an unknown source id yields null rather than a guessed position",
+    placeAfterNode({ a: at(0, 0) }, "nope") === null);
 }
 
 if (failures > 0) {

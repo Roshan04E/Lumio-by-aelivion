@@ -101,6 +101,45 @@ export const REROUTE_SIZE = 18;
 export const BACKDROP_TITLEBAR_H = 22;
 export const BACKDROP_RESIZE_HANDLE = 14;
 
+/** Horizontal gap between a node and one auto-placed after it — wide enough that the connecting wire
+ *  reads as a link rather than the two bodies touching. */
+export const NODE_PLACE_GAP_X = 44;
+/** Vertical step used when the slot to the right is already occupied. */
+export const NODE_PLACE_STEP_Y = NODE_H + 22;
+
+/**
+ * Where a node added "after" `sourceId` should land: immediately to its RIGHT, which is the direction
+ * a Fusion-style graph reads and the direction the auto-wire runs (source output → new input). Placing
+ * at the cursor instead — what the menu did before — meant a keyboard-driven add dropped the node
+ * wherever the pointer happened to rest, often on top of existing nodes and rarely near the thing it
+ * was just wired to.
+ *
+ * Occupied slots step DOWNWARD rather than rightward: adding three nodes off one source is a fan-out,
+ * and a fan reads as a column. Stepping right would build a chain the graph does not have.
+ *
+ * Pure, so the placement rule is gated without a canvas.
+ */
+export function placeAfterNode(
+  nodes: Record<string, { ui: { x: number; y: number } }>,
+  sourceId: string
+): { x: number; y: number } | null {
+  const source = nodes[sourceId];
+  if (!source) return null;
+  const x = Math.round(source.ui.x + NODE_W + NODE_PLACE_GAP_X);
+  const others = Object.entries(nodes).filter(([id]) => id !== sourceId).map(([, n]) => n.ui);
+  // Overlap is judged on the node BODY, not its centre: two nodes 1px apart do not overlap, and a
+  // strict-equality check would have let a near-miss stack visually while reporting the slot free.
+  const collides = (candidateY: number): boolean =>
+    others.some((other) => Math.abs(other.x - x) < NODE_W && Math.abs(other.y - candidateY) < NODE_H);
+  let y = Math.round(source.ui.y);
+  // Bounded: a graph dense enough to fill 24 slots straight down is better served by dropping the node
+  // than by scanning forever, and the caller still gets a usable position.
+  for (let step = 0; step < 24 && collides(y); step += 1) {
+    y = Math.round(source.ui.y + (step + 1) * NODE_PLACE_STEP_Y);
+  }
+  return { x, y };
+}
+
 export const clampZoom = (zoom: number): number => Math.min(2.5, Math.max(0.25, zoom));
 
 export const worldToScreen = (view: FlarexViewState, wx: number, wy: number): [number, number] => [

@@ -315,6 +315,15 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
                   setBrowseOpen(false);
                 }}
                 onClose={() => setBrowseOpen(false)}
+                // Same channel the single-icon palette buttons above use, so a node found by SEARCH
+                // drags and splices identically to one that happened to earn a toolbar icon.
+                onDragStartType={(type) => {
+                  flarexPaletteDrag.current = type;
+                  setBrowseOpen(false);
+                }}
+                onDragEndType={() => {
+                  flarexPaletteDrag.current = null;
+                }}
               />
             </div>
           </>

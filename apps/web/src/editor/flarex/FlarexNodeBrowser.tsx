@@ -18,9 +18,18 @@ export interface FlarexNodeBrowserProps {
   /** Escape / click-away closer. */
   onClose: () => void;
   autoFocus?: boolean;
+  /** Drag-to-place: arm/disarm the canvas's palette-drag channel. Omit and entries are click-only. */
+  onDragStartType?: ((type: FlarexNodeType) => void) | undefined;
+  onDragEndType?: (() => void) | undefined;
 }
 
-export function FlarexNodeBrowser({ onPick, onClose, autoFocus = true }: FlarexNodeBrowserProps) {
+export function FlarexNodeBrowser({
+  onPick,
+  onClose,
+  autoFocus = true,
+  onDragStartType,
+  onDragEndType
+}: FlarexNodeBrowserProps) {
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const catalog = useMemo(() => buildFlarexCatalog(), []);
@@ -57,7 +66,28 @@ export function FlarexNodeBrowser({ onPick, onClose, autoFocus = true }: FlarexN
       key={type}
       type="button"
       className={`flarex-node-menu-item${isActive ? " is-active" : ""}`}
-      onPointerDown={(e) => e.preventDefault()}
+      // DRAG TO PLACE (2026-07-28). Clicking adds where the canvas decides; dragging lets the user
+      // decide, which is how every node editor they have used already behaves.
+      //
+      // Deliberately the SAME mechanism as the toolbar palette (`onPaletteDragStart` →
+      // `flarexPaletteDrag`) rather than a second drag protocol. The canvas already resolves that
+      // channel into a drop AND a wire-splice when the pointer is over an edge, so routing the browser
+      // through it means dragging a searched node onto a wire splices it exactly like a palette drag —
+      // for free, and impossible to let drift out of sync with it.
+      draggable
+      onDragStart={(e) => {
+        onDragStartType?.(type);
+        e.dataTransfer.setData("text/plain", type); // some browsers refuse to start a drag without data
+        // `move` would imply the catalog entry is consumed by the drop; it is a palette.
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      onDragEnd={() => onDragEndType?.()}
+      // Click-add wants the default suppressed so the popover keeps focus; a DRAG needs the pointer
+      // event to proceed or the native drag never starts. `draggable` is the discriminator.
+      onPointerDown={(e) => {
+        if (e.button === 0 && e.pointerType === "mouse") return;
+        e.preventDefault();
+      }}
       onClick={() => onPick(type)}
     >
       <span className="flarex-node-menu-name">

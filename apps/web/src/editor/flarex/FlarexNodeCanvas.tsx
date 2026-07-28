@@ -29,6 +29,7 @@ import {
   NODE_LABEL_GAP,
   NODE_THUMB_H,
   NODE_W,
+  placeAfterNode,
   SOCKET_R,
   backdropSize,
   clampZoom,
@@ -1102,13 +1103,26 @@ export function FlarexNodeCanvas({
   /** Insert the chosen type at the menu's world position. If exactly one node is selected, auto-
    *  wire its first compatible output into the new node's first compatible input (Fusion "insert
    *  after selected") — skipped silently when no socket types match. ONE commit. */
-  const insertNodeFromMenu = (type: FlarexNodeType) => {
+  const insertNodeFromMenu = (type: FlarexNodeType, dropAt?: { wx: number; wy: number }) => {
     const menu = nodeMenu;
-    if (!menu) return;
+    // A DRAG carries its own drop point and so needs no open menu; a click still requires one.
+    if (!menu && !dropAt) return;
     const selected = stateRef.current.selectedNodeIds;
     const id = `n_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     onUpdateComp((current) => {
-      const node = createFlarexNode(type, id, Math.round(menu.wx - NODE_W / 2), Math.round(menu.wy - 18));
+      // PLACEMENT, in priority order (2026-07-28):
+      //   1. an explicit drop point — the user pointed at a spot, so honour it exactly;
+      //   2. to the RIGHT of a single selected node — the direction the graph reads and the direction
+      //      the auto-wire below runs, so the new node lands beside what it was just connected to;
+      //   3. the menu position, i.e. wherever the cursor was.
+      // (3) was the only rule before, which meant a keyboard-driven add (Tab, type, Enter) dropped the
+      // node under a pointer the user was not thinking about — frequently on top of existing nodes.
+      const placed =
+        dropAt
+          ? { x: Math.round(dropAt.wx - NODE_W / 2), y: Math.round(dropAt.wy - 18) }
+          : (selected.length === 1 ? placeAfterNode(current.nodes, selected[0]!) : null) ??
+            { x: Math.round(menu!.wx - NODE_W / 2), y: Math.round(menu!.wy - 18) };
+      const node = createFlarexNode(type, id, placed.x, placed.y);
       let next: FlarexComp = { ...current, nodes: { ...current.nodes, [id]: node } };
       if (selected.length === 1) {
         const source = current.nodes[selected[0]!];
@@ -1388,7 +1402,20 @@ export function FlarexNodeCanvas({
       {/* F1: add-node browser (categorized + searchable), anchored at the cursor. */}
       {nodeMenu ? (
         <div className="flarex-node-menu" style={{ left: nodeMenu.sx, top: nodeMenu.sy }}>
-          <FlarexNodeBrowser onPick={insertNodeFromMenu} onClose={() => setNodeMenu(null)} />
+          <FlarexNodeBrowser
+            onPick={insertNodeFromMenu}
+            onClose={() => setNodeMenu(null)}
+            // Dragging out of the menu hands off to the palette channel the canvas already handles
+            // (drop, or splice when released on a wire). The menu closes on drag start: it is anchored
+            // at the cursor, so leaving it open would cover the canvas the user is dragging onto.
+            onDragStartType={(type) => {
+              flarexPaletteDrag.current = type;
+              setNodeMenu(null);
+            }}
+            onDragEndType={() => {
+              flarexPaletteDrag.current = null;
+            }}
+          />
         </div>
       ) : null}
       {/* F1.3: minimal node context menu. */}
