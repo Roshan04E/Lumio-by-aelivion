@@ -2039,3 +2039,8 @@ which is dormant under fixed full quality. Worth re-checking now that Full no lo
 
 **Gates.** `wcpool` 69/69, `coherence` 5666/5666, `fullres` 203/203, `gop` 26/26, typecheck clean.
 NOT verified in a browser: this is a UI/behaviour change and needs a human to drive it.
+
+**Verified live (2026-07-28).** User on the reference Flarex comp at `1` with `Orig` off: "yes its far
+smooth than before". The freeze was the element-path cap, not render cost — resolution was never the
+expensive part of "full quality", which is why every previous attempt to explain the lag in terms of
+GPU load went nowhere.
