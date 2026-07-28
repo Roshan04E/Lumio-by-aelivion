@@ -1746,3 +1746,55 @@ malformed summary yields `[]` rather than failing the gate.
 **Verified.** Scoped `PIXEL_FIXTURES=flarex-merge-blend` run: passes at the tight bar, `summary.json`
 still holds all 53 entries, and the entry records `maxDiffRatio: 0.005` — the bar actually applied,
 not the global default it was previously reporting regardless.
+
+## v32o — preferSoftwareDecode: measured at last, and it earns its keep (2026-07-28)
+
+**Status change.** v30 shipped `preferSoftwareDecode` on Flarex virtual loaders on a decoder-contention
+theory that was later disproved, and the tracker has carried it as "kept, unproven" since. It costs a
+CPU H.264 decode per loader. It is now KEPT ON EVIDENCE.
+
+**Why it became measurable.** Session sharing (v32l) narrowed the question into something a single comp
+can answer. An ATTACHED loader receives the host's hardware session whatever it asked for, so the flag
+can only still affect loaders that did NOT attach — two in the reference comp. `?flarexSwDecode=0/1`
+was added purely to A/B it; absent the param the behaviour is unchanged.
+
+**Result, one paired 20s run on the same comp.** Arm A (flag on): `activeSoftware: 2`, every source
+`ok`, `staleMs 0`, no watchdog entry, no heals, `WcHolds 3263`. Arm B (flag off, all hardware):
+`active: 3` / `activeSoftware: 0`, and the pipeline broke —
+
+```
+Live-freeze watchdog: 1 total · worst ∞ (no-source) behind
+  ⚠ 26c6cf60 — wc ∞ behind @ t=16.15s · playing=true
+WebCodecs heals: busyWedge 1
+Element reloads/seeks: SettleSwaps 2 · StaleDrawKicks 5 · WcHolds 16272
+```
+
+`26c6cf60` is `n_mrzusqg4_99w3` — one of the two loaders under test. A source went infinitely behind
+with NO frame at all while playing, and the pool had to fire a `busyWedge` heal. That is the
+multi-source freeze symptom, reproduced on demand by turning the flag off. **The user's independent
+report matches the instruments exactly: "playback was smooth [with sw], and it was lagging when
+swdecoder was false."** Perception and counters agreeing on the same run is worth more than either
+alone — the instrument could be measuring the wrong thing; the eye cannot be talked out of a stutter.
+
+**What this data does NOT support.** `__flarexProfile.report` is a snapshot of ONE frame (659 vs 740),
+so the CPU 3.30 vs 4.90 ms and `resolveSourceDraw` 1.50 vs 3.10 ms are single samples and no cost
+figure may be quoted from them. Only the cumulative counters — watchdog, heals, StaleDrawKicks,
+WcHolds — accumulate across the run and mean anything. n=1 per arm; the wedge is strong evidence, not
+proof. What would overturn it: repeated OFF runs with a clean watchdog.
+
+**Rule.** *A flag kept "just in case" is a flag nobody can remove.* This one sat unproven for a month
+because the code offered no way to turn it off — the measurement was impossible, so the debt was
+permanent. A behavioural flag should ship with the switch that lets someone later decide it was wrong.
+
+**Instrument failure that preceded the result, worth more than the result.** The first A/B was VOID: the
+build was verified with `'shared' in __rfWcPool`, which tests the session-sharing commit from earlier
+the same day. It was true, so a bundle with no toggle in it at all passed the check, and `=0` read as a
+null result rather than an absent feature. Confirmed after the fact by grepping the served
+`index-BH_BXbzF.js` for `flarexSwDecode` — zero occurrences. `__rfFlarexSwDecode` is now published
+unconditionally (null / true / false) so absence and off are distinguishable. *A build check must test
+the symbol the measurement depends on, not a neighbouring one* — the same shape as v32l's decode column
+reporting the request instead of the session, and the third time this file has recorded a measurement
+round lost to a stale bundle.
+
+**Unblocks.** Item 3 (`preferNativeDecode` inferring decode cost from `mediaUrl !== proxyUrl`) was
+deliberately gated behind this decision.
