@@ -216,6 +216,9 @@ export function FlarexNodeCanvas({
   /** F1: the add-node search menu (Tab or right-click empty canvas). `wx/wy` = world insert
    *  position; `sx/sy` = screen anchor for the DOM overlay. */
   const [nodeMenu, setNodeMenu] = useState<{ sx: number; sy: number; wx: number; wy: number; query: string; activeIndex: number } | null>(null);
+  /** A drag is in flight OUT of the add-node menu — the menu stays mounted (the drag source must
+   *  survive) but stops intercepting pointer events so the drop reaches the canvas beneath it. */
+  const [menuDragging, setMenuDragging] = useState(false);
   /** F1.3: minimal right-click-on-node context menu (Rename/Enable-Disable/Delete/View). */
   const [nodeContextMenu, setNodeContextMenu] = useState<{ sx: number; sy: number; nodeId: string } | null>(null);
   /** F5.1: inline rename — an absolutely-positioned input over the canvas at the node's screen rect. */
@@ -1393,6 +1396,10 @@ export function FlarexNodeCanvas({
       {nodeMenu || nodeContextMenu ? (
         <div
           className="flarex-menu-backdrop"
+          // The click-away catcher is `inset: 0` over the whole canvas, so while it is up EVERY drop
+          // lands on it instead of the canvas — the reason drag-from-menu did nothing at all on first
+          // ship. It must stand down for the duration of a drag it is not part of.
+          style={menuDragging ? { pointerEvents: "none" } : undefined}
           onPointerDown={() => {
             setNodeMenu(null);
             setNodeContextMenu(null);
@@ -1401,19 +1408,35 @@ export function FlarexNodeCanvas({
       ) : null}
       {/* F1: add-node browser (categorized + searchable), anchored at the cursor. */}
       {nodeMenu ? (
-        <div className="flarex-node-menu" style={{ left: nodeMenu.sx, top: nodeMenu.sy }}>
+        <div
+          className="flarex-node-menu"
+          style={{
+            left: nodeMenu.sx,
+            top: nodeMenu.sy,
+            // STAY MOUNTED, GO TRANSPARENT TO EVENTS during a drag (2026-07-28). The menu is anchored
+            // at the cursor, so it sits over the canvas the user is dragging onto and would swallow the
+            // drop. Closing it on `dragstart` was the first fix and it broke the feature outright:
+            // unmounting the drag SOURCE mid-drag aborts the drag in Chrome, so nothing ever dropped.
+            // `pointer-events: none` gets the menu out of the way without destroying the element the
+            // drag belongs to.
+            ...(menuDragging ? { pointerEvents: "none" as const, opacity: 0.35 } : {}),
+          }}
+        >
           <FlarexNodeBrowser
             onPick={insertNodeFromMenu}
             onClose={() => setNodeMenu(null)}
             // Dragging out of the menu hands off to the palette channel the canvas already handles
-            // (drop, or splice when released on a wire). The menu closes on drag start: it is anchored
-            // at the cursor, so leaving it open would cover the canvas the user is dragging onto.
+            // (drop, or splice when released on a wire).
             onDragStartType={(type) => {
               flarexPaletteDrag.current = type;
-              setNodeMenu(null);
+              setMenuDragging(true);
             }}
             onDragEndType={() => {
               flarexPaletteDrag.current = null;
+              setMenuDragging(false);
+              // Closing here rather than on drag start: by `dragend` the drop has already been
+              // delivered, so the source element has done its job and can go.
+              setNodeMenu(null);
             }}
           />
         </div>

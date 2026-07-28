@@ -461,3 +461,28 @@ passing through, and corrupt JSON not throwing. Shared + web typecheck clean; `w
 **Left open deliberately.** No inspector UI for choosing a track yet — the node renders from data but
 nothing populates that data from the editor. That is the next slice, and it is UI work rather than
 contract work.
+
+**Drag-from-menu did nothing on first ship (2026-07-28, user-reported).** Two independent faults, either
+of which alone was fatal:
+
+1. **The click-away backdrop swallowed every drop.** `.flarex-menu-backdrop` is `position: absolute;
+   inset: 0; z-index: 40` — while a menu is open it blankets the entire canvas. The drag worked; the
+   drop landed on a div with no drop handler. The canvas never saw it.
+2. **Closing the menu on `dragstart` aborted the drag.** That close was written deliberately — the menu
+   is anchored at the cursor and would otherwise cover the drop target — but unmounting the drag SOURCE
+   mid-drag cancels the drag in Chrome. The fix for the second problem caused a third.
+
+Both now use one `menuDragging` flag: the menu and the backdrop stay MOUNTED and take
+`pointer-events: none` for the duration, and the menu closes on `dragend`, by which time the drop has
+been delivered. Applied to the canvas add-node menu and the toolbar Browse popover, which had the same
+pair of faults.
+
+*Rule: an overlay that exists to catch clicks will also catch drops.* A full-bleed backdrop is
+invisible in every sense — it does not appear in the UI, it does not appear in the component you are
+debugging, and it silently owns every pointer event over the surface you think you are targeting. The
+palette buttons worked from day one because the toolbar has no backdrop over the canvas; the identical
+code failed from the menu for reasons entirely outside it.
+
+*Second rule, cheaper: this could not have been caught by a typecheck or a unit test, and I shipped it
+saying so.* Drag-and-drop across two stacking contexts is exactly the class of change that needs a
+human to try it once before it counts as done.
