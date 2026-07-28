@@ -121,6 +121,7 @@ import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../p
 import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
 import { useFlarexCompProxies } from "../editor/flarex/useFlarexCompProxies";
 import { notePlaybackActive, noteRenderScale } from "../editor/performance/frame-stats";
+import { hasMeasuredDenseGop } from "../editor/performance/sourceProxyEngine";
 import { ensureAdaptiveQualityStarted, getAdaptiveScaleCap, subscribeAdaptiveScaleCap } from "../editor/performance/adaptive-quality";
 import { PreviewStatsOverlay } from "./PreviewStatsOverlay";
 import { ScenePreviewCanvas, type SceneViewerCaptureHandle } from "./ScenePreviewCanvas";
@@ -3338,7 +3339,19 @@ const PreviewLayer = memo(function PreviewLayer({
             // element decoder: the WC preview pool is for keyframe-dense proxies — a sparse-GOP
             // camera original freezes it (2026-07-06). Flips to WC automatically when the proxy
             // lands (mediaUrl becomes proxyUrl → new key/src remounts the layer).
-            preferNativeDecode={mediaUrl !== (asset as (typeof asset & { proxyUrl?: string }) | undefined)?.proxyUrl}
+            //
+            // ...UNLESS the source was MEASURED cheap to seek (2026-07-28). "No proxy" was standing in
+            // for "expensive to seek", which is an inference from URL identity, and it inverts on the
+            // very sources the GOP probe was built to classify: a small keyframe-dense clip has no
+            // proxy precisely BECAUSE it was measured cheap, and this line then forced it onto the
+            // element path — the freeze path for a Flarex loader. Same error the file-size gate made
+            // (v32j), one layer down. `hasMeasuredDenseGop` is true only on a positive measurement, so
+            // unprobed and unmeasurable sources keep the conservative element decoder exactly as
+            // before; nothing is relaxed on a guess.
+            preferNativeDecode={
+              mediaUrl !== (asset as (typeof asset & { proxyUrl?: string }) | undefined)?.proxyUrl &&
+              !hasMeasuredDenseGop(asset?.id)
+            }
             matte={layer.matte}
             pipeline={videoColorPipeline}
             mediaEffects={videoMediaEffects}

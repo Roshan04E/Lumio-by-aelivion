@@ -1,4 +1,4 @@
-import { Fragment, lazy, memo, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Fragment, lazy, memo, startTransition, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
@@ -269,7 +269,12 @@ import {
 import { createProxyBlobStore, isProxyMediaSupported, type ProxyBlobStore } from "../editor/performance/proxyMediaStore";
 import { generateSpanProxy, ProxyGenerationAborted, type ProxyGenerationDiagnostic } from "../editor/performance/proxyWorkerClient";
 import { SpanVerificationAborted, verifySpanBlobIntegrity } from "../editor/performance/spanVerification";
-import { ensureSourceProxy, setSourceProxyBuildSuspended, setSourceProxyProgressListener } from "../editor/performance/sourceProxyEngine";
+import {
+  ensureSourceProxy,
+  setSourceProxyBuildSuspended,
+  setSourceProxyDenseGopListener,
+  setSourceProxyProgressListener
+} from "../editor/performance/sourceProxyEngine";
 import { setWorldAssetProvider } from "../ai/world";
 import { isBackgroundWorkAllowed, setBackgroundGate, subscribeBackgroundGate } from "../editor/performance/backgroundScheduler";
 import { ensureDegradationControllerStarted } from "../editor/performance/degradation";
@@ -1360,6 +1365,16 @@ export function EditorPage() {
       applySourceProxyPatches();
     }
   }, [isPlaying, applySourceProxyPatches]);
+  // A source measured keyframe-dense keeps its ORIGINAL url (no proxy is built for it), so nothing in
+  // the graph changes when the verdict lands and no remount is triggered. `preferNativeDecode` reads
+  // that verdict during render, so without this bump it would keep whatever it concluded before the
+  // probe answered — right only by luck of an unrelated re-render. One counter, one re-render per
+  // newly-measured asset; the set is monotonic so this cannot loop.
+  const [, bumpDenseGopVerdict] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    setSourceProxyDenseGopListener(() => bumpDenseGopVerdict());
+    return () => setSourceProxyDenseGopListener(null);
+  }, []);
   // Cold-origin UX (1e → live progress 2026-07-18): builds used to announce themselves ONCE and then
   // run silently — with ingest jank on top, users read the silence as "the timeline froze". The
   // engine now emits stepped progress (every 5%, throttled at the source); mirror it into the notice

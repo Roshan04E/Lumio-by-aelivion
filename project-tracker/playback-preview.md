@@ -1798,3 +1798,49 @@ round lost to a stale bundle.
 
 **Unblocks.** Item 3 (`preferNativeDecode` inferring decode cost from `mediaUrl !== proxyUrl`) was
 deliberately gated behind this decision.
+
+## v32p — the last inference: "no proxy" was standing in for "expensive to seek" (2026-07-28)
+
+**The pattern, third occurrence.** v32j killed a file-SIZE heuristic that concluded "small ⇒ cheap to
+decode" and skipped the proxy; smoke footage inverts it, because the file is small BECAUSE the encoder
+bought that size with long GOPs. The replacement MEASURES seek cost (`gop-probe.ts`). But one layer
+down, `VideoPreview` was still inferring the same quantity from a different proxy variable:
+
+```ts
+preferNativeDecode={mediaUrl !== asset.proxyUrl}
+```
+
+"No proxy, therefore expensive to seek, therefore force the `<video>` element decoder." That inference
+inverts on exactly the sources the probe exists to classify. A small keyframe-dense clip has no proxy
+*precisely because it was measured cheap* — and this line then pushed it onto the element path, which
+for a Flarex loader is the freeze `WebglMediaLayer` warns about. The probe already knew the answer and
+had nowhere to put it: the engine computed the verdict, used its negative half to decide the build, and
+discarded the positive half.
+
+**Fix.** `measuredDenseGop` retains the positive verdict; `hasMeasuredDenseGop(assetId)` exposes it;
+`preferNativeDecode` now requires BOTH no-proxy AND not-measured-dense. Membership needs a POSITIVE
+measurement — a `null` profile (WebM, oversized, no `stss` box) never lands in the set, so unprobed and
+unmeasurable sources keep the conservative element decoder exactly as before. Nothing is relaxed on a
+guess; the set only ever ADDS permission to use the pooled decoder, mirroring the probe's own doctrine
+that it only ever adds a reason to build.
+
+**The async hole, closed deliberately.** A dense verdict changes NO url — no proxy is built, so the
+graph is untouched and nothing remounts. `preferNativeDecode` is computed during render, so the verdict
+would have been read before it existed and then never re-read, correct only by luck of an unrelated
+re-render. `setSourceProxyDenseGopListener` bumps one counter per newly-measured asset; the set is
+monotonic so it cannot loop. *A value that arrives asynchronously needs a way to announce itself, or it
+is not a value, it is a race.*
+
+**Rule.** *When a measurement replaces a heuristic, hunt every OTHER consumer of the quantity the
+heuristic was estimating.* Deleting the heuristic at its original site left a second copy of the same
+bad inference one layer down, phrased differently enough to look unrelated — size at ingest, url at
+render, both standing in for seek cost.
+
+**Gates.** `gop:test` 26/26, `wcpool:test` 59/59, `coherence:test` 5666/5666, `fullres:test` 203/203,
+web typecheck clean. None of the three touched files is in `RENDER_FINGERPRINT_SOURCES`, so no cached
+proxy span is invalidated and export output is unchanged.
+
+**NOT yet verified in a browser.** The path this fixes needs a source that SKIPS its proxy on a dense
+measurement; the reference comp builds all 6, so it never exercises the new branch. Someone should
+confirm with a small keyframe-dense clip that `__rfSourceMap` shows `wc-*` rather than `element` for a
+skipped source.

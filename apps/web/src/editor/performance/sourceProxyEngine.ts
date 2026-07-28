@@ -187,6 +187,51 @@ async function waitWhileSuspended(): Promise<void> {
 // Session memory: settled assets (built / permanently skipped / failed) + in-queue ids.
 const settled = new Set<string>();
 const inQueue = new Set<string>();
+
+/**
+ * MEASURED-DENSE SOURCES (2026-07-28). Assets whose GOP profile was actually probed and came back
+ * keyframe-dense enough that no proxy was warranted. This is the positive half of the probe's verdict,
+ * which the engine previously computed and threw away.
+ *
+ * It exists because `VideoPreview` had to INFER decode cost from `mediaUrl !== asset.proxyUrl` — "no
+ * proxy, therefore expensive to seek, therefore force the `<video>` element decoder". That is the same
+ * shape of inference as the file-size gate this probe replaced (v32j), and it fails the same way: a
+ * source can lack a proxy precisely BECAUSE it was measured cheap, and it then gets pushed onto the
+ * element path — which for a Flarex loader is the freeze `WebglMediaLayer` warns about. The source was
+ * measured safe for WebCodecs and sent to the slow path anyway, for want of somewhere to put the
+ * answer.
+ *
+ * Membership requires a POSITIVE measurement. A `null` profile ("cannot tell" — WebM, oversized, no
+ * `stss` box) never lands here, so every caller keeps its existing conservative behaviour unless the
+ * probe actually said dense. This set only ever ADDS permission to use the pooled decoder, mirroring
+ * the probe's own doctrine that it only ever adds a reason to build.
+ */
+const measuredDenseGop = new Set<string>();
+
+/**
+ * True only if this asset's GOP was measured and found dense. False for unprobed, unmeasurable and
+ * sparse sources alike — callers must treat it as "known cheap", never as "not known expensive".
+ */
+export function hasMeasuredDenseGop(assetId: string | null | undefined): boolean {
+  return !!assetId && measuredDenseGop.has(assetId);
+}
+
+// A skip decision arrives asynchronously, after the probe. Renderers that consult
+// `hasMeasuredDenseGop` during render would otherwise keep whatever they concluded before the answer
+// existed — correct only by luck of an unrelated re-render. Fires once per newly-measured asset.
+let denseGopListener: ((assetId: string) => void) | null = null;
+export function setSourceProxyDenseGopListener(listener: ((assetId: string) => void) | null): void {
+  denseGopListener = listener;
+}
+function noteMeasuredDense(assetId: string, profile: GopProfile | null): void {
+  if (!profile || measuredDenseGop.has(assetId)) return;
+  measuredDenseGop.add(assetId);
+  try {
+    denseGopListener?.(assetId);
+  } catch {
+    /* a listener fault must never fail the build decision */
+  }
+}
 const queue: Array<{ asset: SourceAsset; onReady: ReadyCallback }> = [];
 let draining = false;
 
@@ -406,6 +451,7 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   if (blob.size < MIN_SOURCE_BYTES) {
     const profile = await gop();
     if (!needsProxyForDecodeCost(profile)) {
+      noteMeasuredDense(asset.id, profile);
       record(asset.id, "skipped", 0, `source small enough (${describeGopProfile(profile)})`);
       return null;
     }
@@ -434,6 +480,7 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     // whole GOP per seek. The transcode is worth it for the keyframe density alone even at scale 1.
     const profile = await gop();
     if (!needsProxyForDecodeCost(profile)) {
+      noteMeasuredDense(asset.id, profile);
       record(asset.id, "skipped", 0, `already proxy-sized (${describeGopProfile(profile)})`);
       return null;
     }
