@@ -29,6 +29,7 @@ import {
   wouldCreateFlarexCycle,
 } from "./registry";
 import { createFlarexNode, flarexNodeDefs, parseFlarexNodeParams } from "./node-defs";
+import { sampleTrackingPathAt } from "../masks";
 import {
   collectFlarexVirtualLayers,
   flarexVirtualLayerId,
@@ -1705,6 +1706,79 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
     () => ({ type: "video", durationSeconds: 30 })
   );
   check("isolation: the host's virtual loaders still resolve", virtuals.some((v) => v.id === flarexVirtualLayerId("cx", "cx_srcin")));
+}
+
+// ── Tracker v1: match-move against an EXISTING track ───────────────────────
+{
+  const track = {
+    id: "tp1",
+    durationSeconds: 4,
+    smoothing: 0,
+    source: "mock" as const,
+    points: [
+      { timeSeconds: 0, position: { x: 10, y: 20 }, bounds: { timeSeconds: 0, x: 0, y: 0, width: 1, height: 1 }, confidence: 1, scale: 1, rotateZ: 0 },
+      { timeSeconds: 2, position: { x: 30, y: 60 }, bounds: { timeSeconds: 2, x: 0, y: 0, width: 1, height: 1 }, confidence: 1, scale: 2, rotateZ: 90 },
+    ],
+  };
+
+  // RELATIVE to the first point: attaching a tracker must leave the picture where the user put it and
+  // then follow. Absolute output would make every Tracker node a jump cut on insertion.
+  const atStart = sampleTrackingPathAt(track, 0);
+  check("a track is identity at its own start",
+    atStart.dx === 0 && atStart.dy === 0 && atStart.scale === 1 && atStart.rotateZ === 0);
+
+  const mid = sampleTrackingPathAt(track, 1);
+  check("samples linearly between points", Math.abs(mid.dx - 10) < 1e-9 && Math.abs(mid.dy - 20) < 1e-9);
+  check("scale composes as a RATIO, not a difference", Math.abs(mid.scale - 1.5) < 1e-9);
+  check("rotation composes as a difference", Math.abs(mid.rotateZ - 45) < 1e-9);
+
+  // A clip outliving its track holds the endpoint, which is what every NLE does.
+  const past = sampleTrackingPathAt(track, 99);
+  check("past the end holds the last point", Math.abs(past.dx - 20) < 1e-9 && Math.abs(past.rotateZ - 90) < 1e-9);
+  check("before the start holds the first point", sampleTrackingPathAt(track, -5).dx === 0);
+  check("an empty track is identity",
+    sampleTrackingPathAt({ ...track, points: [] }, 1).scale === 1);
+
+  const build = (params: Record<string, string | number | boolean>): FlarexComp => {
+    const comp = createFlarexComp("tk", "Tracker fixture");
+    const tracker = createFlarexNode("tracker", "tk1");
+    tracker.params = { ...tracker.params, ...params };
+    comp.nodes[tracker.id] = tracker;
+    comp.edges = [
+      { id: "tk_e1", from: { nodeId: "tk_in", socket: "out" }, to: { nodeId: "tk1", socket: "in" } },
+      { id: "tk_e2", from: { nodeId: "tk1", socket: "out" }, to: { nodeId: "tk_out", socket: "in" } },
+    ];
+    return comp;
+  };
+
+  // A transform-stage node lowers to a WRAP: the group's `shell` carries the transform and the input
+  // stays an untouched child. Reading `.transform` off the top-level draw finds nothing.
+  const shellOf = (d: unknown) => (d as { shell?: SceneLayerDraw })?.shell?.transform;
+  const tracked = compileFlarexComp(build({ trackingPathData: JSON.stringify(track) }), { ...lowerCtx(), timeSeconds: 1 });
+  const base = hostDraw();
+  check("the embedded track drives the shell transform",
+    Math.abs((shellOf(tracked)?.x ?? 0) - (base.transform.x + 10)) < 1e-9);
+  check("…and y", Math.abs((shellOf(tracked)?.y ?? 0) - (base.transform.y + 20)) < 1e-9);
+  check("…and scale, multiplicatively over the host framing",
+    Math.abs((shellOf(tracked)?.scale ?? 0) - base.transform.scale * 1.5) < 1e-9);
+  check("…and rotation, additively", Math.abs((shellOf(tracked)?.rotation ?? -1) - 45) < 1e-9);
+  check("the tracked input is left untouched as a child — the move is on the shell",
+    isGroupDraw(tracked) && Math.abs((tracked.children[0] as SceneLayerDraw).transform.x - base.transform.x) < 1e-9);
+
+  // PARITY IS THE POINT: the data travels in node params, so a renderer that never sees ProjectGraph
+  // still tracks. A by-id-only design would follow in the preview and sit still in the export.
+  const byIdOnly = compileFlarexComp(build({ trackingPathId: "tp1" }), { ...lowerCtx(), timeSeconds: 1 });
+  check("a bare id with no adapter passes through rather than blanking",
+    !isGroupDraw(byIdOnly) && Math.abs((byIdOnly as SceneLayerDraw).transform.x - base.transform.x) < 1e-9);
+  const viaAdapter = compileFlarexComp(build({ trackingPathId: "tp1" }), {
+    ...lowerCtx(), timeSeconds: 1, resolveTrackingPath: (id) => (id === "tp1" ? track : null),
+  });
+  check("…but the adapter resolves it when a caller supplies one",
+    Math.abs((shellOf(viaAdapter)?.x ?? 0) - (base.transform.x + 10)) < 1e-9);
+
+  // A deleted track must degrade the node, never the comp, and never throw on the playback hot path.
+  const corrupt = compileFlarexComp(build({ trackingPathData: "{not json" }), lowerCtx());
+  check("corrupt track data passes through instead of throwing", corrupt !== null && !isGroupDraw(corrupt));
 }
 
 if (failures > 0) {

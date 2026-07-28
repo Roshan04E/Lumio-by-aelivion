@@ -620,10 +620,30 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     group: "tracking",
     inputs: [image("in", "Input", true)],
     outputs: OUT,
-    // trackingPathId references a trackingPath artifact / editableFields entry (v2).
-    params: z.object({ trackingPathId: z.string().default("") }).strict(),
+    // MATCH-MOVE v1 (2026-07-28): follows an EXISTING track (`trackingPathId` names a
+    // TrackingPathArtifactData the person-extraction path already produces). It does not ANALYSE —
+    // computing a track is a separate project. Empty id, or an id whose artifact is gone, passes
+    // through untouched.
+    params: z.object({
+      trackingPathId: z.string().default(""),
+      /**
+       * The track itself, JSON-serialized (the flat-params convention for complex payloads).
+       *
+       * EMBEDDED, not referenced, and that is a parity decision rather than a storage one:
+       * `editableFields` lives on `ProjectGraph`, which the renderer never receives, so a
+       * by-id-only Tracker would follow the track in the preview and sit still in the export —
+       * exactly the class of divergence ADR-007 removes by construction. Carrying the points in
+       * node params puts them in the manifest, which both renderers read.
+       *
+       * `trackingPathId` is retained as provenance (which saved track this came from, for re-link
+       * and for a future store that does reach the renderer); it is not what renders.
+       */
+      trackingPathData: z.string().default(""),
+      /** 0 = raw track, 1 = maximum smoothing. Overrides the artifact's own value when set. */
+      smoothing: num(0, 0, 1),
+    }).strict(),
     keyframeable: [],
-    phase: 2,
+    phase: 1.5,
   },
 };
 

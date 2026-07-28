@@ -43,6 +43,22 @@ import {
 // registered no matter which module loaded first (idempotent — same call effects.ts makes).
 registerBuiltinFragmentEffects();
 import { getCompositionColorPipeline } from "../composition-style";
+import { sampleTrackingPathAt, type TrackingPathArtifactData } from "../masks";
+
+/**
+ * Parse a Tracker node's embedded track. Malformed or empty JSON yields null, so the node passes
+ * through — a corrupt param must degrade the node, never throw inside a per-frame lowering that runs
+ * on the playback hot path.
+ */
+function parseTrackingPathParam(raw: string): TrackingPathArtifactData | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as TrackingPathArtifactData;
+    return Array.isArray(parsed?.points) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
@@ -98,6 +114,13 @@ export interface FlarexLowerCtx {
    * unwired), so a preview pass can never blank the real viewer.
    */
   previewRootNodeId?: string | undefined;
+  /**
+   * Tracker (2026-07-28): resolve a `trackingPathId` to the tracking artifact it names. Mirrors
+   * `resolveSourceDraw` — the compiler stays free of artifact storage, the caller owns lookup, and a
+   * missing track returns null so the node soft-degrades to pass-through rather than blanking a comp
+   * whose track was deleted. Omitted → every Tracker passes through (the Phase-1 behaviour).
+   */
+  resolveTrackingPath?: ((trackingPathId: string) => TrackingPathArtifactData | null) | undefined;
 }
 
 type FlarexImageValue = SceneLayerDraw | SceneGroupDraw;
@@ -1289,8 +1312,50 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       // yet lowered — they pass through so a saved graph containing them still renders.
       case "aiMatte":
         return null;
-      case "tracker":
-        return passthrough(node);
+
+      /**
+       * TRACKER v1 (2026-07-28) — match-move: follow an EXISTING track, do not compute one.
+       *
+       * ADR-010 compliance is by declaration only; the evaluator learns nothing. The node reads
+       * `params` and `time`, resolves a `source` (the tracking artifact) through the caller-supplied
+       * adapter, and lowers to the same shell transform the Transform node uses. No new evaluator
+       * question, no new ArtifactKind — `TrackingData` was already in the registry and ADR-010 already
+       * named `tracker` among the types the evaluator must not know about.
+       *
+       * Parity is structural: this is the only production compile site (`build-scene-draws.ts`), which
+       * both the web preview and Remotion go through, so a tracked move cannot differ between them.
+       *
+       * Soft-degrade to pass-through when the artifact is missing or the adapter is absent — the same
+       * contract MediaIn uses for an unready source. A comp containing a Tracker whose track was
+       * deleted must still render, un-tracked, rather than blank.
+       */
+      case "tracker": {
+        const input = imageInput(node, "in");
+        if (!input) return null;
+        // EMBEDDED data first — it is what travels in the manifest and therefore what both renderers
+        // agree on. The id-based adapter is a convenience for callers that have a store; if it ever
+        // became the primary path it would have to reach Remotion too, or the preview would track and
+        // the export would not.
+        const path = parseTrackingPathParam(str(node, "trackingPathData", ""))
+          ?? (ctx.resolveTrackingPath?.(str(node, "trackingPathId", "")) ?? null);
+        if (!path || path.points.length === 0) return passthrough(node);
+        const sample = sampleTrackingPathAt(path, ctx.timeSeconds, num(node, "smoothing", 0) || undefined);
+        const wrap = wrapFor(input, STAGE_TRANSFORM);
+        frameProfiler.bump("compile.operations");
+        frameProfiler.bump("compile.objects");
+        const base = wrap.shell.transform;
+        // COMPOSES with whatever transform the shell already carries rather than replacing it: a
+        // Tracker downstream of a Transform must follow the track ON TOP of the user's framing. The
+        // Transform node overwrites here because it IS the framing; this one is a delta.
+        wrap.shell.transform = {
+          ...base,
+          x: base.x + sample.dx,
+          y: base.y + sample.dy,
+          scale: Math.max(0, base.scale * sample.scale),
+          rotation: base.rotation + sample.rotateZ,
+        };
+        return { kind: "image", draw: wrap };
+      }
 
       default:
         return passthrough(node);

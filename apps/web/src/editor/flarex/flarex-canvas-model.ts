@@ -12,11 +12,12 @@ import type { FlarexComp, FlarexEdge, FlarexNode } from "@orreris/shared";
 
 /** Node types the user can ADD (via palette, drag, or the F1 Tab search menu) — excludes the fixed
  *  comp OUTPUT (mediaOut; a comp has exactly one) and the types whose `lower()` is still unwired
- *  (aiMatte, tracker). `text` left this list once Text+ gained a real lowering (it is backed by a
+ *  (aiMatte). `text` left this list once Text+ gained a real lowering (it is backed by a
  *  virtual text layer now, so it renders); an unlowered node in the palette is a node that silently
  *  does nothing. MediaIn IS addable (multi-clip MediaIn, FLAREX.md Phase 2). One canonical list so the
  *  palette and the search menu can never drift apart. */
-const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "aiMatte", "tracker"]);
+// `tracker` became addable 2026-07-28 (match-move v1 lowers for real); `aiMatte` is still un-lowered.
+const NOT_ADDABLE = new Set<FlarexNodeType>(["mediaOut", "aiMatte"]);
 export const flarexAddableNodeTypes: FlarexNodeType[] = flarexNodeTypes.filter((t) => !NOT_ADDABLE.has(t));
 
 // Node categories are a purely LOGICAL grouping (labels + order below). They deliberately carry NO

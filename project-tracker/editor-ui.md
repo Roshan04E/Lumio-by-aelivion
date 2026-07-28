@@ -409,3 +409,55 @@ and using §7 as a general escape hatch is how a frozen contract rots.
 shape and inspector copy, so the narrow one cannot be quietly widened later. Shipping the narrow one
 while letting people believe they have the general one is the v32i merge-blend mistake again — two
 constructs sharing a lowering shape do not share its semantics.
+
+## Tracker v1 — match-move against an existing track (2026-07-28)
+
+Per `plans/flarex-timespeed-tracker.md` §1 and ADR-010. **The node was already declared** in
+`node-defs.ts` (image in → image out, `trackingPathId`) and lowered to `passthrough` — declared for the
+palette surface, never wired. v1 is its lowering, not its design.
+
+**Scope: consume, do not analyse.** It follows a `TrackingPathArtifactData` the person-extraction path
+already produces. Computing a track is a tracking algorithm — a different project with a different risk
+profile, and what "make our trackers advanced" means later. That analyser will declare `stateful` + a
+seek contract and bake to exactly this artifact, so this node becomes its consumer unchanged.
+
+**ADR-010: satisfied by declaration alone.** No new evaluator question, no new ArtifactKind —
+`TrackingData` was already in the registry and ADR-010 already named `tracker` among the types the
+evaluator must not know about. Contrast TimeSpeed, which needed ADR-011.
+
+**The parity decision, which drove the whole design.** The obvious shape is "reference the track by id".
+It is wrong here: `editableFields` lives on `ProjectGraph`, which the RENDERER NEVER RECEIVES. A
+by-id-only Tracker would follow the track in the preview and sit still in the export — silently, and
+only on a real render. So the track is EMBEDDED in node params as JSON (the flat-params convention for
+complex payloads), which puts it in the manifest that both renderers read. `trackingPathId` survives as
+provenance for re-link, not as what renders. An optional `resolveTrackingPath` adapter exists for
+callers that have a store, but it is deliberately the fallback: if it ever became primary it would have
+to reach Remotion too.
+
+*Rule: before referencing data by id, check that every consumer can resolve the id.* The renderer's
+input is the manifest and nothing else — anything not in it does not exist at export time.
+
+**Lowering.** A shell transform at `STAGE_TRANSFORM`, like the Transform node, but COMPOSED rather than
+assigned: a Tracker downstream of a Transform must follow the track on top of the user's framing, so it
+adds to `x`/`y`, multiplies `scale`, adds `rotation`. Transform overwrites because it *is* the framing;
+this is a delta.
+
+**Sampling is relative to the track's first point.** `sampleTrackingPathAt` returns an offset, so
+attaching a tracker leaves the picture where the user put it and then follows. Absolute output would
+make every Tracker node a jump cut on insertion. Scale composes as a RATIO (a track that doubles the
+subject doubles the attached element regardless of base scale); rotation as a difference. Endpoints
+hold outside the track's duration, as every NLE does when a clip outlives its track.
+
+**Soft-degrade, never blank.** Missing track, empty points, or corrupt JSON → pass through. A comp whose
+track was deleted must still render un-tracked, and a per-frame lowering on the playback hot path must
+never throw.
+
+**Gates.** `flarex:test` +12 assertions: identity at the track's own start, linear interpolation, the
+ratio/difference composition rules, endpoint holding at both ends, the empty track, the embedded path
+driving the shell while the input child stays untouched, the adapter path, a bare id with no adapter
+passing through, and corrupt JSON not throwing. Shared + web typecheck clean; `wcpool` 69/69,
+`coherence` 5666/5666, `fullres` 203/203, `gop` 26/26, `flarex:align` green.
+
+**Left open deliberately.** No inspector UI for choosing a track yet — the node renders from data but
+nothing populates that data from the editor. That is the next slice, and it is UI work rather than
+contract work.

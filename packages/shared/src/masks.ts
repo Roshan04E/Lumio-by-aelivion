@@ -970,6 +970,76 @@ export function applyStabilizationComposition(
   };
 }
 
+/**
+ * One tracked sample at an arbitrary time, expressed as an OFFSET FROM THE TRACK'S FIRST POINT.
+ *
+ * Relative, not absolute, because a match-move must be identity at the start of the track: attaching a
+ * tracker to a clip should leave the picture where the user put it and then follow, not teleport it to
+ * wherever the tracked subject happened to be in frame 1. Absolute output would make every Tracker node
+ * a jump cut on insertion.
+ *
+ * The existing tracking consumer (`buildTrackingKeyframes`) bakes points into keyframes at authoring
+ * time; this samples the same data at RENDER time, which is what a node in an evaluated graph needs.
+ * Both go through `smoothTrackingPoints` so a track reads identically whichever path consumes it.
+ */
+export interface TrackingSample {
+  /** Comp-percent offset from the first point (timeline transform units). */
+  dx: number;
+  dy: number;
+  /** Multiplier relative to the first point's scale; 1 when the track carries no scale channel. */
+  scale: number;
+  /** Degrees relative to the first point's rotation; 0 when the track carries no rotation channel. */
+  rotateZ: number;
+}
+
+export const TRACKING_SAMPLE_IDENTITY: TrackingSample = { dx: 0, dy: 0, scale: 1, rotateZ: 0 };
+
+/**
+ * Sample a track at `timeSeconds`, linearly between the two bracketing points and clamped at both
+ * ends — a track is defined over its own duration and holds its endpoints outside it, which is what
+ * every NLE does when a clip outlives its track. Undefined 3D channels mean "no change from identity"
+ * per `TrackingPoint`, so they read as scale 1 / rotation 0 rather than as zero.
+ */
+export function sampleTrackingPathAt(
+  path: TrackingPathArtifactData,
+  timeSeconds: number,
+  smoothing?: number
+): TrackingSample {
+  const points = smoothTrackingPoints(path.points, smoothing ?? path.smoothing);
+  const first = points[0];
+  if (!first) return TRACKING_SAMPLE_IDENTITY;
+  const baseScale = first.scale ?? 1;
+  const baseRot = first.rotateZ ?? 0;
+  const at = (p: TrackingPoint): TrackingSample => ({
+    dx: p.position.x - first.position.x,
+    dy: p.position.y - first.position.y,
+    // Ratio, not difference: scale composes multiplicatively, and a track that doubles the subject
+    // must double the attached element regardless of what the base scale happened to be.
+    scale: baseScale === 0 ? 1 : (p.scale ?? 1) / baseScale,
+    rotateZ: (p.rotateZ ?? 0) - baseRot,
+  });
+  if (timeSeconds <= first.timeSeconds) return at(first);
+  const last = points[points.length - 1]!;
+  if (timeSeconds >= last.timeSeconds) return at(last);
+  for (let i = 1; i < points.length; i += 1) {
+    const b = points[i]!;
+    if (b.timeSeconds < timeSeconds) continue;
+    const a = points[i - 1]!;
+    const span = b.timeSeconds - a.timeSeconds;
+    // Coincident timestamps would divide by zero; the later point wins, matching keyframe semantics.
+    const u = span <= 0 ? 1 : (timeSeconds - a.timeSeconds) / span;
+    const sa = at(a);
+    const sb = at(b);
+    return {
+      dx: sa.dx + (sb.dx - sa.dx) * u,
+      dy: sa.dy + (sb.dy - sa.dy) * u,
+      scale: sa.scale + (sb.scale - sa.scale) * u,
+      rotateZ: sa.rotateZ + (sb.rotateZ - sa.rotateZ) * u,
+    };
+  }
+  return at(last);
+}
+
 export function smoothTrackingPoints(points: TrackingPoint[], smoothing: number): TrackingPoint[] {
   const amount = Math.max(0, Math.min(0.95, smoothing));
   if (points.length < 3 || amount <= 0) {
