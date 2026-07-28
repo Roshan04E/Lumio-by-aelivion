@@ -486,3 +486,36 @@ code failed from the menu for reasons entirely outside it.
 *Second rule, cheaper: this could not have been caught by a typecheck or a unit test, and I shipped it
 saying so.* Drag-and-drop across two stacking contexts is exactly the class of change that needs a
 human to try it once before it counts as done.
+
+**Third attempt, and the first one driven by data (2026-07-28).** Two fixes had already landed and the
+feature was still dead. `window.__rfFlarexDrag` counts the four independent stages of a drag; the
+toolbar palette — a source known to WORK — reports into the same counters, so the comparison isolates
+the difference instead of describing the symptom.
+
+```
+palette drag:  start 2 · over 29 · drop 1 · inserted 1
+menu drag:     start 3 · over 29 · drop 1 · inserted 1     ← `over` did not move
+```
+
+`start` incremented and `over` stayed frozen: the drag BEGAN and the canvas then received **zero**
+dragover events. Not a targeting problem, not the backdrop — the drag was dying at birth.
+
+**Cause: a `setState` inside `dragstart`.** The menu path set a `menuDragging` flag to make the menu
+and backdrop transparent to pointer events. React reconciles the subtree that owns the drag source, and
+Chrome cancels a drag whose source element is reconciled out from under it. The working palette path
+sets no state at all, which is precisely why it worked. Both earlier fixes were real defects — the
+`inset: 0` backdrop swallowing drops, the unmount-on-dragstart — but the third was mine, introduced by
+the fix for the second.
+
+Now a ref mutation: `setMenuDragPassthrough` writes `style.pointerEvents` directly on the menu and
+backdrop nodes. The DOM changes, nothing re-renders, the drag survives. Same treatment for the toolbar
+Browse popover.
+
+*Rule: during a native drag, do not re-render the subtree containing the drag source.* React state is
+the reflex for "change how this looks while X is happening", and it is the wrong tool for the duration
+of a drag. Reach for a ref.
+
+*Rule, harder-won: three attempts at one bug is a signal to stop reasoning and start measuring.* The
+first two fixes were correct code changes that did not fix the reported problem, which is evidence
+about the diagnosis, not the code. Four counters found in one reading what two rounds of reading the
+source could not.

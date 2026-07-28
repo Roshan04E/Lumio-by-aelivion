@@ -116,9 +116,18 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
   // Tab menu). Icon-only pins cover the commons; this is the everything-else entry point. Positioned
   // with position:fixed off the button rect because the toolbar clips overflow (overflow-x:auto).
   const [browseOpen, setBrowseOpen] = useState(false);
-  /** A drag is in flight out of the Browse popover: keep it mounted (the drag source must survive)
-   *  but let pointer events through, so the drop reaches the canvas rather than the popover chrome. */
-  const [browseDragging, setBrowseDragging] = useState(false);
+  /** A drag out of the Browse popover: keep it mounted AND do not re-render while it is in flight.
+   *  Measured on the canvas menu — a setState in `dragstart` re-renders the subtree owning the drag
+   *  source and Chrome cancels the drag (start 3, over 0). Refs, mutated directly. */
+  const browseElRef = useRef<HTMLDivElement | null>(null);
+  const browseBackdropElRef = useRef<HTMLDivElement | null>(null);
+  const setBrowseDragPassthrough = (on: boolean) => {
+    for (const el of [browseElRef.current, browseBackdropElRef.current]) {
+      if (!el) continue;
+      el.style.pointerEvents = on ? "none" : "";
+    }
+    if (browseElRef.current) browseElRef.current.style.opacity = on ? "0.35" : "";
+  };
   const [browsePos, setBrowsePos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   // Node thumbnails (Slice 6) — a view mode, persisted like a preference, not project data.
   const [thumbnails, setThumbnails] = useState(readThumbnailPref);
@@ -316,17 +325,14 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
                 would destroy the drag source and abort the drag. Same fault, same fix, as the
                 canvas add-node menu. */}
             <div
+              ref={browseBackdropElRef}
               className="flarex-menu-backdrop flarex-menu-backdrop--fixed"
-              style={browseDragging ? { pointerEvents: "none" } : undefined}
               onPointerDown={() => setBrowseOpen(false)}
             />
             <div
+              ref={browseElRef}
               className="flarex-node-menu flarex-palette-browse-pop"
-              style={{
-                left: browsePos.x,
-                top: browsePos.y,
-                ...(browseDragging ? { pointerEvents: "none" as const, opacity: 0.35 } : {}),
-              }}
+              style={{ left: browsePos.x, top: browsePos.y }}
             >
               <FlarexNodeBrowser
                 onPick={(type) => {
@@ -339,12 +345,13 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
                 onDragStartType={(type) => {
                   flarexPaletteDrag.current = type;
                   flarexTraceDragStart(type);
-                  setBrowseDragging(true);
+                  // Ref mutation, NOT setState — a re-render here kills the drag.
+                  setBrowseDragPassthrough(true);
                 }}
                 onDragEndType={() => {
                   flarexPaletteDrag.current = null;
-                  setBrowseDragging(false);
-                  // Closed on dragEND, not dragSTART: by now the drop has been delivered.
+                  setBrowseDragPassthrough(false);
+                  // Safe now: by `dragend` the drop has been delivered.
                   setBrowseOpen(false);
                 }}
               />
