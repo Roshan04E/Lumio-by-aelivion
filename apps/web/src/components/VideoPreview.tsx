@@ -204,6 +204,29 @@ function renderDebugEnabled(): boolean {
   }
   return renderDebugFlag;
 }
+
+// MEASUREMENT ESCAPE HATCH for `preferSoftwareDecode` on Flarex virtual loaders (2026-07-28).
+// The flag shipped on a decoder-contention theory that was later disproved, and it costs a CPU H.264
+// decode per loader; the tracker has carried it as "kept, unproven" since v30. Decoder session
+// sharing narrowed what it can still affect — an ATTACHED loader gets the host's hardware session
+// regardless of what it asked for — so the only subjects left are loaders that did not attach, and
+// the keep-or-revert call needs an A/B on the same comp rather than an argument.
+//
+// `?flarexSwDecode=0` forces it off, `=1` forces it on. ABSENT the param the behaviour is exactly
+// today's (on for virtual loaders), so this is inert for every user who does not type it.
+// Delete this together with the decision it exists to settle.
+let flarexSwDecodeFlag: boolean | null | undefined;
+function flarexSwDecodeOverride(): boolean | null {
+  if (flarexSwDecodeFlag === undefined) {
+    try {
+      const raw = new URLSearchParams(window.location.search).get("flarexSwDecode");
+      flarexSwDecodeFlag = raw === null ? null : raw !== "0";
+    } catch {
+      flarexSwDecodeFlag = null;
+    }
+  }
+  return flarexSwDecodeFlag;
+}
 function bumpRenderCount(name: string): void {
   if (!renderDebugEnabled()) return;
   const w = window as unknown as { __rfRenderCounts?: Record<string, number> };
@@ -3326,7 +3349,8 @@ const PreviewLayer = memo(function PreviewLayer({
             // block. That contention (not reset churn) is the confirmed multi-source freeze: with 3
             // seek-on-demand streams the host wins the block and the loaders starve. Software decode runs
             // them on CPU threads in parallel; the host keeps hardware. See preferSoftwareDecode.
-            preferSoftwareDecode={isFlarexVirtualLayerId(layer.id)}
+            // `?flarexSwDecode=0/1` overrides for the keep-or-revert measurement; absent, unchanged.
+            preferSoftwareDecode={(flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id)}
             hidden={pending || (hideForTransition && !sceneComposited)}
             interactiveHidden={sceneComposited && !pending}
             // Scene-composited media carries no per-clip reveal (junctions fold in-compositor) — null it for
