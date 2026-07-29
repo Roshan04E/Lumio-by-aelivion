@@ -242,6 +242,51 @@ function flarexSwDecodeOverride(): boolean | null {
   }
   return flarexSwDecodeFlag;
 }
+/**
+ * The peak |rate| a Flarex virtual loader is asked to traverse its source at — 1 for every loader that
+ * is not retimed, which is every loader that existed before TimeSpeed (ADR-011).
+ *
+ * DECODE DEMAND SCALES WITH THIS, and that is the whole reason it is a number rather than a boolean.
+ * A seek-on-demand provider decodes from the nearest keyframe to the requested time; at rate R the
+ * requested times are R× further apart each frame, so it decodes ~R× the frames per displayed frame.
+ * A decode budget that is comfortable at 1× is exceeded at 2× and hopeless at 10× — measured
+ * 2026-07-29 as "plays at 1× and jitters", which is the loader presenting stale frames (`tolerateLag`)
+ * because it never catches up. Published as `__rfFlarexLoaderRate` so the decision is legible next to
+ * `__rfWcMode`, since the request and the outcome have already been confused once here.
+ */
+function flarexLoaderRate(layer: Pick<TimelineLayer, "id" | "speed" | "speedKeyframes">): number {
+  if (!isFlarexVirtualLayerId(layer.id)) return 1;
+  const rate = flarexLoaderRateOf(layer);
+  flarexLoaderRates[layer.id] = rate;
+  return rate;
+}
+
+/**
+ * Declared EAGERLY at module scope so `__rfFlarexLoaderRate` exists the moment this bundle loads.
+ * An empty object means "this build knows about loader rates and has seen none"; an ABSENT one means
+ * the build predates them. That distinction is the whole point — a symbol published only once a
+ * retimed loader mounts cannot tell a working feature from a stale bundle, which has already voided
+ * one measurement round here (see `flarexSwDecodeOverride`).
+ */
+const flarexLoaderRates: Record<string, number> = {};
+try {
+  (window as unknown as { __rfFlarexLoaderRate?: Record<string, number> }).__rfFlarexLoaderRate = flarexLoaderRates;
+} catch {
+  /* ignore */
+}
+
+function flarexLoaderRateOf(layer: Pick<TimelineLayer, "speed" | "speedKeyframes">): number {
+  const ramp = layer.speedKeyframes;
+  // A ramp's PEAK sets the budget: the worst instant decides whether the loader keeps up, and a ramp
+  // that spends one second at 8× starves there no matter how gentle its average is.
+  if (ramp?.length) {
+    let peak = 0;
+    for (const point of ramp) peak = Math.max(peak, Math.abs(point.value) || 0);
+    return peak > 0 ? peak : 1;
+  }
+  return Math.abs(layer.speed ?? 1) || 1;
+}
+
 function bumpRenderCount(name: string): void {
   if (!renderDebugEnabled()) return;
   const w = window as unknown as { __rfRenderCounts?: Record<string, number> };
@@ -3379,13 +3424,22 @@ const PreviewLayer = memo(function PreviewLayer({
             // seek-on-demand streams the host wins the block and the loaders starve. Software decode runs
             // them on CPU threads in parallel; the host keeps hardware. See preferSoftwareDecode.
             // `?flarexSwDecode=0/1` overrides for the keep-or-revert measurement; absent, unchanged.
-            preferSoftwareDecode={(flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id)}
+            //
+            // NOT above 1× (2026-07-29). Software decode is a THROUGHPUT COMPROMISE accepted to keep the
+            // hardware block free; a loader running faster than real time needs ~rate× the decode work,
+            // so the compromise that is comfortable at 1× is exactly what breaks at 2×. Measured: GPU
+            // 16ms and CPU 3ms — a healthy frame pipeline — while the loader logged LOST SOURCE and
+            // played at 1× with jumps. That is starvation, not frame cost. Loaders at 1× are untouched,
+            // so the proven multi-source behaviour this flag exists for is unchanged.
+            preferSoftwareDecode={
+              (flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id) && flarexLoaderRate(layer) <= 1
+            }
             // A RETIMED loader (TimeSpeed, ADR-011) must decode alone. It usually carries the HOST's own
             // url — a promoted host MediaIn always does — and by construction asks for a different time
             // than the host, which is the one case session sharing cannot serve: neither member ever hits
             // `pending`/`lastServed`, so both pay a seek per frame until the divergence detector gives up.
             // Un-retimed loaders share exactly as before.
-            exclusiveDecode={isFlarexVirtualLayerId(layer.id) && (layer.speed !== undefined && layer.speed !== 1 || (layer.speedKeyframes?.length ?? 0) > 0)}
+            exclusiveDecode={flarexLoaderRate(layer) !== 1}
             hidden={pending || (hideForTransition && !sceneComposited)}
             interactiveHidden={sceneComposited && !pending}
             // Scene-composited media carries no per-clip reveal (junctions fold in-compositor) — null it for

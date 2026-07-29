@@ -2112,3 +2112,55 @@ clip a second time (the copy carries the host's effects deliberately: a retime m
 shot's grade). If lag survives this fix, that doubling is the next suspect and `?flarexProfile=1` plus
 `__rfWcPool` is what distinguishes them. Shipping the feature without measuring its cost was the
 mistake; the fix for that is a measurement, not another guess.
+
+## v32x — the frame pipeline was never the problem: decode demand scales with retime rate (2026-07-29)
+
+**The measurement ended two wrong theories at once.** Profiler across ~60 frames with a TimeSpeed live:
+GPU 15.7–17.8 ms, CPU 2.3–5.9 ms. That is the *ordinary* floor (v-flarex-performance: "GPU 15–19 ms is
+the real floor"). So the compile side is not elevated and neither is the composite — **the doubled
+decode-and-grade of a promoted host MediaIn, which I named as the prime suspect, costs nothing
+visible.** Whatever is wrong is not frame COST.
+
+What is wrong is in the same report: `media LOST SOURCE — no frame for 6f / 125ms (decoder
+dropped/preempted)`, `RECOVERED after 7f / 181ms`. And the founder's symptom, which is the whole
+diagnosis in one sentence: *"even in the speed of 2x or 10x it plays at 1x, but jitters and updates its
+time in between."*
+
+**That is starvation, and it is what `tolerateLag` looks like from the outside.** A loader that cannot
+keep up presents the latest advancing frame rather than freeze-holding (v30, deliberate). Under a
+retime that reads as: picture crawls at roughly real time, then jumps when a seek finally lands. The
+node is not being ignored — the decoder is being outrun.
+
+**Why it is outrun: decode demand is multiplied by the rate.** A seek-on-demand provider decodes from
+the nearest keyframe to the requested time. At rate R the requested times are R× further apart every
+frame, so it decodes ~R× the frames per displayed frame. This is not a constant overhead that
+optimization removes; it is the shape of the work.
+
+`__rfWcPool` says the loader was carrying that alone, in software: `active: 1, activeSoftware: 1` —
+the single live WC session is the SOFTWARE one, so the host was not on WebCodecs at all (element path,
+which means `preferNativeDecode` was true, which means `mediaUrl !== proxyUrl` — **the host is playing
+the ORIGINAL, no ingest proxy**). So the actual configuration was: software H.264 decode, of an
+original full-res file, seek-on-demand, at 2–10× real time. That cannot work, and no amount of
+compositor work would have made it work.
+
+**Fix: stop paying a throughput compromise on the one consumer that cannot afford it.**
+`preferSoftwareDecode` exists to keep the hardware block free for the host — a trade of throughput for
+non-contention that was measured fine at 1×. It is now applied only at rate ≤ 1. A retimed loader takes
+hardware, and it is already `exclusive` (v32w), so it is one extra stream, not a share.
+
+Loaders at 1× — every loader that existed before TimeSpeed — are bit-identical to before, which is the
+guard against re-opening the multi-source freeze this flag was built for.
+
+`__rfFlarexLoaderRate` publishes the per-loader rate, declared EAGERLY at module scope: empty = this
+build knows about rates and saw none, absent = the build predates them. The same presence-test
+discipline that a voided A/B round taught this file.
+
+*Rule: a symptom that scales with a parameter is a budget problem, not a bug.* "Lags with TimeSpeed"
+invited a hunt for something newly wrong. "Plays at 1× at both 2× and 10×" says the consumer is
+saturated and the rate is the axis. The second sentence was worth more than the whole profiler dump —
+and it came from the founder, not the instrument.
+
+**Still open, and named honestly:** at high rates on long-GOP ORIGINAL media this will not be real time
+even on hardware — every NLE answers that with optimized media, and ours is the ingest proxy, which
+this asset does not appear to have. Whether that is "no proxy was built" or "a proxy exists and the
+retimed loader is not using it" is the next question, and `__rfSourceMap` answers it.
