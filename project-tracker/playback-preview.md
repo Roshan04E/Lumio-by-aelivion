@@ -2164,3 +2164,116 @@ and it came from the founder, not the instrument.
 even on hardware — every NLE answers that with optimized media, and ours is the ingest proxy, which
 this asset does not appear to have. Whether that is "no proxy was built" or "a proxy exists and the
 retimed loader is not using it" is the next question, and `__rfSourceMap` answers it.
+
+## v32y — the playhead lies during PLAYBACK; pause is only where the truth arrives (2026-07-29)
+
+**Founder report:** "when I pause, the playback is paused but after a fraction of a second it tries to
+render 5-6 frames later… one playhead should not lie, it should always render the exact frame." Present
+since the beginning, assumed to be by design until browser NLEs and Premiere/Resolve were checked and
+none of them do it. Both the editor and the Flarex viewer.
+
+**The framing that unlocked it: nothing is wrong at the pause edge.** Paused, every source converges on
+the exact requested time — that part already worked, and it is *why* the jump exists. Three independent
+slacks let the presented picture sit BEHIND the transport during playback, all of them forward-biased,
+and pausing collapses all three at once. The correction is the visible event; the error is upstream of
+it. This file's own v30 states the policy outright ("PLAYING = SMOOTH, PAUSED = COHERENT") and
+`VideoPreview.tsx:3129` already documents the 2026-07-03 version of the same report — the fix that
+shipped then BOUNDED the error at 0.15s rather than removing it, which is why it came back.
+
+The three, with the numbers that were actually measured this round:
+
+1. **WC served frames presented while behind** — `WC_HOLD_LAG_S = 0.35` (≈10 frames at 30fps),
+   unbounded for `tolerateLag` loaders, which is why Flarex is the worse of the two pages.
+2. **`<video>` element free-run** — corrected only past 0.15s, and only every 500ms.
+3. **Pause committed the raw wall-clock anchor** — up to one `playbackCommitIntervalMs` (40ms
+   balanced / 90ms performance) ahead of the last time the viewer had rendered, and **off the frame
+   grid**: pause was the ONLY transport path that never quantized. Measured live at 39.9ms of commit
+   lag, parking at 3.354700s — between frames 100 and 101.
+
+**Shipped: #3 only, because only #3 is defect.** #1 and #2 are trade-offs bought with real scar tissue
+(v30's host-starvation freeze, the 2026-07-16 seek-storm tab hang), and tightening either on a hunch is
+how this file fills up. `quantizeToFrameGrid(t, "nearest" | "current")` now owns both grids: a SCRUB
+takes the frame nearest the pointer (unchanged), a STOP takes `floor(t·fps)` — the frame that was on
+screen, since rounding parks on a frame the user never saw. `parkTransportAt` is now the single stop
+authority; the playback effect's `!isPlaying` branch used to park at the COMMITTED clock while the
+spacebar path parked at the LIVE anchor, two authorities that could disagree by a commit interval.
+
+**A/B, same media, same session:** without the fix, parked 3.354700s, off-grid, commit lag 39.9ms. With
+it, parked 4.300000s = frame 129 exactly, and the commit/live split at the stop reads 0.0ms. The gate
+FAILS on the old code and PASSES on the new — a gate never seen to fail is not evidence.
+
+**New instrument: `pnpm --filter @orreris/worker pause:gate`** (`pause-coherence-gate.ts`), plus
+`window.__rfClock` (committed + live at full precision — the on-screen readout is `toFixed(2)`, which
+cannot resolve a frame at 30fps, so nothing outside React could check grid alignment at all).
+
+*It asserts on two axes and refuses to conflate them,* which is v-full-res-rendezvous' lesson applied a
+second time: a pure pixel diff across the pause edge sees the full-res settle (300ms–3s, by design) and
+the time jump in one number and can never separate them. So TIME is asserted with the resolution-blind
+instrument (`__flarexCoherence` staleness, recorded regardless of the hold flag) and pixels are a
+reported artifact, not the bar.
+
+**Residual, named honestly.** Worst staleness during playback measured 79.5ms (2.4 frames) on the
+`[element]` path in one run, 29.3ms in another, 0.0ms in a third — n=3, high variance, freshly-created
+projects. That is a distribution to gather, not a threshold to act on, and Phase 2 (tightening #1/#2)
+is deliberately blocked on it. The pixel axis read 0.000% in every run, which proves LESS than it
+looks: the capture starts after the pause click round-trip, by which time the correction has landed.
+
+**Two blind spots in the new instrument, stated before they mislead someone.** `maxStalenessSeconds`
+excludes `awaitingFrame` sources — a source with NO decode for the requested time has no served time to
+subtract, so it scores 0ms while being the worse state. One run read "0.0ms worst" beside
+`escapeHatches=54/58`; the gate now says so out loud instead of letting the headline read clean. And
+62% escape hatches in a healthy-looking run means **most frames presented during playback are not the
+frame the playhead names** — the barrier is off by design, so this is the policy working as written,
+which is exactly the thing worth deciding about rather than discovering.
+
+*Rule: when a correction is visible, suspect the state it corrects, not the correction.* Four separate
+rounds treated the pause snap as the bug and bounded it; it is a symptom of a playback model that
+presents frames the playhead does not name. Bounding a lie makes it smaller, not true.
+
+**Open, and requiring a decision rather than more code:** #1 and #2 cannot be removed by moving the
+playhead — the pixels are stale relative to ANY transport time. Real-time playback off a
+seek-on-demand decoder is structurally offset (request T, decode 100ms, present at T+100ms). The escape
+is read-ahead into a presentation queue so lag degrades into DROPPED frames (correct time, judder)
+instead of OFFSET frames (smooth, wrong time) — which is what Premiere and Resolve actually do, and it
+would retire `tolerateLag` entirely. That is an ADR, not a patch.
+
+## v32y — the residual stutter was a retry loop with no bound, not decode and not GPU (2026-07-29)
+
+**Decode is fixed and verified.** Post-rebuild `__rfFlarexLoaderRate` = `{loaderA: 1, loaderB: 2}` (so
+the bundle IS the bundle), and the 2× loader moved `element`/**stale** → `wc-hw`/**ok**, staleMs 0, all
+three sources advancing, no `LOST SOURCE`. The 1× loader stayed `wc-sw`, untouched, as intended.
+
+**Two theories died on the way here, both mine.** The doubled decode-and-grade of a promoted host
+MediaIn: GPU 15.8–18.6 ms, CPU 3–5 ms, compile 2 ms of a 20 ms frame — invisible. Long-GOP originals:
+`__rfSourceProxy.recent` says the only skipped asset is `source small enough (gop p95 12f / max 12f
+over 300f)`, which is keyframe-DENSE and correctly skipped. Both were plausible and both were wrong.
+
+**What the data actually said, in a column I nearly scrolled past.** Per-source frame versions across
+62 composites: host v41→v95, the 1× loader v54→v116 — exactly one new frame per composite each. The 2×
+loader: **v1820 → v6154, about 70 per composite.**
+
+It is not decoding 2× faster, it is publishing 70× more. Every publish bumps `frameVersion` and calls
+`sceneSink.onFrame()`, which re-arms a scene recomposite. That is the stutter.
+
+**Why it never converges.** A seek-on-demand provider trails its request by roughly one decode; at rate
+R that trail is R× further in SOURCE seconds. So a 2× loader sits permanently above `WC_HOLD_LAG_S`,
+and the lag-tolerant branch — correctly, per v30 — presents and re-arms *every* pass. The re-arm was
+paced by a macrotask (v32-era fix, microtask → macrotask), which bounds latency but not RATE: the loop
+then runs as fast as the event loop will turn it.
+
+**Fix: pace a SELF-DRIVEN retry to the display.** A layer can show one frame per composite; a retry
+that outruns the display is manufacturing frames nothing will ever see. `wcRerequestPaceRef` marks a
+re-arm as `"frame"` (rAF) when the layer is re-asking on its own behalf, `"task"` when an outside
+request arrived mid-decode. Never freeze-hold is intact — it still pulls continuously and still
+presents the latest advancing frame, once per display frame. A converging source never sets the flag.
+
+**Scoped to the playing lag-tolerant branch only.** The two catch-up HOLD branches re-arm identically
+and `__rfWcHolds` climbs ~11/composite in the same capture — but they do not present per pass, so they
+churn nothing, and they are the paused-recovery path where an rAF pace would stall in a hidden tab.
+Named here, not "fixed" on the strength of a neighbouring diagnosis.
+
+*Rule: a bounded budget is not a bounded rate.* The macrotask yield was the right fix for main-thread
+occupancy during a scrub and it is still right. It just never claimed to limit how OFTEN a self-driven
+loop re-enters — and for a consumer that can never converge, "as fast as the loop allows" is the same
+spin the yield was introduced to stop, one level up. Whenever a retry can be permanently unsatisfiable,
+pace it to the thing that consumes its output.

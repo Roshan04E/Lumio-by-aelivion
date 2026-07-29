@@ -820,6 +820,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             window.clearTimeout(wcTolerateRetryTimerRef.current);
             wcTolerateRetryTimerRef.current = null;
           }
+          if (wcRerequestRafRef.current !== null) {
+            cancelAnimationFrame(wcRerequestRafRef.current);
+            wcRerequestRafRef.current = null;
+            wcRerequestPendingRef.current = false;
+          }
           wcTolerateRetryRef.current = 0;
           wcProviderRef.current = null;
           setWcHeldFrame(null);
@@ -1862,21 +1867,62 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
      * anyway during a scrub.
      */
     const wcRerequestPendingRef = useRef(false);
+    /**
+     * `"task"` = a real request arrived while one was in flight; the follow-up should run as soon as
+     * the loop allows, because something outside asked for a newer time.
+     *
+     * `"frame"` = the layer is re-asking on its OWN behalf (the lag-tolerant degraded path and the
+     * catch-up holds). Those are paced to the DISPLAY, and the reason is a hard bound rather than a
+     * tuning preference: a layer can only show one frame per composite, so a self-driven retry that
+     * runs faster than the display is producing frames nothing will ever see.
+     *
+     * Measured 2026-07-29, and it is not a small effect. A 2× retimed loader sits permanently above
+     * `WC_HOLD_LAG_S` — a seek-on-demand decoder trails its request by roughly one decode, and at rate
+     * R that trail is R× further in source seconds — so the tolerant branch presented AND re-armed on
+     * every single iteration. Paced only by a macrotask, it ran ~70 times per composited frame
+     * (`__rfSourceMap` frame versions: v1820 → v6154 over 62 composites, against exactly 1/frame for
+     * both un-retimed sources beside it). Every one of those publishes a frame version and re-arms a
+     * scene recomposite. That is the residual stutter: not decode, not GPU, just a loop with no bound.
+     *
+     * This does NOT weaken "never freeze-hold" (v30): the layer still re-requests continuously and
+     * still presents the latest advancing frame — once per displayed frame, which is all a display can
+     * take. A source that converges never sets the flag at all and is untouched.
+     *
+     * SCOPED TO THE PLAYING LAG-TOLERANT BRANCH ONLY, deliberately. The two catch-up HOLD branches
+     * below re-arm themselves the same way and their counter (`__rfWcHolds`) also climbs by ~11 per
+     * composite in the same capture — but they do NOT present on each pass, so they churn no frame
+     * versions and re-arm no composites, and I have not measured them doing harm. They are also the
+     * paused-recovery path, where an rAF pace would stop advancing in a backgrounded tab (rAF does not
+     * fire when hidden; a macrotask does). Left alone rather than "fixed" on the strength of a
+     * neighbouring diagnosis.
+     */
+    const wcRerequestPaceRef = useRef<"task" | "frame">("task");
+    const wcRerequestRafRef = useRef<number | null>(null);
     function scheduleWcRerequest() {
       if (wcRerequestPendingRef.current) return;
       wcRerequestPendingRef.current = true;
-      void yieldTask().then(() => {
+      const fire = () => {
         wcRerequestPendingRef.current = false;
+        wcRerequestRafRef.current = null;
+        // Back to the SAFE default. "frame" is a claim about one specific retry, not a mode the layer
+        // stays in — leaving it latched would slow a genuine external request behind a display frame.
+        wcRerequestPaceRef.current = "task";
         // The provider can be disposed across the yield (unmount, src change, pool eviction); the
         // null check is the same guard the null-frame retry timer already uses.
         if (wcProviderRef.current) requestWcFrameRef.current();
-      });
+      };
+      if (wcRerequestPaceRef.current === "frame" && typeof requestAnimationFrame === "function") {
+        wcRerequestRafRef.current = requestAnimationFrame(fire);
+        return;
+      }
+      void yieldTask().then(fire);
     }
 
     function requestWcFrame() {
       const provider = wcProviderRef.current;
       if (!provider || mediaType !== "video") return;
       if (wcBusyRef.current) {
+        wcRerequestPaceRef.current = "task"; // an OUTSIDE request arrived mid-decode — not self-driven
         wcRerequestRef.current = true;
         return;
       }
@@ -1978,6 +2024,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               // smooth-but-slightly-behind, in sync "enough", and scales (none freeze). No hold streak, so
               // the sustained-hold native bail above never fires for these either.
               wcHoldStartRef.current = null;
+              wcRerequestPaceRef.current = "frame"; // self-driven: one present per display is the ceiling
               wcRerequestRef.current = true;
               presentFrame();
             } else if (lag > WC_HOLD_LAG_S && !reversedPlayback) {
