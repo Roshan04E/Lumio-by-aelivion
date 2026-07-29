@@ -27,6 +27,9 @@ import {
   NODE_BEZEL,
   NODE_FOOTER_H,
   NODE_LABEL_GAP,
+  NODE_LABEL_PX,
+  NODE_TITLE_PX,
+  labelAlphaForPx,
   NODE_THUMB_H,
   NODE_W,
   placeAfterNode,
@@ -465,9 +468,11 @@ export function FlarexNodeCanvas({
       g.roundRect(x, y, w, titleH, [6 * view.zoom, 6 * view.zoom, 0, 0]);
       g.fillStyle = `rgba(${hexToRgbTriplet(color)},0.5)`;
       g.fill();
-      if (view.zoom > 0.35) {
-        g.fillStyle = `rgba(${pal.textRgb},0.85)`;
-        g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
+      const backdropPx = NODE_LABEL_PX * view.zoom;
+      const backdropAlpha = labelAlphaForPx(backdropPx);
+      if (backdropAlpha > 0) {
+        g.fillStyle = `rgba(${pal.textRgb},${0.85 * backdropAlpha})`;
+        g.font = `${backdropPx}px Inter, system-ui, sans-serif`;
         g.textBaseline = "middle";
         g.fillText(typeof node.params.title === "string" ? node.params.title : "Backdrop", x + 8 * view.zoom, y + titleH / 2, w - 16 * view.zoom);
       }
@@ -509,16 +514,18 @@ export function FlarexNodeCanvas({
       g.roundRect(x, y, w, titleH, collapsed ? 7 * view.zoom : [7 * view.zoom, 7 * view.zoom, 0, 0]);
       g.fillStyle = `rgba(${pal.mutedRgb},0.22)`;
       g.fill();
-      if (view.zoom > 0.35) {
+      const groupPx = NODE_LABEL_PX * view.zoom;
+      const groupAlpha = labelAlphaForPx(groupPx);
+      if (groupAlpha > 0) {
         // Disclosure caret: ▸ collapsed, ▾ expanded — the affordance for the double-click toggle.
         const title = typeof node.params.title === "string" ? node.params.title : "Group";
         const count = groupMembers(node).length;
-        g.fillStyle = `rgba(${pal.textRgb},0.85)`;
-        g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
+        g.fillStyle = `rgba(${pal.textRgb},${0.85 * groupAlpha})`;
+        g.font = `${groupPx}px Inter, system-ui, sans-serif`;
         g.textBaseline = "middle";
         g.fillText(`${collapsed ? "▸" : "▾"} ${title}`, x + 8 * view.zoom, y + titleH / 2, w - 46 * view.zoom);
         if (collapsed) {
-          g.fillStyle = `rgba(${pal.mutedRgb},0.9)`;
+          g.fillStyle = `rgba(${pal.mutedRgb},${0.9 * groupAlpha})`;
           g.textAlign = "right";
           g.fillText(String(count), x + w - 8 * view.zoom, y + titleH / 2);
           g.textAlign = "left";
@@ -601,13 +608,16 @@ export function FlarexNodeCanvas({
       // one it stays the compact Fusion box with the name inside. `showThumb` picks between them.
       const showThumb = flarexNodeThumbnailsEnabled() && nodeHasThumbnail(node);
       const label = node.label ?? def.label;
-      const labelVisible = view.zoom > 0.45;
+      // Type scales WITH the tile and fades out when it passes below readability — see NODE_LABEL_PX.
+      const titlePx = NODE_TITLE_PX * view.zoom;
+      const bodyPx = NODE_LABEL_PX * view.zoom;
       const dimText = node.enabled ? 0.92 : 0.45;
 
-      if (showThumb && labelVisible) {
+      const titleAlpha = labelAlphaForPx(titlePx);
+      if (showThumb && titleAlpha > 0) {
         // Name ABOVE the tile. Left-aligned to the node's edge so a column of nodes reads as a list.
-        g.fillStyle = `rgba(${pal.textRgb},${node.enabled ? 0.8 : 0.4})`;
-        g.font = `${Math.max(8, 10 * view.zoom)}px Inter, system-ui, sans-serif`;
+        g.fillStyle = `rgba(${pal.textRgb},${(node.enabled ? 0.8 : 0.4) * titleAlpha})`;
+        g.font = `${titlePx}px Inter, system-ui, sans-serif`;
         g.textBaseline = "alphabetic";
         g.fillText(label, x + 1, y - NODE_LABEL_GAP * view.zoom, w);
       }
@@ -661,11 +671,14 @@ export function FlarexNodeCanvas({
         g.lineWidth = 1;
         g.strokeStyle = `rgba(${pal.borderRgb},1)`;
         g.stroke();
-        if (labelVisible) {
+        // The footer index rides the same scale-and-fade rule as every other label.
+        const indexPx = 9.5 * view.zoom;
+        const indexAlpha = labelAlphaForPx(indexPx);
+        if (indexAlpha > 0) {
           const index = nodeIndices.get(node.id);
           if (index !== undefined) {
-            g.fillStyle = `rgba(${pal.dimRgb},${node.enabled ? 1 : 0.5})`;
-            g.font = `${Math.max(8, 9.5 * view.zoom)}px Inter, system-ui, sans-serif`;
+            g.fillStyle = `rgba(${pal.dimRgb},${(node.enabled ? 1 : 0.5) * indexAlpha})`;
+            g.font = `${indexPx}px Inter, system-ui, sans-serif`;
             g.textBaseline = "middle";
             g.fillText(String(index).padStart(2, "0"), x + 6 * view.zoom, fy + fh / 2);
           }
@@ -708,9 +721,10 @@ export function FlarexNodeCanvas({
         g.globalAlpha = node.enabled ? 0.9 : 0.4;
         g.fillRect(x, y, Math.max(2, 3 * view.zoom), h);
         g.globalAlpha = 1;
-        if (labelVisible) {
-          g.fillStyle = `rgba(${pal.textRgb},${dimText})`;
-          g.font = `${Math.max(9, 11 * view.zoom)}px Inter, system-ui, sans-serif`;
+        const bodyAlpha = labelAlphaForPx(bodyPx);
+        if (bodyAlpha > 0) {
+          g.fillStyle = `rgba(${pal.textRgb},${dimText * bodyAlpha})`;
+          g.font = `${bodyPx}px Inter, system-ui, sans-serif`;
           g.textBaseline = "middle";
           g.fillText(label, x + 9 * view.zoom, y + h / 2, w - 14 * view.zoom);
         }

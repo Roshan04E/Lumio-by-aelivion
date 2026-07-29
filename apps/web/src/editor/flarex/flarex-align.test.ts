@@ -10,6 +10,10 @@
 
 import { createFlarexNode } from "@orreris/shared";
 import {
+  LABEL_FADE_FULL_PX,
+  LABEL_FADE_ZERO_PX,
+  NODE_LABEL_PX,
+  labelAlphaForPx,
   placeAfterNode,
   NODE_PLACE_GAP_X,
   NODE_PLACE_STEP_Y,
@@ -259,6 +263,28 @@ function check(name: string, condition: boolean): void {
 
   check("an unknown source id yields null rather than a guessed position",
     placeAfterNode({ a: at(0, 0) }, "nope") === null);
+}
+
+// ── Label scale + fade (2026-07-29) ─────────────────────────────────────────
+// Labels used to carry a screen-px FLOOR and a hard `zoom > 0.45` cutoff. Together those made
+// "frame the whole graph" — the view `fitToView` lands on, near the 0.25 zoom floor — render
+// anonymous rectangles. The fade replaces the cliff; these pin the shape of it.
+{
+  check("full opacity once the type is comfortably readable", labelAlphaForPx(12) === 1);
+  check("exactly at the full-size threshold it is opaque", labelAlphaForPx(LABEL_FADE_FULL_PX) === 1);
+  check("sub-pixel type is fully gone, not a grey smear", labelAlphaForPx(2) === 0);
+  check("exactly at the zero threshold it is gone", labelAlphaForPx(LABEL_FADE_ZERO_PX) === 0);
+
+  // The whole point: BETWEEN the thresholds it is partial, so zooming out dissolves rather than snaps.
+  const mid = labelAlphaForPx((LABEL_FADE_ZERO_PX + LABEL_FADE_FULL_PX) / 2);
+  check("between the thresholds it fades progressively", mid > 0.4 && mid < 0.6);
+  check("the fade is monotonic in size", labelAlphaForPx(4) < labelAlphaForPx(5) && labelAlphaForPx(5) < labelAlphaForPx(6));
+
+  // The regression itself, stated in zoom terms rather than pixels: at the OLD cutoff the label was
+  // invisible; it must now be legible, because that is the band `fitToView` puts a big graph in.
+  check("a label is visible at the old 0.45 cutoff", labelAlphaForPx(NODE_LABEL_PX * 0.45) > 0);
+  check("...and at the 0.35 backdrop/group cutoff too", labelAlphaForPx(NODE_LABEL_PX * 0.35) > 0);
+  check("garbage size never yields a partial alpha", labelAlphaForPx(Number.NaN) === 0);
 }
 
 if (failures > 0) {

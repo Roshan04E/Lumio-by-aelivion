@@ -288,6 +288,39 @@ export const NODE_BEZEL = 3;
 export const NODE_LABEL_GAP = 6;
 
 /**
+ * Label type sizes in WORLD units — multiplied by zoom exactly like every other node metric, so text
+ * scales WITH its tile.
+ *
+ * It did not, and the result was a blank graph (2026-07-29 report: "text doesn't scale with the node
+ * canvas — results in blackout"). The sizes carried a screen-pixel FLOOR (`Math.max(9, 11 * zoom)`),
+ * so past ~0.8 zoom the type stopped shrinking while the tile kept going: the name outgrew the box it
+ * sits in. A hard `zoom > 0.45` cutoff was then added to hide the overflow — two workarounds that
+ * cancel into "no labels at all". `clampZoom` floors at 0.25 and `fitToView` routinely lands near it,
+ * so FRAMING THE WHOLE GRAPH was guaranteed to produce anonymous rectangles: the one view where
+ * knowing what a node is matters most.
+ */
+export const NODE_LABEL_PX = 11;
+/** The outside (thumbnail-form) name. Slightly smaller — it sits above the tile, not inside it. */
+export const NODE_TITLE_PX = 10;
+
+/**
+ * Opacity for a label rendered at `px` screen pixels: a FADE, not a cliff.
+ *
+ * Below ~3.5px type is sub-pixel — it is a grey smear that costs fill time and reads as dirt, so it
+ * goes. Between there and ~6.5px it dissolves progressively, which is what Fusion and Nuke both do
+ * and why zooming out of a large graph there feels continuous rather than switching modes. A single
+ * threshold cannot do this: whatever value you pick, one side of it is either unreadable clutter or
+ * an abrupt blackout.
+ */
+export const LABEL_FADE_ZERO_PX = 3.5;
+export const LABEL_FADE_FULL_PX = 6.5;
+export function labelAlphaForPx(px: number): number {
+  if (!Number.isFinite(px) || px <= LABEL_FADE_ZERO_PX) return 0;
+  if (px >= LABEL_FADE_FULL_PX) return 1;
+  return (px - LABEL_FADE_ZERO_PX) / (LABEL_FADE_FULL_PX - LABEL_FADE_ZERO_PX);
+}
+
+/**
  * Whether nodes currently render a thumbnail strip — a VIEW MODE, in the same category as pan/zoom,
  * which is why it lives in the view model rather than in project data (a preview preference must not
  * be a graph mutation, and it must not travel between machines with the file).

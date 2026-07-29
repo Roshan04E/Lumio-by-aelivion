@@ -655,3 +655,34 @@ keeping the host's effects and dropping `flarexCompId`, and "no TimeSpeed ⇒ st
 *Rule: when a mechanism can't reach the case, check whether the case can be moved to the mechanism.*
 The compiler cannot retime a decode. Rather than teaching it to, the host MediaIn was turned into the
 thing that already retimes — a loader. The feature landed as composition, not as new pipeline.
+
+## Node labels scale with the canvas — two workarounds that cancelled into a blackout (2026-07-29)
+
+**Report:** a framed-to-fit graph renders as anonymous dark rectangles. "Text doesn't scale with the
+node canvas — results in blackout."
+
+**Both halves were bugs, and the second was added to hide the first.** Label sizes carried a SCREEN-px
+floor (`Math.max(9, 11 * zoom)`), so below ~0.8 zoom the type stopped shrinking while the tile kept
+going — the name outgrew the box it sits in. A hard `zoom > 0.45` cutoff (0.35 for backdrops/groups)
+was then added, which hid the overflow by hiding the text. Two workarounds that cancel into "no labels".
+
+**Why it hit the most important view.** `clampZoom` floors at 0.25 and `fitToView` routinely lands
+near it, so FRAMING THE WHOLE GRAPH was guaranteed to sit inside the dead band — the one view where
+knowing what a node is matters most, and the only one a screenshot of a big comp ever shows.
+
+**Fix:** type is a WORLD metric like every other node dimension (`NODE_LABEL_PX` / `NODE_TITLE_PX` ×
+zoom, no floor), and the cliff becomes a fade — `labelAlphaForPx`, full at 6.5px, gone at 3.5px,
+linear between. Applied to all five label sites that shared the pattern: node body, node title above a
+thumbnail, footer index, backdrop title, group title.
+
+A single threshold cannot do this job. Whatever value you pick, one side of it is unreadable clutter
+and the other is an abrupt blackout — which is exactly how the codebase ended up with a floor AND a
+cutoff, each covering for the other. Fusion and Nuke both dissolve, and that is why zooming out of a
+large graph in them feels continuous instead of mode-switching.
+
+*Rule: when a workaround needs a second workaround, the first one is the bug.* The floor was there to
+keep text legible and it is what made text illegible; the cutoff was there to hide the damage. Neither
+was defensible alone, and together they read as a deliberate design.
+
+**Gated:** `flarex:align:test` +9 — including the regression stated in zoom terms (a label must be
+visible at the old 0.45 and 0.35 cutoffs), monotonicity, and NaN never yielding a partial alpha.
