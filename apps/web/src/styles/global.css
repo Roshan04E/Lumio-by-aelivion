@@ -25712,3 +25712,32 @@ h3.notes-note-md-heading {
   color: color-mix(in srgb, var(--nle-accent, #4d9fff) 55%, transparent);
   border-color: color-mix(in srgb, var(--nle-accent, #4d9fff) 25%, transparent);
 }
+
+/* Tracker node — saved-track picker (see FlarexTrackPicker.tsx). Sits in a `control` field, so the
+   row label/grid comes from the shared PropertyFieldList; this styles only the control's own body. */
+.flarex-track-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.flarex-track-picker-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.flarex-track-picker-meta {
+  font-size: 10px;
+  color: var(--nle-muted);
+  font-variant-numeric: tabular-nums;
+}
+/* The two prose states — no library yet, and a track whose library entry was deleted. Dim and small:
+   they explain, they are not controls, and they must not read as louder than the picker itself. */
+.flarex-track-picker-empty,
+.flarex-track-picker-note {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--nle-dim);
+}

@@ -9,7 +9,7 @@
  * lives in this subtree.
  */
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { getLivePlaybackTime, usePlaybackClock } from "../../playback/playback-clock";
 import { BottomWorkspace } from "../graph/BottomWorkspace";
 import { applyFlarexGraphLayer, buildFlarexGraphLayer } from "./flarex-graph-bridge";
@@ -28,6 +28,7 @@ import {
   type TimelineLayer,
 } from "@orreris/shared";
 import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
+import type { SavedTrack } from "../../lib/trackLibrary";
 import { FlarexInspector } from "./FlarexInspector";
 import { FlarexSourceViewer } from "./FlarexSourceViewer";
 import { rebuildSourceProxy } from "../performance/sourceProxyEngine";
@@ -89,6 +90,13 @@ function readThumbnailPref(): boolean {
 
 export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph, viewerCaptureRef }: FlarexWorkspaceProps) {
   const comp = layer ? getLayerFlarexComp(graph, layer) : undefined;
+  // Saved tracks a Tracker node may follow. Derived from the `graph` this component already holds
+  // rather than threaded as a new prop: EditorPage is the 15k-line monolith the repo keeps touch
+  // points down in, and `editableFields.trackLibrary` is the same source the clip-mask tracker reads.
+  const trackLibrary: SavedTrack[] = useMemo(() => {
+    const stored = graph.editableFields?.trackLibrary;
+    return Array.isArray(stored) ? (stored as SavedTrack[]) : [];
+  }, [graph.editableFields]);
   const layerStart = layer?.startSeconds ?? 0;
   const compTime = Math.max(0, timeSeconds - layerStart);
 
@@ -440,6 +448,7 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
           compTime={compTime}
           onSeekCompTime={(t) => onSeek(layerStart + t)}
           sourceAssets={sourceAssets}
+          trackLibrary={trackLibrary}
           onPickSource={onPickSource ? (nodeId) => onPickSource(comp.id, nodeId) : undefined}
           onInspectSource={(assetId) => setInspectAssetId(assetId)}
         />

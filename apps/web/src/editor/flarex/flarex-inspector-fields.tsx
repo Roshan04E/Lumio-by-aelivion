@@ -49,6 +49,7 @@ import {
   type FlarexNode,
   type FragmentEffectDefinition,
   type FragmentEffectParam,
+  type TrackingPathArtifactData,
 } from "@orreris/shared";
 import { ColorWheels } from "../../components/ColorWheels";
 import { CurveEditor } from "../../components/CurveEditor";
@@ -58,6 +59,8 @@ import { HueSatCurves } from "../../components/HueSatCurves";
 import { LutFileImport } from "../../components/LutFileImport";
 import type { PropertyField, PropertyFieldAxis } from "../inspector/PropertyFieldList";
 import { FlarexSourcePicker, type FlarexSourceAssetOption } from "./FlarexSourcePicker";
+import { FlarexTrackPicker } from "./FlarexTrackPicker";
+import type { SavedTrack } from "../../lib/trackLibrary";
 import {
   applyNodeParamValueAtTime,
   clearNodeParamKeyframes,
@@ -255,11 +258,13 @@ export interface BuildFlarexNodeFieldsArgs {
   onPickSource?: ((nodeId: string) => void) | undefined;
   /** Open the Source Viewer (proxy vs original A/B) for an asset. */
   onInspectSource?: ((assetId: string) => void) | undefined;
+  /** Saved tracks (`editableFields.trackLibrary`) a Tracker node may follow. */
+  trackLibrary?: SavedTrack[];
 }
 
 /** Translate one node's definition + params into the shared inspector schema. */
 export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): PropertyField[] {
-  const { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource } = args;
+  const { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource, trackLibrary = [] } = args;
   const def = getFlarexNodeDefinition(node.type);
   const keyframeable = new Set(def.keyframeable);
   const nodeId = node.id;
@@ -530,6 +535,52 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
         icon: <Film size={14} />,
         className: "flarex-row-source",
         control: <FlarexSourcePicker value={current} assets={sourceAssets} onOpenPicker={onPickSource ? () => onPickSource(nodeId) : undefined} onClear={() => onPick("")} onInspect={onInspectSource} />,
+      });
+      continue;
+    }
+
+    // ── Tracker: the picker owns BOTH params ────────────────────────────────
+    // `trackingPathData` is the embedded payload the renderers read — megabytes of point JSON. The
+    // generic renderer showed it as a text row, which is how the node shipped with no usable UI. It is
+    // written by the picker and never edited by hand, so it is not a field at all.
+    if (node.type === "tracker" && key === "trackingPathData") continue;
+    if (node.type === "tracker" && key === "trackingPathId") {
+      const attachedId = typeof node.params.trackingPathId === "string" ? node.params.trackingPathId : "";
+      const raw = typeof node.params.trackingPathData === "string" ? node.params.trackingPathData : "";
+      let attached: TrackingPathArtifactData | null = null;
+      try {
+        const parsed = raw ? (JSON.parse(raw) as TrackingPathArtifactData) : null;
+        // Soft-parse: a malformed payload must degrade to "nothing attached", never throw on a render.
+        attached = parsed && Array.isArray(parsed.points) ? parsed : null;
+      } catch {
+        attached = null;
+      }
+      // ONE edit writes both params — id (provenance) and data (what the renderers read). Two separate
+      // setParam calls would be two undo steps for one user action.
+      const writeTrack = (nextId: string, nextData: string) =>
+        onUpdateComp((cur) => {
+          const target = cur.nodes[nodeId];
+          if (!target) return cur;
+          return {
+            ...cur,
+            nodes: { ...cur.nodes, [nodeId]: { ...target, params: { ...target.params, trackingPathId: nextId, trackingPathData: nextData } } },
+          };
+        });
+      fields.push({
+        kind: "control",
+        key,
+        label: "Track",
+        icon: <Crosshair size={14} />,
+        className: "flarex-row-track",
+        control: (
+          <FlarexTrackPicker
+            value={attachedId}
+            data={attached}
+            tracks={trackLibrary}
+            onAttach={(track) => writeTrack(track.id, JSON.stringify(track.trackingPath))}
+            onDetach={() => writeTrack("", "")}
+          />
+        ),
       });
       continue;
     }

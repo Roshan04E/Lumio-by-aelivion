@@ -17,6 +17,7 @@ import { PropertyFieldList } from "../inspector/PropertyFieldList";
 import { FlarexNodeIcon } from "./flarex-node-icons";
 import { buildFlarexColorNodeSections, buildFlarexNodeFields } from "./flarex-inspector-fields";
 import type { FlarexSourceAssetOption } from "./FlarexSourcePicker";
+import type { SavedTrack } from "../../lib/trackLibrary";
 
 const WIDTH_KEY = "flarex.inspectorWidth";
 const MAX_KEY = "flarex.inspectorMax";
@@ -39,9 +40,11 @@ export interface FlarexInspectorProps {
   onPickSource?: ((nodeId: string) => void) | undefined;
   /** Open the Source Viewer (proxy vs original A/B) for an asset. */
   onInspectSource?: ((assetId: string) => void) | undefined;
+  /** Saved tracks a Tracker node may follow (`editableFields.trackLibrary`). */
+  trackLibrary?: SavedTrack[];
 }
 
-export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekCompTime, sourceAssets = [], onPickSource, onInspectSource }: FlarexInspectorProps) {
+export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekCompTime, sourceAssets = [], onPickSource, onInspectSource, trackLibrary = [] }: FlarexInspectorProps) {
   const [width, setWidth] = useState<number>(() => {
     const stored = Number(window.localStorage.getItem(WIDTH_KEY));
     return Number.isFinite(stored) && stored >= MIN_W && stored <= MAX_W ? stored : 300;
@@ -129,7 +132,7 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
   const def = getFlarexNodeDefinition(node.type);
   // The WHOLE Flarex-specific step: node definition → shared inspector schema. Everything below renders
   // through the same InspectorSection + `.effect-controls` container + shared controls as the Edit page.
-  const builderArgs = { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource };
+  const builderArgs = { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource, trackLibrary };
 
   // The unified Color node carries the whole grade toolset (~25 params), so it renders as collapsible
   // stages in PIPELINE ORDER instead of one wall of sliders — a section header's dot says whether that
