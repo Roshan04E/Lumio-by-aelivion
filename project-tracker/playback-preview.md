@@ -2424,3 +2424,43 @@ down, and shipped for the instrument. Nobody asked which OTHER code paths consum
 unclamped quantity, and the hold policy did.
 
 **Gated:** coherence 5666/5666, wcpool 75/75, fullres 203/203, gop 26/26.
+
+## v33b — "same playhead, different host": the fall-back was showing a different MOMENT (2026-07-29)
+
+**The report was a correctness bug, not a performance one**, and it explains why four rounds of decoder
+work never landed. Two screenshots of one clip at one playhead showed two different frames of the
+shot — sun in frame in one, not in the other. No amount of decode tuning produces that; only drawing
+the wrong time does.
+
+**Mechanism, confirmed in code.** `compile-flarex.ts`'s `mediaIn` ends with an unconditional
+`return cloneImage(ctx.hostSourceDraw)` whenever the resolver answers null. `buildLayerDraw` returns
+null on exactly one relevant condition — *the graded canvas has not landed yet* (it is one of only two
+`return null` sites, and the file names them). So on every frame the promoted loader's canvas was late,
+the MediaIn drew the HOST at the PLAYHEAD instead: an un-retimed frame, spliced into a retimed clip.
+Two moments alternating at decode-jitter frequency. That is the judder.
+
+**Fix: a third resolver answer.** `"pending"` = a loader OWNS this node and has no picture yet, as
+distinct from null = no loader owns it. `build-scene-draws` can tell them apart (it looks the virtual
+layer up before building) and now says which. Under a transform, `"pending"` produces NOTHING.
+
+**Scoped to a transformed context, and the pixel gate is why the first version was wrong.** Dropping
+the fall-back for EVERY unready loader is what a purist would do. It is also wrong: the two renderers
+do not become ready on the same frame, and without a retime the host draw is the SAME MOMENT — a
+genuine soft-degrade that holds them together. `activeTimeSeconds !== ctx.timeSeconds` is exactly the
+question "is `hostSourceDraw` from the context I am evaluating in?", needs no new plumbing, and is
+true only under a transform.
+
+**`flarex-generators` is FLAKY — bisected, not assumed.** It read 86.895% after this change, which
+looked like the scoping failure above. It reads 86.895% at `0e6792a`, before any TimeSpeed work
+existed, and 0.000% twice in a row with the change in place. 86.9% is the whole frame: one side has
+the generator, the other does not — a raster-readiness race in the harness. Recorded here rather than
+chased, and NOT to be read as a signal next time it flickers.
+
+*Rule: when a symptom survives every performance fix, stop asking why it is slow and ask whether it is
+correct.* "Freeze play" sounded like a decode budget and got four rounds of decode work — all of which
+were real bugs, none of which was THIS one. The founder's screenshot pair asked a different question
+("why are these two frames different?") and it took one code read to answer. A symptom described in
+performance language is not evidence that the cause is performance.
+
+**Gated:** flarex:test (+3), pixel gate flarex fixtures 0.000% (generators 2×), compproxy, cache-gate,
+coherence 5666/5666, both typechecks.

@@ -821,7 +821,12 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         // the last frame to the end of the comp. `freeze`/image/unknown loaders never end (Infinity).
         const localT = Math.max(0, t - layer.startSeconds);
         if (localT >= virtual.durationSeconds) return "ended";
-        return cachedPreFlarexDraw(virtual, dims, comp.version ?? 0);
+        // A loader EXISTS for this node, so the answer is its picture or "not yet" — never the host's.
+        // `buildLayerDraw` returns null on exactly one relevant condition here: the graded canvas has
+        // not landed. Reporting that as null let the compiler substitute `hostSourceDraw`, which under
+        // a retime is a different MOMENT of the shot — the "same playhead, different host" flash
+        // (2026-07-29). `"pending"` says whose it is and that it isn't ready.
+        return cachedPreFlarexDraw(virtual, dims, comp.version ?? 0) ?? "pending";
       },
     }));
     return lowered ?? draw;

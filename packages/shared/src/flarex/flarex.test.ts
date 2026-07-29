@@ -2002,6 +2002,36 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   }
 
   {
+    // THE HOST FALL-BACK UNDER A RETIME (2026-07-29 report: "same playhead, different host").
+    // `hostSourceDraw` is the picture at the PLAYHEAD. Under a transform this node is being evaluated
+    // at another moment of the same shot, so substituting it shows the wrong frame rather than a
+    // degraded one — and it alternates with correct frames as the loader drops in and out, which is
+    // judder no decoder fix can reach.
+    const comp = retimed(0.5);
+    const notLanded = compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: () => "pending" });
+    check("a RETIMED loader with no picture yet yields NOTHING, never the playhead frame",
+      notLanded === null || (notLanded as SceneLayerDraw).debugLayerId !== "host");
+
+    // …but an UN-retimed unready loader keeps the host fall-back. The host draw is the same MOMENT
+    // there, so it is a real soft-degrade — and the two renderers do not become ready on the same
+    // frame, so dropping it turns a readiness race into a parity failure (flarex-generators went
+    // 0.000% → 86.895% when this was unscoped).
+    const plainPending = compileFlarexComp(createFlarexComp("mhq", "No retime"), { ...lowerCtx(), resolveSourceDraw: () => "pending" });
+    check("an UN-retimed unready loader still soft-degrades to the host (renderer parity)",
+      Boolean(plainPending) && (plainPending as SceneLayerDraw).debugLayerId === "host");
+
+    // null is a DIFFERENT answer — "no loader owns this node" — and must keep the Phase-1 degrade,
+    // which is the right picture wherever nothing is retimed and the only thing standing between a
+    // declined promotion and a blank comp.
+    const noLoader = compileFlarexComp(comp, { ...lowerCtx(), resolveSourceDraw: () => null });
+    check("null still soft-degrades to the host (no loader owns the node)",
+      Boolean(noLoader) && (noLoader as SceneLayerDraw).debugLayerId === "host");
+    const plain = compileFlarexComp(createFlarexComp("mhp", "No retime"), { ...lowerCtx(), resolveSourceDraw: () => null });
+    check("an UN-retimed MediaIn still soft-degrades to the host (unchanged)",
+      Boolean(plain) && (plain as SceneLayerDraw).debugLayerId === "host");
+  }
+
+  {
     // The asset-source MediaIn (a bare loader) takes the same rate through the same helper.
     const comp = retimed(0.5);
     const src = createFlarexNode("mediaIn", "mh_src");

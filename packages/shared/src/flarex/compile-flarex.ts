@@ -91,8 +91,16 @@ export interface FlarexLowerCtx {
    * duration (a short clip in a longer comp), so the MediaIn produces NOTHING (transparent) rather
    * than the host — downstream merges then drop it and only the background remains. `nodeId` lets the
    * caller find that node's virtual layer. Omitted → every MediaIn resolves to the host clip (Phase 1).
+   *
+   * `"pending"` (2026-07-29) is the third distinct answer: a loader OWNS this node but has no picture
+   * yet. The node then produces NOTHING rather than the host, because under a retime the host draw is
+   * a different moment of the shot, not a degraded version of the right one — see the `mediaIn` case.
+   * A caller that cannot tell "no loader" from "loader not ready" may keep returning null and simply
+   * gets the Phase-1 soft-degrade, which is correct wherever nothing is retimed.
    */
-  resolveSourceDraw?: ((nodeId: string, sourceAssetId: string) => SceneLayerDraw | "ended" | null) | undefined;
+  resolveSourceDraw?:
+    | ((nodeId: string, sourceAssetId: string) => SceneLayerDraw | "ended" | "pending" | null)
+    | undefined;
   /**
    * DEBUG OVERRIDE for the materialization decision (Flarex evaluation engine — ADR-008 rule 3):
    * force these node ids to SEAL their image output into an isolated render-target boundary (an
@@ -1068,7 +1076,38 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           // Source ran past its own end (short clip in a longer comp): produce nothing — the node's
           // output is empty, so a merge downstream keeps only the background. NOT a host fall-back.
           if (resolved === "ended") return null;
-          if (resolved) return { kind: "image", draw: cloneImage(resolved) };
+          /**
+           * `"pending"` — THIS NODE HAS A LOADER AND IT HAS NO PICTURE YET (2026-07-29).
+           *
+           * Distinct from null, and the distinction is the bug it fixes. `ctx.hostSourceDraw` is the
+           * host clip at `ctx.timeSeconds`, the PLAYHEAD. A retimed MediaIn is evaluated at another
+           * moment of the same shot, so substituting the host draw there does not degrade the
+           * picture — it shows a different one. Reported as "at same playhead, different host":
+           * whenever the loader's graded canvas had not landed (`buildLayerDraw` returns null on
+           * exactly that, one of its two null sites), the MediaIn flashed the un-retimed playhead
+           * frame, so the clip alternated between two moments. That reads as judder no decoder work
+           * could ever reach, because the decoder was never what was wrong.
+           *
+           * Producing NOTHING is the honest answer, and the one `"ended"` and an unbacked generator
+           * already give: a merge downstream keeps its background. A transparent beat while a loader
+           * warms is a gap; a frame from elsewhere in the shot is a lie.
+           *
+           * SCOPED TO A TRANSFORMED CONTEXT, and the pixel gate is why. Dropping the fall-back for
+           * every unready loader took `flarex-generators` from 0.000% to 86.895%: the two renderers
+           * do not become ready on the same frame, and the host fall-back was holding them together.
+           * Without a retime the host draw is the SAME MOMENT, so it is a genuine soft-degrade and
+           * removing it just exposes a readiness race as a parity failure. WITH a retime it is a
+           * different moment, and no amount of agreement makes a wrong frame right.
+           *
+           * `activeTimeSeconds !== ctx.timeSeconds` is exactly the question "is `hostSourceDraw` from
+           * the context I am evaluating in?" — no new plumbing, and true only under a transform.
+           *
+           * null still means "no loader owns this node" and still soft-degrades to the host — the
+           * Phase-1 contract, and the right answer when promotion legitimately declined.
+           */
+          if (resolved === "pending" && activeTimeSeconds !== ctx.timeSeconds) return null;
+          // An un-retimed `"pending"` falls THROUGH to the host below — same moment, real degrade.
+          if (resolved && resolved !== "pending") return { kind: "image", draw: cloneImage(resolved) };
         }
         return { kind: "image", draw: cloneImage(ctx.hostSourceDraw) };
       }
@@ -1087,7 +1126,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         if (!ctx.resolveSourceDraw) return null;
         frameProfiler.bump("compile.resolveSourceCalls");
         const resolved = frameProfiler.measure("compile.resolveSource", () => ctx.resolveSourceDraw!(node.id, ""));
-        if (!resolved || resolved === "ended") return null;
+        // A generator already produces NOTHING when its backing layer is absent or spent, so
+        // `"pending"` (raster not landed) joins the same branch — it was always the honest answer here.
+        if (!resolved || resolved === "ended" || resolved === "pending") return null;
         const draw = cloneImage(resolved);
         if (!isGroup(draw)) {
           const opacity = node.type === "background" ? clamp01(num(node, "opacity", 1)) * 100 : draw.transform.opacity;
