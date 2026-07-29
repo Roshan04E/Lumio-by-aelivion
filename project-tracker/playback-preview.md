@@ -2311,3 +2311,116 @@ never been rate-aware.
 **Also from this round:** `__rfWcHolds` is `undefined` in a fresh session, confirming the non-tolerant
 hold branches (v32y, deliberately left alone) are not firing at all here. The earlier count of ~11 per
 composite came from a session that had been scrubbed. Nothing to chase there yet.
+
+## v32z — the residual, measured: p50 ≈ 4 frames, tail ≈ 20 (2026-07-29)
+
+**Supersedes v32y's residual estimate.** That entry reported n=3, "79.5 / 29.3 / 0.0 ms, high variance,
+a distribution to gather". It was gathered. The gate now runs N play→pause cycles in ONE warm session
+(`PAUSE_GATE_CYCLES`), walking the timeline so each cycle samples different material instead of
+replaying one warm second.
+
+Two independent runs, different media, 16 cycles each, same box, same session shape:
+
+| | p50 | p90 | max | hatches |
+|---|---|---|---|---|
+| 26MB source | 163.6ms (**4.9f**) | 407.0ms (12.2f) | 527.7ms (15.8f) | 71% |
+| 107MB source | 128.1ms (**3.8f**) | 348.1ms (10.4f) | 684.6ms (20.5f) | 65% |
+
+**The founder's "5-6 frames… or 3-4, I can't exactly tell you" is the p50, and the reason it could not
+be pinned is the spread.** Both runs agree to within a frame at the median and disagree by 5 frames at
+the tail, which is the shape of a stall distribution, not a constant offset. 32/32 parks landed on the
+frame grid (unambiguously 30fps), and the parked commit/live split read 0.0ms every single cycle — the
+v32y fix holds across the timeline, on both sources, warm and cold.
+
+**The offender is the ELEMENT path in both runs, and the tail exceeds every documented bound.** 527ms
+and 684ms are past `WC_HOLD_LAG_S` (350ms) and 3–4× the element corrector's 0.15s threshold. That is
+not a contradiction, it is the mechanism: **0.15s is not a bound on drift, it is a bound on drift AT
+SAMPLE TIME.** The corrector is a 500ms `setInterval`; between samples nothing bounds anything, so a
+single ~0.5s decode stall lands whole and is only clipped at the next tick. A threshold sampled at 2Hz
+cannot bound a transient shorter than its own period.
+
+*Caveat that decides what this data can be used for:* both runs were freshly uploaded originals with
+**no ingest proxy built yet**, so `preferNativeDecode` was true and the host sat on `<video>` (the
+v32x configuration). This characterises the ELEMENT path. The WC path — where `WC_HOLD_LAG_S` is the
+actual governor — is NOT characterised by these numbers, and a project whose proxies exist may sit in a
+different regime entirely. `PROBE_EDITOR_URL` points the gate at a real project for exactly that.
+
+**Gate semantics split, deliberately.** GRID fails hard forever (it guards what shipped). TIME is
+advisory by default with a banner, `PAUSE_GATE_STRICT=1` to enforce. Failing the whole run on a
+residual we knowingly deferred would conflate "you regressed" with "the known baseline is still there",
+and would make the gate useless for catching a GRID regression in the meantime. Flip the default when
+Phase 2 lands.
+
+**Three bugs in the instrument, found by using it — worth recording because each one flattered the
+result.** (1) `gridFps` returned the FIRST matching rate, and 3.500000s sits on the 24, 25, 30, 50 and
+60fps grids at once — it reported 24fps and converted 156ms into "3.8 frames" when the honest answer
+was 4.7. Fixed by intersecting candidate sets ACROSS cycles; only the true rate divides every park.
+(2) The pixel phase clicked Pause after playback had already auto-stopped at the composition end, and
+waited out a 30s timeout on a transport that was already parked. (3) A fixed 6s wait for the upload
+metadata probe was enough for 26MB and not for 107MB, surfacing 40s later as an unexplained navigation
+timeout. All three are the same error: *guessing at a state instead of waiting for it.*
+
+*Rule: an instrument's first job is to fail. Three runs that all passed said nothing; the run that
+resolved 32 cycles said the median is 4 frames and the tail is 20.*
+
+## v33a — the lag was manufactured by an unclamped request, and the retry loop turned it into a stall (2026-07-29)
+
+**Founder, correctly: "first diagnose confirm and tell me the reason, do not assume."** Three rounds
+had each fixed something real and left the symptom. This one is confirmed by three independent
+instruments agreeing, before any code changed.
+
+1. `[perf] STALL 1582ms — 53× scheduleWcRerequest`, 7× `requestWcFrame < fire`, 5× `getFrame`. The
+   main-thread block IS the retry loop; the profiler named it.
+2. `Element reloads/seeks: WcHolds 658265`. Six hundred fifty-eight THOUSAND hold decisions.
+3. `Live-freeze watchdog: worst 18.47s behind · ⚠ smoke.mp4 — wc 6.07s behind @ t=3.03s · phase=hold
+   playing=false`.
+
+**Root cause: `mapSourceTime` has no ceiling.** It floors at 0 and at −preroll, but nothing clamps the
+top. Once the playhead passes a clip's material the requested source time keeps climbing while the
+decoder — correctly — serves the last decodable frame forever. `lastFrameLagSeconds` is the difference
+between those two, so it grows without bound on a source that is showing exactly the right picture.
+**The picture was never wrong. The error signal was.** The hold policy then did precisely what it
+should with a permanently-huge lag: hold, re-arm, forever.
+
+`temporal-coherence.ts` had already found and fixed this — for the staleness INSTRUMENT — and wrote
+down the rule: *"a request outside the material in EITHER direction is served by the nearest real
+frame, and that frame is correct."* Its own header records the same false reading (every source
+"11–19s stale at once", diagnosed as "four simultaneous decoder deaths were never plausible; one
+missing clamp was"). The REQUEST path never got the clamp, so the instrument read clean while the
+policy fed by the same quantity spun. Now clamped at `decodableEndSeconds` — same value, same source
+of truth, applied where the lag is generated.
+
+**Why a retime found it:** at rate R a clip runs off the end of its material R× sooner. 2× reached in
+seconds what 1× needs minutes of tail to reach. TimeSpeed did not create this bug; it made it fast.
+
+**Second fix, now evidence-backed:** the catch-up HOLD branches are rAF-paced too. v32y left them on
+task pacing with the explicit note "I have not measured them doing harm" — the stall profile is that
+measurement. Not presenting per pass is not the same as not costing. With the clamp in place this is
+defence in depth: a future non-convergent state degrades to one retry per displayed frame instead of
+saturating the main thread.
+
+### How real NLEs avoid this class entirely (founder asked; researched rather than assumed)
+
+Avid's off-speed playback patent describes the shape: read at least one complete GOP into a
+**compressed data buffer**, build a **frame ring** describing each image in it, and play from the
+ring — plus a SECOND stateless single-frame decoder used specifically for off-speed playback, distinct
+from the sequential decoder used at 1× or slower. Resolve/Premiere are the same family: decode ahead
+into RAM, play out of a buffer.
+
+The structural difference is not the decoder, it is the direction of control. Ours is PULL: the
+compositor asks for a frame at time t, one decode in flight, and when the answer is late the layer
+retries. A retime multiplies the demand that design was tuned for, and every failure mode becomes a
+retry loop. A read-ahead ring is PUSH: the decoder runs ahead on its own schedule and playback reads
+whatever is in the ring, so being late costs a repeated frame, never a retry storm — there is nothing
+to retry against.
+
+That is a real architectural gap and it is worth naming as one rather than patching around forever.
+The four fixes in v32w–v33a are all correct and all necessary, but they are each "make the pull path
+survive one more condition". A read-ahead ring for preview sources would delete the CLASS.
+
+*Rule: when the picture is right and the metric is wrong, fix the metric — and check every consumer of
+that metric, not just the one that reported.* The clamp existed. It had been reasoned about, written
+down, and shipped for the instrument. Nobody asked which OTHER code paths consumed the same
+unclamped quantity, and the hold policy did.
+
+**Gated:** coherence 5666/5666, wcpool 75/75, fullres 203/203, gop 26/26.

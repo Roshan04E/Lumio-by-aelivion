@@ -1888,13 +1888,17 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
      * still presents the latest advancing frame — once per displayed frame, which is all a display can
      * take. A source that converges never sets the flag at all and is untouched.
      *
-     * SCOPED TO THE PLAYING LAG-TOLERANT BRANCH ONLY, deliberately. The two catch-up HOLD branches
-     * below re-arm themselves the same way and their counter (`__rfWcHolds`) also climbs by ~11 per
-     * composite in the same capture — but they do NOT present on each pass, so they churn no frame
-     * versions and re-arm no composites, and I have not measured them doing harm. They are also the
-     * paused-recovery path, where an rAF pace would stop advancing in a backgrounded tab (rAF does not
-     * fire when hidden; a macrotask does). Left alone rather than "fixed" on the strength of a
-     * neighbouring diagnosis.
+     * APPLIES TO THE CATCH-UP HOLD BRANCHES TOO (2026-07-29). They were left on task pacing one round
+     * earlier because they do not present per pass, so they churn no frame versions — and I said in
+     * the tracker that I had not measured them doing harm. Then I measured them: `__rfWcHolds` at
+     * 658,265 and `scheduleWcRerequest` as 53 of 71 samples inside a 1.6s MAIN THREAD BLOCKED report.
+     * Not presenting is not the same as not costing; the loop alone was the stall.
+     *
+     * The tail clamp in `requestWcFrame` removes the condition that made them unsatisfiable, so this
+     * is now defence in depth rather than the fix. Keeping it: any future non-convergent state should
+     * degrade to one retry per displayed frame, not saturate the main thread. The hidden-tab caveat
+     * stands (rAF does not fire when hidden, a macrotask does) and is the right trade — a backgrounded
+     * tab has nothing to show, and the freeze watchdog still heals on return.
      */
     const wcRerequestPaceRef = useRef<"task" | "frame">("task");
     const wcRerequestRafRef = useRef<number | null>(null);
@@ -1937,7 +1941,28 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         if (Math.abs(live - tp.currentTime) < WC_LIVE_CLOCK_MAX_DIVERGENCE_S) timelineTime = live;
         else recordWcStaleTime(src);
       }
-      const sourceTime = mapSourceTime(tp, timelineTime);
+      // TAIL CLAMP ON THE REQUEST (2026-07-29). `mapSourceTime` floors at 0 and at −preroll but has
+      // NO ceiling, so once the playhead passes a clip's material the requested source time keeps
+      // climbing while the decoder — correctly — serves the last decodable frame forever. The gap is
+      // reported as `lastFrameLagSeconds` and it grows without bound: measured 6.07s behind, worst
+      // 18.47s, on a source that was showing exactly the right picture.
+      //
+      // That manufactured lag is what drove the hold policy: permanently over `WC_HOLD_LAG_S`,
+      // permanently re-arming, `__rfWcHolds` at 658,265 and `scheduleWcRerequest` as 53 of 71 samples
+      // in a 1.6s main-thread block. The picture was never wrong; the ERROR SIGNAL was.
+      //
+      // `temporal-coherence.ts` already made exactly this correction for the staleness INSTRUMENT and
+      // wrote down why: "a request outside the material in EITHER direction is served by the nearest
+      // real frame, and that frame is correct." The request path never got it, so the instrument read
+      // clean while the policy it shares a cause with span. Same clamp, same source of truth
+      // (`decodableEndSeconds`), now applied where the lag is actually generated.
+      //
+      // A retime is what made this reachable: at rate R a clip runs off the end of its material R×
+      // sooner, so 2× found in seconds what 1× would take minutes of tail to reach.
+      const mediaEnd = provider.decodableEndSeconds;
+      const rawSourceTime = mapSourceTime(tp, timelineTime);
+      const sourceTime =
+        mediaEnd != null && Number.isFinite(mediaEnd) && mediaEnd > 0 ? Math.min(rawSourceTime, mediaEnd) : rawSourceTime;
       void provider
         .getFrame(sourceTime)
         .then((frame) => {
@@ -2058,6 +2083,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               // regions" (2026-07-04 __rfLiveFreeze capture: holding:true chained 10s+, 15s behind).
               if (wcHoldStartRef.current === null) wcHoldStartRef.current = nowMs;
               if (nowMs - wcHoldStartRef.current < WC_HOLD_MAX_MS) {
+                wcRerequestPaceRef.current = "frame"; // self-driven catch-up hold — see the pace ref
                 wcRerequestRef.current = true;
                 // Soak telemetry (__rf* convention): proves in the field whether the rewind hold is
                 // engaging (console: window.__rfWcHolds). Counter only — no logging on the hot path.
@@ -2072,6 +2098,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
                 // 2026-07-04 paused-stale capture showed lag frozen at 1.41s across samples because
                 // no further decode was ever requested (so neither convergence NOR the stall
                 // bail-out above could happen).
+                wcRerequestPaceRef.current = "frame"; // self-driven degraded march — see the pace ref
                 wcRerequestRef.current = true;
                 presentFrame();
               }
