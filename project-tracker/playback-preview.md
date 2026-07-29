@@ -2277,3 +2277,37 @@ occupancy during a scrub and it is still right. It just never claimed to limit h
 loop re-enters — and for a consumer that can never converge, "as fast as the loop allows" is the same
 spin the yield was introduced to stop, one level up. Whenever a retry can be permanently unsatisfiable,
 pace it to the thing that consumes its output.
+
+## v32z — the hold policy measured lag in SOURCE seconds and compared it to a viewer tolerance (2026-07-29)
+
+**Report:** one comp, two MediaIns on the SAME file — right plume at 1× smooth, left plume at 2×
+"freeze play". Same asset, same decoder mode, same everything except the rate. That control is the
+whole diagnosis: nothing about the file, the proxy, the GPU or the compositor can differ between them.
+
+`lastFrameLagSeconds` is measured in **source** seconds — requested source time minus the served
+frame's own timestamp. `WC_HOLD_LAG_S` (0.35) is a tolerance for how far behind **the viewer** the
+picture may fall. Those are the same quantity only at rate 1. At rate R a physically identical delay of
+one decode reads R× larger, so the 2× loader crossed a 0.35s bar at 0.175s of real lateness, sat
+permanently on the lag-tolerant branch, and presented stale-but-advancing frames forever — which is
+exactly what "freeze play" looks like from the outside.
+
+`stalenessSeconds` in `temporal-coherence.ts` already states this rule and applies it: *"Playback rate;
+converts source seconds to timeline seconds so sources are comparable."* The hold POLICY never got the
+same treatment, and there was no reason to notice: until TimeSpeed, no preview source ran at a rate
+other than its own clip's, so the file's own `speedFactor` had nothing to disagree with.
+
+`lag` is now normalized by `|speed|` for every THRESHOLD comparison. `sourceLag` stays raw and is the
+only value allowed near `servedSourceTimeRef` — that ref is a source time and feeds `stalenessSeconds`,
+which divides by the rate itself; stamping it normalized would divide twice and under-report staleness
+to the coherence gate. A gate that reads clean while the picture is wrong is worse than no gate.
+
+*Rule: when a constant is compared to a measurement, check they are in the same UNITS — especially when
+a neighbouring file already documents the conversion.* The correct treatment was written down, tested
+and shipped one directory away; this site simply never needed it, so the mismatch sat dormant until a
+node made rate a per-source property. New feature, old latent bug, and the feature is only the thing
+that made it reachable — the retime did not break the hold policy, it revealed that the hold policy had
+never been rate-aware.
+
+**Also from this round:** `__rfWcHolds` is `undefined` in a fresh session, confirming the non-tolerant
+hold branches (v32y, deliberately left alone) are not firing at all here. The earlier count of ~11 per
+composite came from a session that had been scrubbed. Nothing to chase there yet.

@@ -1965,7 +1965,30 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             // the tail of the catch-up presented as the fast-forward pan anyway (3rd soak report,
             // 2026-07-04). A source that truly can't converge (decode slower than the moving
             // playhead) degrades to the progressive pan after the window instead of freezing.
-            const lag = provider.lastFrameLagSeconds ?? 0;
+            //
+            // NORMALIZED TO TIMELINE SECONDS (2026-07-29). `lastFrameLagSeconds` is measured in SOURCE
+            // seconds — requested source time minus the served frame's own timestamp — while
+            // `WC_HOLD_LAG_S` is a tolerance for how far behind the VIEWER the picture may fall. Those
+            // are the same number only at rate 1. At rate R a physically identical delay of one decode
+            // reads R× larger, so a 2× loader crossed a 0.35s bar at 0.175s of real lateness and sat
+            // permanently on the degraded branch — presenting stale-but-advancing frames forever, which
+            // is precisely the "left plume freeze-plays while the right one is smooth" report, the two
+            // being the same file at 2× and 1×.
+            //
+            // `stalenessSeconds` already states this rule and applies it ("Playback rate; converts
+            // source seconds to timeline seconds so sources are comparable"). The hold POLICY simply
+            // never got the same treatment, because until TimeSpeed no preview source ran at a rate
+            // other than its clip's own — and a clip's rate reaches this file through `speedFactor`,
+            // which the pre-retime code had no reason to consult here.
+            //
+            // `sourceLag` stays RAW and is the only thing allowed near `servedSourceTimeRef`: that ref
+            // is a SOURCE time, and it feeds `stalenessSeconds`, which divides by the rate itself.
+            // Stamping it with an already-normalized lag would divide twice and quietly under-report
+            // staleness to the coherence gate — a gate reading clean while the picture is wrong is
+            // worse than no gate.
+            const sourceLag = provider.lastFrameLagSeconds ?? 0;
+            const lagRate = Math.abs(tp.speed) > 0 && Number.isFinite(tp.speed) ? Math.abs(tp.speed) : 1;
+            const lag = sourceLag / lagRate;
             const nowMs = performance.now();
             if (wcHoldStartRef.current !== null) {
               const streakMs = nowMs - wcHoldStartRef.current;
@@ -1998,9 +2021,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
               // starts clean next time. Without this a source that recovers keeps its old (long) delay.
               wcTolerateRetryRef.current = 0;
               // Stamp the served time of the frame we are about to hold (see `servedSourceTimeRef`).
-              // `sourceTime` is the target THIS request asked for and `lag` is how far the provider's
-              // answer trailed it, so their difference is the time actually on screen.
-              servedSourceTimeRef.current = sourceTime - lag;
+              // `sourceTime` is the target THIS request asked for and `sourceLag` is how far the
+              // provider's answer trailed it IN SOURCE SECONDS, so their difference is the source time
+              // actually on screen. Deliberately NOT the rate-normalized `lag` — see its definition.
+              servedSourceTimeRef.current = sourceTime - sourceLag;
               // Clone before holding: our copy survives the provider closing its original.
               let held: CanvasImageSource = frame;
               if (typeof VideoFrame !== "undefined" && frame instanceof VideoFrame) {
