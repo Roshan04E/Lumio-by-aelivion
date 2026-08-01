@@ -2703,3 +2703,57 @@ Exactly the join the audit had to do by hand across four keying schemes.
 the summary could chase the downstream node when the cause is the source ending. Degradations do not
 carry causality today; adding it is a real improvement and deliberately out of scope — noted so nobody
 mistakes the derived row for a second bug.
+
+---
+
+## v33 — the 62% incoherence baseline is REAL, and the cause is a documented trade-off (2026-08-01)
+
+**Problem.** A real session moved the Phase-0 coherence numbers hard: `incoherenceRate` 0.112 → **0.623**
+and `worstPresentedStalenessSeconds` 0.183 → **43.19**. A 43-second coherence error is not credible as
+lag, and every Phase 4 slice is judged against these numbers. Suspicion (mine): the media-end clamp had
+stopped applying, exactly as in v31a, so a playhead past the material would accrue staleness without
+bound — an instrument fault, not a runtime fault.
+
+**That suspicion was wrong, and the way it was killed is the point.** The ledger recorded the clamp's
+OUTPUT and never its INPUT, so "the instrument is broken" and "the decoder is wrong" were
+indistinguishable in the data. Adding `ScenePreviewMediaSnapshot.mediaEndSeconds` — the same value
+`stalenessSeconds` clamps against — made it decidable in one console read.
+
+**What the data showed.** Two populations, not one:
+
+| target | served | staleness | reading |
+|---|---|---|---|
+| 0.51 | 35.58 | 35.04 | source 35s **AHEAD** — a backward seek still holding its old frame |
+| 20.9 | 5.36 | 15.50 | source **pinned** for ~50 consecutive composites, playhead parked |
+
+The arithmetic closes exactly on both, which is itself the evidence the mapping is trustworthy:
+`35.580 − 0.512 − 0.0334 (1/29.97) = 35.035` vs 35.0352 reported, and `20.9 − 5.36 − 0.04 (1/25) = 15.50`
+vs 15.50 reported — the asset is 25fps, so the frame period that closes the second row is the right one.
+
+**`mediaEnd: 55.08`** on the parked source, with `decode: "element"`. The clamp had a real value, well
+past the 20.9 request, so it correctly did not apply. **The artifact hypothesis is dead: the 62% is
+real.** The preview genuinely presented frames ~15s away from the requested moment.
+
+**Root cause, and it is deliberate.** `selectVideoDrawSource`'s stale-element guard
+(`ELEMENT_FALLBACK_MAX_LAG_S`) is wrapped in `if (wcProviderRef.current)`. With no WC provider the
+element IS the primary decode path (`wcDecode` off is still the default), so the guard is skipped by
+design — `temporal-coherence.ts` states the reason outright: refusing its frames "would blank the layer
+permanently rather than briefly". A pooled element sits wherever its last owner left it, so a warm
+lease hands back a frame from another shot until the seek lands, and with no provider nothing refuses it.
+
+**Why this is not a bug to fix here.** The trade-off is real and the alternative (blank the layer) is
+worse. It is precisely the construct ADR-012 §0.3 names: scarcity resolved by substituted content
+rather than declared absence. **S4.5 deletes it, S4.4 replaces "hold or don't" with `effectiveTime`, and
+S4.6 makes both transport states coherent.** The 62% is therefore the honest bar those three must beat,
+not a number to be explained away.
+
+**The lesson, which is the same one as v31a with the sign flipped.** There it was a broken rig producing
+a false verdict against a sound barrier. Here the rig was sound and the alarming number was true. Both
+times the resolution was the same move: **record the INPUT of a computation beside its output.** A
+measurement you cannot attribute is not evidence in either direction — it only feels like evidence when
+it agrees with you.
+
+**Left open, named rather than fixed:** the element path reported `servedSourceTime: null` at rest while
+still reading `state: ok`, and a null served time means `stalenessSeconds` returns null, which never
+gates. So a source on the element path is intermittently invisible to the coherence gate. Not chased —
+it belongs with S4.2 (`servedTime` end-to-end), where every participant is required to carry one.
