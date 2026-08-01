@@ -965,7 +965,17 @@ export function ScenePreviewCanvas({
     // clean, because "showed the wrong picture while reporting coherent" is a different bug from
     // "showed the wrong picture while reporting stale", and only this can tell them apart.
     const allStaleness: Record<string, number | null> = {};
+    // because both are per-source facts about this one present, and a second walk could not see the
     let maxStalenessSeconds = 0;
+    // WHICH source was worst, and what moment it was actually showing. Captured because the staleness
+    // NUMBER alone cannot distinguish the two things that produce a large one, and they need opposite
+    // fixes: a backward seek leaves a source transiently far ahead of the request (served >> requested,
+    // decays as it catches up), while a source whose material has ENDED sits pinned at its last frame
+    // while the playhead walks away from it (served constant, staleness growing linearly with
+    // targetTime — and if that is what is happening, it is a measurement artifact, not lag, because the
+    // last frame IS the right answer past the end).
+    let worstStaleId = "";
+    let worstStaleServed: number | null = null;
     // ATOMIC FULL-RES SWAP: tallies for this composite. The DECISION for this composite was made from
     // the previous one (`fullResCommittedRef`, resolved after the draw below) — deliberately, because
     // `gradeMediaInContext` is invoked lazily by `buildSceneDraws` as it walks the layers, so there is
@@ -1010,7 +1020,11 @@ export function ScenePreviewCanvas({
         // not measure.
         if (!awaiting) {
           staleBySource[resolvedId] = snap.stalenessSeconds!;
-          if (snap.stalenessSeconds! > maxStalenessSeconds) maxStalenessSeconds = snap.stalenessSeconds!;
+          if (snap.stalenessSeconds! > maxStalenessSeconds) {
+            maxStalenessSeconds = snap.stalenessSeconds!;
+            worstStaleId = resolvedId;
+            worstStaleServed = snap.servedSourceTime;
+          }
         }
       }
       // ATOMIC FULL-RES SWAP: tally this participant, then use its upgrade only if the viewer has
@@ -1288,6 +1302,8 @@ export function ScenePreviewCanvas({
         staleIds,
         notReadyIds,
         maxStalenessSeconds,
+        worstSourceId: worstStaleId,
+        worstSourceServedTime: worstStaleServed,
         playing,
       });
       // Keep the settle window open for the duration of a COHERENCE hold. Paused there is no rAF
@@ -1364,6 +1380,8 @@ export function ScenePreviewCanvas({
         staleIds,
         notReadyIds,
         maxStalenessSeconds,
+        worstSourceId: worstStaleId,
+        worstSourceServedTime: worstStaleServed,
         playing,
       });
     } catch (error) {

@@ -69,6 +69,20 @@ export interface PresentSample {
   /** Worst per-source staleness this frame, in seconds. The coherence error. */
   readonly maxStalenessSeconds: number;
   readonly playing: boolean;
+  /** The source with the worst staleness this frame, when there was one. */
+  readonly worstSourceId?: string | undefined;
+  /**
+   * The moment that worst source was actually showing.
+   *
+   * Recorded because the staleness NUMBER alone cannot separate the two causes of a large one, and they
+   * need opposite responses. A backward seek leaves a source transiently AHEAD of the request and the
+   * gap decays as it catches up — real lag, worth holding for. A source whose material has ENDED sits
+   * pinned at its last frame while the playhead walks away, so the gap grows linearly with `targetTime`
+   * — and that is not lag at all, because past the end the last frame IS the right answer. Without the
+   * served time the two are indistinguishable in the ledger, and one of them would have S4.6 chasing a
+   * target that cannot be reached.
+   */
+  readonly worstSourceServedTime?: number | null | undefined;
   /**
    * The moment the frame actually represents, once the runtime can answer that (slice S4.4). Undefined
    * today: the present is *for* `targetTime` and the sources may or may not agree with it, which is
@@ -159,7 +173,10 @@ class PresentLedger {
           targetTime: Number(sample.targetTime.toFixed(4)),
           staleCount: sample.staleIds.length,
           maxStalenessSeconds: Number(sample.maxStalenessSeconds.toFixed(4)),
-          worstSource: sample.staleIds[0] ?? "",
+          worstSource: sample.worstSourceId || sample.staleIds[0] || "",
+          // The pair that classifies the cause. `served` constant while `targetTime` advances is an
+          // ended source (artifact); `served` ahead of the request and closing is a seek transient.
+          worstServed: sample.worstSourceServedTime ?? -1,
         },
       });
     }
