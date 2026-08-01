@@ -2,12 +2,13 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { registerSW } from "virtual:pwa-register";
-import { configureFontResolver, warpFontFile } from "@orreris/shared";
+import { configureFontResolver, kernelDiagnostics, warpFontFile } from "@orreris/shared";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";
 import { installPerfDiagnostics } from "./lib/perfDiagnostics";
 import { installCrashTelemetry } from "./lib/crash-telemetry";
+import { resolveKernelDiagnosticsEnabled } from "./playback/frame-completion";
 import { migrateBrandLocalStorage, migrateBrandBlobStores } from "./lib/brand-migration";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
@@ -47,6 +48,13 @@ installPerfDiagnostics();
 // Crash forensics: onerror/unhandledrejection → localStorage ring buffer (survives a hard crash);
 // the next boot surfaces the previous session's tail. Read via window.__rfCrashLog.
 installCrashTelemetry();
+
+// The kernel diagnostics flag, resolved by the HOST (ADR-012 I-36, slice S3.1). The kernel used to read
+// `window` for this itself, which made it behave differently under React than under the worker or the
+// harness — the one thing I-36 forbids, and a breach of the standing rule that `packages/shared` never
+// reads `window`. Now the app looks and the kernel is told, exactly like `precision` and
+// `regionPassModel`. Before `createRoot`, so the very first frame is already recorded correctly.
+kernelDiagnostics.enabled = resolveKernelDiagnosticsEnabled();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

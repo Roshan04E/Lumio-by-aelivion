@@ -10,5 +10,7 @@
 export * from "./diagnostics";
 export * from "./frame-scheduler";
 export * from "./settle-window";
+export * from "./state-registry";
+export * from "./session";
 export * from "./degradation-sink";
 export * from "./present-ledger";

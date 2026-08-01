@@ -159,21 +159,29 @@ export type RuntimeEventInput = Omit<RuntimeEvent, "seq" | "at"> & { readonly at
 // Flag
 // ---------------------------------------------------------------------------------------------
 
-const FLAG_QUERY = "kernelDiagnostics";
-const FLAG_STORAGE = "orreris.kernel.diagnostics";
+/**
+ * The flag's NAMES, kept here so the host and the kernel cannot disagree about what to look for; the
+ * host does the looking. Exported because `apps/web` resolves them at startup and calls
+ * `kernelDiagnostics.enabled = ...` — see below for why the reading moved out.
+ */
+export const KERNEL_DIAGNOSTICS_FLAG_QUERY = "kernelDiagnostics";
+export const KERNEL_DIAGNOSTICS_FLAG_STORAGE = "orreris.kernel.diagnostics";
 
+/**
+ * Default ON, and resolved by the HOST rather than here (fixed in slice S3.1).
+ *
+ * This function used to read `window.location.search` and `window.localStorage` directly, which is an
+ * I-36 violation the S3.1 structural conformance check caught on its first run — and also a breach of a
+ * standing repo rule stated in `ScenePreviewCanvas`: *"the app owns the flag; `packages/shared` never
+ * reads `window`"*. It survived S0.1 review because reading a flag feels like configuration rather than
+ * like a host dependency. It is a host dependency: it makes the kernel behave differently under React
+ * than under the worker or the harness, which is exactly the property I-36 exists to forbid.
+ *
+ * The fix is the same shape this repo already uses for `precision` and `regionPassModel` — the value is
+ * passed IN. `apps/web` resolves the flag once at startup and assigns `enabled`; every other host gets
+ * the default, which is what the worker and the harness were already getting by accident.
+ */
 function resolveEnabled(): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined" && typeof window.location?.search === "string") {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.has(FLAG_QUERY)) return truthy(params.get(FLAG_QUERY));
-      const stored = window.localStorage?.getItem(FLAG_STORAGE);
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* restricted storage / SSR — fall through to the default */
-    }
-  }
   return true;
 }
 

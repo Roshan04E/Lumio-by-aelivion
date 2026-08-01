@@ -1,3 +1,5 @@
+import { KERNEL_DIAGNOSTICS_FLAG_QUERY, KERNEL_DIAGNOSTICS_FLAG_STORAGE } from "@orreris/shared";
+
 /**
  * Settle window vs. frame completion (ADR-012 slice S2.2) — the flag, and the pure decisions.
  *
@@ -73,6 +75,31 @@ export function getFrameCompletionEnabled(): boolean {
  */
 export function getFrameScopesEnabled(): boolean {
   return readFlag("kernelScopes");
+}
+
+/**
+ * The kernel diagnostics flag, resolved HOST-side (ADR-012 I-36, slice S3.1).
+ *
+ * `?kernelDiagnostics=0` → localStorage `orreris.kernel.diagnostics` → **ON**. Default on, because the
+ * sink is allocation-free while disabled at its call sites and the whole Phase 0 argument is that the
+ * runtime should be observable by default rather than on request.
+ *
+ * The names come from the kernel so the two cannot disagree about what to look for; the *looking* is
+ * the host's job, which is the entire point of the fix.
+ */
+export function resolveKernelDiagnosticsEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has(KERNEL_DIAGNOSTICS_FLAG_QUERY)) return truthy(params.get(KERNEL_DIAGNOSTICS_FLAG_QUERY));
+      const stored = window.localStorage?.getItem(KERNEL_DIAGNOSTICS_FLAG_STORAGE);
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return true;
 }
 
 function readFlag(name: string): boolean {

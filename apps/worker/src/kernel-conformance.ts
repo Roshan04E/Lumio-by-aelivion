@@ -35,9 +35,12 @@
  * Plus the enforced properties of the diagnostics sink itself (S0.1).
  */
 
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   __resetFrameScheduler,
   activeFrame,
+  createRuntimeSession,
   awaitFrameSettled,
   beginFrame,
   classifyComposite,
@@ -74,12 +77,15 @@ let pendingResolved = 0;
 const pendingNotes: string[] = [];
 
 /** An invariant that holds today. Must pass; failing it fails the run. */
-function enforced(invariant: string, name: string, condition: boolean): void {
+function enforced(invariant: string, name: string, condition: boolean, detail?: string): void {
   if (condition) {
     console.log(`  ok    [${invariant}] ${name}`);
   } else {
     enforcedFailures += 1;
     console.error(`  FAIL  [${invariant}] ${name}`);
+    // A structural check knows WHICH file broke it; printing that is the difference between a failure
+    // someone can fix and one they have to re-derive.
+    if (detail) console.error(`        ${detail}`);
   }
 }
 
@@ -740,6 +746,104 @@ console.log("\nS2.3 — purpose scoping (I-32)");
   __resetFrameScheduler();
   kernelDiagnostics.enabled = wasEnabled;
   kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S3.1 — kernel session + state registry
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS3.1 — runtime session and state registry (I-36)");
+{
+  // ── I-36, asserted MECHANICALLY ────────────────────────────────────────────────────────────────
+  // A prose rule about imports is worth nothing the first time someone needs `document` in a hurry.
+  // This reads the kernel's own source and greps it, so the invariant fails in CI rather than in a
+  // review someone was rushing. It is the cheapest structural test in the suite and the one that
+  // protects the property the whole design is paid for: the same kernel runs under React, headless
+  // export, a worker and a future native host WITHOUT behaviour change.
+  const kernelDir = fileURLToPath(new URL("../../../packages/shared/src/kernel/", import.meta.url));
+  const kernelFiles = readdirSync(kernelDir).filter((f) => f.endsWith(".ts"));
+  enforced("I-36", "the kernel directory is non-empty (the scan below is not vacuous)", kernelFiles.length >= 5);
+
+  // `performance` and a guarded `globalThis` are permitted: both exist in Node, a worker and a browser,
+  // so neither ties the kernel to a host. `window`/`document` are the DOM; `WebGL`/`canvas` are a
+  // rendering API; `react` is a UI framework. Those are what I-36 actually forbids.
+  const forbidden: { pattern: RegExp; what: string }[] = [
+    { pattern: /\bfrom\s+["']react["']/, what: "a React import" },
+    { pattern: /\bdocument\./, what: "the DOM (`document`)" },
+    { pattern: /\bwindow\./, what: "the DOM (`window`)" },
+    { pattern: /\brequestAnimationFrame\b/, what: "a host frame loop" },
+    { pattern: /\bWebGL|HTMLCanvasElement|OffscreenCanvas\b/, what: "a rendering API" },
+  ];
+  const violations: string[] = [];
+  for (const file of kernelFiles) {
+    const source = readFileSync(kernelDir + file, "utf8");
+    // Comments are prose and may legitimately NAME the forbidden things — this very file's headers
+    // discuss React and the DOM at length. Stripping them is what keeps the check about code.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const { pattern, what } of forbidden) {
+      if (pattern.test(code)) violations.push(`${file} contains ${what}`);
+    }
+  }
+  enforced("I-36", `no kernel file imports a UI framework, DOM or rendering API (${kernelFiles.length} files scanned)`,
+    violations.length === 0, violations.join(" · "));
+
+  // ── The registry's contract ────────────────────────────────────────────────────────────────────
+  const session = createRuntimeSession({ id: "conformance" });
+  const other = createRuntimeSession({ id: "conformance-2" });
+
+  enforced("I-16", "an unwritten key reads its fallback", session.state.get("missing", 7) === 7);
+  session.state.set("a", 1);
+  enforced("I-16", "a written key reads back", session.state.get("a", 0) === 1);
+  // The property that makes a session a session: two of them cannot see each other. Without this,
+  // I-37 is unreachable — a runtime you can only have one of cannot be driven twice in one process.
+  enforced("I-37", "sessions are isolated from one another", other.state.get("a", 0) === 0);
+
+  const seen: number[] = [];
+  const off = session.state.subscribe<number>("a", (v) => seen.push(v));
+  enforced("I-16", "subscribing does not itself deliver a value", seen.length === 0);
+
+  // Coalescing is the whole reason this is not just a Map: a frame writes many keys, and a subscriber
+  // that renders must not render once per write.
+  session.state.set("a", 2);
+  session.state.set("a", 3);
+  session.state.flush();
+  enforced("I-16", "two writes in one turn notify ONCE, with the latest value",
+    seen.length === 1 && seen[0] === 3);
+
+  // A re-write of the same value is not a change. Without this, "subscribe" would mean "wake me every
+  // frame", because a frame re-writes most of its state with what it already had.
+  const before = session.state.versionOf("a");
+  const changed = session.state.set("a", 3);
+  session.state.flush();
+  enforced("I-16", "writing an unchanged value is not a change",
+    changed === false && seen.length === 1 && session.state.versionOf("a") === before);
+
+  off();
+  session.state.set("a", 4);
+  session.state.flush();
+  enforced("I-16", "unsubscribing stops delivery", seen.length === 1);
+
+  // A subscriber that throws must not stop the others being told, nor take down the writer — which in
+  // the live runtime is the draw loop.
+  const after: number[] = [];
+  const offBad = session.state.subscribe("b", () => { throw new Error("bad subscriber"); });
+  const offGood = session.state.subscribe<number>("b", (v) => after.push(v));
+  let writerSurvived = true;
+  session.state.set("b", 9);
+  try { session.state.flush(); } catch { writerSurvived = false; }
+  offBad(); offGood();
+  enforced("I-16", "a throwing subscriber cannot break the writer or its peers",
+    writerSurvived && after.length === 1 && after[0] === 9);
+
+  // Lifecycle: the callers that will drive this (React unmount, context-loss recovery, export
+  // completion) can all fire twice. A lifetime that only survives being ended once is the shape that
+  // produced the double-release decoder class.
+  session.dispose();
+  session.dispose();
+  enforced("I-24", "dispose is idempotent and leaves the session disposed", session.isDisposed);
+  enforced("I-24", "a disposed session accepts no further writes",
+    session.state.set("a", 99) === false && session.state.get("a", 0) === 0);
+  other.dispose();
 }
 
 // ---------------------------------------------------------------------------------------------
