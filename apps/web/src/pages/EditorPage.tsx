@@ -338,6 +338,7 @@ import { flushColdPlaybackNotify, getPlaybackClock, setColdPlaybackSuspended, se
 import { HARD_RESYNC_S, MAX_SERVO_PER_TICK_S, SERVO_GAIN, getAudioClockEnabled, getAudioMasterTime, noteAudioClockDrift } from "../playback/audio-clock";
 import { EDITOR_RESPONSIVE_LAYOUT, getEditorPaneResizeBounds, useEditorResponsiveLayout, type EditorOverlayPanel } from "../editor/responsive-layout";
 import { averageTrackConfidence, type SavedTrack } from "../lib/trackLibrary";
+import { buildFlarexMaskBridge, flarexMaskPointsToParam } from "../editor/flarex/flarex-mask-bridge";
 import {
   createAsset,
   cancelJob,
@@ -903,6 +904,10 @@ export function EditorPage() {
   // when set, the media pool is in "pick one" mode and a tile click routes to the Flarex comp node
   // instead of the timeline. Reuses the SAME media pool UI the user knows from "Replace asset".
   const [flarexSourcePick, setFlarexSourcePick] = useState<{ compId: string; nodeId: string } | null>(null);
+  // Which Flarex mask node the viewer's on-canvas editor is pointed at. REPORTED by FlarexWorkspace
+  // (it owns node selection); this only mirrors it so the bridge can be built here, where the viewer's
+  // props are assembled.
+  const [flarexMaskNode, setFlarexMaskNode] = useState<{ compId: string; nodeId: string } | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [pasteAttributesModalOpen, setPasteAttributesModalOpen] = useState(false);
   const [pendingExternalTimelineImport, setPendingExternalTimelineImport] = useState<ImportedExternalTimeline | null>(null);
@@ -5516,6 +5521,38 @@ export function EditorPage() {
     setNotice(`MediaIn source: ${asset.fileName}`);
   }
 
+  /**
+   * Flarex mask node → the REAL on-viewer mask editor (`flarex-mask-bridge`).
+   *
+   * The node is presented as a synthetic comp-space shape layer carrying one mask, so
+   * `MaskEditorOverlay` edits it with its existing gestures and learns nothing about Flarex. Commits
+   * come back as comp-pixel points and are written to the node's `points` param through the same
+   * `stampFlarexComp` path every other node edit uses (one graph write, one undo step).
+   */
+  const flarexMaskEdit = useMemo(() => {
+    if (editorPage !== "flarex" || !graph || !composition || !flarexMaskNode) return undefined;
+    const comp = graph.flarexComps?.[flarexMaskNode.compId];
+    const node = comp?.nodes[flarexMaskNode.nodeId];
+    if (!comp || !node) return undefined;
+    const bridged = buildFlarexMaskBridge(node, composition.width, composition.height);
+    if (!bridged) return undefined;
+    return {
+      layer: bridged.layer,
+      masks: bridged.masks,
+      onCommitPoints: (points: MaskPoint[]) => {
+        const liveComp = graph.flarexComps?.[flarexMaskNode.compId];
+        const liveNode = liveComp?.nodes[flarexMaskNode.nodeId];
+        if (!liveComp || !liveNode) return;
+        const nextNode = {
+          ...liveNode,
+          params: { ...liveNode.params, points: flarexMaskPointsToParam(points, composition.width, composition.height) },
+        };
+        const nextComp = { ...liveComp, nodes: { ...liveComp.nodes, [flarexMaskNode.nodeId]: nextNode } };
+        void updateGraph({ ...stampFlarexComp(graph, nextComp), version: graph.version + 1 });
+      },
+    };
+  }, [editorPage, graph, composition, flarexMaskNode]);
+
   function handleCopyLayer(layerId: string) {
     if (!composition) {
       return;
@@ -7183,15 +7220,56 @@ export function EditorPage() {
     );
   }
 
-  function pausePlaybackAtLiveClock() {
-    const stopped = getLivePlaybackTime();
+  /**
+   * Snap a time onto the composition's frame grid, clamped to [0, duration].
+   *
+   * The `mode` is the entire reason this is shared rather than inlined twice. A SCRUB wants the
+   * frame NEAREST the pointer (`"nearest"` — Premiere semantics, and what `setEditorCurrentTime`
+   * has always done). A STOP wants the frame that was actually ON SCREEN: at wall time `t` the
+   * viewer is showing frame `floor(t · fps)`, so rounding a stop parks on a frame the user never
+   * saw. Pause was the ONLY transport path that quantized at all — it committed the raw wall-clock
+   * anchor — which is why it landed between frames, up to one clock-commit interval
+   * (`playbackCommitIntervalMs`: 40ms balanced, 90ms performance) ahead of the last time the
+   * viewer had actually rendered. That is 1–5 frames of "it jumps forward when I pause", before
+   * any decode lag is counted (2026-07-29 report; measured 39.9ms of commit lag, parking at
+   * 3.354700s — between frames 100 and 101 — see tracker playback-preview v32y).
+   *
+   * The epsilon defends `"current"` against float error only: `t · fps` for a time already on the
+   * grid can land a hair BELOW the integer (3.4333333333333336 × 30 = 103.00000000000001 is fine,
+   * but the other side of that error would floor to 102 and park a frame early). `"nearest"` takes
+   * no epsilon so it stays bit-identical to the expression it replaces.
+   */
+  function quantizeToFrameGrid(timeSeconds: number, mode: "nearest" | "current" = "nearest") {
+    const fps = compositionRef.current?.fps || 30;
+    const duration = compositionRef.current?.durationSeconds ?? timeSeconds;
+    const frame = mode === "current" ? Math.floor(timeSeconds * fps + 1e-6) : Math.round(timeSeconds * fps);
+    return Math.max(0, Math.min(duration, frame / fps));
+  }
+
+  /**
+   * Park the transport at `rawTimeSeconds`, snapped to the frame the viewer was showing.
+   *
+   * THE one place a stop settles the playhead. There used to be two — this function's body, and the
+   * `!isPlaying` branch of the playback effect, which parked at the COMMITTED clock while this one
+   * parked at the LIVE anchor. Those disagree by up to a full commit interval, and two stop
+   * authorities that can disagree about the stop frame is exactly how the off-grid park got in.
+   * Deliberately does NOT call `setIsPlaying(false)`: the effect branch runs when `isPlaying` is
+   * ALREADY false, and calling it there would be a self-triggering loop. Callers own that bit.
+   */
+  function parkTransportAt(rawTimeSeconds: number) {
+    const stopped = quantizeToFrameGrid(rawTimeSeconds, "current");
     bridgeLiveMarkTo(stopped); // v27: live trail reaches the exact parked playhead, no cyan gap
     currentTimeRef.current = stopped;
     playbackStartRef.current = null;
     setPlaybackClock(stopped);
     setColdPlaybackSuspended(false);
-    flushColdPlaybackNotify(); // pause — settle cold panels exactly on the stop frame
+    flushColdPlaybackNotify(); // stop — settle cold panels exactly on the stop frame
     setPlaybackStart(null);
+    return stopped;
+  }
+
+  function pausePlaybackAtLiveClock() {
+    parkTransportAt(getLivePlaybackTime());
     setIsPlaying(false);
   }
 
@@ -8729,6 +8807,7 @@ export function EditorPage() {
               onPreviewMaskScalar={stablePreviewMaskScalar}
               onUpdateLayerMasks={stablePreviewUpdateLayerMasks}
               onCommitMaskPoints={stablePreviewCommitMaskPoints}
+              maskEditOverride={flarexMaskEdit}
               onCommitShapePath={stablePreviewCommitShapePath}
             />
             {shuttleRate !== null && (
@@ -9116,6 +9195,7 @@ export function EditorPage() {
                   graph={graph}
                   layer={inspectorLayer ?? null}
                   assets={assets}
+                  onMaskNodeChange={setFlarexMaskNode}
                   onPickSource={(compId, nodeId) => {
                     // Enter media-pool pick mode for this MediaIn node (reuses the "Replace asset" UI).
                     setAssetPickerForLayerId(null);

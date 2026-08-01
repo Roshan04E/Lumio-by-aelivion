@@ -29,6 +29,7 @@ import {
 } from "@orreris/shared";
 import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 import type { SavedTrack } from "../../lib/trackLibrary";
+import { isFlarexMaskNode } from "./flarex-mask-bridge";
 import { FlarexInspector } from "./FlarexInspector";
 import { FlarexSourceViewer } from "./FlarexSourceViewer";
 import { rebuildSourceProxy } from "../performance/sourceProxyEngine";
@@ -60,6 +61,13 @@ export interface FlarexWorkspaceProps {
   /** Enter media-pool "pick one" mode for a MediaIn node's source (reuses the timeline's Replace-asset
    *  flow — the user clicks a real media-pool tile, EditorPage writes the node's `sourceAssetId`). */
   onPickSource?: (compId: string, nodeId: string) => void;
+  /**
+   * REPORT (one-way) which mask node the viewer should let you edit on-canvas — the comp + node ids
+   * only, never a command. EditorPage bridges those into the real mask overlay; this component keeps
+   * owning selection, exactly like every other host↔panel seam in the editor (a report that could be
+   * fed back as a command is the voice-mode feedback loop all over again).
+   */
+  onMaskNodeChange?: (target: { compId: string; nodeId: string } | null) => void;
   /** The single write path — receives the full next graph (EditorPage stamps history/persistence). */
   onUpdateGraph: (nextGraph: ProjectGraph) => void;
   /** Shared transport playhead (seconds); comp-local time = timeSeconds − layer.startSeconds. */
@@ -88,7 +96,7 @@ function readThumbnailPref(): boolean {
   }
 }
 
-export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph, viewerCaptureRef }: FlarexWorkspaceProps) {
+export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onMaskNodeChange, onUpdateGraph, timeSeconds, onSeek, isPlaying = false, graphOpen = false, onCloseGraph, viewerCaptureRef }: FlarexWorkspaceProps) {
   const comp = layer ? getLayerFlarexComp(graph, layer) : undefined;
   // Saved tracks a Tracker node may follow. Derived from the `graph` this component already holds
   // rather than threaded as a new prop: EditorPage is the 15k-line monolith the repo keeps touch
@@ -276,6 +284,18 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onUpd
   // Graph drawer (shared GraphEditor via the bridge): the ONE selected node's keyframeable params
   // become effect-kind targets on a synthetic layer; edits map back to comp.animations.
   const graphNode = selectedNodeIds.length === 1 ? comp.nodes[selectedNodeIds[0]!] ?? null : null;
+
+  // The single selected node, when it is a mask node — the viewer's on-canvas editor follows THIS.
+  const maskNodeId = selectedNodeIds.length === 1 && isFlarexMaskNode(comp.nodes[selectedNodeIds[0]!]) ? selectedNodeIds[0]! : null;
+  const reportMaskNode = onMaskNodeChange;
+  const compId = comp.id;
+  useEffect(() => {
+    if (!reportMaskNode) return undefined;
+    reportMaskNode(maskNodeId ? { compId, nodeId: maskNodeId } : null);
+    // Leaving the page / deselecting must retract it, or the viewer keeps offering to edit a node the
+    // user can no longer see.
+    return () => reportMaskNode(null);
+  }, [reportMaskNode, compId, maskNodeId]);
   const graphBridge = graphNode ? buildFlarexGraphLayer(comp, graphNode, layer.durationSeconds, layerStart) : null;
   // Route the shared GraphEditor's layer-updater back onto the comp: rebuild the synthetic layer
   // from the CURRENT node (avoids stale closures), apply the updater, translate to comp.animations.

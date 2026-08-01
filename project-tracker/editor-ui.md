@@ -686,3 +686,39 @@ was defensible alone, and together they read as a deliberate design.
 
 **Gated:** `flarex:align:test` +9 — including the regression stated in zoom terms (a label must be
 visible at the old 0.45 and 0.35 cutoffs), monotonicity, and NaN never yielding a partial alpha.
+
+## Flarex masks get the REAL mask editor, by bridge (2026-07-30)
+
+**Founder's call: "match the clip mask editor exactly."** Not a lookalike — the same component.
+
+`polygonMask`/`bezierMask` shipped with `points` rendered as rows of 0–1 number inputs: you typed
+coordinates and guessed where they landed. The app already owned a full on-viewer editor
+(`MaskEditorOverlay`, ~700 lines: point drag, edge insert, double-click delete, tangents, marquee).
+
+**Bridge, not refactor — the pattern this codebase already proved.** `flarex-graph-bridge.ts` presents
+a node to the 1487-line GraphEditor as a synthetic `TimelineLayer`, which is why curves-on-nodes
+shipped without the EditSubject refactor that had been fenced for weeks. `flarex-mask-bridge.ts` is the
+same move: the node becomes a synthetic SHAPE layer carrying one `Mask`, and the overlay edits it
+knowing nothing about Flarex.
+
+`shape` is load-bearing, not arbitrary: the overlay treats `text`/`shape` layers as authored in COMP
+space (identity transform) and everything else as riding the layer transform. A mask node's points ARE
+comp-relative, so the mapping collapses to a multiply by width/height. `shapeKind` is NOT `"pen"` —
+that flag routes the overlay into editing a layer's own outline instead of its masks.
+
+**Seam:** `VideoPreview.maskEditOverride` — layer + masks + a points commit. GEOMETRY ONLY:
+`onUpdateLayerMasks` / `onPreviewMaskScalar` / `onCommitShapePath` are WITHHELD while it is set, rather
+than pointed at a layer that does not exist. The node's feather/invert/enable are its own params and
+stay in its inspector. Selection is REPORTED one-way by FlarexWorkspace (`onMaskNodeChange`) and
+retracted on unmount — the panel keeps owning selection, per the host↔panel token doctrine.
+
+**The one honest limit, stated not discovered:** `MaskPoint` carries bezier tangents; the node param is
+`[x, y]` pairs. Tangents are dropped on commit. A `bezierMask` still curves (the compiler lowers
+positions through the shared bezier rasterizer) so dragging points shapes the curve — you just cannot
+pull a handle and have it persist. Storing them needs `[x,y]` → 6-tuple plus a lowering change; that
+was the option explicitly declined. An affordance that silently discards the edit is the Tracker's
+text-blob bug in a new place, so it is named here and in the module header.
+
+*Rule: when a capable component is coupled to one subject, bridge the new subject INTO it before
+considering a refactor OUT of it.* Twice now the "obvious" answer was to abstract an EditSubject out of
+a large component, and twice a ~120-line adapter delivered the same result with none of the risk.

@@ -554,6 +554,7 @@ function VideoPreviewImpl({
   onToggleShowMasks,
   onUpdateLayerMasks,
   onCommitMaskPoints,
+  maskEditOverride,
   onPreviewMaskScalar,
   onCommitShapePath,
   maskEffectId,
@@ -635,6 +636,18 @@ function VideoPreviewImpl({
   onUpdateLayerMasks?: ((layerId: string, updater: (masks: Mask[]) => Mask[]) => void) | undefined;
   /** Commit edited outline points for one mask (path-keyframe-aware in EditorPage). */
   onCommitMaskPoints?: ((layerId: string, maskId: string, points: MaskPoint[]) => void) | undefined;
+  /**
+   * Point the REAL mask editor at something that is not a timeline clip (Flarex mask nodes).
+   *
+   * The layer+mask pair comes from `flarex-mask-bridge`, which presents a node as a synthetic shape
+   * layer in comp space; the overlay never learns Flarex exists. GEOMETRY ONLY — the node's feather /
+   * invert / enable are its own params and stay in its inspector, so `onUpdateLayerMasks`,
+   * `onPreviewMaskScalar` and `onCommitShapePath` are withheld while this is set rather than being
+   * pointed at a layer that does not exist.
+   */
+  maskEditOverride?:
+    | { layer: TimelineLayer; masks: Mask[]; onCommitPoints: (points: MaskPoint[]) => void }
+    | undefined;
   /** Live feather/opacity from the on-canvas widget; commit=false while dragging, true on release. */
   onPreviewMaskScalar?: ((layerId: string, maskId: string, patch: { feather?: number; opacity?: number }, commit: boolean) => void) | undefined;
   /** Pen tool on a PEN SHAPE layer: commit the drawn outline as the layer's own geometry. */
@@ -1028,7 +1041,13 @@ function VideoPreviewImpl({
   // the ORIGINAL composition, not `renderedLayerEntries`: region effects expand into render-only clones (the
   // base clone keeps this id but has the region effects stripped), so editing must use the un-expanded layer
   // to still see `effect.masks` (region masks) — otherwise the region mask is invisible/uneditable.
-  const maskActiveLayer = selectedLayerId
+  // FLAREX MASK NODE OVERRIDE (2026-07-30). A mask node presents itself as a synthetic layer+mask via
+  // `flarex-mask-bridge`, so the REAL editor below edits it with no knowledge that Flarex exists —
+  // the same bridge pattern that put the graph editor on nodes. When present it WINS over the clip
+  // selection, because the Flarex page's viewer is showing the comp, not the timeline stack.
+  const maskActiveLayer = maskEditOverride
+    ? maskEditOverride.layer
+    : selectedLayerId
     ? composition.tracks
         .flatMap((track) => track.layers)
         .find(
@@ -1040,7 +1059,9 @@ function VideoPreviewImpl({
         )
     : undefined;
   // The mask collection the overlay edits: a blur effect's region masks (Phase 3) or the clip masks.
-  const maskEditMasks: Mask[] = maskActiveLayer
+  const maskEditMasks: Mask[] = maskEditOverride
+    ? maskEditOverride.masks
+    : maskActiveLayer
     ? maskEffectId
       ? maskActiveLayer.effects.find((effect) => effect.id === maskEffectId)?.masks ?? []
       : maskActiveLayer.masks ?? []
@@ -2055,10 +2076,10 @@ function VideoPreviewImpl({
                   activeMaskId={activeMaskId}
                   onSelectMask={onSelectMask}
                   onChangeMaskTool={onChangeMaskTool}
-                  onUpdateLayerMasks={onUpdateLayerMasks}
-                  onCommitMaskPoints={onCommitMaskPoints}
-                  onPreviewMaskScalar={onPreviewMaskScalar}
-                  onCommitShapePath={onCommitShapePath}
+                  onUpdateLayerMasks={maskEditOverride ? undefined : onUpdateLayerMasks}
+                  onCommitMaskPoints={maskEditOverride ? (_layerId, _maskId, points) => maskEditOverride.onCommitPoints(points) : onCommitMaskPoints}
+                  onPreviewMaskScalar={maskEditOverride ? undefined : onPreviewMaskScalar}
+                  onCommitShapePath={maskEditOverride ? undefined : onCommitShapePath}
                 />
               ) : null}
               {/* Portal target for selection/motion overlays — sibling of the clip, so it isn't cropped. */}
@@ -2224,6 +2245,34 @@ function arePreviewLayerPropsEqual(prev: PreviewLayerProps, next: PreviewLayerPr
 /** Stable no-op for the Flarex virtual-loader decoders' interaction handlers (never fired —
  *  those PreviewLayers are non-interactive; a module const keeps PreviewLayer's memo from busting). */
 const NOOP = () => {};
+
+// ── ELEMENT DRIFT CORRECTION: detection rate ≠ correction rate (2026-07-29) ─────────────────────
+// See the corrector effect in PreviewLayer for the full reasoning. In short: the old 500ms
+// `setInterval` did BOTH jobs, so the 0.15s threshold below was never a bound on drift — only a
+// bound on drift AT SAMPLE TIME. A decode stall shorter than the sample period landed whole and went
+// unseen until the next tick, which is why the measured tail (528–685ms, tracker v32z) ran 3–4× past
+// this effect's own threshold.
+/** Sampling: `video.currentTime` is a free numeric read with no decoder involvement. */
+const DRIFT_SAMPLE_MS = 100;
+/**
+ * Seeking: the expensive and DANGEROUS side. A `currentTime` write on a playing element flushes and
+ * re-primes the decoder, and doing it per tick hung the tab (2026-07-16). This preserves the old
+ * worst-case seek rate EXPLICITLY, instead of inheriting it accidentally from the sample period.
+ */
+const MIN_CORRECTION_INTERVAL_MS = 500;
+/**
+ * Trigger, deliberately UNCHANGED. v32z measured p50 drift sitting right at 0.15s, so this is an
+ * EXERCISED bound, not unused headroom — and lowering it would add seeks, the one axis with a known
+ * tab-hang failure mode. Enforcing the existing bound is this round's job; re-sizing it needs its own
+ * measurement.
+ */
+const DRIFT_THRESHOLD_S = 0.15;
+
+/** Telemetry: `__rfDriftCorrections`. A seek storm shows up here as a climbing `corrections`. */
+const driftStats = { corrections: 0, worstDriftMs: 0, rateLimited: 0 };
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "__rfDriftCorrections", { configurable: true, get: () => driftStats });
+}
 
 const PreviewLayer = memo(function PreviewLayer({
   currentTime,
@@ -3183,6 +3232,10 @@ const PreviewLayer = memo(function PreviewLayer({
     if (!video || !isVideo || !effectivePlaying || hasSpeedRamp(layer)) {
       return;
     }
+    // v32z: SAMPLE fast, SEEK at the old rate. The trigger condition and the maximum seek rate are
+    // both unchanged — only the latency between a stall starting and the correction firing drops
+    // (~500ms worst case → ~100ms). Same seeks, sooner. See the constants above the component.
+    let lastCorrectionMs = 0;
     const interval = window.setInterval(() => {
       if (video.paused || video.seeking || video.readyState < 2) return;
       // R3: no longer clamps `local` to [0, duration] — that artificial clamp fought post/pre-roll
@@ -3193,10 +3246,21 @@ const PreviewLayer = memo(function PreviewLayer({
       const local = getPlaybackClock() - layer.startSeconds;
       const speed = getLayerSpeedAt(layer, Math.max(0, local));
       const { time: expected } = resolveSourceSeconds(local);
-      if (Number.isFinite(expected) && Math.abs(video.currentTime - expected) > 0.15 * Math.max(1, Math.abs(speed))) {
-        video.currentTime = expected;
+      if (!Number.isFinite(expected)) return;
+      const drift = Math.abs(video.currentTime - expected);
+      // Record what the picture is ACTUALLY doing, corrected or not — the drift we decline to fix
+      // (below threshold, or rate-limited) is exactly the residual the pause gate measures.
+      if (drift * 1000 > driftStats.worstDriftMs) driftStats.worstDriftMs = drift * 1000;
+      if (drift <= DRIFT_THRESHOLD_S * Math.max(1, Math.abs(speed))) return;
+      const now = performance.now();
+      if (now - lastCorrectionMs < MIN_CORRECTION_INTERVAL_MS) {
+        driftStats.rateLimited += 1;
+        return;
       }
-    }, 500);
+      lastCorrectionMs = now;
+      driftStats.corrections += 1;
+      video.currentTime = expected;
+    }, DRIFT_SAMPLE_MS);
     return () => window.clearInterval(interval);
   }, [effectivePlaying, isVideo, layer, mediaUrl, asset?.durationSeconds]);
 
