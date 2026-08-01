@@ -75,6 +75,24 @@ export interface ScenePreviewMediaSnapshot {
    */
   stalenessSeconds: number | null;
   /**
+   * The last decodable source time this layer knows about, or null when it knows of none.
+   *
+   * The SAME value `stalenessSeconds` clamps its request against, surfaced so the clamp's input is
+   * observable rather than inferred. Null here is the whole question: a null skips the clamp, and a
+   * skipped clamp makes a playhead parked past the material report staleness that grows without bound
+   * — lag that does not exist. With this field a large staleness reading is finally decidable:
+   *
+   *   mediaEnd null                          → the clamp never ran; the reading is an ARTIFACT.
+   *   mediaEnd known and ≈ the served time   → the source is correctly pinned at its last frame and
+   *                                            the request should have been clamped to it — a bug in
+   *                                            the mapping, not in the decoder.
+   *   mediaEnd known and well beyond it      → material exists that the decoder is not serving. A
+   *                                            genuinely wedged decode, and a different problem.
+   *
+   * Diagnostic only — nothing reads it to make a decision.
+   */
+  mediaEndSeconds: number | null;
+  /**
    * ATOMIC FULL-RES SWAP (2026-07-28) — the layer's full-res settle frame, OFFERED, not applied.
    *
    * The full-res settle path (user rule 2026-07-05) leases the ORIGINAL bytes ~300ms after the

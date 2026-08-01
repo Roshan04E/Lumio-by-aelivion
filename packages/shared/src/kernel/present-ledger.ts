@@ -84,6 +84,16 @@ export interface PresentSample {
    */
   readonly worstSourceServedTime?: number | null | undefined;
   /**
+   * The last decodable time that source knows of, or null when it knows of none.
+   *
+   * This is the field that makes a large staleness reading DECIDABLE rather than merely alarming. The
+   * staleness math clamps its request against this value; a null skips the clamp entirely, after which
+   * a playhead parked past the material accrues staleness without bound — lag that does not exist.
+   * Recording the clamp's input beside its output is what separates "the instrument is wrong" from
+   * "the decoder is wedged", and those two have nothing in common but the symptom.
+   */
+  readonly worstSourceMediaEnd?: number | null | undefined;
+  /**
    * The moment the frame actually represents, once the runtime can answer that (slice S4.4). Undefined
    * today: the present is *for* `targetTime` and the sources may or may not agree with it, which is
    * precisely the gap this ledger measures.
@@ -177,6 +187,8 @@ class PresentLedger {
           // The pair that classifies the cause. `served` constant while `targetTime` advances is an
           // ended source (artifact); `served` ahead of the request and closing is a seek transient.
           worstServed: sample.worstSourceServedTime ?? -1,
+          // -1 = the source reported no media end, so the clamp never ran on it.
+          worstMediaEnd: sample.worstSourceMediaEnd ?? -1,
         },
       });
     }

@@ -976,6 +976,7 @@ export function ScenePreviewCanvas({
     // last frame IS the right answer past the end).
     let worstStaleId = "";
     let worstStaleServed: number | null = null;
+    let worstStaleMediaEnd: number | null = null;
     // ATOMIC FULL-RES SWAP: tallies for this composite. The DECISION for this composite was made from
     // the previous one (`fullResCommittedRef`, resolved after the draw below) — deliberately, because
     // `gradeMediaInContext` is invoked lazily by `buildSceneDraws` as it walks the layers, so there is
@@ -1010,9 +1011,23 @@ export function ScenePreviewCanvas({
           shared: snap.decodeSharedWith,
           state: snap.awaitingFrame ? "AWAITING" : isStale(snap.stalenessSeconds) ? "stale" : "ok",
           staleMs: snap.stalenessSeconds == null ? null : Math.round(snap.stalenessSeconds * 1000),
+          // The clamp's input. `null` beside a large `staleMs` means the clamp never ran and the
+          // reading is an artifact of a playhead past the material, not lag anyone can fix.
+          mediaEnd: snap.mediaEndSeconds,
+          served: snap.servedSourceTime,
         };
       }
       allStaleness[resolvedId] = awaiting ? Number.POSITIVE_INFINITY : snap.stalenessSeconds;
+          id: resolvedId,
+          frameVersion: snap.frameVersion,
+          stalenessSeconds: snap.stalenessSeconds,
+          awaiting,
+          decodeMode: snap.decodeMode,
+          label: snap.sourceLabel,
+          nominalFps: snap.nominalFps,
+          servedSourceTime: snap.servedSourceTime,
+        });
+      }
       if (awaiting || isStale(snap.stalenessSeconds)) {
         staleIds.push(resolvedId);
         // `awaiting` has no measurable distance — there is no served time to compare — so it must not
@@ -1024,6 +1039,7 @@ export function ScenePreviewCanvas({
             maxStalenessSeconds = snap.stalenessSeconds!;
             worstStaleId = resolvedId;
             worstStaleServed = snap.servedSourceTime;
+            worstStaleMediaEnd = snap.mediaEndSeconds;
           }
         }
       }
@@ -1304,6 +1320,7 @@ export function ScenePreviewCanvas({
         maxStalenessSeconds,
         worstSourceId: worstStaleId,
         worstSourceServedTime: worstStaleServed,
+        worstSourceMediaEnd: worstStaleMediaEnd,
         playing,
       });
       // Keep the settle window open for the duration of a COHERENCE hold. Paused there is no rAF
@@ -1382,6 +1399,7 @@ export function ScenePreviewCanvas({
         maxStalenessSeconds,
         worstSourceId: worstStaleId,
         worstSourceServedTime: worstStaleServed,
+        worstSourceMediaEnd: worstStaleMediaEnd,
         playing,
       });
     } catch (error) {

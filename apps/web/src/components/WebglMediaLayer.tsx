@@ -638,15 +638,20 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
      * `playback/temporal-coherence.ts` so it stays pure and testable; this only supplies the inputs
      * this layer owns: the request mapping, the playback rate, and the provider's own frame rate.
      */
+    // The clamp's input, hoisted so the snapshot can REPORT it. A large staleness reading is only
+    // interpretable next to this: null means the clamp never ran and the reading is an artifact.
+    const currentMediaEndSeconds = (): number | null => {
+      const el = sourceVideoRef.current;
+      const elDuration = el && Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+      return wcProviderRef.current?.decodableEndSeconds ?? elDuration;
+    };
     const computeStalenessSeconds = (servedSourceTime: number | null): number | null => {
       const tp = wcTimeRef.current;
       // Media end for the tail clamp. The provider's demuxed `decodableEndSeconds` is the TRUE last
       // decodable sample (the same value `scene-frame-compositor` treats as the asset's media end);
       // the element's `duration` is the fallback when no provider exists. Either may be absent, and
       // absent simply skips the clamp.
-      const el = sourceVideoRef.current;
-      const elDuration = el && Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
-      const mediaEndSeconds = wcProviderRef.current?.decodableEndSeconds ?? elDuration;
+      const mediaEndSeconds = currentMediaEndSeconds();
       return stalenessSeconds({
         requestedSourceTime: mapSourceTime(tp),
         servedSourceTime,
@@ -2246,6 +2251,9 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             transition: gi.transition,
             transitionKey: gi.transitionKey,
             stalenessSeconds,
+            // Diagnostic companion to the line above: the clamp's input, so a large staleness reading
+            // can be told apart from a clamp that never ran. Video only — a still has no media end.
+            mediaEndSeconds: mediaType === "video" ? currentMediaEndSeconds() : null,
             fullResFrame,
             fullResPending,
             awaitingFrame,
