@@ -224,7 +224,15 @@ export function endFrame(outcome: FrameOutcome, settled = false): void {
   // A frame can only settle by presenting. Enforced here rather than trusted from the caller: "held but
   // settled" is a contradiction that would let a consumer wake on a frame that never reached the
   // screen, which is precisely the class of bug the signal exists to remove.
-  const reallySettled = settled && outcome === "presented";
+  //
+  // And only a DELIVERING purpose can settle at all (S2.3). `settled` means "the picture is ready", and
+  // a thumbnail or capture is one consumer's private picture, at its own time, of its own layer subset
+  // — waking a listener on it hands that listener someone else's frame. Enforced rather than left to
+  // convention for the same reason as the line above: the call sites that would get it wrong are the
+  // ones nobody re-reads. `export` settles because an export frame IS a delivered picture; `analysis`
+  // does not, because nothing is delivered.
+  const deliveringPurpose = request.purpose === "live" || request.purpose === "export";
+  const reallySettled = settled && outcome === "presented" && deliveringPurpose;
   if (reallySettled) settledCount += 1;
 
   // Notified BEFORE the diagnostics early-return below, and for every frame including healthy ones —

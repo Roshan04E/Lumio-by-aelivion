@@ -44,12 +44,44 @@
  * comparison run rather than a blind one.
  */
 export function getFrameCompletionEnabled(): boolean {
+  return readFlag("kernelFrames");
+}
+
+/**
+ * Do thumbnail and capture frames get their OWN caches? (ADR-012 I-32, slice S2.3.)
+ * Flag: `?kernelScopes=1` → localStorage `orreris.kernelScopes` → **OFF**.
+ *
+ * ## What it is protecting
+ *
+ * A thumbnail is not a small live frame; it is a different frame that happens to look similar. It runs
+ * at a different time, for a different consumer, on a different layer set — and today it runs through
+ * the LIVE matte cache, the live nested-matte caches, the live Flarex source-draw cache and the live
+ * grade renderers. So generating node thumbnails re-keys and evicts entries the live frame is about to
+ * need, and the live frame pays for work it did not ask for. That is I-32, and it is invisible in
+ * profiles because the cost lands on the *next* live frame rather than on the thumbnail.
+ *
+ * ## Why it is pixel-neutral, and why that is the whole safety argument
+ *
+ * These caches are memoization: an entry is derivable from its key. Giving a scratch pass its own
+ * cache changes hit rates and nothing else — every pixel is identical, just occasionally recomputed.
+ * The pixel gate is therefore a real check here rather than a formality, and a diff would mean a cache
+ * was carrying state that was never a pure function of its key, which is a finding in itself.
+ *
+ * The cost is duplicated GPU memory while a capture handle is alive. It is bounded by disposing the
+ * scratch scope with the handle — the same lifetime rule the `capture:`/`thumb:` grade-renderer pools
+ * already follow, which is the precedent this generalises rather than a new idea.
+ */
+export function getFrameScopesEnabled(): boolean {
+  return readFlag("kernelScopes");
+}
+
+function readFlag(name: string): boolean {
   const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
   if (typeof window !== "undefined") {
     try {
       const params = new URLSearchParams(window.location.search);
-      if (params.has("kernelFrames")) return truthy(params.get("kernelFrames"));
-      const stored = window.localStorage?.getItem("orreris.kernelFrames");
+      if (params.has(name)) return truthy(params.get(name));
+      const stored = window.localStorage?.getItem(`orreris.${name}`);
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

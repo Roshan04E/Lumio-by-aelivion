@@ -689,6 +689,60 @@ console.log("\nS2.2 — frame completion (I-30, I-31)");
 }
 
 // ---------------------------------------------------------------------------------------------
+// S2.3 — purpose-scoped frames
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS2.3 — purpose scoping (I-32)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  __resetFrameScheduler();
+  kernelDiagnostics.reset();
+
+  // Purpose is not decoration: it is what lets a consumer, a budget or a resource scope tell a
+  // thumbnail from the live frame. If a scratch frame were opened without one, every downstream
+  // distinction this slice depends on would collapse to "some frame".
+  const thumb = beginFrame("thumbnail", 4);
+  enforced("I-32", "a thumbnail frame declares its purpose", thumb.purpose === "thumbnail");
+  enforced("I-32", "a scratch frame is still deadline-bound", thumb.deadlineMs !== null);
+  endFrame("presented");
+
+  // A scratch frame must never claim settled. `settled` means "the picture is ready"; a thumbnail is
+  // one consumer's private picture at its own time, and waking a live listener on it hands that
+  // listener someone else's frame — the same class of error as `presented` vs `settled` in S2.2.
+  const woke: string[] = [];
+  const off = onFrameCompleted((c) => { if (c.settled) woke.push(c.frame.purpose); });
+  beginFrame("thumbnail", 5);
+  endFrame("presented", true);
+  beginFrame("capture", 6);
+  endFrame("presented", true);
+  beginFrame("analysis", 6.5);
+  endFrame("presented", true);
+  beginFrame("export", 7);
+  endFrame("presented", true);
+  beginFrame("live", 7.5);
+  endFrame("presented", true);
+  off();
+  enforced("I-32", "a scratch frame can NEVER report settled, even when its caller claims it",
+    !woke.includes("thumbnail") && !woke.includes("capture") && !woke.includes("analysis"));
+  enforced("I-30", "a delivering purpose still settles normally",
+    woke.length === 2 && woke[0] === "export" && woke[1] === "live");
+
+  // Overlap is the observable form of the violation: a scratch frame opened INSIDE a live frame is
+  // reaching live state by definition, because it is running in the live frame's turn.
+  kernelDiagnostics.reset();
+  beginFrame("live", 8);
+  beginFrame("capture", 8);
+  enforced("I-32", "a capture opened inside a live frame is reported as an overlap",
+    kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "frame-overlap"));
+  endFrame("abandoned");
+
+  __resetFrameScheduler();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------------------------
 

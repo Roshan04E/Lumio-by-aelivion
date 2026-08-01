@@ -64,7 +64,7 @@ import {
   shouldHoldForCoherence,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
-import { getFrameCompletionEnabled } from "../playback/frame-completion";
+import { getFrameCompletionEnabled, getFrameScopesEnabled } from "../playback/frame-completion";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
 
@@ -537,6 +537,19 @@ export function ScenePreviewCanvas({
   // shared by the live + capture build paths. Plain JS (no GPU resources) → cleared, not disposed.
   const flarexSourceDrawCacheRef = useRef<FlarexSourceDrawCache>(new FlarexSourceDrawCache());
   const rasterizerRef = useRef<SceneTextRasterizer | null>(null);
+  /**
+   * SCRATCH SCOPE (ADR-012 I-32, slice S2.3) — the caches a thumbnail or capture frame uses instead of
+   * the live ones. Built lazily on first scratch frame and disposed with the capture handle, so an
+   * editor that never opens a thumbnail pays nothing.
+   *
+   * The matte cache is dimension-bound (`new SceneMaskMatteCache(w, h)`), so the scratch copy tracks the
+   * dimensions it was built for and is rebuilt when they change — the same reason the live one lives in
+   * a `[width, height]` effect.
+   */
+  const scratchMatteCacheRef = useRef<{ cache: SceneMaskMatteCache; width: number; height: number } | null>(null);
+  const scratchNestMatteCachesRef = useRef<Map<string, SceneMaskMatteCache>>(new Map());
+  const scratchFlarexSourceDrawCacheRef = useRef<FlarexSourceDrawCache>(new FlarexSourceDrawCache());
+  const frameScopesEnabledRef = useRef(getFrameScopesEnabled());
   // R1 fix: first-blocked timestamp per currently-unready layer id (escape-hatch timer for the
   // hold-previous-frame gate in `drawRef.current` — see `NOT_READY_HOLD_MS`).
   const notReadySinceRef = useRef<Map<string, number>>(new Map());
@@ -637,6 +650,11 @@ export function ScenePreviewCanvas({
     // Flarex source-draw cache holds only plain JS templates (no GPU resources) — clear so a rebuild
     // starts cold rather than reusing draws keyed against a torn-down comp.
     flarexSourceDrawCacheRef.current.clear();
+    // The scratch scope dies with the context too, not only with the capture handle (S2.3). A context
+    // loss invalidates its GPU objects exactly as it does the live ones, and a scratch cache holding
+    // handles into a dead context is the use-after-dispose S5.2 is meant to make unrepresentable —
+    // until then, disposing it here is what keeps it from happening.
+    disposeScratchScope();
     try {
       rasterizerRef.current?.dispose();
     } catch {
@@ -1585,11 +1603,62 @@ export function ScenePreviewCanvas({
     };
   }, [recoveryTick]);
 
+  /**
+   * The cache bundle a SCRATCH frame (thumbnail / capture) should use — ADR-012 I-32, slice S2.3.
+   *
+   * One implementation for both scratch call sites: two would be two answers to "which caches does a
+   * thumbnail use", which is regression G5 and precisely how the live/scratch distinction got lost in
+   * the first place.
+   *
+   * With the flag off this returns the live refs, i.e. exactly today's behaviour, so the old path stays
+   * intact until the scoped one has been soaked.
+   */
+  const scratchScopeCaches = () => {
+    if (!frameScopesEnabledRef.current) {
+      return {
+        matteCache: matteCacheRef.current,
+        nestMatteCaches: nestMatteCachesRef.current,
+        flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
+      };
+    }
+    const { width: w, height: h } = inputsRef.current;
+    const existing = scratchMatteCacheRef.current;
+    // Rebuilt on a dimension change rather than resized: the live cache is rebuilt for the same reason
+    // (its effect is keyed on [width, height]), and a scratch cache holding mattes rasterized for the
+    // old comp size would hand back the wrong-sized matte for a key that still looked valid.
+    if (!existing || existing.width !== w || existing.height !== h) {
+      existing?.cache.dispose();
+      scratchMatteCacheRef.current = { cache: new SceneMaskMatteCache(w, h), width: w, height: h };
+    }
+    return {
+      matteCache: scratchMatteCacheRef.current!.cache,
+      nestMatteCaches: scratchNestMatteCachesRef.current,
+      flarexSourceDrawCache: scratchFlarexSourceDrawCacheRef.current,
+    };
+  };
+
+  const disposeScratchScope = () => {
+    scratchMatteCacheRef.current?.cache.dispose();
+    scratchMatteCacheRef.current = null;
+    for (const cache of scratchNestMatteCachesRef.current.values()) {
+      try {
+        cache.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    scratchNestMatteCachesRef.current.clear();
+    scratchFlarexSourceDrawCacheRef.current.clear();
+  };
+
   // Publish the viewer-capture handle (todo.md Phase 6B P1a). Methods read live refs, so one stable object
   // stays valid across recoveries — each call re-checks the compositor before touching the GPU.
   useEffect(() => {
     if (!captureRef) return undefined;
     const releaseCaptureResources = () => {
+      // The scratch scope's lifetime IS the handle's — the same rule the "capture:"/"thumb:" grade
+      // renderers below already follow. S2.3 only generalises it to the caches they were sharing.
+      disposeScratchScope();
       for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
         // "thumb:" is the node-thumbnail pool (Slice 6) — same lifetime rule as the capture pool: both
         // are scratch, both are rebuilt on demand, and neither may outlive the handle.
@@ -1637,6 +1706,12 @@ export function ScenePreviewCanvas({
       const { layers: ls, width: w, height: h, renderScale: rScale, nestedGroups: nestGroups } = inputsRef.current;
       const host = ls.find((layer) => layer.id === layerId);
       if (!host) return null;
+      // A thumbnail is a frame with a purpose, not an untracked side errand (S2.1/S2.3). Naming it
+      // makes `frame-overlap` meaningful — one rendered inside a live frame is the I-32 violation this
+      // scope exists to prevent, and it is now reported rather than invisible.
+      beginFrame("thumbnail", inputsRef.current.currentTime);
+      let thumbOutcome: FrameOutcome = "abandoned";
+      const scoped = scratchScopeCaches();
       try {
         const draws = buildSceneDraws({
           // The clip ALONE: this shows what this layer (or node) OUTPUTS, not what the timeline
@@ -1648,17 +1723,17 @@ export function ScenePreviewCanvas({
           renderScale: rScale,
           transitions: [],
           rasterizer: rasterizerRef.current,
-          matteCache: matteCacheRef.current,
+          matteCache: scoped.matteCache,
           gradeRenderers: gradeRenderersRef.current,
           getMediaGraded,
           gradeOverlay: makeGradeOverlayRef.current(compositor, overlayScope),
           createCanvas: () => document.createElement("canvas"),
           regionPassModel: getRegionPassesEnabled(),
           nestedGroups: nestGroups,
-          nestMatteCaches: nestMatteCachesRef.current,
+          nestMatteCaches: scoped.nestMatteCaches,
           flarexComps: inputsRef.current.flarexComps,
           flarexVirtualLayers: inputsRef.current.flarexVirtualLayers,
-          flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
+          flarexSourceDrawCache: scoped.flarexSourceDrawCache,
           // Re-root at this node when asked. Deliberately WITHOUT `flarexCompProxies`: a comp proxy
           // replaces the whole lowering with one pre-rendered frame, so every node would render
           // identically as the comp's final output — the one input that would make this silently wrong.
@@ -1690,9 +1765,15 @@ export function ScenePreviewCanvas({
         // renderFrameThumbnail leaves OUR frame in the retained composite, which is what the color
         // scopes sample. Re-arm the settle window so the live frame is re-composited over it.
         requestDraw();
+        thumbOutcome = "presented";
         return rendered;
       } catch {
+        thumbOutcome = "failed";
         return null;
+      } finally {
+        // A thumbnail never claims `settled`: it is a scratch frame for one consumer, and waking a
+        // "the picture is ready" listener on it would hand that listener someone else's picture.
+        endFrame(thumbOutcome);
       }
     };
 
@@ -1729,6 +1810,9 @@ export function ScenePreviewCanvas({
         const { width: w, height: h, backgroundColor: bg, renderScale: rScale, nestedGroups: nestGroups } = inputsRef.current;
         const renderW = Math.max(1, Math.round(w * rScale));
         const renderH = Math.max(1, Math.round(h * rScale));
+        beginFrame("capture", t);
+        let captureOutcome: FrameOutcome = "abandoned";
+        const scoped = scratchScopeCaches();
         try {
           const draws = buildSceneDraws({
             layers: ls,
@@ -1738,29 +1822,37 @@ export function ScenePreviewCanvas({
             renderScale: rScale,
             transitions: tPairs,
             rasterizer: rasterizerRef.current,
-            matteCache: matteCacheRef.current,
+            matteCache: scoped.matteCache,
             gradeRenderers: gradeRenderersRef.current,
             getMediaGraded,
             gradeOverlay: makeGradeOverlayRef.current(compositor, "capture:"),
             createCanvas: () => document.createElement("canvas"),
             regionPassModel: getRegionPassesEnabled(),
             // Same live composition's groups (this capture renders THIS viewer's own layer set at another
-            // time — see the handle's docstring); matte-cache pool shared with the live path exactly like
-            // `matteCacheRef` already is above (re-keys per (layer, tLocal), so alternating just re-hashes,
-            // never corrupts — the same trade-off the pre-existing code already accepts for `matteCacheRef`).
+            // time — see the handle's docstring). The matte-cache pool USED to be shared with the live
+            // path, and the note here recorded the trade-off honestly: "alternating just re-hashes, never
+            // corrupts". Correct about corruption, and that was never the cost — the cost is that every
+            // re-hash EVICTS an entry the live frame is about to need, so a capture loop running beside a
+            // paused viewer makes the viewer recompute mattes it already had. Under S2.3 a capture gets
+            // its own pool and the live frame stops paying for it (I-32).
             nestedGroups: nestGroups,
-            nestMatteCaches: nestMatteCachesRef.current,
+            nestMatteCaches: scoped.nestMatteCaches,
             flarexComps: inputsRef.current.flarexComps,
             flarexVirtualLayers: inputsRef.current.flarexVirtualLayers,
-            flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
+            flarexSourceDrawCache: scoped.flarexSourceDrawCache,
           });
-          return compositor.renderFrameOffscreen(
+          const out = compositor.renderFrameOffscreen(
             { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t },
             buffer
           );
+          captureOutcome = "presented";
+          return out;
         } catch {
           // A lost context is detected/recovered by the render loop; the capture caller just retries/fails.
+          captureOutcome = "failed";
           return null;
+        } finally {
+          endFrame(captureOutcome);
         }
       },
       renderFlarexNodeThumbnail({ hostLayerId, nodeId, targetWidth, targetHeight, buffer }) {
