@@ -17,6 +17,8 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Columns2, LayoutGrid, Rows3, Square } from "lucide-react";
+import { onFrameCompleted } from "@orreris/shared";
+import { getFrameCompletionEnabled } from "../playback/frame-completion";
 
 export type ScopeMode = "waveform" | "parade" | "vectorscope" | "histogram";
 
@@ -613,6 +615,9 @@ export function ColorScopes({
   /** Deadline the paused watch runs to; each change EXTENDS it rather than restarting a timer. */
   const watchUntilRef = useRef(0);
   const watchTimerRef = useRef<number | null>(null);
+  // Read once per mount, like every other engine flag. When on, the viewer's completion signal owns
+  // "is the picture ready" and the bounded poll below is not installed at all.
+  const [frameCompletionOwnsReadiness] = useState(getFrameCompletionEnabled);
 
   const sample = useCallback(() => {
     lastSampleAtRef.current = Date.now();
@@ -680,6 +685,15 @@ export function ColorScopes({
     // to the event rate at exactly the moment the user needs the main thread free. Extending a deadline
     // that one long-lived timer reads keeps the cadence at a steady 90ms no matter how fast the ticks
     // arrive; the immediate sample below is then only for a discrete edit landing after a quiet period.
+    // S2.2: with frame completion owning readiness, this whole poll is unnecessary — the viewer says
+    // when the picture is done and the scopes sample exactly once, then. The 90ms/800ms guess exists
+    // only because nothing could answer that, and every sample it takes before the final frame is a GPU
+    // readback plus a full-frame accumulation per open pane, spent on a picture that is about to change.
+    // The flag is exclusive: one mechanism decides, never both (G5).
+    if (frameCompletionOwnsReadiness) {
+      if (Date.now() - lastSampleAtRef.current >= EDIT_RESAMPLE_MS) sample();
+      return undefined;
+    }
     watchUntilRef.current = Date.now() + EDIT_WATCH_MS;
     if (Date.now() - lastSampleAtRef.current >= EDIT_RESAMPLE_MS) sample();
     if (watchTimerRef.current === null) {
@@ -693,7 +707,36 @@ export function ColorScopes({
       }, EDIT_RESAMPLE_MS);
     }
     return undefined;
-  }, [tick, isPlaying, changeKey, sample]);
+  }, [tick, isPlaying, changeKey, sample, frameCompletionOwnsReadiness]);
+
+  /**
+   * S2.2 — sample when the viewer says the picture is READY, instead of guessing at 90ms intervals.
+   *
+   * Only settled frames wake this: a frame that presented while a source was stale is on screen but is
+   * not the final picture, and scoping a grade off it would show the user numbers for the wrong shot.
+   * That distinction is the entire reason `settled` is a stricter predicate than `presented`.
+   *
+   * The sample is deferred to a rAF rather than taken inline. A completion listener runs inside
+   * `endFrame`, i.e. inside the draw the viewer is still unwinding, and a scope sample is a GPU readback
+   * plus a full-frame accumulation per open pane — doing that synchronously would charge the viewer's
+   * frame budget for a panel's work and turn the instrument into the stall.
+   */
+  useEffect(() => {
+    if (!frameCompletionOwnsReadiness || isPlaying) return undefined;
+    let raf = 0;
+    const off = onFrameCompleted((completion) => {
+      if (!completion.settled || completion.frame.purpose !== "live") return;
+      if (raf !== 0) return;
+      raf = window.requestAnimationFrame(() => {
+        raf = 0;
+        sampleRef.current();
+      });
+    });
+    return () => {
+      off();
+      if (raf !== 0) window.cancelAnimationFrame(raf);
+    };
+  }, [frameCompletionOwnsReadiness, isPlaying]);
 
   // The watch timer outlives individual effect runs by design, so unmount is the one place that must
   // stop it — otherwise it keeps sampling a torn-down component's compositor.

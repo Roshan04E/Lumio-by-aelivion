@@ -38,8 +38,12 @@
 import {
   __resetFrameScheduler,
   activeFrame,
+  awaitFrameSettled,
   beginFrame,
+  classifyComposite,
   compileFlarexComp,
+  frameSchedulerStats,
+  onFrameCompleted,
   createFlarexComp,
   createFlarexNode,
   healFlarexRegistry,
@@ -575,6 +579,109 @@ console.log("\nS2.1 — frame scheduler (I-30 partial)");
   endFrame("held");
   enforced("I-30", "a held frame IS recorded",
     kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "frame-held"));
+
+  __resetFrameScheduler();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S2.2 — explicit frame completion
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS2.2 — frame completion (I-30, I-31)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  __resetFrameScheduler();
+  kernelDiagnostics.reset();
+
+  // I-30: every frame that begins, ends. `begun - completed` is 1 inside a frame and 0 outside it, and
+  // any other value is a missed `endFrame` — the leak that would mis-attribute every later event.
+  enforced("I-30", "no frame is in flight at rest", frameSchedulerStats().begun === frameSchedulerStats().completed);
+  beginFrame("live", 0);
+  enforced("I-30", "exactly one frame is in flight inside one",
+    frameSchedulerStats().begun - frameSchedulerStats().completed === 1);
+  endFrame("presented", true);
+  enforced("I-30", "every frame that begins, ends",
+    frameSchedulerStats().begun === frameSchedulerStats().completed);
+
+  // The distinction the slice exists for. A frame that did not present cannot have settled, and the
+  // scheduler enforces that rather than trusting the caller — "held but settled" would let a consumer
+  // wake on a frame that never reached the screen.
+  const seen: { outcome: string; settled: boolean }[] = [];
+  const off = onFrameCompleted((c) => seen.push({ outcome: c.outcome, settled: c.settled }));
+  beginFrame("live", 1);
+  endFrame("held", true);
+  enforced("I-30", "a HELD frame can never report settled", seen[0]?.settled === false);
+  beginFrame("live", 2);
+  endFrame("presented", false);
+  enforced("I-30", "a presented frame with work outstanding is not settled", seen[1]?.settled === false);
+  beginFrame("live", 3);
+  endFrame("presented", true);
+  enforced("I-30", "a presented frame with nothing outstanding IS settled", seen[2]?.settled === true);
+  enforced("I-30", "listeners are notified for EVERY frame, not just interesting ones", seen.length === 3);
+  off();
+  beginFrame("live", 4);
+  endFrame("presented", true);
+  enforced("I-30", "unsubscribing stops notification", seen.length === 3);
+
+  // A subscriber that throws must not take down the draw loop that notified it — the loop is the only
+  // thing keeping the viewer alive, and a diagnostic consumer is never worth it.
+  kernelDiagnostics.reset();
+  const offThrow = onFrameCompleted(() => { throw new Error("subscriber blew up"); });
+  let survived = true;
+  beginFrame("live", 5);
+  try { endFrame("presented", true); } catch { survived = false; }
+  offThrow();
+  enforced("I-30", "a throwing listener cannot break the frame loop", survived);
+  enforced("I-29", "a throwing listener is REPORTED, not swallowed",
+    kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "frame-listener-threw"));
+
+  // The pure classifier the viewer drives — the counts that decide whether the settle window can be
+  // retired. `load-bearing` is the one that blocks the flag: a repaint only the timer caught.
+  enforced("I-31", "playing composites are never charged to the settle window",
+    classifyComposite({ playing: true, previousSettled: true, rearmedSinceSettled: false, settled: false }) === "playing");
+  enforced("I-31", "compositing toward a first settlement is the window doing its job",
+    classifyComposite({ playing: false, previousSettled: false, rearmedSinceSettled: false, settled: false }) === "converging");
+  enforced("I-31", "a re-armed window is converging again, not waste",
+    classifyComposite({ playing: false, previousSettled: true, rearmedSinceSettled: true, settled: true }) === "converging");
+  enforced("I-31", "re-settling with nothing re-armed is pure surplus",
+    classifyComposite({ playing: false, previousSettled: true, rearmedSinceSettled: false, settled: true }) === "surplus");
+  enforced("I-31", "an UNsettled composite nothing re-armed is load-bearing — closing the window would lose it",
+    classifyComposite({ playing: false, previousSettled: true, rearmedSinceSettled: false, settled: false }) === "load-bearing");
+
+  __resetFrameScheduler();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// I-31 — a bounded wait's expiry must be REPORTED, never indistinguishable from its success. This is
+// the exact property the 600ms settle window lacks, and the reason it cannot be reasoned about: a
+// consumer receives `null` and knows it timed out, rather than receiving a frame that was never ready.
+// Awaited at top level so a regression fails the harness instead of becoming an unhandled rejection.
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  __resetFrameScheduler();
+  kernelDiagnostics.reset();
+
+  const timedOut = await awaitFrameSettled({ timeoutMs: 5 });
+  enforced("I-31", "a wait that expires resolves null rather than lying", timedOut === null);
+  enforced("I-29", "an expired wait is reported",
+    kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "frame-await-timeout"));
+
+  // And it must actually resolve on the real signal — a wait that only ever times out is not a signal.
+  const settled = awaitFrameSettled({ timeoutMs: 1000 });
+  beginFrame("live", 7);
+  endFrame("presented", true);
+  enforced("I-30", "a wait resolves on the settling frame", (await settled)?.frame.targetTime === 7);
+
+  // Purpose-scoped: an export frame settling must not wake a consumer waiting on the live viewer.
+  const liveOnly = awaitFrameSettled({ purpose: "live", timeoutMs: 50 });
+  beginFrame("export", 8);
+  endFrame("presented", true);
+  enforced("I-32", "a wait scoped to a purpose ignores other purposes", (await liveOnly) === null);
 
   __resetFrameScheduler();
   kernelDiagnostics.enabled = wasEnabled;

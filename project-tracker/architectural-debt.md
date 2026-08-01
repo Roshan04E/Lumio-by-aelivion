@@ -89,6 +89,7 @@ Entries are never rewritten. To change one, append a new dated note under it.
 - Planned slice: S2.2 (retirement), enforced by S7.1
 - Tracking issue: —
 - Detection: a new consumer waiting on the settle window instead of `FrameComplete`
+- **Update (2026-08-01, S2.2 shipped):** the expiry condition is now MEASURABLE rather than aspirational, and it turned out to need two counters, not one. `settle-backstop-expired` is the debt's own condition — the window ran out while the picture had still not settled, so the viewer stopped compositing on an unfinished frame. `settle-window-load-bearing` is the stricter one that gates the FLAG: a composite that was not settled inside a window nothing had re-armed, i.e. a repaint that only the timer caught because some producer arrives without announcing itself. Both must read zero across a real soak before `orreris.kernelFrames` may default on; a non-zero `load-bearing` count names a producer to fix rather than a reason to keep the timer. Retirement is therefore gated on evidence from `__rfKernel.events("transition")`, not on the slice having merged. Debt remains **open** by design: S2.2 built the instrument and the switch, and deliberately did not flip it.
 
 ### DEBT-006 — Materialization threshold carried from the ADR-008-violating implementation
 - Status: open

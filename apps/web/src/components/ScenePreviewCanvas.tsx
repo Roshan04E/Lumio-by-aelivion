@@ -37,7 +37,9 @@ import {
   FlarexSourceDrawCache,
   beginFrame,
   colorPipelineCacheKey,
+  classifyComposite,
   endFrame,
+  kernelDiagnostics,
   noteHeld,
   notePresent,
   recordFlarexDegradation,
@@ -62,6 +64,7 @@ import {
   shouldHoldForCoherence,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
+import { getFrameCompletionEnabled } from "../playback/frame-completion";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
 
@@ -724,7 +727,17 @@ export function ScenePreviewCanvas({
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
   const activeUntilRef = useRef(0);
+  // ── FRAME COMPLETION (ADR-012 slice S2.2) ────────────────────────────────────────────────────────
+  // Did the LAST composite settle (present with nothing outstanding), and has anything re-armed the
+  // window since? Together they classify every settle-window composite — see `frame-completion.ts` for
+  // why `load-bearing` is the count that decides whether the window can be retired.
+  const prevSettledRef = useRef(false);
+  const rearmedSinceSettledRef = useRef(true);
+  const settledRef = useRef(false);
+  // Read once per mount, like every other engine flag in this file.
+  const frameCompletionEnabledRef = useRef(getFrameCompletionEnabled());
   const requestDraw = () => {
+    rearmedSinceSettledRef.current = true;
     activeUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + SCENE_SETTLE_MS;
   };
   // Hand `requestDraw` to the caller (imperative, no re-render) so a media re-grade can re-arm a
@@ -1339,6 +1352,12 @@ export function ScenePreviewCanvas({
       // one of its two bounded hatches. Both are honest under today's architecture; the ledger makes
       // them countable, and that count is the baseline slice S4.6 has to beat.
       outcomeRef.current = "presented";
+      // SETTLED (S2.2): on screen, and nothing outstanding — no source showing another moment, no layer
+      // without its texture. Deliberately stricter than `presented`: during playback the barrier is off,
+      // so frames present with stale sources routinely, and a consumer waiting for "the picture is
+      // ready" that woke on those would capture the wrong moment. The two predicates are computed from
+      // the same two arrays the hold gate just used, so they cannot drift apart.
+      settledRef.current = staleIds.length === 0 && notReadyIds.length === 0;
       notePresent({
         targetTime: t,
         participants: liveMediaSourceIds.size,
@@ -1370,13 +1389,58 @@ export function ScenePreviewCanvas({
     // `outcomeRef` is set at the exit points inside; the default is `abandoned`, which is the honest
     // answer for the early returns that give up before deciding anything.
     outcomeRef.current = "abandoned";
+    // S2.2: assumed false until the present path proves otherwise. An early return therefore reports
+    // "not settled", which is the honest answer — a frame that gave up settled nothing.
+    settledRef.current = false;
     beginFrame("live", inputsRef.current.currentTime);
+
+    // ONE post-frame step for both branches below. Inlining it twice would be two implementations of
+    // the window-ownership rule, which is exactly regression G5 — and the profiling branch is the one
+    // nobody reads, so that is where the two would drift.
+    const finishFrame = () => {
+      const settled = settledRef.current;
+      const playing = inputsRef.current.isPlaying;
+      // Classified BEFORE the refs are advanced: the classification is about the state this composite
+      // ran under, not the state it produced.
+      const kind = classifyComposite({
+        playing,
+        previousSettled: prevSettledRef.current,
+        rearmedSinceSettled: rearmedSinceSettledRef.current,
+        settled,
+      });
+      if ((kind === "surplus" || kind === "load-bearing") && kernelDiagnostics.enabled) {
+        kernelDiagnostics.record({
+          kind: "transition",
+          // `load-bearing` is a WARNING because it is the finding that blocks the flag: a repaint that
+          // only the timer caught means some producer arrives without re-arming, and closing the window
+          // would lose it. `surplus` is merely waste, and waste is `info`.
+          severity: kind === "load-bearing" ? "warn" : "info",
+          subject: { kind: "runtime" },
+          reason: `settle-window-${kind}`,
+          detail: { targetTime: Number(inputsRef.current.currentTime.toFixed(4)), outcome: outcomeRef.current },
+        });
+      }
+      prevSettledRef.current = settled;
+      if (settled) {
+        rearmedSinceSettledRef.current = false;
+        // THE BEHAVIOURAL HALF OF S2.2, and the only thing the flag gates. Completion replaces the
+        // timer: there is provably nothing left to wait for, so the window closes now instead of
+        // burning up to 600ms of composites nobody will see. Only while paused — during playback the
+        // transport owns the cadence and the window is not consulted at all.
+        //
+        // Safe only because re-arming is event-driven (`requestDraw` from any async arrival), which is
+        // the property the `load-bearing` counter above exists to verify rather than assume.
+        if (frameCompletionEnabledRef.current && !playing) activeUntilRef.current = 0;
+      }
+      endFrame(outcomeRef.current, settled);
+    };
+
     const profiling = frameProfiler.enabled() && inputsRef.current.isPlaying;
     if (!profiling) {
       try {
         drawFrameImpl();
       } finally {
-        endFrame(outcomeRef.current);
+        finishFrame();
       }
       return;
     }
@@ -1387,7 +1451,7 @@ export function ScenePreviewCanvas({
     } finally {
       frameProfiler.time("frame.cpu", performance.now() - t0);
       frameProfiler.endFrame(compositorRef.current?.profilerSnapshot());
-      endFrame(outcomeRef.current);
+      finishFrame();
     }
   };
 
@@ -1397,6 +1461,8 @@ export function ScenePreviewCanvas({
   useEffect(() => {
     let cancelled = false;
     let wasSuspended = false;
+    // Edge detection for the settle-window backstop below — we care about the tick the window CLOSES on.
+    let wasInWindow = false;
     // Baseline for playback frame-interval telemetry (frame-stats.ts). Reset across pauses/suspends so
     // a pause gap is never counted as a "frame". Measurement only — no effect on the render itself.
     let lastPlayingFrameTs = 0;
@@ -1425,7 +1491,23 @@ export function ScenePreviewCanvas({
         }
         const now = typeof performance !== "undefined" ? performance.now() : Date.now();
         const playingFrame = inputsRef.current.isPlaying;
-        if (playingFrame || now < activeUntilRef.current) {
+        const inWindow = now < activeUntilRef.current;
+        // DEBT-005's retirement condition (S2.2). The settle window is meant to be a BACKSTOP; this
+        // records the only case where it actually acted as one — the window ran out while the picture
+        // had still not settled, so the viewer stopped compositing on a frame that was never finished.
+        // In steady state this must never fire. While it does, the timer is load-bearing and the debt
+        // stands; when a soak produces none, completion is doing the whole job.
+        if (wasInWindow && !inWindow && !playingFrame && !prevSettledRef.current && kernelDiagnostics.enabled) {
+          kernelDiagnostics.record({
+            kind: "transition",
+            severity: "warn",
+            subject: { kind: "runtime" },
+            reason: "settle-backstop-expired",
+            detail: { targetTime: Number(inputsRef.current.currentTime.toFixed(4)) },
+          });
+        }
+        wasInWindow = inWindow;
+        if (playingFrame || inWindow) {
           drawRef.current();
           // Playback smoothness telemetry: interval between composited playback frames + composite CPU
           // cost. Feeds the Stats HUD and the adaptive quality controller. Skipped for settle-window

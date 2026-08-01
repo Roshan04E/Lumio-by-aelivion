@@ -53,10 +53,108 @@ export interface FrameRequest {
 /** How a frame ended. `abandoned` is not a failure — a superseded live frame is the common case. */
 export type FrameOutcome = "presented" | "held" | "abandoned" | "failed";
 
+/**
+ * What a completed frame tells its consumers (slice S2.2).
+ *
+ * `settled` is the predicate the whole slice exists to provide: the frame reached the screen AND
+ * nothing was outstanding when it did — no stale source, no unready layer. It is the answer to the
+ * question five separate timeouts in this runtime are currently guessing at.
+ *
+ * **`presented` and `settled` are not the same claim**, and conflating them is how the guessing
+ * started. A frame presented while a source was stale *did* reach the screen — the barrier is off
+ * during playback by design — but it is not the frame anyone waiting for "the picture is ready"
+ * meant. A capture that fires on `presented` captures the wrong moment; one that fires on `settled`
+ * cannot.
+ */
+export interface FrameCompletion {
+  readonly frame: FrameRequest;
+  readonly outcome: FrameOutcome;
+  /** Presented AND nothing outstanding. The real "this frame is done" signal. */
+  readonly settled: boolean;
+  readonly elapsedMs: number;
+  /** 0 when the deadline was met, or when the frame declared none. */
+  readonly overranByMs: number;
+}
+
 const DEFAULT_LIVE_BUDGET_MS = 33;
 
 let nextId = 1;
 let active: FrameRequest | null = null;
+let begun = 0;
+let completed = 0;
+let settledCount = 0;
+
+/**
+ * Completion listeners. A plain array rather than a Set because it is iterated on every frame and
+ * never contains more than a handful — and because iteration order being registration order makes a
+ * consumer's behaviour reproducible, which a Set does not guarantee across engines.
+ */
+const listeners: ((completion: FrameCompletion) => void)[] = [];
+
+/**
+ * Subscribe to frame completion. Returns the unsubscribe.
+ *
+ * This is the replacement for inferring readiness from a timer. A listener MUST NOT throw and MUST NOT
+ * begin a frame: it runs inside `endFrame`, after the active frame has been cleared but while the
+ * caller is still unwinding its own draw, so scheduling work from here would nest a frame inside the
+ * completion of another. Throws are caught and reported rather than propagated, because one bad
+ * subscriber must not take down the draw loop that notified it.
+ */
+export function onFrameCompleted(listener: (completion: FrameCompletion) => void): () => void {
+  listeners.push(listener);
+  return () => {
+    const at = listeners.indexOf(listener);
+    if (at >= 0) listeners.splice(at, 1);
+  };
+}
+
+/**
+ * Resolve on the next frame that settles, or `null` if `timeoutMs` elapses first.
+ *
+ * The timeout is a **reported failure, never a silent fallback** (I-31): a consumer that times out
+ * gets `null` and must decide what that means, rather than receiving a frame that was never ready and
+ * being unable to tell. That distinction is the difference between this and the settle window it
+ * replaces — the window's expiry was indistinguishable from its success.
+ */
+export function awaitFrameSettled(options?: { purpose?: FramePurpose; timeoutMs?: number }): Promise<FrameCompletion | null> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const off = onFrameCompleted((completion) => {
+      if (!completion.settled) return;
+      if (options?.purpose !== undefined && completion.frame.purpose !== options.purpose) return;
+      off();
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(completion);
+    });
+    const timeoutMs = options?.timeoutMs;
+    if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) {
+      timer = setTimeout(() => {
+        off();
+        if (kernelDiagnostics.enabled) {
+          kernelDiagnostics.record({
+            kind: "transition",
+            severity: "warn",
+            subject: { kind: "runtime" },
+            reason: "frame-await-timeout",
+            detail: { purpose: options?.purpose ?? "any", timeoutMs },
+          });
+        }
+        resolve(null);
+      }, timeoutMs);
+    }
+  });
+}
+
+/**
+ * Counters for the termination invariant (I-30): every frame that begins must end.
+ *
+ * `begun - completed` is 0 outside a frame and 1 inside one. Any other value is a leak, and the
+ * conformance suite asserts it directly — the failure it guards against is a `beginFrame` whose
+ * `endFrame` was missed on an early return, which would silently mis-attribute every later event.
+ */
+export function frameSchedulerStats(): { begun: number; completed: number; settled: number; active: boolean } {
+  return { begun, completed, settled: settledCount, active: active !== null };
+}
 
 /**
  * The frame currently being built, or `null` outside one.
@@ -95,6 +193,7 @@ export function beginFrame(purpose: FramePurpose, targetTime: number, budgetMs?:
       detail: { outerPurpose: active.purpose, innerPurpose: purpose },
     });
   }
+  begun += 1;
   const request: FrameRequest = {
     id: nextId++,
     targetTime,
@@ -115,12 +214,51 @@ export function beginFrame(purpose: FramePurpose, targetTime: number, budgetMs?:
  * rather than corrected. S2.2 turns this into the signal consumers await instead of inferring readiness
  * from a settle window.
  */
-export function endFrame(outcome: FrameOutcome): void {
+export function endFrame(outcome: FrameOutcome, settled = false): void {
   const request = active;
   active = null;
-  if (request === null || !kernelDiagnostics.enabled) return;
+  if (request === null) return;
+  completed += 1;
   const now = typeof performance !== "undefined" ? performance.now() : Date.now();
   const overranBy = request.deadlineMs === null ? 0 : Math.max(0, now - request.deadlineMs);
+  // A frame can only settle by presenting. Enforced here rather than trusted from the caller: "held but
+  // settled" is a contradiction that would let a consumer wake on a frame that never reached the
+  // screen, which is precisely the class of bug the signal exists to remove.
+  const reallySettled = settled && outcome === "presented";
+  if (reallySettled) settledCount += 1;
+
+  // Notified BEFORE the diagnostics early-return below, and for every frame including healthy ones —
+  // consumers are the point of this slice, and a signal that fired only on interesting frames would be
+  // a worse timeout than the one it replaces.
+  if (listeners.length > 0) {
+    const completion: FrameCompletion = {
+      frame: request,
+      outcome,
+      settled: reallySettled,
+      elapsedMs: now - request.requestedAt,
+      overranByMs: overranBy,
+    };
+    // Copied because a listener may unsubscribe itself (`awaitFrameSettled` always does), and mutating
+    // the array mid-iteration would skip the next subscriber.
+    for (const listener of listeners.slice()) {
+      try {
+        listener(completion);
+      } catch (error) {
+        if (kernelDiagnostics.enabled) {
+          kernelDiagnostics.record({
+            kind: "transition",
+            severity: "error",
+            subject: { kind: "frame", frameId: request.id },
+            reason: "frame-listener-threw",
+            frameId: request.id,
+            detail: { message: error instanceof Error ? error.message : String(error) },
+          });
+        }
+      }
+    }
+  }
+
+  if (!kernelDiagnostics.enabled) return;
   // Only the interesting frames are recorded individually; a healthy live frame that met its deadline
   // is the overwhelming majority and would drown the ring in noise. The ledger counts those.
   if (outcome === "presented" && overranBy === 0) return;
@@ -135,6 +273,7 @@ export function endFrame(outcome: FrameOutcome): void {
       targetTime: Number(request.targetTime.toFixed(4)),
       elapsedMs: Number((now - request.requestedAt).toFixed(2)),
       overranByMs: Number(overranBy.toFixed(2)),
+      settled: reallySettled,
     },
   });
 }
@@ -143,4 +282,15 @@ export function endFrame(outcome: FrameOutcome): void {
 export function __resetFrameScheduler(): void {
   nextId = 1;
   active = null;
+  begun = 0;
+  completed = 0;
+  settledCount = 0;
+  listeners.length = 0;
+}
+
+if (typeof globalThis !== "undefined") {
+  Object.defineProperty(globalThis, "__rfFrames", {
+    configurable: true,
+    get: () => ({ ...frameSchedulerStats(), listeners: listeners.length }),
+  });
 }

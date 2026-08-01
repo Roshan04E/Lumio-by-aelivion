@@ -9,5 +9,6 @@
  */
 export * from "./diagnostics";
 export * from "./frame-scheduler";
+export * from "./settle-window";
 export * from "./degradation-sink";
 export * from "./present-ledger";
