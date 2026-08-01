@@ -38,6 +38,7 @@ import { compileFlarexComp } from "../flarex/compile-flarex";
 import { flarexVirtualLayerId } from "../flarex/virtual-layers";
 import { FlarexSourceDrawCache } from "../flarex/source-draw-cache";
 import type { FlarexComp } from "../flarex/types";
+import type { FlarexDegradation } from "../flarex/degradation";
 import type { TimelineEffectParamValue, TimelineLayer, TransitionSpec } from "../types";
 // VALUE import (not type-only): nested-comp masks need their OWN matte-cache instance, sized to the
 // nested composition, distinct from the parent's — lazily constructed here and pooled in the caller-
@@ -198,6 +199,29 @@ export interface BuildSceneDrawsInputs {
    * renders one comp at a time, so a single id is sufficient.
    */
   flarexPreviewRootNodeId?: string | undefined;
+  /**
+   * PER-COMP preview roots (`compId → nodeId`) — the live viewer's view dots (ADR-012 §0.5, S1.2).
+   *
+   * Separate from the scalar {@link flarexPreviewRootNodeId} above, and it has to be: that one is the
+   * thumbnail path, which renders ONE comp in isolation, so a single id is sufficient there. A live
+   * frame can contain several comps, each with its own dot — passing a scalar would re-root every comp
+   * in the frame to one node, which is a worse bug than the one this slice fixes.
+   *
+   * Runtime-only, exactly like the scalar: never serialized, never on the render manifest. Export and
+   * the worker pass nothing, so they always begin at each comp's MediaOut — which is the whole point
+   * of I-26. The scalar wins when both are present (a thumbnail pass is explicitly re-rooting).
+   */
+  flarexPreviewRoots?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Flarex lowering degradation out-channel (slice S0.2) — forwarded verbatim to `compileFlarexComp`'s
+   * `onDegrade`, with the comp id attached so a caller with several comps in one frame can attribute a
+   * node without a second lookup.
+   *
+   * Same contract as {@link onLayerNotReady} beside it: **purely observability**, it never changes what
+   * `buildSceneDraws` returns, and omitting it (export, worker, fixtures) is byte-identical. See
+   * `flarex/degradation.ts` for why the three host-substitution reasons are reported separately.
+   */
+  onFlarexDegrade?: ((compId: string, degradation: FlarexDegradation) => void) | undefined;
   /**
    * Cross-frame cache for Flarex asset-source draws (perf: `resolveSourceDraw` rebuilt a full per-clip
    * draw every frame, ~54% of compile time — profiler-measured). A BARE virtual loader's draw structure
@@ -807,7 +831,11 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       materializeNodeIds: inputs.flarexMaterializeNodeIds,
       // Node previews (Slice 4): re-root this compile at an arbitrary node without disturbing the
       // comp's persisted view dot. Undefined in normal rendering.
-      previewRootNodeId: inputs.flarexPreviewRootNodeId,
+      // Thumbnail scalar wins (it is explicitly re-rooting one comp); otherwise this comp's own live
+      // view dot, if the viewer supplied one. Absent in export/worker → roots at MediaOut (I-26).
+      previewRootNodeId: inputs.flarexPreviewRootNodeId ?? inputs.flarexPreviewRoots?.[comp.id],
+      // Degradation reporting (S0.2). Observability only; absent → the compiler is unchanged.
+      onDegrade: inputs.onFlarexDegrade ? (degradation) => inputs.onFlarexDegrade!(comp.id, degradation) : undefined,
       // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
       // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its
       // media is provided via `getMediaGraded(virtualId)` exactly like a real clip; an unready/absent

@@ -1,0 +1,598 @@
+/**
+ * ADR-012 Runtime Kernel — headless conformance harness (slice S0.4).
+ *
+ *   pnpm --filter @orreris/worker kernel:conform
+ *
+ * ## What this is
+ *
+ * The permanent home for ADR-012 Part 12 invariant assertions. It runs the REAL shared code
+ * (`compileFlarexComp`, `healFlarexRegistry`, the kernel diagnostics sink) with synthetic time and
+ * synthetic media, outside a browser, with no renderer attached. That is invariant I-37 — the kernel
+ * must be drivable headlessly — and it is what turns the 2026-08-01 audit's prose findings into
+ * something CI can hold onto.
+ *
+ * Repo convention: no test framework. Assert, print, exit non-zero on failure.
+ *
+ * ## The two tiers, and why `pending` asserts the BUG
+ *
+ * - **enforced** — an invariant that is satisfied today. It must pass. It may never be disabled,
+ *   skipped, or weakened (governance §7 C2). The set of enforced assertions only ever grows.
+ *
+ * - **pending(SLICE)** — a known violation the migration has not reached yet. The assertion is
+ *   written the other way round: it asserts the DEFECT still reproduces. That is deliberate. It
+ *   means the day a slice fixes the defect, the pending check fails loudly and the engineer must
+ *   promote it to `enforced` in the same PR — so a fix can never land without the ratchet noticing.
+ *   A pending check that fails is therefore *good news that requires work*, not a broken build; it
+ *   is reported separately and does NOT fail the run.
+ *
+ * ## Scope today (Phase 0)
+ *
+ * Three audit findings reproduced headlessly, each pinned to the slice that retires it:
+ *   F1  graph cardinality is not enforced by the model                        → S1.1
+ *   F2  the persisted view dot changes compiled output (I-26)                 → S1.2
+ *   F3  scarcity is resolved by substituting the host clip, unobservably      → S0.2 / S4.5
+ *
+ * Plus the enforced properties of the diagnostics sink itself (S0.1).
+ */
+
+import {
+  __resetFrameScheduler,
+  activeFrame,
+  beginFrame,
+  compileFlarexComp,
+  createFlarexComp,
+  createFlarexNode,
+  healFlarexRegistry,
+  isValidFlarexEdge,
+  kernelDiagnostics,
+  endFrame,
+  noteHeld,
+  notePresent,
+  parseFlarexSourceSubject,
+  presentLedger,
+  recordFlarexDegradation,
+  stampFlarexComp,
+  subjectKey,
+  summarizeFlarexDegradations,
+  type FlarexComp,
+  type FlarexDegradation,
+  type FlarexLowerCtx,
+  type ProjectGraph,
+  type SceneLayerDraw,
+} from "@orreris/shared";
+
+// ---------------------------------------------------------------------------------------------
+// Assertion tiers
+// ---------------------------------------------------------------------------------------------
+
+let enforcedFailures = 0;
+let pendingResolved = 0;
+const pendingNotes: string[] = [];
+
+/** An invariant that holds today. Must pass; failing it fails the run. */
+function enforced(invariant: string, name: string, condition: boolean): void {
+  if (condition) {
+    console.log(`  ok    [${invariant}] ${name}`);
+  } else {
+    enforcedFailures += 1;
+    console.error(`  FAIL  [${invariant}] ${name}`);
+  }
+}
+
+/**
+ * A known violation. `stillBroken` must be TRUE while the defect exists. When it flips false, the
+ * slice that fixed it must promote this to {@link enforced} — see the module header.
+ */
+function pending(slice: string, name: string, stillBroken: boolean): void {
+  if (stillBroken) {
+    console.log(`  pend  [${slice}] ${name} — reproduces, as expected`);
+  } else {
+    pendingResolved += 1;
+    pendingNotes.push(`[${slice}] ${name}`);
+    console.log(`  DONE  [${slice}] ${name} — NO LONGER REPRODUCES: promote to enforced()`);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fixtures — synthetic media, synthetic time, no renderer
+// ---------------------------------------------------------------------------------------------
+
+/** A stand-in for a decoded frame. Nothing here samples it; only identity and size matter. */
+function syntheticDraw(id: string): SceneLayerDraw {
+  return {
+    debugLayerId: id,
+    source: { texture: {} as WebGLTexture, width: 1920, height: 1080 },
+    sourceWidth: 1920,
+    sourceHeight: 1080,
+    fit: "cover",
+    transform: { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
+    blendMode: "normal",
+    sourceVersion: 7,
+  };
+}
+
+function lowerCtx(overrides: Partial<FlarexLowerCtx> = {}): FlarexLowerCtx {
+  return {
+    compWidth: 1920,
+    compHeight: 1080,
+    renderScale: 1,
+    timeSeconds: 1,
+    frameTimeSeconds: 1,
+    hostSourceDraw: syntheticDraw("host"),
+    matteCache: null,
+    ...overrides,
+  };
+}
+
+function graphFixture(comp: FlarexComp): ProjectGraph {
+  return { projectId: "p1", effects: [], editableFields: {}, version: 1, flarexComps: { [comp.id]: comp } };
+}
+
+/** `mediaIn → blur → mediaOut`. The blur makes "did the dot re-root?" observable in the output. */
+function blurComp(id: string): FlarexComp {
+  const comp = createFlarexComp(id, id);
+  const blur = createFlarexNode("blur", `${id}_blur`);
+  comp.nodes[blur.id] = blur;
+  comp.edges = [
+    { id: `${id}_e1`, from: { nodeId: `${id}_in`, socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: `${id}_e2`, from: { nodeId: blur.id, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } },
+  ];
+  return comp;
+}
+
+// ---------------------------------------------------------------------------------------------
+// S0.1 — Diagnostics sink (enforced)
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS0.1 — Diagnostics sink");
+{
+  kernelDiagnostics.reset();
+  const wasEnabled = kernelDiagnostics.enabled;
+
+  // One identity namespace: the join the audit had to do by hand must now be mechanical.
+  enforced(
+    "I-29",
+    "a Flarex virtual source id folds onto its node subject",
+    (() => {
+      const parsed = parseFlarexSourceSubject("flarexsrc:comp7:node3");
+      return (
+        parsed !== null &&
+        subjectKey({ kind: "node", compId: parsed.compId, nodeId: parsed.nodeId }) === "node:comp7/node3"
+      );
+    })(),
+  );
+  enforced("I-29", "an ordinary layer source id is not mistaken for a Flarex one", parseFlarexSourceSubject("layer_42") === null);
+  enforced(
+    "I-29",
+    "subject keys are stable and distinct across kinds",
+    subjectKey({ kind: "comp", compId: "c" }) !== subjectKey({ kind: "node", compId: "c", nodeId: "c" }),
+  );
+
+  // Recording, aggregation, and the query surface.
+  kernelDiagnostics.enabled = true;
+  kernelDiagnostics.reset();
+  for (let i = 0; i < 3; i++) {
+    kernelDiagnostics.record({
+      kind: "degradation",
+      severity: "warn",
+      subject: { kind: "node", compId: "c1", nodeId: "n1" },
+      reason: "source-pending",
+    });
+  }
+  kernelDiagnostics.record({
+    kind: "denial",
+    severity: "warn",
+    subject: { kind: "source", sourceId: "flarexsrc:c1:n2" },
+    reason: "no-session-available",
+  });
+
+  enforced("I-29", "events are recorded in order with monotonic seq", (() => {
+    const events = kernelDiagnostics.events();
+    return events.length === 4 && events.every((e, i) => e.seq === i);
+  })());
+  enforced("I-29", "events are filterable by kind", kernelDiagnostics.events({ kind: "denial" }).length === 1);
+  enforced("I-29", "repeated causes aggregate rather than multiply", (() => {
+    const row = kernelDiagnostics.summary().find((r) => r.reason === "source-pending");
+    return row?.count === 3 && row.subject === "node:c1/n1";
+  })());
+  enforced("I-29", "degradation and denial are DISTINCT kinds", (() => {
+    const kinds = new Set(kernelDiagnostics.summary().map((r) => r.kind));
+    return kinds.has("degradation") && kinds.has("denial");
+  })());
+
+  // The no-perturbation rule (governance G14 / programme risk R1). The disabled path must not
+  // record; call sites additionally guard on `.enabled` so the argument is never even built.
+  kernelDiagnostics.reset();
+  kernelDiagnostics.enabled = false;
+  kernelDiagnostics.record({ kind: "degradation", severity: "info", subject: { kind: "runtime" }, reason: "ignored" });
+  enforced("R1", "a disabled sink records nothing", kernelDiagnostics.events().length === 0);
+  kernelDiagnostics.enabled = wasEnabled;
+}
+
+// ---------------------------------------------------------------------------------------------
+// F1 — graph cardinality is not enforced by the model (retired by S1.1)
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nF1 — graph cardinality (I-20)");
+{
+  // Two edges into the SAME input socket. Every endpoint is real and every socket type matches, so
+  // `isValidFlarexEdge` — the healer's only test — accepts both. The one-wire-per-input rule lives
+  // in a UI drag handler, which paste, import, AI intent and load all bypass.
+  const comp = blurComp("card");
+  const second = createFlarexNode("mediaIn", "card_in2");
+  comp.nodes[second.id] = second;
+  const duplicate = { id: "card_dup", from: { nodeId: second.id, socket: "out" }, to: { nodeId: "card_blur", socket: "in" } };
+  comp.edges.push(duplicate);
+
+  enforced("I-20", "both duplicate edges are individually 'valid' by endpoint+type", isValidFlarexEdge(comp.nodes, duplicate));
+
+  // PROMOTED from pending to enforced by S1.1 (2026-08-01).
+  const healed = healFlarexRegistry(graphFixture(comp));
+  const healedEdges = healed.flarexComps?.["card"]?.edges ?? [];
+  const intoBlurIn = healedEdges.filter((e) => e.to.nodeId === "card_blur" && e.to.socket === "in").length;
+  enforced("I-20", "the healer enforces one wire per input socket", intoBlurIn === 1);
+  enforced("I-20", "it keeps the LAST wire, matching the compiler's edgeInto", (() => {
+    const kept = healedEdges.find((e) => e.to.nodeId === "card_blur" && e.to.socket === "in");
+    return kept?.id === "card_dup";
+  })());
+
+  // The write seam, not just the load path — paste, AI intent and node insertion all funnel here.
+  const stamped = stampFlarexComp(graphFixture(blurComp("seam")), (() => {
+    const c = blurComp("seam");
+    c.edges.push({ id: "seam_dup", from: { nodeId: "seam_in", socket: "out" }, to: { nodeId: "seam_blur", socket: "in" } });
+    return c;
+  })());
+  enforced("I-20", "the write seam enforces it too", (stamped.flarexComps?.["seam"]?.edges ?? []).filter((e) => e.to.nodeId === "seam_blur" && e.to.socket === "in").length === 1);
+
+  // The hazard the first implementation of this slice actually hit: "last wins" alone let a DANGLING
+  // edge displace a real wire, silently disconnecting a node while the editor still looked right.
+  enforced("I-20", "a dangling edge never outranks a connected one", (() => {
+    const c = blurComp("dang");
+    c.edges.push({ id: "dang_ghost", from: { nodeId: "ghost", socket: "out" }, to: { nodeId: "dang_blur", socket: "in" } });
+    const out = stampFlarexComp(graphFixture(c), c).flarexComps?.["dang"]?.edges ?? [];
+    const kept = out.filter((e) => e.to.nodeId === "dang_blur" && e.to.socket === "in");
+    return kept.length === 1 && kept[0]!.from.nodeId === "dang_in";
+  })());
+
+  // Multi-input nodes are NOT the target: merge has in/bg, matteControl has a/b. The rule is per
+  // SOCKET. A per-node rule would silently break every composite in the product.
+  enforced("I-20", "distinct sockets on one node are untouched", (() => {
+    const c = createFlarexComp("multi", "multi");
+    const merge = createFlarexNode("merge", "multi_merge");
+    const bg = createFlarexNode("mediaIn", "multi_bg");
+    c.nodes[merge.id] = merge;
+    c.nodes[bg.id] = bg;
+    c.edges = [
+      { id: "m1", from: { nodeId: "multi_in", socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
+      { id: "m2", from: { nodeId: bg.id, socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
+      { id: "m3", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "multi_out", socket: "in" } },
+    ];
+    return (healFlarexRegistry(graphFixture(c)).flarexComps?.["multi"]?.edges ?? []).length === 3;
+  })());
+
+  // The point of the slice: three consumers previously disagreed about what the graph WAS. A healed
+  // graph must be one-per-socket, which is what makes edgeInto, fanout and the retime walk agree.
+  enforced("I-20", "a healed graph has no duplicate input sockets at all", (() => {
+    const seen = new Set<string>();
+    return healedEdges.every((e) => {
+      const key = `${e.to.nodeId}:${e.to.socket}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  })());
+}
+
+// ---------------------------------------------------------------------------------------------
+// F2 — the persisted view dot changes compiled output (retired by S1.2)
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nF2 — view dot reaches the renderers (I-26)");
+{
+  // `previewNodeId` is persisted EDITOR state. Compiling the same graph with and without it set must
+  // produce the same pixels once ADR-012 §0.5 lands: preview routing is runtime state supplied per
+  // frame, render routing is a property of the graph. Today the compiler falls back to the persisted
+  // field, so a saved view dot re-roots export as well as preview.
+  const withoutDot = compileFlarexComp(blurComp("dot"), lowerCtx());
+
+  const dotted = blurComp("dot");
+  dotted.previewNodeId = "dot_in"; // inspect the MediaIn — upstream of the blur
+  const withDot = compileFlarexComp(dotted, lowerCtx());
+
+  enforced("I-26", "the un-dotted graph compiles to something", withoutDot !== null);
+
+  // PROMOTED from pending to enforced by S1.2 (2026-08-01). A viewing affordance may not change
+  // delivered pixels; export begins at the graph's output regardless of what is being inspected.
+  enforced("I-26", "a persisted view dot does NOT change compiled output",
+    JSON.stringify(withDot) === JSON.stringify(withoutDot));
+
+  // The dot still has to WORK — as runtime state supplied by the viewer, not read from the document.
+  const viewed = compileFlarexComp(blurComp("dot2"), { ...lowerCtx(), previewRootNodeId: "dot2_in" });
+  enforced("I-26", "a RUNTIME preview root still re-roots the compile",
+    JSON.stringify(viewed) !== JSON.stringify(compileFlarexComp(blurComp("dot2"), lowerCtx())));
+
+  // The scalar→map distinction. A live frame can hold several comps, each with its own dot; a scalar
+  // runtime root would re-root every comp in the frame to one node — worse than the bug being fixed.
+  enforced("I-26", "preview roots are per comp, not global", (() => {
+    const a = blurComp("mA");
+    const b = blurComp("mB");
+    a.previewNodeId = "mA_in";
+    b.previewNodeId = "mB_in";
+    const roots: Record<string, string> = { mA: "mA_in" }; // only A is being inspected
+    const rootedA = compileFlarexComp(a, { ...lowerCtx(), previewRootNodeId: roots[a.id] });
+    const rootedB = compileFlarexComp(b, { ...lowerCtx(), previewRootNodeId: roots[b.id] });
+    const plain = compileFlarexComp(blurComp("mB"), lowerCtx());
+    // A is re-rooted (no blur wrap); B is untouched and still lowers its full chain.
+    return JSON.stringify(rootedA) !== JSON.stringify(rootedB) && JSON.stringify(rootedB) === JSON.stringify(plain);
+  })());
+}
+
+// ---------------------------------------------------------------------------------------------
+// F3 — scarcity resolves to substituted content, unobservably (retired by S0.2 / S4.5)
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nF3 — host-clip substitution (I-27, I-34)");
+{
+  // An asset-backed MediaIn whose loader owns the node but has no picture yet. ADR-012 §0.3 says the
+  // answer must be a DECLARED absence. Today two of `resolveSourceDraw`'s five outcomes silently
+  // substitute the host clip — a different shot's pixels, presented as if they were this node's.
+  const comp = createFlarexComp("sub", "sub");
+  const asset = createFlarexNode("mediaIn", "sub_asset");
+  asset.params = { ...asset.params, sourceAssetId: "asset-1" };
+  comp.nodes[asset.id] = asset;
+  comp.edges = [{ id: "sub_e", from: { nodeId: asset.id, socket: "out" }, to: { nodeId: "sub_out", socket: "in" } }];
+
+  const host = syntheticDraw("host");
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  kernelDiagnostics.reset();
+
+  const out = compileFlarexComp(
+    comp,
+    lowerCtx({ hostSourceDraw: host, resolveSourceDraw: () => null }),
+  );
+
+  const substituted = out !== null && (out as SceneLayerDraw).debugLayerId === host.debugLayerId;
+  pending("S4.5", "an unresolved asset MediaIn yields the HOST clip's pixels", substituted);
+
+  // PROMOTED from pending to enforced by S0.2 (2026-08-01). The substitution still happens — that is
+  // S4.5's job — but it is no longer silent, which is the precondition for deciding whether to delete
+  // it on evidence rather than on principle.
+  const degradations: FlarexDegradation[] = [];
+  const outReported = compileFlarexComp(
+    comp,
+    lowerCtx({ hostSourceDraw: host, resolveSourceDraw: () => null, onDegrade: (d) => degradations.push(d) }),
+  );
+
+  enforced("I-34", "the host substitution is reported", degradations.length === 1);
+  enforced("I-34", "it is attributed to the substituting node", degradations[0]?.nodeId === "sub_asset");
+  enforced("I-34", "it is flagged as a SUBSTITUTION, not a plain absence", degradations[0]?.substituted === true);
+  enforced("I-34", "its cause is distinguished (no loader, vs pending, vs no resolver)", degradations[0]?.reason === "host-substituted:no-loader");
+
+  // The out-channel contract, and the whole reason S0.2 could land before S4.5: attaching it must not
+  // change a single byte of the lowering result. This is the headless half of the pixel gate.
+  enforced("S0.2", "attaching the out-channel is byte-identical", JSON.stringify(outReported) === JSON.stringify(out));
+
+  // The bridge into the sink: one identity namespace, and the count that S4.5 will be judged against.
+  kernelDiagnostics.reset();
+  for (const d of degradations) recordFlarexDegradation("sub", d);
+  const summary = summarizeFlarexDegradations();
+  enforced("I-29", "the substitution census counts it", summary.substitutedTotal === 1);
+  enforced("I-29", "it joins the node identity namespace", summary.substitutions[0]?.subject === "node:sub/sub_asset");
+
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S0.2 — every degradation is named, and absence is distinguished from substitution
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS0.2 — degradation vocabulary (I-34)");
+{
+  const assetComp = (id: string, retimed: boolean): FlarexComp => {
+    const comp = createFlarexComp(id, id);
+    const asset = createFlarexNode("mediaIn", `${id}_asset`);
+    asset.params = { ...asset.params, sourceAssetId: "asset-1" };
+    comp.nodes[asset.id] = asset;
+    if (!retimed) {
+      comp.edges = [{ id: `${id}_e`, from: { nodeId: asset.id, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } }];
+      return comp;
+    }
+    // A TimeSpeed above the MediaIn moves the evaluation cursor off the frame time. That difference is
+    // the whole distinction between an honest same-moment degrade and a different-moment substitution.
+    const speed = createFlarexNode("timeSpeed", `${id}_speed`);
+    speed.params = { ...speed.params, speed: 2 };
+    comp.nodes[speed.id] = speed;
+    comp.edges = [
+      { id: `${id}_e1`, from: { nodeId: asset.id, socket: "out" }, to: { nodeId: speed.id, socket: "in" } },
+      { id: `${id}_e2`, from: { nodeId: speed.id, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } },
+    ];
+    return comp;
+  };
+
+  const reasonsFor = (comp: FlarexComp, resolve: FlarexLowerCtx["resolveSourceDraw"]): string[] => {
+    const seen: FlarexDegradation[] = [];
+    compileFlarexComp(comp, lowerCtx({ resolveSourceDraw: resolve, onDegrade: (d) => seen.push(d) }));
+    return seen.map((d) => d.reason);
+  };
+
+  enforced("I-34", "a source past its own end declares absence, never substitution", (() => {
+    const seen: FlarexDegradation[] = [];
+    compileFlarexComp(assetComp("ended", false), lowerCtx({ resolveSourceDraw: () => "ended", onDegrade: (d) => seen.push(d) }));
+    return seen.length === 1 && seen[0]!.reason === "source-ended" && seen[0]!.substituted === false;
+  })());
+
+  enforced("I-34", "no resolver at all is distinguished from a resolver that returned null",
+    reasonsFor(assetComp("nores", false), undefined).includes("host-substituted:no-resolver"));
+
+  enforced("I-34", "an UN-retimed pending substitutes the host, and says so",
+    reasonsFor(assetComp("pend", false), () => "pending").includes("host-substituted:pending"));
+
+  // The 2026-07-29 fix, now observable: under a retime the host draw is a DIFFERENT MOMENT, so the
+  // node produces nothing instead. Same input, different answer, and the difference is now recorded.
+  enforced("I-34", "a RETIMED pending produces nothing instead of another moment", (() => {
+    const seen: FlarexDegradation[] = [];
+    compileFlarexComp(assetComp("retimed", true), lowerCtx({ resolveSourceDraw: () => "pending", onDegrade: (d) => seen.push(d) }));
+    const retimed = seen.find((d) => d.reason === "source-pending-retimed");
+    return retimed !== undefined && retimed.substituted === false && retimed.atTimeSeconds !== retimed.frameTimeSeconds;
+  })());
+
+  enforced("I-34", "an unimplemented node type is named, not silently null", (() => {
+    const comp = createFlarexComp("ai", "ai");
+    const ai = createFlarexNode("aiMatte", "ai_node");
+    comp.nodes[ai.id] = ai;
+    comp.edges = [{ id: "ai_e", from: { nodeId: ai.id, socket: "out" }, to: { nodeId: "ai_out", socket: "in" } }];
+    const seen: FlarexDegradation[] = [];
+    compileFlarexComp(comp, lowerCtx({ onDegrade: (d) => seen.push(d) }));
+    return seen.some((d) => d.reason === "node-unimplemented" && d.nodeType === "aiMatte");
+  })());
+
+  // Asserted with no exemptions: a channel that reports on a healthy graph is noise, and noise is how
+  // an observability channel stops being read.
+  enforced("S0.2", "no degradation is reported for a healthy graph",
+    reasonsFor(blurComp("healthy"), () => syntheticDraw("src")).length === 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// S0.3 — presented-frame ledger (I-2 observable)
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS0.3 — presented-frame ledger (I-2)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  presentLedger.reset();
+
+  const sample = (targetTime: number, staleIds: string[], playing = true) => ({
+    targetTime,
+    participants: 3,
+    staleIds,
+    notReadyIds: [] as string[],
+    maxStalenessSeconds: staleIds.length > 0 ? 0.12 : 0,
+    playing,
+  });
+
+  notePresent(sample(0.0, []));
+  notePresent(sample(0.1, []));
+  notePresent(sample(0.2, ["src-a"])); // presented despite disagreement
+  noteHeld("coherence", sample(0.3, ["src-a"]));
+  noteHeld("not-ready", sample(0.4, []));
+
+  const s = presentLedger.summary();
+  enforced("I-2", "presents and holds are counted apart", s.presented === 3 && s.total === 5);
+  enforced("I-1", "a present with a stale source is classified incoherent", s.incoherent === 1 && s.coherent === 2);
+  enforced("I-1", "the incoherence rate is over PRESENTED frames, not all composites", Math.abs(s.incoherenceRate - 1 / 3) < 1e-9);
+  enforced("I-1", "the two hold gates are distinguished", s["held-coherence"] === 1 && s["held-not-ready"] === 1);
+  enforced("I-1", "the worst coherence error on a presented frame is retained", Math.abs(s.worstPresentedStalenessSeconds - 0.12) < 1e-9);
+
+  // The classification is the ledger's, not the caller's — a caller cannot record a frame as coherent
+  // while handing over a non-empty stale set, because `notePresent` derives the outcome itself.
+  enforced("I-1", "coherence is derived, never asserted by the caller",
+    presentLedger.rows().filter((r) => r.outcome === "coherent" && r.stale > 0).length === 0);
+
+  // I-2: a viewer that cannot keep up drops presents; it never reorders them.
+  presentLedger.reset();
+  notePresent(sample(1.0, []));
+  notePresent(sample(1.5, []));
+  enforced("I-2", "forward presents are monotonic", presentLedger.summary().nonMonotonicPresents === 0);
+  notePresent(sample(1.2, [])); // backward while playing
+  enforced("I-2", "a backward present while playing is detected", presentLedger.summary().nonMonotonicPresents === 1);
+
+  // Scrubbing moves the playhead backward legitimately — only PLAYBACK is required to be monotonic.
+  presentLedger.reset();
+  notePresent(sample(2.0, [], false));
+  notePresent(sample(1.0, [], false));
+  enforced("I-2", "a paused seek backward is not a monotonicity violation", presentLedger.summary().nonMonotonicPresents === 0);
+
+  presentLedger.reset();
+  kernelDiagnostics.enabled = false;
+  notePresent(sample(9.0, ["x"]));
+  enforced("R1", "a disabled sink records no presents", presentLedger.summary().total === 0);
+  kernelDiagnostics.enabled = wasEnabled;
+  presentLedger.reset();
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S2.1 — frame identity, purpose and lifecycle
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS2.1 — frame scheduler (I-30 partial)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  __resetFrameScheduler();
+  kernelDiagnostics.reset();
+
+  enforced("I-30", "there is no active frame outside one", activeFrame() === null);
+
+  const a = beginFrame("live", 1.5);
+  enforced("I-30", "a frame carries its target time and purpose", a.targetTime === 1.5 && a.purpose === "live");
+  enforced("I-30", "the active frame is readable while building", activeFrame()?.id === a.id);
+  enforced("I-30", "a live frame carries a deadline", a.deadlineMs !== null);
+  endFrame("presented");
+  enforced("I-30", "ending a frame clears it", activeFrame() === null);
+
+  const b = beginFrame("live", 1.6);
+  enforced("I-30", "frame ids are monotonic and never reused", b.id > a.id);
+  endFrame("presented");
+
+  // ADR-012 §6.8: an export frame has nothing to gain from being rushed and everything to lose from
+  // being degraded, so it declares no deadline at all.
+  const exp = beginFrame("export", 0);
+  enforced("I-30", "an export frame declares NO deadline", exp.deadlineMs === null);
+  endFrame("presented");
+
+  // Overlap is a purpose-scope violation waiting to happen (I-32, S2.3). Until it is structurally
+  // impossible it must at least be visible, never silently tolerated.
+  kernelDiagnostics.reset();
+  beginFrame("live", 2);
+  beginFrame("thumbnail", 2);
+  enforced("I-32", "a nested frame is reported as an overlap",
+    kernelDiagnostics.summary().some((r) => r.reason === "frame-overlap"));
+  endFrame("abandoned");
+
+  // Correlation: a degradation recorded inside a frame carries that frame's id, without the call site
+  // having to pass it. This is what makes "which frame did that substitution happen in?" answerable.
+  kernelDiagnostics.reset();
+  const framed = beginFrame("live", 3);
+  recordFlarexDegradation("c1", {
+    nodeId: "n1", nodeType: "mediaIn", reason: "host-substituted:no-loader",
+    substituted: true, atTimeSeconds: 3, frameTimeSeconds: 3,
+  });
+  enforced("I-29", "a degradation inherits the active frame id",
+    kernelDiagnostics.events({ kind: "degradation" })[0]?.frameId === framed.id);
+  endFrame("presented");
+
+  // Healthy frames must not flood the ring — the ledger counts those. Only late/held/failed frames
+  // are recorded individually, or the interesting events get evicted by the boring ones.
+  kernelDiagnostics.reset();
+  for (let i = 0; i < 50; i++) { beginFrame("live", i); endFrame("presented"); }
+  enforced("R1", "on-time presented frames are not recorded individually",
+    kernelDiagnostics.events({ kind: "transition" }).length === 0);
+  beginFrame("live", 99);
+  endFrame("held");
+  enforced("I-30", "a held frame IS recorded",
+    kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "frame-held"));
+
+  __resetFrameScheduler();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Result
+// ---------------------------------------------------------------------------------------------
+
+console.log("");
+if (pendingResolved > 0) {
+  console.log(`${pendingResolved} pending check(s) no longer reproduce — promote to enforced():`);
+  for (const note of pendingNotes) console.log(`  - ${note}`);
+  console.log("");
+}
+if (enforcedFailures > 0) {
+  console.error(`kernel:conform FAILED — ${enforcedFailures} enforced invariant(s) broken`);
+  process.exit(1);
+}
+console.log("kernel:conform OK — all enforced invariants hold");

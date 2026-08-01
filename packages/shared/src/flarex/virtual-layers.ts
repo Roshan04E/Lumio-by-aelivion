@@ -266,6 +266,13 @@ export function collectFlarexVirtualLayers(
   layers: readonly TimelineLayer[],
   flarexComps: Record<string, FlarexComp> | undefined,
   lookupAsset: (assetId: string) => FlarexSourceAssetInfo | null,
+  /**
+   * Live per-comp preview roots (`compId → nodeId`), ADR-012 §0.5 / slice S1.2. A node being INSPECTED
+   * still needs its upstream loaders retimed, or the viewer shows the right node at the wrong moment —
+   * but that root is runtime state supplied by the viewer, never the persisted `comp.previewNodeId`.
+   * Omitted by export and the worker, which retime from MediaOut alone.
+   */
+  previewRoots?: Readonly<Record<string, string>> | undefined,
 ): TimelineLayer[] {
   if (!flarexComps) return [];
   const out: TimelineLayer[] = [];
@@ -275,7 +282,7 @@ export function collectFlarexVirtualLayers(
     if (!comp) continue;
     // TimeSpeed's media half (ADR-011): the retime each MediaIn sits under, resolved once per comp
     // from static params. Empty for every comp without a TimeSpeed, which is the shipped behaviour.
-    const retimes = resolveFlarexMediaInRetimes(comp);
+    const retimes = resolveFlarexMediaInRetimes(comp, previewRoots?.[comp.id]);
     for (const node of Object.values(comp.nodes)) {
       // Generator nodes (Text / Background) are backed by a RASTERIZED virtual layer — no asset to
       // resolve, so they short-circuit the media path below entirely.

@@ -35,8 +35,14 @@ import {
   type FlarexCompProxyFrame,
   frameProfiler,
   FlarexSourceDrawCache,
+  beginFrame,
   colorPipelineCacheKey,
+  endFrame,
+  noteHeld,
+  notePresent,
+  recordFlarexDegradation,
   type ColorPipeline,
+  type FrameOutcome,
   type FlarexComp,
   type NestedGroupSpec,
   type SceneFrameSpec,
@@ -462,6 +468,10 @@ export interface ScenePreviewCanvasProps {
   /** Flarex node comps (`ProjectGraph.flarexComps`, FLAREX.md) — buildSceneDraws lowers `flarexCompId`
    *  clips through the shared compiler. Undefined = comp'd clips render plain. */
   flarexComps?: Record<string, FlarexComp> | undefined;
+  /** Live per-comp view dots (`compId → nodeId`) as RUNTIME input — ADR-012 §0.5, slice S1.2. The
+   *  compiler no longer reads the persisted `comp.previewNodeId`, so this is the only channel by which
+   *  a view dot reaches the viewer. Export and the worker pass nothing and root at MediaOut (I-26). */
+  flarexPreviewRoots?: Readonly<Record<string, string>> | undefined;
   /** Flarex asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic
    *  off-timeline media layers whose graded canvases the caller ALSO publishes into `gradedRef`
    *  (by virtual id), consulted only by the Flarex compiler's `resolveSourceDraw`. Undefined = no
@@ -500,6 +510,7 @@ export function ScenePreviewCanvas({
   mediaSourceAlias,
   nestedGroups,
   flarexComps,
+  flarexPreviewRoots,
   flarexVirtualLayers,
   flarexCompProxiesRef,
   captureRef,
@@ -707,8 +718,8 @@ export function ScenePreviewCanvas({
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
-  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexVirtualLayers });
-  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexVirtualLayers };
+  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexVirtualLayers });
+  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexVirtualLayers };
   // Event-driven redraw: composite while playing, or for a settle window after any input change /
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
@@ -719,7 +730,12 @@ export function ScenePreviewCanvas({
   // Hand `requestDraw` to the caller (imperative, no re-render) so a media re-grade can re-arm a
   // recomposite — `requestDraw` only touches a ref, so assigning it every render is cheap and safe.
   if (redrawRef) redrawRef.current = requestDraw;
-  useEffect(requestDraw, [layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, nestedGroups]);
+  // `flarexPreviewRoots` is here because after S1.2 it is the ONLY channel by which a view dot reaches
+  // the compiler. Before, toggling a dot redrew incidentally — it bumped comp.version, which produced a
+  // new graph and thus a new `layers` array identity. Relying on that is exactly the coupling the
+  // kernel migration is unpicking, and an explicit dependency costs nothing: the memo behind it is
+  // keyed on `graph.flarexComps`, so its identity is stable while the dots are.
+  useEffect(requestDraw, [layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, nestedGroups, flarexPreviewRoots]);
 
   useEffect(() => {
     disposedRef.current = false;
@@ -874,11 +890,15 @@ export function ScenePreviewCanvas({
   // The latest draw closure, kept in a ref so the persistent rAF loop always runs current logic
   // without re-subscribing. Reads live values from `inputsRef` / `gradedRef` (both stable refs).
   const drawRef = useRef<() => void>(() => {});
+  // Outcome of the frame currently being built (S2.1) — set at each exit point below, read by the
+  // `finally` in `drawRef.current`. A ref rather than a return value because the exit points are
+  // spread across early returns that cannot all be funnelled through one.
+  const outcomeRef = useRef<FrameOutcome>("abandoned");
   const drawFrameImpl = () => {
     const drawStart = performance.now();
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
-    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexVirtualLayers: fxVirtual } = inputsRef.current;
+    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexPreviewRoots: fxRoots, flarexVirtualLayers: fxVirtual } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
@@ -1130,6 +1150,7 @@ export function ScenePreviewCanvas({
       nestedGroups: nestGroups,
       nestMatteCaches: nestMatteCachesRef.current,
       flarexComps: fxComps,
+      flarexPreviewRoots: fxRoots,
       flarexVirtualLayers: fxVirtual,
       // Comp proxies (plans/flarex-comp-proxy.md, S2) — read LIVE off the ref at draw time, exactly like
       // `gradedRef`: the frame for each proxied comp is refreshed asynchronously by its decoder, and a
@@ -1137,6 +1158,15 @@ export function ScenePreviewCanvas({
       flarexCompProxies: flarexCompProxiesRef?.current,
       flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
       onLayerNotReady: (id) => notReadyIds.push(id),
+      // Flarex lowering degradations → the kernel diagnostics sink (ADR-012 slice S0.2). Purely an
+      // out-channel, exactly like `onLayerNotReady` above it: this cannot change what buildSceneDraws
+      // returns, and the pixel gate asserts it (all 17 Flarex fixtures at 0.000% with it attached).
+      //
+      // This is the call site that makes the numbers REAL. The headless harness proves the channel is
+      // correct; only the live viewer can answer how often a node actually shows another shot's pixels,
+      // on which nodes, in which projects — the measurement ADR-012 §0.3 / I-27 needs before slice S4.5
+      // deletes the host-clip fallback. Read it from the console as `__rfFlarexDegradation`.
+      onFlarexDegrade: recordFlarexDegradation,
       }));
     } catch (error) {
       fail("build draw list", error);
@@ -1236,6 +1266,17 @@ export function ScenePreviewCanvas({
         // WRONG one, and they call for opposite fixes.
         staleIds.length > 0 ? "coherence" : "not-ready"
       );
+      // Presented-frame ledger (ADR-012 slice S0.3). A withheld composite is recorded too: the hold
+      // RATE is half the picture, because a barrier that reaches coherence by never presenting has not
+      // solved anything. Same classification the gate above just made, so the two cannot disagree.
+      noteHeld(staleIds.length > 0 ? "coherence" : "not-ready", {
+        targetTime: t,
+        participants: liveMediaSourceIds.size,
+        staleIds,
+        notReadyIds,
+        maxStalenessSeconds,
+        playing,
+      });
       // Keep the settle window open for the duration of a COHERENCE hold. Paused there is no rAF
       // pump, so the loop only composites while `activeUntilRef` is in the future — and re-arming is
       // normally the arriving frame's job (`onFrame` → `requestDraw`). A source that stops delivering
@@ -1246,6 +1287,7 @@ export function ScenePreviewCanvas({
       // Not busy work: each composite during a hold IS the convergence re-check (it re-reads every
       // source's snapshot), and it is bounded by STALE_HOLD_MAX_MS, after which we present regardless.
       if (!playing && staleIds.length > 0) requestDraw();
+      outcomeRef.current = "held";
       return;
     }
     noteCoherence(
@@ -1289,7 +1331,24 @@ export function ScenePreviewCanvas({
       if (playing) {
         frameRendered?.(t);
       }
+      // Recorded AFTER the composite succeeds, so the ledger counts frames that reached the screen
+      // rather than frames we intended to show — a throw here is a failure, not a present.
+      //
+      // `staleIds` non-empty at this point means the frame was presented DESPITE disagreement: while
+      // playing the barrier is off by design (`tolerateLag`), and while paused a hold expired through
+      // one of its two bounded hatches. Both are honest under today's architecture; the ledger makes
+      // them countable, and that count is the baseline slice S4.6 has to beat.
+      outcomeRef.current = "presented";
+      notePresent({
+        targetTime: t,
+        participants: liveMediaSourceIds.size,
+        staleIds,
+        notReadyIds,
+        maxStalenessSeconds,
+        playing,
+      });
     } catch (error) {
+      outcomeRef.current = "failed";
       fail("render", error);
     }
     // Whole-frame envelope. If this reports ~7500ms while grade+composite are small, the time is in
@@ -1303,9 +1362,22 @@ export function ScenePreviewCanvas({
   // reset counters, open/close the GPU timer query, time total CPU, and print the report. When disabled
   // every call short-circuits and this is byte-for-byte the same as calling `drawFrameImpl` directly.
   drawRef.current = () => {
+    // FRAME IDENTITY (ADR-012 3.3, slice S2.1). Wrapping here rather than inside `drawFrameImpl` is
+    // deliberate: that function has a dozen early returns — context lost, both hold gates, the render
+    // catch — and a `finally` around the CALL is the only placement that cannot miss one. Missing an
+    // `endFrame` would leave a frame permanently "active" and mis-attribute every later event to it.
+    //
+    // `outcomeRef` is set at the exit points inside; the default is `abandoned`, which is the honest
+    // answer for the early returns that give up before deciding anything.
+    outcomeRef.current = "abandoned";
+    beginFrame("live", inputsRef.current.currentTime);
     const profiling = frameProfiler.enabled() && inputsRef.current.isPlaying;
     if (!profiling) {
-      drawFrameImpl();
+      try {
+        drawFrameImpl();
+      } finally {
+        endFrame(outcomeRef.current);
+      }
       return;
     }
     frameProfiler.beginFrame();
@@ -1315,6 +1387,7 @@ export function ScenePreviewCanvas({
     } finally {
       frameProfiler.time("frame.cpu", performance.now() - t0);
       frameProfiler.endFrame(compositorRef.current?.profilerSnapshot());
+      endFrame(outcomeRef.current);
     }
   };
 

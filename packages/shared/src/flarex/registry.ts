@@ -6,6 +6,7 @@
  * (defaults filled, dangling edges dropped) before the compiler or UI touches it.
  */
 
+import { kernelDiagnostics } from "../kernel/diagnostics";
 import type { ProjectGraph, TimelineLayer } from "../types";
 import { createFlarexNode, findFlarexInputSocket, findFlarexOutputSocket, getFlarexNodeDefinition } from "./node-defs";
 import type { FlarexComp, FlarexEdge, FlarexNode } from "./types";
@@ -40,8 +41,84 @@ export function createFlarexComp(id: string, name: string): FlarexComp {
 /** Write-through seam: store/replace a comp in the registry with its version bumped.
  *  Call on EVERY comp mutation (the flarex.* actions funnel through this). */
 export function stampFlarexComp(graph: ProjectGraph, comp: FlarexComp): ProjectGraph {
-  const stamped: FlarexComp = { ...comp, version: (comp.version ?? 0) + 1 };
+  // I-20 enforced at the WRITE, not at the gesture. Every mutation path funnels through here — drag,
+  // paste, AI intent, keyframe edits, node insertion — so this is the one place that can guarantee the
+  // invariant regardless of which one produced the comp. See `dedupeFlarexEdges`.
+  const deduped = dedupeFlarexEdges(comp.edges ?? [], comp.nodes ?? {});
+  if (deduped) {
+    reportEdgeRepair(comp.id, (comp.edges?.length ?? 0) - deduped.length, "write");
+  }
+  const stamped: FlarexComp = { ...comp, edges: deduped ?? comp.edges, version: (comp.version ?? 0) + 1 };
   return { ...graph, flarexComps: { ...(graph.flarexComps ?? {}), [stamped.id]: stamped } };
+}
+
+/** Repairs are reported, never silent: a graph that changed on load is something a user may notice. */
+function reportEdgeRepair(compId: string, dropped: number, at: "write" | "load"): void {
+  if (dropped <= 0 || !kernelDiagnostics.enabled) return;
+  kernelDiagnostics.record({
+    kind: "repair",
+    severity: "warn",
+    subject: { kind: "comp", compId },
+    reason: "duplicate-input-edge",
+    detail: { dropped, at },
+  });
+}
+
+/**
+ * ONE WIRE PER INPUT SOCKET (ADR-012 I-20, slice S1.1).
+ *
+ * Drops every edge but the LAST into any given `to.nodeId:to.socket`, preserving order otherwise, and
+ * returns the SAME array when nothing needed dropping (so a healthy graph costs one pass and no
+ * allocation).
+ *
+ * ## Why this has to live in the model
+ *
+ * The rule was previously enforced in exactly one place: a pointer-drag handler in `FlarexNodeCanvas`.
+ * Paste, AI node-graph intent, project import and load all bypassed it, and a duplicate is not
+ * detectable downstream because every individual edge is perfectly valid — both endpoints exist and
+ * both socket types match, which is all `isValidFlarexEdge` (and therefore the healer) ever checked.
+ *
+ * A duplicate then makes three consumers disagree about what the graph *is*:
+ *
+ *   - `compile-flarex`'s `edgeInto` is a Map keyed by socket, so the LAST edge silently wins and the
+ *     other is invisible to lowering;
+ *   - its `fanout` counter increments per EDGE, so a duplicate inflates the fan-out of the upstream
+ *     node and can trip the ADR-008 materialize decision — a node seals into a render target because
+ *     of a wire nobody can see;
+ *   - `resolveFlarexMediaInRetimes` walks EVERY incoming edge by design, so a TimeSpeed reaching a
+ *     MediaIn through the invisible edge retimes a loader that lowering never reads.
+ *
+ * Three answers to one question. Deduping here makes all three agree by construction.
+ *
+ * ## Why "last wins" and not "first"
+ *
+ * It matches `edgeInto`'s Map-overwrite semantics exactly, so healing an already-loaded graph cannot
+ * change which wire lowering was already using — the repair is invisible in the picture, which is the
+ * only safe direction for a load-time fixup. It also matches the drag handler this replaces, whose
+ * filter-then-append kept the newly dropped wire.
+ *
+ * NOTE: multiple edges into DIFFERENT sockets of one node are correct and untouched — `merge` has
+ * in/bg, `matteControl` has a/b. The rule is per socket, never per node.
+ */
+export function dedupeFlarexEdges(edges: readonly FlarexEdge[], nodes?: Record<string, FlarexNode>): FlarexEdge[] | null {
+  // Pass 1: the last edge per socket, and separately the last edge per socket whose endpoints exist.
+  // The split matters. "Last wins" alone lets a DANGLING edge displace a real wire — a pasted or
+  // imported comp carrying a stale edge into an occupied socket would silently disconnect the node,
+  // and the graph would look correct in the editor while lowering read nothing. A dangling edge is not
+  // a wire and may never outrank one; it is left for the healer to drop on its own terms.
+  const lastBySocket = new Map<string, number>();
+  const lastConnectedBySocket = nodes ? new Map<string, number>() : null;
+  for (let i = 0; i < edges.length; i++) {
+    const key = `${edges[i]!.to.nodeId}:${edges[i]!.to.socket}`;
+    lastBySocket.set(key, i);
+    if (lastConnectedBySocket && nodes![edges[i]!.from.nodeId] && nodes![edges[i]!.to.nodeId]) {
+      lastConnectedBySocket.set(key, i);
+    }
+  }
+  if (lastBySocket.size === edges.length) return null; // already one-per-socket — no allocation
+
+  const winner = (key: string): number => lastConnectedBySocket?.get(key) ?? lastBySocket.get(key)!;
+  return edges.filter((edge, i) => winner(`${edge.to.nodeId}:${edge.to.socket}`) === i);
 }
 
 /** An edge is valid when both endpoints exist and the socket types match. */
@@ -114,7 +191,13 @@ export function healFlarexRegistry(graph: ProjectGraph): ProjectGraph {
   const healed: Record<string, FlarexComp> = {};
   for (const [id, comp] of Object.entries(comps)) {
     const nodes = comp.nodes ?? {};
-    const edges = (comp.edges ?? []).filter((edge) => isValidFlarexEdge(nodes, edge));
+    const valid = (comp.edges ?? []).filter((edge) => isValidFlarexEdge(nodes, edge));
+    // I-20 on the LOAD path (S1.1). Endpoint+type validity was never sufficient: a duplicate edge into
+    // one socket passes `isValidFlarexEdge` twice, and the three consumers then disagree about the
+    // graph — see `dedupeFlarexEdges`. Hand-edited, imported and AI-generated comps all arrive here.
+    const deduped = dedupeFlarexEdges(valid);
+    if (deduped) reportEdgeRepair(comp.id ?? id, valid.length - deduped.length, "load");
+    const edges = deduped ?? valid;
     const previewValid = !comp.previewNodeId || Boolean(nodes[comp.previewNodeId]);
     const next: FlarexComp = {
       ...comp,

@@ -47,3 +47,5 @@ decision, what was rejected, the consequences, and whether it is Stable or Provi
 - [ADR-009 — Content Version Contract (completeness rules)](009-content-version-contract.md) — Frozen (§1–3 normative; §4–8 superseded by ADR-010)
 - [ADR-010 — Node Capability Contract (the evaluator foundation)](010-node-capability-contract.md) — Frozen
 - [ADR-011 — Evaluation Context Transform (the fourth evaluator question)](011-evaluation-context-transform.md) — Provisional (extends ADR-010 §5 by ONE question)
+- [ADR-012 — Flarex Runtime Kernel & Evaluation Engine Specification](012-flarex-runtime-kernel.md) — **Accepted** (governing spec; amends ADR-007 §soft-degrade, §dirty-key, §view-dot)
+- [ADR-013 — Media Acquisition Scheduling & the Performance Governor](013-media-acquisition-scheduling.md) — **Accepted** (extends ADR-012 Part 3/4/12 by two subsystems, contracts C15–C18, invariants I-40…I-54; changes no existing clause)

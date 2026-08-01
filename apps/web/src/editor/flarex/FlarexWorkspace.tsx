@@ -420,6 +420,32 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onMas
             Thumbs
           </button>
         </div>
+        {/*
+          VIEW-DOT NOTICE (ADR-012 §0.5, slice S1.2). The view dot used to re-root the EXPORT as well as
+          the preview; it no longer does. That is a real change to what an existing project delivers, so
+          it has to be surfaced — but a one-time modal saying "the view dot no longer re-roots export"
+          is meaningless to this product's audience, who do not know what a view dot or a root is, and
+          it gets dismissed unread by the one person it was for.
+
+          So the notice IS the affordance: it appears only while a dot is set, states the distinction in
+          the words a person would use, and clears with one click. It shows up exactly when it matters,
+          in the place it matters, and it keeps working after the "one time" has passed.
+        */}
+        {comp?.previewNodeId ? (
+          <div className="flarex-toolbar-group flarex-viewdot-notice">
+            <span className="flarex-viewdot-notice-text" title="You are previewing one node's output. Exports and renders always use the Output node, so what you deliver is unaffected.">
+              Previewing a node · export uses Output
+            </span>
+            <button
+              type="button"
+              className="flarex-toolbar-btn"
+              title="Go back to previewing the finished comp"
+              onClick={() => updateComp((current) => ({ ...current, previewNodeId: undefined }))}
+            >
+              Show final
+            </button>
+          </div>
+        ) : null}
         {groupableNodeIds.length >= 2 ? (
           <div className="flarex-toolbar-group">
             <button type="button" className="flarex-toolbar-btn" title="Group the selected nodes (collapse with a double-click)" onClick={handleGroupSelection}>

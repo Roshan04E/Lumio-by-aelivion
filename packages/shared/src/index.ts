@@ -29,6 +29,10 @@ export * from "./flarex/time-transform";
 export * from "./flarex/source-draw-cache";
 // Node content hashing (ADR-009) — the editor's node thumbnails key their cache on it.
 export * from "./flarex/content-hash";
+// Lowering degradation vocabulary (ADR-012 I-34, slice S0.2) — observability out-channel only.
+export * from "./flarex/degradation";
+// Runtime kernel (ADR-012) — framework-free; see packages/shared/src/kernel/index.ts.
+export * from "./kernel";
 export * from "./notes/types";
 export * from "./notes/registry";
 export * from "./notes/notes-intent";

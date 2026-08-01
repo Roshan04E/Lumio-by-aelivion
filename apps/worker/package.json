@@ -18,6 +18,7 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "render:compare": "tsx src/render-comparison-test.ts",
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
+    "kernel:conform": "tsx src/kernel-conformance.ts",
     "flarex:cache-gate": "tsx src/flarex-cache-gate.ts",
     "flarex:proxy-gate": "tsx src/flarex-proxy-parity-gate.ts",
     "flarex:perf": "tsx src/flarex-perf-scorecard.ts",

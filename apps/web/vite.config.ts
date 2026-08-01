@@ -30,6 +30,18 @@ const RENDER_FINGERPRINT_SOURCES = [
   "packages/shared/src/color/scene-compositor.ts",
   "packages/shared/src/color/media-renderer.ts",
   "packages/shared/src/color/gl-context.ts",
+  // SHADER SOURCE (added 2026-08-01). These files literally contain the GLSL that produces pixels, so
+  // editing one changes output without touching any file previously on this list — which is how the
+  // `fract(sin())` → integer-hash parity fix would have left pre-fix proxy spans serving speckled
+  // stylize output forever. `glsl-hash.ts` is the shared prelude both registries embed: changing it
+  // alone changes every effect and transition that hashes, and nothing else here would notice.
+  "packages/shared/src/color/glsl-hash.ts",
+  "packages/shared/src/color/fragment-effects/registry.ts",
+  "packages/shared/src/color/fragment-effects/builtins.ts",
+  "packages/shared/src/color/fragment-effects/stylize.ts",
+  "packages/shared/src/color/transitions/registry.ts",
+  "packages/shared/src/color/transitions/pipeline.ts",
+  "packages/shared/src/color/transitions/pipeline-assembler.ts",
   "packages/shared/src/scene/build-scene-draws.ts",
   "packages/shared/src/scene/scene-text-raster.ts",
   "packages/shared/src/scene/scene-mask-matte.ts",

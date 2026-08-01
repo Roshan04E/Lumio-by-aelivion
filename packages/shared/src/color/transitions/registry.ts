@@ -1,3 +1,4 @@
+import { GLSL_HASH_PRELUDE } from "../glsl-hash";
 import type { TransitionPipeline } from "./pipeline";
 
 /**
@@ -86,7 +87,7 @@ vec2 _fitUv(vec2 uv, vec2 s){ return (uv - 0.5) * s + 0.5; }
 vec4 getFromColor(vec2 uv){ return texture(uFrom, clamp(_fitUv(uv, uFromFit), 0.0, 1.0)); }
 vec4 getToColor(vec2 uv){ return texture(uTo, clamp(_fitUv(uv, uToFit), 0.0, 1.0)); }
 
-float _rand(vec2 co){ return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453); }
+${GLSL_HASH_PRELUDE}
 float _luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
 // Scale about centre (s>1 → zoom in).
 vec2 _scaleUV(vec2 uv, float s){ return (uv - 0.5) / max(s, 1e-4) + 0.5; }

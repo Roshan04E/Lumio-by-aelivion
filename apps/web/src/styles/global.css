@@ -23626,6 +23626,25 @@ input.scrub-number:focus {
   padding-right: 2px;
   white-space: nowrap;
 }
+/* View-dot notice (ADR-012 §0.5, slice S1.2) — shown only while a node is being previewed. It replaces
+   a one-time migration dialog nobody would have read: the export routing changed, and this states it in
+   the viewer's own words, at the only moment it is true. Accent-tinted rather than warning-coloured —
+   previewing a node is a normal thing to be doing, not a problem to fix. */
+.flarex-viewdot-notice {
+  margin-left: auto;
+  padding: 2px 4px 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--nle-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--nle-accent) 10%, transparent);
+}
+.flarex-viewdot-notice-text {
+  font-size: 10px;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--nle-accent) 75%, #e6ecf4);
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* `.flarex-toolbar-btn` styling now lives in the canonical `.ui-btn` grouped rule (Notes page). */
 
 /* Comp proxy (render cache) cluster — pushed to the far end of the strip: it acts on the WHOLE comp,

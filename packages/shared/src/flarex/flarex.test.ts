@@ -505,17 +505,29 @@ function groupDepth(draw: SceneDraw | null): number {
     { id: "e1", from: { nodeId: "v1_in", socket: "out" }, to: { nodeId: "b1", socket: "in" } },
     { id: "e2", from: { nodeId: "b1", socket: "out" }, to: { nodeId: "v1_out", socket: "in" } },
   ];
+  // CONTRACT REVERSED by ADR-012 §0.5 / slice S1.2 (2026-08-01). ADR-007 re-rooted preview AND export
+  // from the persisted `previewNodeId` "by design"; product decision made the view dot editor-only. It
+  // must never change delivered pixels (I-26), so no renderer reads it any more — preview routing is
+  // runtime state, render routing is a property of the graph.
+  //
+  // These assertions used to require the opposite. They are rewritten rather than deleted, so the
+  // reversal is visible in the diff instead of silently disappearing from the suite.
   comp.previewNodeId = "v1_in";
   const previewed = compileFlarexComp(comp, lowerCtx());
-  check("view dot on MediaIn shows the clean plate (no wrap)", Boolean(previewed) && !isGroupDraw(previewed));
+  check(
+    "a persisted view dot does NOT re-root the compile (I-26)",
+    isGroupDraw(previewed) && previewed.shell.blurPx === 10,
+  );
+  check(
+    "compiling is byte-identical with and without a persisted view dot",
+    JSON.stringify(previewed) === JSON.stringify(compileFlarexComp({ ...comp, previewNodeId: undefined }, lowerCtx())),
+  );
   comp.previewNodeId = "ghost";
-  const fallback = compileFlarexComp(comp, lowerCtx());
-  check("dangling view dot falls back to MediaOut", isGroupDraw(fallback) && fallback.shell.blurPx === 10);
   const healed = healFlarexRegistry({ ...graphFixture(), flarexComps: { v1: comp } });
-  check("healer clears a dangling previewNodeId", getFlarexComp(healed, "v1")?.previewNodeId === undefined);
+  check("healer still clears a dangling previewNodeId (it remains editor state)", getFlarexComp(healed, "v1")?.previewNodeId === undefined);
 
-  // Slice 4: the RUNTIME re-root that per-node thumbnails compile through. It must win over the
-  // persisted view dot AND leave it untouched, or rendering a thumbnail would move the user's viewer.
+  // The RUNTIME re-root: what per-node thumbnails AND the live viewer's view dot both compile through.
+  // It must leave the persisted selection untouched, or rendering a thumbnail would move the viewer.
   comp.previewNodeId = "v1_out";
   const rooted = compileFlarexComp(comp, { ...lowerCtx(), previewRootNodeId: "v1_in" });
   check("previewRootNodeId re-roots the compile", Boolean(rooted) && !isGroupDraw(rooted));

@@ -63,6 +63,7 @@ import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
 import { computeFlarexContentHashes } from "./content-hash";
+import { isSubstitutionReason, type FlarexDegradationReason, type FlarexOnDegrade } from "./degradation";
 import { frameProfiler } from "../color/frame-profiler";
 import { flarexChannelSources, getFlarexNodeDefinition } from "./node-defs";
 import type { FlarexComp, FlarexNode, FlarexNodeType } from "./types";
@@ -122,6 +123,21 @@ export interface FlarexLowerCtx {
    * unwired), so a preview pass can never blank the real viewer.
    */
   previewRootNodeId?: string | undefined;
+  /**
+   * DEGRADATION OUT-CHANNEL (slice S0.2). Called whenever a node produces less than it was asked for —
+   * a source that ended, a loader with no picture yet, an unbacked generator, an unimplemented node, a
+   * cycle, or a **host-clip substitution**. See `degradation.ts` for the vocabulary and for why the
+   * three substitution reasons are kept apart.
+   *
+   * PURELY OBSERVABILITY, exactly like `buildSceneDraws`' `onLayerNotReady`: attaching it or omitting
+   * it produces byte-identical draws, and the pixel gate asserts that with the channel attached and
+   * detached. Omit it (export, worker, fixtures) and lowering behaves as it always has.
+   *
+   * The compiler does not know what a degradation *means* — it does not import the diagnostics sink,
+   * does not decide severity, and does not decide whether anyone cares. That is the caller's, which is
+   * what keeps lowering free of policy (ADR-012 I-15).
+   */
+  onDegrade?: FlarexOnDegrade | undefined;
   /**
    * Tracker (2026-07-28): resolve a `trackingPathId` to the tracking artifact it names. Mirrors
    * `resolveSourceDraw` — the compiler stays free of artifact storage, the caller owns lookup, and a
@@ -744,7 +760,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    */
   const lowerColorNode = (node: FlarexNode): FlarexValue | null => {
     const input = imageInput(node, "in");
-    if (!input) return null;
+    if (!input) {
+      degrade(node.id, "input-missing");
+      return null;
+    }
     const read: FlarexParamReader = {
       num: (key, fallback) => num(node, key, fallback),
       str: (key, fallback) => str(node, key, fallback),
@@ -839,7 +858,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    */
   const lowerFilterNode = (node: FlarexNode): FlarexValue | null => {
     const input = imageInput(node, "in");
-    if (!input) return null;
+    if (!input) {
+      degrade(node.id, "input-missing");
+      return null;
+    }
     const spec = FLAREX_FILTER_NODES[node.type];
     if (!spec) return { kind: "image", draw: input };
     const params = spec.build({
@@ -935,6 +957,31 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
   frameProfiler.bump("compile.maps", 2); // memo + visiting (profiler-only temp-collection count)
 
   /**
+   * Report a degradation (slice S0.2). Observability only — it never changes what lowering returns,
+   * and every call site is a plain statement beside an unchanged `return`.
+   *
+   * Reads `activeTimeSeconds` rather than taking it, so a caller cannot report the frame time for a
+   * node that was evaluated under a retime — the distinction between `host-substituted:pending` and
+   * `source-pending-retimed` is exactly that difference, and passing it in would let a site get it
+   * wrong silently.
+   *
+   * The `onDegrade` guard is load-bearing: with no channel attached this costs one property read and
+   * allocates nothing, which is what keeps an export or worker compile byte-identical in cost as well
+   * as in output.
+   */
+  const degrade = (nodeId: string, reason: FlarexDegradationReason): void => {
+    if (!ctx.onDegrade) return;
+    ctx.onDegrade({
+      nodeId,
+      nodeType: comp.nodes[nodeId]?.type,
+      reason,
+      substituted: isSubstitutionReason(reason),
+      atTimeSeconds: activeTimeSeconds,
+      frameTimeSeconds: ctx.timeSeconds,
+    });
+  };
+
+  /**
    * Cost estimate for a built subtree, denominated in FULL-FRAME GPU PASSES — the unit materialization
    * is paid for in. Structural only: it counts the passes the compositor will actually run (fragment
    * passes, region passes, and each nested group's own composite), never node types, so it stays
@@ -1022,9 +1069,15 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         if (cachedNode) frameProfiler.noteEval(nodeId, cachedNode.type, "skipped");
         return memo.get(key) ?? null;
       }
-      if (visiting.has(key)) return null; // cycle — degrade, never hang
+      if (visiting.has(key)) {
+        degrade(nodeId, "graph-cycle");
+        return null; // cycle — degrade, never hang
+      }
       const node = nodes[nodeId];
-      if (!node) return null;
+      if (!node) {
+        degrade(nodeId, "node-missing");
+        return null;
+      }
       frameProfiler.noteEval(nodeId, node.type, "evaluated");
       visiting.add(key);
       // The cursor moves for the duration of this node's lowering and is restored after, so a sibling
@@ -1075,7 +1128,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           const resolved = frameProfiler.measure("compile.resolveSource", () => ctx.resolveSourceDraw!(node.id, sourceAssetId));
           // Source ran past its own end (short clip in a longer comp): produce nothing — the node's
           // output is empty, so a merge downstream keeps only the background. NOT a host fall-back.
-          if (resolved === "ended") return null;
+          if (resolved === "ended") {
+            degrade(node.id, "source-ended");
+            return null;
+          }
           /**
            * `"pending"` — THIS NODE HAS A LOADER AND IT HAS NO PICTURE YET (2026-07-29).
            *
@@ -1105,9 +1161,18 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
            * null still means "no loader owns this node" and still soft-degrades to the host — the
            * Phase-1 contract, and the right answer when promotion legitimately declined.
            */
-          if (resolved === "pending" && activeTimeSeconds !== ctx.timeSeconds) return null;
+          if (resolved === "pending" && activeTimeSeconds !== ctx.timeSeconds) {
+            degrade(node.id, "source-pending-retimed");
+            return null;
+          }
           // An un-retimed `"pending"` falls THROUGH to the host below — same moment, real degrade.
           if (resolved && resolved !== "pending") return { kind: "image", draw: cloneImage(resolved) };
+          // Reached the host fall-back. Both remaining causes substitute ANOTHER SOURCE'S pixels, and
+          // they are reported apart because they have different fixes: `pending` is a readiness race
+          // (S4.4's barrier), `no-loader` is a source that was never admitted (S4.3's admission).
+          degrade(node.id, resolved === "pending" ? "host-substituted:pending" : "host-substituted:no-loader");
+        } else {
+          degrade(node.id, "host-substituted:no-resolver");
         }
         return { kind: "image", draw: cloneImage(ctx.hostSourceDraw) };
       }
@@ -1123,12 +1188,20 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       // costs no extra nest — the generator is always a bare `SceneLayerDraw`.
       case "text":
       case "background": {
-        if (!ctx.resolveSourceDraw) return null;
+        if (!ctx.resolveSourceDraw) {
+          degrade(node.id, "generator-unbacked");
+          return null;
+        }
         frameProfiler.bump("compile.resolveSourceCalls");
         const resolved = frameProfiler.measure("compile.resolveSource", () => ctx.resolveSourceDraw!(node.id, ""));
         // A generator already produces NOTHING when its backing layer is absent or spent, so
         // `"pending"` (raster not landed) joins the same branch — it was always the honest answer here.
-        if (!resolved || resolved === "ended" || resolved === "pending") return null;
+        if (!resolved || resolved === "ended" || resolved === "pending") {
+          // One reason, unlike MediaIn: a generator NEVER substitutes, so the three causes share a fix
+          // (rasterize the backing layer) and splitting them would add noise without adding a decision.
+          degrade(node.id, "generator-unbacked");
+          return null;
+        }
         const draw = cloneImage(resolved);
         if (!isGroup(draw)) {
           const opacity = node.type === "background" ? clamp01(num(node, "opacity", 1)) * 100 : draw.transform.opacity;
@@ -1187,7 +1260,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "transform": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const wrap = wrapFor(input, STAGE_TRANSFORM);
         frameProfiler.bump("compile.operations"); // transform op on the shell
         frameProfiler.bump("compile.objects"); // new transform object
@@ -1230,7 +1306,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "blur": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const sigma = Math.max(0, num(node, "sigma", 8));
         if (sigma <= 0) return { kind: "image", draw: input };
         const mask = matteInput(node, "mask");
@@ -1255,7 +1334,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "glow": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const radius = Math.max(0, num(node, "radius", 24));
         if (radius <= 0) return { kind: "image", draw: input };
         const wrap = wrapFor(input, STAGE_GLOW);
@@ -1271,7 +1353,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "sharpen": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         // Node amount 0..2 → builtin sharpen's 0..100 scale.
         const pass = fragmentPass(node, builtinFragmentEffectId("sharpen"), { amount: Math.max(0, Math.min(100, num(node, "amount", 0.5) * 50)) });
         return { kind: "image", draw: pass ? pushFragmentPass(input, pass) : input };
@@ -1279,7 +1364,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "filter": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const effectId = str(node, "effectId", "");
         if (!effectId) return { kind: "image", draw: input };
         const defId = effectId.includes(".") ? effectId : builtinFragmentEffectId(effectId);
@@ -1298,7 +1386,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "chromaKey": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const pass = fragmentPass(node, FLAREX_CHROMA_KEY_ID, {
           keyColor: parseHexColor(str(node, "color", "#00b140")),
           tolerance: num(node, "tolerance", 0.35),
@@ -1316,7 +1407,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
 
       case "lumaKey": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const pass = fragmentPass(node, FLAREX_LUMA_KEY_ID, {
           low: num(node, "low", 0),
           high: num(node, "high", 1),
@@ -1347,7 +1441,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "matteControl": {
         const a = matteInput(node, "a");
         const b = matteInput(node, "b");
-        if (!a && !b) return null;
+        if (!a && !b) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         const operation = str(node, "operation", "add") as Mask["mode"];
         const feather = Math.max(0, Math.min(1, num(node, "feather", 0))) * Math.min(ctx.compWidth, ctx.compHeight) * 0.5;
         const masks: Mask[] = [
@@ -1412,6 +1509,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       }
 
       case "aiMatte":
+        degrade(node.id, "node-unimplemented");
         return null;
 
       /**
@@ -1432,7 +1530,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        */
       case "tracker": {
         const input = imageInput(node, "in");
-        if (!input) return null;
+        if (!input) {
+          degrade(node.id, "input-missing");
+          return null;
+        }
         // EMBEDDED data first — it is what travels in the manifest and therefore what both renderers
         // agree on. The id-based adapter is a convenience for callers that have a store; if it ever
         // became the primary path it would have to reach Remotion too, or the preview would track and
@@ -1463,11 +1564,20 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     }
   }
 
-  // View-any-node (Fusion view dot): root at the previewed node when set; a preview that yields
-  // no image (matte-only node, unwired) falls back to MediaOut so the frame never goes blank.
-  // `ctx.previewRootNodeId` is the RUNTIME override (node thumbnails) and wins over the persisted
-  // view-dot selection, so a thumbnail pass never disturbs what the user is viewing.
-  const previewRootId = ctx.previewRootNodeId ?? comp.previewNodeId;
+  // View-any-node (Fusion view dot): root at the previewed node when the RUNTIME asks for it; a
+  // preview that yields no image (matte-only node, unwired) falls back to MediaOut so the frame never
+  // goes blank.
+  //
+  // THE PERSISTED `comp.previewNodeId` IS DELIBERATELY NOT READ HERE (ADR-012 §0.5, slice S1.2).
+  // ADR-007 originally re-rooted preview AND export from it "by design"; that is reversed by product
+  // decision. The view dot is an editing affordance for inspecting an intermediate node — it must
+  // never change delivered pixels, which is I-26. Export always begins at the graph's output.
+  //
+  // Preview routing is RUNTIME state, supplied per frame by whoever is viewing; render routing is a
+  // property of the graph. Because this read is in shared code, dropping the fallback corrects the web
+  // preview, the local export and the Remotion worker in one move. `previewNodeId` stays persisted and
+  // the healer still validates it — editor state that survives a reload is still editor state.
+  const previewRootId = ctx.previewRootNodeId;
   const previewNode = previewRootId ? nodes[previewRootId] : undefined;
   if (previewNode && previewNode.type !== "mediaOut") {
     const previewed = evalNode(previewNode.id);

@@ -1300,6 +1300,27 @@ function VideoPreviewImpl({
   // their own hidden PreviewLayers (below) into the SAME graded-canvas / single-ctx maps under their
   // virtual ids, and passed to ScenePreviewCanvas so the Flarex compiler can pull each MediaIn's
   // source. They never enter `sceneLayers`, so they never composite on the timeline themselves.
+  /**
+   * The live viewer's per-comp view dots, as RUNTIME input (`compId → nodeId`) — ADR-012 §0.5, S1.2.
+   *
+   * `comp.previewNodeId` stays persisted, because editor state that survives a reload is still editor
+   * state. What changed is WHO reads it: the editor does, right here, and hands it to the renderers as
+   * a per-frame input. No renderer reads it from the graph any more, so export and the worker begin at
+   * MediaOut no matter what the user was inspecting (I-26 — a viewing affordance must not change
+   * delivered pixels).
+   *
+   * A map, not a scalar: one frame can hold several comps, each with its own dot.
+   */
+  const flarexPreviewRoots = useMemo(() => {
+    const comps = graph.flarexComps;
+    if (!comps) return undefined;
+    let roots: Record<string, string> | undefined;
+    for (const comp of Object.values(comps)) {
+      if (comp.previewNodeId) (roots ??= {})[comp.id] = comp.previewNodeId;
+    }
+    return roots;
+  }, [graph.flarexComps]);
+
   const flarexVirtualLayers = useMemo(() => {
     if (!graph.flarexComps) return [];
     return collectFlarexVirtualLayers(
@@ -1313,8 +1334,11 @@ function VideoPreviewImpl({
           durationSeconds: asset.durationSeconds,
         };
       },
+      // A node being inspected still needs its upstream loaders retimed, or the viewer shows the
+      // right node at the wrong moment.
+      flarexPreviewRoots,
     );
-  }, [graph.flarexComps, renderedLayerEntries, resolvedAssets]);
+  }, [graph.flarexComps, renderedLayerEntries, resolvedAssets, flarexPreviewRoots]);
 
 
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
@@ -1876,6 +1900,8 @@ function VideoPreviewImpl({
                   mediaSourceAlias={sceneSharedMediaClones}
                   nestedGroups={nestExpansion.groups}
                   flarexComps={graph.flarexComps}
+                  // The live view dots, as runtime input (ADR-012 §0.5). Export/worker pass nothing.
+                  flarexPreviewRoots={flarexPreviewRoots}
                   flarexVirtualLayers={activeFlarexVirtualLayers}
                   flarexCompProxiesRef={flarexCompProxyFramesRef}
                   captureRef={proxyCaptureRef}

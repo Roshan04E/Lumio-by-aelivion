@@ -1140,9 +1140,12 @@ export function FlarexNodeCanvas({
           to: { nodeId: input.nodeId, socket: input.socket },
         };
         if (!isValidFlarexEdge(current.nodes, edge) || wouldCreateFlarexCycle(current, edge.from.nodeId, edge.to.nodeId)) return current;
-        // An input socket holds ONE wire — replace any existing one.
-        const edges = current.edges.filter((e) => !(e.to.nodeId === edge.to.nodeId && e.to.socket === edge.to.socket));
-        return { ...current, edges: [...edges, edge] };
+        // One wire per input socket is enforced by the MODEL now (`dedupeFlarexEdges`, called from
+        // `stampFlarexComp` and the load-time healer — ADR-012 I-20, slice S1.1). This handler used to
+        // be the only place it held, which is exactly why paste, AI intent and import could all
+        // produce a graph the compiler and the retime resolver read differently. Appending is enough:
+        // dedupe keeps the LAST edge into a socket, which is this one.
+        return { ...current, edges: [...current.edges, edge] };
       });
     }
   };

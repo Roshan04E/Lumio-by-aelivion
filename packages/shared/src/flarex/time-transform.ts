@@ -97,7 +97,10 @@ export interface FlarexMediaInRetime {
  * Nodes not reachable from any root (a disconnected branch mid-edit) are absent from the map and read
  * as identity — the same picture they show today.
  */
-export function resolveFlarexMediaInRetimes(comp: FlarexComp): Map<string, FlarexMediaInRetime> {
+export function resolveFlarexMediaInRetimes(
+  comp: FlarexComp,
+  previewRootNodeId?: string | undefined,
+): Map<string, FlarexMediaInRetime> {
   const out = new Map<string, FlarexMediaInRetime>();
   const nodes = comp.nodes;
   // Inputs per node, in edge order — the compiler's `edgeInto` is keyed by socket and keeps one edge
@@ -131,8 +134,12 @@ export function resolveFlarexMediaInRetimes(comp: FlarexComp): Map<string, Flare
     seen.delete(nodeId);
   };
 
-  const viewDot = comp.previewNodeId ? nodes[comp.previewNodeId] : undefined;
-  if (viewDot && viewDot.type !== "mediaOut") visit(viewDot.id, FLAREX_IDENTITY_TIME_TRANSFORM, new Set());
+  // Preview root (ADR-012 §0.5, slice S1.2): a node being INSPECTED still needs its upstream loaders
+  // retimed, or the viewer shows the right node at the wrong moment. But the root comes from the
+  // runtime, not from the persisted `comp.previewNodeId` — a viewing affordance must not change what
+  // any renderer resolves. Export passes nothing here and walks from MediaOut alone.
+  const previewRoot = previewRootNodeId ? nodes[previewRootNodeId] : undefined;
+  if (previewRoot && previewRoot.type !== "mediaOut") visit(previewRoot.id, FLAREX_IDENTITY_TIME_TRANSFORM, new Set());
   for (const node of Object.values(nodes)) {
     if (node.type === "mediaOut") visit(node.id, FLAREX_IDENTITY_TIME_TRANSFORM, new Set());
   }

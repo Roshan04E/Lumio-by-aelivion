@@ -13,6 +13,8 @@
  * uploaded UNPACK_FLIP_Y=true.
  */
 
+import { GLSL_HASH_PRELUDE } from "../glsl-hash";
+
 export type FragmentParamType = "float" | "vec2" | "vec3" | "bool";
 
 export interface FragmentEffectParam {
@@ -107,7 +109,7 @@ const GLSL_TYPE: Record<FragmentParamType, string> = {
 const HARNESS_PRELUDE = `
 vec4 getSrcColor(vec2 uv){ return texture(uSrc, clamp(uv, 0.0, 1.0)); }
 
-float _rand(vec2 co){ return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453); }
+${GLSL_HASH_PRELUDE}
 float _luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
 `;
 

@@ -2165,78 +2165,6 @@ even on hardware — every NLE answers that with optimized media, and ours is th
 this asset does not appear to have. Whether that is "no proxy was built" or "a proxy exists and the
 retimed loader is not using it" is the next question, and `__rfSourceMap` answers it.
 
-## v32y — the playhead lies during PLAYBACK; pause is only where the truth arrives (2026-07-29)
-
-**Founder report:** "when I pause, the playback is paused but after a fraction of a second it tries to
-render 5-6 frames later… one playhead should not lie, it should always render the exact frame." Present
-since the beginning, assumed to be by design until browser NLEs and Premiere/Resolve were checked and
-none of them do it. Both the editor and the Flarex viewer.
-
-**The framing that unlocked it: nothing is wrong at the pause edge.** Paused, every source converges on
-the exact requested time — that part already worked, and it is *why* the jump exists. Three independent
-slacks let the presented picture sit BEHIND the transport during playback, all of them forward-biased,
-and pausing collapses all three at once. The correction is the visible event; the error is upstream of
-it. This file's own v30 states the policy outright ("PLAYING = SMOOTH, PAUSED = COHERENT") and
-`VideoPreview.tsx:3129` already documents the 2026-07-03 version of the same report — the fix that
-shipped then BOUNDED the error at 0.15s rather than removing it, which is why it came back.
-
-The three, with the numbers that were actually measured this round:
-
-1. **WC served frames presented while behind** — `WC_HOLD_LAG_S = 0.35` (≈10 frames at 30fps),
-   unbounded for `tolerateLag` loaders, which is why Flarex is the worse of the two pages.
-2. **`<video>` element free-run** — corrected only past 0.15s, and only every 500ms.
-3. **Pause committed the raw wall-clock anchor** — up to one `playbackCommitIntervalMs` (40ms
-   balanced / 90ms performance) ahead of the last time the viewer had rendered, and **off the frame
-   grid**: pause was the ONLY transport path that never quantized. Measured live at 39.9ms of commit
-   lag, parking at 3.354700s — between frames 100 and 101.
-
-**Shipped: #3 only, because only #3 is defect.** #1 and #2 are trade-offs bought with real scar tissue
-(v30's host-starvation freeze, the 2026-07-16 seek-storm tab hang), and tightening either on a hunch is
-how this file fills up. `quantizeToFrameGrid(t, "nearest" | "current")` now owns both grids: a SCRUB
-takes the frame nearest the pointer (unchanged), a STOP takes `floor(t·fps)` — the frame that was on
-screen, since rounding parks on a frame the user never saw. `parkTransportAt` is now the single stop
-authority; the playback effect's `!isPlaying` branch used to park at the COMMITTED clock while the
-spacebar path parked at the LIVE anchor, two authorities that could disagree by a commit interval.
-
-**A/B, same media, same session:** without the fix, parked 3.354700s, off-grid, commit lag 39.9ms. With
-it, parked 4.300000s = frame 129 exactly, and the commit/live split at the stop reads 0.0ms. The gate
-FAILS on the old code and PASSES on the new — a gate never seen to fail is not evidence.
-
-**New instrument: `pnpm --filter @orreris/worker pause:gate`** (`pause-coherence-gate.ts`), plus
-`window.__rfClock` (committed + live at full precision — the on-screen readout is `toFixed(2)`, which
-cannot resolve a frame at 30fps, so nothing outside React could check grid alignment at all).
-
-*It asserts on two axes and refuses to conflate them,* which is v-full-res-rendezvous' lesson applied a
-second time: a pure pixel diff across the pause edge sees the full-res settle (300ms–3s, by design) and
-the time jump in one number and can never separate them. So TIME is asserted with the resolution-blind
-instrument (`__flarexCoherence` staleness, recorded regardless of the hold flag) and pixels are a
-reported artifact, not the bar.
-
-**Residual, named honestly.** Worst staleness during playback measured 79.5ms (2.4 frames) on the
-`[element]` path in one run, 29.3ms in another, 0.0ms in a third — n=3, high variance, freshly-created
-projects. That is a distribution to gather, not a threshold to act on, and Phase 2 (tightening #1/#2)
-is deliberately blocked on it. The pixel axis read 0.000% in every run, which proves LESS than it
-looks: the capture starts after the pause click round-trip, by which time the correction has landed.
-
-**Two blind spots in the new instrument, stated before they mislead someone.** `maxStalenessSeconds`
-excludes `awaitingFrame` sources — a source with NO decode for the requested time has no served time to
-subtract, so it scores 0ms while being the worse state. One run read "0.0ms worst" beside
-`escapeHatches=54/58`; the gate now says so out loud instead of letting the headline read clean. And
-62% escape hatches in a healthy-looking run means **most frames presented during playback are not the
-frame the playhead names** — the barrier is off by design, so this is the policy working as written,
-which is exactly the thing worth deciding about rather than discovering.
-
-*Rule: when a correction is visible, suspect the state it corrects, not the correction.* Four separate
-rounds treated the pause snap as the bug and bounded it; it is a symptom of a playback model that
-presents frames the playhead does not name. Bounding a lie makes it smaller, not true.
-
-**Open, and requiring a decision rather than more code:** #1 and #2 cannot be removed by moving the
-playhead — the pixels are stale relative to ANY transport time. Real-time playback off a
-seek-on-demand decoder is structurally offset (request T, decode 100ms, present at T+100ms). The escape
-is read-ahead into a presentation queue so lag degrades into DROPPED frames (correct time, judder)
-instead of OFFSET frames (smooth, wrong time) — which is what Premiere and Resolve actually do, and it
-would retire `tolerateLag` entirely. That is an ADR, not a patch.
-
 ## v32y — the residual stutter was a retry loop with no bound, not decode and not GPU (2026-07-29)
 
 **Decode is fixed and verified.** Post-rebuild `__rfFlarexLoaderRate` = `{loaderA: 1, loaderB: 2}` (so
@@ -2311,57 +2239,6 @@ never been rate-aware.
 **Also from this round:** `__rfWcHolds` is `undefined` in a fresh session, confirming the non-tolerant
 hold branches (v32y, deliberately left alone) are not firing at all here. The earlier count of ~11 per
 composite came from a session that had been scrubbed. Nothing to chase there yet.
-
-## v32z — the residual, measured: p50 ≈ 4 frames, tail ≈ 20 (2026-07-29)
-
-**Supersedes v32y's residual estimate.** That entry reported n=3, "79.5 / 29.3 / 0.0 ms, high variance,
-a distribution to gather". It was gathered. The gate now runs N play→pause cycles in ONE warm session
-(`PAUSE_GATE_CYCLES`), walking the timeline so each cycle samples different material instead of
-replaying one warm second.
-
-Two independent runs, different media, 16 cycles each, same box, same session shape:
-
-| | p50 | p90 | max | hatches |
-|---|---|---|---|---|
-| 26MB source | 163.6ms (**4.9f**) | 407.0ms (12.2f) | 527.7ms (15.8f) | 71% |
-| 107MB source | 128.1ms (**3.8f**) | 348.1ms (10.4f) | 684.6ms (20.5f) | 65% |
-
-**The founder's "5-6 frames… or 3-4, I can't exactly tell you" is the p50, and the reason it could not
-be pinned is the spread.** Both runs agree to within a frame at the median and disagree by 5 frames at
-the tail, which is the shape of a stall distribution, not a constant offset. 32/32 parks landed on the
-frame grid (unambiguously 30fps), and the parked commit/live split read 0.0ms every single cycle — the
-v32y fix holds across the timeline, on both sources, warm and cold.
-
-**The offender is the ELEMENT path in both runs, and the tail exceeds every documented bound.** 527ms
-and 684ms are past `WC_HOLD_LAG_S` (350ms) and 3–4× the element corrector's 0.15s threshold. That is
-not a contradiction, it is the mechanism: **0.15s is not a bound on drift, it is a bound on drift AT
-SAMPLE TIME.** The corrector is a 500ms `setInterval`; between samples nothing bounds anything, so a
-single ~0.5s decode stall lands whole and is only clipped at the next tick. A threshold sampled at 2Hz
-cannot bound a transient shorter than its own period.
-
-*Caveat that decides what this data can be used for:* both runs were freshly uploaded originals with
-**no ingest proxy built yet**, so `preferNativeDecode` was true and the host sat on `<video>` (the
-v32x configuration). This characterises the ELEMENT path. The WC path — where `WC_HOLD_LAG_S` is the
-actual governor — is NOT characterised by these numbers, and a project whose proxies exist may sit in a
-different regime entirely. `PROBE_EDITOR_URL` points the gate at a real project for exactly that.
-
-**Gate semantics split, deliberately.** GRID fails hard forever (it guards what shipped). TIME is
-advisory by default with a banner, `PAUSE_GATE_STRICT=1` to enforce. Failing the whole run on a
-residual we knowingly deferred would conflate "you regressed" with "the known baseline is still there",
-and would make the gate useless for catching a GRID regression in the meantime. Flip the default when
-Phase 2 lands.
-
-**Three bugs in the instrument, found by using it — worth recording because each one flattered the
-result.** (1) `gridFps` returned the FIRST matching rate, and 3.500000s sits on the 24, 25, 30, 50 and
-60fps grids at once — it reported 24fps and converted 156ms into "3.8 frames" when the honest answer
-was 4.7. Fixed by intersecting candidate sets ACROSS cycles; only the true rate divides every park.
-(2) The pixel phase clicked Pause after playback had already auto-stopped at the composition end, and
-waited out a 30s timeout on a transport that was already parked. (3) A fixed 6s wait for the upload
-metadata probe was enough for 26MB and not for 107MB, surfacing 40s later as an unexplained navigation
-timeout. All three are the same error: *guessing at a state instead of waiting for it.*
-
-*Rule: an instrument's first job is to fail. Three runs that all passed said nothing; the run that
-resolved 32 cycles said the median is 4 frames and the tail is 20.*
 
 ## v33a — the lag was manufactured by an unclamped request, and the retry loop turned it into a stall (2026-07-29)
 
@@ -2464,3 +2341,365 @@ performance language is not evidence that the cause is performance.
 
 **Gated:** flarex:test (+3), pixel gate flarex fixtures 0.000% (generators 2×), compproxy, cache-gate,
 coherence 5666/5666, both typechecks.
+
+
+## v33c — the playhead lies during PLAYBACK; pause is only where the truth arrives (2026-07-29)
+
+**Founder report:** "when I pause, the playback is paused but after a fraction of a second it tries to
+render 5-6 frames later… one playhead should not lie, it should always render the exact frame." Present
+since the beginning, assumed to be by design until browser NLEs and Premiere/Resolve were checked and
+none of them do it. Both the editor and the Flarex viewer.
+
+**The framing that unlocked it: nothing is wrong at the pause edge.** Paused, every source converges on
+the exact requested time — that part already worked, and it is *why* the jump exists. Three independent
+slacks let the presented picture sit BEHIND the transport during playback, all of them forward-biased,
+and pausing collapses all three at once. The correction is the visible event; the error is upstream of
+it. This file's own v30 states the policy outright ("PLAYING = SMOOTH, PAUSED = COHERENT") and
+`VideoPreview.tsx:3129` already documents the 2026-07-03 version of the same report — the fix that
+shipped then BOUNDED the error at 0.15s rather than removing it, which is why it came back.
+
+The three, with the numbers that were actually measured this round:
+
+1. **WC served frames presented while behind** — `WC_HOLD_LAG_S = 0.35` (≈10 frames at 30fps),
+   unbounded for `tolerateLag` loaders, which is why Flarex is the worse of the two pages.
+2. **`<video>` element free-run** — corrected only past 0.15s, and only every 500ms.
+3. **Pause committed the raw wall-clock anchor** — up to one `playbackCommitIntervalMs` (40ms
+   balanced / 90ms performance) ahead of the last time the viewer had rendered, and **off the frame
+   grid**: pause was the ONLY transport path that never quantized. Measured live at 39.9ms of commit
+   lag, parking at 3.354700s — between frames 100 and 101.
+
+**Shipped: #3 only, because only #3 is defect.** #1 and #2 are trade-offs bought with real scar tissue
+(v30's host-starvation freeze, the 2026-07-16 seek-storm tab hang), and tightening either on a hunch is
+how this file fills up. `quantizeToFrameGrid(t, "nearest" | "current")` now owns both grids: a SCRUB
+takes the frame nearest the pointer (unchanged), a STOP takes `floor(t·fps)` — the frame that was on
+screen, since rounding parks on a frame the user never saw. `parkTransportAt` is now the single stop
+authority; the playback effect's `!isPlaying` branch used to park at the COMMITTED clock while the
+spacebar path parked at the LIVE anchor, two authorities that could disagree by a commit interval.
+
+**A/B, same media, same session:** without the fix, parked 3.354700s, off-grid, commit lag 39.9ms. With
+it, parked 4.300000s = frame 129 exactly, and the commit/live split at the stop reads 0.0ms. The gate
+FAILS on the old code and PASSES on the new — a gate never seen to fail is not evidence.
+
+**New instrument: `pnpm --filter @orreris/worker pause:gate`** (`pause-coherence-gate.ts`), plus
+`window.__rfClock` (committed + live at full precision — the on-screen readout is `toFixed(2)`, which
+cannot resolve a frame at 30fps, so nothing outside React could check grid alignment at all).
+
+*It asserts on two axes and refuses to conflate them,* which is v-full-res-rendezvous' lesson applied a
+second time: a pure pixel diff across the pause edge sees the full-res settle (300ms–3s, by design) and
+the time jump in one number and can never separate them. So TIME is asserted with the resolution-blind
+instrument (`__flarexCoherence` staleness, recorded regardless of the hold flag) and pixels are a
+reported artifact, not the bar.
+
+**Residual, named honestly.** Worst staleness during playback measured 79.5ms (2.4 frames) on the
+`[element]` path in one run, 29.3ms in another, 0.0ms in a third — n=3, high variance, freshly-created
+projects. That is a distribution to gather, not a threshold to act on, and Phase 2 (tightening #1/#2)
+is deliberately blocked on it. The pixel axis read 0.000% in every run, which proves LESS than it
+looks: the capture starts after the pause click round-trip, by which time the correction has landed.
+
+**Two blind spots in the new instrument, stated before they mislead someone.** `maxStalenessSeconds`
+excludes `awaitingFrame` sources — a source with NO decode for the requested time has no served time to
+subtract, so it scores 0ms while being the worse state. One run read "0.0ms worst" beside
+`escapeHatches=54/58`; the gate now says so out loud instead of letting the headline read clean. And
+62% escape hatches in a healthy-looking run means **most frames presented during playback are not the
+frame the playhead names** — the barrier is off by design, so this is the policy working as written,
+which is exactly the thing worth deciding about rather than discovering.
+
+*Rule: when a correction is visible, suspect the state it corrects, not the correction.* Four separate
+rounds treated the pause snap as the bug and bounded it; it is a symptom of a playback model that
+presents frames the playhead does not name. Bounding a lie makes it smaller, not true.
+
+**Open, and requiring a decision rather than more code:** #1 and #2 cannot be removed by moving the
+playhead — the pixels are stale relative to ANY transport time. Real-time playback off a
+seek-on-demand decoder is structurally offset (request T, decode 100ms, present at T+100ms). The escape
+is read-ahead into a presentation queue so lag degrades into DROPPED frames (correct time, judder)
+instead of OFFSET frames (smooth, wrong time) — which is what Premiere and Resolve actually do, and it
+would retire `tolerateLag` entirely. That is an ADR, not a patch.
+
+## v33d — the residual, measured: p50 ≈ 4 frames, tail ≈ 20 (2026-07-29)
+
+**Supersedes v32y's residual estimate.** That entry reported n=3, "79.5 / 29.3 / 0.0 ms, high variance,
+a distribution to gather". It was gathered. The gate now runs N play→pause cycles in ONE warm session
+(`PAUSE_GATE_CYCLES`), walking the timeline so each cycle samples different material instead of
+replaying one warm second.
+
+Two independent runs, different media, 16 cycles each, same box, same session shape:
+
+| | p50 | p90 | max | hatches |
+|---|---|---|---|---|
+| 26MB source | 163.6ms (**4.9f**) | 407.0ms (12.2f) | 527.7ms (15.8f) | 71% |
+| 107MB source | 128.1ms (**3.8f**) | 348.1ms (10.4f) | 684.6ms (20.5f) | 65% |
+
+**The founder's "5-6 frames… or 3-4, I can't exactly tell you" is the p50, and the reason it could not
+be pinned is the spread.** Both runs agree to within a frame at the median and disagree by 5 frames at
+the tail, which is the shape of a stall distribution, not a constant offset. 32/32 parks landed on the
+frame grid (unambiguously 30fps), and the parked commit/live split read 0.0ms every single cycle — the
+v32y fix holds across the timeline, on both sources, warm and cold.
+
+**The offender is the ELEMENT path in both runs, and the tail exceeds every documented bound.** 527ms
+and 684ms are past `WC_HOLD_LAG_S` (350ms) and 3–4× the element corrector's 0.15s threshold. That is
+not a contradiction, it is the mechanism: **0.15s is not a bound on drift, it is a bound on drift AT
+SAMPLE TIME.** The corrector is a 500ms `setInterval`; between samples nothing bounds anything, so a
+single ~0.5s decode stall lands whole and is only clipped at the next tick. A threshold sampled at 2Hz
+cannot bound a transient shorter than its own period.
+
+*Caveat that decides what this data can be used for:* both runs were freshly uploaded originals with
+**no ingest proxy built yet**, so `preferNativeDecode` was true and the host sat on `<video>` (the
+v32x configuration). This characterises the ELEMENT path. The WC path — where `WC_HOLD_LAG_S` is the
+actual governor — is NOT characterised by these numbers, and a project whose proxies exist may sit in a
+different regime entirely. `PROBE_EDITOR_URL` points the gate at a real project for exactly that.
+
+**Gate semantics split, deliberately.** GRID fails hard forever (it guards what shipped). TIME is
+advisory by default with a banner, `PAUSE_GATE_STRICT=1` to enforce. Failing the whole run on a
+residual we knowingly deferred would conflate "you regressed" with "the known baseline is still there",
+and would make the gate useless for catching a GRID regression in the meantime. Flip the default when
+Phase 2 lands.
+
+**Three bugs in the instrument, found by using it — worth recording because each one flattered the
+result.** (1) `gridFps` returned the FIRST matching rate, and 3.500000s sits on the 24, 25, 30, 50 and
+60fps grids at once — it reported 24fps and converted 156ms into "3.8 frames" when the honest answer
+was 4.7. Fixed by intersecting candidate sets ACROSS cycles; only the true rate divides every park.
+(2) The pixel phase clicked Pause after playback had already auto-stopped at the composition end, and
+waited out a 30s timeout on a transport that was already parked. (3) A fixed 6s wait for the upload
+metadata probe was enough for 26MB and not for 107MB, surfacing 40s later as an unexplained navigation
+timeout. All three are the same error: *guessing at a state instead of waiting for it.*
+
+*Rule: an instrument's first job is to fail. Three runs that all passed said nothing; the run that
+resolved 32 cycles said the median is 4 frames and the tail is 20.*
+
+## v33e — Phase 2: faster detection buys the BODY and costs the TAIL (2026-07-29)
+
+**Change.** The element drift corrector (`VideoPreview.tsx`) did detection and correction on one
+500ms `setInterval`, so its 0.15s threshold was only ever a bound on drift AT SAMPLE TIME (v32z).
+Split them: SAMPLE at 100ms (`video.currentTime` is a free numeric read, no decoder involvement),
+SEEK no more often than every 500ms (`MIN_CORRECTION_INTERVAL_MS` — the old rate, now explicit
+instead of inherited from the sample period). The 0.15s trigger is UNCHANGED: v32z measured p50
+drift sitting right on it, so it is exercised bound, not headroom. Telemetry `__rfDriftCorrections`.
+
+**Measured, before → after, worst staleness per cycle:**
+
+| source | p50 | p90 | max |
+|---|---|---|---|
+| 26MB (n=16) | 163.6 → **124.6** | 407.0 → **345.3** | 527.7 → **387.2** |
+| 107MB (n=16) | 128.1 → **91.9** | 348.1 → **192.7** | 684.6 → *878.8* |
+| 107MB (n=32, ×2) | → 107 / 149.7 | → 207 / **209.1** | → *939 / 751.7* |
+
+**The body improved and the tail got worse, and both are reproducible.** p90 on the heavy source fell
+from 348ms to ~200ms across THREE post-change runs (193/207/209 — tight), and p50 improved or held on
+both sources. But the heavy source's max went 685 → 752/879/939 across those same three runs. That is
+not one noisy extreme; it is consistent.
+
+**Why, and it is the interesting part.** `__rfDriftCorrections` says the corrector is nowhere near
+seek-storming: **0.09–0.21 seeks/sec** over 48–96s windows, with the min-interval floor refusing 0–10.
+So the change did NOT add seek pressure — the 2026-07-16 tab-hang failure mode is not in play. But the
+corrector also reports the worst drift it SAW at 790–981ms, i.e. it watched drift an order of magnitude
+past its own threshold without acting on it, because the effect returns early on
+`video.seeking || readyState < 2` — **it is blind exactly while a correction is in flight, and a seek
+on a heavy long-GOP original takes a long time to land.** Detect sooner ⇒ seek sooner ⇒ more time
+inside blind windows on the material where seeks are slowest. We bought the body with the tail.
+
+*Rule: a corrective seek is not free feedback — it is a blind interval whose length scales with the
+media it is correcting.* Sampling faster improves anything the corrector can fix quickly and worsens
+anything it cannot, so on hard sources faster detection is a tail RISK, not a tail fix.
+
+**This is Phase 3's argument, arrived at empirically rather than by reasoning.** Seeking is the wrong
+correction primitive for staying aligned during playback: every correction costs a blind window
+proportional to decode difficulty. Read-ahead into a presentation queue removes the need to correct at
+all, and it is the only thing that can take the tail down. `WC_HOLD_LAG_S` was NOT touched — v32z's
+data characterises the element path only, and there is still no WC-path measurement to justify moving
+it.
+
+**Kept, not reverted, and the trade stated plainly:** the typical pause (p50/p90 — what the founder
+actually reported) is meaningfully better on both sources; the rare worst case on heavy originals is
+worse. Reverting is a two-constant change if that trade is judged wrong.
+## v33f — S0 built; the verdict is DEFICIT and it does not yet decide anything (2026-07-29)
+
+**Built** `apps/web/src/playback/readahead-probe.ts` — slice S0 of `plans/preview-readahead-ring.md`,
+whose own gate reads: *"if headroom is already negative on the founder's machine, a ring buys
+ordering, not smoothness, and that changes the pitch."* Inert unless `?previewRing=probe`.
+
+**Hooked at the COMPOSITE, not at `getFrame`, and that choice was load-bearing.** The obvious seam is
+`requestWcFrame`'s completion — but v33d found the editor's host clip on the `element` path the whole
+time (fresh original, no ingest proxy, `preferNativeDecode` wins). Instrumenting `getFrame` would have
+measured an empty seam and reported a confident zero. `ScenePreviewMediaSnapshot` is the one layer
+where both decode paths look alike, so `frameVersion` advancing IS a frame delivered, whoever decoded
+it. Verified rather than assumed: on the element path rvfc → `drawVideoFrame` → `publishSceneFrame`
+bumps the version once per presented frame.
+
+**Measured (headed, 107MB original):** delivered **6.8/s** against demand **48/s** → headroom
+**−41/s**, worst lead −0.939s, 69% empty reads. Lead is ≤0 by construction in a pull design — nothing
+is decoded before it is asked for — and making it positive is the ring's entire purpose, so that is
+the right before-picture even though the number is trivially signed.
+
+**HEADLESS WAS INFLATING EVERYTHING, including v33d and v33e.** Playwright launches headless by
+default and headless Chrome has no GPU, therefore no hardware video decode. Same source, same cycles:
+headless delivered 3.9/s and p50 135ms; headed delivered **6.8/s** and p50 **83ms**. Nearly double the
+delivery and nearly half the staleness. Every figure published in v33d/v33e was taken headless and
+**overstates the real problem** — `PAUSE_GATE_HEADED=1` added, and those runs need repeating before
+anyone quotes them. Third instrument-trust failure in this sequence, and the same shape as the
+`react-dom.development` one: *verify the harness is the thing you think it is before believing its
+output.*
+
+**The verdict does not decide anything yet, and saying otherwise would be the real error.** DEFICIT
+was measured on a freshly uploaded original with **no ingest proxy** — the exact configuration v32x
+already concluded "will not be real time even on hardware". Real projects run on proxies. So S0
+currently says *"a ring cannot fill on unproxied originals"*, which nobody doubted, and it says
+nothing about the steady state. **S1 is NOT justified by this run.** What would justify it: S0 on
+proxied media, and S0 on a Flarex comp (the `tolerateLag`/WC half, still uncharacterised).
+
+*Rule: a gate slice that returns the answer you could have predicted has not run yet — it has run on
+the wrong input.*
+
+D1 (byte budget), D2 (thread), D3 (ownership) remain open founder decisions per the plan §3; nothing
+has been built that presumes any of them. Live checklist: `PAUSE_COHERENCE_TODO.md`.
+
+## v33g — S0 on the PROXIED/WC path: the premise is closer than the element runs suggested (2026-07-29)
+
+**The run v33f said was missing.** `PAUSE_GATE_WAIT_PROXY=1` waits for the decode path to leave
+`element` (polling `__rfSourceMap`, nudging with a paused seek because proxy builds suspend during
+playback), so the gate finally measured the STEADY STATE instead of the import. Source came up
+`wc-hw` — the first WebCodecs-path measurement in this whole sequence.
+
+**Proxied/WC vs unproxied/element, same media, headed:**
+
+| | element (no proxy) | **wc-hw (proxied)** |
+|---|---|---|
+| empty reads | 69–79% | **6%** |
+| escape hatches | 59–88% | **10%** |
+| delivered | 3.9–6.8/s | **21.3/s** |
+| staleness p50 | 83–135ms | 190.7ms |
+| p90 / max | 574 / 939ms | **292 / 292ms** |
+| element corrector | 0.28–0.40 seeks/s | **0** (correctly — not that path) |
+
+**Two things flip at once, and they point opposite ways.** Coherence transforms: empty reads collapse
+from ~70% to 6%, hatches from ~88% to 10%, and the tail from 939ms to 292ms — the alarming figures in
+v33d/v33e were substantially a measurement of *unproxied originals*, not of the product as used.
+But p50 staleness gets WORSE (83–135 → 190.7ms), and the tail, while far tighter, still sits at 8.8
+frames. A proxied source is far more CONSISTENT and not obviously more current.
+
+**A flaw in my own probe, stated because it changes the verdict's magnitude.** `demandFps` is the
+COMPOSITE rate (40.5/s), but a 30fps source can never deliver more than 30 new frames/sec — the extra
+composites redraw a frame that is still correct. So headroom against composite rate overstates the
+deficit: 21.3 vs 40.5 reads −19.2/s, while the honest shortfall against the source's own 30fps ceiling
+is **−8.7/s**. Still negative, so the verdict does not flip — but "can't keep up by a factor of two"
+and "delivers 21 of a possible 30" are different claims, and only the second is true. Carrying nominal
+fps onto the snapshot would make this exact; documented in `SourceHeadroom.demandFps` as the follow-up.
+
+**Verdict, honestly: still DEFICIT, but narrowly, and on one source.** A ring cannot fill from a source
+already 8.7fps short of its own ceiling — it would inherit the deficit. What a ring would still buy is
+what v33f said: ORDERING and BOUNDED failure, which the 6% empty-read figure suggests is a smaller
+prize on proxied media than the element numbers implied. **S1 is still not justified**, and the reason
+has moved: not "the decoders are hopeless" but "on the configuration users actually run, the pull path
+is already at 90% coherence and the remaining 10% is a decode shortfall a ring cannot manufacture
+frames to cover."
+
+*Rule: measure the configuration users run before designing for the one they don't.* Four rounds of
+alarming numbers came from freshly imported unproxied originals — a state that exists for seconds.
+
+**Not yet measured, and the last real gap:** a Flarex comp (multi-source, `tolerateLag`, where
+`WC_HOLD_LAG_S` actually governs and lag is presented unbounded). One source on `wc-hw` is not the
+contention case the ring plan was written for.
+
+Instrument note: `worstLead −13.5s` in that run is an artifact — the probe accumulates across the
+proxy-wait phase, whose seeks are legitimate transport jumps, not decode deficits. Reset the probe
+after the wait before reading lead.
+
+## v33h — the S0 verdict flipped twice before the instrument was right (2026-07-29)
+
+**Do not read v33f/v33g's headroom figures. They were wrong in two independent ways**, and the
+sequence is worth keeping because each error looked like a result:
+
+| # | delivery counted as | demand measured as | verdict |
+|---|---|---|---|
+| 1 (v33f/g) | publishes | composite rate | −19.2/s DEFICIT |
+| 2 | publishes | min(composite, source fps) | **+13.5/s SURPLUS** |
+| 3 (this) | distinct frames on the source grid | min(composite, source fps) | **−9.9/s DEFICIT** |
+
+**Reading 2 is the instructive one: it flipped the plan's gate to GO on a number that was impossible
+on its face** — 43.5 delivered/s from a 30fps source. Nothing can deliver more frames than it has.
+
+**Error A — demand was the COMPOSITE rate.** The compositor runs at ~57/s; a 30fps source cannot
+deliver more than 30 distinct frames/sec no matter how often it is asked, and the composites in
+between redraw a frame that is still correct. Fixed by carrying `nominalFps` onto
+`ScenePreviewMediaSnapshot` and capping demand at `min(composite, source fps)`.
+
+**Error B — delivery was PUBLISHES, not frames.** `frameVersion` increments on every publish, and the
+WC path republishes on each completed request including ones that returned the frame it already held.
+Carrying `servedSourceTime` fixed only half of it: that value is stamped `sourceTime - lag`, and both
+terms drift continuously, so the same decoded frame reports a slightly different served time every
+republish — still 39.1/s. Only bucketing the served time to the source's own frame grid (`round(t ·
+fps)`) made "a different frame" mean a different FRAME.
+
+**Error C — `worstLead` was measuring the ruler, not the decoder.** It read −13.4s, which was the
+gate's own Home keypress: rewind 13s and every source is instantly "13s behind" with no decoder at
+fault. Gating the jump composite alone did nothing (the source stays legitimately behind for many
+composites while it re-decodes, and none of THOSE are jumps), so the lead statistic is now suppressed
+for a 1.5s settling window after any transport discontinuity.
+
+**The corrected reading, and why it is believable this time.** Proxied `wc-hw`, headed, n=12:
+delivered **20.1/s** against a **30/s** ceiling → **−9.9/s DEFICIT**; empty reads 5%, hatches 11%,
+staleness p50 193ms / p90 250ms / max 305ms. Two independent sanity checks now pass that failed
+before: delivered ≤ nominal fps, and `worstLead` (−0.305s) equals `max staleness` (305.4ms) exactly —
+two quantities computed by different code paths agreeing to the millisecond.
+
+**Verdict: DEFICIT, and S1 is still not justified.** The source delivers 20 of a possible 30 frames
+per second on the configuration users actually run. A ring cannot manufacture the missing 10 — it
+would inherit the shortfall. What it would still buy is ORDERING and BOUNDED failure, and at 5% empty
+reads that prize is smaller than the element-path numbers implied.
+
+*Rule: a verdict that flips when you fix the instrument was never a verdict. Sanity-check the
+measurement against physics — "delivered > source fps" is impossible, and it sat in the output for
+two rounds being read as good news.*
+
+## Phase-0 baseline — the first measured coherence numbers (2026-08-01)
+Captured on a real multi-source Flarex project (smoke.mp4 + subject, Channel Boolean → Merge → MediaOut)
+with `?kernelDiagnostics=1`, via the ADR-012 S0.3 ledger and S0.2 degradation channel. **These are the
+numbers every later slice is compared against — do not re-baseline without saying so.**
+
+    __rfPresentLedger    presented 1575 · coherent 1398 · incoherent 177
+                         incoherenceRate      0.1124      ← 1 present in 9 disagrees
+                         worstPresentedStaleness 0.183s   ← 5.5 frames @30fps
+                         nonMonotonicPresents 0           ← I-2 already holds
+                         holdRate 0.0187 · held-coherence 30 · held-not-ready 0
+    __rfFlarexDegradation substitutedTotal 27 across 2 nodes
+
+**What the shape says, beyond the headline rate:**
+- `held-not-ready: 0` — the not-ready gate NEVER fired. Every hold was a coherence hold, and those are
+  paused-only by design. So during playback nothing is withheld at all: the 177 incoherent presents ARE
+  `tolerateLag`, finally measured rather than argued about. This is exactly what S4.6 replaces, and the
+  bar it has to beat is 11.24% → ~0 in BOTH transport states.
+- `nonMonotonicPresents: 0` is a genuinely useful negative: I-2 needs no repair, so S4.6 can be judged
+  purely on coherence without also having to prove it did not introduce reordering.
+- 183ms worst-case is well past the point a viewer reads it as "that layer arrived late", which is the
+  reported symptom this whole programme started from.
+- `substitutedTotal: 27` on 2 nodes confirms the host-clip fallback fires in ordinary use — S4.5 is
+  deleting a live construct, not a theoretical one.
+
+**Method note:** the ledger classifies from the stale set itself rather than trusting the caller, and
+records holds alongside presents, so a future "improvement" that reaches coherence by simply withholding
+more frames is visible as a rising `holdRate` instead of hiding inside a falling `incoherenceRate`.
+
+### Baseline correction + causal chain, second capture (2026-08-01)
+A longer session materially changed one conclusion and demonstrated the sink's main design goal.
+
+**CORRECTION — paused incoherence is NOT negligible.** The first 20s capture read 103
+`incoherent-present-playing` vs **1** paused, which read as "paused is already coherent". At session
+length it is 1918 playing vs **508 paused**. The earlier reading was a short-sample artifact. Cause is
+known and expected: the coherence barrier ships OFF (`?flarexCoherence=1`) because the 2026-07-28 soak
+found sources routinely fail to converge inside the 1.5s budget, so a stale paused frame is simply
+presented. **S4.6 must move both transport states**, and the paused half cannot be assumed solved.
+
+**Causal chain, visible for the first time.** Two degradation rows, same node-comp, same count (51),
+same `firstAt` to 0.1ms:
+
+    source-ended    node n_msaigz2p_ojcl   count 51   firstAt 534478.3
+    input-missing   node n_msaiha2g_c7yb   count 51   firstAt 534478.3
+
+The smoke MediaIn (16s asset) ran past its own duration inside a longer comp and produced nothing; the
+node downstream reported a missing input. That is the DESIGNED soft-degrade for a short clip in a long
+comp — correct behaviour, and the first time the cause and its consequence have been joinable at all.
+Exactly the join the audit had to do by hand across four keying schemes.
+
+**Reviewer note:** `input-missing` is a CONSEQUENCE here, not an independent fact. A reader scanning
+the summary could chase the downstream node when the cause is the source ending. Degradations do not
+carry causality today; adding it is a real improvement and deliberately out of scope — noted so nobody
+mistakes the derived row for a second bug.
