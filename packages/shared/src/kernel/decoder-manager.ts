@@ -202,6 +202,148 @@ export function releaseDecoderHold(session: RuntimeSession, key: string): void {
   session.state.set(KEY_HOLDS, next);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Borrow grants — S3.3's observability obligation, and S4.7's evidence base
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The rule by which borrows are granted today, named so a record can say which rule produced it.
+ *
+ * **INHERITED, NOT ENDORSED.** S3.3 carries the existing predicate over completely unchanged: a borrow
+ * is granted on decode-key identity plus decode-mode compatibility, and on nothing else. S3.3 owns
+ * session *lifetime*. Whether a borrow is *safe* is a different question with a different owner —
+ * ADR-012 §3.11, slice S4.7 — because answering it requires per-source requested times, which are in
+ * §3.11's input set and not in §3.10's. Writing a predicate here would put half of S4.7 inside an
+ * ownership migration whose whole value is being behaviour-neutral.
+ *
+ * The string is carried in every record so that a reader of a soak log can tell "granted by the old
+ * rule" from "granted by a predicate" without diffing the pool.
+ */
+export const BORROW_RULE_INHERITED = "identity-match (INHERITED, not endorsed)";
+
+/**
+ * Why a participant's requested time is missing from a grant record.
+ *
+ * A closed union, because the honest answer to "what time did the joiner want?" is load-bearing and
+ * must not decay into an unexplained `null`.
+ */
+export type BorrowTimeUnavailable =
+  /**
+   * **The interface limitation found by the 2026-08-02 S3.3 audit.** At the instant a borrow is granted
+   * the joining member has not asked for anything: `AcquireOptions` carries priority, decode-mode and
+   * exclusivity but no time, and `SharedMember.requestedTime` is `NaN` until the member's first
+   * `getFrame`. So the pool decides sharing strictly BEFORE it can know whether the two members' times
+   * co-locate.
+   *
+   * This is recorded rather than repaired. Adding a declared time to the acquire interface is a change
+   * S4.7 needs and S3.3 must not make — it would be partial S4.7 logic wearing an instrumentation
+   * costume, and the field would then carry a value the caller invented for the record's benefit. The
+   * record's job is to say what was actually knowable, and this is the finding: under today's
+   * interface, identity-alone is not merely the unguarded choice, it is the ONLY decision available.
+   */
+  | "joiner-has-not-requested-yet";
+
+/** Why the borrow was granted — the match facts, recorded so the grant is explicable without the pool. */
+export interface BorrowGrounds {
+  /** Always true: a non-matching key is not offered. Present so the record is self-describing. */
+  readonly keyMatched: boolean;
+  /** The decode-mode compatibility check that accompanies identity (hardware/software). */
+  readonly softwareCompatible: boolean;
+  readonly joinerSoftware: boolean;
+  readonly incumbentSoftware: boolean;
+}
+
+export interface BorrowGrant {
+  /** The decode key (media URL + decode mode) both participants share. */
+  readonly key: string;
+  /** What the JOINER declared it will ask for. Always null today — see {@link BorrowTimeUnavailable}. */
+  readonly joinerTime: number | null;
+  /** Why {@link joinerTime} is null, or null when a time was genuinely supplied. */
+  readonly joinerTimeUnavailable: BorrowTimeUnavailable | null;
+  /**
+   * What the INCUMBENT members are asking for at the moment of the grant. Non-finite entries are
+   * dropped rather than coerced: a member that has not yet requested contributes no evidence, and a
+   * zero in its place would be a fabricated data point in the census S4.7 is designed against.
+   */
+  readonly incumbentTimes: readonly number[];
+  /** Incumbent members present, including those with no known time. `incumbentTimes.length` ≤ this. */
+  readonly incumbentCount: number;
+  readonly joinerPriority: string;
+  readonly incumbentPriority: string;
+  readonly grounds: BorrowGrounds;
+  /** Always {@link BORROW_RULE_INHERITED} while S4.7 is unwritten. */
+  readonly rule: string;
+}
+
+const KEY_BORROWS = "decoder.borrows";
+/**
+ * Bounded. This is a census, not a journal — an unbounded one would be a memory leak inside the module
+ * whose subject is memory leaks, and the questions asked of it ("does a preload ever join a serving
+ * session?") are answered by a sample, not by an exhaustive history.
+ */
+const MAX_BORROW_RECORDS = 64;
+
+/**
+ * Record that a session was BORROWED. **Records; does not judge.**
+ *
+ * WHY THIS IS S3.3's JOB. The revised *done when* asks S3.3 for "every borrow grant recorded with both
+ * participants' requested times", and that ordering is deliberate: a satisfaction predicate written
+ * before anyone has measured which borrows actually occur would be a guess with a flag on it. The
+ * 2026-08-02 finding — a preload source joining a *serving* session at `capMisses: 0`, costing the
+ * on-screen clip two hardware resets and ~295ms of supply 1.2s before a cut — was a single observation
+ * on a single fixture. This turns it into a census, across whatever topologies a soak happens to reach.
+ *
+ * It changes nothing. No caller consults it, no allocation happens on a non-borrow path, and the
+ * predicate that produced the grant is untouched upstream.
+ */
+export function noteBorrowGrant(
+  session: RuntimeSession,
+  grant: {
+    key: string;
+    incumbentTimes: readonly number[];
+    incumbentCount: number;
+    joinerPriority: string;
+    incumbentPriority: string;
+    grounds: BorrowGrounds;
+  }
+): void {
+  const record: BorrowGrant = {
+    key: grant.key,
+    // Not inferred, not defaulted, not back-filled from the incumbent. See BorrowTimeUnavailable.
+    joinerTime: null,
+    joinerTimeUnavailable: "joiner-has-not-requested-yet",
+    incumbentTimes: grant.incumbentTimes.filter((time) => Number.isFinite(time)),
+    incumbentCount: grant.incumbentCount,
+    joinerPriority: grant.joinerPriority,
+    incumbentPriority: grant.incumbentPriority,
+    grounds: grant.grounds,
+    rule: BORROW_RULE_INHERITED,
+  };
+  const prev = session.state.get<readonly BorrowGrant[]>(KEY_BORROWS, []);
+  session.state.set(KEY_BORROWS, prev.length >= MAX_BORROW_RECORDS ? [...prev.slice(1), record] : [...prev, record]);
+  kernelDiagnostics.record({
+    kind: "transition",
+    severity: "info",
+    // Same subject the rest of this module uses for sessions — a borrow is a decode-session event, and
+    // giving it a private subject kind would split the decoder's diagnostics across two identities.
+    subject: { kind: "resource", resourceKind: "decode-session" },
+    reason: "borrow-granted",
+    detail: {
+      rule: BORROW_RULE_INHERITED,
+      joinerPriority: grant.joinerPriority,
+      incumbentPriority: grant.incumbentPriority,
+      incumbentCount: grant.incumbentCount,
+      joinerTime: null,
+      joinerTimeUnavailable: "joiner-has-not-requested-yet",
+    },
+  });
+}
+
+/** Every borrow this session has granted, oldest first (bounded). Query-path only — allocates. */
+export function borrowGrants(session: RuntimeSession): readonly BorrowGrant[] {
+  return session.state.get<readonly BorrowGrant[]>(KEY_BORROWS, []);
+}
+
 /** The host opened a real session for `key`. Counted, because a key may be opened more than once
  *  (an `exclusive` retimed loader deliberately refuses to share the host's session). */
 export function noteDecoderSessionOpened(session: RuntimeSession, key: string): void {
@@ -270,6 +412,16 @@ export interface DecoderLedger {
   readonly unmet: readonly string[];
   /** Bindings whose source has left the declared set. These are what `orphaned` is usually named by. */
   readonly staleBindings: readonly string[];
+  /**
+   * Borrows granted, oldest first (bounded). **Observability only** — nothing consults this to make a
+   * decision, and S4.7 is the slice that will.
+   *
+   * On the ledger rather than behind a separate accessor because a borrow is a statement about session
+   * lifetime — the incumbent's session now outlives the joiner's independent need for one — and reading
+   * it beside `open`/`orphaned`/`unmet` is what lets "session count is a function of admission alone" be
+   * checked against the sessions that were never allocated because they were borrowed instead.
+   */
+  readonly borrows: readonly BorrowGrant[];
 }
 
 /**
@@ -298,6 +450,7 @@ export function decoderLedger(session: RuntimeSession): DecoderLedger {
     staleBindings: Object.keys(bindings(session))
       .filter((sourceId) => !declared.has(sourceId))
       .sort(),
+    borrows: borrowGrants(session),
   };
 }
 

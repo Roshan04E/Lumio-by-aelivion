@@ -47,6 +47,8 @@ import {
   demoteMediaSources,
   holdDecoderSession,
   isMediaSourceDemoted,
+  noteBorrowGrant,
+  BORROW_RULE_INHERITED,
   releaseDecoderHold,
   DECODER_RETENTION_MS,
   bindDecoderSource,
@@ -1217,6 +1219,75 @@ console.log("\nS3.5 — proxy substitution as demotion, not deletion (I-16/I-24)
   session.dispose();
   kernelDiagnostics.enabled = wasEnabled;
   kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S3.3 (revised) — borrow grants are RECORDED, and the rule stays inherited
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS3.3 (revised) — borrow observability, no borrow predicate (I-29)");
+{
+  const session = createRuntimeSession({ id: "conformance-borrow" });
+  const KEY = "https://example.test/shared.mp4#hw";
+
+  enforced("I-29", "a session that has granted no borrows reports none", decoderLedger(session).borrows.length === 0);
+
+  noteBorrowGrant(session, {
+    key: KEY,
+    incumbentTimes: [4.5, Number.NaN],
+    incumbentCount: 2,
+    joinerPriority: "preload",
+    incumbentPriority: "playhead",
+    grounds: { keyMatched: true, softwareCompatible: true, joinerSoftware: false, incumbentSoftware: false },
+  });
+  const [grant] = decoderLedger(session).borrows;
+
+  enforced("I-29", "the grant is on the ledger, beside the sessions it explains", grant !== undefined);
+  enforced("I-29", "…carrying the key both participants share", grant?.key === KEY);
+  enforced("I-29", "…and BOTH priorities, which is what makes preload-joins-playhead findable",
+    grant?.joinerPriority === "preload" && grant?.incumbentPriority === "playhead");
+
+  // The honesty clause. A joiner has not requested anything at grant time, and the record must SAY that
+  // rather than default to 0, copy the incumbent, or leave an unexplained null. A fabricated time here
+  // would corrupt the very census S4.7's predicate is supposed to be derived from.
+  enforced("I-29", "the joiner's time is null — it has not asked for anything yet", grant?.joinerTime === null);
+  enforced("I-29", "…and the record NAMES why, rather than leaving an unexplained null",
+    grant?.joinerTimeUnavailable === "joiner-has-not-requested-yet");
+
+  // Unknown incumbent times are dropped, not coerced — same reason.
+  enforced("I-29", "unknown incumbent times are omitted, never coerced to a number",
+    grant?.incumbentTimes.length === 1 && grant.incumbentTimes[0] === 4.5);
+  enforced("I-29", "…while the member COUNT still reports the ones with no known time",
+    grant?.incumbentCount === 2);
+
+  enforced("I-29", "the grounds explain why the borrow was offered", grant?.grounds.keyMatched === true);
+
+  // THE BOUNDARY. S3.3 records; S4.7 decides. A rule string that ever stops saying INHERITED means a
+  // predicate has been written, and this assertion is what makes that impossible to do quietly.
+  enforced("I-29", "every grant is stamped with the INHERITED rule — S4.7 owns the decision",
+    grant?.rule === BORROW_RULE_INHERITED && /INHERITED, not endorsed/.test(BORROW_RULE_INHERITED));
+
+  // Bounded: a census, not a journal.
+  for (let i = 0; i < 80; i++) {
+    noteBorrowGrant(session, {
+      key: `${KEY}/${i}`,
+      incumbentTimes: [],
+      incumbentCount: 1,
+      joinerPriority: "playhead",
+      incumbentPriority: "playhead",
+      grounds: { keyMatched: true, softwareCompatible: true, joinerSoftware: true, incumbentSoftware: true },
+    });
+  }
+  const bounded = decoderLedger(session).borrows;
+  enforced("I-31", "the borrow record is bounded — an unbounded census is a leak of its own",
+    bounded.length === 64 && bounded[bounded.length - 1]?.key === `${KEY}/79`);
+
+  // And recording changes NOTHING about lifetime: this commit is behaviour-neutral by construction, so
+  // the verdict for a key nobody declared must read exactly as it did before any borrow was recorded.
+  enforced("I-24", "recording a borrow does not make its key required",
+    decoderReleaseVerdict(session, KEY, "lifecycle") === "release");
+
+  session.dispose();
 }
 
 // ---------------------------------------------------------------------------------------------

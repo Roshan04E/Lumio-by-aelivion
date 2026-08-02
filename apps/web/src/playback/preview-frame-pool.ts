@@ -50,6 +50,7 @@
 import {
   DECODER_RETENTION_MS,
   defaultSession,
+  noteBorrowGrant,
   noteDecoderRetentionExpired,
   noteDecoderSessionClosed,
   noteDecoderSessionOpened,
@@ -1076,6 +1077,33 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
         asset: traceAsset(url),
         reason: "explicit",
         note: `shared software=${existing.software} priority=${priority}`,
+      });
+      // S3.3 (revised done-when): RECORD the grant. Do NOT judge it.
+      //
+      // The predicate is `findAttachableSession` above and it is untouched — deciding whether a borrow
+      // is SAFE needs per-source requested times, which are ADR-012 §3.11's input set and therefore
+      // S4.7's slice, not this one. What S3.3 owes is the evidence that slice gets written against, so
+      // the eventual predicate is derived from borrows that actually happened rather than guessed.
+      //
+      // Read AFTER `findAttachableSession` and BEFORE `attachMember`, which is the only instant the two
+      // participants are distinguishable: once attached, the joiner is just another member. The
+      // incumbents' times are whatever they are asking for right now; the joiner's does not exist yet
+      // (see BorrowTimeUnavailable) and is recorded as unavailable rather than invented.
+      noteBorrowGrant(defaultSession, {
+        key: url,
+        incumbentTimes: [...existing.members].map((member) => member.requestedTime),
+        incumbentCount: existing.members.size,
+        joinerPriority: priority,
+        // The session's EFFECTIVE priority (`recomputeSessionPriority`: playhead if any member is), not
+        // any one member's. That is the number the 2026-08-02 finding turns on — a `preload` joiner
+        // against a `playhead` incumbent is the shape that cost the on-screen clip its supply.
+        incumbentPriority: existing.record.priority,
+        grounds: {
+          keyMatched: true,
+          softwareCompatible: canAttachToSession(existing.software, software),
+          joinerSoftware: software,
+          incumbentSoftware: existing.software,
+        },
       });
       // No `reserveSession`, no `bumpActive` — the session is already counted, and that is the point.
       return attachMember(existing, options);
