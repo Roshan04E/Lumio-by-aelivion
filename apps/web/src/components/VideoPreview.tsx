@@ -1409,6 +1409,22 @@ function VideoPreviewImpl({
    * performance win is preserved because a suspended loader's output is not consumed anyway — while the
    * proxy serves, the compiler is short-circuited and nothing reads these sources.
    */
+  /**
+   * Last LIVE time each virtual loader was fed, so a suspended one can be fed a frozen one (S3.5, soak
+   * 2026-08-02).
+   *
+   * A demoted loader kept receiving the playhead, and a prop that changes 60×/s is not free even when
+   * every consumer of it early-returns: it re-renders the whole `PreviewLayer` → `WebglMediaLayer`
+   * subtree per frame per suspended source, and — now that `effectivePlaying` is false — it drives the
+   * PAUSED-path `syncVideoTime` effect, i.e. one `currentTime` write per frame on a video element. This
+   * file's own history says that is the decoder-flush seek storm (2026-07-16 hang), so demotion must not
+   * quietly reintroduce it on the loaders it just paused.
+   *
+   * Written during render on purpose: it is a pure cache of a value derived from this render's props, so
+   * it is idempotent under a double-render and needs no effect to stay correct. Keyed by loader id and
+   * bounded by the comps in the project.
+   */
+  const suspendedLoaderTimesRef = useRef(new Map<string, number>());
   const proxySuspendedSourceIds = useMemo(() => {
     if (proxyServedCompIds.length === 0) return EMPTY_SOURCE_ID_SET;
     const served = new Set(proxyServedCompIds);
@@ -2108,10 +2124,16 @@ function VideoPreviewImpl({
                         ? vlayer.startSeconds + Math.max(0, srcDur - sourceIn) - 1 / 240
                         : Infinity;
                     const vTime = Math.min(currentTime, holdEnd);
+                    // A demoted loader holds the moment it was demoted at, rather than tracking a playhead
+                    // it is not rendering against. See suspendedLoaderTimesRef.
+                    const isSuspended = proxySuspendedSourceIds.has(vlayer.id);
+                    const heldTimes = suspendedLoaderTimesRef.current;
+                    if (!isSuspended) heldTimes.set(vlayer.id, vTime);
+                    const loaderTime = isSuspended ? heldTimes.get(vlayer.id) ?? vTime : vTime;
                     return (
                     <PreviewLayer
                       key={vlayer.id}
-                      currentTime={vTime}
+                      currentTime={loaderTime}
                       isPlaying={isPlaying}
                       layer={vlayer}
                       pending={false}
@@ -2125,7 +2147,7 @@ function VideoPreviewImpl({
                       // DEMOTED while this comp's proxy is serving (S3.5). The loader stays mounted and
                       // keeps its session; it just stops pulling. Always `false` on the legacy path,
                       // where a served comp's loaders are not in this list at all.
-                      suspended={proxySuspendedSourceIds.has(vlayer.id)}
+                      suspended={isSuspended}
                       bakeOpacity={false}
                       onGradedFrame={
                         singleCtxPreview
@@ -2532,7 +2554,13 @@ const PreviewLayer = memo(function PreviewLayer({
   // decodes so the viewer never shows black (start, cut, or seek). Captured once, cached.
   const videoPoster = useVideoPoster(isVideo ? mediaUrl : undefined, layer.sourceInSeconds ?? 0);
   // A pending layer is only mounted to pre-seek; it must never actually play.
-  const effectivePlaying = isPlaying && !pending;
+  //
+  // A SUSPENDED layer is the same category (S3.5, soak 2026-08-02): mounted, holding its session and its
+  // last frame, not producing. Without this it was the single biggest cost of the demotion path — the
+  // <video> element free-ran at full rate decoding every frame of a source the compiler is short-circuited
+  // past, so a proxied comp paid for its proxy AND for N live element decodes. That is the 75→35-40fps the
+  // delete-filter was papering over, and demotion has to actually remove it rather than rename it.
+  const effectivePlaying = isPlaying && !pending && !suspended;
   const [transformHud, setTransformHud] = useState<PreviewTransformHud | null>(null);
   const transformHudTimerRef = useRef<number | null>(null);
 

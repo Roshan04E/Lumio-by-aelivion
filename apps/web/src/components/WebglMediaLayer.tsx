@@ -1590,6 +1590,12 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       const STRICT_SYNC_DRIFT_S = 0.05; // ~1.5 frames at 30fps — below this the ghost isn't visible
       const STRICT_SYNC_MIN_INTERVAL_MS = 700; // gentle: at most ~1 corrective seek/sec while drifting
       const interval = window.setInterval(() => {
+        // SUSPENDED (S3.5, soak 2026-08-02): every branch below exists to make a source that SHOULD be
+        // producing produce again — so on a demoted loader every one of them is a false positive, and
+        // two of them (`video.play()`, `drawVideoFrameRef`) actively undo the suspension 2×/second.
+        // "Frozen" is the declared state here, not a fault; healing it is the watchdog disagreeing with
+        // the Media Manager about whether this source is meant to be pulling (I-29).
+        if (suspendedRef.current) return;
         const tp = wcTimeRef.current;
         const nowMs = performance.now();
         const expected = mapSourceTime(tp);
@@ -1723,6 +1729,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     useEffect(() => {
       if (mediaType !== "video") return undefined;
       const reprime = () => {
+        // A demoted loader is not what coverage-exit reveals — the proxy overlay it sits under is a
+        // DIFFERENT surface. Repriming it would resume decode and (element path) restart playback for a
+        // source nothing reads. Resumption is driven by the `suspended` prop flipping, which re-arms both
+        // paths on its own; this signal must not be a second, unsynchronised way back in (S3.5).
+        if (suspendedRef.current) return;
         const tp = wcTimeRef.current;
         const provider = wcProviderRef.current;
         if (provider) {
