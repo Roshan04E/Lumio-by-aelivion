@@ -417,7 +417,126 @@ async function run(): Promise<void> {
   }
 }
 
+
+// ── 8. S4.7 — session satisfaction: a borrow must not degrade the service it joins ─────────────
+//
+// The pure predicate is asserted in kernel:conform. What can only be asserted HERE is that the pool
+// actually consults it, and — the half that matters most — that the case sharing was BUILT for still
+// shares. A slice that prevents the harm by preventing all sharing has not solved anything.
+//
+// The flag reads `window`, which node does not have, so it is stubbed for this section only. Every
+// other flag in this file resolves through the same reader, so the stub supplies a full location and a
+// null localStorage: each falls through to its own default exactly as it does with no window at all.
+async function runSatisfaction(): Promise<void> {
+  const priorWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    location: { search: "?kernelSessionSatisfaction=1" },
+    localStorage: null,
+  };
+  try {
+    // 8a. THE CASE SHARING EXISTS FOR — one file, host clip and comp MediaIn, same moment. Must share.
+    {
+      const URL_DUP = "blob:s47-duplicate.mp4";
+      const before = getWcPoolStats();
+      const host = acquirePreviewFrameProvider(URL_DUP, { priority: "playhead", requestedTime: 5.0 });
+      await host!.ready;
+      await (await host!.ready)!.getFrame(5.0); // the incumbent is now genuinely SERVING 5.0
+      const loader = acquirePreviewFrameProvider(URL_DUP, { priority: "playhead", requestedTime: 5.0 });
+      const after = getWcPoolStats();
+      assert(loader != null, "the co-located duplicate still gets a lease");
+      eq(after.shared - before.shared, 1, "…and it is a SHARE — the duplicate-decode win survives S4.7");
+      eq(after.borrowRefusals - before.borrowRefusals, 0, "…refusing it would spend the slot sharing exists to save");
+      loader!.release();
+      host!.release();
+    }
+
+    // 8b. THE MEASURED HARM — a preload joining a SERVING session far away. This is the 2026-08-02
+    // finding: capMisses 0 (spare capacity), yet the borrow cost the on-screen clip two hardware resets
+    // and ~295ms of supply. It must now be refused rather than discovered four bad frames later.
+    {
+      const URL_FAR = "blob:s47-preload-crossing.mp4";
+      const before = getWcPoolStats();
+      const playing = acquirePreviewFrameProvider(URL_FAR, { priority: "playhead", requestedTime: 5.0 });
+      await (await playing!.ready)!.getFrame(5.0);
+      const preload = acquirePreviewFrameProvider(URL_FAR, { priority: "preload", requestedTime: 6.2 });
+      const after = getWcPoolStats();
+      eq(after.shared - before.shared, 0, "a preload 1.2s from a SERVING incumbent does not borrow it");
+      eq(after.borrowRefusals - before.borrowRefusals, 1, "…the refusal is counted, so the cost is visible");
+      eq(after.shareDetaches - before.shareDetaches, 0, "…and no detach was needed: the harm never happened");
+
+      // THE TRADE, asserted rather than assumed. A refused borrow does not become a free session: the
+      // joiner drops through to ordinary admission, and near the cap admission has nothing to give — so
+      // it takes the `<video>` fallback, the same path it already takes when the pool is full. That is
+      // the slice's stated risk made concrete, and the pair of numbers below is how a soak detects it
+      // getting out of hand: refusals that convert into cap misses are sessions sharing used to save.
+      const paidWithACapMiss = preload == null;
+      assert(
+        paidWithACapMiss ? after.capMisses > before.capMisses : preload != null,
+        paidWithACapMiss
+          ? "a refused borrow near the cap costs a cap miss — the documented <video> fallback"
+          : "a refused borrow below the cap gets its own session instead"
+      );
+      preload?.release();
+      playing!.release();
+    }
+
+    // 8c. A SECOND TOPOLOGY, as the slice requires — the reported fixture is the only one measured, and
+    // other routes reach the same identity match. Here an UNRELATED consumer arrives at a session whose
+    // members have not yet requested anything: nothing is being served, so nothing can be degraded.
+    {
+      const URL_COLD = "blob:s47-cold-session.mp4";
+      const before = getWcPoolStats();
+      const first = acquirePreviewFrameProvider(URL_COLD, { priority: "playhead", requestedTime: 1.0 });
+      const second = acquirePreviewFrameProvider(URL_COLD, { priority: "preload", requestedTime: 9.9 });
+      const after = getWcPoolStats();
+      assert(first != null && second != null, "both cold acquisitions get a lease");
+      eq(after.shared - before.shared, 1, "a session nobody has asked anything of yet is joinable at ANY time");
+      await Promise.all([first!.ready, second!.ready]);
+      second!.release();
+      first!.release();
+    }
+
+    // 8d. THE UNDECLARED JOINER. Before S4.7 this was the only reachable state, and granting it is what
+    // the slice removes. A missed call site must lose a share, loudly — never resurrect the defect.
+    {
+      const URL_UND = "blob:s47-undeclared.mp4";
+      const before = getWcPoolStats();
+      const serving = acquirePreviewFrameProvider(URL_UND, { priority: "playhead", requestedTime: 3.0 });
+      await (await serving!.ready)!.getFrame(3.0);
+      const mystery = acquirePreviewFrameProvider(URL_UND, { priority: "playhead" }); // no requestedTime
+      const after = getWcPoolStats();
+      eq(after.shared - before.shared, 0, "a joiner that cannot say what it wants cannot prove it is safe");
+      eq(after.borrowRefusals - before.borrowRefusals, 1, "…and the lost share is recorded, not silent");
+      mystery!.release();
+      serving!.release();
+    }
+  } finally {
+    if (priorWindow === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = priorWindow;
+  }
+
+  // 8e. NON-VACUITY. With the flag OFF the harmful borrow is GRANTED — i.e. the defect still reproduces
+  // and these assertions are measuring the flag, not a coincidence of the stub. `window` is restored to
+  // absent above, so the reader falls back to its OFF default.
+  {
+    const URL_OFF = "blob:s47-flag-off.mp4";
+    const before = getWcPoolStats();
+    const playing = acquirePreviewFrameProvider(URL_OFF, { priority: "playhead", requestedTime: 5.0 });
+    await (await playing!.ready)!.getFrame(5.0);
+    const preload = acquirePreviewFrameProvider(URL_OFF, { priority: "preload", requestedTime: 6.2 });
+    const after = getWcPoolStats();
+    eq(after.shared - before.shared, 1, "FLAG OFF: the harmful borrow is still granted — the defect reproduces");
+    eq(after.borrowRefusals - before.borrowRefusals, 0, "FLAG OFF: nothing is refused — inherited behaviour, exactly");
+    preload!.release();
+    playing!.release();
+  }
+}
+
 await run();
+// AFTER `run()`, deliberately: section 3a asserts on the module-level `providersCreated` counter,
+// and a section that acquires first would make that count read 7 instead of 1 — a real failure caused
+// entirely by test ordering.
+await runSatisfaction();
 
 console.log(`\npreview-frame-pool: ${checks - failures}/${checks} assertions passed`);
 if (failures > 0) {

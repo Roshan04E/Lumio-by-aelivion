@@ -344,6 +344,177 @@ export function borrowGrants(session: RuntimeSession): readonly BorrowGrant[] {
   return session.state.get<readonly BorrowGrant[]>(KEY_BORROWS, []);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Session satisfaction (slice S4.7) — CAN this session serve the new requirement without harming
+// the one it already serves?
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Why a session can or cannot satisfy a requirement. A closed union because every answer is a declared
+ * observable state (I-29): a refusal costs a decode session, and a cost with no stated reason is exactly
+ * the undeclared degradation this slice removes — just pointed the other way.
+ */
+export type SatisfactionReason =
+  /** No incumbent has requested anything yet, so there is no service to degrade. */
+  | "no-incumbent-demand"
+  /** The joiner wants what the session is already serving; one decode feeds both. */
+  | "co-located"
+  /** Granting would make one decoder serve two distinct moments — a seek per member per frame. */
+  | "would-diverge"
+  /** The joiner did not declare what it will ask for, so safety is unprovable. */
+  | "joiner-undeclared";
+
+export interface SatisfactionVerdict {
+  readonly satisfies: boolean;
+  readonly reason: SatisfactionReason;
+  /** Widest distance between the joiner and any incumbent, or null when not computable. */
+  readonly gapSeconds: number | null;
+  /** The tolerance the decision was made against — the caller's, echoed so a log is self-explaining. */
+  readonly toleranceSeconds: number;
+}
+
+/**
+ * **The S4.7 decision.** Can `incumbentTimes`' session also serve `joinerTime` without degrading the
+ * service it already provides?
+ *
+ * ## Why the Decoder Manager and not Admission
+ *
+ * ADR-012 §3.11 owns sharing and is the only subsystem whose ***In*** carries "per-source requested
+ * times (post-retime)". §3.10's does not. Admission can grant *capacity*; it constitutionally cannot
+ * choose *which session satisfies a grant*, because it cannot see the times that make one session
+ * interchangeable with another. That is the whole reason this is a slice and not the second half of
+ * S4.3.
+ *
+ * ## The criterion is BORROWED FROM THE BACKSTOP, deliberately
+ *
+ * `tolerance` is the caller's own divergence tolerance — the same number `isDiverged` uses to decide a
+ * live share has broken. Inventing a second threshold here would have been easy and would have quietly
+ * destroyed the slice's *done when*: "`noteDivergence` fires zero times across a full soak" is only a
+ * meaningful assertion if the predicate refuses **exactly** what the backstop would later detach. With
+ * one shared criterion, a firing is a proof that this function was wrong about a specific pair of
+ * times — which is precisely the inversion the programme asks for in §10, where repair becomes
+ * diagnostics.
+ *
+ * ## The four answers, and why each is what it is
+ *
+ * - **No incumbent demand → GRANT.** A session whose members have not yet asked for anything has no
+ *   service to protect. This is not an edge case: two layers mounting in the same tick is the single
+ *   most common real share, and it is *the* case sharing was built for — one file read as both the host
+ *   clip and a comp's MediaIn. A predicate that refused here would spend the sessions sharing exists to
+ *   save, which is this slice's stated risk.
+ * - **Co-located → GRANT.** Both want the same moment; one decode feeds both, which is the entire win.
+ * - **Would diverge → REFUSE.** One decoder dragged between two playheads is a seek — a whole GOP — per
+ *   member per frame. Measured 2026-08-02: a `preload` joiner joined a *serving* session at
+ *   `capMisses: 0` — spare capacity, harmful reuse — and cost the on-screen clip two hardware resets and
+ *   ~295ms of supply, 1.2s before a cut. Refusing sends the joiner to its own session or its `<video>`
+ *   fallback, which is the path it already takes when the pool is full.
+ * - **Joiner undeclared → REFUSE.** Not a judgement about the joiner but an admission about us: with no
+ *   declared time, safety is unprovable, and granting anyway would restore the unguarded borrow under a
+ *   flag that claims to have fixed it. Refusing makes a missed call site visible as a lost share rather
+ *   than silent as a resurrected defect. (Before S4.7 this was the ONLY answer available — the acquire
+ *   interface carried no time at all; see the 2026-08-02 S3.3 audit.)
+ *
+ * Pure. Takes times rather than reading them, so it is testable without a pool, a decoder or a DOM —
+ * and so that the host keeps ownership of where a "requested time" comes from (I-36).
+ */
+export function sessionSatisfaction(
+  incumbentTimes: readonly number[],
+  joinerTime: number | null,
+  toleranceSeconds: number
+): SatisfactionVerdict {
+  const known = incumbentTimes.filter((time) => Number.isFinite(time));
+  if (known.length === 0) {
+    return { satisfies: true, reason: "no-incumbent-demand", gapSeconds: null, toleranceSeconds };
+  }
+  if (joinerTime == null || !Number.isFinite(joinerTime)) {
+    return { satisfies: false, reason: "joiner-undeclared", gapSeconds: null, toleranceSeconds };
+  }
+  let gapSeconds = 0;
+  for (const time of known) gapSeconds = Math.max(gapSeconds, Math.abs(time - joinerTime));
+  return gapSeconds <= toleranceSeconds
+    ? { satisfies: true, reason: "co-located", gapSeconds, toleranceSeconds }
+    : { satisfies: false, reason: "would-diverge", gapSeconds, toleranceSeconds };
+}
+
+const KEY_REFUSALS = "decoder.borrowRefusals";
+
+/**
+ * Record a borrow REFUSED, with the same care the grant record takes.
+ *
+ * A refusal is a real cost — it spends a decode session out of a budget of four — so it must be as
+ * visible as the harm it prevents. Without this, the failure mode of a too-strict predicate (this
+ * slice's stated risk) would present as unexplained cap misses somewhere else entirely.
+ */
+export function noteBorrowRefused(
+  session: RuntimeSession,
+  refusal: { key: string; verdict: SatisfactionVerdict; joinerPriority: string; incumbentPriority: string }
+): void {
+  const prev = session.state.get<readonly BorrowRefusal[]>(KEY_REFUSALS, []);
+  const record: BorrowRefusal = {
+    key: refusal.key,
+    reason: refusal.verdict.reason,
+    gapSeconds: refusal.verdict.gapSeconds,
+    toleranceSeconds: refusal.verdict.toleranceSeconds,
+    joinerPriority: refusal.joinerPriority,
+    incumbentPriority: refusal.incumbentPriority,
+  };
+  session.state.set(KEY_REFUSALS, prev.length >= MAX_BORROW_RECORDS ? [...prev.slice(1), record] : [...prev, record]);
+  kernelDiagnostics.record({
+    kind: "denial",
+    // INFO, not warn: a refusal is the slice working. The warning-level event in this area is
+    // `noteDivergence` firing, which after S4.7 means this predicate got one wrong.
+    severity: "info",
+    subject: { kind: "resource", resourceKind: "decode-session" },
+    reason: `borrow-refused:${refusal.verdict.reason}`,
+    detail: {
+      gapSeconds: refusal.verdict.gapSeconds,
+      toleranceSeconds: refusal.verdict.toleranceSeconds,
+      joinerPriority: refusal.joinerPriority,
+      incumbentPriority: refusal.incumbentPriority,
+    },
+  });
+}
+
+export interface BorrowRefusal {
+  readonly key: string;
+  readonly reason: SatisfactionReason;
+  readonly gapSeconds: number | null;
+  readonly toleranceSeconds: number;
+  readonly joinerPriority: string;
+  readonly incumbentPriority: string;
+}
+
+export function borrowRefusals(session: RuntimeSession): readonly BorrowRefusal[] {
+  return session.state.get<readonly BorrowRefusal[]>(KEY_REFUSALS, []);
+}
+
+/**
+ * The backstop fired: a live share broke that the predicate had approved. **After S4.7 this is a defect
+ * report, not a routine correction** (programme §10) — it is the assertion that `sessionSatisfaction`
+ * was right, and a firing says it was wrong about a specific pair of times.
+ *
+ * `noteDivergence` stays in the code and stays instrumented for exactly this reason. The slice's *done
+ * when* is that this counter reads zero across a full soak.
+ */
+export function noteSatisfactionMiss(session: RuntimeSession, key: string, detail: Record<string, unknown>): void {
+  const prev = session.state.get<number>("decoder.satisfactionMisses", 0);
+  session.state.set("decoder.satisfactionMisses", prev + 1);
+  kernelDiagnostics.record({
+    kind: "degradation",
+    // WARN, and the only warning in this area: after S4.7 a divergence detach means a share this module
+    // approved had to be torn down under load — an incumbent was degraded exactly as the slice promised
+    // it would not be.
+    severity: "warn",
+    subject: { kind: "resource", resourceKind: "decode-session" },
+    reason: "satisfaction-miss:divergence-detach",
+    detail: { ...detail, key },
+  });
+}
+
+export function satisfactionMisses(session: RuntimeSession): number {
+  return session.state.get<number>("decoder.satisfactionMisses", 0);
+}
+
 /** The host opened a real session for `key`. Counted, because a key may be opened more than once
  *  (an `exclusive` retimed loader deliberately refuses to share the host's session). */
 export function noteDecoderSessionOpened(session: RuntimeSession, key: string): void {

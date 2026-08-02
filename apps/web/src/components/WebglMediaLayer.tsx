@@ -806,6 +806,12 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             preferSoftware: props.preferSoftwareDecode,
             // A retimed loader shares the host's URL and by construction never its time.
             exclusive: props.exclusiveDecode,
+            // DECLARED INTENT (S4.7). The same mapping `requestWcFrame` will use on its very first
+            // request, so the kernel judges the borrow against what this loader will ACTUALLY ask for
+            // rather than against nothing. Without it the satisfaction predicate has no operand and must
+            // refuse — which is the honest failure, but it would cost the duplicate-decode share this
+            // whole mechanism exists to keep.
+            requestedTime: mediaType === "video" ? mapSourceTime(wcTimeRef.current) : undefined,
           });
       wcLeaseRef.current = wcLease;
       // DECODER MANAGER (ADR-012 3.11, slice S3.3) — report which decoder this source is reading

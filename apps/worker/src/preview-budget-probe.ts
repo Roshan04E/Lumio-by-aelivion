@@ -70,6 +70,8 @@ interface Sample {
   droppedRatio: number;
   severeCount: number;
   renderScale: number;
+  /** Served times observed this sample, from any decode path. See the note at the sampling site. */
+  served: number[];
 }
 
 interface ArmResult {
@@ -162,6 +164,15 @@ async function sampleArm(page: Page, name: string): Promise<ArmResult> {
         droppedRatio: Number(stats.droppedRatio ?? 0),
         severeCount: Number(stats.severeCount ?? 0),
         renderScale: Number(stats.renderScale ?? 1),
+        // Cross-path decode evidence. `mediaFps` comes from requestVideoFrameCallback, which is a
+        // <video>-ELEMENT api — on the WebCodecs path there is no element and no rvfc, so it reads 0
+        // while decoding perfectly well. Using it alone to decide "did anything decode?" made the
+        // vacuity guard fire on healthy WC runs: the same class of instrument error it was built to
+        // catch, pointed the other way. `__rfSourceMap[*].served` is S4.2's served time and is
+        // published by BOTH paths, so a changing set of served times is decode evidence either way.
+        served: Object.values(((globalThis as Record<string, any>).__rfSourceMap ?? {}) as Record<string, any>)
+          .map((row) => (row && typeof row.served === "number" ? row.served : null))
+          .filter((t): t is number => t != null),
       };
     }).catch((error: unknown) => {
       const message = String(error);
@@ -318,7 +329,13 @@ async function main(): Promise<void> {
   // two such arms agree with each other to three significant figures, which reads as a beautifully
   // reproducible null result rather than as a broken measurement. It is the frame-budget equivalent of a
   // vacuous assertion, and the ratchet's rule applies: an instrument that cannot fail is not evidence.
-  const vacuous = results.filter((r) => r.samples.length > 0 && r.samples.every((s) => s.mediaFps === 0));
+  const decodedInArm = (r: ArmResult): boolean => {
+    if (r.samples.some((s) => s.mediaFps > 0)) return true; // element path
+    const seen = new Set<number>();
+    for (const sample of r.samples) for (const t of sample.served) seen.add(Math.round(t * 1000));
+    return seen.size > 1; // WebCodecs path: served times ADVANCED
+  };
+  const vacuous = results.filter((r) => r.samples.length > 0 && !decodedInArm(r));
   if (vacuous.length > 0) {
     console.log(
       `\n[budget] ⚠ VOID — no video frames were presented in ${vacuous.length}/${results.length} arm(s).\n` +

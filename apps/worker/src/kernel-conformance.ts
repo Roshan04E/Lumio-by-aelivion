@@ -48,6 +48,11 @@ import {
   holdDecoderSession,
   isMediaSourceDemoted,
   noteBorrowGrant,
+  noteBorrowRefused,
+  noteSatisfactionMiss,
+  satisfactionMisses,
+  sessionSatisfaction,
+  borrowRefusals,
   BORROW_RULE_INHERITED,
   releaseDecoderHold,
   DECODER_RETENTION_MS,
@@ -1364,6 +1369,95 @@ console.log("\nS4.1 — time provenance: one authority, named derivations (T1-T5
   // only that presentation time is reachable from effective time and from nothing else.
   enforced("I-4", "presentation time derives from the effective time that produced the frame",
     (derivePresentationTime(effective) as number) === 12.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// S4.7 — session satisfaction: can this session serve the new requirement without harming the old?
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS4.7 — session satisfaction (I-29/P11; ADR-012 §3.11)");
+{
+  // The pool's own tolerance at 30fps: SHARE_DIVERGENCE_FRAMES(2) / 30. The predicate is handed this
+  // same number so it refuses exactly what `isDiverged` would later detach — see below.
+  const TOL = 2 / 30;
+
+  // ── THE CASE SHARING WAS BUILT FOR. One file read as both the host clip and a comp's MediaIn, both
+  // tracking the same playhead. This MUST still share: the slice's own risk line says a too-strict
+  // predicate spends the sessions sharing exists to save, and this is that saving.
+  enforced("I-29", "the duplicate-decode share survives — same file, same moment",
+    sessionSatisfaction([12.0], 12.0, TOL).satisfies);
+  enforced("I-29", "…and survives sub-frame jitter between two members tracking one playhead",
+    sessionSatisfaction([12.0], 12.0 + TOL * 0.5, TOL).satisfies);
+  enforced("I-29", "…right up to the tolerance boundary, which is a share not a detach",
+    sessionSatisfaction([12.0], 12.0 + TOL, TOL).satisfies);
+
+  // ── THE SAME-TICK MOUNT. Two layers mounting in one tick is the most common real share, and neither
+  // has requested anything yet. Nothing is being served, so nothing can be degraded.
+  enforced("I-29", "a session nobody has asked anything of yet can always be joined",
+    sessionSatisfaction([Number.NaN, Number.NaN], 12.0, TOL).satisfies);
+  enforced("I-29", "…and that is reported as an absence of demand, not as co-location",
+    sessionSatisfaction([Number.NaN], 12.0, TOL).reason === "no-incumbent-demand");
+
+  // ── THE MEASURED HARM (2026-08-02). A preload joiner ~1.2s from a SERVING incumbent, at capMisses 0:
+  // spare capacity, harmful reuse. Two hardware resets and ~295ms of lost supply on the on-screen clip.
+  const harmful = sessionSatisfaction([12.0], 13.2, TOL);
+  enforced("I-29", "a preload joining a serving session 1.2s away is refused", !harmful.satisfies);
+  enforced("I-29", "…with the reason and the distance both stated, not merely denied",
+    harmful.reason === "would-diverge" && Math.abs((harmful.gapSeconds ?? 0) - 1.2) < 1e-9);
+
+  // ── THE INTERFACE HOLE, closed. Before S4.7 the acquire path carried no time at all, so this was the
+  // only reachable state. It must REFUSE: granting anyway would restore the unguarded borrow under a
+  // flag claiming to have fixed it, and a missed call site would be silent instead of visible.
+  const undeclared = sessionSatisfaction([12.0], null, TOL);
+  enforced("I-29", "an undeclared joiner cannot prove it is safe, so it does not borrow",
+    !undeclared.satisfies && undeclared.reason === "joiner-undeclared");
+  enforced("I-29", "…but only when there is service to protect — undeclared is not itself a refusal",
+    sessionSatisfaction([], null, TOL).satisfies);
+
+  // ── THE WIDEST incumbent governs, not the nearest. A session serving two moments must not admit a
+  // third that is close to one of them and far from the other.
+  const spread = sessionSatisfaction([12.0, 12.9], 12.95, TOL);
+  enforced("I-29", "the FURTHEST incumbent decides — being near one member is not enough",
+    !spread.satisfies && Math.abs((spread.gapSeconds ?? 0) - 0.95) < 1e-9);
+
+  // ── THE BOND WITH THE BACKSTOP. This is what makes "noteDivergence fires zero times" a real
+  // assertion rather than a hope: the predicate and the detach must agree on every pair of times. A
+  // second, independently-chosen threshold here would silently decouple them, and the done-when would
+  // become unfalsifiable. Swept across the boundary, both directions.
+  let disagreements = 0;
+  for (let delta = 0; delta <= 0.4; delta += 0.005) {
+    const granted = sessionSatisfaction([10.0], 10.0 + delta, TOL).satisfies;
+    // `isDiverged`'s criterion, restated: spread strictly greater than tolerance is divergence.
+    const wouldDetach = 10.0 + delta - 10.0 > TOL + 1e-12;
+    if (granted === wouldDetach) disagreements += 1;
+  }
+  enforced("I-29", "the predicate refuses EXACTLY what the divergence backstop would detach",
+    disagreements === 0, `${disagreements} disagreements across the tolerance sweep`);
+
+  // ── REFUSALS ARE OBSERVABLE. A refusal costs a session out of a budget of four; an unexplained one
+  // would be the same undeclared degradation this slice removes, pointed the other way.
+  const session = createRuntimeSession({ id: "conformance-satisfaction" });
+  noteBorrowRefused(session, {
+    key: "https://example.test/a.mp4#hw",
+    verdict: harmful,
+    joinerPriority: "preload",
+    incumbentPriority: "playhead",
+  });
+  const [refusal] = borrowRefusals(session);
+  enforced("I-29", "a refused borrow is recorded with its reason and its measured gap",
+    refusal?.reason === "would-diverge" && Math.abs((refusal.gapSeconds ?? 0) - 1.2) < 1e-9);
+  enforced("I-29", "…and with both priorities, which is the shape the 2026-08-02 harm had",
+    refusal?.joinerPriority === "preload" && refusal.incumbentPriority === "playhead");
+
+  // ── THE DONE-WHEN's counter. Zero until the backstop fires; a firing is a defect report against the
+  // predicate, not a routine correction (programme §10).
+  enforced("I-29", "satisfaction misses start at zero — the number the soak is judged on",
+    satisfactionMisses(session) === 0);
+  noteSatisfactionMiss(session, "https://example.test/a.mp4#hw", { requestedTimes: [10, 11] });
+  enforced("I-29", "…and a divergence detach is counted as a MISS, not as normal operation",
+    satisfactionMisses(session) === 1);
+
+  session.dispose();
 }
 
 // ---------------------------------------------------------------------------------------------

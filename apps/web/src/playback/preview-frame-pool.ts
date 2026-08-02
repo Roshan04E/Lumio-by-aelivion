@@ -51,6 +51,9 @@ import {
   DECODER_RETENTION_MS,
   defaultSession,
   noteBorrowGrant,
+  noteBorrowRefused,
+  noteSatisfactionMiss,
+  sessionSatisfaction,
   noteDecoderRetentionExpired,
   noteDecoderSessionClosed,
   noteDecoderSessionOpened,
@@ -167,6 +170,32 @@ export function getKernelDecoderLifetimeEnabled(): boolean {
   return true;
 }
 
+/**
+ * Kill switch for kernel-owned session SATISFACTION (ADR-012 slice S4.7):
+ * `?kernelSessionSatisfaction=1` → localStorage `orreris.kernel.sessionSatisfaction` → **OFF**.
+ *
+ * Ships OFF, unlike S3.3's, and the asymmetry is deliberate. This is the fourth slice to touch the
+ * decoder — the most defect-dense subsystem in the runtime — and programme risk R2 says never ship two
+ * decoder slices in one release and soak before every merge in Phases 3–4. Off by default means the
+ * merge carries zero behavioural risk while the arms are measured; the flip is a separate, evidenced
+ * decision. Off restores the inherited identity-match borrow exactly.
+ */
+export function getKernelSessionSatisfactionEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("kernelSessionSatisfaction")) {
+        return truthy(new URLSearchParams(window.location.search).get("kernelSessionSatisfaction"));
+      }
+      const stored = window.localStorage?.getItem("orreris.kernel.sessionSatisfaction");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return false;
+}
+
 export interface ReleaseOptions {
   /**
    * The kernel Decoder Manager's verdict (ADR-012 3.11, slice S3.3): a declared source still needs this
@@ -238,6 +267,21 @@ export interface AcquireOptions {
    * v32l and stays untouched.
    */
   exclusive?: boolean | undefined;
+  /**
+   * The source time this consumer is about to ask for — **declared intent** (ADR-012 slice S4.7).
+   *
+   * The 2026-08-02 S3.3 audit found the hole this fills: at the instant a borrow was granted the
+   * joining member had not asked for anything. `SharedMember.requestedTime` is NaN until the first
+   * `getFrame`, and nothing else here carried a time — so the pool decided sharing strictly BEFORE it
+   * could know whether the two members' times co-locate. Identity-alone was not merely the unguarded
+   * choice, it was the only decision the interface could express.
+   *
+   * Optional because a caller that genuinely cannot say must be able to say *that*. It is not a
+   * loophole: an undeclared joiner is REFUSED a borrow (`joiner-undeclared`), so a missed call site
+   * shows up as a lost share rather than as a silently resurrected defect. Ignored entirely when the
+   * satisfaction flag is off.
+   */
+  requestedTime?: number | undefined;
 }
 
 interface IdleEntry {
@@ -275,6 +319,12 @@ let initFailures = 0;
 let preemptions = 0;
 let shared = 0;
 let shareDetaches = 0;
+/**
+ * Borrows the S4.7 predicate declined. The COST side of the slice: each one spends a session out of a
+ * budget of four, so a rising count with no corresponding fall in `shareDetaches` is the too-strict
+ * predicate this slice lists as its own risk.
+ */
+let borrowRefusals = 0;
 let wedgeTimeouts = 0;
 let retentions = 0;
 let retentionHits = 0;
@@ -647,6 +697,11 @@ function recomputeSessionPriority(session: SharedSession): void {
   session.record.priority = priority;
 }
 
+/**
+ * Candidates by IDENTITY. Unchanged from before S4.7 and deliberately still identity-only: this answers
+ * "which sessions COULD serve this key at all", which is a compatibility question about decoders.
+ * Whether one of them SHOULD is a different question with a different owner — see `chooseSatisfying`.
+ */
 function findAttachableSession(key: string, software: boolean): SharedSession | null {
   for (const session of sharedSessions) {
     if (session.torn || !session.shareable) continue;
@@ -654,6 +709,51 @@ function findAttachableSession(key: string, software: boolean): SharedSession | 
     if (!canAttachToSession(session.software, software)) continue;
     return session;
   }
+  return null;
+}
+
+/**
+ * S4.7: of the identity-compatible sessions, pick one that can serve `requestedTime` **without
+ * degrading the service it already provides** — or none, and say why.
+ *
+ * Split from `findAttachableSession` rather than folded into it because the two questions are owned by
+ * different subsystems: identity/decode-mode compatibility is a property of decoders (this file),
+ * satisfaction is ADR-012 §3.11's (the kernel). Folding them would have hidden a policy decision inside
+ * a lookup, which is the shape of defect this whole programme exists to unwind.
+ *
+ * The tolerance handed to the kernel is `divergenceToleranceSeconds` — the SAME number `isDiverged`
+ * uses on the live share. That is what makes the slice's *done when* meaningful: the predicate refuses
+ * exactly what the backstop would later detach, so a `noteDivergence` firing is a proof the predicate
+ * was wrong rather than a routine correction (programme §10).
+ */
+function chooseSatisfyingSession(
+  key: string,
+  software: boolean,
+  options: AcquireOptions,
+  priority: WcLeasePriority
+): SharedSession | null {
+  const candidate = findAttachableSession(key, software);
+  if (!candidate) return null;
+  if (!getKernelSessionSatisfactionEnabled()) return candidate; // flag off → inherited identity-match
+
+  const incumbentTimes: number[] = [];
+  for (const member of candidate.members) incumbentTimes.push(member.requestedTime);
+  const verdict = sessionSatisfaction(
+    incumbentTimes,
+    options.requestedTime ?? null,
+    divergenceToleranceSeconds(candidate.provider?.nominalFps)
+  );
+  if (verdict.satisfies) return candidate;
+  borrowRefusals += 1;
+  noteBorrowRefused(defaultSession, {
+    key,
+    verdict,
+    joinerPriority: priority,
+    incumbentPriority: candidate.record.priority,
+  });
+  // No fall-through to another candidate: `findAttachableSession` returns the first compatible session
+  // and there is at most one live session per key by construction (a second is only created when this
+  // path declines). Scanning further would be dead code pretending to be thorough.
   return null;
 }
 
@@ -755,6 +855,19 @@ function noteDivergence(session: SharedSession): void {
   if (latest.strikes < SHARE_DIVERGENCE_STRIKES) return;
 
   shareDetaches += 1;
+  // S4.7 (programme §10 — repair becomes diagnostics). This detach is still the repair, and it stays:
+  // a backstop that was removed would take its evidence with it. But with the flag on it also carries a
+  // second meaning — the kernel APPROVED this share, using the very tolerance `isDiverged` just failed,
+  // so a firing is a defect report against `sessionSatisfaction` rather than a routine correction. The
+  // slice's *done when* is that this number stays at zero across a full soak.
+  if (getKernelSessionSatisfactionEnabled()) {
+    noteSatisfactionMiss(defaultSession, session.key, {
+      requestedTimes: times.filter((time) => Number.isFinite(time)),
+      toleranceSeconds: divergenceToleranceSeconds(session.provider?.nominalFps),
+      members: session.members.size,
+      strikes: latest.strikes,
+    });
+  }
   session.shareable = false;
   const notify = latest.onPreempted;
   releaseMember(session, latest);
@@ -1068,7 +1181,8 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
     // over spending a new slot. A session still INITIALIZING is attachable too, and deliberately so:
     // two layers mounting in the same tick is the single most common real case, and without it the
     // dedupe would miss the exact scenario it exists for.
-    const existing = getWcSessionShareEnabled() && !options.exclusive ? findAttachableSession(url, software) : null;
+    const existing =
+      getWcSessionShareEnabled() && !options.exclusive ? chooseSatisfyingSession(url, software, options, priority) : null;
     if (existing) {
       shared += 1;
       traceEvent({
@@ -1224,6 +1338,15 @@ export interface WcPoolStats {
   retentionExpiries: number;
   /** Retained parks evicted anyway because a cap demanded it. Retention is a preference, not a veto. */
   retentionOverrides: number;
+  /**
+   * Borrows the S4.7 satisfaction predicate declined (0 when the flag is off).
+   *
+   * Read BESIDE `shareDetaches`, never alone: together they are the whole slice. Refusals rising while
+   * detaches fall to zero is the predicate working — harm prevented up front instead of repaired after
+   * four bad frames. Refusals rising while detaches stay at zero AND `capMisses` rises is the
+   * too-strict predicate this slice names as its own risk, spending the sessions sharing exists to save.
+   */
+  borrowRefusals: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1246,6 +1369,7 @@ export function getWcPoolStats(): WcPoolStats {
     retentionHits,
     retentionExpiries,
     retentionOverrides,
+    borrowRefusals,
     shared,
     sharedActive,
     shareDetaches,

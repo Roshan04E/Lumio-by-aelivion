@@ -330,7 +330,14 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           return;
         }
         const objectUrl = URL.createObjectURL(stored.blob);
-        const lease = acquirePreviewFrameProvider(objectUrl, { priority: "playhead" });
+        // DECLARED INTENT (S4.7): comp-local seconds, the same basis `pumpOne` requests in. A comp proxy
+        // has a freshly-minted blob URL, so it never actually borrows — no other consumer can hold that
+        // key. Declared anyway rather than left undefined, because "this caller cannot say" and "this
+        // caller happens never to collide" are different claims and only one of them is true here.
+        const lease = acquirePreviewFrameProvider(objectUrl, {
+          priority: "playhead",
+          requestedTime: Math.max(0, getLivePlaybackTime() - entry.hostStartSeconds),
+        });
         if (!lease) {
           // Pool is full. The comp's own sources will take those slots instead — no worse than today.
           unservableKeysRef.current.add(entry.key);
