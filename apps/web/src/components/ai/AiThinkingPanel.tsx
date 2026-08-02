@@ -155,13 +155,98 @@ function EventRow({ event }: { event: ExperienceEvent }) {
   );
 }
 
+const PANEL_W = 620;
+const PLACEMENT_KEY = "orreris.oris.panel.placement.v1";
+
+interface Placement {
+  x: number;
+  y: number;
+  minimised: boolean;
+}
+
+/** Default: bottom-right, where it started — but clamped so it is always on screen. */
+function defaultPlacement(): Placement {
+  return { x: Math.max(12, window.innerWidth - PANEL_W - 12), y: Math.max(12, window.innerHeight - 420), minimised: false };
+}
+
+function loadPlacement(): Placement {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PLACEMENT_KEY) ?? "null") as Partial<Placement> | null;
+    if (saved && typeof saved.x === "number" && typeof saved.y === "number") {
+      // Clamp on load: a window that shrank since last session must not strand the panel
+      // off-screen where it cannot be dragged back.
+      return {
+        x: Math.min(Math.max(0, saved.x), Math.max(0, window.innerWidth - 120)),
+        y: Math.min(Math.max(0, saved.y), Math.max(0, window.innerHeight - 40)),
+        minimised: Boolean(saved.minimised)
+      };
+    }
+  } catch {
+    // fall through to the default
+  }
+  return defaultPlacement();
+}
+
 export function AiThinkingPanel() {
   const shown = useMemo(() => isAiThinkingShown(), []);
   const [events, setEvents] = useState<ExperienceEvent[]>([]);
   const [stats, setStats] = useState<ExperienceStats | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [placement, setPlacement] = useState<Placement>(() => (shown ? loadPlacement() : { x: 0, y: 0, minimised: false }));
   const listRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * A pointer drag also fires `click` on the element it started from. Without this, dragging
+   * the minimised pill re-opens the panel instead of moving it — which is the only thing a
+   * floating pill really needs to do. Set once the pointer travels past a small threshold, so
+   * a genuine click (no movement) still opens.
+   */
+  const draggedRef = useRef(false);
+
+  useEffect(() => {
+    if (!shown) {
+      return;
+    }
+    try {
+      localStorage.setItem(PLACEMENT_KEY, JSON.stringify(placement));
+    } catch {
+      // Placement is a convenience; losing it must never break the observatory.
+    }
+  }, [shown, placement]);
+
+  /** Drag from the header. Pointer capture so a fast drag cannot escape the handle. */
+  const startDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    draggedRef.current = false;
+    if ((event.target as HTMLElement).closest("[data-oris-control]")) {
+      return; // let the header's own controls work; everything else is a drag handle
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let origin = { x: 0, y: 0 };
+    setPlacement((current) => {
+      origin = { x: current.x, y: current.y };
+      return current;
+    });
+    const move = (moveEvent: PointerEvent) => {
+      if (Math.abs(moveEvent.clientX - startX) > 4 || Math.abs(moveEvent.clientY - startY) > 4) {
+        draggedRef.current = true;
+      }
+      setPlacement((current) => ({
+        ...current,
+        x: Math.min(Math.max(0, origin.x + (moveEvent.clientX - startX)), window.innerWidth - 120),
+        y: Math.min(Math.max(0, origin.y + (moveEvent.clientY - startY)), window.innerHeight - 40)
+      }));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  }, []);
 
   const refresh = useCallback(() => {
     setEvents(listExperience().slice(-200).reverse());
@@ -190,14 +275,57 @@ export function AiThinkingPanel() {
     return null;
   }
 
+  // MINIMISED: a small pill, not a smaller panel. The old "hide" only shrank the width to
+  // 320px and stayed pinned bottom-right, which still covered the inspector's lower rows —
+  // an observatory that blocks the thing you are trying to observe.
+  if (placement.minimised) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          if (draggedRef.current) {
+            draggedRef.current = false;
+            return; // that was a drag, not a click
+          }
+          setPlacement((c) => ({ ...c, minimised: false }));
+        }}
+        onPointerDown={startDrag as unknown as React.PointerEventHandler<HTMLButtonElement>}
+        title="ORIS — click to open, drag to move"
+        style={{
+          all: "unset",
+          position: "fixed",
+          left: placement.x,
+          top: placement.y,
+          cursor: "grab",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "4px 9px",
+          background: "#0b1220f2",
+          border: "1px solid #1e293b",
+          borderRadius: 999,
+          boxShadow: "0 6px 20px rgba(0,0,0,.45)",
+          font: `11px/1.4 ${MONO}`,
+          color: "#7dd3fc",
+          zIndex: 99999,
+          backdropFilter: "blur(6px)"
+        }}
+      >
+        <span style={{ width: 6, height: 6, borderRadius: 999, background: "#7dd3fc" }} />
+        ORIS
+        <span style={{ color: "#64748b" }}>{stats ? stats.events : 0}</span>
+      </button>
+    );
+  }
+
   return (
     <div
       style={{
         position: "fixed",
-        right: 12,
-        bottom: 12,
-        width: collapsed ? 320 : 620,
-        maxHeight: collapsed ? undefined : "70vh",
+        left: placement.x,
+        top: placement.y,
+        width: PANEL_W,
+        maxHeight: collapsed ? undefined : "60vh",
         display: "flex",
         flexDirection: "column",
         background: "#0b1220f2",
@@ -210,14 +338,27 @@ export function AiThinkingPanel() {
         backdropFilter: "blur(6px)"
       }}
     >
-      <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 9px", borderBottom: "1px solid #1e293b" }}>
+      <div
+        onPointerDown={startDrag}
+        style={{
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          padding: "7px 9px",
+          borderBottom: "1px solid #1e293b",
+          cursor: "grab",
+          touchAction: "none"
+        }}
+      >
+        <span style={{ color: "#334155", letterSpacing: 2 }}>⠿</span>
         <strong style={{ color: "#7dd3fc", letterSpacing: 0.4 }}>ORIS · what the AI is doing</strong>
         <span style={{ flex: 1 }} />
-        <button type="button" onClick={copyJson} style={buttonStyle}>
+        <button type="button" data-oris-control onClick={copyJson} style={buttonStyle}>
           {copied ? "copied" : "copy json"}
         </button>
         <button
           type="button"
+          data-oris-control
           onClick={() => {
             clearExperience();
             refresh();
@@ -226,8 +367,11 @@ export function AiThinkingPanel() {
         >
           clear
         </button>
-        <button type="button" onClick={() => setCollapsed((v) => !v)} style={buttonStyle}>
-          {collapsed ? "open" : "hide"}
+        <button type="button" data-oris-control onClick={() => setCollapsed((v) => !v)} style={buttonStyle}>
+          {collapsed ? "list" : "rows"}
+        </button>
+        <button type="button" data-oris-control onClick={() => setPlacement((c) => ({ ...c, minimised: true }))} style={buttonStyle} title="Minimise to a pill">
+          —
         </button>
       </div>
 
