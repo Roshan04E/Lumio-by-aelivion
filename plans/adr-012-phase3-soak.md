@@ -1,0 +1,230 @@
+# ADR-012 Phase 3 — browser soak protocol
+
+**Purpose.** Phase 3 shipped three behavioural changes to the most defect-dense subsystem in the
+runtime. Every safety argument for them is currently *structural* — reasoned from the code, asserted
+headlessly at 139/139, and **never watched running**. Phase 4 builds directly on decoder behaviour, so
+this is the gate between the two.
+
+**Governance.** Risk **R2**: *never ship two decoder slices in one release.* S3.3 and S3.5 are both
+decoder slices and are both in this unreleased range. That is the reason S3.5 defaults OFF and the
+reason Run C is separate from Run B rather than folded into it.
+
+---
+
+## 0. What you are testing
+
+| Flag | Default | Slice | The claim being tested |
+|---|---|---|---|
+| `kernelDecoderLifetime` | **ON** | S3.3 | A re-render no longer destroys a decoder; retention pays for itself and leaks nothing |
+| `kernelResources` | **ON** | S3.4 | Reclamation happens on held frames; nothing visible is ever swept |
+| `kernelProxySource` | **OFF** | S3.5 | A proxy demotes its sources instead of deleting them — **without** re-introducing 75→35fps |
+
+Flags are read once at load. **Changing one means a reload**, and any run where you changed a flag
+mid-session is void.
+
+## 0.1 The console handles
+
+```js
+__rfKernelState        // NEW — the three Phase 3 ledgers, point-in-time state
+__rfWcPool             // decoder pool: sessions, caps, retention counters
+__rfKernel.summary()   // the kernel event ring, rolled up by reason
+__rfFlarexProxy        // per-comp proxy decode stats
+__rfWcMode             // per-source decode mode (wc-hw / wc-sw / element)
+__rfFlarexDegradation  // host-clip substitution census
+```
+
+Reset between runs with `__rfKernel.reset()`. `__rfWcPool` counters are cumulative for the page
+lifetime and are **not** resettable — record them as deltas or reload between runs.
+
+## 0.2 Reaching the editor
+
+The `CLAUDE.md` demo login is not seeded and returns 401. Use **"Try the demo"** → upload → **Continue**
+→ **Blank Project**.
+
+---
+
+## Run A — baseline (all kernel flags off)
+
+**URL:** `?kernelDecoderLifetime=0&kernelResources=0&kernelProxySource=0`
+
+This is the control. Without it, every number below is unanchored.
+
+- [ ] **A1.** Build a Flarex comp with **3+ asset-source MediaIns** on one clip. Play the whole clip.
+- [ ] **A2.** Record `__rfWcPool` — note `created`, `capMisses`, `preemptions`, `reused`.
+- [ ] **A3.** Scrub hard across the clip for ~30s. Record `__rfWcPool` again.
+- [ ] **A4.** With the **frame profiler** on (`?flarexProfile=1`), note steady-state **fps while playing
+      the comp**. This is the number S3.5 must not regress.
+- [ ] **A5.** Prepare a proxy for the comp, let it serve, then **drag a layer underneath the clip and
+      back out** (this breaks and restores `canSubstituteFlarexProxy` eligibility).
+
+**Expect:** `created` climbs steadily with scrubbing — this is the defect, visible as decoders being
+rebuilt. At A5 expect a **visible degrade**: the comp's MediaIns fall back to the host clip's picture
+for a beat while decoders re-acquire from cold. **That flash is the bug Phase 3 exists to remove** — if
+you cannot reproduce it here, say so, because then S3.5's premise needs re-examining before Phase 4.
+
+---
+
+## Run B — S3.3 + S3.4 (the shipped defaults)
+
+**URL:** *(no flags — these are already the defaults)*
+
+### B1 — decoder lifetime (S3.3)
+
+- [ ] Repeat A1–A3 identically.
+- [ ] Read `__rfWcPool`.
+
+**Expect:**
+- `retentions` **> 0** — releases the kernel overruled, i.e. decoders an unmount did not destroy.
+- `retentionHits / retentions` **meaningfully above zero**. This is the honesty check: near-zero means
+  the residency is protecting decoders nothing comes back for — cost with no benefit, and the signal to
+  re-tune `DECODER_RETENTION_MS` or revert. **Report the ratio even if it looks good.**
+- `created` **lower than Run A** for the same scrubbing. This is the win, stated as a number.
+- `retentionOverrides` small — retained parks evicted anyway under cap pressure. Non-zero is fine
+  (retention is a preference, never a veto); large means the TTL is fighting the caps.
+- `wedgeTimeouts` **0**. Any non-zero here is a decoder that stopped answering — investigate before
+  Phase 4 regardless of what else passes.
+
+- [ ] Read `__rfKernelState.decoder`.
+
+**Expect:**
+- `orphaned` **empty**. ← **The single most important reading in this document.** This is the leak S3.3's
+  retention could introduce. Non-empty at rest = stop, do not proceed to Phase 4.
+- `unmet` empty **at rest**. Transient non-empty during scrubbing is normal (a session costs a demux and
+  an index). Persistently non-empty is starvation, and retention must never be what hides it.
+- `openCount` ≤ 4 (`MAX_WC_TOTAL_SESSIONS`), always.
+
+- [ ] `__rfKernel.summary()` — look for `decoder-retained:lifecycle` and `decoder-retention-expired`.
+
+**Expect:** both present. Retentions that expire unused are the residency being too long; retentions
+that always hit are it being about right. A run with **only** expiries and no hits means the mechanism
+is pure cost.
+
+### B2 — resource reclamation (S3.4)
+
+- [ ] Open **several node thumbnails** beside a paused viewer, then leave the tab idle ~30s.
+- [ ] Read `__rfKernelState.resources`.
+
+**Expect:**
+- `byScope` shows `live` **and** `scratch:capture`/`scratch:thumb` separately. If everything is `live`,
+  the scope derivation is wrong and the I-8 fix is not actually in effect.
+- `reclaimedWhileUnpresented` — **non-zero is the finding, not the failure.** Every one is memory the
+  old prune would have held until a frame presented. **Zero across the whole soak is also a valid
+  result** and means the amplifier does not fire on this hardware; record which you saw.
+- `oldestIdleMs` bounded, not climbing without limit.
+
+- [ ] **The safety check that matters:** with a comp playing, watch for **any layer going black or
+      flickering** at ~10s intervals (the `RESOURCE_IDLE_MS` cadence).
+
+**Expect:** none, ever. A visible layer being swept is the one way this slice can do harm; it would mean
+a touch site was missed. If you see it, note **which layer type** (media / text / shape) — that names
+the missing touch.
+
+### B3 — the A/B that isolates it
+
+- [ ] Reload with `?kernelResources=0` and repeat B2's idle test.
+
+**Expect:** `reclaimedWhileUnpresented` stays 0 (the sweep is off). If B2 showed flicker and this does
+not, the sweep is the cause and `RESOURCE_IDLE_MS` / the touch sites are where to look.
+
+---
+
+## Run C — S3.5 (the flag that is not on yet)
+
+**URL:** `?kernelProxySource=1`
+
+**Run this separately from Run B.** R2 is the reason: two decoder slices under observation at once
+means an ambiguous result, and an ambiguous decoder result is how the last two freezes were
+misdiagnosed for several rounds each.
+
+### C1 — the regression this must not cause
+
+- [ ] Repeat **A4 exactly**: proxy serving, comp playing, `?flarexProfile=1`, read steady-state fps.
+
+**Expect:** **within noise of Run A's A4.** This is the whole risk of the slice. The structural argument
+is that a suspended loader is not pulled from and its output is not consumed — but that argument has
+never been measured, and **this checkbox is the flag's flip condition.** A material drop toward ~35fps
+means suspension is not actually stopping the pulls, and the flag stays off.
+
+- [ ] Cross-check: `__rfFlarexProxy` for the served comp shows `decodes` climbing (the proxy is
+      decoding) while the comp's **loaders** are not. `__rfWcPool.activeSoftware` should be **stable**,
+      not climbing.
+
+### C2 — the failure it fixes
+
+- [ ] Repeat **A5**: proxy serving, drag a layer under the clip and back out.
+
+**Expect:** **no host-clip flash.** The loaders were never unmounted, so there is nothing to warm up.
+This is "a crossfade in resource terms, not a cut", and it is the observable form of the whole slice.
+
+- [ ] `__rfFlarexDegradation.substitutedTotal` — compare against the same manoeuvre in Run A.
+
+**Expect:** **lower than Run A.** Each substitution is a MediaIn showing the host clip's pixels; that is
+the I-27 violation S4.5 deletes, and this slice should reduce the count without touching that code.
+
+### C3 — the states are exclusive
+
+- [ ] While the proxy serves, read `__rfKernelState.media`.
+
+**Expect:** `demoted` **non-empty**, `suppressed` **empty**. Both populated means the mutual-exclusion
+clearing is broken and the census is unreadable. `active` should equal `declared` — a demoted source is
+still active, and that is the entire I-16 distinction.
+
+### C4 — proxy SUSPENDED hysteresis
+
+- [ ] Drag a layer under the proxied clip and back out **within ~2s** (`PROXY_SUSPEND_MS`).
+
+**Expect:** the proxy resumes **without re-acquiring** — `__rfFlarexProxy[compId].decodes` continues
+climbing from where it was, and `__rfWcPool.created` does **not** increment for the proxy's object URL.
+
+- [ ] Now drag it under and leave it >2s, then restore.
+
+**Expect:** the proxy is genuinely released and re-acquired — `created` increments. The bound is
+supposed to expire; that is I-31, not a bug.
+
+- [ ] **Edit a node in the comp** while its proxy serves.
+
+**Expect:** **immediate** teardown, not a 2s suspension — that is `INVALID`, not `SUSPENDED`. A stale
+frame surviving an edit would be a correctness failure, and it is the one case hysteresis must not
+apply to.
+
+---
+
+## Run D — stress, all flags on
+
+**URL:** `?kernelDecoderLifetime=1&kernelResources=1&kernelProxySource=1`
+
+Only after B and C are individually clean.
+
+- [ ] Rigorous scrubbing across a multi-comp timeline for **2–3 minutes**, then leave paused for 60s.
+
+**Expect:**
+- No white page / renderer crash. (The 2026-07-27 lesson: two caps that merely sum are not a budget —
+  `openCount` must stay ≤ 4 throughout.)
+- `__rfKernelState.decoder.orphaned` **empty at rest**.
+- `__rfWcPool.wedgeTimeouts` **0**.
+- `capMisses` may be non-zero under stress — that is the pool refusing, which is correct behaviour, not
+  a failure. Read it **with** `active`/`activeSoftware` to see which pool ran out.
+- Memory (DevTools → Performance monitor, JS heap + GPU) **flat or sawtoothing**, not monotonically
+  climbing across the 3 minutes.
+
+---
+
+## What "pass" means
+
+Phase 4 may start when:
+
+1. `decoder.orphaned` is empty at rest in **every** run;
+2. `wedgeTimeouts` is 0 in every run;
+3. no visible layer was ever swept, flashed, or blacked out;
+4. C1's fps is within noise of A4 — **or** S3.5 stays off and Phase 4 proceeds with
+   `kernelProxySource=0`, which is legitimate and costs nothing structural.
+
+A **fail on C1 alone does not block Phase 4.** S3.5's flag is off by default precisely so that its
+measurement is not on the critical path. Record it and move on.
+
+## What to write down
+
+For each run: the flag string, the `__rfWcPool` object, `__rfKernelState`, `__rfKernel.summary()`, the
+fps reading, and — most valuable of all — **anything you saw that this document did not predict.**
+Every one of the runtime's worst bugs was first noticed as something that looked slightly wrong and was
+explained away.
