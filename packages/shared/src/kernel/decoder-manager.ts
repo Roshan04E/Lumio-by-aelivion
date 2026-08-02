@@ -60,6 +60,7 @@ import type { RuntimeSession } from "./session";
 
 const KEY_BINDINGS = "decoder.bindings";
 const KEY_OPEN = "decoder.open";
+const KEY_HOLDS = "decoder.holds";
 
 /**
  * How long a retained session may sit unused before the host must let it go.
@@ -148,7 +149,8 @@ export function decoderReleaseVerdict(
   cause: DecoderReleaseCause
 ): DecoderReleaseVerdict {
   if (cause !== "lifecycle") return "release";
-  if (!requiredKeys(session).has(key)) return "release";
+  const held = key in session.state.get<Readonly<Record<string, string>>>(KEY_HOLDS, {});
+  if (!held && !requiredKeys(session).has(key)) return "release";
 
   if (kernelDiagnostics.enabled) {
     // A `write-off` would be wrong: nothing was discarded — this is the record of work SAVED, and of an
@@ -166,6 +168,38 @@ export function decoderReleaseVerdict(
     });
   }
   return "retain";
+}
+
+/**
+ * A NON-GRAPH consumer holds this session (slice S3.5 amendment, from the 2026-08-02 soak).
+ *
+ * Not every legitimate session is backed by a declared source. The comp proxy is the standing example:
+ * it decodes a rendered blob that no `MediaIn` points at, so it has a real session and no binding — and
+ * the first soak duly reported every comp proxy as `orphaned`, which is the reading that was supposed to
+ * mean "a session leaked".
+ *
+ * **That was the instrument being wrong, not the runtime.** A criterion whose false positives are the
+ * normal case is worse than no criterion, because the first real leak is indistinguishable from the
+ * noise it is buried in.
+ *
+ * A hold is deliberately NOT a declaration. Declaring the proxy as a graph source would put a second
+ * writer on the Media Manager's declared set and make "which sources does the graph contain?" depend on
+ * a rendering decision — the exact I-16 confusion this programme is unwinding. The proxy is a
+ * *consumer of capacity*, not a member of the graph, and this is the narrower fact that says so.
+ */
+export function holdDecoderSession(session: RuntimeSession, key: string, holder: string): void {
+  const prev = session.state.get<Readonly<Record<string, string>>>(KEY_HOLDS, {});
+  if (prev[key] === holder) return;
+  session.state.set(KEY_HOLDS, { ...prev, [key]: holder });
+}
+
+/** Release a hold. Idempotent — the callers that drive it are teardown paths that can fire twice. */
+export function releaseDecoderHold(session: RuntimeSession, key: string): void {
+  const prev = session.state.get<Readonly<Record<string, string>>>(KEY_HOLDS, {});
+  if (!(key in prev)) return;
+  const next = { ...prev };
+  delete next[key];
+  session.state.set(KEY_HOLDS, next);
 }
 
 /** The host opened a real session for `key`. Counted, because a key may be opened more than once
@@ -226,6 +260,8 @@ export interface DecoderLedger {
    * that has to stay at zero for this slice to be safe.
    */
   readonly orphaned: readonly string[];
+  /** Open sessions held by a non-graph consumer (the comp proxy). Legitimate, and never orphaned. */
+  readonly held: readonly string[];
   /**
    * Required but not open — **the starvation signal**. Expected non-zero transiently (a session takes a
    * demux and an index to come up); persistent non-zero is a source that asked and never got one, which
@@ -248,12 +284,16 @@ export function decoderLedger(session: RuntimeSession): DecoderLedger {
   const declared = new Set(getMediaSources(session).declared);
   const required = requiredKeys(session);
   const counts = openCounts(session);
+  const holds = session.state.get<Readonly<Record<string, string>>>(KEY_HOLDS, {});
   const open = Object.keys(counts).sort();
   return {
     required: [...required].sort(),
     open,
+    held: Object.keys(holds).sort(),
     openCount: open.reduce((total, key) => total + (counts[key] ?? 0), 0),
-    orphaned: open.filter((key) => !required.has(key)),
+    // A held key is accounted for, so it is not orphaned. Without this every comp proxy read as a leak
+    // and the criterion that was supposed to catch a real one caught only itself.
+    orphaned: open.filter((key) => !required.has(key) && !(key in holds)),
     unmet: [...required].filter((key) => (counts[key] ?? 0) === 0).sort(),
     staleBindings: Object.keys(bindings(session))
       .filter((sourceId) => !declared.has(sourceId))

@@ -76,8 +76,17 @@ function summarize(): FlarexDegradationSummary {
   const substitutions = rows
     .filter((row) => row.reason.startsWith("host-substituted:"))
     .map((row) => ({ subject: row.subject, reason: row.reason, count: row.count }));
+  // Folded BY REASON, which is what the field is called and was not what it did (soak, 2026-08-02).
+  // The sink aggregates per (kind, subject, reason), so two nodes degrading for the same cause produced
+  // two identical-looking rows — a reader saw `input-missing 680` twice and had no way to tell whether
+  // that was one cause counted twice or two nodes counted once. `substitutions` stays per-subject on
+  // purpose: there the question is *which node* showed another shot's pixels.
+  const byReasonTotals = new Map<string, number>();
+  for (const row of rows) byReasonTotals.set(row.reason, (byReasonTotals.get(row.reason) ?? 0) + row.count);
   return {
-    byReason: rows.map((row) => ({ reason: row.reason, count: row.count })),
+    byReason: [...byReasonTotals.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count),
     substitutions,
     substitutedTotal: substitutions.reduce((total, row) => total + row.count, 0),
   };

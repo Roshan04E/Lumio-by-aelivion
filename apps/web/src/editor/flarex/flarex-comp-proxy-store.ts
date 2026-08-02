@@ -182,6 +182,9 @@ export async function putFlarexCompProxy(compId: string, key: string, blob: Blob
     // OPFS quota/permission failure — keep the render usable for this session rather than losing it.
     memoryProxies.set(compId, record);
   }
+  // AFTER the write, on both paths: a listener that re-checks the store must never be woken before the
+  // thing it is going to look for exists.
+  notifyStoreChanged();
   return record;
 }
 
@@ -228,8 +231,46 @@ export async function hasFlarexCompProxy(compId: string, key: string): Promise<b
 /** Drop the proxy for `compId` (the S3 "Clear proxy" action). Never throws. */
 export async function removeFlarexCompProxy(compId: string): Promise<void> {
   memoryProxies.delete(compId);
+  notifyStoreChanged();
   const directory = await proxyDirectory();
   if (!directory) return;
   await directory.removeEntry(sidecarFileName(compId)).catch(() => undefined);
   await directory.removeEntry(blobFileName(compId)).catch(() => undefined);
+}
+
+// ── Store-change notification (2026-08-02) ──────────────────────────────────
+//
+// WHY THIS EXISTS. `useFlarexCompProxies` remembers keys it has already looked up and found nothing
+// for, so an eligibility recompute does not re-hit the store every render. That memo had no
+// invalidation: its comment said it is "retried only when the KEY changes, i.e. after a re-render of
+// the proxy" — but **re-rendering a proxy does not change the key.** The key is a hash of the comp's
+// identity, and preparing a proxy is precisely the operation that does not alter it.
+//
+// So the sequence that matters most was the one that could never recover: open the Edit page (no proxy
+// yet → key memoized as missing), press Prepare proxy (stored under the SAME key), and the substitution
+// never engages until a reload clears the ref. Reported from the soak, 2026-08-02.
+//
+// A store notification rather than a TTL: "has a proxy appeared?" has an exact answer at an exact
+// moment, and polling for it would be a guess with a latency knob attached.
+
+const storeListeners = new Set<() => void>();
+
+function notifyStoreChanged(): void {
+  for (const listener of [...storeListeners]) {
+    try {
+      listener();
+    } catch {
+      /* a listener must never break a store write */
+    }
+  }
+}
+
+/**
+ * Fires whenever a proxy is stored or removed. Callers that memoize a *negative* lookup must
+ * invalidate that memo here — a positive lookup is self-invalidating (the key changes with the comp),
+ * a negative one is not.
+ */
+export function subscribeFlarexProxyStore(listener: () => void): () => void {
+  storeListeners.add(listener);
+  return () => storeListeners.delete(listener);
 }

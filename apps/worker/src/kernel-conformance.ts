@@ -45,6 +45,8 @@ import {
   getMediaSources,
   suppressMediaSources,
   demoteMediaSources,
+  holdDecoderSession,
+  releaseDecoderHold,
   DECODER_RETENTION_MS,
   bindDecoderSource,
   decoderLedger,
@@ -1153,6 +1155,26 @@ console.log("\nS3.5 — proxy substitution as demotion, not deletion (I-16/I-24)
     demoteMediaSources(session, [], "comp-proxy-serving") === true &&
       getMediaSources(session).demoted.length === 0 &&
       decoderLedger(session).openCount === 1);
+
+  // ── A session with no declared source behind it is not automatically a leak ───────────────────
+  // The comp proxy decodes a rendered blob no MediaIn points at. The first soak reported every proxy
+  // as `orphaned` — the reading that is supposed to mean "a session leaked" — so the criterion's false
+  // positives were the normal case, which is worse than having no criterion at all.
+  const PROXY_KEY = "blob:comp-proxy";
+  noteDecoderSessionOpened(session, PROXY_KEY);
+  enforced("I-8", "an unheld, undeclared session reads as orphaned",
+    decoderLedger(session).orphaned.includes(PROXY_KEY));
+  holdDecoderSession(session, PROXY_KEY, "comp-proxy:c1");
+  enforced("I-8", "a HELD session is accounted for, not orphaned",
+    !decoderLedger(session).orphaned.includes(PROXY_KEY) && decoderLedger(session).held.includes(PROXY_KEY));
+  // A hold is a real claim on capacity, so it survives a lifecycle release exactly as a binding does.
+  enforced("I-24", "a held session is retained on a lifecycle release",
+    decoderReleaseVerdict(session, PROXY_KEY, "lifecycle") === "retain");
+  enforced("I-24", "…but a broken hold is still released", decoderReleaseVerdict(session, PROXY_KEY, "failed") === "release");
+  releaseDecoderHold(session, PROXY_KEY);
+  releaseDecoderHold(session, PROXY_KEY); // idempotent: teardown paths fire twice
+  enforced("I-8", "releasing the hold returns it to orphaned", decoderLedger(session).orphaned.includes(PROXY_KEY));
+  noteDecoderSessionClosed(session, PROXY_KEY, "shutdown");
 
   // Same discipline as suppression, for the same reasons — the census has to mean something.
   enforced("I-16", "an undeclared source cannot be demoted into existence",

@@ -27,9 +27,10 @@ import { getLivePlaybackTime } from "../../playback/playback-clock";
 import type { FrameProvider } from "../../export/source-decoder";
 import { flarexCompProxyIdentity, flarexCompProxyKey } from "./flarex-comp-proxy";
 import { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
-import { getFlarexCompProxy } from "./flarex-comp-proxy-store";
+import { getFlarexCompProxy, subscribeFlarexProxyStore } from "./flarex-comp-proxy-store";
 import { setFlarexProxyServing } from "./flarex-proxy-status";
 import { getKernelProxySourceEnabled as kernelProxySourceEnabled } from "../../playback/frame-completion";
+import { defaultSession, holdDecoderSession, releaseDecoderHold } from "@orreris/shared";
 
 /** `?flarexProxy=0` disables playback substitution outright (proxies can still be rendered/stored). */
 function proxyPlaybackEnabled(): boolean {
@@ -179,15 +180,40 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
   isPlayingRef.current = isPlaying;
 
   /**
-   * Keys whose proxy could not be turned into a decoder (missing blob, pool full, init failed). Retried
-   * only when the KEY changes, i.e. after a re-render of the proxy.
+   * Keys whose proxy exists but **cannot be served** — the pool refused a lease, or the decoder failed
+   * to init. Permanent for the page: retried only when the KEY changes, i.e. after a re-render.
    *
    * Without this, a failing key is re-attempted on every eligibility recompute: acquire a pooled session,
    * fail init, release, repeat — burning one of only 4 sessions in a loop while the comp's real sources
    * compete for the rest. Bounded here rather than in the pool, because "this exact file can't be served"
    * is knowledge only this caller has.
    */
-  const failedKeysRef = useRef<Set<string>>(new Set());
+  const unservableKeysRef = useRef<Set<string>>(new Set());
+  /**
+   * Keys we looked up and found **nothing stored for**. A different fact from the one above, and
+   * conflating the two was a real bug (soak, 2026-08-02).
+   *
+   * "No proxy under this key" is not a failure and costs no decoder session — `getFlarexCompProxy`
+   * returns undefined and we bail long before `acquirePreviewFrameProvider`. The loop the set above
+   * guards against cannot happen here. What memoizing it permanently DID do was make the most ordinary
+   * sequence unrecoverable: open the Edit page (nothing stored → memoized missing), press Prepare
+   * proxy (stored under the SAME key, because the key is the comp's identity and preparing a proxy
+   * does not change it), and substitution never engaged until a reload.
+   *
+   * Cleared on any store write — see `subscribeFlarexProxyStore`. Positive lookups need no such
+   * invalidation: their key changes whenever the comp does.
+   */
+  const missingKeysRef = useRef<Set<string>>(new Set());
+  /** Bumped by a store write so the reconcile effect re-runs and re-checks the missing keys. */
+  const [storeTick, setStoreTick] = useState(0);
+  useEffect(
+    () =>
+      subscribeFlarexProxyStore(() => {
+        missingKeysRef.current.clear();
+        setStoreTick((tick) => tick + 1);
+      }),
+    []
+  );
 
   const setServing = useCallback((compId: string, serving: boolean) => {
     setServingCompIds((current) => {
@@ -250,6 +276,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         // Loaders must come back BEFORE the proxy stops drawing, or the comp has no sources for a frame.
         setServing(compId, false);
         active.lease.release();
+        releaseDecoderHold(defaultSession, active.objectUrl);
         URL.revokeObjectURL(active.objectUrl);
         continue;
       }
@@ -270,24 +297,26 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         delete framesRef.current[compId];
         closeHeld(active);
         active.lease.release();
+        releaseDecoderHold(defaultSession, active.objectUrl);
         URL.revokeObjectURL(active.objectUrl);
       }, PROXY_SUSPEND_MS);
     }
 
     for (const entry of eligible) {
-      if (activeRef.current.has(entry.compId) || failedKeysRef.current.has(entry.key)) continue;
+      if (activeRef.current.has(entry.compId) || unservableKeysRef.current.has(entry.key)) continue;
+      if (missingKeysRef.current.has(entry.key)) continue;
       void (async () => {
         const stored = await getFlarexCompProxy(entry.compId, entry.key);
         // No proxy under this key — the comp was edited since it was built, or never had one. Live.
         if (!stored || cancelled) {
-          if (!stored) failedKeysRef.current.add(entry.key);
+          if (!stored) missingKeysRef.current.add(entry.key);
           return;
         }
         const objectUrl = URL.createObjectURL(stored.blob);
         const lease = acquirePreviewFrameProvider(objectUrl, { priority: "playhead" });
         if (!lease) {
           // Pool is full. The comp's own sources will take those slots instead — no worse than today.
-          failedKeysRef.current.add(entry.key);
+          unservableKeysRef.current.add(entry.key);
           URL.revokeObjectURL(objectUrl);
           return;
         }
@@ -307,15 +336,19 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           suspendTimer: null,
         };
         activeRef.current.set(entry.compId, active);
+        // DECODER MANAGER (S3.5 amendment): a comp proxy holds a real session that no declared source
+        // backs. Saying so here is what stops the ledger reading every proxy as a leaked session.
+        holdDecoderSession(defaultSession, objectUrl, `comp-proxy:${entry.compId}`);
         const provider = await lease.ready;
         if (cancelled || activeRef.current.get(entry.compId) !== active) return;
         if (!provider) {
           // Decoder init failed — drop back to live evaluation rather than showing nothing, and don't
-          // re-attempt this exact file (see failedKeysRef).
-          failedKeysRef.current.add(entry.key);
+          // re-attempt this exact file (see unservableKeysRef).
+          unservableKeysRef.current.add(entry.key);
           activeRef.current.delete(entry.compId);
           closeHeld(active);
           lease.release();
+          releaseDecoderHold(defaultSession, objectUrl);
           URL.revokeObjectURL(objectUrl);
           return;
         }
@@ -337,7 +370,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
     return () => {
       cancelled = true;
     };
-  }, [eligible, requestRedraw, setServing]);
+  }, [eligible, requestRedraw, setServing, storeTick]);
 
   // Publish for the timeline's clip badge. `servingCompIds` is identity-stable unless it really
   // changed (see setServing), so this is a no-op on ordinary renders.
@@ -353,6 +386,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         if (active.suspendTimer !== null) window.clearTimeout(active.suspendTimer);
         closeHeld(active);
         active.lease.release();
+        releaseDecoderHold(defaultSession, active.objectUrl);
         URL.revokeObjectURL(active.objectUrl);
       }
       activeRef.current.clear();

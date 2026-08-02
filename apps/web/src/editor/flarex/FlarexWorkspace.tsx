@@ -245,6 +245,33 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onMas
     });
   };
 
+  // The single selected node, when it is a mask node — the viewer's on-canvas editor follows THIS.
+  //
+  // MUST stay ABOVE the two early returns below. It is a hook, and those returns are conditional on
+  // `layer`/`comp`, so with the effect underneath them the component called 11 hooks when there was no
+  // comp and 12 when there was. React reads that as a changed hook order and refuses to render
+  // outright: "Rendered more hooks than during the previous render."
+  //
+  // It fires on the most ordinary transitions there are — opening the page with no clip selected and
+  // then selecting one, or pressing "Create Flarex comp" from the empty state — which is why it
+  // surfaced the moment someone drove the page rather than landing on it already populated.
+  //
+  // Everything it reads is now null-safe rather than guarded by an early return, and reporting `null`
+  // when there is no comp is the correct behaviour anyway: there is no mask node to offer.
+  const maskNodeId =
+    comp && selectedNodeIds.length === 1 && isFlarexMaskNode(comp.nodes[selectedNodeIds[0]!])
+      ? selectedNodeIds[0]!
+      : null;
+  const reportMaskNode = onMaskNodeChange;
+  const compId = comp?.id ?? null;
+  useEffect(() => {
+    if (!reportMaskNode) return undefined;
+    reportMaskNode(compId && maskNodeId ? { compId, nodeId: maskNodeId } : null);
+    // Leaving the page / deselecting must retract it, or the viewer keeps offering to edit a node the
+    // user can no longer see.
+    return () => reportMaskNode(null);
+  }, [reportMaskNode, compId, maskNodeId]);
+
   if (!layer) {
     return (
       <div className="flarex-workspace flarex-workspace-empty">
@@ -285,17 +312,6 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onMas
   // become effect-kind targets on a synthetic layer; edits map back to comp.animations.
   const graphNode = selectedNodeIds.length === 1 ? comp.nodes[selectedNodeIds[0]!] ?? null : null;
 
-  // The single selected node, when it is a mask node — the viewer's on-canvas editor follows THIS.
-  const maskNodeId = selectedNodeIds.length === 1 && isFlarexMaskNode(comp.nodes[selectedNodeIds[0]!]) ? selectedNodeIds[0]! : null;
-  const reportMaskNode = onMaskNodeChange;
-  const compId = comp.id;
-  useEffect(() => {
-    if (!reportMaskNode) return undefined;
-    reportMaskNode(maskNodeId ? { compId, nodeId: maskNodeId } : null);
-    // Leaving the page / deselecting must retract it, or the viewer keeps offering to edit a node the
-    // user can no longer see.
-    return () => reportMaskNode(null);
-  }, [reportMaskNode, compId, maskNodeId]);
   const graphBridge = graphNode ? buildFlarexGraphLayer(comp, graphNode, layer.durationSeconds, layerStart) : null;
   // Route the shared GraphEditor's layer-updater back onto the comp: rebuild the synthetic layer
   // from the CURRENT node (avoids stale closures), apply the updater, translate to comp.animations.
