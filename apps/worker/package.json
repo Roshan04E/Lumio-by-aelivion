@@ -39,7 +39,8 @@
     "media:shared-probe": "tsx src/media-shared-context-probe.ts",
     "render:manifest": "tsx src/render-manifest-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "preview:budget": "tsx src/preview-budget-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

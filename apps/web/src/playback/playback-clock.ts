@@ -1,4 +1,12 @@
 import { useSyncExternalStore } from "react";
+import {
+  assumeLiveFromCommitted,
+  authoritativeTime,
+  commitTimelineTime,
+  deriveTimelineTime,
+  type CommittedTime,
+  type TimelineTime,
+} from "@orreris/shared";
 
 /**
  * High-frequency playback clock, decoupled from the editor's React state.
@@ -16,7 +24,18 @@ import { useSyncExternalStore } from "react";
  * fraction of the tick rate — so a tick no longer re-renders the world.
  */
 
-let clockTime = 0;
+/**
+ * TIME PROVENANCE (ADR-012 Part 7, slice S4.1). This store holds a **committed** time — the latched
+ * copy React consumers last observed — which is a DIFFERENT derivation from the live, anchor-derived
+ * timeline time below, and the two differ by up to one commit interval while playing.
+ *
+ * That is not pedantry. The audio-master authority gate compared a live time against this committed
+ * one, elected a cold-starting element on the stale comparison, and hard-resynced the playhead back to
+ * the element's start latency — reported twice (2026-07-03). Both operands were `number`, so nothing
+ * at the call site could show the mistake. They are now different types, and mixing them is a compile
+ * error rather than a soak finding.
+ */
+let clockTime = commitTimelineTime(deriveTimelineTime(authoritativeTime(0)));
 const listeners = new Set<() => void>();
 
 // React subscribers (usePlaybackClock) are notified at most ONCE PER ANIMATION FRAME. Scrubbing
@@ -83,11 +102,17 @@ function scheduleColdNotify(): void {
 }
 
 /** Push a new playhead time and notify subscribers. Called from the playback rAF loop and on seek. */
+/**
+ * The one place the transport's position enters the time model (T1). Callers pass plain seconds
+ * BY DESIGN: a seek, a stop, a duration clamp is the authoritative position being asserted from
+ * outside, and requiring each of the sixteen such sites to construct a label would only spread the
+ * ingress that T1 says should be singular. Everything downstream of this line is labelled.
+ */
 export function setPlaybackClock(time: number): void {
   if (time === clockTime) {
     return;
   }
-  clockTime = time;
+  clockTime = commitTimelineTime(deriveTimelineTime(authoritativeTime(time)));
   // Imperative subscribers (playhead DOM write) synchronously — zero latency.
   for (const listener of listeners) {
     listener();
@@ -97,8 +122,15 @@ export function setPlaybackClock(time: number): void {
   scheduleColdNotify();
 }
 
-/** Read the current playhead time imperatively (e.g. to flush the exact time on stop). */
-export function getPlaybackClock(): number {
+/**
+ * Read the COMMITTED playhead time imperatively (e.g. to flush the exact time on stop).
+ *
+ * Returns a `CommittedTime`: correct for anything that must agree with what React last rendered, and
+ * up to one commit interval stale for anything comparing against live media. If you are about to
+ * compare this with a decoder's position, you want {@link getLivePlaybackTime} — and the type now
+ * says so.
+ */
+export function getPlaybackClock(): CommittedTime {
   return clockTime;
 }
 
@@ -134,8 +166,13 @@ export function setLivePlaybackTimeReader(reader: (() => number) | null): void {
   liveTimeReader = reader;
 }
 
-export function getLivePlaybackTime(): number {
-  return liveTimeReader ? liveTimeReader() : clockTime;
+export function getLivePlaybackTime(): TimelineTime {
+  // The fallback is a CLAIM — "no commit latency applies here" — true for fixtures, export and the
+  // worker, which have no live anchor. `assumeLiveFromCommitted` exists so that claim is greppable
+  // instead of being an implicit `return clockTime` nobody would think to question.
+  return liveTimeReader
+    ? deriveTimelineTime(authoritativeTime(liveTimeReader()))
+    : assumeLiveFromCommitted(clockTime);
 }
 
 // React (useSyncExternalStore) subscriptions — notified via the per-frame coalescer above.

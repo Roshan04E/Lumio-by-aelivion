@@ -62,6 +62,17 @@ import {
   resourceLedger,
   resourcesInScope,
   touchResource,
+  assumeLiveFromCommitted,
+  authoritativeTime,
+  coherenceGap,
+  commitTimelineTime,
+  deriveDecodeTime,
+  deriveEvaluationTime,
+  derivePresentationTime,
+  deriveTargetTime,
+  deriveTimelineTime,
+  servedTime,
+  unsafeLabelTime,
   awaitFrameSettled,
   beginFrame,
   classifyComposite,
@@ -1196,6 +1207,79 @@ console.log("\nS3.5 — proxy substitution as demotion, not deletion (I-16/I-24)
   session.dispose();
   kernelDiagnostics.enabled = wasEnabled;
   kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S4.1 — time provenance (ADR-012 Part 7)
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS4.1 — time provenance: one authority, named derivations (T1-T5)");
+{
+  // The labels are compile-time brands, so the invariant that MATTERS here — an unlabelled number
+  // cannot be passed where a labelled time is expected — is enforced by `tsc`, which is this repo's
+  // lint step. What a runtime harness can still protect is the thing tsc cannot see: that the escape
+  // hatch stays a hatch. `unsafeLabelTime` is deliberately the only unchecked way in, and its value is
+  // entirely in being rare; a second unaudited cast anywhere in the kernel silently restores the
+  // inference T2 forbids. So the ratchet is structural, and it is the reason this section exists at all.
+  const kernelDir = fileURLToPath(new URL("../../../packages/shared/src/kernel/", import.meta.url));
+  const timeTypeCast = /\bas\s+(?:Authoritative|Timeline|Committed|Target|Effective|Evaluation|Decode|Served|Presentation)Time\b|\bas\s+Time</;
+  const casters: string[] = [];
+  for (const file of readdirSync(kernelDir).filter((f) => f.endsWith(".ts") && f !== "time.ts")) {
+    const code = readFileSync(kernelDir + file, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    if (timeTypeCast.test(code)) casters.push(file);
+  }
+  enforced("I-4", "only time.ts mints labelled times — every other module derives them",
+    casters.length === 0, casters.join(" · "));
+
+  // T1/T2: the crossings exist and are named. Numerically these are identities today (composition
+  // coordinates equal transport seconds), which is exactly why they need to be functions: an identity
+  // with a name is a seam, an identity without one is an assumption nobody can find later.
+  const authoritative = authoritativeTime(12.5);
+  const timeline = deriveTimelineTime(authoritative);
+  const target = deriveTargetTime(timeline);
+  enforced("I-4", "authoritative → timeline → target preserves the moment", (target as number) === 12.5);
+
+  // The 2026-07-03 defect, stated as a type: `committed` and `timeline` are different labels precisely
+  // because they hold different values. Asserting they can DIVERGE is what keeps someone from later
+  // "simplifying" them into one alias on the grounds that both are numbers of seconds.
+  const committed = commitTimelineTime(deriveTimelineTime(authoritativeTime(12.4)));
+  enforced("I-4", "committed time is a distinct derivation that may trail the live one",
+    (committed as number) !== (timeline as number));
+  enforced("I-4", "…and reading it as live is an explicit, greppable claim",
+    (assumeLiveFromCommitted(committed) as number) === 12.4);
+
+  // T4: evaluation time is a parameter derived through the context transform, never an ambient cursor.
+  const effective = unsafeLabelTime(12.0, "effective");
+  enforced("I-4", "evaluation time defaults to the effective time it came from",
+    (deriveEvaluationTime(effective) as number) === 12.0);
+  enforced("I-4", "…and an ADR-011 context transform applies at that one crossing",
+    (deriveEvaluationTime(effective, (s) => s * 2) as number) === 24.0);
+
+  // The decode clamp is not incidental: an unclamped decode time past a source's available media is
+  // the tail ping-pong / seek storm already paid for once in WebglMediaLayer.
+  const evaluation = deriveEvaluationTime(effective);
+  enforced("I-4", "decode time applies in-point and rate",
+    (deriveDecodeTime(evaluation, { sourceInSeconds: 2, rate: 1 }) as number) === 14.0);
+  enforced("I-4", "decode time clamps to the source's available media",
+    (deriveDecodeTime(evaluation, { durationSeconds: 5 }) as number) === 5);
+  enforced("I-4", "decode time never goes negative",
+    (deriveDecodeTime(unsafeLabelTime(-3, "evaluation")) as number) === 0);
+  enforced("I-4", "an unknown duration does not clamp",
+    (deriveDecodeTime(evaluation) as number) === 12.0);
+
+  // T5, and the sign convention the staleness report got wrong until 2026-08-01: POSITIVE means the
+  // delivered frame is BEHIND the moment it was meant to represent.
+  enforced("I-3", "a frame behind its target reports a positive coherence gap",
+    coherenceGap(target, servedTime(12.0)) > 0);
+  enforced("I-3", "a frame at its target reports no gap",
+    coherenceGap(target, servedTime(12.5)) === 0);
+
+  // T8's operand. The barrier that enforces monotonicity does not exist yet (S4.4), so this asserts
+  // only that presentation time is reachable from effective time and from nothing else.
+  enforced("I-4", "presentation time derives from the effective time that produced the frame",
+    (derivePresentationTime(effective) as number) === 12.0);
 }
 
 // ---------------------------------------------------------------------------------------------

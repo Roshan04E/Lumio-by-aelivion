@@ -7,6 +7,7 @@
  *
  * Built slice by slice per `plans/adr-012-implementation-programme.md`. Today: diagnostics (S0.1).
  */
+export * from "./time";
 export * from "./diagnostics";
 export * from "./frame-scheduler";
 export * from "./settle-window";

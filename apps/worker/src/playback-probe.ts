@@ -8,21 +8,8 @@
  *
  * Run: pnpm --filter @orreris/worker exec tsx src/playback-probe.ts   (dev server must be up)
  */
-import { chromium, type Page } from "playwright";
-
-const BASE = process.env.PROBE_BASE ?? "http://localhost:5173";
-
-async function reachEditor(page: Page) {
-  if (page.url().includes("/editor/")) return;
-  await page.goto(`${BASE}/create`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(800);
-  const useTemplate = page.getByRole("button", { name: /use template/i }).first();
-  if ((await useTemplate.count().catch(() => 0)) && (await useTemplate.isVisible().catch(() => false))) {
-    await useTemplate.click().catch(() => undefined);
-    await page.waitForURL(/\/editor\//, { timeout: 15000 }).catch(() => undefined);
-    await page.waitForTimeout(2500);
-  }
-}
+import { chromium } from "playwright";
+import { reachEditor, EDITOR_BASE as BASE } from "./browser/editor-session";
 
 async function main() {
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
