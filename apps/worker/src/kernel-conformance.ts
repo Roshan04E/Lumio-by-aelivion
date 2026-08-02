@@ -46,6 +46,7 @@ import {
   suppressMediaSources,
   demoteMediaSources,
   holdDecoderSession,
+  isMediaSourceDemoted,
   releaseDecoderHold,
   DECODER_RETENTION_MS,
   bindDecoderSource,
@@ -1195,6 +1196,15 @@ console.log("\nS3.5 — proxy substitution as demotion, not deletion (I-16/I-24)
   enforced("I-29", "an unchanged demotion set does not re-report",
     demoteMediaSources(session, [A], "comp-proxy-serving") === false &&
       kernelDiagnostics.events({ kind: "transition" }).length === before);
+
+  // A REPORTER must be able to tell an intentional silence from a fault, cheaply, per source per frame.
+  // Two of them failed to: the freeze watchdog "healed" demoted loaders twice a second, and the frame
+  // profiler logged them as "decoder dropped/preempted" — the exact opposite of what happened. Both were
+  // found in the field rather than here, so the predicate they now share gets a check of its own.
+  enforced("I-29", "a demoted source is answerable as demoted, without building the declaration",
+    isMediaSourceDemoted(session, A));
+  enforced("I-29", "…and a declared, undemoted source is not",
+    !isMediaSourceDemoted(session, OTHER));
 
   // And the graph still wins. A demoted source that leaves the graph is gone — demotion is a rendering
   // decision, and a rendering decision may never be the thing that keeps a source alive either.

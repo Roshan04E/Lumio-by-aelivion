@@ -174,6 +174,19 @@ export function getMediaSources(session: RuntimeSession): MediaSourceDeclaration
   };
 }
 
+/**
+ * Is this source DEMOTED — declared, but deliberately not producing (S3.5)?
+ *
+ * Exists so a reporter can tell an intentional silence from a fault without allocating the full
+ * declaration on a hot path. That distinction is I-29 and it is not decorative: the frame profiler was
+ * labelling every demoted loader "decoder dropped/preempted", which is the exact opposite of what had
+ * happened — the decoder was fine and had been TOLD to stop. One state read, one linear scan of a list
+ * that holds a handful of ids.
+ */
+export function isMediaSourceDemoted(session: RuntimeSession, id: string): boolean {
+  return session.state.get<readonly string[]>(KEY_DEMOTED, []).includes(id);
+}
+
 /** Subscribe to membership changes. Coalesced by the registry — see `state-registry.ts`. */
 export function subscribeMediaSources(session: RuntimeSession, listener: () => void): () => void {
   const offDeclared = session.state.subscribe(KEY_DECLARED, listener);

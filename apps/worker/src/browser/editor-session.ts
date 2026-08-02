@@ -42,29 +42,55 @@ export interface ReachEditorOptions {
 }
 
 /**
- * A small real mp4 to seed a project with. Prefers an explicit `PROBE_CLIP`, else the smallest rendered
- * final lying in the API's storage — real H.264 the decoder path will actually accept, and small enough
- * that the upload is not itself the thing being measured.
+ * Duration in seconds from the mp4 `mvhd` box, or null if it cannot be read. Deliberately dependency-free
+ * — a seed-file chooser must not need ffprobe on the PATH to work.
  */
-export function defaultClipPath(): string {
+function mp4DurationSeconds(file: string): number | null {
+  try {
+    const bytes = fs.readFileSync(file);
+    const at = bytes.indexOf(Buffer.from("mvhd"));
+    if (at < 0) return null;
+    const version = bytes[at + 4];
+    if (version === 0) {
+      const timescale = bytes.readUInt32BE(at + 16);
+      return timescale > 0 ? bytes.readUInt32BE(at + 20) / timescale : null;
+    }
+    const timescale = bytes.readUInt32BE(at + 24);
+    return timescale > 0 ? Number(bytes.readBigUInt64BE(at + 28)) / timescale : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A real mp4 to seed a project with. Chosen by **duration first**, which is not a detail: the first
+ * version of this picked the smallest file, which turned out to be ~1s long, so a 10s measurement run
+ * spent 9 of those seconds past the end of its own material — decoding nothing, compositing nothing, and
+ * reporting a beautifully reproducible 75.0fps in both arms of an A/B that was measuring an empty
+ * timeline. A seed clip must outlast the window that samples it.
+ *
+ * Among clips long enough, the SMALLEST wins: the upload is setup, not the thing being measured.
+ */
+export function defaultClipPath(minimumSeconds = 20): string {
   const explicit = process.env.PROBE_CLIP;
   if (explicit) return explicit;
   const dir = path.join(repoRoot, "apps/api/storage/finals");
-  const files = fs.existsSync(dir)
+  const candidates = fs.existsSync(dir)
     ? fs
         .readdirSync(dir)
         .filter((name) => name.endsWith(".mp4"))
         .map((name) => path.join(dir, name))
-        .map((file) => ({ file, size: fs.statSync(file).size }))
-        .filter((entry) => entry.size > 8_000)
+        .map((file) => ({ file, size: fs.statSync(file).size, seconds: mp4DurationSeconds(file) }))
+        .filter((entry) => entry.seconds != null && entry.seconds >= minimumSeconds)
         .sort((a, b) => a.size - b.size)
     : [];
-  if (files.length === 0) {
+  if (candidates.length === 0) {
     throw new Error(
-      "no seed clip: set PROBE_CLIP=<path to an .mp4> (none found under apps/api/storage/finals)"
+      `no seed clip of at least ${minimumSeconds}s: set PROBE_CLIP=<path to an .mp4> ` +
+        "(searched apps/api/storage/finals)"
     );
   }
-  return files[0]!.file;
+  return candidates[0]!.file;
 }
 
 /**
@@ -120,6 +146,60 @@ export async function reachEditor(page: Page, options: ReachEditorOptions = {}):
   }
   await page.waitForTimeout(options.settleMs ?? 6_000);
   return page.url();
+}
+
+/**
+ * Give the project a Flarex comp with a BUILT PROXY — the fixture the demotion path needs.
+ *
+ * Without this, a probe measuring `kernelProxySource` is measuring nothing: a blank project has no comp,
+ * so nothing is ever demoted and both arms are identical by construction. The first runs of
+ * `preview-budget-probe` reported a beautifully reproducible null result for exactly that reason.
+ *
+ * The flow is the product's own: select the clip → Flarex page → "Create Flarex comp" (which wires a
+ * MediaIn → MediaOut graph over the clip's own media) → "Prepare proxy" → wait for "Proxy ready" → back
+ * to Edit. Nothing is injected into stores; if the product's path breaks, the fixture breaks loudly,
+ * which is the point of building it this way rather than reaching into the graph.
+ *
+ * Returns false when the fixture could not be built, so a caller can report a VOID run rather than a
+ * confident number about a comp that does not exist.
+ */
+export async function buildFlarexProxyFixture(page: Page, timeoutMs = 180_000): Promise<boolean> {
+  const clip = page.locator(".timeline-clip").first();
+  if (!(await clip.count().catch(() => 0))) return false;
+  await clip.click().catch(() => undefined);
+  await page.waitForTimeout(500);
+
+  await page.getByRole("tab", { name: /flarex/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(1_500);
+
+  const create = page.getByRole("button", { name: /create flarex comp/i }).first();
+  if (await create.count().catch(() => 0)) {
+    await create.click().catch(() => undefined);
+    await page.waitForTimeout(2_500);
+  }
+
+  const proxyButton = page.locator(".flarex-proxy-btn").first();
+  if (!(await proxyButton.count().catch(() => 0))) return false;
+  const label = (await proxyButton.textContent().catch(() => "")) ?? "";
+  if (!/proxy ready/i.test(label)) {
+    await proxyButton.click().catch(() => undefined);
+    // The render walks the clip's whole span, so this is minutes on a long source, not seconds. Waiting
+    // on the button's own state is what keeps that honest instead of a guessed sleep.
+    await page
+      .locator(".flarex-proxy-btn", { hasText: /proxy ready/i })
+      .first()
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .catch(() => undefined);
+  }
+  const ready = await page
+    .locator(".flarex-proxy-btn", { hasText: /proxy ready/i })
+    .first()
+    .count()
+    .catch(() => 0);
+
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(2_000);
+  return ready > 0;
 }
 
 /** Re-open an existing project id under a different flag set — the A/B seam. Keeps the same profile. */

@@ -25,6 +25,9 @@
  */
 
 /** Cheap, semantically-grouped counter buckets — a flat map keyed by a dotted name. */
+import { isMediaSourceDemoted } from "../kernel/media-manager";
+import { defaultSession } from "../kernel/session";
+
 type Counters = Record<string, number>;
 
 /** A snapshot of compositor-owned cache/VRAM state at frame end (supplied by the caller — see
@@ -328,11 +331,22 @@ class FrameProfiler {
         this.warnEdge(`media STALLED: ${this.shortId(id)} — held ${st.heldFrames}f / ${Math.round(t - st.lastAdvanceAt)}ms while playing (decoder not advancing)`);
       }
     } else if (!hasFrame && st.everHadFrame && st.noFrameFrames >= LOST_FRAMES) {
-      // Delivered NO frame for a perceptible span — the decoder was dropped/preempted (mode:"none" lane).
-      this.bump("media.lostSource");
-      if (!st.lostWarned) {
-        st.lostWarned = true;
-        this.warnEdge(`media LOST SOURCE: ${this.shortId(id)} — no frame for ${st.noFrameFrames}f / ${Math.round(t - st.noFrameStartAt)}ms (decoder dropped/preempted)`);
+      // ...UNLESS the kernel says this source was TOLD to stop (S3.5 demotion). A demoted loader
+      // delivers no frame by design, so "decoder dropped/preempted" is the exact opposite of what
+      // happened — the decoder is fine and idle on purpose. Reporting a declared state as a fault is
+      // the I-29 mistake, and it is not cosmetic: with `?kernelProxySource=1` every proxied comp's
+      // MediaIn sources warn continuously, which buries the REAL contention warnings from ordinary
+      // timeline layers in the same log. This is the same correction already applied to the freeze
+      // watchdog in WebglMediaLayer; the profiler is the second reporter that had to learn it.
+      if (isMediaSourceDemoted(defaultSession, id)) {
+        this.bump("media.demotedSilence");
+      } else {
+        // Delivered NO frame for a perceptible span — the decoder was dropped/preempted (mode:"none").
+        this.bump("media.lostSource");
+        if (!st.lostWarned) {
+          st.lostWarned = true;
+          this.warnEdge(`media LOST SOURCE: ${this.shortId(id)} — no frame for ${st.noFrameFrames}f / ${Math.round(t - st.noFrameStartAt)}ms (decoder dropped/preempted)`);
+        }
       }
     } else if (hasFrame && !st.everAdvanced && st.heldFrames >= 20) {
       this.bump("media.neverAdvanced");

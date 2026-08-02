@@ -36,7 +36,13 @@
  *   PROBE_SECONDS=20 ...   (default 12 of playback per arm)
  */
 import { chromium, type BrowserContext, type Page } from "playwright";
-import { reachEditor, reopenWithFlags, EDITOR_BASE } from "./browser/editor-session";
+import {
+  buildFlarexProxyFixture,
+  defaultClipPath,
+  reachEditor,
+  reopenWithFlags,
+  EDITOR_BASE,
+} from "./browser/editor-session";
 
 const SECONDS = Number(process.env.PROBE_SECONDS ?? 12);
 /** Discarded before sampling: the first second of playback is decoder warmup, not steady state. */
@@ -103,8 +109,30 @@ async function pause(page: Page): Promise<void> {
   await page.locator(PAUSE).first().click({ timeout: 3_000 }).catch(() => undefined);
 }
 
+/**
+ * Pin the playback resolution before measuring.
+ *
+ * Auto quality is a closed loop: it drops resolution when frames are dropped and recovers when smooth,
+ * so it CHANGES THE WORKLOAD IN RESPONSE TO THE WORKLOAD. Left on, the first real run of this probe
+ * settled one arm at 0.25 and the other at 0.5 and then compared their frame rates — 67.9 against 63.4,
+ * a difference that is entirely the resolution and says nothing about the flag under test. An adaptive
+ * controller in the measurement path is a confound, not a feature, and a fixed scale is the only way the
+ * two arms are doing the same amount of work.
+ *
+ * Half is the pin: Full leaves no headroom for a regression to show up in, Quarter hides one.
+ */
+async function pinRenderScale(page: Page): Promise<void> {
+  await page
+    .locator('.viewer-controls button[title^="Half playback resolution"]')
+    .first()
+    .click({ timeout: 5_000 })
+    .catch(() => undefined);
+  await page.waitForTimeout(300);
+}
+
 async function sampleArm(page: Page, name: string): Promise<ArmResult> {
   const samples: Sample[] = [];
+  await pinRenderScale(page);
   if (!(await play(page))) {
     return {
       name,
@@ -233,12 +261,25 @@ async function main(): Promise<void> {
     await page.waitForTimeout(6_000);
     projectUrl = page.url();
   } else {
-    projectUrl = await reachEditor(page);
+    // The seed clip must outlast the sample window, or the run measures an empty timeline. See
+    // defaultClipPath — this is not hypothetical, it is what the first two runs of this probe did.
+    projectUrl = await reachEditor(page, { clipPath: defaultClipPath(SECONDS + 8) });
   }
   if (!projectUrl.includes("/editor/")) {
     throw new Error(`not in the editor: ${projectUrl}`);
   }
   console.log(`project: ${projectUrl}`);
+
+  // The fixture, built once, before either arm. `kernelProxySource` only does anything to a comp that is
+  // being served from a proxy; without one the arms are identical by construction and the run is theatre.
+  // `PROBE_NO_FIXTURE=1` skips it to measure the flag's UNCONDITIONAL cost, which is a different question
+  // and should be asked deliberately rather than by accident.
+  let hasFixture = false;
+  if (process.env.PROBE_NO_FIXTURE !== "1") {
+    console.log("building fixture: Flarex comp + proxy (this renders the clip's span — minutes, not seconds)");
+    hasFixture = await buildFlarexProxyFixture(page);
+    console.log(hasFixture ? "  · proxy ready" : "  · FIXTURE FAILED — arms will not exercise demotion");
+  }
   console.log(`arms: ${ARMS.length} × ${SECONDS}s of playback (after ${WARMUP_MS}ms warmup), same page, same project`);
 
   const results: ArmResult[] = [];
@@ -254,6 +295,49 @@ async function main(): Promise<void> {
 
   console.log("\n════ frame budget ════");
   for (const result of results) report(result);
+
+  // VACUITY GUARD. A compositor happily repaints an unchanged frame at display refresh, so an arm whose
+  // playhead sat past the end of its own material reports a flawless ~75fps while decoding nothing — and
+  // two such arms agree with each other to three significant figures, which reads as a beautifully
+  // reproducible null result rather than as a broken measurement. It is the frame-budget equivalent of a
+  // vacuous assertion, and the ratchet's rule applies: an instrument that cannot fail is not evidence.
+  const vacuous = results.filter((r) => r.samples.length > 0 && r.samples.every((s) => s.mediaFps === 0));
+  if (vacuous.length > 0) {
+    console.log(
+      `\n[budget] ⚠ VOID — no video frames were presented in ${vacuous.length}/${results.length} arm(s).\n` +
+        "         The compositor ran, the decoder did not: the playhead was past the end of its material,\n" +
+        "         or every layer was a still. These numbers compare an empty timeline with an empty\n" +
+        "         timeline. Seed a longer clip (PROBE_CLIP) or shorten PROBE_SECONDS."
+    );
+  }
+
+  // COMPARABILITY GUARD, the other half of the vacuity one. Two arms are only comparable if they did the
+  // same amount of work per frame, and `renderScale` is the one input that silently differs — Auto is a
+  // closed loop and even pinned, a click can miss. Reporting a delta across different resolutions is
+  // reporting the resolution.
+  const scales = new Set(
+    results.flatMap((r) => r.samples.map((s) => s.renderScale))
+  );
+  if (scales.size > 1) {
+    console.log(
+      `\n[budget] ⚠ VOID — render scale was not constant across the run (${[...scales].join(", ")}).\n` +
+        "         Auto quality adapts the workload to the workload, so this delta is the resolution,\n" +
+        "         not the flag. Pin a fixed resolution before trusting the comparison."
+    );
+  }
+
+  // The third way this comparison can be void: nothing was demoted, so both arms ran the same code.
+  const demotedAnywhere = results.some((r) => {
+    const media = (r.kernel as { media?: { demoted?: string[] } } | null)?.media;
+    return (media?.demoted?.length ?? 0) > 0;
+  });
+  if (!demotedAnywhere && process.env.PROBE_NO_FIXTURE !== "1") {
+    console.log(
+      "\n[budget] ⚠ VOID for the demotion question — no source was ever demoted in either arm.\n" +
+        `         ${hasFixture ? "The proxy built but never served during the sample window." : "The fixture failed to build."}\n` +
+        "         This still measures the flag's unconditional cost, which is a different question."
+    );
+  }
 
   const [a, b] = results;
   if (a && b && a.samples.length > 0 && b.samples.length > 0) {
