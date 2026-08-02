@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { GlobalErrorToast } from "./components/GlobalErrorToast";
+import { AiThinkingPanel } from "./components/ai/AiThinkingPanel";
 import { isApiOffline, subscribeApiOffline } from "./lib/api";
 
 const HomePage = lazy(() => import("./pages/HomePage").then((module) => ({ default: module.HomePage })));
@@ -44,6 +45,8 @@ export default function App() {
     <AppShell>
       <ApiOfflineBanner />
       <GlobalErrorToast />
+      {/* ORIS Stage A observatory — renders only under ?aiThinkingShow=1 */}
+      <AiThinkingPanel />
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/" element={<HomePage />} />

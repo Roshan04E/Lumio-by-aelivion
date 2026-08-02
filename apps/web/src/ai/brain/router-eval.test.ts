@@ -66,9 +66,17 @@ function route(prompt: string, context: Partial<BrainContext> = {}): BrainRouteR
 }
 
 let failures = 0;
+let passes = 0;
+
+/**
+ * ADR-016 I13 — a verifier must prove it RAN. "No complaints" and "never executed" are the
+ * same output otherwise, and the consumer reads both as success. Raise when checks are added.
+ */
+const EXPECTED_MIN_CHECKS = 328;
 
 function check(label: string, ok: boolean, detail?: string): void {
   if (ok) {
+    passes += 1;
     console.log(`  ✓ ${label}`);
   } else {
     failures += 1;
@@ -1090,7 +1098,16 @@ async function main(): Promise<void> {
     console.error(`\nbrain:eval — ${failures} check(s) FAILED`);
     process.exit(1);
   }
-  console.log("\nbrain:eval — all checks passed.");
+  if (passes < EXPECTED_MIN_CHECKS) {
+    console.error(`\n❌ suite shrank: ${passes} checks ran, expected at least ${EXPECTED_MIN_CHECKS}.`);
+    process.exit(1);
+  }
+  console.log(`\nbrain:eval — all ${passes} checks passed.`);
+  process.exit(0);
 }
+
+// ADR-016 I13 loud-exit guard: an early return inside main(), or an event loop that drains
+// before it resolves, would otherwise exit 0 having verified nothing.
+process.exitCode = 1;
 
 void main();

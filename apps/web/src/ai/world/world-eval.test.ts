@@ -391,7 +391,7 @@ async function run(): Promise<void> {
     profileAfter?.path === "user-profile@builtin" && profileAfter.fact.value.totalRejected === 2
   );
 
-  const secondAsset: SourceAsset = { ...asset, id: "a2", fileType: "image/png", durationSeconds: 0, sizeBytes: 1024 * 1024, source: "stock" };
+  const secondAsset: SourceAsset = { ...asset, id: "a2", fileType: "image/png", durationSeconds: 0, sizeBytes: 1024 * 1024, source: "pexels" };
   const projectCtx: WorldContext = { composition: textComp, assets: [asset, secondAsset] };
   const media = await queryFact<ProjectMediaFact>(
     { type: PROJECT_MEDIA_FACT, target: { kind: "project", id: PROJECT_TARGET_ID } },
@@ -403,7 +403,7 @@ async function run(): Promise<void> {
       media.fact.value.videoCount === 1 &&
       media.fact.value.imageCount === 1 &&
       media.fact.value.totalFootageSeconds === 12.5 &&
-      media.fact.value.bySource["stock"] === 1 &&
+      media.fact.value.bySource["pexels"] === 1 &&
       media.fact.value.bySource["local"] === 1
   );
   const mediaChanged = await queryFact<ProjectMediaFact>(

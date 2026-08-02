@@ -11,6 +11,9 @@
  * ours is registered data end to end. Pure module (node-safe) — covered by brain:eval.
  */
 
+import { appendDecisionEvent } from "./experience/stream";
+import type { DecisionAction, DecisionCandidate, DecisionOwner } from "./experience/stream";
+
 export interface DecisionTrace {
   /** The user ask that produced the decision. */
   prompt: string;
@@ -24,13 +27,40 @@ export interface DecisionTrace {
   steps: string[];
   applied: number;
   failed: number;
+  /** When the decision FINISHED. Paired with `startedAt`; see that field. */
   at: number;
+
+  // ── ORIS Stage A enrichment (ORIS_RESEARCH_PROGRAMME.md §12.1) ─────────────────────────
+  // All optional: the WHY reflex and the transcript's trace row consume only the fields
+  // above, so every existing call site stays valid and nothing about the runtime changes.
+  // These widen the OBSERVATION surface; they do not alter behaviour.
+
+  /** Who made the claim — structured, so attribution never parses the `route` display string. */
+  owner?: DecisionOwner;
+  /** The claim itself. H5 (calibration) cannot be tested without it. */
+  confidence?: { label: string; percent: number | null };
+  /** When the decision STARTED. A pair, not a duration — a scalar destroys temporal overlap. */
+  startedAt?: number;
+  /** Structured actions; `steps` remains the human-readable rendering of the same thing. */
+  actions?: DecisionAction[];
+  /** Hypotheses considered, including the rejected ones — the counterfactual record. */
+  candidates?: DecisionCandidate[];
 }
 
 let last: DecisionTrace | null = null;
 
 export function recordDecisionTrace(trace: DecisionTrace): void {
   last = trace;
+  // ORIS Stage A (O1): the trace is also an EPISODE — one thing that happened, in order,
+  // with an outcome. Appending here rather than at each call site means every apply/answer
+  // seam the runtime already has, and every future one, lands in the corpus for free.
+  // Purely additive: the WHY reflex still reads `last`, and a stream failure must never
+  // break an edit, so the append is guarded.
+  try {
+    appendDecisionEvent(trace);
+  } catch {
+    // Observability must not be able to take down the thing it observes.
+  }
 }
 
 export function getLastDecisionTrace(): DecisionTrace | null {

@@ -43,9 +43,18 @@ import {
 } from "./hypothesis-route";
 
 let failures = 0;
+let passes = 0;
+
+/**
+ * ADR-016 I13 — a verifier must prove it RAN. A green result and a result that never executed
+ * are otherwise the same output, which makes the check worth zero (and worse than zero, since
+ * its consumer reads silence as success). Raise when checks are added; never lower it quietly.
+ */
+const EXPECTED_MIN_CHECKS = 92;
 
 function check(label: string, ok: boolean, detail?: string): void {
   if (ok) {
+    passes += 1;
     console.log(`  ✓ ${label}`);
   } else {
     failures += 1;
@@ -536,12 +545,21 @@ async function runK4(): Promise<void> {
   check("rejected dialect never joined the registry", !listBlueprintDialects().includes("bogus"));
 }
 
+// ADR-016 I13 loud-exit guard: if the event loop drains before runK4() settles (a
+// forever-pending promise), `.finally` never fires and node would exit 0 having verified
+// nothing. This default turns that silent pass into a failure.
+process.exitCode = 1;
+
 runK4()
   .catch((error) => {
     failures += 1;
     console.error(`  ✗ K4 suite crashed — ${String(error)}`);
   })
   .finally(() => {
+    if (failures === 0 && passes < EXPECTED_MIN_CHECKS) {
+      console.error(`\n❌ suite shrank: ${passes} checks ran, expected at least ${EXPECTED_MIN_CHECKS}.`);
+      process.exit(1);
+    }
     console.log(failures === 0 ? "\nblueprint:eval PASS" : `\nblueprint:eval FAIL — ${failures} failure(s)`);
     process.exit(failures === 0 ? 0 : 1);
   });

@@ -1,0 +1,15 @@
+{
+  // ORIS/ADR-016 — the acceptance suites are part of the TRUSTED COMPUTING BASE.
+  // The base config excludes `src/**/*.test.ts`, so every eval script in this package was
+  // outside the compiler: a check could assert against a property that no longer exists and
+  // still report green. That is false confidence, which is worse than an obvious failure.
+  //
+  // Kept separate from `tsconfig.json` so the browser build is untouched — in particular,
+  // node types are available HERE and nowhere else, so no component can reach for `process`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src"],
+  "exclude": []
+}
