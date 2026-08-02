@@ -40,7 +40,8 @@
     "render:manifest": "tsx src/render-manifest-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/index.ts",
-    "preview:budget": "tsx src/preview-budget-probe.ts"
+    "preview:budget": "tsx src/preview-budget-probe.ts",
+    "preview:profile": "tsx src/preview-cpu-profile.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",
