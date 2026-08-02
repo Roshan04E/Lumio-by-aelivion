@@ -97,6 +97,9 @@ import {
   subjectKey,
   summarizeFlarexDegradations,
   type FlarexComp,
+  type FlarexCompProxyFrame,
+  type SceneTextureSource,
+  type ServedTime,
   type FlarexDegradation,
   type FlarexLowerCtx,
   type ProjectGraph,
@@ -1361,6 +1364,53 @@ console.log("\nS4.1 — time provenance: one authority, named derivations (T1-T5
   // only that presentation time is reachable from effective time and from nothing else.
   enforced("I-4", "presentation time derives from the effective time that produced the frame",
     (derivePresentationTime(effective) as number) === 12.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// S4.2 — servedTime survives the grade and the proxy
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS4.2 — a texture is pixels-at-a-moment (T5/T7, I-3)");
+{
+  // The grade stage's contract, exercised through the same helper shape both producers use: a known
+  // reading becomes a labelled time; an unknowable one stays ABSENT rather than becoming a number.
+  const label = (seconds: number | null): { servedTime?: ServedTime } =>
+    seconds == null || !Number.isFinite(seconds) ? {} : { servedTime: servedTime(seconds) };
+
+  const graded: SceneTextureSource = { texture: {} as never, width: 1920, height: 1080, ...label(4.25) };
+  enforced("I-3", "a graded media texture carries the moment its pixels represent", graded.servedTime === 4.25);
+
+  // The distinction the whole slice turns on. `servedTime: undefined` and an ABSENT key are different
+  // under exactOptionalPropertyTypes, and only the absent form can mean "this path cannot say" without
+  // a reader mistaking it for a time. A still or a generator raster is coherent at every playhead and
+  // must produce the absent form, never 0 — which would read as "coherent at t=0" and be wrong at every
+  // other moment.
+  const timeless: SceneTextureSource = { texture: {} as never, width: 8, height: 8, ...label(null) };
+  enforced("I-3", "a time-invariant source omits the field rather than claiming a time",
+    !("servedTime" in timeless));
+  enforced("I-3", "…and a non-finite reading is treated as unknowable, not coerced",
+    !("servedTime" in { ...label(Number.NaN) }));
+
+  // T7: a proxy is a source. This is the participant that had a version and no time, so a whole comp's
+  // stand-in could be arbitrarily behind the playhead and still read as ready.
+  const proxied: FlarexCompProxyFrame = {
+    source: {} as never,
+    sourceWidth: 1920,
+    sourceHeight: 1080,
+    sourceVersion: 7,
+    ...label(4.2),
+  };
+  enforced("I-3", "a proxy frame carries a served time — T7, a proxy is a source",
+    proxied.servedTime === 4.2);
+
+  // What the barrier will do with them (S4.4 owns the decision; this asserts only that the operands
+  // are now present and comparable). A held texture reports the grade's moment, not the request's —
+  // which is the entire reason the field exists.
+  const target = deriveTargetTime(deriveTimelineTime(authoritativeTime(4.5)));
+  enforced("I-3", "a held texture's gap from the frame it should represent is now computable",
+    Math.abs(coherenceGap(target, servedTime(graded.servedTime!)) - 0.25) < 1e-9);
+  enforced("I-3", "…for the proxy participant too, in the same units",
+    Math.abs(coherenceGap(target, servedTime(proxied.servedTime!)) - 0.3) < 1e-9);
 }
 
 // ---------------------------------------------------------------------------------------------

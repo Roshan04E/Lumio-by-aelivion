@@ -30,7 +30,24 @@ import { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
 import { getFlarexCompProxy, subscribeFlarexProxyStore } from "./flarex-comp-proxy-store";
 import { setFlarexProxyServing } from "./flarex-proxy-status";
 import { getKernelProxySourceEnabled as kernelProxySourceEnabled } from "../../playback/frame-completion";
-import { defaultSession, holdDecoderSession, releaseDecoderHold } from "@orreris/shared";
+import { defaultSession, holdDecoderSession, releaseDecoderHold, servedTime, type ServedTime } from "@orreris/shared";
+
+/**
+ * The moment a delivered proxy frame actually represents (ADR-012 T5/T7, slice S4.2).
+ *
+ * `VideoFrame.timestamp` is microseconds in the source's own timebase, which for a comp proxy is
+ * comp-local seconds — the same basis as the `localT` the pump asks with, so the two are directly
+ * comparable and the barrier in S4.4 needs no conversion.
+ *
+ * A spreadable partial so that "cannot say" stays ABSENT rather than becoming `servedTime: undefined`:
+ * under `exactOptionalPropertyTypes` those differ, and the difference is the point — an unknowable time
+ * must never be readable as a current one.
+ */
+function proxyServedTime(frame: unknown): { servedTime?: ServedTime } {
+  if (typeof VideoFrame === "undefined" || !(frame instanceof VideoFrame)) return {};
+  const seconds = frame.timestamp / 1_000_000;
+  return Number.isFinite(seconds) ? { servedTime: servedTime(seconds) } : {};
+}
 
 /** `?flarexProxy=0` disables playback substitution outright (proxies can still be rendered/stored). */
 function proxyPlaybackEnabled(): boolean {
@@ -474,6 +491,19 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
             sourceWidth: provider.width,
             sourceHeight: provider.height,
             sourceVersion: active.version,
+            // ADR-012 T7, slice S4.2 — "a proxy is a source; it carries a time". Until now this was the
+            // one participant standing in for a whole comp that a coherence check could not evaluate:
+            // it had a version and no time, so it could be arbitrarily behind the playhead and still
+            // read as ready, because there was nothing to read.
+            //
+            // Taken from the DELIVERED frame's own timestamp, never from `localT`. `localT` is what we
+            // ASKED for; a decoder answers with the nearest frame it has, and treating the request as
+            // the answer is exactly the conflation this slice exists to remove — it would make every
+            // proxy frame report perfect coherence by construction. Comparable to `localT` without
+            // conversion because a comp proxy is an mp4 of the comp's own span, so its timebase IS
+            // comp-local seconds. Absent (not zero) when the source is not a `VideoFrame` and cannot
+            // say — "unknowable" must never be readable as "current".
+            ...proxyServedTime(frame),
           };
           // First frame for this comp → its asset-source loaders can stop decoding (see servingCompIds).
           if (active.version === 1) setServing(active.compId, true);

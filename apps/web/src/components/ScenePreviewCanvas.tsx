@@ -48,9 +48,11 @@ import {
   recordFlarexDegradation,
   registerResource,
   resourcesInScope,
+  servedTime,
   touchResource,
   RESOURCE_IDLE_MS,
   type ResourceScope,
+  type ServedTime,
   type ColorPipeline,
   type FrameOutcome,
   type FlarexComp,
@@ -76,6 +78,24 @@ import { getFrameCompletionEnabled, getFrameScopesEnabled, getKernelResourcesEna
 import { isReadaheadProbeEnabled, noteReadaheadComposite, type ReadaheadSample } from "../playback/readahead-probe";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
+
+/**
+ * Label a producer's raw served-time reading as a kernel {@link ServedTime} (ADR-012 T5, slice S4.2).
+ *
+ * This grade stage is where the value crossed from "a number the media layer happens to know" into the
+ * scene graph, and it is exactly where it used to be dropped — the texture was modelled as pixels
+ * rather than as pixels-at-a-moment, so everything downstream had to infer coherence from a monotonic
+ * publish counter that structurally cannot answer "is this the texture for the frame I am about to
+ * present?".
+ *
+ * Returns a SPREADABLE partial rather than a bare value so that "the path cannot say" stays *absent*
+ * instead of becoming `servedTime: undefined`. Under `exactOptionalPropertyTypes` those are different
+ * things, and the distinction is load-bearing: absent means unknowable (a still, a generator raster),
+ * and it must never be readable as "assume it is current".
+ */
+function servedTimeOf(seconds: number | null): { servedTime?: ServedTime } {
+  return seconds == null || !Number.isFinite(seconds) ? {} : { servedTime: servedTime(seconds) };
+}
 
 /** Soak telemetry (__rf* convention) for the single-ctx preview: `grades` = in-context media grades that
  *  actually ran, `skips` = frames a media layer's cached RenderTarget was reused (unchanged frame + grade).
@@ -621,7 +641,28 @@ export function ScenePreviewCanvas({
   // `lastKey` folds the layer's frame version + grade keys so an unchanged media frame skips the re-grade +
   // upload entirely (the static-photo win). Lives on the compositor's context; disposed on rebuild/unmount.
   const sharedMediaRenderersRef = useRef<
-    Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; lastKey: string; lastW: number; lastH: number }>
+    Map<
+      string,
+      {
+        renderer: MediaWebGLRenderer;
+        target: RenderTarget;
+        pipelineKey: string;
+        lastKey: string;
+        lastW: number;
+        lastH: number;
+        /**
+         * The media time the pixels currently in `target` represent (ADR-012 T5, slice S4.2).
+         *
+         * Stored on the ENTRY, not read per call, because the entry outlives the frame that filled it.
+         * This target is handed back unchanged on the re-grade skip and on the two hold paths, and in
+         * every one of those cases the honest answer to "when are these pixels from?" is the moment of
+         * the last GRADE — not the moment being asked about. Recomputing it from the live snapshot
+         * would make a held texture claim to be current, which is precisely the failure the barrier in
+         * S4.4 exists to catch.
+         */
+        lastServedTime: number | null;
+      }
+    >
   >(new Map());
   const kernelResourcesRef = useRef(getKernelResourcesEnabled());
   /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
@@ -1136,13 +1177,17 @@ export function ScenePreviewCanvas({
         // (2026-07-07 soak report: 11 flickers / 19s of scrubbing).
         if (entry && entry.lastW > 0) {
           recordSingleCtx("skips");
-          return { texture: entry.target.tex, width: entry.lastW, height: entry.lastH };
+          // Held pixels carry the time they were graded at, NOT the time being requested. This is the
+          // hold the 2026-07-07 anti-flicker fix introduced, and the reason a source that decoded once
+          // could read as "ready" forever no matter how stale — the texture had no way to say when it
+          // was from. Now it does.
+          return { texture: entry.target.tex, width: entry.lastW, height: entry.lastH, ...servedTimeOf(entry.lastServedTime) };
         }
         return null; // never had a frame — same as the old "no canvas yet" (poster covers it)
       }
       const gl = compositor.sharedGl;
       if (!entry) {
-        entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0 };
+        entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0, lastServedTime: null };
         sharedMediaRenderersRef.current.set(resolvedId, entry);
         // Always `live`: this pool is only ever built from the live frame's media set. The capture path
         // reuses the graded textures the live frame already produced rather than making its own, which
@@ -1165,7 +1210,10 @@ export function ScenePreviewCanvas({
       const key = `${snap.frameVersion}|${snap.pipelineKey}|${snap.mediaEffectsKey}|${snap.amount}|${snap.bakedOpacity}|${snap.transitionKey}|fr${chosenFrame === snap.fullResFrame ? 1 : 0}`;
       if (!snap.matte && entry.lastKey === key && entry.target.width === w0 && entry.target.height === h0) {
         recordSingleCtx("skips");
-        return { texture: entry.target.tex, width: w0, height: h0 };
+        // Re-grade skip: same frame version, same grade — so the same pixels, and therefore the same
+        // served time. Reading it from the entry rather than the snapshot keeps the skip honest even if
+        // the producer's own reading has since moved.
+        return { texture: entry.target.tex, width: w0, height: h0, ...servedTimeOf(entry.lastServedTime) };
       }
       if (entry.pipelineKey !== snap.pipelineKey) {
         entry.renderer.setPipeline(snap.pipeline);
@@ -1196,8 +1244,11 @@ export function ScenePreviewCanvas({
       entry.lastKey = snap.matte ? "" : key; // matte present → force a re-grade next frame
       entry.lastW = w0;
       entry.lastH = h0;
+      // A real grade just happened, so THESE pixels are the frame the producer reports. The only place
+      // the entry's served time is written — every other path reads it back.
+      entry.lastServedTime = snap.servedSourceTime;
       recordSingleCtx("grades");
-      return { texture: entry.target.tex, width: w0, height: h0 };
+      return { texture: entry.target.tex, width: w0, height: h0, ...servedTimeOf(snap.servedSourceTime) };
     };
     const getMediaSingleCtx = (id: string): SceneTextureSource | null => {
       const sources = mediaSourcesRef?.current;
@@ -1236,7 +1287,10 @@ export function ScenePreviewCanvas({
         if (held && held.lastW > 0) {
           liveMediaSourceIds.add(resolvedId);
           recordSingleCtx("skips");
-          return { texture: held.target.tex, width: held.lastW, height: held.lastH };
+          // Descriptor-gap hold: the producer is gone entirely, so nothing can report a CURRENT time —
+          // the pixels are the last grade's and say so. Of the four hold paths this is the one most
+          // likely to persist, because a remount plus a decode is not a sub-frame event.
+          return { texture: held.target.tex, width: held.lastW, height: held.lastH, ...servedTimeOf(held.lastServedTime) };
         }
         return null;
       }
