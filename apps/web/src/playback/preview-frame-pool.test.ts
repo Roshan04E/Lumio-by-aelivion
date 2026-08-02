@@ -366,6 +366,55 @@ async function run(): Promise<void> {
     host!.release();
     loader!.release();
   }
+
+  // ── 7. KERNEL-OWNED SESSION LIFETIME (ADR-012 slice S3.3) ─────────────────
+  //
+  // The effect that acquires a session is keyed on `[mediaType, src]`, so a `useMemo` recompute
+  // upstream unmounts the layer and its cleanup destroys the decoder — a demux, a sample index and a
+  // GOP window discarded by a rendering decision that had nothing to say about resources (I-24). The
+  // park that release leaves behind then loses a two-deep FIFO to the very next mount, so a comp with
+  // four loaders reliably lost two decoders to a re-render.
+  //
+  // The fix is not "never release" — the component really is gone. It is that the kernel decides what
+  // the release MEANS, and a release for a source the graph still declares parks RETAINED.
+  {
+    const RETAINED = "blob:still-declared.mp4";
+    const JUNK_A = "blob:scrolled-past-a.mp4";
+    const JUNK_B = "blob:scrolled-past-b.mp4";
+
+    const retained = acquirePreviewFrameProvider(RETAINED, { priority: "playhead" });
+    await retained!.ready;
+    const retentionsBefore = getWcPoolStats().retentions;
+    retained!.release({ retain: true, cause: "lifecycle" });
+    eq(getWcPoolStats().retentions - retentionsBefore, 1, "an overruled lifecycle release is counted as a retention");
+    eq(getWcPoolStats().retainedIdle >= 1, true, "…and the park it leaves is marked retained");
+
+    // Two ordinary parks now compete for the same two-deep FIFO. Before this slice the retained one was
+    // indistinguishable from them and eviction order was decided by mount order.
+    const junkA = acquirePreviewFrameProvider(JUNK_A, { priority: "playhead" });
+    await junkA!.ready;
+    const junkB = acquirePreviewFrameProvider(JUNK_B, { priority: "playhead" });
+    await junkB!.ready;
+    junkA!.release();
+    junkB!.release();
+
+    providersCreated = 0;
+    const hitsBefore = getWcPoolStats().retentionHits;
+    const remount = acquirePreviewFrameProvider(RETAINED, { priority: "playhead" });
+    const remountProvider = await remount!.ready;
+    // THE assertion of the slice: the decoder the unmount would have destroyed is still here.
+    eq(providersCreated, 0, "a RETAINED park survives the idle FIFO an ordinary park loses to");
+    eq(getWcPoolStats().retentionHits - hitsBefore, 1, "…and the reuse is counted, so a retention that never pays off is visible");
+    assert((await remountProvider!.getFrame(1)) != null, "the reused retained decoder actually serves frames");
+
+    // Retention must not leak into the default path: an ordinary release is byte-identical to before.
+    remount!.release();
+    const ordinary = acquirePreviewFrameProvider("blob:ordinary.mp4", { priority: "playhead" });
+    await ordinary!.ready;
+    const retainedIdleBefore = getWcPoolStats().retainedIdle;
+    ordinary!.release();
+    eq(getWcPoolStats().retainedIdle, retainedIdleBefore, "a release with no verdict parks ordinarily — unchanged behaviour");
+  }
 }
 
 await run();

@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
 } from "react";
-import { colorPipelineCacheKey, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@orreris/shared";
+import { bindDecoderSource, colorPipelineCacheKey, decoderReleaseVerdict, defaultSession, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@orreris/shared";
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
@@ -414,6 +414,19 @@ interface VideoProps extends BaseProps {
    * a different `t`; see `AcquireOptions.exclusive`.
    */
   exclusiveDecode?: boolean | undefined;
+  /**
+   * This layer's RUNTIME SOURCE IDENTITY in the kernel's namespace — the `flarexsrc:<compId>:<nodeId>`
+   * id the Media Manager declared (ADR-012 slice S3.2), for the sources it declares.
+   *
+   * Supplied so the Decoder Manager can answer one question at release time: *does a source the GRAPH
+   * still declares need this decoder?* Without the id the only available answer is "a component
+   * unmounted", which is the I-24 violation slice S3.3 exists to remove.
+   *
+   * Absent for ordinary timeline clips, deliberately: S3.2 declares Flarex virtual loaders only, and a
+   * binding for a source the Media Manager never declared would be a kernel view that disagrees with
+   * the graph. Those layers keep today's release behaviour exactly.
+   */
+  decoderSourceId?: string | undefined;
   onLoadedMetadata?: ((event: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
 }
 
@@ -777,6 +790,12 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             exclusive: props.exclusiveDecode,
           });
       wcLeaseRef.current = wcLease;
+      // DECODER MANAGER (ADR-012 3.11, slice S3.3) — report which decoder this source is reading
+      // through. The BINDING is written here because only the acquirer knows the key (proxy vs
+      // original, hardware vs software, GOP-probe outcome); its LIFETIME is the graph's, via the S3.2
+      // declared set. Mounts write bindings; only the graph removes them — the moment an unmount could
+      // remove one, an unmount would once again be able to end a decoder's life.
+      if (wcLease && props.decoderSourceId) bindDecoderSource(defaultSession, props.decoderSourceId, src);
       if (mediaType === "video") {
         // The SESSION's mode, not `preferSoftwareDecode`. A loader that attached to the host's
         // hardware session asked for software and got hardware; reporting the request made a share
@@ -800,7 +819,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           if (disposed || sourceVideoRef.current) return;
           wcProviderRef.current = null;
           setWcHeldFrame(null);
-          wcLeaseRef.current?.release();
+          // `failed`, never retained: this path runs because the session is broken (init hung, preempted
+          // mid-init, provider never arrived). Retaining it would park a decoder that has already proven
+          // it cannot serve, for the next consumer to inherit.
+          wcLeaseRef.current?.release({ cause: "failed" });
           wcLeaseRef.current = null;
           wcModeRef.current = "element";
           recordWcMode(src, "element");
@@ -834,7 +856,27 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           wcProviderRef.current = null;
           setWcHeldFrame(null);
           wcLeaseRef.current = null;
-          wcLease.release();
+          /**
+           * THE I-24 SEAM (ADR-012 slice S3.3).
+           *
+           * This cleanup is the line the audit named: the effect is keyed on `[mediaType, src]`, so a
+           * `useMemo` recompute upstream unmounts the layer and DESTROYS a hardware decode session —
+           * a demux, a sample index and a GOP window thrown away by a rendering decision that had
+           * nothing to say about resources.
+           *
+           * It is not fixed by refusing to release: the component really is gone and cannot hold a
+           * lease. It is fixed by the KERNEL deciding what the release means. A source the graph still
+           * declares keeps its decoder parked and protected for `DECODER_RETENTION_MS`; a source that
+           * left the graph is released exactly as before. Presentation stops changing lifetime, and
+           * lifetime becomes a function of the declared set.
+           *
+           * With no `decoderSourceId` (ordinary timeline clips — S3.2 declares Flarex loaders only) the
+           * verdict is `release` by construction, which is today's behaviour byte for byte.
+           */
+          const verdict = props.decoderSourceId
+            ? decoderReleaseVerdict(defaultSession, src, "lifecycle")
+            : "release";
+          wcLease.release({ retain: verdict === "retain", cause: "lifecycle" });
         });
         void wcLease.ready.then((provider) => {
           if (disposed) return;

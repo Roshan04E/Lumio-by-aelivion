@@ -3541,6 +3541,11 @@ const PreviewLayer = memo(function PreviewLayer({
             // Presenting the latest advancing frame degrades gracefully (smooth-but-slightly-behind) and
             // scales to many sources. The host clip keeps the normal hold path.
             tolerateLag={isFlarexVirtualLayerId(layer.id)}
+            // The kernel source identity (S3.2's declared set) for a Flarex virtual loader, so the
+            // Decoder Manager can tell a release caused by a re-render from one caused by the source
+            // leaving the graph (S3.3). Undefined for ordinary clips — they are not declared sources
+            // yet, and a binding the Media Manager never declared is one the kernel must refuse.
+            decoderSourceId={isFlarexVirtualLayerId(layer.id) ? layer.id : undefined}
             // ...and decode in SOFTWARE so they don't contend with the host for the one hardware H.264
             // block. That contention (not reset churn) is the confirmed multi-source freeze: with 3
             // seek-on-demand streams the host wins the block and the loaders starve. Software decode runs

@@ -34,11 +34,27 @@
  * preload leases, PREEMPTS the oldest one (its `onPreempted` fires → the shell falls back to the
  * `<video>` path it would have used anyway). Visibility changes flow in via `lease.setPriority`.
  *
+ * Session LIFETIME ownership (2026-08-02, ADR-012 slice S3.3): this file still owns the mechanism —
+ * sessions, sharing, caps, preemption, parking — but no longer owns the question *does this release
+ * actually end the session?* A release now carries the kernel Decoder Manager's verdict. When a source
+ * the graph still DECLARES is reading a key, the park it leaves behind is RETAINED: exempt from the
+ * idle FIFO for `DECODER_RETENTION_MS`, never exempt from a cap. That is I-24 — presentation policy
+ * (a component unmounting) must not decide resource lifetime. Kill switch: `?kernelDecoderLifetime=0`.
+ *
  * Flag (repo convention): `?wcDecode=0|1` → localStorage `orreris.wcDecode` → `VITE_WC_DECODE` →
  * **ON** (default since 2026-07-04: long ON-flag soaks were clean, every WC failure mode self-heals
  * to the `<video>` element path, and source proxies made the decode side cheap; the flag remains
  * the kill switch). Telemetry: `window.__rfWcPool`.
  */
+
+import {
+  DECODER_RETENTION_MS,
+  defaultSession,
+  noteDecoderRetentionExpired,
+  noteDecoderSessionClosed,
+  noteDecoderSessionOpened,
+  type DecoderReleaseCause,
+} from "@orreris/shared";
 
 import { createFrameProvider, type FrameProvider } from "../export/source-decoder";
 import {
@@ -125,11 +141,51 @@ export function getWcSessionShareEnabled(): boolean {
   return true;
 }
 
+/**
+ * Kill switch for kernel-owned session lifetime (ADR-012 slice S3.3), matching the `wcDecode`/`wcShare`
+ * convention: `?kernelDecoderLifetime=0` → localStorage `orreris.kernel.decoderLifetime` → ON.
+ *
+ * OFF restores the pre-S3.3 behaviour exactly: every release parks into the same undifferentiated FIFO,
+ * and a component unmount is once again the thing that ends a decoder's life. This is the programme's
+ * declared rollback for the slice, and the reason it exists is R2 — decoder lifetime is the most
+ * defect-dense area in the runtime, and a flag is cheaper than a revert at 2am.
+ */
+export function getKernelDecoderLifetimeEnabled(): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      if (new URLSearchParams(window.location.search).has("kernelDecoderLifetime")) {
+        return truthy(new URLSearchParams(window.location.search).get("kernelDecoderLifetime"));
+      }
+      const stored = window.localStorage?.getItem("orreris.kernel.decoderLifetime");
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return true;
+}
+
+export interface ReleaseOptions {
+  /**
+   * The kernel Decoder Manager's verdict (ADR-012 3.11, slice S3.3): a declared source still needs this
+   * decoder, so the park it leaves behind must survive the idle FIFO for {@link DECODER_RETENTION_MS}.
+   *
+   * Retention never raises a cap. A retained park still counts as a live session against every ceiling
+   * in this file and is still evicted when the machine budget demands it — it only changes WHICH park
+   * is chosen first, which is the entire difference between "the decoder for a source that still exists"
+   * and "the decoder for a clip the viewer scrolled past".
+   */
+  retain?: boolean | undefined;
+  /** Why, for the kernel ledger. Defaults to `lifecycle` — the only cause a component release has. */
+  cause?: DecoderReleaseCause | undefined;
+}
+
 export interface PreviewFrameLease {
   /** Resolves to the provider, or null when init/probe failed (caller → `<video>` fallback). */
   readonly ready: Promise<FrameProvider | null>;
   /** Idempotent. Parks a healthy provider for same-URL reuse; disposes otherwise. */
-  release(): void;
+  release(options?: ReleaseOptions): void;
   /** Update pending/pre-roll ↔ live status so preemption picks the right victims. */
   setPriority(priority: WcLeasePriority): void;
   /**
@@ -188,6 +244,14 @@ interface IdleEntry {
   provider: FrameProvider;
   /** Which decoder this provider actually IS. Warm reuse must match it — see `acquire`. */
   software: boolean;
+  /**
+   * `performance.now()` deadline until which this park is RETAINED (0 = an ordinary park).
+   *
+   * Set only when the kernel Decoder Manager overruled a lifecycle release (S3.3). Bounded on purpose:
+   * a source can stay declared forever while the viewer never looks at it again, and an unbounded
+   * retention would be a leak wearing the costume of a fix (I-31).
+   */
+  retainUntil: number;
 }
 
 interface LeaseRecord {
@@ -211,6 +275,10 @@ let preemptions = 0;
 let shared = 0;
 let shareDetaches = 0;
 let wedgeTimeouts = 0;
+let retentions = 0;
+let retentionHits = 0;
+let retentionExpiries = 0;
+let retentionOverrides = 0;
 
 /**
  * BACKSTOP for a `getFrame` that never settles (2026-07-28).
@@ -265,7 +333,10 @@ function guardWedge(session: SharedSession, raw: Promise<CanvasImageSource | nul
       settled = true;
       wedgeTimeouts += 1;
       try {
-        tearDownSession(session, "preempt");
+        // `failed`, not `preempted`: the mode is a preemption because that is the teardown that gets
+        // the ordering right, but the CAUSE is a decoder that stopped answering. Conflating them would
+        // make the ledger read slot pressure where there was a broken decode.
+        tearDownSession(session, "preempt", { cause: "failed" });
       } catch {
         /* teardown must never turn a stalled frame into a thrown one */
       }
@@ -359,6 +430,48 @@ export function findWarmIdleIndex(
   software: boolean
 ): number {
   return entries.findIndex((entry) => entry.url === url && entry.software === software);
+}
+
+// ── Retained parks (slice S3.3) ─────────────────────────────────────────────
+//
+// A retained park is an ordinary park with a deadline and a preference. It changes exactly one thing:
+// the ORDER in which parks are chosen for eviction. Every cap in this file still binds.
+
+function nowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+/**
+ * Drop expired retentions back to ordinary parks, reporting each expiry (I-31 — a bounded wait whose
+ * expiry is never reported is indistinguishable from one that always paid off).
+ *
+ * Called from the two paths that can consume a park, so an expired retention can never be honoured:
+ * expiring lazily rather than on a timer keeps this file free of a scheduler it does not need, and a
+ * retention nobody ever looks at costs nothing to have held a moment too long.
+ */
+function expireRetentions(at: number): void {
+  for (const entry of idle) {
+    if (entry.retainUntil === 0 || entry.retainUntil > at) continue;
+    entry.retainUntil = 0;
+    retentionExpiries += 1;
+    noteDecoderRetentionExpired(defaultSession, entry.url);
+  }
+}
+
+/**
+ * Index of the park to evict among those matching `match`, preferring one that is NOT retained.
+ *
+ * Falls back to a retained park when every candidate is retained: retention is a preference, never a
+ * veto. A budget a subsystem can refuse to honour is not a budget, and this file already carries the
+ * scar from two caps that "merely summed" (see `MAX_WC_TOTAL_SESSIONS`).
+ */
+function pickEvictIndex(match: (entry: IdleEntry) => boolean): number {
+  expireRetentions(nowMs());
+  const free = idle.findIndex((entry) => match(entry) && entry.retainUntil === 0);
+  if (free !== -1) return free;
+  const retained = idle.findIndex(match);
+  if (retained !== -1) retentionOverrides += 1;
+  return retained;
 }
 
 // ── Shared decoder sessions ─────────────────────────────────────────────────
@@ -552,8 +665,20 @@ function findAttachableSession(key: string, software: boolean): SharedSession | 
  * synchronously (switching to `<video>`, clearing a held frame) must never be able to observe a
  * half-torn session, and disposing first would make that ordering an accident of implementation.
  */
-function tearDownSession(session: SharedSession, mode: "release" | "preempt"): void {
+/**
+ * `cause` and `retain` are the kernel ledger's inputs (S3.3). They live on THIS function rather than on
+ * `release()` because this is the one place a session actually ends — via a release, a preemption, a
+ * wedge write-off or a failed init. Recording the close at the caller instead would have missed three
+ * of those four, and a ledger that only sees the tidy path is worse than no ledger.
+ */
+function tearDownSession(
+  session: SharedSession,
+  mode: "release" | "preempt",
+  options: { retain?: boolean; cause?: DecoderReleaseCause } = {}
+): void {
   if (session.torn) return;
+  const retain = options.retain === true;
+  noteDecoderSessionClosed(defaultSession, session.key, options.cause ?? (mode === "preempt" ? "preempted" : "lifecycle"));
   session.torn = mode;
   session.shareable = false;
   sharedSessions.delete(session);
@@ -583,16 +708,25 @@ function tearDownSession(session: SharedSession, mode: "release" | "preempt"): v
   session.pending = null;
   if (!provider) return; // still initializing — the init `.then` reads `session.torn` and finishes the job
   if (mode === "preempt") disposeTraced(provider, session.key, "preempt");
-  else parkOrDispose(session.key, provider, session.software);
+  else parkOrDispose(session.key, provider, session.software, retain);
 }
 
-function releaseMember(session: SharedSession, member: SharedMember): void {
+/**
+ * `retain` is the kernel's verdict and it only reaches the park when this member was the LAST one.
+ * While another lease is still on the session there is nothing to retain: the decoder is not going
+ * anywhere, and marking a live session retained would double-count it against the retention budget.
+ */
+function releaseMember(
+  session: SharedSession,
+  member: SharedMember,
+  options: { retain?: boolean; cause?: DecoderReleaseCause } = {}
+): void {
   if (member.dead) return;
   member.dead = true;
   releaseMemberClone(member);
   session.members.delete(member);
   session.refCount -= 1;
-  if (session.refCount <= 0) tearDownSession(session, "release");
+  if (session.refCount <= 0) tearDownSession(session, "release", options);
   else recomputeSessionPriority(session);
 }
 
@@ -737,10 +871,13 @@ function attachMember(session: SharedSession, options: AcquireOptions): PreviewF
   return {
     ready,
     session: view,
-    release() {
+    release(options?: ReleaseOptions) {
       if (member.dead) return;
       traceEvent({ event: "release", provider: session.provider, asset: traceAsset(session.key), reason: "explicit" });
-      releaseMember(session, member);
+      releaseMember(session, member, {
+        retain: options?.retain === true && getKernelDecoderLifetimeEnabled(),
+        cause: options?.cause ?? "lifecycle",
+      });
     },
     setPriority(next: WcLeasePriority) {
       member.priority = next;
@@ -814,7 +951,7 @@ function createSession(
           traceEvent({ event: "create", asset: traceAsset(key), reason: "init-failed" });
           // Unwinds the accounting and evicts the session from the registry, so nothing can attach
           // to a decoder that never existed. `provider` is null, so nothing is parked or disposed.
-          tearDownSession(session, "release");
+          tearDownSession(session, "release", { cause: "failed" });
           return null;
         });
 
@@ -853,7 +990,7 @@ function reserveSession(software: boolean, priority: WcLeasePriority): boolean {
   const headroom = priority === "preload" ? 1 : 0;
   while (activeOf(software) + idleCountOf(software) + headroom >= sessionCap(software)) {
     if (priority === "preload") return false;
-    const evictIndex = idle.findIndex((entry) => entry.software === software);
+    const evictIndex = pickEvictIndex((entry) => entry.software === software);
     if (evictIndex !== -1) {
       const evicted = idle.splice(evictIndex, 1)[0]!;
       disposeTraced(evicted.provider, evicted.url, "pool-evict-mode-cap");
@@ -866,8 +1003,8 @@ function reserveSession(software: boolean, priority: WcLeasePriority): boolean {
   while (totalSessions() + headroom >= MAX_WC_TOTAL_SESSIONS) {
     if (priority === "preload") return false;
     // Drop a park of the OTHER mode first: this mode's parks are the ones we might still warm-reuse.
-    let evictIndex = idle.findIndex((entry) => entry.software !== software);
-    if (evictIndex === -1) evictIndex = idle.findIndex((entry) => entry.software === software);
+    let evictIndex = pickEvictIndex((entry) => entry.software !== software);
+    if (evictIndex === -1) evictIndex = pickEvictIndex((entry) => entry.software === software);
     if (evictIndex !== -1) {
       const evicted = idle.splice(evictIndex, 1)[0]!;
       disposeTraced(evicted.provider, evicted.url, "pool-evict-total-cap");
@@ -908,10 +1045,19 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   // session: the host frozen while the loaders played (2026-07-27). The reverse leak is just as bad — a
   // loader inheriting the host's hardware provider is back on the contended block this all exists to
   // avoid. A parked provider's decoder cannot be reconfigured, so the mode has to be matched, not coerced.
+  //
+  // Retentions are expired FIRST, so a park that outlived its residency can neither be warm-reused as
+  // "retained" nor protect itself from the eviction loops below. The deadline is meaningless if the
+  // only path that reads it is the one that evicts.
+  expireRetentions(nowMs());
   const idleIndex = findWarmIdleIndex(idle, url, software);
   let warm: FrameProvider | null = null;
   if (idleIndex !== -1) {
-    warm = idle.splice(idleIndex, 1)[0]!.provider;
+    const entry = idle.splice(idleIndex, 1)[0]!;
+    warm = entry.provider;
+    // The number this slice is judged on: a warm reuse of a RETAINED park is a decoder that today's
+    // FIFO would have thrown away — a demux, a sample index and a GOP window not paid for twice.
+    if (entry.retainUntil > 0) retentionHits += 1;
     reused += 1;
     traceEvent({ event: "warm-reuse", provider: warm, asset: traceAsset(url), reason: "explicit" });
   } else {
@@ -948,6 +1094,10 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
     note: `${warm ? "warm" : "cold"} software=${software} priority=${priority}`,
   });
   bumpActive(software, 1);
+  // Paired with the `noteDecoderSessionClosed` in `tearDownSession`. Attaches deliberately do NOT note
+  // an open: the ledger counts SESSIONS, and a share is one session — the same reason `bumpActive` is
+  // skipped on that path.
+  noteDecoderSessionOpened(defaultSession, url);
 
   const session = createSession(url, software, priority, warm);
   // Unshareable in BOTH directions: skipping the join above only stops this consumer taking someone
@@ -957,21 +1107,27 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   return attachMember(session, options);
 }
 
-function parkOrDispose(url: string, provider: FrameProvider, software: boolean) {
+function parkOrDispose(url: string, provider: FrameProvider, software: boolean, retain = false) {
   traceEvent({ event: "park", provider, asset: traceAsset(url), reason: "explicit" });
-  idle.push({ url, provider, software });
+  if (retain) retentions += 1;
+  idle.push({ url, provider, software, retainUntil: retain ? nowMs() + DECODER_RETENTION_MS : 0 });
   // Enforce the GLOBAL session cap here too, not just the idle-cache size: a lease released while
   // its init was still in flight stops counting toward its active count immediately, but its decoder
   // parks here when the init resolves — without this check that path pinned active+idle = 5 real
   // sessions (seen in the 2026-07-03 smoke stats) on hardware that has ~3.
+  //
+  // The FIFO became a PREFERENCE ordering in S3.3: among parks, one a declared source still needs goes
+  // last. This is the whole behavioural delta of the slice — a comp with four loaders used to lose two
+  // decoders to this loop on a re-render, and which two was decided by mount order.
   while (idle.length > MAX_IDLE) {
-    const evicted = idle.shift()!;
+    const index = pickEvictIndex(() => true);
+    const evicted = idle.splice(index === -1 ? 0 : index, 1)[0]!;
     disposeTraced(evicted.provider, evicted.url, "pool-evict-idle-cap");
   }
   // ...the per-mode cap, dropping only parks of the OVERSUBSCRIBED mode: a parked software loader must
   // never be evicted to make room for hardware sessions it does not compete with (and vice versa).
   while (activeOf(software) + idleCountOf(software) > sessionCap(software)) {
-    const evictIndex = idle.findIndex((entry) => entry.software === software);
+    const evictIndex = pickEvictIndex((entry) => entry.software === software);
     if (evictIndex === -1) break;
     const evicted = idle.splice(evictIndex, 1)[0]!;
     disposeTraced(evicted.provider, evicted.url, "pool-evict-mode-cap");
@@ -979,7 +1135,8 @@ function parkOrDispose(url: string, provider: FrameProvider, software: boolean) 
   // ...and the TOTAL ceiling, which a park can push over on its own (a lease released mid-init stops
   // counting as active immediately but still parks a real decoder when the init resolves).
   while (totalSessions() > MAX_WC_TOTAL_SESSIONS && idle.length > 0) {
-    const evicted = idle.shift()!;
+    const index = pickEvictIndex(() => true);
+    const evicted = idle.splice(index === -1 ? 0 : index, 1)[0]!;
     disposeTraced(evicted.provider, evicted.url, "pool-evict-total-cap");
   }
 }
@@ -1025,6 +1182,20 @@ export interface WcPoolStats {
    * to convert into a recoverable one. Distinct from `preemptions`, which counts slot pressure.
    */
   wedgeTimeouts: number;
+  /** Parks currently held past the idle FIFO because a declared source still needs them (S3.3). */
+  retainedIdle: number;
+  /** Releases the kernel overruled — i.e. decoders a component unmount did NOT destroy. */
+  retentions: number;
+  /**
+   * Retained parks that were warm-reused before expiring. THE ratio that says whether kernel-owned
+   * lifetime pays: `retentionHits / retentions` near zero means the residency is protecting decoders
+   * nothing comes back for, which is cost with no benefit and the signal to re-tune or revert.
+   */
+  retentionHits: number;
+  /** Retentions that hit their residency deadline unused (I-31 — the expiry half of a bounded wait). */
+  retentionExpiries: number;
+  /** Retained parks evicted anyway because a cap demanded it. Retention is a preference, not a veto. */
+  retentionOverrides: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1036,7 +1207,17 @@ export function getWcPoolStats(): WcPoolStats {
   for (const session of sharedSessions) {
     if (session.refCount > 1) sharedActive += 1;
   }
+  let retainedIdle = 0;
+  const at = nowMs();
+  for (const entry of idle) {
+    if (entry.retainUntil > at) retainedIdle += 1;
+  }
   return {
+    retainedIdle,
+    retentions,
+    retentionHits,
+    retentionExpiries,
+    retentionOverrides,
     shared,
     sharedActive,
     shareDetaches,

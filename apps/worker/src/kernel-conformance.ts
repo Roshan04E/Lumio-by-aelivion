@@ -44,6 +44,13 @@ import {
   declareMediaSources,
   getMediaSources,
   suppressMediaSources,
+  DECODER_RETENTION_MS,
+  bindDecoderSource,
+  decoderLedger,
+  decoderReleaseVerdict,
+  noteDecoderRetentionExpired,
+  noteDecoderSessionClosed,
+  noteDecoderSessionOpened,
   awaitFrameSettled,
   beginFrame,
   classifyComposite,
@@ -907,6 +914,98 @@ console.log("\nS3.2 — media source declaration (I-16)");
   declareMediaSources(session, ["flarexsrc:c2:n1"]);
   enforced("I-16", "the graph, and only the graph, decides membership",
     sameList(getMediaSources(session).declared, ["flarexsrc:c2:n1"]));
+
+  session.dispose();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S3.3 — the Decoder Manager owns session LIFETIME
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS3.3 — decoder session lifetime (I-24)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  kernelDiagnostics.reset();
+  const session = createRuntimeSession({ id: "decoder" });
+
+  const HOST = "flarexsrc:c1:host";
+  const LOADER = "flarexsrc:c1:n2";
+  const KEY_A = "blob:asset-a";
+  const KEY_B = "blob:asset-b";
+  declareMediaSources(session, [HOST, LOADER]);
+
+  // A binding the Media Manager never declared would make the kernel's view disagree with the graph —
+  // the same rule S3.2 enforces for suppression, and for the same reason.
+  enforced("I-16", "an undeclared source cannot bind a decoder",
+    bindDecoderSource(session, "flarexsrc:ghost:n9", KEY_A) === false);
+  enforced("I-24", "a declared source binds its decoder key", bindDecoderSource(session, HOST, KEY_A) === true);
+  bindDecoderSource(session, LOADER, KEY_B);
+  enforced("I-24", "re-binding the same key is not a change", bindDecoderSource(session, HOST, KEY_A) === false);
+
+  // ── THE INVARIANT ─────────────────────────────────────────────────────────────────────────────
+  // I-24: presentation policy MUST NOT change resource lifetime. A component unmounting is presentation
+  // policy. Today it is also a decoder teardown, because the effect that acquires the session is keyed
+  // on `[mediaType, src]` — so a `useMemo` recompute upstream throws away a demux, a sample index and a
+  // GOP window for a source that never left the graph.
+  enforced("I-24", "a lifecycle release of a STILL-DECLARED source does not end the session",
+    decoderReleaseVerdict(session, KEY_A, "lifecycle") === "retain");
+  enforced("I-29", "the retention is REPORTED, not silent",
+    kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "decoder-retained:lifecycle"));
+
+  // The other half, and the half that keeps this safe. A broken decoder must never be retained: parking
+  // one hands the next consumer the same wedge, which is why `tearDownSession` disposes on preemption
+  // rather than parking. Only a LIFECYCLE cause is ever overruled.
+  for (const cause of ["preempted", "failed", "shutdown", "undeclared"] as const) {
+    enforced("I-24", `a ${cause} release is honoured immediately`,
+      decoderReleaseVerdict(session, KEY_A, cause) === "release");
+  }
+
+  // ── Lifetime follows the GRAPH ────────────────────────────────────────────────────────────────
+  noteDecoderSessionOpened(session, KEY_A);
+  noteDecoderSessionOpened(session, KEY_B);
+  const held = decoderLedger(session);
+  enforced("I-24", "every open session is required by a declared source",
+    held.openCount === 2 && held.orphaned.length === 0 && held.unmet.length === 0);
+
+  // The ONE thing that ends a session: the source leaving the declared set. Nothing about rendering,
+  // nothing about mounting.
+  declareMediaSources(session, [HOST]);
+  enforced("I-24", "a source leaving the graph makes its decoder releasable",
+    decoderReleaseVerdict(session, KEY_B, "lifecycle") === "release");
+  const dropped = decoderLedger(session);
+  enforced("I-29", "a session outliving its requirement is VISIBLE as orphaned, not silent",
+    sameList(dropped.orphaned, [KEY_B]) && sameList(dropped.staleBindings, [LOADER]));
+
+  noteDecoderSessionClosed(session, KEY_B, "undeclared");
+  enforced("I-24", "closing the orphan returns the ledger to a clean state",
+    decoderLedger(session).orphaned.length === 0 && decoderLedger(session).openCount === 1);
+
+  // A key may legitimately be opened twice — an `exclusive` retimed loader refuses to share the host's
+  // session by construction (ADR-011). A ledger that collapsed those to one would under-count real
+  // decoders, which is the reading the whole slice is judged on.
+  noteDecoderSessionOpened(session, KEY_A);
+  enforced("I-24", "a key opened twice counts as two sessions", decoderLedger(session).openCount === 2);
+  noteDecoderSessionClosed(session, KEY_A, "lifecycle");
+  enforced("I-24", "closing one of two leaves the other open",
+    decoderLedger(session).openCount === 1 && decoderLedger(session).open.length === 1);
+
+  // A required key with no session is STARVATION, and retention must never be able to hide it — that is
+  // admission's business in S4.3, and a number that reads healthy because a park exists would bury it.
+  noteDecoderSessionClosed(session, KEY_A, "failed");
+  enforced("I-29", "a required key with no session reports as unmet",
+    sameList(decoderLedger(session).unmet, [KEY_A]) && decoderLedger(session).openCount === 0);
+  enforced("I-29", "a non-lifecycle close is recorded with its cause",
+    kernelDiagnostics.events({ kind: "write-off" }).some((e) => e.reason === "decoder-closed:failed"));
+
+  // I-31: a bounded wait whose expiry is never reported is indistinguishable from one that always paid
+  // off. The residency is the bound; this is the report.
+  noteDecoderRetentionExpired(session, KEY_A);
+  enforced("I-31", "a retention expiry is bounded and reported",
+    DECODER_RETENTION_MS > 0 &&
+      kernelDiagnostics.events({ kind: "pressure" }).some((e) => e.reason === "decoder-retention-expired"));
 
   session.dispose();
   kernelDiagnostics.enabled = wasEnabled;
