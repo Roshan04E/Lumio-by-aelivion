@@ -264,6 +264,28 @@ export interface SessionPayload {
   /** Stable, local, non-PII. An unlabelled multi-user corpus is unpartitionable forever. */
   seatId: string;
   startedAt: number;
+  /** Which vocabulary `coverage` is drawn from. Absence is only readable against a version. */
+  coveragePolicy: string;
+  /**
+   * ADR-017 U8 / ADR-016 I12 — **what this build was CAPABLE of observing.**
+   *
+   * An absent value has two causes: the thing did not happen, or nothing was watching. They
+   * are indistinguishable in the data, everywhere, permanently — unless coverage is recorded.
+   * A field that reads null across a whole period may mean the organism was in an unusual
+   * state for a year, or may mean the seam was wired the following Tuesday, and those support
+   * opposite conclusions about everything measured in that window.
+   *
+   * A token present means this build could produce that observation. **Absent means it could
+   * not.** That is what turns an honest `undeclared` into usable evidence rather than a hole:
+   * with `ai.initiator` present in coverage, "undeclared at a committed write" licenses the
+   * read-time derivation "not AI-initiated" — under a named policy, justified by a recorded
+   * fact, and never written as evidence.
+   *
+   * Recovering this from build metadata or source history is NOT sufficient: those live
+   * outside the corpus, are not guaranteed to outlive it, and resolve to nothing whenever
+   * build identity was not captured — which is exactly when nobody was paying attention.
+   */
+  coverage: string[];
 }
 
 /**
@@ -429,6 +451,29 @@ export const PROVISIONAL_POLICY: SegmentationPolicy = {
  * runnable policy is a decoration, not a citation.
  */
 export const TAU_POLICY_V1_ID = "tau.consequence-only.v1";
+
+/** The vocabulary `SessionPayload.coverage` draws from. Bump when tokens are added or retired. */
+export const COVERAGE_POLICY_ID = "coverage.v1";
+
+/**
+ * What this build can observe, as of Phase 3a.
+ *
+ * NOTABLY ABSENT, and absent on purpose — these are recorded gaps, not oversights:
+ *   `human.initiator`          the choke point never witnesses that a human acted; only the
+ *                              AI declares, so a human commit is `undeclared` (U6)
+ *   `human.operationIdentity`  57 call sites each know their operation and none declares it
+ *   `decision.situation`       `setSituation` has no call sites yet (Phase 3b)
+ *   `decision.facts`           `beginDecision`/`observeFact` likewise
+ *   `decision.candidates`      not yet emitted by the router
+ */
+export const BUILD_COVERAGE: string[] = [
+  "editor.commit",
+  "editor.undo",
+  "editor.redo",
+  "ai.decision",
+  "ai.initiator",
+  "ai.actionIds"
+];
 
 /** The τ model that produced stored `tau`/`dTau` values. Bumped when the model changes. */
 export const TAU_POLICY_ID = "tau.consequence-only.v2";
@@ -761,7 +806,9 @@ function openSession(reason: SessionPayload["reason"]): void {
       schemaVersion: SCHEMA_VERSION,
       buildId,
       seatId: resolveSeatId(),
-      startedAt: at
+      startedAt: at,
+      coveragePolicy: COVERAGE_POLICY_ID,
+      coverage: [...BUILD_COVERAGE]
     }
   });
   state.sessionEventId = event.id;

@@ -34,6 +34,8 @@ const fakeStorage = new Map<string, string>();
 import * as streamModule from "./stream";
 import {
   BASELINE_POLICIES,
+  BUILD_COVERAGE,
+  COVERAGE_POLICY_ID,
   INTENT_CLASS_POLICY_ID,
   PRODUCER_KINDS,
   PROVISIONAL_POLICY,
@@ -82,7 +84,7 @@ let passes = 0;
  * regression that reports success — the same false-confidence failure as an eval outside the
  * compiler. Raise this when checks are added; never lower it without saying why.
  */
-const EXPECTED_MIN_CHECKS = 105;
+const EXPECTED_MIN_CHECKS = 111;
 
 function check(label: string, ok: boolean, detail?: string): void {
   if (ok) {
@@ -137,6 +139,23 @@ async function main(): Promise<void> {
   check("session carries schemaVersion", session.payload.schemaVersion === SCHEMA_VERSION);
   check("session carries buildId (§12 item 11)", session.payload.buildId === "test-build-abc123");
   check("session carries a stable non-PII seatId (§12 item 12)", session.payload.seatId.startsWith("seat-"));
+  check("session records COVERAGE — what this build could observe (U8/I12)", session.payload.coverage.length > 0);
+  check("coverage names its vocabulary version", session.payload.coveragePolicy === COVERAGE_POLICY_ID, "absence is only readable against a version");
+  check(
+    "coverage claims the editor seams that are actually wired",
+    ["editor.commit", "editor.undo", "editor.redo"].every((t) => session.payload.coverage.includes(t))
+  );
+  check(
+    "coverage does NOT claim the human-side gaps ADR-017 leaves open",
+    !session.payload.coverage.includes("human.initiator") && !session.payload.coverage.includes("human.operationIdentity"),
+    "a token present means the build COULD produce it; claiming one it cannot is the I10 fabrication"
+  );
+  check(
+    "coverage does not claim the unwired decision fields",
+    !session.payload.coverage.includes("decision.situation") && !session.payload.coverage.includes("decision.facts"),
+    "they read null today; coverage is what makes that legible as unwired rather than measured"
+  );
+  check("the exported vocabulary and the recorded row agree", BUILD_COVERAGE.join() === session.payload.coverage.join());
   check("decision rows join by sessionId, never duplicate the facts", first.sessionId === session.sessionId && !("buildId" in first.payload));
 
   const second = appendDecisionEvent(trace({ at: T0 + 500, prompt: "make it moodier" }));
