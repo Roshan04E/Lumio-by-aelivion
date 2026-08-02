@@ -41,6 +41,9 @@ import {
   __resetFrameScheduler,
   activeFrame,
   createRuntimeSession,
+  declareMediaSources,
+  getMediaSources,
+  suppressMediaSources,
   awaitFrameSettled,
   beginFrame,
   classifyComposite,
@@ -75,6 +78,11 @@ import {
 let enforcedFailures = 0;
 let pendingResolved = 0;
 const pendingNotes: string[] = [];
+
+/** Ordered list equality, for assertions about sets the kernel promises to keep sorted. */
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
 
 /** An invariant that holds today. Must pass; failing it fails the run. */
 function enforced(invariant: string, name: string, condition: boolean, detail?: string): void {
@@ -844,6 +852,65 @@ console.log("\nS3.1 — runtime session and state registry (I-36)");
   enforced("I-24", "a disposed session accepts no further writes",
     session.state.set("a", 99) === false && session.state.get("a", 0) === 0);
   other.dispose();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S3.2 — the Media Manager owns which sources EXIST
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS3.2 — media source declaration (I-16)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  kernelDiagnostics.reset();
+  const session = createRuntimeSession({ id: "media" });
+
+  const ids = ["flarexsrc:c1:n1", "flarexsrc:c1:n2", "flarexsrc:c2:n1"];
+  enforced("I-16", "declaring a source set reports the change", declareMediaSources(session, ids) === true);
+  enforced("I-16", "the declared set is sorted and de-duplicated",
+    sameList(getMediaSources(session).declared, ["flarexsrc:c1:n1", "flarexsrc:c1:n2", "flarexsrc:c2:n1"]));
+
+  // Re-declaring identical membership must be a no-op. The declaration is recomputed whenever the graph
+  // or timeline changes — during an edit that is every frame — and a version that moved every time would
+  // make "the source set changed" a signal with no information in it.
+  enforced("I-16", "re-declaring the same membership changes nothing",
+    declareMediaSources(session, [...ids].reverse()) === false);
+
+  // ── THE INVARIANT ─────────────────────────────────────────────────────────────────────────────
+  // A rendering decision may change a source's PRIORITY. It may not change whether the source EXISTS.
+  // Today's proxy filter deletes sources from the set, which is why a comp whose proxy drops out has
+  // neither a proxy nor warm decoders — they were not demoted, they were deleted.
+  suppressMediaSources(session, ["flarexsrc:c1:n1"], "comp-proxy-serving");
+  const afterSuppress = getMediaSources(session);
+  enforced("I-16", "suppression does NOT remove a source from the declared set",
+    afterSuppress.declared.length === 3 && afterSuppress.declared.includes("flarexsrc:c1:n1"));
+  enforced("I-16", "suppression is visible as its own state, not as an absence",
+    sameList(afterSuppress.suppressed, ["flarexsrc:c1:n1"]) && afterSuppress.active.length === 2);
+  enforced("I-29", "a suppressed source is REPORTED with its reason",
+    kernelDiagnostics.events({ kind: "denial" }).some((e) => e.reason === "source-suppressed:comp-proxy-serving"));
+
+  // Re-suppressing an unchanged set must not re-report. Otherwise the count measures how often the
+  // caller recomputes rather than how often a source actually disappeared — and only the second is
+  // the number S3.5 will be judged against.
+  const denialsBefore = kernelDiagnostics.events({ kind: "denial" }).length;
+  suppressMediaSources(session, ["flarexsrc:c1:n1"], "comp-proxy-serving");
+  enforced("I-29", "an unchanged suppression set does not re-report",
+    kernelDiagnostics.events({ kind: "denial" }).length === denialsBefore);
+
+  // Suppressing something never declared would make the kernel's count disagree with the graph, which
+  // is the one thing this module must never do.
+  suppressMediaSources(session, ["flarexsrc:ghost:n9"], "comp-proxy-serving");
+  enforced("I-16", "an undeclared source cannot be suppressed into existence",
+    !getMediaSources(session).suppressed.includes("flarexsrc:ghost:n9"));
+
+  // Removing a source from the GRAPH is the only thing that removes it from the declared set.
+  declareMediaSources(session, ["flarexsrc:c2:n1"]);
+  enforced("I-16", "the graph, and only the graph, decides membership",
+    sameList(getMediaSources(session).declared, ["flarexsrc:c2:n1"]));
+
+  session.dispose();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
 }
 
 // ---------------------------------------------------------------------------------------------

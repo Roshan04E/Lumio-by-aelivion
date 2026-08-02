@@ -82,6 +82,9 @@ import {
   frameOutlinePathD,
   mediaRectInFrame,
   snapMediaRectToBox,
+  declareMediaSources,
+  defaultSession,
+  suppressMediaSources,
   type ProjectGraph,
   type SourceAsset,
   type TimelineComposition,
@@ -1389,6 +1392,35 @@ function VideoPreviewImpl({
     if (proxyServedCompIds.length === 0) return flarexVirtualLayers;
     const served = new Set(proxyServedCompIds);
     return flarexVirtualLayers.filter((vlayer) => !served.has(vlayer.id.split(":")[1] ?? ""));
+  }, [flarexVirtualLayers, proxyServedCompIds]);
+
+  /**
+   * MEDIA MANAGER (ADR-012 3.9, slice S3.2) — publish which sources EXIST, separately from which are
+   * being rendered.
+   *
+   * The filter above is correct about performance and wrong about vocabulary: it expresses "stop
+   * decoding these" as "these do not exist", and after it runs nothing downstream — admission,
+   * readiness, diagnostics — can tell the difference between a source served by a proxy and a source
+   * that was never in the graph. That is **I-16**, and it is why a comp whose proxy drops out is left
+   * with neither a proxy nor warm decoders: the sources were not demoted, they were deleted.
+   *
+   * This slice changes nothing about what renders. It moves ownership of the DECLARATION to the kernel
+   * and makes the suppression a named, counted state instead of an absence — the same move S0.2 made
+   * for lowering degradations, and for the same reason: **S3.5 replaces this filter with demotion, and
+   * that should be done against evidence about how often and how long sources actually disappear.**
+   *
+   * An effect rather than inline in the memo above: publishing is a side effect on kernel state, and
+   * doing it during render would make a re-render a state write — which is regression G1 wearing the
+   * costume of the fix for it.
+   */
+  useEffect(() => {
+    declareMediaSources(defaultSession, flarexVirtualLayers.map((vlayer) => vlayer.id));
+    const served = new Set(proxyServedCompIds);
+    suppressMediaSources(
+      defaultSession,
+      flarexVirtualLayers.filter((v) => served.has(v.id.split(":")[1] ?? "")).map((v) => v.id),
+      "comp-proxy-serving"
+    );
   }, [flarexVirtualLayers, proxyServedCompIds]);
 
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload

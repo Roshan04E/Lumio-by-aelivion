@@ -1,0 +1,138 @@
+/**
+ * Media Manager (ADR-012 3.9, slice S3.2) — which sources EXIST.
+ *
+ * ## The distinction this module is built on
+ *
+ * A source **existing** and a source being **rendered** are different facts, and the runtime currently
+ * conflates them. `VideoPreview` derives the Flarex virtual-layer set correctly (pure, from the graph),
+ * and then a second memo *removes* entries from it because a comp proxy is serving those comps. After
+ * that filter, the source does not exist as far as anything downstream can tell: no decoder, no
+ * admission, no readiness record, no diagnostics.
+ *
+ * That is **I-16**: *no rendering decision may change whether a source exists — only its priority.* And
+ * it has a known cost. The proxy filter is why a comp whose proxy drops out is left with neither a proxy
+ * nor warm decoders: the sources were not demoted, they were deleted, so there was nothing to fall back
+ * to. (The filter is not a mistake — it exists because keeping those loaders mounted cost 75→35fps. The
+ * mistake is that "stop decoding this" was expressed as "this does not exist".)
+ *
+ * ## What this slice does, and what it does not
+ *
+ * S3.2 moves **ownership of the result**, not the logic. `collectFlarexVirtualLayers` stays exactly
+ * where it is and stays the derivation — it was already pure and already correct. What changes is that
+ * the kernel now holds the declared set, versions it, and **records every suppression** rather than
+ * letting sources vanish silently.
+ *
+ * Suppression is still honoured, so nothing renders differently. But it is now a *named, counted state*
+ * instead of an absence, which is the same move S0.2 made for lowering degradations — and for the same
+ * reason: S3.5 deletes this filter in favour of demotion, and that deletion should be made against
+ * evidence about how often and for how long sources actually disappear.
+ *
+ * ## Why the set is compared before it is stored
+ *
+ * The declaration is recomputed whenever the graph or the timeline changes, which during an edit is
+ * every frame. Storing a fresh array each time would make every subscriber wake on every frame and turn
+ * "the source set changed" into a meaningless signal. Identity is therefore the *sorted id set*, and the
+ * version only moves when membership actually moves.
+ */
+
+import { kernelDiagnostics } from "./diagnostics";
+import type { RuntimeSession } from "./session";
+
+const KEY_DECLARED = "media.sources.declared";
+const KEY_SUPPRESSED = "media.sources.suppressed";
+
+export interface MediaSourceDeclaration {
+  /** Every source the GRAPH says exists, sorted. Never filtered by a rendering decision. */
+  readonly declared: readonly string[];
+  /**
+   * Declared sources a rendering decision is currently choosing not to run.
+   *
+   * The I-16 violation, made countable rather than invisible. Empty is the goal state, reached by S3.5
+   * demoting these to a lower priority instead of removing them.
+   */
+  readonly suppressed: readonly string[];
+  /** `declared` minus `suppressed` — what actually runs today. */
+  readonly active: readonly string[];
+}
+
+function sortedUnique(ids: Iterable<string>): string[] {
+  return [...new Set(ids)].sort();
+}
+
+/** Cheap set equality for already-sorted arrays. */
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Declare the sources the graph says exist. Idempotent: re-declaring the same membership is a no-op, so
+ * a caller may call this every frame without waking anything.
+ *
+ * Returns whether membership changed.
+ */
+export function declareMediaSources(session: RuntimeSession, ids: Iterable<string>): boolean {
+  const next = sortedUnique(ids);
+  const prev = session.state.get<readonly string[]>(KEY_DECLARED, []);
+  if (sameIds(prev, next)) return false;
+  session.state.set(KEY_DECLARED, next as readonly string[]);
+  return true;
+}
+
+/**
+ * Record that a rendering decision is suppressing some declared sources.
+ *
+ * `reason` is required and free-form because "why did this source stop existing" was the question the
+ * audit could not answer from any instrument. Ids not in the declared set are ignored: suppressing
+ * something that was never declared is a caller bug, and silently inventing membership here would hide
+ * it — the count would then disagree with the graph, which is the one thing this module must not do.
+ */
+export function suppressMediaSources(session: RuntimeSession, ids: Iterable<string>, reason: string): boolean {
+  const declared = session.state.get<readonly string[]>(KEY_DECLARED, []);
+  const next = sortedUnique(ids).filter((id) => declared.includes(id));
+  const prev = session.state.get<readonly string[]>(KEY_SUPPRESSED, []);
+  if (sameIds(prev, next)) return false;
+  session.state.set(KEY_SUPPRESSED, next as readonly string[]);
+
+  if (kernelDiagnostics.enabled) {
+    // Only the newly suppressed are reported. Re-reporting a source that was already suppressed would
+    // make the count a function of how often the caller recomputes rather than of how often a source
+    // actually disappeared — and the whole point of the number is the second thing.
+    for (const id of next) {
+      if (prev.includes(id)) continue;
+      kernelDiagnostics.record({
+        kind: "denial",
+        // A warning, not info: a suppressed source is invisible to admission, readiness and decoding,
+        // which is the I-16 violation S3.5 retires — not a normal steady state to be at peace with.
+        severity: "warn",
+        subject: { kind: "source", sourceId: id },
+        reason: `source-suppressed:${reason}`,
+        detail: { declaredCount: declared.length, suppressedCount: next.length },
+      });
+    }
+  }
+  return true;
+}
+
+export function getMediaSources(session: RuntimeSession): MediaSourceDeclaration {
+  const declared = session.state.get<readonly string[]>(KEY_DECLARED, []);
+  const suppressed = session.state.get<readonly string[]>(KEY_SUPPRESSED, []);
+  return {
+    declared,
+    suppressed,
+    active: suppressed.length === 0 ? declared : declared.filter((id) => !suppressed.includes(id)),
+  };
+}
+
+/** Subscribe to membership changes. Coalesced by the registry — see `state-registry.ts`. */
+export function subscribeMediaSources(session: RuntimeSession, listener: () => void): () => void {
+  const offDeclared = session.state.subscribe(KEY_DECLARED, listener);
+  const offSuppressed = session.state.subscribe(KEY_SUPPRESSED, listener);
+  return () => {
+    offDeclared();
+    offSuppressed();
+  };
+}
+
+export const MEDIA_SOURCE_KEYS = { declared: KEY_DECLARED, suppressed: KEY_SUPPRESSED } as const;
