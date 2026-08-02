@@ -227,6 +227,7 @@ import type { GenerateStudioPrefill } from "../components/generate/GenerateStudi
 import type { ToolStepResult } from "../ai/executor/PlanExecutor";
 import type { PlanStep } from "../ai/types";
 import { orisNoteGraphWrite } from "../editor/oris-write-probe";
+import { appendEditCommit, appendHistoryAction } from "../ai/experience/stream";
 import { shouldRecordHistoryEntry, type CommitIntent } from "../editor/gesture-scope";
 import { NumberControl } from "../editor/inspector/controls/NumberControl";
 import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
@@ -3209,6 +3210,8 @@ export function EditorPage() {
     }
 
     const nextDuration = durationSeconds ?? project.durationSeconds;
+    const isHistoryWrite = options.recordHistory !== false;
+    const changed = project.projectGraph !== nextGraph || project.durationSeconds !== nextDuration;
     // ORIS Q5 write probe — measurement instrument, OFF unless `?orisWriteProbe=1`. Records
     // what this choke point actually commits, so the user-action producer's grain is decided by
     // data rather than by intuition. Strictly additive: reads nothing, changes nothing, and
@@ -3216,31 +3219,57 @@ export function EditorPage() {
     // Placed OUTSIDE the history branch deliberately: undo/redo write with
     // `recordHistory: false`, so an instrument inside the branch is blind to exactly the
     // gesture Q4 cares about — and reports that blindness as "undo does not write".
-    orisNoteGraphWrite(
-      project.projectGraph !== nextGraph || project.durationSeconds !== nextDuration,
-      undoStackRef.current.length,
-      options.recordHistory !== false,
-      options.intent
-    );
-    if (options.recordHistory !== false) {
-      const changed = project.projectGraph !== nextGraph || project.durationSeconds !== nextDuration;
-      if (changed) {
-        // One gesture = one undo entry. Outside a gesture this is unconditionally true, so
-        // every existing caller is unaffected; inside one, only the first write pushes, and the
-        // entry therefore holds the state from BEFORE the gesture rather than from one
-        // pointer-move ago. See editor/gesture-scope.ts for the measurement that motivated it.
-        if (shouldRecordHistoryEntry()) {
-          undoStackRef.current.push({
-            projectGraph: project.projectGraph,
-            durationSeconds: project.durationSeconds
-          });
-          if (undoStackRef.current.length > 150) {
-            undoStackRef.current.shift();
-          }
+    orisNoteGraphWrite(changed, undoStackRef.current.length, isHistoryWrite, options.intent);
+
+    // Captured ONCE. `shouldRecordHistoryEntry()` is side-effecting — it marks the gesture as
+    // having pushed — so calling it again below to decide whether to observe would record two
+    // undo entries per gesture and undo the fix it implements.
+    let pushedHistoryEntry = false;
+    if (isHistoryWrite && changed) {
+      // One gesture = one undo entry. Outside a gesture this is unconditionally true, so
+      // every existing caller is unaffected; inside one, only the first write pushes, and the
+      // entry therefore holds the state from BEFORE the gesture rather than from one
+      // pointer-move ago. See editor/gesture-scope.ts for the measurement that motivated it.
+      pushedHistoryEntry = shouldRecordHistoryEntry();
+      if (pushedHistoryEntry) {
+        undoStackRef.current.push({
+          projectGraph: project.projectGraph,
+          durationSeconds: project.durationSeconds
+        });
+        if (undoStackRef.current.length > 150) {
+          undoStackRef.current.shift();
         }
-        redoStackRef.current = [];
-        setHistoryVersion((value) => value + 1);
       }
+      redoStackRef.current = [];
+      setHistoryVersion((value) => value + 1);
+    }
+
+    // ── ORIS editor producer (ADR-017) ────────────────────────────────────────────────────
+    // `pushedHistoryEntry` is the U3 signal: ONE COMMITTED GESTURE. Deliberately not `changed`
+    // (true for all ~20 writes of a parameter drag) and not `isHistoryWrite` (likewise) —
+    // either would record twenty user actions for one slider adjustment.
+    //
+    // U10: observation here is strictly additive and may never alter commit semantics. The
+    // choke point is the most load-bearing path in the product; a throw from an observer would
+    // be a data-integrity bug in the user's project.
+    try {
+      if (pushedHistoryEntry) {
+        appendEditCommit({
+          initiator: options.intent?.initiator ?? null,
+          actionIds: options.intent?.actionIds ?? [],
+          summary: options.intent?.summary ?? null,
+          graphVersion: nextGraph.version,
+          undoDepth: undoStackRef.current.length
+        });
+      } else if (changed && options.intent?.history) {
+        appendHistoryAction({
+          operation: options.intent.history,
+          graphVersion: nextGraph.version,
+          undoDepth: undoStackRef.current.length
+        });
+      }
+    } catch {
+      // An observer may never break what it observes.
     }
 
     // Composition-registry write-through (Block 2, NESTING_MATURITY.md): every persisted graph
@@ -3268,7 +3297,10 @@ export function EditorPage() {
 
     redoStackRef.current.push({ projectGraph: project.projectGraph, durationSeconds: project.durationSeconds });
     setHistoryVersion((value) => value + 1);
-    await updateGraph(previous.projectGraph, previous.durationSeconds, { recordHistory: false });
+    await updateGraph(previous.projectGraph, previous.durationSeconds, {
+      recordHistory: false,
+      intent: { history: "undo" }
+    });
     setNotice("Undo complete");
   }
 
@@ -3284,7 +3316,10 @@ export function EditorPage() {
 
     undoStackRef.current.push({ projectGraph: project.projectGraph, durationSeconds: project.durationSeconds });
     setHistoryVersion((value) => value + 1);
-    await updateGraph(next.projectGraph, next.durationSeconds, { recordHistory: false });
+    await updateGraph(next.projectGraph, next.durationSeconds, {
+      recordHistory: false,
+      intent: { history: "redo" }
+    });
     setNotice("Redo complete");
   }
 

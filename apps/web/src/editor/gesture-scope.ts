@@ -45,6 +45,12 @@ export interface CommitIntent {
   actionIds?: string[];
   /** Human-readable, for explainability. Never parsed — ADR-015 D4. */
   summary?: string;
+  /**
+   * Declared by `undo()`/`redo()`, which genuinely know which affordance the user took.
+   * ADR-017 U5: this records that an undo OCCURRED. It never records what it reversed —
+   * the history stack holds whole-composition snapshots, so the target was never witnessed.
+   */
+  history?: "undo" | "redo";
 }
 
 let depth = 0;
