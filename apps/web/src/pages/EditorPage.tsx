@@ -226,6 +226,8 @@ const GenerateStudio = lazy(() => import("../components/generate/GenerateStudio"
 import type { GenerateStudioPrefill } from "../components/generate/GenerateStudio";
 import type { ToolStepResult } from "../ai/executor/PlanExecutor";
 import type { PlanStep } from "../ai/types";
+import { orisNoteGraphWrite } from "../editor/oris-write-probe";
+import { shouldRecordHistoryEntry, type CommitIntent } from "../editor/gesture-scope";
 import { NumberControl } from "../editor/inspector/controls/NumberControl";
 import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
@@ -3190,21 +3192,44 @@ export function EditorPage() {
     };
   }, [selectedPaletteAsset]);
 
-  async function updateGraph(nextGraph: ProjectGraph, durationSeconds?: number, options: { recordHistory?: boolean } = {}) {
+  async function updateGraph(
+    nextGraph: ProjectGraph,
+    durationSeconds?: number,
+    options: { recordHistory?: boolean; intent?: CommitIntent } = {}
+  ) {
     if (!project) {
       return;
     }
 
     const nextDuration = durationSeconds ?? project.durationSeconds;
+    // ORIS Q5 write probe — measurement instrument, OFF unless `?orisWriteProbe=1`. Records
+    // what this choke point actually commits, so the user-action producer's grain is decided by
+    // data rather than by intuition. Strictly additive: reads nothing, changes nothing, and
+    // cannot throw into the write path.
+    // Placed OUTSIDE the history branch deliberately: undo/redo write with
+    // `recordHistory: false`, so an instrument inside the branch is blind to exactly the
+    // gesture Q4 cares about — and reports that blindness as "undo does not write".
+    orisNoteGraphWrite(
+      project.projectGraph !== nextGraph || project.durationSeconds !== nextDuration,
+      undoStackRef.current.length,
+      options.recordHistory !== false,
+      options.intent
+    );
     if (options.recordHistory !== false) {
       const changed = project.projectGraph !== nextGraph || project.durationSeconds !== nextDuration;
       if (changed) {
-        undoStackRef.current.push({
-          projectGraph: project.projectGraph,
-          durationSeconds: project.durationSeconds
-        });
-        if (undoStackRef.current.length > 150) {
-          undoStackRef.current.shift();
+        // One gesture = one undo entry. Outside a gesture this is unconditionally true, so
+        // every existing caller is unaffected; inside one, only the first write pushes, and the
+        // entry therefore holds the state from BEFORE the gesture rather than from one
+        // pointer-move ago. See editor/gesture-scope.ts for the measurement that motivated it.
+        if (shouldRecordHistoryEntry()) {
+          undoStackRef.current.push({
+            projectGraph: project.projectGraph,
+            durationSeconds: project.durationSeconds
+          });
+          if (undoStackRef.current.length > 150) {
+            undoStackRef.current.shift();
+          }
         }
         redoStackRef.current = [];
         setHistoryVersion((value) => value + 1);
@@ -3273,7 +3298,10 @@ export function EditorPage() {
     }
   }
 
-  async function updateComposition(nextComposition: TimelineComposition, options: { plugins?: ImportedPluginLibrary | undefined } = {}) {
+  async function updateComposition(
+    nextComposition: TimelineComposition,
+    options: { plugins?: ImportedPluginLibrary | undefined; intent?: CommitIntent } = {}
+  ) {
     if (!graph) {
       return;
     }
@@ -3286,7 +3314,7 @@ export function EditorPage() {
       composition: normalizedComposition,
       ...(options.plugins ? { plugins: options.plugins } : {}),
       version: graph.version + 1
-    }, normalizedComposition.durationSeconds);
+    }, normalizedComposition.durationSeconds, options.intent ? { intent: options.intent } : {});
   }
 
   /**
@@ -7934,7 +7962,17 @@ export function EditorPage() {
     // The dock only renders under the `… && composition` guard below, so composition is present
     // whenever the panel can call this (the assertion mirrors the old inline closure's narrowing).
     getContext: () => ({ composition: composition!, selection: selectedLayerIds, nowSeconds: currentTimeRef.current }),
-    commitComposition: (after: TimelineComposition) => updateComposition(after),
+    // The AI's commits funnel through the SAME choke point as every human edit, so without
+    // this declaration the two are indistinguishable there and the only honest record for
+    // everything would be "undeclared". This is the one caller that genuinely knows.
+    commitComposition: (after: TimelineComposition, summary?: string, actionIds?: string[]) =>
+      updateComposition(after, {
+        intent: {
+          initiator: "ai",
+          ...(summary ? { summary } : {}),
+          ...(actionIds && actionIds.length > 0 ? { actionIds } : {})
+        }
+      }),
     openTool: (step: Parameters<typeof openToolForAi>[0]) => openToolForAi(step),
     onUndo: () => {
       void undo();

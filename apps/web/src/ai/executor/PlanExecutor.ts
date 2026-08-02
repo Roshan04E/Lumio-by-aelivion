@@ -12,7 +12,7 @@ export interface ExecutorDeps {
   /** Fresh editor context (composition/selection/playhead) at execution start. */
   getContext: () => PlannerContext;
   /** Commit one applied step to the editor (records one undo entry). */
-  commitComposition: (after: TimelineComposition, summary: string) => Promise<void> | void;
+  commitComposition: (after: TimelineComposition, summary: string, actionIds?: string[]) => Promise<void> | void;
   /** Open an existing tool window; resolves when the user applies or cancels. */
   openTool?: (step: PlanStep) => Promise<ToolStepResult>;
   /**
@@ -72,7 +72,7 @@ export async function executePlan(plan: AiPlan, deps: ExecutorDeps): Promise<Exe
         { ai: true }
       );
       if (outcome.ok) {
-        await deps.commitComposition(outcome.result.after, outcome.result.summary);
+        await deps.commitComposition(outcome.result.after, outcome.result.summary, [step.actionId]);
         working = { ...working, composition: outcome.result.after };
         const explicitTarget = (step.params as { layerId?: string } | undefined)?.layerId;
         if (explicitTarget) {

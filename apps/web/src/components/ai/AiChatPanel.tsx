@@ -99,7 +99,7 @@ export interface AiChatPanelProps {
   /** Fresh editor context (composition/selection/playhead). Called at plan + execute time. */
   getContext: () => PlannerContext;
   /** Commit one applied step to the editor (goes through the normal undo path). */
-  commitComposition: (after: PlannerContext["composition"], summary: string) => Promise<void> | void;
+  commitComposition: (after: PlannerContext["composition"], summary: string, actionIds?: string[]) => Promise<void> | void;
   /** Optional: open an existing tool window for a `tool` step. */
   openTool?: (step: PlanStep) => Promise<ToolStepResult>;
   /** Optional: undo ONE committed editor change. The panel calls it once per step the last plan applied. */
@@ -1018,7 +1018,7 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           }
           composition = outcome.result.after;
         }
-        await commitComposition(composition, `Color grade (${actions.length} effect${actions.length > 1 ? "s" : ""})`);
+        await commitComposition(composition, `Color grade (${actions.length} effect${actions.length > 1 ? "s" : ""})`, actions.map((a) => a.actionId));
         return {
           applied: true,
           composition,
@@ -1185,9 +1185,13 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           acceptedApproximation: true
         });
       }
-      const countingCommit: AiChatPanelProps["commitComposition"] = async (after, summary) => {
+      const countingCommit: AiChatPanelProps["commitComposition"] = async (after, summary, actionIds) => {
         runCommitsRef.current += 1;
-        await commitComposition(after, summary);
+        // `actionIds` MUST be forwarded: this wrapper is what the executor actually calls, so
+        // dropping it here silently strips operation identity from every plan-driven commit
+        // while the AI declaration still arrives. Typecheck cannot catch it — the parameter is
+        // optional — and the probe found it as `actionIds seen: []`.
+        await commitComposition(after, summary, actionIds);
       };
       const rowIdByStep = new Map<string, string>();
       const startedAt = new Map<string, number>();
@@ -1471,7 +1475,10 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
               steps: [],
               applied: 0,
               failed: 0,
-              at: Date.now()
+              at: Date.now(),
+              // ORIS Stage A: structured owner so attribution never parses the route label.
+              owner: { tier: routed.tier, ruleId: routed.ruleId, recipeId: null, provider: null },
+              startedAt: Date.now() - (performance.now() - reflexStartedAt)
             });
           }
           commitBrainTurn({ prompt, ruleId: routed.ruleId, hadEdits: false, at: Date.now(), source: "brain" });
@@ -1558,7 +1565,20 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
             steps: approvedPlan.steps.map((step) => step.summary),
             applied: outcome.applied,
             failed: outcome.failed,
-            at: Date.now()
+            at: Date.now(),
+            owner: {
+              tier: fastMeta ? "llm-fast" : routed.tier,
+              ruleId: routed.ruleId,
+              recipeId: null,
+              provider: fastMeta?.provider ?? null
+            },
+            confidence: { label: approvedPlan.confidence, percent: approvedPlan.confidencePercent ?? null },
+            startedAt: Date.now() - (performance.now() - reflexStartedAt),
+            // Only registry actions; `tool` steps open a window and carry no actionId, and
+            // inventing one for them would fabricate an observation.
+            actions: approvedPlan.steps.flatMap((step) =>
+              step.actionId ? [{ actionId: step.actionId, targetLayerIds: [], ok: true, error: null }] : []
+            )
           };
           recordDecisionTrace(brainTrace);
           pushItem({ kind: "trace", trace: brainTrace });
@@ -1851,7 +1871,11 @@ export const AiChatPanel = memo(function AiChatPanel({ getContext, commitComposi
           steps: executedSteps.map((step) => step.summary ?? step.actionId),
           applied: report.applied,
           failed: report.failed,
-          at: Date.now()
+          at: Date.now(),
+          owner: { tier: "model", ruleId: "llm.plan", recipeId: null, provider: live.provider ?? null },
+          actions: executedSteps.flatMap((step) =>
+            step.actionId ? [{ actionId: step.actionId, targetLayerIds: [], ok: true, error: null }] : []
+          )
         };
         recordDecisionTrace(modelTrace);
         pushItem({ kind: "trace", trace: modelTrace });

@@ -1,4 +1,5 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { beginEditGesture, endEditGesture } from "../../gesture-scope";
 import type { KeyframeInterpolation } from "@orreris/shared";
 import { ScrubNumberInput } from "../../../components/ScrubNumberInput";
 import { PropertyRow } from "./PropertyRow";
@@ -73,6 +74,9 @@ export function NumberControl({ icon, keyframe, label, value, min, max, step, sl
     event.currentTarget.setPointerCapture(event.pointerId);
     padDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startValue: value };
     setIsScrubbing(true);
+    // One gesture = one undo entry. Values keep committing per pointer-move so the preview
+    // stays live; only the history entry coalesces.
+    beginEditGesture();
   };
 
   const handlePadPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -89,6 +93,9 @@ export function NumberControl({ icon, keyframe, label, value, min, max, step, sl
     if (!drag || drag.pointerId !== event.pointerId) return;
     padDragRef.current = null;
     setIsScrubbing(false);
+    // Bound to the SAME guard as the open, so the scope can never be left dangling. This
+    // handler is wired to both pointerup and pointercancel — a cancel still ends the gesture.
+    endEditGesture();
   };
 
   return (
@@ -107,6 +114,12 @@ export function NumberControl({ icon, keyframe, label, value, min, max, step, sl
             step={step}
             type="range"
             value={clamped}
+            // A native range drag is one gesture too, and it fires `change` per move exactly
+            // like the scrub pad. `pointercancel` is bound as well so an interrupted drag
+            // (scroll, focus loss) still closes the scope.
+            onPointerDown={beginEditGesture}
+            onPointerUp={endEditGesture}
+            onPointerCancel={endEditGesture}
             onChange={(event) => commitValue(Number(event.target.value))}
           />
         ) : (
