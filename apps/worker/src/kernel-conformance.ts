@@ -51,6 +51,14 @@ import {
   noteDecoderRetentionExpired,
   noteDecoderSessionClosed,
   noteDecoderSessionOpened,
+  RESOURCE_IDLE_MS,
+  __resetResourceManager,
+  collectIdleResources,
+  forgetResource,
+  registerResource,
+  resourceLedger,
+  resourcesInScope,
+  touchResource,
   awaitFrameSettled,
   beginFrame,
   classifyComposite,
@@ -1007,6 +1015,87 @@ console.log("\nS3.3 — decoder session lifetime (I-24)");
     DECODER_RETENTION_MS > 0 &&
       kernelDiagnostics.events({ kind: "pressure" }).some((e) => e.reason === "decoder-retention-expired"));
 
+  session.dispose();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S3.4 — the Resource Manager owns derived-cache lifetime
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS3.4 — derived resource ownership and reclamation (I-8/I-33)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  kernelDiagnostics.reset();
+  const session = createRuntimeSession({ id: "resources" });
+  __resetResourceManager(session);
+
+  const T0 = 1_000_000;
+  // The exact shape of the live viewer's pool: three owners' resources in one map, which until this
+  // slice were told apart by parsing a prefix off the key in two independently-maintained predicates.
+  registerResource(session, "grade/layer-a", { scope: "live", kind: "grade-renderer", id: "layer-a" }, T0);
+  registerResource(session, "grade/capture:layer-a", { scope: "scratch:capture", kind: "grade-renderer", id: "capture:layer-a" }, T0);
+  registerResource(session, "grade/thumb:node-1", { scope: "scratch:thumb", kind: "grade-renderer", id: "thumb:node-1" }, T0);
+  // A layer id and a resolved source id are routinely the SAME string. A registry that keyed on the
+  // host's id alone would collapse these two into one record, and one of two real GPU resources would
+  // become invisible to every count and every sweep.
+  registerResource(session, "media/layer-a", { scope: "live", kind: "media-renderer", id: "layer-a" }, T0);
+
+  enforced("I-8", "two pools may hold the same id without colliding", resourceLedger(session, T0).total === 4);
+  enforced("I-8", "ownership is a SCOPE, answerable without parsing a key",
+    sameList(resourcesInScope(session, "scratch:capture").map((r) => r.id), ["capture:layer-a"]) &&
+      sameList(resourcesInScope(session, "scratch:thumb").map((r) => r.id), ["thumb:node-1"]) &&
+      resourcesInScope(session, "live").length === 2);
+  // A reclaim hands back the host's own handle, so the host indexes its pool with it rather than
+  // slicing a namespace off the registry key — the habit the slice exists to remove.
+  enforced("I-8", "a record carries the pool and the handle the host will delete with",
+    resourcesInScope(session, "scratch:capture")[0]?.kind === "grade-renderer" &&
+      resourcesInScope(session, "scratch:capture")[0]?.id === "capture:layer-a");
+
+  // Touching an unregistered key must NOT register it. A resource whose owner was never declared must
+  // not be able to acquire one by being used — that is how the three-owner map got that way.
+  touchResource(session, "grade/never-declared", T0);
+  enforced("I-8", "using an undeclared resource does not give it an owner", resourceLedger(session, T0).total === 4);
+
+  // ── THE INVARIANT ─────────────────────────────────────────────────────────────────────────────
+  // I-33: reclamation MUST NOT depend on frames being presented. The live prune sits after the
+  // coherence-hold early return, so a held frame reclaims nothing — and a held frame is exactly when
+  // pressure is building. Aging is wall clock, so it runs when the frame loop has stopped delivering.
+  const T_SOON = T0 + RESOURCE_IDLE_MS / 2;
+  enforced("I-33", "nothing is reclaimed before the TTL",
+    collectIdleResources(session, T_SOON, RESOURCE_IDLE_MS, false) === null);
+
+  // The safety property that lets the sweep run above the hold gate at all: an entry used THIS frame
+  // has age zero, whatever the frame's outcome turns out to be.
+  const T_LATE = T0 + RESOURCE_IDLE_MS * 2;
+  touchResource(session, "grade/layer-a", T_LATE);
+  const reclaimed = collectIdleResources(session, T_LATE, RESOURCE_IDLE_MS, false);
+  enforced("I-33", "a resource touched this frame is never reclaimed, in any outcome",
+    reclaimed !== null && !reclaimed.some((r) => r.key === "grade/layer-a"));
+  enforced("I-33", "reclamation happens on a frame that never presented",
+    reclaimed !== null && reclaimed.length === 3);
+  enforced("I-29", "…and is REPORTED as such, so the I-33 census is readable",
+    kernelDiagnostics.events({ kind: "pressure" }).some((e) => e.reason === "idle-reclaim-unpresented"));
+  enforced("I-33", "the unpresented reclaim count is the number the amplifier is measured by",
+    resourceLedger(session, T_LATE).reclaimedWhileUnpresented === 3);
+
+  // The sweep REPORTS; the host disposes. The kernel never owns the GL object (I-36), so a record must
+  // survive until the host says it is gone — a sweep that forgot on its own would make a failed dispose
+  // invisible and the resource unreachable forever.
+  enforced("I-8", "collecting does not itself forget the record", resourceLedger(session, T_LATE).total === 4);
+  for (const record of reclaimed ?? []) forgetResource(session, record.key);
+  enforced("I-8", "the host forgetting is what ends the record",
+    resourceLedger(session, T_LATE).total === 1 && resourcesInScope(session, "live").length === 1);
+
+  // A healthy session reclaims NOTHING: the set-difference fast path already disposed everything this
+  // would catch. If this ever starts returning entries in the common case, the sweep has become a
+  // second reclamation policy rather than a backstop for the first — which is regression G5.
+  enforced("I-33", "a session whose resources are all in use sweeps nothing",
+    collectIdleResources(session, T_LATE, RESOURCE_IDLE_MS, true) === null);
+
+  __resetResourceManager(session);
   session.dispose();
   kernelDiagnostics.enabled = wasEnabled;
   kernelDiagnostics.reset();

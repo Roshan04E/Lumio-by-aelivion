@@ -78,6 +78,33 @@ export function getFrameScopesEnabled(): boolean {
 }
 
 /**
+ * Does the kernel Resource Manager reclaim idle derived resources? (ADR-012 I-8/I-33, slice S3.4.)
+ * Flag: `?kernelResources=0` → localStorage `orreris.kernelResources` → **ON**.
+ *
+ * ## What it is protecting
+ *
+ * The viewer's grade renderers and render targets are pruned by a set-difference loop that sits AFTER
+ * the coherence-hold early return, so **a held frame reclaims nothing**. That is the amplifier in the
+ * loop both runtime audits identified: slow sources → held frames → no reclamation → VRAM climbs →
+ * context eviction → every cache destroyed → slow sources. The recovery mechanism feeds the failure,
+ * which is why no amount of timeout tuning has ever broken the cycle (I-33).
+ *
+ * The kernel adds a **wall-clock idle sweep** that runs on every frame regardless of outcome. It cannot
+ * race the fast path it backs up: an entry touched this frame has age zero, and the TTL is far longer
+ * than the longest hold episode on record. In a healthy session it reclaims *nothing*, because the
+ * set-difference prune already disposed everything it would have caught — it bites only in the failure.
+ *
+ * Default ON with a kill switch rather than off-by-default, unlike `kernelScopes`: this only ever
+ * disposes resources that are provably unreferenced and would otherwise be leaked until a frame
+ * presents, so the flag-off state is the one carrying the risk. Ownership itself (scopes replacing the
+ * `capture:`/`thumb:` key-prefix sniffing) is unconditional and byte-neutral — the scope is derived from
+ * the same prefix at registration, so the two sets are identical by construction.
+ */
+export function getKernelResourcesEnabled(): boolean {
+  return readFlagDefaultOn("kernelResources");
+}
+
+/**
  * The kernel diagnostics flag, resolved HOST-side (ADR-012 I-36, slice S3.1).
  *
  * `?kernelDiagnostics=0` → localStorage `orreris.kernel.diagnostics` → **ON**. Default on, because the
@@ -94,6 +121,22 @@ export function resolveKernelDiagnosticsEnabled(): boolean {
       const params = new URLSearchParams(window.location.search);
       if (params.has(KERNEL_DIAGNOSTICS_FLAG_QUERY)) return truthy(params.get(KERNEL_DIAGNOSTICS_FLAG_QUERY));
       const stored = window.localStorage?.getItem(KERNEL_DIAGNOSTICS_FLAG_STORAGE);
+      if (stored != null) return truthy(stored);
+    } catch {
+      /* SSR / restricted storage — fall through */
+    }
+  }
+  return true;
+}
+
+/** Same resolution order as {@link readFlag}, with the opposite default — a kill switch, not an opt-in. */
+function readFlagDefaultOn(name: string): boolean {
+  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
+  if (typeof window !== "undefined") {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has(name)) return truthy(params.get(name));
+      const stored = window.localStorage?.getItem(`orreris.${name}`);
       if (stored != null) return truthy(stored);
     } catch {
       /* SSR / restricted storage — fall through */

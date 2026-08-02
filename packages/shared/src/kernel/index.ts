@@ -14,5 +14,6 @@ export * from "./state-registry";
 export * from "./session";
 export * from "./media-manager";
 export * from "./decoder-manager";
+export * from "./resource-manager";
 export * from "./degradation-sink";
 export * from "./present-ledger";

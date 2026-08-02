@@ -38,11 +38,19 @@ import {
   beginFrame,
   colorPipelineCacheKey,
   classifyComposite,
+  collectIdleResources,
+  defaultSession,
   endFrame,
+  forgetResource,
   kernelDiagnostics,
   noteHeld,
   notePresent,
   recordFlarexDegradation,
+  registerResource,
+  resourcesInScope,
+  touchResource,
+  RESOURCE_IDLE_MS,
+  type ResourceScope,
   type ColorPipeline,
   type FrameOutcome,
   type FlarexComp,
@@ -64,7 +72,8 @@ import {
   shouldHoldForCoherence,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
-import { getFrameCompletionEnabled, getFrameScopesEnabled } from "../playback/frame-completion";
+import { getFrameCompletionEnabled, getFrameScopesEnabled, getKernelResourcesEnabled } from "../playback/frame-completion";
+import { isReadaheadProbeEnabled, noteReadaheadComposite, type ReadaheadSample } from "../playback/readahead-probe";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
 
@@ -614,6 +623,9 @@ export function ScenePreviewCanvas({
   const sharedMediaRenderersRef = useRef<
     Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; lastKey: string; lastW: number; lastH: number }>
   >(new Map());
+  const kernelResourcesRef = useRef(getKernelResourcesEnabled());
+  /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
+  const lastResourceSweepRef = useRef(0);
   const failedRef = useRef(false);
   // Bounded-recovery bookkeeping (see MAX_SCENE_REBUILDS above).
   const rebuildAttemptsRef = useRef(0);
@@ -621,6 +633,27 @@ export function ScenePreviewCanvas({
   const recoveryTimerRef = useRef<number | null>(null);
   const onFailureRef = useRef(onFailure);
   onFailureRef.current = onFailure;
+  /**
+   * RESOURCE MANAGER (ADR-012 3.12, slice S3.4) — who owns a pooled grade renderer.
+   *
+   * `sharedGradeRenderersRef` holds entries for three different owners: the live frame, the viewer
+   * capture handle, and the node-thumbnail pool. Until now the owner was decided by **parsing a prefix
+   * off the key** — `startsWith("capture:")` as a skip in the live prune, `startsWith("capture:") ||
+   * startsWith("thumb:")` as a select in the capture release. Two predicates, independently maintained,
+   * both re-deriving the same fact from a substring; a fourth owner or a typo in either one silently
+   * double-disposes a live resource or leaks a scratch one. That is **I-8**.
+   *
+   * The prefix is still where the answer comes from — it is the caller's existing, correct convention —
+   * but it is read **once, here, at registration**, and after that ownership is a field. That makes this
+   * change byte-neutral by construction (the same keys land in the same sets) while removing the second
+   * and third places that had to agree about it.
+   */
+  const gradeScopeOf = (key: string): ResourceScope =>
+    key.startsWith("capture:") ? "scratch:capture" : key.startsWith("thumb:") ? "scratch:thumb" : "live";
+  /** Registry key. Namespaced because a layer id and a resolved source id are routinely equal. */
+  const gradeResourceKey = (id: string): string => `grade/${id}`;
+  const mediaResourceKey = (id: string): string => `media/${id}`;
+
   const stopLoop = () => {
     if (!rafRef.current) return;
     cancelAnimationFrame(rafRef.current);
@@ -681,6 +714,7 @@ export function ScenePreviewCanvas({
         /* ignore */
       }
     }
+    for (const id of sharedMediaRenderersRef.current.keys()) forgetResource(defaultSession, mediaResourceKey(id));
     sharedMediaRenderersRef.current.clear();
     for (const { renderer, target } of sharedGradeRenderersRef.current.values()) {
       try {
@@ -694,6 +728,10 @@ export function ScenePreviewCanvas({
         /* ignore */
       }
     }
+    // Records go with the resources, in the same teardown. A registry that outlived a context loss would
+    // hand the sweep ids into pools that no longer contain them — harmless today (the lookup misses) and
+    // exactly the kind of drift that makes a ledger stop being evidence.
+    for (const id of sharedGradeRenderersRef.current.keys()) forgetResource(defaultSession, gradeResourceKey(id));
     sharedGradeRenderersRef.current.clear();
   };
   const isContextLostError = (error: unknown) =>
@@ -886,6 +924,17 @@ export function ScenePreviewCanvas({
           pipelineKey: "",
         };
         sharedGradeRenderersRef.current.set(key, entry);
+        registerResource(
+          defaultSession,
+          gradeResourceKey(key),
+          { scope: gradeScopeOf(key), kind: "grade-renderer", id: key },
+          performance.now()
+        );
+      } else {
+        // Touched on ACCESS, not on a successful draw: an entry reached and then short-circuited (an
+        // unchanged pipeline, a cached target) is still in use, and ageing it out from under a live
+        // consumer is the one way a wall-clock sweep could do harm.
+        touchResource(defaultSession, gradeResourceKey(key), performance.now());
       }
       entry.target.resize(targetW, targetH);
       const pipelineKey = colorPipelineCacheKey(pipeline);
@@ -983,7 +1032,11 @@ export function ScenePreviewCanvas({
     // clean, because "showed the wrong picture while reporting coherent" is a different bug from
     // "showed the wrong picture while reporting stale", and only this can tell them apart.
     const allStaleness: Record<string, number | null> = {};
+    // READ-AHEAD PROBE (S0, plans/preview-readahead-ring.md). Collected in the SAME walk as staleness
     // because both are per-source facts about this one present, and a second walk could not see the
+    // same instant. Inert unless `?previewRing=probe` — the array simply stays empty.
+    const readaheadProbeOn = isReadaheadProbeEnabled();
+    const readaheadSamples: ReadaheadSample[] = [];
     let maxStalenessSeconds = 0;
     // WHICH source was worst, and what moment it was actually showing. Captured because the staleness
     // NUMBER alone cannot distinguish the two things that produce a large one, and they need opposite
@@ -1036,6 +1089,8 @@ export function ScenePreviewCanvas({
         };
       }
       allStaleness[resolvedId] = awaiting ? Number.POSITIVE_INFINITY : snap.stalenessSeconds;
+      if (readaheadProbeOn) {
+        readaheadSamples.push({
           id: resolvedId,
           frameVersion: snap.frameVersion,
           stalenessSeconds: snap.stalenessSeconds,
@@ -1068,6 +1123,11 @@ export function ScenePreviewCanvas({
       if (snap.fullResFrame) fullResReadyCount += 1;
       const chosenFrame = useFullRes && snap.fullResFrame ? snap.fullResFrame : snap.frame;
       let entry = sharedMediaRenderersRef.current.get(resolvedId);
+      // BEFORE the source-less branch below, deliberately. That branch returns the entry's last graded
+      // texture — it is the entry's most important use, not an absence of one — and a transiently
+      // source-less layer (element mid-seek, decode in flight) can hold there for a long time. Touching
+      // only on a successful grade would let the idle sweep dispose the very target being shown.
+      if (entry) touchResource(defaultSession, mediaResourceKey(resolvedId), performance.now());
       if (!chosenFrame || chosenFrame.width <= 0 || chosenFrame.height <= 0) {
         // Transiently source-less: an element mid-seek drops readyState<2 for a few frames, a WC decode
         // is still in flight, a still is decoding. HOLD the last graded frame — the own-canvas path did
@@ -1084,6 +1144,15 @@ export function ScenePreviewCanvas({
       if (!entry) {
         entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0 };
         sharedMediaRenderersRef.current.set(resolvedId, entry);
+        // Always `live`: this pool is only ever built from the live frame's media set. The capture path
+        // reuses the graded textures the live frame already produced rather than making its own, which
+        // is why `renderIsolated` can be synchronous at all.
+        registerResource(
+          defaultSession,
+          mediaResourceKey(resolvedId),
+          { scope: "live", kind: "media-renderer", id: resolvedId },
+          performance.now()
+        );
       }
       const w0 = chosenFrame.width;
       const h0 = chosenFrame.height;
@@ -1296,6 +1365,58 @@ export function ScenePreviewCanvas({
       const layer = ls.find((item) => item.id === id);
       return layer != null && (layer.type === "video" || layer.type === "image");
     };
+    // Record BEFORE the hold decision, so a withheld composite still counts as demand: playback asked
+    // for this moment whether or not the viewer got to show it, and a ring would have been read here
+    // either way. Counting only presented composites would flatter the demand figure exactly on the
+    // frames where the sources were struggling.
+    if (readaheadProbeOn) noteReadaheadComposite(readaheadSamples, now, t);
+
+    /**
+     * IDLE SWEEP (ADR-012 I-33, slice S3.4) — reclamation that does not depend on a frame presenting.
+     *
+     * Placed HERE, above every hold gate, because that is the whole point. The set-difference prune far
+     * below sits after the coherence-hold `return`, so a held frame reclaims nothing — and a held frame
+     * is precisely when memory pressure is building. That is the amplifier both runtime audits named:
+     * slow sources → held frames → no reclamation → VRAM climbs → context eviction → every cache
+     * destroyed → slow sources. The recovery mechanism feeds the failure.
+     *
+     * **This sweep can run here and that prune cannot**, and the difference is not a preference. The
+     * prune subtracts against `liveMediaSourceIds`, which is populated by the grade pass a hold skips —
+     * running it early would compute the difference against an empty set and dispose the held frame's
+     * own renderers (the file already carries a comment about that landmine). A wall-clock sweep has no
+     * such dependency: an entry touched this frame has age zero, so it is safe on any frame in any
+     * outcome, by construction.
+     *
+     * In a healthy session this reclaims NOTHING — the fast path already disposed everything it would
+     * have caught. It bites only in the failure, which is exactly where the old reclamation went quiet.
+     * Rate-limited to once per TTL so the per-frame cost is one number comparison (risk R1).
+     */
+    if (kernelResourcesRef.current && now - lastResourceSweepRef.current > RESOURCE_IDLE_MS) {
+      lastResourceSweepRef.current = now;
+      // `presented: false` — this runs before the hold decision, so whether this frame reaches the
+      // screen is not yet known. Reporting the pessimistic value keeps the I-33 census honest: it
+      // counts reclaims that happened without a present being guaranteed, which is the property the
+      // old code could not achieve at all.
+      const idle = collectIdleResources(defaultSession, now, RESOURCE_IDLE_MS, false);
+      if (idle) {
+        for (const record of idle) {
+          forgetResource(defaultSession, record.key);
+          // Dispatch on the record's OWN kind and id. Nothing parses the key — that habit is what this
+          // slice exists to remove, and re-introducing it in the sweep would be the same bug one layer up.
+          const pool = record.kind === "grade-renderer" ? sharedGradeRenderersRef.current : sharedMediaRenderersRef.current;
+          const entry = pool.get(record.id) as { renderer: MediaWebGLRenderer; target?: RenderTarget } | undefined;
+          if (!entry) continue;
+          try {
+            entry.renderer.dispose();
+            entry.target?.dispose();
+          } catch {
+            /* a dying GPU object must never throw into the draw loop */
+          }
+          pool.delete(record.id);
+        }
+      }
+    }
+
     const heldIds = playing ? notReadyIds : notReadyIds.filter(isMediaLayerId);
     if (
       heldIds.some(
@@ -1366,12 +1487,15 @@ export function ScenePreviewCanvas({
     );
     const liveLayerIds = new Set(ls.map((layer) => layer.id));
     for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
-      // "capture:"-prefixed entries belong to the viewer-capture run (arbitrary times / layers) — its own
-      // releaseCaptureResources() disposes them, not the live frame's prune.
-      if (liveLayerIds.has(id) || id.startsWith("capture:")) continue;
+      // Entries owned by a SCRATCH scope belong to the viewer-capture run or the thumbnail pool
+      // (arbitrary times / layers) — their own releaseCaptureResources() disposes them, not the live
+      // frame's prune. The scope is the owner (I-8, S3.4); it was a `startsWith("capture:")` here and a
+      // different substring test in the release path, which is two places that had to agree.
+      if (liveLayerIds.has(id) || gradeScopeOf(id) !== "live") continue;
       renderer.dispose();
       target.dispose();
       sharedGradeRenderersRef.current.delete(id);
+      forgetResource(defaultSession, gradeResourceKey(id));
     }
     // Single-ctx: dispose media-grade renderers whose source id wasn't consumed this frame (clip left the
     // window / its descriptor was withdrawn). `liveMediaSourceIds` is populated by gradeMediaInContext above.
@@ -1381,6 +1505,7 @@ export function ScenePreviewCanvas({
         renderer.dispose();
         target.dispose();
         sharedMediaRenderersRef.current.delete(id);
+        forgetResource(defaultSession, mediaResourceKey(id));
       }
     }
 
@@ -1659,21 +1784,27 @@ export function ScenePreviewCanvas({
       // The scratch scope's lifetime IS the handle's — the same rule the "capture:"/"thumb:" grade
       // renderers below already follow. S2.3 only generalises it to the caches they were sharing.
       disposeScratchScope();
-      for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
-        // "thumb:" is the node-thumbnail pool (Slice 6) — same lifetime rule as the capture pool: both
-        // are scratch, both are rebuilt on demand, and neither may outlive the handle.
-        if (!id.startsWith("capture:") && !id.startsWith("thumb:")) continue;
-        try {
-          renderer.dispose();
-        } catch {
-          /* ignore */
+      // The scratch scopes ASK THE REGISTRY who they own (S3.4) instead of asking a string what it looks
+      // like. `capture:` and `thumb:` are still two scopes with one lifetime — both are scratch, both are
+      // rebuilt on demand, and neither may outlive the handle — but that is now one statement here rather
+      // than a substring test kept in sync with the live prune's inverse of it.
+      for (const scope of ["scratch:capture", "scratch:thumb"] as const) {
+        for (const record of resourcesInScope(defaultSession, scope)) {
+          const entry = sharedGradeRenderersRef.current.get(record.id);
+          forgetResource(defaultSession, record.key);
+          if (!entry) continue;
+          try {
+            entry.renderer.dispose();
+          } catch {
+            /* ignore */
+          }
+          try {
+            entry.target.dispose();
+          } catch {
+            /* ignore */
+          }
+          sharedGradeRenderersRef.current.delete(record.id);
         }
-        try {
-          target.dispose();
-        } catch {
-          /* ignore */
-        }
-        sharedGradeRenderersRef.current.delete(id);
       }
     };
     /**
