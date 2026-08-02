@@ -20,6 +20,7 @@ import type { ColorPipeline } from "../color/types";
 import { getFragmentEffect } from "../color/fragment-effects/registry";
 import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass, SceneTextureSource } from "../color/scene-compositor";
+import type { ServedTime } from "../kernel/time";
 import {
   getActiveTransition,
   getCompositionBlendMode,
@@ -85,6 +86,19 @@ export interface FlarexCompProxyFrame {
   sourceWidth: number;
   sourceHeight: number;
   sourceVersion?: number | undefined;
+  /**
+   * The moment this pre-rendered frame represents (ADR-012 T7, slice S4.2).
+   *
+   * T7 is one sentence — "a proxy is a source; it carries a time, participates in readiness, and is
+   * subject to every rule above" — and this field is the half of it that was missing. A proxy frame
+   * had a version and no time, so the one participant standing in for a whole comp was the one
+   * participant a coherence check could not evaluate. It could be arbitrarily behind the playhead and
+   * read as ready, because there was nothing to read.
+   *
+   * Optional on the same terms as `SceneTextureSource.servedTime`: absent means the path cannot say,
+   * never that the frame is current.
+   */
+  servedTime?: ServedTime | undefined;
 }
 
 export interface BuildSceneDrawsInputs {

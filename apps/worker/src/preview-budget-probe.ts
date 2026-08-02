@@ -147,6 +147,9 @@ async function sampleArm(page: Page, name: string): Promise<ArmResult> {
 
   const deadline = Date.now() + SECONDS * 1_000;
   while (Date.now() < deadline) {
+    // A dev-server HMR reload destroys the execution context mid-sample and used to kill the run with a
+    // raw Playwright error. Editing source while a probe drives the page is operator error, but the probe
+    // should report the arm as spoiled rather than lose the whole measurement to it.
     const snap = await page.evaluate(() => {
       const stats = (globalThis as Record<string, any>).__rfFrameStats;
       if (!stats) return null;
@@ -160,7 +163,21 @@ async function sampleArm(page: Page, name: string): Promise<ArmResult> {
         severeCount: Number(stats.severeCount ?? 0),
         renderScale: Number(stats.renderScale ?? 1),
       };
+    }).catch((error: unknown) => {
+      const message = String(error);
+      if (/Execution context was destroyed|Target closed/.test(message)) return "navigated" as const;
+      throw error;
     });
+    if (snap === "navigated") {
+      return {
+        name,
+        samples,
+        pool: null,
+        kernel: null,
+        degradation: null,
+        error: "the page navigated mid-arm (dev-server reload?) — this arm is spoiled",
+      };
+    }
     // Idle samples (fps 0) are not slow frames — they are the absence of frames, and averaging them in
     // would make a paused arm look catastrophic rather than absent.
     if (snap && snap.fps > 0) samples.push(snap);

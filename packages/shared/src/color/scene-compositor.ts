@@ -43,6 +43,7 @@ import {
   type TransitionParam,
 } from "./transitions/registry";
 import { PipelineAssembler } from "./transitions/pipeline-assembler";
+import type { ServedTime } from "../kernel/time";
 import {
   buildFragmentEffectPassShader,
   buildFragmentEffectShader,
@@ -74,6 +75,20 @@ export interface SceneTextureSource {
   height: number;
   /** Diagnostic-only backing target metadata for single-context export probes. */
   debugTarget?: { width: number; height: number; framebufferStatus?: string; framebufferComplete?: boolean } | undefined;
+  /**
+   * The media time these pixels ACTUALLY represent (ADR-012 T5, slice S4.2).
+   *
+   * The producer already knows this — `ScenePreviewMediaSnapshot.servedSourceTime` — and the grade
+   * stage threw it away, because a texture was modelled as pixels rather than as pixels-at-a-moment.
+   * Everything downstream then had to infer coherence from a monotonic publish COUNTER, which cannot
+   * answer the only question that matters: "is this the texture for the frame I am about to present?"
+   *
+   * Optional, and must stay optional until every producer supplies one: absent means "this path cannot
+   * say", which is the honest answer for a still, a generator raster, or an export source that has no
+   * decoder behind it. Absent is NOT "assume it is current" — that assumption is what the readiness
+   * barrier (S4.4) exists to stop making.
+   */
+  servedTime?: ServedTime | undefined;
 }
 
 /** True when a layer source is a same-context GPU texture (sample directly) vs an uploadable `TexImageSource`. */
