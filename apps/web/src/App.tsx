@@ -4,6 +4,11 @@ import { AppShell } from "./components/AppShell";
 import { GlobalErrorToast } from "./components/GlobalErrorToast";
 import { AiThinkingPanel } from "./components/ai/AiThinkingPanel";
 import { isApiOffline, subscribeApiOffline } from "./lib/api";
+import { configureExperience } from "./ai/experience/stream";
+
+// The ORIS session row records WHICH BUILD observed it. `configureExperience` previously had
+// no production call site, so every real session recorded `buildId: "unknown"`.
+configureExperience({ buildId: typeof __ORRERIS_BUILD_ID__ === "string" ? __ORRERIS_BUILD_ID__ : "unknown" });
 
 const HomePage = lazy(() => import("./pages/HomePage").then((module) => ({ default: module.HomePage })));
 const TemplatesPage = lazy(() => import("./pages/TemplatesPage").then((module) => ({ default: module.TemplatesPage })));

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -98,9 +99,29 @@ function assertProductionBuild() {
   };
 }
 
+/**
+ * WHICH BODY this was (ORIS_SELF.md §6 — an upgrade is an autobiographical event).
+ *
+ * Deliberately NOT `renderPipelineFingerprint()`: that hashes only render-critical files, so
+ * it would report identical ids across builds that differ everywhere else — a misleading
+ * observation, which ADR-016 I10 forbids. Git HEAD identifies the whole tree.
+ */
+function buildId(): string {
+  try {
+    const head = execSync("git rev-parse --short HEAD", { cwd: repoRoot, encoding: "utf8" }).trim();
+    const dirty = execSync("git status --porcelain", { cwd: repoRoot, encoding: "utf8" }).trim().length > 0;
+    return dirty ? `${head}-dirty` : head;
+  } catch {
+    // No git, or not a checkout. "unknown" is the honest answer and stays distinguishable
+    // from a real id — never a plausible-looking fake.
+    return "unknown";
+  }
+}
+
 export default defineConfig({
   define: {
-    __ORRERIS_RENDER_FINGERPRINT__: JSON.stringify(renderPipelineFingerprint())
+    __ORRERIS_RENDER_FINGERPRINT__: JSON.stringify(renderPipelineFingerprint()),
+    __ORRERIS_BUILD_ID__: JSON.stringify(buildId())
   },
   plugins: [
     assertProductionBuild(),

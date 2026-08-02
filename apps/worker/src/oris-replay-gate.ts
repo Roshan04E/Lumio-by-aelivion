@@ -286,6 +286,15 @@ async function main() {
     withCoverage.length > 0 && withCoverage.every((e) => typeof e.payload.coveragePolicy === "string")
   );
 
+  // 6c — WHICH BODY observed this (ORIS_SELF.md §6). Verified rather than assumed: U12 exists
+  // because wiring that typechecks is not wiring that works.
+  const builds = sessions.map((e) => e.payload.buildId);
+  check(
+    "6c. the session records a real build id, not \"unknown\"",
+    sessions.length > 0 && builds.every((b) => typeof b === "string" && b !== "unknown"),
+    JSON.stringify(builds)
+  );
+
   // Secondary — runtime counters, NOT part of the replay (they are not in the corpus).
   const stats = await page.evaluate(() => {
     const w = window as unknown as { __orisWriteProbe?: unknown };

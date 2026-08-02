@@ -7,3 +7,4 @@
  * scripts); consumers must guard with `typeof`.
  */
 declare const __ORRERIS_RENDER_FINGERPRINT__: string | undefined;
+declare const __ORRERIS_BUILD_ID__: string | undefined;
