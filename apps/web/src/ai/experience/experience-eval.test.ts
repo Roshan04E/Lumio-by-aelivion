@@ -84,7 +84,7 @@ let passes = 0;
  * regression that reports success — the same false-confidence failure as an eval outside the
  * compiler. Raise this when checks are added; never lower it without saying why.
  */
-const EXPECTED_MIN_CHECKS = 111;
+const EXPECTED_MIN_CHECKS = 112;
 
 function check(label: string, ok: boolean, detail?: string): void {
   if (ok) {
@@ -273,7 +273,12 @@ async function main(): Promise<void> {
   );
   check("an undo does not advance τ", undone.dTau === 0, "it returns the world to a state it already occupied");
   check("a commit DOES advance τ", commit.dTau > 0);
-  check("the superseded τ policy is retained and distinct (I8)", TAU_POLICY_V1_ID !== TAU_POLICY_ID && TAU_POLICY_V1_ID.endsWith(".v1"));
+  // Asserted via the ROW rather than by comparing two literals: `TAU_POLICY_V1_ID !== TAU_POLICY_ID`
+  // is a comparison of two literal types, so it is statically known-true and can never fail — a
+  // vacuous check, and tsc flags it (TS2367). What actually matters is that v1 is still exported
+  // and runnable while new rows name v2.
+  check("the superseded τ policy is RETAINED (I8)", TAU_POLICY_V1_ID.endsWith(".v1"), "an id that resolves to nothing is a decoration");
+  check("new rows name the CURRENT τ policy", commit.tauPolicy === TAU_POLICY_ID && TAU_POLICY_ID.endsWith(".v2"));
 
   // ── situation: state, not an event ────────────────────────────────────────────────────
   console.log("\nsituation (standing state, snapshotted at append)");
