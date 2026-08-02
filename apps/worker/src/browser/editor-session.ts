@@ -202,6 +202,112 @@ export async function buildFlarexProxyFixture(page: Page, timeoutMs = 180_000): 
   return ready > 0;
 }
 
+/**
+ * Add an ASSET-SOURCE MediaIn to the selected clip's comp, bound to the project's own asset — the
+ * topology every open decoder question needs, and the one no fixture has had.
+ *
+ * WHY THIS SPECIFIC SHAPE. `buildFlarexProxyFixture` alone produces a comp whose MediaIn reads its HOST
+ * clip, and `collectFlarexVirtualLayers` builds a loader only for MediaIn nodes carrying a
+ * `sourceAssetId`. So that fixture declares no sources, demotes nothing, and borrows nothing: three
+ * slices' worth of measurement all came back reading zero on it. Binding a MediaIn to the same asset the
+ * host clip already plays gives **one file read through two doors**, which is simultaneously:
+ *
+ *   · the duplicate-decode case session sharing was BUILT for (S4.7 must keep it sharing),
+ *   · a declared source the Media Manager can demote (S3.5's C1 question), and
+ *   · the identity match that made the 2026-08-02 harm reachable at all (S4.7's done-when).
+ *
+ * Wiring is deliberately not attempted: virtual loaders are collected from `comp.nodes` regardless of
+ * reachability, so an unwired MediaIn still opens a decoder — which is the whole subject here. Dragging
+ * a wire in Playwright would add flake for no measurement.
+ *
+ * Returns false if the graph could not be built, so a caller reports a void run rather than a confident
+ * number about a topology that is not there.
+ */
+export async function addAssetSourceMediaIn(page: Page): Promise<boolean> {
+  // Selects the clip and creates the comp if needed, so this can run BEFORE the proxy is rendered.
+  // Ordering is not cosmetic: `comp.version` is the proxy's cache key, so a MediaIn added after a build
+  // invalidates it immediately and the run would measure a comp with no usable proxy.
+  const clip = page.locator(".timeline-clip").first();
+  if (!(await clip.count().catch(() => 0))) return false;
+  await clip.click().catch(() => undefined);
+  await page.waitForTimeout(500);
+
+  await page.getByRole("tab", { name: /flarex/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(1_200);
+
+  const create = page.getByRole("button", { name: /create flarex comp/i }).first();
+  if (await create.count().catch(() => 0)) {
+    await create.click().catch(() => undefined);
+    await page.waitForTimeout(2_500);
+  }
+
+  const add = page.locator('[aria-label="Add MediaIn"]').first();
+  if (!(await add.count().catch(() => 0))) return false;
+  await add.click().catch(() => undefined);
+  await page.waitForTimeout(1_000);
+
+  // The node's inspector row. Its label is the bound asset's name, or "Host clip" while unbound — which
+  // is exactly the state we are here to change.
+  const trigger = page.locator(".flarex-source-trigger").first();
+  if (!(await trigger.count().catch(() => 0))) return false;
+  await trigger.click().catch(() => undefined);
+  await page.waitForTimeout(800);
+
+  // Replace mode routes a DOUBLE click to `onPickReplacement`; a single click only selects (deliberate
+  // product behaviour since 2026-07-04 — a single click used to be a silent composition edit).
+  const tile = page.locator(".asset-tile").first();
+  if (!(await tile.count().catch(() => 0))) return false;
+  await tile.dblclick().catch(() => undefined);
+  await page.waitForTimeout(1_500);
+
+  const bound = await trigger.getAttribute("title").catch(() => null);
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(2_500);
+  // "Host clip" means the pick did not land — the node exists but declares no asset, so it opens no
+  // decoder and the fixture would silently be the old one again.
+  return bound != null && !/host clip/i.test(bound);
+}
+
+/**
+ * Put a SECOND clip of the same asset on the timeline — the preload crossing.
+ *
+ * WHY. The two-MediaIn fixture reproduces the duplicate-decode SHARE (one file, two doors, both at the
+ * same moment) but not the HARM. The 2026-08-02 finding needed a third participant: a **preload** — the
+ * pre-roll shell that mounts ~1.2s before a cut and acquires the upcoming clip's asset while a different
+ * consumer is already serving that same asset live. Identity matched, times did not, and the incumbent
+ * paid two hardware resets for it.
+ *
+ * Two clips of one asset back to back is the smallest arrangement that produces it: as the playhead
+ * nears the cut, clip two's shell asks for a time ~a lookahead ahead of what clip one is serving. Which
+ * is exactly the pair `sessionSatisfaction` is supposed to keep apart, and — with the flag off — exactly
+ * what `noteDivergence` is supposed to detach four bad frames later.
+ *
+ * Without this the slice's *done when* ("zero divergence firings across a soak") is satisfied trivially,
+ * by a fixture in which nothing could ever diverge. That is not evidence, it is an absence of it.
+ */
+export async function addSecondClipOfSameAsset(page: Page): Promise<boolean> {
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(800);
+  const before = await page.locator(".timeline-clip").count().catch(() => 0);
+
+  const tile = page.locator(".asset-tile").first();
+  if (!(await tile.count().catch(() => 0))) return false;
+  await tile.hover().catch(() => undefined);
+  await page.waitForTimeout(300);
+  // A VIDEO asset does not get a button titled "Add to timeline" — that title belongs to the non-video
+  // branch. Video renders a trio instead: "Add video only" / "Add audio only" / "Add linked video +
+  // audio". Matching only the generic title is why the first attempt at this silently added nothing.
+  const add = page
+    .locator('.asset-card-actions button[title^="Add video only"], .asset-card-actions button[title^="Add to timeline"]')
+    .first();
+  if (!(await add.count().catch(() => 0))) return false;
+  await add.click({ force: true }).catch(() => undefined);
+  await page.waitForTimeout(2_500);
+
+  const after = await page.locator(".timeline-clip").count().catch(() => 0);
+  return after > before;
+}
+
 /** Re-open an existing project id under a different flag set — the A/B seam. Keeps the same profile. */
 export async function reopenWithFlags(page: Page, projectUrl: string, flags: string, settleMs = 6_000): Promise<void> {
   const url = new URL(projectUrl);

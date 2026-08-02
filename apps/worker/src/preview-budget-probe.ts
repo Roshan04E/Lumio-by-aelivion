@@ -37,6 +37,8 @@
  */
 import { chromium, type BrowserContext, type Page } from "playwright";
 import {
+  addAssetSourceMediaIn,
+  addSecondClipOfSameAsset,
   buildFlarexProxyFixture,
   defaultClipPath,
   reachEditor,
@@ -49,10 +51,20 @@ const SECONDS = Number(process.env.PROBE_SECONDS ?? 12);
 const WARMUP_MS = 1_500;
 
 /** The arms. Equal durations, same project, same page — the three things the hand-run soak could not hold. */
-const ARMS: { name: string; flags: string }[] = [
-  { name: "baseline (proxy source OFF)", flags: "kernelProxySource=0" },
-  { name: "S3.5 demotion (proxy source ON)", flags: "kernelProxySource=1" },
-];
+const ARM_SETS: Record<string, { name: string; flags: string }[]> = {
+  // Default: S3.5's open C1 question — what demotion costs, if anything.
+  demotion: [
+    { name: "baseline (proxy source OFF)", flags: "kernelProxySource=0" },
+    { name: "S3.5 demotion (proxy source ON)", flags: "kernelProxySource=1" },
+  ],
+  // S4.7: does guarding the borrow path change the frame budget, and does the backstop stop firing?
+  // Both arms keep demotion OFF so the only variable is satisfaction.
+  satisfaction: [
+    { name: "inherited identity-match borrow", flags: "kernelProxySource=0&kernelSessionSatisfaction=0" },
+    { name: "S4.7 session satisfaction", flags: "kernelProxySource=0&kernelSessionSatisfaction=1" },
+  ],
+};
+const ARMS = ARM_SETS[process.env.PROBE_ARMS ?? "demotion"] ?? ARM_SETS.demotion!;
 
 interface Sample {
   /** Compositor repaint rate — runs at display refresh and will happily redraw an unchanged frame. */
@@ -242,6 +254,13 @@ function report(result: ArmResult): void {
       `   decoder  created ${pool.created} · active ${pool.active} (preload ${pool.activePreload}) · idle ${pool.idle} · ` +
         `retained ${pool.retainedIdle} · retention hits ${pool.retentionHits}/${pool.retentions} · capMisses ${pool.capMisses}`
     );
+    // The S4.7 triple, always together. `shareDetaches` is the DONE-WHEN (zero across a soak);
+    // `borrowRefusals` is what the predicate cost to get there; `capMisses` is whether that cost was
+    // paid in lost sessions. Any one of the three alone is misleading.
+    console.log(
+      `   sharing  shared ${pool.shared} (active ${pool.sharedActive}) · detaches ${pool.shareDetaches} ` +
+        `· refusals ${pool.borrowRefusals ?? 0} · frames served ${pool.sharedFramesServed} (hits ${pool.sharedFrameHits})`
+    );
   }
   const kernel = result.kernel as { media?: Record<string, unknown>; decoder?: Record<string, unknown> } | null;
   if (kernel?.media) {
@@ -304,7 +323,18 @@ async function main(): Promise<void> {
   // and should be asked deliberately rather than by accident.
   let hasFixture = false;
   if (process.env.PROBE_NO_FIXTURE !== "1") {
-    console.log("building fixture: Flarex comp + proxy (this renders the clip's span — minutes, not seconds)");
+    console.log("building fixture: Flarex comp + asset-source MediaIn + proxy");
+    // The MediaIn goes in BEFORE the proxy is rendered, so the proxy is built over the comp this run
+    // actually measures. Building it first and editing after would invalidate it on the next frame —
+    // comp.version is the proxy's key.
+    const mediaIn = await addAssetSourceMediaIn(page);
+    console.log(`  · asset-source MediaIn: ${mediaIn ? "bound" : "FAILED — comp declares no source"}`);
+    // The preload crossing. Only needed for the S4.7 arms, where a borrow across two DIFFERENT times is
+    // the thing under test; the demotion arms do not need it and it would only add decode load.
+    if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
+      const second = await addSecondClipOfSameAsset(page);
+      console.log(`  · second clip of the same asset: ${second ? "added — preload crossing reachable" : "FAILED"}`);
+    }
     hasFixture = await buildFlarexProxyFixture(page);
     console.log(hasFixture ? "  · proxy ready" : "  · FIXTURE FAILED — arms will not exercise demotion");
   }
@@ -365,7 +395,8 @@ async function main(): Promise<void> {
     const media = (r.kernel as { media?: { demoted?: string[] } } | null)?.media;
     return (media?.demoted?.length ?? 0) > 0;
   });
-  if (!demotedAnywhere && process.env.PROBE_NO_FIXTURE !== "1") {
+  const armsVaryDemotion = (process.env.PROBE_ARMS ?? "demotion") === "demotion";
+  if (!demotedAnywhere && armsVaryDemotion && process.env.PROBE_NO_FIXTURE !== "1") {
     console.log(
       "\n[budget] ⚠ VOID for the demotion question — no source was ever demoted in either arm.\n" +
         `         ${hasFixture ? "The proxy built but never served during the sample window." : "The fixture failed to build."}\n` +
