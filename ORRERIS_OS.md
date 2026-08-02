@@ -10,6 +10,10 @@
 > - [`AI_ARCHITECTURE.md`](AI_ARCHITECTURE.md) — *how today's AI routing works* (the tiered
 >   brain, B0–B8, CP1). It keeps shipping independently; this doc never overrides its
 >   invariants — it extends them upward.
+> - [`ORIS_ARCHITECTURE.md`](ORIS_ARCHITECTURE.md) — the **cognitive organism** that lives in
+>   this runtime: memory, self/user models, drives, development, identity over years. This
+>   doc defines the *habitat*; that one defines the *inhabitant*, and treats every layer
+>   here as fixed. Research document — nothing in it is shipped.
 > - [`architecture.md`](architecture.md) — shipped/deferred product log.
 > - `project-tracker/` — append-only problem/solution logs.
 >

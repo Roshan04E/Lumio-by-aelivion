@@ -49,3 +49,6 @@ decision, what was rejected, the consequences, and whether it is Stable or Provi
 - [ADR-011 — Evaluation Context Transform (the fourth evaluator question)](011-evaluation-context-transform.md) — Provisional (extends ADR-010 §5 by ONE question)
 - [ADR-012 — Flarex Runtime Kernel & Evaluation Engine Specification](012-flarex-runtime-kernel.md) — **Accepted** (governing spec; amends ADR-007 §soft-degrade, §dirty-key, §view-dot)
 - [ADR-013 — Media Acquisition Scheduling & the Performance Governor](013-media-acquisition-scheduling.md) — **Accepted** (extends ADR-012 Part 3/4/12 by two subsystems, contracts C15–C18, invariants I-40…I-54; changes no existing clause)
+- [ADR-014 — Experience Stream Architecture](014-experience-stream.md) — **Accepted** (E1–E14; the ORIS history substrate: append-only, envelope/payload, producer≠kind, provenance outranks retention)
+- [ADR-015 — Decision Evidence Schema](015-decision-evidence.md) — **Accepted** (D1–D10; what one AI decision preserves about itself — situation, facts, owner, claim, candidates; beliefs deliberately excluded)
+- [ADR-016 — Evidence Integrity](016-evidence-integrity.md) — **Accepted** (I1–I14; when a record may be trusted: per-field admission, sequence over clocks, retained policies, quarantine-by-derivation, observation coverage, verifiers must prove they ran)
