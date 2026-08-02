@@ -1786,12 +1786,15 @@ export function EditorPage() {
     if (!isPlaying || !composition) {
       // Leaving playback: un-suspend the cold clock and flush it so the cold panels (inspector,
       // scopes, mixer) land exactly where playback stopped, not on the last throttled low-rate notify.
+      // Unconditional (not folded into parkTransportAt below): the composition can go null while
+      // already stopped, and the cold panels must un-freeze on that path too.
       setColdPlaybackSuspended(false);
       if (playbackStartRef.current) {
-        const stopped = getPlaybackClock();
-        bridgeLiveMarkTo(stopped); // v27: settle the live trail on the stop frame (end-of-playback path)
-        currentTimeRef.current = stopped;
-        flushColdPlaybackNotify();
+        // Stops that did NOT come through pausePlaybackAtLiveClock land here — end-of-playback
+        // above, and any future setIsPlaying(false). Park through the SAME function so every stop
+        // settles on the same grid; this branch used to keep the raw committed clock, which is a
+        // different (off-grid, and up to one commit interval earlier) frame than the pause path's.
+        parkTransportAt(getPlaybackClock());
       }
       playbackStartRef.current = null;
       setPlaybackStart(null);
@@ -1863,7 +1866,11 @@ export function EditorPage() {
       const nextTime = Math.max(0, started.timeSeconds + (clockMs - started.clockMs) / 1000);
       currentTimeRef.current = nextTime; // always live for handlers reading the ref
       if (nextTime >= composition.durationSeconds) {
-        setPlaybackClock(composition.durationSeconds);
+        // Quantize here rather than pushing the raw duration and letting the stop branch correct it:
+        // a composition whose duration is not on the frame grid would otherwise commit an off-grid
+        // clock for one paint before settling. `parkTransportAt` (via the !isPlaying branch) lands
+        // on the same value, so this is the same frame reached without the intermediate flash.
+        setPlaybackClock(quantizeToFrameGrid(composition.durationSeconds, "current"));
         setColdPlaybackSuspended(false);
         flushColdPlaybackNotify(); // end of playback — settle cold panels on the final frame
         setIsPlaying(false);
@@ -7426,11 +7433,10 @@ export function EditorPage() {
   function setEditorCurrentTime(timeSeconds: number) {
     // Quantize the playhead to the frame grid (Premiere semantics — frames are all that can
     // render); same-frame scrub moves dedupe for free via the clock store's own equality check.
-    // Clamp to [0, duration] here so the playhead can never overshoot the composition (the old
-    // clamp effect keyed on `currentTime` state is gone with the state).
-    const fps = compositionRef.current?.fps || 30;
-    const duration = compositionRef.current?.durationSeconds ?? timeSeconds;
-    const quantized = Math.max(0, Math.min(duration, Math.round(timeSeconds * fps) / fps));
+    // Clamp to [0, duration] happens inside the quantizer so the playhead can never overshoot the
+    // composition (the old clamp effect keyed on `currentTime` state is gone with the state).
+    // "nearest" is the SEEK grid — see quantizeToFrameGrid for why a stop uses a different one.
+    const quantized = quantizeToFrameGrid(timeSeconds, "nearest");
     currentTimeRef.current = quantized;
     if (isPlaying) {
       const started = { clockMs: performance.now(), timeSeconds: quantized };
