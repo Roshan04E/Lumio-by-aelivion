@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   clearExperience,
   experienceStats,
+  isAction,
   isDecision,
   listExperience,
   subscribeExperience,
@@ -73,7 +74,9 @@ function EventRow({ event }: { event: ExperienceEvent }) {
   const colour = PRODUCER_COLOR[event.producer] ?? "#cbd5e1";
   const headline = isDecision(event)
     ? `${event.payload.prompt.slice(0, 64)}${event.payload.prompt.length > 64 ? "…" : ""}`
-    : `${event.payload.reason} · build ${event.payload.buildId}`;
+    : isAction(event)
+      ? `${event.payload.operation} · ${event.payload.initiator ?? "undeclared"}${event.payload.actionIds.length > 0 ? ` · ${event.payload.actionIds.join(", ")}` : ""}`
+      : `${event.payload.reason} · build ${event.payload.buildId}`;
   const latency =
     isDecision(event) && event.payload.startedAt !== null ? `${event.t - event.payload.startedAt}ms` : null;
 
@@ -126,6 +129,17 @@ function EventRow({ event }: { event: ExperienceEvent }) {
               <Field label="candidates" value={event.payload.candidates} />
               <Field label="steps" value={event.payload.steps} />
               <Field label="notes" value={event.payload.notes} />
+            </>
+          ) : isAction(event) ? (
+            <>
+              <div style={{ color: "#334155", margin: "6px 0 2px" }}>── action payload ──</div>
+              <Field label="operation" value={event.payload.operation} />
+              {/* `null` renders as "not observed" — U6: undeclared is a reading, never "user". */}
+              <Field label="initiator" value={event.payload.initiator} />
+              <Field label="actionIds" value={event.payload.actionIds} />
+              <Field label="summary" value={event.payload.summary} />
+              <Field label="graphVersion" value={event.payload.graphVersion} />
+              <Field label="undoDepth" value={event.payload.undoDepth} />
             </>
           ) : (
             <>

@@ -42,10 +42,13 @@ import {
   SCHEMA_VERSION,
   __resetExperienceMemoryForTests,
   appendDecisionEvent,
+  appendEditCommit,
+  appendHistoryAction,
   beginDecision,
   clearExperience,
   configureExperience,
   experienceStats,
+  isAction,
   isDecision,
   isSession,
   listDecisions,
@@ -59,6 +62,7 @@ import {
   setSituation,
   subscribeExperience,
   TAU_POLICY_ID,
+  TAU_POLICY_V1_ID,
   tauAdvance,
   type SegmentationPolicy
 } from "./stream";
@@ -78,7 +82,7 @@ let passes = 0;
  * regression that reports success — the same false-confidence failure as an eval outside the
  * compiler. Raise this when checks are added; never lower it without saying why.
  */
-const EXPECTED_MIN_CHECKS = 90;
+const EXPECTED_MIN_CHECKS = 105;
 
 function check(label: string, ok: boolean, detail?: string): void {
   if (ok) {
@@ -149,9 +153,19 @@ async function main(): Promise<void> {
   );
   check("the producer table names each boundary", PRODUCER_KINDS.ai.join() === "decision" && PRODUCER_KINDS.system.join() === "session");
   check(
-    "reserved producers claim no kinds until they are wired",
-    PRODUCER_KINDS.editor.length === 0 && PRODUCER_KINDS.ledger.length === 0,
-    "editor→outcome and ledger→prediction are declared, not yet observed"
+    "the editor producer claims `action`, and NOT `outcome`",
+    PRODUCER_KINDS.editor.join() === "action",
+    "ADR-017 U1: nobody witnesses an outcome, so there is no outcome kind to claim"
+  );
+  check(
+    "a genuinely unwired producer still claims nothing",
+    PRODUCER_KINDS.ledger.length === 0,
+    "ledger→prediction is declared in prose, not yet observed"
+  );
+  check(
+    "no producer may emit another's kind",
+    !PRODUCER_KINDS.ai.includes("action") && !PRODUCER_KINDS.editor.includes("decision"),
+    "ORIS-18 — the editor never claims a confidence, the AI never claims a committed mutation"
   );
 
   // ── τ ──────────────────────────────────────────────────────────────────────────────────
@@ -201,6 +215,46 @@ async function main(): Promise<void> {
   const afterDrain = appendDecisionEvent(trace({ at: T0 + 200 }));
   check("emitted signals drain (never attach twice)", !afterDrain.signals.some((s) => s.kind === "project-switch"));
   check("provisional episodes are listable", listEpisodes().length === 2);
+
+  // ── the editor producer (ADR-017) ─────────────────────────────────────────────────────
+  console.log("\nthe editor producer — committed mutations, never outcomes");
+  clearExperience();
+  const commit = appendEditCommit({
+    initiator: "ai",
+    actionIds: ["addEffect", "setEffectParam"],
+    summary: "Color grade (2 effects)",
+    graphVersion: 7,
+    undoDepth: 1
+  });
+  check("an action row is produced by `editor`", commit.producer === "editor" && commit.kind === "action");
+  check("isAction narrows the union", listExperience().filter(isAction).length === 1);
+  check("a commit records the declared initiator", commit.payload.initiator === "ai");
+  check("actionIds is a LIST, so a multi-action commit keeps all of them", commit.payload.actionIds.length === 2, "a scalar would silently keep only the last");
+  check("the action row references the session row (ORIS-17)", commit.refs.length === 1);
+  check("an action row carries NO decision fields", !("prompt" in commit.payload) && !("confidence" in commit.payload));
+  check(
+    "an action row carries no outcome class, verdict, or causal ref (U11)",
+    !("outcome" in commit.payload) && !("accepted" in commit.payload) && !("refDecision" in commit.payload),
+    "nobody witnesses acceptance; it is derived at read time or not at all"
+  );
+
+  const undeclared = appendEditCommit({ initiator: null, actionIds: [], summary: null, graphVersion: 8, undoDepth: 2 });
+  check(
+    "an undeclared commit records null, NEVER 'user' (U6)",
+    undeclared.payload.initiator === null,
+    "treating an omitted declaration as evidence of a human is the I10 fabrication"
+  );
+
+  const undone = appendHistoryAction({ operation: "undo", graphVersion: 7, undoDepth: 1 });
+  check("an undo is recorded as an OCCURRENCE", undone.payload.operation === "undo");
+  check(
+    "an undo records no target and no initiator (U5/U9)",
+    undone.payload.actionIds.length === 0 && undone.payload.initiator === null,
+    "the history stack holds snapshots, not commits — the target was never witnessed"
+  );
+  check("an undo does not advance τ", undone.dTau === 0, "it returns the world to a state it already occupied");
+  check("a commit DOES advance τ", commit.dTau > 0);
+  check("the superseded τ policy is retained and distinct (I8)", TAU_POLICY_V1_ID !== TAU_POLICY_ID && TAU_POLICY_V1_ID.endsWith(".v1"));
 
   // ── situation: state, not an event ────────────────────────────────────────────────────
   console.log("\nsituation (standing state, snapshotted at append)");

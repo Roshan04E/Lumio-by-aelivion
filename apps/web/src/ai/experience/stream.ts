@@ -13,7 +13,7 @@
  *
  *     ai      → decision events        (wired: recordDecisionTrace)
  *     system  → session events         (wired: hydration / reload)
- *     editor  → outcome events         (Finding 0 — reserved, not yet wired)
+ *     editor  → action events          (wired: the composition write choke point, ADR-017)
  *     ledger  → prediction events      (Stage B — reserved, not yet wired)
  *
  * One log preserves global ordering and keeps replay a single pass. That is why events are
@@ -47,17 +47,17 @@ import type { DecisionTrace } from "../decision-trace";
 /**
  * Bumped whenever an envelope or payload shape changes. Stored per SESSION, not per event.
  *
- * v5 is ADDITIVE and reads v4 rows unchanged: it stops WRITING two derived signals and adds
- * one session reason. `STORAGE_KEY` therefore stays at v4 — the key tracks readability
+ * v6 is ADDITIVE and reads v4/v5 rows unchanged: it adds the `action` kind (ADR-017) and the
+ * session coverage record. v5 stopped WRITING two derived signals and added one session reason. `STORAGE_KEY` therefore stays at v4 — the key tracks readability
  * generations, not schema versions, and discarding a readable corpus to renumber a key would
  * be exactly the silent shrinkage ADR-016 I9 forbids.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // ── Envelope ─────────────────────────────────────────────────────────────────────────────
 
 /** Reserved kinds are declared but unwired — their payload shapes are Stage B's to settle. */
-export type EventKind = "decision" | "session";
+export type EventKind = "decision" | "session" | "action";
 export type Producer = "ai" | "editor" | "ledger" | "system";
 
 /**
@@ -75,7 +75,9 @@ export type Producer = "ai" | "editor" | "ledger" | "system";
 export const PRODUCER_KINDS: Record<Producer, EventKind[]> = {
   ai: ["decision"],
   system: ["session"],
-  editor: [], // reserved: "outcome" — Finding 0, unwired
+  // ADR-017: the editor witnesses COMMITTED MUTATIONS. Not outcomes — nobody witnesses
+  // "accepted" or "rejected", so there is no outcome producer and there will not be one.
+  editor: ["action"],
   ledger: [] // reserved: "prediction" — Stage B, unwired
 };
 
@@ -264,9 +266,49 @@ export interface SessionPayload {
   startedAt: number;
 }
 
+/**
+ * What the EDITOR witnesses when the composition changes (ADR-017 U1–U11).
+ *
+ * Every field is observed at the composition write choke point. Nothing here is derived, and
+ * nothing here is an interpretation: there is no outcome class, no quality judgement, no
+ * confidence, and no causal reference — because no producer witnesses any of those (ORIS-19).
+ */
+export interface ActionPayload {
+  /**
+   * Which affordance produced the commit. WITNESSED, not classified: an edit, an undo and a
+   * redo arrive through different call paths, and the caller that took one knows which.
+   *
+   * U5: an undo is recorded as an OCCURRENCE. That it happened is witnessed; *what it undid*
+   * is not, because the history stack holds whole-composition snapshots rather than commits.
+   * "The user rejected the AI" is therefore derived at read time, never stored.
+   */
+  operation: "commit" | "undo" | "redo";
+  /**
+   * U6 — declared by callers that genuinely know; `null` means UNDECLARED, and never "user".
+   * The choke point does not witness authorship: the AI's commits arrive through the same
+   * function as every human edit. Treating an omitted declaration as evidence of a human is
+   * the I10 fabrication pattern, so absence stays absence and attribution is derived on read,
+   * licensed by the session's coverage record.
+   */
+  initiator: "ai" | "user" | null;
+  /**
+   * U7 — the registry actions this commit carried, where the caller kept their identity.
+   * A LIST because one commit may carry several; a scalar would silently keep only the last.
+   * Empty means none was declared, which is again a reading and not a gap.
+   */
+  actionIds: string[];
+  /** Human-readable, for explainability. Never parsed (ADR-015 D4). */
+  summary: string | null;
+  /** Graph version after the write — witnessed, and an independent replay cross-check. */
+  graphVersion: number;
+  /** Undo depth after the operation — witnessed; lets a replay verify the history math. */
+  undoDepth: number;
+}
+
 export type DecisionEvent = Envelope<"decision", DecisionPayload>;
 export type SessionEvent = Envelope<"session", SessionPayload>;
-export type ExperienceEvent = DecisionEvent | SessionEvent;
+export type ActionEvent = Envelope<"action", ActionPayload>;
+export type ExperienceEvent = DecisionEvent | SessionEvent | ActionEvent;
 
 export function isDecision(event: ExperienceEvent): event is DecisionEvent {
   return event.kind === "decision";
@@ -274,6 +316,10 @@ export function isDecision(event: ExperienceEvent): event is DecisionEvent {
 
 export function isSession(event: ExperienceEvent): event is SessionEvent {
   return event.kind === "session";
+}
+
+export function isAction(event: ExperienceEvent): event is ActionEvent {
+  return event.kind === "action";
 }
 
 // ── Signals ──────────────────────────────────────────────────────────────────────────────
@@ -376,8 +422,16 @@ export const PROVISIONAL_POLICY: SegmentationPolicy = {
   fixedWindowMs: 0
 };
 
+/**
+ * SUPERSEDED, RETAINED (ADR-016 I8). v1 covered two producers; v2 extends the same
+ * consequence-only model to the editor's action rows. Rows written under v1 keep naming v1,
+ * and v1 stays here so their τ remains reproducible — a policy id that no longer resolves to a
+ * runnable policy is a decoration, not a citation.
+ */
+export const TAU_POLICY_V1_ID = "tau.consequence-only.v1";
+
 /** The τ model that produced stored `tau`/`dTau` values. Bumped when the model changes. */
-export const TAU_POLICY_ID = "tau.consequence-only.v1";
+export const TAU_POLICY_ID = "tau.consequence-only.v2";
 
 let buildId = "unknown";
 let configuredSeatId = "";
@@ -822,6 +876,64 @@ export function appendDecisionEvent(trace: DecisionTrace): DecisionEvent {
       candidates: trace.candidates ? [...trace.candidates] : []
     }
   });
+}
+
+// ── The `editor` producer (ADR-017) ──────────────────────────────────────────────────────
+
+/** Shared envelope wiring for both editor entry points. */
+function pushAction(payload: ActionPayload, consequence: number): ActionEvent {
+  ensureHydrated();
+  const at = Date.now();
+  const signals = pendingSignals;
+  pendingSignals = [];
+  return push({
+    producer: "editor",
+    kind: "action",
+    t: at,
+    tauInputs: { base: TAU_BASE, consequence, surprise: null },
+    signals,
+    // ORIS-17: the session row carries this row's buildId/seatId/coverage, so it may not be
+    // evicted while this row survives.
+    refs: state.sessionEventId ? [state.sessionEventId] : [],
+    payload
+  });
+}
+
+/**
+ * One COMMITTED user gesture (ADR-017 U3).
+ *
+ * The caller must invoke this only when a history entry was actually pushed. That is the U3
+ * signal, and the two nearby properties are both wrong: a parameter drag makes ~20 graph
+ * writes and all of them are "history-recording", so keying on either would record twenty
+ * user actions for one gesture. Measured, not assumed — see plans/oris-outcome-seam-design.md §14.
+ */
+export function appendEditCommit(args: {
+  initiator: "ai" | "user" | null;
+  actionIds: string[];
+  summary: string | null;
+  graphVersion: number;
+  undoDepth: number;
+}): ActionEvent {
+  return pushAction({ operation: "commit", ...args }, 1);
+}
+
+/**
+ * An undo or redo OCCURRED (ADR-017 U5).
+ *
+ * Records that it happened, never what it reversed: the history stack holds whole-composition
+ * snapshots, so the target was never witnessed. Consequence is 0 — an undo returns the world
+ * to a state it already occupied, so τ does not advance. That is a judgement, which is exactly
+ * why it is stored as a τ INPUT under a named policy rather than baked into τ.
+ */
+export function appendHistoryAction(args: {
+  operation: "undo" | "redo";
+  graphVersion: number;
+  undoDepth: number;
+}): ActionEvent {
+  return pushAction(
+    { operation: args.operation, initiator: null, actionIds: [], summary: null, graphVersion: args.graphVersion, undoDepth: args.undoDepth },
+    0
+  );
 }
 
 /**
