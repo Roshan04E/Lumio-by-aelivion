@@ -44,6 +44,7 @@ import {
   declareMediaSources,
   getMediaSources,
   suppressMediaSources,
+  demoteMediaSources,
   DECODER_RETENTION_MS,
   bindDecoderSource,
   decoderLedger,
@@ -1096,6 +1097,80 @@ console.log("\nS3.4 — derived resource ownership and reclamation (I-8/I-33)");
     collectIdleResources(session, T_LATE, RESOURCE_IDLE_MS, true) === null);
 
   __resetResourceManager(session);
+  session.dispose();
+  kernelDiagnostics.enabled = wasEnabled;
+  kernelDiagnostics.reset();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S3.5 — a proxy stops deleting the sources it stands in for
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS3.5 — proxy substitution as demotion, not deletion (I-16/I-24)");
+{
+  const wasEnabled = kernelDiagnostics.enabled;
+  kernelDiagnostics.enabled = true;
+  kernelDiagnostics.reset();
+  const session = createRuntimeSession({ id: "proxy" });
+
+  const A = "flarexsrc:c1:n1";
+  const B = "flarexsrc:c1:n2";
+  const OTHER = "flarexsrc:c2:n1";
+  const KEY_A = "blob:a";
+  declareMediaSources(session, [A, B, OTHER]);
+  bindDecoderSource(session, A, KEY_A);
+  noteDecoderSessionOpened(session, KEY_A);
+
+  // ── THE DIFFERENCE, stated as an assertion ────────────────────────────────────────────────────
+  // Suppression and demotion both mean "stop producing". Only one of them leaves anything to come
+  // back to. This is the whole slice.
+  demoteMediaSources(session, [A, B], "comp-proxy-serving");
+  const demoted = getMediaSources(session);
+  enforced("I-16", "a demoted source is still DECLARED", demoted.declared.length === 3);
+  enforced("I-16", "a demoted source is still ACTIVE — demotion is a priority, not an absence",
+    demoted.active.length === 3 && sameList(demoted.demoted, [A, B]));
+  enforced("I-29", "the demotion is reported with its reason",
+    kernelDiagnostics.events({ kind: "transition" }).some((e) => e.reason === "source-demoted:comp-proxy-serving"));
+
+  // The consequence that makes this worth the risk: a demoted source's DECODER survives, so when the
+  // proxy falters there is something warm to fall back to. Under suppression the source was deleted,
+  // its layer unmounted, and the release was honoured — a demux, an index and a GOP window from cold.
+  enforced("I-24", "a demoted source's decoder is retained on a lifecycle release",
+    decoderReleaseVerdict(session, KEY_A, "lifecycle") === "retain");
+  enforced("I-24", "…and the session is still counted as required, not orphaned",
+    decoderLedger(session).orphaned.length === 0 && sameList(decoderLedger(session).required, [KEY_A]));
+
+  // Contrast, asserted directly rather than described: this is what the old path did.
+  suppressMediaSources(session, [A, B], "comp-proxy-serving");
+  const suppressed = getMediaSources(session);
+  enforced("I-16", "a SUPPRESSED source is removed from the active set — the state being retired",
+    suppressed.active.length === 1 && sameList(suppressed.active, [OTHER]));
+  suppressMediaSources(session, [], "comp-proxy-serving");
+
+  // Restoring is a flag flip. Nothing is re-declared, nothing is re-acquired, and the decoder never
+  // moved — which is what "a crossfade in resource terms, not a cut" actually means.
+  enforced("I-24", "un-demoting restores the source with its decoder untouched",
+    demoteMediaSources(session, [], "comp-proxy-serving") === true &&
+      getMediaSources(session).demoted.length === 0 &&
+      decoderLedger(session).openCount === 1);
+
+  // Same discipline as suppression, for the same reasons — the census has to mean something.
+  enforced("I-16", "an undeclared source cannot be demoted into existence",
+    demoteMediaSources(session, ["flarexsrc:ghost:n9"], "comp-proxy-serving") === false);
+  demoteMediaSources(session, [A], "comp-proxy-serving");
+  const before = kernelDiagnostics.events({ kind: "transition" }).length;
+  enforced("I-29", "an unchanged demotion set does not re-report",
+    demoteMediaSources(session, [A], "comp-proxy-serving") === false &&
+      kernelDiagnostics.events({ kind: "transition" }).length === before);
+
+  // And the graph still wins. A demoted source that leaves the graph is gone — demotion is a rendering
+  // decision, and a rendering decision may never be the thing that keeps a source alive either.
+  declareMediaSources(session, [OTHER]);
+  enforced("I-16", "a demoted source that leaves the graph is no longer declared",
+    !getMediaSources(session).declared.includes(A));
+  enforced("I-24", "…and its decoder becomes releasable, demotion notwithstanding",
+    decoderReleaseVerdict(session, KEY_A, "lifecycle") === "release");
+
   session.dispose();
   kernelDiagnostics.enabled = wasEnabled;
   kernelDiagnostics.reset();

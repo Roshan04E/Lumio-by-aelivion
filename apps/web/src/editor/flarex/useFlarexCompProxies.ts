@@ -29,6 +29,7 @@ import { flarexCompProxyIdentity, flarexCompProxyKey } from "./flarex-comp-proxy
 import { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
 import { getFlarexCompProxy } from "./flarex-comp-proxy-store";
 import { setFlarexProxyServing } from "./flarex-proxy-status";
+import { getKernelProxySourceEnabled as kernelProxySourceEnabled } from "../../playback/frame-completion";
 
 /** `?flarexProxy=0` disables playback substitution outright (proxies can still be rendered/stored). */
 function proxyPlaybackEnabled(): boolean {
@@ -73,7 +74,35 @@ interface ActiveProxy {
    * consumer here clones for exactly this reason (see WebglMediaLayer's presentFrame).
    */
   held: VideoFrame | null;
+  /**
+   * SUSPENDED since this wall-clock ms, or null while SERVING (ADR-012 5.12, slice S3.5).
+   *
+   * The proxy state machine is `… → SERVING → SUSPENDED → SERVING`, and the ADR calls `SUSPENDED`
+   * mandatory: *a proxy must relinquish gradually, with its sources warm, before it stops serving.*
+   * Before this, losing eligibility went straight to teardown — lease released, object URL revoked — so
+   * a comp that briefly stopped qualifying paid a full re-demux and re-index to come back.
+   *
+   * Eligibility is not a stable property. It depends on `canSubstituteFlarexProxy`, which reads the
+   * z-order: anything drawn beneath the clip disqualifies it. So dragging a layer under a proxied clip
+   * and back out, or a transient during a reorder, is an ordinary edit that used to destroy a decoder.
+   *
+   * A KEY change is different and is still an immediate teardown, deliberately: that is `INVALID`, not
+   * `SUSPENDED` — the comp was edited, and a stale frame must never survive an edit.
+   */
+  suspendedSince: number | null;
+  /** The bounded relinquish timer. Cleared on resume; fires the real teardown on expiry (I-31). */
+  suspendTimer: number | null;
 }
+
+/**
+ * How long a proxy may sit SUSPENDED before it is really let go.
+ *
+ * Bounded for the same reason every other wait in this runtime is (I-31): a comp can stop being eligible
+ * and never come back, and an unbounded suspension would pin a decode session and a blob for the rest of
+ * the session. Two seconds covers the edit-shaped causes — a reorder, a drag over and back — without
+ * holding a slot through anything a user would experience as a decision.
+ */
+const PROXY_SUSPEND_MS = 2_000;
 
 /**
  * `window.__rfFlarexProxy` — which decode path each comp proxy actually got, and how it is doing.
@@ -199,14 +228,50 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
 
     for (const [compId, active] of activeRef.current) {
       const next = wanted.get(compId);
-      if (next && next.key === active.key) continue;
-      activeRef.current.delete(compId);
+      if (next && next.key === active.key) {
+        // RESUME (S3.5). Eligible again under the same key while suspended — nothing was destroyed, so
+        // this is a flag flip rather than an acquisition. `setServing` stays false until a frame is
+        // actually presented again, which is the same rule the first-frame flip already follows.
+        if (active.suspendedSince !== null) {
+          if (active.suspendTimer !== null) window.clearTimeout(active.suspendTimer);
+          active.suspendTimer = null;
+          active.suspendedSince = null;
+        }
+        continue;
+      }
+      // INVALID — the comp was edited, so the stored frames are for a different picture. Immediate,
+      // never suspended: a stale frame must not survive an edit.
+      const invalid = next != null && next.key !== active.key;
+      if (invalid || !kernelProxySourceEnabled()) {
+        activeRef.current.delete(compId);
+        delete framesRef.current[compId];
+        closeHeld(active);
+        if (active.suspendTimer !== null) window.clearTimeout(active.suspendTimer);
+        // Loaders must come back BEFORE the proxy stops drawing, or the comp has no sources for a frame.
+        setServing(compId, false);
+        active.lease.release();
+        URL.revokeObjectURL(active.objectUrl);
+        continue;
+      }
+      // SUSPENDED — ineligible, but the decoder and the blob are kept for a bounded window. The comp
+      // goes back to its live graph immediately (the loaders were never unmounted under S3.5, so they
+      // are warm and already pulling again), and coming back costs nothing.
+      if (active.suspendedSince !== null) continue;
+      active.suspendedSince = Date.now();
       delete framesRef.current[compId];
       closeHeld(active);
-      // Loaders must come back BEFORE the proxy stops drawing, or the comp has no sources for a frame.
+      active.version = 0; // a resume presents a first frame again
       setServing(compId, false);
-      active.lease.release();
-      URL.revokeObjectURL(active.objectUrl);
+      requestRedraw();
+      active.suspendTimer = window.setTimeout(() => {
+        const current = activeRef.current.get(compId);
+        if (current !== active || active.suspendedSince === null) return;
+        activeRef.current.delete(compId);
+        delete framesRef.current[compId];
+        closeHeld(active);
+        active.lease.release();
+        URL.revokeObjectURL(active.objectUrl);
+      }, PROXY_SUSPEND_MS);
     }
 
     for (const entry of eligible) {
@@ -238,6 +303,8 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           pendingTime: null,
           version: 0,
           held: null,
+          suspendedSince: null,
+          suspendTimer: null,
         };
         activeRef.current.set(entry.compId, active);
         const provider = await lease.ready;
@@ -283,6 +350,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
   useEffect(
     () => () => {
       for (const active of activeRef.current.values()) {
+        if (active.suspendTimer !== null) window.clearTimeout(active.suspendTimer);
         closeHeld(active);
         active.lease.release();
         URL.revokeObjectURL(active.objectUrl);
@@ -305,6 +373,10 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
   const pumpOne = useRef((active: ActiveProxy, timeSeconds: number) => {
       const provider = active.provider;
       if (!provider) return;
+      // A SUSPENDED proxy holds its decoder and decodes nothing (S3.5). Pumping here would keep
+      // publishing frames for a comp that is no longer entitled to be substituted — the substitution
+      // outliving its own eligibility, which is the I-25 half of what this state exists to prevent.
+      if (active.suspendedSince !== null) return;
       // One in-flight decode per comp, LATEST TIME WINS — remembered, not discarded.
       if (active.busy) {
         active.pendingTime = timeSeconds;
@@ -330,6 +402,16 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
           active.busy = false;
           // Stale entry (comp swapped out mid-decode) — do NOT drain: this active is finished with.
           if (activeRef.current.get(active.compId) !== active) return;
+          // SUSPENDED mid-decode (S3.5). A suspended active is deliberately still in the map — that is
+          // what keeps its decoder — so the identity check above passes and this frame would be
+          // published for a comp that has just lost the right to be substituted, flipping `setServing`
+          // back on behind it. The substitution outliving its own eligibility is exactly the I-25
+          // failure `SUSPENDED` exists to prevent, and the request/response gap is the only place it
+          // can happen. Dropped, not drained: the pending time is for a state we are no longer in.
+          if (active.suspendedSince !== null) {
+            active.pendingTime = null;
+            return;
+          }
           if (!frame) {
             proxyNulls.set(active.compId, (proxyNulls.get(active.compId) ?? 0) + 1);
             recordProxyStat(active.compId, { nulls: proxyNulls.get(active.compId) });

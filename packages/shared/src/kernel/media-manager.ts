@@ -40,6 +40,7 @@ import type { RuntimeSession } from "./session";
 
 const KEY_DECLARED = "media.sources.declared";
 const KEY_SUPPRESSED = "media.sources.suppressed";
+const KEY_DEMOTED = "media.sources.demoted";
 
 export interface MediaSourceDeclaration {
   /** Every source the GRAPH says exists, sorted. Never filtered by a rendering decision. */
@@ -51,7 +52,19 @@ export interface MediaSourceDeclaration {
    * demoting these to a lower priority instead of removing them.
    */
   readonly suppressed: readonly string[];
-  /** `declared` minus `suppressed` — what actually runs today. */
+  /**
+   * Declared sources that still EXIST, still hold their decoder, and are merely not being pulled from
+   * right now — **the state that replaces suppression** (slice S3.5).
+   *
+   * The difference is the entire point of I-16. A suppressed source is gone: no decoder, no admission,
+   * no readiness record, so when the thing that suppressed it falters there is nothing to fall back to.
+   * A demoted source is a source at a lower priority: its session stays warm, its last frame stays held,
+   * and restoring it is a flag flip rather than a demux, an index and a GOP window.
+   *
+   * This is what makes a proxy transition "a crossfade in resource terms, not a cut".
+   */
+  readonly demoted: readonly string[];
+  /** `declared` minus `suppressed` — what actually runs today. Demoted sources are still active. */
   readonly active: readonly string[];
 }
 
@@ -115,12 +128,48 @@ export function suppressMediaSources(session: RuntimeSession, ids: Iterable<stri
   return true;
 }
 
+/**
+ * Record that a rendering decision wants some declared sources to stop *producing* — without ceasing to
+ * exist. **This is the call that replaces {@link suppressMediaSources}** (slice S3.5).
+ *
+ * Same declared-set discipline as suppression: a source that is not declared cannot be demoted, because
+ * the kernel's view must never disagree with the graph. And the same no-re-report rule, for the same
+ * reason — the count must measure how often a source was actually demoted, not how often the caller
+ * recomputed.
+ *
+ * Reported at `info`, not `warn`. Suppression is warned about because it is the I-16 violation; demotion
+ * is the fix, and recording the correct behaviour at warning level is how a channel becomes noise.
+ */
+export function demoteMediaSources(session: RuntimeSession, ids: Iterable<string>, reason: string): boolean {
+  const declared = session.state.get<readonly string[]>(KEY_DECLARED, []);
+  const next = sortedUnique(ids).filter((id) => declared.includes(id));
+  const prev = session.state.get<readonly string[]>(KEY_DEMOTED, []);
+  if (sameIds(prev, next)) return false;
+  session.state.set(KEY_DEMOTED, next as readonly string[]);
+
+  if (kernelDiagnostics.enabled) {
+    for (const id of next) {
+      if (prev.includes(id)) continue;
+      kernelDiagnostics.record({
+        kind: "transition",
+        severity: "info",
+        subject: { kind: "source", sourceId: id },
+        reason: `source-demoted:${reason}`,
+        detail: { declaredCount: declared.length, demotedCount: next.length },
+      });
+    }
+  }
+  return true;
+}
+
 export function getMediaSources(session: RuntimeSession): MediaSourceDeclaration {
   const declared = session.state.get<readonly string[]>(KEY_DECLARED, []);
   const suppressed = session.state.get<readonly string[]>(KEY_SUPPRESSED, []);
+  const demoted = session.state.get<readonly string[]>(KEY_DEMOTED, []);
   return {
     declared,
     suppressed,
+    demoted,
     active: suppressed.length === 0 ? declared : declared.filter((id) => !suppressed.includes(id)),
   };
 }
@@ -129,10 +178,12 @@ export function getMediaSources(session: RuntimeSession): MediaSourceDeclaration
 export function subscribeMediaSources(session: RuntimeSession, listener: () => void): () => void {
   const offDeclared = session.state.subscribe(KEY_DECLARED, listener);
   const offSuppressed = session.state.subscribe(KEY_SUPPRESSED, listener);
+  const offDemoted = session.state.subscribe(KEY_DEMOTED, listener);
   return () => {
     offDeclared();
     offSuppressed();
+    offDemoted();
   };
 }
 
-export const MEDIA_SOURCE_KEYS = { declared: KEY_DECLARED, suppressed: KEY_SUPPRESSED } as const;
+export const MEDIA_SOURCE_KEYS = { declared: KEY_DECLARED, suppressed: KEY_SUPPRESSED, demoted: KEY_DEMOTED } as const;

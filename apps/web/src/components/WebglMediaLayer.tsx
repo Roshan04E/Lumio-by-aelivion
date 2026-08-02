@@ -308,6 +308,22 @@ interface BaseProps {
    * only the terminal draw is replaced by a publish. See scene-media-source.ts.
    */
   sceneMediaSink?: SceneMediaSink | undefined;
+  /**
+   * DEMOTED, not removed (ADR-012 I-16/I-24, slice S3.5) — this source still exists, still holds its
+   * decode session, still holds its last frame, and is simply not being pulled from right now.
+   *
+   * Set while a comp proxy is serving this loader's comp. Until S3.5 the caller expressed that by
+   * *deleting the virtual layer*, which unmounted the layer and destroyed its decoder — so when the
+   * proxy faltered the comp had neither a proxy nor a warm source, and every MediaIn soft-degraded to
+   * the host clip until N decoders had re-demuxed and re-indexed from cold.
+   *
+   * The performance reason the deletion existed is real and is preserved here: a substituted comp that
+   * kept pulling frames decoded N streams PLUS the proxy, measured at 75→35fps. Suspending the pull —
+   * rather than the existence — recovers that win without paying for it in resource lifetime, because
+   * a suspended loader's output is not consumed anyway: while the proxy serves, the compiler is
+   * short-circuited and nothing reads these sources.
+   */
+  suspended?: boolean | undefined;
 }
 
 interface ImageProps extends BaseProps {
@@ -620,6 +636,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // Live pending/pre-roll flag, read at lease-acquire time (the mount effect keys on src only).
     const hiddenAtMountRef = useRef(hidden);
     hiddenAtMountRef.current = hidden;
+    const suspendedRef = useRef(props.suspended === true);
+    suspendedRef.current = props.suspended === true;
     // Live time mapping inputs for the async frame requests (props close over stale values).
     const wcTimeRef = useRef({ currentTime: 0, start: 0, sourceIn: 0, speed: 1, preroll: 0, isPlaying: false });
     if (mediaType === "video") {
@@ -903,8 +921,21 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // treating this clip as a preemption victim (and vice versa if a live clip returns to pending).
     useEffect(() => {
       if (mediaType !== "video") return;
-      wcLeaseRef.current?.setPriority(hidden ? "preload" : "playhead");
-    }, [mediaType, hidden]);
+      // A SUSPENDED source is demoted, not evicted (S3.5): `preload` is exactly the priority that says
+      // "keep this session, but let a playhead source preempt it if the machine runs out" — which is the
+      // programme's stated mitigation for the sessions this slice keeps warm. It cannot starve a visible
+      // source, because `reserveSession` preempts the oldest preload lease before it ever refuses a
+      // playhead one.
+      wcLeaseRef.current?.setPriority(hidden || props.suspended ? "preload" : "playhead");
+    }, [mediaType, hidden, props.suspended]);
+    // RESUME. Coming out of suspension must repaint from the source's own decoder immediately: the proxy
+    // that was standing in has just stopped, so anything that waits for the next transport change would
+    // leave the comp on the last proxy frame — the visible "cut" this slice exists to turn into a
+    // crossfade. Cheap and idempotent: `requestWcFrame` no-ops when a decode is already in flight.
+    useEffect(() => {
+      if (mediaType !== "video" || props.suspended) return;
+      if (wcProviderRef.current) requestWcFrameRef.current();
+    }, [mediaType, props.suspended]);
 
     useLayoutEffect(() => {
       if (mediaType !== "video" || !matte?.uri) return undefined;
@@ -1972,6 +2003,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     function requestWcFrame() {
       const provider = wcProviderRef.current;
       if (!provider || mediaType !== "video") return;
+      // SUSPENDED (slice S3.5). The single funnel every decode pull passes through, which is why the
+      // guard is here and not at the ~7 call sites: one of those left un-guarded would be a source that
+      // quietly kept decoding behind a proxy, i.e. the 75→35fps regression back with no symptom to name.
+      //
+      // The lease, the provider and the held frame are all kept. That is the difference between this and
+      // the unmount it replaces: resuming is a boolean, not a demux.
+      if (suspendedRef.current) return;
       if (wcBusyRef.current) {
         wcRerequestPaceRef.current = "task"; // an OUTSIDE request arrived mid-decode — not self-driven
         wcRerequestRef.current = true;
@@ -2309,6 +2347,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             sourceLabel:
               props.assetLabel ??
               (typeof src === "string" ? (src.split("?")[0] ?? src).split("/").pop() ?? null : null),
+            // The provider's demuxed rate — the same value `computeStalenessSeconds` already uses for
+            // its frame-period tolerance. Null on the element path, which exposes no fps API; the
+            // read-ahead probe treats null as "ceiling unknown" rather than guessing.
+            nominalFps: wcProviderRef.current?.nominalFps ?? null,
+            // The moment the held frame actually represents — already tracked for the staleness
+            // model (`servedSourceTimeRef`, stamped in presentFrame as `sourceTime - lag`).
+            servedSourceTime: servedSourceTimeRef.current,
           };
         },
       };

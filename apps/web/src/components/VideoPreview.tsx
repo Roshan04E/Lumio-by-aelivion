@@ -84,6 +84,7 @@ import {
   snapMediaRectToBox,
   declareMediaSources,
   defaultSession,
+  demoteMediaSources,
   suppressMediaSources,
   type ProjectGraph,
   type SourceAsset,
@@ -118,6 +119,7 @@ setGlGovernorEnabled(getGlGovernorEnabled());
 setGlContextBudget(8, 12);
 import { getLivePlaybackTime, getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
+import { getKernelProxySourceEnabled } from "../playback/frame-completion";
 import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
 import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../playback/audio-fx-worklet";
@@ -302,6 +304,14 @@ function bumpRenderCount(name: string): void {
 // reveal is instant. ~1.2s gives slower-decoding sources time without keeping more than the next clip
 // mounted.
 const PRELOAD_LOOKAHEAD_SECONDS = 1.2;
+/**
+ * Read once at module load (flag convention: reload to change), like every other engine flag — and
+ * because a flag that could change between the memo and the effect below would let the two disagree
+ * about whether a source is suppressed or demoted.
+ */
+const kernelProxySourceEnabled = getKernelProxySourceEnabled();
+/** Shared empty set, so the no-proxy case keeps a stable identity and wakes no memo downstream. */
+const EMPTY_SOURCE_ID_SET: ReadonlySet<string> = new Set<string>();
 
 // --- Composition guides (preview overlay grids) ----------------------------------
 type GridMode =
@@ -1382,13 +1392,32 @@ function VideoPreviewImpl({
   }, [requestFlarexProxyFrames, isPlaying]);
 
   /**
-   * Loaders for comps currently PLAYED FROM A PROXY are dropped — this is what makes the proxy a win.
-   * Short-circuiting the compiler does NOT stop these decoders: without this a substituted comp decodes
-   * every MediaIn source PLUS the proxy, which is strictly more work than not proxying at all (user
-   * report: 75fps → 35-40fps). Keyed off `flarexVirtualLayerId`'s `flarexsrc:<compId>:<nodeId>` form.
-   * Identity-stable when nothing is served, so the non-proxy path allocates nothing new.
+   * Loaders for comps currently PLAYED FROM A PROXY — **demoted, or (legacy) dropped.**
+   *
+   * Short-circuiting the compiler does NOT stop these decoders: the virtual loaders are still built and
+   * still mount a decoder each, so a substituted comp decodes every MediaIn source PLUS the proxy —
+   * strictly more work than not proxying at all (user report: 75fps → 35-40fps). Something has to stop
+   * them, and until S3.5 that something was **deleting them from the set**.
+   *
+   * That deletion is I-16: a rendering decision changing whether a source EXISTS. Its cost is the reason
+   * S3.5 exists — a comp whose proxy falters has neither a proxy nor a warm decoder, because its sources
+   * were not demoted, they were deleted, so every MediaIn soft-degrades to the host clip until N
+   * decoders re-demux and re-index from cold. **A cut, where the resource story should be a crossfade.**
+   *
+   * With `?kernelProxySource=1` the filter is gone: the loaders stay mounted, keep their sessions at
+   * `preload` priority, keep their last frame, and are told to stop *pulling* (`suspended`). The
+   * performance win is preserved because a suspended loader's output is not consumed anyway — while the
+   * proxy serves, the compiler is short-circuited and nothing reads these sources.
    */
+  const proxySuspendedSourceIds = useMemo(() => {
+    if (proxyServedCompIds.length === 0) return EMPTY_SOURCE_ID_SET;
+    const served = new Set(proxyServedCompIds);
+    return new Set(flarexVirtualLayers.filter((v) => served.has(v.id.split(":")[1] ?? "")).map((v) => v.id));
+  }, [flarexVirtualLayers, proxyServedCompIds]);
   const activeFlarexVirtualLayers = useMemo(() => {
+    // Demotion path: every declared source stays in the set. Identity-stable, so the non-proxy case is
+    // byte-for-byte what it was.
+    if (kernelProxySourceEnabled) return flarexVirtualLayers;
     if (proxyServedCompIds.length === 0) return flarexVirtualLayers;
     const served = new Set(proxyServedCompIds);
     return flarexVirtualLayers.filter((vlayer) => !served.has(vlayer.id.split(":")[1] ?? ""));
@@ -1415,13 +1444,18 @@ function VideoPreviewImpl({
    */
   useEffect(() => {
     declareMediaSources(defaultSession, flarexVirtualLayers.map((vlayer) => vlayer.id));
-    const served = new Set(proxyServedCompIds);
-    suppressMediaSources(
-      defaultSession,
-      flarexVirtualLayers.filter((v) => served.has(v.id.split(":")[1] ?? "")).map((v) => v.id),
-      "comp-proxy-serving"
-    );
-  }, [flarexVirtualLayers, proxyServedCompIds]);
+    const affected = [...proxySuspendedSourceIds];
+    // S3.5 flips WHICH state this is, and the two must be mutually exclusive: a source reported as both
+    // suppressed and demoted would make the census that justified this change unreadable in the run that
+    // proves it. Whichever path is off is explicitly cleared rather than left holding a stale set.
+    if (kernelProxySourceEnabled) {
+      demoteMediaSources(defaultSession, affected, "comp-proxy-serving");
+      suppressMediaSources(defaultSession, [], "comp-proxy-serving");
+    } else {
+      suppressMediaSources(defaultSession, affected, "comp-proxy-serving");
+      demoteMediaSources(defaultSession, [], "comp-proxy-serving");
+    }
+  }, [flarexVirtualLayers, proxySuspendedSourceIds]);
 
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm
@@ -2088,6 +2122,10 @@ function VideoPreviewImpl({
                       selected={false}
                       sceneComposited
                       hideVisual
+                      // DEMOTED while this comp's proxy is serving (S3.5). The loader stays mounted and
+                      // keeps its session; it just stops pulling. Always `false` on the legacy path,
+                      // where a served comp's loaders are not in this list at all.
+                      suspended={proxySuspendedSourceIds.has(vlayer.id)}
                       bakeOpacity={false}
                       onGradedFrame={
                         singleCtxPreview
@@ -2190,6 +2228,8 @@ type PreviewLayerProps = {
   hideForTransition?: boolean;
   /** Scene compositor renders this text/shape layer in the GPU pass — hide its DOM visual, keep handles. */
   hideVisual?: boolean;
+  /** Demoted while a comp proxy serves this loader's comp (ADR-012 slice S3.5) — mounted, not pulling. */
+  suspended?: boolean;
   /** Scene compositor draws this MEDIA clip — hide the DOM canvas via opacity:0 but keep it click-selectable. */
   sceneComposited?: boolean;
   /** Before/after compare: skip the color grade so the original (ungraded) frame shows. */
@@ -2357,6 +2397,7 @@ const PreviewLayer = memo(function PreviewLayer({
   rotationSnapEnabled = false,
   hideForTransition = false,
   hideVisual = false,
+  suspended = false,
   strictSourceSync = false,
   sceneComposited = false,
   bypassColor = false,
@@ -3546,6 +3587,8 @@ const PreviewLayer = memo(function PreviewLayer({
             // leaving the graph (S3.3). Undefined for ordinary clips — they are not declared sources
             // yet, and a binding the Media Manager never declared is one the kernel must refuse.
             decoderSourceId={isFlarexVirtualLayerId(layer.id) ? layer.id : undefined}
+            // S3.5: demoted, not deleted. The session and the last frame are kept; only the pull stops.
+            suspended={suspended}
             // ...and decode in SOFTWARE so they don't contend with the host for the one hardware H.264
             // block. That contention (not reset churn) is the confirmed multi-source freeze: with 3
             // seek-on-demand streams the host wins the block and the loaders starve. Software decode runs
