@@ -42,6 +42,8 @@
  * fps, and source rates differ from the comp's anyway — a comp routinely mixes 24/30/60fps material,
  * so no single frame budget is correct for all of its sources.
  */
+import { KERNEL_FLAGS, readKernelFlag } from "./kernel-flags";
+
 export const COHERENCE_TOLERANCE_S = 1e-3;
 
 /**
@@ -238,6 +240,29 @@ export function isStale(staleness: number | null): boolean {
  *
  * Same duration, deliberately: "no single source stalls the viewer for longer than this, and neither
  * does any combination of them".
+ */
+/**
+ * S4.6 — is the UNIFIED coherence path active? (`?kernelCoherenceUnified=1` → OFF by default.)
+ *
+ * The single exclusive flag for S4.5 + S4.6. On, the paused-only barrier below and the host-clip
+ * substitution in `compile-flarex.ts` are BOTH replaced by the readiness barrier's `effectiveTime`;
+ * off, both remain exactly as they were. They share one switch because they cannot be reverted
+ * separately: restoring the fallback without the barrier brings the wrong picture back, and keeping
+ * the barrier without the fallback is fine but pointless — the fallback was what hid the race.
+ */
+export function getCoherenceUnifiedEnabled(): boolean {
+  return readKernelFlag(KERNEL_FLAGS.coherenceUnified);
+}
+
+/**
+ * PAUSED-ONLY BARRIER — superseded by the readiness barrier when {@link getCoherenceUnifiedEnabled}
+ * is on (ADR-012 slice S4.6). Kept, and kept reachable ONLY through the flag-off branch, because it is
+ * this slice's declared rollback: the programme requires that turning the flag off restores the
+ * previous renderer exactly, and that is only true if the code it restores still exists.
+ *
+ * Note the first line, which is the whole reason S4.4 exists: `playing` returns false immediately. This
+ * function has never done anything during playback, so "unifying coherence across transport states"
+ * means giving playback an answer it has never had — not tightening one it already had.
  */
 export function shouldHoldForCoherence(args: {
   playing: boolean;

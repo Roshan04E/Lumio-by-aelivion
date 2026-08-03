@@ -49,6 +49,10 @@ import {
   registerResource,
   resourcesInScope,
   servedTime,
+  resolveReadiness,
+  deriveTargetTime,
+  deriveTimelineTime,
+  authoritativeTime,
   touchResource,
   RESOURCE_IDLE_MS,
   type ResourceScope,
@@ -72,6 +76,7 @@ import {
   getCoherenceHoldEnabled,
   isStale,
   shouldHoldForCoherence,
+  getCoherenceUnifiedEnabled,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
 import { getFrameCompletionEnabled, getFrameScopesEnabled, getKernelResourcesEnabled } from "../playback/frame-completion";
@@ -625,6 +630,12 @@ export function ScenePreviewCanvas({
   const staleSinceRef = useRef<Map<string, number>>(new Map());
   // Read once per mount (flag convention: reload to change), like every other engine flag.
   const coherenceHoldEnabledRef = useRef(getCoherenceHoldEnabled());
+  /**
+   * S4.5 + S4.6's single exclusive flag, resolved ONCE at mount. Re-reading it per frame would let the
+   * renderer change policy mid-playback, which is a worse failure than either policy: the fallback
+   * would appear and disappear between frames. A ref, not state — nothing re-renders on it.
+   */
+  const coherenceUnifiedRef = useRef(getCoherenceUnifiedEnabled());
   const rafRef = useRef<number>(0);
   const disposedRef = useRef(false);
   const contextLostRef = useRef(false);
@@ -1346,6 +1357,9 @@ export function ScenePreviewCanvas({
       flarexComps: fxComps,
       flarexPreviewRoots: fxRoots,
       flarexVirtualLayers: fxVirtual,
+      // S4.5 — the HOST decides the substitution policy and the compiler is told (I-15: the lowering
+      // layer owns no policy). Read from a ref so the live path never re-resolves a flag per frame.
+      allowHostSubstitution: !coherenceUnifiedRef.current,
       // Comp proxies (plans/flarex-comp-proxy.md, S2) — read LIVE off the ref at draw time, exactly like
       // `gradedRef`: the frame for each proxied comp is refreshed asynchronously by its decoder, and a
       // prop snapshot would draw the previous one. Undefined/empty ⇒ every comp lowers live as before.
@@ -1490,14 +1504,30 @@ export function ScenePreviewCanvas({
       // same requested time or the frame is not presented — see `playback/temporal-coherence.ts`.
       // The episode clock is `coherenceHoldStartRef`, read here and advanced by `noteCoherence` below,
       // so the gate and the probe agree on what one hold episode is by construction.
-      shouldHoldForCoherence({
-        playing,
-        staleIds,
-        staleSince,
-        holdStartedMs: coherenceHoldStartRef.current,
-        nowMs: now,
-        enabled: coherenceHoldEnabledRef.current,
-      })
+      (coherenceUnifiedRef.current
+        ? // S4.6 — ONE mechanism for both transport states. The barrier resolves the latest moment every
+          // participant can show; the frame is withheld only when even that moment cannot be served,
+          // which is the `degraded` verdict. Paused and playing take the same path — the old barrier
+          // returned false on its first line while playing, so playback had no coherence policy at all
+          // and `tolerateLag` stood in for one.
+          resolveReadiness(
+            deriveTargetTime(deriveTimelineTime(authoritativeTime(t))),
+            Object.entries(allStaleness).map(([id, staleness]) => ({
+              id,
+              // `Infinity` is this file's existing encoding for "awaiting, no frame at all" — the
+              // barrier's `null`, which is a declared degradation rather than an input to the minimum.
+              // A finite staleness means the source HAS pixels, from `t - staleness` seconds ago.
+              servedTime: staleness === null ? undefined : Number.isFinite(staleness) ? servedTime(t - staleness) : null,
+            }))
+          ).outcome === "degraded"
+        : shouldHoldForCoherence({
+            playing,
+            staleIds,
+            staleSince,
+            holdStartedMs: coherenceHoldStartRef.current,
+            nowMs: now,
+            enabled: coherenceHoldEnabledRef.current,
+          }))
     ) {
       noteCoherence(
         coherenceHoldStartRef,

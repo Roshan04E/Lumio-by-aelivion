@@ -205,6 +205,15 @@ export interface BuildSceneDrawsInputs {
    */
   flarexMaterializeNodeIds?: ReadonlySet<string> | undefined;
   /**
+   * S4.5: may an unresolved MediaIn show the host clip's pixels? Threaded verbatim to the compiler's
+   * `allowHostSubstitution`. Undefined keeps the pre-S4.5 substitution, so every caller that has not
+   * been taught the policy — export, worker, gates — behaves exactly as before.
+   *
+   * The POLICY is decided by the host that owns the flag; this is the wire, not the decision. A scene
+   * builder that read the flag itself would put browser state on the export path.
+   */
+  allowHostSubstitution?: boolean | undefined;
+  /**
    * Runtime re-root for a Flarex compile (Slice 4, node previews): compile the comp as if this node were
    * the output. Forwarded verbatim to `compileFlarexComp`'s `previewRootNodeId`, which takes precedence
    * over the comp's persisted `previewNodeId` WITHOUT mutating it — so rendering a node thumbnail can
@@ -843,6 +852,7 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // Runtime-only materialization policy (Slice 1) — undefined in production (dormant); set only
       // by the parity gate. Never sourced from persisted graph/manifest data.
       materializeNodeIds: inputs.flarexMaterializeNodeIds,
+      allowHostSubstitution: inputs.allowHostSubstitution,
       // Node previews (Slice 4): re-root this compile at an arbitrary node without disturbing the
       // comp's persisted view dot. Undefined in normal rendering.
       // Thumbnail scalar wins (it is explicitly re-rooting one comp); otherwise this comp's own live

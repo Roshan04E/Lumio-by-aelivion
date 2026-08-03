@@ -1772,6 +1772,93 @@ console.log("\nS4.4 — the latest coherent moment (I-1/I-6, T3)");
 }
 
 // ---------------------------------------------------------------------------------------------
+// S4.5 + S4.6 — the fallback is gone and there is ONE timing policy
+// ---------------------------------------------------------------------------------------------
+//
+// Four properties were required before this slice counts as complete. Three are structural and are
+// asserted by scanning source, because they are claims about what does NOT exist — and "I removed it"
+// is exactly the claim a reviewer cannot check by reading a diff of what remains.
+
+console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-34/I-6)");
+{
+  const webDir = fileURLToPath(new URL("../../web/src/", import.meta.url));
+  const sharedDir = fileURLToPath(new URL("../../../packages/shared/src/", import.meta.url));
+  const strip = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ── (2) THE FALLBACK IS DELETED, NOT RELOCATED. One site may name `hostSourceDraw` as a *value* —
+  // the compiler's own guarded return — and no other module may construct a draw from it. A relocated
+  // fallback would show up as a second file reaching for the host draw.
+  const hostDrawUsers: string[] = [];
+  for (const file of [...walkTs(sharedDir), ...walkTs(webDir)]) {
+    if (file.endsWith("compile-flarex.ts") || file.endsWith("build-scene-draws.ts")) continue;
+    if (/cloneImage\s*\(\s*ctx\.hostSourceDraw|draw:\s*ctx\.hostSourceDraw/.test(strip(readFileSync(file, "utf8")))) {
+      hostDrawUsers.push(file.split(/[\\/]/).slice(-2).join("/"));
+    }
+  }
+  enforced("I-27", "the host-clip substitution exists in ONE place — it was deleted, not moved",
+    hostDrawUsers.length === 0, hostDrawUsers.join(" · "));
+
+  // …and that one place is genuinely guarded. A `return` of the host draw with no policy check above it
+  // would mean the flag does nothing, which is the difference between deleting a fallback and
+  // describing one.
+  const compiler = strip(readFileSync(`${sharedDir}flarex/compile-flarex.ts`, "utf8"));
+  enforced("I-34", "…and that place is gated on the declared policy, so the switch is real",
+    /allowHostSubstitution\s*===\s*false\s*&&\s*substituting\s*\)\s*return null;/.test(compiler));
+
+  // …and the deletion stays SCOPED to the case I-27 actually forbids. The first version of S4.5
+  // returned null for every path that reached the host draw and failed 11 flarex fixtures at up to
+  // 76.9% — on frames the ledger reported fully settled, with the degradation channel naming
+  // `host-substituted:no-loader` on every one and `:pending` on none. `no-loader` is not a
+  // substitution: no loader was ever promoted, so the host clip IS that node's source.
+  //
+  // This asserts the PREDICATE, not the gate, because the gate above would keep passing if someone
+  // widened `substituting` to true. That is exactly how the bug was written the first time.
+  enforced("I-27", "…and it deletes only a genuine substitution — `no-loader` is this node's own source",
+    /substituting\s*=\s*resolved\s*===\s*"pending";/.test(compiler),
+    "the host draw may be withheld only when the node HAS a loader whose pixels have not arrived");
+
+  // ── (1) THE OLD TIMING POLICIES ARE UNREACHABLE, NOT MERELY BYPASSED. `shouldHoldForCoherence` may
+  // be called from exactly one site, and only from the flag-off branch. More than one live call site
+  // means a second timing policy survived the unification.
+  let holdCallSites = 0;
+  for (const file of walkTs(webDir)) {
+    if (file.endsWith("temporal-coherence.ts") || file.includes(".test.")) continue;
+    holdCallSites += (strip(readFileSync(file, "utf8")).match(/shouldHoldForCoherence\s*\(/g) ?? []).length;
+  }
+  enforced("I-6", "the paused-only barrier has exactly ONE caller, reachable only with the flag off",
+    holdCallSites === 1, `${holdCallSites} call sites`);
+
+  // ── (3) ONE SOURCE OF EVALUATION TIME. `effectiveTime` may be minted in one place only, and S4.4's
+  // ratchet already proves that for the label. What this adds is the barrier's own exclusivity: no
+  // module outside the kernel may construct a readiness verdict, so there is no second way to compute
+  // "the moment to render at".
+  const verdictBuilders: string[] = [];
+  for (const file of [...walkTs(sharedDir), ...walkTs(webDir)]) {
+    // `time.ts` DEFINES it and `readiness-barrier.ts` is its only permitted caller; both excluded by
+    // NAME rather than by pattern, so a third file is a failure and not a quiet widening. The first run
+    // of this check failed on `time.ts` itself — the definition matched a regex meant for calls, which
+    // is the ordinary way a source scan ends up asserting something other than what it claims.
+    if (file.endsWith("readiness-barrier.ts") || file.endsWith("time.ts")) continue;
+    if (/effectiveTimeFromBarrier\s*\(/.test(strip(readFileSync(file, "utf8")))) {
+      verdictBuilders.push(file.split(/[\\/]/).slice(-2).join("/"));
+    }
+  }
+  enforced("I-1", "only the readiness barrier mints an effective time — there is no alternate timing path",
+    verdictBuilders.length === 0, verdictBuilders.join(" · "));
+
+  // ── (4) ROLLBACK. The flag-off path must be the PREVIOUS renderer, which is only true if the old
+  // code still exists to be restored. Asserted positively: deleting `shouldHoldForCoherence` outright
+  // would pass the "one caller" check above while destroying the rollback, so both directions matter.
+  const coherence = readFileSync(`${webDir}playback/temporal-coherence.ts`, "utf8");
+  enforced("I-25", "the pre-S4.6 barrier is retained so flag-off restores the previous renderer",
+    /export function shouldHoldForCoherence/.test(coherence));
+  enforced("I-25", "…and the substitution default is UNCHANGED, so an untaught caller keeps its behaviour",
+    /allowHostSubstitution\?:\s*boolean\s*\|\s*undefined/.test(compiler) &&
+      !/allowHostSubstitution\s*=\s*false/.test(compiler));
+}
+
+// ---------------------------------------------------------------------------------------------
 // I-5 / I-15 / I-35 — invariants three shipped modules CLAIM in their headers
 // ---------------------------------------------------------------------------------------------
 //

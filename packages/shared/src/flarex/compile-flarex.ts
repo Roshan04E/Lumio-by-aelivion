@@ -80,6 +80,20 @@ export interface FlarexLowerCtx {
   frameTimeSeconds: number;
   /** The host clip's normal, fully-built draw (grade + transform + masks + passes) = MediaIn. */
   hostSourceDraw: SceneLayerDraw;
+  /**
+   * May an unresolved MediaIn show the HOST CLIP's pixels? (ADR-012 I-27/I-34, slice S4.5.)
+   *
+   * `false` deletes the substitution: `resolveSourceDraw → null` means no picture, never someone
+   * else's. Defaults to `true`, which is the pre-S4.5 behaviour, so a caller that has not been taught
+   * the policy keeps exactly what it had.
+   *
+   * **Passed as DATA, never read as a flag here.** I-15 forbids the lowering layer from owning policy,
+   * and reading a feature flag in this file is precisely that — it would also make the compile depend
+   * on browser state, which is what keeps it out of the export and the harness. The host decides; the
+   * compiler is told. The I-15 ratchet in `kernel-conformance.ts` fails the build if this file ever
+   * grows a flag read, a clock or module state.
+   */
+  allowHostSubstitution?: boolean | undefined;
   /** The caller's comp-sized matte cache; null = shape-mask nodes soft-degrade to no matte. */
   matteCache?: SceneMaskMatteCache | null | undefined;
   /**
@@ -1119,6 +1133,11 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         // independently decoded loader at the retimed rate (ADR-011). No promotion — every comp
         // without a TimeSpeed — resolves to null and falls through to the host exactly as before.
         const sourceAssetId = str(node, "sourceAssetId", "");
+        // Is reaching the host draw a SUBSTITUTION (this node has its own loader and the pixels have
+        // not arrived) or this node's own source reached by the declining-promotion path? Only the
+        // first is what I-27 forbids, and only the first is what S4.5 deletes. Default false: a node
+        // with no resolver at all cannot be substituting anything.
+        let substituting = false;
         if (ctx.resolveSourceDraw) {
           // Profiler-only: `resolveSourceDraw` is the browser's asset-source ADAPTER — it builds a full
           // per-clip draw (grade pipeline, transforms, masks) via buildLayerPreFlarexDraw. This is real
@@ -1167,13 +1186,43 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           }
           // An un-retimed `"pending"` falls THROUGH to the host below — same moment, real degrade.
           if (resolved && resolved !== "pending") return { kind: "image", draw: cloneImage(resolved) };
-          // Reached the host fall-back. Both remaining causes substitute ANOTHER SOURCE'S pixels, and
-          // they are reported apart because they have different fixes: `pending` is a readiness race
-          // (S4.4's barrier), `no-loader` is a source that was never admitted (S4.3's admission).
+          // Reached the host fall-back. The two causes are reported apart because they have different
+          // fixes — `pending` is a readiness race (S4.4's barrier), `no-loader` is a source that was
+          // never admitted (S4.3's admission) — and, as S4.5 discovered, because only ONE of them is
+          // a substitution at all. See the S4.5 note below.
           degrade(node.id, resolved === "pending" ? "host-substituted:pending" : "host-substituted:no-loader");
+          substituting = resolved === "pending";
         } else {
           degrade(node.id, "host-substituted:no-resolver");
         }
+        // S4.5 — DECLARED ABSENCE. The degradation above is still reported either way; what changes is
+        // whether the frame then shows another source's pixels. `null` here means the node produces
+        // nothing and a downstream merge keeps its background: a transparent beat while a loader warms
+        // is a gap, a frame from elsewhere in the shot is a lie (I-27/I-34).
+        //
+        // This is the single most damaging construct in the runtime precisely because it is invisible:
+        // the picture is always plausible, so the readiness race underneath it has never had to be
+        // fixed. S4.4's barrier is what makes deleting it survivable — the frame resolves to a moment
+        // every participant CAN show instead of the moment one of them cannot.
+        //
+        // SCOPED TO `pending`, and the pixel gate is why — measured, not reasoned. The first version of
+        // this slice returned null for all three causes and failed ELEVEN flarex fixtures at up to
+        // 76.9%, on frames the present ledger reported fully settled (`notReady: 0`). The degradation
+        // channel named the cause on every one of them: `host-substituted:no-loader`, and not a single
+        // `:pending`. So the slice deleted the exact case it was not aimed at.
+        //
+        // The distinction the first version missed is that these three reasons are not three flavours
+        // of one thing. I-27 forbids resolving scarcity by showing ANOTHER source's content, and only
+        // `pending` does that: the node HAS a loader, that loader owns the pixels, and they have not
+        // arrived — so the host draw is a stand-in for something else. `no-loader` and `no-resolver`
+        // are the opposite statement. No loader was ever promoted for this node, which means the host
+        // clip IS its source; drawing it is not substitution, it is the Phase-1 contract three comment
+        // lines above ("still soft-degrades to the host — the right answer when promotion legitimately
+        // declined"). Deleting that leaves a node whose source is present and readable drawing nothing.
+        //
+        // Put plainly: the invariant is about WHOSE pixels these are, not about which code path reached
+        // them. Same line, opposite meanings.
+        if (ctx.allowHostSubstitution === false && substituting) return null;
         return { kind: "image", draw: cloneImage(ctx.hostSourceDraw) };
       }
 

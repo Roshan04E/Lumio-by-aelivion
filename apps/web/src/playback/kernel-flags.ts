@@ -62,6 +62,11 @@ export const KERNEL_FLAGS = {
   proxySource: { query: "kernelProxySource", storage: "orreris.kernelProxySource", defaultOn: false },
   resources: { query: "kernelResources", storage: "orreris.kernelResources", defaultOn: true },
   sourceAdmission: { query: "kernelSourceAdmission", storage: "orreris.kernel.sourceAdmission", defaultOn: false },
+  // ONE exclusive flag for S4.5+S4.6 (ADR-012 §4, atomic group). They cannot be separated: deleting
+  // the host-clip fallback exposes every readiness gap the substitution was hiding, and only the
+  // unified barrier — one coherence mechanism across both transport states, answering with a moment
+  // instead of a boolean — covers them. S4.4 is NOT in this group; it is additive and shipped alone.
+  coherenceUnified: { query: "kernelCoherenceUnified", storage: "orreris.kernel.coherenceUnified", defaultOn: false },
   frames: { query: "kernelFrames", storage: "orreris.kernelFrames", defaultOn: false },
   scopes: { query: "kernelScopes", storage: "orreris.kernelScopes", defaultOn: false },
 } as const satisfies Record<string, KernelFlag>;
