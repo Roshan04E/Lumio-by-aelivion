@@ -500,11 +500,24 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     fanout.set(edge.from.nodeId, (fanout.get(edge.from.nodeId) ?? 0) + 1);
   }
 
-  /** Keyframe-aware numeric param (comp-local time). */
-  const num = (node: FlarexNode, key: string, fallback: number): number => {
+  /**
+   * Keyframe-aware numeric param, evaluated AT AN EXPLICITLY PASSED TIME (ADR-012 T4, slice S6.1).
+   *
+   * `at` is first and required. It used to read a mutable `activeTimeSeconds` cursor that the retime
+   * scope saved and restored around `lowerNode`, and the argument for that was real: threading a
+   * parameter through every helper is wide, and a missed site is silent — it evaluates a param at the
+   * wrong time with no error.
+   *
+   * T4 inverts that argument rather than dismissing it. Once the ambient cursor does not EXIST, a
+   * missed site cannot be silent, because there is nothing left for it to read: it stops compiling.
+   * The wide change is paid once, in exchange for the whole class becoming unrepresentable — which is
+   * the difference between fixing the three sites that read the un-retimed clock and making a fourth
+   * one impossible to write.
+   */
+  const num = (at: number, node: FlarexNode, key: string, fallback: number): number => {
     frameProfiler.bump("compile.paramEvals");
     const base = typeof node.params[key] === "number" ? (node.params[key] as number) : fallback;
-    return evaluateFlarexNodeParam({ animations: comp.animations, baseValue: base, nodeId: node.id, paramKey: key, timeSeconds: activeTimeSeconds });
+    return evaluateFlarexNodeParam({ animations: comp.animations, baseValue: base, nodeId: node.id, paramKey: key, timeSeconds: at });
   };
   const str = (node: FlarexNode, key: string, fallback: string): string =>
     typeof node.params[key] === "string" ? (node.params[key] as string) : fallback;
@@ -703,18 +716,26 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return wrap;
   };
 
-  /** Rasterize a matte value through the caller's comp-sized cache. Null = soft degrade (no matte). */
-  const rasterizeMatte = (matte: FlarexMatteValue, key: string): { tex: TexImageSource; version: number | undefined } | null => {
+  /**
+   * Rasterize a matte value through the caller's comp-sized cache. Null = soft degrade (no matte).
+   *
+   * Rasterized at the EVALUATION time (T4, slice S6.1), not the frame time. This was one of the three
+   * sites reading the un-retimed clock: a matte inside a TimeSpeed subtree animates on the playhead
+   * while the image it masks animates on the retimed clock, so the mask and its content drift apart —
+   * visibly, and only under a retime, which is why it survived. Identical for every non-retimed graph,
+   * where `at` IS `ctx.timeSeconds`.
+   */
+  const rasterizeMatte = (matte: FlarexMatteValue, key: string, at: number): { tex: TexImageSource; version: number | undefined } | null => {
     const mc = ctx.matteCache;
     if (!mc || matte.masks.length === 0) return null;
     const layerLike = { id: key, masks: matte.masks, animations: [] } as unknown as TimelineLayer;
-    const tex = mc.get(layerLike, ctx.timeSeconds);
+    const tex = mc.get(layerLike, at);
     if (!tex) return null;
     return { tex, version: mc.versionOf(key) };
   };
 
-  const applyMatteToImage = (draw: FlarexImageValue, matte: FlarexMatteValue, key: string): FlarexImageValue => {
-    const raster = rasterizeMatte(matte, key);
+  const applyMatteToImage = (draw: FlarexImageValue, matte: FlarexMatteValue, key: string, at: number): FlarexImageValue => {
+    const raster = rasterizeMatte(matte, key, at);
     if (!raster) return draw;
     if (isGroup(draw)) {
       const wrap = wrapFor(draw, STAGE_MASK);
@@ -772,14 +793,14 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    *   - the same effect type is already folded in — two of one stage collapse, so it opens a fresh
    *     wrap and nests, exactly as it did before coalescing existed.
    */
-  const lowerColorNode = (node: FlarexNode): FlarexValue | null => {
-    const input = imageInput(node, "in");
+  const lowerColorNode = (node: FlarexNode, at: number): FlarexValue | null => {
+    const input = imageInput(node, "in", at);
     if (!input) {
-      degrade(node.id, "input-missing");
+      degrade(at, node.id, "input-missing");
       return null;
     }
     const read: FlarexParamReader = {
-      num: (key, fallback) => num(node, key, fallback),
+      num: (key, fallback) => num(at, node, key, fallback),
       str: (key, fallback) => str(node, key, fallback),
       bool: (key) => bool(node, key),
     };
@@ -803,9 +824,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     const film = node.type === "color" ? buildUnifiedColorPasses(node, read) : [];
     if (effects.length === 0 && film.length === 0) return { kind: "image", draw: input };
 
-    const mask = matteInput(node, "mask");
+    const mask = matteInput(node, "mask", at);
     if (mask) {
-      const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
+      const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`, at);
       if (raster) {
         const pipeline = effects.length ? pipelineForEffects(effects) : null;
         let draw = input;
@@ -870,24 +891,24 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    * A wired matte confines the pass to that region — the pass model's own `mask`, so a masked filter
    * still costs one pass rather than opening a region nest.
    */
-  const lowerFilterNode = (node: FlarexNode): FlarexValue | null => {
-    const input = imageInput(node, "in");
+  const lowerFilterNode = (node: FlarexNode, at: number): FlarexValue | null => {
+    const input = imageInput(node, "in", at);
     if (!input) {
-      degrade(node.id, "input-missing");
+      degrade(at, node.id, "input-missing");
       return null;
     }
     const spec = FLAREX_FILTER_NODES[node.type];
     if (!spec) return { kind: "image", draw: input };
     const params = spec.build({
-      num: (key, fallback) => num(node, key, fallback),
+      num: (key, fallback) => num(at, node, key, fallback),
       str: (key, fallback) => str(node, key, fallback),
       bool: (key) => bool(node, key),
     });
     const pass = fragmentPass(node, spec.effect, params);
     if (!pass) return { kind: "image", draw: input };
-    const mask = matteInput(node, "mask");
+    const mask = matteInput(node, "mask", at);
     if (mask) {
-      const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
+      const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`, at);
       if (raster) {
         pass.mask = raster.tex;
         pass.maskVersion = raster.version;
@@ -958,7 +979,6 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    * with many chances to miss one — and a MISSED one is silent, evaluating a param at the wrong time
    * with no error. Set immediately around `lowerNode`, restored in `finally`.
    */
-  let activeTimeSeconds = ctx.timeSeconds;
 
   /**
    * Memo identity MUST include the evaluation time (ADR-011 §2): the same node under two different
@@ -983,14 +1003,14 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    * allocates nothing, which is what keeps an export or worker compile byte-identical in cost as well
    * as in output.
    */
-  const degrade = (nodeId: string, reason: FlarexDegradationReason): void => {
+  const degrade = (at: number, nodeId: string, reason: FlarexDegradationReason): void => {
     if (!ctx.onDegrade) return;
     ctx.onDegrade({
       nodeId,
       nodeType: comp.nodes[nodeId]?.type,
       reason,
       substituted: isSubstitutionReason(reason),
-      atTimeSeconds: activeTimeSeconds,
+      atTimeSeconds: at,
       frameTimeSeconds: ctx.timeSeconds,
     });
   };
@@ -1042,7 +1062,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return estimateDrawCost(draw) >= MATERIALIZE_MIN_PASSES;
   };
 
-  const inputValue = (node: FlarexNode, socket: string, timeSeconds = activeTimeSeconds): FlarexValue | null => {
+  const inputValue = (node: FlarexNode, socket: string, timeSeconds: number): FlarexValue | null => {
     const from = edgeInto.get(`${node.id}:${socket}`);
     if (!from) return null;
     const value = evalNode(from, timeSeconds);
@@ -1051,21 +1071,21 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return value.kind === "image" ? { kind: "image", draw: cloneImage(value.draw) } : { kind: "matte", matte: { masks: value.matte.masks } };
   };
 
-  const imageInput = (node: FlarexNode, socket: string): FlarexImageValue | null => {
-    const v = inputValue(node, socket);
+  const imageInput = (node: FlarexNode, socket: string, at: number): FlarexImageValue | null => {
+    const v = inputValue(node, socket, at);
     return v?.kind === "image" ? v.draw : null;
   };
 
-  const matteInput = (node: FlarexNode, socket: string): FlarexMatteValue | null => {
-    const v = inputValue(node, socket);
+  const matteInput = (node: FlarexNode, socket: string, at: number): FlarexMatteValue | null => {
+    const v = inputValue(node, socket, at);
     return v?.kind === "matte" ? v.matte : null;
   };
 
   /** Pass-through target for a disabled node: its first wired image input. */
-  const passthrough = (node: FlarexNode): FlarexValue | null => {
+  const passthrough = (node: FlarexNode, at: number): FlarexValue | null => {
     for (const input of getFlarexNodeDefinition(node.type).inputs) {
       if (input.type !== "image") continue;
-      const v = inputValue(node, input.id);
+      const v = inputValue(node, input.id, at);
       if (v) return v;
     }
     return null;
@@ -1084,26 +1104,20 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         return memo.get(key) ?? null;
       }
       if (visiting.has(key)) {
-        degrade(nodeId, "graph-cycle");
+        degrade(timeSeconds, nodeId, "graph-cycle");
         return null; // cycle — degrade, never hang
       }
       const node = nodes[nodeId];
       if (!node) {
-        degrade(nodeId, "node-missing");
+        degrade(timeSeconds, nodeId, "node-missing");
         return null;
       }
       frameProfiler.noteEval(nodeId, node.type, "evaluated");
       visiting.add(key);
-      // The cursor moves for the duration of this node's lowering and is restored after, so a sibling
-      // branch evaluated later is unaffected by a transform applied on this one.
-      const outerTime = activeTimeSeconds;
-      activeTimeSeconds = timeSeconds;
-      let value: FlarexValue | null;
-      try {
-        value = node.enabled ? lowerNode(node) : passthrough(node);
-      } finally {
-        activeTimeSeconds = outerTime;
-      }
+      // The retimed time is PASSED DOWN rather than parked in a cursor, so a sibling branch cannot be
+      // affected by a transform applied on this one — not because we remembered to restore it, but
+      // because it was never shared. The save/restore pair (and every way to forget one) is gone.
+      let value: FlarexValue | null = node.enabled ? lowerNode(node, timeSeconds) : passthrough(node, timeSeconds);
       visiting.delete(key);
       // Materialization boundary: seal an image-producing node's output into its own RTT when the
       // evaluator-owned decision says so (fan-out / debug override today). Mattes stay vector (never
@@ -1118,7 +1132,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     }
   }
 
-  function lowerNode(node: FlarexNode): FlarexValue | null {
+  function lowerNode(node: FlarexNode, at: number): FlarexValue | null {
     // Profiler-only, node-blind: count a lowering visit per node type (the report aggregates merge /
     // transform / effect visits from these). No `switch` on type for profiling — just the label.
     frameProfiler.bump(`visit.${node.type}`);
@@ -1148,7 +1162,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           // Source ran past its own end (short clip in a longer comp): produce nothing — the node's
           // output is empty, so a merge downstream keeps only the background. NOT a host fall-back.
           if (resolved === "ended") {
-            degrade(node.id, "source-ended");
+            degrade(at, node.id, "source-ended");
             return null;
           }
           /**
@@ -1180,8 +1194,8 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
            * null still means "no loader owns this node" and still soft-degrades to the host — the
            * Phase-1 contract, and the right answer when promotion legitimately declined.
            */
-          if (resolved === "pending" && activeTimeSeconds !== ctx.timeSeconds) {
-            degrade(node.id, "source-pending-retimed");
+          if (resolved === "pending" && at !== ctx.timeSeconds) {
+            degrade(at, node.id, "source-pending-retimed");
             return null;
           }
           // An un-retimed `"pending"` falls THROUGH to the host below — same moment, real degrade.
@@ -1190,10 +1204,10 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           // fixes — `pending` is a readiness race (S4.4's barrier), `no-loader` is a source that was
           // never admitted (S4.3's admission) — and, as S4.5 discovered, because only ONE of them is
           // a substitution at all. See the S4.5 note below.
-          degrade(node.id, resolved === "pending" ? "host-substituted:pending" : "host-substituted:no-loader");
+          degrade(at, node.id, resolved === "pending" ? "host-substituted:pending" : "host-substituted:no-loader");
           substituting = resolved === "pending";
         } else {
-          degrade(node.id, "host-substituted:no-resolver");
+          degrade(at, node.id, "host-substituted:no-resolver");
         }
         // S4.5 — DECLARED ABSENCE. The degradation above is still reported either way; what changes is
         // whether the frame then shows another source's pixels. `null` here means the node produces
@@ -1238,7 +1252,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "text":
       case "background": {
         if (!ctx.resolveSourceDraw) {
-          degrade(node.id, "generator-unbacked");
+          degrade(at, node.id, "generator-unbacked");
           return null;
         }
         frameProfiler.bump("compile.resolveSourceCalls");
@@ -1248,16 +1262,16 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         if (!resolved || resolved === "ended" || resolved === "pending") {
           // One reason, unlike MediaIn: a generator NEVER substitutes, so the three causes share a fix
           // (rasterize the backing layer) and splitting them would add noise without adding a decision.
-          degrade(node.id, "generator-unbacked");
+          degrade(at, node.id, "generator-unbacked");
           return null;
         }
         const draw = cloneImage(resolved);
         if (!isGroup(draw)) {
-          const opacity = node.type === "background" ? clamp01(num(node, "opacity", 1)) * 100 : draw.transform.opacity;
+          const opacity = node.type === "background" ? clamp01(num(at, node, "opacity", 1)) * 100 : draw.transform.opacity;
           draw.transform = {
             ...draw.transform,
             // Node x/y are comp FRACTIONS; the composite transform takes percent-of-comp.
-            ...(node.type === "text" ? { x: clamp01(num(node, "x", 0.5)) * 100, y: clamp01(num(node, "y", 0.5)) * 100 } : {}),
+            ...(node.type === "text" ? { x: clamp01(num(at, node, "x", 0.5)) * 100, y: clamp01(num(at, node, "y", 0.5)) * 100 } : {}),
             opacity,
           };
         }
@@ -1265,20 +1279,20 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       }
 
       case "mediaOut":
-        return inputValue(node, "in");
+        return inputValue(node, "in", at);
 
       // Reroute (F2, round 3): pure pass-through — a wire-organization dot, never alters output.
       case "reroute":
-        return inputValue(node, "in");
+        return inputValue(node, "in", at);
 
       case "merge": {
-        const bg = imageInput(node, "bg");
-        let fg = imageInput(node, "fg");
+        const bg = imageInput(node, "bg", at);
+        let fg = imageInput(node, "fg", at);
         if (!bg || !fg) return bg ? { kind: "image", draw: bg } : fg ? { kind: "image", draw: fg } : null;
-        const mask = matteInput(node, "mask");
-        if (mask) fg = applyMatteToImage(fg, mask, `flarex_${comp.id}_${node.id}_mask`);
+        const mask = matteInput(node, "mask", at);
+        if (mask) fg = applyMatteToImage(fg, mask, `flarex_${comp.id}_${node.id}_mask`, at);
         const blend = str(node, "blend", "normal") as SceneLayerDraw["blendMode"];
-        const opacity = Math.max(0, Math.min(1, num(node, "opacity", 1)));
+        const opacity = Math.max(0, Math.min(1, num(at, node, "opacity", 1)));
         if (isGroup(fg)) {
           fg.shell.blendMode = blend;
           fg.shell.transform.opacity *= opacity;
@@ -1308,9 +1322,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       }
 
       case "transform": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         const wrap = wrapFor(input, STAGE_TRANSFORM);
@@ -1318,13 +1332,13 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         frameProfiler.bump("compile.objects"); // new transform object
         // x/y are PERCENT offsets from center (timeline-transform units: anchor comp position 0..100).
         wrap.shell.transform = {
-          x: 50 + num(node, "x", 0),
-          y: 50 + num(node, "y", 0),
-          scale: Math.max(0, num(node, "scale", 1)),
-          rotation: num(node, "rotation", 0),
+          x: 50 + num(at, node, "x", 0),
+          y: 50 + num(at, node, "y", 0),
+          scale: Math.max(0, num(at, node, "scale", 1)),
+          rotation: num(at, node, "rotation", 0),
           opacity: wrap.shell.transform.opacity,
-          anchorX: num(node, "anchorX", 0.5) * 100,
-          anchorY: num(node, "anchorY", 0.5) * 100,
+          anchorX: num(at, node, "anchorX", 0.5) * 100,
+          anchorY: num(at, node, "anchorY", 0.5) * 100,
         };
         return { kind: "image", draw: wrap };
       }
@@ -1340,7 +1354,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "hslQualifier":
       case "lut":
       case "look":
-        return lowerColorNode(node);
+        return lowerColorNode(node, at);
 
       // Likewise every builtin-wrapping filter node (see `FLAREX_FILTER_NODES`).
       case "directionalBlur":
@@ -1351,19 +1365,19 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "channelBoolean":
       case "vignette":
       case "grain":
-        return lowerFilterNode(node);
+        return lowerFilterNode(node, at);
 
       case "blur": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
-        const sigma = Math.max(0, num(node, "sigma", 8));
+        const sigma = Math.max(0, num(at, node, "sigma", 8));
         if (sigma <= 0) return { kind: "image", draw: input };
-        const mask = matteInput(node, "mask");
+        const mask = matteInput(node, "mask", at);
         if (mask) {
-          const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`);
+          const raster = rasterizeMatte(mask, `flarex_${comp.id}_${node.id}_mask`, at);
           if (raster) {
             return {
               kind: "image",
@@ -1382,39 +1396,39 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       }
 
       case "glow": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
-        const radius = Math.max(0, num(node, "radius", 24));
+        const radius = Math.max(0, num(at, node, "radius", 24));
         if (radius <= 0) return { kind: "image", draw: input };
         const wrap = wrapFor(input, STAGE_GLOW);
         wrap.shell.glow = {
           radiusPx: radius * ctx.renderScale,
           color: [1, 1, 1],
           mode: "highlights",
-          threshold: Math.max(0, Math.min(1, num(node, "threshold", 0.7))),
-          strength: Math.max(0, num(node, "intensity", 0.6)),
+          threshold: Math.max(0, Math.min(1, num(at, node, "threshold", 0.7))),
+          strength: Math.max(0, num(at, node, "intensity", 0.6)),
         };
         return { kind: "image", draw: wrap };
       }
 
       case "sharpen": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         // Node amount 0..2 → builtin sharpen's 0..100 scale.
-        const pass = fragmentPass(node, builtinFragmentEffectId("sharpen"), { amount: Math.max(0, Math.min(100, num(node, "amount", 0.5) * 50)) });
+        const pass = fragmentPass(node, builtinFragmentEffectId("sharpen"), { amount: Math.max(0, Math.min(100, num(at, node, "amount", 0.5) * 50)) });
         return { kind: "image", draw: pass ? pushFragmentPass(input, pass) : input };
       }
 
       case "filter": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         const effectId = str(node, "effectId", "");
@@ -1429,41 +1443,41 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
             overrides = {};
           }
         }
-        const pass = fragmentPass(node, defId, overrides, Math.max(0, Math.min(1, num(node, "intensity", 1))));
+        const pass = fragmentPass(node, defId, overrides, Math.max(0, Math.min(1, num(at, node, "intensity", 1))));
         return { kind: "image", draw: pass ? pushFragmentPass(input, pass) : input };
       }
 
       case "chromaKey": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         const pass = fragmentPass(node, FLAREX_CHROMA_KEY_ID, {
           keyColor: parseHexColor(str(node, "color", "#00b140")),
-          tolerance: num(node, "tolerance", 0.35),
-          softness: num(node, "softness", 0.1),
-          clipBlack: num(node, "clipBlack", 0),
-          clipWhite: num(node, "clipWhite", 1),
-          spillSuppression: num(node, "spillSuppression", 0.5),
-          edgeSoftness: num(node, "edgeSoftness", 2),
-          choke: num(node, "choke", 0.05),
-          decontaminate: num(node, "decontaminate", 0.5),
+          tolerance: num(at, node, "tolerance", 0.35),
+          softness: num(at, node, "softness", 0.1),
+          clipBlack: num(at, node, "clipBlack", 0),
+          clipWhite: num(at, node, "clipWhite", 1),
+          spillSuppression: num(at, node, "spillSuppression", 0.5),
+          edgeSoftness: num(at, node, "edgeSoftness", 2),
+          choke: num(at, node, "choke", 0.05),
+          decontaminate: num(at, node, "decontaminate", 0.5),
           matteOnly: bool(node, "matteOnly"),
         });
         return { kind: "image", draw: pass ? pushFragmentPass(input, pass) : input };
       }
 
       case "lumaKey": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         const pass = fragmentPass(node, FLAREX_LUMA_KEY_ID, {
-          low: num(node, "low", 0),
-          high: num(node, "high", 1),
-          softness: num(node, "softness", 0.1),
+          low: num(at, node, "low", 0),
+          high: num(at, node, "high", 1),
+          softness: num(at, node, "softness", 0.1),
           invertKey: bool(node, "invert"),
           matteOnly: bool(node, "matteOnly"),
         });
@@ -1474,28 +1488,28 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "ellipseMask": {
         const w = ctx.compWidth;
         const h = ctx.compHeight;
-        const cx = num(node, "centerX", 0.5) * w;
-        const cy = num(node, "centerY", 0.5) * h;
-        const halfW = (Math.max(0, num(node, "width", 0.5)) * w) / 2;
-        const halfH = (Math.max(0, num(node, "height", 0.5)) * h) / 2;
+        const cx = num(at, node, "centerX", 0.5) * w;
+        const cy = num(at, node, "centerY", 0.5) * h;
+        const halfW = (Math.max(0, num(at, node, "width", 0.5)) * w) / 2;
+        const halfH = (Math.max(0, num(at, node, "height", 0.5)) * h) / 2;
         const mask = createBoxMask(node.type === "rectMask" ? "rectangle" : "ellipse", cx - halfW, cy - halfH, cx + halfW, cy + halfH, 1);
         mask.id = `flarex_${comp.id}_${node.id}`;
         // Node feather is a comp fraction (resolution-independent); Mask.feather is px.
-        mask.feather = Math.max(0, Math.min(1, num(node, "feather", 0))) * Math.min(w, h) * 0.5;
+        mask.feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * Math.min(w, h) * 0.5;
         mask.inverted = bool(node, "invert");
-        if (node.type === "rectMask") mask.cornerRadius = Math.max(0, Math.min(1, num(node, "cornerRadius", 0))) * Math.min(halfW, halfH);
+        if (node.type === "rectMask") mask.cornerRadius = Math.max(0, Math.min(1, num(at, node, "cornerRadius", 0))) * Math.min(halfW, halfH);
         return { kind: "matte", matte: { masks: [mask] } };
       }
 
       case "matteControl": {
-        const a = matteInput(node, "a");
-        const b = matteInput(node, "b");
+        const a = matteInput(node, "a", at);
+        const b = matteInput(node, "b", at);
         if (!a && !b) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         const operation = str(node, "operation", "add") as Mask["mode"];
-        const feather = Math.max(0, Math.min(1, num(node, "feather", 0))) * Math.min(ctx.compWidth, ctx.compHeight) * 0.5;
+        const feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * Math.min(ctx.compWidth, ctx.compHeight) * 0.5;
         const masks: Mask[] = [
           ...(a?.masks ?? []),
           ...(b?.masks ?? []).map((mask) => ({ ...mask, mode: operation })),
@@ -1526,7 +1540,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           node.type === "polygonMask" ? "Polygon" : "Bezier",
         );
         mask.id = `flarex_${comp.id}_${node.id}`;
-        mask.feather = Math.max(0, Math.min(1, num(node, "feather", 0))) * Math.min(w, h) * 0.5;
+        mask.feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * Math.min(w, h) * 0.5;
         mask.inverted = bool(node, "invert");
         return { kind: "matte", matte: { masks: [mask] } };
       }
@@ -1551,14 +1565,14 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        * virtual loader as a rate, which is why `speed`/`offset` are constants (see node-defs).
        */
       case "timeSpeed": {
-        const speed = num(node, "speed", 1);
-        const offset = num(node, "offset", 0);
-        const inner = inputValue(node, "in", activeTimeSeconds * speed + offset);
+        const speed = num(at, node, "speed", 1);
+        const offset = num(at, node, "offset", 0);
+        const inner = inputValue(node, "in", at * speed + offset);
         return inner?.kind === "image" ? { kind: "image", draw: inner.draw } : inner;
       }
 
       case "aiMatte":
-        degrade(node.id, "node-unimplemented");
+        degrade(at, node.id, "node-unimplemented");
         return null;
 
       /**
@@ -1578,9 +1592,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        * deleted must still render, un-tracked, rather than blank.
        */
       case "tracker": {
-        const input = imageInput(node, "in");
+        const input = imageInput(node, "in", at);
         if (!input) {
-          degrade(node.id, "input-missing");
+          degrade(at, node.id, "input-missing");
           return null;
         }
         // EMBEDDED data first — it is what travels in the manifest and therefore what both renderers
@@ -1589,8 +1603,11 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         // the export would not.
         const path = parseTrackingPathParam(str(node, "trackingPathData", ""))
           ?? (ctx.resolveTrackingPath?.(str(node, "trackingPathId", "")) ?? null);
-        if (!path || path.points.length === 0) return passthrough(node);
-        const sample = sampleTrackingPathAt(path, ctx.timeSeconds, num(node, "smoothing", 0) || undefined);
+        if (!path || path.points.length === 0) return passthrough(node, at);
+        // T4: the track is sampled at the EVALUATION time. Reading `ctx.timeSeconds` here meant a
+        // retimed subtree followed the playhead's track position while its pixels came from another
+        // moment — the second of the three un-retimed reads, and the same failure shape as the matte.
+        const sample = sampleTrackingPathAt(path, at, num(at, node, "smoothing", 0) || undefined);
         const wrap = wrapFor(input, STAGE_TRANSFORM);
         frameProfiler.bump("compile.operations");
         frameProfiler.bump("compile.objects");
@@ -1609,7 +1626,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       }
 
       default:
-        return passthrough(node);
+        return passthrough(node, at);
     }
   }
 

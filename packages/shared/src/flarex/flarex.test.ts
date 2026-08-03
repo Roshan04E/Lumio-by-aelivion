@@ -8,6 +8,16 @@
  * param normalization, edge validation, cycle guard, healer behavior.
  */
 import { compileFlarexComp, type FlarexLowerCtx } from "./compile-flarex";
+import { sceneTexture } from "../color/scene-compositor";
+import { defaultSession, registerResource } from "../kernel";
+
+/** A real, never-forgotten handle so the fixture resolves through the production path (S5.2). */
+const TEST_HANDLE = registerResource(
+  defaultSession,
+  "test/flarex-fixture-texture",
+  { scope: "live", kind: "test", id: "flarex-fixture-texture" },
+  0
+);
 import { computeFlarexContentHashes } from "./content-hash";
 import {
   builtinFragmentEffectId,
