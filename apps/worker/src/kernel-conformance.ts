@@ -49,6 +49,9 @@ import {
   isMediaSourceDemoted,
   admissionDenials,
   contributionRank,
+  resolveReadiness,
+  MAX_PRESENTATION_LAG_S,
+  type ReadinessParticipant,
   noteAdmissionDenied,
   rankAdmission,
   MIN_RESIDENCY_MS,
@@ -1339,7 +1342,11 @@ console.log("\nS4.1 — time provenance: one authority, named derivations (T1-T5
   // entirely in being rare; a second unaudited cast anywhere in the kernel silently restores the
   // inference T2 forbids. So the ratchet is structural, and it is the reason this section exists at all.
   const kernelDir = fileURLToPath(new URL("../../../packages/shared/src/kernel/", import.meta.url));
-  const timeTypeCast = /\bas\s+(?:Authoritative|Timeline|Committed|Target|Effective|Evaluation|Decode|Served|Presentation)Time\b|\bas\s+Time</;
+  // Two ways in, and BOTH are the hatch. A cast is the obvious one; `unsafeLabelTime` is the other, and
+  // S4.4's barrier nearly used it for exactly the reason the hatch exists to prevent — a second module
+  // needing a label and reaching for the escape instead of a named derivation. Catching only casts would
+  // have let that through while the ratchet reported green, which is the failure mode a ratchet has.
+  const timeTypeCast = /\bas\s+(?:Authoritative|Timeline|Committed|Target|Effective|Evaluation|Decode|Served|Presentation)Time\b|\bas\s+Time<|\bunsafeLabelTime\s*\(/;
   const casters: string[] = [];
   for (const file of readdirSync(kernelDir).filter((f) => f.endsWith(".ts") && f !== "time.ts")) {
     const code = readFileSync(kernelDir + file, "utf8")
@@ -1697,6 +1704,71 @@ console.log("\nS4.3 — source admission (ADR-012 §6.3/§6.11/§6.12)");
     contributionRank(NEWCOMER) === contributionRank({ ...NEWCOMER }));
 
   session.dispose();
+}
+
+// ---------------------------------------------------------------------------------------------
+// S4.4 — the readiness barrier answers with a MOMENT, not a boolean
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS4.4 — the latest coherent moment (I-1/I-6, T3)");
+{
+  const target = deriveTargetTime(deriveTimelineTime(authoritativeTime(10)));
+  const at = (id: string, seconds: number | null | undefined): ReadinessParticipant =>
+    seconds === undefined ? { id } : { id, servedTime: seconds === null ? null : servedTime(seconds) };
+
+  // ── THE DEFECT THE SLICE EXISTS FOR. `shouldHoldForCoherence` opens with
+  // `if (!enabled || playing || …) return false` — it does nothing while the transport moves, because
+  // "hold or don't" has no good answer there. The barrier's question does.
+  const lagging = resolveReadiness(target, [at("a", 10), at("b", 9.8)]);
+  enforced("I-6", "a frame with one lagging source resolves to a MOMENT both can show",
+    lagging.outcome === "lagged" && Math.abs((lagging.effectiveTime as number) - 9.8) < 1e-9);
+  enforced("I-6", "…and names who put it there, so the lag has a subject",
+    sameList(lagging.constrainedBy, ["b"]) && Math.abs(lagging.lagSeconds - 0.2) < 1e-9);
+
+  // The minimum, not the average or the newest — either of those names a moment some participant has
+  // no pixels for, which is the incoherence the barrier exists to remove.
+  const three = resolveReadiness(target, [at("a", 10), at("b", 9.9), at("c", 9.5)]);
+  enforced("I-1", "the effective time is the OLDEST served moment, never an average",
+    Math.abs((three.effectiveTime as number) - 9.5) < 1e-9);
+
+  // ── ABSENT vs NULL. A still is coherent at every moment and must not drag the frame backwards; a
+  // time-dependent source with NO pixels cannot be repaired by moving time at all. Collapsing the two
+  // is how a generator raster ends up setting a frame's clock.
+  const withStill = resolveReadiness(target, [at("video", 10), at("still", undefined)]);
+  enforced("I-1", "a time-invariant participant constrains nothing",
+    withStill.outcome === "coherent" && (withStill.effectiveTime as number) === 10);
+  const withDead = resolveReadiness(target, [at("video", 10), at("dead", null)]);
+  enforced("I-27", "a participant with no pixels is DECLARED degraded, never served by moving time",
+    withDead.outcome === "degraded" && sameList(withDead.degraded, ["dead"]));
+  enforced("I-27", "…and does not drag the effective time anywhere — there is no moment that fixes it",
+    (withDead.effectiveTime as number) === 10);
+
+  // ── I-2 / monotonicity: a source serving AHEAD of the request must not pull the frame into the
+  // future. This is tracker v33's 35-second reading — a backward seek still holding its old frame — and
+  // a barrier that took the minimum without a ceiling would have presented it.
+  const ahead = resolveReadiness(target, [at("a", 45), at("b", 10)]);
+  enforced("I-2", "a source running AHEAD cannot drag the frame forward; the request is the ceiling",
+    (ahead.effectiveTime as number) === 10 && ahead.outcome === "coherent");
+
+  // ── §6.9's bounded lag. Past the budget, walking further back is a stall wearing coherence's
+  // clothes, so it is declared rather than presented.
+  const stalled = resolveReadiness(target, [at("a", 10), at("b", 10 - MAX_PRESENTATION_LAG_S - 0.01)]);
+  enforced("I-31", "lag past the declared budget is a DEGRADATION, not an ever-deeper hold",
+    stalled.outcome === "degraded" && stalled.degraded.includes("b"));
+  const withinBudget = resolveReadiness(target, [at("a", 10), at("b", 10 - MAX_PRESENTATION_LAG_S + 0.01)]);
+  enforced("I-31", "…and inside the budget it is still presented, coherent and late",
+    withinBudget.outcome === "lagged");
+
+  // ── PURITY (I-37): the same inputs give the same verdict, with no clock read. This is what lets an
+  // export, a worker and this harness share one barrier.
+  const a = resolveReadiness(target, [at("x", 9.7), at("y", 9.9)]);
+  const b = resolveReadiness(target, [at("y", 9.9), at("x", 9.7)]);
+  enforced("I-37", "the barrier is pure and order-independent",
+    a.effectiveTime === b.effectiveTime && a.outcome === b.outcome);
+
+  // An empty frame is on time, not infinitely late — the degenerate case a minimum gets wrong.
+  enforced("I-1", "a frame with no time-dependent participants is on time",
+    resolveReadiness(target, []).outcome === "coherent");
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -160,6 +160,25 @@ export function servedTime(seconds: number): ServedTime {
 }
 
 /** The effective time of a frame on screen. Owner: Presentation Barrier (T8 enforces monotonicity). */
+/**
+ * Mint an effective time — **the Readiness Barrier's derivation, and only its** (T3, slice S4.4).
+ *
+ * S4.1 deliberately shipped without this, with a note saying it belonged to the barrier. It lives here
+ * anyway, because `time.ts` being the only module that mints a labelled time is a property the
+ * conformance ratchet enforces mechanically, and a second minting site would make that ratchet a
+ * comment. Ownership of the DECISION is the barrier's; ownership of the LABEL stays here. The two are
+ * different things and the split costs nothing.
+ *
+ * Why it matters that this is narrow: `effectiveTime` is the only time evaluation may see, so whoever
+ * can mint one decides what the whole frame renders. Today's runtime is what happens when everyone can
+ * — `tolerateLag`, `NOT_READY_HOLD_MS`, `WC_HOLD_LAG_S` and the paused-only barrier are four
+ * independent notions of tolerable lag that cannot be reconciled because none is expressed in the same
+ * terms as the others.
+ */
+export function effectiveTimeFromBarrier(seconds: number): EffectiveTime {
+  return unsafeLabelTime(seconds, "effective");
+}
+
 export function derivePresentationTime(effective: EffectiveTime): PresentationTime {
   return effective as number as PresentationTime;
 }
