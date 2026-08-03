@@ -94,6 +94,17 @@ export interface FlarexLowerCtx {
    * grows a flag read, a clock or module state.
    */
   allowHostSubstitution?: boolean | undefined;
+  /**
+   * Out-channel for node evaluation records (slice S6.4). Absent = no records, today's behaviour.
+   *
+   * A CALLBACK, not a session handle — and the conformance harness is why. My first version imported
+   * the kernel's record store here and `[I-15] the lowering layer owns no clock, no kernel dependency
+   * and no module state` failed immediately. It was right: a compiler that reaches into the kernel is
+   * a compiler that cannot run headless, in a second host, or in the worker without dragging a session
+   * with it. Same shape as `onDegrade` and `onLayerNotReady` above — the compiler reports, the host
+   * decides what that means and where it goes.
+   */
+  onEvaluated?: ((nodeId: string, contextKey: string, value: unknown) => void) | undefined;
   /** The caller's comp-sized matte cache; null = shape-mask nodes soft-degrade to no matte. */
   matteCache?: SceneMaskMatteCache | null | undefined;
   /**
@@ -681,8 +692,56 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    *  node's runtime `evaluationKey`. Runtime-only: reached solely via `ctx.materializeNodeIds`,
    *  never via persisted params. The input `draw` (whatever upstream folded) becomes the sealed
    *  group's child, so the boundary rasterizes everything up to and including this node's op. */
+  /**
+   * Is this wrap a pure container — an RTT that copies its child and applies nothing?
+   *
+   * The discriminator for tagging in place, and it is narrower than "is a group" on purpose. Sealing a
+   * wrap that carries a real op would move that op OUT of the artifact: today the op is applied while
+   * compositing into the sealed group's target, so the cached pixels include it; tagged in place, the
+   * artifact holds the pre-op children and the op runs on the way out. The pixels still land the same,
+   * but the artifact no longer means the same thing, and `materialization inserts only identity nests`
+   * — the reason pixel parity holds BY CONSTRUCTION rather than by measurement — stops being true.
+   *
+   * An identity nest inside an identity nest is pure waste, and that IS the two-RTT case ADR-008 rule 2
+   * names. Trading a structural guarantee for a slightly wider optimisation would be a poor bargain.
+   */
+  const isIdentityNest = (g: FlarexWrapGroup): boolean => {
+    const sh = g.shell;
+    return (
+      !g.pipeline && !sh.mask && !sh.blurPx && !sh.glow && !sh.fragmentPasses && !sh.regionPasses &&
+      sh.fit === "fill" && sh.blendMode === "normal" &&
+      sh.transform.x === 50 && sh.transform.y === 50 && sh.transform.scale === 1 &&
+      sh.transform.rotation === 0 && sh.transform.opacity === 100
+    );
+  };
+
   const materialize = (draw: FlarexImageValue, nodeId: string, at: number): FlarexWrapGroup => {
-    const wrap = newWrap(draw);
+    /**
+     * TAG THE GROUP THAT IS ALREADY THERE (ADR-008 rule 2, slice S6.3).
+     *
+     * Materialization means "this output gets its own render target". When the value is ALREADY a
+     * compiler-owned wrap, it already has one — so wrapping it in a second group bought a second RTT
+     * and an extra composite to produce identical pixels. Sealing in place is the same boundary at
+     * half the cost.
+     *
+     * Narrow on purpose. Tagging is only safe for a group THIS compiler made (`__flarexStage` is the
+     * marker) and has not already sealed for another node: sealing a group we do not own would change
+     * the semantics of somebody else's subtree, and re-sealing an existing boundary would move it.
+     * Everything else — a bare layer draw, a foreign group — still gets a wrap, because for those
+     * there genuinely is no target yet.
+     *
+     * Safe to mutate: `materialize` runs on the value `evalNode` just produced, and every shared
+     * subtree reaches a consumer through `cloneImage`'s per-consumer copy, so this object is not one
+     * another consumer is holding.
+     */
+    const candidate = draw as FlarexWrapGroup;
+    const inPlace =
+      isGroup(draw) &&
+      candidate.__flarexStage !== undefined &&
+      !candidate.__flarexSealed &&
+      isIdentityNest(candidate);
+    const wrap = inPlace ? (draw as FlarexWrapGroup) : newWrap(draw);
+    if (inPlace) frameProfiler.bump("compile.materializeTagged");
     wrap.__flarexSealed = true;
     frameProfiler.noteMaterialize();
     wrap.evaluationKey = `flarex_${comp.id}_${nodeId}`;
@@ -1063,6 +1122,39 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    * trivial shared leaves (a bare MediaIn feeding several branches) were each sealed into an identity RTT
    * that bought nothing. The dense 100-node comp, where the deduped subtrees are genuinely expensive,
    * gained 42% on p95 for 2.0MB. So the discriminator is subtree COST, exactly as ADR-010 §3 specified.
+   *
+   * RE-DERIVED and KEPT AT 2 (S6.3, 2026-08-03) — same number, different reason, which is the point.
+   *
+   * DEBT-006 was right that the 2026-07-26 derivation was void: it was measured against a `materialize()`
+   * that WRAPPED a second group, so it priced an extra full-frame composite that tagging-in-place no
+   * longer charges. Re-deriving it first needed a scenario the suite did not have — thresholds 1 and 2
+   * differ on exactly ONE input, a shared subtree costing exactly 1 pass, and every existing scenario sat
+   * above it (`shared-expensive`) or below it (`fanout-8` shares a bare MediaIn, a non-group, cost 0).
+   * Measured against those alone the constant was unfalsifiable: 1 and 2 produced byte-identical
+   * behaviour on all seven scenarios.
+   *
+   * With `shared-cheap-1x8` (one colour node — a nest, no fragment or region pass — fanning out to 8
+   * consumers at 4K) threshold 1 looks like a clear win, and taken alone it would have been adopted:
+   *
+   *   shared-cheap-1x8          threshold 2 (folded)  p50 0.70ms  p95 1.70ms      0MB   0 evict
+   *                             threshold 1 (sealed)  p50 0.30ms  p95 0.90ms   31.6MB   0 evict
+   *
+   * It is the OTHER shape that decides it. `shouldMaterialize` gates on `fanout > 1`, which counts graph
+   * EDGES, not distinct evaluation contexts. Put a retime on each branch and the shared node is evaluated
+   * once per branch at its own time — correctly, per ADR-011 §2, since collapsing them would be the stale
+   * hit ADR-009 calls unforgivable — so it is sealed once PER BRANCH and dedupes NOTHING:
+   *
+   *   shared-cheap-retimed-1x8  threshold 2 (folded)  p50 1.20ms  p95  2.70ms      0MB     0 evict
+   *                             threshold 1 (sealed)  p50 1.30ms  p95 12.30ms   253.1MB   389 evict
+   *
+   * So threshold 1 buys ~0.5ms of p50 on genuine sharing and pays 9.6ms of p95 TAIL, 253MB and 389
+   * evictions in 60 frames where fanout lies. Playback drops frames on the tail, not the median. 2 holds.
+   *
+   * The cost-1 class is exactly where a retime makes fanout lie, so the threshold is doing a second job
+   * the original derivation never named: it is the backstop for context-blind fanout counting. Lower it
+   * only together with a fanout that counts evaluation CONTEXTS (tracked as DEBT-007, candidate S6.5).
+   *
+   * NOT COVERED: this desktop GPU, not the Iris Xe low-end target.
    */
   const MATERIALIZE_MIN_PASSES = 2;
 
@@ -1148,6 +1240,22 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         value = { kind: "image", draw: materialize(value.draw, nodeId, timeSeconds) };
       }
       memo.set(key, value);
+      /**
+       * NODE EVALUATION RECORD (ADR-012 §5.4, slice S6.4).
+       *
+       * Written, never read back — the store is the precondition for dirty propagation (S6.5) and
+       * incremental planning (S6.6), and reuse belongs to those slices. Handing back a persisted draw
+       * today would return textures whose pool entries may since have been disposed; the moment to do
+       * that safely is once S6.5 can say what is still valid.
+       *
+       * The context key is `evalKey`'s, which already folds the evaluation TIME — so the two sides of
+       * a retime keep separate records instead of collapsing into one, the same distinction S6.2 had
+       * to make in the artifact cache one layer up.
+       *
+       * Gated: with records off this is one property read and no allocation (R1), and the evaluator
+       * behaves exactly as before.
+       */
+      ctx.onEvaluated?.(nodeId, key, value);
       return value;
     } finally {
       frameProfiler.exitEval();

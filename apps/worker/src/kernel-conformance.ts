@@ -75,8 +75,13 @@ import {
   noteDecoderSessionClosed,
   noteDecoderSessionOpened,
   RESOURCE_IDLE_MS,
+  __resetEvaluationRecords,
   __resetResourceManager,
   checkHandle,
+  evaluationRecord,
+  evaluationRecordStats,
+  noteEvaluation,
+  MAX_EVALUATION_RECORDS,
   sceneTexture,
   collectIdleResources,
   noteStaleHandle,
@@ -1834,6 +1839,46 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
   const sharedDir = fileURLToPath(new URL("../../../packages/shared/src/", import.meta.url));
   const strip = (source: string): string =>
     source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ── S6.4 — NODE EVALUATION RECORDS (I-34) ───────────────────────────────────────────────────────
+  // The done-when is "a node has an observable state between frames", so the assertion has to be
+  // about SURVIVAL, not about the store existing.
+  {
+    const rs = createRuntimeSession({ id: "records" });
+    __resetEvaluationRecords(rs);
+    noteEvaluation(rs, "n1", "ctx@1", { v: 1 }, 10, 1_000);
+    enforced("I-34", "a record exists after one evaluation",
+      evaluationRecordStats(rs).size === 1 && evaluationRecordStats(rs).maxFrames === 1);
+
+    // FAN-OUT MUST NOT COUNT AS SURVIVAL. A node evaluated three times inside ONE frame has been
+    // observed in one frame; counting each visit would turn fan-out into a false claim of persistence,
+    // which is the exact property this slice is supposed to demonstrate.
+    noteEvaluation(rs, "n1", "ctx@1", { v: 2 }, 10, 1_001);
+    noteEvaluation(rs, "n1", "ctx@1", { v: 3 }, 10, 1_002);
+    enforced("I-34", "…and three visits in ONE frame is still one frame of survival",
+      evaluationRecordStats(rs).maxFrames === 1 && evaluationRecordStats(rs).survivingRecords === 0);
+
+    noteEvaluation(rs, "n1", "ctx@1", { v: 4 }, 11, 1_003);
+    enforced("I-34", "…but the next frame is survival, observable between frames",
+      evaluationRecordStats(rs).maxFrames === 2 && evaluationRecordStats(rs).survivingRecords === 1);
+
+    // Identity is (nodeId, context): the two sides of a retime are different evaluations of one node
+    // and must not collapse into a single record — the same collision S6.2 fixed one layer up.
+    noteEvaluation(rs, "n1", "ctx@2", { v: 9 }, 11, 1_004);
+    enforced("I-34", "a second evaluation CONTEXT is a second record, not an overwrite",
+      evaluationRecordStats(rs).size === 2 &&
+        (evaluationRecord(rs, "n1", "ctx@1", 1_005)?.value as { v: number } | undefined)?.v === 4);
+
+    // Bounded: a store that survives frames is a store that grows.
+    for (let i = 0; i < MAX_EVALUATION_RECORDS + 16; i += 1) {
+      noteEvaluation(rs, `bulk${i}`, "c", i, 12, 2_000 + i);
+    }
+    const bulk = evaluationRecordStats(rs);
+    enforced("I-21", "the record store is bounded and reports what it dropped",
+      bulk.size <= MAX_EVALUATION_RECORDS && bulk.evictions > 0, `size=${bulk.size} evictions=${bulk.evictions}`);
+    __resetEvaluationRecords(rs);
+    rs.dispose();
+  }
 
   // ── S5.3 — WALL-CLOCK AGEING (I-21/I-33) ────────────────────────────────────────────────────────
   // DEBT-002's Detection field names the regression exactly: "a new prune or TTL counted in presented
