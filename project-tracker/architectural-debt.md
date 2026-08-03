@@ -45,6 +45,20 @@ Entries are never rewritten. To change one, append a new dated note under it.
 - Planned slice: S4.5 — must ship in the same release as S4.3
 - Tracking issue: —
 - Detection: any new call path that reaches `resolveSourceDraw`'s host-substitution branch, or any new fallback that yields pixels from a different source
+- **Update (2026-08-03, S4.5 shipped as `a2da2e4`):** this entry's premise was too broad and the slice
+  inherited the error. "The host-clip fallback" is not one construct: three causes reach that `return`,
+  and only `host-substituted:pending` is a substitution under I-27 — the node has a loader, that loader
+  owns the pixels, and they are late. `no-loader` and `no-resolver` mean no loader was ever promoted, so
+  the host clip **is** that node's source; drawing it is the Phase-1 contract, not a stand-in. The first
+  cut of S4.5 withheld all three and failed 11 flarex fixtures at up to 76.9%, on frames the present
+  ledger reported fully settled — the degradation channel named `:no-loader` on every one and `:pending`
+  on none. So the debt as written pointed at a superset of the violation.
+  Debt remains **open**, with the expiry condition unchanged in words but different in meaning: the
+  pending check still reproduces because it exercises the flag-OFF default, so retirement is now gated on
+  `kernelCoherenceUnified` defaulting ON (evidence, per R7), not on the slice having merged. The
+  `no-loader` path is NOT debt and will never be retired — conformance pins it via the predicate
+  `substituting = resolved === "pending"` rather than via the gate, because the gate keeps passing if
+  someone widens the predicate, which is precisely how this was written wrong the first time.
 
 ### DEBT-002 — Kernel owns state but presentation still gates reclamation
 - Status: open
