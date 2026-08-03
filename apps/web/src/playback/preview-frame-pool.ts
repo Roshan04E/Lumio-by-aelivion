@@ -47,6 +47,7 @@
  * the kill switch). Telemetry: `window.__rfWcPool`.
  */
 
+import { KERNEL_FLAGS, readKernelFlag } from "./kernel-flags";
 import {
   DECODER_RETENTION_MS,
   kernelDiagnostics,
@@ -160,19 +161,7 @@ export function getWcSessionShareEnabled(): boolean {
  * defect-dense area in the runtime, and a flag is cheaper than a revert at 2am.
  */
 export function getKernelDecoderLifetimeEnabled(): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined") {
-    try {
-      if (new URLSearchParams(window.location.search).has("kernelDecoderLifetime")) {
-        return truthy(new URLSearchParams(window.location.search).get("kernelDecoderLifetime"));
-      }
-      const stored = window.localStorage?.getItem("orreris.kernel.decoderLifetime");
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  return true;
+  return readKernelFlag(KERNEL_FLAGS.decoderLifetime);
 }
 
 /**
@@ -186,19 +175,7 @@ export function getKernelDecoderLifetimeEnabled(): boolean {
  * decision. Off restores the inherited identity-match borrow exactly.
  */
 export function getKernelSessionSatisfactionEnabled(): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined") {
-    try {
-      if (new URLSearchParams(window.location.search).has("kernelSessionSatisfaction")) {
-        return truthy(new URLSearchParams(window.location.search).get("kernelSessionSatisfaction"));
-      }
-      const stored = window.localStorage?.getItem("orreris.kernel.sessionSatisfaction");
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  return false;
+  return readKernelFlag(KERNEL_FLAGS.sessionSatisfaction);
 }
 
 export interface ReleaseOptions {

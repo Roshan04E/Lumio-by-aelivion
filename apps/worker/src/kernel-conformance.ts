@@ -1707,6 +1707,26 @@ console.log("\nI-5 / I-15 / I-35 — the claims shipped modules make about thems
   enforced("I-5", "an evaluation time exists only by explicit derivation from a passed-in effective time",
     (evaluation as number) === 3.5);
 
+  // ── R7 (flag discipline): ONE authoritative flag-resolution path.
+  //
+  // The review found query→storage→default implemented four times, each with its own `truthy`, its own
+  // try/catch and its own default — and the drift had already begun (`orreris.${name}` in the helpers,
+  // `orreris.kernel.${name}` inline). A rollback path you cannot predict the resolution of is the one
+  // you reach for when something is on fire, so "there is exactly one reader" is worth a ratchet rather
+  // than a convention.
+  const flagReaders: string[] = [];
+  for (const file of walkTs(fileURLToPath(new URL("../../web/src/", import.meta.url)))) {
+    if (file.endsWith("kernel-flags.ts")) continue;
+    const code = strip(readFileSync(file, "utf8"));
+    // A kernel flag read is the pair: a `kernel*` name AND a localStorage lookup in the same file.
+    // Either alone is innocent — plenty of files read storage for unrelated settings.
+    if (/localStorage[?]?\.getItem/.test(code) && /["'`]orreris\.kernel[A-Z.]/.test(code)) {
+      flagReaders.push(file.split(/[\\/]/).slice(-2).join("/"));
+    }
+  }
+  enforced("I-29", "kernel flags resolve in exactly one place — no second reader may re-derive the order",
+    flagReaders.length === 0, flagReaders.join(" · "));
+
   // ── I-15: the lowering layer MUST NOT own policy, state, resources, or a clock.
   //
   // `degradation-sink.ts` rests its whole design on this: the compiler emits a degradation knowing

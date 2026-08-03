@@ -1,4 +1,4 @@
-import { KERNEL_DIAGNOSTICS_FLAG_QUERY, KERNEL_DIAGNOSTICS_FLAG_STORAGE } from "@orreris/shared";
+import { KERNEL_FLAGS, readKernelFlag } from "./kernel-flags";
 
 /**
  * Settle window vs. frame completion (ADR-012 slice S2.2) — the flag, and the pure decisions.
@@ -46,7 +46,7 @@ import { KERNEL_DIAGNOSTICS_FLAG_QUERY, KERNEL_DIAGNOSTICS_FLAG_STORAGE } from "
  * comparison run rather than a blind one.
  */
 export function getFrameCompletionEnabled(): boolean {
-  return readFlag("kernelFrames");
+  return readKernelFlag(KERNEL_FLAGS.frames);
 }
 
 /**
@@ -74,7 +74,7 @@ export function getFrameCompletionEnabled(): boolean {
  * already follow, which is the precedent this generalises rather than a new idea.
  */
 export function getFrameScopesEnabled(): boolean {
-  return readFlag("kernelScopes");
+  return readKernelFlag(KERNEL_FLAGS.scopes);
 }
 
 /**
@@ -102,7 +102,7 @@ export function getFrameScopesEnabled(): boolean {
  * before it can carry a default, and a flag is what makes that soak an A/B rather than a bisect.
  */
 export function getKernelProxySourceEnabled(): boolean {
-  return readFlag("kernelProxySource");
+  return readKernelFlag(KERNEL_FLAGS.proxySource);
 }
 
 /**
@@ -129,7 +129,7 @@ export function getKernelProxySourceEnabled(): boolean {
  * the same prefix at registration, so the two sets are identical by construction.
  */
 export function getKernelResourcesEnabled(): boolean {
-  return readFlagDefaultOn("kernelResources");
+  return readKernelFlag(KERNEL_FLAGS.resources);
 }
 
 /**
@@ -143,48 +143,8 @@ export function getKernelResourcesEnabled(): boolean {
  * the host's job, which is the entire point of the fix.
  */
 export function resolveKernelDiagnosticsEnabled(): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined") {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.has(KERNEL_DIAGNOSTICS_FLAG_QUERY)) return truthy(params.get(KERNEL_DIAGNOSTICS_FLAG_QUERY));
-      const stored = window.localStorage?.getItem(KERNEL_DIAGNOSTICS_FLAG_STORAGE);
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  return true;
+  return readKernelFlag(KERNEL_FLAGS.diagnostics);
 }
 
-/** Same resolution order as {@link readFlag}, with the opposite default — a kill switch, not an opt-in. */
-function readFlagDefaultOn(name: string): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined") {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.has(name)) return truthy(params.get(name));
-      const stored = window.localStorage?.getItem(`orreris.${name}`);
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  return true;
-}
 
-function readFlag(name: string): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined") {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.has(name)) return truthy(params.get(name));
-      const stored = window.localStorage?.getItem(`orreris.${name}`);
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  return false;
-}
 
