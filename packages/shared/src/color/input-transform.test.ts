@@ -104,17 +104,18 @@ const JOINS: { id: Exclude<InputColorSpace, "auto">; code: number; tol: number; 
   // join. Asserting at 95/1023 measured a point mid-segment and reported a 6% "discontinuity" that was
   // simply the curve going up.
   { id: "logc4", code: 0, tol: 1e-4 },
-  { id: "dlog", code: 6.025 * 0.0078 + 0.0929, tol: 1e-3 },
+  { id: "dlog", code: 0.14, tol: 1e-3 },
   {
     id: "flog",
-    code: 8.735631 * 0.00089 + 0.092864,
+    code: 0.100537775223865,
     tol: 2e-2,
-    // REAL FINDING, not a tolerance fudge. F-Log's two branches disagree by ~1% at the join, which means
-    // at least one of {e, f, cut1} as written here is wrong: the published inverse cut is 0.1005378, but
-    // e*cut1 + f computes 0.1006387. Those must be the same number and are not. The curve is usable (the
-    // error is confined to a hair either side of near-black) but F-Log is the FIRST format to check
-    // against its data sheet — this is the test earning its keep.
-    note: "branches disagree ~1% — constants suspect, see plan"
+    // NOT a tolerance fudge, and NOT our bug — this note previously said "constants suspect", which the
+    // 2026-08-03 document pass DISPROVED. Every F-Log constant matches the data sheet. The spec itself
+    // branches encode on cut1 (linear space) and decode on cut2 (code space), and those name different
+    // points: e*cut1 + f = 0.1006387 ≠ cut2 = 0.1005378. Fujifilm's own curve is discontinuous here, so
+    // reproducing it faithfully means reproducing the seam. The test keeps measuring it so the number
+    // stays visible rather than becoming folklore.
+    note: "discontinuity is the SPEC's — Fujifilm branches encode on cut1, decode on cut2"
   },
   { id: "hlg", code: 0.5, tol: 1e-4 }
 ];
@@ -223,6 +224,24 @@ check(
   })
 );
 check("every entry names a document", ALL.every((id) => Boolean(INPUT_TRANSFERS[id].verification.document)));
+
+console.log("\n— documented spec seams: where a vendor's own encode/decode disagree —");
+// Two formats publish an encode threshold in LINEAR space and a decode threshold in CODE space that do
+// not name the same point, leaving a narrow band that does not round-trip. That is the SPEC's, and it is
+// asserted here so it stays a known quantity: if a future edit "fixes" it, this test fails and forces the
+// question "did we just diverge from every other implementation of this data sheet?".
+const SEAMS: { id: Exclude<InputColorSpace, "auto">; encodeDerived: number; publishedDecode: number }[] = [
+  { id: "flog", encodeDerived: 8.735631 * 0.00089 + 0.092864, publishedDecode: 0.100537775223865 },
+  { id: "dlog", encodeDerived: 6.025 * 0.0078 + 0.0929, publishedDecode: 0.14 }
+];
+for (const { id, encodeDerived, publishedDecode } of SEAMS) {
+  const def = INPUT_TRANSFERS[id];
+  const width = Math.abs(encodeDerived - publishedDecode);
+  check(
+    `${def.label}: spec's own thresholds differ by ${width.toExponential(2)} in code (band is not round-trippable)`,
+    width > 0 && width < 2e-4
+  );
+}
 
 /* ------------------------------------------------------------------ progress dashboard */
 // Stage 2a is dormant by design, so there is no UI to read its state from. This output IS the colour

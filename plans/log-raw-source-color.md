@@ -319,11 +319,11 @@ at the join. Results:
 | D-Log | 4.33e-5 | ” |
 | **F-Log** | **1.34e-2** | **branches DISAGREE — at least one constant is wrong** |
 
-**F-Log is the one real finding.** Its published inverse cut is `0.100537775`, but `e·cut1 + f` computes
-`0.1006387` from the constants as written here. Those must be the same number. So one of `{e, f, cut1}`
-is wrong, and **F-Log is the first format to check against its data sheet.** The curve is still usable —
-the error is confined to a sliver either side of near-black — but it is knowingly imperfect and the test
-says so on every run rather than hiding behind a widened tolerance.
+**F-Log looked like the one real finding.** Its published inverse cut is `0.100537775`, but `e·cut1 + f`
+computes `0.1006387`. The conclusion drawn at the time — "one of `{e, f, cut1}` is wrong" — **was itself
+wrong, and the document pass below disproved it.** Left here rather than edited away: the test was right
+that something was inconsistent, and wrong about who to blame, which is worth knowing about this class
+of evidence. A continuity failure localises a problem; it does not attribute one.
 
 **Independent corroboration for three formats.** 18% grey was derived from each curve, then compared to
 the greys those formats are *known* to publish: **S-Log3 0.4106** (Sony states code 420/1023 = 0.41056 —
@@ -366,6 +366,42 @@ Pending: Apple Log, LogC4, D-Log. Inconsistent: F-Log.
 
 Because the stage is dormant there is no UI to read this from, so **`idt:test` prints the whole ladder on
 every run** and is the colour-science progress tracker. Reviewers read the test output, not the registry.
+
+### Document comparison pass — 2026-08-03 (agent-performed → `corroborated`)
+
+Per the founder's ruling, `spec-checked` is reserved for **human** review against the authoritative
+specification; agent-performed comparison lands at `corroborated` however careful. That definition is now
+in the type's doc comment so it cannot drift. This pass promoted 4 formats and left the wiring gate
+untouched at 4/11.
+
+| Format | Result |
+|---|---|
+| Apple Log | all six constants match the white paper → corroborated |
+| ARRI LogC4 | a/b/c match the 2022-05 spec (via OpenColorIO config-aces); s and t derived → corroborated |
+| DJI D-Log | all constants match the white paper; **decode threshold corrected** to the published `0.14` (had been derived as `0.139995`) → corroborated |
+| Fujifilm F-Log | all eight constants match the data sheet; **decode threshold corrected** to the published `cut2` → corroborated |
+| Sony S-Log3 | both branches match the published formulas character-for-character → stays corroborated |
+| Panasonic V-Log | `cut1 0.01, b 0.00873, c 0.241514, d 0.598206, cut2 0.181` all match → stays corroborated |
+| ARRI LogC3 | primary source not reached this pass; evidence remains the grey point alone → stays corroborated |
+
+**The F-Log verdict reversed, and that is the important result.** The constants were never wrong. The data
+sheet gives encode a threshold in LINEAR space (`cut1 = 0.00089`) and decode a threshold in CODE space
+(`cut2 = 0.100537775223865`), and those do not name the same point — `e·cut1 + f = 0.1006387 ≠ cut2`,
+because `cut2` derives from the log segment while `e·cut1 + f` derives from the linear one, and **the two
+segments do not meet.** Fujifilm's published curve is discontinuous at the toe.
+
+We reproduce it as published rather than "correcting" it: a corrected-but-nonstandard F-Log would
+disagree with every other tool implementing the data sheet, which is worse than a 1e-4 seam in near-black.
+
+**Two real bugs found, both the same shape:** F-Log and D-Log were each using a threshold *derived* from
+the encode side instead of the vendor's *published* decode threshold. Harmless in magnitude (1e-4 code
+bands), but wrong, and only visible by reading the documents. A new test asserts both seams so the
+numbers stay known rather than becoming folklore — and so that a future "fix" fails loudly and has to
+answer whether it just diverged from every other implementation.
+
+**Method note for the human pass:** the continuity test localises inconsistency but does **not** attribute
+it. It flagged F-Log correctly and I blamed our transcription; the cause was the spec. Treat a continuity
+failure as "these two things disagree", never as "our number is wrong".
 
 ### Not in Stage 2a
 

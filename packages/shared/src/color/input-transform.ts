@@ -60,12 +60,22 @@ export type InputColorSpace =
  * **Only `spec-checked` clears a space for renderer wiring** — see `spacesAwaitingVerification()`.
  */
 export type TransferVerification =
-  /** Compared against the authoritative document, in full. */
+  /**
+   * **HUMAN-REVIEWED** against the authoritative specification, with revision and reviewer recorded.
+   *
+   * The human requirement is definitional, not incidental (founder decision, 2026-08-03). This badge
+   * must never come to mean "the implementation matched a document an LLM fetched", even when the
+   * numbers turn out identical — an agent comparing figures and a colourist confirming a curve are
+   * different claims, and the whole ladder is worthless if the top rung erodes. Agent-performed
+   * comparison, however careful, lands at `corroborated`.
+   */
   | { status: "spec-checked"; document: string; revision: string; checkedBy: string }
   /**
-   * Coefficients unchecked, but the curve independently reproduces published behaviour at a known
-   * operating point (e.g. the vendor's stated 18% grey code). Evidence is required and is the reason
-   * this outranks spec-pending; it is NOT a substitute for reading the document.
+   * Independently compared against published vendor material — **explicitly including work performed
+   * by an AI agent** — with the evidence recorded. Also covers a curve that reproduces a published
+   * operating point (e.g. the vendor's stated 18% grey) without its full coefficient set being read.
+   *
+   * Strong enough to trust while developing; NOT sufficient to wire into a renderer.
    */
   | { status: "corroborated"; document: string; evidence: string }
   /** Implemented and internally consistent; nothing has been compared to anything external. */
@@ -179,7 +189,11 @@ function appleLogFromLinear(y: number): number {
 
 /* ------------------------------------------------------------------ DJI D-Log */
 const DLOG_CUT_LINEAR = 0.0078;
-const DLOG_CUT_CODE = 6.025 * DLOG_CUT_LINEAR + 0.0929;
+// DJI publishes the DECODE threshold as 0.14 in code space, not as e*cut1+f (= 0.139995). Using the
+// published figure rather than the derived one, because matching the document is the point — see F-Log
+// for why the two can legitimately differ. Consequence is a 5e-6-wide code band that is not exactly
+// round-trippable; that band is the spec's, not ours.
+const DLOG_CUT_CODE = 0.14;
 function dlogToLinear(x: number): number {
   if (x <= DLOG_CUT_CODE) return (x - 0.0929) / 6.025;
   return (10 ** ((x - 0.584555) / 0.256663) - 0.0108) / 0.9892;
@@ -190,8 +204,25 @@ function dlogFromLinear(y: number): number {
 }
 
 /* ------------------------------------------------------------------ Fujifilm F-Log */
+/**
+ * Verified against the Fujifilm F-Log Data Sheet (Ver. 1.0/1.1/1.2 all agree). Every constant here is
+ * the published one.
+ *
+ * **The ~1.3% discontinuity at the toe is Fujifilm's, not ours** — an earlier note in this file blamed a
+ * transcription error, and that was wrong. The data sheet gives the two directions DIFFERENT thresholds
+ * in DIFFERENT spaces: encode branches on `cut1 = 0.00089` in LINEAR space, decode branches on
+ * `cut2 = 0.100537775223865` in CODE space. Those two do not name the same point —
+ * `e·cut1 + f = 0.1006387 ≠ cut2` — because `cut2` is derived from the LOG segment while `e·cut1 + f`
+ * comes from the LINEAR one, and the two segments do not meet.
+ *
+ * So the published curve is genuinely discontinuous at the join, and encode/decode are not exact
+ * inverses across the ~1e-4-wide code band between the two thresholds. We reproduce the spec rather
+ * than "fix" it: a corrected-but-nonstandard F-Log would disagree with every other tool that
+ * implements the data sheet, which is a worse outcome than a 1e-4 seam in near-black.
+ */
 const FLOG = { a: 0.555556, b: 0.009468, c: 0.344676, d: 0.790453, e: 8.735631, f: 0.092864, cut1: 0.00089 } as const;
-const FLOG_CUT_CODE = FLOG.e * FLOG.cut1 + FLOG.f;
+/** Published decode threshold. NOT `e·cut1 + f` — see above; using the derived value was our one real bug. */
+const FLOG_CUT_CODE = 0.100537775223865;
 function flogToLinear(x: number): number {
   if (x < FLOG_CUT_CODE) return (x - FLOG.f) / FLOG.e;
   return (10 ** ((x - FLOG.d) / FLOG.c) - FLOG.b) / FLOG.a;
@@ -238,7 +269,8 @@ export const PQ_DIFFUSE_WHITE_NITS = 203;
 
 /* ------------------------------------------------------------------ registry */
 
-const SPEC_PENDING = (document: string): TransferVerification => ({ status: "spec-pending", document });
+// No entry is `spec-pending` any more — the 2026-08-03 document pass gave every format evidence. The
+// status remains in the type as the correct starting state for the next format someone adds.
 
 export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTransferDefinition> = {
   rec709: {
@@ -255,7 +287,13 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
   "apple-log": {
     id: "apple-log", label: "Apple Log", toLinear: appleLogToLinear, fromLinear: appleLogFromLinear,
     domain: "scene-linear", nativeGamut: "bt2020", implementation: "implemented",
-    verification: SPEC_PENDING("Apple, Apple Log Profile White Paper (2023)")
+    verification: {
+      status: "corroborated",
+      document: "Apple, Apple Log Profile White Paper (Sept 2023)",
+      evidence:
+        "All six constants confirmed against the published white paper: R0 −0.05641088, Rt 0.01, " +
+        "c 47.28711236, β 0.00964052, γ 0.08550479, δ 0.69336945. Branches meet at the join to 1.19e-8."
+    }
   },
   slog3: {
     id: "slog3", label: "Sony S-Log3", toLinear: slog3ToLinear, fromLinear: slog3FromLinear,
@@ -287,23 +325,41 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
   logc4: {
     id: "logc4", label: "ARRI LogC4", toLinear: logc4ToLinear, fromLinear: logc4FromLinear,
     domain: "scene-linear", nativeGamut: "arri-wide-gamut-4", implementation: "implemented",
-    verification: SPEC_PENDING("ARRI, LogC4 Logarithmic Colour Aware Curve (2022)")
+    verification: {
+      status: "corroborated",
+      document: "ARRI, LogC4 Logarithmic Colour Space Specification (2022-05)",
+      evidence:
+        "a = (2^18−16)/117.45, b = (1023−95)/1023, c = 95/1023 confirmed against the ARRI " +
+        "specification via the OpenColorIO config-aces ARRI transform generator; s and t are derived " +
+        "from them here exactly as the spec defines, which removes the transcription surface entirely. " +
+        "Join continuous to 1.26e-8."
+    }
   },
   dlog: {
     id: "dlog", label: "DJI D-Log", toLinear: dlogToLinear, fromLinear: dlogFromLinear,
     domain: "scene-linear", nativeGamut: "d-gamut", implementation: "implemented",
-    verification: SPEC_PENDING("DJI, D-Log Decoding Guide")
+    verification: {
+      status: "corroborated",
+      document: "DJI, D-Log/D-Gamut White Paper",
+      evidence:
+        "All constants confirmed against the DJI white paper: linear segment 6.025/0.0929, log " +
+        "segment 0.256663/0.584555, scaling 0.9892/0.0108, encode cut 0.0078. Decode threshold " +
+        "corrected to DJI's PUBLISHED 0.14 — it had been derived as 0.139995."
+    }
   },
   flog: {
     id: "flog", label: "Fujifilm F-Log", toLinear: flogToLinear, fromLinear: flogFromLinear,
     domain: "scene-linear", nativeGamut: "f-gamut", implementation: "implemented",
     verification: {
-      status: "known-inconsistent",
-      document: "Fujifilm, F-Log Data Sheet",
-      issue:
-        "Branches disagree by 1.34e-2 at the join: the published inverse cut is 0.100537775, but " +
-        "e*cut1 + f computes 0.1006387 from the constants as written. Those must be the same number, " +
-        "so at least one of {e, f, cut1} is wrong. Error is confined to near-black. Fix before use."
+      status: "corroborated",
+      document: "Fujifilm, F-Log Data Sheet (Ver. 1.0 / 1.1 / 1.2 — identical constants)",
+      evidence:
+        "All eight constants confirmed against the data sheet. The ~1.3e-2 join discontinuity is the " +
+        "SPEC's, not a transcription error, reversing this entry's earlier verdict: encode branches on " +
+        "cut1 = 0.00089 in LINEAR space, decode on cut2 = 0.100537775223865 in CODE space, and " +
+        "e·cut1 + f = 0.1006387 ≠ cut2. Our one genuine bug was using the derived threshold instead of " +
+        "the published cut2 — fixed. Reproduced as published rather than corrected, so this agrees with " +
+        "every other data-sheet implementation."
     }
   },
   hlg: {
