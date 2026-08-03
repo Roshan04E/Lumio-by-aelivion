@@ -89,6 +89,79 @@ export interface ResourceRecord {
   readonly id: string;
   /** `performance.now()`-domain wall clock of the last use. The ONLY input to the idle sweep. */
   lastUsedAt: number;
+  /**
+   * Which INCARNATION of this key is live (ADR-012 I-17/I-9, slice S5.2).
+   *
+   * A key is reused: a grade renderer for layer `x` is disposed on resize and a new one is created
+   * under the same key moments later. Identity alone therefore cannot answer "is the thing I was
+   * handed still the thing that exists?" — which is why a stale `SceneTextureSource` is currently
+   * prevented only by statement ordering, and why nothing detects it when the ordering is wrong.
+   *
+   * Monotonic per key, and it survives forgetting: {@link forgetResource} keeps the counter so a key
+   * re-registered later cannot re-issue a generation that an outstanding handle still matches. A
+   * counter that reset on delete would make the dangerous case — dispose, recreate, sample the old
+   * handle — the one case it failed to catch.
+   */
+  readonly generation: number;
+}
+
+/**
+ * A reference to a resource that can be CHECKED, unlike a device pointer (slice S5.2).
+ *
+ * The point is what it deliberately does not carry: no `WebGLTexture`, no buffer, nothing the holder
+ * could use without asking first. A holder must resolve it, and resolution can fail — which is what
+ * turns use-after-dispose from an invisible corruption into a declared, countable event (I-29).
+ *
+ * The kernel issues and validates these but never stores the device object itself; that stays with the
+ * host pool, because a kernel that held a `WebGLTexture` would be a kernel that imports a rendering
+ * API (I-36). Liveness accounting here, pixels there.
+ */
+export interface ResourceHandle {
+  readonly key: string;
+  readonly generation: number;
+}
+
+/** Why a handle failed to resolve. `missing` = never registered or forgotten; `stale` = superseded. */
+export type HandleFailure = "missing" | "stale";
+
+let staleHandleResolves = 0;
+
+/**
+ * Is this handle still the live incarnation of its key?
+ *
+ * Returns the failure REASON rather than a bare false (I-35), because the two causes are different
+ * bugs: `missing` is a lifetime that ended under the holder, `stale` is a key that was rebuilt while
+ * the holder kept the old reference. Hot path — one map lookup, no allocation on success.
+ */
+export function checkHandle(session: RuntimeSession, handle: ResourceHandle): HandleFailure | null {
+  const record = tables.get(session)?.get(handle.key);
+  if (record === undefined) return "missing";
+  if (record.generation !== handle.generation) return "stale";
+  return null;
+}
+
+/**
+ * Record that a holder tried to use a superseded resource, and say which.
+ *
+ * Counted unconditionally while the DETAIL is diagnostics-gated (R1): the count is the census that
+ * says whether I-17 is actually satisfied in the field, and a census that only runs when someone is
+ * watching cannot answer that. The attribution costs an object, so it pays only when asked for.
+ */
+export function noteStaleHandle(session: RuntimeSession, handle: ResourceHandle, failure: HandleFailure): void {
+  staleHandleResolves += 1;
+  if (!kernelDiagnostics.enabled) return;
+  kernelDiagnostics.record({
+    kind: "degradation",
+    severity: "warn",
+    subject: { kind: "runtime" },
+    reason: `handle-${failure}`,
+    detail: { key: handle.key, generation: handle.generation },
+  });
+}
+
+/** Handles that resolved to nothing since process start. **Non-zero is the finding** (I-17). */
+export function staleHandleCount(): number {
+  return staleHandleResolves;
 }
 
 /** A record plus its registry key, handed back by the sweep. */
@@ -106,6 +179,20 @@ export interface ReclaimableResource extends ResourceRecord {
  * `WeakMap` keyed on the session — session-scoped without being state.
  */
 const tables = new WeakMap<RuntimeSession, Map<string, ResourceRecord>>();
+
+/**
+ * Highest generation ever issued per key — kept SEPARATELY from the record table, and outliving it.
+ *
+ * The record dies with {@link forgetResource}; this does not. That asymmetry is the whole mechanism:
+ * dispose → recreate under the same key → sample a handle taken before the dispose is precisely the
+ * use-after-dispose S5.2 exists to catch, and a counter stored on the record would have been deleted
+ * by the dispose and reissued the same number to the new incarnation. The stale handle would then
+ * validate cleanly against the resource that replaced it, which is worse than no check at all.
+ *
+ * Unbounded in principle, bounded in practice by the key space (pool keys, not per-frame values), and
+ * it holds numbers rather than resources — so it pins nothing.
+ */
+const generations = new WeakMap<RuntimeSession, Map<string, number>>();
 
 function tableOf(session: RuntimeSession): Map<string, ResourceRecord> {
   let table = tables.get(session);
@@ -129,14 +216,26 @@ export function registerResource(
   key: string,
   entry: { scope: ResourceScope; kind: string; id: string },
   at: number
-): void {
+): ResourceHandle {
   const table = tableOf(session);
   const existing = table.get(key);
   if (existing) {
     existing.lastUsedAt = at;
-    return;
+    // Same incarnation: re-registering an existing key is a touch, so the handle a caller already
+    // holds must stay valid. Bumping here would invalidate live handles on an idempotent call.
+    return { key, generation: existing.generation };
   }
-  table.set(key, { scope: entry.scope, kind: entry.kind, id: entry.id, lastUsedAt: at });
+  // A key absent from the table is a NEW incarnation, whether it was never registered or was
+  // forgotten. `generations` is the memory that outlives the record — see the note on its declaration.
+  const generation = (generations.get(session)?.get(key) ?? 0) + 1;
+  let seen = generations.get(session);
+  if (!seen) {
+    seen = new Map<string, number>();
+    generations.set(session, seen);
+  }
+  seen.set(key, generation);
+  table.set(key, { scope: entry.scope, kind: entry.kind, id: entry.id, lastUsedAt: at, generation });
+  return { key, generation };
 }
 
 /**
@@ -259,6 +358,11 @@ export function resourceLedger(session: RuntimeSession, at: number): ResourceLed
 /** Test-support: drop every record for a session, and reset the process-wide reclaim counters. */
 export function __resetResourceManager(session: RuntimeSession): void {
   tables.delete(session);
+  // Generations too, so a harness gets a clean numbering. Test-only: dropping this in production is
+  // what the counter's whole design forbids, since it would let a rebuilt key reissue a live handle's
+  // generation. Safe here because a reset session has no outstanding handles by construction.
+  generations.delete(session);
   reclaimedTotal = 0;
   reclaimedWhileUnpresented = 0;
+  staleHandleResolves = 0;
 }

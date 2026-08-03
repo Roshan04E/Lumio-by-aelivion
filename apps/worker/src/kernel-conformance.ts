@@ -75,7 +75,10 @@ import {
   noteDecoderSessionOpened,
   RESOURCE_IDLE_MS,
   __resetResourceManager,
+  checkHandle,
   collectIdleResources,
+  noteStaleHandle,
+  staleHandleCount,
   forgetResource,
   registerResource,
   resourceLedger,
@@ -1150,6 +1153,42 @@ console.log("\nS3.4 — derived resource ownership and reclamation (I-8/I-33)");
   // second reclamation policy rather than a backstop for the first — which is regression G5.
   enforced("I-33", "a session whose resources are all in use sweeps nothing",
     collectIdleResources(session, T_LATE, RESOURCE_IDLE_MS, true) === null);
+
+  // ── S5.2 — HANDLES WITH GENERATIONS (I-17/I-9) ──────────────────────────────────────────────────
+  // A device pointer cannot answer "are you still the thing that exists?", so today only statement
+  // ordering keeps the `SceneTextureSource` path from sampling a disposed texture — and nothing
+  // notices when the ordering is wrong. A handle can be asked.
+  __resetResourceManager(session);
+  const h1 = registerResource(session, "grade/gen", { scope: "live", kind: "grade-renderer", id: "gen" }, T0);
+  enforced("I-9", "a live handle resolves", checkHandle(session, h1) === null);
+
+  // Idempotent re-registration is a TOUCH, so a handle a caller already holds must survive it.
+  // Bumping here would invalidate live handles on the most common call in the system.
+  const h1again = registerResource(session, "grade/gen", { scope: "live", kind: "grade-renderer", id: "gen" }, T0);
+  enforced("I-9", "re-registering the same key is a touch, not a new incarnation",
+    h1again.generation === h1.generation && checkHandle(session, h1) === null);
+
+  // THE CASE THE SLICE EXISTS FOR: dispose, recreate under the SAME key, then sample a handle taken
+  // before the dispose. A generation stored on the record would have died with it and reissued the
+  // same number — the stale handle would validate against the resource that replaced it, which is
+  // worse than no check at all. The counter therefore outlives the record.
+  forgetResource(session, "grade/gen");
+  enforced("I-9", "a forgotten key reports MISSING, not merely false",
+    checkHandle(session, h1) === "missing");
+  const h2 = registerResource(session, "grade/gen", { scope: "live", kind: "grade-renderer", id: "gen" }, T0);
+  enforced("I-17", "a rebuilt key does NOT reissue the disposed incarnation's generation",
+    h2.generation > h1.generation);
+  enforced("I-17", "…so the pre-dispose handle reports STALE against its replacement",
+    checkHandle(session, h1) === "stale" && checkHandle(session, h2) === null);
+
+  // I-35: the failure says WHICH, because the two are different bugs — `missing` is a lifetime that
+  // ended under the holder, `stale` is a key rebuilt while the holder kept the old reference.
+  const before = staleHandleCount();
+  noteStaleHandle(session, h1, "stale");
+  enforced("I-29", "a stale resolve is counted, so I-17 has a field census",
+    staleHandleCount() === before + 1);
+  enforced("I-29", "…and attributed to the key that was superseded",
+    kernelDiagnostics.events({ kind: "degradation" }).some((e) => e.reason === "handle-stale"));
 
   __resetResourceManager(session);
   session.dispose();
