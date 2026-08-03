@@ -49,6 +49,7 @@
 
 import {
   DECODER_RETENTION_MS,
+  kernelDiagnostics,
   defaultSession,
   noteAdmissionDenied,
   rankAdmission,
@@ -1190,6 +1191,12 @@ function reportAdmissionDenial(
   priority: WcLeasePriority,
   contribution: VisibleContribution | undefined
 ): void {
+  // R1, and this one is mine: `rankAdmission` allocates a candidate array and sorts it, so the guard
+  // inside `noteAdmissionDenied` is too late — the work is already done by the time it returns. A cap
+  // miss is not a hot path, but the rule is that instrumentation costs nothing when off, not that it
+  // costs little somewhere unimportant. `admissionDenials` is therefore a diagnostics-only figure and
+  // reads 0 with diagnostics disabled; `capMisses` is the unconditional counter beside it.
+  if (!kernelDiagnostics.enabled) return;
   const now = nowMs();
   const candidates: AdmissionCandidate[] = [];
   for (const record of activeLeases) {

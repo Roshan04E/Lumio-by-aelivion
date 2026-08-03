@@ -307,6 +307,13 @@ export function noteBorrowGrant(
     grounds: BorrowGrounds;
   }
 ): void {
+  // R1 — the instrument must not be the thing being measured. Everything below allocates: a record
+  // object plus a COPY of the ring on every borrow, on the acquire path. `kernelDiagnostics.record`
+  // checks `enabled` itself, but only after the caller has already paid for the payload, so the check
+  // belongs here. The COUNTERS beside this (satisfactionMisses, session open/close) deliberately stay
+  // ungated: they are the evidence a soak is judged on, and evidence that disappears when observation
+  // is turned off is not evidence.
+  if (!kernelDiagnostics.enabled) return;
   const record: BorrowGrant = {
     key: grant.key,
     // Not inferred, not defaulted, not back-filled from the incumbent. See BorrowTimeUnavailable.
@@ -449,6 +456,9 @@ export function noteBorrowRefused(
   session: RuntimeSession,
   refusal: { key: string; verdict: SatisfactionVerdict; joinerPriority: string; incumbentPriority: string }
 ): void {
+  // R1, same reasoning as `noteBorrowGrant`: the record and the ring copy are both allocations on a
+  // path that runs per acquire.
+  if (!kernelDiagnostics.enabled) return;
   const prev = session.state.get<readonly BorrowRefusal[]>(KEY_REFUSALS, []);
   const record: BorrowRefusal = {
     key: refusal.key,

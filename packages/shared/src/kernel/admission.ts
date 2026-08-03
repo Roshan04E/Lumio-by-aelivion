@@ -306,6 +306,9 @@ const MAX_DENIAL_RECORDS = 64;
  * be the thing being measured).
  */
 export function noteAdmissionDenied(session: RuntimeSession, denial: AdmissionDenial): void {
+  // R1: the ring copy below is an allocation on the cap-miss path. `kernelDiagnostics.record` gates
+  // itself, but only after the payload is built, so the check has to be here to be worth anything.
+  if (!kernelDiagnostics.enabled) return;
   const prev = session.state.get<AdmissionDenial[]>(KEY_DENIALS, []);
   session.state.set(
     KEY_DENIALS,
