@@ -114,6 +114,17 @@ interface SourceSample {
   why: string | null;
   wcProvider: boolean;
   wcBusy: boolean;
+  /**
+   * The two fields that MOVE every composite, carried so the liveness test has something to test.
+   *
+   * Without them the freshness fingerprint was built from `decode`/`state`/`why`/`wcProvider` alone —
+   * all of which a healthy source holds constant for seconds at a time — so a source decoding at 30fps
+   * reported `graded 4/36`. The fix for a instrument that counted corpses cannot itself be blind to the
+   * living: `served` advances with every delivered frame and `staleMs` is recomputed against the moving
+   * playhead, so a row being written is a row where at least one of these two differs.
+   */
+  served: number | null;
+  staleMs: number | null;
 }
 
 interface ArmResult {
@@ -243,6 +254,8 @@ async function sampleArm(page: Page, name: string, seekLeadSeconds: number | nul
             why: row?.why == null ? null : String(row.why),
             wcProvider: !!row?.wcProvider,
             wcBusy: !!row?.wcBusy,
+            served: typeof row?.served === "number" ? row.served : null,
+            staleMs: typeof row?.staleMs === "number" ? row.staleMs : null,
           })
         ),
       };

@@ -50,6 +50,10 @@
 import {
   DECODER_RETENTION_MS,
   defaultSession,
+  noteAdmissionDenied,
+  rankAdmission,
+  type AdmissionCandidate,
+  type VisibleContribution,
   noteBorrowGrant,
   noteBorrowRefused,
   noteSatisfactionMiss,
@@ -282,6 +286,23 @@ export interface AcquireOptions {
    * satisfaction flag is off.
    */
   requestedTime?: number | undefined;
+  /**
+   * What this consumer contributes to the picture — **declared merit** (ADR-012 §6.3, slice S4.3).
+   *
+   * Admission ranks by visible contribution rather than by arrival, because arrival is a React
+   * scheduling artifact: whichever MediaIn mounts first wins a hardware slot today, so which source
+   * looks broken can differ between two runs of one project.
+   *
+   * Optional for the same reason `requestedTime` is, and with the OPPOSITE default. An undeclared
+   * borrow is refused (a lost share is cheap and visible); an undeclared *admission* is ranked at
+   * {@link UNDECLARED_RANK} — above provably-invisible, below provably-visible — because refusing here
+   * would deny a decoder outright and turn a missing call site into a black picture.
+   *
+   * NOTE what must NOT be passed as zero contribution: a `hidden` pre-roll shell (it is about to be on
+   * screen and denying it defeats pre-roll) and a `suspended`/demoted source (I-24 — a presentation
+   * policy must not change resource lifetime; demotion suspends the PULL, never the session).
+   */
+  contribution?: VisibleContribution | undefined;
 }
 
 interface IdleEntry {
@@ -304,6 +325,12 @@ interface LeaseRecord {
   priority: WcLeasePriority;
   acquiredAt: number;
   software: boolean;
+  /**
+   * What this lease declared it contributes to the picture (S4.3). Absent when the producer could not
+   * say — see {@link AcquireOptions.contribution}; absent is NOT zero, and the kernel ranks it as
+   * undeclared rather than as worthless.
+   */
+  contribution?: VisibleContribution | undefined;
   preempt(): void;
 }
 
@@ -315,6 +342,12 @@ let reused = 0;
 let created = 0;
 let createdSoftware = 0;
 let capMisses = 0;
+/**
+ * Denials RANKED and recorded (S4.3). Read beside `capMisses`, never instead of it: `capMisses` counts
+ * the times a caller fell back, this counts the times the kernel could say who should have lost. They
+ * differ while producers have not all declared a contribution, and that difference is the wiring gap.
+ */
+let admissionDenialCount = 0;
 let initFailures = 0;
 let preemptions = 0;
 let shared = 0;
@@ -1004,7 +1037,8 @@ function createSession(
   key: string,
   software: boolean,
   priority: WcLeasePriority,
-  warm: FrameProvider | null
+  warm: FrameProvider | null,
+  contribution?: VisibleContribution | undefined
 ): SharedSession {
   // `record.preempt` and the init `.then` both close over `session`, so those two fields can only be
   // assigned after the object exists. The cast buys that one cycle and nothing else.
@@ -1025,6 +1059,10 @@ function createSession(
     priority,
     acquiredAt: Date.now(),
     software,
+    // Carried so a LATER cap miss can rank this incumbent against the newcomer. Admission compares a
+    // request against the sessions actually held, and an incumbent whose merit was thrown away at
+    // acquire time can only ever be ranked as undeclared.
+    contribution,
     preempt() {
       if (session.torn) return;
       preemptions += 1;
@@ -1131,6 +1169,45 @@ function reserveSession(software: boolean, priority: WcLeasePriority): boolean {
   return true;
 }
 
+/**
+ * Rank the request that just missed the cap against the incumbents holding the slots, and RECORD the
+ * denial (ADR-012 §6.12 — exceeding a budget is reported and the excess attributed).
+ *
+ * Deliberately returns nothing. Admission is being made observable one commit before it is made
+ * authoritative, so the very first thing anyone sees from S4.3 is evidence gathered while behaviour is
+ * still byte-identical to today's. If the ranking is wrong, it is wrong in a log rather than in the
+ * picture — and the programme has now twice paid for a decision input that turned out not to exist at
+ * the decision point (S3.3's joiner time, S4.7's `requestedTime`), which is precisely the class of
+ * mistake this ordering surfaces for free.
+ *
+ * First-request time is `acquiredAt` for incumbents and now for the newcomer, so aging cannot yet lift a
+ * source that has been retrying for seconds — a lease that failed left no record to age. That gap is
+ * real and belongs to the authoritative half, where a denied candidate has to persist to be re-ranked.
+ */
+function reportAdmissionDenial(
+  url: string,
+  software: boolean,
+  priority: WcLeasePriority,
+  contribution: VisibleContribution | undefined
+): void {
+  const now = nowMs();
+  const candidates: AdmissionCandidate[] = [];
+  for (const record of activeLeases) {
+    if (record.software !== software) continue;
+    candidates.push({
+      key: record.url,
+      priority: record.priority,
+      contribution: record.contribution,
+      firstRequestedAtMs: record.acquiredAt,
+      admittedAtMs: record.acquiredAt,
+    });
+  }
+  candidates.push({ key: url, priority, contribution, firstRequestedAtMs: now, admittedAtMs: null });
+  const decision = rankAdmission(candidates, sessionCap(software), now);
+  for (const denial of decision.denied) noteAdmissionDenied(defaultSession, denial);
+  admissionDenialCount += decision.denied.length;
+}
+
 function oldestPreloadLease(software: boolean): LeaseRecord | null {
   let oldest: LeaseRecord | null = null;
   for (const record of activeLeases) {
@@ -1225,6 +1302,12 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
     if (!reserveSession(software, priority)) {
       capMisses += 1;
       traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
+      // S4.3, OBSERVABILITY HALF (behaviour-neutral). Who lost, and to what — `capMisses` is a number
+      // with no subject, and "the fourth MediaIn never gets a decoder" and "the fourth MediaIn is denied
+      // at rank 5 of 8 behind three fully-occluded sources" are the same defect with and without a
+      // diagnosis. Ranking runs here but decides NOTHING: the caller still falls back exactly as before,
+      // so this can be read in the product before the switch is ever flipped ("instrument before switch").
+      reportAdmissionDenial(url, software, priority, options.contribution);
       return null;
     }
   }
@@ -1241,7 +1324,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   // skipped on that path.
   noteDecoderSessionOpened(defaultSession, url);
 
-  const session = createSession(url, software, priority, warm);
+  const session = createSession(url, software, priority, warm, options.contribution);
   // Unshareable in BOTH directions: skipping the join above only stops this consumer taking someone
   // else's session, and would leave the host free to attach to THIS one on its next acquire — the same
   // divergence, arrived at from the other side.
@@ -1347,6 +1430,12 @@ export interface WcPoolStats {
    * too-strict predicate this slice names as its own risk, spending the sessions sharing exists to save.
    */
   borrowRefusals: number;
+  /**
+   * Cap misses that admission could ATTRIBUTE (S4.3). Behaviour-neutral today: ranking runs, records who
+   * should have lost, and changes nothing about who actually did. A gap between this and `capMisses`
+   * means producers are still not declaring — the wiring, measurable rather than assumed.
+   */
+  admissionDenials: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1370,6 +1459,7 @@ export function getWcPoolStats(): WcPoolStats {
     retentionExpiries,
     retentionOverrides,
     borrowRefusals,
+    admissionDenials: admissionDenialCount,
     shared,
     sharedActive,
     shareDetaches,
