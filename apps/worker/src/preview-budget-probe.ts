@@ -70,7 +70,12 @@ const ARM_SETS: Record<string, { name: string; flags: string }[]> = {
 // so a finding that survives both orders is the flag and one that flips is the ordering.
 const ARMS = (() => {
   const set = ARM_SETS[process.env.PROBE_ARMS ?? "demotion"] ?? ARM_SETS.demotion!;
-  return process.env.PROBE_REVERSE === "1" ? [...set].reverse() : set;
+  // PROBE_EXTRA_FLAGS is appended to EVERY arm, so it varies the environment both arms share rather
+  // than the variable under test. `wcDecode=1` is the expected use: S4.7's subsystem does not exist
+  // on the element path, and an arm pair measured with it off compares two absences.
+  const extra = process.env.PROBE_EXTRA_FLAGS;
+  const withExtra = extra ? set.map((arm) => ({ ...arm, flags: `${arm.flags}&${extra}` })) : set;
+  return process.env.PROBE_REVERSE === "1" ? [...withExtra].reverse() : withExtra;
 })();
 
 interface Sample {
@@ -575,10 +580,35 @@ async function main(): Promise<void> {
   // near the state, not that the state is fixed. The asymmetry IS the evidence, so say so when it is
   // missing rather than printing two tidy zeroes and calling it a pass.
   if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
+    // FIFTH way, and it precedes all the others: the WebCodecs path can be off entirely. S4.7 governs
+    // WebCodecs SESSION sharing — `findAttachableSession`, `SharedMember`, `noteDivergence`. On the
+    // `<video>` element path there are no sessions to share, so `shared 0 · refusals 0` is not a strict
+    // predicate, it is an absent subsystem. The 2026-08-03 run that prompted this check read
+    // `decode element` on all four sources in both arms and still produced numbers tidy enough to
+    // argue about for an hour.
+    //
+    // Checked BEFORE the detach/refusal guard because it explains that guard's own failure: a path
+    // that is off cannot detach or refuse either, so the symptom test cannot distinguish "fixed" from
+    // "never ran". Two recorded freeze post-mortems already say to read the decode mode first.
+    const allSources = results.flatMap((r) => r.samples.flatMap((s) => s.sources ?? []));
+    const wcSeen = allSources.some((src) => src.wcProvider === true);
+    const wcUnreported = allSources.length > 0 && allSources.every((src) => src.wcProvider === null);
+    if (!wcSeen) {
+      const why = wcUnreported
+        ? "No source reported wcProvider at all (this build does not publish it)."
+        : "Every source decoded through the <video> element path.";
+      console.log(
+        "\n[budget] ⚠ VOID for the S4.7 done-when — the WebCodecs path was never engaged.\n" +
+          `         ${why}\n` +
+          "         S4.7 guards WebCodecs session sharing, so there was nothing for it to guard.\n" +
+          "         Re-run with PROBE_EXTRA_FLAGS=wcDecode=1 before reading any sharing number\n" +
+          "         below as evidence about the predicate."
+      );
+    }
     const engaged = results.some(
       (r) => (Number(r.pool?.shareDetaches ?? 0) > 0) || (Number(r.pool?.borrowRefusals ?? 0) > 0)
     );
-    if (!engaged) {
+    if (!engaged && wcSeen) {
       console.log(
         "\n[budget] ⚠ VOID for the S4.7 done-when — no arm ever detached OR refused a borrow.\n" +
           "         The flag-OFF arm is supposed to reproduce the harm; it did not, so zero divergence\n" +
