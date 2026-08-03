@@ -293,6 +293,77 @@ async function main(): Promise<void> {
       };
 
       /**
+       * A CHEAP shared subtree — the scenario that decides `MATERIALIZE_MIN_PASSES`, and the one the
+       * suite was missing.
+       *
+       * `shouldMaterialize` is `fanout>1 ∧ estimateDrawCost >= MATERIALIZE_MIN_PASSES`, so thresholds 1
+       * and 2 differ on exactly one input: a shared subtree costing exactly 1 pass. Nothing else here
+       * produces that. `sharedExpensiveComp` is far above it, and `fanout-8` shares a bare MediaIn whose
+       * draw is not a group at all (cost 0, below both). Measured against those two alone the threshold
+       * is unfalsifiable — every value in {1,2} yields byte-identical behaviour.
+       *
+       * One colour node is cost 1: it opens a nest (the group's own composite) and adds no fragment or
+       * region pass. It fans out to N merge consumers, so without materialization that nest is re-run per
+       * consumer, and with it, it is rendered once. That is the whole question S6.3 reopens — tagging
+       * removed the extra wrap the old threshold was pricing, so the break-even may have moved.
+       */
+      const sharedCheapComp = (id: string, consumers: number) => {
+        const comp = createFlarexComp(id, "SharedCheap");
+        const shared = `${id}_cc`;
+        const node = createFlarexNode("colorCorrect", shared);
+        node.params = { ...node.params, exposure: 18, saturation: 128 };
+        comp.nodes[shared] = node;
+        comp.edges.push({ id: "sc_in", from: { nodeId: `${id}_in`, socket: "out" }, to: { nodeId: shared, socket: "in" } });
+        let prevMerge: string | null = null;
+        for (let c = 0; c < consumers; c++) {
+          const mg = `${id}_m${c}`;
+          comp.nodes[mg] = createFlarexNode("merge", mg);
+          comp.edges.push({ id: `scb${c}`, from: { nodeId: prevMerge ?? shared, socket: "out" }, to: { nodeId: mg, socket: "bg" } });
+          comp.edges.push({ id: `scf${c}`, from: { nodeId: shared, socket: "out" }, to: { nodeId: mg, socket: "fg" } });
+          prevMerge = mg;
+        }
+        comp.edges = comp.edges.filter((e: FlarexEdgeLike) => e.to.nodeId !== `${id}_out`);
+        comp.edges.push({ id: "sco", from: { nodeId: prevMerge!, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } });
+        return { comp, nodes: consumers + 3 };
+      };
+
+      /**
+       * The same cheap shared node, but reached at DIFFERENT TIMES — materialization's worst case, and
+       * the counterweight to `shared-cheap-1x8`.
+       *
+       * `shouldMaterialize` gates on `fanout > 1`, which counts graph EDGES, not distinct evaluation
+       * contexts. Put a retime on each branch and the shared node is evaluated once per branch at its own
+       * time: the memo keys differ (correctly — ADR-011 §2), so it is sealed once PER BRANCH. Every render
+       * target is allocated and nothing is deduped. Lowering the threshold widens the set of nodes that
+       * can land here, so the threshold cannot be chosen from the favourable shape alone.
+       */
+      const sharedCheapRetimedComp = (id: string, consumers: number) => {
+        const comp = createFlarexComp(id, "SharedCheapRetimed");
+        const shared = `${id}_cc`;
+        const node = createFlarexNode("colorCorrect", shared);
+        node.params = { ...node.params, exposure: 18, saturation: 128 };
+        comp.nodes[shared] = node;
+        comp.edges.push({ id: "scr_in", from: { nodeId: `${id}_in`, socket: "out" }, to: { nodeId: shared, socket: "in" } });
+        let prevMerge: string | null = null;
+        for (let c = 0; c < consumers; c++) {
+          // A distinct speed per branch, so every consumer reaches `shared` at its own time.
+          const ts = `${id}_t${c}`;
+          const tsNode = createFlarexNode("timeSpeed", ts);
+          tsNode.params = { ...tsNode.params, speed: 0.5 + c * 0.25 };
+          comp.nodes[ts] = tsNode;
+          comp.edges.push({ id: `scrt${c}`, from: { nodeId: shared, socket: "out" }, to: { nodeId: ts, socket: "in" } });
+          const mg = `${id}_m${c}`;
+          comp.nodes[mg] = createFlarexNode("merge", mg);
+          comp.edges.push({ id: `scrb${c}`, from: { nodeId: prevMerge ?? ts, socket: "out" }, to: { nodeId: mg, socket: "bg" } });
+          comp.edges.push({ id: `scrf${c}`, from: { nodeId: ts, socket: "out" }, to: { nodeId: mg, socket: "fg" } });
+          prevMerge = mg;
+        }
+        comp.edges = comp.edges.filter((e: FlarexEdgeLike) => e.to.nodeId !== `${id}_out`);
+        comp.edges.push({ id: "scro", from: { nodeId: prevMerge!, socket: "out" }, to: { nodeId: `${id}_out`, socket: "in" } });
+        return { comp, nodes: consumers * 2 + 3 };
+      };
+
+      /**
        * Colour-chain A/B — what pipeline coalescing actually buys, measured rather than asserted.
        *
        * Both arms do the SAME amount of grading work; they differ only in whether the compiler is allowed
@@ -348,6 +419,12 @@ async function main(): Promise<void> {
       run("chain-40", chainComp("p3", 40), { width: 1920, height: 1080, renderScale: 1 });
       // The shape the cache exists for: one costly stack consumed many times.
       run("shared-expensive-6x8", sharedExpensiveComp("p5", 6, 8), { width: 1920, height: 1080, renderScale: 1 });
+      // The threshold's deciding shape: a cost-1 shared subtree, the only input on which
+      // MATERIALIZE_MIN_PASSES 1 and 2 disagree. At 4K for the same reason the colour chain is —
+      // one render target per nest is under the noise floor at 1080p on a desktop GPU.
+      run("shared-cheap-1x8", sharedCheapComp("p6", 8), { width: 3840, height: 2160, renderScale: 1 });
+      // …and its worst case: the same shape with a retime per branch, where materialization dedupes nothing.
+      run("shared-cheap-retimed-1x8", sharedCheapRetimedComp("p7", 8), { width: 3840, height: 2160, renderScale: 1 });
       // The roadmap's committed Phase 2 target.
       run("heavy-100-at-half", fanoutComp("p4", 49), { width: 1920, height: 1080, renderScale: 0.5 });
       return scenarios;
