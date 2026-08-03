@@ -5,6 +5,9 @@
  */
 export * from "./types";
 export * from "./color-management";
+// Stage 2a input transforms. Exported so Stage 3 can find them; NOTHING consumes them in a renderer
+// yet, and most carry verification: "spec-pending" — see plans/log-raw-source-color.md before wiring.
+export * from "./input-transform";
 export * from "./curve";
 export * from "./wheels";
 export * from "./hsl";

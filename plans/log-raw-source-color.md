@@ -87,6 +87,10 @@ honest warning shown today. **Hence Stage 0 is a prerequisite, not an optimisati
 
 **Renamed from "10-bit precision" — the old title claimed something this stage does not deliver.**
 
+> **Stage 0 preserves precision DURING PROCESSING. It does not preserve SOURCE precision.**
+> Every contributor who reads "10-bit pipeline" assumes the opposite, including the person who wrote
+> that title. See the correction below before building on this stage.
+
 **Goal:** float render targets so a log→linear stretch has headroom, without regressing the 8-bit path.
 
 **Correction (review 2026-08-03): Stage 0 does NOT preserve source bit depth, and the plan should never
@@ -219,8 +223,17 @@ interface InputTransferDefinition {
   // kinks) while its CONSTANTS remain unchecked against the vendor document, which is exactly the
   // state Stage 2a lands in.
   implementation: "stub" | "implemented";
-  verification: "unverified" | "self-consistent" | "spec-checked";
+  verification: TransferVerification;
 }
+
+// "unverified" was the wrong word — it reads as "probably wrong", when the real state is "implemented,
+// internally tested, awaiting comparison against the authoritative document". Provenance is part of the
+// SHAPE rather than a convention: you cannot claim spec-checked without naming the document and its
+// revision, because in five years someone will ask why a constant is 0.241514 and not 0.24151, and the
+// answer has to be traceable to a specific revision or they will re-audit it from scratch.
+type TransferVerification =
+  | { status: "spec-pending" }
+  | { status: "spec-checked"; document: string; revision: string; checkedBy: string };
 ```
 
 `fromLinear` is not needed by the renderer. It exists because a round-trip test is the only check that
@@ -285,6 +298,50 @@ until someone wires it. That is the point — the math gets to be reviewed befor
 (both are open standards I am confident in and can state exactly), and hold the camera-log formats until
 the vendor PDFs can be checked. Smaller, fully trustworthy, but it covers the *least* interesting case —
 Apple Log on an iPhone is the footage this whole plan exists for.
+
+### Stage 2a — SHIPPED 2026-08-03 (`input-transform.ts`, `idt:test`)
+
+Landed dormant as designed: exported from the color barrel so Stage 3 can find it, **zero renderer call
+sites**, 7 of 11 spaces at `verification: "spec-pending"`.
+
+**The continuity test paid for itself immediately.** It is not a structural check — these curves are
+published as a toe and a log segment *fitted to meet*, so a mistyped coefficient makes the branches part
+at the join. Results:
+
+| Format | Relative jump at join | Reading |
+|---|---|---|
+| Apple Log | 1.19e-8 | branches meet — constants mutually consistent |
+| S-Log3 | 3.04e-8 | ” |
+| LogC4 | 1.26e-8 | ” |
+| HLG | 6.12e-9 | ” |
+| LogC3 | 4.44e-6 | ” |
+| V-Log | 5.59e-6 | ” |
+| D-Log | 4.33e-5 | ” |
+| **F-Log** | **1.34e-2** | **branches DISAGREE — at least one constant is wrong** |
+
+**F-Log is the one real finding.** Its published inverse cut is `0.100537775`, but `e·cut1 + f` computes
+`0.1006387` from the constants as written here. Those must be the same number. So one of `{e, f, cut1}`
+is wrong, and **F-Log is the first format to check against its data sheet.** The curve is still usable —
+the error is confined to a sliver either side of near-black — but it is knowingly imperfect and the test
+says so on every run rather than hiding behind a widened tolerance.
+
+**Independent corroboration for three formats.** 18% grey was derived from each curve, then compared to
+the greys those formats are *known* to publish: **S-Log3 0.4106** (Sony states code 420/1023 = 0.41056 —
+exact), **V-Log 0.4233** (Panasonic publishes 42.3% IRE), **LogC3 0.3910** (ARRI publishes ~39.1%). Three
+constants sets landing on their published grey points is real evidence, arrived at from the curve rather
+than asserted. It does not clear them for wiring, but it moves them from "memory" to "corroborated".
+
+**Two test bugs found and fixed, both worth recording** — they were wrong *assumptions about log*, not
+slips:
+
+1. *"A log curve decodes code 0.5 to below 0.5."* False. LogC3 gives 0.5134 and LogC4 gives 2.2050, both
+   correct: where code 0.5 sits relative to 18% grey is per-format (LogC3 puts grey at 0.391, LogC4 at
+   0.278), so a format with more range above grey legitimately decodes 0.5 higher. **Scene-linear above
+   1.0 is the expected result of a log decode, not a bug** — that headroom is what log buys. Replaced
+   with the actual signature: highlights above diffuse white (code 1.0 → 7× to 470×), and convexity
+   above grey.
+2. *PQ was asserted continuous "at its join".* ST 2084 has no join — it is one smooth expression. The
+   test was measuring the curve's own slope across its sampling interval, i.e. its own step size.
 
 ### Not in Stage 2a
 
