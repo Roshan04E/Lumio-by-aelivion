@@ -2814,3 +2814,47 @@ effect, so the *counters* are evidence and the *frame budget* is not yet.
 **Rule.** A fixture must be checked for whether it can *express* the defect, not just whether it runs.
 Both failures here produced plausible, healthy-looking numbers — `shared 5`, `detaches 0` — from an
 arrangement in which the measured quantity could not have been non-zero.
+
+## v34a — the decoder is not contended, it is ABSENT (2026-08-03)
+
+**Context.** v34's corrected fixture made S4.7's asymmetry visible. It also made something larger
+visible, which was not what anyone was looking for.
+
+**The number that redirected the programme.** `mediaFps` across four *identical* runs of one project,
+same machine, minutes apart: **45.7 · 27.1 · 8.0 · 1.7**. The compositor held 60–70fps throughout. Decode
+collapsed 25× run to run while the picture kept repainting — which is exactly the user's report ("FPS 37,
+Media ~50, freeze-play, struggling very hard"), reproducing on demand for the first time.
+
+The budget probe could not say why, because it kept `served` from `__rfSourceMap` and discarded every
+field beside it. Decode path, supply state and await reason were already published per composite. The
+answer was in the page and not in the report.
+
+**Per-source, one arm (10s, 35 samples):**
+
+| source | decode | state | wcProvider |
+|---|---|---|---|
+| A | `element` | stale 97–100% | **0%** |
+| B | `wc-hw`/`element` | stale 60% · AWAITING 24% · ok 14% | **23%** |
+
+**What this rules out.** The working assumption behind ADR-012 Phase 4 — S4.3 admission, S4.4–S4.6
+readiness — is that consumers *compete* for a scarce decoder. Source B has no provider for 77% of
+playback and source A never gets one at all. **A slice that arbitrates contention cannot help a source
+with no session to contend for.** S4.3 remains a real architectural slice; it is unlikely to move this
+symptom.
+
+**One honest deduction about the evidence.** `wcBusy 0%` was initially reported as independent
+confirmation that the decoder is not saturated. It is not independent: `awaitReason` is assigned
+`wcBusy ? "WC_DECODE_IN_FLIGHT" : "WC_NO_FRAME"`, so `WC_NO_FRAME 24%` and `wcBusy 0%` are one
+measurement stated twice. The finding rests on `wcProvider 23%` and `decode element`, which are
+separate fields and do stand alone.
+
+**Correction to v34.** A fourth run had the flag-**ON** arm detach once (`detaches 1 · refusals 2`).
+S4.7's done-when ("zero divergence firings across a soak") is therefore met in **3 of 4** runs, not
+uniformly. The predicate reduces detaches; it has not been shown to eliminate them. The flag stays off.
+
+**Direction (agreed with the user, 2026-08-03).** ADR-012 fixes decoder *correctness*; this is decoder
+*availability*, and they are different problems. Finish ADR-012 cleanly, keep S4.7 flagged until its
+soak is clean, and do **not** assume the freeze symptom is solved by completing the programme. The next
+investigation is provider lifetime: was one never created, created and released, demoted, refused by
+proxy selection, reclaimed by retention — or did the source simply stay on `<video>` forever? Those are
+lifecycle questions, not scheduling ones.

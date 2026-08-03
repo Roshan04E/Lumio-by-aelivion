@@ -91,6 +91,29 @@ interface Sample {
   renderScale: number;
   /** Served times observed this sample, from any decode path. See the note at the sampling site. */
   served: number[];
+  /**
+   * Per-source supply state this sample — the whole point of the v34 follow-up.
+   *
+   * `mediaFps` swung 45.7 / 27.1 / 8.0 / 1.7 across four identical runs of one project while the
+   * compositor held 60-70fps throughout: decode collapsed 25× run to run and the frame-budget table
+   * could not say why, because it kept only `served` and discarded every field beside it. These are
+   * already published per composite — decode path, whether the source has a frame at all, and the
+   * reason it does not — so the answer was in the page the whole time and not in the report.
+   */
+  sources: SourceSample[];
+}
+
+interface SourceSample {
+  id: string;
+  asset: string;
+  /** `element` vs `wc-hw` / `wc-sw`. An ingest proxy flips this, and it is worth a decode-rate order. */
+  decode: string;
+  /** `ok` | `stale` | `AWAITING` — AWAITING means no frame at all, which is not slowness but absence. */
+  state: string;
+  /** Whose fault the absence is (`awaitReason`). Null when there is nothing to explain. */
+  why: string | null;
+  wcProvider: boolean;
+  wcBusy: boolean;
 }
 
 interface ArmResult {
@@ -211,6 +234,17 @@ async function sampleArm(page: Page, name: string, seekLeadSeconds: number | nul
         served: Object.values(((globalThis as Record<string, any>).__rfSourceMap ?? {}) as Record<string, any>)
           .map((row) => (row && typeof row.served === "number" ? row.served : null))
           .filter((t): t is number => t != null),
+        sources: Object.entries(((globalThis as Record<string, any>).__rfSourceMap ?? {}) as Record<string, any>).map(
+          ([id, row]) => ({
+            id,
+            asset: String(row?.asset ?? "-"),
+            decode: String(row?.decode ?? "-"),
+            state: String(row?.state ?? "-"),
+            why: row?.why == null ? null : String(row.why),
+            wcProvider: !!row?.wcProvider,
+            wcBusy: !!row?.wcBusy,
+          })
+        ),
       };
     }).catch((error: unknown) => {
       const message = String(error);
@@ -289,6 +323,38 @@ function report(result: ArmResult): void {
     `   dropped   ${(percentile(result.samples.map((s) => s.droppedRatio), 50) * 100).toFixed(1)}% of frames   ` +
       `severe ${Math.max(...result.samples.map((s) => s.severeCount))}`
   );
+  // MEDIA SUPPLY, per source. `mediaFps` is one number for the whole scene, so a run where one source
+  // decoded fine and another never started looks identical to a run where both limped. This breaks the
+  // aggregate back into "which source, on which decode path, in what state, and why".
+  const bySource = new Map<string, { asset: string; decode: Set<string>; state: Map<string, number>; why: Map<string, number>; provider: number; busy: number; n: number }>();
+  for (const sample of result.samples) {
+    for (const src of sample.sources ?? []) {
+      let row = bySource.get(src.id);
+      if (!row) {
+        row = { asset: src.asset, decode: new Set(), state: new Map(), why: new Map(), provider: 0, busy: 0, n: 0 };
+        bySource.set(src.id, row);
+      }
+      row.decode.add(src.decode);
+      row.state.set(src.state, (row.state.get(src.state) ?? 0) + 1);
+      if (src.why) row.why.set(src.why, (row.why.get(src.why) ?? 0) + 1);
+      if (src.wcProvider) row.provider += 1;
+      if (src.wcBusy) row.busy += 1;
+      row.n += 1;
+    }
+  }
+  for (const [id, row] of bySource) {
+    const pct = (n: number) => `${Math.round((n / Math.max(1, row.n)) * 100)}%`;
+    const states = [...row.state.entries()].sort((a, b) => b[1] - a[1]).map(([s, n]) => `${s} ${pct(n)}`).join(" · ");
+    const whys = [...row.why.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([w, n]) => `${w} ${pct(n)}`).join(" · ");
+    console.log(
+      // The id TAIL, not its head: every source in a project shares the `project_local_<ts>_` prefix, so
+      // truncating from the left printed the same 28 characters for both doors and made the two rows
+      // indistinguishable — in a table whose entire purpose is telling them apart.
+      `   source   ${row.asset.slice(-28)} […${id.slice(-24)}]  decode ${[...row.decode].join("/")}  ${states}` +
+        (whys ? `  why: ${whys}` : "") +
+        `  wcProvider ${pct(row.provider)}  wcBusy ${pct(row.busy)}`
+    );
+  }
   const pool = result.pool;
   if (pool) {
     console.log(
