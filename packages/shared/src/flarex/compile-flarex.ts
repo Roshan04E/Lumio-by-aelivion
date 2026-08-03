@@ -191,7 +191,9 @@ type FlarexImageValue = SceneLayerDraw | SceneGroupDraw;
 /** Matte values stay VECTOR (`Mask[]`) until applied to an image, so MatteControl combines
  *  losslessly through the same multi-mask compositing the mask rasterizer already does. */
 type FlarexMatteValue = { masks: Mask[] };
-type FlarexValue = { kind: "image"; draw: FlarexImageValue } | { kind: "matte"; matte: FlarexMatteValue };
+/** Exported only because `FlarexLowerCtx.reuseValue` already puts it on the public surface
+ *  structurally (S6.6) — a caller that has to RETURN one needs to be able to name it. */
+export type FlarexValue = { kind: "image"; draw: FlarexImageValue } | { kind: "matte"; matte: FlarexMatteValue };
 
 /** Shell-order stages for wrap-collapsing (see header). */
 const STAGE_PIPELINE = 1;

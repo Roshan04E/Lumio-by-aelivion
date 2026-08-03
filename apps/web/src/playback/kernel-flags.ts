@@ -75,6 +75,7 @@ export const KERNEL_FLAGS = {
   // "low risk" in the programme is an argument about correctness, not about frame budget.
   proxyUpload: { query: "kernelProxyUpload", storage: "orreris.kernel.proxyUpload", defaultOn: false },
   wallClockTtl: { query: "kernelWallClockTtl", storage: "orreris.kernel.wallClockTtl", defaultOn: false },
+  incremental: { query: "kernelIncremental", storage: "orreris.kernel.incremental", defaultOn: false },
   scopes: { query: "kernelScopes", storage: "orreris.kernelScopes", defaultOn: false },
 } as const satisfies Record<string, KernelFlag>;
 

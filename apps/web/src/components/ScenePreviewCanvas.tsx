@@ -67,10 +67,16 @@ import {
   type ScenePreviewTransition,
   isSceneTextureSource,
   sceneTexture,
+  activeFrame,
   type ResourceHandle,
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { KERNEL_FLAGS, readKernelFlag } from "../playback/kernel-flags";
+import {
+  abortIncrementalFrame,
+  beginIncrementalFrame,
+  commitIncrementalFrame,
+} from "../playback/incremental-evaluation";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
@@ -708,6 +714,9 @@ export function ScenePreviewCanvas({
   // S5.3. Read once per mount like every other engine flag here, and pushed into the compositor module
   // (which has no `window` in the export Worker) rather than read there.
   const wallClockTtlRef = useRef(readKernelFlag(KERNEL_FLAGS.wallClockTtl));
+  // S6.4/S6.5/S6.6 — incremental Flarex evaluation. Read once per mount like every other engine flag
+  // here; the whole feature is one default-OFF switch, and with it off no channel is attached at all.
+  const incrementalRef = useRef(readKernelFlag(KERNEL_FLAGS.incremental));
   /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
   const lastResourceSweepRef = useRef(0);
   const failedRef = useRef(false);
@@ -1474,6 +1483,30 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     // withheld frame still pays for its build (Flarex compile + rasterizer + source-draw resolve), and
     // a withheld frame is precisely when the stalls under investigation occur.
     const buildStart = performance.now();
+    /**
+     * INCREMENTAL EVALUATION (S6.4/S6.5/S6.6) — declare the graph and open the two channels.
+     *
+     * The media epoch is the sum of the pool's content versions: each entry bumps exactly when its
+     * re-grade actually runs, so a change here means some decoded picture is new. That is the one axis
+     * with no representation in the graph at all — nothing about a comp changes when a frame decodes —
+     * and it is summed rather than compared per entry because ANY new picture invalidates every MediaIn
+     * conservatively, which is the starting position the completion plan asks for.
+     */
+    let incremental: ReturnType<typeof beginIncrementalFrame> = null;
+    if (incrementalRef.current) {
+      let mediaEpoch = 0;
+      for (const entry of sharedMediaRenderersRef.current.values()) mediaEpoch += entry.version;
+      incremental = beginIncrementalFrame({
+        comps: fxComps,
+        renderScale: rScale,
+        width: w,
+        height: h,
+        frameTimeSeconds: t,
+        mediaEpoch,
+        frameId: activeFrame()?.id ?? 0,
+        nowMs: performance.now(),
+      });
+    }
     try {
       // Profiler times the whole draw-list build (includes the Flarex evaluator + content hashing).
       draws = frameProfiler.measure("evaluator.build", () => buildSceneDraws({
@@ -1517,8 +1550,13 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // on which nodes, in which projects — the measurement ADR-012 §0.3 / I-27 needs before slice S4.5
       // deletes the host-clip fallback. Read it from the console as `__rfFlarexDegradation`.
       onFlarexDegrade: recordFlarexDegradation,
+      // S6.4/S6.6 — absent unless the flag is on, so the default path is byte-identical.
+      flarexOnEvaluated: incremental?.onEvaluated,
+      flarexReuseValue: incremental?.reuseValue,
       }));
     } catch (error) {
+      // A build that threw did not do the work the dirty marks describe, so the dirt must survive.
+      abortIncrementalFrame();
       fail("build draw list", error);
       return;
     }
@@ -1714,6 +1752,10 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // source's snapshot), and it is bounded by STALE_HOLD_MAX_MS, after which we present regardless.
       if (!playing && staleIds.length > 0) requestDraw();
       outcomeRef.current = "held";
+      // A HELD frame never reached the screen, so the nodes it dirtied still need evaluating. Clearing
+      // here would drop the only record of that and leave the next frame reusing results for inputs
+      // that changed — a stale pixel surviving until something else happens to dirty those nodes again.
+      abortIncrementalFrame();
       return;
     }
     noteCoherence(
@@ -1786,8 +1828,12 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         worstSourceMediaEnd: worstStaleMediaEnd,
         playing,
       });
+      // The frame composited and presented — only now is clearing the dirt an honest assertion that
+      // the work those marks described was actually done.
+      commitIncrementalFrame();
     } catch (error) {
       outcomeRef.current = "failed";
+      abortIncrementalFrame();
       fail("render", error);
     }
     // Whole-frame envelope. If this reports ~7500ms while grade+composite are small, the time is in

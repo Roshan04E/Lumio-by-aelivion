@@ -82,42 +82,60 @@ export interface PlanRequest {
   readonly nowMs: number;
 }
 
+export interface ReuseQuery {
+  readonly nodeId: string;
+  readonly contextKey: string;
+  readonly dirty: ReadonlySet<string>;
+  readonly isReusable?: ((record: EvaluationRecord) => boolean) | undefined;
+  readonly nowMs: number;
+}
+
+export type ReuseDecision =
+  | { readonly reuse: true; readonly record: EvaluationRecord }
+  | { readonly reuse: false; readonly reason: PlanReason };
+
 /**
- * Build the plan.
+ * The three gates, for ONE node — the single place they are implemented.
  *
- * Note the order of the gates: dirty is checked FIRST and short-circuits, so a dirty node never even
- * looks up a record. That is not a micro-optimisation — consulting a record for a node we already know
- * is stale is how a reuse path grows an accidental dependency on data it must not trust.
+ * A live host cannot use {@link planEvaluation} directly, because a plan has to name each node's
+ * evaluation context up front and only the compiler knows that: the context key is `evalKey`'s, minted
+ * mid-traversal and folding the evaluation time a retime may have changed. So the host answers per node
+ * as it is asked. `planEvaluation` is this function in a loop, which is what keeps the batch view and
+ * the live path from drifting into two subtly different notions of reusable.
+ *
+ * Gate order is deliberate: dirty short-circuits, so a dirty node never looks up a record. Consulting a
+ * record for a node already known to be stale is how a reuse path grows an accidental dependency on
+ * data it must not trust.
  */
+export function reuseDecision(session: RuntimeSession, query: ReuseQuery): ReuseDecision {
+  if (query.dirty.has(query.nodeId)) return { reuse: false, reason: "dirty" };
+  if (!query.isReusable) return { reuse: false, reason: "unvalidated" };
+  const record = evaluationRecord(session, query.nodeId, query.contextKey, query.nowMs);
+  if (!record) return { reuse: false, reason: "no-record" };
+  if (!query.isReusable(record)) return { reuse: false, reason: "stale-resource" };
+  return { reuse: true, record };
+}
+
+/** Batch form: {@link reuseDecision} over a known node set, for stats and headless assertions. */
 export function planEvaluation(session: RuntimeSession, request: PlanRequest): EvaluationPlan {
   const evaluate = new Set<string>();
   const reuse = new Set<string>();
   const reasons = new Map<string, PlanReason>();
 
-  const schedule = (nodeId: string, reason: PlanReason): void => {
-    evaluate.add(nodeId);
-    reasons.set(nodeId, reason);
-  };
-
   for (const nodeId of request.nodeIds) {
-    if (request.dirty.has(nodeId)) {
-      schedule(nodeId, "dirty");
+    const decision = reuseDecision(session, {
+      nodeId,
+      contextKey: request.contextKeyOf(nodeId),
+      dirty: request.dirty,
+      isReusable: request.isReusable,
+      nowMs: request.nowMs,
+    });
+    if (decision.reuse) {
+      reuse.add(nodeId);
       continue;
     }
-    if (!request.isReusable) {
-      schedule(nodeId, "unvalidated");
-      continue;
-    }
-    const record = evaluationRecord(session, nodeId, request.contextKeyOf(nodeId), request.nowMs);
-    if (!record) {
-      schedule(nodeId, "no-record");
-      continue;
-    }
-    if (!request.isReusable(record)) {
-      schedule(nodeId, "stale-resource");
-      continue;
-    }
-    reuse.add(nodeId);
+    evaluate.add(nodeId);
+    reasons.set(nodeId, decision.reason);
   }
 
   if (kernelDiagnostics.enabled && reuse.size > 0) {

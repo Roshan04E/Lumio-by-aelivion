@@ -36,7 +36,7 @@ import { evaluateTimelineEffectParam } from "../animation";
 import { FRAGMENT_PASS_EFFECT_TYPES, expandLayerEffectRegions, hasRegionColorEffect } from "../clip-masks";
 import { NEST_ID_SEPARATOR, type NestedGroupSpec } from "../nesting";
 import { fragmentEffectParamsFromStorage, SHADER_MANIFEST_ID_PARAM_KEY } from "../plugin-effect-adapter";
-import { compileFlarexComp } from "../flarex/compile-flarex";
+import { compileFlarexComp, type FlarexValue } from "../flarex/compile-flarex";
 import { flarexVirtualLayerId } from "../flarex/virtual-layers";
 import { FlarexSourceDrawCache } from "../flarex/source-draw-cache";
 import type { FlarexComp } from "../flarex/types";
@@ -246,6 +246,21 @@ export interface BuildSceneDrawsInputs {
    * `flarex/degradation.ts` for why the three host-substitution reasons are reported separately.
    */
   onFlarexDegrade?: ((compId: string, degradation: FlarexDegradation) => void) | undefined;
+  /**
+   * Incremental evaluation channels (slices S6.4/S6.6), forwarded verbatim to `compileFlarexComp`.
+   *
+   * Both are pass-through: this module holds no records, consults no planner and owns no policy — it
+   * only knows which comp is being lowered, which is exactly the piece the host cannot supply on its
+   * own. `onEvaluated` reports what a node produced; `reuseValue` answers whether a node's previous
+   * result may be served instead of lowering it. Absent (export, worker, fixtures, flag off) ⇒ every
+   * node is lowered, byte-identical to before the slices.
+   *
+   * Comp-scoped by construction: the ids handed over are node ids, so a host with several comps in one
+   * frame MUST namespace by comp or two comps' node `n0` would share a record. The comp id is attached
+   * here rather than trusted to the host for the same reason `onFlarexDegrade` attaches it.
+   */
+  flarexOnEvaluated?: ((compId: string, nodeId: string, contextKey: string, value: unknown) => void) | undefined;
+  flarexReuseValue?: ((compId: string, nodeId: string, contextKey: string) => FlarexValue | null) | undefined;
   /**
    * Cross-frame cache for Flarex asset-source draws (perf: `resolveSourceDraw` rebuilt a full per-clip
    * draw every frame, ~54% of compile time — profiler-measured). A BARE virtual loader's draw structure
@@ -865,6 +880,13 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       previewRootNodeId: inputs.flarexPreviewRootNodeId ?? inputs.flarexPreviewRoots?.[comp.id],
       // Degradation reporting (S0.2). Observability only; absent → the compiler is unchanged.
       onDegrade: inputs.onFlarexDegrade ? (degradation) => inputs.onFlarexDegrade!(comp.id, degradation) : undefined,
+      // S6.4/S6.6 — comp id attached here, so a node id is never ambiguous across comps in one frame.
+      onEvaluated: inputs.flarexOnEvaluated
+        ? (nodeId, contextKey, value) => inputs.flarexOnEvaluated!(comp.id, nodeId, contextKey, value)
+        : undefined,
+      reuseValue: inputs.flarexReuseValue
+        ? (nodeId, contextKey) => inputs.flarexReuseValue!(comp.id, nodeId, contextKey)
+        : undefined,
       // Asset-source MediaIn (FLAREX.md Phase 2, Fusion Loader model): build the source draw from the
       // node's VIRTUAL loader (decoded off-timeline by the caller, addressed by comp+node id). Its
       // media is provided via `getMediaGraded(virtualId)` exactly like a real clip; an unready/absent
