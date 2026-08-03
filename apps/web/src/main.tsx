@@ -2,13 +2,14 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { registerSW } from "virtual:pwa-register";
-import { configureFontResolver, kernelDiagnostics, warpFontFile } from "@orreris/shared";
+import { configureFontResolver, kernelDiagnostics, setSceneWallClockTtl, warpFontFile } from "@orreris/shared";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";
 import { installPerfDiagnostics } from "./lib/perfDiagnostics";
 import { installCrashTelemetry } from "./lib/crash-telemetry";
 import { resolveKernelDiagnosticsEnabled } from "./playback/frame-completion";
+import { KERNEL_FLAGS, readKernelFlag } from "./playback/kernel-flags";
 import { migrateBrandLocalStorage, migrateBrandBlobStores } from "./lib/brand-migration";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
@@ -55,6 +56,9 @@ installCrashTelemetry();
 // reads `window`. Now the app looks and the kernel is told, exactly like `precision` and
 // `regionPassModel`. Before `createRoot`, so the very first frame is already recorded correctly.
 kernelDiagnostics.enabled = resolveKernelDiagnosticsEnabled();
+// S5.3, same reason: the compositor ages caches on wall-clock, but it runs in the export Worker too,
+// where there is no `window` to ask. The host looks; the module is told.
+setSceneWallClockTtl(readKernelFlag(KERNEL_FLAGS.wallClockTtl));
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -69,6 +69,7 @@ import {
   type ResourceHandle,
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
+import { KERNEL_FLAGS, readKernelFlag } from "../playback/kernel-flags";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
@@ -680,6 +681,9 @@ export function ScenePreviewCanvas({
     >
   >(new Map());
   const kernelResourcesRef = useRef(getKernelResourcesEnabled());
+  // S5.3. Read once per mount like every other engine flag here, and pushed into the compositor module
+  // (which has no `window` in the export Worker) rather than read there.
+  const wallClockTtlRef = useRef(readKernelFlag(KERNEL_FLAGS.wallClockTtl));
   /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
   const lastResourceSweepRef = useRef(0);
   const failedRef = useRef(false);
@@ -1496,6 +1500,11 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // screen is not yet known. Reporting the pessimistic value keeps the I-33 census honest: it
       // counts reclaims that happened without a present being guaranteed, which is the property the
       // old code could not achieve at all.
+      // S5.3: age the COMPOSITOR's own caches on the same pre-hold tick. The kernel sweep above covers
+      // resources the kernel knows about; the compositor's texture/program/target caches were pruned
+      // only at the tail of a composited frame, so a viewer that held, paused or hid stopped reclaiming
+      // exactly when pressure was highest. This is the half of I-21/I-33 the kernel could not reach.
+      if (wallClockTtlRef.current) compositor.sweepIdleCaches();
       const idle = collectIdleResources(defaultSession, now, RESOURCE_IDLE_MS, false);
       if (idle) {
         for (const record of idle) {

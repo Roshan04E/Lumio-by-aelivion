@@ -68,6 +68,10 @@ export const KERNEL_FLAGS = {
   // instead of a boolean — covers them. S4.4 is NOT in this group; it is additive and shipped alone.
   coherenceUnified: { query: "kernelCoherenceUnified", storage: "orreris.kernel.coherenceUnified", defaultOn: false },
   frames: { query: "kernelFrames", storage: "orreris.kernelFrames", defaultOn: false },
+  // S5.3. OFF by default: flag-off is the pre-slice behaviour EXACTLY (frame-counted TTLs, prunes only
+  // at the tail of a composited frame), and the declared risk is over-aggressive reclamation causing
+  // re-upload churn — which only a soak can rule out.
+  wallClockTtl: { query: "kernelWallClockTtl", storage: "orreris.kernel.wallClockTtl", defaultOn: false },
   scopes: { query: "kernelScopes", storage: "orreris.kernelScopes", defaultOn: false },
 } as const satisfies Record<string, KernelFlag>;
 

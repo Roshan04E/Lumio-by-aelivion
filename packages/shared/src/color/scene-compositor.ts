@@ -564,12 +564,16 @@ interface CompiledFragmentEffect {
   uHasPassMask: WebGLUniformLocation | null;
   params: { param: FragmentEffectParam; location: WebGLUniformLocation | null }[];
   lastFrame: number;
+  /** Wall-clock `performance.now()` of the last use (S5.3). Ages while nothing composites. */
+  lastUsedMs: number;
 }
 
 /** A pooled intermediate target for one pass of a multi-pass fragment effect. */
 interface PassGraphTarget {
   rt: RenderTarget;
   lastFrame: number;
+  /** Wall-clock `performance.now()` of the last use (S5.3). Ages while nothing composites. */
+  lastUsedMs: number;
 }
 
 const COMPOSITE_VS = `#version 300 es
@@ -1078,6 +1082,61 @@ class ContentArtifactCache {
   }
 }
 
+
+/**
+ * Wall clock for cache ageing (S5.3). `performance.now()` where it exists, `Date.now()` otherwise —
+ * the export Worker has both, but a Node harness importing this module may have neither monotonic.
+ */
+let wallClockTtl = false;
+
+/**
+ * Whether cache ageing uses wall-clock (S5.3). Host-set rather than read here, because the flag
+ * vocabulary lives in the app and this module may not have a `window` at all (export Worker, Node
+ * harness). Defaults OFF: flag-off is the pre-slice behaviour, exactly.
+ */
+export function setSceneWallClockTtl(enabled: boolean): void {
+  wallClockTtl = enabled;
+}
+
+function wallClockTtlEnabled(): boolean {
+  return wallClockTtl;
+}
+
+function sceneNowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+/**
+ * Wall-clock TTLs, sized to match what the frame counts meant at 60fps (300 frames = 5s, 120 = 2s), so
+ * flipping the flag changes WHEN ageing happens, not how long things live in the healthy case.
+ */
+const TTL_LONG_MS = 5_000;
+const TTL_SHORT_MS = 2_000;
+
+/**
+ * Has this entry gone unused long enough to reclaim?
+ *
+ * One predicate for every cache, so the two units cannot drift apart — the bug DEBT-002's Detection
+ * field is watching for is precisely a new TTL counted in presented frames.
+ *
+ * Frames are the WRONG unit and that is the whole slice: `frameCounter` only advances when a frame
+ * actually composites, so a viewer that is held, idle or hidden stops ageing its caches at the exact
+ * moment it most needs to. That is the positive feedback loop in the programme's rationale — slow
+ * sources hold frames, held frames stop reclamation, VRAM climbs, the context is evicted, every cache
+ * dies, and the sources get slower still. Wall-clock ageing breaks it because time passes whether or
+ * not anything drew.
+ *
+ * Flag OFF keeps the frame comparison EXACTLY, rather than assuming 60fps and swapping the unit: at
+ * 30fps, 300 frames is ten seconds where 5000ms is five, so a silent unit swap would double the
+ * eviction rate on slower machines — the ones least able to afford re-upload churn (this slice's
+ * declared risk).
+ */
+function agedOut(nowMs: number, frameNow: number, entry: { lastFrame: number; lastUsedMs: number }, frames: number, ttlMs: number): boolean {
+  return wallClockTtlEnabled()
+    ? nowMs - entry.lastUsedMs > ttlMs
+    : frameNow - entry.lastFrame > frames;
+}
+
 export class SceneCompositor {
   readonly canvas: AnyCanvas;
   private readonly gl: WebGL2RenderingContext;
@@ -1087,7 +1146,7 @@ export class SceneCompositor {
   // Per-source GPU texture cache (keyed by the source object). Re-uploading via texSubImage2D instead
   // of texImage2D, and skipping the upload entirely for unchanged sources, removes the per-frame
   // texImage2D realloc churn that caused the periodic playback hitch.
-  private readonly srcTextures = new Map<TexImageSource, { tex: WebGLTexture; w: number; h: number; version: number; lastFrame: number }>();
+  private readonly srcTextures = new Map<TexImageSource, { tex: WebGLTexture; w: number; h: number; version: number; lastFrame: number; lastUsedMs: number }>();
   private frameCounter = 0;
   // Content-addressed artifact cache (Flarex evaluation engine, Slice 2). Lazy — created on first
   // materialized-group render so a compositor that never renders Flarex pays nothing.
@@ -1203,7 +1262,7 @@ export class SceneCompositor {
   // pass hasn't drawn for a while (grade toggled off / clip left the window).
   private readonly regionGradeRenderers = new Map<
     string,
-    { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; lastFrame: number }
+    { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; lastFrame: number; lastUsedMs: number }
   >();
   // While pre-composing a nest, layers composite with NORMAL blend (the clip's own blend mode applies when the
   // MIXED result lands on the main scene, not between the clip's own layers). Set only inside precomposeGroup.
@@ -1611,6 +1670,8 @@ export class SceneCompositor {
     target: RenderTarget;
     pipelineKey: string;
     lastFrame: number;
+  /** Wall-clock `performance.now()` of the last use (S5.3). Ages while nothing composites. */
+  lastUsedMs: number;
   } {
     let entry = this.regionGradeRenderers.get(effectKey);
     if (!entry) {
@@ -1619,6 +1680,7 @@ export class SceneCompositor {
         target: new RenderTarget(this.gl, Math.max(1, this.width), Math.max(1, this.height), this.precision),
         pipelineKey: "",
         lastFrame: this.frameCounter,
+        lastUsedMs: sceneNowMs(),
       };
       this.regionGradeRenderers.set(effectKey, entry);
     }
@@ -1628,8 +1690,9 @@ export class SceneCompositor {
   /** Drop grade renderers whose pass hasn't drawn recently (grade removed / clip left the window). */
   private pruneRegionGradeRenderers(): void {
     if (this.regionGradeRenderers.size === 0) return;
+    const nowMs = sceneNowMs();
     for (const [key, entry] of this.regionGradeRenderers) {
-      if (this.frameCounter - entry.lastFrame > 300) {
+      if (agedOut(nowMs, this.frameCounter, entry, 300, TTL_LONG_MS)) {
         entry.renderer.dispose();
         entry.target.dispose();
         this.regionGradeRenderers.delete(key);
@@ -1736,6 +1799,7 @@ export class SceneCompositor {
     const existing = this.fragmentPrograms.get(key);
     if (existing) {
       existing.lastFrame = this.frameCounter;
+      existing.lastUsedMs = sceneNowMs();
       return existing;
     }
     const gl = this.gl;
@@ -1751,6 +1815,7 @@ export class SceneCompositor {
       uHasPassMask: def.maskAware ? gl.getUniformLocation(program, "uHasPassMask") : null,
       params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
       lastFrame: this.frameCounter,
+      lastUsedMs: sceneNowMs(),
     };
     this.fragmentPrograms.set(key, compiled);
     return compiled;
@@ -1852,11 +1917,12 @@ export class SceneCompositor {
   private passGraphTarget(key: string, width: number, height: number): RenderTarget {
     let entry = this.passGraphTargets.get(key);
     if (!entry) {
-      entry = { rt: new RenderTarget(this.gl, width, height, this.precision), lastFrame: this.frameCounter };
+      entry = { rt: new RenderTarget(this.gl, width, height, this.precision), lastFrame: this.frameCounter, lastUsedMs: sceneNowMs() };
       this.passGraphTargets.set(key, entry);
     }
     entry.rt.resize(width, height);
     entry.lastFrame = this.frameCounter;
+    entry.lastUsedMs = sceneNowMs();
     return entry.rt;
   }
 
@@ -1920,14 +1986,15 @@ export class SceneCompositor {
   private pruneFragmentPrograms(): void {
     if (this.fragmentPrograms.size === 0 && this.passGraphTargets.size === 0) return;
     const gl = this.gl;
+    const nowMs = sceneNowMs();
     for (const [key, entry] of this.fragmentPrograms) {
-      if (this.frameCounter - entry.lastFrame > 300) {
+      if (agedOut(nowMs, this.frameCounter, entry, 300, TTL_LONG_MS)) {
         gl.deleteProgram(entry.program);
         this.fragmentPrograms.delete(key);
       }
     }
     for (const [key, entry] of this.passGraphTargets) {
-      if (this.frameCounter - entry.lastFrame > 300) {
+      if (agedOut(nowMs, this.frameCounter, entry, 300, TTL_LONG_MS)) {
         entry.rt.dispose();
         this.passGraphTargets.delete(key);
       }
@@ -2183,10 +2250,11 @@ export class SceneCompositor {
     const needAlloc = !entry || entry.w !== sw || entry.h !== sh;
     const textureState: UploadDebugSnapshot["textureState"] = !entry ? "new" : needAlloc ? "resize" : "existing";
     if (!entry) {
-      entry = { tex: this.makeTex(), w: sw, h: sh, version: Number.NaN, lastFrame: this.frameCounter };
+      entry = { tex: this.makeTex(), w: sw, h: sh, version: Number.NaN, lastFrame: this.frameCounter, lastUsedMs: sceneNowMs() };
       this.srcTextures.set(source, entry);
     }
     entry.lastFrame = this.frameCounter;
+    entry.lastUsedMs = sceneNowMs();
     // Unchanged content (a versioned source whose version + size match the last upload) → reuse as-is.
     if (version !== undefined && !needAlloc && entry.version === version) {
       frameProfiler.noteTextureCache(true);
@@ -2242,8 +2310,9 @@ export class SceneCompositor {
   /** Free cached textures for sources not seen for a while (e.g. a layer that left the comp). */
   private pruneTextures(): void {
     const gl = this.gl;
+    const nowMs = sceneNowMs();
     for (const [source, entry] of this.srcTextures) {
-      if (this.frameCounter - entry.lastFrame > 120) {
+      if (agedOut(nowMs, this.frameCounter, entry, 120, TTL_SHORT_MS)) {
         gl.deleteTexture(entry.tex);
         this.srcTextures.delete(source);
       }
@@ -2561,6 +2630,9 @@ export class SceneCompositor {
           entry.pipelineKey = key;
         }
         entry.lastFrame = this.frameCounter;
+      entry.lastUsedMs = sceneNowMs();
+        entry.lastUsedMs = sceneNowMs();
+    entry.lastUsedMs = sceneNowMs();
         entry.renderer.draw({
           sourceTexture: this.accumA.tex,
           sourceWidth: this.width,
@@ -2866,6 +2938,8 @@ export class SceneCompositor {
         entry.pipelineKey = key;
       }
       entry.lastFrame = this.frameCounter;
+      entry.lastUsedMs = sceneNowMs();
+    entry.lastUsedMs = sceneNowMs();
       entry.target.resize(nestW, nestH);
       entry.renderer.draw({
         sourceTexture: resultTex,
@@ -2958,6 +3032,26 @@ export class SceneCompositor {
     this.presentFrame();
   }
 
+
+  /**
+   * Age every internal cache. Callable WITHOUT compositing — that is the point of S5.3.
+   *
+   * Previously these three prunes ran only at the tail of `renderFrameCore`, so reclamation was
+   * gated behind a frame reaching that far. A viewer holding for a slow source, paused, or hidden
+   * therefore stopped reclaiming at the exact moment VRAM pressure was highest (I-21/I-33). The host
+   * now also calls this from above its hold gate, so the caches age on wall-clock whether or not
+   * anything drew.
+   *
+   * Cheap when there is nothing to do: each prune early-returns on an empty map, so an idle tick is a
+   * few size checks (R1).
+   */
+  sweepIdleCaches(): void {
+    if (this.disposed) return;
+    this.pruneTextures();
+    this.pruneRegionGradeRenderers();
+    this.pruneFragmentPrograms();
+  }
+
   /** Composite the frame into the accumulator (everything except the present). False = nothing to draw. */
   private renderFrameCore(spec: SceneFrameSpec): boolean {
     if (this.disposed) return false;
@@ -2994,9 +3088,7 @@ export class SceneCompositor {
       }
     }
 
-    this.pruneTextures();
-    this.pruneRegionGradeRenderers();
-    this.pruneFragmentPrograms();
+    this.sweepIdleCaches();
     // Content-cache retention (Slice 2, commit 3c-B). AFTER every draw: intra-frame fan-out has had its
     // chance to hit, so anything untouched this frame is genuinely idle and safe to reclaim.
     this.contentArtifactCache?.evictToBudget(this.frameCounter);

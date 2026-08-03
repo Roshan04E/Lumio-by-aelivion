@@ -1835,6 +1835,32 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
   const strip = (source: string): string =>
     source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
+  // ── S5.3 — WALL-CLOCK AGEING (I-21/I-33) ────────────────────────────────────────────────────────
+  // DEBT-002's Detection field names the regression exactly: "a new prune or TTL counted in presented
+  // frames rather than wall-clock milliseconds". Frames are the wrong unit because `frameCounter` only
+  // advances when a frame composites, so a held, paused or hidden viewer stops ageing its caches at the
+  // moment VRAM pressure is highest — the feedback loop this slice breaks.
+  //
+  // Asserted against the SOURCE rather than behaviour because the failure is a new call site someone
+  // adds later, and by the time it shows up in a soak it is a week old.
+  {
+    const compositorSrc = strip(readFileSync(`${sharedDir}color/scene-compositor.ts`, "utf8"));
+    const rawFrameTtls = compositorSrc.match(/frameCounter\s*-\s*\w+\.lastFrame\s*>/g) ?? [];
+    enforced("I-21", "no cache TTL compares frame counts directly — they all go through one predicate",
+      rawFrameTtls.length === 0, `${rawFrameTtls.length} raw frame-count TTL comparison(s)`);
+    enforced("I-33", "the compositor can age its caches WITHOUT compositing a frame",
+      /sweepIdleCaches\s*\(\s*\)\s*:\s*void/.test(compositorSrc));
+    // The host must call it from ABOVE its hold gate, or the sweep is decoupled in name only.
+    const canvasSrc = strip(readFileSync(`${webDir}components/ScenePreviewCanvas.tsx`, "utf8"));
+    const sweepAt = canvasSrc.indexOf("sweepIdleCaches()");
+    // The CALL, not the identifier: `shouldHoldForCoherence` also appears in the import list at the top
+    // of the file, and matching that made the check compare the sweep against line 1 — it passed for the
+    // wrong reason until this harness failed it.
+    const holdAt = canvasSrc.search(/shouldHoldForCoherence\s*\(\s*\{/);
+    enforced("I-33", "…and the host sweeps BEFORE the hold decision, not after it",
+      sweepAt > 0 && holdAt > 0 && sweepAt < holdAt);
+  }
+
   // ── (2) THE FALLBACK IS DELETED, NOT RELOCATED. One site may name `hostSourceDraw` as a *value* —
   // the compiler's own guarded return — and no other module may construct a draw from it. A relocated
   // fallback would show up as a second file reaching for the host draw.
