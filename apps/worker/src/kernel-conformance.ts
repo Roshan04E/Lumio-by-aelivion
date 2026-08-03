@@ -41,6 +41,7 @@ import {
   __resetFrameScheduler,
   activeFrame,
   createRuntimeSession,
+  defaultSession,
   declareMediaSources,
   getMediaSources,
   suppressMediaSources,
@@ -76,6 +77,7 @@ import {
   RESOURCE_IDLE_MS,
   __resetResourceManager,
   checkHandle,
+  sceneTexture,
   collectIdleResources,
   noteStaleHandle,
   staleHandleCount,
@@ -139,6 +141,14 @@ const pendingNotes: string[] = [];
  * tree rather than one file: a rule like "nobody reads the ambient frame's time" is only worth
  * asserting if it is asserted everywhere the read could appear.
  */
+/** A real, never-forgotten handle so fixtures resolve through the production path, not around it. */
+const TEST_HANDLE = registerResource(
+  defaultSession,
+  "test/fixture-texture",
+  { scope: "live", kind: "test", id: "fixture-texture" },
+  0
+);
+
 function walkTs(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -188,7 +198,7 @@ function pending(slice: string, name: string, stillBroken: boolean): void {
 function syntheticDraw(id: string): SceneLayerDraw {
   return {
     debugLayerId: id,
-    source: { texture: {} as WebGLTexture, width: 1920, height: 1080 },
+    source: sceneTexture(TEST_HANDLE, () => ({}) as WebGLTexture, 1920, 1080),
     sourceWidth: 1920,
     sourceHeight: 1080,
     fit: "cover",
@@ -1545,7 +1555,7 @@ console.log("\nS4.2 — a texture is pixels-at-a-moment (T5/T7, I-3)");
   const label = (seconds: number | null): { servedTime?: ServedTime } =>
     seconds == null || !Number.isFinite(seconds) ? {} : { servedTime: servedTime(seconds) };
 
-  const graded: SceneTextureSource = { texture: {} as never, width: 1920, height: 1080, ...label(4.25) };
+  const graded: SceneTextureSource = sceneTexture(TEST_HANDLE, () => ({}) as never, 1920, 1080, label(4.25));
   enforced("I-3", "a graded media texture carries the moment its pixels represent", graded.servedTime === 4.25);
 
   // The distinction the whole slice turns on. `servedTime: undefined` and an ABSENT key are different
@@ -1553,7 +1563,7 @@ console.log("\nS4.2 — a texture is pixels-at-a-moment (T5/T7, I-3)");
   // a reader mistaking it for a time. A still or a generator raster is coherent at every playhead and
   // must produce the absent form, never 0 — which would read as "coherent at t=0" and be wrong at every
   // other moment.
-  const timeless: SceneTextureSource = { texture: {} as never, width: 8, height: 8, ...label(null) };
+  const timeless: SceneTextureSource = sceneTexture(TEST_HANDLE, () => ({}) as never, 8, 8, label(null));
   enforced("I-3", "a time-invariant source omits the field rather than claiming a time",
     !("servedTime" in timeless));
   enforced("I-3", "…and a non-finite reading is treated as unknowable, not coerced",

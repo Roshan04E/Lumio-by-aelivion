@@ -44,6 +44,8 @@ import {
 } from "./transitions/registry";
 import { PipelineAssembler } from "./transitions/pipeline-assembler";
 import type { ServedTime } from "../kernel/time";
+import { checkHandle, noteStaleHandle, registerResource, type ResourceHandle } from "../kernel/resource-manager";
+import { defaultSession, type RuntimeSession } from "../kernel/session";
 import {
   buildFragmentEffectPassShader,
   buildFragmentEffectShader,
@@ -68,8 +70,28 @@ export type ObjectFit = "cover" | "contain" | "fill";
  * the `export:worker-scene` parity gate).
  */
 export interface SceneTextureSource {
-  /** A texture created on this `SceneCompositor`'s context (the caller owns its lifetime). */
-  texture: WebGLTexture;
+  /**
+   * Which incarnation of the owning resource these pixels belong to (ADR-012 I-17/I-9, slice S5.2).
+   *
+   * Paired with {@link SceneTextureSource.acquire}, this is what makes the reference CHECKABLE. A bare
+   * `WebGLTexture` cannot answer "are you still the thing that exists?", so before S5.2 nothing but
+   * statement ordering stopped this path sampling a disposed target — and nothing noticed when the
+   * ordering was wrong. Sampling a deleted texture is not a crash; it is a silently wrong picture.
+   *
+   * Safe as a stand-in for the pointer because `RenderTarget.tex` is `readonly` and allocated once in
+   * the constructor — a resize reallocates storage on the SAME texture object. Texture identity is
+   * therefore target identity, so "the generation moved" means precisely "that target was disposed".
+   */
+  handle: ResourceHandle;
+  /**
+   * Fetch the live texture from its owner, or null once the owner has let it go.
+   *
+   * The owner supplies this rather than the consumer holding a pointer, because lifetime knowledge
+   * belongs with whoever controls the lifetime. Consumers must go through
+   * {@link resolveSceneTexture}, never call this directly — the handle check is what turns a
+   * use-after-dispose into a declared, counted event instead of a corrupt frame.
+   */
+  acquire: () => WebGLTexture | null;
   /** Natural pixel size (used for object-fit, same as `sourceWidth`/`sourceHeight`). */
   width: number;
   height: number;
@@ -93,7 +115,75 @@ export interface SceneTextureSource {
 
 /** True when a layer source is a same-context GPU texture (sample directly) vs an uploadable `TexImageSource`. */
 export function isSceneTextureSource(s: TexImageSource | SceneTextureSource): s is SceneTextureSource {
-  return (s as SceneTextureSource).texture !== undefined && typeof (s as SceneTextureSource).width === "number";
+  return typeof (s as SceneTextureSource).acquire === "function" && typeof (s as SceneTextureSource).width === "number";
+}
+
+/**
+ * Build a checkable reference to a texture the caller owns (slice S5.2).
+ *
+ * `acquire` is a thunk rather than the texture itself so the OWNER decides, at sample time, whether it
+ * still has one. Every producer already allocated a source object per frame, so this costs one closure
+ * where there was already one object — measurable enough to note, not enough to matter (R1).
+ */
+export function sceneTexture(
+  handle: ResourceHandle,
+  acquire: () => WebGLTexture | null,
+  width: number,
+  height: number,
+  extra?: Partial<Pick<SceneTextureSource, "debugTarget" | "servedTime">>
+): SceneTextureSource {
+  return { handle, acquire, width, height, ...extra };
+}
+
+/**
+ * Resolve a scene texture, or NOTHING if its owner has moved on.
+ *
+ * The one place the handle is checked, so a consumer cannot skip it by accident. A stale or missing
+ * handle yields null — the "declared empty resource" of S5.2 — and is counted and attributed rather
+ * than sampled. Before this, the same situation read whatever the driver left at that name.
+ *
+ * Null is the caller's cue to draw nothing for this layer. That is a real behaviour change ONLY in the
+ * case that was already broken; on every live handle the returned texture is exactly what the previous
+ * `source.texture` field held.
+ */
+/**
+ * A scene texture the compositor produces and consumes WITHIN ONE CALL (nested-comp RTT, content-cache
+ * hit). Exempt from generation checking, and the exemption is the point rather than a shortcut.
+ *
+ * S5.2 exists because a texture reference can outlive its resource — it is handed across a subsystem
+ * boundary, held for a frame, and sampled after the owner disposed it. These two never leave the
+ * statement that made them: the producing expression is an argument to the consuming call. There is no
+ * interval in which disposal could occur, so there is nothing a generation could detect, and giving
+ * them a registry entry would add per-frame churn to the draw path to check a window of zero width.
+ *
+ * The exemption is narrow BY CONSTRUCTION, not by convention: it takes a bare `WebGLTexture`, so a
+ * caller that wants to store one for later cannot reach for this without the storage being obvious.
+ */
+export function ephemeralSceneTexture(texture: WebGLTexture, width: number, height: number): SceneTextureSource {
+  return { handle: EPHEMERAL_HANDLE, acquire: () => texture, width, height };
+}
+
+/**
+ * The one handle that always resolves, held by the compositor for its own intra-call textures.
+ *
+ * Registered against a real key rather than faked with a sentinel generation, so `checkHandle` keeps a
+ * single meaning — "is this the live incarnation" — with no special case that a future reader would
+ * have to know about. It is never forgotten, so it is never stale.
+ */
+const EPHEMERAL_HANDLE: ResourceHandle = registerResource(
+  defaultSession,
+  "scene-compositor/intra-call",
+  { scope: "live", kind: "scene-compositor", id: "intra-call" },
+  0
+);
+
+export function resolveSceneTexture(session: RuntimeSession, source: SceneTextureSource): WebGLTexture | null {
+  const failure = checkHandle(session, source.handle);
+  if (failure !== null) {
+    noteStaleHandle(session, source.handle, failure);
+    return null;
+  }
+  return source.acquire();
 }
 
 export interface SceneLayerTransform {
@@ -2307,9 +2397,20 @@ export class SceneCompositor {
     // Source: a same-context texture is sampled DIRECTLY (no upload — the single-context export path); any
     // other source uploads via the per-source cache (texSubImage2D / skip-unchanged, no realloc). The mask
     // matte stays a 2D canvas (CPU raster) → always the upload path.
+    // S5.2: a same-context texture is RESOLVED through its handle, never read as a pointer. Null means
+    // the owner disposed it — draw nothing rather than sample whatever the driver left at that name.
     const srcTex = isSceneTextureSource(layer.source)
-      ? layer.source.texture
+      ? resolveSceneTexture(defaultSession, layer.source)
       : this.uploadSource(layer.source, layer.sourceVersion, { layerId: layer.debugLayerId, role: "source", frameTime: this.debugFrameTime });
+    // DECLARED EMPTY (S5.2). The handle did not resolve, so this layer's pixels no longer exist. Drawing
+    // nothing is the honest answer and matches what the rest of the runtime already does with absence
+    // (I-27/I-34): a merge downstream keeps its background. `resolveSceneTexture` has already counted
+    // and attributed it, so this is a silent return only in the sense that it does not draw — the event
+    // itself is on the record.
+    //
+    // Unreachable today by design: every producer publishes a handle from the same pool entry it reads
+    // the texture from. It fires when that stops being true, which is exactly the bug I-17 names.
+    if (srcTex === null) return;
     const maskTex = layer.mask
       ? this.uploadSource(layer.mask, layer.maskVersion, { layerId: layer.debugLayerId, role: "mask", frameTime: this.debugFrameTime })
       : null;
@@ -2711,7 +2812,7 @@ export class SceneCompositor {
       const hit = this.contentCache().lookup(contentKey, this.frameCounter);
       if (hit) {
         this.renderLayerInto(
-          { ...draw.shell, source: { texture: hit.artifact.tex, width: nestW, height: nestH }, sourceWidth: nestW, sourceHeight: nestH },
+          { ...draw.shell, source: ephemeralSceneTexture(hit.artifact.tex, nestW, nestH), sourceWidth: nestW, sourceHeight: nestH },
           dest,
         );
         return;
@@ -2804,7 +2905,7 @@ export class SceneCompositor {
     // clip's fit/transform/mask/blur/glow/blend/regionPasses in PARENT coordinates (this.width/height are
     // already restored above), and the nest RTT is just its source texture — no new composite logic.
     this.renderLayerInto(
-      { ...draw.shell, source: { texture: resultTex, width: nestW, height: nestH }, sourceWidth: nestW, sourceHeight: nestH },
+      { ...draw.shell, source: ephemeralSceneTexture(resultTex, nestW, nestH), sourceWidth: nestW, sourceHeight: nestH },
       dest,
     );
     // Only now is this depth's pair free to reuse — `resultTex` was read by the shell composite above.

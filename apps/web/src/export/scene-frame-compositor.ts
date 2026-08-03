@@ -40,7 +40,12 @@ import {
   getCompositionFilterEffects,
   getCompositionMediaEffects,
   getCompositionObjectFit,
+  defaultSession,
+  forgetResource,
   isSceneTextureSource,
+  registerResource,
+  sceneTexture,
+  type ResourceHandle,
   isTrackEnabled,
   buildSceneDraws,
   buildRegionBlurCloneAliases,
@@ -115,9 +120,9 @@ export class SceneFrameCompositor {
   private readonly singleContext: boolean;
   private readonly sharedGl: WebGL2RenderingContext | null;
   private readonly stageProbe: SceneFrameStageProbeOptions | null;
-  private readonly mediaSharedRenderers = new Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget }>();
+  private readonly mediaSharedRenderers = new Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; handle: ResourceHandle }>();
   private readonly freeMediaShared: { renderer: MediaWebGLRenderer; target: RenderTarget }[] = [];
-  private readonly overlaySharedRenderers = new Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string }>();
+  private readonly overlaySharedRenderers = new Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; handle: ResourceHandle }>();
   // Pools `buildSceneDraws` lazily fills + prunes: per-text/shape-layer overlay-grade renderers and
   // per-active-junction transition mix engines. We own them so they persist + get disposed with us.
   private readonly gradeRenderers = new Map<string, { renderer: MediaWebGLRenderer; pipelineKey: string }>();
@@ -274,7 +279,7 @@ export class SceneFrameCompositor {
       `effects=${hasEffects ? "1" : "0"}`,
       `blur=${draw.blurPx ?? 0}`,
       `glow=${draw.glow ? "1" : "0"}`,
-      `tex=${isSceneTextureSource(draw.source) && draw.source.texture ? "1" : isSceneTextureSource(draw.source) ? "0" : "n/a"}`,
+      `tex=${isSceneTextureSource(draw.source) ? (draw.source.acquire() ? "1" : "0") : "n/a"}`,
       `rt=${rt ? `${rt.width}x${rt.height}:${rt.framebufferStatus}` : "n/a"}`,
     ].join(" ");
   }
@@ -440,6 +445,9 @@ export class SceneFrameCompositor {
         if (activeMediaIds.has(id)) continue;
         this.mediaSharedRenderers.delete(id);
         this.mediaPipelineKeys.delete(id);
+        // Forget BEFORE the pair can be handed to another layer, so no window exists in which the old
+        // key and the new owner are both live.
+        forgetResource(defaultSession, `export-media/${id}`);
         if (this.freeMediaShared.length < MAX_POOLED_MEDIA_RENDERERS) this.freeMediaShared.push(entry);
         else { entry.renderer.dispose(); entry.target.dispose(); }
       }
@@ -458,12 +466,27 @@ export class SceneFrameCompositor {
   }
 
   /** Single-context: get/create the {shared MediaWebGLRenderer, RenderTarget} pair grading layer `id`. */
-  private mediaSharedFor(id: string): { renderer: MediaWebGLRenderer; target: RenderTarget } {
+  private mediaSharedFor(id: string): { renderer: MediaWebGLRenderer; target: RenderTarget; handle: ResourceHandle } {
     let entry = this.mediaSharedRenderers.get(id);
     if (!entry) {
-      entry = this.freeMediaShared.pop() ?? {
+      const recycled = this.freeMediaShared.pop();
+      const pair = recycled ?? {
         renderer: new MediaWebGLRenderer({ sharedGl: this.sharedGl! }),
         target: new RenderTarget(this.sharedGl!, 1, 1),
+      };
+      // A RECYCLED pair is the same GL target serving a DIFFERENT layer, which is exactly the case a
+      // raw pointer cannot express: a draw still holding the previous owner's reference would sample
+      // pixels that now belong to someone else. Registering under the new id mints a new handle, and
+      // the release below forgot the old key — so the stale reference resolves stale rather than
+      // silently reading another layer's frame.
+      entry = {
+        ...pair,
+        handle: registerResource(
+          defaultSession,
+          `export-media/${id}`,
+          { scope: "export", kind: "media-renderer", id },
+          performance.now()
+        ),
       };
       this.mediaSharedRenderers.set(id, entry);
     }
@@ -480,7 +503,19 @@ export class SceneFrameCompositor {
     if (!gl) return null;
     let entry = this.overlaySharedRenderers.get(layerId);
     if (!entry) {
-      entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "" };
+      entry = {
+        renderer: new MediaWebGLRenderer({ sharedGl: gl }),
+        target: new RenderTarget(gl, 1, 1),
+        pipelineKey: "",
+        // `scope: "export"` — this pool belongs to a render job, not to the live viewer, and the two
+        // must be distinguishable to anything that releases or sweeps by scope.
+        handle: registerResource(
+          defaultSession,
+          `export-overlay/${layerId}`,
+          { scope: "export", kind: "grade-renderer", id: layerId },
+          performance.now()
+        ),
+      };
       this.overlaySharedRenderers.set(layerId, entry);
     }
     const key = colorPipelineCacheKey(pipeline);
@@ -499,7 +534,9 @@ export class SceneFrameCompositor {
       mediaEffects: null,
       target: entry.target,
     });
-    return { texture: entry.target.tex, width: srcCanvas.width, height: srcCanvas.height, debugTarget: this.debugRenderTarget(entry.target) };
+    return sceneTexture(entry.handle, () => entry!.target.tex, srcCanvas.width, srcCanvas.height, {
+      debugTarget: this.debugRenderTarget(entry.target),
+    });
   };
 
   /** Single-context: dispose overlay grade renderers/targets whose text/shape layer isn't active this frame. */
@@ -606,7 +643,7 @@ export class SceneFrameCompositor {
 
     if (this.singleContext) {
       // Single-context: grade into a shared-context RenderTarget and hand back the texture directly (no canvas).
-      const { renderer, target } = this.mediaSharedFor(layer.id);
+      const { renderer, target, handle } = this.mediaSharedFor(layer.id);
       const pipelineKey = colorPipelineCacheKey(pipeline);
       if (this.mediaPipelineKeys.get(layer.id) !== pipelineKey) {
         renderer.setPipeline(pipeline);
@@ -627,7 +664,9 @@ export class SceneFrameCompositor {
           detail: `providerKey=${providerKey} target=${w}x${h}:${this.debugRenderTarget(target).framebufferStatus}`,
         });
       }
-      return { texture: target.tex, width: source.width, height: source.height, debugTarget: this.debugRenderTarget(target) };
+      return sceneTexture(handle, () => target.tex, source.width, source.height, {
+        debugTarget: this.debugRenderTarget(target),
+      });
     }
 
     const renderer = this.mediaRendererFor(layer.id);

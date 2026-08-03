@@ -41,7 +41,15 @@ import {
   type TimelineLayer,
   type TransitionSpec,
   type TransitionWindowSides,
+  defaultSession,
+  forgetResource,
+  registerResource,
+  sceneTexture,
+  type ResourceHandle,
 } from "@orreris/shared";
+
+/** Fails closed: an empty key resolves as `missing`, so an unregistered entry draws nothing. */
+const PROXY_PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
 import { MediaEncoder } from "../../export/video-encoder";
 import { acquireVideo, type VideoLease } from "../../lib/video-element-pool";
 import { applyActiveAdjustmentEffects, isLayerActive, isIncomingInPreroll, isOutgoingInPostroll } from "../../components/VideoPreview";
@@ -90,6 +98,8 @@ interface MediaSourceEntry {
   renderer?: MediaWebGLRenderer | undefined;
   target?: RenderTarget | undefined;
   pipelineKey: string;
+  /** Which incarnation of this capture's target the scene draws reference (S5.2). */
+  handle?: ResourceHandle | undefined;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -203,6 +213,10 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
       } catch {
         /* ignore */
       }
+      // Forget AFTER disposing, so the record's life never outlasts the resource's. Forgetting is what
+      // advances the generation for a key reused by the next capture run, which is what makes a draw
+      // still holding this run's handle resolve stale instead of sampling a freed target.
+      forgetResource(defaultSession, `proxy-capture/${entry.layer.id}`);
     }
     media.clear();
     capture.releaseCaptureResources();
@@ -229,6 +243,15 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
       }
       entry.renderer = new MediaWebGLRenderer({ sharedGl }, { label: `viewer-proxy:${layer.id}` });
       entry.target = new RenderTarget(sharedGl, 1, 1);
+      // `scratch:proxy-capture`, not `live`: these targets belong to one capture run and are disposed
+      // with it. Scoping them apart is what lets the idle sweep and any scope release tell a capture's
+      // resources from the viewer's, which is the distinction the whole scope vocabulary exists for.
+      entry.handle = registerResource(
+        defaultSession,
+        `proxy-capture/${layer.id}`,
+        { scope: "scratch:proxy-capture", kind: "media-renderer", id: layer.id },
+        performance.now()
+      );
       media.set(layer.id, entry);
       throwIfAborted(signal);
     }
@@ -350,7 +373,7 @@ async function createSpanRenderer(input: ViewerCaptureSpanInput): Promise<SpanRe
         transition: null,
         target: entry.target,
       });
-      graded.set(layer.id, { texture: entry.target.tex, width: sw, height: sh });
+      graded.set(layer.id, sceneTexture(entry.handle ?? PROXY_PLACEHOLDER_HANDLE, () => entry.target?.tex ?? null, sw, sh));
     }
 
     await capture.ensureTextRasters(mergedLayers, t);

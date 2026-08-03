@@ -65,6 +65,8 @@ import {
   type SceneTextureSource,
   type TimelineLayer,
   type ScenePreviewTransition,
+  sceneTexture,
+  type ResourceHandle,
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
@@ -640,7 +642,7 @@ export function ScenePreviewCanvas({
   const disposedRef = useRef(false);
   const contextLostRef = useRef(false);
   const [recoveryTick, setRecoveryTick] = useState(0);
-  const sharedGradeRenderersRef = useRef<Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string }>>(new Map());
+  const sharedGradeRenderersRef = useRef<Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; pipelineKey: string; handle: ResourceHandle }>>(new Map());
   // Per-text/shape-layer color-grade renderers (Phase 4.1c). A graded overlay's UNGRADED raster stays
   // cached (transform/grade-independent — the 4.1b win); the grade is applied as a post-pass through the
   // SAME `MediaWebGLRenderer` the media path + export overlay-grade use, so the result becomes the scene
@@ -661,6 +663,8 @@ export function ScenePreviewCanvas({
         lastKey: string;
         lastW: number;
         lastH: number;
+        /** Which incarnation of this pool entry the scene draws reference (S5.2). */
+        handle: ResourceHandle;
         /**
          * The media time the pixels currently in `target` represent (ADR-012 T5, slice S4.2).
          *
@@ -703,6 +707,15 @@ export function ScenePreviewCanvas({
   const gradeScopeOf = (key: string): ResourceScope =>
     key.startsWith("capture:") ? "scratch:capture" : key.startsWith("thumb:") ? "scratch:thumb" : "live";
   /** Registry key. Namespaced because a layer id and a resolved source id are routinely equal. */
+  /**
+ * The handle a pool entry holds for the instant between construction and registration.
+ *
+ * Fails CLOSED — an empty key resolves as `missing`, never as live — so if a draw ever did escape with
+ * one, it would be counted and drawn empty rather than sampling a texture it has no claim to. A
+ * placeholder that validated would be a hole in the check this slice exists to add.
+ */
+const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
+
   const gradeResourceKey = (id: string): string => `grade/${id}`;
   const mediaResourceKey = (id: string): string => `media/${id}`;
 
@@ -974,9 +987,16 @@ export function ScenePreviewCanvas({
           renderer: new MediaWebGLRenderer({ sharedGl: gl }),
           target: new RenderTarget(gl, targetW, targetH),
           pipelineKey: "",
+          // Overwritten on the next line by the register call, which is the only thing that can mint a
+          // real one. Never observable: the entry is not reachable by a draw until this function returns.
+          handle: PLACEHOLDER_HANDLE,
         };
         sharedGradeRenderersRef.current.set(key, entry);
-        registerResource(
+        // The handle is taken from the SAME call that created the entry, so it names this incarnation
+        // and no other (S5.2). Storing it on the entry is what keeps that true: re-deriving it later
+        // would read whatever the key means then, which is precisely the confusion generations exist
+        // to remove.
+        entry.handle = registerResource(
           defaultSession,
           gradeResourceKey(key),
           { scope: gradeScopeOf(key), kind: "grade-renderer", id: key },
@@ -988,6 +1008,7 @@ export function ScenePreviewCanvas({
         // consumer is the one way a wall-clock sweep could do harm.
         touchResource(defaultSession, gradeResourceKey(key), performance.now());
       }
+      const gradeHandle = entry.handle;
       entry.target.resize(targetW, targetH);
       const pipelineKey = colorPipelineCacheKey(pipeline);
       if (entry.pipelineKey !== pipelineKey) {
@@ -1005,7 +1026,7 @@ export function ScenePreviewCanvas({
         mediaEffects: null,
         target: entry.target,
       });
-      return { texture: entry.target.tex, width: targetW, height: targetH };
+      return sceneTexture(gradeHandle, () => entry.target.tex, targetW, targetH);
     };
   });
 
@@ -1202,18 +1223,18 @@ export function ScenePreviewCanvas({
           // hold the 2026-07-07 anti-flicker fix introduced, and the reason a source that decoded once
           // could read as "ready" forever no matter how stale — the texture had no way to say when it
           // was from. Now it does.
-          return { texture: entry.target.tex, width: entry.lastW, height: entry.lastH, ...servedTimeOf(entry.lastServedTime) };
+          return sceneTexture(entry.handle, () => entry!.target.tex, entry.lastW, entry.lastH, servedTimeOf(entry.lastServedTime));
         }
         return null; // never had a frame — same as the old "no canvas yet" (poster covers it)
       }
       const gl = compositor.sharedGl;
       if (!entry) {
-        entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0, lastServedTime: null };
+        entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0, lastServedTime: null, handle: PLACEHOLDER_HANDLE };
         sharedMediaRenderersRef.current.set(resolvedId, entry);
         // Always `live`: this pool is only ever built from the live frame's media set. The capture path
         // reuses the graded textures the live frame already produced rather than making its own, which
         // is why `renderIsolated` can be synchronous at all.
-        registerResource(
+        entry.handle = registerResource(
           defaultSession,
           mediaResourceKey(resolvedId),
           { scope: "live", kind: "media-renderer", id: resolvedId },
@@ -1234,7 +1255,7 @@ export function ScenePreviewCanvas({
         // Re-grade skip: same frame version, same grade — so the same pixels, and therefore the same
         // served time. Reading it from the entry rather than the snapshot keeps the skip honest even if
         // the producer's own reading has since moved.
-        return { texture: entry.target.tex, width: w0, height: h0, ...servedTimeOf(entry.lastServedTime) };
+        return sceneTexture(entry.handle, () => entry!.target.tex, w0, h0, servedTimeOf(entry.lastServedTime));
       }
       if (entry.pipelineKey !== snap.pipelineKey) {
         entry.renderer.setPipeline(snap.pipeline);
@@ -1269,7 +1290,7 @@ export function ScenePreviewCanvas({
       // the entry's served time is written — every other path reads it back.
       entry.lastServedTime = snap.servedSourceTime;
       recordSingleCtx("grades");
-      return { texture: entry.target.tex, width: w0, height: h0, ...servedTimeOf(snap.servedSourceTime) };
+      return sceneTexture(entry.handle, () => entry!.target.tex, w0, h0, servedTimeOf(snap.servedSourceTime));
     };
     const getMediaSingleCtx = (id: string): SceneTextureSource | null => {
       const sources = mediaSourcesRef?.current;
@@ -1311,7 +1332,7 @@ export function ScenePreviewCanvas({
           // Descriptor-gap hold: the producer is gone entirely, so nothing can report a CURRENT time —
           // the pixels are the last grade's and say so. Of the four hold paths this is the one most
           // likely to persist, because a remount plus a decode is not a sub-frame event.
-          return { texture: held.target.tex, width: held.lastW, height: held.lastH, ...servedTimeOf(held.lastServedTime) };
+          return sceneTexture(held.handle, () => held.target.tex, held.lastW, held.lastH, servedTimeOf(held.lastServedTime));
         }
         return null;
       }

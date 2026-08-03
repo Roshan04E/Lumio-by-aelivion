@@ -139,7 +139,7 @@ function graphFixture(): ProjectGraph {
 function hostDraw(sourceVersion: number | null = 7): SceneLayerDraw {
   return {
     debugLayerId: "host",
-    source: { texture: {} as WebGLTexture, width: 1920, height: 1080 },
+    source: sceneTexture(TEST_HANDLE, () => ({}) as WebGLTexture, 1920, 1080),
     sourceWidth: 1920,
     sourceHeight: 1080,
     fit: "cover",
