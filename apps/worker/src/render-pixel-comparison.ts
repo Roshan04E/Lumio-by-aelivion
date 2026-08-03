@@ -117,9 +117,17 @@ async function main() {
     const baseUrl = `http://127.0.0.1:${port}/editor/__preview-fixture`;
     await waitForServer(baseUrl);
     for (const key of fixtureKeys) {
-      const url = `${baseUrl}?fixture=${encodeURIComponent(key)}&rendererMode=${rendererMode}`;
+      // PIXEL_URL_EXTRA appends raw query params to the fixture URL, which is how a runtime FLAG arm
+      // gets measured: every kernel flag resolves query-param first (`readKernelFlag`), so
+      // `PIXEL_URL_EXTRA=kernelCoherenceUnified=1` runs the gate against the flag-on path without
+      // touching the default the gate otherwise measures. Needed because a slice shipped behind a
+      // default-off flag is otherwise INERT here — an A/B of it compares two identical code paths and
+      // reports a reassuring null result about a change it never executed.
+      const extra = process.env.PIXEL_URL_EXTRA ? `&${process.env.PIXEL_URL_EXTRA}` : "";
+      const url = `${baseUrl}?fixture=${encodeURIComponent(key)}&rendererMode=${rendererMode}${extra}`;
       const previewFramePath = path.join(artifactDir, `web-preview-${key}.png`);
-      await capturePreviewFrame(url, previewFramePath);
+      const readiness = await capturePreviewFrame(url, previewFramePath);
+      if (readiness) readinessObservations.push({ fixture: key, ...readiness });
       previews.set(key, previewFramePath);
     }
   } finally {
@@ -162,6 +170,31 @@ async function main() {
     )}\n`
   );
 
+  // Printed BEFORE the throw: a failing run is the one whose readiness reading matters, and a report
+  // that only appears on success would systematically exclude every case it exists to explain.
+  if (observeReadiness && readinessObservations.length) {
+    const outcomeOf = new Map(results.map((r) => [r.fixture, r.diffRatio > barFor(r.fixture) ? "FAIL" : "pass"]));
+    console.log("\n── readiness observation (PIXEL_READY_OBSERVE=1, capture timing UNCHANGED) ──");
+    console.log("fixture                        gate   settled@capture  firstSettled  afterCapture  composites  participants  notReady  fallback cause");
+    for (const o of readinessObservations) {
+      const settled = o.ledgerPresent ? (o.settledAtCapture ? "yes" : o.neverSettled ? "NEVER" : "no") : "no-ledger";
+      console.log(
+        `${o.fixture.padEnd(30)} ${(outcomeOf.get(o.fixture) ?? "?").padEnd(6)} ${settled.padEnd(15)} ` +
+          `${(o.firstSettledAtMs === null ? "-" : `${Math.round(o.firstSettledAtMs)}ms`).padEnd(13)} ` +
+          `${(o.settledAfterMs === null ? "-" : `+${o.settledAfterMs}ms`).padEnd(13)} ` +
+          `${String(o.composites).padEnd(11)} ${String(o.participants).padEnd(13)} ${String(o.notReady).padEnd(9)} ${o.degradation}`
+      );
+    }
+    // Appended, not overwritten: choosing a bound needs a distribution across runs, and one run is
+    // one sample of a race.
+    fs.appendFileSync(
+      path.join(artifactDir, "readiness-observations.jsonl"),
+      `${readinessObservations
+        .map((o) => JSON.stringify({ at: new Date().toISOString(), gate: outcomeOf.get(o.fixture) ?? "?", ...o }))
+        .join("\n")}\n`
+    );
+  }
+
   if (failures.length) {
     throw new Error(`Pixel comparison failed for ${failures.length} fixture(s):\n  ${failures.join("\n  ")}`);
   }
@@ -187,7 +220,96 @@ function startWebServer(port: number) {
   return child;
 }
 
-async function capturePreviewFrame(url: string, outputPath: string) {
+/**
+ * READINESS OBSERVATION (default OFF, `PIXEL_READY_OBSERVE=1`) — measuring the capture race before
+ * changing anything about it.
+ *
+ * The 250 ms sleep below is the gate's only wait for GPU output, and `flarex-generators` fails at
+ * 86.895% in ~40% of runs (25-pair interleaved sweep, 2026-08-03: HEAD 10/25, ADR-012 10/25 — the
+ * fixture is flaky at HEAD, which is what cleared the implementation). 86.895% is the documented
+ * signature of a blank capture. This mode tests that explanation and sizes its fix WITHOUT touching
+ * capture timing, so the numbers describe the gate as it actually ships:
+ *
+ *   - `atCapture` is read immediately BEFORE the screenshot. If the blank-capture story is right,
+ *     failing runs are the ones whose frame was not settled at that instant. That is the causal test,
+ *     and it is only trustworthy because nothing here moves the screenshot.
+ *   - `settledAfterMs` keeps polling AFTER the screenshot, so a run that missed still reports when it
+ *     WOULD have been ready. That is the latency distribution the eventual bound gets chosen from —
+ *     p50/p95/max, not one maximum, since a bound picked off a single worst run encodes that run.
+ *
+ * SETTLED is the present ledger's own definition, not a new one invented here: a composite that
+ * presented with no stale source AND nothing not-ready. The stricter `notReady === 0` matters —
+ * `outcome: "coherent"` alone only means no source disagreed about the MOMENT, and a generator whose
+ * raster has not landed is not stale, it is absent. Absence is exactly this fixture's failure.
+ */
+const observeReadiness = process.env.PIXEL_READY_OBSERVE === "1";
+const READY_POLL_BUDGET_MS = 10_000;
+
+interface ReadinessObservation {
+  fixture: RenderComparisonFixtureKey;
+  /** Composites recorded by capture time. 0 means the ledger was empty — nothing had presented. */
+  composites: number;
+  /** Was a settled composite already on record when the screenshot was taken? */
+  settledAtCapture: boolean;
+  /** Page-relative ms of the first settled composite, or null if none had happened by capture. */
+  firstSettledAtMs: number | null;
+  /** Ms spent polling AFTER capture before a settled composite appeared. Null = it already had. */
+  settledAfterMs: number | null;
+  /** True when the budget expired with no settled composite ever — the case a fatal wait must not hang on. */
+  neverSettled: boolean;
+  /** Media sources in the last recorded composite. 0 is legitimate (a text/shape-only fixture). */
+  participants: number;
+  /** Layers with no content in the last recorded composite. Non-zero at capture = a blank region. */
+  notReady: number;
+  /** False when the page published no ledger at all — legacy renderer, or diagnostics off. */
+  ledgerPresent: boolean;
+  /** Flarex fallback causes seen this capture, e.g. `host-substituted:no-loader=12`. */
+  degradation: string;
+}
+
+const readinessObservations: ReadinessObservation[] = [];
+
+/**
+ * Read the ledger's view of readiness plus the page clock. Returns null when the page publishes no
+ * ledger. Only ever called AFTER the screenshot — see the note at the capture site.
+ */
+async function readLedgerWithClock(page: import("playwright").Page) {
+  return page.evaluate(() => {
+    const ledger = (globalThis as { __rfPresentLedger?: { rows: (limit?: number) => unknown[] } })
+      .__rfPresentLedger;
+    if (!ledger) return null;
+    const rows = ledger.rows(2048) as {
+      atMs: number;
+      outcome: string;
+      participants: number;
+      stale: number;
+      notReady: number;
+    }[];
+    const settled = rows.find((row) => row.outcome === "coherent" && row.notReady === 0);
+    const last = rows[rows.length - 1];
+    // WHY a node fell back, not just that it did. `degrade()` runs BEFORE S4.5's
+    // `allowHostSubstitution === false` early return, so the reasons are still recorded on a flag-on
+    // run — which is what makes this the decisive reading: it separates `host-substituted:pending`
+    // (a node's own pixels have not arrived — the I-27 violation S4.5 exists to delete) from
+    // `:no-loader` / `:no-resolver` (the host clip IS this node's source, and drawing it is correct).
+    const degradation = (
+      globalThis as { __rfFlarexDegradation?: { byReason: { reason: string; count: number }[] } }
+    ).__rfFlarexDegradation;
+    return {
+      nowMs: performance.now(),
+      composites: rows.length,
+      firstSettledAtMs: settled ? settled.atMs : null,
+      participants: last?.participants ?? 0,
+      notReady: last?.notReady ?? 0,
+      degradation: (degradation?.byReason ?? [])
+        .filter((row) => row.reason.startsWith("host-substituted:") || row.reason.startsWith("source-"))
+        .map((row) => `${row.reason}=${row.count}`)
+        .join(" "),
+    };
+  });
+}
+
+async function capturePreviewFrame(url: string, outputPath: string): Promise<Omit<ReadinessObservation, "fixture"> | null> {
   // PIXEL_BROWSER_CHANNEL lets a dev without the Playwright-managed Chromium fall back to an
   // installed channel ("msedge"/"chrome"); default uses the bundled Chromium.
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
@@ -220,12 +342,89 @@ async function capturePreviewFrame(url: string, outputPath: string) {
     // across identical-code runs). Capture-sync only; thresholds and rendering are untouched.
     await page.waitForTimeout(250);
 
+    // NOTHING may touch the page between the sleep and the screenshot. The first version of this
+    // instrument read the ledger here, and `page.evaluate` is a round-trip — it inserted delay at
+    // exactly the point where timing decides the outcome, and produced 6 passes in 6 runs against a
+    // measured 40% failure rate (p ~ 0.047). That is programme risk R1, the observer effect, and an
+    // instrument that widens the race it is measuring reports on a gate that does not ship.
+    //
+    // So: capture first, ask afterwards, and RECONSTRUCT the capture instant from timestamps. The page
+    // clock at the read is `nowMs`; subtracting the Node-side elapsed since just before the screenshot
+    // places the shutter on the page's own timeline without ever having spoken to the page.
+    const beforeShot = Date.now();
     await page.locator(".preview-composition-space").screenshot({
       animations: "disabled",
       caret: "hide",
       omitBackground: false,
       path: outputPath
     });
+
+    if (!observeReadiness) return null;
+    const afterShot = await readLedgerWithClock(page);
+    const atCapture = afterShot
+      ? {
+          ...afterShot,
+          // Page-clock instant of the shutter. Rounded off by however long the screenshot took, which
+          // biases toward calling a marginal frame "settled at capture" — the conservative direction,
+          // since it under-reports the very failures this is looking for.
+          captureAtPageMs: afterShot.nowMs - (Date.now() - beforeShot),
+        }
+      : null;
+
+    if (!atCapture) {
+      // No ledger: legacy renderer mode, or diagnostics disabled. Reported rather than inferred —
+      // an absent instrument must not read as a healthy zero.
+      return {
+        composites: 0, settledAtCapture: false, firstSettledAtMs: null, settledAfterMs: null,
+        neverSettled: false, participants: 0, notReady: 0, ledgerPresent: false, degradation: "",
+      };
+    }
+
+    // Keep watching AFTER the capture. A run that captured early still tells us when it settled, and
+    // that is the only way to size the bound from runs that FAILED rather than only from ones that
+    // happened to win the race.
+    // Settled AT CAPTURE is a timestamp question, not an ordering one: the first settled composite
+    // must predate the shutter. Reading the ledger after the fact would otherwise credit the capture
+    // with a composite that only landed while we were asking about it.
+    const settledAtCapture =
+      atCapture.firstSettledAtMs !== null && atCapture.firstSettledAtMs <= atCapture.captureAtPageMs;
+
+    let settledAfterMs: number | null = null;
+    let firstSettledAtMs = atCapture.firstSettledAtMs;
+    let latest: {
+      composites: number; firstSettledAtMs: number | null; participants: number; notReady: number;
+    } = atCapture;
+    if (firstSettledAtMs === null) {
+      const pollStart = Date.now();
+      while (Date.now() - pollStart < READY_POLL_BUDGET_MS) {
+        await page.waitForTimeout(50);
+        const now = await readLedgerWithClock(page);
+        if (!now) break;
+        latest = now;
+        if (now.firstSettledAtMs !== null) {
+          firstSettledAtMs = now.firstSettledAtMs;
+          settledAfterMs = Date.now() - pollStart;
+          break;
+        }
+      }
+    }
+
+    return {
+      composites: latest.composites,
+      settledAtCapture,
+      firstSettledAtMs,
+      // How far the shutter MISSED by, when it did. This is the number the bound gets sized from.
+      settledAfterMs:
+        settledAfterMs ??
+        (firstSettledAtMs !== null && !settledAtCapture
+          ? Math.round(firstSettledAtMs - atCapture.captureAtPageMs)
+          : null),
+      neverSettled: firstSettledAtMs === null,
+      participants: latest.participants,
+      notReady: latest.notReady,
+      ledgerPresent: true,
+      degradation: atCapture.degradation,
+    };
   } finally {
     await browser.close();
   }
