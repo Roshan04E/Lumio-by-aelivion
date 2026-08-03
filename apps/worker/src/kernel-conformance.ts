@@ -47,6 +47,14 @@ import {
   demoteMediaSources,
   holdDecoderSession,
   isMediaSourceDemoted,
+  admissionDenials,
+  contributionRank,
+  noteAdmissionDenied,
+  rankAdmission,
+  MIN_RESIDENCY_MS,
+  PERMANENT_DENIAL_AFTER_MS,
+  type AdmissionCandidate,
+  type VisibleContribution,
   noteBorrowGrant,
   noteBorrowRefused,
   noteSatisfactionMiss,
@@ -1505,6 +1513,130 @@ console.log("\nS4.2 — a texture is pixels-at-a-moment (T5/T7, I-3)");
     Math.abs(coherenceGap(target, servedTime(graded.servedTime!)) - 0.25) < 1e-9);
   enforced("I-3", "…for the proxy participant too, in the same units",
     Math.abs(coherenceGap(target, servedTime(proxied.servedTime!)) - 0.3) < 1e-9);
+}
+
+// ---------------------------------------------------------------------------------------------
+// S4.3 — source admission: who gets scarce decode capacity
+// ---------------------------------------------------------------------------------------------
+
+console.log("\nS4.3 — source admission (ADR-012 §6.3/§6.11/§6.12)");
+{
+  const session = createRuntimeSession({ id: "conformance-s43" });
+  const NOW = 100_000;
+  const seen = (key: string, contribution: VisibleContribution | undefined, opts: Partial<AdmissionCandidate> = {}): AdmissionCandidate => ({
+    key,
+    priority: "playhead",
+    contribution,
+    firstRequestedAtMs: NOW,
+    admittedAtMs: null,
+    ...opts,
+  });
+  const visible = (area: number, opacity = 1): VisibleContribution => ({
+    reachable: true,
+    area,
+    opacity,
+    underDisabledBranch: false,
+  });
+
+  // ── §6.3: RANKED BY CONTRIBUTION, NOT ARRIVAL. This is the defect the slice exists for — mount order
+  // is a React scheduling artifact, so under first-come the source that looks broken can change between
+  // two runs of one project. `small` asks FIRST and must still lose.
+  const byArrival = [seen("small", visible(0.02)), seen("full", visible(0.9))];
+  const ranked = rankAdmission(byArrival, 1, NOW);
+  enforced("I-27", "a large contributor beats a small one that asked first",
+    sameList(ranked.admitted, ["full"]));
+  // NON-VACUITY: assert arrival order really would have chosen differently. Without this the check
+  // passes just as well on a fixture where both orders agree, which proves nothing about ranking.
+  enforced("I-27", "…and arrival order WOULD have chosen the other one (the defect is reproduced)",
+    byArrival[0]!.key === "small");
+
+  // Determinism on the size the slice's own testing line names. Same inputs, same answer, twice —
+  // including the tie-break, which is arbitrary but must be FIXED or a comp's denied source changes
+  // between two identical frames.
+  const eight = Array.from({ length: 8 }, (_, i) => seen(`m${i}`, visible(0.1)));
+  const a = rankAdmission(eight, 3, NOW);
+  const b = rankAdmission([...eight].reverse(), 3, NOW);
+  enforced("I-27", "ranking is deterministic and order-independent across 8 equal MediaIns",
+    sameList(a.admitted, b.admitted) && a.admitted.length === 3);
+
+  // ── Invisible is not the same as unlucky. A comp full of disabled branches must not read as
+  // over-budget, or whoever reads the diagnostic raises a cap that was never the constraint.
+  const invisible = rankAdmission(
+    [seen("on", visible(0.5)), seen("off", { reachable: true, area: 0.9, opacity: 1, underDisabledBranch: true })],
+    2,
+    NOW
+  );
+  enforced("I-27", "a zero-contribution source is denied for CONTRIBUTION, not for scarcity",
+    invisible.denied.find((d) => d.key === "off")?.reason === "no-visible-contribution");
+  enforced("I-27", "…even with capacity to spare — it is not a budget problem",
+    invisible.admitted.length === 1 && !invisible.admitted.includes("off"));
+  enforced("I-27", "a fully transparent source contributes nothing however large it is",
+    contributionRank(visible(1, 0)) === 0);
+
+  // ── The undeclared-input rule, learned the hard way in S3.3 and S4.7: a decision input that does not
+  // exist must be RECORDED as absent, never defaulted. Zero would silently starve every consumer not yet
+  // taught to declare — an instrumentation gap turning into a black picture.
+  const mixed = rankAdmission([seen("known", visible(0.5)), seen("unknown", undefined), seen("dead", { reachable: false, area: 1, opacity: 1, underDisabledBranch: false })], 3, NOW);
+  enforced("I-29", "an undeclared contribution outranks a provably-invisible source…",
+    contributionRank(undefined) > contributionRank({ reachable: false, area: 1, opacity: 1, underDisabledBranch: false }));
+  enforced("I-29", "…and loses to a provably-visible one",
+    contributionRank(undefined) < contributionRank(visible(0.5)));
+  enforced("I-29", "…and the denial says the input was missing, not that the source was worthless",
+    rankAdmission([seen("known", visible(0.5)), seen("unknown", undefined)], 1, NOW)
+      .denied.find((d) => d.key === "unknown")?.undeclared === true);
+  enforced("I-27", "an unreachable source is denied on contribution", mixed.denied.some((d) => d.key === "dead"));
+
+  // ── §6.11 FAIRNESS. A persistently low-ranked source must eventually win or be declared denied.
+  // Waiting forever is not one of the two acceptable ends.
+  const starved = seen("tiny", visible(0.01), { firstRequestedAtMs: NOW - 20_000 });
+  const fresh = seen("mid", visible(0.2));
+  enforced("I-31", "aging lifts a long-denied source above a higher-contribution newcomer",
+    sameList(rankAdmission([starved, fresh], 1, NOW).admitted, ["tiny"]));
+  enforced("I-31", "…and without aging it would still be losing (the term is doing the work)",
+    sameList(rankAdmission([{ ...starved, firstRequestedAtMs: NOW }, fresh], 1, NOW).admitted, ["mid"]));
+  const forever = rankAdmission(
+    [seen("big", visible(0.9)), seen("never", visible(0.001), { firstRequestedAtMs: NOW - PERMANENT_DENIAL_AFTER_MS - 1 })],
+    0,
+    NOW
+  );
+  enforced("I-31", "a source denied past the terminal is DECLARED permanently denied, not left waiting",
+    forever.denied.find((d) => d.key === "never")?.reason === "permanently-denied");
+
+  // ── HYSTERESIS damps oscillation, NOT badness. The slice's testing line is explicit that an
+  // under-budget comp with divergent trajectories must produce no churn at all — churn that residency
+  // has to damp when capacity is sufficient would mean the ranking is wrong, and damping it hides that.
+  const incumbent = seen("held", visible(0.1), { admittedAtMs: NOW - 100 });
+  const challenger = seen("better", visible(0.8));
+  const damped = rankAdmission([incumbent, challenger], 1, NOW);
+  enforced("I-25", "an incumbent inside its residency window keeps the slot against a better challenger",
+    sameList(damped.admitted, ["held"]));
+  enforced("I-25", "…and that is REPORTED as hysteresis, not passed off as a ranking outcome",
+    sameList(damped.heldByResidency, ["held"]));
+  const expired = rankAdmission([{ ...incumbent, admittedAtMs: NOW - MIN_RESIDENCY_MS - 1 }, challenger], 1, NOW);
+  enforced("I-25", "…and once residency expires the better source takes it",
+    sameList(expired.admitted, ["better"]));
+  const underBudget = rankAdmission([seen("x", visible(0.3)), seen("y", visible(0.7))], 4, NOW);
+  enforced("I-25", "an UNDER-BUDGET comp denies nothing and needs no damping",
+    underBudget.denied.length === 0 && underBudget.heldByResidency.length === 0);
+
+  // ── §6.12 / THE DONE-WHEN: denial is observable in diagnostics for over-budget comps. A `null` return
+  // and a `capMisses` counter is a number with no subject; this is the same event with a name attached.
+  enforced("I-29", "no denials are recorded before anything is denied", admissionDenials(session).length === 0);
+  const overBudget = rankAdmission(
+    [seen("a1", visible(0.9)), seen("a2", visible(0.5)), seen("a3", visible(0.3)), seen("a4", visible(0.2))],
+    2,
+    NOW
+  );
+  for (const denial of overBudget.denied) noteAdmissionDenied(session, denial);
+  const recorded = admissionDenials(session);
+  enforced("I-29", "an over-budget comp reports every denial it made",
+    recorded.length === 2 && sameList([...recorded].map((d) => d.key).sort(), ["a3", "a4"]));
+  enforced("I-29", "…each naming the bar it failed to clear, so 'raise the cap' is a checkable claim",
+    recorded.every((d) => d.admittedFloor != null && d.rank < d.admittedFloor!));
+  enforced("I-29", "…and attributing the denial to scarcity rather than to invisibility",
+    recorded.every((d) => d.reason === "over-budget"));
+
+  session.dispose();
 }
 
 // ---------------------------------------------------------------------------------------------

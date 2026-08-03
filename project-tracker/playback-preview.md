@@ -2858,3 +2858,39 @@ soak is clean, and do **not** assume the freeze symptom is solved by completing 
 investigation is provider lifetime: was one never created, created and released, demoted, refused by
 proxy selection, reclaimed by retention — or did the source simply stay on `<video>` forever? Those are
 lifecycle questions, not scheduling ones.
+
+## v34b — CORRECTION to v34a: a never-deleted diagnostic row is not a sample (2026-08-03)
+
+**v34a's headline claim was wrong, and the error is instructive.** It read:
+
+> One source sits on `element` with NO provider for 97–100% of the arm.
+
+`__rfSourceMap` is written per composite and **never deleted** — `(w.__rfSourceMap ??= {})[id] = {…}`,
+with no removal anywhere in the tree. A source that leaves the draw set leaves its last row behind
+permanently, and the budget probe read the whole map every 250ms and counted that corpse as a live
+sample.
+
+The run parks at 7s with the cut at 11s and plays 10s, so the FIRST clip is past its out-point for most
+of the sampled window. It was not starved of a decoder. **It was not in the scene.** The row was frozen
+at its last graded value, and 100% of a frozen row reads exactly like 100% of a starved one.
+
+**What survives.** The second clip — the one that IS live across the cut — held a WebCodecs provider in
+21–22% of samples. That figure is now also suspect for the same reason (it is inactive before the cut),
+and the corrected instrument must re-measure it before anything is concluded.
+
+**The discriminator, and why it needs no app change.** A row still being graded is rewritten every
+composite, and `staleMs` is recomputed against an advancing playhead — so *something* in it moves even
+when the source is stuck. A row byte-identical to the previous sample is not being written at all. The
+probe now drops those and reports `graded n/total` beside every percentage, so "12 of 40 samples" can
+never again be read as if it covered the arm.
+
+**The pattern, third occurrence this session.** `mediaFps` reading 0 on the WebCodecs path; `wcBusy` and
+`WC_NO_FRAME` counted as two facts when they are one; and now a diagnostic map with no delete. Every one
+produced a confident, plausible, wrong number. **The instrument is part of the system under test, and it
+gets audited before its output becomes a finding** — especially when the output is the finding you were
+hoping for.
+
+**Status of the v34a direction.** The "decoder availability, not contention" hypothesis is NOT
+withdrawn — it was never resting on the first clip's row alone, and `shared`/`detaches`/`refusals` come
+from `__rfWcPool`, which is unaffected. But it is now **unproven** rather than evidenced, and needs a
+re-measurement on the corrected instrument before it directs any work.

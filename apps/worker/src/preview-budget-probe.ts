@@ -326,12 +326,36 @@ function report(result: ArmResult): void {
   // MEDIA SUPPLY, per source. `mediaFps` is one number for the whole scene, so a run where one source
   // decoded fine and another never started looks identical to a run where both limped. This breaks the
   // aggregate back into "which source, on which decode path, in what state, and why".
-  const bySource = new Map<string, { asset: string; decode: Set<string>; state: Map<string, number>; why: Map<string, number>; provider: number; busy: number; n: number }>();
+  const bySource = new Map<string, { asset: string; decode: Set<string>; state: Map<string, number>; why: Map<string, number>; provider: number; busy: number; n: number; frozen: number }>();
+  /**
+   * LEFTOVER ROWS ARE NOT SAMPLES.
+   *
+   * `__rfSourceMap` is written per composite and **never deleted** — `(w.__rfSourceMap ??= {})[id] = …`
+   * with no removal anywhere. A source that leaves the draw set therefore leaves its last row behind
+   * forever, and a probe reading the whole map every 250ms keeps counting that corpse as a live sample.
+   *
+   * This produced a wrong finding, stated confidently: "one source sits on `element` with no provider
+   * for 97-100% of the arm". The run parks at 7s and the cut is at 11s, so the FIRST clip is past its
+   * out-point for most of the sampled window — it was not starved of a decoder, it was not in the scene.
+   *
+   * The discriminator needs no app change. A row still being graded is rewritten every composite, and
+   * `staleMs` is recomputed against an advancing playhead, so *something* in it moves even when the
+   * source is stuck. A row that is byte-identical to the previous sample is not being written at all.
+   */
+  const previous = new Map<string, string>();
   for (const sample of result.samples) {
     for (const src of sample.sources ?? []) {
+      const fingerprint = JSON.stringify(src);
+      const wasFrozen = previous.get(src.id) === fingerprint;
+      previous.set(src.id, fingerprint);
+      if (wasFrozen) {
+        const row = bySource.get(src.id);
+        if (row) row.frozen += 1;
+        continue;
+      }
       let row = bySource.get(src.id);
       if (!row) {
-        row = { asset: src.asset, decode: new Set(), state: new Map(), why: new Map(), provider: 0, busy: 0, n: 0 };
+        row = { asset: src.asset, decode: new Set(), state: new Map(), why: new Map(), provider: 0, busy: 0, n: 0, frozen: 0 };
         bySource.set(src.id, row);
       }
       row.decode.add(src.decode);
@@ -352,7 +376,11 @@ function report(result: ArmResult): void {
       // indistinguishable — in a table whose entire purpose is telling them apart.
       `   source   ${row.asset.slice(-28)} […${id.slice(-24)}]  decode ${[...row.decode].join("/")}  ${states}` +
         (whys ? `  why: ${whys}` : "") +
-        `  wcProvider ${pct(row.provider)}  wcBusy ${pct(row.busy)}`
+        `  wcProvider ${pct(row.provider)}  wcBusy ${pct(row.busy)}` +
+        // Percentages are OF LIVE SAMPLES. `graded n/total` is what makes that readable: a source graded
+        // in 12 of 40 samples was out of the scene for the rest, and reading its 12 samples as if they
+        // covered the arm is the exact error this line exists to prevent anyone repeating.
+        `  graded ${row.n}/${row.n + row.frozen}`
     );
   }
   const pool = result.pool;
