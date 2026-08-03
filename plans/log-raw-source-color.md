@@ -47,6 +47,28 @@ capability honestly rather than fail obscurely.
 Missing: **nothing reads `VideoFrame.colorSpace`.** `VideoColorSpace` appears only in
 `video-encoder.ts` (export tagging, P2). Source detection is the pending P3.
 
+## The working colour space (was missing; review 2026-08-03)
+
+Every stage below says "log → linear". **Linear in which primaries?** That was never stated, and
+without it Stage 2b is undefined — a gamut matrix has to have a destination.
+
+**Orreris's internal working space is linear Rec.709, D65** — already the code's answer
+(`ColorWorkingSpace = "rec709-linear"`, `DEFAULT_PROJECT_COLOR_SETTINGS`), never the plan's. Every IDT
+maps into that space: transfer to linear, then primaries to Rec.709. Transfer and primaries are
+separate concerns and are applied as separate steps (2a and 2b).
+
+**The honest caveat, which nobody raised:** Rec.709 is a *narrow* working gamut, and it is a poor one
+for grading log. S-Gamut3, ARRI Wide Gamut and BT.2020 all contain colours Rec.709 cannot represent, so
+converting into Rec.709 linear **clips them permanently** — before the grade, where a colourist would
+have wanted to pull them back. A scene-referred wide working space (ACEScg, or linear BT.2020) is the
+correct long-term answer for log footage.
+
+Not changing it now: the working space is a project-wide decision that touches the grade math, the LUT
+baker, export tagging and every saved project, and it deserves its own ADR rather than being smuggled in
+under a source-format plan. `ColorWorkingSpace` is already a union type with one member, which is the
+extension point. **Stage 2b must not be read as "log is now colour-accurate" — it is "log is now
+correctly interpreted, then clipped to Rec.709."** That distinction belongs in the UI copy too.
+
 ## The load-bearing constraint: the pipeline is 8-bit
 
 The entire GPU path is RGBA8:
@@ -61,14 +83,36 @@ honest warning shown today. **Hence Stage 0 is a prerequisite, not an optimisati
 
 ---
 
-## Stage 0 — 10-bit precision (prerequisite)
+## Stage 0 — working precision (prerequisite)
+
+**Renamed from "10-bit precision" — the old title claimed something this stage does not deliver.**
 
 **Goal:** float render targets so a log→linear stretch has headroom, without regressing the 8-bit path.
 
+**Correction (review 2026-08-03): Stage 0 does NOT preserve source bit depth, and the plan should never
+have implied it would.** Frames reach the GPU through `texImage2D(…, gl.RGBA, gl.UNSIGNED_BYTE, source)`
+(`media-renderer.ts:353`/`:355`) into an RGBA8 texture. A 10-bit HEVC `VideoFrame` is therefore already
+truncated to 8 bits *before* any render target sees it. Half-float accumulators cannot recover
+information that was discarded one step earlier.
+
+What Stage 0 actually buys — still worth having, and still a genuine Stage 2 prerequisite — is
+**headroom through the grade chain**: no re-quantisation between stacked operations, and no clipping of
+super-white/sub-black between them. A log→linear stretch amplifies exactly the errors 8-bit intermediates
+introduce, so this is the difference between a log workflow that bands and one that doesn't. It is
+"working precision", not "10-bit input".
+
+Getting true 10-bit *input* is a separate, unproven piece of work: either `texImage2D` with an
+`RGBA16F` internal format from a `VideoFrame` (browser conversion behaviour is implementation-defined —
+would need measuring, not assuming), or `VideoFrame.copyTo()` at `P010` plus a YUV→RGB shader, which is a
+real ingest redesign. **Neither is in this plan.** It gets its own stage when someone has measured
+whether the browser preserves the bits at all.
+
 1. `RenderTarget` gains a precision option: `RGBA16F` + `HALF_FLOAT` when available
    (`EXT_color_buffer_half_float` / WebGL2 core), falling back to RGBA8.
-2. Frame upload stays `UNSIGNED_BYTE` for 8-bit sources (nothing to gain); 10-bit sources upload at
-   half-float once Stage 1 can identify them.
+2. **Frame upload stays `UNSIGNED_BYTE`, unconditionally.** Not a staging decision — the browser already
+   does YUV→RGB internally, so a CPU-side convert-then-upload adds bandwidth and a copy to reach a
+   precision the decode path did not hand us in the first place. Revisit only if browsers expose a
+   native float upload from `VideoFrame`.
 3. Flag `?hdrPipeline=0|1` → `localStorage orreris.hdrPipeline` → `VITE_HDR_PIPELINE` → **default
    OFF**, matching the `singleCtxPreview` / `glGovernor` resolution order exactly.
 4. Telemetry `window.__rfHdrPipeline` — `{ targets, halfFloat, fallbacks }` — always on regardless of
@@ -104,6 +148,23 @@ Now read from the codec configuration (`readBitDepth`):
 - **Neither** — `undefined`, falling back to the old inference so this can only be more accurate than
   before, never less. Confidence drops to `medium` when the depth was inferred rather than read: a
   reading and a guess must not claim the same confidence.
+
+**Confidence model — revised by review 2026-08-03.** `high | medium | low` is a summary with no stated
+basis, and it collides with `detectedFrom`, which is already the evidence axis. The two collapse into one
+ordered ladder naming *what the claim rests on*:
+
+```
+authoritative  — the user said so (Stage 3 override). Beats everything; never overwritten by detection.
+detected       — read from the bitstream: colr box, hvcC bit depth, VideoFrame.colorSpace.
+inferred       — derived from a different field (the old "pq||hlg ⇒ 10-bit" guess).
+assumed        — the Rec.709 default, i.e. nothing was known.
+```
+
+Confidence stops being hand-set and becomes a function of the strongest evidence present, so a reading and
+a guess can no longer claim the same standing. `SourceColorMetadata` is **persisted in saved projects**, so
+this is a migration, not a rename: `normalizeSourceColorMetadata` already coerces unknown values to
+defaults, which is the seam — map legacy `high→detected`, `medium→inferred`, `low→assumed` there, and old
+projects keep loading.
 
 **Still open in Stage 1** (deliberately deferred, low value relative to cost):
 
@@ -150,10 +211,15 @@ export type InputColorSpace =
 interface InputTransferDefinition {
   id: InputColorSpace;
   label: string;               // "Apple Log", "Sony S-Log3" — the Stage 3 dropdown reads this
-  toLinear(code: number): number;    // 0..1 code → scene linear, 0.18 == 18% grey
+  toLinear(code: number): number;     // 0..1 code → the ENCODING's own linear quantity
   fromLinear(linear: number): number; // exact inverse; only exists so the tests can prove round-trip
-  nativeGamut: string;         // recorded now, CONSUMED in 2b
-  verified: "spec" | "unverified";
+  nativeGamut: string;                // recorded now, CONSUMED in 2b
+  // Two axes, not one. "verified" alone was overloaded — it could mean implemented, reviewed, spec-
+  // checked or tested, and those come apart: a curve can be implemented and tested (round-trip, no
+  // kinks) while its CONSTANTS remain unchecked against the vendor document, which is exactly the
+  // state Stage 2a lands in.
+  implementation: "stub" | "implemented";
+  verification: "unverified" | "self-consistent" | "spec-checked";
 }
 ```
 
@@ -161,11 +227,28 @@ interface InputTransferDefinition {
 catches a transcription error in a piecewise function without a reference implementation to diff
 against — the same reason `cpu.ts` is the ground truth for the LUT baker.
 
-**Scene-referred normalisation.** Camera log curves are scene-referred (1.0 = 18% grey × some stops), but
-PQ and HLG are display-referred and absolute. Those two need a stated diffuse-white reference or the
-picture comes out at the wrong exposure: **PQ normalised so 203 nits → 1.0** (ITU-R BT.2408 reference
-white), **HLG so E'=0.75 → 1.0**. That choice is a judgement call, it is visible as overall brightness,
-and it is written down here so it can be argued with rather than discovered later.
+**Scene-referred normalisation — REVISED (review 2026-08-03).** The earlier draft folded a 203-nit
+diffuse-white mapping into the PQ transfer function itself. That was wrong, and the reviewer's reasoning
+is right: **a transfer function should represent the ENCODING, not editor policy.** PQ decodes to
+absolute cd/m²; that is what PQ means. Deciding that 203 nits is "white" is a working-space question, and
+burying it inside the decode makes HDR export harder later — the export path would have to un-apply a
+normalisation it never asked for, and there would be no single place to change the reference.
+
+So the two responsibilities split:
+
+```
+decode transfer  →  the encoding's own reference   (PQ: cd/m², HLG: scene 0..1, log: scene-linear)
+        ↓
+working-space normalisation  →  diffuse white = 1.0 in linear Rec.709
+```
+
+`toLinear()` returns the encoding's native quantity. A separate, explicitly-named
+`normalizeToWorkingSpace(space, value)` applies the diffuse-white policy (BT.2408's 203 nits for PQ,
+E'=0.75 for HLG, 1.0 for scene-referred log, which is a no-op). One policy, one place, and HDR export can
+choose not to call it.
+
+**Semantic IDs** are already the design — `id: "apple-log"` is the stored value, `label: "Apple Log"` is
+display-only. Stage 3 persists the id, never the label, so localisation stays free.
 
 ### The risk you should decide on
 
@@ -214,19 +297,75 @@ Apple Log on an iPhone is the footage this whole plan exists for.
   lands first because it is the testable ground truth the LUT baker already consumes — same pattern as
   `applyPipelineToRgb` → `bakePipelineToLut3d`.
 
+## Stage 2.5 — Display transform (ODT), added by review 2026-08-03
+
+Accepted as a distinct concept. An IDT gets footage *into* the working space; a **display transform** gets
+the working space *onto a screen*, and it is not the same thing as export. Everything below belongs to it
+and has nowhere else sensible to live:
+
+- SDR preview of HDR material (tone mapping)
+- display/monitor LUTs and calibration
+- the viewer's own transform, which may legitimately differ from the export's
+
+Naming the boundary now costs nothing and stops display concerns from leaking into IDTs later — which is
+precisely the mistake the PQ normalisation above was making. Not scheduled; recorded as the correct home
+for that class of work.
+
 ## Stage 3 — Manual "Input Color Space" override
 
 Per-clip dropdown; detection sets the default, user overrides. **Not a nicety** — camera log is
 frequently untagged or mistagged, and every professional tool has this control for exactly that
 reason. Stage 2 without Stage 3 is unshippable.
 
-## Stage 4 — ProRes / RAW reach
+## Stage 4 — Unsupported acquisition codecs (broadened by review 2026-08-03)
+
+Was "ProRes / RAW". Renamed because the capability is codec-independent and naming it after two formats
+invites a second implementation when the third arrives. The bucket is: **anything the browser cannot
+decode but a professional acquires in** — ProRes, CineForm, DNxHR/DNxHD, REDCODE, BRAW, Canon RAW,
+X-OCN. Architecturally one feature: detect an undecodable codec at ingest, transcode, keep the original.
 
 Cannot decode in-browser, so transcode on import. This fits the existing architecture rather than
 adding a new one: `sourceProxy.worker.ts` already does off-thread transcode to proxies with originals
-kept for export. Add a WASM ffmpeg decode path there for ProRes.
+kept for export. Add a WASM ffmpeg decode path there.
 
 Biggest lift, fewest users helped, and it does not block anything else. Last.
+
+---
+
+## Review response — 2026-08-03
+
+Points accepted and folded in above: no half-float uploads (Stage 0.2, and the stronger correction that
+there is no 10-bit to preserve at that point anyway); format-driven artifact budget; richer confidence
+model (Stage 1); split `implementation` / `verification` status (Stage 2a); PQ/HLG normalisation moved out
+of the transfer functions; Stage 2.5 display transform; Stage 4 broadened; **working colour space stated
+explicitly**, which was a real omission that left Stage 2b undefined.
+
+Two points NOT taken as given, with reasons:
+
+**"Abstract precision into `WorkingPrecision` / `RenderTargetConfig`."** Agreed on naming, but the stated
+benefit — easier WebGPU/Vulkan migration — is already banked and does not depend on the rename. Every GL
+enum is confined to `RenderTarget.allocate()`; `RenderTargetPrecision` is already the abstraction
+boundary, and callers pass `this.precision` without touching a GL constant. What actually leaks is that
+the *token values* read as GL formats (`"rgba8"`), which is a clarity problem, not a portability one.
+Renaming a shipped union used across ~20 call sites, while a sibling agent is mid-flight in the same
+package, buys clarity at the cost of conflict risk. **Deferred to whenever a second backend actually
+lands**, when the rename can be driven by a real second implementation instead of a guess at one.
+
+**"Budget should be `w × h × bytesPerPixel(format) × samples`."** The format half shipped in `a30a0fc`.
+The `samples` factor is declined: there is not one multisampled render target in the compositor, and
+`presentFrame` explicitly avoids blitting to a multisampled default framebuffer. A factor that is always
+1 is untested by construction and reads as though MSAA is supported when it is not. Add it with the
+first multisampled target, not before.
+
+Two things the review did not catch, now recorded above:
+
+1. **Stage 0 never delivered "10-bit".** Uploads are RGBA8, so source precision is gone before any render
+   target exists. The stage title was making a claim the code cannot support. Retitled, rescoped, and the
+   real 10-bit-input work called out as separate and unproven.
+2. **Rec.709 linear clips wide-gamut log.** Choosing it as the working space means S-Gamut3 / ARRI Wide
+   Gamut / BT.2020 colours are destroyed on the way in, before the grade. Stage 2b makes log *correctly
+   interpreted*, not *colour-accurate*, and the plan now says so rather than letting the UI imply
+   otherwise.
 
 ---
 
