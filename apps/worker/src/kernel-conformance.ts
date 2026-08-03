@@ -110,6 +110,16 @@ import {
   onFrameCompleted,
   createFlarexComp,
   createFlarexNode,
+  computeFlarexContentHashes,
+  __resetDependencyGraph,
+  declareNode,
+  declareOpaque,
+  dependencyStats,
+  dirtyClosure,
+  clearDirty,
+  markAxisDirty,
+  markDirty,
+  undeclareNode,
   healFlarexRegistry,
   isValidFlarexEdge,
   kernelDiagnostics,
@@ -1878,6 +1888,179 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
       bulk.size <= MAX_EVALUATION_RECORDS && bulk.evictions > 0, `size=${bulk.size} evictions=${bulk.evictions}`);
     __resetEvaluationRecords(rs);
     rs.dispose();
+  }
+
+  // ── S6.5 — DEPENDENCY TRACKING + DIRTY PROPAGATION (I-18/I-23, ADR-009 R2/R3) ────────────────────
+  // The done-when is "an edit dirties exactly its forward closure, PROVABLY", and the risk line says
+  // under-approximation is a correctness bug with conservatism the only permitted error. So the
+  // headline assertion below is a randomised property test asserting a SUPERSET relation, never
+  // equality: equality is the direction that would let a missed node pass as a tighter closure.
+  {
+    const ds = createRuntimeSession({ id: "deps" });
+    __resetDependencyGraph(ds);
+
+    // A tiny chain a→b→c plus an unrelated d, so "unrelated stays clean" is checkable at all.
+    declareNode(ds, "a", [], ["content"]);
+    declareNode(ds, "b", ["a"], ["content"]);
+    declareNode(ds, "c", ["b"], ["content"]);
+    declareNode(ds, "d", [], ["content"]);
+    clearDirty(ds);
+
+    markDirty(ds, "a", "content");
+    const chain = dirtyClosure(ds, ["a", "b", "c", "d"]);
+    enforced("I-18", "an edit propagates FORWARD through the whole downstream chain",
+      chain.dirty.has("a") && chain.dirty.has("b") && chain.dirty.has("c"));
+    enforced("I-18", "…and stops — an unrelated branch is not dirtied by it",
+      !chain.dirty.has("d"), `dirty={${[...chain.dirty].join(",")}}`);
+
+    // UNKNOWN ⇒ DIRTY. This is why `dirtyClosure` takes the caller's node list instead of walking only
+    // what it was told about: a node nobody declared must be VISIBLE, not merely absent from a map.
+    clearDirty(ds);
+    const withStranger = dirtyClosure(ds, ["a", "b", "c", "d", "stranger"]);
+    enforced("I-23", "a node nobody declared is dirty, because unknown can never be assumed clean",
+      withStranger.dirty.has("stranger") && withStranger.undeclared.has("stranger"));
+
+    // PER-AXIS. The performance argument for axes is that a context change must not dirty a node that
+    // declared independence from context; the risk is the same fact read the other way.
+    clearDirty(ds);
+    declareNode(ds, "ctxReader", [], ["context"]);
+    clearDirty(ds);
+    markAxisDirty(ds, "context");
+    const byAxis = dirtyClosure(ds, ["a", "b", "c", "d", "ctxReader"]);
+    enforced("I-18", "a context change dirties only the nodes that declared the context axis",
+      byAxis.dirty.has("ctxReader") && !byAxis.dirty.has("a") && !byAxis.dirty.has("d"));
+    enforced("I-29", "…and the closure can still say WHICH axis seeded it",
+      (byAxis.seedsByAxis.get("context")?.has("ctxReader") ?? false) && !byAxis.seedsByAxis.has("time"));
+
+    // OPACITY beats a hopeful declaration: a node that cannot describe itself says so and stays dirty,
+    // and its downstream cone with it.
+    clearDirty(ds);
+    declareOpaque(ds, "a");
+    const opaque = dirtyClosure(ds, ["a", "b", "c", "d"]);
+    enforced("I-23", "an opaque node is dirty every frame, and takes its downstream with it",
+      opaque.dirty.has("a") && opaque.dirty.has("c") && !opaque.dirty.has("d"));
+
+    // A REWIRE is a content change even with no param touched (ADR-009 R3 — topology is content).
+    __resetDependencyGraph(ds);
+    declareNode(ds, "a", [], ["content"]);
+    declareNode(ds, "b", ["a"], ["content"]);
+    clearDirty(ds);
+    declareNode(ds, "b", [], ["content"]);
+    const rewired = dirtyClosure(ds, ["a", "b"]);
+    enforced("I-23", "a rewire dirties the rewired node even though no param changed",
+      rewired.dirty.has("b") && !rewired.dirty.has("a"));
+
+    // Re-declaring the SAME dependencies must not churn, or a per-frame declare pass would mark the
+    // whole graph dirty every frame and quietly restore today's behaviour while looking tracked.
+    clearDirty(ds);
+    declareNode(ds, "b", [], ["content"]);
+    enforced("I-18", "re-declaring identical dependencies is a no-op, not a per-frame invalidation",
+      dependencyStats(ds).pendingSeeds === 0);
+
+    // A node leaving the graph invalidates whoever read it — a dangling read is a content change.
+    __resetDependencyGraph(ds);
+    declareNode(ds, "a", [], ["content"]);
+    declareNode(ds, "b", ["a"], ["content"]);
+    clearDirty(ds);
+    undeclareNode(ds, "a");
+    const removed = dirtyClosure(ds, ["b"]);
+    enforced("I-23", "removing a node dirties its readers", removed.dirty.has("b"));
+
+    // CYCLES must terminate. The compiler soft-degrades them rather than rejecting them, so the
+    // tracker will be handed one eventually and must not hang.
+    __resetDependencyGraph(ds);
+    declareNode(ds, "x", ["y"], ["content"]);
+    declareNode(ds, "y", ["x"], ["content"]);
+    clearDirty(ds);
+    markDirty(ds, "x", "content");
+    const cyclic = dirtyClosure(ds, ["x", "y"]);
+    enforced("I-18", "a cyclic graph terminates and dirties both members",
+      cyclic.dirty.has("x") && cyclic.dirty.has("y"));
+
+    // Clearing is the CALLER's assertion that the work was done, so computing a closure must not
+    // clear by itself — an aborted frame would otherwise lose the reason its nodes were dirty.
+    __resetDependencyGraph(ds);
+    declareNode(ds, "a", [], ["content"]);
+    markDirty(ds, "a", "content");
+    dirtyClosure(ds, ["a"]);
+    enforced("I-23", "computing a closure does not clear it — only the caller who did the work may",
+      dirtyClosure(ds, ["a"]).dirty.has("a"));
+
+    // ── THE PROPERTY TEST ─────────────────────────────────────────────────────────────────────────
+    // Non-circular by construction: the dirty closure comes from the tracker's own reverse index,
+    // while the ground truth comes from `computeFlarexContentHashes` — an INDEPENDENT Merkle fold over
+    // the real comp, before and after the edit. If both were derived from the same walk the test would
+    // assert only that the walk equals itself.
+    {
+      let checked = 0;
+      let violations = 0;
+      let propagatingTrials = 0;
+      let maxChanged = 0;
+      let rng = 0x2f6e2b1;
+      const rand = (n: number): number => {
+        // xorshift — deterministic, so a failure is reproducible rather than a one-off anecdote.
+        rng ^= rng << 13; rng ^= rng >>> 17; rng ^= rng << 5; rng &= 0x7fffffff;
+        return rng % n;
+      };
+
+      for (let trial = 0; trial < 200; trial += 1) {
+        const size = 3 + rand(8);
+        const comp = createFlarexComp(`p${trial}`, "prop");
+        const ids: string[] = [];
+        for (let i = 0; i < size; i += 1) {
+          const id = `n${i}`;
+          const node = createFlarexNode("colorCorrect", id);
+          node.params = { ...node.params, exposure: rand(50) };
+          comp.nodes[id] = node;
+          ids.push(id);
+        }
+        // Random DAG: edges only ever point forward in index order, so it is acyclic by construction
+        // and the ground-truth fold is well defined.
+        comp.edges = [];
+        for (let i = 1; i < size; i += 1) {
+          if (rand(4) === 0) continue; // some nodes stay roots
+          const from = ids[rand(i)]!;
+          comp.edges.push({ id: `e${i}`, from: { nodeId: from, socket: "out" }, to: { nodeId: ids[i]!, socket: "in" } });
+        }
+
+        __resetDependencyGraph(ds);
+        const upstreamOf = new Map<string, string[]>(ids.map((id) => [id, []]));
+        for (const edge of comp.edges) upstreamOf.get(edge.to.nodeId)!.push(edge.from.nodeId);
+        for (const id of ids) declareNode(ds, id, upstreamOf.get(id)!, ["content"]);
+        clearDirty(ds);
+
+        const before = computeFlarexContentHashes(comp, 0);
+        const edited = ids[rand(size)]!;
+        const target = comp.nodes[edited]!;
+        target.params = { ...target.params, exposure: Number(target.params.exposure) + 1 + rand(9) };
+        const after = computeFlarexContentHashes(comp, 0);
+
+        const actuallyChanged = ids.filter((id) => before.get(id) !== after.get(id));
+        markDirty(ds, edited, "content");
+        const closure = dirtyClosure(ds, ids);
+
+        checked += 1;
+        for (const id of actuallyChanged) {
+          if (!closure.dirty.has(id)) violations += 1;
+        }
+        // A trial where the edit changed only the edited node proves nothing about PROPAGATION — it
+        // would pass against a tracker that dirties the seed and stops.
+        if (actuallyChanged.length > 1) propagatingTrials += 1;
+        if (actuallyChanged.length > maxChanged) maxChanged = actuallyChanged.length;
+      }
+
+      // VACUITY GUARD, and it is the assertion that makes the one below mean anything. 200 trials that
+      // never generated a downstream edge would report a flawless superset relation while testing
+      // nothing — the same failure as a perf suite that cannot distinguish the constant it calibrates.
+      enforced("I-23", "…and the trials actually exercised propagation (guard against a vacuous pass)",
+        propagatingTrials > 50 && maxChanged > 2,
+        `propagating=${propagatingTrials}/${checked} maxChanged=${maxChanged}`);
+      enforced("I-23", "PROPERTY (200 random DAGs + edits): the dirty closure never MISSES a node whose content actually changed",
+        violations === 0, `trials=${checked} violations=${violations}`);
+    }
+
+    __resetDependencyGraph(ds);
+    ds.dispose();
   }
 
   // ── S5.3 — WALL-CLOCK AGEING (I-21/I-33) ────────────────────────────────────────────────────────

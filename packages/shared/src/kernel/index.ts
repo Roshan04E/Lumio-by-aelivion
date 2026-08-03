@@ -19,6 +19,7 @@ export * from "./resource-manager";
 export * from "./admission";
 export * from "./readiness-barrier";
 export * from "./evaluation-records";
+export * from "./dependency-graph";
 export * from "./inspect";
 export * from "./degradation-sink";
 export * from "./present-ledger";
