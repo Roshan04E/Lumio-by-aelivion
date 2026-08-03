@@ -37,7 +37,6 @@ import {
   FlarexSourceDrawCache,
   beginFrame,
   colorPipelineCacheKey,
-  classifyComposite,
   defaultSession,
   endFrame,
   forgetResource,
@@ -78,6 +77,7 @@ import {
   sweepIdleSceneResources,
 } from "../playback/scene-resource-orchestration";
 import { advanceBlockingClock, decideSceneReadiness } from "../playback/scene-readiness";
+import { runLiveFrameScope } from "../playback/scene-frame-scope";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
@@ -1763,82 +1763,24 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     markHotSpot("scene-draw-total", drawStart, `layers=${ls.length}`);
   };
 
-  // Debug-only profiling wrapper (flarexProfile flag): brackets ONE playback frame so the profiler can
-  // reset counters, open/close the GPU timer query, time total CPU, and print the report. When disabled
-  // every call short-circuits and this is byte-for-byte the same as calling `drawFrameImpl` directly.
+  // FRAME IDENTITY (ADR-012 3.3, slice S2.1) + the settle window's ownership rule, both owned by
+  // `playback/scene-frame-scope.ts` since S7.1. The scope wraps the CALL, not the body, because
+  // `drawFrameImpl` has a dozen early returns and only that placement cannot miss one.
   drawRef.current = () => {
-    // FRAME IDENTITY (ADR-012 3.3, slice S2.1). Wrapping here rather than inside `drawFrameImpl` is
-    // deliberate: that function has a dozen early returns — context lost, both hold gates, the render
-    // catch — and a `finally` around the CALL is the only placement that cannot miss one. Missing an
-    // `endFrame` would leave a frame permanently "active" and mis-attribute every later event to it.
-    //
-    // `outcomeRef` is set at the exit points inside; the default is `abandoned`, which is the honest
-    // answer for the early returns that give up before deciding anything.
-    outcomeRef.current = "abandoned";
-    // S2.2: assumed false until the present path proves otherwise. An early return therefore reports
-    // "not settled", which is the honest answer — a frame that gave up settled nothing.
-    settledRef.current = false;
-    beginFrame("live", inputsRef.current.currentTime);
-
-    // ONE post-frame step for both branches below. Inlining it twice would be two implementations of
-    // the window-ownership rule, which is exactly regression G5 — and the profiling branch is the one
-    // nobody reads, so that is where the two would drift.
-    const finishFrame = () => {
-      const settled = settledRef.current;
-      const playing = inputsRef.current.isPlaying;
-      // Classified BEFORE the refs are advanced: the classification is about the state this composite
-      // ran under, not the state it produced.
-      const kind = classifyComposite({
-        playing,
-        previousSettled: prevSettledRef.current,
-        rearmedSinceSettled: rearmedSinceSettledRef.current,
-        settled,
-      });
-      if ((kind === "surplus" || kind === "load-bearing") && kernelDiagnostics.enabled) {
-        kernelDiagnostics.record({
-          kind: "transition",
-          // `load-bearing` is a WARNING because it is the finding that blocks the flag: a repaint that
-          // only the timer caught means some producer arrives without re-arming, and closing the window
-          // would lose it. `surplus` is merely waste, and waste is `info`.
-          severity: kind === "load-bearing" ? "warn" : "info",
-          subject: { kind: "runtime" },
-          reason: `settle-window-${kind}`,
-          detail: { targetTime: Number(inputsRef.current.currentTime.toFixed(4)), outcome: outcomeRef.current },
-        });
-      }
-      prevSettledRef.current = settled;
-      if (settled) {
-        rearmedSinceSettledRef.current = false;
-        // THE BEHAVIOURAL HALF OF S2.2, and the only thing the flag gates. Completion replaces the
-        // timer: there is provably nothing left to wait for, so the window closes now instead of
-        // burning up to 600ms of composites nobody will see. Only while paused — during playback the
-        // transport owns the cadence and the window is not consulted at all.
-        //
-        // Safe only because re-arming is event-driven (`requestDraw` from any async arrival), which is
-        // the property the `load-bearing` counter above exists to verify rather than assume.
-        if (frameCompletionEnabledRef.current && !playing) activeUntilRef.current = 0;
-      }
-      endFrame(outcomeRef.current, settled);
-    };
-
-    const profiling = frameProfiler.enabled() && inputsRef.current.isPlaying;
-    if (!profiling) {
-      try {
-        drawFrameImpl();
-      } finally {
-        finishFrame();
-      }
-      return;
-    }
-    frameProfiler.beginFrame();
-    const t0 = performance.now();
-    try {
-      drawFrameImpl();
-    } finally {
-      frameProfiler.time("frame.cpu", performance.now() - t0);
-      frameProfiler.endFrame(compositorRef.current?.profilerSnapshot());
-      finishFrame();
-    }
+    runLiveFrameScope({
+      refs: {
+        outcome: outcomeRef,
+        settled: settledRef,
+        prevSettled: prevSettledRef,
+        rearmedSinceSettled: rearmedSinceSettledRef,
+        activeUntil: activeUntilRef,
+      },
+      targetTimeSeconds: () => inputsRef.current.currentTime,
+      isPlaying: () => inputsRef.current.isPlaying,
+      frameCompletionEnabled: frameCompletionEnabledRef.current,
+      draw: drawFrameImpl,
+      profilerSnapshot: () => compositorRef.current?.profilerSnapshot(),
+    });
   };
 
   // rAF loop that only COMPOSITES while playing or inside a settle window (after a change / async raster
