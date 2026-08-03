@@ -104,3 +104,51 @@ headroom, not from this single run. (2) `flarex-generators` is FLAKY, not loose:
 one sweep and 0.000% on the next two. 86.895% is the documented signature of a generator producing
 nothing, i.e. a readiness race at capture time, and it is unrelated to the hash. It needs its own
 investigation — a fixture that fails catastrophically one run in three is not a gate.
+
+## v5 — `flarex-generators` never becomes ready; the 250 ms sleep was hiding it (2026-08-03)
+
+**Problem:** `flarex-generators` fails the pixel gate at 86.895% in roughly 40% of runs, on the same
+commit, on a clean machine. v4 left this open as "a readiness race at capture time" and it was
+repeatedly mistaken for a regression in whatever was being worked on that day — it cost most of a
+session on ADR-012 S4.5 before being pinned down.
+
+**Root cause:** two separate defects that looked like one.
+
+1. *The gate never asked whether the picture existed.* `PreviewFixturePage.tsx` renders
+   `data-render-fixture="ready"` as a **string literal** on the section, so it is true the moment
+   React mounts and says nothing about painting. The only wait for GPU output was
+   `page.waitForTimeout(250)`. The readiness contract for a pixel comparison was React mount plus
+   elapsed wall-clock.
+2. *The frame genuinely never settles.* Instrumenting the present ledger at capture time gives a
+   clean separation across 8 runs: passing runs report `settled yes / 3 composites / notReady 0`;
+   failing runs report **`NEVER` settled / 2 composites / notReady 2**, and stay that way through a
+   full 10-second poll AFTER capture. The picture does not arrive late — it does not arrive. Two
+   layers never become ready and the compositor stops re-compositing.
+
+So the sleep is not the bug; it is what hides the bug, successfully about 60% of the time.
+
+**Fix:** none yet for (2) — logged here so it stops being re-discovered. For (1), `PIXEL_READY_OBSERVE=1`
+(commit `6d57179`) reports the ledger's verdict at capture: composites, participants, not-ready
+layers, time-to-settle, and Flarex fallback causes. Deliberately NOT yet enforced as a bounded fatal
+wait: while (2) exists, a fatal wait converts a 40% flaky failure into a 40% deterministic one.
+Enforcement is gated on (2) being fixed, not on the harness.
+
+**Verify:** 25-pair interleaved A/B, HEAD vs ADR-012 S4.5/S4.6, single fixture, alternating arms —
+**10/25 failures on both arms, Fisher exact p = 1.0**. Interleaved rather than blocked because the
+suspect is a timing race and any drift across the run (thermal, caches, process accumulation) would
+otherwise land entirely on whichever arm ran second and manufacture a difference. That result is what
+cleared the implementation; the fixture flakes identically without it.
+
+**Two measurement traps this cost, both worth remembering:**
+
+- *An instrument inside the window it measures.* The first version of the observation read the ledger
+  BETWEEN the settle sleep and the screenshot. `page.evaluate` is a round-trip, so it widened the race
+  and produced 6 passes in 6 runs against a 40% base rate. It failed by producing CLEAN data, which is
+  why it was nearly accepted as proof the fix worked. Any read that crosses into the page must happen
+  after the shutter.
+- *A trend read off five samples.* Mid-sweep the drift check showed both arms falling 60%→0% and a
+  shader-cache warm-up mechanism was proposed for it. By the end it had reversed (25%→54%). A decline
+  that becomes an incline is noise. The drift check was right to exist; believing it at n=5 was not.
+
+**Not the cause, ruled out with evidence:** orphaned Chromium processes (71 of them, real but
+unrelated), the `fract(sin())` hash of v4, and ADR-012 S4.5/S4.6.
