@@ -2757,3 +2757,60 @@ it agrees with you.
 still reading `state: ok`, and a null served time means `stalenessSeconds` returns null, which never
 gates. So a source on the element path is intermittently invisible to the coherence gate. Not chased —
 it belongs with S4.2 (`servedTime` end-to-end), where every participant is required to carry one.
+
+## v34 — the fixture that could not fail: co-location is not a cut (2026-08-03)
+
+**Problem.** S4.7 (session satisfaction) shipped flag-off with a *done when* of "zero `noteDivergence`
+firings across a soak". Three consecutive A/B runs reported `detaches 0 · refusals 0` in **both** arms —
+including the arm with the flag OFF, which still contains the defect. That reads as a pass and is not
+one: **a criterion satisfied by the unfixed arm is an absence of evidence, not evidence.**
+
+**Two fixture defects, both silent, both found by looking at the DOM rather than the numbers.**
+
+1. **The second clip was not a second clip.** `addSecondClipOfSameAsset` used the asset bin's
+   `Add video only`, which puts the new clip on a **new track starting at zero**. Geometry read back
+   from the page: two `.timeline-clip` elements, *both* at `left: 124`, `width: 1599`, differing only
+   in `top`. That is one asset playing the same instant twice — **co-location**, the case sharing was
+   built for and which by construction can never diverge. The fixture reported a healthy `shared 5`
+   while the harm it existed to reproduce was arithmetically impossible.
+2. **The run never went near the boundary anyway.** Reachable is not visited. Playback started at t=0
+   and the pre-roll shell mounts ~1.2s before a cut, so the crossing sat outside every sample window.
+
+**Fix.** `cutClipAtFraction` — park the playhead inside the clip, select it, `Split at playhead (S)` —
+and `seekBeforeCut`, which parks the playhead a fixed lead before the boundary *per arm* (a reload
+resets it to 0, so it belongs to the arm, not the fixture). The split's success check is that the two
+clips' **left edges differ**, which is exactly what the old helper would have failed.
+
+`seekBeforeCut` does not reimplement the timeline's x↔time mapping; it **calibrates against the editor**
+— click the ruler at two known x, read `__rfClock.committed` each time, take the slope. Right even if
+the zoom defaults change, and self-checking if the mapping ever stops being affine.
+
+**What the corrected fixture shows.** Two independent runs that actually visited the crossing:
+
+| run | flag | shared | detaches | refusals |
+|---|---|---|---|---|
+| 18s | OFF | 10 | **2** | 0 |
+| 18s | ON  | 6  | **0** | 3 |
+| 10s | OFF | 10 | **1** | 0 |
+| 10s | ON  | 5  | **0** | 2 |
+
+The asymmetry the slice claims, in both: the defect **reproduces** with the flag off, and the predicate
+refuses 2–3 borrows to get detaches to zero. The cost is visible too — shares granted roughly halve.
+
+**Not established, and stated as such.** One run showed p50 fps 37.3 → 70.0 (+88%) with `mediaFps`
+1.7 → 27.1 in favour of the flag. **That number is not claimed.** A reverse-order repetition landed
+`shared 0` in both arms — the crossing was not visited at all, the probe's own guard voided it, and
+media barely decoded in either arm. Run-to-run variance on this fixture is currently larger than the
+effect, so the *counters* are evidence and the *frame budget* is not yet.
+
+**Two instrument fixes fell out.**
+- The run outlived its material: playback reached the end, `isPlaying` went false, and
+  `playbackRenderScale` (`isPlaying ? profile : 1`) snapped to Full while the compositor kept
+  repainting the last frame at display rate. Those idle samples mixed a second resolution into an arm
+  pinned to Half and fired the comparability guard. The sampler now **stops when the transport does**.
+- A fourth VOID guard: if neither arm ever detached *or* refused, say so loudly instead of printing two
+  tidy zeroes. That guard is what caught the reverse run.
+
+**Rule.** A fixture must be checked for whether it can *express* the defect, not just whether it runs.
+Both failures here produced plausible, healthy-looking numbers — `shared 5`, `detaches 0` — from an
+arrangement in which the measured quantity could not have been non-zero.

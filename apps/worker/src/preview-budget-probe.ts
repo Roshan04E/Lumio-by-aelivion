@@ -38,11 +38,12 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 import {
   addAssetSourceMediaIn,
-  addSecondClipOfSameAsset,
+  cutClipAtFraction,
   buildFlarexProxyFixture,
   defaultClipPath,
   reachEditor,
   reopenWithFlags,
+  seekBeforeCut,
   EDITOR_BASE,
 } from "./browser/editor-session";
 
@@ -64,7 +65,13 @@ const ARM_SETS: Record<string, { name: string; flags: string }[]> = {
     { name: "S4.7 session satisfaction", flags: "kernelProxySource=0&kernelSessionSatisfaction=1" },
   ],
 };
-const ARMS = ARM_SETS[process.env.PROBE_ARMS ?? "demotion"] ?? ARM_SETS.demotion!;
+// Arm ORDER is a confound: the first arm pays every one-time cost (shader compile, proxy warm, GPU
+// clock ramp) and the second inherits a warmed machine. `PROBE_REVERSE=1` runs the same pair backwards,
+// so a finding that survives both orders is the flag and one that flips is the ordering.
+const ARMS = (() => {
+  const set = ARM_SETS[process.env.PROBE_ARMS ?? "demotion"] ?? ARM_SETS.demotion!;
+  return process.env.PROBE_REVERSE === "1" ? [...set].reverse() : set;
+})();
 
 interface Sample {
   /** Compositor repaint rate — runs at display refresh and will happily redraw an unchanged frame. */
@@ -144,9 +151,26 @@ async function pinRenderScale(page: Page): Promise<void> {
   await page.waitForTimeout(300);
 }
 
-async function sampleArm(page: Page, name: string): Promise<ArmResult> {
+async function sampleArm(page: Page, name: string, seekLeadSeconds: number | null): Promise<ArmResult> {
   const samples: Sample[] = [];
   await pinRenderScale(page);
+  // Park before the cut BEFORE playing. A reload resets the playhead to 0, so this belongs to the arm,
+  // not to the fixture — and both arms have to start from the same place or the comparison is of two
+  // different stretches of footage. Reported per arm for exactly that reason.
+  if (seekLeadSeconds != null) {
+    const seek = await seekBeforeCut(page, seekLeadSeconds);
+    console.log(
+      seek
+        ? `  · parked at ${seek.parkedSeconds.toFixed(2)}s, ${(seek.cutSeconds - seek.parkedSeconds).toFixed(2)}s before the cut at ${seek.cutSeconds.toFixed(2)}s`
+        : "  · SEEK FAILED — the run starts at 0 and will not visit the crossing"
+    );
+    if (!seek) {
+      return { name, samples, pool: null, kernel: null, degradation: null, error: "could not park before the cut" };
+    }
+    // The crossing is a WINDOW, not a state: the shell mounts ~1.2s out and the borrow is over once the
+    // cut passes. Waiting out the whole first clip would sample mostly ordinary playback and dilute it.
+    await page.waitForTimeout(400);
+  }
   if (!(await play(page))) {
     return {
       name,
@@ -159,7 +183,9 @@ async function sampleArm(page: Page, name: string): Promise<ArmResult> {
   }
   await page.waitForTimeout(WARMUP_MS);
 
-  const deadline = Date.now() + SECONDS * 1_000;
+  let stoppedEarly = false;
+  const startedAt = Date.now();
+  const deadline = startedAt + SECONDS * 1_000;
   while (Date.now() < deadline) {
     // A dev-server HMR reload destroys the execution context mid-sample and used to kill the run with a
     // raw Playwright error. Editing source while a probe drives the page is operator error, but the probe
@@ -205,6 +231,16 @@ async function sampleArm(page: Page, name: string): Promise<ArmResult> {
     // would make a paused arm look catastrophic rather than absent.
     if (snap && snap.fps > 0) samples.push(snap);
     await page.waitForTimeout(250);
+
+    // STOP WHEN THE TRANSPORT DOES. Playback that reaches the end of the timeline stops itself, and the
+    // compositor keeps repainting the last frame at display rate — so `fps` stays healthy while nothing
+    // decodes. Worse, `playbackRenderScale` is `isPlaying ? profile : 1`, so those idle samples arrive
+    // labelled Full and mix a second resolution into an arm that was pinned to Half. That is what fired
+    // the comparability guard on the first cut run: not the pin failing, the run outliving its material.
+    if (!(await page.locator(PAUSE).first().count().catch(() => 0))) {
+      stoppedEarly = true;
+      break;
+    }
   }
 
   const tail = await page.evaluate(() => ({
@@ -213,6 +249,11 @@ async function sampleArm(page: Page, name: string): Promise<ArmResult> {
     degradation: (globalThis as Record<string, any>).__rfFlarexDegradation ?? null,
   }));
   await pause(page);
+  if (stoppedEarly) {
+    console.log(
+      `  · transport stopped itself after ${((Date.now() - startedAt) / 1000).toFixed(1)}s — the run outlived its material`
+    );
+  }
   return { name, samples, ...tail };
 }
 
@@ -321,6 +362,11 @@ async function main(): Promise<void> {
   // being served from a proxy; without one the arms are identical by construction and the run is theatre.
   // `PROBE_NO_FIXTURE=1` skips it to measure the flag's UNCONDITIONAL cost, which is a different question
   // and should be asked deliberately rather than by accident.
+  // Lead comfortably longer than WARMUP_MS: the pre-roll shell mounts ~1.2s before the cut, and a lead
+  // of 2s would put the whole crossing inside the discarded warmup — the counters would still see it
+  // (they are cumulative and read at the tail) but the frame-budget samples would not, so a cost paid
+  // exactly at the crossing would be invisible. 4s puts the mount ~1.3s into the sampled window.
+  let seekLeadSeconds: number | null = null;
   let hasFixture = false;
   if (process.env.PROBE_NO_FIXTURE !== "1") {
     console.log("building fixture: Flarex comp + asset-source MediaIn + proxy");
@@ -332,8 +378,11 @@ async function main(): Promise<void> {
     // The preload crossing. Only needed for the S4.7 arms, where a borrow across two DIFFERENT times is
     // the thing under test; the demotion arms do not need it and it would only add decode load.
     if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
-      const second = await addSecondClipOfSameAsset(page);
-      console.log(`  · second clip of the same asset: ${second ? "added — preload crossing reachable" : "FAILED"}`);
+      const cut = await cutClipAtFraction(page);
+      console.log(`  · cut at ${cut != null ? `${cut.toFixed(2)}s — preload crossing reachable` : "FAILED"}`);
+      // Reachable is not visited. Only park before the cut if there IS one; parking off a single clip
+      // would land the playhead somewhere arbitrary and quietly change what the arms measure.
+      if (cut != null) seekLeadSeconds = Number(process.env.PROBE_SEEK_LEAD ?? 4);
     }
     hasFixture = await buildFlarexProxyFixture(page);
     console.log(hasFixture ? "  · proxy ready" : "  · FIXTURE FAILED — arms will not exercise demotion");
@@ -347,7 +396,7 @@ async function main(): Promise<void> {
     console.log(`  · ${arm.name}: reloading with ?${arm.flags}`);
     await reopenWithFlags(page, projectUrl, arm.flags);
     console.log(`  · ${arm.name}: playing ${SECONDS}s`);
-    results.push(await sampleArm(page, `${arm.name}   [?${arm.flags}]`));
+    results.push(await sampleArm(page, `${arm.name}   [?${arm.flags}]`, seekLeadSeconds));
     console.log(`  · ${arm.name}: done`);
   }
 
@@ -402,6 +451,25 @@ async function main(): Promise<void> {
         `         ${hasFixture ? "The proxy built but never served during the sample window." : "The fixture failed to build."}\n` +
         "         This still measures the flag's unconditional cost, which is a different question."
     );
+  }
+
+  // The fourth way this run can be void, and the one S4.7 keeps tripping over: the fixture can REACH the
+  // crossing without the run VISITING it. If neither arm ever detached and neither ever refused, then the
+  // arm that still contains the defect satisfied the done-when too — which says the fixture never got
+  // near the state, not that the state is fixed. The asymmetry IS the evidence, so say so when it is
+  // missing rather than printing two tidy zeroes and calling it a pass.
+  if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
+    const engaged = results.some(
+      (r) => (Number(r.pool?.shareDetaches ?? 0) > 0) || (Number(r.pool?.borrowRefusals ?? 0) > 0)
+    );
+    if (!engaged) {
+      console.log(
+        "\n[budget] ⚠ VOID for the S4.7 done-when — no arm ever detached OR refused a borrow.\n" +
+          "         The flag-OFF arm is supposed to reproduce the harm; it did not, so zero divergence\n" +
+          "         in the flag-ON arm is an absence of evidence, not evidence. The crossing was\n" +
+          "         reachable but not visited. Frame-budget numbers below are still valid."
+      );
+    }
   }
 
   const [a, b] = results;

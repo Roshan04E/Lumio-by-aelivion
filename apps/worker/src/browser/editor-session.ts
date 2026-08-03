@@ -269,7 +269,7 @@ export async function addAssetSourceMediaIn(page: Page): Promise<boolean> {
 }
 
 /**
- * Put a SECOND clip of the same asset on the timeline — the preload crossing.
+ * Cut the timeline's clip in two at the playhead — the preload crossing.
  *
  * WHY. The two-MediaIn fixture reproduces the duplicate-decode SHARE (one file, two doors, both at the
  * same moment) but not the HARM. The 2026-08-02 finding needed a third participant: a **preload** — the
@@ -277,35 +277,131 @@ export async function addAssetSourceMediaIn(page: Page): Promise<boolean> {
  * consumer is already serving that same asset live. Identity matched, times did not, and the incumbent
  * paid two hardware resets for it.
  *
- * Two clips of one asset back to back is the smallest arrangement that produces it: as the playhead
- * nears the cut, clip two's shell asks for a time ~a lookahead ahead of what clip one is serving. Which
- * is exactly the pair `sessionSatisfaction` is supposed to keep apart, and — with the flag off — exactly
- * what `noteDivergence` is supposed to detach four bad frames later.
+ * A CUT is the smallest arrangement that produces it, and the most ordinary: as the playhead nears the
+ * boundary, the second half's shell asks for a time ~a lookahead ahead of what the first half is
+ * serving. Exactly the pair `sessionSatisfaction` is supposed to keep apart, and — with the flag off —
+ * exactly what `noteDivergence` is supposed to detach four bad frames later.
  *
- * Without this the slice's *done when* ("zero divergence firings across a soak") is satisfied trivially,
- * by a fixture in which nothing could ever diverge. That is not evidence, it is an absence of it.
+ * WHY NOT "add the asset again", which is what this helper used to do. `Add video only` puts the new
+ * clip on a NEW TRACK STARTING AT ZERO: two clips of one asset playing the same moment on top of each
+ * other. That is CO-LOCATION — the case sharing was built for and which by construction can never
+ * diverge — so the fixture reported a healthy `shared 5` while the harm it existed to reproduce was
+ * arithmetically impossible. Two runs of "detaches 0 in both arms" were that, not a working guard.
+ *
+ * Without a real cut the slice's *done when* ("zero divergence firings across a soak") is satisfied
+ * trivially, by a fixture in which nothing could ever diverge. That is not evidence, it is an absence
+ * of it.
+ *
+ * Returns the cut position in seconds, or null.
  */
-export async function addSecondClipOfSameAsset(page: Page): Promise<boolean> {
+export async function cutClipAtFraction(page: Page, fraction = 0.55): Promise<number | null> {
   await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
   await page.waitForTimeout(800);
   const before = await page.locator(".timeline-clip").count().catch(() => 0);
+  if (before === 0) return null;
 
-  const tile = page.locator(".asset-tile").first();
-  if (!(await tile.count().catch(() => 0))) return false;
-  await tile.hover().catch(() => undefined);
+  const box = await page.evaluate(() => {
+    const ruler = document.querySelector(".timeline-ruler");
+    const clip = document.querySelector(".timeline-clip");
+    if (!(ruler instanceof HTMLElement) || !(clip instanceof HTMLElement)) return null;
+    const r = ruler.getBoundingClientRect();
+    const c = clip.getBoundingClientRect();
+    return { rulerY: r.top + r.height / 2, clipLeft: c.left, clipWidth: c.width, clipY: c.top + c.height / 2 };
+  });
+  if (!box || box.clipWidth < 20) return null;
+
+  // Park the playhead inside the clip, then select the clip, then split. The order matters: clicking a
+  // clip deliberately does NOT move the playhead (startScrub returns early on `.timeline-clip`), so
+  // selecting after seeking keeps the position that was just set.
+  const cutX = box.clipLeft + box.clipWidth * fraction;
+  await page.mouse.click(cutX, box.rulerY);
   await page.waitForTimeout(300);
-  // A VIDEO asset does not get a button titled "Add to timeline" — that title belongs to the non-video
-  // branch. Video renders a trio instead: "Add video only" / "Add audio only" / "Add linked video +
-  // audio". Matching only the generic title is why the first attempt at this silently added nothing.
-  const add = page
-    .locator('.asset-card-actions button[title^="Add video only"], .asset-card-actions button[title^="Add to timeline"]')
-    .first();
-  if (!(await add.count().catch(() => 0))) return false;
-  await add.click({ force: true }).catch(() => undefined);
-  await page.waitForTimeout(2_500);
+  await page.mouse.click(cutX, box.clipY);
+  await page.waitForTimeout(300);
 
-  const after = await page.locator(".timeline-clip").count().catch(() => 0);
-  return after > before;
+  const split = page.locator('button[title^="Split at playhead"]').first();
+  if (!(await split.count().catch(() => 0))) return null;
+  await split.click({ timeout: 5_000 }).catch(() => undefined);
+  await page.waitForTimeout(1_500);
+
+  // Two clips is not enough: the old helper produced two clips that started at the same x. The cut is
+  // only real if their LEFT EDGES differ.
+  const edges = await page.evaluate(() => {
+    const lefts = Array.from(document.querySelectorAll(".timeline-clip"))
+      .map((el) => el.getBoundingClientRect().left)
+      .sort((a, b) => a - b);
+    return lefts.filter((x, i) => i === 0 || x - lefts[i - 1]! > 4).length;
+  });
+  if (edges < 2) return null;
+  return page.evaluate(
+    () => (window as unknown as { __rfClock?: { committed: number } }).__rfClock?.committed ?? null
+  );
+}
+
+export interface CutSeekResult {
+  /** Where the two clips meet, in seconds, as the editor itself reports it. */
+  cutSeconds: number;
+  /** Where the playhead actually landed. Snapping means this is not exactly `cut - lead`. */
+  parkedSeconds: number;
+  pixelsPerSecond: number;
+}
+
+/**
+ * Park the playhead just before the cut, so the sample window CONTAINS the preload crossing.
+ *
+ * {@link addSecondClipOfSameAsset} makes the crossing reachable; it does not make the run visit it.
+ * The second clip appends after the first, so a 25s sample starting at t=0 on a ~28s first clip never
+ * gets within the ~1.2s pre-roll lookahead of the boundary — the shell never mounts, nothing borrows
+ * across two times, and `shareDetaches` reads 0 in the arm that still contains the defect. A criterion
+ * satisfied by the unfixed arm is not evidence of a fix, it is an absence of one, so the run has to
+ * start where the interesting thing happens.
+ *
+ * HOW. Timeline x↔time is a zoom-, scroll- and duration-dependent mapping, and this deliberately does
+ * not reimplement it: it CALIBRATES against the editor. Click the ruler at two known x, read the
+ * resulting time from `__rfClock` each time, and the slope between them is pixels-per-second as the
+ * app actually applies it today. Anything derived from that is right even if the timeline's zoom
+ * defaults change — and if the mapping ever stops being affine, the verification read at the end
+ * catches it rather than silently parking somewhere else.
+ */
+export async function seekBeforeCut(page: Page, leadSeconds = 2.5): Promise<CutSeekResult | null> {
+  const geometry = await page.evaluate(() => {
+    const ruler = document.querySelector(".timeline-ruler");
+    if (!(ruler instanceof HTMLElement)) return null;
+    const lefts = Array.from(document.querySelectorAll(".timeline-clip"))
+      .map((el) => el.getBoundingClientRect())
+      .filter((r) => r.width > 2)
+      .map((r) => r.left)
+      .sort((a, b) => a - b);
+    // Distinct edges: a linked video+audio pair puts two clips at the SAME x, and treating the twin
+    // as "the second clip" would put the cut at the start of the timeline.
+    const distinct = lefts.filter((x, i) => i === 0 || x - lefts[i - 1]! > 4);
+    if (distinct.length < 2) return null;
+    const r = ruler.getBoundingClientRect();
+    return { cutX: distinct[1]!, rulerY: r.top + r.height / 2, rulerLeft: r.left, rulerRight: r.right };
+  });
+  if (!geometry) return null;
+
+  const clickAt = async (x: number): Promise<number | null> => {
+    if (x < geometry.rulerLeft + 2 || x > geometry.rulerRight - 2) return null;
+    await page.mouse.click(x, geometry.rulerY);
+    await page.waitForTimeout(250);
+    return page.evaluate(
+      () => (window as unknown as { __rfClock?: { committed: number } }).__rfClock?.committed ?? null
+    );
+  };
+
+  // Two-point calibration. The reference click is 200px back from the cut — far enough that snapping
+  // (which quantises both reads to the frame grid) is small against the span, near enough to stay on
+  // screen at any sane zoom.
+  const cutSeconds = await clickAt(geometry.cutX);
+  const refX = geometry.cutX - 200;
+  const refSeconds = await clickAt(refX);
+  if (cutSeconds == null || refSeconds == null || !(cutSeconds > refSeconds)) return null;
+  const pixelsPerSecond = 200 / (cutSeconds - refSeconds);
+
+  const parkedSeconds = await clickAt(geometry.cutX - leadSeconds * pixelsPerSecond);
+  if (parkedSeconds == null) return null;
+  return { cutSeconds, parkedSeconds, pixelsPerSecond };
 }
 
 /** Re-open an existing project id under a different flag set — the A/B seam. Keeps the same profile. */
