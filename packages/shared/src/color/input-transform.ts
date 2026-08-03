@@ -48,14 +48,30 @@ export type InputColorSpace =
   | "pq";
 
 /**
- * Provenance is structural, not a convention: `spec-checked` cannot be claimed without naming the
- * document and revision it was checked against. "Unverified" was rejected as a word — it reads as
- * "probably wrong", when the state is "implemented, internally tested, awaiting the authoritative
- * document".
+ * Confidence ladder, most trustworthy first. Provenance is structural, not a convention: each status
+ * carries the evidence that status requires, so none of them can be claimed by editing a single word.
+ *
+ * "Unverified" was rejected as a word — it reads as "probably wrong", when the real state is
+ * "implemented, internally tested, awaiting the authoritative document". And a flat verified/unverified
+ * flag lost the most interesting distinction we actually have: a curve whose coefficients are unchecked
+ * but which independently reproduces a published operating point is in a materially better state than
+ * one that has never been compared to anything.
+ *
+ * **Only `spec-checked` clears a space for renderer wiring** — see `spacesAwaitingVerification()`.
  */
 export type TransferVerification =
+  /** Compared against the authoritative document, in full. */
+  | { status: "spec-checked"; document: string; revision: string; checkedBy: string }
+  /**
+   * Coefficients unchecked, but the curve independently reproduces published behaviour at a known
+   * operating point (e.g. the vendor's stated 18% grey code). Evidence is required and is the reason
+   * this outranks spec-pending; it is NOT a substitute for reading the document.
+   */
+  | { status: "corroborated"; document: string; evidence: string }
+  /** Implemented and internally consistent; nothing has been compared to anything external. */
   | { status: "spec-pending"; document: string }
-  | { status: "spec-checked"; document: string; revision: string; checkedBy: string };
+  /** A defect is KNOWN and located. Must be corrected before use; never silently downgraded. */
+  | { status: "known-inconsistent"; document: string; issue: string };
 
 /** What the encoding's linear quantity MEANS — the unit `toLinear` returns. */
 export type LinearDomain =
@@ -244,17 +260,29 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
   slog3: {
     id: "slog3", label: "Sony S-Log3", toLinear: slog3ToLinear, fromLinear: slog3FromLinear,
     domain: "scene-linear", nativeGamut: "s-gamut3.cine", implementation: "implemented",
-    verification: SPEC_PENDING("Sony, S-Log3/S-Gamut3 Technical Summary")
+    verification: {
+      status: "corroborated",
+      document: "Sony, S-Log3/S-Gamut3 Technical Summary",
+      evidence: "18% grey derived from the curve → 0.41056, matching Sony's published code 420/1023 exactly"
+    }
   },
   vlog: {
     id: "vlog", label: "Panasonic V-Log", toLinear: vlogToLinear, fromLinear: vlogFromLinear,
     domain: "scene-linear", nativeGamut: "v-gamut", implementation: "implemented",
-    verification: SPEC_PENDING("Panasonic, V-Log/V-Gamut Reference Manual")
+    verification: {
+      status: "corroborated",
+      document: "Panasonic, V-Log/V-Gamut Reference Manual",
+      evidence: "18% grey derived from the curve → 0.4233, matching Panasonic's published 42.3% IRE"
+    }
   },
   logc3: {
     id: "logc3", label: "ARRI LogC3 (EI 800)", toLinear: logc3ToLinear, fromLinear: logc3FromLinear,
     domain: "scene-linear", nativeGamut: "arri-wide-gamut-3", implementation: "implemented",
-    verification: SPEC_PENDING("ARRI, ALEXA LogC Curve — Usage in VFX")
+    verification: {
+      status: "corroborated",
+      document: "ARRI, ALEXA LogC Curve — Usage in VFX",
+      evidence: "18% grey derived from the curve → 0.3910, matching ARRI's published ~39.1% for EI 800"
+    }
   },
   logc4: {
     id: "logc4", label: "ARRI LogC4", toLinear: logc4ToLinear, fromLinear: logc4FromLinear,
@@ -269,7 +297,14 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
   flog: {
     id: "flog", label: "Fujifilm F-Log", toLinear: flogToLinear, fromLinear: flogFromLinear,
     domain: "scene-linear", nativeGamut: "f-gamut", implementation: "implemented",
-    verification: SPEC_PENDING("Fujifilm, F-Log Data Sheet")
+    verification: {
+      status: "known-inconsistent",
+      document: "Fujifilm, F-Log Data Sheet",
+      issue:
+        "Branches disagree by 1.34e-2 at the join: the published inverse cut is 0.100537775, but " +
+        "e*cut1 + f computes 0.1006387 from the constants as written. Those must be the same number, " +
+        "so at least one of {e, f, cut1} is wrong. Error is confined to near-black. Fix before use."
+    }
   },
   hlg: {
     id: "hlg", label: "HLG (BT.2100)", toLinear: hlgToLinear, fromLinear: hlgFromLinear,
@@ -333,8 +368,38 @@ export const SELECTABLE_INPUT_SPACES: InputColorSpace[] = [
   "hlg", "pq"
 ];
 
-/** Spaces still awaiting an authoritative check — the gate Stage 3 must respect before wiring. */
-export function specPendingSpaces(): InputColorSpace[] {
-  return (Object.keys(INPUT_TRANSFERS) as Exclude<InputColorSpace, "auto">[])
-    .filter((id) => INPUT_TRANSFERS[id].verification.status === "spec-pending");
+export type VerificationStatus = TransferVerification["status"];
+
+/** Most trustworthy first. Also the display order of the `idt:test` dashboard. */
+export const VERIFICATION_ORDER: VerificationStatus[] = [
+  "spec-checked",
+  "corroborated",
+  "spec-pending",
+  "known-inconsistent"
+];
+
+const ALL_TRANSFER_IDS = (): Exclude<InputColorSpace, "auto">[] =>
+  Object.keys(INPUT_TRANSFERS) as Exclude<InputColorSpace, "auto">[];
+
+/**
+ * Everything NOT cleared for renderer wiring. `corroborated` is deliberately included: agreeing with a
+ * published grey point is evidence about one operating point, not about the coefficient set, and the
+ * gate is "someone read the document" — not "it looks right".
+ */
+export function spacesAwaitingVerification(): InputColorSpace[] {
+  return ALL_TRANSFER_IDS().filter((id) => INPUT_TRANSFERS[id].verification.status !== "spec-checked");
+}
+
+/**
+ * Verification state grouped by status. Because Stage 2a is intentionally dormant, this is the colour
+ * science work's progress tracker — `idt:test` renders it on every run so a reviewer can read the
+ * confidence picture without going through the registry by hand.
+ */
+export function verificationSummary(): { status: VerificationStatus; spaces: InputTransferDefinition[] }[] {
+  return VERIFICATION_ORDER.map((status) => ({
+    status,
+    spaces: ALL_TRANSFER_IDS()
+      .map((id) => INPUT_TRANSFERS[id])
+      .filter((def) => def.verification.status === status)
+  }));
 }

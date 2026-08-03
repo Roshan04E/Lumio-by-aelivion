@@ -343,6 +343,30 @@ slips:
 2. *PQ was asserted continuous "at its join".* ST 2084 has no join — it is one smooth expression. The
    test was measuring the curve's own slope across its sampling interval, i.e. its own step size.
 
+### Verification ladder + dashboard (added by review, 2026-08-03)
+
+A binary verified/unverified flag lost the distinction that turned out to matter most: a curve whose
+coefficients are unread but which *independently reproduces a published operating point* is in a
+materially better state than one never compared to anything. Four statuses, each carrying the evidence
+its own claim requires — so none can be granted by editing one word:
+
+| Status | Means | Requires |
+|---|---|---|
+| `spec-checked` | compared against the authoritative document | `revision`, `checkedBy` |
+| `corroborated` | reproduces published behaviour at a known operating point | `evidence` |
+| `spec-pending` | implemented, internally consistent, externally uncompared | `document` |
+| `known-inconsistent` | a defect is located | `issue` |
+
+**Only `spec-checked` clears a space for wiring** (`spacesAwaitingVerification()`). Corroborated is
+explicitly NOT sufficient: a matching grey point is evidence about one operating point, not about the
+coefficient set, and the gate is "someone read the document".
+
+Current state — **4 / 11 cleared**: Rec.709, sRGB, HLG, PQ. Corroborated: S-Log3, V-Log, LogC3.
+Pending: Apple Log, LogC4, D-Log. Inconsistent: F-Log.
+
+Because the stage is dormant there is no UI to read this from, so **`idt:test` prints the whole ladder on
+every run** and is the colour-science progress tracker. Reviewers read the test output, not the registry.
+
 ### Not in Stage 2a
 
 - **Gamut matrices (2b).** S-Gamut3.Cine / V-Gamut / ARRI Wide Gamut 3 / 4 / D-Gamut / F-Gamut → Rec.709.

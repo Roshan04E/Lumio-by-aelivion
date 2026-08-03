@@ -25,10 +25,12 @@ import {
   inputTransfer,
   inputCodeToWorkingLinear,
   normalizeToWorkingSpace,
-  specPendingSpaces,
+  spacesAwaitingVerification,
+  verificationSummary,
   HLG_SCENE_DIFFUSE_WHITE,
   PQ_DIFFUSE_WHITE_NITS,
-  type InputColorSpace
+  type InputColorSpace,
+  type VerificationStatus
 } from "./input-transform";
 
 let failures = 0;
@@ -206,12 +208,75 @@ check(
     return v.status !== "spec-checked" || Boolean(v.document && v.revision && v.checkedBy);
   })
 );
-check("spec-pending entries all name the document to check", ALL.every((id) => Boolean(INPUT_TRANSFERS[id].verification.document)));
+check(
+  "corroborated entries all state their evidence",
+  ALL.every((id) => {
+    const v = INPUT_TRANSFERS[id].verification;
+    return v.status !== "corroborated" || Boolean(v.evidence);
+  })
+);
+check(
+  "known-inconsistent entries all describe the defect",
+  ALL.every((id) => {
+    const v = INPUT_TRANSFERS[id].verification;
+    return v.status !== "known-inconsistent" || Boolean(v.issue);
+  })
+);
+check("every entry names a document", ALL.every((id) => Boolean(INPUT_TRANSFERS[id].verification.document)));
 
-const pending = specPendingSpaces();
-console.log(`\n  NOTE — ${pending.length} space(s) awaiting authoritative verification: ${pending.join(", ")}`);
-console.log("  These are internally consistent but NOT checked against the vendor documents.");
-console.log("  Nothing may consume them in a renderer until that pass is done (plans/log-raw-source-color.md).");
+/* ------------------------------------------------------------------ progress dashboard */
+// Stage 2a is dormant by design, so there is no UI to read its state from. This output IS the colour
+// science progress tracker — it is printed on every run so a reviewer can see the confidence picture
+// without reading the registry by hand.
+
+const BADGE: Record<VerificationStatus, string> = {
+  "spec-checked": "OK ",
+  corroborated: "~  ",
+  "spec-pending": "?  ",
+  "known-inconsistent": "XX "
+};
+const MEANING: Record<VerificationStatus, string> = {
+  "spec-checked": "compared against the authoritative document — cleared for wiring",
+  corroborated: "reproduces published behaviour at a known operating point; coefficients unread",
+  "spec-pending": "implemented and internally consistent; compared against nothing external",
+  "known-inconsistent": "a defect is located and must be corrected before use"
+};
+
+const summary = verificationSummary();
+const total = ALL.length;
+const cleared = total - spacesAwaitingVerification().length;
+
+console.log(`\n${"─".repeat(78)}`);
+console.log(" VERIFICATION STATUS — colour science progress tracker");
+console.log(`${"─".repeat(78)}`);
+for (const { status, spaces } of summary) {
+  if (spaces.length === 0) continue;
+  console.log(`\n  ${BADGE[status]}${status}  (${spaces.length})`);
+  console.log(`      ${MEANING[status]}`);
+  for (const def of spaces) {
+    console.log(`      · ${def.label.padEnd(22)} ${def.verification.document}`);
+    const v = def.verification;
+    if (v.status === "corroborated") console.log(`        evidence: ${v.evidence}`);
+    if (v.status === "known-inconsistent") {
+      // Wrapped so the located defect stays readable in a terminal.
+      const words = v.issue.split(" ");
+      let line = "        DEFECT:  ";
+      for (const w of words) {
+        if (line.length + w.length > 76) {
+          console.log(line);
+          line = "                 ";
+        }
+        line += `${w} `;
+      }
+      console.log(line.trimEnd());
+    }
+    if (v.status === "spec-checked") console.log(`        checked: ${v.revision} · by ${v.checkedBy}`);
+  }
+}
+console.log(`\n${"─".repeat(78)}`);
+console.log(`  Cleared for renderer wiring: ${cleared} / ${total}   (spec-checked only)`);
+console.log(`  Gate: plans/log-raw-source-color.md — Stage 3 must not offer an unverified space.`);
+console.log(`${"─".repeat(78)}`);
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed.`);
