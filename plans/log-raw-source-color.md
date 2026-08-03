@@ -378,6 +378,23 @@ every run** and is the colour-science progress tracker. Reviewers read the test 
   lands first because it is the testable ground truth the LUT baker already consumes — same pattern as
   `applyPipelineToRgb` → `bakePipelineToLut3d`.
 
+## Agreed order of work (settled 2026-08-03 — Stage 2a architecture is CLOSED)
+
+Design is done; what remains is verification and integration, not architecture. Do not reopen 2a's shape.
+
+1. **Wait for the editor files to stabilise.** `EditorPage.tsx` and the inspector are live with ADR-012
+   sibling work. Three performance measurements were already voided today by hot-reloads of half-edited
+   render code; do not interleave.
+2. **Vendor-document verification pass.** Order: **F-Log first** (only format with a localised,
+   reproducible defect), then Apple Log, S-Log3, V-Log, LogC3, LogC4, D-Log.
+3. **Promote verified spaces to `spec-checked`**, with `revision` and `checkedBy` filled in.
+4. **Stage 3 — offering ONLY `spec-checked` entries.**
+5. **Stage 2b — gamut matrices**, once a user can actually select an input space.
+
+**The step that actually gates Stage 3 is (2), not the UI.** Today `spacesAwaitingVerification()` would
+hide 7 of 11 — including Apple Log, the format this entire plan exists to serve. A dropdown built before
+the verification pass would ship with nothing worth selecting in it. Budget the reading, not the widget.
+
 ## Stage 2.5 — Display transform (ODT), added by review 2026-08-03
 
 Accepted as a distinct concept. An IDT gets footage *into* the working space; a **display transform** gets
