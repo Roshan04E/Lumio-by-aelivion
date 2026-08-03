@@ -158,6 +158,54 @@ export interface ScenePreviewMediaSnapshot {
   decodeSharedWith: number;
   /** Filename tail of the source URL — what a person can actually recognise in a console dump. */
   sourceLabel: string | null;
+  /**
+   * The source's own frame rate, when the decoder knows it. Null on paths that cannot report it
+   * (a `<video>` element exposes no fps API) and for time-invariant sources.
+   *
+   * Carried for the read-ahead probe (`playback/readahead-probe.ts`), where its absence produced a
+   * measurably wrong verdict: demand was estimated from the COMPOSITE rate (~44/s), but a 30fps
+   * source can never deliver more than 30 new frames/sec — the extra composites redraw a frame that
+   * is still correct. That read 25.5 delivered against 44.3 demanded (−18.8/s) when the honest
+   * shortfall against the source's own ceiling is −4.5/s. Same data, and a four-fold difference in
+   * how bad it sounds — which is the number gating whether the ring gets built at all.
+   */
+  nominalFps: number | null;
+  /**
+   * Source seconds the currently-held frame actually represents. Null when the path cannot know.
+   *
+   * `frameVersion` cannot substitute for this. It counts PUBLISHES, and the WebCodecs path republishes
+   * whenever a request completes — including when the provider returns the frame it already had. A
+   * probe counting publishes therefore read 43.5 "delivered/s" from a 30fps source, which is
+   * impossible on its face and flipped a verdict the wrong way. Distinct served times are the only
+   * honest measure of how many real frames a decoder produced.
+   */
+  servedSourceTime: number | null;
+  /**
+   * Which branch produced `awaitingFrame`, or null when a frame was found. One of `NO_LEASE`,
+   * `READY_STATE_n`, `VIDEO_WIDTH_ZERO`, `WC_NO_FRAME`, `WC_DECODE_IN_FLIGHT`, `WC_FRAME_CLOSED`,
+   * `ELEMENT_REJECTED_STALE`.
+   *
+   * The boolean alone cannot separate the two opposite causes of an identical symptom: the browser
+   * having produced no frame, versus a frame existing that this layer did not or would not take.
+   * Every reason above belongs to exactly one of those camps, which is what makes the distinction
+   * measurable instead of arguable.
+   */
+  awaitReason: string | null;
+  /**
+   * The backing `<video>`'s own state, when there is one. A pooled element is never in the document,
+   * so this is the ONLY way to observe it — an out-of-page probe sees nothing (verified 2026-08-02:
+   * `document.querySelectorAll("video")` found only unrelated detached elements).
+   *
+   * `elementTime` is the load-bearing one: a `<video>` whose `currentTime` stops advancing while
+   * `readyState` stays at 4 is the browser's decoder stalling, and no other field in this snapshot
+   * can show that — the layer keeps being handed a perfectly valid frame, the same one each time.
+   */
+  elementTime: number | null;
+  elementReadyState: number | null;
+  elementPaused: boolean | null;
+  elementNetworkState: number | null;
+  hasWcProvider: boolean;
+  wcBusy: boolean;
 }
 
 /** Registered by `WebglMediaLayer`; polled by `ScenePreviewCanvas` at composite time. */

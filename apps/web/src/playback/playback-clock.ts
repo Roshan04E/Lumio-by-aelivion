@@ -212,6 +212,21 @@ export function usePlaybackClock(fallback: number, live: boolean): number {
   return live ? time : fallback;
 }
 
+// Debug handle, matching the repo's __rf* telemetry convention (__rfAudioClock, __rfWcPool).
+//
+// `committed` is the store clock at FULL precision, which nothing outside React could read: the
+// on-screen readout is `toFixed(2)`, and 10ms of resolution cannot tell a parked playhead that sits
+// ON the frame grid from one that sits between frames (a frame is 33ms at 30fps, 17ms at 60). That
+// distinction is the whole of the 2026-07-29 pause bug, so the gate that guards it needs the real
+// number. `live` is the anchor-derived sub-commit time, so a reader can also see how far the
+// committed clock trails during playback — the other half of the same bug.
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "__rfClock", {
+    configurable: true,
+    get: () => ({ committed: clockTime, live: getLivePlaybackTime(), coldSuspended }),
+  });
+}
+
 function subscribeCold(listener: () => void): () => void {
   coldListeners.add(listener);
   return () => {

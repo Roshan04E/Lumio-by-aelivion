@@ -1,4 +1,5 @@
 import { evaluateAnimatedValue, evaluateTimelineEffectParam, evaluateTimelineTransform } from "./animation";
+import type { VisibleContribution } from "./kernel/admission";
 import { frameProfiler } from "./color/frame-profiler";
 import { COLOR_EFFECT_TYPES, compileColorPipeline, DEFAULT_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
@@ -1624,4 +1625,49 @@ function parseLutBase64(value: unknown): Lut3d | null {
 function combineFilter(cssFilter: string | undefined, colorFilter: CompositionColorFilter | null): string | undefined {
   const parts = [cssFilter, colorFilter?.filterRef].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" ") : undefined;
+}
+
+/**
+ * What a timeline layer contributes to the picture right now, for decode admission (ADR-012 §6.3,
+ * slice S4.3).
+ *
+ * ## Where this lives, and why not in the kernel
+ *
+ * The kernel owns the VOCABULARY (`VisibleContribution`) and the ranking; it must never learn what a
+ * `TimelineLayer` is — I-36 keeps it free of product types as surely as it keeps it free of the DOM.
+ * The derivation is a product question ("what does a layer contribute?"), so it lives beside the other
+ * composition accessors and every host — preview, export, a headless harness — computes it the same way.
+ *
+ * ## What is deliberately NOT folded in
+ *
+ * Two flags that look like zero contribution and are not, both named at `AcquireOptions.contribution`:
+ *
+ *  - **`hidden`** — a pre-roll shell, about to be on screen. Ranking it at zero denies the decoder that
+ *    exists precisely to make the next cut instant, so pre-roll would defeat itself.
+ *  - **`suspended`** — a demoted source (a comp proxy is serving). **I-24: a presentation policy MUST
+ *    NOT change resource lifetime.** Demotion suspends the pull, never the session; letting it lower a
+ *    rank would let a presentation decision evict a decoder, which is the exact coupling S3.5 removed.
+ *
+ * Neither is a caller's option to override, which is why they are absent from the signature rather than
+ * defaulted in it.
+ *
+ * ## Area is an estimate, and says so
+ *
+ * True contributed area needs occlusion and the composited draw rect, which the scene builder owns and
+ * the acquire path cannot see. `scale²` clamped to 1 is the honest approximation for media, which fills
+ * its frame by default: it is monotonic in the quantity that matters and never claims more than the
+ * output. When the draw-rect owner can supply a real figure it replaces this without changing the shape.
+ */
+export function getLayerVisibleContribution(
+  layer: Pick<CompositionLayerStyleInput, "startSeconds" | "transform" | "keyframes" | "animations"> | undefined,
+  options: CompositionStyleOptions & { reachable?: boolean; underDisabledBranch?: boolean } = {}
+): VisibleContribution {
+  const transform = getCompositionTransform(layer, options);
+  const scale = Number.isFinite(transform.scale) ? Math.max(0, transform.scale) : 1;
+  return {
+    reachable: options.reachable !== false,
+    area: Math.min(1, scale * scale),
+    opacity: Math.min(1, Math.max(0, transform.opacity / 100)),
+    underDisabledBranch: options.underDisabledBranch === true,
+  };
 }

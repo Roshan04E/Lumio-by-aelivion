@@ -1127,6 +1127,16 @@ export function ScenePreviewCanvas({
           // reading is an artifact of a playhead past the material, not lag anyone can fix.
           mediaEnd: snap.mediaEndSeconds,
           served: snap.servedSourceTime,
+          // WHY it is awaiting, and what the backing element was doing at that instant. `state`
+          // says a source has no frame; these say whose fault that is — see `awaitReason` and
+          // `elementTime` on ScenePreviewMediaSnapshot.
+          why: snap.awaitReason,
+          elTime: snap.elementTime,
+          elReady: snap.elementReadyState,
+          elPaused: snap.elementPaused,
+          elNetwork: snap.elementNetworkState,
+          wcProvider: snap.hasWcProvider,
+          wcBusy: snap.wcBusy,
         };
       }
       allStaleness[resolvedId] = awaiting ? Number.POSITIVE_INFINITY : snap.stalenessSeconds;

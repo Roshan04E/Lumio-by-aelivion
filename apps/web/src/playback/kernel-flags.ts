@@ -61,6 +61,7 @@ export const KERNEL_FLAGS = {
   sessionSatisfaction: { query: "kernelSessionSatisfaction", storage: "orreris.kernel.sessionSatisfaction", defaultOn: false },
   proxySource: { query: "kernelProxySource", storage: "orreris.kernelProxySource", defaultOn: false },
   resources: { query: "kernelResources", storage: "orreris.kernelResources", defaultOn: true },
+  sourceAdmission: { query: "kernelSourceAdmission", storage: "orreris.kernel.sourceAdmission", defaultOn: false },
   frames: { query: "kernelFrames", storage: "orreris.kernelFrames", defaultOn: false },
   scopes: { query: "kernelScopes", storage: "orreris.kernelScopes", defaultOn: false },
 } as const satisfies Record<string, KernelFlag>;

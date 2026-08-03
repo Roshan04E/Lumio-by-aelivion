@@ -47,6 +47,7 @@ import {
   effectsWithLayerRegionMask,
   isWebgl2ColorSupported,
   getCompositionMediaStyle,
+  getLayerVisibleContribution,
   getOverlayMaskWrapperStyle,
   getCompositionShapeStyle,
   getCompositionTextRunStyle,
@@ -3588,6 +3589,10 @@ const PreviewLayer = memo(function PreviewLayer({
               mediaUrl !== (asset as (typeof asset & { proxyUrl?: string }) | undefined)?.proxyUrl &&
               !hasMeasuredDenseGop(asset?.id)
             }
+            // DECODE ADMISSION (ADR-012 §6.3, slice S4.3). Evaluated at the CURRENT time, so an
+            // animated scale or opacity moves a source's rank as it moves on screen — merit is a
+            // property of the graph at an instant, never of when the layer happened to mount.
+            visibleContribution={getLayerVisibleContribution(layer, { currentTimeSeconds: currentTime })}
             // The diagnostic tables key on this; the url tail degrades to an opaque blob UUID.
             assetLabel={asset?.fileName ?? asset?.id}
             matte={layer.matte}
@@ -3926,6 +3931,7 @@ const PreviewLayer = memo(function PreviewLayer({
           bakeOpacity={bakeOpacity}
           hidden={hideForTransition && !sceneComposited}
           interactiveHidden={sceneComposited && !pending}
+          visibleContribution={getLayerVisibleContribution(layer, { currentTimeSeconds: currentTime })}
           dragHandlers={dragHandlers}
           onWebglFailed={() => setWebglMediaFailed(true)}
           style={webglImageStyle}

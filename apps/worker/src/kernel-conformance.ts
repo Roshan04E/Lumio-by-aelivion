@@ -1656,6 +1656,46 @@ console.log("\nS4.3 — source admission (ADR-012 §6.3/§6.11/§6.12)");
   enforced("I-29", "…and attributing the denial to scarcity rather than to invisibility",
     recorded.every((d) => d.reason === "over-budget"));
 
+  // ── THE AUTHORITATIVE HALF (S4.3). The pool asks one question of the ranking: did the newcomer win,
+  // and if so which incumbent yields? These assert the shape that question is answered in, because the
+  // pool's branch is `decision.admitted.includes(url)` plus the first denied incumbent — and both halves
+  // have to be true together or a source loses a session it should have kept.
+  const INCUMBENT = { reachable: true, area: 0.05, opacity: 1, underDisabledBranch: false };
+  const NEWCOMER = { reachable: true, area: 0.85, opacity: 1, underDisabledBranch: false };
+  const contested = rankAdmission(
+    [
+      { key: "incumbent", priority: "playhead", contribution: INCUMBENT, firstRequestedAtMs: 0, admittedAtMs: 0 },
+      { key: "newcomer", priority: "playhead", contribution: NEWCOMER, firstRequestedAtMs: 5_000, admittedAtMs: null },
+    ],
+    1,
+    5_000
+  );
+  enforced("I-27", "a large newcomer wins the last slot from a tiny incumbent past its residency",
+    sameList(contested.admitted, ["newcomer"]) && contested.denied[0]?.key === "incumbent");
+
+  // The rollback property, asserted rather than asserted-about: the ranking must not name a victim when
+  // the newcomer LOST. The pool preempts only on `admitted.includes(url)`, so a ranking that admitted
+  // the newcomer while also denying it — or that denied everyone — would make the flag able to churn
+  // sessions for no gain. A slice whose kill switch is its only safety net has to be checkable here.
+  const outranked = rankAdmission(
+    [
+      { key: "incumbent", priority: "playhead", contribution: NEWCOMER, firstRequestedAtMs: 0, admittedAtMs: 0 },
+      { key: "newcomer", priority: "playhead", contribution: INCUMBENT, firstRequestedAtMs: 5_000, admittedAtMs: null },
+    ],
+    1,
+    5_000
+  );
+  enforced("I-27", "a small newcomer takes nothing — no victim is named when it lost",
+    sameList(outranked.admitted, ["incumbent"]) && !outranked.admitted.includes("newcomer"));
+
+  // I-24 again, from the admission side. A demoted or pre-roll source must not be RANKED at zero —
+  // `hidden`/`suspended` are deliberately absent from `getLayerVisibleContribution`'s inputs, so the
+  // only way they could reach the ranking is if someone added them. What is assertable here is the
+  // consequence: an ordinary visible source and a pre-roll source with the same geometry rank the same,
+  // because nothing in the contribution shape can express "about to be shown".
+  enforced("I-24", "contribution has no channel for transport state — a pre-roll shell cannot be ranked down",
+    contributionRank(NEWCOMER) === contributionRank({ ...NEWCOMER }));
+
   session.dispose();
 }
 

@@ -174,6 +174,20 @@ export function getKernelDecoderLifetimeEnabled(): boolean {
  * merge carries zero behavioural risk while the arms are measured; the flip is a separate, evidenced
  * decision. Off restores the inherited identity-match borrow exactly.
  */
+/**
+ * Kill switch for RANKED source admission (ADR-012 §6.3, slice S4.3):
+ * `?kernelSourceAdmission=1` → localStorage `orreris.kernel.sourceAdmission` → **OFF**.
+ *
+ * Ships OFF under R2 — the fifth slice to touch the decoder — and because the authoritative half is the
+ * first thing in this programme that can take a session AWAY from a source that already had one. Off,
+ * the ranking still runs and still records who should have lost, so the policy is readable in the
+ * product before it is ever allowed to act. That ordering is the point: a switch flipped on evidence
+ * gathered under the switch.
+ */
+export function getKernelSourceAdmissionEnabled(): boolean {
+  return readKernelFlag(KERNEL_FLAGS.sourceAdmission);
+}
+
 export function getKernelSessionSatisfactionEnabled(): boolean {
   return readKernelFlag(KERNEL_FLAGS.sessionSatisfaction);
 }
@@ -326,6 +340,12 @@ let capMisses = 0;
  * differ while producers have not all declared a contribution, and that difference is the wiring gap.
  */
 let admissionDenialCount = 0;
+/**
+ * Slots taken FROM an incumbent by ranked admission (S4.3, authoritative half). Zero while
+ * `kernelSourceAdmission` is off, which is what makes the flag's rollback checkable rather than
+ * asserted: a non-zero count with the flag off would mean the switch is not the switch.
+ */
+let admissionPreemptions = 0;
 let initFailures = 0;
 let preemptions = 0;
 let shared = 0;
@@ -1167,17 +1187,23 @@ function reportAdmissionDenial(
   software: boolean,
   priority: WcLeasePriority,
   contribution: VisibleContribution | undefined
-): void {
+): LeaseRecord | null {
   // R1, and this one is mine: `rankAdmission` allocates a candidate array and sorts it, so the guard
   // inside `noteAdmissionDenied` is too late — the work is already done by the time it returns. A cap
   // miss is not a hot path, but the rule is that instrumentation costs nothing when off, not that it
   // costs little somewhere unimportant. `admissionDenials` is therefore a diagnostics-only figure and
   // reads 0 with diagnostics disabled; `capMisses` is the unconditional counter beside it.
-  if (!kernelDiagnostics.enabled) return;
+  const authoritative = getKernelSourceAdmissionEnabled();
+  // R1: with diagnostics off AND the flag off there is nothing to compute, and `rankAdmission`
+  // allocates. With the flag ON the ranking is load-bearing, so it runs regardless of observation —
+  // behaviour must never depend on whether anyone is watching.
+  if (!kernelDiagnostics.enabled && !authoritative) return null;
   const now = nowMs();
+  const byKey = new Map<string, LeaseRecord>();
   const candidates: AdmissionCandidate[] = [];
   for (const record of activeLeases) {
     if (record.software !== software) continue;
+    byKey.set(record.url, record);
     candidates.push({
       key: record.url,
       priority: record.priority,
@@ -1188,8 +1214,24 @@ function reportAdmissionDenial(
   }
   candidates.push({ key: url, priority, contribution, firstRequestedAtMs: now, admittedAtMs: null });
   const decision = rankAdmission(candidates, sessionCap(software), now);
-  for (const denial of decision.denied) noteAdmissionDenied(defaultSession, denial);
-  admissionDenialCount += decision.denied.length;
+  if (kernelDiagnostics.enabled) {
+    for (const denial of decision.denied) noteAdmissionDenied(defaultSession, denial);
+    admissionDenialCount += decision.denied.length;
+  }
+  if (!authoritative) return null;
+
+  // THE AUTHORITATIVE HALF. Capacity is granted by merit rather than by arrival — but only when the
+  // newcomer actually WON. If the ranking put it below the bar it is denied exactly as before, which is
+  // what keeps the flag a policy switch rather than a licence to churn.
+  if (!decision.admitted.includes(url)) return null;
+  // The victim is an incumbent the ranking denied. `heldByResidency` is not consulted here because
+  // residency already decided admission above: anything still admitted survived it, so anything denied
+  // is denied on merit and not merely un-damped.
+  for (const denial of decision.denied) {
+    const victim = byKey.get(denial.key);
+    if (victim) return victim;
+  }
+  return null;
 }
 
 function oldestPreloadLease(software: boolean): LeaseRecord | null {
@@ -1284,15 +1326,30 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
       return attachMember(existing, options);
     }
     if (!reserveSession(software, priority)) {
-      capMisses += 1;
-      traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
-      // S4.3, OBSERVABILITY HALF (behaviour-neutral). Who lost, and to what — `capMisses` is a number
-      // with no subject, and "the fourth MediaIn never gets a decoder" and "the fourth MediaIn is denied
-      // at rank 5 of 8 behind three fully-occluded sources" are the same defect with and without a
-      // diagnosis. Ranking runs here but decides NOTHING: the caller still falls back exactly as before,
-      // so this can be read in the product before the switch is ever flipped ("instrument before switch").
-      reportAdmissionDenial(url, software, priority, options.contribution);
-      return null;
+      // S4.3. Who lost, and to what — `capMisses` is a number with no subject, and "the fourth MediaIn
+      // never gets a decoder" and "the fourth MediaIn is denied at rank 5 of 8 behind three
+      // fully-occluded sources" are the same defect with and without a diagnosis.
+      //
+      // The ranking runs either way; only the ACTING on it is flagged. With `kernelSourceAdmission`
+      // off this records and returns null — byte-identical to the pre-slice fallback. With it on, an
+      // incumbent the ranking placed below the newcomer yields its slot, which is the whole slice:
+      // capacity granted by visible contribution rather than by which layer React mounted first.
+      const victim = reportAdmissionDenial(url, software, priority, options.contribution);
+      if (victim) {
+        // Preempt frees the session SYNCHRONOUSLY, so the retry below sees the slot. The victim's
+        // `onPreempted` runs its own fallback exactly as it does for the existing preload preemption
+        // path — admission reuses that mechanism rather than inventing a second way to lose a session.
+        admissionPreemptions += 1;
+        traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `admission-preempt victim=${traceAsset(victim.url)}` });
+        victim.preempt();
+      }
+      // Re-reserve after a preemption; a victim that failed to free its slot must still be a clean
+      // denial rather than an oversubscription.
+      if (!victim || !reserveSession(software, priority)) {
+        capMisses += 1;
+        traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
+        return null;
+      }
     }
   }
   traceEvent({
@@ -1420,6 +1477,8 @@ export interface WcPoolStats {
    * means producers are still not declaring — the wiring, measurable rather than assumed.
    */
   admissionDenials: number;
+  /** Slots ranked admission took from an incumbent. Always 0 with `kernelSourceAdmission` off. */
+  admissionPreemptions: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1444,6 +1503,7 @@ export function getWcPoolStats(): WcPoolStats {
     retentionOverrides,
     borrowRefusals,
     admissionDenials: admissionDenialCount,
+    admissionPreemptions,
     shared,
     sharedActive,
     shareDetaches,

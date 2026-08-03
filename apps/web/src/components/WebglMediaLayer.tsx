@@ -10,6 +10,7 @@ import {
   type HTMLAttributes,
 } from "react";
 import { bindDecoderSource, colorPipelineCacheKey, decoderReleaseVerdict, defaultSession, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@orreris/shared";
+import type { VisibleContribution } from "@orreris/shared";
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
@@ -324,6 +325,18 @@ interface BaseProps {
    * short-circuited and nothing reads these sources.
    */
   suspended?: boolean | undefined;
+  /**
+   * What this layer contributes to the picture, for decode admission (ADR-012 §6.3, slice S4.3).
+   *
+   * Forwarded verbatim to `acquirePreviewFrameProvider` and never computed here: the layer knows its
+   * own pixels but not the composition it sits in, and a component that guessed its own importance
+   * would be ranking itself. `VideoPreview` derives it via `getLayerVisibleContribution`.
+   *
+   * Absent is meaningful and must stay possible — the kernel ranks an undeclared source between
+   * "provably invisible" and "provably visible" rather than starving it, so a call site that has not
+   * been taught to declare loses rank, never its picture.
+   */
+  visibleContribution?: VisibleContribution | undefined;
 }
 
 interface ImageProps extends BaseProps {
@@ -597,6 +610,21 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // never leave a stale time attached to whatever frame arrives next. Set on present (below).
       if (!next) servedSourceTimeRef.current = null;
     }
+    /**
+     * WHY this layer has no frame for the current moment — one reason per composite (2026-08-02).
+     *
+     * `awaitingFrame` is a boolean, and a boolean cannot answer the only question that matters once a
+     * freeze has been localised to the element path: **does the browser fail to produce a frame, or do
+     * we fail to acquire one?** Those are opposite bugs with identical symptoms. Browser starvation
+     * (no decode exists yet) is a media-stack problem; acquisition failure (a frame exists and we
+     * refuse or cannot reach it) is ours. The 2026-08-02 freeze probe could rule out the compositor,
+     * the main thread, the GPU, Flarex and the decoder pool, and then stopped exactly here.
+     *
+     * Set at every `null` return in `selectVideoDrawSource` and read by the snapshot, so the reason
+     * always describes the SAME evaluation the compositor acted on rather than a re-derivation.
+     * Diagnostic only — nothing branches on it.
+     */
+    const awaitReasonRef = useRef<string>("none");
     const wcBusyRef = useRef(false);
     const wcRerequestRef = useRef(false);
     const wcNullCountRef = useRef(0);
@@ -796,6 +824,26 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         mediaType === "video" &&
         !props.tolerateLag &&
         (props.preferNativeDecode || wcBailedSources.has(src));
+      // ROUTING LEDGER (2026-08-02). This expression is a routing decision, and a routing decision
+      // that can change mid-session is a starvation source that looks exactly like a decoder bug: a
+      // clip can be re-evaluated on every remount (src change, proxy landing, full-quality toggle,
+      // pool eviction), and `wcBailedSources` is module-global and append-only, so one source's bail
+      // silently re-routes every later layer on the same URL. Recording each evaluation with its
+      // INPUTS is what makes "did routing flip, and why" answerable instead of inferred from the
+      // decode column after the fact. Pure telemetry.
+      if (typeof window !== "undefined" && mediaType === "video") {
+        const w = window as { __rfRouting?: Record<string, unknown[]> };
+        const log = (w.__rfRouting ??= {});
+        const key = src.length > 48 ? `…${src.slice(-48)}` : src;
+        (log[key] ??= []).push({
+          at: Math.round(performance.now()),
+          route: forceElementPath ? "element" : "pool",
+          preferNativeDecode: props.preferNativeDecode === true,
+          bailed: wcBailedSources.has(src),
+          tolerateLag: props.tolerateLag === true,
+          hidden: hiddenAtMountRef.current,
+        });
+      }
       const wcLease = forceElementPath
         ? null
         : acquirePreviewFrameProvider(src, {
@@ -812,6 +860,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             // refuse — which is the honest failure, but it would cost the duplicate-decode share this
             // whole mechanism exists to keep.
             requestedTime: mediaType === "video" ? mapSourceTime(wcTimeRef.current) : undefined,
+            // DECLARED MERIT (S4.3). Note what is NOT passed: `hidden` and `suspended` do not lower it.
+            // A hidden pre-roll shell is about to be on screen, and a suspended source is demoted —
+            // I-24 forbids a presentation policy from changing resource lifetime.
+            contribution: props.visibleContribution,
           });
       wcLeaseRef.current = wcLease;
       // DECODER MANAGER (ADR-012 3.11, slice S3.3) — report which decoder this source is reading
@@ -1845,6 +1897,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // ref is cleared synchronously on any transport movement (see the settle effect), so the paused
       // check is belt-and-braces against a draw racing the play flip.
       const settle = includeSettle ? settleSourceRef.current : null;
+      awaitReasonRef.current = "none";
       if (settle && !wcTimeRef.current.isPlaying && settle.width > 0 && settle.height > 0) {
         // The settle source IS a pooled <video> parked on the requested frame by an exact native seek,
         // so its own currentTime is the served time — no derivation needed.
@@ -1856,7 +1909,25 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         return { source: wcFrame.source, width: wcFrame.width, height: wcFrame.height, servedSourceTime: servedSourceTimeRef.current };
       }
       const video = sourceVideoRef.current;
-      if (!video || video.readyState < 2 || video.videoWidth === 0) return null;
+      if (!video || video.readyState < 2 || video.videoWidth === 0) {
+        // The three failures the old single `return null` collapsed into one boolean. NO_LEASE is
+        // ours (the layer holds no element at all); READY_STATE_n and VIDEO_WIDTH_ZERO are the
+        // browser's (an element we hold, that has no decoded frame to give). That split IS the
+        // Case-A/Case-B question, so it has to survive to the snapshot.
+        awaitReasonRef.current = !video
+          ? "NO_LEASE"
+          : video.readyState < 2
+            ? `READY_STATE_${video.readyState}`
+            : "VIDEO_WIDTH_ZERO";
+        // A WebCodecs provider that exists but handed us nothing is a THIRD case, and it hides
+        // behind the element reasons because the element check runs last. Name it explicitly.
+        if (wcProviderRef.current && !wcFrame) {
+          awaitReasonRef.current = wcBusyRef.current ? "WC_DECODE_IN_FLIGHT" : "WC_NO_FRAME";
+        } else if (wcFrameClosed) {
+          awaitReasonRef.current = "WC_FRAME_CLOSED";
+        }
+        return null;
+      }
       // STALE FALLBACK ELEMENT (2026-07-28). A pooled element sits wherever its last owner left it.
       // When a WC provider exists this element is only a stopgap, and drawing it while it is seconds
       // from the requested time paints a different shot entirely — measured 21.0s out, and the cause
@@ -1866,6 +1937,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       if (wcProviderRef.current) {
         const requested = mapSourceTime(wcTimeRef.current);
         if (Number.isFinite(requested) && Math.abs(video.currentTime - requested) > ELEMENT_FALLBACK_MAX_LAG_S) {
+          // Unambiguously OURS: a decoded frame exists and we refuse it for being the wrong shot.
+          awaitReasonRef.current = "ELEMENT_REJECTED_STALE";
           return null;
         }
       }
@@ -2371,6 +2444,20 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             // The moment the held frame actually represents — already tracked for the staleness
             // model (`servedSourceTimeRef`, stamped in presentFrame as `sourceTime - lag`).
             servedSourceTime: servedSourceTimeRef.current,
+            // ── Case A (browser starves) vs Case B (we fail to acquire) ──────────────────────────
+            // `awaitReason` names which null branch fired. The element fields answer the harder half:
+            // a frozen picture with a frame on offer every composite is invisible to `awaitingFrame`,
+            // because the layer IS handed a source — it is just the same source. A `<video>` whose own
+            // `currentTime` stops while `readyState` stays 4 is the browser failing to decode; one
+            // whose clock advances while our picture does not is us failing to consume. Neither is
+            // derivable from anything the snapshot carried before.
+            awaitReason: awaitingFrame ? awaitReasonRef.current : null,
+            elementTime: sourceVideoRef.current?.currentTime ?? null,
+            elementReadyState: sourceVideoRef.current?.readyState ?? null,
+            elementPaused: sourceVideoRef.current?.paused ?? null,
+            elementNetworkState: sourceVideoRef.current?.networkState ?? null,
+            hasWcProvider: wcProviderRef.current != null,
+            wcBusy: wcBusyRef.current,
           };
         },
       };
