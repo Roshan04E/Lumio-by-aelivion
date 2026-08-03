@@ -126,6 +126,94 @@ the existing pixel-gate harness (e.g. Apple Log 0.0 / 0.5 / 1.0 → known linear
 
 Depends on Stage 0 (banding) and Stage 1 (knowing which curve).
 
+### Stage 2 design (2026-08-03) — READ THE RISK SECTION BEFORE APPROVING
+
+**Split into 2a (transfer) and 2b (gamut).** These are independent corrections and 2a is where the
+visible win is: a log clip looks flat/washed because the TRANSFER curve is wrong, and fixing it alone
+restores normal contrast and black level. Gamut is a secondary accuracy correction (saturation and hue
+of strongly-coloured objects). Shipping 2a first is a coherent increment; shipping 2b first would be
+nearly invisible. **This pass is 2a only.**
+
+**New file:** `packages/shared/src/color/input-transform.ts`. Deliberately a NEW file rather than an
+extension of `color-management.ts`, and deliberately in `packages/shared/src/color/` — that directory
+currently has zero uncommitted sibling edits, whereas ADR-012 work is live in `ScenePreviewCanvas.tsx`,
+`WebglMediaLayer.tsx`, `scene-media-source.ts` and the playback clock. Stage 2a touches none of those.
+
+**Shape** — a registry, one entry per camera encoding:
+
+```ts
+export type InputColorSpace =
+  | "auto" | "rec709" | "srgb"
+  | "apple-log" | "slog3" | "vlog" | "logc3" | "logc4" | "dlog" | "flog"
+  | "hlg" | "pq";
+
+interface InputTransferDefinition {
+  id: InputColorSpace;
+  label: string;               // "Apple Log", "Sony S-Log3" — the Stage 3 dropdown reads this
+  toLinear(code: number): number;    // 0..1 code → scene linear, 0.18 == 18% grey
+  fromLinear(linear: number): number; // exact inverse; only exists so the tests can prove round-trip
+  nativeGamut: string;         // recorded now, CONSUMED in 2b
+  verified: "spec" | "unverified";
+}
+```
+
+`fromLinear` is not needed by the renderer. It exists because a round-trip test is the only check that
+catches a transcription error in a piecewise function without a reference implementation to diff
+against — the same reason `cpu.ts` is the ground truth for the LUT baker.
+
+**Scene-referred normalisation.** Camera log curves are scene-referred (1.0 = 18% grey × some stops), but
+PQ and HLG are display-referred and absolute. Those two need a stated diffuse-white reference or the
+picture comes out at the wrong exposure: **PQ normalised so 203 nits → 1.0** (ITU-R BT.2408 reference
+white), **HLG so E'=0.75 → 1.0**. That choice is a judgement call, it is visible as overall brightness,
+and it is written down here so it can be argued with rather than discovered later.
+
+### The risk you should decide on
+
+**The formula CONSTANTS are being written from memory, not transcribed from the vendor PDFs in front of
+me.** The structure of each curve I am confident about; the specific coefficients (`0.24151`, `5.367655`,
+`47.28711236`, …) are exactly the kind of thing that is easy to get subtly wrong, and a wrong constant
+does not crash — it produces a picture that is plausibly wrong, which is the worst failure mode for a
+colour tool.
+
+What the tests CAN prove without the source documents: round-trip exactness, monotonicity, continuity
+across each piecewise join (a transcription slip usually shows up as a visible kink), 0→0, and correct
+ordering between formats. What they CANNOT prove: that the constants are the vendor's constants. A test
+written from the same memory as the code is not an independent check.
+
+So Stage 2a lands as **`verified: "unverified"`** on every camera-log entry, and the flip to `"spec"` is
+a separate human pass against the vendor documents:
+
+| Format | Source document to check against |
+|---|---|
+| Apple Log | Apple, *Apple Log Profile White Paper* (2023) |
+| S-Log3 | Sony, *S-Log3 / S-Gamut3 Technical Summary* |
+| V-Log | Panasonic, *V-Log/V-Gamut Reference Manual* |
+| LogC3 | ARRI, *ALEXA LogC Curve — Usage in VFX* |
+| LogC4 | ARRI, *LogC4 Logarithmic Colour Aware Curve* (2022) |
+| D-Log | DJI, *D-Log Decoding Guide* |
+| F-Log | Fujifilm, *F-Log Data Sheet* |
+| HLG / PQ | ITU-R BT.2100, SMPTE ST 2084 — standards, highest confidence |
+
+This is safe to land unverified **only because nothing consumes it yet**: no renderer call site, and the
+whole feature sits behind Stage 3's override plus the `hdrPipeline` flag. It is dead code with tests
+until someone wires it. That is the point — the math gets to be reviewed before it can affect a frame.
+
+**Alternative if you would rather not carry unverified constants at all:** do HLG and PQ only this pass
+(both are open standards I am confident in and can state exactly), and hold the camera-log formats until
+the vendor PDFs can be checked. Smaller, fully trustworthy, but it covers the *least* interesting case —
+Apple Log on an iPhone is the footage this whole plan exists for.
+
+### Not in Stage 2a
+
+- **Gamut matrices (2b).** S-Gamut3.Cine / V-Gamut / ARRI Wide Gamut 3 / 4 / D-Gamut / F-Gamut → Rec.709.
+  Same constant-transcription risk, larger number sets, less visible payoff. `nativeGamut` is recorded
+  now so 2b is a pure addition.
+- **Any renderer wiring.** Stage 2a must be pixel-neutral: `render:compare:pixels` unchanged, because
+  nothing calls it.
+- **Shader implementation.** The transforms have to run per-pixel on the GPU eventually. The CPU form
+  lands first because it is the testable ground truth the LUT baker already consumes — same pattern as
+  `applyPipelineToRgb` → `bakePipelineToLut3d`.
+
 ## Stage 3 — Manual "Input Color Space" override
 
 Per-clip dropdown; detection sets the default, user overrides. **Not a nicety** — camera log is
