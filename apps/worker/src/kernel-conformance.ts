@@ -864,7 +864,12 @@ console.log("\nS3.1 — runtime session and state registry (I-36)");
 
   enforced("I-16", "an unwritten key reads its fallback", session.state.get("missing", 7) === 7);
   session.state.set("a", 1);
-  enforced("I-16", "a written key reads back", session.state.get("a", 0) === 1);
+  // `get<number>`, explicitly: the generic otherwise infers from the fallback LITERAL, so `get("a", 0)`
+  // is typed `0` and `=== 1` is a compile error about types that "have no overlap". The assertion was
+  // always correct at runtime — it is the inference that was too narrow, and widening it is the whole
+  // fix. Worth naming because the failure mode is an assertion that cannot be written rather than one
+  // that is wrong, and the tempting workaround (compare against 0) would have deleted the check.
+  enforced("I-16", "a written key reads back", session.state.get<number>("a", 0) === 1);
   // The property that makes a session a session: two of them cannot see each other. Without this,
   // I-37 is unreachable — a runtime you can only have one of cannot be driven twice in one process.
   enforced("I-37", "sessions are isolated from one another", other.state.get("a", 0) === 0);

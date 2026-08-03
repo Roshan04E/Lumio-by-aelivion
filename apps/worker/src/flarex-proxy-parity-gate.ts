@@ -90,7 +90,13 @@ async function main(): Promise<void> {
       readback.width = width;
       readback.height = height;
       const readCtx = readback.getContext("2d", { willReadFrequently: true })!;
-      const snapshot = (glCanvas: HTMLCanvasElement): Uint8ClampedArray => {
+      // `Uint8ClampedArray<ArrayBuffer>`, not the bare alias. TypedArrays became generic over their
+      // backing buffer, so `getImageData().data` now widens to `ArrayBufferLike` — which includes
+      // `SharedArrayBuffer` — while the `ImageData` constructor accepts only `ArrayBuffer`. The widening
+      // is a lib-side possibility, never a runtime one: `getImageData` cannot return shared-backed
+      // pixels. Narrowing here rather than casting at the two call sites keeps the claim in one place,
+      // beside the call that justifies it. Types only; no runtime change.
+      const snapshot = (glCanvas: HTMLCanvasElement): Uint8ClampedArray<ArrayBuffer> => {
         readCtx.clearRect(0, 0, width, height);
         readCtx.drawImage(glCanvas, 0, 0, width, height);
         return readCtx.getImageData(0, 0, width, height).data;
