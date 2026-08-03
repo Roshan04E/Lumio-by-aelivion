@@ -112,8 +112,9 @@ interface SourceSample {
   state: string;
   /** Whose fault the absence is (`awaitReason`). Null when there is nothing to explain. */
   why: string | null;
-  wcProvider: boolean;
-  wcBusy: boolean;
+  /** `null` = this build does not publish the field at all. See the note at the sampling site. */
+  wcProvider: boolean | null;
+  wcBusy: boolean | null;
   /**
    * The two fields that MOVE every composite, carried so the liveness test has something to test.
    *
@@ -252,8 +253,14 @@ async function sampleArm(page: Page, name: string, seekLeadSeconds: number | nul
             decode: String(row?.decode ?? "-"),
             state: String(row?.state ?? "-"),
             why: row?.why == null ? null : String(row.why),
-            wcProvider: !!row?.wcProvider,
-            wcBusy: !!row?.wcBusy,
+            // ABSENT is not FALSE. `wcProvider`/`wcBusy`/`why` are published by a diagnostics block
+            // that is currently UNCOMMITTED work in `ScenePreviewCanvas.tsx`. Coercing a missing field
+            // with `!!` turns "this build does not report it" into "the source never had a provider" —
+            // and that reading is what the 2026-08-03 availability hypothesis was built on. If that work
+            // is ever discarded or stashed, the probe would keep printing `wcProvider 0%` and it would
+            // look exactly like a finding. Absent must be visible as absent.
+            wcProvider: typeof row?.wcProvider === "boolean" ? row.wcProvider : null,
+            wcBusy: typeof row?.wcBusy === "boolean" ? row.wcBusy : null,
             served: typeof row?.served === "number" ? row.served : null,
             staleMs: typeof row?.staleMs === "number" ? row.staleMs : null,
           })
@@ -339,7 +346,7 @@ function report(result: ArmResult): void {
   // MEDIA SUPPLY, per source. `mediaFps` is one number for the whole scene, so a run where one source
   // decoded fine and another never started looks identical to a run where both limped. This breaks the
   // aggregate back into "which source, on which decode path, in what state, and why".
-  const bySource = new Map<string, { asset: string; decode: Set<string>; state: Map<string, number>; why: Map<string, number>; provider: number; busy: number; n: number; frozen: number }>();
+  const bySource = new Map<string, { asset: string; decode: Set<string>; state: Map<string, number>; why: Map<string, number>; provider: number; providerUnreported: number; busy: number; n: number; frozen: number }>();
   /**
    * LEFTOVER ROWS ARE NOT SAMPLES.
    *
@@ -368,13 +375,14 @@ function report(result: ArmResult): void {
       }
       let row = bySource.get(src.id);
       if (!row) {
-        row = { asset: src.asset, decode: new Set(), state: new Map(), why: new Map(), provider: 0, busy: 0, n: 0, frozen: 0 };
+        row = { asset: src.asset, decode: new Set(), state: new Map(), why: new Map(), provider: 0, providerUnreported: 0, busy: 0, n: 0, frozen: 0 };
         bySource.set(src.id, row);
       }
       row.decode.add(src.decode);
       row.state.set(src.state, (row.state.get(src.state) ?? 0) + 1);
       if (src.why) row.why.set(src.why, (row.why.get(src.why) ?? 0) + 1);
-      if (src.wcProvider) row.provider += 1;
+      if (src.wcProvider === null) row.providerUnreported += 1;
+      else if (src.wcProvider) row.provider += 1;
       if (src.wcBusy) row.busy += 1;
       row.n += 1;
     }
@@ -389,7 +397,8 @@ function report(result: ArmResult): void {
       // indistinguishable — in a table whose entire purpose is telling them apart.
       `   source   ${row.asset.slice(-28)} […${id.slice(-24)}]  decode ${[...row.decode].join("/")}  ${states}` +
         (whys ? `  why: ${whys}` : "") +
-        `  wcProvider ${pct(row.provider)}  wcBusy ${pct(row.busy)}` +
+        `  wcProvider ${row.providerUnreported === row.n ? "NOT REPORTED BY THIS BUILD" : pct(row.provider)}` +
+        `  wcBusy ${pct(row.busy)}` +
         // Percentages are OF LIVE SAMPLES. `graded n/total` is what makes that readable: a source graded
         // in 12 of 40 samples was out of the scene for the rest, and reading its 12 samples as if they
         // covered the arm is the exact error this line exists to prevent anyone repeating.
