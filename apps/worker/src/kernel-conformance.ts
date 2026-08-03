@@ -2215,7 +2215,16 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
       /sweepIdleCaches\s*\(\s*\)\s*:\s*void/.test(compositorSrc));
     // The host must call it from ABOVE its hold gate, or the sweep is decoupled in name only.
     const canvasSrc = strip(readFileSync(`${webDir}components/ScenePreviewCanvas.tsx`, "utf8"));
-    const sweepAt = canvasSrc.indexOf("sweepIdleCaches()");
+    // S7.1 moved the sweep BODY into `playback/scene-resource-orchestration.ts`, so the canvas no longer
+    // contains `sweepIdleCaches()` — but the ORDERING claim is about the canvas, because only the canvas
+    // knows where its hold gate is. So the position is now taken from the call the canvas does make.
+    // Re-pointed rather than relaxed: this still fails if the sweep moves below the hold.
+    const sweepAt = canvasSrc.search(/sweepIdleSceneResources\s*\(\s*\{/);
+    // The extraction is only honest if the sweep really did land there, so assert the callee exists and
+    // still ages the compositor's caches — otherwise this ordering check could pass against nothing.
+    const resourceSrc = strip(readFileSync(`${webDir}playback/scene-resource-orchestration.ts`, "utf8"));
+    enforced("I-33", "…and the extracted sweep is the one that ages the compositor's caches",
+      /sweepIdleCaches\s*\(\s*\)/.test(resourceSrc) && sweepAt >= 0);
     // The CALL, not the identifier: `shouldHoldForCoherence` also appears in the import list at the top
     // of the file, and matching that made the check compare the sweep against line 1 — it passed for the
     // wrong reason until this harness failed it.

@@ -38,7 +38,6 @@ import {
   beginFrame,
   colorPipelineCacheKey,
   classifyComposite,
-  collectIdleResources,
   defaultSession,
   endFrame,
   forgetResource,
@@ -47,15 +46,12 @@ import {
   notePresent,
   recordFlarexDegradation,
   registerResource,
-  resourcesInScope,
   servedTime,
   resolveReadiness,
   deriveTargetTime,
   deriveTimelineTime,
   authoritativeTime,
   touchResource,
-  RESOURCE_IDLE_MS,
-  type ResourceScope,
   type ServedTime,
   type ColorPipeline,
   type FrameOutcome,
@@ -77,6 +73,14 @@ import {
   beginIncrementalFrame,
   commitIncrementalFrame,
 } from "../playback/incremental-evaluation";
+import {
+  gradeResourceKey,
+  gradeScopeOf,
+  mediaResourceKey,
+  pruneDepartedSceneResources,
+  releaseScratchSceneResources,
+  sweepIdleSceneResources,
+} from "../playback/scene-resource-orchestration";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
@@ -741,9 +745,6 @@ export function ScenePreviewCanvas({
    * change byte-neutral by construction (the same keys land in the same sets) while removing the second
    * and third places that had to agree about it.
    */
-  const gradeScopeOf = (key: string): ResourceScope =>
-    key.startsWith("capture:") ? "scratch:capture" : key.startsWith("thumb:") ? "scratch:thumb" : "live";
-  /** Registry key. Namespaced because a layer id and a resolved source id are routinely equal. */
   /**
  * The handle a pool entry holds for the instant between construction and registration.
  *
@@ -753,8 +754,6 @@ export function ScenePreviewCanvas({
  */
 const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
 
-  const gradeResourceKey = (id: string): string => `grade/${id}`;
-  const mediaResourceKey = (id: string): string => `media/${id}`;
 
   const stopLoop = () => {
     if (!rafRef.current) return;
@@ -1649,36 +1648,15 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
      * have caught. It bites only in the failure, which is exactly where the old reclamation went quiet.
      * Rate-limited to once per TTL so the per-frame cost is one number comparison (risk R1).
      */
-    if (kernelResourcesRef.current && now - lastResourceSweepRef.current > RESOURCE_IDLE_MS) {
-      lastResourceSweepRef.current = now;
-      // `presented: false` — this runs before the hold decision, so whether this frame reaches the
-      // screen is not yet known. Reporting the pessimistic value keeps the I-33 census honest: it
-      // counts reclaims that happened without a present being guaranteed, which is the property the
-      // old code could not achieve at all.
-      // S5.3: age the COMPOSITOR's own caches on the same pre-hold tick. The kernel sweep above covers
-      // resources the kernel knows about; the compositor's texture/program/target caches were pruned
-      // only at the tail of a composited frame, so a viewer that held, paused or hid stopped reclaiming
-      // exactly when pressure was highest. This is the half of I-21/I-33 the kernel could not reach.
-      if (wallClockTtlRef.current) compositor.sweepIdleCaches();
-      const idle = collectIdleResources(defaultSession, now, RESOURCE_IDLE_MS, false);
-      if (idle) {
-        for (const record of idle) {
-          forgetResource(defaultSession, record.key);
-          // Dispatch on the record's OWN kind and id. Nothing parses the key — that habit is what this
-          // slice exists to remove, and re-introducing it in the sweep would be the same bug one layer up.
-          const pool = record.kind === "grade-renderer" ? sharedGradeRenderersRef.current : sharedMediaRenderersRef.current;
-          const entry = pool.get(record.id) as { renderer: MediaWebGLRenderer; target?: RenderTarget } | undefined;
-          if (!entry) continue;
-          try {
-            entry.renderer.dispose();
-            entry.target?.dispose();
-          } catch {
-            /* a dying GPU object must never throw into the draw loop */
-          }
-          pool.delete(record.id);
-        }
-      }
-    }
+    lastResourceSweepRef.current = sweepIdleSceneResources({
+      enabled: kernelResourcesRef.current,
+      wallClockTtl: wallClockTtlRef.current,
+      compositor,
+      nowMs: now,
+      lastSweepMs: lastResourceSweepRef.current,
+      gradePool: sharedGradeRenderersRef.current,
+      mediaPool: sharedMediaRenderersRef.current,
+    });
 
     const heldIds = playing ? notReadyIds : notReadyIds.filter(isMediaLayerId);
     if (
@@ -1768,29 +1746,12 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       allStaleness,
       staleIds.length === 0 ? "coherent" : "hatch"
     );
-    const liveLayerIds = new Set(ls.map((layer) => layer.id));
-    for (const [id, { renderer, target }] of sharedGradeRenderersRef.current) {
-      // Entries owned by a SCRATCH scope belong to the viewer-capture run or the thumbnail pool
-      // (arbitrary times / layers) — their own releaseCaptureResources() disposes them, not the live
-      // frame's prune. The scope is the owner (I-8, S3.4); it was a `startsWith("capture:")` here and a
-      // different substring test in the release path, which is two places that had to agree.
-      if (liveLayerIds.has(id) || gradeScopeOf(id) !== "live") continue;
-      renderer.dispose();
-      target.dispose();
-      sharedGradeRenderersRef.current.delete(id);
-      forgetResource(defaultSession, gradeResourceKey(id));
-    }
-    // Single-ctx: dispose media-grade renderers whose source id wasn't consumed this frame (clip left the
-    // window / its descriptor was withdrawn). `liveMediaSourceIds` is populated by gradeMediaInContext above.
-    if (sharedMediaRenderersRef.current.size > 0) {
-      for (const [id, { renderer, target }] of sharedMediaRenderersRef.current) {
-        if (liveMediaSourceIds.has(id)) continue;
-        renderer.dispose();
-        target.dispose();
-        sharedMediaRenderersRef.current.delete(id);
-        forgetResource(defaultSession, mediaResourceKey(id));
-      }
-    }
+    pruneDepartedSceneResources({
+      liveLayerIds: new Set(ls.map((layer) => layer.id)),
+      liveMediaSourceIds,
+      gradePool: sharedGradeRenderersRef.current,
+      mediaPool: sharedMediaRenderersRef.current,
+    });
 
     const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t };
     try {
@@ -2071,28 +2032,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // The scratch scope's lifetime IS the handle's — the same rule the "capture:"/"thumb:" grade
       // renderers below already follow. S2.3 only generalises it to the caches they were sharing.
       disposeScratchScope();
-      // The scratch scopes ASK THE REGISTRY who they own (S3.4) instead of asking a string what it looks
-      // like. `capture:` and `thumb:` are still two scopes with one lifetime — both are scratch, both are
-      // rebuilt on demand, and neither may outlive the handle — but that is now one statement here rather
-      // than a substring test kept in sync with the live prune's inverse of it.
-      for (const scope of ["scratch:capture", "scratch:thumb"] as const) {
-        for (const record of resourcesInScope(defaultSession, scope)) {
-          const entry = sharedGradeRenderersRef.current.get(record.id);
-          forgetResource(defaultSession, record.key);
-          if (!entry) continue;
-          try {
-            entry.renderer.dispose();
-          } catch {
-            /* ignore */
-          }
-          try {
-            entry.target.dispose();
-          } catch {
-            /* ignore */
-          }
-          sharedGradeRenderersRef.current.delete(record.id);
-        }
-      }
+      releaseScratchSceneResources(sharedGradeRenderersRef.current);
     };
     /**
      * Composite ONE layer of the live scene through this viewer's own compositor, caches and graded
