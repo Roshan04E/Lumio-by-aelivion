@@ -128,6 +128,21 @@ let pendingResolved = 0;
 const pendingNotes: string[] = [];
 
 /** Ordered list equality, for assertions about sets the kernel promises to keep sorted. */
+/**
+ * Every `.ts` under `dir`, recursively. Used by the source-level ratchets, which have to scan a whole
+ * tree rather than one file: a rule like "nobody reads the ambient frame's time" is only worth
+ * asserting if it is asserted everywhere the read could appear.
+ */
+function walkTs(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...walkTs(full));
+    else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) out.push(full);
+  }
+  return out;
+}
+
 function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
@@ -1635,6 +1650,107 @@ console.log("\nS4.3 — source admission (ADR-012 §6.3/§6.11/§6.12)");
     recorded.every((d) => d.admittedFloor != null && d.rank < d.admittedFloor!));
   enforced("I-29", "…and attributing the denial to scarcity rather than to invisibility",
     recorded.every((d) => d.reason === "over-budget"));
+
+  session.dispose();
+}
+
+// ---------------------------------------------------------------------------------------------
+// I-5 / I-15 / I-35 — invariants three shipped modules CLAIM in their headers
+// ---------------------------------------------------------------------------------------------
+//
+// Why these three, together, and now. The 2026-08-03 conformance review counted 39 invariants declared
+// in ADR-012 against 19 asserted here, and most of the difference belongs to slices that have not
+// shipped. These three do not: `frame-scheduler.ts` cites I-5, `degradation-sink.ts` cites I-15, and
+// `resource-manager.ts` cites I-35 — in shipped code, with nothing verifying any of them.
+//
+// A module asserting an invariant in prose that no harness checks is the specification drift ADR-012
+// exists to prevent, and it is the more dangerous kind: the claim reads as settled, so nobody re-derives
+// it, and the day it stops being true nothing says so.
+
+console.log("\nI-5 / I-15 / I-35 — the claims shipped modules make about themselves");
+{
+  const kernelDir = fileURLToPath(new URL("../../../packages/shared/src/kernel/", import.meta.url));
+  const strip = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ── I-5: evaluation time MUST be threaded explicitly to every time-dependent read.
+  //
+  // `activeFrame()` is the ONE piece of ambient state the kernel tolerates, and `frame-scheduler.ts`
+  // justifies it on the grounds that a frame id is a correlation token from which nothing decides
+  // anything (rule T4). But `FrameRequest` also carries `targetTime` — a real time, on an ambient
+  // object, reachable from anywhere with no parameter passing. That is precisely the shape I-5 forbids,
+  // one property access away, and prose is all that currently stands between them.
+  //
+  // tsc cannot catch it: `targetTime` is a plain `number`, so reading it compiles anywhere. What a
+  // harness can protect is that nobody starts.
+  const ambientTimeRead = /\bactiveFrame\s*\(\s*\)\s*[?]?\.\s*targetTime\b/;
+  const ambientReaders: string[] = [];
+  let scanned = 0;
+  for (const dir of [kernelDir, fileURLToPath(new URL("../../web/src/", import.meta.url))]) {
+    for (const file of walkTs(dir)) {
+      scanned += 1;
+      if (ambientTimeRead.test(strip(readFileSync(file, "utf8")))) ambientReaders.push(file.split(/[\\/]/).slice(-2).join("/"));
+    }
+  }
+  // A ratchet that scans nothing passes for the wrong reason, and a mistyped path is the cheapest way
+  // to get there. Assert the scan HAPPENED before trusting what it did not find — the same rule the
+  // budget probe's vacuity guards enforce, moved onto a static check.
+  enforced("I-37", "the ambient-time scan actually walked the tree — a zero-file scan proves nothing",
+    scanned > 200, `scanned ${scanned} files`);
+  enforced("I-5", `nobody reads an evaluation time off the ambient frame — T4, the one tolerated global stays a token (${scanned} files)`,
+    ambientReaders.length === 0, ambientReaders.join(" · "));
+
+  // And the positive half: the ONLY way to obtain an evaluation time is to derive one from an
+  // effective time, which is a parameter by construction. This is what makes the ratchet above a
+  // belt-and-braces check rather than the whole defence.
+  const evaluation = deriveEvaluationTime(unsafeLabelTime(3.5, "effective"));
+  enforced("I-5", "an evaluation time exists only by explicit derivation from a passed-in effective time",
+    (evaluation as number) === 3.5);
+
+  // ── I-15: the lowering layer MUST NOT own policy, state, resources, or a clock.
+  //
+  // `degradation-sink.ts` rests its whole design on this: the compiler emits a degradation knowing
+  // nothing about the sink, and severity/subject decisions live caller-side because they are policy.
+  // If the compiler ever grows a clock or module state, that split is over and the sink's rationale
+  // silently becomes false — so the check belongs on the compiler, not on the sink.
+  const loweringPath = fileURLToPath(new URL("../../../packages/shared/src/flarex/compile-flarex.ts", import.meta.url));
+  const lowering = strip(readFileSync(loweringPath, "utf8"));
+  const loweringViolations: string[] = [];
+  if (/\bDate\.now\b|\bperformance\.now\b/.test(lowering)) loweringViolations.push("reads a clock");
+  if (/\bfrom\s+["'][^"']*\/kernel/.test(lowering)) loweringViolations.push("imports the kernel");
+  // Module-scope `let`/`var` is mutable state the lowering layer would own across calls, which is what
+  // makes a compile depend on what was compiled before it. `const` is fine — a table is not state.
+  if (/^(?:export\s+)?(?:let|var)\s/m.test(lowering)) loweringViolations.push("holds module-level mutable state");
+  enforced("I-15", "the lowering layer owns no clock, no kernel dependency and no module state",
+    loweringViolations.length === 0, loweringViolations.join(" · "));
+
+  // ── I-35: no operation MUST communicate failure by returning nothing.
+  //
+  // `resource-manager.ts` cites I-35 as a DISCLAIMER — `collectIdleResources` returns null, and the
+  // header argues that null here is a described "no work" rather than a communicated failure. That
+  // argument is only sound while the function genuinely cannot fail, so this pins both halves: null
+  // means nothing to do, and work produces a described list.
+  const session = createRuntimeSession({ id: "conformance-i35" });
+  enforced("I-35", "an empty resource table returns null meaning NO WORK — the documented non-failure",
+    collectIdleResources(session, 1_000, 10_000, true) === null);
+  registerResource(session, "rt:a", { scope: "live", kind: "render-target", id: "a" }, 0);
+  const reclaimable = collectIdleResources(session, 100_000, 10_000, true);
+  enforced("I-35", "…and an overdue resource comes back DESCRIBED, not as a bare signal",
+    reclaimable?.length === 1 && reclaimable[0]?.key === "rt:a" && reclaimable[0]?.kind === "render-target");
+
+  // The operation that CAN fail is admission, and its whole S4.3 design is that failure is a state with
+  // a subject. Assert the I-35 property directly: every denial carries a reason, so no caller ever has
+  // to infer one from an absent return.
+  const denied = rankAdmission(
+    [
+      { key: "a", priority: "playhead", contribution: { reachable: true, area: 0.9, opacity: 1, underDisabledBranch: false }, firstRequestedAtMs: 0, admittedAtMs: null },
+      { key: "b", priority: "playhead", contribution: { reachable: true, area: 0.1, opacity: 1, underDisabledBranch: false }, firstRequestedAtMs: 0, admittedAtMs: null },
+    ],
+    1,
+    0
+  );
+  enforced("I-35", "a refused admission returns a REASON, never merely an absence",
+    denied.denied.length === 1 && typeof denied.denied[0]?.reason === "string" && denied.denied[0]!.reason.length > 0);
 
   session.dispose();
 }
