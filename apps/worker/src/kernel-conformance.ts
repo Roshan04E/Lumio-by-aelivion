@@ -119,6 +119,8 @@ import {
   clearDirty,
   markAxisDirty,
   markDirty,
+  planEvaluation,
+  planReuseRatio,
   undeclareNode,
   healFlarexRegistry,
   isValidFlarexEdge,
@@ -2061,6 +2063,139 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
 
     __resetDependencyGraph(ds);
     ds.dispose();
+  }
+
+  // ── S6.6 — INCREMENTAL EVALUATION PLANNING (I-18/I-23) ──────────────────────────────────────────
+  // Done-when: "a static comp costs ~zero evaluation per frame with IDENTICAL output". The identity
+  // half is the one that can fail silently, so it is asserted structurally rather than by eyeballing a
+  // frame: a skipped node does not throw, it shows the previous frame's pixels.
+  {
+    const ps = createRuntimeSession({ id: "plan" });
+    __resetEvaluationRecords(ps);
+    __resetDependencyGraph(ps);
+
+    // Draws carry closures (`acquire`) and cannot be JSON-compared directly. Functions collapse to a
+    // token: two draws that differ only by closure IDENTITY are byte-identical as far as the renderer
+    // is concerned, and comparing identity would fail on structurally perfect output.
+    const canon = (value: unknown): string =>
+      JSON.stringify(value, (_k, v) => (typeof v === "function" ? "«fn»" : v)) ?? "∅";
+
+    const buildComp = (exposure: number): FlarexComp => {
+      const comp = createFlarexComp("inc", "incremental");
+      let prev = "inc_in";
+      for (let i = 0; i < 5; i += 1) {
+        const id = `cc${i}`;
+        const node = createFlarexNode("colorCorrect", id);
+        node.params = { ...node.params, exposure: exposure + i };
+        comp.nodes[id] = node;
+        comp.edges.push({ id: `e${i}`, from: { nodeId: prev, socket: "out" }, to: { nodeId: id, socket: "in" } });
+        prev = id;
+      }
+      comp.edges = comp.edges.filter((e) => e.to.nodeId !== "inc_out");
+      comp.edges.push({ id: "eo", from: { nodeId: prev, socket: "out" }, to: { nodeId: "inc_out", socket: "in" } });
+      return comp;
+    };
+
+    const ctxFor = (extra: Partial<FlarexLowerCtx>): FlarexLowerCtx => lowerCtx(extra);
+    const upstreamsOf = (c: FlarexComp, nodeId: string): string[] =>
+      c.edges.filter((e) => e.to.nodeId === nodeId).map((e) => e.from.nodeId);
+
+    const comp = buildComp(10);
+    const nodeIds = Object.keys(comp.nodes);
+
+    // FRAME 1 — full evaluation, recording what each node produced and under which context key.
+    const keyOf = new Map<string, string>();
+    const frame1 = compileFlarexComp(comp, ctxFor({
+      onEvaluated: (nodeId, contextKey, value) => {
+        keyOf.set(nodeId, contextKey);
+        noteEvaluation(ps, nodeId, contextKey, value, 1, 1_000);
+      },
+    }));
+
+    for (const id of nodeIds) declareNode(ps, id, upstreamsOf(comp, id), ["content"]);
+    clearDirty(ps);
+
+    // FRAME 2, unchanged comp — the static case the done-when is about.
+    let reuseHits = 0;
+    const planFor = (dirtyNodes: ReadonlySet<string>) =>
+      planEvaluation(ps, {
+        nodeIds,
+        dirty: dirtyNodes,
+        contextKeyOf: (nodeId) => keyOf.get(nodeId) ?? "",
+        isReusable: () => true, // the host's texture-liveness check; always-alive in a headless comp
+        nowMs: 2_000,
+      });
+
+    const staticPlan = planFor(dirtyClosure(ps, nodeIds).dirty);
+
+    const makeReuse = (plan: { reuse: ReadonlySet<string> }) =>
+      (nodeId: string, contextKey: string) => {
+        if (!plan.reuse.has(nodeId)) return null;
+        const record = evaluationRecord(ps, nodeId, contextKey, 2_000);
+        if (!record) return null;
+        reuseHits += 1;
+        return record.value as never;
+      };
+
+    const incrementalStatic = compileFlarexComp(comp, ctxFor({ reuseValue: makeReuse(staticPlan) }));
+    const fullStatic = compileFlarexComp(comp, ctxFor({}));
+
+    enforced("I-23", "a static comp REUSES rather than re-evaluating (guard against a vacuous identity pass)",
+      staticPlan.reuse.size === nodeIds.length && reuseHits > 0,
+      `reuse=${staticPlan.reuse.size}/${nodeIds.length} hits=${reuseHits} ratio=${planReuseRatio(staticPlan).toFixed(2)}`);
+    enforced("I-18", "…and the incremental output is byte-identical to the full one",
+      canon(incrementalStatic) === canon(fullStatic));
+
+    // SCRIPTED EDIT — the case where reuse must partially retract. Editing the MIDDLE node means the
+    // two nodes below it must be re-evaluated and the two above must not.
+    const editedComp = buildComp(10);
+    const middle = editedComp.nodes.cc2!;
+    editedComp.nodes.cc2 = { ...middle, params: { ...middle.params, exposure: 99 } };
+    markDirty(ps, "cc2", "content");
+    const editedPlan = planFor(dirtyClosure(ps, nodeIds).dirty);
+
+    reuseHits = 0;
+    const incrementalEdited = compileFlarexComp(editedComp, ctxFor({ reuseValue: makeReuse(editedPlan) }));
+    const fullEdited = compileFlarexComp(editedComp, ctxFor({}));
+
+    enforced("I-23", "an edit retracts reuse for the edited node and everything downstream of it",
+      editedPlan.evaluate.has("cc2") && editedPlan.evaluate.has("cc3") && editedPlan.evaluate.has("cc4"));
+    enforced("I-18", "…while nodes UPSTREAM of the edit are still reused",
+      editedPlan.reuse.has("cc0") && editedPlan.reuse.has("cc1"));
+    enforced("I-18", "…and the incremental output after the edit is byte-identical to the full one",
+      canon(incrementalEdited) === canon(fullEdited),
+      `reuseHits=${reuseHits}`);
+
+    // GATE 3 — clean is not sufficient. A record whose resources the host cannot vouch for must be
+    // re-evaluated: this is the whole reason S6.4 shipped write-only until S6.5 existed.
+    clearDirty(ps);
+    const unusable = planEvaluation(ps, {
+      nodeIds,
+      dirty: new Set(),
+      contextKeyOf: (nodeId) => keyOf.get(nodeId) ?? "",
+      isReusable: () => false,
+      nowMs: 3_000,
+    });
+    enforced("I-23", "a clean node whose resources are NOT vouched for is still evaluated (gate 3)",
+      unusable.reuse.size === 0 && unusable.reasons.get("cc0") === "stale-resource");
+
+    // No callback at all must mean no reuse — a validity question nobody answered is not a yes.
+    const unasked = planEvaluation(ps, {
+      nodeIds,
+      dirty: new Set(),
+      contextKeyOf: (nodeId) => keyOf.get(nodeId) ?? "",
+      nowMs: 3_000,
+    });
+    enforced("I-23", "omitting the validity callback disables reuse entirely, rather than defaulting to yes",
+      unasked.reuse.size === 0 && unasked.reasons.get("cc0") === "unvalidated");
+
+    // The flag-off rollback has to be the OLD path exactly, not a fast path that happens to agree.
+    enforced("I-18", "with no reuse channel attached, output is unchanged from before the slice",
+      canon(compileFlarexComp(comp, ctxFor({}))) === canon(frame1));
+
+    __resetEvaluationRecords(ps);
+    __resetDependencyGraph(ps);
+    ps.dispose();
   }
 
   // ── S5.3 — WALL-CLOCK AGEING (I-21/I-33) ────────────────────────────────────────────────────────

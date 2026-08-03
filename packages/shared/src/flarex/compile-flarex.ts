@@ -105,6 +105,21 @@ export interface FlarexLowerCtx {
    * decides what that means and where it goes.
    */
   onEvaluated?: ((nodeId: string, contextKey: string, value: unknown) => void) | undefined;
+  /**
+   * IN-channel for incremental evaluation (slice S6.6). Absent = every node is lowered, today's
+   * behaviour and the flag-off rollback.
+   *
+   * The mirror of `onEvaluated`, and I-15 shapes it the same way: the compiler does not consult a
+   * planner, a dirty set or a session — it asks the host one question about one node and believes the
+   * answer. All the policy (is it clean? is there a record? are its textures still alive?) lives
+   * behind this callback, where the host can see a kernel and this file cannot.
+   *
+   * Returning a value is a promise that it is BYTE-IDENTICAL to what lowering would have produced.
+   * Returning null means "evaluate it", and is always safe; that asymmetry is deliberate, because the
+   * failure mode of a wrong `null` is wasted work and the failure mode of a wrong value is a stale
+   * pixel on a frame that should have looked different.
+   */
+  reuseValue?: ((nodeId: string, contextKey: string) => FlarexValue | null) | undefined;
   /** The caller's comp-sized matte cache; null = shape-mask nodes soft-degrade to no matte. */
   matteCache?: SceneMaskMatteCache | null | undefined;
   /**
@@ -1225,6 +1240,25 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       if (!node) {
         degrade(timeSeconds, nodeId, "node-missing");
         return null;
+      }
+      /**
+       * INCREMENTAL EVALUATION (slice S6.6).
+       *
+       * Placed BEFORE lowering, which is the whole point: returning here skips this node's entire
+       * upstream subtree, because nothing below is ever asked for. A reuse that still recursed would
+       * save only one node's own work and leave the traversal cost — the thing that actually dominates
+       * a hundred-node comp — exactly where it was.
+       *
+       * The key handed over is `evalKey`'s, so it already folds the evaluation TIME: the two sides of a
+       * retime cannot be served each other's result, the same distinction S6.2 needed in the artifact
+       * cache and S6.4 needed in the record store. A null answer means "evaluate", and costs one
+       * property read when no host has attached the channel.
+       */
+      const reused = ctx.reuseValue?.(nodeId, key);
+      if (reused) {
+        memo.set(key, reused);
+        frameProfiler.noteEval(nodeId, node.type, "skipped");
+        return reused;
       }
       frameProfiler.noteEval(nodeId, node.type, "evaluated");
       visiting.add(key);

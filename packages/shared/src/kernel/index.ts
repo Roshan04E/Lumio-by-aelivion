@@ -20,6 +20,7 @@ export * from "./admission";
 export * from "./readiness-barrier";
 export * from "./evaluation-records";
 export * from "./dependency-graph";
+export * from "./evaluation-planner";
 export * from "./inspect";
 export * from "./degradation-sink";
 export * from "./present-ledger";
