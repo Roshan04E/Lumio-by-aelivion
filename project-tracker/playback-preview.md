@@ -2894,3 +2894,52 @@ hoping for.
 withdrawn — it was never resting on the first clip's row alone, and `shared`/`detaches`/`refusals` come
 from `__rfWcPool`, which is unaffected. But it is now **unproven** rather than evidenced, and needs a
 re-measurement on the corrected instrument before it directs any work.
+
+## v34c — the evidence pipeline was tied to repository state, not revision state (2026-08-03)
+
+**FREEZE.** ADR-012 is implementation-blocked at the S4.3 producer boundary. Not architecture-blocked:
+nothing about the design is in question, and no architectural review is reopened when it lifts.
+
+**What was found.** `preview-budget-probe.ts` (committed) reads `wcProvider`, `wcBusy` and `why` from
+`__rfSourceMap`. Those three fields are published by a diagnostics block in `ScenePreviewCanvas.tsx`
+that **exists in no commit** — uncommitted working-tree state belonging to a third session, alongside
+its producers in `WebglMediaLayer.tsx` and its type in `scene-media-source.ts`.
+
+So the v34a measurement that produced `wcProvider 23%` — the number behind the "decoder availability,
+not contention" hypothesis — **cannot be reproduced from a clean checkout.** It was measured against
+code that is not in the repository. That is the 2026-07-28 "verify the build IS the build" lesson in a
+new costume: there, the build was not the source; here, the source is not the revision.
+
+**What was verified, rather than assumed:**
+
+| check | result |
+|---|---|
+| commits touching the four blocked files | all are ADR-012 slices from this session; the colour session touched none |
+| last write to all four | the same second, `00:13:45`, untouched 11h — one atomic write, not a live edit |
+| web typecheck with the changes present | clean — the work compiles, it is not mid-edit |
+| `HEAD` versions of the three files | publish **zero** of the fields (`WebglMediaLayer`'s 10 matches at HEAD are all internal `wcBusyRef`) |
+| committed consumers of the fields | only the probe, and only through an untyped runtime read |
+
+The last two together are the important ones: **`HEAD` is self-consistent.** A clean checkout compiles
+and runs; the probe simply reports `NOT REPORTED BY THIS BUILD`. The repository is reproducible — what
+was not reproducible was the *evidence*.
+
+**Instrument fixed first.** The probe coerced the three fields with `!!`, so a build without that block
+would print `wcProvider 0%` for every source — indistinguishable from a source that never got a decoder,
+which is precisely the finding shape it would have been believed as. Absent now prints as absent. Fourth
+instrument correction this session, and the same shape every time: **a missing input rendering as a
+confident value.**
+
+**Resolution, in order (decided with the user):**
+
+1. The owning session commits the four runtime files as its own atomic commit — authorship preserved,
+   baseline reproducible, evidence pipeline restored.
+2. Only then does S4.3 resume, at the exact blocked point: `visibleContribution` onto
+   `WebglMediaLayer`'s props → `acquirePreviewFrameProvider`, with `VideoPreview` computing it.
+
+**A stash is not a substitute for a commit.** Private state cannot found reproducible evidence, and
+stashing this particular work would silently break a committed probe. A stash is correct only if the
+owning session decides to *abandon* the work.
+
+**Standing until then:** no measurement may rely on those fields; S4.7 stays flag-off pending its R2
+soak; S4.3 stays observability-only.
