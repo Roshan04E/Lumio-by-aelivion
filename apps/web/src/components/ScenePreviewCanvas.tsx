@@ -65,6 +65,7 @@ import {
   type SceneTextureSource,
   type TimelineLayer,
   type ScenePreviewTransition,
+  isSceneTextureSource,
   sceneTexture,
   type ResourceHandle,
 } from "@orreris/shared";
@@ -680,6 +681,19 @@ export function ScenePreviewCanvas({
       }
     >
   >(new Map());
+  /**
+   * Per-comp upload targets for Flarex comp proxies (S5.4).
+   *
+   * The proxy is the ONLY path that hands a fresh per-frame object to `SceneLayerDraw.source`: it
+   * publishes a new `VideoFrame` on every decode, and the compositor's `srcTextures` cache is keyed by
+   * OBJECT IDENTITY. So each decoded frame minted a texture that nothing could ever hit again, and they
+   * accumulated until a TTL swept them — O(frames) textures for a path that needs O(1). Uploading into
+   * one target per comp puts the proxy on the same footing as every other source.
+   */
+  const proxyUploadsRef = useRef<
+    Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; handle: ResourceHandle; lastVersion: number }>
+  >(new Map());
+  const proxyUploadRef = useRef(readKernelFlag(KERNEL_FLAGS.proxyUpload));
   const kernelResourcesRef = useRef(getKernelResourcesEnabled());
   // S5.3. Read once per mount like every other engine flag here, and pushed into the compositor module
   // (which has no `window` in the export Worker) rather than read there.
@@ -784,6 +798,18 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       }
     }
     for (const id of sharedMediaRenderersRef.current.keys()) forgetResource(defaultSession, mediaResourceKey(id));
+    // S5.4 proxy upload targets. Same shape as the pools above: dispose the GL objects, then forget the
+    // records — in that order, so a record never outlives the resource it describes.
+    for (const [compId, entry] of proxyUploadsRef.current) {
+      try {
+        entry.renderer.dispose();
+        entry.target.dispose();
+      } catch {
+        /* a dying GPU object must never throw out of teardown */
+      }
+      forgetResource(defaultSession, `flarex-proxy/${compId}`);
+    }
+    proxyUploadsRef.current.clear();
     sharedMediaRenderersRef.current.clear();
     for (const { renderer, target } of sharedGradeRenderersRef.current.values()) {
       try {
@@ -861,6 +887,81 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
   const settledRef = useRef(false);
   // Read once per mount, like every other engine flag in this file.
   const frameCompletionEnabledRef = useRef(getFrameCompletionEnabled());
+
+  /**
+   * Upload each comp proxy frame into ITS OWN render target, once per decoded version (S5.4).
+   *
+   * The identity that matters here is the COMP, not the frame object. Keying the pool by comp id is the
+   * whole fix: the same target is reused decode after decode, so texture count is bounded by the number
+   * of proxied comps instead of by how long playback has been running.
+   *
+   * `lastVersion` is the skip: the publisher already bumps `sourceVersion` on every new frame, so an
+   * unchanged version means the pixels on the target are still the right ones and the upload can be
+   * skipped entirely — the same contract `srcTextures` used, now keyed by something stable.
+   *
+   * Returns a NEW record rather than mutating the ref: the ref belongs to the publishing hook, and
+   * writing a converted source back into it would leave the publisher unable to tell its own frame from
+   * ours (and would close over a target it does not own).
+   */
+  const uploadProxyFrames = (
+    frames: Record<string, FlarexCompProxyFrame> | undefined
+  ): Record<string, FlarexCompProxyFrame> | undefined => {
+    if (!frames) return frames;
+    const gl = compositorRef.current?.sharedGl;
+    if (!gl) return frames;
+    const out: Record<string, FlarexCompProxyFrame> = {};
+    for (const [compId, frame] of Object.entries(frames)) {
+      // Already a same-context texture (nothing to upload), or a version we cannot reason about.
+      if (isSceneTextureSource(frame.source) || frame.sourceVersion === undefined) {
+        out[compId] = frame;
+        continue;
+      }
+      const w = Math.max(1, frame.sourceWidth);
+      const h = Math.max(1, frame.sourceHeight);
+      let entry = proxyUploadsRef.current.get(compId);
+      if (!entry) {
+        entry = {
+          renderer: new MediaWebGLRenderer({ sharedGl: gl }, { label: `flarex-proxy:${compId}` }),
+          target: new RenderTarget(gl, w, h),
+          handle: PLACEHOLDER_HANDLE,
+          lastVersion: Number.NaN,
+        };
+        entry.handle = registerResource(
+          defaultSession,
+          `flarex-proxy/${compId}`,
+          { scope: "live", kind: "media-renderer", id: compId },
+          performance.now()
+        );
+        proxyUploadsRef.current.set(compId, entry);
+      } else {
+        touchResource(defaultSession, `flarex-proxy/${compId}`, performance.now());
+      }
+      if (entry.lastVersion !== frame.sourceVersion) {
+        entry.target.resize(w, h);
+        entry.renderer.draw({
+          source: frame.source as TexImageSource,
+          sourceWidth: w,
+          sourceHeight: h,
+          matte: null,
+          // null = passthrough. This pass exists to move pixels onto a stable target, not to grade:
+          // the proxy is a pre-rendered frame of the comp and its look is already baked in.
+          pipeline: null,
+          amount: 1,
+          opacity: 1,
+          mediaEffects: null,
+          target: entry.target,
+        });
+        entry.lastVersion = frame.sourceVersion;
+      }
+      const live = entry;
+      out[compId] = {
+        ...frame,
+        source: sceneTexture(live.handle, () => live.target.tex, w, h),
+      };
+    }
+    return out;
+  };
+
   const requestDraw = () => {
     rearmedSinceSettledRef.current = true;
     activeUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + SCENE_SETTLE_MS;
@@ -1388,7 +1489,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // Comp proxies (plans/flarex-comp-proxy.md, S2) — read LIVE off the ref at draw time, exactly like
       // `gradedRef`: the frame for each proxied comp is refreshed asynchronously by its decoder, and a
       // prop snapshot would draw the previous one. Undefined/empty ⇒ every comp lowers live as before.
-      flarexCompProxies: flarexCompProxiesRef?.current,
+      flarexCompProxies: proxyUploadRef.current
+        ? uploadProxyFrames(flarexCompProxiesRef?.current)
+        : flarexCompProxiesRef?.current,
       flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
       onLayerNotReady: (id) => notReadyIds.push(id),
       // Flarex lowering degradations → the kernel diagnostics sink (ADR-012 slice S0.2). Purely an
