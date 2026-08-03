@@ -663,6 +663,16 @@ export function ScenePreviewCanvas({
         target: RenderTarget;
         pipelineKey: string;
         lastKey: string;
+        /**
+         * Monotonic content version of the pixels in `target` (S6.2).
+         *
+         * Bumped exactly when the re-grade actually runs, i.e. when `lastKey` changes — that key
+         * already folds frame version, pipeline, effects, amount, opacity, transition and the
+         * proxy/full-res choice, so it is precisely "did the pixels change". A number rather than the
+         * key itself because the identity travels through `dependencyVersions` as an opaque token and
+         * a monotonic counter cannot collide across sources the way a shared key string could.
+         */
+        version: number;
         lastW: number;
         lastH: number;
         /** Which incarnation of this pool entry the scene draws reference (S5.2). */
@@ -1328,13 +1338,13 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
           // hold the 2026-07-07 anti-flicker fix introduced, and the reason a source that decoded once
           // could read as "ready" forever no matter how stale — the texture had no way to say when it
           // was from. Now it does.
-          return sceneTexture(entry.handle, () => entry!.target.tex, entry.lastW, entry.lastH, servedTimeOf(entry.lastServedTime));
+          return sceneTexture(entry.handle, () => entry!.target.tex, entry.lastW, entry.lastH, { ...servedTimeOf(entry.lastServedTime), version: entry.version });
         }
         return null; // never had a frame — same as the old "no canvas yet" (poster covers it)
       }
       const gl = compositor.sharedGl;
       if (!entry) {
-        entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0, lastServedTime: null, handle: PLACEHOLDER_HANDLE };
+        entry = { renderer: new MediaWebGLRenderer({ sharedGl: gl }), target: new RenderTarget(gl, 1, 1), pipelineKey: "", lastKey: "", lastW: 0, lastH: 0, lastServedTime: null, handle: PLACEHOLDER_HANDLE, version: 0 };
         sharedMediaRenderersRef.current.set(resolvedId, entry);
         // Always `live`: this pool is only ever built from the live frame's media set. The capture path
         // reuses the graded textures the live frame already produced rather than making its own, which
@@ -1360,7 +1370,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         // Re-grade skip: same frame version, same grade — so the same pixels, and therefore the same
         // served time. Reading it from the entry rather than the snapshot keeps the skip honest even if
         // the producer's own reading has since moved.
-        return sceneTexture(entry.handle, () => entry!.target.tex, w0, h0, servedTimeOf(entry.lastServedTime));
+        return sceneTexture(entry.handle, () => entry!.target.tex, w0, h0, { ...servedTimeOf(entry.lastServedTime), version: entry.version });
       }
       if (entry.pipelineKey !== snap.pipelineKey) {
         entry.renderer.setPipeline(snap.pipeline);
@@ -1388,6 +1398,10 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         target: entry.target,
       });
       markHotSpot("scene-media-grade", gradeStart, `${resolvedId} ${w0}x${h0}`);
+      // The re-grade ran, so these are new pixels: bump BEFORE publishing so the version describes
+      // what the target now holds. A matte forces the key empty (re-grade every frame) and the version
+      // moves with it, which is correct — a live matte genuinely changes the output each frame.
+      entry.version += 1;
       entry.lastKey = snap.matte ? "" : key; // matte present → force a re-grade next frame
       entry.lastW = w0;
       entry.lastH = h0;
@@ -1395,7 +1409,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // the entry's served time is written — every other path reads it back.
       entry.lastServedTime = snap.servedSourceTime;
       recordSingleCtx("grades");
-      return sceneTexture(entry.handle, () => entry!.target.tex, w0, h0, servedTimeOf(snap.servedSourceTime));
+      return sceneTexture(entry.handle, () => entry!.target.tex, w0, h0, { ...servedTimeOf(snap.servedSourceTime), version: entry.version });
     };
     const getMediaSingleCtx = (id: string): SceneTextureSource | null => {
       const sources = mediaSourcesRef?.current;
@@ -1437,7 +1451,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
           // Descriptor-gap hold: the producer is gone entirely, so nothing can report a CURRENT time —
           // the pixels are the last grade's and say so. Of the four hold paths this is the one most
           // likely to persist, because a remount plus a decode is not a sub-frame event.
-          return sceneTexture(held.handle, () => held.target.tex, held.lastW, held.lastH, servedTimeOf(held.lastServedTime));
+          return sceneTexture(held.handle, () => held.target.tex, held.lastW, held.lastH, { ...servedTimeOf(held.lastServedTime), version: held.version });
         }
         return null;
       }

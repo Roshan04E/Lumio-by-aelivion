@@ -184,7 +184,20 @@ const STAGE_MASK = 7;
  * artifact is left uncacheable (see `materialize`) rather than risk a stale hit. New dynamic axes add
  * a resolver entry — the compositor's cache logic never changes.
  */
-const FLAREX_DEPENDENCY_RESOLVERS: Record<string, (ctx: FlarexLowerCtx) => string> = {
+const FLAREX_DEPENDENCY_RESOLVERS: Record<string, (ctx: FlarexLowerCtx, at: number) => string> = {
+  /**
+   * The FRAME time, deliberately — a token must describe what the shader actually reads.
+   *
+   * S6.2 first changed this to the evaluation time, on the reasoning that T4 makes evaluation time
+   * authoritative. The flarex contract test rejected it, and the test was right: fragment passes take
+   * `timeSeconds: ctx.frameTimeSeconds`, so `uTime` IS the playhead even inside a retimed subtree.
+   * Keying on the evaluation time would have left the identity no longer determining the pixels — a
+   * stale hit whenever the two diverge, which is a worse failure than the collision being fixed.
+   *
+   * The retime axis is handled separately and conditionally, at the fold site below. Whether a retimed
+   * subtree's effects SHOULD animate on retimed time is a real question, and a different slice: it
+   * would change pixels, which this one may not.
+   */
   time: (ctx) => `t:${ctx.frameTimeSeconds}`,
 };
 
@@ -668,7 +681,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
    *  node's runtime `evaluationKey`. Runtime-only: reached solely via `ctx.materializeNodeIds`,
    *  never via persisted params. The input `draw` (whatever upstream folded) becomes the sealed
    *  group's child, so the boundary rasterizes everything up to and including this node's op. */
-  const materialize = (draw: FlarexImageValue, nodeId: string): FlarexWrapGroup => {
+  const materialize = (draw: FlarexImageValue, nodeId: string, at: number): FlarexWrapGroup => {
     const wrap = newWrap(draw);
     wrap.__flarexSealed = true;
     frameProfiler.noteMaterialize();
@@ -689,7 +702,16 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     const sources = scanSourceIdentity(draw, { tokens: [], dynamic: false });
     if (!resolvers.some((resolve) => resolve === undefined) && !sources.dynamic) {
       wrap.contentHash = contentHashes.get(nodeId);
-      const tokens = deps.map((_dep, index) => resolvers[index]!(ctx));
+      const tokens = deps.map((_dep, index) => resolvers[index]!(ctx, at));
+      // RETIMED NODES FOLD THEIR EVALUATION TIME (S6.2). `contentHashes` is computed once per compile
+      // at `ctx.timeSeconds`, so for a node evaluated at another moment the hash describes the wrong
+      // params — two retimes of one animated node hash identically while producing different pixels.
+      //
+      // Conditional on purpose. Folding `at` unconditionally would put a per-frame value into every
+      // key, including static nodes that currently have no time term at all — their keys are stable
+      // across frames, which is the entire reason they hit. Making every key change every frame would
+      // "fix" a collision by destroying the cache for the nodes it serves best.
+      if (at !== ctx.timeSeconds) tokens.push(`e:${at.toFixed(6)}`);
       if (deps.length) wrap.dependencies = deps;
       // Source versions are an OPAQUE identity term, not a semantic dependency name — they fold into
       // `dependencyVersions` (which the compositor never interprets) but never into `dependencies`
@@ -1123,7 +1145,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       // evaluator-owned decision says so (fan-out / debug override today). Mattes stay vector (never
       // rasterized here). Pixel-neutral by construction — sealing inserts only identity nests.
       if (value?.kind === "image" && shouldMaterialize(nodeId, value.draw)) {
-        value = { kind: "image", draw: materialize(value.draw, nodeId) };
+        value = { kind: "image", draw: materialize(value.draw, nodeId, timeSeconds) };
       }
       memo.set(key, value);
       return value;

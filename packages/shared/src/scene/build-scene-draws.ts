@@ -19,6 +19,7 @@ import { colorPipelineCacheKey } from "../color/pipeline";
 import type { ColorPipeline } from "../color/types";
 import { getFragmentEffect } from "../color/fragment-effects/registry";
 import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
+import { isSceneTextureSource } from "../color/scene-compositor";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass, SceneTextureSource } from "../color/scene-compositor";
 import type { ServedTime } from "../kernel/time";
 import {
@@ -689,7 +690,11 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // photo ≈ 46MB) was texSubImage2D'd on EVERY composited frame, which froze low-end preview
       // whenever a photo clip was on screen (2026-07-03 report). No producer record (DOM fallback
       // canvases, exotic sources) → undefined → today's always-upload behavior.
-      sourceVersion: getTexImageSourceProducerInfo(mediaSource as unknown as TexImageSource)?.updatedAt,
+      // A same-context texture carries its own version (S6.2); only an UPLOADED source is findable in
+      // the producer WeakMap. Asking the map about a texture was the browser half of the dead cache.
+      sourceVersion: isSceneTextureSource(mediaSource as never)
+        ? (mediaSource as unknown as SceneTextureSource).version
+        : getTexImageSourceProducerInfo(mediaSource as unknown as TexImageSource)?.updatedAt,
     };
   };
 

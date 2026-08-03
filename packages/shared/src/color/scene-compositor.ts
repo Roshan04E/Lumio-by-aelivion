@@ -111,6 +111,19 @@ export interface SceneTextureSource {
    * barrier (S4.4) exists to stop making.
    */
   servedTime?: ServedTime | undefined;
+  /**
+   * Content version of these pixels — bumped when what the texture HOLDS changes (slice S6.2).
+   *
+   * The uploaded-source path gets this from `getTexImageSourceProducerInfo`, a WeakMap keyed by the
+   * `TexImageSource` object. A same-context texture is not one of those, so the lookup returned null
+   * and the version came out `undefined` — which `addRasterVersion` reads as "undescribable", leaving
+   * every artifact in the browser uncacheable. That is why the content cache is dead in the preview
+   * and live in the worker: not a policy difference, a lookup that could not succeed.
+   *
+   * Still optional, on the same terms as `servedTime`: absent means this path cannot say, and
+   * uncacheable remains the right answer for a producer that does not know when its pixels changed.
+   */
+  version?: number | undefined;
 }
 
 /** True when a layer source is a same-context GPU texture (sample directly) vs an uploadable `TexImageSource`. */
@@ -130,7 +143,7 @@ export function sceneTexture(
   acquire: () => WebGLTexture | null,
   width: number,
   height: number,
-  extra?: Partial<Pick<SceneTextureSource, "debugTarget" | "servedTime">>
+  extra?: Partial<Pick<SceneTextureSource, "debugTarget" | "servedTime" | "version">>
 ): SceneTextureSource {
   return { handle, acquire, width, height, ...extra };
 }
