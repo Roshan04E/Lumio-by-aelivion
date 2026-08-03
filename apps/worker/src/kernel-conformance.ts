@@ -2225,10 +2225,18 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
     const resourceSrc = strip(readFileSync(`${webDir}playback/scene-resource-orchestration.ts`, "utf8"));
     enforced("I-33", "…and the extracted sweep is the one that ages the compositor's caches",
       /sweepIdleCaches\s*\(\s*\)/.test(resourceSrc) && sweepAt >= 0);
-    // The CALL, not the identifier: `shouldHoldForCoherence` also appears in the import list at the top
-    // of the file, and matching that made the check compare the sweep against line 1 — it passed for the
-    // wrong reason until this harness failed it.
-    const holdAt = canvasSrc.search(/shouldHoldForCoherence\s*\(\s*\{/);
+    // The CALL, not the identifier: the hold predicate also appears in the import list at the top of the
+    // file, and matching that made the check compare the sweep against line 1 — it passed for the wrong
+    // reason until this harness failed it.
+    //
+    // S7.1 moved the predicate itself into `playback/scene-readiness.ts`, so the canvas anchor is now
+    // the decision CALL. Re-pointed rather than relaxed, and paired with an assertion that the callee
+    // really does own the hold — an ordering check against an anchor that decides nothing is the same
+    // vacuous pass in a new costume.
+    const holdAt = canvasSrc.search(/decideSceneReadiness\s*\(\s*\{/);
+    const readinessSrc = strip(readFileSync(`${webDir}playback/scene-readiness.ts`, "utf8"));
+    enforced("I-33", "…and the extracted decision is the one that owns BOTH hold gates",
+      /shouldHoldForCoherence\s*\(\s*\{/.test(readinessSrc) && /resolveReadiness\s*\(/.test(readinessSrc));
     enforced("I-33", "…and the host sweeps BEFORE the hold decision, not after it",
       sweepAt > 0 && holdAt > 0 && sweepAt < holdAt);
   }

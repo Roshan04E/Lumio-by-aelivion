@@ -47,10 +47,6 @@ import {
   recordFlarexDegradation,
   registerResource,
   servedTime,
-  resolveReadiness,
-  deriveTargetTime,
-  deriveTimelineTime,
-  authoritativeTime,
   touchResource,
   type ServedTime,
   type ColorPipeline,
@@ -81,6 +77,7 @@ import {
   releaseScratchSceneResources,
   sweepIdleSceneResources,
 } from "../playback/scene-resource-orchestration";
+import { advanceBlockingClock, decideSceneReadiness } from "../playback/scene-readiness";
 import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
@@ -89,7 +86,6 @@ import {
   STALE_HOLD_MAX_MS,
   getCoherenceHoldEnabled,
   isStale,
-  shouldHoldForCoherence,
   getCoherenceUnifiedEnabled,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
@@ -436,16 +432,7 @@ export interface SceneViewerCaptureHandle {
 // frame, a text raster — lands on screen. While PLAYING we composite every frame regardless.
 const SCENE_SETTLE_MS = 600;
 
-// R1 fix: how long a stacked-layer's source may stay unready before we give up holding the previous
-// frame and composite anyway (escape hatch for a permanently-broken source — e.g. a renamed/missing
-// asset — so the preview never freezes forever waiting on it).
-const NOT_READY_HOLD_MS = 300;
-// Media sources can legitimately need >300ms to (re)prime at play start — proxy-arrival remount,
-// settle→element handoff, cold decoder after load (the play-start black-flicker lineage, tracker
-// playback-preview v20–v24). MEDIA layers hold the last presented picture up to this longer cap —
-// freeze, never black, like every pro NLE — while text/shape keep the short cap (a mid-typing
-// raster must not freeze the viewer for 1.5s).
-const NOT_READY_HOLD_MEDIA_MS = 1500;
+// The not-ready hold caps now live with the gate that applies them, in `playback/scene-readiness.ts`.
 
 // TEMPORAL COHERENCE (2026-07-28): the not-ready gate above asks "does this layer have a texture",
 // which is presentation BATCHING, not temporal synchronization — see `playback/temporal-coherence.ts`
@@ -1568,12 +1555,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     // are exempt — holding there made scrubbing feel laggy without the flash actually occurring at rest.
     const blockedSince = notReadySinceRef.current;
     const now = performance.now();
-    for (const id of notReadyIds) {
-      if (!blockedSince.has(id)) blockedSince.set(id, now);
-    }
-    for (const id of blockedSince.keys()) {
-      if (!notReadyIds.includes(id)) blockedSince.delete(id);
-    }
+    advanceBlockingClock(blockedSince, notReadyIds, now);
     // ── ATOMIC FULL-RES SWAP: resolve the rendezvous now that every participant has been seen ──────
     //
     // The invariant: a paused viewer sharpens ALL of its sources in one composite, or none of them.
@@ -1604,12 +1586,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     // Per-source staleness clock (temporal coherence). A source that converges drops out of `staleIds`
     // and its clock is cleared, so a later stall gets a fresh budget rather than inheriting an old one.
     const staleSince = staleSinceRef.current;
-    for (const id of staleIds) {
-      if (!staleSince.has(id)) staleSince.set(id, now);
-    }
-    for (const id of staleSince.keys()) {
-      if (!staleIds.includes(id)) staleSince.delete(id);
-    }
+    advanceBlockingClock(staleSince, staleIds, now);
     // v21 (play-start black-flicker lineage): at the play flip a composite can run BEFORE the
     // playing flag propagates, exactly while the media element re-primes (settle/WC → element
     // handoff) with nothing held yet — and when this hold was playing-gated, that composite
@@ -1658,40 +1635,25 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       mediaPool: sharedMediaRenderersRef.current,
     });
 
-    const heldIds = playing ? notReadyIds : notReadyIds.filter(isMediaLayerId);
-    if (
-      heldIds.some(
-        (id) => now - (blockedSince.get(id) ?? now) < (isMediaLayerId(id) ? NOT_READY_HOLD_MEDIA_MS : NOT_READY_HOLD_MS)
-      ) ||
-      // TEMPORAL COHERENCE (2026-07-28): at a FIXED playhead every media source must represent the
-      // same requested time or the frame is not presented — see `playback/temporal-coherence.ts`.
-      // The episode clock is `coherenceHoldStartRef`, read here and advanced by `noteCoherence` below,
-      // so the gate and the probe agree on what one hold episode is by construction.
-      (coherenceUnifiedRef.current
-        ? // S4.6 — ONE mechanism for both transport states. The barrier resolves the latest moment every
-          // participant can show; the frame is withheld only when even that moment cannot be served,
-          // which is the `degraded` verdict. Paused and playing take the same path — the old barrier
-          // returned false on its first line while playing, so playback had no coherence policy at all
-          // and `tolerateLag` stood in for one.
-          resolveReadiness(
-            deriveTargetTime(deriveTimelineTime(authoritativeTime(t))),
-            Object.entries(allStaleness).map(([id, staleness]) => ({
-              id,
-              // `Infinity` is this file's existing encoding for "awaiting, no frame at all" — the
-              // barrier's `null`, which is a declared degradation rather than an input to the minimum.
-              // A finite staleness means the source HAS pixels, from `t - staleness` seconds ago.
-              servedTime: staleness === null ? undefined : Number.isFinite(staleness) ? servedTime(t - staleness) : null,
-            }))
-          ).outcome === "degraded"
-        : shouldHoldForCoherence({
-            playing,
-            staleIds,
-            staleSince,
-            holdStartedMs: coherenceHoldStartRef.current,
-            nowMs: now,
-            enabled: coherenceHoldEnabledRef.current,
-          }))
-    ) {
+    // TEMPORAL COHERENCE (2026-07-28): at a FIXED playhead every media source must represent the same
+    // requested time or the frame is not presented — see `playback/temporal-coherence.ts`. The episode
+    // clock is `coherenceHoldStartRef`, read here and advanced by `noteCoherence` below, so the gate
+    // and the probe agree on what one hold episode is by construction.
+    const readiness = decideSceneReadiness({
+      playing,
+      notReadyIds,
+      isMediaLayerId,
+      blockedSince,
+      staleIds,
+      staleSince,
+      allStaleness,
+      holdStartedMs: coherenceHoldStartRef.current,
+      nowMs: now,
+      targetTimeSeconds: t,
+      coherenceUnified: coherenceUnifiedRef.current,
+      coherenceHoldEnabled: coherenceHoldEnabledRef.current,
+    });
+    if (readiness.hold) {
       noteCoherence(
         coherenceHoldStartRef,
         t,
@@ -1700,15 +1662,12 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         true,
         staleBySource,
         allStaleness,
-        // Which gate actually withheld this frame. The two are routinely confused in the aggregate
-        // counters: a not-ready hold means a source has NO frame, a coherence hold means it has the
-        // WRONG one, and they call for opposite fixes.
-        staleIds.length > 0 ? "coherence" : "not-ready"
+        readiness.reason
       );
       // Presented-frame ledger (ADR-012 slice S0.3). A withheld composite is recorded too: the hold
       // RATE is half the picture, because a barrier that reaches coherence by never presenting has not
       // solved anything. Same classification the gate above just made, so the two cannot disagree.
-      noteHeld(staleIds.length > 0 ? "coherence" : "not-ready", {
+      noteHeld(readiness.reason === "coherence" ? "coherence" : "not-ready", {
         targetTime: t,
         participants: liveMediaSourceIds.size,
         staleIds,
@@ -1744,7 +1703,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       false,
       staleBySource,
       allStaleness,
-      staleIds.length === 0 ? "coherent" : "hatch"
+      readiness.reason
     );
     pruneDepartedSceneResources({
       liveLayerIds: new Set(ls.map((layer) => layer.id)),
