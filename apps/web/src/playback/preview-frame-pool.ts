@@ -169,33 +169,6 @@ export function getKernelDecoderLifetimeEnabled(): boolean {
   return readKernelFlag(KERNEL_FLAGS.decoderLifetime);
 }
 
-/**
- * Kill switch for kernel-owned session SATISFACTION (ADR-012 slice S4.7):
- * `?kernelSessionSatisfaction=1` → localStorage `orreris.kernel.sessionSatisfaction` → **OFF**.
- *
- * Ships OFF, unlike S3.3's, and the asymmetry is deliberate. This is the fourth slice to touch the
- * decoder — the most defect-dense subsystem in the runtime — and programme risk R2 says never ship two
- * decoder slices in one release and soak before every merge in Phases 3–4. Off by default means the
- * merge carries zero behavioural risk while the arms are measured; the flip is a separate, evidenced
- * decision. Off restores the inherited identity-match borrow exactly.
- */
-/**
- * Kill switch for RANKED source admission (ADR-012 §6.3, slice S4.3):
- * `?kernelSourceAdmission=1` → localStorage `orreris.kernel.sourceAdmission` → **OFF**.
- *
- * Ships OFF under R2 — the fifth slice to touch the decoder — and because the authoritative half is the
- * first thing in this programme that can take a session AWAY from a source that already had one. Off,
- * the ranking still runs and still records who should have lost, so the policy is readable in the
- * product before it is ever allowed to act. That ordering is the point: a switch flipped on evidence
- * gathered under the switch.
- */
-export function getKernelSourceAdmissionEnabled(): boolean {
-  return readKernelFlag(KERNEL_FLAGS.sourceAdmission);
-}
-
-export function getKernelSessionSatisfactionEnabled(): boolean {
-  return readKernelFlag(KERNEL_FLAGS.sessionSatisfaction);
-}
 
 export interface ReleaseOptions {
   /**
@@ -837,17 +810,6 @@ function chooseSatisfyingSession(
 ): SharedSession | null {
   const candidate = findAttachableSession(key, software);
   if (!candidate) return null;
-  if (!getKernelSessionSatisfactionEnabled()) {
-    // Flag off → inherited identity-match. Recorded under its own reason rather than left null, so a
-    // flag-off detach is distinguishable from an unrecorded one.
-    pendingApproval = {
-      reason: "flag-off-identity-match",
-      gapSeconds: null,
-      joinerTime: options.requestedTime ?? null,
-      servedAtApproval: candidate.lastServed?.time ?? null,
-    };
-    return candidate;
-  }
 
   const incumbentTimes: number[] = [];
   for (const member of candidate.members) incumbentTimes.push(member.requestedTime);
@@ -991,14 +953,12 @@ function noteDivergence(session: SharedSession): void {
   // second meaning — the kernel APPROVED this share, using the very tolerance `isDiverged` just failed,
   // so a firing is a defect report against `sessionSatisfaction` rather than a routine correction. The
   // slice's *done when* is that this number stays at zero across a full soak.
-  if (getKernelSessionSatisfactionEnabled()) {
-    noteSatisfactionMiss(defaultSession, session.key, {
-      requestedTimes: times.filter((time) => Number.isFinite(time)),
-      toleranceSeconds: divergenceToleranceSeconds(session.provider?.nominalFps),
-      members: session.members.size,
-      strikes: latest.strikes,
-    });
-  }
+  noteSatisfactionMiss(defaultSession, session.key, {
+    requestedTimes: times.filter((time) => Number.isFinite(time)),
+    toleranceSeconds: divergenceToleranceSeconds(session.provider?.nominalFps),
+    members: session.members.size,
+    strikes: latest.strikes,
+  });
   session.shareable = false;
   const notify = latest.onPreempted;
   releaseMember(session, latest);
@@ -1036,7 +996,6 @@ function noteDivergence(session: SharedSession): void {
  * jitter to ride out and waiting only guarantees the harm.
  */
 function reviseBlindShare(session: SharedSession): void {
-  if (!getKernelSessionSatisfactionEnabled()) return;
   // S7.2 DIAGNOSIS, observability only. Under `kernelProxySource=1` this function declines on every
   // run while a divergence detaches anyway (`blindSplits: 0`, deterministic 3/3). It has four early
   // returns and guessing which one fired is exactly the inference that cost this programme two
@@ -1412,11 +1371,8 @@ function reportAdmissionDenial(
   // miss is not a hot path, but the rule is that instrumentation costs nothing when off, not that it
   // costs little somewhere unimportant. `admissionDenials` is therefore a diagnostics-only figure and
   // reads 0 with diagnostics disabled; `capMisses` is the unconditional counter beside it.
-  const authoritative = getKernelSourceAdmissionEnabled();
-  // R1: with diagnostics off AND the flag off there is nothing to compute, and `rankAdmission`
-  // allocates. With the flag ON the ranking is load-bearing, so it runs regardless of observation —
-  // behaviour must never depend on whether anyone is watching.
-  if (!kernelDiagnostics.enabled && !authoritative) return null;
+  // The ranking is load-bearing, so it runs regardless of observation: behaviour must never depend on
+  // whether anyone is watching. The denial RECORD below is diagnostics-gated (R1); the decision is not.
   const now = nowMs();
   const byKey = new Map<string, LeaseRecord>();
   const candidates: AdmissionCandidate[] = [];
@@ -1437,11 +1393,9 @@ function reportAdmissionDenial(
     for (const denial of decision.denied) noteAdmissionDenied(defaultSession, denial);
     admissionDenialCount += decision.denied.length;
   }
-  if (!authoritative) return null;
-
-  // THE AUTHORITATIVE HALF. Capacity is granted by merit rather than by arrival — but only when the
-  // newcomer actually WON. If the ranking put it below the bar it is denied exactly as before, which is
-  // what keeps the flag a policy switch rather than a licence to churn.
+  // Capacity is granted by merit rather than by arrival — but only when the newcomer actually WON. If
+  // the ranking put it below the bar it is denied exactly as arrival order would have, which is what
+  // keeps this a policy rather than a licence to churn.
   if (!decision.admitted.includes(url)) return null;
   // The victim is an incumbent the ranking denied. `heldByResidency` is not consulted here because
   // residency already decided admission above: anything still admitted survived it, so anything denied

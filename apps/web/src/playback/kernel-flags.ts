@@ -58,9 +58,7 @@ export const KERNEL_FLAGS = {
   // reads it cannot disagree about what to look for. Every other flag is host-owned and names itself.
   diagnostics: { query: KERNEL_DIAGNOSTICS_FLAG_QUERY, storage: KERNEL_DIAGNOSTICS_FLAG_STORAGE, defaultOn: true },
   decoderLifetime: { query: "kernelDecoderLifetime", storage: "orreris.kernel.decoderLifetime", defaultOn: true },
-  sessionSatisfaction: { query: "kernelSessionSatisfaction", storage: "orreris.kernel.sessionSatisfaction", defaultOn: false },
   resources: { query: "kernelResources", storage: "orreris.kernelResources", defaultOn: true },
-  sourceAdmission: { query: "kernelSourceAdmission", storage: "orreris.kernel.sourceAdmission", defaultOn: false },
   // ONE exclusive flag for S4.5+S4.6 (ADR-012 §4, atomic group). They cannot be separated: deleting
   // the host-clip fallback exposes every readiness gap the substitution was hiding, and only the
   // unified barrier — one coherence mechanism across both transport states, answering with a moment

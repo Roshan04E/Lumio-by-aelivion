@@ -59,12 +59,19 @@ const ARM_SETS: Record<string, { name: string; flags: string }[]> = {
     { name: "baseline (proxy source OFF)", flags: "kernelProxySource=0" },
     { name: "S3.5 demotion (proxy source ON)", flags: "kernelProxySource=1" },
   ],
-  // S4.7: does guarding the borrow path change the frame budget, and does the backstop stop firing?
-  // Both arms keep demotion OFF so the only variable is satisfaction.
-  satisfaction: [
-    { name: "inherited identity-match borrow", flags: "kernelProxySource=0&kernelSessionSatisfaction=0" },
-    { name: "S4.7 session satisfaction", flags: "kernelProxySource=0&kernelSessionSatisfaction=1" },
-  ],
+  /**
+   * S4.7, post-S7.2. ONE arm, because there is no longer a second configuration to compare against:
+   * `kernelSessionSatisfaction` and `kernelProxySource` are deleted and satisfaction is simply how the
+   * runtime behaves. Keeping the old pair would have left two arms whose flag strings name nothing,
+   * reporting a beautifully reproducible null result about one configuration measured twice.
+   *
+   * WHAT IS LOST, stated because it matters: the flag-off arm was this soak's vacuity guard — it
+   * reproduced the harm every run, which is what proved the fixture could still fail. With the old path
+   * deleted that control is gone, so `blindSplits > 0` becomes the guard: it says the blind-share path
+   * was actually reached this run. A run reporting `detaches 0 · blindSplits 0` is NOT a pass, it is a
+   * fixture that never got there, and must be read as void.
+   */
+  satisfaction: [{ name: "shipping configuration", flags: "wcDecode=1" }],
 };
 // Arm ORDER is a confound: the first arm pays every one-time cost (shader compile, proxy warm, GPU
 // clock ramp) and the second inherits a warmed machine. `PROBE_REVERSE=1` runs the same pair backwards,
