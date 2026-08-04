@@ -50,33 +50,6 @@ export function getFrameCompletionEnabled(): boolean {
 }
 
 
-/**
- * Is a proxy-served Flarex loader DEMOTED rather than deleted? (ADR-012 I-16/I-24, slice S3.5.)
- * Flag: `?kernelProxySource=1` → localStorage `orreris.kernelProxySource` → **OFF**.
- *
- * ## What it is protecting
- *
- * While a comp proxy serves, `VideoPreview` removes that comp's virtual loaders from the layer set.
- * That is what makes the proxy a win — a substituted comp that kept its loaders decoded N source streams
- * PLUS the proxy, measured at 75→35fps — and it is also I-16, a rendering decision changing whether a
- * source *exists*. The cost is the failure this slice is named for: a comp whose proxy falters has
- * neither a proxy nor a warm decoder, so every MediaIn soft-degrades to the host clip until N decoders
- * re-demux and re-index from cold. A cut, where the resource story should be a crossfade.
- *
- * On, the loaders stay mounted, hold their sessions at `preload` priority, hold their last frame, and
- * stop *pulling* frames. The performance win is preserved because a suspended loader's output is not
- * consumed anyway: while the proxy serves, the compiler is short-circuited and nothing reads them.
- *
- * ## Why OFF by default, unlike `kernelResources`
- *
- * Governance risk **R2**: *never ship two decoder slices in one release.* S3.3 already changed decoder
- * lifetime in this same unreleased range, and this slice keeps sessions alive that used to be freed —
- * exactly the cost the deletion existed to avoid. It needs its own soak against the 75→35fps regression
- * before it can carry a default, and a flag is what makes that soak an A/B rather than a bisect.
- */
-export function getKernelProxySourceEnabled(): boolean {
-  return readKernelFlag(KERNEL_FLAGS.proxySource);
-}
 
 /**
  * Does the kernel Resource Manager reclaim idle derived resources? (ADR-012 I-8/I-33, slice S3.4.)

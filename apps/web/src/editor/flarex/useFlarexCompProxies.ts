@@ -29,7 +29,6 @@ import { flarexCompProxyIdentity, flarexCompProxyKey } from "./flarex-comp-proxy
 import { canSubstituteFlarexProxy } from "./flarex-proxy-eligibility";
 import { getFlarexCompProxy, subscribeFlarexProxyStore } from "./flarex-comp-proxy-store";
 import { setFlarexProxyServing } from "./flarex-proxy-status";
-import { getKernelProxySourceEnabled as kernelProxySourceEnabled } from "../../playback/frame-completion";
 import { defaultSession, holdDecoderSession, releaseDecoderHold, servedTime, type ServedTime } from "@orreris/shared";
 
 /**
@@ -285,7 +284,7 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
       // INVALID — the comp was edited, so the stored frames are for a different picture. Immediate,
       // never suspended: a stale frame must not survive an edit.
       const invalid = next != null && next.key !== active.key;
-      if (invalid || !kernelProxySourceEnabled()) {
+      if (invalid) {
         activeRef.current.delete(compId);
         delete framesRef.current[compId];
         closeHeld(active);
