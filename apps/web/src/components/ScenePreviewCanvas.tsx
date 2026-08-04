@@ -89,7 +89,7 @@ import {
   getCoherenceUnifiedEnabled,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
-import { getFrameCompletionEnabled, getKernelResourcesEnabled } from "../playback/frame-completion";
+import { getKernelResourcesEnabled } from "../playback/frame-completion";
 import { isReadaheadProbeEnabled, noteReadaheadComposite, type ReadaheadSample } from "../playback/readahead-probe";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
@@ -883,7 +883,6 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
   const rearmedSinceSettledRef = useRef(true);
   const settledRef = useRef(false);
   // Read once per mount, like every other engine flag in this file.
-  const frameCompletionEnabledRef = useRef(getFrameCompletionEnabled());
 
   /**
    * Upload each comp proxy frame into ITS OWN render target, once per decoded version (S5.4).
@@ -1763,7 +1762,6 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       },
       targetTimeSeconds: () => inputsRef.current.currentTime,
       isPlaying: () => inputsRef.current.isPlaying,
-      frameCompletionEnabled: frameCompletionEnabledRef.current,
       draw: drawFrameImpl,
       profilerSnapshot: () => compositorRef.current?.profilerSnapshot(),
     });

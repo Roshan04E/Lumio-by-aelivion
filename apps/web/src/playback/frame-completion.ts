@@ -34,20 +34,6 @@ import { KERNEL_FLAGS, readKernelFlag } from "./kernel-flags";
  * retire a mechanism, or adopt one, on anything but a measurement taken in a sound rig.
  */
 
-/**
- * Is completion allowed to CLOSE the settle window? Flag (repo convention): `?kernelFrames=1` →
- * localStorage `orreris.kernelFrames` → **OFF**.
- *
- * Exclusive, per the programme: with it on the window is owned by the completion signal, with it off by
- * the timer. Never both — two mechanisms driving one window is regression G5, and the whole point is
- * that there be one answer to "is this frame done".
- *
- * Measurement is independent of the flag, so `?kernelFrames=0` still gives a fully instrumented
- * comparison run rather than a blind one.
- */
-export function getFrameCompletionEnabled(): boolean {
-  return readKernelFlag(KERNEL_FLAGS.frames);
-}
 
 
 

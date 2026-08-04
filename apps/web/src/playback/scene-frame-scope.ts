@@ -51,8 +51,6 @@ export interface LiveFrameScopeParams {
   /** Read at scope OPEN and again at close — the transport can move during the draw. */
   readonly targetTimeSeconds: () => number;
   readonly isPlaying: () => boolean;
-  /** `kernelFrames` (S2.2) — default OFF. Gates only the window-closing half. */
-  readonly frameCompletionEnabled: boolean;
   readonly draw: () => void;
   readonly profilerSnapshot: () => CompositorProfilerSnapshot | null | undefined;
 }
@@ -95,7 +93,7 @@ function finishFrame(params: LiveFrameScopeParams): void {
     //
     // Safe only because re-arming is event-driven (`requestDraw` from any async arrival), which is the
     // property the `load-bearing` counter above exists to VERIFY rather than assume.
-    if (params.frameCompletionEnabled && !playing) params.refs.activeUntil.current = 0;
+    if (!playing) params.refs.activeUntil.current = 0;
   }
   endFrame(params.refs.outcome.current, settled);
 }

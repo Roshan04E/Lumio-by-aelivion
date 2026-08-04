@@ -18,7 +18,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Columns2, LayoutGrid, Rows3, Square } from "lucide-react";
 import { onFrameCompleted } from "@orreris/shared";
-import { getFrameCompletionEnabled } from "../playback/frame-completion";
 
 export type ScopeMode = "waveform" | "parade" | "vectorscope" | "histogram";
 
@@ -461,7 +460,6 @@ const PLAYING_RESAMPLE_MS = 100;
  * sample lands before the final frame and the scopes end up one edit stale.
  */
 const EDIT_RESAMPLE_MS = 90;
-const EDIT_WATCH_MS = 800;
 
 const SCOPE_LABELS: Record<ScopeMode, string> = {
   waveform: "Waveform",
@@ -612,12 +610,6 @@ export function ColorScopes({
    */
   const lastSampleAtRef = useRef(0);
 
-  /** Deadline the paused watch runs to; each change EXTENDS it rather than restarting a timer. */
-  const watchUntilRef = useRef(0);
-  const watchTimerRef = useRef<number | null>(null);
-  // Read once per mount, like every other engine flag. When on, the viewer's completion signal owns
-  // "is the picture ready" and the bounded poll below is not installed at all.
-  const [frameCompletionOwnsReadiness] = useState(getFrameCompletionEnabled);
 
   const sample = useCallback(() => {
     lastSampleAtRef.current = Date.now();
@@ -659,10 +651,6 @@ export function ColorScopes({
 
   useEffect(() => {
     if (isPlaying) {
-      // Playback owns the cadence from here; retire any paused watch still counting down, or the two
-      // loops would sample concurrently at different resolutions.
-      if (watchTimerRef.current !== null) window.clearInterval(watchTimerRef.current);
-      watchTimerRef.current = null;
       // LIVE loop: the cold playhead clock (our `tick` prop) is deliberately SUSPENDED during
       // playback so the heavy cold panels never compete with playback smoothness — which froze the
       // scopes on the pre-play frame. Instead of un-suspending that clock (doctrine: don't), the
@@ -685,29 +673,14 @@ export function ColorScopes({
     // to the event rate at exactly the moment the user needs the main thread free. Extending a deadline
     // that one long-lived timer reads keeps the cadence at a steady 90ms no matter how fast the ticks
     // arrive; the immediate sample below is then only for a discrete edit landing after a quiet period.
-    // S2.2: with frame completion owning readiness, this whole poll is unnecessary — the viewer says
-    // when the picture is done and the scopes sample exactly once, then. The 90ms/800ms guess exists
-    // only because nothing could answer that, and every sample it takes before the final frame is a GPU
-    // readback plus a full-frame accumulation per open pane, spent on a picture that is about to change.
-    // The flag is exclusive: one mechanism decides, never both (G5).
-    if (frameCompletionOwnsReadiness) {
-      if (Date.now() - lastSampleAtRef.current >= EDIT_RESAMPLE_MS) sample();
-      return undefined;
-    }
-    watchUntilRef.current = Date.now() + EDIT_WATCH_MS;
+    // S2.2: frame completion owns readiness, so the paused-edit POLL is gone. The viewer says when the
+    // picture is done and the scopes sample exactly once, then — see the completion effect below. The
+    // old 90ms/800ms watch existed only because nothing could answer that question, and every sample it
+    // took before the final frame was a GPU readback plus a full-frame accumulation per open pane, spent
+    // on a picture that was about to change. One mechanism decides, never both (G5).
     if (Date.now() - lastSampleAtRef.current >= EDIT_RESAMPLE_MS) sample();
-    if (watchTimerRef.current === null) {
-      watchTimerRef.current = window.setInterval(() => {
-        if (Date.now() >= watchUntilRef.current) {
-          if (watchTimerRef.current !== null) window.clearInterval(watchTimerRef.current);
-          watchTimerRef.current = null;
-          return;
-        }
-        sampleRef.current();
-      }, EDIT_RESAMPLE_MS);
-    }
     return undefined;
-  }, [tick, isPlaying, changeKey, sample, frameCompletionOwnsReadiness]);
+  }, [tick, isPlaying, changeKey, sample]);
 
   /**
    * S2.2 — sample when the viewer says the picture is READY, instead of guessing at 90ms intervals.
@@ -722,7 +695,7 @@ export function ColorScopes({
    * frame budget for a panel's work and turn the instrument into the stall.
    */
   useEffect(() => {
-    if (!frameCompletionOwnsReadiness || isPlaying) return undefined;
+    if (isPlaying) return undefined;
     let raf = 0;
     const off = onFrameCompleted((completion) => {
       if (!completion.settled || completion.frame.purpose !== "live") return;
@@ -736,17 +709,7 @@ export function ColorScopes({
       off();
       if (raf !== 0) window.cancelAnimationFrame(raf);
     };
-  }, [frameCompletionOwnsReadiness, isPlaying]);
-
-  // The watch timer outlives individual effect runs by design, so unmount is the one place that must
-  // stop it — otherwise it keeps sampling a torn-down component's compositor.
-  useEffect(
-    () => () => {
-      if (watchTimerRef.current !== null) window.clearInterval(watchTimerRef.current);
-      watchTimerRef.current = null;
-    },
-    []
-  );
+  }, [isPlaying]);
 
   const selectLayout = (next: ScopeLayout) => {
     setLayout(next);
