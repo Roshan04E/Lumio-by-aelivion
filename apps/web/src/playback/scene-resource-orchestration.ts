@@ -60,8 +60,6 @@ export const gradeScopeOf = (key: string): ResourceScope =>
   key.startsWith("capture:") ? "scratch:capture" : key.startsWith("thumb:") ? "scratch:thumb" : "live";
 
 export interface IdleSweepParams {
-  /** `kernelResources` — default ON. */
-  readonly enabled: boolean;
   readonly compositor: { sweepIdleCaches: () => void };
   readonly nowMs: number;
   readonly lastSweepMs: number;
@@ -79,7 +77,7 @@ export interface IdleSweepParams {
  * caught. It bites only in the failure, which is exactly where the old reclamation went quiet.
  */
 export function sweepIdleSceneResources(params: IdleSweepParams): number {
-  if (!params.enabled || params.nowMs - params.lastSweepMs <= RESOURCE_IDLE_MS) return params.lastSweepMs;
+  if (params.nowMs - params.lastSweepMs <= RESOURCE_IDLE_MS) return params.lastSweepMs;
 
   // S5.3: age the COMPOSITOR's own caches on the same pre-hold tick. The kernel sweep below covers
   // resources the kernel knows about; the compositor's texture/program/target caches were pruned only

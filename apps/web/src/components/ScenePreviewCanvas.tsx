@@ -84,7 +84,6 @@ import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-e
 import type { ScenePreviewMediaSource } from "./scene-media-source";
 import { STALE_HOLD_MAX_MS, isStale } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
-import { getKernelResourcesEnabled } from "../playback/frame-completion";
 import { isReadaheadProbeEnabled, noteReadaheadComposite, type ReadaheadSample } from "../playback/readahead-probe";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
@@ -684,7 +683,6 @@ export function ScenePreviewCanvas({
   const proxyUploadsRef = useRef<
     Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; handle: ResourceHandle; lastVersion: number }>
   >(new Map());
-  const kernelResourcesRef = useRef(getKernelResourcesEnabled());
   /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
   const lastResourceSweepRef = useRef(0);
   const failedRef = useRef(false);
@@ -1596,7 +1594,6 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
      * Rate-limited to once per TTL so the per-frame cost is one number comparison (risk R1).
      */
     lastResourceSweepRef.current = sweepIdleSceneResources({
-      enabled: kernelResourcesRef.current,
       compositor,
       nowMs: now,
       lastSweepMs: lastResourceSweepRef.current,

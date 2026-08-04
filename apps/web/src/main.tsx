@@ -9,7 +9,6 @@ import { initAnalyticsPersistence } from "./ai/analytics-store";
 import { installPerfDiagnostics } from "./lib/perfDiagnostics";
 import { installCrashTelemetry } from "./lib/crash-telemetry";
 import { resolveKernelDiagnosticsEnabled } from "./playback/frame-completion";
-import { KERNEL_FLAGS, readKernelFlag } from "./playback/kernel-flags";
 import { migrateBrandLocalStorage, migrateBrandBlobStores } from "./lib/brand-migration";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";

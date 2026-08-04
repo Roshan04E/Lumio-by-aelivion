@@ -42,7 +42,6 @@
  * fps, and source rates differ from the comp's anyway — a comp routinely mixes 24/30/60fps material,
  * so no single frame budget is correct for all of its sources.
  */
-import { KERNEL_FLAGS, readKernelFlag } from "./kernel-flags";
 
 export const COHERENCE_TOLERANCE_S = 1e-3;
 

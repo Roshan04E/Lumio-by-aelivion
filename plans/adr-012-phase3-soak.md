@@ -331,3 +331,53 @@ the POLICY — in particular R2, which must be restated there as a soak rule rat
 rule. That edit is outstanding only because the programme file carries another session's uncommitted
 work; when it lands, mirror these five rules there and cross-reference this playbook so the two cannot
 diverge.
+
+---
+
+# Rollout flags vs observability controls (added 2026-08-04, S7.2)
+
+S7.2 says "delete every `kernel.*` flag". One flag does not belong to that sentence, and the
+distinction is architectural rather than a carve-out for convenience.
+
+**A ROLLOUT FLAG selects behaviour.** It chooses between two implementations, or keeps a rollback path
+alive. Once one implementation is accepted, the other is debt and the flag must be eliminated —
+`kernelScopes`, `kernelProxyUpload`, `kernelIncremental`, `kernelProxySource`, `kernelWallClockTtl`,
+`kernelSessionSatisfaction`, `kernelSourceAdmission`, `kernelFrames`, `kernelCoherenceUnified`,
+`kernelResources`, `kernelDecoderLifetime`. All eleven are gone.
+
+**An OBSERVABILITY CONTROL selects whether instrumentation is emitted.** It does not change what the
+editor does. `kernelDiagnostics` is the only one, and it is RETAINED.
+
+Retaining it is what keeps programme risk **R1 (the observer effect)** enforceable. R1 requires
+instrumentation to be *allocation-free when off*, and several guards sit on per-acquire and per-frame
+paths where the record is genuinely expensive: `rankAdmission` allocates a candidate array and sorts
+it, the borrow-grant record copies a ring buffer. Delete the switch and that property becomes
+unachievable rather than merely unused — the cost is paid on every frame forever, and no future
+investigation can turn on expensive telemetry without paying for it permanently.
+
+The single-execution-path objective is untouched: the editor behaves identically with diagnostics on
+or off. That is exactly what makes it an observability control and not a rollout flag.
+
+## The audit that justifies retaining it
+
+Every guarded site was classified before this decision. All 25 runtime sites are **pure telemetry**,
+and the property that makes them so is uniform: **the state change happens BEFORE the guard, and only
+the `record()` call is inside it.**
+
+| site | unguarded (behaviour) | guarded (telemetry) |
+|---|---|---|
+| `dependency-graph:156` | `store.opaque.add(nodeId)` | `dependency-axis-unknown` |
+| `dependency-graph:288` | `store.undeclaredSeen += …` | `dependency-undeclared-nodes` |
+| `decoder-manager:543` | `session.state.set(KEY_OPEN, …)` | `decoder-closed:<cause>` |
+| `evaluation-planner:141` | `evaluate.add` / `reasons.set` | `evaluation-plan` |
+| `frame-scheduler:133/255` | `off()`, `listener(completion)` | timeout / listener-threw |
+| `preview-frame-pool:1380` | `rankAdmission(...)` — the DECISION | `noteAdmissionDenied` + counter |
+| `scene-frame-scope:74` | `classifyComposite(...)` | `settle-window-*` |
+
+`frame-scheduler:186`'s `active !== null` gates REPORTING an overlap, not scheduling. The
+`kernel-conformance.ts` hits are the harness setting the flag for its own tests, not guards.
+
+**If a future guard lands in a third bucket — anything that changes scheduling, admission, caching,
+borrowing, timing or execution — it is not diagnostics and must be refactored out before it ships.**
+The rule to apply when reviewing one: does the runtime do something different with the flag off? If
+yes, it is behaviour wearing a diagnostics guard.

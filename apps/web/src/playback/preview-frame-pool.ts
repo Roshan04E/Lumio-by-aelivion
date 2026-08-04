@@ -156,18 +156,6 @@ export function getWcSessionShareEnabled(): boolean {
   return true;
 }
 
-/**
- * Kill switch for kernel-owned session lifetime (ADR-012 slice S3.3), matching the `wcDecode`/`wcShare`
- * convention: `?kernelDecoderLifetime=0` → localStorage `orreris.kernel.decoderLifetime` → ON.
- *
- * OFF restores the pre-S3.3 behaviour exactly: every release parks into the same undifferentiated FIFO,
- * and a component unmount is once again the thing that ends a decoder's life. This is the programme's
- * declared rollback for the slice, and the reason it exists is R2 — decoder lifetime is the most
- * defect-dense area in the runtime, and a flag is cheaper than a revert at 2am.
- */
-export function getKernelDecoderLifetimeEnabled(): boolean {
-  return readKernelFlag(KERNEL_FLAGS.decoderLifetime);
-}
 
 
 export interface ReleaseOptions {
@@ -1198,7 +1186,7 @@ function attachMember(session: SharedSession, options: AcquireOptions): PreviewF
       if (member.dead) return;
       traceEvent({ event: "release", provider: session.provider, asset: traceAsset(session.key), reason: "explicit" });
       releaseMember(session, member, {
-        retain: options?.retain === true && getKernelDecoderLifetimeEnabled(),
+        retain: options?.retain === true,
         cause: options?.cause ?? "lifecycle",
       });
     },
