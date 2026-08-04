@@ -1100,21 +1100,6 @@ class ContentArtifactCache {
  * Wall clock for cache ageing (S5.3). `performance.now()` where it exists, `Date.now()` otherwise —
  * the export Worker has both, but a Node harness importing this module may have neither monotonic.
  */
-let wallClockTtl = false;
-
-/**
- * Whether cache ageing uses wall-clock (S5.3). Host-set rather than read here, because the flag
- * vocabulary lives in the app and this module may not have a `window` at all (export Worker, Node
- * harness). Defaults OFF: flag-off is the pre-slice behaviour, exactly.
- */
-export function setSceneWallClockTtl(enabled: boolean): void {
-  wallClockTtl = enabled;
-}
-
-function wallClockTtlEnabled(): boolean {
-  return wallClockTtl;
-}
-
 function sceneNowMs(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
@@ -1144,10 +1129,8 @@ const TTL_SHORT_MS = 2_000;
  * eviction rate on slower machines — the ones least able to afford re-upload churn (this slice's
  * declared risk).
  */
-function agedOut(nowMs: number, frameNow: number, entry: { lastFrame: number; lastUsedMs: number }, frames: number, ttlMs: number): boolean {
-  return wallClockTtlEnabled()
-    ? nowMs - entry.lastUsedMs > ttlMs
-    : frameNow - entry.lastFrame > frames;
+function agedOut(nowMs: number, entry: { lastUsedMs: number }, ttlMs: number): boolean {
+  return nowMs - entry.lastUsedMs > ttlMs;
 }
 
 export class SceneCompositor {
@@ -1705,7 +1688,7 @@ export class SceneCompositor {
     if (this.regionGradeRenderers.size === 0) return;
     const nowMs = sceneNowMs();
     for (const [key, entry] of this.regionGradeRenderers) {
-      if (agedOut(nowMs, this.frameCounter, entry, 300, TTL_LONG_MS)) {
+      if (agedOut(nowMs, entry, TTL_LONG_MS)) {
         entry.renderer.dispose();
         entry.target.dispose();
         this.regionGradeRenderers.delete(key);
@@ -2001,13 +1984,13 @@ export class SceneCompositor {
     const gl = this.gl;
     const nowMs = sceneNowMs();
     for (const [key, entry] of this.fragmentPrograms) {
-      if (agedOut(nowMs, this.frameCounter, entry, 300, TTL_LONG_MS)) {
+      if (agedOut(nowMs, entry, TTL_LONG_MS)) {
         gl.deleteProgram(entry.program);
         this.fragmentPrograms.delete(key);
       }
     }
     for (const [key, entry] of this.passGraphTargets) {
-      if (agedOut(nowMs, this.frameCounter, entry, 300, TTL_LONG_MS)) {
+      if (agedOut(nowMs, entry, TTL_LONG_MS)) {
         entry.rt.dispose();
         this.passGraphTargets.delete(key);
       }
@@ -2325,7 +2308,7 @@ export class SceneCompositor {
     const gl = this.gl;
     const nowMs = sceneNowMs();
     for (const [source, entry] of this.srcTextures) {
-      if (agedOut(nowMs, this.frameCounter, entry, 120, TTL_SHORT_MS)) {
+      if (agedOut(nowMs, entry, TTL_SHORT_MS)) {
         gl.deleteTexture(entry.tex);
         this.srcTextures.delete(source);
       }

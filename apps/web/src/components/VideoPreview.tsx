@@ -120,7 +120,6 @@ setGlGovernorEnabled(getGlGovernorEnabled());
 setGlContextBudget(8, 12);
 import { getLivePlaybackTime, getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
-import { getKernelProxySourceEnabled } from "../playback/frame-completion";
 import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
 import { createAudioFxNode, ensureAudioFxWorklet, updateAudioFxNode } from "../playback/audio-fx-worklet";
@@ -310,7 +309,6 @@ const PRELOAD_LOOKAHEAD_SECONDS = 1.2;
  * because a flag that could change between the memo and the effect below would let the two disagree
  * about whether a source is suppressed or demoted.
  */
-const kernelProxySourceEnabled = getKernelProxySourceEnabled();
 /** Shared empty set, so the no-proxy case keeps a stable identity and wakes no memo downstream. */
 const EMPTY_SOURCE_ID_SET: ReadonlySet<string> = new Set<string>();
 
@@ -1431,14 +1429,9 @@ function VideoPreviewImpl({
     const served = new Set(proxyServedCompIds);
     return new Set(flarexVirtualLayers.filter((v) => served.has(v.id.split(":")[1] ?? "")).map((v) => v.id));
   }, [flarexVirtualLayers, proxyServedCompIds]);
-  const activeFlarexVirtualLayers = useMemo(() => {
-    // Demotion path: every declared source stays in the set. Identity-stable, so the non-proxy case is
-    // byte-for-byte what it was.
-    if (kernelProxySourceEnabled) return flarexVirtualLayers;
-    if (proxyServedCompIds.length === 0) return flarexVirtualLayers;
-    const served = new Set(proxyServedCompIds);
-    return flarexVirtualLayers.filter((vlayer) => !served.has(vlayer.id.split(":")[1] ?? ""));
-  }, [flarexVirtualLayers, proxyServedCompIds]);
+  // S3.5: a proxied source is DEMOTED, not removed — every declared source stays in the set, so the
+  // list is identity-stable and a comp being served by its proxy no longer changes who is declared.
+  const activeFlarexVirtualLayers = flarexVirtualLayers;
 
   /**
    * MEDIA MANAGER (ADR-012 3.9, slice S3.2) — publish which sources EXIST, separately from which are
@@ -1462,16 +1455,11 @@ function VideoPreviewImpl({
   useEffect(() => {
     declareMediaSources(defaultSession, flarexVirtualLayers.map((vlayer) => vlayer.id));
     const affected = [...proxySuspendedSourceIds];
-    // S3.5 flips WHICH state this is, and the two must be mutually exclusive: a source reported as both
-    // suppressed and demoted would make the census that justified this change unreadable in the run that
-    // proves it. Whichever path is off is explicitly cleared rather than left holding a stale set.
-    if (kernelProxySourceEnabled) {
-      demoteMediaSources(defaultSession, affected, "comp-proxy-serving");
-      suppressMediaSources(defaultSession, [], "comp-proxy-serving");
-    } else {
-      suppressMediaSources(defaultSession, affected, "comp-proxy-serving");
-      demoteMediaSources(defaultSession, [], "comp-proxy-serving");
-    }
+    // S3.5: a proxy-served source is DEMOTED. `suppressMediaSources` is still cleared explicitly rather
+    // than left alone, because suppression and demotion must stay mutually exclusive — a source reported
+    // as both would make the I-33 census unreadable.
+    demoteMediaSources(defaultSession, affected, "comp-proxy-serving");
+    suppressMediaSources(defaultSession, [], "comp-proxy-serving");
   }, [flarexVirtualLayers, proxySuspendedSourceIds]);
 
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload

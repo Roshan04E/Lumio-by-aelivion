@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { registerSW } from "virtual:pwa-register";
-import { configureFontResolver, kernelDiagnostics, setSceneWallClockTtl, warpFontFile } from "@orreris/shared";
+import { configureFontResolver, kernelDiagnostics, warpFontFile } from "@orreris/shared";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";
@@ -58,7 +58,6 @@ installCrashTelemetry();
 kernelDiagnostics.enabled = resolveKernelDiagnosticsEnabled();
 // S5.3, same reason: the compositor ages caches on wall-clock, but it runs in the export Worker too,
 // where there is no `window` to ask. The host looks; the module is told.
-setSceneWallClockTtl(readKernelFlag(KERNEL_FLAGS.wallClockTtl));
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -700,9 +700,6 @@ export function ScenePreviewCanvas({
     Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; handle: ResourceHandle; lastVersion: number }>
   >(new Map());
   const kernelResourcesRef = useRef(getKernelResourcesEnabled());
-  // S5.3. Read once per mount like every other engine flag here, and pushed into the compositor module
-  // (which has no `window` in the export Worker) rather than read there.
-  const wallClockTtlRef = useRef(readKernelFlag(KERNEL_FLAGS.wallClockTtl));
   /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
   const lastResourceSweepRef = useRef(0);
   const failedRef = useRef(false);
@@ -1617,7 +1614,6 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
      */
     lastResourceSweepRef.current = sweepIdleSceneResources({
       enabled: kernelResourcesRef.current,
-      wallClockTtl: wallClockTtlRef.current,
       compositor,
       nowMs: now,
       lastSweepMs: lastResourceSweepRef.current,

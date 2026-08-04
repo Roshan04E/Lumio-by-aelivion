@@ -62,8 +62,6 @@ export const gradeScopeOf = (key: string): ResourceScope =>
 export interface IdleSweepParams {
   /** `kernelResources` — default ON. */
   readonly enabled: boolean;
-  /** `kernelWallClockTtl` (S5.3) — default OFF; gates the compositor's own cache ageing. */
-  readonly wallClockTtl: boolean;
   readonly compositor: { sweepIdleCaches: () => void };
   readonly nowMs: number;
   readonly lastSweepMs: number;
@@ -87,7 +85,7 @@ export function sweepIdleSceneResources(params: IdleSweepParams): number {
   // resources the kernel knows about; the compositor's texture/program/target caches were pruned only
   // at the tail of a composited frame, so a viewer that held, paused or hid stopped reclaiming exactly
   // when pressure was highest. This is the half of I-21/I-33 the kernel cannot reach.
-  if (params.wallClockTtl) params.compositor.sweepIdleCaches();
+  params.compositor.sweepIdleCaches();
 
   // `presented: false` — this runs before the hold decision, so whether this frame reaches the screen
   // is not yet known. Reporting the pessimistic value keeps the I-33 census honest.

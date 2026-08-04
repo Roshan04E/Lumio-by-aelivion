@@ -59,7 +59,6 @@ export const KERNEL_FLAGS = {
   diagnostics: { query: KERNEL_DIAGNOSTICS_FLAG_QUERY, storage: KERNEL_DIAGNOSTICS_FLAG_STORAGE, defaultOn: true },
   decoderLifetime: { query: "kernelDecoderLifetime", storage: "orreris.kernel.decoderLifetime", defaultOn: true },
   sessionSatisfaction: { query: "kernelSessionSatisfaction", storage: "orreris.kernel.sessionSatisfaction", defaultOn: false },
-  proxySource: { query: "kernelProxySource", storage: "orreris.kernelProxySource", defaultOn: false },
   resources: { query: "kernelResources", storage: "orreris.kernelResources", defaultOn: true },
   sourceAdmission: { query: "kernelSourceAdmission", storage: "orreris.kernel.sourceAdmission", defaultOn: false },
   // ONE exclusive flag for S4.5+S4.6 (ADR-012 §4, atomic group). They cannot be separated: deleting
@@ -73,7 +72,6 @@ export const KERNEL_FLAGS = {
   // re-upload churn — which only a soak can rule out.
   // S5.4. OFF by default: the upload pass is a new GL draw per proxied comp per decoded version, and
   // "low risk" in the programme is an argument about correctness, not about frame budget.
-  wallClockTtl: { query: "kernelWallClockTtl", storage: "orreris.kernel.wallClockTtl", defaultOn: false },
 } as const satisfies Record<string, KernelFlag>;
 
 /**
