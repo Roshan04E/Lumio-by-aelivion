@@ -449,3 +449,61 @@ export async function awaitWebCodecsEngaged(page: Page, timeoutMs = 60_000): Pro
   }
   return false;
 }
+
+/**
+ * Import extra media into the project's asset bin — the S4.3 fixture's raw material.
+ *
+ * WHY DISTINCT FILES. Source admission ranks CANDIDATES FOR A DECODER SLOT, and a slot is keyed by
+ * decoder identity (today, the URL). Adding the same asset eight times therefore produces eight doors
+ * onto ONE session — the duplicate-decode share, which by construction can never exceed the budget and
+ * so can never be denied. An over-budget comp needs eight DIFFERENT files or the fixture measures
+ * sharing while claiming to measure admission. This is the same trap `cutClipAtFraction` documents for
+ * S4.7, one subsystem along.
+ *
+ * Returns the asset-tile count actually reached, so a caller can report a VOID run rather than a
+ * confident number about a comp that never went over budget.
+ */
+export async function importAssets(page: Page, files: readonly string[]): Promise<number> {
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(600);
+  const input = page.locator(".asset-upload-button input[type=file]").first();
+  if (!(await input.count().catch(() => 0))) return 0;
+  await input.setInputFiles([...files]).catch(() => undefined);
+  // Import probes duration/dimensions off a hidden <video> per file, so the settle scales with count.
+  await page.waitForTimeout(2_000 + files.length * 1_500);
+  return page.locator(".asset-tile").count().catch(() => 0);
+}
+
+/**
+ * Add ONE MediaIn bound to the asset-bin tile at `assetIndex`, on a comp that already exists.
+ *
+ * Split from {@link addAssetSourceMediaIn} rather than folded into it because that helper is written to
+ * build the FIRST node (it creates the comp when absent and always takes the first trigger and the first
+ * tile). Reusing it in a loop would rebind node #1 eight times and report success each time — a comp
+ * with one source, dressed as eight. Here the new node is addressed with `.last()` and the asset with
+ * `.nth()`, which are the two things that have to differ per call.
+ */
+export async function addMediaInBoundTo(page: Page, assetIndex: number): Promise<boolean> {
+  await page.getByRole("tab", { name: /flarex/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(900);
+
+  const add = page.locator('[aria-label="Add MediaIn"]').first();
+  if (!(await add.count().catch(() => 0))) return false;
+  await add.click().catch(() => undefined);
+  await page.waitForTimeout(900);
+
+  const trigger = page.locator(".flarex-source-trigger").last();
+  if (!(await trigger.count().catch(() => 0))) return false;
+  await trigger.click().catch(() => undefined);
+  await page.waitForTimeout(700);
+
+  const tile = page.locator(".asset-tile").nth(assetIndex);
+  if (!(await tile.count().catch(() => 0))) return false;
+  await tile.dblclick().catch(() => undefined);
+  await page.waitForTimeout(1_200);
+
+  // "Host clip" means the pick did not land: the node exists but declares no asset, so it opens no
+  // decoder and contributes nothing to the budget the fixture is trying to exceed.
+  const bound = await trigger.getAttribute("title").catch(() => null);
+  return bound != null && !/host clip/i.test(bound);
+}

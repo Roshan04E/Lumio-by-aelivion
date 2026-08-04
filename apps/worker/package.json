@@ -41,6 +41,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/index.ts",
     "preview:budget": "tsx src/preview-budget-probe.ts",
+    "preview:admission": "tsx src/source-admission-probe.ts",
     "preview:profile": "tsx src/preview-cpu-profile.ts",
     "preview:freeze": "tsx src/preview-freeze-probe.ts"
   },
