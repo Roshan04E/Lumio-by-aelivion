@@ -323,12 +323,6 @@ let shareDetaches = 0;
  * landing; both at zero on a fixture that used to detach is a fixture that stopped exercising the path.
  */
 let blindShareSplits = 0;
-/** S7.2 diagnosis: why `reviseBlindShare` declined. Counters only — see that function. */
-let blindSkipServed = 0;
-let blindSkipSolo = 0;
-let blindSkipNotBlind = 0;
-let blindSkipUndeclared = 0;
-let blindSkipColocated = 0;
 /** S4.7 diagnosis: one entry per detach, naming the approval that let the borrow happen. Bounded. */
 const detachedApprovals: {
   reason: string;
@@ -984,10 +978,6 @@ function noteDivergence(session: SharedSession): void {
  * jitter to ride out and waiting only guarantees the harm.
  */
 function reviseBlindShare(session: SharedSession): void {
-  // S7.2 DIAGNOSIS, observability only. Under `kernelProxySource=1` this function declines on every
-  // run while a divergence detaches anyway (`blindSplits: 0`, deterministic 3/3). It has four early
-  // returns and guessing which one fired is exactly the inference that cost this programme two
-  // sessions; each is counted instead. Nothing reads these to make a decision.
   // NOT `session.lastServed !== null`. That was this function's original test and it is too coarse:
   // `lastServed` is one entry for the whole session, so a blind joiner serving its OWN first request
   // makes the session read as "in service" while nothing yet depends on it — and under
@@ -1004,14 +994,8 @@ function reviseBlindShare(session: SharedSession): void {
       break;
     }
   }
-  if (incumbentInService) {
-    blindSkipServed += 1;
-    return;
-  }
-  if (session.members.size < 2) {
-    blindSkipSolo += 1;
-    return;
-  }
+  if (incumbentInService) return;
+  if (session.members.size < 2) return;
 
   // The blind approval belongs to the SESSION, not to whoever happens to be declaring. Gating on the
   // declaring member looked equivalent and is not: the awaited fact almost always arrives via the OTHER
@@ -1026,21 +1010,12 @@ function reviseBlindShare(session: SharedSession): void {
       break;
     }
   }
-  if (!blindJoin) {
-    blindSkipNotBlind += 1;
-    return;
-  }
+  if (!blindJoin) return;
 
   const times: number[] = [];
   for (const m of session.members) times.push(m.requestedTime);
-  if (times.some((time) => !Number.isFinite(time))) {
-    blindSkipUndeclared += 1;
-    return;
-  }
-  if (!isDiverged(times, session.provider?.nominalFps)) {
-    blindSkipColocated += 1;
-    return;
-  }
+  if (times.some((time) => !Number.isFinite(time))) return;
+  if (!isDiverged(times, session.provider?.nominalFps)) return;
 
   let latest: SharedMember | null = null;
   for (const m of session.members) {
@@ -1713,13 +1688,6 @@ if (typeof window !== "undefined") {
       // The fix's own counter, reported alongside so a soak can tell a working correction from a fixture
       // that simply stopped reaching the path.
       blindSplits: blindShareSplits,
-      blindSkips: {
-        served: blindSkipServed,
-        solo: blindSkipSolo,
-        notBlind: blindSkipNotBlind,
-        undeclared: blindSkipUndeclared,
-        colocated: blindSkipColocated,
-      },
     }),
   });
 }

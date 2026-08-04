@@ -152,7 +152,6 @@ interface ArmResult {
     refusals?: { reason?: string; gapSeconds?: number | null; toleranceSeconds?: number }[];
     misses?: number;
     blindSplits?: number;
-    blindSkips?: { served?: number; solo?: number; notBlind?: number; undeclared?: number; colocated?: number };
     detached?: {
       reason?: string;
       gapSecondsAtApproval?: number | null;
@@ -465,12 +464,7 @@ function report(result: ArmResult): void {
             : "") +
           // Printed unconditionally, including the zero. A silent absence would read the same whether the
           // fix never fired or the fixture never reached the path, and those mean opposite things.
-          `   blindSplits: ${borrow.blindSplits ?? 0}` +
-          (borrow.blindSkips
-            ? `   skips: served ${borrow.blindSkips.served ?? 0} · solo ${borrow.blindSkips.solo ?? 0} · ` +
-              `notBlind ${borrow.blindSkips.notBlind ?? 0} · undeclared ${borrow.blindSkips.undeclared ?? 0} · ` +
-              `colocated ${borrow.blindSkips.colocated ?? 0}`
-            : "")
+          `   blindSplits: ${borrow.blindSplits ?? 0}`
       );
       // THE ANSWER. One line per detach, naming the approval that permitted it.
       for (const d of borrow.detached ?? []) {
