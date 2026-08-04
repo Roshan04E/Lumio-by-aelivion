@@ -82,12 +82,7 @@ import { recordPlaybackFrame } from "../editor/performance/frame-stats";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { getHdrPipelineEnabled, getRegionPassesEnabled } from "../color/render-engine";
 import type { ScenePreviewMediaSource } from "./scene-media-source";
-import {
-  STALE_HOLD_MAX_MS,
-  getCoherenceHoldEnabled,
-  isStale,
-  getCoherenceUnifiedEnabled,
-} from "../playback/temporal-coherence";
+import { STALE_HOLD_MAX_MS, isStale } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
 import { getKernelResourcesEnabled } from "../playback/frame-completion";
 import { isReadaheadProbeEnabled, noteReadaheadComposite, type ReadaheadSample } from "../playback/readahead-probe";
@@ -259,30 +254,22 @@ function createCoherenceStats(): CoherenceStats {
       console.log(`convergence events  ${s.holdStreaks}   ← one per scrub that had to wait`);
       console.log(`time to coherent    last ${ms(s.lastHoldMs)} · avg ${ms(s.avgHoldMs)} · worst ${ms(s.maxHoldMs)}`);
       console.log(`worst staleness     ${(s.maxStalenessSeconds * 1000).toFixed(1)}ms beyond one frame`);
-      // The SAME counter means two different things depending on whether the barrier was armed, and
-      // reporting it as "barrier overridden" with the flag off was actively misleading (2026-07-28:
-      // 1174 "escape hatches" in a run where nothing could ever hold). With the hold disabled this is
-      // simply the incoherent-frame RATE — the Track B baseline, not a failure of anything.
-      const armed = getCoherenceHoldEnabled();
-      const pct = s.composites > 0 ? ((s.escapeHatches / s.composites) * 100).toFixed(1) : "0.0";
+      // This counter used to mean two different things depending on whether the barrier was armed, and
+      // reporting it as "barrier overridden" while nothing could hold was actively misleading
+      // (2026-07-28: 1174 "escape hatches" in a run with the barrier off). The barrier is now always
+      // armed, so the ambiguity is gone with the switch: an escape hatch is an escape hatch.
       if (s.escapeHatches === 0) {
         console.log("%cincoherent frames   0  ✓ every presented frame was temporally coherent", "color:#3c3");
-      } else if (armed) {
+      } else {
         console.log(
           `%cescape hatches      ${s.escapeHatches}  ✗ mixed-generation frames reached the screen ` +
             `(${s.escapeHatchEpisode} episode-cap, ${s.escapeHatchWriteOff} write-off)`,
           "color:#e55"
         );
-      } else {
-        console.log(
-          `%cincoherent frames   ${s.escapeHatches} of ${s.composites} (${pct}%)  — barrier DISABLED, ` +
-            "this is the baseline rate, not an override (?flarexCoherence=1 to arm it)",
-          "color:#e90"
-        );
       }
       const offenders = Object.entries(s.offenders).sort((a, b) => b[1] - a[1]);
       if (offenders.length > 0) {
-        console.log(armed ? "stale sources (most first):" : "stale sources — worst offender is the one to chase:");
+        console.log("stale sources (most first):");
         for (const [id, n] of offenders.slice(0, 8)) {
           const worst = s.staleWorstMs[id] ?? 0;
           // Seconds of staleness is the tell: a few frames behind is latency, 20s+ is a source that
@@ -629,13 +616,11 @@ export function ScenePreviewCanvas({
   // against `staleIds` and is uniform. Sharing one map would couple two independent hold policies.
   const staleSinceRef = useRef<Map<string, number>>(new Map());
   // Read once per mount (flag convention: reload to change), like every other engine flag.
-  const coherenceHoldEnabledRef = useRef(getCoherenceHoldEnabled());
   /**
    * S4.5 + S4.6's single exclusive flag, resolved ONCE at mount. Re-reading it per frame would let the
    * renderer change policy mid-playback, which is a worse failure than either policy: the fallback
    * would appear and disappear between frames. A ref, not state — nothing re-renders on it.
    */
-  const coherenceUnifiedRef = useRef(getCoherenceUnifiedEnabled());
   const rafRef = useRef<number>(0);
   const disposedRef = useRef(false);
   const contextLostRef = useRef(false);
@@ -1506,7 +1491,6 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       flarexVirtualLayers: fxVirtual,
       // S4.5 — the HOST decides the substitution policy and the compiler is told (I-15: the lowering
       // layer owns no policy). Read from a ref so the live path never re-resolves a flag per frame.
-      allowHostSubstitution: !coherenceUnifiedRef.current,
       // Comp proxies (plans/flarex-comp-proxy.md, S2) — read LIVE off the ref at draw time, exactly like
       // `gradedRef`: the frame for each proxied comp is refreshed asynchronously by its decoder, and a
       // prop snapshot would draw the previous one. Undefined/empty ⇒ every comp lowers live as before.
@@ -1630,13 +1614,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       isMediaLayerId,
       blockedSince,
       staleIds,
-      staleSince,
       allStaleness,
-      holdStartedMs: coherenceHoldStartRef.current,
       nowMs: now,
       targetTimeSeconds: t,
-      coherenceUnified: coherenceUnifiedRef.current,
-      coherenceHoldEnabled: coherenceHoldEnabledRef.current,
     });
     if (readiness.hold) {
       noteCoherence(

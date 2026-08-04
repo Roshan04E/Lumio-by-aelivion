@@ -63,7 +63,6 @@ export const KERNEL_FLAGS = {
   // the host-clip fallback exposes every readiness gap the substitution was hiding, and only the
   // unified barrier — one coherence mechanism across both transport states, answering with a moment
   // instead of a boolean — covers them. S4.4 is NOT in this group; it is additive and shipped alone.
-  coherenceUnified: { query: "kernelCoherenceUnified", storage: "orreris.kernel.coherenceUnified", defaultOn: false },
   // S5.3. OFF by default: flag-off is the pre-slice behaviour EXACTLY (frame-counted TTLs, prunes only
   // at the tail of a composited frame), and the declared risk is over-aggressive reclamation causing
   // re-upload churn — which only a soak can rule out.

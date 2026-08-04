@@ -80,21 +80,7 @@ export interface FlarexLowerCtx {
   frameTimeSeconds: number;
   /** The host clip's normal, fully-built draw (grade + transform + masks + passes) = MediaIn. */
   hostSourceDraw: SceneLayerDraw;
-  /**
-   * May an unresolved MediaIn show the HOST CLIP's pixels? (ADR-012 I-27/I-34, slice S4.5.)
-   *
-   * `false` deletes the substitution: `resolveSourceDraw → null` means no picture, never someone
-   * else's. Defaults to `true`, which is the pre-S4.5 behaviour, so a caller that has not been taught
-   * the policy keeps exactly what it had.
-   *
-   * **Passed as DATA, never read as a flag here.** I-15 forbids the lowering layer from owning policy,
-   * and reading a feature flag in this file is precisely that — it would also make the compile depend
-   * on browser state, which is what keeps it out of the export and the harness. The host decides; the
-   * compiler is told. The I-15 ratchet in `kernel-conformance.ts` fails the build if this file ever
-   * grows a flag read, a clock or module state.
-   */
-  allowHostSubstitution?: boolean | undefined;
-  /**
+    /**
    * Out-channel for node evaluation records (slice S6.4). Absent = no records, today's behaviour.
    *
    * A CALLBACK, not a session handle — and the conformance harness is why. My first version imported
@@ -1402,7 +1388,12 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         //
         // Put plainly: the invariant is about WHOSE pixels these are, not about which code path reached
         // them. Same line, opposite meanings.
-        if (ctx.allowHostSubstitution === false && substituting) return null;
+        // I-27: scarcity is never resolved by showing ANOTHER source's content. `substituting` means
+        // the node HAS a loader, that loader owns the pixels, and they have not arrived — so a host
+        // draw here would be a stand-in for something else. `no-loader` / `no-resolver` are the
+        // opposite statement (no loader was ever promoted, so the host clip IS this node's source) and
+        // still soft-degrade below. Same line, opposite meanings — see the note above.
+        if (substituting) return null;
         return { kind: "image", draw: cloneImage(ctx.hostSourceDraw) };
       }
 

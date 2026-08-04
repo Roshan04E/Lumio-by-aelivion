@@ -28,7 +28,6 @@ import {
   resolveReadiness,
   servedTime,
 } from "@orreris/shared";
-import { shouldHoldForCoherence } from "./temporal-coherence";
 
 /**
  * How long a stacked layer's source may stay unready before we give up holding the previous frame and
@@ -73,16 +72,10 @@ export interface ReadinessDecisionInputs {
   readonly isMediaLayerId: (id: string) => boolean;
   readonly blockedSince: ReadonlyMap<string, number>;
   readonly staleIds: readonly string[];
-  readonly staleSince: Map<string, number>;
   /** Per-source staleness in seconds; `null` = awaiting, no frame at all. */
   readonly allStaleness: Readonly<Record<string, number | null>>;
-  readonly holdStartedMs: number | null;
   readonly nowMs: number;
   readonly targetTimeSeconds: number;
-  /** `kernelCoherenceUnified` (S4.6) — default OFF. */
-  readonly coherenceUnified: boolean;
-  /** The pre-S4.6 barrier's own switch. */
-  readonly coherenceHoldEnabled: boolean;
 }
 
 export interface ReadinessDecision {
@@ -111,30 +104,22 @@ export function decideSceneReadiness(inputs: ReadinessDecisionInputs): Readiness
       (inputs.isMediaLayerId(id) ? NOT_READY_HOLD_MEDIA_MS : NOT_READY_HOLD_MS)
   );
 
-  const coherenceHold = inputs.coherenceUnified
-    ? resolveReadiness(
-        deriveTargetTime(deriveTimelineTime(authoritativeTime(inputs.targetTimeSeconds))),
-        Object.entries(inputs.allStaleness).map(([id, staleness]) => ({
-          id,
-          // `Infinity` is the caller's existing encoding for "awaiting, no frame at all" — the
-          // barrier's `null`, which is a declared degradation rather than an input to the minimum.
-          // A finite staleness means the source HAS pixels, from `t - staleness` seconds ago.
-          servedTime:
-            staleness === null
-              ? undefined
-              : Number.isFinite(staleness)
-                ? servedTime(inputs.targetTimeSeconds - staleness)
-                : null,
-        }))
-      ).outcome === "degraded"
-    : shouldHoldForCoherence({
-        playing: inputs.playing,
-        staleIds: [...inputs.staleIds],
-        staleSince: inputs.staleSince,
-        holdStartedMs: inputs.holdStartedMs,
-        nowMs: inputs.nowMs,
-        enabled: inputs.coherenceHoldEnabled,
-      });
+  const coherenceHold =
+    resolveReadiness(
+      deriveTargetTime(deriveTimelineTime(authoritativeTime(inputs.targetTimeSeconds))),
+      Object.entries(inputs.allStaleness).map(([id, staleness]) => ({
+        id,
+        // `Infinity` is the caller's existing encoding for "awaiting, no frame at all" — the barrier's
+        // `null`, which is a declared degradation rather than an input to the minimum. A finite
+        // staleness means the source HAS pixels, from `t - staleness` seconds ago.
+        servedTime:
+          staleness === null
+            ? undefined
+            : Number.isFinite(staleness)
+              ? servedTime(inputs.targetTimeSeconds - staleness)
+              : null,
+      }))
+    ).outcome === "degraded";
 
   if (notReadyHold || coherenceHold) {
     // Which gate actually withheld this frame. A not-ready hold means a source has NO frame; a

@@ -88,49 +88,6 @@ export const ASSUMED_MIN_FPS = 24;
  */
 export const ELEMENT_FALLBACK_MAX_LAG_S = 1;
 
-/**
- * Is the HOLD enabled? Flag (repo convention): `?flarexCoherence=0` → localStorage
- * `orreris.flarexCoherence` → **ON** (default since 2026-07-28).
- *
- * ── It shipped OFF for a day, and that was a measurement error ────────────────────────────────────
- * The first browser verification appeared to falsify the premise this barrier rests on — that a
- * paused loader converges on the requested time in a few hundred ms. Measured then: 24.3s worst
- * staleness and 44 of 47 escape-hatch activations being per-source WRITE-OFFS, i.e. sources that
- * never converged inside their budget. On that evidence the barrier could only withhold, give up, and
- * let the stagger return — strictly worse than not holding.
- *
- * Every input to that verdict was broken, and none of it was the barrier:
- *   1. the production build shipped `react-dom.development`, costing multi-second commit stalls that
- *      froze every decoder mid-convergence;
- *   2. `requestWcFrame` re-entered across a microtask, saturating the main thread during exactly the
- *      scrubs being measured;
- *   3. `stalenessSeconds` had no media-end clamp, so a playhead past a clip's material reported
- *      15-25s of lag that did not exist.
- *
- * Re-measured after those three fixes, on the same machine and comp: **339ms average convergence,
- * 1513ms worst**, and the user-visible result is the invariant — every MediaIn lands together.
- *
- * The lesson is worth more than the flag: do not retire a mechanism on a measurement taken in a broken
- * environment. Establish that the rig is sound before concluding the design is wrong.
- *
- * MEASUREMENT IS INDEPENDENT of this flag: staleness is computed and reported to
- * `window.__flarexCoherence` either way, so `?flarexCoherence=0` still gives a fully instrumented
- * comparison run rather than a blind one.
- */
-export function getCoherenceHoldEnabled(): boolean {
-  const truthy = (v: string | null | undefined): boolean => v === "1" || v === "true";
-  if (typeof window !== "undefined") {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.has("flarexCoherence")) return truthy(params.get("flarexCoherence"));
-      const stored = window.localStorage?.getItem("orreris.flarexCoherence");
-      if (stored != null) return truthy(stored);
-    } catch {
-      /* SSR / restricted storage — fall through */
-    }
-  }
-  return true;
-}
 
 /** One source frame period, exact when the provider knows its rate. */
 export function sourceFramePeriodSeconds(nominalFps: number | null | undefined): number {
@@ -241,44 +198,4 @@ export function isStale(staleness: number | null): boolean {
  * Same duration, deliberately: "no single source stalls the viewer for longer than this, and neither
  * does any combination of them".
  */
-/**
- * S4.6 — is the UNIFIED coherence path active? (`?kernelCoherenceUnified=1` → OFF by default.)
- *
- * The single exclusive flag for S4.5 + S4.6. On, the paused-only barrier below and the host-clip
- * substitution in `compile-flarex.ts` are BOTH replaced by the readiness barrier's `effectiveTime`;
- * off, both remain exactly as they were. They share one switch because they cannot be reverted
- * separately: restoring the fallback without the barrier brings the wrong picture back, and keeping
- * the barrier without the fallback is fine but pointless — the fallback was what hid the race.
- */
-export function getCoherenceUnifiedEnabled(): boolean {
-  return readKernelFlag(KERNEL_FLAGS.coherenceUnified);
-}
 
-/**
- * PAUSED-ONLY BARRIER — superseded by the readiness barrier when {@link getCoherenceUnifiedEnabled}
- * is on (ADR-012 slice S4.6). Kept, and kept reachable ONLY through the flag-off branch, because it is
- * this slice's declared rollback: the programme requires that turning the flag off restores the
- * previous renderer exactly, and that is only true if the code it restores still exists.
- *
- * Note the first line, which is the whole reason S4.4 exists: `playing` returns false immediately. This
- * function has never done anything during playback, so "unifying coherence across transport states"
- * means giving playback an answer it has never had — not tightening one it already had.
- */
-export function shouldHoldForCoherence(args: {
-  playing: boolean;
-  staleIds: readonly string[];
-  /** Wall ms each currently-stale id was FIRST seen stale (its own write-off clock). */
-  staleSince: ReadonlyMap<string, number>;
-  /** Wall ms this contiguous hold began; null when not currently holding. */
-  holdStartedMs: number | null;
-  nowMs: number;
-  /** {@link getCoherenceHoldEnabled}. Injected so the decision stays pure and testable. */
-  enabled: boolean;
-}): boolean {
-  const { playing, staleIds, staleSince, holdStartedMs, nowMs, enabled } = args;
-  if (!enabled || playing || staleIds.length === 0) return false;
-  // Episode ceiling.
-  if (holdStartedMs !== null && nowMs - holdStartedMs >= STALE_HOLD_MAX_MS) return false;
-  // Hold only for sources still within their own budget — a written-off source no longer counts.
-  return staleIds.some((id) => nowMs - (staleSince.get(id) ?? nowMs) < STALE_HOLD_MAX_MS);
-}

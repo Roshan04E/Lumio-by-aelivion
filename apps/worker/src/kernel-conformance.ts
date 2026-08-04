@@ -2235,8 +2235,12 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
     // vacuous pass in a new costume.
     const holdAt = canvasSrc.search(/decideSceneReadiness\s*\(\s*\{/);
     const readinessSrc = strip(readFileSync(`${webDir}playback/scene-readiness.ts`, "utf8"));
+    // S7.2 re-pointed the coherence half: the paused-only barrier it used to name is deleted, so the
+    // witness is now the surviving pair — the not-ready gate and the unified barrier — both of which
+    // must still be decided HERE. Re-pointed rather than dropped: the invariant is that the callee owns
+    // the decision, and that is as true with one coherence mechanism as with two.
     enforced("I-33", "…and the extracted decision is the one that owns BOTH hold gates",
-      /shouldHoldForCoherence\s*\(\s*\{/.test(readinessSrc) && /resolveReadiness\s*\(/.test(readinessSrc));
+      /notReadyHold\s*=/.test(readinessSrc) && /resolveReadiness\s*\(/.test(readinessSrc));
     enforced("I-33", "…and the host sweeps BEFORE the hold decision, not after it",
       sweepAt > 0 && holdAt > 0 && sweepAt < holdAt);
   }
@@ -2254,12 +2258,13 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
   enforced("I-27", "the host-clip substitution exists in ONE place — it was deleted, not moved",
     hostDrawUsers.length === 0, hostDrawUsers.join(" · "));
 
-  // …and that one place is genuinely guarded. A `return` of the host draw with no policy check above it
-  // would mean the flag does nothing, which is the difference between deleting a fallback and
-  // describing one.
+  // …and the substitution is now UNCONDITIONAL, because S7.2 removed the policy that could re-enable
+  // it. This assertion used to prove the switch was real ("gated on the declared policy"); with one
+  // execution path there is no switch to be real, and the stronger statement is that no caller can ask
+  // for the old behaviour at all — the option is gone from the compiler's surface entirely.
   const compiler = strip(readFileSync(`${sharedDir}flarex/compile-flarex.ts`, "utf8"));
-  enforced("I-34", "…and that place is gated on the declared policy, so the switch is real",
-    /allowHostSubstitution\s*===\s*false\s*&&\s*substituting\s*\)\s*return null;/.test(compiler));
+  enforced("I-34", "…and the substitution is refused unconditionally — there is no policy to opt out of",
+    /if\s*\(\s*substituting\s*\)\s*return null;/.test(compiler) && !/allowHostSubstitution/.test(compiler));
 
   // …and the deletion stays SCOPED to the case I-27 actually forbids. The first version of S4.5
   // returned null for every path that reached the host draw and failed 11 flarex fixtures at up to
@@ -2273,16 +2278,19 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
     /substituting\s*=\s*resolved\s*===\s*"pending";/.test(compiler),
     "the host draw may be withheld only when the node HAS a loader whose pixels have not arrived");
 
-  // ── (1) THE OLD TIMING POLICIES ARE UNREACHABLE, NOT MERELY BYPASSED. `shouldHoldForCoherence` may
-  // be called from exactly one site, and only from the flag-off branch. More than one live call site
-  // means a second timing policy survived the unification.
+  // ── (1) THE OLD TIMING POLICY IS GONE, NOT MERELY UNREACHABLE. Until S7.2 this allowed exactly ONE
+  // call site — the flag-off branch — because the rollback required the old barrier to still exist.
+  // With the flag deleted the requirement inverts: ZERO call sites, and the definition deleted too. A
+  // surviving `shouldHoldForCoherence` would be a second timing policy that nothing can reach and
+  // nobody maintains, which is how a "one mechanism" claim quietly becomes false again.
   let holdCallSites = 0;
   for (const file of walkTs(webDir)) {
     if (file.endsWith("temporal-coherence.ts") || file.includes(".test.")) continue;
     holdCallSites += (strip(readFileSync(file, "utf8")).match(/shouldHoldForCoherence\s*\(/g) ?? []).length;
   }
-  enforced("I-6", "the paused-only barrier has exactly ONE caller, reachable only with the flag off",
-    holdCallSites === 1, `${holdCallSites} call sites`);
+  enforced("I-6", "the paused-only barrier is gone — no callers, and no definition to call",
+    holdCallSites === 0 && !/export function shouldHoldForCoherence/.test(readFileSync(`${webDir}playback/temporal-coherence.ts`, "utf8")),
+    `${holdCallSites} call sites`);
 
   // ── (3) ONE SOURCE OF EVALUATION TIME. `effectiveTime` may be minted in one place only, and S4.4's
   // ratchet already proves that for the label. What this adds is the barrier's own exclusivity: no
@@ -2302,15 +2310,12 @@ console.log("\nS4.5 + S4.6 — declared absence, and one timing policy (I-27/I-3
   enforced("I-1", "only the readiness barrier mints an effective time — there is no alternate timing path",
     verdictBuilders.length === 0, verdictBuilders.join(" · "));
 
-  // ── (4) ROLLBACK. The flag-off path must be the PREVIOUS renderer, which is only true if the old
-  // code still exists to be restored. Asserted positively: deleting `shouldHoldForCoherence` outright
-  // would pass the "one caller" check above while destroying the rollback, so both directions matter.
-  const coherence = readFileSync(`${webDir}playback/temporal-coherence.ts`, "utf8");
-  enforced("I-25", "the pre-S4.6 barrier is retained so flag-off restores the previous renderer",
-    /export function shouldHoldForCoherence/.test(coherence));
-  enforced("I-25", "…and the substitution default is UNCHANGED, so an untaught caller keeps its behaviour",
-    /allowHostSubstitution\?:\s*boolean\s*\|\s*undefined/.test(compiler) &&
-      !/allowHostSubstitution\s*=\s*false/.test(compiler));
+  // ── (4) ROLLBACK, RETIRED. Two I-25 assertions used to live here, and both existed solely to keep the
+  // flag-off path restorable: the pre-S4.6 barrier had to still exist, and the substitution default had
+  // to stay untouched so an untaught caller kept its old behaviour. S7.2 deleted the rollback
+  // deliberately, so preserving them would assert that the thing we just removed is still present —
+  // a test suite arguing with its own codebase. Their replacements are the I-6 and I-34 checks above,
+  // which now assert the permanent shape: no barrier, no policy, one path.
 }
 
 // ---------------------------------------------------------------------------------------------
