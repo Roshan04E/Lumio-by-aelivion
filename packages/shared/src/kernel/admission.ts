@@ -192,7 +192,8 @@ function clamp01(value: number): number {
 export function rankAdmission(
   candidates: readonly AdmissionCandidate[],
   capacity: number,
-  nowMs: number
+  nowMs: number,
+  observe?: AdmissionObserver | undefined
 ): AdmissionDecision {
   const scored = candidates.map((candidate) => {
     const merit = contributionRank(candidate.contribution);
@@ -294,7 +295,238 @@ export function rankAdmission(
     });
   }
 
+  // ADR-013 Phase 0 / M1. Everything below the guard is measurement: the decision is already made and
+  // is returned unchanged whether or not anyone is observing. `observe` is undefined unless the host
+  // resolved diagnostics on, so the disabled cost is one undefined check (R1).
+  if (observe !== undefined) {
+    observe(
+      buildScoredDecision(scored, admittedSet, heldByResidency, eligible, slots, nowMs)
+    );
+  }
+
   return { admitted, denied, heldByResidency };
+}
+
+// ── ADR-013 Phase 0 measurement surface (M1, M5) ────────────────────────────
+//
+// This section records HOW a decision was reached. It computes nothing the decision consumed, and
+// `rankAdmission` returns byte-identical results with it absent — which is the property that makes it
+// an observability control rather than behaviour wearing a diagnostics guard (S7.2's classification
+// rule: does the runtime do something different with the flag off?).
+
+/** One candidate as the ranker actually scored it. */
+export interface AdmissionScoredEntry {
+  readonly key: string;
+  /** Contribution merit alone, 0..1. `UNDECLARED_RANK` when nothing was declared. */
+  readonly merit: number;
+  /** The §6.11 fairness term. See {@link AdmissionScoredDecision.agingAllZero}. */
+  readonly aging: number;
+  readonly rank: number;
+  readonly undeclared: boolean;
+  readonly residencyProtected: boolean;
+  /** `admittedAtMs != null` — this candidate already holds capacity. Splits every M1/M5 census. */
+  readonly incumbent: boolean;
+  readonly admitted: boolean;
+  /** What `rankAdmission` computed as this candidate's denial duration. Asserted by C2. */
+  readonly deniedForMs: number;
+}
+
+/**
+ * Which level of the comparator decided the admitted/denied boundary.
+ *
+ * TRI-VALUED, and that is the point (ADR-013 Phase 0 §2). The sort has three levels — rank, then
+ * residency-protection, then `key` — so a boolean "was it a tie-break" would merge *damped by
+ * hysteresis, as designed* with *decided alphabetically*, which are the opposite findings. M1's whole
+ * result turns on telling them apart.
+ */
+export type AdmissionTieBreak =
+  /** Ranks differed at the boundary: the ordering ordered. */
+  | "rank"
+  /** Minimum residency held a slot a challenger would otherwise have taken. */
+  | "residency"
+  /** Ranks and protection were equal; the `key` string comparator decided. */
+  | "key"
+  /** Nothing eligible was denied — capacity was not contended. */
+  | "uncontended";
+
+/** Whether the boundary sat between declared candidates, undeclared ones, or across the two. */
+export type AdmissionBoundaryDeclaration = "declared" | "undeclared" | "mixed" | "none";
+
+export interface AdmissionScoredDecision {
+  readonly capacity: number;
+  readonly tieBroken: AdmissionTieBreak;
+  /**
+   * Classifies the decision for M1's split. Only `declared` boundaries contribute to *T*_declared;
+   * `undeclared` ones feed *T*_undeclared; `mixed` is counted and excluded from both, because a
+   * boundary between a declared and an undeclared candidate is evidence about neither.
+   */
+  readonly boundary: AdmissionBoundaryDeclaration;
+  readonly entries: readonly AdmissionScoredEntry[];
+  /**
+   * **C1 assertion.** True when every aging term in this decision is exactly zero.
+   *
+   * The reading this design is built on (`preview-frame-pool.ts:1345-1353`) is that incumbents always
+   * carry `admittedAtMs`, and the sole null-valued candidate is a newcomer whose `firstRequestedAtMs`
+   * is `now` — so the §6.11 fairness term is structurally inert on the live path. That is a READ, and
+   * ADR-017 U12 is the standing reminder that a read is not a measurement: five files were wired and
+   * typecheck was clean while a wrapper silently dropped the value. This field is how the read gets
+   * watched working. `false` means the call path has changed and M1's analysis needs revisiting.
+   */
+  readonly agingAllZero: boolean;
+  /**
+   * **C2 assertion.** True when every incumbent's `deniedForMs` equals its residency age.
+   *
+   * `deniedForMs` means time-since-first-denial for a newcomer and time-since-acquire for an
+   * incumbent, which is why a long-held incumbent that loses its slot is labelled
+   * `"permanently-denied"`. M5's census split depends on that being the semantics; `false` means the
+   * split is invalid and M5 must be re-derived BEFORE its decision rule is applied.
+   */
+  readonly incumbentDeniedForMsIsResidency: boolean;
+}
+
+export type AdmissionObserver = (decision: AdmissionScoredDecision) => void;
+
+interface ScoredInternal {
+  readonly candidate: AdmissionCandidate;
+  readonly merit: number;
+  readonly deniedForMs: number;
+  readonly rank: number;
+  readonly undeclared: boolean;
+  readonly residencyProtected: boolean;
+}
+
+function buildScoredDecision(
+  scored: readonly ScoredInternal[],
+  admittedSet: ReadonlySet<string>,
+  heldByResidency: readonly string[],
+  eligible: readonly ScoredInternal[],
+  capacity: number,
+  nowMs: number
+): AdmissionScoredDecision {
+  const entries: AdmissionScoredEntry[] = scored.map((entry) => ({
+    key: entry.candidate.key,
+    merit: entry.merit,
+    aging: entry.rank - entry.merit,
+    rank: entry.rank,
+    undeclared: entry.undeclared,
+    residencyProtected: entry.residencyProtected,
+    incumbent: entry.candidate.admittedAtMs != null,
+    admitted: admittedSet.has(entry.candidate.key),
+    deniedForMs: entry.deniedForMs,
+  }));
+
+  // The boundary is the lowest-ranked ADMITTED against the highest-ranked ELIGIBLE DENIED. Not
+  // `order[i]` vs `order[i+1]`: residency-protected incumbents claim slots before the rank walk, so
+  // adjacency in the sorted array is not adjacency at the decision boundary.
+  let lastAdmitted: ScoredInternal | undefined;
+  let firstDenied: ScoredInternal | undefined;
+  for (const entry of eligible) {
+    if (admittedSet.has(entry.candidate.key)) {
+      if (lastAdmitted === undefined || entry.rank < lastAdmitted.rank) lastAdmitted = entry;
+    } else if (firstDenied === undefined || entry.rank > firstDenied.rank) {
+      firstDenied = entry;
+    }
+  }
+
+  let tieBroken: AdmissionTieBreak;
+  if (firstDenied === undefined || lastAdmitted === undefined) {
+    tieBroken = "uncontended";
+  } else if (heldByResidency.length > 0) {
+    // The strong case: a protected incumbent kept a slot a strictly higher-ranked candidate wanted.
+    // Checked first because it subsumes the equal-rank case below.
+    tieBroken = "residency";
+  } else if (lastAdmitted.rank !== firstDenied.rank) {
+    tieBroken = "rank";
+  } else if (lastAdmitted.residencyProtected !== firstDenied.residencyProtected) {
+    tieBroken = "residency";
+  } else {
+    tieBroken = "key";
+  }
+
+  const boundary: AdmissionBoundaryDeclaration =
+    firstDenied === undefined || lastAdmitted === undefined
+      ? "none"
+      : lastAdmitted.undeclared === firstDenied.undeclared
+        ? lastAdmitted.undeclared
+          ? "undeclared"
+          : "declared"
+        : "mixed";
+
+  let agingAllZero = true;
+  let incumbentDeniedForMsIsResidency = true;
+  for (const entry of scored) {
+    if (entry.rank !== entry.merit) agingAllZero = false;
+    const admittedAt = entry.candidate.admittedAtMs;
+    if (admittedAt != null && entry.deniedForMs !== Math.max(0, nowMs - admittedAt)) {
+      incumbentDeniedForMsIsResidency = false;
+    }
+  }
+
+  return {
+    capacity,
+    tieBroken,
+    boundary,
+    entries,
+    agingAllZero,
+    incumbentDeniedForMsIsResidency,
+  };
+}
+
+const KEY_SCORED = "admission.scored";
+const MAX_SCORED_RECORDS = 256;
+
+/**
+ * Record one scored decision. Caller must already have checked {@link kernelDiagnostics}.enabled —
+ * this is the ring copy the S7.2 audit flagged as genuinely expensive, and the guard has to be at the
+ * call site to be worth anything.
+ *
+ * The C1/C2 assertions are recorded as `repair`-severity events rather than thrown. A throw here would
+ * be a behaviour change smuggled in behind a diagnostics guard, which is the exact thing the retained
+ * flag exists to keep impossible.
+ */
+export function noteAdmissionScored(session: RuntimeSession, decision: AdmissionScoredDecision): void {
+  if (!kernelDiagnostics.enabled) return;
+  const prev = session.state.get<AdmissionScoredDecision[]>(KEY_SCORED, []);
+  session.state.set(
+    KEY_SCORED,
+    prev.length >= MAX_SCORED_RECORDS ? [...prev.slice(1), decision] : [...prev, decision]
+  );
+  kernelDiagnostics.record({
+    kind: "denial",
+    severity: "info",
+    subject: { kind: "resource", resourceKind: "decode-session" },
+    reason: `admission-scored:${decision.tieBroken}`,
+    detail: {
+      capacity: decision.capacity,
+      candidates: decision.entries.length,
+      boundary: decision.boundary,
+      agingAllZero: decision.agingAllZero,
+      incumbentDeniedForMsIsResidency: decision.incumbentDeniedForMsIsResidency,
+    },
+  });
+  // Assertion failures get their own reason so they aggregate in `__rfKernel.summary()` rather than
+  // hiding in a detail field nobody groups by. C1 and C2 are the two premises Stage 1's analysis
+  // rests on; if either stops holding, the run that shows it must be impossible to miss.
+  if (!decision.agingAllZero) {
+    kernelDiagnostics.record({
+      kind: "repair",
+      severity: "warn",
+      subject: { kind: "resource", resourceKind: "decode-session" },
+      reason: "admission-assert-c1-aging-nonzero",
+    });
+  }
+  if (!decision.incumbentDeniedForMsIsResidency) {
+    kernelDiagnostics.record({
+      kind: "repair",
+      severity: "warn",
+      subject: { kind: "resource", resourceKind: "decode-session" },
+      reason: "admission-assert-c2-deniedforms-not-residency",
+    });
+  }
+}
+
+export function admissionScored(session: RuntimeSession): readonly AdmissionScoredDecision[] {
+  return session.state.get<AdmissionScoredDecision[]>(KEY_SCORED, []);
 }
 
 // ── Diagnostics (§6.12: report the excess, attribute it) ────────────────────

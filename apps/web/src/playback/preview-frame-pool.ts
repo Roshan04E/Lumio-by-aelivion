@@ -53,6 +53,7 @@ import {
   kernelDiagnostics,
   defaultSession,
   noteAdmissionDenied,
+  noteAdmissionScored,
   rankAdmission,
   type AdmissionCandidate,
   type VisibleContribution,
@@ -1351,7 +1352,17 @@ function reportAdmissionDenial(
     });
   }
   candidates.push({ key: url, priority, contribution, firstRequestedAtMs: now, admittedAtMs: null });
-  const decision = rankAdmission(candidates, sessionCap(software), now);
+  // ADR-013 Phase 0 / M1. The observer is built ONLY when diagnostics are on: a closure allocated
+  // unconditionally would be the observer effect arriving through the argument list, on the one path
+  // whose contention Stage 1 is measuring. Off, this is an `undefined` argument.
+  const decision = rankAdmission(
+    candidates,
+    sessionCap(software),
+    now,
+    kernelDiagnostics.enabled
+      ? (scored) => noteAdmissionScored(defaultSession, scored)
+      : undefined
+  );
   if (kernelDiagnostics.enabled) {
     for (const denial of decision.denied) noteAdmissionDenied(defaultSession, denial);
     admissionDenialCount += decision.denied.length;
