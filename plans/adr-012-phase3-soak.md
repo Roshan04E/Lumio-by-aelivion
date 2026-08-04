@@ -297,3 +297,37 @@ sampled, because nothing had ever soaked that arrangement.
 
 **Corollary for R2** ("never ship two decoder slices in one release"): read it as a SOAK rule, not a
 commit-hygiene rule. Two decoder slices verified independently are not verified together.
+
+## Every decoder-topology change must be BISECTABLE
+
+A family containing more than one behavioural change must be splittable, so a decoder soak can isolate
+the first regression to a single commit.
+
+`dc1319d → 92ce73b` is the reference case. One commit removed two flags — `kernelProxySource` and
+`kernelWallClockTtl` — because both looked like mechanical deletions and both passed every gate the
+programme had. When the soak failed, the failure named a COMMIT, not a cause, and the two flags had to
+be separated after the fact to find out which one mattered. Four isolation runs answered it:
+
+| tree state | flag-on arm |
+|---|---|
+| pre-S7.2 baseline | `detaches 0 · blindSplits 1` |
+| family 1 only | `detaches 0 · blindSplits 1` |
+| families 1+2 | `detaches 1 · blindSplits 0` |
+| families 1+2+3 | `detaches 1 · blindSplits 0` |
+| `wallClockTtl` removed, `proxySource` restored | `detaches 0 · blindSplits 2` |
+
+`wallClockTtl` was innocent and stayed deleted; `proxySource` was the cause and came back. That
+separation was recoverable only because the commit could be split. Had the family also carried the
+decoder pair, the same soak would have implicated three behavioural changes at once and the bisect
+would have cost a day rather than four runs.
+
+The rule is therefore about the SHAPE of the commit, not its size: group by "one behavioural change I
+can revert alone", never by "flags that happen to be adjacent in the file".
+
+---
+
+**Ownership note.** This document owns the PROCEDURE. `adr-012-implementation-programme.md` should own
+the POLICY — in particular R2, which must be restated there as a soak rule rather than a release-hygiene
+rule. That edit is outstanding only because the programme file carries another session's uncommitted
+work; when it lands, mirror these five rules there and cross-reference this playbook so the two cannot
+diverge.
