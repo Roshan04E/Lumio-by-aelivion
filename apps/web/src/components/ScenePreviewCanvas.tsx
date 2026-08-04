@@ -89,7 +89,7 @@ import {
   getCoherenceUnifiedEnabled,
 } from "../playback/temporal-coherence";
 import { decideFullResRendezvous } from "../playback/full-res-rendezvous";
-import { getFrameCompletionEnabled, getFrameScopesEnabled, getKernelResourcesEnabled } from "../playback/frame-completion";
+import { getFrameCompletionEnabled, getKernelResourcesEnabled } from "../playback/frame-completion";
 import { isReadaheadProbeEnabled, noteReadaheadComposite, type ReadaheadSample } from "../playback/readahead-probe";
 
 export type { ScenePreviewTransition } from "@orreris/shared";
@@ -584,7 +584,6 @@ export function ScenePreviewCanvas({
   const scratchMatteCacheRef = useRef<{ cache: SceneMaskMatteCache; width: number; height: number } | null>(null);
   const scratchNestMatteCachesRef = useRef<Map<string, SceneMaskMatteCache>>(new Map());
   const scratchFlarexSourceDrawCacheRef = useRef<FlarexSourceDrawCache>(new FlarexSourceDrawCache());
-  const frameScopesEnabledRef = useRef(getFrameScopesEnabled());
   // R1 fix: first-blocked timestamp per currently-unready layer id (escape-hatch timer for the
   // hold-previous-frame gate in `drawRef.current` — see `NOT_READY_HOLD_MS`).
   const notReadySinceRef = useRef<Map<string, number>>(new Map());
@@ -700,14 +699,10 @@ export function ScenePreviewCanvas({
   const proxyUploadsRef = useRef<
     Map<string, { renderer: MediaWebGLRenderer; target: RenderTarget; handle: ResourceHandle; lastVersion: number }>
   >(new Map());
-  const proxyUploadRef = useRef(readKernelFlag(KERNEL_FLAGS.proxyUpload));
   const kernelResourcesRef = useRef(getKernelResourcesEnabled());
   // S5.3. Read once per mount like every other engine flag here, and pushed into the compositor module
   // (which has no `window` in the export Worker) rather than read there.
   const wallClockTtlRef = useRef(readKernelFlag(KERNEL_FLAGS.wallClockTtl));
-  // S6.4/S6.5/S6.6 — incremental Flarex evaluation. Read once per mount like every other engine flag
-  // here; the whole feature is one default-OFF switch, and with it off no channel is attached at all.
-  const incrementalRef = useRef(readKernelFlag(KERNEL_FLAGS.incremental));
   /** Wall clock of the last idle sweep, so the per-frame cost is one number comparison (risk R1). */
   const lastResourceSweepRef = useRef(0);
   const failedRef = useRef(false);
@@ -1478,21 +1473,18 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
      * and it is summed rather than compared per entry because ANY new picture invalidates every MediaIn
      * conservatively, which is the starting position the completion plan asks for.
      */
-    let incremental: ReturnType<typeof beginIncrementalFrame> = null;
-    if (incrementalRef.current) {
-      let mediaEpoch = 0;
-      for (const entry of sharedMediaRenderersRef.current.values()) mediaEpoch += entry.version;
-      incremental = beginIncrementalFrame({
-        comps: fxComps,
-        renderScale: rScale,
-        width: w,
-        height: h,
-        frameTimeSeconds: t,
-        mediaEpoch,
-        frameId: activeFrame()?.id ?? 0,
-        nowMs: performance.now(),
-      });
-    }
+    let mediaEpoch = 0;
+    for (const entry of sharedMediaRenderersRef.current.values()) mediaEpoch += entry.version;
+    const incremental = beginIncrementalFrame({
+      comps: fxComps,
+      renderScale: rScale,
+      width: w,
+      height: h,
+      frameTimeSeconds: t,
+      mediaEpoch,
+      frameId: activeFrame()?.id ?? 0,
+      nowMs: performance.now(),
+    });
     try {
       // Profiler times the whole draw-list build (includes the Flarex evaluator + content hashing).
       draws = frameProfiler.measure("evaluator.build", () => buildSceneDraws({
@@ -1522,9 +1514,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // Comp proxies (plans/flarex-comp-proxy.md, S2) — read LIVE off the ref at draw time, exactly like
       // `gradedRef`: the frame for each proxied comp is refreshed asynchronously by its decoder, and a
       // prop snapshot would draw the previous one. Undefined/empty ⇒ every comp lowers live as before.
-      flarexCompProxies: proxyUploadRef.current
-        ? uploadProxyFrames(flarexCompProxiesRef?.current)
-        : flarexCompProxiesRef?.current,
+      flarexCompProxies: uploadProxyFrames(flarexCompProxiesRef?.current),
       flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
       onLayerNotReady: (id) => notReadyIds.push(id),
       // Flarex lowering degradations → the kernel diagnostics sink (ADR-012 slice S0.2). Purely an
@@ -1883,18 +1873,8 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
    * One implementation for both scratch call sites: two would be two answers to "which caches does a
    * thumbnail use", which is regression G5 and precisely how the live/scratch distinction got lost in
    * the first place.
-   *
-   * With the flag off this returns the live refs, i.e. exactly today's behaviour, so the old path stays
-   * intact until the scoped one has been soaked.
    */
   const scratchScopeCaches = () => {
-    if (!frameScopesEnabledRef.current) {
-      return {
-        matteCache: matteCacheRef.current,
-        nestMatteCaches: nestMatteCachesRef.current,
-        flarexSourceDrawCache: flarexSourceDrawCacheRef.current,
-      };
-    }
     const { width: w, height: h } = inputsRef.current;
     const existing = scratchMatteCacheRef.current;
     // Rebuilt on a dimension change rather than resized: the live cache is rebuilt for the same reason
