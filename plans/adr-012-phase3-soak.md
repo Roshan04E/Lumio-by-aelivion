@@ -228,3 +228,72 @@ For each run: the flag string, the `__rfWcPool` object, `__rfKernelState`, `__rf
 fps reading, and — most valuable of all — **anything you saw that this document did not predict.**
 Every one of the runtime's worst bugs was first noticed as something that looked slightly wrong and was
 explained away.
+
+---
+
+# MANDATORY GATE: decoder-soak acceptance (added 2026-08-04)
+
+**Every change to decoder topology must pass a decoder soak before it is accepted. Pixel parity is not
+sufficient evidence and never was.**
+
+This is not a precaution. It is the direct finding of the S7.2 rollout, and it was paid for twice in
+one day.
+
+## What happened
+
+S7.2 removed `kernelProxySource`, one of five flags whose ON path had already passed the pixel gate —
+all 53 fixtures green with every default-OFF flag forced on. The deletion passed `kernel:conform`,
+typecheck and the pixel gate again after it landed. It was, by every gate the programme had, safe.
+
+The decoder soak then showed a divergence detach that had not existed before it:
+
+| tree state | flag-on arm |
+|---|---|
+| pre-S7.2 baseline | `shared 8 · grants 8 · detaches 0 · blindSplits 1` |
+| family 1 only | `shared 8 · grants 8 · detaches 0 · blindSplits 1` |
+| `kernelProxySource` removed | `shared 5 · grants 5 · detaches 1 · blindSplits 0` |
+
+## Why pixel parity cannot see it
+
+Demotion keeps every declared source in the set instead of filtering out comps a proxy is serving.
+That changes **who is declared**, and who is declared decides **who competes for a decode session** —
+so the borrow topology changes with it: 8 grants become 5. Every pixel is still identical, because the
+picture does not depend on which decoder produced it. The gate is measuring the output of the decode
+path while the defect is in its allocation.
+
+Any change with this shape — anything altering the set of declared sources, session identity, lease
+priority, admission, or retention — is a decoder-topology change, whatever else it looks like.
+
+## What the gate is
+
+Run the decoder soak and require, on the arm under test:
+
+- **zero divergence detaches** (`shareDetaches`, and no `⚠ DETACH` in the ledger);
+- **`capMisses` flat** against the pre-change baseline — a fix that stops detaching by spending more
+  sessions has moved the cost, not removed it;
+- **sharing intact** — grants and hit ratio comparable to baseline. A run that stopped detaching
+  because it stopped sharing has broken the thing the slice exists to protect;
+- **no new approval mechanism** in the `approved-as` ledger.
+
+```
+PIXEL_BROWSER_CHANNEL=chrome PROBE_CUTS=3 PROBE_CUT_FRACTION=0.85 \
+  PROBE_ARMS=satisfaction PROBE_EXTRA_FLAGS="wcDecode=1&<flags under test>" \
+  PROBE_REQUIRE_WC=1 pnpm --filter @orreris/worker preview:budget
+```
+
+`PIXEL_BROWSER_CHANNEL=chrome` is a precondition, not a preference: without it the probe runs
+SwiftShader at ~8fps, where these races do not reproduce at all. Nine "clean" runs were collected that
+way before anyone noticed, and they were void.
+
+## The deeper rule: acceptance must be regenerated for the operating configuration
+
+S4.7's original acceptance — 12/12 clean — was measured with `kernelProxySource` OFF, i.e. for the
+configuration S7.2 exists to delete. It proved the FLAGGED topology, not the one that ships.
+
+When a flag is removed, the operating configuration changes, and prior acceptance evidence does not
+transfer to it. It has to be regenerated under the flags as they will actually run. The second defect
+found on 2026-08-04 was deterministic (3/3) in the always-on topology and had simply never been
+sampled, because nothing had ever soaked that arrangement.
+
+**Corollary for R2** ("never ship two decoder slices in one release"): read it as a SOAK rule, not a
+commit-hygiene rule. Two decoder slices verified independently are not verified together.
