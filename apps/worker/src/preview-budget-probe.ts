@@ -35,9 +35,13 @@
  *   PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker preview:budget
  *   PROBE_SECONDS=20 ...   (default 12 of playback per arm)
  */
+import fs from "node:fs";
+import path from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
   addAssetSourceMediaIn,
+  addMediaInBoundTo,
+  importAssets,
   cutClipAtFraction,
   buildFlarexProxyFixture,
   awaitWebCodecsEngaged,
@@ -49,6 +53,40 @@ import {
 } from "./browser/editor-session";
 
 const SECONDS = Number(process.env.PROBE_SECONDS ?? 12);
+
+/**
+ * How many DISTINCT asset-source MediaIns the fixture binds. Default 1 keeps every existing arm
+ * comparison byte-identical.
+ *
+ * ADR-013 Phase 0 / M0 needs more than one, and the reason is the vacuity rule. The one-MediaIn fixture
+ * opens two sessions against a four-slot budget, so `capMisses` is 0 because nothing was ever contended
+ * — indistinguishable from `capMisses` 0 because the path is clean. M0 measures whether an instrument on
+ * the CONTENTION path perturbs it; a run with no contention cannot answer that in either direction.
+ *
+ * The files must DIFFER. A decoder slot is keyed by URL, so N copies of one asset are N doors onto one
+ * session: they can never exceed the budget and never be denied. See `importAssets`.
+ */
+const SOURCES = Math.max(1, Number(process.env.PROBE_SOURCES ?? 1));
+
+/**
+ * Distinct seed files, smallest first. Mirrors `source-admission-probe`'s helper — admission and the
+ * observer effect need the same raw material, and `defaultClipPath` returns exactly one clip.
+ */
+function seedClips(count: number): string[] {
+  const first = defaultClipPath(SECONDS + 8);
+  const dir = path.dirname(first);
+  const files = fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith(".mp4"))
+    .map((name) => path.join(dir, name))
+    .filter((file) => fs.statSync(file).size > 0)
+    .sort((a, b) => fs.statSync(a).size - fs.statSync(b).size);
+  const picked = [first, ...files.filter((f) => f !== first)].slice(0, count);
+  if (picked.length < count) {
+    throw new Error(`need ${count} distinct clips, found ${picked.length} in ${dir}`);
+  }
+  return picked;
+}
 /** Discarded before sampling: the first second of playback is decoder warmup, not steady state. */
 const WARMUP_MS = 1_500;
 
@@ -72,6 +110,39 @@ const ARM_SETS: Record<string, { name: string; flags: string }[]> = {
    * fixture that never got there, and must be read as void.
    */
   satisfaction: [{ name: "shipping configuration", flags: "wcDecode=1" }],
+  /**
+   * ADR-013 Phase 0 / **M0 variance baseline**. Two IDENTICAL arms.
+   *
+   * Run this BEFORE `observer`. M0's decision rule compares the on/off pair against a threshold, and a
+   * threshold of zero assumes `capMisses` is deterministic — which is an assumption, not a measurement.
+   * A contention counter on a machine with real timing variance need not repeat. If it does not, the
+   * strict bar fails spuriously, a sound instrument gets refactored, and all of Stage 1 is blocked by
+   * a number that was never stable.
+   *
+   * Two identical arms measure exactly that. The output IS the variance *V*. A null result here — both
+   * arms identical — is the strong outcome and is worth recording as such: a deterministic `capMisses`
+   * makes every later contention comparison in this programme sharper.
+   */
+  "observer-variance": [
+    { name: "off arm A (variance baseline)", flags: "kernelDiagnostics=0" },
+    { name: "off arm B (variance baseline)", flags: "kernelDiagnostics=0" },
+  ],
+  /**
+   * ADR-013 Phase 0 / **M0 proper** — the observer effect in the ON direction.
+   *
+   * R1 requires an instrument to cost nothing when OFF, and that half is verified structurally. But
+   * Stage 1 runs with the instruments ON, and `admission.scored` copies a ring on the per-acquire path.
+   * Verifying only the off direction proves the shipped runtime is unharmed and merely ASSUMES the
+   * measured one is — on the exact path whose contention every Stage 1 number describes.
+   *
+   * `capMisses` is the load-bearing comparand because it is the UNCONDITIONAL counter. `admissionDenials`
+   * is counted inside the diagnostics guard and reads 0 in the off arm by construction, so comparing it
+   * across these two arms would manufacture the effect this measurement exists to detect.
+   */
+  observer: [
+    { name: "instruments OFF", flags: "kernelDiagnostics=0" },
+    { name: "instruments ON", flags: "kernelDiagnostics=1" },
+  ],
 };
 // Arm ORDER is a confound: the first arm pays every one-time cost (shader compile, proxy warm, GPU
 // clock ramp) and the second inherits a warmed machine. `PROBE_REVERSE=1` runs the same pair backwards,
@@ -530,7 +601,7 @@ async function main(): Promise<void> {
   } else {
     // The seed clip must outlast the sample window, or the run measures an empty timeline. See
     // defaultClipPath — this is not hypothetical, it is what the first two runs of this probe did.
-    projectUrl = await reachEditor(page, { clipPath: defaultClipPath(SECONDS + 8) });
+    projectUrl = await reachEditor(page, { clipPath: seedClips(1)[0] ?? defaultClipPath(SECONDS + 8) });
   }
   if (!projectUrl.includes("/editor/")) {
     throw new Error(`not in the editor: ${projectUrl}`);
@@ -568,13 +639,41 @@ async function main(): Promise<void> {
   // exactly at the crossing would be invisible. 4s puts the mount ~1.3s into the sampled window.
   let seekLeadSeconds: number | null = null;
   let hasFixture = false;
+  let boundSources = 0;
   if (process.env.PROBE_NO_FIXTURE !== "1") {
     console.log("building fixture: Flarex comp + asset-source MediaIn + proxy");
     // The MediaIn goes in BEFORE the proxy is rendered, so the proxy is built over the comp this run
     // actually measures. Building it first and editing after would invalidate it on the next frame —
     // comp.version is the proxy's key.
+    // Extra DISTINCT assets first: `addMediaInBoundTo` addresses tiles by index, so they must exist
+    // before any node asks for one. Skipped entirely at SOURCES=1, which keeps the default path
+    // byte-identical to every arm comparison already recorded against this probe.
+    if (SOURCES > 1) {
+      const extra = seedClips(SOURCES).slice(1);
+      const tiles = await importAssets(page, extra);
+      console.log(`  · asset bin: ${tiles} tile(s) after importing ${extra.length} distinct file(s)`);
+    }
+
     const mediaIn = await addAssetSourceMediaIn(page);
-    console.log(`  · asset-source MediaIn: ${mediaIn ? "bound" : "FAILED — comp declares no source"}`);
+    console.log(
+      `  · asset-source MediaIn 1: ${
+        mediaIn.ok
+          ? `bound → ${mediaIn.detail ?? "?"}`
+          : `FAILED at gate \`${mediaIn.gate}\`${mediaIn.detail ? ` (${mediaIn.detail})` : ""} — comp declares no source`
+      }`
+    );
+    boundSources = mediaIn.ok ? 1 : 0;
+    for (let i = 1; i < SOURCES; i += 1) {
+      // Tile index i: tile 0 is the host clip, already taken by `addAssetSourceMediaIn` above.
+      const extraIn = await addMediaInBoundTo(page, i);
+      if (extraIn.ok) boundSources += 1;
+      console.log(
+        `  · asset-source MediaIn ${i + 1}: ${
+          extraIn.ok ? `bound → ${extraIn.detail ?? "?"}` : `FAILED at gate \`${extraIn.gate}\``
+        }`
+      );
+    }
+    if (SOURCES > 1) console.log(`  · sources bound: ${boundSources}/${SOURCES}`);
     // The preload crossing. Only needed for the S4.7 arms, where a borrow across two DIFFERENT times is
     // the thing under test; the demotion arms do not need it and it would only add decode load.
     if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
@@ -658,6 +757,43 @@ async function main(): Promise<void> {
   }
 
   // The third way this comparison can be void: nothing was demoted, so both arms ran the same code.
+  /**
+   * ADR-013 Phase 0 / M0 — the vacuity guard, declared with the measurement rather than discovered.
+   *
+   * The rule this enforces: **a counter that reads 0 because the path was never reached is
+   * indistinguishable from one that reads 0 because the path is clean.** It is the same rule as
+   * "`detaches 0 · blindSplits 0` must be read as VOID", one subsystem along, and M0's first run was
+   * lost to exactly it — two arms, `capMisses 0` on both, on a fixture that opened two sessions against
+   * a four-slot budget and could not have been denied by construction.
+   *
+   * So M0 requires evidence that the CONTENTION path was live: sessions reaching the cap, or a cap miss
+   * actually recorded. Without it the arms agree about a path neither of them exercised.
+   */
+  if ((process.env.PROBE_ARMS ?? "demotion").startsWith("observer")) {
+    const contended = results.some((r) => {
+      const pool = r.pool as { capMisses?: number; created?: number; active?: number } | null;
+      return (pool?.capMisses ?? 0) > 0;
+    });
+    const peakActive = Math.max(
+      0,
+      ...results.map((r) => Number((r.pool as { active?: number } | null)?.active ?? 0))
+    );
+    if (!contended) {
+      console.log(
+        "\n[budget] ⚠ VOID for the M0 observer question — the contention path was never reached.\n" +
+          `         capMisses 0 in every arm; peak active sessions ${peakActive} of a 4-slot budget.\n` +
+          `         ${boundSources} asset-source MediaIn(s) bound. An instrument on the contention path\n` +
+          "         cannot be shown to perturb it, or not to, by a run that never contended.\n" +
+          "         Re-run with PROBE_SOURCES=6 (distinct files) to exceed the budget."
+      );
+    } else {
+      console.log(
+        `\n[budget] M0 contention guard: PASSED — capMisses > 0, peak active ${peakActive}, ` +
+          `${boundSources} sources bound.`
+      );
+    }
+  }
+
   const demotedAnywhere = results.some((r) => {
     const media = (r.kernel as { media?: { demoted?: string[] } } | null)?.media;
     return (media?.demoted?.length ?? 0) > 0;

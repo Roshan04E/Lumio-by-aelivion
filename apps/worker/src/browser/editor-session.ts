@@ -163,6 +163,47 @@ export async function reachEditor(page: Page, options: ReachEditorOptions = {}):
  * Returns false when the fixture could not be built, so a caller can report a VOID run rather than a
  * confident number about a comp that does not exist.
  */
+/**
+ * Which gate a fixture step stopped at — the discriminator these helpers used to lack.
+ *
+ * WHY THIS EXISTS. `addAssetSourceMediaIn` had five distinct `return false` points and reported one
+ * boolean. When it failed during ADR-013 Phase 0 / M0 the run was void and the cause was unnameable:
+ * no clip, no comp, no trigger, no tile and a pick that silently did not land are five different
+ * repairs, and a caller could only say "FAILED". That is ADR-012's fourth learning — *count the
+ * reasons; never infer which branch fired* — applied to the harness rather than to the runtime, and
+ * the harness is where it bites hardest, because a void run costs the whole measurement.
+ *
+ * `unbound-host-clip` is the interesting one and the reason a boolean was never enough: the node WAS
+ * created, so every structural check passes, but it declares no asset — it opens no decoder, and the
+ * fixture is silently the old comp-with-no-sources that three slices' worth of measurement already
+ * came back reading zero on.
+ */
+export type FixtureGate =
+  | "ok"
+  /** No `.timeline-clip` — the project has no clip to hang a comp on. */
+  | "no-timeline-clip"
+  /** The Flarex page never offered "Add MediaIn": the comp was not created, or the tab did not open. */
+  | "no-add-mediain-button"
+  /** The node exists but its inspector row never rendered. */
+  | "no-source-trigger"
+  /** The asset bin had no tile at the requested index — usually an import that did not land. */
+  | "no-asset-tile"
+  /** The trigger rendered without a `title`; the bind cannot be confirmed either way. */
+  | "bound-title-unreadable"
+  /** The pick did not land: node created, still reading the host clip, declaring no source. */
+  | "unbound-host-clip";
+
+export interface FixtureStep {
+  readonly ok: boolean;
+  readonly gate: FixtureGate;
+  /** What was actually observed at the gate — the bound title, the tile index. Never load-bearing. */
+  readonly detail?: string | undefined;
+}
+
+function step(gate: FixtureGate, detail?: string): FixtureStep {
+  return { ok: gate === "ok", gate, detail };
+}
+
 export async function buildFlarexProxyFixture(page: Page, timeoutMs = 180_000): Promise<boolean> {
   const clip = page.locator(".timeline-clip").first();
   if (!(await clip.count().catch(() => 0))) return false;
@@ -223,12 +264,12 @@ export async function buildFlarexProxyFixture(page: Page, timeoutMs = 180_000): 
  * Returns false if the graph could not be built, so a caller reports a void run rather than a confident
  * number about a topology that is not there.
  */
-export async function addAssetSourceMediaIn(page: Page): Promise<boolean> {
+export async function addAssetSourceMediaIn(page: Page): Promise<FixtureStep> {
   // Selects the clip and creates the comp if needed, so this can run BEFORE the proxy is rendered.
   // Ordering is not cosmetic: `comp.version` is the proxy's cache key, so a MediaIn added after a build
   // invalidates it immediately and the run would measure a comp with no usable proxy.
   const clip = page.locator(".timeline-clip").first();
-  if (!(await clip.count().catch(() => 0))) return false;
+  if (!(await clip.count().catch(() => 0))) return step("no-timeline-clip");
   await clip.click().catch(() => undefined);
   await page.waitForTimeout(500);
 
@@ -242,21 +283,22 @@ export async function addAssetSourceMediaIn(page: Page): Promise<boolean> {
   }
 
   const add = page.locator('[aria-label="Add MediaIn"]').first();
-  if (!(await add.count().catch(() => 0))) return false;
+  if (!(await add.count().catch(() => 0))) return step("no-add-mediain-button");
   await add.click().catch(() => undefined);
   await page.waitForTimeout(1_000);
 
   // The node's inspector row. Its label is the bound asset's name, or "Host clip" while unbound — which
   // is exactly the state we are here to change.
   const trigger = page.locator(".flarex-source-trigger").first();
-  if (!(await trigger.count().catch(() => 0))) return false;
+  if (!(await trigger.count().catch(() => 0))) return step("no-source-trigger");
   await trigger.click().catch(() => undefined);
   await page.waitForTimeout(800);
 
   // Replace mode routes a DOUBLE click to `onPickReplacement`; a single click only selects (deliberate
   // product behaviour since 2026-07-04 — a single click used to be a silent composition edit).
   const tile = page.locator(".asset-tile").first();
-  if (!(await tile.count().catch(() => 0))) return false;
+  const tiles = await tile.count().catch(() => 0);
+  if (!tiles) return step("no-asset-tile");
   await tile.dblclick().catch(() => undefined);
   await page.waitForTimeout(1_500);
 
@@ -265,7 +307,9 @@ export async function addAssetSourceMediaIn(page: Page): Promise<boolean> {
   await page.waitForTimeout(2_500);
   // "Host clip" means the pick did not land — the node exists but declares no asset, so it opens no
   // decoder and the fixture would silently be the old one again.
-  return bound != null && !/host clip/i.test(bound);
+  if (bound == null) return step("bound-title-unreadable");
+  if (/host clip/i.test(bound)) return step("unbound-host-clip", bound);
+  return step("ok", bound);
 }
 
 /**
@@ -483,27 +527,29 @@ export async function importAssets(page: Page, files: readonly string[]): Promis
  * with one source, dressed as eight. Here the new node is addressed with `.last()` and the asset with
  * `.nth()`, which are the two things that have to differ per call.
  */
-export async function addMediaInBoundTo(page: Page, assetIndex: number): Promise<boolean> {
+export async function addMediaInBoundTo(page: Page, assetIndex: number): Promise<FixtureStep> {
   await page.getByRole("tab", { name: /flarex/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
   await page.waitForTimeout(900);
 
   const add = page.locator('[aria-label="Add MediaIn"]').first();
-  if (!(await add.count().catch(() => 0))) return false;
+  if (!(await add.count().catch(() => 0))) return step("no-add-mediain-button");
   await add.click().catch(() => undefined);
   await page.waitForTimeout(900);
 
   const trigger = page.locator(".flarex-source-trigger").last();
-  if (!(await trigger.count().catch(() => 0))) return false;
+  if (!(await trigger.count().catch(() => 0))) return step("no-source-trigger");
   await trigger.click().catch(() => undefined);
   await page.waitForTimeout(700);
 
   const tile = page.locator(".asset-tile").nth(assetIndex);
-  if (!(await tile.count().catch(() => 0))) return false;
+  if (!(await tile.count().catch(() => 0))) return step("no-asset-tile", `index ${assetIndex}`);
   await tile.dblclick().catch(() => undefined);
   await page.waitForTimeout(1_200);
 
   // "Host clip" means the pick did not land: the node exists but declares no asset, so it opens no
   // decoder and contributes nothing to the budget the fixture is trying to exceed.
   const bound = await trigger.getAttribute("title").catch(() => null);
-  return bound != null && !/host clip/i.test(bound);
+  if (bound == null) return step("bound-title-unreadable");
+  if (/host clip/i.test(bound)) return step("unbound-host-clip", bound);
+  return step("ok", bound);
 }

@@ -118,13 +118,15 @@ async function main(): Promise<void> {
   console.log(`  · asset bin: ${tiles} tile(s) after import`);
 
   const first = await addAssetSourceMediaIn(page);
-  console.log(`  · MediaIn 1: ${first ? "bound" : "FAILED"}`);
-  let bound = first ? 1 : 0;
+  console.log(`  · MediaIn 1: ${first.ok ? `bound → ${first.detail ?? "?"}` : `FAILED at gate \`${first.gate}\``}`);
+  let bound = first.ok ? 1 : 0;
   for (let i = 1; i < SOURCES; i += 1) {
     // Tile index i: tile 0 is the host clip, already taken by `addAssetSourceMediaIn` above.
-    const ok = await addMediaInBoundTo(page, i);
-    if (ok) bound += 1;
-    console.log(`  · MediaIn ${i + 1}: ${ok ? "bound" : "FAILED"}`);
+    const result = await addMediaInBoundTo(page, i);
+    if (result.ok) bound += 1;
+    console.log(
+      `  · MediaIn ${i + 1}: ${result.ok ? `bound → ${result.detail ?? "?"}` : `FAILED at gate \`${result.gate}\``}`
+    );
   }
   console.log(`sources bound: ${bound}/${SOURCES}`);
 
