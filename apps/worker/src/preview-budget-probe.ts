@@ -35,11 +35,12 @@
  *   PIXEL_BROWSER_CHANNEL=chrome pnpm --filter @orreris/worker preview:budget
  *   PROBE_SECONDS=20 ...   (default 12 of playback per arm)
  */
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
   addAssetSourceMediaIn,
   cutClipAtFraction,
   buildFlarexProxyFixture,
+  awaitWebCodecsEngaged,
   defaultClipPath,
   reachEditor,
   reopenWithFlags,
@@ -139,6 +140,19 @@ interface ArmResult {
   pool: Record<string, number> | null;
   kernel: unknown;
   degradation: unknown;
+  borrow?: {
+    grants?: { grounds?: string; incumbentTimes?: number[]; incumbentCount?: number; joinerPriority?: string; incumbentPriority?: string }[];
+    refusals?: { reason?: string; gapSeconds?: number | null; toleranceSeconds?: number }[];
+    misses?: number;
+    blindSplits?: number;
+    detached?: {
+      reason?: string;
+      gapSecondsAtApproval?: number | null;
+      joinerTimeAtApproval?: number | null;
+      servedAtApproval?: number | null;
+      requestedTimesAtDetach?: number[];
+    }[];
+  } | null;
   error?: string;
 }
 
@@ -306,6 +320,9 @@ async function sampleArm(page: Page, name: string, seekLeadSeconds: number | nul
     pool: (globalThis as Record<string, any>).__rfWcPool ?? null,
     kernel: (globalThis as Record<string, any>).__rfKernelState ?? null,
     degradation: (globalThis as Record<string, any>).__rfFlarexDegradation ?? null,
+    // S4.7 diagnosis: `shareDetaches` says a granted borrow diverged; only the ledger says WHICH grant
+    // and on what grounds, and the two grounds have different corrections.
+    borrow: (globalThis as Record<string, any>).__rfBorrowLedger ?? null,
   }));
   await pause(page);
   if (stoppedEarly) {
@@ -423,6 +440,34 @@ function report(result: ArmResult): void {
       `   sharing  shared ${pool.shared} (active ${pool.sharedActive}) · detaches ${pool.shareDetaches} ` +
         `· refusals ${pool.borrowRefusals ?? 0} · frames served ${pool.sharedFramesServed} (hits ${pool.sharedFrameHits})`
     );
+    // THE DIAGNOSIS LINE. A detach names a grant that should not have been made; the grounds say which
+    // correction applies. Printed whenever a detach occurred, and also when grants exist at all, so a
+    // passing run still shows what it approved rather than only explaining failures.
+    const borrow = result.borrow;
+    if (borrow) {
+      // `grounds` on a grant is S3.3's STRUCTURAL record (key/software compatibility), not the
+      // satisfaction verdict — so it cannot name the approval path. `incumbentTimes` can: an empty
+      // array IS `known.length === 0`, i.e. the no-incumbent-demand branch.
+      const blind = (borrow.grants ?? []).filter((g) => (g.incumbentTimes?.length ?? 0) === 0).length;
+      const compared = (borrow.grants ?? []).length - blind;
+      console.log(
+        `   grants   ${borrow.grants?.length ?? 0} (no-incumbent-demand ${blind} · compared ${compared})` +
+          (borrow.refusals?.length
+            ? `   refused: ${[...new Set(borrow.refusals.map((r) => r.reason ?? "?"))].join(" · ")}`
+            : "") +
+          // Printed unconditionally, including the zero. A silent absence would read the same whether the
+          // fix never fired or the fixture never reached the path, and those mean opposite things.
+          `   blindSplits: ${borrow.blindSplits ?? 0}`
+      );
+      // THE ANSWER. One line per detach, naming the approval that permitted it.
+      for (const d of borrow.detached ?? []) {
+        console.log(
+          `   ⚠ DETACH approved-as=${d.reason} gapAtApproval=${d.gapSecondsAtApproval ?? "—"} ` +
+            `joinerTimeAtApproval=${d.joinerTimeAtApproval ?? "—"} servedAtApproval=${d.servedAtApproval ?? "NEVER-SERVED"} ` +
+            `timesAtDetach=${JSON.stringify(d.requestedTimesAtDetach ?? [])}`
+        );
+      }
+    }
   }
   const kernel = result.kernel as { media?: Record<string, unknown>; decoder?: Record<string, unknown> } | null;
   if (kernel?.media) {
@@ -450,13 +495,19 @@ async function main(): Promise<void> {
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
   const profile = process.env.PROBE_PROFILE;
   let context: BrowserContext;
+  // The launched browser is held so teardown can close it. Closing only the context leaves the browser
+  // process alive, which keeps node's event loop from draining: the probe then prints its full report
+  // and hangs forever. That failure mode is worse than a crash, because the measurement LOOKS complete
+  // while the process wedges — it stalled a sequential soak batch for hours and led to a finished run
+  // being discarded as "void". A persistent context owns its own browser, so it has nothing to hold.
+  let browser: Browser | null = null;
   if (profile) {
     context = await chromium.launchPersistentContext(profile, {
       ...(channel ? { channel } : {}),
       viewport: { width: 1600, height: 900 },
     });
   } else {
-    const browser = await chromium.launch(channel ? { channel } : {});
+    browser = await chromium.launch(channel ? { channel } : {});
     context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   }
   const page = context.pages()[0] ?? (await context.newPage());
@@ -479,6 +530,27 @@ async function main(): Promise<void> {
   }
   console.log(`project: ${projectUrl}`);
 
+  /**
+   * WEBCODECS PRECONDITION (2026-08-03) — established BEFORE anything plays.
+   *
+   * `preferNativeDecode` routes a source to the `<video>` element until its ingest proxy lands, and
+   * proxy builds suspend during playback. So a soak that starts playing on arrival guarantees the
+   * element path and then reports `shared 0 · refusals 0` — a measurement of a subsystem that was never
+   * allowed to start, which is precisely how two S4.7 runs were lost and mis-attributed to a
+   * non-existent decoder init hang.
+   *
+   * Waiting here rather than voiding at the end is the difference between a run that CAN answer the
+   * S4.7 question and a run that reports the failure articulately after wasting its samples.
+   */
+  if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction" || process.env.PROBE_REQUIRE_WC === "1") {
+    const engaged = await awaitWebCodecsEngaged(page, Number(process.env.PROBE_WC_WAIT_MS ?? 60_000));
+    console.log(
+      engaged
+        ? "webcodecs: engaged (ingest proxy landed) — the S4.7 subsystem exists in this run"
+        : "webcodecs: NEVER ENGAGED — every source is on the element path; sharing numbers below are VOID"
+    );
+  }
+
   // The fixture, built once, before either arm. `kernelProxySource` only does anything to a comp that is
   // being served from a proxy; without one the arms are identical by construction and the run is theatre.
   // `PROBE_NO_FIXTURE=1` skips it to measure the flag's UNCONDITIONAL cost, which is a different question
@@ -499,11 +571,29 @@ async function main(): Promise<void> {
     // The preload crossing. Only needed for the S4.7 arms, where a borrow across two DIFFERENT times is
     // the thing under test; the demotion arms do not need it and it would only add decode load.
     if ((process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
-      const cut = await cutClipAtFraction(page);
-      console.log(`  · cut at ${cut != null ? `${cut.toFixed(2)}s — preload crossing reachable` : "FAILED"}`);
+      // PROBE_CUTS>1 exists because a detach is a RACE, not a certainty: one crossing per run makes each
+      // ~10-minute run a single lottery ticket, and a seven-run series bought exactly one detach event —
+      // not enough to name a mechanism. Each additional cut is another crossing of the SAME borrow path
+      // the fixture already exercises, so this raises the sample count without inventing an attach
+      // ordering that could not occur in production. `cutClipAtFraction` always splits the FIRST clip, so
+      // repeated calls walk the boundaries backwards toward the start; parking before the earliest one
+      // and playing forward crosses all of them in one pass, with no mid-arm seeking to perturb the
+      // frame budget. Default 1 keeps every existing arm comparison byte-identical.
+      const cuts = Math.max(1, Number(process.env.PROBE_CUTS ?? 1));
+      const made: number[] = [];
+      for (let i = 0; i < cuts; i += 1) {
+        const cut = await cutClipAtFraction(page, Number(process.env.PROBE_CUT_FRACTION ?? 0.55));
+        if (cut == null) break;
+        made.push(cut);
+      }
+      console.log(
+        made.length > 0
+          ? `  · ${made.length} cut(s) at ${made.map((c) => `${c.toFixed(2)}s`).join(", ")} — preload crossing(s) reachable`
+          : "  · cut FAILED"
+      );
       // Reachable is not visited. Only park before the cut if there IS one; parking off a single clip
       // would land the playhead somewhere arbitrary and quietly change what the arms measure.
-      if (cut != null) seekLeadSeconds = Number(process.env.PROBE_SEEK_LEAD ?? 4);
+      if (made.length > 0) seekLeadSeconds = Number(process.env.PROBE_SEEK_LEAD ?? 4);
     }
     hasFixture = await buildFlarexProxyFixture(page);
     console.log(hasFixture ? "  · proxy ready" : "  · FIXTURE FAILED — arms will not exercise demotion");
@@ -632,10 +722,27 @@ async function main(): Promise<void> {
   }
   if (errors.length) console.log(`\nconsole errors (${errors.length}):\n${errors.slice(0, 5).map((e) => `  ${e}`).join("\n")}`);
 
-  await context.close();
+  // Teardown is bounded and never allowed to fail the run: every number above is already printed, so a
+  // browser that will not close is a harness problem, not a measurement problem. Racing a timer keeps a
+  // stuck close from re-creating the hang this guard exists to remove.
+  const closed = (async () => {
+    await context.close();
+    await browser?.close();
+  })();
+  await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 15_000))]).catch(() => {
+    /* teardown is best-effort — the report is the deliverable */
+  });
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    // Backstop for a handle nobody thought to close. `unref()` is the whole point: if the loop is already
+    // drained the process exits immediately and this timer never fires, so the normal path keeps its
+    // natural exit and flushes stdout the ordinary way. It only fires when something IS still holding the
+    // loop open — the case that used to hang forever — and 5s is long enough for the report to be flushed.
+    setTimeout(() => process.exit(0), 5_000).unref();
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

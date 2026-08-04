@@ -415,3 +415,37 @@ export async function reopenWithFlags(page: Page, projectUrl: string, flags: str
   await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(settleMs);
 }
+
+/**
+ * Wait until at least one source is actually decoding through WebCodecs.
+ *
+ * ## The precondition every WebCodecs soak has silently skipped
+ *
+ * `preferNativeDecode` is `mediaUrl !== proxyUrl && !hasMeasuredDenseGop(assetId)`, and it forces the
+ * `<video>` element path. A freshly imported clip has no ingest proxy, so it is element-routed BY
+ * DESIGN — the WC preview pool is built for keyframe-dense proxies and a sparse-GOP camera original
+ * wedges it (2026-07-06). WebCodecs becomes eligible only once the proxy lands, which is ~10s after
+ * import on this box.
+ *
+ * And proxy builds SUSPEND during any playback. So a soak that presses play on arrival pins
+ * `preferNativeDecode` true forever, routes every source to the element path, and then reports
+ * `shared 0 · refusals 0 · wcProvider 0%` — numbers that look like a decoder bug and are actually a
+ * measurement of a subsystem that was never allowed to start. Two S4.7 runs were lost to that, and the
+ * cause was recorded as a suspected "WebCodecs init hang" that does not exist: `__rfWcHeals` was null
+ * and `pool.created` was 0, so nothing was ever built, let alone hung.
+ *
+ * Call this BEFORE playing, and treat a false return as VOID rather than as a result.
+ */
+export async function awaitWebCodecsEngaged(page: Page, timeoutMs = 60_000): Promise<boolean> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const engaged = await page.evaluate(() => {
+      const modes = (globalThis as unknown as { __rfWcMode?: Record<string, string> }).__rfWcMode ?? {};
+      const values = Object.values(modes);
+      return values.length > 0 && values.some((mode) => mode !== "element");
+    });
+    if (engaged) return true;
+    await page.waitForTimeout(1_000);
+  }
+  return false;
+}

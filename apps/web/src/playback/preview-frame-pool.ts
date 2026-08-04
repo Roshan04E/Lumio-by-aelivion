@@ -60,6 +60,11 @@ import {
   noteBorrowRefused,
   noteSatisfactionMiss,
   sessionSatisfaction,
+  // Aliased: this module has its own `borrowRefusals` COUNTER, and importing the kernel reader under
+  // the same name would shadow it silently — two different numbers behind one identifier.
+  borrowGrants as kernelBorrowGrants,
+  borrowRefusals as kernelBorrowRefusals,
+  satisfactionMisses as kernelSatisfactionMisses,
   noteDecoderRetentionExpired,
   noteDecoderSessionClosed,
   noteDecoderSessionOpened,
@@ -351,6 +356,22 @@ let preemptions = 0;
 let shared = 0;
 let shareDetaches = 0;
 /**
+ * S4.7: blind shares split BEFORE serving, once the incumbent declared and the pair proved incompatible.
+ * Deliberately not folded into `shareDetaches` — see {@link reviseBlindShare}. Read together they say
+ * whether the fix worked or merely renamed the harm: splits rising while detaches fall is the fix
+ * landing; both at zero on a fixture that used to detach is a fixture that stopped exercising the path.
+ */
+let blindShareSplits = 0;
+/** S4.7 diagnosis: one entry per detach, naming the approval that let the borrow happen. Bounded. */
+const detachedApprovals: {
+  reason: string;
+  gapSecondsAtApproval: number | null;
+  joinerTimeAtApproval: number | null;
+  servedAtApproval: number | null;
+  requestedTimesAtDetach: number[];
+  joinedAt: number;
+}[] = [];
+/**
  * Borrows the S4.7 predicate declined. The COST side of the slice: each one spends a session out of a
  * budget of four, so a rising count with no corresponding fall in `shareDetaches` is the too-strict
  * predicate this slice lists as its own risk.
@@ -636,6 +657,18 @@ interface SharedMember {
   held: CanvasImageSource | null;
   dead: boolean;
   onPreempted?: (() => void) | undefined;
+  /**
+   * S4.7 DIAGNOSIS (observability only — nothing branches on this).
+   *
+   * The verdict that approved this member's borrow. `shareDetaches` can say a granted borrow later
+   * diverged; only this can say which approval path produced it, and the two paths have different
+   * corrections: a `co-located` grant that drifted is a tolerance question, while `no-incumbent-demand`
+   * approved with nothing to compare against at all. Counters cannot distinguish them, and guessing
+   * between them is how a previous investigation here stayed wrong for two sessions.
+   */
+  approval?:
+    | { reason: string; gapSeconds: number | null; joinerTime: number | null; servedAtApproval: number | null }
+    | undefined;
 }
 
 interface SharedSession {
@@ -757,6 +790,33 @@ function findAttachableSession(key: string, software: boolean): SharedSession | 
  * exactly what the backstop would later detach, so a `noteDivergence` firing is a proof the predicate
  * was wrong rather than a routine correction (programme §10).
  */
+/**
+ * S4.7 DIAGNOSIS — the verdict that approved the borrow about to be attached.
+ *
+ * Module-scoped rather than threaded through the return type, and that is safe for one specific
+ * reason worth stating: `chooseSatisfyingSession` and the `attachMember` that consumes this run in the
+ * SAME synchronous block with no `await` between them, so no second acquire can interleave and claim
+ * another borrow's verdict. Cleared on consumption so a stale verdict can never attach to a member
+ * that was not approved by it.
+ *
+ * Observability only. Nothing reads this to make a decision.
+ */
+let pendingApproval: {
+  reason: string;
+  gapSeconds: number | null;
+  joinerTime: number | null;
+  /**
+   * S4.7 DIAGNOSIS, second question. Every observed divergence detach came through `no-incumbent-demand`,
+   * whose premise is "nothing is being served, so nothing can be degraded" — the same-tick mount the
+   * conformance suite deliberately protects. That premise is only true if the session really has no
+   * position. `lastServed.time` is the session's ACTUAL position, independent of what any member has
+   * declared, so this distinguishes a genuinely blind session (premise holds, borrow is fine) from one
+   * already serving a distant moment (premise false, and silence was read as consent). Which of those it
+   * is decides the fix, so it is measured rather than assumed.
+   */
+  servedAtApproval: number | null;
+} | null = null;
+
 function chooseSatisfyingSession(
   key: string,
   software: boolean,
@@ -765,7 +825,17 @@ function chooseSatisfyingSession(
 ): SharedSession | null {
   const candidate = findAttachableSession(key, software);
   if (!candidate) return null;
-  if (!getKernelSessionSatisfactionEnabled()) return candidate; // flag off → inherited identity-match
+  if (!getKernelSessionSatisfactionEnabled()) {
+    // Flag off → inherited identity-match. Recorded under its own reason rather than left null, so a
+    // flag-off detach is distinguishable from an unrecorded one.
+    pendingApproval = {
+      reason: "flag-off-identity-match",
+      gapSeconds: null,
+      joinerTime: options.requestedTime ?? null,
+      servedAtApproval: candidate.lastServed?.time ?? null,
+    };
+    return candidate;
+  }
 
   const incumbentTimes: number[] = [];
   for (const member of candidate.members) incumbentTimes.push(member.requestedTime);
@@ -774,7 +844,15 @@ function chooseSatisfyingSession(
     options.requestedTime ?? null,
     divergenceToleranceSeconds(candidate.provider?.nominalFps)
   );
-  if (verdict.satisfies) return candidate;
+  if (verdict.satisfies) {
+    pendingApproval = {
+      reason: verdict.reason,
+      gapSeconds: verdict.gapSeconds,
+      joinerTime: options.requestedTime ?? null,
+      servedAtApproval: candidate.lastServed?.time ?? null,
+    };
+    return candidate;
+  }
   borrowRefusals += 1;
   noteBorrowRefused(defaultSession, {
     key,
@@ -886,6 +964,16 @@ function noteDivergence(session: SharedSession): void {
   if (latest.strikes < SHARE_DIVERGENCE_STRIKES) return;
 
   shareDetaches += 1;
+  // S4.7 DIAGNOSIS: the whole point of the ledger — this names the approval path that produced THIS
+  // detach, rather than leaving it to be inferred from aggregate grant counts.
+  detachedApprovals.push({
+    reason: latest.approval?.reason ?? "no-approval-recorded",
+    gapSecondsAtApproval: latest.approval?.gapSeconds ?? null,
+    joinerTimeAtApproval: latest.approval?.joinerTime ?? null,
+    servedAtApproval: latest.approval?.servedAtApproval ?? null,
+    requestedTimesAtDetach: times.filter((time) => Number.isFinite(time)),
+    joinedAt: latest.joinedAt,
+  });
   // S4.7 (programme §10 — repair becomes diagnostics). This detach is still the repair, and it stays:
   // a backstop that was removed would take its evidence with it. But with the flag on it also carries a
   // second meaning — the kernel APPROVED this share, using the very tolerance `isDiverged` just failed,
@@ -899,6 +987,78 @@ function noteDivergence(session: SharedSession): void {
       strikes: latest.strikes,
     });
   }
+  session.shareable = false;
+  const notify = latest.onPreempted;
+  releaseMember(session, latest);
+  try {
+    notify?.();
+  } catch {
+    /* victim callback must not break the serving path */
+  }
+}
+
+/**
+ * S4.7 — THE DEFERRED HALF OF A BLIND APPROVAL.
+ *
+ * `sessionSatisfaction` approves a joiner when no incumbent has declared a time, on the stated premise
+ * that "nothing is being served, so nothing can be degraded". The soak says that premise is TRUE at
+ * approval and the branch is right to allow it: across 7 divergence detaches, every one was approved as
+ * `no-incumbent-demand` and every one measured carried `servedAtApproval = NEVER-SERVED`. The share was
+ * never wrong when it was made — it was never RE-EXAMINED when the fact it was waiting on arrived.
+ *
+ * So the defect is not in the predicate and the fix is not to tighten it. Refusing blind joins outright
+ * would break the same-tick mount the conformance suite deliberately protects (two layers mounting in
+ * one tick, neither having asked for anything yet) and would spend the sessions sharing exists to save.
+ * Instead the same decision is completed later, the first moment it is answerable.
+ *
+ * Two conditions keep this narrow, and both matter:
+ *  - `lastServed === null` — the session has never served. That is exactly the state the detaches were
+ *    approved in, and it is why the split is free: no incumbent loses a decoder it was using, so this
+ *    cannot become the "too-strict predicate spends real sessions" failure the slice warns about. Once a
+ *    session HAS served, this stays out of the way and the strike-based backstop keeps ownership.
+ *  - every member declared — an undeclared member is the very ambiguity being waited on, so acting while
+ *    one remains would just move the guess earlier.
+ *
+ * No strikes here, unlike {@link noteDivergence}. Strikes exist to ride out transient jitter between two
+ * members tracking one playhead; this fires before a single frame has been served, where there is no
+ * jitter to ride out and waiting only guarantees the harm.
+ */
+function reviseBlindShare(session: SharedSession): void {
+  if (!getKernelSessionSatisfactionEnabled()) return;
+  if (session.lastServed !== null) return;
+  if (session.members.size < 2) return;
+
+  // The blind approval belongs to the SESSION, not to whoever happens to be declaring. Gating on the
+  // declaring member looked equivalent and is not: the awaited fact almost always arrives via the OTHER
+  // member. The joiner declares first and finds the incumbent still undeclared, so nothing can be
+  // decided; then the incumbent declares — the moment the picture completes — but the incumbent CREATED
+  // the session and carries no approval record, so a declarer-gated check rejects it and the share
+  // survives to detach. Measured: a run with `blindSplits: 1` that still lost a share to exactly this.
+  let blindJoin = false;
+  for (const m of session.members) {
+    if (m.approval?.reason === "no-incumbent-demand") {
+      blindJoin = true;
+      break;
+    }
+  }
+  if (!blindJoin) return;
+
+  const times: number[] = [];
+  for (const m of session.members) times.push(m.requestedTime);
+  if (times.some((time) => !Number.isFinite(time))) return;
+  if (!isDiverged(times, session.provider?.nominalFps)) return;
+
+  let latest: SharedMember | null = null;
+  for (const m of session.members) {
+    if (!latest || m.joinedAt > latest.joinedAt) latest = m;
+  }
+  if (!latest) return;
+
+  // Counted separately from `shareDetaches` ON PURPOSE. The done-when is "zero divergence detaches", and
+  // folding these in would let a fix look like a pass by renaming the harm. A split is the cheap,
+  // pre-service correction; a detach is an incumbent losing a decoder mid-serve. They are different
+  // events and the ledger has to be able to tell them apart.
+  blindShareSplits += 1;
   session.shareable = false;
   const notify = latest.onPreempted;
   releaseMember(session, latest);
@@ -928,6 +1088,12 @@ function memberProvider(session: SharedSession, member: SharedMember): FrameProv
       const provider = session.provider;
       if (!provider || member.dead) return null;
       member.requestedTime = sourceTimeSeconds;
+      // The declaration seam: this assignment IS the arrival of the fact a blind approval was waiting on,
+      // so the deferred half of that decision runs here and before any frame is served.
+      reviseBlindShare(session);
+      // `reviseBlindShare` can evict THIS member. Serving on through a lease that was just released would
+      // hand back a frame from a session the caller no longer belongs to.
+      if (member.dead) return null;
       const counts = session.refCount > 1; // only a REAL share tells us anything about sharing
       if (counts) sharedFramesServed += 1;
       const halfPeriod = 0.5 / (provider.nominalFps && provider.nominalFps > 0 ? provider.nominalFps : 30);
@@ -990,7 +1156,11 @@ function attachMember(session: SharedSession, options: AcquireOptions): PreviewF
     held: null,
     dead: false,
     onPreempted: options.onPreempted,
+    // Consumed and cleared — see `pendingApproval`. A member attached without going through the
+    // satisfaction path (a fresh session, a warm park) legitimately carries none.
+    approval: pendingApproval ?? undefined,
   };
+  pendingApproval = null;
   session.members.add(member);
   session.refCount += 1;
   recomputeSessionPriority(session);
@@ -1528,5 +1698,30 @@ if (typeof window !== "undefined") {
   Object.defineProperty(window, "__rfWcPool", {
     configurable: true,
     get: () => getWcPoolStats(),
+  });
+  /**
+   * S4.7 diagnosis handle: the borrow ledger the kernel already keeps, made readable from the page.
+   *
+   * `shareDetaches` says a granted borrow later diverged; it cannot say WHICH grant or on what
+   * grounds, and those have different corrections — a grant made on `co-located` grounds that drifted
+   * is a tolerance question, while one made on `no-incumbent-demand` was approved with nothing to
+   * compare against at all. Guessing between them is how the previous parked item stayed misdiagnosed
+   * for two sessions.
+   *
+   * Read-only getter, query-path only (both readers allocate on read and nothing calls them per
+   * frame), so this cannot perturb what it measures — same contract as `__rfWcPool` above.
+   */
+  Object.defineProperty(window, "__rfBorrowLedger", {
+    configurable: true,
+    get: () => ({
+      grants: kernelBorrowGrants(defaultSession),
+      refusals: kernelBorrowRefusals(defaultSession),
+      misses: kernelSatisfactionMisses(defaultSession),
+      // The discriminator: which approval path produced each actual detach.
+      detached: detachedApprovals,
+      // The fix's own counter, reported alongside so a soak can tell a working correction from a fixture
+      // that simply stopped reaching the path.
+      blindSplits: blindShareSplits,
+    }),
   });
 }
