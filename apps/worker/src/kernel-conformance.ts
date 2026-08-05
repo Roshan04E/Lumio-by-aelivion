@@ -447,9 +447,16 @@ console.log("\nF2 — view dot reaches the renderers (I-26)");
 
 console.log("\nF3 — host-clip substitution (I-27, I-34)");
 {
-  // An asset-backed MediaIn whose loader owns the node but has no picture yet. ADR-012 §0.3 says the
-  // answer must be a DECLARED absence. Today two of `resolveSourceDraw`'s five outcomes silently
-  // substitute the host clip — a different shot's pixels, presented as if they were this node's.
+  // An asset-backed MediaIn against `resolveSourceDraw`'s two host-drawing outcomes.
+  //
+  // REWRITTEN 2026-08-05 (DEBT-008). This block used to open by saying the compiler "silently
+  // substitutes the host clip", and asserted that as a pending() defect. Both are now wrong, and the
+  // way they were wrong is the point: `null` here means NO LOADER WAS EVER PROMOTED, so the host clip
+  // IS this node's source and drawing it is the Phase-1 contract — not a substitution at all. Only
+  // `"pending"` is I-27's violation (a loader owns the pixels and they are late), and since S7.2
+  // family 5 that returns null unconditionally. Filing the correct behaviour as an outstanding defect
+  // is what made DEBT-001's expiry condition unsatisfiable: it watched a check that can never stop
+  // reproducing. Both outcomes are now asserted as permanent, and named for which one they are.
   const comp = createFlarexComp("sub", "sub");
   const asset = createFlarexNode("mediaIn", "sub_asset");
   asset.params = { ...asset.params, sourceAssetId: "asset-1" };
@@ -467,7 +474,22 @@ console.log("\nF3 — host-clip substitution (I-27, I-34)");
   );
 
   const substituted = out !== null && (out as SceneLayerDraw).debugLayerId === host.debugLayerId;
-  pending("S4.5", "an unresolved asset MediaIn yields the HOST clip's pixels", substituted);
+  // PROMOTED from pending() to enforced by DEBT-008 (2026-08-05), and renamed to say WHICH cause.
+  // Permanent behaviour, not a defect awaiting a slice: `no-loader` draws the host because the host is
+  // the source. If this ever fails, S4.5's scoping has been re-widened to swallow the Phase-1 contract
+  // — the exact regression whose first attempt failed 11 flarex fixtures at up to 76.9%.
+  enforced("I-27", "a NO-LOADER MediaIn draws the host clip — the host IS its source", substituted);
+
+  // THE OTHER HALF, and the one I-27 is actually about. A node whose loader owns the pixels and has
+  // not produced them must yield a DECLARED ABSENCE, never another shot's frame. Asserted
+  // behaviourally here; I-34 asserts it structurally (the refusal is unconditional and no opt-out
+  // exists). The structural check alone would pass if the branch stopped being reached, so the pair is
+  // the claim: this one proves the rule still bites, that one proves nobody can opt out of it.
+  const pendingOut = compileFlarexComp(
+    comp,
+    lowerCtx({ hostSourceDraw: host, resolveSourceDraw: () => "pending" }),
+  );
+  enforced("I-27", "a PENDING MediaIn yields absence, never the host's pixels", pendingOut === null);
 
   // PROMOTED from pending to enforced by S0.2 (2026-08-01). The substitution still happens — that is
   // S4.5's job — but it is no longer silent, which is the precondition for deciding whether to delete
@@ -540,7 +562,17 @@ console.log("\nS0.2 — degradation vocabulary (I-34)");
   enforced("I-34", "no resolver at all is distinguished from a resolver that returned null",
     reasonsFor(assetComp("nores", false), undefined).includes("host-substituted:no-resolver"));
 
-  enforced("I-34", "an UN-retimed pending substitutes the host, and says so",
+  // RENAMED 2026-08-05 (DEBT-008, same defect one line down). This read "an UN-retimed pending
+  // substitutes the host, and says so" — and it has been untrue since S7.2 family 5 (`366860c`), which
+  // made that refusal unconditional. The check never looked at the draw; it only ever looked at the
+  // REASON, so it kept passing while its name described behaviour the runtime had stopped having. The
+  // F3 block above asserts what actually happens now (`pendingOut === null`).
+  //
+  // The reason STRING keeps `host-substituted:` deliberately. It is the diagnostic vocabulary shared
+  // with `__rfFlarexDegradation`, the probes and the substitution census that DEBT-001 was judged on;
+  // renaming it would break every reader to fix a word. What it means today is "this is the case that
+  // WOULD have substituted" — see the drift note in DEBT-008.
+  enforced("I-34", "an UN-retimed pending is REPORTED as host-substituted:pending",
     reasonsFor(assetComp("pend", false), () => "pending").includes("host-substituted:pending"));
 
   // The 2026-07-29 fix, now observable: under a retime the host draw is a DIFFERENT MOMENT, so the

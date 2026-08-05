@@ -274,7 +274,7 @@ Entries are never rewritten. To change one, append a new dated note under it.
   class, which is why a third appeared. This entry exists so the fourth is caught by a rule.
 
 ### DEBT-008 — the `[S4.5]` pending check is mis-named for what it now guards
-- Status: open
+- Status: **RETIRED 2026-08-05** (see the closing update at the end of this entry)
 - Registered: 2026-08-05 (discovered auditing DEBT-001 at S7.2 close)
 - Reason: the check reads "an unresolved asset MediaIn yields the HOST clip's pixels" and is registered
   as `pending("S4.5", …)`, i.e. as *a known violation the migration has not reached yet*. It is neither.
@@ -292,6 +292,28 @@ Entries are never rewritten. To change one, append a new dated note under it.
 - Cost of leaving it: a `pending()` entry is a standing claim that the migration is unfinished. This one
   can never stop reproducing, so it will misinform every future audit exactly as it misinformed
   DEBT-001's expiry condition.
+- **Update (2026-08-05) — RETIRED, and there were TWO of them.** The `pending("S4.5", …)` call is now
+  `enforced("I-27", "a NO-LOADER MediaIn draws the host clip — the host IS its source")`: same boolean,
+  correct tier, and named for the cause it actually exercises.
+  **Second instance found while fixing the first, one line down.** `enforced("I-34", "an UN-retimed
+  pending substitutes the host, and says so")` has been untrue since S7.2 family 5 (`366860c`) made the
+  refusal unconditional. It kept passing because it never looked at the draw — only at whether the
+  REASON `host-substituted:pending` was reported. A name describing behaviour the runtime had stopped
+  having, guarded by a check that could not notice. Renamed to "is REPORTED as
+  host-substituted:pending"; the assertion itself is byte-identical.
+  **Gap closed, not just renamed.** I-27's actual claim — a `pending` MediaIn yields absence, never
+  another shot's pixels — had only a *structural* guard (I-34 greps the source for the unconditional
+  refusal). Structural checks pass if the branch merely stops being reached. Added the behavioural
+  half: `resolveSourceDraw: () => "pending"` must compile to `null`. **Falsifiability verified** — with
+  the refusal disabled (`if (false && substituting)`) the new I-27 assertion FAILS alongside I-34,
+  while the `no-loader` assertion correctly stays green, so the pair discriminates rather than
+  co-firing.
+  **Vocabulary drift, recorded and deliberately NOT fixed:** the reason string is still
+  `host-substituted:pending` and the degradation record still sets `substituted: true`, for a case that
+  no longer substitutes anything. It now means "the case that WOULD have substituted". Renaming it
+  would break `__rfFlarexDegradation`, the probes, and the substitution census DEBT-001 was judged
+  against — a wide blast radius to fix a word. Left as-is with the meaning written down; if it is ever
+  renamed, `substitutedTotal` stops being comparable across that boundary.
 
 ---
 
@@ -301,5 +323,8 @@ Entries are never rewritten. To change one, append a new dated note under it.
   structurally impossible since `366860c` and is pinned by enforced invariant I-34. Its original expiry
   condition was unsatisfiable (it watched the `no-loader` path, which is correct behaviour); see
   DEBT-008 for the harness tidy-up that remains.
+- **DEBT-008** — retired 2026-08-05 in place above. Two mis-named conformance assertions corrected
+  (one promoted `pending`→`enforced`, one renamed), and I-27 gained the behavioural guard it was
+  missing — verified non-vacuous by breaking the runtime and watching it fail.
 - **DEBT-006** — retired 2026-08-03 in place above; the S6.3 commit (`b5452cd`) has landed. The
   threshold stays at 2 on a replaced justification: it now backstops DEBT-007's context-blind `fanout`.
