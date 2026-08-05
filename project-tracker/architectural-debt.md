@@ -216,18 +216,38 @@ Entries are never rewritten. To change one, append a new dated note under it.
      intra-call texture then resolved null and a comp went black the moment a node needed a nested
      render. Fixed with a `permanent` scope.
   3. *2026-08-05* — `media/flarexsrc:*`: consumed through the compiler, therefore absent from
-     `liveMediaSourceIds`. The **departed prune** was fixed (`declaredMediaSourceIds` retention), but
-     the **wall-clock idle sweep** keys on `lastUsedAt`, and the only `touchResource` for the media pool
-     (`ScenePreviewCanvas.tsx:1298`) sits inside the grade-pass loop the loader never enters. So it is
-     reclaimed on the idle clock and rebuilt — a periodic playback hitch at ~10-20s spacing, confirmed
-     by the founder against `RESOURCE_IDLE_MS = 10_000`.
+     `liveMediaSourceIds`, so the **departed prune** disposed it on every presented frame it was not
+     sampled. Fixed by `declaredMediaSourceIds` retention (`51abcac`) — mount, not consumption, is the
+     liveness proof for a loader. Second gap in the same resource, fixed at `671cc71`:
+     `getMediaSingleCtx`'s **descriptor-missing branch serves the entry's last graded texture and
+     returns before reaching `gradeMediaInContext`**, i.e. it serves WITHOUT touching. A remount plus a
+     decode is not a sub-frame event, so that gap can outlast `RESOURCE_IDLE_MS` and the idle sweep
+     then reclaims a resource that is on screen.
+     - **CORRECTION (2026-08-05).** As first written this entry blamed the idle-sweep half on the media
+       pool's only `touchResource` (`ScenePreviewCanvas.tsx:1298`) sitting in a grade loop "the loader
+       never enters". **That is false and was inference, not measurement.** The loader does reach it:
+       `getMediaGraded` → `getMediaSingleCtx` → `gradeMediaInContext` → the touch, on both the
+       cache-hit path (`build-scene-draws.ts:985`) and the miss path (`buildLayerDraw:680`). Measured
+       refutation: 15s LONGPLAY and 15s LONGIDLE arms — 3× the TTL — with `reclaimedTotal` 0,
+       resources 3→3, media 2→2. A frozen `lastUsedAt` would have moved `reclaimedTotal` during
+       LONGPLAY, when the viewer is certainly compositing. The *fix direction* (touch on the consumer's
+       path, never a `permanent` exemption) was right; the *mechanism* was wrong, and it was corrected
+       by the session holding the measurements rather than by the one holding the theory.
+     - **The founder's ~10-20s hitch is a REAL report** (asked and confirmed verbatim: "yes,... around
+       10-20 sec span") but its cause is now **unattributed**: 30s spanning 3× the TTL did not
+       reproduce a periodic hitch, and the mechanism above is refuted. Do not close instance 3 on the
+       probe evidence alone. The remaining acceptance surface is the founder's own comp, which has the
+       **merge topology** — the fixture is a lone `MediaIn→MediaOut`, which renders this defect as
+       *black* rather than as *flashing the host*, so it cannot exhibit the reported symptom.
 - Invariant affected: I-24 (presentation policy MUST NOT change resource lifetime) — reached through
   the reclaimer rather than through the acquirer, which is why the existing detection missed it
 - Owner: unassigned
 - Expiry condition: every reclaimer proves liveness from a signal its resource's **actual consumer**
   emits — i.e. no pool infers departure or idleness from a set populated by a pass that does not
   consume that resource
-- Planned slice: none yet; instance 3 is live and being fixed separately
+- Planned slice: none — instances 1–3 are fixed (`51abcac`, `671cc71`, `e6cf87c`). The entry stays
+  **open** because the class is not closed by fixing its instances: the expiry condition is about every
+  reclaimer, and instance 3's residual symptom is still unattributed (see the CORRECTION above).
 - Tracking issue: —
 - Detection: a resource registered in one subsystem and swept by another that keys on a set the first
   subsystem never writes to. Concretely: a `ScenePool` entry with no `touchResource` call on its own
