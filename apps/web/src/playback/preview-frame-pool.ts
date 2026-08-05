@@ -57,6 +57,7 @@ import {
   admissionScored,
   rankAdmission,
   type AdmissionCandidate,
+  type FramePurpose,
   type VisibleContribution,
   noteBorrowGrant,
   noteBorrowRefused,
@@ -263,6 +264,18 @@ export interface AcquireOptions {
    * policy must not change resource lifetime; demotion suspends the PULL, never the session).
    */
   contribution?: VisibleContribution | undefined;
+  /**
+   * C15 purpose class (ADR-012 §6.1) — WHAT this acquisition is for. Recorded, never ranked.
+   *
+   * Threaded for ADR-013 Phase 0 / M5, which asks whether observed contention is CROSS-class (a live
+   * frame losing to a background thumbnail) or INTRA-class (live losing to live). A per-class
+   * reservation can only express the first; if the contention is mostly the second then per-class
+   * reserves are insufficient rather than merely simpler.
+   *
+   * Absent where the call site cannot say. Never defaulted to `live` — a manufactured purpose would
+   * invent the very intra-class contention being measured (DEBT-012).
+   */
+  purpose?: FramePurpose | undefined;
 }
 
 interface IdleEntry {
@@ -291,6 +304,8 @@ interface LeaseRecord {
    * undeclared rather than as worthless.
    */
   contribution?: VisibleContribution | undefined;
+  /** C15 purpose class, carried so a later cap miss can attribute this incumbent's class. */
+  purpose?: FramePurpose | undefined;
   preempt(): void;
 }
 
@@ -1179,7 +1194,8 @@ function createSession(
   software: boolean,
   priority: WcLeasePriority,
   warm: FrameProvider | null,
-  contribution?: VisibleContribution | undefined
+  contribution?: VisibleContribution | undefined,
+  purpose?: FramePurpose | undefined
 ): SharedSession {
   // `record.preempt` and the init `.then` both close over `session`, so those two fields can only be
   // assigned after the object exists. The cast buys that one cycle and nothing else.
@@ -1204,6 +1220,7 @@ function createSession(
     // request against the sessions actually held, and an incumbent whose merit was thrown away at
     // acquire time can only ever be ranked as undeclared.
     contribution,
+    purpose,
     preempt() {
       if (session.torn) return;
       preemptions += 1;
@@ -1329,7 +1346,8 @@ function reportAdmissionDenial(
   url: string,
   software: boolean,
   priority: WcLeasePriority,
-  contribution: VisibleContribution | undefined
+  contribution: VisibleContribution | undefined,
+  purpose: FramePurpose | undefined
 ): LeaseRecord | null {
   // R1, and this one is mine: `rankAdmission` allocates a candidate array and sorts it, so the guard
   // inside `noteAdmissionDenied` is too late — the work is already done by the time it returns. A cap
@@ -1348,11 +1366,12 @@ function reportAdmissionDenial(
       key: record.url,
       priority: record.priority,
       contribution: record.contribution,
+      purpose: record.purpose,
       firstRequestedAtMs: record.acquiredAt,
       admittedAtMs: record.acquiredAt,
     });
   }
-  candidates.push({ key: url, priority, contribution, firstRequestedAtMs: now, admittedAtMs: null });
+  candidates.push({ key: url, priority, contribution, purpose, firstRequestedAtMs: now, admittedAtMs: null });
   // ADR-013 Phase 0 / M1. The observer is built ONLY when diagnostics are on: a closure allocated
   // unconditionally would be the observer effect arriving through the argument list, on the one path
   // whose contention Stage 1 is measuring. Off, this is an `undefined` argument.
@@ -1482,7 +1501,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
       // off this records and returns null — byte-identical to the pre-slice fallback. With it on, an
       // incumbent the ranking placed below the newcomer yields its slot, which is the whole slice:
       // capacity granted by visible contribution rather than by which layer React mounted first.
-      const victim = reportAdmissionDenial(url, software, priority, options.contribution);
+      const victim = reportAdmissionDenial(url, software, priority, options.contribution, options.purpose);
       if (victim) {
         // Preempt frees the session SYNCHRONOUSLY, so the retry below sees the slot. The victim's
         // `onPreempted` runs its own fallback exactly as it does for the existing preload preemption
@@ -1513,7 +1532,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   // skipped on that path.
   noteDecoderSessionOpened(defaultSession, url);
 
-  const session = createSession(url, software, priority, warm, options.contribution);
+  const session = createSession(url, software, priority, warm, options.contribution, options.purpose);
   // Unshareable in BOTH directions: skipping the join above only stops this consumer taking someone
   // else's session, and would leave the host free to attach to THIS one on its next acquire — the same
   // divergence, arrived at from the other side.

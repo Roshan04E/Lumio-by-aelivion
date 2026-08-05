@@ -58,6 +58,7 @@
  */
 
 import { kernelDiagnostics } from "./diagnostics";
+import type { FramePurpose } from "./frame-scheduler";
 import type { RuntimeSession } from "./session";
 
 /**
@@ -91,6 +92,32 @@ export interface VisibleContribution {
 export interface AdmissionCandidate {
   key: string;
   priority: "playhead" | "preload";
+  /**
+   * WHAT this acquisition is for (ADR-012 §6.1) — C15's purpose class, threaded 2026-08-05 for
+   * ADR-013 Phase 0 / M5.
+   *
+   * **Recorded, never ranked.** Nothing in {@link rankAdmission} reads it, and it is deliberately
+   * absent from the scoring, the sort and the eligibility filter. M5 asks *who contends with whom* —
+   * whether the observed contention is cross-class (`live` losing to a background `thumbnail`) or
+   * intra-class (`live` losing to `live`) — because a per-class reservation can only express the first,
+   * and if the contention is mostly the second then per-class reserves are not merely simpler, they are
+   * insufficient (ADR-013 §4.4, OQ5).
+   *
+   * Carrying it as data is the whole point: **letting it influence the decision would be a mechanism
+   * change in the middle of a measurement programme**, which is how a programme loses the ability to
+   * interpret its own numbers. The reservation policy that eventually reads this is a slice, and it
+   * comes after the magnitudes are settled.
+   *
+   * `priority` is NOT this. `playhead`/`preload` is a lease-ordering hint about *when* a source is
+   * needed; purpose is *what the work is for*, and the two are independent — a `preload` shell for a
+   * live frame is `live` purpose at `preload` priority.
+   *
+   * Optional, and absence is meaningful for the same reason {@link contribution}'s is: a call site that
+   * has not been taught to declare says so, rather than having a plausible default invented on its
+   * behalf. That distinction is exactly what DEBT-012 exists to name — a manufactured declaration reads
+   * healthier than an absent one while carrying less information.
+   */
+  purpose?: FramePurpose | undefined;
   contribution?: VisibleContribution | undefined;
   /** Wall clock when this candidate first asked. Drives aging (§6.11); never drives merit. */
   firstRequestedAtMs: number;
@@ -152,6 +179,8 @@ export interface AdmissionDenial {
   deniedForMs: number;
   /** True when the contribution was not declared and {@link UNDECLARED_RANK} stood in for it. */
   undeclared: boolean;
+  /** C15 purpose class, or null where undeclared. Attribution only — never a denial reason. */
+  purpose?: FramePurpose | null | undefined;
 }
 
 export interface AdmissionDecision {
@@ -292,6 +321,7 @@ export function rankAdmission(
       admittedFloor: admittedFloor === Infinity ? null : admittedFloor,
       deniedForMs: entry.deniedForMs,
       undeclared: entry.undeclared,
+      purpose: entry.candidate.purpose ?? null,
     });
   }
 
@@ -329,6 +359,14 @@ export interface AdmissionScoredEntry {
   readonly admitted: boolean;
   /** What `rankAdmission` computed as this candidate's denial duration. Asserted by C2. */
   readonly deniedForMs: number;
+  /**
+   * C15's purpose class, or `null` where the call site has not declared one.
+   *
+   * `null` is reported as `undeclared`, never folded into `live`. Defaulting it would manufacture the
+   * very intra-class contention M5 is trying to measure — DEBT-012's shape, arriving inside the
+   * instrument built to detect it.
+   */
+  readonly purpose: FramePurpose | null;
 }
 
 /**
@@ -413,6 +451,7 @@ function buildScoredDecision(
     incumbent: entry.candidate.admittedAtMs != null,
     admitted: admittedSet.has(entry.candidate.key),
     deniedForMs: entry.deniedForMs,
+    purpose: entry.candidate.purpose ?? null,
   }));
 
   // The boundary is the lowest-ranked ADMITTED against the highest-ranked ELIGIBLE DENIED. Not

@@ -860,6 +860,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             // refuse — which is the honest failure, but it would cost the duplicate-decode share this
             // whole mechanism exists to keep.
             requestedTime: mediaType === "video" ? mapSourceTime(wcTimeRef.current) : undefined,
+            // DECLARED PURPOSE (C15, ADR-012 §6.1). A media layer in the viewer is serving the LIVE
+            // frame — including a hidden pre-roll shell, which is about to be on screen. Purpose is
+            // what the work is FOR; `priority` above is when it is needed, and the two are
+            // independent. Recorded only: nothing ranks on it (ADR-013 Phase 0 / M5).
+            purpose: "live",
             // DECLARED MERIT (S4.3). Note what is NOT passed: `hidden` and `suspended` do not lower it.
             // A hidden pre-roll shell is about to be on screen, and a suspended source is demoted —
             // I-24 forbids a presentation policy from changing resource lifetime.

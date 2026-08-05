@@ -307,5 +307,69 @@ console.log("\nsanity — the residency window is the one the kernel declares");
   );
 }
 
+// ── C15 purpose class: RECORDED, never RANKED ───────────────────────────────
+//
+// The whole justification for threading purpose during a measurement programme is that it is data and
+// not policy. If it ever influenced the decision it would be a mechanism change mid-measurement, and
+// every number collected before and after would stop being comparable. This asserts the property
+// rather than trusting the comment that claims it.
+console.log("\nC15 — purpose is recorded and never ranked");
+{
+  const now = 10_000;
+  const base: AdmissionCandidate[] = [
+    { key: "a", priority: "playhead", contribution: full, firstRequestedAtMs: 0, admittedAtMs: 0 },
+    { key: "b", priority: "playhead", contribution: half, firstRequestedAtMs: 0, admittedAtMs: 0 },
+    { key: "c", priority: "playhead", contribution: full, firstRequestedAtMs: now, admittedAtMs: null },
+  ];
+  const withPurpose: AdmissionCandidate[] = [
+    { ...base[0]!, purpose: "thumbnail" },
+    { ...base[1]!, purpose: "live" },
+    { ...base[2]!, purpose: "analysis" },
+  ];
+  const plain = rankAdmission(base, 2, now);
+  const tagged = rankAdmission(withPurpose, 2, now);
+  check(
+    "tagging every candidate with a purpose changes the decision NOT AT ALL",
+    JSON.stringify(plain.admitted) === JSON.stringify(tagged.admitted) &&
+      JSON.stringify(plain.heldByResidency) === JSON.stringify(tagged.heldByResidency),
+    `${JSON.stringify(plain.admitted)} vs ${JSON.stringify(tagged.admitted)}`
+  );
+  check(
+    "…including when the LOWEST-merit candidate is the only `live` one",
+    tagged.denied.some((d) => d.key === "b"),
+    JSON.stringify(tagged.denied.map((d) => d.key))
+  );
+
+  const decision = observe(withPurpose, 2, now);
+  check(
+    "…and the purpose is nevertheless recorded on every scored entry",
+    decision.entries.every((e) => e.purpose !== undefined),
+    JSON.stringify(decision.entries.map((e) => e.purpose))
+  );
+  check(
+    "…faithfully, without being folded together",
+    new Set(decision.entries.map((e) => e.purpose)).size === 3,
+    JSON.stringify(decision.entries.map((e) => e.purpose))
+  );
+}
+{
+  // Absence stays absence. Defaulting an undeclared purpose to `live` would manufacture the intra-class
+  // contention M5 exists to measure — DEBT-012's shape arriving inside the instrument built to find it.
+  const now = 10_000;
+  const decision = observe(
+    [
+      { key: "a", priority: "playhead", contribution: full, firstRequestedAtMs: 0, admittedAtMs: 0 },
+      { key: "b", priority: "playhead", contribution: full, firstRequestedAtMs: 0, admittedAtMs: 0 },
+    ],
+    1,
+    now
+  );
+  check(
+    "an undeclared purpose records as null, NEVER as a default class",
+    decision.entries.every((e) => e.purpose === null),
+    JSON.stringify(decision.entries.map((e) => e.purpose))
+  );
+}
+
 console.log(`\n${failures === 0 ? "admission:observer OK" : `admission:observer FAILED`} — ${checks - failures}/${checks} checks passed\n`);
 process.exit(failures === 0 ? 0 : 1);

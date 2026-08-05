@@ -53,6 +53,7 @@ interface ScoredEntry {
   incumbent: boolean;
   admitted: boolean;
   deniedForMs: number;
+  purpose: string | null;
 }
 interface ScoredDecision {
   capacity: number;
@@ -261,16 +262,78 @@ async function main(): Promise<void> {
     }
 
     // ── M5 ──────────────────────────────────────────────────────────────────
-    // Purpose class is not carried on the scored record, so the split available today is
-    // incumbent-vs-newcomer. Reported as what it is; see the note printed below.
     const denialEntries = contended.flatMap((d) => d.entries.filter((e) => !e.admitted));
     const incumbentDenied = denialEntries.filter((e) => e.incumbent).length;
     console.log("\n── M5 (OQ5) — who contends with whom?");
     console.log(`   denied candidates          ${denialEntries.length}`);
     console.log(`   …incumbent (displaced)     ${incumbentDenied} = ${pct(incumbentDenied, denialEntries.length)}`);
     console.log(`   …newcomer (refused)        ${denialEntries.length - incumbentDenied}`);
-    console.log("   NOTE: purpose class is not carried on C15 today, so this is the incumbent/newcomer");
-    console.log("   split, NOT the intra-class share the decision rule needs. Recorded as a gap.");
+
+    // C15 purpose class, threaded 2026-08-05. A denial is INTRA-class when the denied candidate and
+    // everything that displaced it share a purpose: a per-class reservation cannot express protection
+    // in that case, so a high share means per-class reserves are insufficient rather than just simpler.
+    let intra = 0;
+    let cross = 0;
+    let unclassifiable = 0;
+    for (const decision of contended) {
+      const admittedPurposes = decision.entries.filter((e) => e.admitted).map((e) => e.purpose);
+      for (const denied of decision.entries.filter((e) => !e.admitted)) {
+        if (denied.purpose == null || admittedPurposes.some((p) => p == null)) {
+          unclassifiable += 1;
+        } else if (admittedPurposes.every((p) => p === denied.purpose)) {
+          intra += 1;
+        } else {
+          cross += 1;
+        }
+      }
+    }
+    const classified = intra + cross;
+    console.log(`   intra-class denials        ${intra}/${classified} = ${pct(intra, classified)}`);
+    console.log(`   cross-class denials        ${cross}/${classified} = ${pct(cross, classified)}`);
+    console.log(`   unclassifiable (undeclared purpose)  ${unclassifiable}`);
+
+    // VACUITY GUARD — purpose DIVERSITY, not merely purpose presence.
+    //
+    // The intra/cross split is only meaningful if a cross-class denial was POSSIBLE. On a fixture where
+    // every candidate carries one purpose, "100% intra-class" is arithmetic, not evidence: there was no
+    // other class to lose to. This is the same shape as `capMisses 0` on an uncontended fixture and as
+    // `U = 0.0%` on a fabricated-declaration path — a number that reads decisive because the
+    // alternative was unreachable.
+    const purposesSeen = new Set(
+      contended.flatMap((d) => d.entries.map((e) => e.purpose)).filter((p): p is string => p != null)
+    );
+    console.log(`   distinct purposes present  ${purposesSeen.size} {${[...purposesSeen].join(", ")}}`);
+
+    console.log("\n   VERDICT against the pre-registered rule:");
+    if (classified === 0) {
+      console.log("     ⚠ VOID — no denial could be classified. Every candidate's purpose is undeclared,");
+      console.log("     so the intra-class share is 0/0. Undeclared is NOT defaulted to `live`: doing so");
+      console.log("     would manufacture the very intra-class contention this measures (DEBT-012).");
+    } else if (purposesSeen.size < 2) {
+      console.log("     ⚠ VOID — only ONE purpose class was present, so a cross-class denial was");
+      console.log("     impossible and the 100% intra-class share is arithmetic rather than evidence.");
+      console.log("     C15 now carries purpose faithfully; what is missing is DIVERSITY in the");
+      console.log("     workload. Every acquisition through this pool today is `live` — background");
+      console.log("     work (proxy builds, thumbnails) does not take decode sessions through this");
+      console.log("     path — so OQ5's per-class-vs-per-source question has no competing classes to");
+      console.log("     arbitrate between yet, and cannot be answered on this runtime as it stands.");
+    } else {
+      const iShare = intra / classified;
+      if (iShare < 0.1) {
+        console.log("     PER-CLASS is sufficient — intra-class share < 10%. Record the measured value");
+        console.log("     as the justification for the simpler design.");
+      } else if (iShare > 0.3) {
+        console.log("     PER-SOURCE IS REQUIRED — intra-class share > 30%. A per-class reserve cannot");
+        console.log("     see the contention it exists to arbitrate.");
+      } else {
+        console.log("     INCONCLUSIVE (0.10–0.30). Widen the corpus; do NOT default to the simpler");
+        console.log("     option because it is simpler.");
+      }
+    }
+    if (denialEntries.length > 0 && contended.length > 0) {
+      // The absolute-rarity falsifier: reservations may be solving a problem this workload lacks.
+      console.log(`   (contended decisions were ${contended.length} of ${scored.length} recorded)`);
+    }
 
     // ── M4 ──────────────────────────────────────────────────────────────────
     console.log("\n── M4 (OQ4) — the pressure signal's own statistics");

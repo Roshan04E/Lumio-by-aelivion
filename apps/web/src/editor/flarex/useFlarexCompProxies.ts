@@ -335,6 +335,10 @@ export function useFlarexCompProxies(input: UseFlarexCompProxiesInput): UseFlare
         // caller happens never to collide" are different claims and only one of them is true here.
         const lease = acquirePreviewFrameProvider(objectUrl, {
           priority: "playhead",
+          // DECLARED PURPOSE (C15). A comp proxy is serving the LIVE picture — it stands in for the
+          // comp's own sources in the frame the user is watching, so it competes as live work and not
+          // as background. Building a proxy would be background; SERVING one is not. Recorded only.
+          purpose: "live",
           requestedTime: Math.max(0, getLivePlaybackTime() - entry.hostStartSeconds),
         });
         if (!lease) {

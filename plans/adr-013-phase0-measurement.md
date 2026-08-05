@@ -439,6 +439,34 @@ acquires), reservations are solving a problem this workload does not have on thi
 priority in the programme drops behind the ladder and the ordering work. That is a finding worth having
 before building the mechanism ADR-013 §4.4 calls the one that "matters most".
 
+#### RESULT (2026-08-05) — C15 delivered; OQ5 is PREMATURE, not blocked and not answered
+
+**C15's purpose class shipped and is proven inert.** `AdmissionCandidate.purpose` carries
+`FramePurpose` (ADR-012 §6.1 — reused, not a parallel taxonomy), threaded through the pool's lease
+record and onto every scored entry and denial. `admission:observer` **27/27** asserts the property that
+justifies threading it mid-programme: tagging every candidate with a purpose changes the admitted set
+and the residency set **not at all**, including when the lowest-merit candidate is the only `live` one;
+and an undeclared purpose records as `null`, never as a default class.
+
+**The measurement then read `intra-class 6/6 = 100.0%`, which fires the pre-registered "PER-SOURCE IS
+REQUIRED" row — and that reading is VOID.** `distinct purposes present: 1 {live}`. With one class in the
+fixture a cross-class denial is arithmetically impossible, so 100% intra-class is a property of the
+fixture, not of the workload. A **purpose-diversity guard** now enforces this, and it is the same shape
+as `capMisses 0` on an uncontended fixture and `U = 0.0%` on a fabricated-declaration path: *a number
+that reads decisive because the alternative was unreachable.*
+
+**The finding underneath it, and it re-scopes OQ5.** Every acquisition through the decode pool today is
+`live`. The three call sites are the media layer, the comp-proxy server and the decoder gate page —
+there is no background acquirer. Proxy builds go through `sourceProxy.worker.ts`, a separate path that
+never touches this pool. So the classes OQ5 proposes to arbitrate **between** do not yet compete:
+
+> OQ5 does not become answerable by widening the corpus. It becomes answerable when background
+> acquisition shares the pool — which is a change to the runtime, not to the fixture.
+
+Recorded as **premature** rather than blocked. The distinction matters for sequencing: a blocked
+question is waiting on Phase 0 work, and a premature one is waiting on the programme. Reservation
+granularity should be re-opened when the first background acquirer lands, and not before.
+
 ---
 
 ### 3.6 M6 — reservation window and background floor (OQ6)
@@ -790,7 +818,7 @@ current form.
 | **2** lag tolerance | **SURVIVES UNCHANGED** | Offline, pixel-based, reads no contention counter. The only magnitude wholly untouched by the model change — which is why it is the safest thing to run, and also why it is the least urgent. |
 | **3** L4 vs L3 ordering | **QUESTION SURVIVES · PROCEDURE BROKEN** | Its cost comparand was fps, which P7/DEBT-011 forbids on a contended fixture. Must be re-specified to measure cost by decode ms and sessions consumed, or to run on a deliberately uncontended fixture. The ordering question itself is unaffected. |
 | **4** Governor hysteresis | **VOID AS POSED** | It asks how long to damp a pressure signal that, on this fixture, has no sustained excursions at all. A **prior question** now stands in front of it: *does sustained pressure exist outside the mount storm?* Until that is answered, sizing a constant is fitting a curve to one point. |
-| **5** reservation granularity | **WELL-POSED · BLOCKED** | The question is unaffected; the instrument is missing. Purpose class is not carried on C15, so intra-class share cannot be computed. Blocked, not inconclusive. |
+| **5** reservation granularity | ~~WELL-POSED · BLOCKED~~ → **PREMATURE (2026-08-05)** | C15 now carries purpose faithfully (`admission:observer` 27/27: recorded, never ranked). The instrument is no longer missing — the **workload** is. Every acquisition through the decode pool today is `purpose: "live"`; background work does not take decode sessions through this path. With one class present, a cross-class denial is impossible and the measured "100% intra-class" is arithmetic, not evidence. **OQ5 cannot be answered on this runtime as it stands**, and it does not become answerable by widening the corpus — it becomes answerable when background acquisition shares the pool. See §3.5. |
 | **6** reservation window + floor | **REWRITTEN** | The window was to be sized from live *lead time* under steady-state competition. If the contention that matters is a mount storm, a reservation's job is to protect against the **storm**, not the steady state, and the window is sized against storm duration instead. This collapses substantially into OQ9 below. |
 | **7** budget K | **SURVIVES · GAINS WEIGHT** | `wcProvider 4/6` shows K decides *how many sources get WebCodecs at all*; the other two are permanently on the element path. But its frontier may no longer be measured by fps (P7) — the comparand becomes routing determinism plus `capMisses`. |
 | **8** Governor cadence | **BLOCKED BEHIND OQ4** | Cadence bounds a reaction to sustained pressure. If there is none, there is nothing to react to and the band is undefined rather than empty. Not independently answerable. |
