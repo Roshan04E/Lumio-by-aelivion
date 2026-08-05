@@ -38,8 +38,58 @@ export function createFlarexComp(id: string, name: string): FlarexComp {
   };
 }
 
-/** Write-through seam: store/replace a comp in the registry with its version bumped.
- *  Call on EVERY comp mutation (the flarex.* actions funnel through this). */
+/**
+ * Everything about a comp that a RENDERER can read, canonicalised — i.e. everything except node `ui`
+ * and comp `view`.
+ *
+ * `compile-flarex.ts` states the rule this encodes in its own header: *"Determinism rule: node `ui` /
+ * comp `view` are never read; same (comp, ctx) → structurally identical draws."* So two comps with the
+ * same signature cannot produce different pixels, and a version bump between them invalidates render
+ * caches for nothing.
+ *
+ * CONSERVATIVE BY CONSTRUCTION, and the direction is not symmetric: an unnecessary bump costs
+ * performance, a missing one ships a stale pixel. So this strips exactly the two fields the compiler
+ * documents as unread and keeps everything else — including `previewNodeId`, which the compiler no
+ * longer reads but the viewer still turns into a per-frame `previewRootNodeId` (ADR-012 S1.2). A new
+ * field on `FlarexComp` is therefore render-relevant by default, which is the safe way round.
+ */
+function flarexRenderSignature(comp: FlarexComp): string {
+  const nodes = Object.keys(comp.nodes)
+    .sort()
+    .map((id) => {
+      const { ui: _ui, ...rest } = comp.nodes[id]!;
+      return [id, rest] as const;
+    });
+  const { nodes: _n, view: _view, version: _v, ...compRest } = comp as FlarexComp & { view?: unknown };
+  return JSON.stringify([compRest, nodes]);
+}
+
+/**
+ * Write-through seam: store/replace a comp in the registry, bumping its version **when the write can
+ * change a pixel**.
+ *
+ * Call on EVERY comp mutation (the flarex.* actions funnel through this).
+ *
+ * ## Why the bump is conditional (2026-08-05)
+ *
+ * `comp.version` is not a change counter, it is the **render dirty key**: it keys
+ * `FlarexSourceDrawCache` (`(layerId, comp.version, renderScale)`) and the comp-proxy identity. It used
+ * to bump on every write, including a node DRAG — a change to `ui.x/ui.y`, which no renderer reads.
+ *
+ * Measured consequence, from a user trace: six position-only writes (versions 41-46, node and edge
+ * counts identical throughout) each invalidated the source-draw template of every asset-source
+ * MediaIn. The rebuild landed on a frame whose graded media was not consumed, `pruneDepartedSceneResources`
+ * read "absent this frame" as "departed", disposed the loader's media resource and forgot it — and the
+ * kernel logged `handle-missing` on `media/flarexsrc:...` with the generation climbing 1, 2, 3 in
+ * lockstep with the drags. A forgotten handle resolves to a null texture, the MediaIn drew nothing, the
+ * comp lowered to null, and `buildSceneDraws`' `lowered ?? draw` put the HOST clip on screen for that
+ * frame. Dragging a node made the node's own picture flash the host clip underneath it.
+ *
+ * `dependency-graph.ts` names this defect in its own header — *"`comp.version` bumps on ANY edit and
+ * invalidates the whole comp"* — and per-axis tracking (S6.5) is the real answer. This is the narrow,
+ * doctrine-backed half of it: not "invalidate less", but "do not invalidate on a field the contract
+ * says is unread".
+ */
 export function stampFlarexComp(graph: ProjectGraph, comp: FlarexComp): ProjectGraph {
   // I-20 enforced at the WRITE, not at the gesture. Every mutation path funnels through here — drag,
   // paste, AI intent, keyframe edits, node insertion — so this is the one place that can guarantee the
@@ -48,7 +98,15 @@ export function stampFlarexComp(graph: ProjectGraph, comp: FlarexComp): ProjectG
   if (deduped) {
     reportEdgeRepair(comp.id, (comp.edges?.length ?? 0) - deduped.length, "write");
   }
-  const stamped: FlarexComp = { ...comp, edges: deduped ?? comp.edges, version: (comp.version ?? 0) + 1 };
+  const next: FlarexComp = { ...comp, edges: deduped ?? comp.edges };
+  // Compared against what is ALREADY in the registry, not against the caller's input: the caller hands
+  // us a whole comp and cannot be trusted to say what it changed. An absent previous comp is a new
+  // registration and always bumps.
+  const previous = graph.flarexComps?.[next.id];
+  const renderUnchanged = previous !== undefined && flarexRenderSignature(previous) === flarexRenderSignature(next);
+  const stamped: FlarexComp = renderUnchanged
+    ? { ...next, version: previous.version ?? 0 }
+    : { ...next, version: (comp.version ?? 0) + 1 };
   return { ...graph, flarexComps: { ...(graph.flarexComps ?? {}), [stamped.id]: stamped } };
 }
 

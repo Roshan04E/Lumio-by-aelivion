@@ -1226,6 +1226,40 @@ console.log("\nS3.4 — derived resource ownership and reclamation (I-8/I-33)");
   //
   // Both directions are asserted. The second is the one that matters: a `permanent` scope that also
   // exempted ordinary resources would retire the sweep by accident, and this file would not notice.
+  // ── comp.version is a RENDER dirty key, not a change counter (2026-08-05 flicker) ───────────────
+  // A node drag writes `ui.x/ui.y`, which `compile-flarex.ts` declares no renderer reads. Bumping the
+  // version there invalidated every asset-source MediaIn's cached source draw, which cost the loader's
+  // media resource (pruned as "departed" on the frame it was rebuilding) and put the HOST clip on
+  // screen in the node's place for that frame.
+  //
+  // Both directions asserted. The second is the one that matters: a signature that ignored too much
+  // would stop bumping on a real edit and ship a stale pixel, which is the unforgivable direction.
+  {
+    const base = createFlarexComp("cv1", "Version");
+    const withComp = stampFlarexComp({ version: 1, flarexComps: {} } as never, base);
+    const stored = withComp.flarexComps!["cv1"]!;
+    const moved: FlarexComp = {
+      ...stored,
+      nodes: Object.fromEntries(
+        Object.entries(stored.nodes).map(([id, n]) => [id, { ...n, ui: { x: n.ui.x + 137, y: n.ui.y + 42 } }])
+      ),
+    };
+    const afterMove = stampFlarexComp(withComp, moved).flarexComps!["cv1"]!;
+    enforced("I-20", "a ui-ONLY comp write does not bump the render dirty key",
+      afterMove.version === stored.version);
+    enforced("I-20", "…and the moved positions are still persisted",
+      Object.values(afterMove.nodes).every((n) => n.ui.x === Object.values(stored.nodes).find((s) => s.id === n.id)!.ui.x + 137));
+
+    const enabledOff: FlarexComp = {
+      ...afterMove,
+      nodes: Object.fromEntries(
+        Object.entries(afterMove.nodes).map(([id, n]) => [id, n.type === "mediaIn" ? { ...n, enabled: false } : n])
+      ),
+    };
+    enforced("I-20", "…while a render-relevant edit beside it still bumps",
+      (stampFlarexComp(stampFlarexComp(withComp, moved), enabledOff).flarexComps!["cv1"]!.version ?? 0) > (afterMove.version ?? 0));
+  }
+
   __resetResourceManager(session);
   const sentinel = registerResource(
     session,
