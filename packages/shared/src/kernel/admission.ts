@@ -161,6 +161,67 @@ export const AGING_RANK_PER_SECOND = 0.05;
  */
 export const PERMANENT_DENIAL_AFTER_MS = 30_000;
 
+/**
+ * How often the denied set is re-examined (ADR-020 slice A).
+ *
+ * **Deliberately its own constant, even though it currently equals `RESOURCE_IDLE_MS` and rides the
+ * same host tick.** Recovery is admission policy; the idle sweep is resource lifetime. Reusing that
+ * constant would mean a later change to *how long a texture may sit unused* silently changes *how
+ * quickly a starved source gets another chance* — which is precisely the coupling ADR-013 was written
+ * about, where two unrelated `frameBudgetMs` constants were never connected and one of them was a
+ * hardcoded 24 nobody owned. Cheap to separate now, invisible later.
+ *
+ * Sized against the mount storm rather than the frame: re-examining faster fights `MIN_RESIDENCY_MS`
+ * (whose whole job is to stop competitors trading a slot), and re-examining on a per-frame cadence
+ * would put ranking on the acquire hot path — R1's warning, and by I-52's own logic a policy that
+ * changes every frame is a schedule.
+ */
+export const ADMISSION_RECOVERY_IDLE_MS = 10_000;
+
+/**
+ * What the recovery pass should do with one denied source.
+ *
+ * `displace` is deliberately absent. Tearing down a decoder session and building another costs a demux
+ * and a GOP window, so rotating sources through slots every ten seconds would trade *silent* degradation
+ * for *visible periodic hitching* — a worse defect that is harder to attribute. Displacement is its own
+ * slice, gated on OQ9 and on a measured cost for a session swap.
+ */
+export type RecoveryAction =
+  /** Free capacity exists — let this source ask again. */
+  | "retry"
+  /** Denied continuously past {@link PERMANENT_DENIAL_AFTER_MS}: §6.11's declared terminal. */
+  | "declare-denied"
+  /** Capacity is full and the terminal is not yet reached. Keep waiting, keep reporting. */
+  | "wait";
+
+export interface DeniedWaiter {
+  readonly key: string;
+  /** When this source was first refused and has been continuously refused since. */
+  readonly deniedSinceMs: number;
+}
+
+/**
+ * Decide what happens to a denied source at the recovery cadence.
+ *
+ * Pure, host-free (I-36): the pool holds the registry and performs the retry; this decides only. That
+ * split is what lets an export, a worker and a headless harness share one recovery policy — and what
+ * makes this testable without a browser.
+ *
+ * **Why "free capacity" and not "outranks an incumbent".** Slice A finds room or says so honestly; it
+ * never takes a slot from a source that is using it. That keeps the mechanism free of the one decision
+ * it could not make well today: siblings inside one comp inherit one host transform and therefore score
+ * identically, so a displacement choice among them would be arbitrary. Admitting into genuinely free
+ * capacity has no such problem — nobody loses.
+ */
+export function recoveryAction(
+  waiter: DeniedWaiter,
+  freeCapacity: number,
+  nowMs: number
+): RecoveryAction {
+  if (freeCapacity > 0) return "retry";
+  return nowMs - waiter.deniedSinceMs >= PERMANENT_DENIAL_AFTER_MS ? "declare-denied" : "wait";
+}
+
 export type DenialReason =
   /** Capacity is full and this candidate ranked below the admitted set. */
   | "over-budget"
