@@ -166,7 +166,7 @@ Entries are never rewritten. To change one, append a new dated note under it.
   same gap unexamined.
 
 ### DEBT-004 — Cache identity is correct but there are no cross-frame records to exploit it
-- Status: open
+- Status: **RETIRED 2026-08-05** (measured; see the closing update at the end of this entry)
 - Registered: 2026-08-01 (pre-registered for S6.2)
 - Reason: correcting cache identity (the time axis, the browser/worker asymmetry) must land before evaluation records, or the records would be built on a key that collides.
 - Invariant affected: none — performance only
@@ -182,6 +182,19 @@ Entries are never rewritten. To change one, append a new dated note under it.
   evaluator is host-wired (`cdc8142`), so cross-frame reuse should now be real. **Owed work:** show a
   clean node reusing a record from a previous frame — a `flarex:perf` run where evaluation count is
   below node count on an unchanged graph would do it. That single number retires this entry.
+- **Update (2026-08-05) — RETIRED on measurement.** `flarex:perf`, 12 frames, real GPU (ANGLE/AMD
+  Radeon Vega 8, D3D11), `shared-expensive-6x8`: **`cache 179h/1m promo=1 evict=0 7.9MB`**.
+  The discriminating number is the MISS COUNT, not the hit count. A cache that only deduplicated
+  *within* a frame would miss once per frame — ~12 misses over this run, one per frame, each frame
+  re-materializing. It missed **once in total**, materialized once (`promo=1`), and served 179 hits
+  after that. The record therefore survived across frames, which is precisely this entry's expiry
+  condition. Evictions zero, so nothing was rebuilt behind the hits.
+  **Read the other eight scenarios correctly before concluding anything from them:** all report
+  `promo=0` and the harness's own `cache INERT` note. That is not a broken cache, it is
+  `MATERIALIZE_MIN_PASSES = 2` excluding comps below the threshold by design — confirmed by dropping the
+  threshold to 1, at which point `shared-cheap-1x8` immediately materializes (`179h/1m promo=1`). An
+  inert scenario proves nothing about this debt either way; `shared-expensive-6x8` is the only one that
+  can answer it.
 
 ### DEBT-005 — Settle-window backstop retained behind explicit frame completion
 - Status: open
@@ -261,6 +274,20 @@ Entries are never rewritten. To change one, append a new dated note under it.
   evaluation contexts and re-run `shared-cheap-retimed-1x8` at threshold 1. Until that runs,
   `MATERIALIZE_MIN_PASSES` stays at **2** — it is the backstop for this entry, and lowering it without
   fixing `fanout` first reproduces p95 2.70→12.30ms and 389 evictions per 60 frames.
+- **Update (2026-08-05) — RE-CONFIRMED on the current build, and my earlier scoping of it was wrong.**
+  I recorded this as "one measurement". It is not: the expiry condition has two clauses, and the first
+  (*`fanout` counts distinct evaluation contexts*) is **implementation work**, not a reading. Only the
+  second clause is measurable, and measuring it first is still worth doing because it says whether the
+  backstop is still earning its place. It is. Threshold temporarily set to 1, `flarex:perf` 12 frames,
+  real GPU:
+  - `shared-cheap-1x8` (the favourable shape): `179h/1m promo=1 evict=0 31.6MB` — threshold 1 **wins**
+    here, which is why this is a genuine trade and not an obvious call.
+  - `shared-cheap-retimed-1x8` (the counterweight): `72h/**109m** promo=9 **evict=101** **253.1MB**`.
+  253.1MB matches the originally registered figure exactly, and 101 evictions in 12 frames is the same
+  rate as the registered 389 per 60. **The defect reproduces unchanged on the post-S7.2 build**, so the
+  threshold-2 backstop stays and DEBT-006's replaced justification still holds. Threshold reverted.
+  **Owed work, restated correctly:** make `fanout` count evaluation contexts (S6.5 made them
+  enumerable), THEN re-run the pair — clause two is the acceptance for clause one, not a substitute.
 
 ### DEBT-010 — the node-thumbnail cache key omits ADR-009's ContextVersion
 - Status: open (LATENT — the symptom is gone, the defect is not)
@@ -413,6 +440,9 @@ Entries are never rewritten. To change one, append a new dated note under it.
   structurally impossible since `366860c` and is pinned by enforced invariant I-34. Its original expiry
   condition was unsatisfiable (it watched the `no-loader` path, which is correct behaviour); see
   DEBT-008 for the harness tidy-up that remains.
+- **DEBT-004** — retired 2026-08-05 in place above, on measurement: `shared-expensive-6x8` shows
+  `179h/1m promo=1`, i.e. ONE miss across 12 frames rather than one per frame, so the evaluation record
+  survives between frames. The other scenarios are inert by threshold design and cannot answer it.
 - **DEBT-008** — retired 2026-08-05 in place above. Two mis-named conformance assertions corrected
   (one promoted `pending`→`enforced`, one renamed), and I-27 gained the behavioural guard it was
   missing — verified non-vacuous by breaking the runtime and watching it fail.

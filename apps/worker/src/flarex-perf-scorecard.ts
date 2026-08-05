@@ -68,12 +68,36 @@ interface ScenarioResult {
 
 async function main(): Promise<void> {
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
-  const browser = await chromium.launch(channel ? { channel } : {});
+  // HEADED is not a convenience flag. Playwright defaults to headless, and headless Chrome falls back
+  // to SwiftShader — software rasterization — so every timing this scorecard has ever printed was a CPU
+  // number wearing a GPU label. It also cannot survive the 3840x2160 scenarios: the renderer is killed
+  // mid-run ("Target page, context or browser has been closed"), which reads as a harness bug rather
+  // than as a regime one. `PROBE_HEADED=1` puts it on the real GPU.
+  const headed = process.env.PROBE_HEADED === "1";
+  const browser = await chromium.launch({ ...(channel ? { channel } : {}), headless: !headed });
   const page = await browser.newPage();
   await page.addInitScript("window.__name = window.__name || function (f) { return f; };");
   page.on("pageerror", (e) => process.stdout.write(`[pageerror] ${String(e)}\n`));
   await page.goto(BASE, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1200);
+
+  // DECLARE THE REGIME BEFORE THE NUMBERS. A scorecard that cannot say which rasterizer produced its
+  // milliseconds invites the reader to compare a SwiftShader run against a GPU run and call the
+  // difference a regression. Counts (`evaluated`, `promo`, `reuse`) are rasterizer-independent and stay
+  // valid either way; only the timings are void, so this reports rather than aborts.
+  const regime = await page.evaluate(() => {
+    try {
+      const c = document.createElement("canvas");
+      const gl = c.getContext("webgl2") ?? c.getContext("webgl");
+      if (!gl) return "no-webgl";
+      const dbg = (gl as WebGLRenderingContext).getExtension("WEBGL_debug_renderer_info");
+      return dbg ? String((gl as WebGLRenderingContext).getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "unknown";
+    } catch {
+      return "unknown";
+    }
+  });
+  const software = /swiftshader|llvmpipe|software/i.test(regime);
+  process.stdout.write(`renderer: ${regime}${software ? "  ** SOFTWARE — timings are VOID, counts still valid; re-run with PROBE_HEADED=1 **" : ""}\n`);
 
   const results: ScenarioResult[] = await page.evaluate(
     async (payload: { frames: number; mods: Record<string, string> }) => {
