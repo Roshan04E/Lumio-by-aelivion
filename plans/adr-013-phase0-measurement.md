@@ -386,6 +386,55 @@ interval, and autocorrelation.
 bound comes from OQ8/M8. Report the band, not a number — the constant is configuration (§6.12) and is
 the founder's to pick within a measured band.
 
+#### RESULT (2026-08-05) — the prior question is answered NEGATIVELY. OQ4 is ill-posed on this runtime.
+
+The playback-contention fixture ran with the contention-possibility guard satisfied: six Flarex sources
+against four slots, `capMisses 6` and 6 scored decisions at mount, then **115 transport samples across
+30s of scripted seeks, scrubs and long jumps.**
+
+```
+capMisses   6 (post-storm) → 6      = +0 during transport
+decisions   6 during mount storm    ·  0 during transport
+```
+
+**Pressure did not rise once.** Not during steady playback (Stage 1, 74 samples) and not under
+aggressive transport (here, 115 samples). The prior question §6.1 placed in front of OQ4 —
+*does sustained pressure exist outside the mount storm?* — is answered **no**.
+
+So OQ4 is not merely unsized. **It asks how long to damp a signal that has no excursions to damp**, and
+a hysteresis constant fitted to it would be fitted to nothing. **OQ8 (cadence) inherits this**: a
+cadence bounds a reaction to sustained pressure, and there is none.
+
+**The mechanism, and it is the sharpest statement of OQ9 so far.** Two measured facts compose:
+
+1. **C1** — the §6.11 aging term is structurally zero on the live admission path (measured, 3 runs).
+2. **This result** — after the mount storm there are *no further admission decisions at all*. Sessions
+   are retained across seeks, so the four winners keep their slots and the two losers never re-enter a
+   ranking.
+
+> **A source that loses the mount-storm lottery has no mechanism by which it can ever be admitted.**
+> It does not age into contention, because aging never fires. It is not re-ranked, because no further
+> decision occurs. It is not declared permanently denied, because that terminal is reached through
+> `deniedForMs`, which for these candidates never accumulates. It simply stays on the `<video>` element
+> path for the lifetime of the session, silently.
+
+ADR-012 §6.11 offers exactly two acceptable ends for a persistently low-ranked source — *it receives a
+session, or it is declared permanently denied.* **Neither occurs.** The third outcome the invariant was
+written to forbid is the one the runtime produces.
+
+**Consequence for acceptance infrastructure, which is why this fixture was built.** Checkpoint 1
+established that the scheduler's acceptance criterion is routing determinism under contention. This
+result says **that criterion can only be measured at mount**, because mount is the only moment
+contention exists. A playback-time convergence test has nothing to observe. That is a constraint on how
+the scheduler is accepted, not a reason to weaken the criterion — and it was worth learning before
+building an acceptance harness around a moment that never arrives.
+
+**Reading 2 — the corpus half of F2, PATH B.** `distinct merits observed across 6 decisions: 1.0000`,
+`tieBroken: residency 6 · rank 0 · key 0`. The live runtime agrees with `contribution:scope`: every
+virtual source scores identically because the identity transform is stamped at synthesis. The corpus
+reading corroborates the mechanism reading for path B. **Path A's corpus reading remains outstanding** —
+see the fixture note in §6.1.
+
 **Falsifier — and it is asymmetric with the others; the asymmetry is part of the result.** If p95 burst
 duration exceeds M8's upper bound, the two bounds cross and there is no valid fixed hysteresis constant:
 the Governor could not be a fixed-hysteresis design, and §3.26's "continuous; hysteretic" lifecycle needs
