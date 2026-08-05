@@ -53,6 +53,8 @@ directive. A run violating any of these is **void** and its numbers must be disc
 | P4 | Prove the build is the build | The temporal-coherence episode traced to a build shipping `react-dom.development` via `.env.local`. Record the bundle mode with each run. |
 | P5 | One topology change per measurement arm | Rule 2. An arm that varies two things names a *run*, not a cause — the `dc1319d` bisect cost four extra runs to learn this. |
 | P6 | Acceptance evidence does not transfer across a configuration change | Rule 3. A baseline collected at K=4 is not a baseline for K=5, even for a number believed unrelated to K. |
+| **P7** | **On a fixture with more declared sources than the session budget, fps is not a comparand** | Measured 2026-08-05 (§4.1.1, DEBT-011). Identical arms differ 55–125%, bistable, and which arm degrades alternates between runs — because arrival order decides who holds a session. Use `capMisses` and the unconditional counters; report `wcProvider %` beside any frame-rate figure so a reader can see which arms were comparable at all. |
+| **P8** | **`wcProvider %` is the precondition instrument, not `awaitWebCodecsEngaged`** | The helper tests `.some(mode !== "element")`, so one engaged source of six satisfies it. It answers "has anything started", never "is this arm comparable". An arm below 100% on a fixture whose sources should all decode is not comparable to one at 100%. |
 
 ### 1.1 Which measurements are decoder-topology changes
 
@@ -632,7 +634,19 @@ decision rule was written against the unconditional counter.
    satisfies it. On a six-source fixture "engaged" can mean 1/6, which is why a per-arm gate reported
    `engaged` for an arm that then sampled at `wcProvider 66%`. It is a shared helper that
    `source-admission-probe` also depends on, so its semantics were **not** changed mid-measurement.
-   Strengthening it to a fraction is a harness slice of its own.
+   Strengthening it to a fraction is **harness slice H1**, and it must land before any later stage whose
+   precondition depends on multi-source engagement — M3's proxy arms and M7's budget frontier both do.
+
+**What actually established the WebCodecs precondition for M0, since the helper cannot.** The verdict
+does not rest on `awaitWebCodecsEngaged`, and saying otherwise would rest it on an instrument disclosed
+as weak in the same breath. It rests on the **independent reading in the report body**: both arms of
+both accepted pairs ran `decode wc-hw` at **`wcProvider 100%`**, against `wcProvider 60–66%` and
+`decode wc-hw/element` on every arm that was rejected. The routing was measured, not assumed.
+
+> **Standing rule from here: `wcProvider %` is the precondition instrument.** `awaitWebCodecsEngaged` is
+> a liveness check — it answers "has anything started", never "is this arm comparable". Any arm whose
+> `wcProvider` is below 100% on a fixture whose sources should all be decoding is not comparable to one
+> at 100%, whatever the helper returned.
 2. The per-arm precondition wait added during this measurement (`reopenWithFlags` settles 6s; an ingest
    proxy lands in ~10s) is correct and retained, but it did **not** remove the swing — the swing was the
    session lottery, not cold start. Recorded because a fix that does not fix the symptom is exactly the
@@ -746,3 +760,16 @@ release-hygiene one, and cross-referencing the playbook so the two cannot diverg
 **Not done in this session.** `plans/adr-012-implementation-programme.md` currently carries another
 session's uncommitted modifications (`git status --short` shows it as ` M`). It has been neither edited
 nor staged. The debt is carried forward and should be picked up when that file is clean.
+
+**Second carried mirror, added 2026-08-05.** P7 and P8 above are measurement rules and belong in the
+programme doc's measurement-rules section, not only here — every future session that compares two arms
+on a contended fixture will otherwise re-derive P7 at the cost of a void run, which is exactly what the
+five soak rules were mirrored to prevent. The authoritative statement is **DEBT-011** in
+`project-tracker/architectural-debt.md`, which carries the numbers and the scheduler's acceptance
+criterion. Mirror both alongside the soak rules when the programme file is clean, and cross-reference
+DEBT-011 rather than restating the numbers, so the two cannot diverge.
+
+**Harness slice H1, booked.** Strengthen `awaitWebCodecsEngaged` from `.some()` to a declared fraction of
+declared sources. Must land **before M3 and M7**, whose preconditions depend on multi-source engagement.
+Not done during a measurement: changing a shared helper's semantics mid-measurement is ADR-012's fourth
+learning inverted, and `source-admission-probe` depends on the current behaviour.

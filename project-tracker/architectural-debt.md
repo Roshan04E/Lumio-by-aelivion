@@ -445,6 +445,42 @@ Entries are never rewritten. To change one, append a new dated note under it.
   against — a wide blast radius to fix a word. Left as-is with the meaning written down; if it is ever
   renamed, `substitutedTotal` stops being comparable across that boundary.
 
+### DEBT-011 — frame rate is not a valid comparand on a contended fixture
+- Status: **open**
+- Registered: 2026-08-05 (ADR-013 Phase 0 / M0)
+- Reason: under contention the runtime has **no arbitration among `playhead` leases** (ADR-013 §1). Which sources hold WebCodecs sessions is decided by arrival order, so it varies run to run; the losers fall to the `<video>` element path. The sampled source's frame rate therefore reports **which lottery it won**, not what the change under test did.
+- Invariant affected: I-40 (not yet implemented — this is the defect it exists to close)
+- Owner: unassigned
+- Expiry condition: identical arms on one contended fixture converge on the same routing across runs — see the acceptance criterion below
+- Planned slice: ADR-013 3.25, Media Acquisition Scheduler
+- Tracking issue: —
+- Detection: any measurement, gate or acceptance argument that compares p50/p95 fps across arms on a fixture with more declared sources than the session budget, without also reporting `wcProvider %`
+
+**The measured numbers, recorded so nobody re-derives them at the cost of a void run.** Four runs,
+eight arms, six distinct sources against a four-slot budget, chrome channel, 14s sampled per arm:
+
+- identical off-arms differ by **55–125%** p50 fps (29.9 vs 67.4; 66.9 vs 29.8);
+- the split is **bistable** — one arm ~67fps, the other ~30fps, never intermediate;
+- **which arm degrades alternates between runs** (run 1: arm A degraded; run 2: arm B degraded);
+- the degraded arm is identifiable *only* from routing: `decode wc-hw/element`, `wcProvider 60–66%`,
+  `stale 53–56%`, `unmet 1`. Its frame rate says nothing about the change under test;
+- meanwhile every unconditional decoder counter is **identical** across all eight arms —
+  `capMisses 10`, `created 11`, `blindSplits 1`. Contention counters are deterministic here; fps is not.
+
+**The rule.** *On a fixture with more declared sources than the session budget, fps may not be used as a
+comparand. Use `capMisses` and the other unconditional counters, and report `wcProvider %` alongside any
+frame-rate figure so a reader can see which arms were even comparable.*
+
+**Acceptance criterion for the slice that retires this — and it is not an fps improvement.** The defect
+is *non-determinism of routing under contention*, so the test is convergence, not speed:
+
+> Identical arms on the same contended fixture must resolve to the **same routing**, run to run.
+> `wcProvider %`, `stale %` and `unmet` are the instruments. **A faster p50 with the lottery still
+> running is not a pass.**
+
+A scheduler could raise p50 by consistently favouring whichever source the probe happens to sample and
+leave the arbitration defect entirely intact. This entry exists partly to make that argument unavailable.
+
 ---
 
 ## Retired
