@@ -305,6 +305,19 @@ Entries are never rewritten. To change one, append a new dated note under it.
   resource subsystem Phase 0 measures
 - Tracking issue: —
 - Detection: any new thumbnail cache path keyed on content identity without an evaluation-time axis
+- **Update (2026-08-05) — PART 1 DONE, part 2 is a design decision and is deliberately not guessed.**
+  ContractVersion is now folded into the key (`${FLAREX_CONTENT_HASH_CONTRACT_VERSION}:${contentHash}`).
+  Two of ADR-009's three axes are present; bumping the hash contract no longer leaves every thumbnail
+  on screen serving pixels computed under the old meaning.
+  **ContextVersion remains absent, and that is the axis the defect needs.** It cannot be folded in from
+  this module because there is no value to fold: `FlarexThumbnailPass` carries `hostLayerId`, `comp`,
+  `timeSeconds`, `nodeIds` and a capture handle, and **none of them changes when media arrives**.
+  Supplying one means deciding what "context" means for a thumbnail — most likely the decoded frame
+  version of every source the node reads — and plumbing it from the viewer. Render dimensions, the
+  usual other component, are constant here (`FLAREX_THUMB_W/H`), so they are not the answer.
+  Left undone on purpose: **a wrong ContextVersion is worse than none**, because it would invalidate
+  correct thumbnails every frame and turn the cache into a per-frame re-render.
+  Reasoning recorded at the `entryKey` site so the next reader does not re-derive it.
 - **Why it currently looks fixed, and why that is the dangerous part.** The visible symptom — node
   thumbnails showing the HOST clip — resolved as a *downstream consequence* of the DEBT-009 latch fix:
   the first render was capturing the host because the MediaIn was substituting the host. Remove the
