@@ -712,6 +712,30 @@ async function main(): Promise<void> {
     // the end is indistinguishable from a hung one, which cost a debugging round the first time.
     console.log(`  · ${arm.name}: reloading with ?${arm.flags}`);
     await reopenWithFlags(page, projectUrl, arm.flags);
+    /**
+     * THE PRECONDITION HAS TO BE RE-ESTABLISHED PER ARM (2026-08-05).
+     *
+     * `awaitWebCodecsEngaged` above runs once, before the arms — but every arm RELOADS, and a reload
+     * puts every source back on the `<video>` element path until its ingest proxy lands again (~10s).
+     * `reopenWithFlags` settles for 6s, which is short of that. So the first arm after a cold reload
+     * sampled a partly-element run and the second inherited warm proxies.
+     *
+     * That is not machine variance, and it is what two "variance baselines" were actually measuring:
+     * 14.5% on one fixture, 125% on the contended one, both between arms that differed only in how far
+     * their decode routing had progressed. The routing was visible in the report the whole time —
+     * `wcProvider 60%` against `wcProvider 100%`, `decode wc-hw/element` against `decode wc-hw` — which
+     * is the recorded rule arriving on schedule: read `__rfWcMode` BEFORE trusting anything
+     * decoder-shaped.
+     *
+     * Waiting here makes the arms comparable. It cannot make them identical, and if a residual
+     * difference survives this, THAT is the variance the measurement was looking for.
+     */
+    if (process.env.PROBE_REQUIRE_WC === "1" || (process.env.PROBE_ARMS ?? "demotion") === "satisfaction") {
+      const armEngaged = await awaitWebCodecsEngaged(page, Number(process.env.PROBE_WC_WAIT_MS ?? 60_000));
+      console.log(
+        `  · ${arm.name}: webcodecs ${armEngaged ? "engaged" : "NEVER ENGAGED — this arm is VOID"}`
+      );
+    }
     console.log(`  · ${arm.name}: playing ${SECONDS}s`);
     results.push(await sampleArm(page, `${arm.name}   [?${arm.flags}]`, seekLeadSeconds));
     console.log(`  · ${arm.name}: done`);

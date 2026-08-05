@@ -579,6 +579,68 @@ be stochastic is itself a finding about what M4 and M5 can claim.
 altering admission outcomes, not merely observing them — it is behaviour wearing a diagnostics guard (§1.2), and it must be
 refactored before any Stage-1 number is collected. That is R1 as a gate rather than as a principle.
 
+### 4.1.1 M0 RESULT — measured 2026-08-05. Stage 1 proceeds unqualified.
+
+Four runs, eight arms, `PROBE_SOURCES=6` distinct files against a 4-slot budget, `PIXEL_BROWSER_CHANNEL=chrome`,
+`PROBE_REQUIRE_WC=1`, 14s sampled per arm. Contention guard PASSED on every run (`capMisses 10`).
+
+**The decision: the observer effect is negligible.**
+
+| | forward order | reverse order |
+|---|---|---|
+| p50 fps OFF | 66.9 | 67.6 |
+| p50 fps ON | 66.6 | 67.8 |
+| Δ | −0.4% | **+0.3%** |
+| Δ`capMisses` | **0** (10 → 10) | **0** (10 → 10) |
+
+The sign of Δfps **flips between orders**, which is what makes it noise rather than a small effect: an
+instrument that cost 0.4% would cost it in both orders. Both arms of both pairs ran fully `wc-hw` at
+`wcProvider 100%`, so this is a comparison between two runs of the same subsystem.
+
+***V*_capMisses = 0, measured across all eight arms** — every arm read exactly `capMisses 10`, `created 11`,
+`blindSplits 1`. `capMisses` is **deterministic on this fixture**, so the strict Δ = 0 bar declared in §4.1
+is kept rather than relaxed. That is the stronger outcome, and it makes every later contention comparison
+in this programme sharper.
+
+**What is NOT usable, and why it is a finding rather than a defeat.** *V*_fps could not be established:
+identical off-arms differ by **55–125%**, and the difference is **bistable** — one arm runs clean at ~67fps
+while the other sits at ~30fps, and *which* arm degrades alternates between runs. The degraded arm is
+always identifiable from its routing, never from its fps: `decode wc-hw/element`, `wcProvider 60–66%`,
+`stale 53–56%`, and `unmet 1`.
+
+The cause is **ADR-013 §1's motivating defect, observed directly**: six sources compete for four slots with
+no arbitration among `playhead` leases, so which sources hold WebCodecs sessions is decided by arrival and
+varies run to run. The losers fall to the `<video>` element path, and the sampled source's fps depends
+entirely on whether it won its lottery that run. This is the concrete form of *"the fourth arrival loses
+because it arrived fourth"* — and it means **fps is not a valid comparand on a contended fixture until the
+Acquisition Scheduler exists.** M0's verdict rests on `capMisses`, which was the load-bearing comparand by
+design (§4.1) and is unaffected.
+
+This also retires the earlier `V_fps ≥ 14.5%` observation: it was never machine variance. It was the same
+routing lottery on a smaller fixture, and it is now explained rather than outstanding.
+
+**Two arm-only differences, confirmed as telemetry and not behaviour.** The ON arm additionally reports
+`grants 3 (no-incumbent-demand 3)` and `degrade substituted ~1010`. Both counters live *inside* the
+diagnostics guard and read 0 with it off — the same shape as `admissionDenials` (§1.2). They are the
+instrument reporting, not the runtime diverging: `capMisses`, `created`, `shared`, `blindSplits`,
+`sessions open`, `orphaned` and `unmet` are byte-identical across the pair. This is precisely why the
+decision rule was written against the unconditional counter.
+
+**Harness findings recorded, not acted on.**
+
+1. `awaitWebCodecsEngaged` tests `values.some(mode => mode !== "element")` — **one** engaged source
+   satisfies it. On a six-source fixture "engaged" can mean 1/6, which is why a per-arm gate reported
+   `engaged` for an arm that then sampled at `wcProvider 66%`. It is a shared helper that
+   `source-admission-probe` also depends on, so its semantics were **not** changed mid-measurement.
+   Strengthening it to a fraction is a harness slice of its own.
+2. The per-arm precondition wait added during this measurement (`reopenWithFlags` settles 6s; an ingest
+   proxy lands in ~10s) is correct and retained, but it did **not** remove the swing — the swing was the
+   session lottery, not cold start. Recorded because a fix that does not fix the symptom is exactly the
+   kind of thing that gets misremembered as having worked.
+
+**`orphaned` is 0 at rest in all eight arms.** The `orphaned 1` seen in the pre-hold run did not reproduce
+on the fixed runtime; it is closed, not carried.
+
 ### 4.2 The reverse dependency: Stages 1 and 3 are conditional on K = 4
 
 The cheap-first argument runs in one direction. The dependency runs in both, and the return direction is
