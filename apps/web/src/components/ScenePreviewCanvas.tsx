@@ -1417,6 +1417,14 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         const held = sharedMediaRenderersRef.current.get(resolvedId);
         if (held && held.lastW > 0) {
           liveMediaSourceIds.add(resolvedId);
+          // TOUCH, for the same reason `gradeMediaInContext` touches before ITS source-less branch:
+          // serving the last graded texture is the entry's most important use, not an absence of one.
+          // This branch was the one place that served an entry without saying so, so a descriptor gap
+          // outlasting RESOURCE_IDLE_MS (a remount plus a decode is not a sub-frame event) let the
+          // wall-clock sweep dispose the very target being shown — the set-difference reaper was taught
+          // to keep this entry and the CLOCK reaper was not. DEBT-009: liveness must come from the
+          // resource's actual consumer, and here the consumer is this return statement.
+          touchResource(defaultSession, mediaResourceKey(resolvedId), performance.now());
           recordSingleCtx("skips");
           // Descriptor-gap hold: the producer is gone entirely, so nothing can report a CURRENT time —
           // the pixels are the last grade's and say so. Of the four hold paths this is the one most
