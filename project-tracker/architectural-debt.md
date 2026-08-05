@@ -642,7 +642,48 @@ reports success it cannot deliver is worse than one that reports the gap, and th
 partly because that distinction gets lost.
 
 Remaining work is therefore a **layer-side slice**, not a kernel one, and it is the only thing standing
-between this entry and retirement.
+between this entry and retirement. It is contracted, unwritten, in
+`plans/adr-020-slice-d-transport-reacquire.md`.
+
+**Update (2026-08-06) — slice A's readings OBSERVED, and the soak that passed it was vacuous.**
+
+Slice A's decoder soak recorded `capMisses 0`. That soak proved the slice *breaks nothing*; it did not
+test it, because with nothing denied the registry was empty for the whole run and the recovery pass
+never rendered a verdict. Shipping a health reading that has never been seen non-zero is DEBT-012 in its
+own right, so the readings were re-run against a fixture built to deny (6 sources / 4 slots, chrome,
+55s sized from `PERMANENT_DENIAL_AFTER_MS` + 2 × `ADMISSION_RECOVERY_IDLE_MS`):
+
+```
+routing          3/6 off-element  — the three losers stuck on <video>, which IS this defect
+capMisses        6
+starvedSources   peak 3 · final 3
+starvedLongestMs peak 186876          (187s, against a 30s terminal)
+recovery         ticks 5 · sweeps 2 (nominal ≈5) · waits 3
+outcomes         retries 0 · permanentDenials 3
+```
+
+Every reading moved, and §6.11's terminal was declared for all three starved sources. The verdict
+arithmetic is exactly consistent (2 sweeps × 3 waiters = 6 = 3 waits + 3 declares), which is the check
+that the counters describe the same events rather than merely being non-zero.
+
+Two things the run added that the constants did not predict:
+
+- **`retries 0`.** Free capacity never appeared — the pool stayed full for the entire session. A retry
+  path triggered *only* by freed capacity would therefore have done nothing here. This is the measured
+  reason slice D's trigger is a transport boundary rather than a capacity event.
+- **OQ10 — the sweep cadence under-delivers, and it already cost a terminal.** `ticks 5 · sweeps 2`:
+  recovery's own 10s limit rejects most of the host ticks it rides. An earlier run in the same session
+  recorded `sweeps 1 · permanentDenials 0` — the terminal was **missed entirely** for a source starved
+  128s. So §6.11's second end is reachable but not *reliably* reached. Not fixed here: it changes when
+  the kernel decides, which is a different blast radius from how the layer acts on a decision, and
+  bundling them would make the soak un-bisectable.
+
+Two instrument additions were needed to make this readable at all, both unconditional:
+`admissionRecoverySweeps`/`admissionRecoveryWaits` (did the pass run, and did it decide per waiter) and
+`admissionRecoveryTicks` (did the host call it). Without them, a run in which nothing recovers and
+nothing reaches the terminal leaves the outcome counters at zero — indistinguishable from a pass that
+never ran. That is DEBT-012's signature, and the fix is the same every time: count the reasons, never
+infer which branch fired.
 
 ---
 

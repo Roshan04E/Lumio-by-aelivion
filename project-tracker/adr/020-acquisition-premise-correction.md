@@ -164,6 +164,13 @@ Sequenced. No code has moved; `MIN_RESIDENCY_MS` is untouched.
 | **A** | **§6.11 recovery** — a denied source must reach one of §6.11's two ends. Requires an admission decision to exist after mount, or a denial that ages toward the declared terminal. | DEBT-013. The user-visible defect, and the only item here that changes what a user sees. |
 | **B** | **F2 — virtual-source contribution.** `collectFlarexVirtualLayers` should derive contribution from the node's role in the comp instead of stamping identity. | Bounded to one collection path (`contribution:scope`). Blocks M1b and every weighting question on path B; blocks nothing on timeline clips. |
 | **C** | **H1 — harness.** `awaitWebCodecsEngaged` tests `.some(mode !== "element")`, so one engaged source of six satisfies it. Strengthen to a declared fraction. | Must precede any stage whose precondition depends on multi-source engagement (M3, M7). |
+| **D** | **The layer-side re-acquire** — recovery marks a source eligible; the layer re-asks at the next transport boundary. Closes DEBT-013's remaining half (clause (a), "subsequently admitted"). | Contract written 2026-08-06: `plans/adr-020-slice-d-transport-reacquire.md`. Depends on A, which supplies the verdict it acts on. |
+
+**On slice C, from the 2026-08-06 census run.** The `.some()` weakness is real, but the obvious
+strengthening — *require most sources off-element* — is **circular** and must not be shipped: a denied
+source falls back to the element path, so that predicate demands the defect under test not occur. It
+voided a run that had in fact produced its denial. The correct form asserts the **budget filled**
+(`engaged ≥ cap`), which proves the subsystem ran without asserting who won.
 
 **Deliberately not proposed: tuning `MIN_RESIDENCY_MS`.** It is the tempting one-liner, and OQ9 is
 unsized. Shortening the window without an answer to *residency ÷ storm duration* trades a measured defect
@@ -204,6 +211,8 @@ competition, and it is a repair of behaviours the competition assumes.
 | `b326137` | `contribution:scope` 9/9 — F2 bounded to one path; DEBT-012 meta-class |
 | `3531972` | C15 purpose class, recorded-never-ranked (27/27); OQ5 premature |
 | `479f875` | Playback contention does not exist; the mount-storm loser can never be admitted |
+| `2a73d05` | Slice A — starvation becomes a reported state; §6.11's terminal made reachable. Soak was **vacuous** (`capMisses 0`): it proved the slice breaks nothing, not that it works |
+| *(this commit)* | Slice A **observed under real denial** — `capMisses 6 · starvedSources 3 · starvedLongestMs 187s · permanentDenials 3`. Every reading seen moving. OQ10 registered |
 
 **Three guards fired on real runs and each prevented a wrong conclusion:** contention-possibility (stopped
 a confident negative from a `wcProvider 0/1` fixture), corpus-variation, and purpose-diversity (stopped
