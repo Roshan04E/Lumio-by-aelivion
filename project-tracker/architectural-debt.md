@@ -168,6 +168,26 @@ Entries are never rewritten. To change one, append a new dated note under it.
   they are zero the timer can go and this retires; if `load-bearing` is non-zero it names a producer
   that arrives without announcing itself, which is a defect to fix rather than a reason to keep a timer.
   Until then the settle window stays.
+- **Update (2026-08-05) — the owed soak RAN. Debt stays open, and the gate is not evaluable on the
+  blank-project fixture.** Gate committed as `pnpm --filter @orreris/worker settle:soak`.
+  Two runs, both against a blank project + one clip, `kernelDiagnostics` on:
+  - **Run 1** (20 scrub/play/pause cycles): `settle-backstop-expired` **1**, `load-bearing` 0,
+    `surplus` 0. Non-zero, so the condition is not met as measured — though a backstop firing mid-scrub
+    is arguably the window doing its job, not debt, which is why run 2 measured steady state instead.
+  - **Run 2** (same gestures, then a 15s QUIET TAIL, counting only the delta): every settle counter 0 —
+    but so was `surplus`, i.e. **no settle signal of any kind**. VOID by its own guard.
+  **Why the fixture cannot answer this.** `frame-held` dominates both runs — 1185 of 1186 transition
+  events in run 1's gesture phase, 207 in run 2's 15s quiet tail alone. The settle-window classifier is
+  reached from the draw path, and a held frame does not get there. On a fixture that holds essentially
+  every paused frame, the window is unreachable, so zero means *not measured*.
+  **Corrected witness, for whoever runs this next.** My first guard used `surplus` as proof the
+  classifier ran; that is wrong — a run can enter the window and never waste a composite. Any non-zero
+  settle signal witnesses reachability, and `settle-backstop-expired` firing in run 1 is what proved the
+  window exists at all. The gate now encodes that.
+  **Owed work, restated:** re-run against a fixture whose picture actually SETTLES while paused — the
+  same acceptance-surface lesson as DEBT-009, where a lone `MediaIn→MediaOut` structurally could not
+  exhibit the reported symptom. A real comp on the founder's project is the surface. Until then S7.2's
+  gate-crossing stands unremedied and the settle window stays.
 
 ### DEBT-006 — Materialization threshold carried from the ADR-008-violating implementation
 - Status: open
