@@ -335,7 +335,38 @@ export function collectFlarexVirtualLayers(
         sourceInSeconds: timing.sourceInSeconds,
         ...(timing.speed === 1 ? {} : { speed: timing.speed }),
         fit: "fill",
-        transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+        /**
+         * INHERITED from the host, not manufactured (ADR-020 slice B; F2 in the Phase 0 record).
+         *
+         * This was a hardcoded `{ scale: 1, opacity: 100 }`. Nobody supplied it — the collection path
+         * invented it — and because `getLayerVisibleContribution` derives ranking merit from exactly
+         * these two numbers, **every Flarex virtual source scored a merit of exactly 1.0, always.**
+         * Measured: two hosts at `scale 1 / opacity 100` and `scale 0.1 / opacity 10` produced virtual
+         * layers that were byte-identical, and rank could not discriminate between any two virtual
+         * sources in the runtime (`contribution:scope`, 9/9).
+         *
+         * That is DEBT-012's shape — *proof by a signal the subject never emits*. An UNDECLARED
+         * contribution ranks at `UNDECLARED_RANK` and honestly says "we do not know"; a manufactured
+         * identity transform asserts "full area, full opacity, fully contributing" with authority, and
+         * it made the instrument that was supposed to detect the gap (`U`, the undeclared fraction)
+         * read a clean 0.0%.
+         *
+         * The comp draws into the host clip's rectangle, so the host's transform is the honest bound on
+         * what any node inside it can contribute to the frame — a source inside a half-scale, 10%-opacity
+         * host cannot contribute a full frame, and must not outrank one that does.
+         *
+         * NOT DRAWN: virtual layers mount with `hideVisual` and feed the scene compositor through a
+         * graded canvas; the picture comes from the comp graph's own transforms. This transform is read
+         * for contribution, which is why changing it is a decoder-topology change (it changes who wins a
+         * session) and not a rendering change. The pixel gate is the evidence for that claim, not this
+         * comment.
+         *
+         * WHAT THIS DOES NOT DO, stated so the next reader does not assume it: siblings inside ONE comp
+         * on ONE host still score identically, because they inherit the same host. Discriminating
+         * between them needs each node's own contribution within the comp — reachability from the active
+         * root, and composited area — which has no channel on a `TimelineLayer` today. See ADR-020 §5.
+         */
+        transform: host.transform ?? { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
         effects: [],
         keyframes: [],
       });

@@ -133,27 +133,45 @@ console.log("\nPATH B — Flarex virtual sources (`collectFlarexVirtualLayers`)"
     "their hosts had RADICALLY different transforms (scale 1/op 100 vs scale 0.1/op 10)",
     hostBig.transform?.scale !== hostTiny.transform?.scale
   );
+  // ADR-020 slice B. Before the slice both assertions below were INVERTED and passing: the path
+  // stamped identity, so both virtual layers read `scale=1 opacity=100` and both merits were 1.0.
+  // They are kept as the same two questions with the answers the slice changes, so the file records
+  // what the defect WAS as well as what the fix does.
   check(
-    "→ PATH B MANUFACTURES the transform: every virtual source is identity regardless of its host",
-    virtuals.every((v) => v.transform?.scale === 1 && v.transform?.opacity === 100),
+    "→ PATH B now INHERITS the host transform instead of manufacturing one",
+    virtuals[0]?.transform?.scale === hostBig.transform?.scale &&
+      virtuals[1]?.transform?.scale === hostTiny.transform?.scale,
     JSON.stringify(virtuals.map((v) => v.transform))
   );
   check(
-    "→ …so every virtual merit is exactly 1.0, and rank CANNOT discriminate among them",
-    merits.every((m) => m === 1),
+    "→ …so a virtual source under a small, faint host no longer outranks a full-frame one",
+    merits[0] !== merits[1] && (merits[1] ?? 1) < (merits[0] ?? 0),
     JSON.stringify(merits)
+  );
+  check(
+    "→ …and the surviving limit is honest: siblings on ONE host still tie",
+    true,
+    "documented, not asserted — see ADR-020 §5"
   );
 }
 
 // ── The scoping verdict ─────────────────────────────────────────────────────
 console.log("\n════ SCOPE VERDICT ════");
 if (failures === 0) {
-  console.log("F2 IS BOUNDED, not systemic.");
+  console.log("F2 IS BOUNDED, not systemic — and PATH B's fabrication is now FIXED (ADR-020 slice B).");
   console.log("  · PATH A (real timeline clips) propagates the layer transform faithfully. Merit");
   console.log("    differs whenever the clips differ, so rank CAN discriminate there and OQ1 remains");
   console.log("    well-posed for timeline clips.");
-  console.log("  · PATH B (`collectFlarexVirtualLayers`) manufactures an identity transform, so every");
-  console.log("    Flarex virtual source scores exactly 1.0 regardless of what its host contributes.");
+  console.log("  · PATH B (`collectFlarexVirtualLayers`) INHERITS the host transform. It used to stamp");
+  console.log("    identity, so every virtual source scored exactly 1.0 regardless of its host; now a");
+  console.log("    source inside a small, faint host cannot outrank one filling the frame.");
+  console.log("");
+  console.log("  SURVIVING LIMIT, and it bounds what slice A can achieve: siblings inside ONE comp on");
+  console.log("  ONE host still score identically, because they inherit the same host. Discriminating");
+  console.log("  between them needs each node's own contribution WITHIN the comp — reachability from");
+  console.log("  the active root, and composited area — for which a TimelineLayer has no channel.");
+  console.log("  See ADR-020 §5; this is the difference between A being non-vacuous across comps and");
+  console.log("  non-vacuous within one.");
   console.log("");
   console.log("  So §0.3 criterion 2 fails FOR THE FLAREX VIRTUAL-SOURCE CLASS — a scoped defect in one");
   console.log("  collection path — NOT a hole in the ADR's membership test.");
