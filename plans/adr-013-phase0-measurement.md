@@ -183,6 +183,36 @@ recorded as mixed and excluded from both, with the count reported.
 | *T*_declared ≤ 0.15 and *U* ≤ 0.15 | Rank genuinely discriminates. Weights are a real tuning surface → proceed to M1b. |
 | otherwise | Inconclusive; widen the corpus and re-run before deciding. No default. |
 
+#### AMENDMENT (2026-08-05) — the rule above is DEFECTIVE and its second row must not be applied
+
+Recorded rather than quietly rewritten, because a pre-registered rule edited after seeing data is worth
+nothing unless the edit and its reason are both visible.
+
+**The defect.** *T*_declared measures the share of contended decisions decided by the `key` comparator.
+The rule then reads a *low* *T*_declared as evidence that **rank** discriminated. That inference does not
+hold: the comparator has **three** levels, so a decision not decided by `key` was decided by `rank` **or**
+by `residency`, and those are opposite findings. Row 2 therefore fires on evidence that does not support
+its conclusion.
+
+**This is self-inflicted and the instrument already knew better.** `tieBroken` was deliberately made
+tri-valued (§2) on the argument that a boolean *"would merge 'damped by hysteresis, as designed' with
+'decided alphabetically', which are the opposite findings"*. The decision rule was then written as if the
+instrument were two-valued. The reasoning that corrects it is the same reasoning that built the
+instrument, and it stands without reference to any measurement — which is what makes this a correction
+rather than a rationalisation.
+
+**The corrected rule.** Report all three shares over declared-boundary contended decisions, and read the
+one that dominates:
+
+| Result | Settles as |
+|---|---|
+| `key` share ≥ 0.5 | **OQ1 is misposed** — the `area` derivation is the open question. *(unchanged)* |
+| `rank` share ≥ 0.5 and *U* ≤ 0.15 | Rank genuinely discriminates → M1b weight sweep. *(this is what row 2 was trying to say)* |
+| **`residency` share ≥ 0.5** | **Rank is inoperative at the moment contention occurs.** Minimum residency is the operative admission policy. Weight tuning is pointless until the residency window is reconciled with when contention actually happens — a *different* question from either original row, and one the original rule could not express. |
+| otherwise | Inconclusive; widen the corpus. No default. |
+
+The third row is new. It was not anticipated, and the measurement produced it on the first run.
+
 **Falsifier, now testing something the rule does not.** *U* ≥ 0.5 says most consumers never declare a
 contribution, so I-48 ("rank is an input, computed by Source Admission") is satisfied only vacuously —
 Admission would be ranking mostly-absent data. That is a wiring defect to fix before the scheduler

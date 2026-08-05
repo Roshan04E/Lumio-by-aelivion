@@ -45,7 +45,8 @@
     "preview:admission": "tsx src/source-admission-probe.ts",
     "preview:profile": "tsx src/preview-cpu-profile.ts",
     "preview:freeze": "tsx src/preview-freeze-probe.ts",
-    "admission:observer": "tsx src/admission-observer-test.ts"
+    "admission:observer": "tsx src/admission-observer-test.ts",
+    "stage1:corpus": "tsx src/stage1-corpus-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

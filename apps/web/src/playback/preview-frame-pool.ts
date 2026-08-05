@@ -54,6 +54,7 @@ import {
   defaultSession,
   noteAdmissionDenied,
   noteAdmissionScored,
+  admissionScored,
   rankAdmission,
   type AdmissionCandidate,
   type VisibleContribution,
@@ -1700,5 +1701,22 @@ if (typeof window !== "undefined") {
       // that simply stopped reaching the path.
       blindSplits: blindShareSplits,
     }),
+  });
+
+  /**
+   * ADR-013 Phase 0 — the scored-decision ring, made readable from the page.
+   *
+   * M1 and M5 are computed entirely from this: whether rank actually separated competitors
+   * (`tieBroken`), whether the boundary sat between declared candidates (`boundary`), who was an
+   * incumbent, and the C1/C2 assertions. The kernel already records it; without a handle the probe
+   * cannot see it, and a measurement that cannot be read is not an instrument.
+   *
+   * Read-only getter on the query path, never per frame — same no-perturbation contract as
+   * `__rfWcPool` and `__rfBorrowLedger` above. `admissionScored` allocates on read, which is why this
+   * is a getter and not a live reference.
+   */
+  Object.defineProperty(window, "__rfAdmissionScored", {
+    configurable: true,
+    get: () => admissionScored(defaultSession),
   });
 }
