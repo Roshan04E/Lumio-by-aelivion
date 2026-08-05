@@ -103,6 +103,21 @@ Entries are never rewritten. To change one, append a new dated note under it.
   **Do not retire on the wall-clock evidence alone.** The remaining condition is specifically: *absent
   this frame* must stop meaning *departed*. Retirement needs a soak, because the set-difference prune is
   load-bearing for VRAM reclamation and loosening it is the failure mode S3.4 was written against.
+- **Update (2026-08-05) — the mechanism half is FIXED; the retention evidence is PARTIAL, do not close.**
+  `51abcac` makes a mounted Flarex loader live even on a frame nobody sampled it (mount, not
+  consumption, is the liveness proof), and `82275b8` closes the descriptor-gap path that served without
+  touching. Founder-confirmed on their own comp. First ledger reading, from the latch acceptance run:
+  `LONGPLAY 15s` and `LONGIDLE 15s` both `resources 3→3 · media-renderer 2→2 · reclaimed 0 ·
+  handleFailures 0`, `scopes[live:2 permanent:1]`. Flat — encouraging, and **not** sufficient: 15s arms
+  on a **3-resource** fixture is not the long session this entry needs, and two of the changes
+  (declared-retention, the `permanent` scope) make the runtime retain MORE in the subsystem whose
+  runaway growth was ADR-012's original amplifier. **Owed: a long session on a real comp, reading
+  `resourceLedger` total/byKind.**
+  **READER TRAP, recorded because it will mislead at 2am.** In that same run `oldestIdleMs` reads
+  **52-68s** — which looks exactly like a frozen-clock leak and is not one. The scope census explains
+  it: the only non-live record is the `permanent` compositor sentinel, which is never touched *by
+  design*. **Read `byScope` before concluding anything from `oldestIdleMs`.** A frozen clock and a
+  correctly-permanent record are indistinguishable in the aggregate number alone.
 
 ### DEBT-003 — Resources accounted but not owned
 - Status: open
@@ -220,6 +235,30 @@ Entries are never rewritten. To change one, append a new dated note under it.
   `MATERIALIZE_MIN_PASSES` stays at **2** — it is the backstop for this entry, and lowering it without
   fixing `fanout` first reproduces p95 2.70→12.30ms and 389 evictions per 60 frames.
 
+### DEBT-010 — the node-thumbnail cache key omits ADR-009's ContextVersion
+- Status: open (LATENT — the symptom is gone, the defect is not)
+- Registered: 2026-08-05 (surfaced by the DEBT-009 latch investigation)
+- Reason: `flarex-node-thumbnails.ts` keys its cache on `NodeContentHash` alone
+  (`:139-143`, `:169`), omitting the **ContextVersion** ADR-009 requires. A thumbnail captured before
+  its source decodes is therefore cached under a key that cannot distinguish "this node's content" from
+  "this node's content, at a moment when nothing had arrived yet", so the stale capture is never
+  invalidated.
+- Invariant affected: ADR-009 completeness rules (cache identity must include the evaluation context)
+- Owner: unassigned
+- Expiry condition: the thumbnail key includes ContextVersion, and a thumbnail captured before decode is
+  replaced once the source arrives
+- Planned slice: none — should land BEFORE ADR-013 Phase 0's baseline, since thumbnails share the
+  resource subsystem Phase 0 measures
+- Tracking issue: —
+- Detection: any new thumbnail cache path keyed on content identity without an evaluation-time axis
+- **Why it currently looks fixed, and why that is the dangerous part.** The visible symptom — node
+  thumbnails showing the HOST clip — resolved as a *downstream consequence* of the DEBT-009 latch fix:
+  the first render was capturing the host because the MediaIn was substituting the host. Remove the
+  substitution and the capture is correct, so the bug disappears from view **without its cause being
+  touched**. It resurfaces whenever a first render lands before decode — a large asset, a cold OPFS —
+  which is rarer now but not gone. An entry exists precisely because "the symptom stopped" is the
+  weakest possible evidence that a cache-identity defect is fixed.
+
 ### DEBT-009 — a resource's liveness is inferred from a signal its consumer does not emit
 - Status: open
 - Registered: 2026-08-05 (third occurrence; registered as a CLASS, not as one bug)
@@ -238,7 +277,7 @@ Entries are never rewritten. To change one, append a new dated note under it.
   3. *2026-08-05* — `media/flarexsrc:*`: consumed through the compiler, therefore absent from
      `liveMediaSourceIds`, so the **departed prune** disposed it on every presented frame it was not
      sampled. Fixed by `declaredMediaSourceIds` retention (`51abcac`) — mount, not consumption, is the
-     liveness proof for a loader. Second gap in the same resource, fixed at `671cc71`:
+     liveness proof for a loader. Second gap in the same resource, fixed at `82275b8`:
      `getMediaSingleCtx`'s **descriptor-missing branch serves the entry's last graded texture and
      returns before reaching `gradeMediaInContext`**, i.e. it serves WITHOUT touching. A remount plus a
      decode is not a sub-frame event, so that gap can outlast `RESOURCE_IDLE_MS` and the idle sweep
@@ -259,12 +298,16 @@ Entries are never rewritten. To change one, append a new dated note under it.
        on probe evidence, because the fixture is a lone `MediaIn→MediaOut` — which renders this defect
        as *black* — while the founder's comp has the **merge topology** that renders it as *flashing the
        host*. The fixture structurally cannot exhibit the reported symptom.
-     - **ACCEPTED on the founder's own comp (2026-08-05):** after `51abcac` + `671cc71` the periodic
-       hitch is gone. That is the acceptance surface the fixtures could not reach, and it is what closes
-       the symptom — not the probe arms. Recorded because the causal chain was never completed: the
-       symptom resolved under fixes whose mechanism (two paths serving without touching) is plausible
-       for it but was never demonstrated to BE it. If a periodic hitch returns, re-open here rather than
-       re-deriving; the refuted `lastUsedAt`-frozen theory is above so it is not tried twice.
+     - **ACCEPTED on the founder's own comp (2026-08-05):** after `51abcac` + `82275b8` the periodic
+       hitch is gone. That is the acceptance surface the fixtures could not reach. But the causal chain
+       was **never completed, and must not be recorded as if it were.** A 30s run spanning three TTLs
+       showed `reclaimedTotal` 0 throughout and zero handle failures — the hitch did not reproduce at
+       all, so nothing here was ever shown to CAUSE it. The founder's own follow-up was "probably gone,
+       I'm not seeing it in another MediaIn clip", which is weaker than a confirmed fix and should be
+       read that way. **Instance 3 is closed on its LATCH symptoms** (black screen, host flicker, node
+       thumbnails, mid-session bind — all founder-confirmed), **not on the periodic hitch.** If a
+       periodic hitch returns it is an unattributed defect and should re-open here; the refuted
+       `lastUsedAt`-frozen theory is recorded above so it is not tried a second time.
      - **Residual, separate, OPEN:** a single hitch of ~800ms-1s, no longer periodic. Long enough to
        need a cause. Prime suspect is startup rather than reclamation — decoder warmup, ingest-proxy
        arrival and first-frame acquisition all land in the first ~1.5s (`preview-budget-probe` discards
@@ -278,7 +321,7 @@ Entries are never rewritten. To change one, append a new dated note under it.
 - Expiry condition: every reclaimer proves liveness from a signal its resource's **actual consumer**
   emits — i.e. no pool infers departure or idleness from a set populated by a pass that does not
   consume that resource
-- Planned slice: none — instances 1–3 are fixed (`51abcac`, `671cc71`, `e6cf87c`). The entry stays
+- Planned slice: none — instances 1–3 are fixed (`51abcac`, `82275b8`, `e6cf87c`). The entry stays
   **open** because the class is not closed by fixing its instances: the expiry condition is about every
   reclaimer, and instance 3's residual symptom is still unattributed (see the CORRECTION above).
 - Tracking issue: —
