@@ -768,6 +768,139 @@ the numbers that would decide them have not been collected.
 
 ---
 
+## 6.1 RE-READ of the eight magnitudes against the measured model (2026-08-05)
+
+Stage 1 did not just answer M1. It **falsified the model the question set was written against.**
+
+> ADR-013 §9 was specified assuming **steady-state pressure arbitrated by rank**.
+> What this runtime actually produces is **transient mount-storm pressure arbitrated by the clock.**
+
+Every contended admission (8/8) was settled by minimum residency; rank decided none; aging fired never;
+and `capMisses` did not move once during 20s of steady-state playback. Three of the eight magnitudes had
+already converged on the same place — residency, the mount storm, and *when* contention happens — which
+is the signature of a mis-specified question set rather than of three unrelated problems.
+
+This pass marks which questions survive that change. It is deliberately short, and it is done **before**
+any further instrument is built, so nothing is built for a question that should not be asked in its
+current form.
+
+| OQ | Status after Stage 1 | What changes |
+|---|---|---|
+| **1** rank weights | **REWRITTEN — partly answered** | Row 3: rank is inoperative at the moment contention occurs. The question is no longer "what are the weights" but **"why does the ranking never run"**. Weight tuning (M1b) is deferred behind that, not cancelled. Gated on the falsifiability check below. |
+| **2** lag tolerance | **SURVIVES UNCHANGED** | Offline, pixel-based, reads no contention counter. The only magnitude wholly untouched by the model change — which is why it is the safest thing to run, and also why it is the least urgent. |
+| **3** L4 vs L3 ordering | **QUESTION SURVIVES · PROCEDURE BROKEN** | Its cost comparand was fps, which P7/DEBT-011 forbids on a contended fixture. Must be re-specified to measure cost by decode ms and sessions consumed, or to run on a deliberately uncontended fixture. The ordering question itself is unaffected. |
+| **4** Governor hysteresis | **VOID AS POSED** | It asks how long to damp a pressure signal that, on this fixture, has no sustained excursions at all. A **prior question** now stands in front of it: *does sustained pressure exist outside the mount storm?* Until that is answered, sizing a constant is fitting a curve to one point. |
+| **5** reservation granularity | **WELL-POSED · BLOCKED** | The question is unaffected; the instrument is missing. Purpose class is not carried on C15, so intra-class share cannot be computed. Blocked, not inconclusive. |
+| **6** reservation window + floor | **REWRITTEN** | The window was to be sized from live *lead time* under steady-state competition. If the contention that matters is a mount storm, a reservation's job is to protect against the **storm**, not the steady state, and the window is sized against storm duration instead. This collapses substantially into OQ9 below. |
+| **7** budget K | **SURVIVES · GAINS WEIGHT** | `wcProvider 4/6` shows K decides *how many sources get WebCodecs at all*; the other two are permanently on the element path. But its frontier may no longer be measured by fps (P7) — the comparand becomes routing determinism plus `capMisses`. |
+| **8** Governor cadence | **BLOCKED BEHIND OQ4** | Cadence bounds a reaction to sustained pressure. If there is none, there is nothing to react to and the band is undefined rather than empty. Not independently answerable. |
+
+**Net: one answered-and-rewritten (1), one untouched (2), one procedure-broken (3), two void-or-blocked
+pending a prior question (4, 8), one blocked on a contract (5), one rewritten (6), one strengthened (7).**
+Only OQ2 can be run today exactly as written.
+
+### OQ9 — the relationship between `MIN_RESIDENCY_MS` and mount-storm duration *(new, 2026-08-05)*
+
+**Nobody wrote this question, and it is the quantity that actually decided every contended admission in
+the only measurement taken.** It may be the most important number in the ADR.
+
+`MIN_RESIDENCY_MS` is 1000ms. Every source in a six-source comp mounts well inside that window. So every
+incumbent is residency-protected for the entire duration of the only contention the runtime produces,
+and the first source to mount is protected against every later challenger regardless of merit. Residency
+was specified to **damp oscillation between competitors** (`admission.ts` header: *"two sources either
+side of the cap trade the slot every frame"*); what it does in practice is **decide the outcome
+outright**, because the contention it was meant to damp finishes before the window expires.
+
+The magnitude needed is the ratio: **mount-storm duration ÷ residency window.** If the storm is shorter
+than the window, residency is not a damping term at all — it is the admission policy, and rank is
+decorative.
+
+**This is one phenomenon with DEBT-011, not a neighbour of it.** DEBT-011 records the routing-side
+symptom: which sources hold WebCodecs sessions varies run to run, bistable, arrival-decided. OQ9 records
+the admission-side cause: arrival order is converted into a protected incumbency before merit is ever
+consulted. Same event, two ends — the lottery is *drawn* at admission and *observed* at routing. They
+must be read together, and neither is retired without the other.
+
+**Not to be acted on yet.** `MIN_RESIDENCY_MS` is the obvious tempting one-liner, and changing a
+mechanism in the middle of a measurement programme is how a programme stops being able to interpret its
+own numbers. Record; change nothing until the magnitudes are settled.
+
+### The falsifiability check OQ1's result is gated on
+
+Rank decided **0/8**. That evidence cannot distinguish two very different worlds:
+
+| | Fix |
+|---|---|
+| **A** — rank is inoperative because residency preempts it | reconcile the residency window with when contention happens (OQ9) |
+| **B** — rank never decides because rank scoring is not correctly wired | fix the wiring; OQ1's result means something else entirely |
+
+The standing rule applies: **prove the instrument can tell the answers apart.** Break residency — force a
+contended decision outside the window, with candidates of differing merit — and confirm rank then decides
+something. If it does not, M1's Row 3 is not the finding; a wiring defect is.
+
+Until that check passes, OQ1's result is **provisional**.
+
+#### RESULT of the falsifiability check (2026-08-05) — VOID as run, and the reason it is void is the answer
+
+The check ran. Its own guard declared it **VOID**, correctly: phase 2 forced contention after the
+residency window had lapsed, but every candidate still scored **merit exactly 1.0000**, and a decision
+between equal merits falls to the `key` comparator by construction. So the run could not separate world
+A from world B — which is precisely what the guard exists to say, and it is the difference between a null
+result and a misread one.
+
+**Two findings came out of the failed attempt, and the second is decisive.**
+
+**F1 — residency protection is RE-ARMED by re-acquisition.** Phase 2 waited 6s so every incumbent
+outlived `MIN_RESIDENCY_MS`, then scrubbed to force contention. The scored records still show
+`residency 2 · rank 0 · key 0` with residency-protected candidates present. Forcing contention forces
+re-acquisition, and re-acquisition resets `admittedAtMs` — so the protection window re-opens for whoever
+gets in first *on every contention event*, not only at mount. OQ9 is therefore worse than first stated:
+it is not "first to mount wins the session for 1s", it is **"first-in wins, on every contention event,
+for 1s"** — and 1s is longer than the event.
+
+**F2 — merit is a manufactured constant for every Flarex virtual source.**
+`collectFlarexVirtualLayers` synthesises each loader with a **hardcoded identity transform**
+(`packages/shared/src/flarex/virtual-layers.ts:338`):
+
+```ts
+transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
+```
+
+`getLayerVisibleContribution` derives `area = min(1, scale²) = 1` and `opacity = 100/100 = 1`, so
+`contributionRank` returns **exactly 1.0 for every virtual source, always**. The live measurement agrees
+with the read: `distinct merits observed: 1.0000` across 8 decisions and 32 candidates, in both phases.
+No product action can differentiate it, which is why the probe's store-side lever had nothing to reach.
+
+**This is a third world the check did not enumerate, and it is the one that holds:**
+
+> **C — rank is correctly wired and correctly computed, and its INPUT is a constant.**
+
+`rankAdmission` is not broken; the offline suite proves it discriminates when given differing merits
+(22/22, including a case where protection lapses and merit decides). Source Admission is not bypassed.
+What is wrong is upstream of both: the contribution handed to it for the source class that dominates
+every contended decision **does not depend on the graph at all**.
+
+**Why this is worse than the `U ≥ 0.5` falsifier the design anticipated.** An undeclared contribution
+ranks at `UNDECLARED_RANK` and *says* "we do not know" — the kernel's own comment calls absence
+meaningful and refuses to synthesize a plausible default. A hardcoded identity transform does the exact
+thing that comment forbids, one layer up: it asserts **full area, full opacity, fully contributing**,
+with authority, for every source regardless of what it contributes. `U` reads 0.0% not because
+declaration is healthy but because every declaration is a fabrication.
+
+**Consequences, recorded and not acted on:**
+
+- **OQ1's Row 3 is superseded, not upheld.** "Residency preempts rank" is true but secondary: even with
+  residency removed, rank would still decide nothing for virtual sources, because their merits are
+  identical by construction. The primary defect is F2.
+- **ADR-013 §0.3's membership test is affected.** Criterion 2 is *"rankable by visible contribution"*,
+  and the drift-detection clause states that an unrankable job forced into the scheduler must be given a
+  **fabricated rank, which is visible in review**. That fabrication already exists, upstream, and was not
+  visible in review. The scheduler would consume it and inherit it.
+- **I-48 is satisfied in letter and defeated in substance.** The scheduler does not compute rank; rank is
+  an input from Source Admission — computed from a constant.
+- OQ1 cannot be re-run meaningfully until F2 is fixed. **M1b is blocked behind it**, and so is any
+  weighting question: there is nothing to weight while every input is 1.0.
+
 ## 7. Named failure modes to watch during Phase 0 itself
 
 ADR-013 names three ways the design degrades. Phase 0 can begin any of them before a line of the

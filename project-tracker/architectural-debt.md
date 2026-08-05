@@ -481,6 +481,32 @@ is *non-determinism of routing under contention*, so the test is convergence, no
 A scheduler could raise p50 by consistently favouring whichever source the probe happens to sample and
 leave the arbitration defect entirely intact. This entry exists partly to make that argument unavailable.
 
+**Update (2026-08-05, ADR-013 Phase 0 Stage 1) — the admission-side half of this entry, and it is the
+same phenomenon rather than a related one.** Stage 1 measured the mechanism that draws the lottery this
+entry observes:
+
+- every contended admission (8/8) was decided by **minimum residency**, not by rank;
+- **rank decided 0/8**; the §6.11 aging term fired on none (C1, now measured on live data, not read);
+- `MIN_RESIDENCY_MS` is 1000ms and every source in a six-source comp mounts inside that window, so the
+  first to mount is protected against every later challenger regardless of merit;
+- `capMisses` did not move once during 20s of steady-state playback — the contention is a **mount-storm
+  transient**, and it finishes before the residency window expires.
+
+So the lottery is **drawn at admission** (arrival order converted into protected incumbency before merit
+is consulted) and **observed at routing** (which sources ended up on WebCodecs vs the element path). One
+event, two ends. Recorded here rather than as a neighbouring entry because reading them apart is what
+would make either look like a tuning problem.
+
+Tracked as **OQ9** in `plans/adr-013-phase0-measurement.md` §6.1: the magnitude needed is *mount-storm
+duration ÷ residency window*. If the storm is shorter than the window, residency is not a damping term —
+it is the admission policy, and rank is decorative.
+
+**Neither half retires without the other.** A change that makes routing deterministic while arrival
+order still decides admission has moved the lottery, not removed it.
+
+**`MIN_RESIDENCY_MS` is not to be changed yet** — a mechanism change mid-measurement is how a programme
+loses the ability to interpret its own numbers.
+
 ---
 
 ## Retired
