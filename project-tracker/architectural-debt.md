@@ -200,6 +200,46 @@ Entries are never rewritten. To change one, append a new dated note under it.
   `MATERIALIZE_MIN_PASSES` stays at **2** — it is the backstop for this entry, and lowering it without
   fixing `fanout` first reproduces p95 2.70→12.30ms and 389 evictions per 60 frames.
 
+### DEBT-009 — a resource's liveness is inferred from a signal its consumer does not emit
+- Status: open
+- Registered: 2026-08-05 (third occurrence; registered as a CLASS, not as one bug)
+- Reason: every reclaimer in the scene path proves liveness the same way — *the grade pass touched it
+  this frame*. That is a sound proof for a timeline clip, whose pixels the grade pass really does
+  consume. It is not sound for anything whose consumer is elsewhere, and the runtime now has two such
+  consumers: the **Flarex compiler** (`resolveSourceDraw`) and the **compositor's own intra-call
+  path**. When the proof does not apply, silence reads as death and the resource is reclaimed while
+  still in use. **Three instances, two of them user-visible:**
+  1. *2026-07-07* — a transiently source-less layer dropped from the draw list: "a black flicker on
+     every ruler click" (11 flickers / 19s of scrubbing). Fixed by teaching the grade path to HOLD.
+  2. *2026-08-05* — `scene-compositor/intra-call`, a module-load sentinel nothing ever touches, so
+     `lastUsedAt` froze at load and the idle sweep reclaimed it after `RESOURCE_IDLE_MS`. Every
+     intra-call texture then resolved null and a comp went black the moment a node needed a nested
+     render. Fixed with a `permanent` scope.
+  3. *2026-08-05* — `media/flarexsrc:*`: consumed through the compiler, therefore absent from
+     `liveMediaSourceIds`. The **departed prune** was fixed (`declaredMediaSourceIds` retention), but
+     the **wall-clock idle sweep** keys on `lastUsedAt`, and the only `touchResource` for the media pool
+     (`ScenePreviewCanvas.tsx:1298`) sits inside the grade-pass loop the loader never enters. So it is
+     reclaimed on the idle clock and rebuilt — a periodic playback hitch at ~10-20s spacing, confirmed
+     by the founder against `RESOURCE_IDLE_MS = 10_000`.
+- Invariant affected: I-24 (presentation policy MUST NOT change resource lifetime) — reached through
+  the reclaimer rather than through the acquirer, which is why the existing detection missed it
+- Owner: unassigned
+- Expiry condition: every reclaimer proves liveness from a signal its resource's **actual consumer**
+  emits — i.e. no pool infers departure or idleness from a set populated by a pass that does not
+  consume that resource
+- Planned slice: none yet; instance 3 is live and being fixed separately
+- Tracking issue: —
+- Detection: a resource registered in one subsystem and swept by another that keys on a set the first
+  subsystem never writes to. Concretely: a `ScenePool` entry with no `touchResource` call on its own
+  consumption path.
+- **The fix for instance 3 is a touch on the compiler's consumption path, NOT an exemption.**
+  `permanent` now exists and is the tempting one-liner; it is wrong here. A Flarex loader genuinely can
+  depart, and an unreclaimable media resource is the VRAM leak S3.4 was written against — that trade
+  converts a ~300ms hitch into the original ADR-012 amplifier. The retention must stay bounded; only
+  the clock is wrong.
+- Note: the two fixes shipped so far (HOLD, `permanent`) each corrected one instance without naming the
+  class, which is why a third appeared. This entry exists so the fourth is caught by a rule.
+
 ### DEBT-008 — the `[S4.5]` pending check is mis-named for what it now guards
 - Status: open
 - Registered: 2026-08-05 (discovered auditing DEBT-001 at S7.2 close)
