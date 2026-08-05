@@ -234,11 +234,24 @@ Entries are never rewritten. To change one, append a new dated note under it.
        path, never a `permanent` exemption) was right; the *mechanism* was wrong, and it was corrected
        by the session holding the measurements rather than by the one holding the theory.
      - **The founder's ~10-20s hitch is a REAL report** (asked and confirmed verbatim: "yes,... around
-       10-20 sec span") but its cause is now **unattributed**: 30s spanning 3× the TTL did not
-       reproduce a periodic hitch, and the mechanism above is refuted. Do not close instance 3 on the
-       probe evidence alone. The remaining acceptance surface is the founder's own comp, which has the
-       **merge topology** — the fixture is a lone `MediaIn→MediaOut`, which renders this defect as
-       *black* rather than as *flashing the host*, so it cannot exhibit the reported symptom.
+       10-20 sec span") but its cause was never attributed: 30s spanning 3× the TTL did not reproduce a
+       periodic hitch, and the mechanism first written here is refuted. It was deliberately NOT closed
+       on probe evidence, because the fixture is a lone `MediaIn→MediaOut` — which renders this defect
+       as *black* — while the founder's comp has the **merge topology** that renders it as *flashing the
+       host*. The fixture structurally cannot exhibit the reported symptom.
+     - **ACCEPTED on the founder's own comp (2026-08-05):** after `51abcac` + `671cc71` the periodic
+       hitch is gone. That is the acceptance surface the fixtures could not reach, and it is what closes
+       the symptom — not the probe arms. Recorded because the causal chain was never completed: the
+       symptom resolved under fixes whose mechanism (two paths serving without touching) is plausible
+       for it but was never demonstrated to BE it. If a periodic hitch returns, re-open here rather than
+       re-deriving; the refuted `lastUsedAt`-frozen theory is above so it is not tried twice.
+     - **Residual, separate, OPEN:** a single hitch of ~800ms-1s, no longer periodic. Long enough to
+       need a cause. Prime suspect is startup rather than reclamation — decoder warmup, ingest-proxy
+       arrival and first-frame acquisition all land in the first ~1.5s (`preview-budget-probe` discards
+       `WARMUP_MS = 1_500` for exactly this reason), and a warmup stall is expected-shaped where a
+       reclaim stall is not. **Discriminator, unmeasured:** does it occur at the START of each playback,
+       or at a random point mid-play? Start ⇒ warmup, and belongs to ADR-013's acquisition scheduling.
+       Mid-play ⇒ neither warmup nor this class, and needs its own hunt.
 - Invariant affected: I-24 (presentation policy MUST NOT change resource lifetime) — reached through
   the reclaimer rather than through the acquirer, which is why the existing detection missed it
 - Owner: unassigned
