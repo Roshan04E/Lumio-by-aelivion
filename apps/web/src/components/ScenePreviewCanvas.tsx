@@ -63,6 +63,7 @@ import {
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { KERNEL_FLAGS, readKernelFlag } from "../playback/kernel-flags";
+import { flarexTraceEnabled, traceFlarexChange } from "../playback/flarex-trace";
 import {
   abortIncrementalFrame,
   beginIncrementalFrame,
@@ -1503,7 +1504,28 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // correct; only the live viewer can answer how often a node actually shows another shot's pixels,
       // on which nodes, in which projects — the measurement ADR-012 §0.3 / I-27 needs before slice S4.5
       // deletes the host-clip fallback. Read it from the console as `__rfFlarexDegradation`.
-      onFlarexDegrade: recordFlarexDegradation,
+      // Wrapped ONLY while the trace is armed (the wrapper is not allocated otherwise), so the shipped
+      // path stays exactly `recordFlarexDegradation`. This is the per-NODE answer to "is the node
+      // processing working": every node that produced less than it was asked for names itself and its
+      // reason here, change-only, in the same timeline as the comp write and the decoder transitions.
+      onFlarexDegrade: flarexTraceEnabled()
+        ? (compId, degradation) => {
+            traceFlarexChange(
+              "node",
+              degradation.nodeId,
+              {
+                type: degradation.nodeType,
+                reason: degradation.reason,
+                substituted: degradation.substituted,
+                at: Number(degradation.atTimeSeconds.toFixed(3)),
+              },
+              // Keyed on the OUTCOME, not the time: `at` advances every frame, and keying on it turned
+              // a six-line story into 300 identical lines on this instrument's first run.
+              `${degradation.nodeType}/${degradation.reason}/${degradation.substituted}`
+            );
+            recordFlarexDegradation(compId, degradation);
+          }
+        : recordFlarexDegradation,
       // S6.4/S6.6 — absent unless the flag is on, so the default path is byte-identical.
       flarexOnEvaluated: incremental?.onEvaluated,
       flarexReuseValue: incremental?.reuseValue,

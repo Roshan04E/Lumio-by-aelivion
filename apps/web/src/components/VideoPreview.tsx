@@ -119,6 +119,7 @@ setGlGovernorEnabled(getGlGovernorEnabled());
 // they're touched every frame.
 setGlContextBudget(8, 12);
 import { getLivePlaybackTime, getPlaybackClock, subscribePlaybackClock, usePlaybackClock } from "../playback/playback-clock";
+import { traceFlarex, traceFlarexChange } from "../playback/flarex-trace";
 import { setMediaPlaybackRate } from "../playback/media-rate";
 import { useRenderCost } from "../lib/perfDiagnostics";
 import { AUDIO_FIRST_ELECTION_GATE_S, AUDIO_MASTER_GATE_S, AUDIO_SESSION_START_TOLERANCE_S, AUDIO_SESSION_START_WINDOW_MS, getAudioClockEnabled, isAudioClockMaster, registerAudioClockSource } from "../playback/audio-clock";import { getPreviewAudioContext, getPreviewMasterBusInput } from "../playback/preview-audio-bus";
@@ -1352,6 +1353,11 @@ function VideoPreviewImpl({
     );
   }, [graph.flarexComps, renderedLayerEntries, resolvedAssets, flarexPreviewRoots]);
 
+  // THE CLIFF, in one line of the trace: a bare MediaIn→MediaOut comp builds NO loaders (an empty
+  // `sourceAssetId` resolves to the host clip's existing draw), so the whole decoder path stays
+  // dormant. The first asset-bound MediaIn is the first entry here — and the first WC acquire.
+  traceFlarexChange("loaders", "set", flarexVirtualLayers.map((v) => `${v.id.split(":").slice(-1)[0]}:${v.type}:${v.assetId ?? "-"}`));
+
 
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
   // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
@@ -1461,6 +1467,12 @@ function VideoPreviewImpl({
     demoteMediaSources(defaultSession, affected, "comp-proxy-serving");
     suppressMediaSources(defaultSession, [], "comp-proxy-serving");
   }, [flarexVirtualLayers, proxySuspendedSourceIds]);
+
+  // Transport anchor for the trace: "as soon as I add a node and play" needs the play in the same
+  // timeline as the loader/decoder transitions, or the reading is a guess about ordering again.
+  useEffect(() => {
+    traceFlarex("transport", isPlaying ? "PLAY" : "PAUSE", { t: Number(getPlaybackClock().toFixed(3)) });
+  }, [isPlaying]);
 
   // Pre-warm first-frame posters for the opening video clips (those near t=0, which have no preload
   // runway) so the very first frame shows a still instead of black before it decodes. Later clips warm

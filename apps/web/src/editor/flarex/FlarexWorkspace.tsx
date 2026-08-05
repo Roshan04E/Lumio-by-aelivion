@@ -11,6 +11,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { getLivePlaybackTime, usePlaybackClock } from "../../playback/playback-clock";
+import { traceFlarex } from "../../playback/flarex-trace";
 import { BottomWorkspace } from "../graph/BottomWorkspace";
 import { applyFlarexGraphLayer, buildFlarexGraphLayer } from "./flarex-graph-bridge";
 import {
@@ -175,7 +176,23 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onMas
     const next = updater(current);
     if (next === current) return;
     // stampFlarexComp bumps comp.version (the render dirty key); graph.version bumps for sync.
-    onUpdateGraph({ ...stampFlarexComp(graph, next), version: graph.version + 1 });
+    const stampedGraph = stampFlarexComp(graph, next);
+    // The trace's anchor event: every node add/delete/wire/param edit funnels through here, so this is
+    // where "I did a thing" lands in the same timeline as what the decoder did about it.
+    //
+    // Reported AFTER stamping, and that ordering is now load-bearing. This used to predict the version
+    // as `(next.version ?? 0) + 1`, which was true only while the seam bumped unconditionally. Now that
+    // it diffs, a ui-only write deliberately keeps its version — and a trace that still predicted the
+    // increment would have shown the bump the fix exists to prevent, i.e. reported the failure it was
+    // being used to verify. An instrument may not model the thing it measures; it reads it.
+    traceFlarex("comp", next.id, {
+      version: stampedGraph.flarexComps?.[next.id]?.version ?? 0,
+      nodes: Object.keys(next.nodes).length,
+      edges: next.edges.length,
+      types: Object.values(next.nodes).map((n) => n.type).join(","),
+      viewDot: next.previewNodeId ?? null,
+    });
+    onUpdateGraph({ ...stampedGraph, version: graph.version + 1 });
   };
 
   const handleCreateComp = () => {
