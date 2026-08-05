@@ -137,6 +137,33 @@ Entries are never rewritten. To change one, append a new dated note under it.
   and show each one routes through the manager, or name the exceptions. Note this entry is adjacent to
   DEBT-002's live defect: the prune disposing a still-declared source is a lifetime decision, and
   whether it counts as "through the Resource Manager" is exactly the question this audit must answer.
+- **Update (2026-08-05) — AUDIT DONE. Still open, but the claim is now enumerated instead of unexamined.**
+  The expiry condition is an exhaustive claim nobody had ever tested. Tested now.
+  **What the Manager actually owns:** 7 `registerResource`/`forgetResource` sites across **4** files —
+  `ScenePreviewCanvas.tsx` (grade, media, flarex-proxy), `viewerProxyCapture.ts`,
+  `export/scene-frame-compositor.ts`, `playback/scene-resource-orchestration.ts`. Note the altitude:
+  the Manager tracks *records* (a renderer, a target) and never a GL object, per I-36 — so counting
+  `gl.createTexture` sites against it is a category error. The 10 allocation sites in
+  `packages/shared/src/color/*` are internals of renderers that ARE tracked, and are not exceptions.
+  **Owners of GL that dispose OUTSIDE the Manager — the real answer, 6 files, in two classes:**
+  - *Not GPU records at all, correctly out of scope:* `preview-frame-pool.ts` (disposes decoder
+    **providers**; lifetime belongs to the Decoder Manager, ADR-012 3.11) and `sourceProxyEngine.ts`
+    (disposes an **encoder** and a provider). Different subsystems, different owners. Not debt.
+  - *Component-owned GL, and this IS the gap:* `TransitionLayer.tsx` (a transition **compositor**),
+    `WebglColorView.tsx` and `WebglVideoOverlay.tsx` (a webgl **applicator** each), and
+    `WebglMediaLayer.tsx` (3 **renderer** disposals). Each is created and destroyed by a React effect
+    cleanup, i.e. **its lifetime is a component unmount** — the precise coupling I-24 forbids and that
+    S3.3 removed for decoder sessions without ever removing it for these.
+  **So the condition is NOT met, and now it is falsifiable.** Retirement requires those four
+  component-owned owners to register (or a written argument that a viewer-local applicator is not a
+  *tracked* resource — defensible for the overlay, much weaker for `TransitionLayer`'s compositor and
+  `WebglMediaLayer`'s renderers, which are full render targets).
+  **Detection sharpened by the audit:** the giveaway is a `.dispose()` inside a `useEffect` cleanup with
+  no matching `forgetResource`. That is a one-line grep and should be the reviewer's check.
+  **Scope note:** 82 `.dispose()` sites exist in `apps/web/src`; most are probe/stress pages
+  (`ExportStressPage`, `GovernorStressPage`, `WcDecoderGatePage`, …) which are not production paths and
+  are excluded deliberately — but if one of those is ever promoted to a real surface it inherits the
+  same gap unexamined.
 
 ### DEBT-004 — Cache identity is correct but there are no cross-frame records to exploit it
 - Status: open
