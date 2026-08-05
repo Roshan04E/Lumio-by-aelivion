@@ -181,12 +181,21 @@ export function ephemeralSceneTexture(texture: WebGLTexture, width: number, heig
  *
  * Registered against a real key rather than faked with a sentinel generation, so `checkHandle` keeps a
  * single meaning — "is this the live incarnation" — with no special case that a future reader would
- * have to know about. It is never forgotten, so it is never stale.
+ * have to know about.
+ *
+ * `scope: "permanent"` is what makes "it is never forgotten, so it is never stale" TRUE. It used to be
+ * registered as `"live"` and that sentence was a hope: nothing touches this record (the whole point is
+ * that the texture is produced and consumed inside one statement, so there is no per-use bookkeeping),
+ * its `lastUsedAt` therefore stayed at module load, and the wall-clock idle sweep reclaimed it after
+ * ten seconds. Every intra-call texture then resolved to `null`, and since a nest render is the only
+ * thing that asks for one, a Flarex comp turned black the instant a node introduced a nest — while a
+ * bare MediaIn→MediaOut comp, which lowers to a pass-through and renders no nest, kept working and hid
+ * the fault (2026-08-05).
  */
 const EPHEMERAL_HANDLE: ResourceHandle = registerResource(
   defaultSession,
   "scene-compositor/intra-call",
-  { scope: "live", kind: "scene-compositor", id: "intra-call" },
+  { scope: "permanent", kind: "scene-compositor", id: "intra-call" },
   0
 );
 

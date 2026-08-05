@@ -1217,6 +1217,29 @@ console.log("\nS3.4 — derived resource ownership and reclamation (I-8/I-33)");
   enforced("I-29", "…and attributed to the key that was superseded",
     kernelDiagnostics.events({ kind: "degradation" }).some((e) => e.reason === "handle-stale"));
 
+  // ── PERMANENT SCOPE (2026-08-05 regression) ────────────────────────────────────────────────────
+  // The compositor's `scene-compositor/intra-call` sentinel is registered once at module load and is
+  // NEVER touched — `ephemeralSceneTexture` hands out its handle without bookkeeping, because the
+  // texture it describes is produced and consumed inside one statement. Registered as `live`, its
+  // `lastUsedAt` therefore sat at module load and the wall-clock sweep reclaimed it after ten seconds;
+  // every intra-call texture then resolved to null and any Flarex comp containing a nest went black.
+  //
+  // Both directions are asserted. The second is the one that matters: a `permanent` scope that also
+  // exempted ordinary resources would retire the sweep by accident, and this file would not notice.
+  __resetResourceManager(session);
+  const sentinel = registerResource(
+    session,
+    "scene-compositor/intra-call",
+    { scope: "permanent", kind: "scene-compositor", id: "intra-call" },
+    T0
+  );
+  registerResource(session, "grade/ordinary", { scope: "live", kind: "grade-renderer", id: "ordinary" }, T0);
+  const swept = collectIdleResources(session, T_LATE, RESOURCE_IDLE_MS, true) ?? [];
+  enforced("I-17", "an untouched PERMANENT resource survives the idle sweep",
+    !swept.some((r) => r.key === "scene-compositor/intra-call") && checkHandle(session, sentinel) === null);
+  enforced("I-33", "…while an untouched LIVE resource beside it is still reclaimed",
+    swept.some((r) => r.key === "grade/ordinary"));
+
   __resetResourceManager(session);
   session.dispose();
   kernelDiagnostics.enabled = wasEnabled;

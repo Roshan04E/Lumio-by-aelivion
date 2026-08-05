@@ -70,8 +70,21 @@ export const RESOURCE_IDLE_MS = 10_000;
  * `capture:`/`thumb:` distinction available to the host without the kernel ever parsing it — the kernel
  * compares scopes for equality and nothing else, which is the property that makes a fourth owner a
  * one-line addition rather than a fourth predicate to keep in sync.
+ *
+ * `permanent` is the one scope the idle sweep may not reclaim, and it exists because the alternative
+ * was a comment. `scene-compositor/intra-call` is a SENTINEL, not a cache: it is registered once at
+ * module load so that a texture the compositor produces and consumes inside one statement still has a
+ * checkable handle, and its docstring asserted "it is never forgotten, so it is never stale". Nothing
+ * enforced that. Nothing touches it either — `ephemeralSceneTexture` hands out the handle without a
+ * `touchResource` — so its `lastUsedAt` was frozen at module load and {@link collectIdleResources}
+ * reclaimed it after {@link RESOURCE_IDLE_MS}. From then on every intra-call texture resolved to
+ * `null`, and a Flarex comp went black the moment a node added a nest to render (2026-08-05).
+ *
+ * The lesson is the reason this is a scope rather than a special case in the sweep: a lifetime that is
+ * NOT "until it goes unused" has to be sayable at the registration site, where the author knows it, and
+ * readable by every reclaimer without any of them re-deriving it.
  */
-export type ResourceScope = "live" | `scratch:${string}` | "export";
+export type ResourceScope = "live" | `scratch:${string}` | "export" | "permanent";
 
 export interface ResourceRecord {
   readonly scope: ResourceScope;
@@ -292,6 +305,10 @@ export function collectIdleResources(
   if (!table || table.size === 0) return null;
   let out: ReclaimableResource[] | null = null;
   for (const [key, record] of table) {
+    // A permanent resource has no idle state to be in: its lifetime is its module's, not its usage's.
+    // Checked before the age test rather than after, so a sentinel nobody touches is never even a
+    // candidate — see the `permanent` note on ResourceScope for what this cost when it was a comment.
+    if (record.scope === "permanent") continue;
     if (at - record.lastUsedAt <= ttlMs) continue;
     (out ??= []).push({ ...record, key });
   }
