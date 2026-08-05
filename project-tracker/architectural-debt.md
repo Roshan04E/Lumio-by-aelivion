@@ -507,6 +507,60 @@ order still decides admission has moved the lottery, not removed it.
 **`MIN_RESIDENCY_MS` is not to be changed yet** — a mechanism change mid-measurement is how a programme
 loses the ability to interpret its own numbers.
 
+### DEBT-012 — CLASS: proof by a signal the subject never emits
+
+- Status: **open** (registered as a META-CLASS with two instances, not as one bug)
+- Registered: 2026-08-05 (ADR-013 Phase 0)
+- Reason: a health signal is verified against something **asserted upstream** rather than **observed from the subject**. The signal cannot fail, so it reads clean *because* the defect is present. This is the shape shared by DEBT-009 and by F2 below, and naming it is what makes it reviewable instead of rediscoverable.
+- Invariant affected: none directly — this is a class of *evidence* defect, which is why it evades invariant checks
+- Owner: unassigned
+- Expiry condition: none — a class entry retires when both instances retire and no third is found
+- Detection: **ask what the subject itself did.** If the answer is "something else supplied the value on its behalf", the signal is a fabrication. A health metric that has never been observed *failing* on a real defect is the leading indicator.
+
+**Instance 1 — liveness (DEBT-009).** Liveness was proved by *"the grade pass touched it this frame"* —
+a touch the loader's consumer never performs, because that consumer is the Flarex compiler. Silence read
+as death.
+
+**Instance 2 — declaration (F2, ADR-013 Phase 0 §6.1).** Ranking merit is proved by the source's declared
+`VisibleContribution`. For Flarex virtual sources, `collectFlarexVirtualLayers`
+(`packages/shared/src/flarex/virtual-layers.ts:338`) synthesises a **hardcoded identity transform**
+(`scale: 1, opacity: 100`), so `contributionRank` returns exactly `1.0` for every such source, always.
+Nobody supplied that transform; the collection path manufactured it.
+
+**The tell, and why it is worth a class entry.** Phase 0 recorded ***U* = 0.0%** — the fraction of
+candidates with *no* declared contribution — as a clean precondition across two checkpoints. It is not
+clean. It reads 0.0% **because every declaration is a fabrication**: an undeclared contribution would
+have ranked at `UNDECLARED_RANK` and honestly said *"we do not know"*, which the kernel's own comment
+insists on (*absence is meaningful; never synthesize a plausible default*). A manufactured identity
+transform does the opposite one layer up — it asserts full area and full opacity **with authority**.
+
+> **The metric that was supposed to detect the wiring gap is the metric the wiring gap makes look
+> healthy.** DEBT-009 proved liveness by a touch the consumer never performs; F2 proves declaration by a
+> transform nobody supplied. Same meta-class: *proof by a signal the subject never emits.*
+
+**Scope of instance 2 — MEASURED 2026-08-05 (`contribution:scope`, 9/9): BOUNDED, not systemic.**
+
+| Path | Behaviour | Evidence |
+|---|---|---|
+| real timeline clips | **propagates** the transform | full 1.0000 · half-scale 0.2500 · 25%-opacity 0.2500 |
+| Flarex virtual sources | **manufactures** identity | hosts at scale 1/op 100 and scale 0.1/op 10 both yield `scale=1 opacity=100` → merit 1.0000 each |
+
+So instance 2 is a **scoped defect in one collection path**, and specifically **not** a hole in ADR-013
+§0.3's membership test: criterion 2 (*"rankable by visible contribution"*) fails for the Flarex
+virtual-source class and holds for timeline clips. The first write-up of this finding stated the
+consequences universally; that over-generalised an all-virtual fixture and is corrected in place in
+`plans/adr-013-phase0-measurement.md` §6.1.
+
+**The limit, stated so it is not over-read in turn:** the check proves the timeline path *can* differ,
+not that real projects *do*. A timeline whose clips all sit at default transform still yields 1.0 for
+every one. That is a corpus question and needs a live run; this settles the mechanism question only.
+
+**Proposed slice — scoped, sequenced, not implemented.** `collectFlarexVirtualLayers` should derive each
+virtual layer's contribution from its node's actual role in the comp rather than stamping identity.
+Sequenced **behind** the C15 purpose-class work and the playback-contention fixture, because F2 is
+bounded: it blocks M1b on virtual sources only, and OQ1 remains runnable on a timeline-clip corpus.
+No code has moved; `MIN_RESIDENCY_MS` is untouched.
+
 ---
 
 ## Retired

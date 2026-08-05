@@ -901,6 +901,78 @@ declaration is healthy but because every declaration is a fabrication.
 - OQ1 cannot be re-run meaningfully until F2 is fixed. **M1b is blocked behind it**, and so is any
   weighting question: there is nothing to weight while every input is 1.0.
 
+#### SCOPE CORRECTION to the four consequences above (2026-08-05, before any write-up)
+
+As first written they are stated universally. That over-generalises the evidence.
+
+**What is actually proven.** The function is `collectFlarexVirtualLayers`. Its name says the fabricated
+transform is applied on the **Flarex virtual-layer collection path**. The fixture was six Flarex sources.
+So F2 is established **for the Flarex virtual-source class, on an all-virtual fixture, and for nothing
+else.** Real timeline clips arrive through a different collection path and plausibly carry genuine user
+transforms; that is untested.
+
+| Claim as first written | Proven | Unproven — pending the scoping run |
+|---|---|---|
+| remove residency and rank still decides nothing | on this all-virtual fixture | on any fixture containing real timeline clips |
+| §0.3 criterion 2 fails | criterion 2 fails **for the Flarex virtual-source class** — a scoped defect | that the ADR's membership test has a hole |
+| OQ1 is superseded | superseded **on virtual sources** | OQ1 may be well-posed on timeline clips |
+| I-48 defeated in substance | for the virtual-source class | generally |
+| M1b is blocked | for virtual sources | M1b may be runnable on a timeline-clip corpus |
+
+**The scoping measurement that decides all five**, to run before F2 is written up: real timeline clips
+under contention, carrying **differing** transforms, reading distinct merit values. Rank discriminating
+there makes F2 a **bounded defect in one collection path**; merit reading 1.0000 there too makes it
+**systemic** and the consequences stand as first written. It also decides whether the F2 slice goes in
+front of C15 and the playback-contention fixture, or behind them.
+
+##### SCOPE RESULT (2026-08-05) — `contribution:scope`, 9/9. **F2 is BOUNDED, not systemic.**
+
+A mechanism check on the two collection paths, run as pure functions with no browser, because the
+question *"can merit differ on this path"* is decidable without one and is sharper than a corpus run.
+
+| Path | Behaviour | Measured |
+|---|---|---|
+| **A — real timeline clips** (`PreviewLayer` → `getLayerVisibleContribution(layer)`) | **propagates** the layer transform | full 1.0000 · half-scale **0.2500** · 25%-opacity **0.2500**; area follows scale², opacity multiplies |
+| **B — Flarex virtual sources** (`collectFlarexVirtualLayers`) | **manufactures** an identity transform | two hosts at scale 1/op 100 and scale 0.1/op 10 both produced virtual layers at `scale=1 opacity=100` → merits **1.0000 · 1.0000** |
+
+So the defect is one collection path, and every consequence re-scopes accordingly:
+
+| Claim as first written | Corrected |
+|---|---|
+| remove residency and rank still decides nothing | **true on all-virtual fixtures only.** On timeline clips rank can and does discriminate. |
+| §0.3 criterion 2 fails | **criterion 2 fails for the Flarex virtual-source class** — a scoped defect in one function, *not* a hole in the ADR's membership test. |
+| OQ1 is superseded | **superseded on virtual sources; well-posed on timeline clips.** M1b is runnable on a timeline-clip corpus. |
+| I-48 defeated in substance | **for the virtual-source class only.** |
+
+**The limit of this check, stated so it is not over-read in turn.** It proves path A *can* differ, not
+that real projects *do*. A timeline whose clips all sit at default transform still yields merit 1.0 for
+every one of them, and that is a **corpus** question — what users' projects actually contain — which
+only a live run answers. The mechanism question and the corpus question are different, and this settles
+the first.
+
+**Sequencing consequence.** F2 is bounded, so the original build order stands: **C15 first**, then the
+playback-contention fixture, then M2. The F2 slice does not go in front of them.
+
+#### RETROACTIVE ANNOTATION — every recorded *U* reading is misleading and is re-marked here
+
+Checkpoints 1 and 2 recorded ***U* = 0.0%*** (0/32 undeclared) and read it as a clean precondition: the
+falsifier that would have fired at *U* ≥ 0.5 stayed silent. **That reading is vacuous on a
+fabricated-declaration path, and it reads clean precisely because the defect is present.**
+
+> Every *U* figure in this document and in commits `82493e9` and `fed62e3` must be read as:
+> ***U* = 0.0% (Flarex virtual-source class only; VACUOUS — declarations are manufactured, not
+> supplied).** It is not evidence that declaration is healthy. It says only that nothing declined to
+> declare — a much weaker statement, and on this path a guaranteed one.
+
+Acceptance evidence does not transfer across a falsified instrument any more than across a flag removal
+(P6). *U* is falsified for the virtual-source class until F2's scope is measured, and **every future *U*
+reading must carry the source class it was measured on.**
+
+This is **DEBT-012 instance 2** — *proof by a signal the subject never emits* — the same meta-class as
+DEBT-009, which proved liveness by a touch the consumer never performs. Registered as a class so a
+reviewer can look for the shape: **a health metric never observed failing on a real defect is the leading
+indicator.**
+
 ## 7. Named failure modes to watch during Phase 0 itself
 
 ADR-013 names three ways the design degrades. Phase 0 can begin any of them before a line of the

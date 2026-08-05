@@ -47,7 +47,8 @@
     "preview:freeze": "tsx src/preview-freeze-probe.ts",
     "admission:observer": "tsx src/admission-observer-test.ts",
     "stage1:corpus": "tsx src/stage1-corpus-probe.ts",
-    "residency:falsify": "tsx src/residency-falsify-probe.ts"
+    "residency:falsify": "tsx src/residency-falsify-probe.ts",
+    "contribution:scope": "tsx src/contribution-scope-test.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",
