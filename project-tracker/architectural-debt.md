@@ -603,6 +603,47 @@ decides the whole session. The three retire together or not at all.
 untouched: shortening it is the tempting one-liner and OQ9 — *residency ÷ mount-storm duration* — is
 still unsized, so it would trade a measured defect for an unmeasured one.
 
+**Update (2026-08-06) — slice A shipped PARTIALLY. The silence is fixed; the permanence is not.**
+
+Of the two halves of this defect, the reportability half is closed and the recovery half is not.
+
+**Closed.** An unconditional denied registry now exists in the pool (deliberately *not* the
+diagnostics ring, which reads empty with instrumentation off — a recovery mechanism reading it would
+stop recovering the moment someone turned diagnostics off, making behaviour depend on observation).
+`__rfWcPool` gained four unconditional readings, and the first two are what make starvation a **state**
+rather than an event:
+
+| reading | why `capMisses` could not say it |
+|---|---|
+| `starvedSources` | how many sources are refused **right now** |
+| `starvedLongestMs` | how long the worst has been refused |
+| `admissionRecoveries` | waiters found free capacity |
+| `admissionPermanentDenials` | waiters that reached §6.11's terminal |
+
+`capMisses` counts the *moment* of denial and then goes quiet, so two sources degraded for four minutes
+read identically to two denied once and immediately served. These distinguish them. §6.11's second
+acceptable end is now reachable: a source starved past `PERMANENT_DENIAL_AFTER_MS` is declared, once,
+at `severity: "warn"`, and **kept in the registry** — dropping it would make the census read healthy
+while the picture is degraded, which is silence arrived at from the other side.
+
+Recovery rides the existing idle-sweep tick with **its own constant**, `ADMISSION_RECOVERY_IDLE_MS`,
+initially equal to `RESOURCE_IDLE_MS`. Separated deliberately: recovery is admission policy, the sweep
+is resource lifetime, and sharing the constant would mean a later change to how long a texture may sit
+unused silently changes how quickly a starved source gets another chance — the same coupling defect as
+the two disconnected `frameBudgetMs` constants ADR-013 was written about.
+
+**NOT closed, and stated precisely.** A denied source still does not re-ask, so acceptance clause **(a)
+"subsequently admitted" is unmet**; clause (b) "explicitly declared denied" is met. The retry half needs
+a layer-side **element→WebCodecs re-acquire path that does not exist**. `requestLiveReprime` was the
+obvious candidate and is the wrong one: reading it shows it re-seeks the `<video>` element and never
+re-attempts an acquire, so hooking recovery to it would have incremented `admissionRecoveries` for
+recoveries that could not happen. **Left unwired rather than wired to a no-op** — a mechanism that
+reports success it cannot deliver is worse than one that reports the gap, and this register exists
+partly because that distinction gets lost.
+
+Remaining work is therefore a **layer-side slice**, not a kernel one, and it is the only thing standing
+between this entry and retirement.
+
 ---
 
 ## Retired

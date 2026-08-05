@@ -52,6 +52,8 @@ import {
   DECODER_RETENTION_MS,
   kernelDiagnostics,
   defaultSession,
+  ADMISSION_RECOVERY_IDLE_MS,
+  recoveryAction,
   noteAdmissionDenied,
   noteAdmissionScored,
   admissionScored,
@@ -1515,6 +1517,11 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
       if (!victim || !reserveSession(software, priority)) {
         capMisses += 1;
         traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `software=${software} priority=${priority}` });
+        // ADR-020 slice A. Record the denial in the UNCONDITIONAL registry, not the diagnostics ring.
+        // `admission.denials` is guard-gated and reads empty with diagnostics off, so a recovery
+        // mechanism reading it would stop recovering the moment someone turned instrumentation off —
+        // behaviour depending on observation, which is the one thing `kernelDiagnostics` must never do.
+        noteDenied(url, software);
         return null;
       }
     }
@@ -1532,12 +1539,100 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   // skipped on that path.
   noteDecoderSessionOpened(defaultSession, url);
 
+  // Served: this source is no longer starved, whatever it was before.
+  deniedWaiters.delete(url);
   const session = createSession(url, software, priority, warm, options.contribution, options.purpose);
   // Unshareable in BOTH directions: skipping the join above only stops this consumer taking someone
   // else's session, and would leave the host free to attach to THIS one on its next acquire — the same
   // divergence, arrived at from the other side.
   if (options.exclusive) session.shareable = false;
   return attachMember(session, options);
+}
+
+// ── ADR-020 slice A: §6.11 recovery ─────────────────────────────────────────
+//
+// The defect this closes, measured in Phase 0: a source denied at mount could never be admitted. It did
+// not age into contention (the §6.11 aging term is structurally zero on this path), it was not
+// re-ranked (no admission decision occurs after the mount storm — 6 at mount, 0 across 30s of
+// transport), and it never reached the permanent-denial terminal (that terminal is read from
+// `deniedForMs`, which for such a candidate never accumulates). It stayed on the `<video>` element path
+// for the lifetime of the session, and NOTHING REPORTED IT: `capMisses` recorded the moment of denial
+// and then went quiet.
+//
+// §6.11 allows exactly two ends — a session, or a declared permanent denial. This makes both reachable.
+
+interface DeniedRecord {
+  deniedSinceMs: number;
+  software: boolean;
+  /** Set once the terminal is declared, so it is reported once rather than every tick. */
+  declared: boolean;
+}
+
+/**
+ * Sources currently refused, keyed by url. UNCONDITIONAL — deliberately not the diagnostics ring.
+ *
+ * Cleared when the source is served, and on `resetPreviewFramePool`. An entry here is a live claim that
+ * something wanted capacity and did not get it; it is the only thing in this module that can answer
+ * "is anything starved right now", which is the question `capMisses` cannot answer because it counts
+ * events rather than describing a state.
+ */
+const deniedWaiters = new Map<string, DeniedRecord>();
+let admissionRecoveries = 0;
+let admissionPermanentDenials = 0;
+let lastRecoverySweepMs = 0;
+
+function noteDenied(url: string, software: boolean): void {
+  const existing = deniedWaiters.get(url);
+  // Continuously denied: keep the ORIGINAL timestamp. Refreshing it on every re-ask would reset the
+  // clock on the §6.11 terminal and reproduce the defect in a new form — a source that asks often
+  // enough could never be declared denied, which is exactly "waiting forever" wearing a retry loop.
+  if (existing) return;
+  deniedWaiters.set(url, { deniedSinceMs: nowMs(), software, declared: false });
+}
+
+/**
+ * Re-examine the denied set. Called on the host's idle tick, rate-limited by its OWN constant.
+ *
+ * Returns true when at least one waiter should re-ask, so the caller can fan out a retry. Nothing here
+ * acquires: this decides and reports, the layer re-asks, and the existing acquire path admits or
+ * refuses exactly as it always has. That keeps one admission decision point rather than two.
+ *
+ * NOT IMPLEMENTED HERE, on purpose: displacing an incumbent. See {@link RecoveryAction}.
+ */
+export function recoverDeniedAdmissions(now = nowMs()): boolean {
+  if (now - lastRecoverySweepMs < ADMISSION_RECOVERY_IDLE_MS) return false;
+  lastRecoverySweepMs = now;
+  if (deniedWaiters.size === 0) return false;
+
+  let shouldRetry = false;
+  for (const [url, record] of deniedWaiters) {
+    // Free capacity is read PER POOL — hardware and software have separate caps, and a software waiter
+    // must not be told to retry because a hardware slot opened. Two caps that merely sum are not a
+    // budget, and this is the same trap one layer up.
+    const free = Math.max(0, sessionCap(record.software) - (record.software ? activeSoftwareSessions : activeSessions));
+    const action = recoveryAction({ key: url, deniedSinceMs: record.deniedSinceMs }, free, now);
+    if (action === "retry") {
+      shouldRetry = true;
+      admissionRecoveries += 1;
+      traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `recovery-retry free=${free}` });
+    } else if (action === "declare-denied" && !record.declared) {
+      // §6.11's second acceptable end. Declared ONCE and left in the registry: the source is still
+      // starved, and dropping it here would make the census read healthy while the picture is degraded
+      // — silence again, arrived at from the other side.
+      record.declared = true;
+      admissionPermanentDenials += 1;
+      if (kernelDiagnostics.enabled) {
+        kernelDiagnostics.record({
+          kind: "denial",
+          severity: "warn",
+          subject: { kind: "resource", resourceKind: "decode-session" },
+          reason: "admission-denied:permanently-denied",
+          detail: { key: url, deniedForMs: now - record.deniedSinceMs, software: record.software },
+        });
+      }
+    }
+  }
+  return shouldRetry;
 }
 
 function parkOrDispose(url: string, provider: FrameProvider, software: boolean, retain = false) {
@@ -1646,6 +1741,20 @@ export interface WcPoolStats {
   admissionDenials: number;
   /** Slots ranked admission took from an incumbent. Always 0 with `kernelSourceAdmission` off. */
   admissionPreemptions: number;
+  /**
+   * ADR-020 slice A — STARVATION AS A STATE, which `capMisses` cannot express.
+   *
+   * `capMisses` counts the MOMENT of denial and then goes quiet; two sources degraded for four minutes
+   * read identically to two denied once and immediately served. These describe the standing condition:
+   * how many sources are refused right now, and how long the worst has been refused. Unconditional —
+   * a soak must be able to read them with diagnostics off.
+   */
+  starvedSources: number;
+  starvedLongestMs: number;
+  /** Waiters told to re-ask because capacity had freed (slice A). */
+  admissionRecoveries: number;
+  /** Waiters that reached §6.11's declared terminal instead of waiting forever. */
+  admissionPermanentDenials: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1671,6 +1780,15 @@ export function getWcPoolStats(): WcPoolStats {
     borrowRefusals,
     admissionDenials: admissionDenialCount,
     admissionPreemptions,
+    starvedSources: deniedWaiters.size,
+    starvedLongestMs: (() => {
+      let worst = 0;
+      const at = nowMs();
+      for (const record of deniedWaiters.values()) worst = Math.max(worst, at - record.deniedSinceMs);
+      return Math.round(worst);
+    })(),
+    admissionRecoveries,
+    admissionPermanentDenials,
     shared,
     sharedActive,
     shareDetaches,

@@ -35,6 +35,7 @@ import {
   RESOURCE_IDLE_MS,
   type ResourceScope,
 } from "@orreris/shared";
+import { recoverDeniedAdmissions } from "./preview-frame-pool";
 
 /** Everything both pools have in common, which is all this module is allowed to know about them. */
 interface DisposableEntry {
@@ -84,6 +85,23 @@ export function sweepIdleSceneResources(params: IdleSweepParams): number {
   // at the tail of a composited frame, so a viewer that held, paused or hid stopped reclaiming exactly
   // when pressure was highest. This is the half of I-21/I-33 the kernel cannot reach.
   params.compositor.sweepIdleCaches();
+
+  // ADR-020 slice A — §6.11 recovery rides this tick and NOTHING ELSE about it is shared. The pass
+  // rate-limits itself on its own `ADMISSION_RECOVERY_IDLE_MS`, so changing `RESOURCE_IDLE_MS` changes
+  // how often this tick fires but not what recovery considers a recovery interval. Riding an existing
+  // cadence rather than adding a timer is deliberate: a new per-frame hook would put ranking on the
+  // acquire hot path (R1), and re-deciding every frame fights the minimum residency whose entire job is
+  // to stop competitors trading a slot.
+  // WHAT THIS DOES TODAY, precisely: it re-examines the denied set, declares §6.11's terminal for
+  // anything starved past the bound, and keeps the starvation census current. It does NOT yet cause a
+  // denied source to re-ask.
+  //
+  // The retry half needs a layer-side element→WebCodecs re-acquire path that does not exist.
+  // `requestLiveReprime` was the obvious candidate and is the WRONG one — reading it shows it re-seeks
+  // the `<video>` element and never re-attempts an acquire, so hooking it here would have counted
+  // recoveries that could not occur. Left unwired deliberately rather than wired to a no-op: a
+  // mechanism that reports success it cannot deliver is worse than one that reports the gap.
+  recoverDeniedAdmissions(params.nowMs);
 
   // `presented: false` — this runs before the hold decision, so whether this frame reaches the screen
   // is not yet known. Reporting the pessimistic value keeps the I-33 census honest.
