@@ -561,6 +561,48 @@ Sequenced **behind** the C15 purpose-class work and the playback-contention fixt
 bounded: it blocks M1b on virtual sources only, and OQ1 remains runnable on a timeline-clip corpus.
 No code has moved; `MIN_RESIDENCY_MS` is untouched.
 
+### DEBT-013 — a source denied at mount can never be admitted, and nothing reports it
+
+- Status: **open — USER-VISIBLE DEFECT**, raised to the founder 2026-08-06
+- Registered: 2026-08-06 (ADR-013 Phase 0; see ADR-020 §2)
+- Reason: ADR-012 §6.11 offers a persistently low-ranked source exactly two ends — *it receives a session, or it is declared permanently denied.* The runtime produces a third: it waits forever. Two independently measured mechanisms compose to make recovery impossible, and neither is individually wrong.
+- Invariant affected: **ADR-012 §6.11 (violated)**; I-40's aging requirement unmet in practice
+- Owner: unassigned
+- Expiry condition: a source denied at mount is subsequently admitted, or is declared permanently denied, on a fixture with more sources than slots
+- Planned slice: ADR-020 §5 slice **A** (§6.11 recovery)
+- Tracking issue: —
+- Detection: any change that adds a retention path, or removes an admission decision point, without adding a compensating re-ranking opportunity. Also: `deniedForMs` failing to accumulate for a candidate that is losing.
+
+**The mechanism, measured.**
+
+1. **Aging is structurally inert on the live admission path.** Incumbents are pushed with `admittedAtMs`
+   set, and `rankAdmission` applies aging only when it is null; the sole null-valued candidate is the
+   newcomer, whose `firstRequestedAtMs` is `now`. **Every aging term in every live contended decision is
+   exactly zero.** Held across three runs, asserted continuously by the instrument (`C1`).
+2. **No admission decision occurs after the mount storm.** Sessions are retained across seeks, so the
+   winners keep their slots and the losers never re-enter a ranking. Measured: **6 decisions at mount, 0
+   across 30s of scripted seeks, scrubs and long jumps** (115 transport samples).
+
+So the loser does not age into contention, is not re-ranked, and never reaches the
+`PERMANENT_DENIAL_AFTER_MS` terminal — because that terminal is reached through `deniedForMs`, which for
+such a candidate never accumulates.
+
+**Why this is a defect and not only an ADR note.** On a six-source comp against a four-slot budget, two
+sources decode through the `<video>` element path **for the lifetime of the session**. That is
+measurably different playback — the element path is the fallback, not the intended one — and **nothing
+reports it**. `capMisses` records the moment of denial and then stops moving; no counter says "two
+sources have been degraded continuously for four minutes". The user sees it; the runtime does not.
+
+**Relationship to the other two entries.** DEBT-011 is the routing-side symptom (which sources end up on
+WebCodecs varies run to run, bistable, arrival-decided). OQ9 is the admission-side cause (arrival order
+converted into a protected incumbency before merit is consulted). **This entry is the consequence that
+makes both permanent**: without it the lottery would be re-drawn and would average out; with it, one draw
+decides the whole session. The three retire together or not at all.
+
+**Not fixed here.** The slice is proposed in ADR-020 §5 and deliberately unwritten. `MIN_RESIDENCY_MS` is
+untouched: shortening it is the tempting one-liner and OQ9 — *residency ÷ mount-storm duration* — is
+still unsized, so it would trade a measured defect for an unmeasured one.
+
 ---
 
 ## Retired

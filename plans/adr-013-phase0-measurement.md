@@ -1081,6 +1081,20 @@ five soak rules were mirrored to prevent. The authoritative statement is **DEBT-
 criterion. Mirror both alongside the soak rules when the programme file is clean, and cross-reference
 DEBT-011 rather than restating the numbers, so the two cannot diverge.
 
+**Third carried mirror, added 2026-08-06.** `project-tracker/adr/README.md` needs its index entry for
+**ADR-020** (the acquisition premise correction). The file currently carries another session's
+uncommitted ADR-018 line, so staging it would sweep their work into an unrelated commit — the entry was
+written, then reverted, and is carried here rather than committed. Add it when that file is clean:
+
+```
+- [ADR-020 — Acquisition premise correction](020-acquisition-premise-correction.md) — **Accepted**
+  (amends ADR-013 §1/§4.4/§9; supersedes nothing). Contention is a mount-storm transient, not
+  steady-state pressure. Restates the motivating defect as ADR-012 §6.11's forbidden third outcome —
+  a source denied at mount can never be admitted (DEBT-013). OQ4/OQ8 closed as ill-posed, OQ5
+  premature, OQ1 superseded on the virtual-source path. Both subsystems, four contracts and fifteen
+  invariants stand.
+```
+
 **Harness slice H1, booked.** Strengthen `awaitWebCodecsEngaged` from `.some()` to a declared fraction of
 declared sources. Must land **before M3 and M7**, whose preconditions depend on multi-source engagement.
 Not done during a measurement: changing a shared helper's semantics mid-measurement is ADR-012's fourth
