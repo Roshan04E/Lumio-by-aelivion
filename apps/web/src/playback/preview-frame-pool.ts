@@ -1571,7 +1571,12 @@ interface DeniedRecord {
 /**
  * Sources currently refused, keyed by url. UNCONDITIONAL — deliberately not the diagnostics ring.
  *
- * Cleared when the source is served, and on `resetPreviewFramePool`. An entry here is a live claim that
+ * An entry is removed when the source is SERVED, and that is the only removal — like every other
+ * counter in this module the registry is page-lifetime, because this module has no reset entry point.
+ * (Slice A's comment here originally claimed clearing "on `resetPreviewFramePool`"; no such function
+ * exists, and a comment asserting a mechanism the code never performs is the same defect class the
+ * counters below exist to catch.) A probe that needs a clean baseline reloads the page. An entry here
+ * is a live claim that
  * something wanted capacity and did not get it; it is the only thing in this module that can answer
  * "is anything starved right now", which is the question `capMisses` cannot answer because it counts
  * events rather than describing a state.
@@ -1580,6 +1585,29 @@ const deniedWaiters = new Map<string, DeniedRecord>();
 let admissionRecoveries = 0;
 let admissionPermanentDenials = 0;
 let lastRecoverySweepMs = 0;
+/**
+ * Recovery passes that ran against a NON-EMPTY registry, and the per-waiter `wait` verdicts they
+ * rendered. Both unconditional, and both exist for one reason: without them, a run in which nothing
+ * recovers and nothing reaches the terminal leaves `admissionRecoveries` and `admissionPermanentDenials`
+ * at zero — which is indistinguishable from a pass that never ran at all.
+ *
+ * That is the vacuity trap this file has been bitten by before (DEBT-012): a health reading of 0 because
+ * the path is clean, and a reading of 0 because the path was never reached, are not the same claim and
+ * must not share a counter. `admissionRecoverySweeps` answers "did recovery look?" and
+ * `admissionRecoveryWaits` answers "did it decide about each waiter?" — neither is inferable from the
+ * outcome counters, so neither is left to inference.
+ */
+let admissionRecoverySweeps = 0;
+let admissionRecoveryWaits = 0;
+/**
+ * Times the host actually CALLED recovery, whether or not the call did anything.
+ *
+ * Separate from `admissionRecoverySweeps` because the two failures they distinguish demand opposite
+ * responses: `ticks 0` means the host tick never fires and recovery is wired to a cadence that does not
+ * run, while `ticks >> sweeps` means the tick fires fine and recovery's own rate limit is what holds it
+ * back. Collapsing them into one number would make the difference a matter of opinion.
+ */
+let admissionRecoveryTicks = 0;
 
 function noteDenied(url: string, software: boolean): void {
   const existing = deniedWaiters.get(url);
@@ -1600,9 +1628,13 @@ function noteDenied(url: string, software: boolean): void {
  * NOT IMPLEMENTED HERE, on purpose: displacing an incumbent. See {@link RecoveryAction}.
  */
 export function recoverDeniedAdmissions(now = nowMs()): boolean {
+  admissionRecoveryTicks += 1;
   if (now - lastRecoverySweepMs < ADMISSION_RECOVERY_IDLE_MS) return false;
   lastRecoverySweepMs = now;
   if (deniedWaiters.size === 0) return false;
+  // Past this line the pass is committed to rendering a verdict for every waiter, so this is the exact
+  // point at which "recovery looked" becomes true.
+  admissionRecoverySweeps += 1;
 
   let shouldRetry = false;
   for (const [url, record] of deniedWaiters) {
@@ -1630,6 +1662,10 @@ export function recoverDeniedAdmissions(now = nowMs()): boolean {
           detail: { key: url, deniedForMs: now - record.deniedSinceMs, software: record.software },
         });
       }
+    } else if (action === "wait") {
+      // Counted so the third branch is not the silent one. Two of three verdicts being instrumented
+      // would still leave "the pass ran but decided nothing" unprovable.
+      admissionRecoveryWaits += 1;
     }
   }
   return shouldRetry;
@@ -1755,6 +1791,15 @@ export interface WcPoolStats {
   admissionRecoveries: number;
   /** Waiters that reached §6.11's declared terminal instead of waiting forever. */
   admissionPermanentDenials: number;
+  /**
+   * Recovery passes that ran against a non-empty registry, and the `wait` verdicts they rendered.
+   * These make the pass itself observable: with only the outcome counters above, "recovery ran and had
+   * nothing to do" and "recovery never ran" are the same reading of 0.
+   */
+  admissionRecoverySweeps: number;
+  admissionRecoveryWaits: number;
+  /** Host calls into recovery, rate-limited or not — separates "the tick never fired" from "it fired and did nothing". */
+  admissionRecoveryTicks: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1789,6 +1834,9 @@ export function getWcPoolStats(): WcPoolStats {
     })(),
     admissionRecoveries,
     admissionPermanentDenials,
+    admissionRecoverySweeps,
+    admissionRecoveryWaits,
+    admissionRecoveryTicks,
     shared,
     sharedActive,
     shareDetaches,
