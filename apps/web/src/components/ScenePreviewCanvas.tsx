@@ -1692,6 +1692,11 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     pruneDepartedSceneResources({
       liveLayerIds: new Set(ls.map((layer) => layer.id)),
       liveMediaSourceIds,
+      // Mounted Flarex loaders. Deliberately a SEPARATE set rather than seeding `liveMediaSourceIds`:
+      // that set is also the `participants` census on every held/presented frame, and folding declared
+      // -but-unsampled loaders into it would inflate the coherence ledger with sources this frame never
+      // actually waited on — buying the fix by corrupting the instrument that has to verify it.
+      declaredMediaSourceIds: fxVirtual && fxVirtual.length > 0 ? new Set(fxVirtual.map((v) => v.id)) : undefined,
       gradePool: sharedGradeRenderersRef.current,
       mediaPool: sharedMediaRenderersRef.current,
     });

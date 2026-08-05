@@ -111,12 +111,40 @@ export function sweepIdleSceneResources(params: IdleSweepParams): number {
 export interface DepartedPruneParams {
   readonly liveLayerIds: ReadonlySet<string>;
   readonly liveMediaSourceIds: ReadonlySet<string>;
+  /**
+   * Media sources that are MOUNTED but whose consumption is mediated, and which this frame's silence
+   * therefore says nothing about (I-8). Retained regardless of `liveMediaSourceIds`.
+   *
+   * Consumption is the right liveness proof for a clip: a clip nobody sampled has left the window, and
+   * `liveMediaSourceIds` is exactly the set of clips the grade pass touched. A Flarex virtual loader
+   * breaks that equivalence. It is mounted by the viewer (it has a descriptor, an element, a decoder
+   * lease) but its pixels are requested through the Flarex COMPILER, and the compiler has several
+   * legitimate reasons to return without asking on any given frame — `resolveSourceDraw` answers
+   * "ended" past the loader's clamped duration, returns early when the node has no virtual layer, and
+   * is never reached at all while an upstream branch is substituting. None of those mean "departed".
+   *
+   * Disposing on that silence was a LATCH, not a one-frame glitch: forget the resource → the holder's
+   * handle goes stale → `resolveSceneTexture` answers null → the MediaIn cannot produce → the compiler
+   * substitutes and returns null → `lowered ?? draw` puts the HOST on screen → and because it
+   * substituted it did not ask again, so the next frame forgets it too. The climbing `generation` on
+   * `media/flarexsrc:*` is that cycle counting its own revolutions.
+   *
+   * This is the same lesson the grade path learned on 2026-07-07 (tracker playback-preview v22): a
+   * transiently source-less layer must HOLD, because dropping it from the draw list produced "a black
+   * flicker on every ruler click". That fix taught one level to hold and left the reaper above it still
+   * inferring departure from silence.
+   *
+   * Retention stays bounded, so this cannot leak: a loader that genuinely goes away leaves this set on
+   * the very next composite and is pruned then, and one that lingers unconsumed is still reclaimed by
+   * the wall-clock idle sweep above.
+   */
+  readonly declaredMediaSourceIds?: ReadonlySet<string> | undefined;
   readonly gradePool: ScenePool;
   readonly mediaPool: ScenePool;
 }
 
 /**
- * Set-difference prune: dispose what this frame did not consume.
+ * Set-difference prune: dispose what this frame did not consume, EXCEPT what was declared present.
  *
  * Runs only on a frame that got past every hold gate, because `liveMediaSourceIds` is populated by the
  * grade pass a hold skips — see the header for why that makes it un-hoistable.
@@ -136,7 +164,7 @@ export function pruneDepartedSceneResources(params: DepartedPruneParams): void {
   // Single-ctx: dispose media-grade renderers whose source id wasn't consumed this frame (clip left the
   // window / its descriptor was withdrawn).
   for (const [id, entry] of params.mediaPool) {
-    if (params.liveMediaSourceIds.has(id)) continue;
+    if (params.liveMediaSourceIds.has(id) || params.declaredMediaSourceIds?.has(id)) continue;
     entry.renderer.dispose();
     entry.target?.dispose();
     params.mediaPool.delete(id);
