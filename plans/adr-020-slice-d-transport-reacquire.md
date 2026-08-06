@@ -1,7 +1,8 @@
-# ADR-020 slice D — the layer-side re-acquire, contracted before it is written
+# ADR-020 slice D — the layer-side re-acquire
 
-*Status: CONTRACT ONLY. No code has moved. Written because this slice crosses out of the kernel, and
-the seam is where the last two admission defects lived.*
+*Status: **IMPLEMENTED 2026-08-06**, and **UNEXERCISED** — see §7. The contract below was written before
+the code, because this slice crosses out of the kernel and the seam is where the last two admission
+defects lived. It is left in its original form; §7 records what the runs then showed.*
 
 ---
 
@@ -76,6 +77,13 @@ entertain a re-ask*, never *a slot is reserved*.
 
 Permitted moments — a **seek**, a **scrub**, or **while paused**. Forbidden: mid-playback on a running
 source.
+
+**Why a transport boundary and not freed capacity — this is the measured reason the slice has its
+shape.** In the 2026-08-06 census the pool stayed full for the entire session and recovery issued
+`retries 0`: free capacity **never appeared**. A retry path triggered only by a capacity event would
+therefore have been *dead code shipped behind a clean gate* — it would have passed every gate in the
+repo while never once firing, and the counters would have read 0 exactly as they do now. The trigger has
+to be an event that actually occurs on a starved runtime, and transport is the one that does.
 
 The reasoning is the risk asymmetry, and it is the same argument that kept displacement out of slice A.
 A re-acquire tears down and rebuilds a decode path. At a transport boundary a decode discontinuity is
@@ -165,3 +173,62 @@ Pixel + typecheck are not sufficient — a decoder soak is required, and the soa
   separate constant was a founder condition, and the composition is the thing to size, not the constant
   to remove.
 - **OQ9.** Residency ÷ mount-storm duration. Unsized; `MIN_RESIDENCY_MS` stays untouched.
+
+---
+
+## 7. What shipped, and what the runs established (2026-08-06)
+
+### Implemented
+
+| Piece | Where |
+|---|---|
+| `eligible` on the denied record; set by recovery on a `retry` verdict, cleared by a refused re-ask | `preview-frame-pool.ts` |
+| `isAdmissionEligible(url)` — advisory, revocable, never a reservation (C-D1) | `preview-frame-pool.ts` |
+| `noteServed(url)` — the single exit from the registry, called from **every** success path | `preview-frame-pool.ts` |
+| Boundary detector: pause, or a transport step > `SEEK_DISCONTINUITY_S` (C-D2, C-D5) | `WebglMediaLayer.tsx` |
+| Re-entry via `wcReacquireEpoch` in the **existing** lease effect's deps | `WebglMediaLayer.tsx` |
+| `admissionReacquireAttempts` / `Grants`; `admission-reacquire` trace reason | pool + trace |
+
+**A slice A defect was found and fixed while writing this.** The share path (`return
+attachMember(existing, …)`) returned early *without clearing the denied registry*. A waiter later
+satisfied by attaching to an existing session therefore stayed counted in `starvedSources` forever and
+would eventually be **declared permanently denied while it was being served**. A census that reports a
+served source as starved is exactly as wrong as one that reports a starved source as served, and D's D1
+criterion ("`starvedSources` decreases") could not have meant anything while it stood. Fixed by routing
+every success path through `noteServed`.
+
+**No bespoke acquire call site.** Re-entry is a dependency bump on the existing lease effect. A separate
+re-acquire would have had to re-derive priority, software preference, exclusivity, requested time,
+purpose and contribution — six chances for the retry path to ask a different question than the mount
+path, at the seam where the last two defects lived.
+
+### Established by the runs
+
+Slice A's census passed **7/7 three times independently**. On the final run: `capMisses 10 ·
+starvedSources peak 5 · starvedLongestMs 82s · ticks 7 · sweeps 4 · waits 7 · permanentDenials 3`.
+
+### NOT established — D is unexercised, and this is the honest result
+
+**77 transport boundaries were driven (P-c satisfied) and produced 0 re-asks — correctly.** Recovery
+granted no eligibility all run (`retries 0`) because free capacity never appeared: the pool stayed full
+for the entire session. With no permission outstanding, the correct number of re-asks is zero.
+
+> **This run shows slice D breaks nothing. It does not show that it works.**
+> D1 and D2 are unexercised, exactly as slice A's `capMisses 0` soak left slice A unexercised.
+
+**Why this fixture structurally cannot exercise it.** Six simultaneous MediaIns in one comp live and die
+together, so every release is a full teardown followed by a fresh lottery — never *one source leaving
+while another stays starved*. D needs capacity to free **asymmetrically**, and that is a property of the
+fixture, not of the runtime.
+
+**The next step is fixture engineering, not code.** An arrangement is needed in which one source departs
+while a starved one remains — timeline clips whose windows differ under a seek is the obvious candidate,
+since a clip leaving the window releases its session while the rest stay mounted. Until such a run
+exists, D's acceptance table is a specification and not evidence, and it should be described that way.
+
+### Carried forward
+
+`ticks`/`sweeps` are recorded on every census run, so **OQ10's sizing evidence accumulates for free**
+rather than needing its own campaign. Three runs so far: `1/–`, `2/5`, `4/6`, `4/7` sweeps/ticks — the
+rate limit rejects a large and *varying* share of host ticks, and the run that recorded `sweeps 1` is the
+one that missed §6.11's terminal entirely.

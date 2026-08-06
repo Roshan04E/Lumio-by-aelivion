@@ -538,6 +538,23 @@ transform does the opposite one layer up — it asserts full area and full opaci
 > healthy.** DEBT-009 proved liveness by a touch the consumer never performs; F2 proves declaration by a
 > transform nobody supplied. Same meta-class: *proof by a signal the subject never emits.*
 
+**Sibling failure mode — the guard that cannot pass (2026-08-06).** The class has a mirror image, and it
+belongs here rather than in an entry of its own: where the instances above are *a signal that cannot
+fail*, this is *a precondition that cannot pass* — both a predicate misaligned with what it claims to
+observe. The starvation census required `≥5 of 6 sources off the <video> element path` before it would
+read a run. But DEBT-013 **is** "a denied source falls back to the element path", so the guard asserted
+the absence of the very defect under test, and declared VOID on a run that had produced it (`capMisses
+4`, two sources starved 183s). It could never have passed on a fixture built to starve — it rejects
+exactly the runs worth reading. **The general fix: a precondition may assert that the MECHANISM RAN,
+never that a particular party PREVAILED.** Here that is `engaged >= cap` — the budget filled, whoever
+won it. This applies directly to the slice-C harness item ("strengthen `awaitWebCodecsEngaged` to a
+declared fraction"), which would have shipped this bug in its obvious form.
+
+The same class occurs in prose: slice A's registry comment claimed clearing "on
+`resetPreviewFramePool`", a function that does not exist in that module (it has no reset entry point at
+all). An assertion about a mechanism nobody performs, one register away from the counters written to
+catch it.
+
 **Scope of instance 2 — MEASURED 2026-08-05 (`contribution:scope`, 9/9): BOUNDED, not systemic.**
 
 | Path | Behaviour | Evidence |

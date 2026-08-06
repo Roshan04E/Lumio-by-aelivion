@@ -45,6 +45,8 @@ export type ProviderTraceReason =
   | "unmount"
   | "src-change"
   | "epoch-bump"
+  /** ADR-020 slice D: a starved source re-asking at a transport boundary. */
+  | "admission-reacquire"
   | "preempt"
   | "pool-evict-idle-cap"
   | "pool-evict-mode-cap"

@@ -15,7 +15,7 @@ import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
 import { recordMediaFrame } from "../editor/performance/frame-stats";
-import { acquirePreviewFrameProvider } from "../playback/preview-frame-pool";
+import { acquirePreviewFrameProvider, isAdmissionEligible } from "../playback/preview-frame-pool";
 import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
 import { ELEMENT_FALLBACK_MAX_LAG_S, sourceFramePeriodSeconds, stalenessSeconds } from "../playback/temporal-coherence";
@@ -72,6 +72,15 @@ const WC_PAUSED_STALE_MAX_MS = 3000;
 // invisible while paused"): a `lease.ready` that never settles (wedged init / starved pool) left
 // the layer with NO source, and a getFrame promise that never resolves left `wcBusy` stuck forever
 // — no lag updates, no null counts, no bail, total silence. Both now converge to the element path.
+/**
+ * ADR-020 slice D: a transport step larger than this is a SEEK, not playback advancing.
+ *
+ * Sized well above a frame at any rate this editor plays (a 24fps frame is ~0.042s) and well below any
+ * deliberate jump, so ordinary playback never reads as a boundary. Getting this wrong is safe in one
+ * direction only: too large merely misses re-acquire opportunities, while too small would let a starved
+ * source re-acquire mid-playback, which C-D2 forbids.
+ */
+const SEEK_DISCONTINUITY_S = 0.5;
 const WC_INIT_TIMEOUT_MS = 4000;
 const WC_BUSY_WEDGE_MS = 3000;
 // LIVE-CLOCK SAMPLING (2026-07-06, tracker playback-preview v5→v6): the committed playback clock
@@ -610,6 +619,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // never leave a stale time attached to whatever frame arrives next. Set on present (below).
       if (!next) servedSourceTimeRef.current = null;
     }
+    /** Slice D: lets the lease trace name a re-acquire run instead of recording it as `unknown`. */
+    const leaseReacquireRef = useRef(-1);
     /**
      * WHY this layer has no frame for the current moment — one reason per composite (2026-08-02).
      *
@@ -661,6 +672,17 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // the compositor keeps compositing the stale canvas at full fps, so ONLY this can see it).
     const lastDrawMsRef = useRef(0);
     const [wcEpoch, setWcEpoch] = useState(0);
+    /**
+     * ADR-020 slice D. Bumped to re-enter the lease effect for a starved source that the pool has
+     * marked eligible, at a transport boundary.
+     *
+     * Deliberately a dependency of the EXISTING lease effect rather than a second acquire call site.
+     * The contract's first clause is that there is one admission decision point; a bespoke re-acquire
+     * would have to re-derive priority, software preference, exclusivity, requested time, purpose and
+     * contribution, and every one of those is a place for the retry path to disagree with the mount
+     * path about what this source is asking for. Re-running the effect asks the identical question.
+     */
+    const [wcReacquireEpoch, setWcReacquireEpoch] = useState(0);
     // Live pending/pre-roll flag, read at lease-acquire time (the mount effect keys on src only).
     const hiddenAtMountRef = useRef(hidden);
     hiddenAtMountRef.current = hidden;
@@ -753,10 +775,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             ? "src-change"
             : leaseEpochRef.current !== wcEpoch
               ? "epoch-bump"
-              : "unknown";
+              : leaseReacquireRef.current !== wcReacquireEpoch
+                ? "admission-reacquire"
+                : "unknown";
       leaseRunRef.current += 1;
       leaseSrcRef.current = src;
       leaseEpochRef.current = wcEpoch;
+      leaseReacquireRef.current = wcReacquireEpoch;
       traceEvent({
         event: "layer:effect",
         asset: traceAsset(src),
@@ -979,7 +1004,51 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         for (const cleanup of cleanups.reverse()) cleanup();
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [mediaType, src]);
+    }, [mediaType, src, wcReacquireEpoch]);
+
+    /**
+     * ADR-020 slice D — the re-acquire trigger, and the reason it is a transport boundary.
+     *
+     * Phase 0 measured a starved runtime in which the pool stayed full for the ENTIRE session:
+     * recovery issued `retries 0` because free capacity never once appeared. A retry path triggered by
+     * a capacity event would therefore have been dead code shipped behind a clean gate — passing every
+     * check in the repo while never firing. The trigger has to be something that actually happens, and
+     * transport is what does: 115 boundaries were sampled in 30 seconds.
+     *
+     * WHY A BOUNDARY AND NOT SIMPLY "SOON". Re-acquiring tears down and rebuilds a decode path. At a
+     * seek, a scrub, or a pause, a decode discontinuity is already happening and already invisible;
+     * mid-playback the same teardown is a visible hitch on a source that is currently working. The cost
+     * is bounded and one-time and is borne by the source that is currently degraded — recovery admits
+     * only into FREE capacity, so nobody else loses a session for this (C-D2).
+     *
+     * WHY THERE IS NO TIMER (C-D5). The layer is already re-rendered on transport; this reads props it
+     * already has. If no boundary ever arrives the source stays starved and keeps reporting it, which
+     * is a correct outcome under C-D3, not an unhandled case.
+     */
+    const transportTimeRef = useRef<number | null>(null);
+    // Read through the same ref the WC frame requests use, so the boundary detector and the decode path
+    // agree on what "now" is by construction rather than by two prop reads staying in step.
+    const transportTime = mediaType === "video" ? wcTimeRef.current.currentTime : 0;
+    const transportPlaying = mediaType === "video" ? wcTimeRef.current.isPlaying : false;
+    useEffect(() => {
+      if (mediaType !== "video") return;
+      const playing = transportPlaying;
+      const time = transportTime;
+      const previous = transportTimeRef.current;
+      transportTimeRef.current = time;
+      // A jump is a discontinuity whichever way it goes, and it is the scrub/seek case. While paused,
+      // any transport change is a boundary; the pause EDGE itself arrives here as an isPlaying change.
+      const jumped = previous !== null && Math.abs(time - previous) > SEEK_DISCONTINUITY_S;
+      if (playing && !jumped) return;
+      // Only a source that actually lost. `wcModeRef` is the SESSION's mode, so this asks "am I on the
+      // element path", not "did I once ask for something".
+      if (wcModeRef.current !== "element") return;
+      // The pool decides whether a re-ask is entertained; this only decides WHEN to make one. A source
+      // that was never denied is not in the registry and is never eligible, so a forced-element or
+      // bailed source cannot loop here.
+      if (!isAdmissionEligible(src)) return;
+      setWcReacquireEpoch((value) => value + 1);
+    }, [mediaType, src, transportTime, transportPlaying]);
     // Pre-roll shells become live at the cut (hidden→false): promote the lease so the pool stops
     // treating this clip as a preemption victim (and vice versa if a live clip returns to pending).
     useEffect(() => {
