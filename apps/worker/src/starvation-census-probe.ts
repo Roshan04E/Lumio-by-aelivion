@@ -67,8 +67,11 @@ interface Census {
   admissionRecoverySweeps: number;
   admissionRecoveryWaits: number;
   admissionRecoveryTicks: number;
+  admissionRecoveryEmptyTicks: number;
   admissionReacquireAttempts: number;
   admissionReacquireGrants: number;
+  tickInterval: { count: number; meanMs: number; minMs: number; maxMs: number };
+  rejectShortfall: { count: number; meanMs: number; minMs: number; maxMs: number };
   active: number;
   activeSoftware: number;
 }
@@ -122,8 +125,11 @@ async function readCensus(page: Page, tMs: number): Promise<Census | null> {
       admissionRecoverySweeps: Number(p.admissionRecoverySweeps ?? -1),
       admissionRecoveryWaits: Number(p.admissionRecoveryWaits ?? -1),
       admissionRecoveryTicks: Number(p.admissionRecoveryTicks ?? -1),
+      admissionRecoveryEmptyTicks: Number(p.admissionRecoveryEmptyTicks ?? -1),
       admissionReacquireAttempts: Number(p.admissionReacquireAttempts ?? -1),
       admissionReacquireGrants: Number(p.admissionReacquireGrants ?? -1),
+      tickInterval: p.recoveryTickIntervalMs ?? { count: 0, meanMs: 0, minMs: 0, maxMs: 0 },
+      rejectShortfall: p.recoveryRejectShortfallMs ?? { count: 0, meanMs: 0, minMs: 0, maxMs: 0 },
       active: Number(p.active ?? 0),
       activeSoftware: Number(p.activeSoftware ?? 0),
     };
@@ -274,16 +280,35 @@ async function main(): Promise<void> {
   console.log(`  capMisses        ${last.capMisses}`);
   console.log(`  starvedSources   peak ${peakStarved} · final ${last.starvedSources}`);
   console.log(`  starvedLongestMs peak ${peakLongest} · final ${last.starvedLongestMs}`);
-  const expectedSweeps = Math.floor((SECONDS * 1_000) / ADMISSION_RECOVERY_IDLE_MS);
   console.log(
     `  recovery         ticks ${last.admissionRecoveryTicks} · sweeps ${last.admissionRecoverySweeps}` +
-      ` (expected ≈${expectedSweeps}) · waits ${last.admissionRecoveryWaits}`
+      ` · empty ${last.admissionRecoveryEmptyTicks} · waits ${last.admissionRecoveryWaits}`
   );
   console.log(`  outcomes         retries ${last.admissionRecoveries} · permanentDenials ${last.admissionPermanentDenials}`);
   console.log(
     `  slice D          boundaries ${boundaries} · reacquire attempts ${last.admissionReacquireAttempts}` +
       ` · grants ${last.admissionReacquireGrants}`
   );
+  const ti = last.tickInterval;
+  const rs = last.rejectShortfall;
+  console.log(
+    `  OQ10 tick period n=${ti.count} · mean ${ti.meanMs}ms · min ${ti.minMs}ms · max ${ti.maxMs}ms` +
+      `   (limit ${ADMISSION_RECOVERY_IDLE_MS}ms)`
+  );
+  console.log(
+    `  OQ10 rejects     n=${rs.count} · shortfall mean ${rs.meanMs}ms · min ${rs.minMs}ms · max ${rs.maxMs}ms`
+  );
+  if (rs.count > 0) {
+    // The whole point of the shortfall reading: a few ms means the limit is beating against the cadence
+    // it rides; seconds means a genuinely different clock, and loosening the limit would be the wrong fix.
+    console.log(
+      rs.maxMs <= 250
+        ? "                   → BEAT: every rejection missed by a hair. The tick is the clock; a second\n" +
+            "                     wall-clock limit of the same period is the interference."
+        : `                   → NOT a beat: rejections miss by up to ${Math.round(rs.maxMs)}ms. Something is\n` +
+            "                     ticking on a different cadence; find it before touching the constant."
+    );
+  }
   console.log(`  sessions         active ${last.active} · software ${last.activeSoftware}`);
 
   // Trajectory, so a constant is not mistaken for a clock.
@@ -321,11 +346,14 @@ async function main(): Promise<void> {
       ["the host tick reaches recovery at all", last.admissionRecoveryTicks > 0, `ticks ${last.admissionRecoveryTicks}`],
       ["the recovery pass ran against a non-empty registry", last.admissionRecoverySweeps > 0, `sweeps ${last.admissionRecoverySweeps}`],
       [
-        // Half the nominal rate is generous on purpose: the point is to catch a cadence that has
-        // effectively stopped, not to police jitter in a rate limit riding a composite loop.
-        "it runs at something like its declared cadence",
-        last.admissionRecoverySweeps >= Math.max(1, Math.floor(expectedSweeps / 2)),
-        `${last.admissionRecoverySweeps} of ≈${expectedSweeps} in ${SECONDS}s`,
+        // OQ10 replaced the old form of this check. It used to compare sweeps against a NOMINAL rate
+        // derived from the constant, which is what led to reading `ticks > sweeps` as "the rate limit
+        // rejects most ticks" — a branch nobody had counted. The honest check is that the accounting
+        // closes: every tick is a sweep, a rejection, or an empty registry, and nothing is unexplained.
+        "every recovery tick is accounted for (ticks = sweeps + rejects + empty)",
+        last.admissionRecoveryTicks ===
+          last.admissionRecoverySweeps + last.rejectShortfall.count + last.admissionRecoveryEmptyTicks,
+        `${last.admissionRecoveryTicks} = ${last.admissionRecoverySweeps} + ${last.rejectShortfall.count} + ${last.admissionRecoveryEmptyTicks}`,
       ],
       ["it rendered a per-waiter verdict", last.admissionRecoveryWaits > 0, `waits ${last.admissionRecoveryWaits}`],
       [

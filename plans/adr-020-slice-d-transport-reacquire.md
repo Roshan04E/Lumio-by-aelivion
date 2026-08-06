@@ -42,11 +42,17 @@ Three facts from this run bear directly on the design:
    capacity never appeared: the pool stayed full for the entire session. **A retry path that only fires
    on freed capacity would have done nothing in this run.** See §5 — this is why the trigger is a
    transport boundary and not a capacity event.
-3. **The sweep cadence under-delivers, and it already cost a terminal.** `ticks 5 · sweeps 2` against a
-   nominal 5: recovery's own 10s rate limit rejects most of the host ticks it rides. An earlier run in
-   the same session recorded `sweeps 1 · permanentDenials 0` — the terminal was **missed entirely** for a
-   source starved 128s. The mechanism is correct; its cadence is not reliable. Recorded here as
-   **OQ10**, not fixed by this slice.
+3. ~~**The sweep cadence under-delivers.** `ticks 5 · sweeps 2`: recovery's own 10s rate limit rejects
+   most of the host ticks it rides.~~ **WRONG — falsified 2026-08-06 by instrumenting the branch.**
+   `rejects n=0` on four consecutive runs; the limit has never rejected a tick. The gap was an uncounted
+   third branch (the registry was still empty), and the accounting now closes at
+   `ticks 7 = sweeps 4 + rejects 0 + empty 3`. The tick period is real and variable
+   (min 10140ms / mean ~11.5s / max 18607ms against a nominal 10s) because the sweep rides the composite
+   loop, but the constant sits *below* the observed minimum and never binds. See DEBT-013 / OQ10.
+
+   *This item is left visible rather than deleted: it was an inference from a gap between two counters,
+   published as a measurement, in a programme whose central rule is `count the reasons, never infer
+   which branch fired`. The rule applies to the person applying it.*
 
 ---
 
@@ -166,12 +172,22 @@ Pixel + typecheck are not sufficient — a decoder soak is required, and the soa
 
 ## 6. Open questions this slice does not answer
 
-- **OQ10 (new, 2026-08-06).** Recovery's rate limit rejects ~60% of the host ticks it rides (`ticks 5 ·
-  sweeps 2`), and a run in the same session missed §6.11's terminal entirely at `sweeps 1`. The two 10s
-  limits — the host's `RESOURCE_IDLE_MS` and recovery's `ADMISSION_RECOVERY_IDLE_MS` — compose into an
-  effective cadence neither declares. **Do not "fix" this by deleting recovery's constant:** the
-  separate constant was a founder condition, and the composition is the thing to size, not the constant
-  to remove.
+- **OQ10 — SIZED AND CLOSED 2026-08-06, premise falsified, no constant changed.** `rejects n=0` across
+  four runs; the rate limit never binds. The gap was the uncounted third branch (empty registry), and
+  the accounting now closes at `ticks 7 = sweeps 4 + rejects 0 + empty 3` on every run. Tick period
+  measured at min 10140ms / mean ~11.5s / max 18607ms against a nominal 10s: the constant sits below the
+  observed minimum, so raising it would start rejecting ticks currently accepted and lowering it would
+  do nothing. The residual is that recovery's cadence is coupled to **compositing activity** rather than
+  a clock (`RESOURCE_IDLE_MS + time-to-next-composite`), which no constant can fix and which the "ride
+  the existing tick" condition deliberately chose. Full record in the debt register under DEBT-013.
+  **Recovery is not under-firing, so the block on the D fixture is lifted on evidence.**
+
+  *(The superseded claim is kept below, struck, because the way it was wrong is the point.)*
+
+- *(SUPERSEDED)* ~~Recovery's rate limit rejects ~60% of the host ticks it rides (`ticks 5 · sweeps 2`);
+  the two 10s limits compose into an effective cadence neither declares.~~ The rejection rate was never
+  measured — it was read off a gap between two counters while the branch that would have proved it went
+  uninstrumented. It is 0%.
 - **OQ9.** Residency ÷ mount-storm duration. Unsized; `MIN_RESIDENCY_MS` stays untouched.
 
 ---
