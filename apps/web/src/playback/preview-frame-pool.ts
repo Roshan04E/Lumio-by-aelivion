@@ -1281,6 +1281,19 @@ const activeOf = (software: boolean): number => (software ? activeSoftwareSessio
 /** Every real decoder session alive right now — active in BOTH modes plus idle parks (which pin one). */
 const totalSessions = (): number => activeSessions + activeSoftwareSessions + idle.length;
 const idleCountOf = (software: boolean): number => idle.reduce((n, entry) => n + (entry.software === software ? 1 : 0), 0);
+/**
+ * Slots a waiter in `software`'s pool could take right now — ONE definition, used by both recovery
+ * triggers (ADR-020 slice E).
+ *
+ * Read PER POOL, never as a sum: hardware and software have separate caps, and a software waiter must
+ * not be told to retry because a hardware slot opened. Two caps that merely sum are not a budget.
+ *
+ * It is one function because slice E gives recovery a SECOND trigger, and two triggers computing "is
+ * there room" independently is precisely how they drift apart — the release path granting a permission
+ * the sweep would refuse, or the reverse, with no way to tell which was right. The eventual answer must
+ * be the same whichever path asked.
+ */
+const freeCapacityFor = (software: boolean): number => Math.max(0, sessionCap(software) - activeOf(software));
 function bumpActive(software: boolean, delta: number): void {
   if (software) activeSoftwareSessions = Math.max(0, activeSoftwareSessions + delta);
   else activeSessions = Math.max(0, activeSessions + delta);
@@ -1298,13 +1311,65 @@ function bumpActive(software: boolean, delta: number): void {
   // opportunity occurs.
   if (delta < 0 && deniedWaiters.size > 0) {
     capacityFreedWhileStarved += 1;
-    for (const record of deniedWaiters.values()) {
-      if (record.software === software) {
-        capacityFreedMatchingPool += 1;
-        break;
-      }
+    // ADR-020 SLICE E — grant at the release, because the opportunity is an EVENT.
+    //
+    // The sweep samples every ~11.5s; OQ11 measured capacity freeing 4-5 times a run inside those gaps
+    // and recovery granting nothing. No cadence fixes a sampler aimed at an event — a faster sweep only
+    // shortens the window it can miss. This is the one place that knows both facts at the instant they
+    // are both true: a slot just opened, and someone is waiting for one.
+    //
+    // GRANT, NEVER RESERVE. The freed slot may be taken by another source before this waiter re-asks,
+    // and that is a LEGAL outcome, not a lost grant — the waiter re-asks through the ordinary acquire
+    // path and is refused exactly as always, which clears the permission and leaves `deniedSinceMs`
+    // untouched (C-D4). One admission decision point survives.
+    //
+    // R1: the scan is O(waiters) with a HOISTED callback and module scratch, so a release allocates
+    // nothing — no closure, no iterator, no array. `deniedWaiters` is empty in every healthy session,
+    // and this whole block is behind `size > 0`, so the cost on a well-fed pool is one comparison.
+    grantScratchSoftware = software;
+    grantScratchFree = freeCapacityFor(software);
+    grantScratchMatched = false;
+    grantScratchGranted = 0;
+    grantScratchBlocked = 0;
+    deniedWaiters.forEach(grantEligibilityOnRelease);
+    releaseScanWaiters += deniedWaiters.size;
+    if (grantScratchMatched) capacityFreedMatchingPool += 1;
+    // Room existed for this pool, yet a same-pool waiter came out of the scan without a permission.
+    // Must be 0: that is slice E's whole claim.
+    if (grantScratchFree > 0) releaseLeftUnpermitted += grantScratchBlocked;
+    if (grantScratchGranted > 0) {
+      releaseGrantEvents += 1;
+      releaseEligibilityGrants += grantScratchGranted;
     }
   }
+}
+
+/**
+ * Slice E's per-waiter grant. Hoisted (never a closure) and reading module scratch, so the release path
+ * stays allocation-free — see the R1 note in {@link bumpActive}.
+ */
+function grantEligibilityOnRelease(record: DeniedRecord): void {
+  if (record.software !== grantScratchSoftware) return;
+  // Recorded even when no slot is actually free, so "a waiter in the right pool existed" stays
+  // distinguishable from "a waiter existed at all". Over-counting the second would make the opportunity
+  // look larger than it was.
+  grantScratchMatched = true;
+  if (grantScratchFree <= 0) {
+    // Room did not actually materialise — the release was in this pool but the pool is still at its cap
+    // (the other ceiling binds). Not a missed grant; recorded separately so it cannot be mistaken for one.
+    grantScratchBlocked += 1;
+    return;
+  }
+  // Already permitted: not a new grant. Re-marking would inflate the count with repeats and hide
+  // whether a permission is being ACTED ON or merely reissued.
+  if (record.eligible) return;
+  record.eligible = true;
+  grantScratchGranted += 1;
+  // Counted here too, so `admissionRecoveries` keeps meaning "permissions granted" WHOLESALE rather
+  // than "permissions granted by the sweep". A reading that stayed 0 while slice E worked would be the
+  // same defect this programme has now hit three times — a counter reporting what one observer saw
+  // instead of what happened. `releaseEligibilityGrants` carries the per-trigger split.
+  admissionRecoveries += 1;
 }
 
 /**
@@ -1648,6 +1713,32 @@ let admissionRecoveryEmptyTicks = 0;
 let capacityFreedWhileStarved = 0;
 let capacityFreedMatchingPool = 0;
 /**
+ * Slice E. Release events that granted at least one permission, permissions granted, and the total
+ * waiter-visits the release scan performed.
+ *
+ * `releaseScanWaiters / capacityFreedWhileStarved` is the mean scan length, which is how the O(waiters)
+ * claim is SHOWN rather than asserted (R1). Scratch state below is module-level so the callback can be
+ * hoisted; single-threaded by construction, and never read outside the synchronous forEach.
+ */
+let releaseGrantEvents = 0;
+let releaseEligibilityGrants = 0;
+let releaseScanWaiters = 0;
+let grantScratchSoftware = false;
+let grantScratchFree = 0;
+let grantScratchMatched = false;
+let grantScratchGranted = 0;
+let grantScratchBlocked = 0;
+/**
+ * Slice E's ACCEPTANCE counter: same-pool waiters still holding no permission at the end of a release
+ * scan, when room existed.
+ *
+ * This is the criterion, and the one the first version of the check got wrong. "Every release granted a
+ * permission" reads 1/4 on a correct run — once all waiters hold one, the next three releases rightly
+ * grant nothing, and the mechanism looks broken while behaving perfectly. What must be true is the
+ * IMPLICATION: an opportunity leaves nobody in the right pool unpermitted.
+ */
+let releaseLeftUnpermitted = 0;
+/**
  * OQ10 SIZING INSTRUMENT — the host tick's actual period, and by how much a rejected tick missed.
  *
  * `ADMISSION_RECOVERY_IDLE_MS` is currently equal to the `RESOURCE_IDLE_MS` of the tick it rides, and
@@ -1781,15 +1872,19 @@ export function recoverDeniedAdmissions(now = nowMs()): boolean {
     // Free capacity is read PER POOL — hardware and software have separate caps, and a software waiter
     // must not be told to retry because a hardware slot opened. Two caps that merely sum are not a
     // budget, and this is the same trap one layer up.
-    const free = Math.max(0, sessionCap(record.software) - (record.software ? activeSoftwareSessions : activeSessions));
-    const action = recoveryAction({ key: url, deniedSinceMs: record.deniedSinceMs }, free, now);
+    const action = recoveryAction({ key: url, deniedSinceMs: record.deniedSinceMs }, freeCapacityFor(record.software), now);
     if (action === "retry") {
       shouldRetry = true;
       // C-D1: mark, do not act. The layer chooses the MOMENT (a transport boundary), because the kernel
       // does not know what the transport is doing; the kernel keeps the decision about the SLOT.
       record.eligible = true;
       admissionRecoveries += 1;
-      traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `recovery-retry free=${free}` });
+      traceEvent({
+        event: "cap-miss",
+        asset: traceAsset(url),
+        reason: "explicit",
+        note: `recovery-retry free=${freeCapacityFor(record.software)} via=sweep`,
+      });
     } else if (action === "declare-denied" && !record.declared) {
       // §6.11's second acceptable end. Declared ONCE and left in the registry: the source is still
       // starved, and dropping it here would make the census read healthy while the picture is degraded
@@ -1958,6 +2053,23 @@ export interface WcPoolStats {
    */
   capacityFreedWhileStarved: number;
   capacityFreedMatchingPool: number;
+  /**
+   * Slice E. `releaseGrantEvents` vs `capacityFreedMatchingPool` is E's acceptance ratio: how many
+   * real opportunities produced a permission, measured where the opportunity occurs. `releaseScanWaiters`
+   * divided by `capacityFreedWhileStarved` shows the scan is O(waiters).
+   */
+  releaseGrantEvents: number;
+  releaseEligibilityGrants: number;
+  releaseScanWaiters: number;
+  /** Slice E's acceptance: same-pool waiters left without a permission when room existed. Must be 0. */
+  releaseLeftUnpermitted: number;
+  /**
+   * WHO is starved. Needed to attribute a re-ask that never happens: slice D's trigger lives in
+   * `WebglMediaLayer`, and the pool is also acquired from `useFlarexCompProxies`, so "no source
+   * re-asked" and "the sources that are starved have no trigger" are different failures that look
+   * identical in a count.
+   */
+  starvedKeys: readonly string[];
   /** Ticks that found an empty registry — the third branch, which closes `ticks = sweeps + rejects + empty`. */
   admissionRecoveryEmptyTicks: number;
   /** OQ10 sizing: the host tick's observed period, and the miss distribution of rejected ticks. */
@@ -2005,6 +2117,11 @@ export function getWcPoolStats(): WcPoolStats {
     admissionRecoveryEmptyTicks,
     capacityFreedWhileStarved,
     capacityFreedMatchingPool,
+    releaseGrantEvents,
+    releaseEligibilityGrants,
+    releaseScanWaiters,
+    releaseLeftUnpermitted,
+    starvedKeys: [...deniedWaiters.keys()],
     recoveryTickIntervalMs: {
       count: tickIntervalCount,
       meanMs: tickIntervalCount > 0 ? Math.round(tickIntervalSumMs / tickIntervalCount) : 0,
