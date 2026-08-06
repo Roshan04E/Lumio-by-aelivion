@@ -1421,6 +1421,9 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   if (!getWcPreviewDecodeEnabled()) return null;
   const priority: WcLeasePriority = options.priority ?? "playhead";
   const software = options.preferSoftware ?? false;
+  // Slice D: read BEFORE anything can clear the record, so an attempt is attributed even when it
+  // succeeds on the very first path it tries.
+  if (deniedWaiters.get(url)?.eligible === true) admissionReacquireAttempts += 1;
   // Warm same-URL reuse first (does not change the session count: idle providers hold sessions).
   //
   // The DECODE MODE is part of the match, not just the URL. A Flarex comp routinely loads the same file
@@ -1492,6 +1495,9 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
         },
       });
       // No `reserveSession`, no `bumpActive` — the session is already counted, and that is the point.
+      // Slice D: a share IS service. This path returned early without clearing the denied registry, so
+      // a waiter later satisfied by attaching stayed counted as starved indefinitely.
+      noteServed(url);
       return attachMember(existing, options);
     }
     if (!reserveSession(software, priority)) {
@@ -1539,8 +1545,7 @@ export function acquirePreviewFrameProvider(url: string, options: AcquireOptions
   // skipped on that path.
   noteDecoderSessionOpened(defaultSession, url);
 
-  // Served: this source is no longer starved, whatever it was before.
-  deniedWaiters.delete(url);
+  noteServed(url);
   const session = createSession(url, software, priority, warm, options.contribution, options.purpose);
   // Unshareable in BOTH directions: skipping the join above only stops this consumer taking someone
   // else's session, and would leave the host free to attach to THIS one on its next acquire — the same
@@ -1566,6 +1571,15 @@ interface DeniedRecord {
   software: boolean;
   /** Set once the terminal is declared, so it is reported once rather than every tick. */
   declared: boolean;
+  /**
+   * ADR-020 slice D (C-D1). Recovery found free capacity and would entertain a re-ask.
+   *
+   * A PERMISSION, never a reservation and never an outcome. The waiter stays in this registry while
+   * eligible — `starvedSources` must not fall until a session is actually served (C-D3), because a
+   * census that goes quiet on permission would report health while the picture is still degraded,
+   * which is the exact defect slice A was written to remove.
+   */
+  eligible: boolean;
 }
 
 /**
@@ -1608,14 +1622,62 @@ let admissionRecoveryWaits = 0;
  * back. Collapsing them into one number would make the difference a matter of opinion.
  */
 let admissionRecoveryTicks = 0;
+/**
+ * Slice D. Re-asks made by an ELIGIBLE source, and how many of them were served.
+ *
+ * `attempts` counts entries into the acquire path by a source holding a live permission — so a run in
+ * which the layer never re-asked and one in which it re-asked and lost are different readings rather
+ * than a shared zero. `grants` is incremented only where a provider is actually handed back, which is
+ * why it lives in `noteServed` and not next to the eligibility check.
+ */
+let admissionReacquireAttempts = 0;
+let admissionReacquireGrants = 0;
 
 function noteDenied(url: string, software: boolean): void {
   const existing = deniedWaiters.get(url);
   // Continuously denied: keep the ORIGINAL timestamp. Refreshing it on every re-ask would reset the
   // clock on the §6.11 terminal and reproduce the defect in a new form — a source that asks often
   // enough could never be declared denied, which is exactly "waiting forever" wearing a retry loop.
-  if (existing) return;
-  deniedWaiters.set(url, { deniedSinceMs: nowMs(), software, declared: false });
+  //
+  // Slice D (C-D4) makes this load-bearing rather than merely careful. Before D nothing re-asked, so
+  // the early return was defensive; now a re-ask arrives at every transport boundary, and resetting
+  // the clock here would make the terminal unreachable for precisely the sources that try hardest.
+  // That reads like correct retry hygiene and is the failure mode the contract calls out by name.
+  if (existing) {
+    // The permission was SPENT and refused. Clearing it stops the layer re-asking at every subsequent
+    // boundary off one stale grant; it waits for recovery to look again and say so again.
+    existing.eligible = false;
+    return;
+  }
+  deniedWaiters.set(url, { deniedSinceMs: nowMs(), software, declared: false, eligible: false });
+}
+
+/**
+ * Served: this source is no longer starved, whatever it was before (C-D3's only exit).
+ *
+ * Called from EVERY path that hands back a working provider, which is the point — the share path used
+ * to return early without clearing, so a waiter that was later served by attaching to an existing
+ * session stayed in the registry, counted in `starvedSources` forever, and would eventually be declared
+ * permanently denied *while it was being served*. A census that can report a served source as starved
+ * is as wrong as one that reports a starved source as served.
+ */
+function noteServed(url: string): void {
+  const record = deniedWaiters.get(url);
+  if (!record) return;
+  if (record.eligible) admissionReacquireGrants += 1;
+  deniedWaiters.delete(url);
+}
+
+/**
+ * Would the pool entertain a re-ask for this url right now? (C-D1.)
+ *
+ * Advisory and revocable. A `true` here is not a slot: the caller re-asks through the ordinary acquire
+ * path and is admitted or refused exactly as always, which keeps ONE admission decision point. Any
+ * caller that reads this as "I am entitled to a session" has created a second admission authority,
+ * which is the arrangement §6.11 exists to prevent.
+ */
+export function isAdmissionEligible(url: string): boolean {
+  return deniedWaiters.get(url)?.eligible === true;
 }
 
 /**
@@ -1645,6 +1707,9 @@ export function recoverDeniedAdmissions(now = nowMs()): boolean {
     const action = recoveryAction({ key: url, deniedSinceMs: record.deniedSinceMs }, free, now);
     if (action === "retry") {
       shouldRetry = true;
+      // C-D1: mark, do not act. The layer chooses the MOMENT (a transport boundary), because the kernel
+      // does not know what the transport is doing; the kernel keeps the decision about the SLOT.
+      record.eligible = true;
       admissionRecoveries += 1;
       traceEvent({ event: "cap-miss", asset: traceAsset(url), reason: "explicit", note: `recovery-retry free=${free}` });
     } else if (action === "declare-denied" && !record.declared) {
@@ -1800,6 +1865,13 @@ export interface WcPoolStats {
   admissionRecoveryWaits: number;
   /** Host calls into recovery, rate-limited or not — separates "the tick never fired" from "it fired and did nothing". */
   admissionRecoveryTicks: number;
+  /**
+   * Slice D. Re-asks by an eligible source, and how many were served. `attempts 0` with
+   * `admissionRecoveries > 0` means the layer never acted on a permission it was granted — the trigger
+   * never fired — which is a different failure from re-asking and losing.
+   */
+  admissionReacquireAttempts: number;
+  admissionReacquireGrants: number;
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1837,6 +1909,8 @@ export function getWcPoolStats(): WcPoolStats {
     admissionRecoverySweeps,
     admissionRecoveryWaits,
     admissionRecoveryTicks,
+    admissionReacquireAttempts,
+    admissionReacquireGrants,
     shared,
     sharedActive,
     shareDetaches,

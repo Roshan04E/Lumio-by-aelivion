@@ -67,6 +67,8 @@ interface Census {
   admissionRecoverySweeps: number;
   admissionRecoveryWaits: number;
   admissionRecoveryTicks: number;
+  admissionReacquireAttempts: number;
+  admissionReacquireGrants: number;
   active: number;
   activeSoftware: number;
 }
@@ -120,6 +122,8 @@ async function readCensus(page: Page, tMs: number): Promise<Census | null> {
       admissionRecoverySweeps: Number(p.admissionRecoverySweeps ?? -1),
       admissionRecoveryWaits: Number(p.admissionRecoveryWaits ?? -1),
       admissionRecoveryTicks: Number(p.admissionRecoveryTicks ?? -1),
+      admissionReacquireAttempts: Number(p.admissionReacquireAttempts ?? -1),
+      admissionReacquireGrants: Number(p.admissionReacquireGrants ?? -1),
       active: Number(p.active ?? 0),
       activeSoftware: Number(p.activeSoftware ?? 0),
     };
@@ -207,13 +211,51 @@ async function main(): Promise<void> {
   const play = page.locator('button[title*="Play"], button[aria-label*="Play"]').first();
   await play.click({ timeout: 10_000 }).catch(() => undefined);
 
+  // ── TRANSPORT (slice D's trigger, and precondition P-c) ───────────────────
+  // Slice D re-asks at a seek, a scrub, or a pause. If no boundary occurs, `admissionReacquireAttempts`
+  // reads 0 for a reason that has nothing to do with the mechanism, so the run has to DRIVE transport
+  // and count what it drove — otherwise "the layer never re-asked" and "the trigger never fired" are
+  // the same zero.
+  // `addMediaInBoundTo` ends on the FLAREX tab, where the timeline ruler is not mounted. Without this
+  // the boundary driver silently finds no ruler and P-c fails for a harness reason that looks exactly
+  // like a product one.
+  await page.getByRole("tab", { name: /^edit$/i }).first().click({ timeout: 10_000 }).catch(() => undefined);
+  await page.waitForTimeout(800);
+  const ruler = await page.evaluate(() => {
+    const el = document.querySelector(".timeline-ruler");
+    if (!(el instanceof HTMLElement)) return null;
+    const r = el.getBoundingClientRect();
+    return r.width > 20 ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;
+  });
+  if (!ruler) console.log("  · ⚠ no timeline ruler — transport cannot be driven; P-c will fail.");
+
   const samples: Census[] = [];
   const started = Date.now();
+  let boundaries = 0;
+  let step = 0;
   while (Date.now() - started < SECONDS * 1_000) {
     const sample = await readCensus(page, Date.now() - started);
     if (sample) samples.push(sample);
+    if (ruler) {
+      // Long jumps and short scrubs alternate — they abandon in-flight work and stay in the same GOP
+      // neighbourhood respectively, and both are boundaries. Every fourth step is a pause/play cycle,
+      // which is the OTHER permitted moment and the one that exercises the paused branch.
+      if (step % 4 === 3) {
+        await play.click({ timeout: 5_000 }).catch(() => undefined);
+        await page.waitForTimeout(400);
+        await play.click({ timeout: 5_000 }).catch(() => undefined);
+        boundaries += 1;
+      } else {
+        const frac = step % 2 === 0 ? 0.1 + (0.8 * ((step / 2) % 5)) / 5 : 0.5 + 0.05 * ((step % 6) - 3);
+        const x = ruler.x + ruler.width * Math.min(0.95, Math.max(0.05, frac));
+        await page.mouse.click(x, ruler.y + ruler.height / 2).catch(() => undefined);
+        boundaries += 1;
+      }
+      step += 1;
+    }
     await page.waitForTimeout(SAMPLE_MS);
   }
+  console.log(`  · transport boundaries driven: ${boundaries}`);
 
   console.log("\n════ starvation census ════");
   if (samples.length === 0) {
@@ -238,6 +280,10 @@ async function main(): Promise<void> {
       ` (expected ≈${expectedSweeps}) · waits ${last.admissionRecoveryWaits}`
   );
   console.log(`  outcomes         retries ${last.admissionRecoveries} · permanentDenials ${last.admissionPermanentDenials}`);
+  console.log(
+    `  slice D          boundaries ${boundaries} · reacquire attempts ${last.admissionReacquireAttempts}` +
+      ` · grants ${last.admissionReacquireGrants}`
+  );
   console.log(`  sessions         active ${last.active} · software ${last.activeSoftware}`);
 
   // Trajectory, so a constant is not mistaken for a clock.
@@ -303,6 +349,47 @@ async function main(): Promise<void> {
           "         on this path — a mechanism wired to a cadence that never fires."
       );
       process.exitCode = 1;
+    }
+
+    // ── SLICE D, reported SEPARATELY from slice A ─────────────────────────────
+    // Kept apart on purpose. Slice A's readings can pass while D is untested, and folding them into one
+    // verdict would let A's green flatter D — which is the exact mistake that let slice A ship on a
+    // `capMisses 0` soak in the first place.
+    console.log("\n──── slice D — the transport re-acquire ────");
+    if (boundaries === 0) {
+      console.log(
+        "  ⚠ P-c FAILED — no transport boundary was driven, so slice D's trigger never fired.\n" +
+          "    `reacquire attempts 0` says nothing about the mechanism here."
+      );
+      process.exitCode = 1;
+    } else if (last.admissionRecoveries === 0) {
+      // The measured case, and NOT a defect in D. Recovery only grants a permission when capacity has
+      // freed; on a pool that stays full for the whole session it grants none, so there is nothing for
+      // the layer to act on. D is untested rather than failing, and saying "PASS" here would be the
+      // vacuity this probe exists to prevent.
+      console.log(
+        `  ⚠ UNEXERCISED — recovery granted no eligibility all run (retries 0), because free capacity\n` +
+          `    never appeared: the pool stayed full for the whole session. ${boundaries} boundaries were\n` +
+          "    driven and correctly produced 0 re-asks, since no source was ever permitted to re-ask.\n" +
+          "    THIS RUN SHOWS SLICE D BREAKS NOTHING; IT DOES NOT SHOW IT WORKS.\n" +
+          "    Exercising D1/D2 needs a fixture where capacity frees ASYMMETRICALLY — one source leaving\n" +
+          "    while another stays starved. Six simultaneous MediaIns cannot produce that: they all live\n" +
+          "    and die together, so every release is a full teardown followed by a fresh lottery."
+      );
+    } else {
+      const dChecks: [string, boolean, string][] = [
+        ["a permitted source actually re-asked", last.admissionReacquireAttempts > 0, `attempts ${last.admissionReacquireAttempts}`],
+        ["a re-ask was served (D1/D2)", last.admissionReacquireGrants > 0, `grants ${last.admissionReacquireGrants}`],
+        [
+          // C-D4. The clock must survive a refused re-ask, or the terminal becomes unreachable for the
+          // sources that try hardest — retry hygiene that quietly defeats slice A.
+          "a refused re-ask did not reset the starvation clock (C-D4)",
+          last.admissionReacquireAttempts === last.admissionReacquireGrants || peakLongest >= ADMISSION_RECOVERY_IDLE_MS,
+          `peak starved ${Math.round(peakLongest / 1000)}s across ${last.admissionReacquireAttempts - last.admissionReacquireGrants} refusal(s)`,
+        ],
+      ];
+      for (const [name, ok, detail] of dChecks) console.log(`  ${ok ? "✓" : "✗"} ${name}  (${detail})`);
+      if (dChecks.some(([, ok]) => !ok)) process.exitCode = 1;
     }
   }
 
