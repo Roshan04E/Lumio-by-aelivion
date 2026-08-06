@@ -60,4 +60,6 @@ There is no per-test filtering - these scripts run a fixed scenario end to end. 
 
 ## Coordination
 
+**Engine architecture now lives in a different repository** (2026-08-06). Read `ARCHITECTURE_SOURCE_OF_TRUTH.md` before writing any architecture document here. Short version: this repo is the shipping web product (features, UX, revenue); `C:\Users\rosha\Documents\orreris` is the native engine repo and owns engine laws, ADRs, and the rendering/scheduling architecture. Existing engine `.md` files here (ORIS_*, ORRERIS_OS, FLAREX_*, PREVIEW_PIPELINE, PLUGIN_ARCHITECTURE, NLE_ANALYSIS, …) are **frozen historical design records** - don't rewrite them to match later decisions. `architecture.md`, `project-tracker/`, and product/UX docs stay live here.
+
 `AGENTS.md` is **retired** (2026-07-14) - do not read or update it; it's a stale multi-agent handoff log kept only for history. `architecture.md` is the product/feature tracker (shipped vs deferred vs next) - update it when you ship or defer something, don't duplicate its content here. Recurring problem/solution logs live in `project-tracker/` (append-only, versioned per category).
