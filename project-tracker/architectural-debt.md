@@ -550,6 +550,15 @@ never that a particular party PREVAILED.** Here that is `engaged >= cap` — the
 won it. This applies directly to the slice-C harness item ("strengthen `awaitWebCodecsEngaged` to a
 declared fraction"), which would have shipped this bug in its obvious form.
 
+**A third shape — the counter maintained on some paths and not others (2026-08-06).** Slice A's denied
+registry was cleared on the create-session success path but NOT on the share path, which returns early
+via `attachMember`. A waiter later satisfied by attaching to an existing session therefore stayed
+counted in `starvedSources` indefinitely and would eventually be **declared permanently denied while it
+was being served** — a census lying in both directions at once. The reading could not fail to look
+plausible, because a partially-maintained counter always produces a number in the right range. The fix
+is structural, not a patch: every success path now exits through one `noteServed`, so a future fourth
+success path cannot forget.
+
 The same class occurs in prose: slice A's registry comment claimed clearing "on
 `resetPreviewFramePool`", a function that does not exist in that module (it has no reset entry point at
 all). An assertion about a mechanism nobody performs, one register away from the counters written to
@@ -694,6 +703,41 @@ Two things the run added that the constants did not predict:
   128s. So §6.11's second end is reachable but not *reliably* reached. Not fixed here: it changes when
   the kernel decides, which is a different blast radius from how the layer acts on a decision, and
   bundling them would make the soak un-bisectable.
+
+  > **OQ10 SIZED AND CLOSED, 2026-08-06 — and the premise above is FALSIFIED. No constant changed.**
+  >
+  > The claim "recovery's own 10s limit rejects most of the host ticks it rides" was an **inference from
+  > `ticks > sweeps`**, and it was wrong. Instrumenting the rejection branch directly gives
+  > **`rejects n=0` across four consecutive runs**: the rate limit has never rejected a single tick. The
+  > entire gap is the third branch nobody had counted — ticks that arrived while the registry was still
+  > empty, which is correct behaviour. With all three counted the accounting closes exactly and
+  > identically on every run: **`ticks 7 = sweeps 4 + rejects 0 + empty 3`**.
+  >
+  > This is the register's own meta-class caught once more, and by me: reading a gap between two counters
+  > as evidence for a *particular* cause, when the branch that would prove it was never instrumented.
+  > **Count the reasons; never infer which branch fired** — the rule applies to the person applying it.
+  >
+  > **Measured tick period (n=18 intervals over 3 runs): min 10140ms, mean ~11.5s, max 18607ms**, against
+  > a nominal 10s. So the constant is not the mechanism — `ADMISSION_RECOVERY_IDLE_MS` sits *below* the
+  > observed minimum and therefore never binds. Raising it "with margin" would begin rejecting ticks that
+  > are currently all accepted; lowering it would change nothing. **Either direction is a change with no
+  > benefit, and one of them is a regression.** It stays at 10s, still named and still separate — the
+  > point was never that it hold a different value, only that changing one does not silently change the
+  > other.
+  >
+  > **What the period distribution actually says.** The sweep rides the composite loop and fires on the
+  > first composite *after* the interval expires, so its period is `RESOURCE_IDLE_MS + time-to-next-
+  > composite` — the overshoot IS the composite gap. Recovery's cadence is therefore **coupled to
+  > compositing activity, not to a clock**, and when the viewer holds or pauses, recovery slows with it.
+  > That is a real property and the residual of OQ10; it is *not* addressable by tuning either constant,
+  > and making recovery independent would mean adding a timer, which the founder condition on slice A
+  > explicitly ruled out in favour of riding the existing tick. **Left as a stated property with an open
+  > decision, not silently fixed.**
+  >
+  > **Consequence for sequencing:** recovery fires every ~11.5s whenever anything is starved (4 sweeps
+  > per 55s run, every run). It is *not* under-firing, so a null result from the slice D fixture will be
+  > attributable rather than ambiguous between "no asymmetric release" and "no permission granted in
+  > time". The block on building that fixture is lifted **on evidence**.
 
 Two instrument additions were needed to make this readable at all, both unconditional:
 `admissionRecoverySweeps`/`admissionRecoveryWaits` (did the pass run, and did it decide per waiter) and

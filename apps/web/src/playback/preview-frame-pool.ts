@@ -1622,6 +1622,34 @@ let admissionRecoveryWaits = 0;
  * back. Collapsing them into one number would make the difference a matter of opinion.
  */
 let admissionRecoveryTicks = 0;
+let admissionRecoveryEmptyTicks = 0;
+/**
+ * OQ10 SIZING INSTRUMENT — the host tick's actual period, and by how much a rejected tick missed.
+ *
+ * `ADMISSION_RECOVERY_IDLE_MS` is currently equal to the `RESOURCE_IDLE_MS` of the tick it rides, and
+ * the observed sweep counts (1/–, 2/5, 4/6, 4/7 across four runs) are the signature of a rate limit
+ * beating against a cadence of its own period: a tick arriving fractionally early is rejected outright,
+ * and the rejected share drifts run to run.
+ *
+ * The SHORTFALL is what distinguishes the two candidate causes, which need opposite fixes:
+ *
+ *   - shortfalls of a few ms → a beat. The tick IS the clock, and re-deriving a second clock from wall
+ *     time is what created the interference. Fix = margin and/or a jitter tolerance.
+ *   - shortfalls of seconds → a genuinely different cadence (e.g. more than one host calling in). Fix =
+ *     understand the second caller, not loosen the limit.
+ *
+ * Kept as running aggregates rather than a ring: four numbers per class, no allocation, readable from a
+ * soak with diagnostics off. Sizing evidence must not depend on instrumentation being switched on.
+ */
+let tickIntervalCount = 0;
+let tickIntervalSumMs = 0;
+let tickIntervalMinMs = Number.POSITIVE_INFINITY;
+let tickIntervalMaxMs = 0;
+let lastTickAtMs = 0;
+let rejectCount = 0;
+let rejectShortfallSumMs = 0;
+let rejectShortfallMinMs = Number.POSITIVE_INFINITY;
+let rejectShortfallMaxMs = 0;
 /**
  * Slice D. Re-asks made by an ELIGIBLE source, and how many of them were served.
  *
@@ -1691,9 +1719,35 @@ export function isAdmissionEligible(url: string): boolean {
  */
 export function recoverDeniedAdmissions(now = nowMs()): boolean {
   admissionRecoveryTicks += 1;
-  if (now - lastRecoverySweepMs < ADMISSION_RECOVERY_IDLE_MS) return false;
+  // OQ10 sizing. Measured before the limit is applied, so the period distribution describes the HOST's
+  // cadence rather than the subset this function chose to act on.
+  if (lastTickAtMs > 0) {
+    const interval = now - lastTickAtMs;
+    tickIntervalCount += 1;
+    tickIntervalSumMs += interval;
+    if (interval < tickIntervalMinMs) tickIntervalMinMs = interval;
+    if (interval > tickIntervalMaxMs) tickIntervalMaxMs = interval;
+  }
+  lastTickAtMs = now;
+  const sinceSweep = now - lastRecoverySweepMs;
+  if (sinceSweep < ADMISSION_RECOVERY_IDLE_MS) {
+    const shortfall = ADMISSION_RECOVERY_IDLE_MS - sinceSweep;
+    rejectCount += 1;
+    rejectShortfallSumMs += shortfall;
+    if (shortfall < rejectShortfallMinMs) rejectShortfallMinMs = shortfall;
+    if (shortfall > rejectShortfallMaxMs) rejectShortfallMaxMs = shortfall;
+    return false;
+  }
   lastRecoverySweepMs = now;
-  if (deniedWaiters.size === 0) return false;
+  if (deniedWaiters.size === 0) {
+    // The THIRD outcome of a tick, and the one OQ10 was misread for want of counting it. `ticks >
+    // sweeps` was taken as evidence that the rate limit was rejecting ticks; measurement showed the
+    // limit rejects nothing and the entire gap is this branch — ticks that arrived before anything was
+    // starved, which is correct behaviour. With all three counted the accounting is closed
+    // (`ticks == sweeps + rejects + empty`) and no branch has to be inferred from the others.
+    admissionRecoveryEmptyTicks += 1;
+    return false;
+  }
   // Past this line the pass is committed to rendering a verdict for every waiter, so this is the exact
   // point at which "recovery looked" becomes true.
   admissionRecoverySweeps += 1;
@@ -1872,6 +1926,11 @@ export interface WcPoolStats {
    */
   admissionReacquireAttempts: number;
   admissionReacquireGrants: number;
+  /** Ticks that found an empty registry — the third branch, which closes `ticks = sweeps + rejects + empty`. */
+  admissionRecoveryEmptyTicks: number;
+  /** OQ10 sizing: the host tick's observed period, and the miss distribution of rejected ticks. */
+  recoveryTickIntervalMs: { count: number; meanMs: number; minMs: number; maxMs: number };
+  recoveryRejectShortfallMs: { count: number; meanMs: number; minMs: number; maxMs: number };
 }
 
 export function getWcPoolStats(): WcPoolStats {
@@ -1911,6 +1970,19 @@ export function getWcPoolStats(): WcPoolStats {
     admissionRecoveryTicks,
     admissionReacquireAttempts,
     admissionReacquireGrants,
+    admissionRecoveryEmptyTicks,
+    recoveryTickIntervalMs: {
+      count: tickIntervalCount,
+      meanMs: tickIntervalCount > 0 ? Math.round(tickIntervalSumMs / tickIntervalCount) : 0,
+      minMs: tickIntervalCount > 0 ? Math.round(tickIntervalMinMs) : 0,
+      maxMs: Math.round(tickIntervalMaxMs),
+    },
+    recoveryRejectShortfallMs: {
+      count: rejectCount,
+      meanMs: rejectCount > 0 ? Math.round(rejectShortfallSumMs / rejectCount) : 0,
+      minMs: rejectCount > 0 ? Math.round(rejectShortfallMinMs) : 0,
+      maxMs: Math.round(rejectShortfallMaxMs),
+    },
     shared,
     sharedActive,
     shareDetaches,
