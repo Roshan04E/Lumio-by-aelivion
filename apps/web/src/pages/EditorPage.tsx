@@ -9326,6 +9326,12 @@ export function EditorPage() {
           that hid the timeline (Notes/Flarex) dragged it mid-screen. As a sibling of `.editor-layout`
           it reserves its own row via `--nle-pagebar-h` and stays pinned to the bottom on every page. */}
       <footer className="flarex-page-tabs" role="tablist" aria-label="Editor pages">
+        {/* Notes sits FIRST (founder request 2026-08-06): the board is where a session starts —
+            you write the idea down before you cut it — so the page order follows the workflow. */}
+        <button type="button" role="tab" aria-selected={editorPage === "notes"} className={editorPage === "notes" ? "is-active" : ""} onClick={() => setEditorPage("notes")}>
+          <StickyNote size={14} aria-hidden="true" />
+          <span>Notes</span>
+        </button>
         <button type="button" role="tab" aria-selected={editorPage === "edit"} className={editorPage === "edit" ? "is-active" : ""} onClick={() => setEditorPage("edit")}>
           <Film size={14} aria-hidden="true" />
           <span>Edit</span>
@@ -9333,10 +9339,6 @@ export function EditorPage() {
         <button type="button" role="tab" aria-selected={editorPage === "flarex"} className={editorPage === "flarex" ? "is-active" : ""} onClick={() => setEditorPage("flarex")}>
           <Workflow size={14} aria-hidden="true" />
           <span>Flarex</span>
-        </button>
-        <button type="button" role="tab" aria-selected={editorPage === "notes"} className={editorPage === "notes" ? "is-active" : ""} onClick={() => setEditorPage("notes")}>
-          <StickyNote size={14} aria-hidden="true" />
-          <span>Notes</span>
         </button>
       </footer>
       {responsiveLayout.usesOverlayPanels && activeResponsiveOverlay ? (
