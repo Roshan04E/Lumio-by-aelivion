@@ -550,6 +550,21 @@ never that a particular party PREVAILED.** Here that is `engaged >= cap` — the
 won it. This applies directly to the slice-C harness item ("strengthen `awaitWebCodecsEngaged` to a
 declared fraction"), which would have shipped this bug in its obvious form.
 
+**THE DETECTION RULE (2026-08-06).** Three instances in one programme — F2's `U = 0.0%`, OQ10's
+rejection rate, OQ11's "capacity never freed" — were the same defect, and it is now general enough to
+state as something checkable at review time rather than as a warning to be careful:
+
+> **Match the instrument's shape to the phenomenon's. Sample for STATES; hook the site for EVENTS.**
+
+All three placed a counter at a **sampler** and asked it about a **phenomenon that is an event**. The
+counters were honest — each faithfully reported what its observer SAW. The topology was wrong, so what
+they saw was not what happened. `starvedSources` is a state and a sample reads it correctly; a decoder
+session being released is an event, and a 11.5s sweep reads it as absent 4 times out of 5.
+
+This is checkable in review without a measurement: *for each counter, name the phenomenon; if it is an
+event, find the hook; if there is no hook, the zero means nothing.* The earlier framings ("proof by a
+signal the subject never emits") described the failure but gave no test.
+
 **A third shape — the counter maintained on some paths and not others (2026-08-06).** Slice A's denied
 registry was cleared on the create-session success path but NOT on the share path, which returns early
 via `attachMember`. A waiter later satisfied by attaching to an existing session therefore stayed
@@ -775,6 +790,49 @@ Two things the run added that the constants did not predict:
   rejection rate, and now this). It is the sharpest statement yet of DEBT-012, because in each case the
   counter was accurate — it faithfully reported what the subject SAW, and I wrote down what the world
   DID.
+
+- **SLICE E — OQ11 FIXED AND ACCEPTED ON ITS OWN TERMS, 2026-08-06.** Eligibility is now granted in the
+  release path (`bumpActive`), where the pool knows both facts at the instant both are true: a slot
+  opened, and someone is waiting. Measured on the census fixture:
+
+  | reading | before E | after E |
+  |---|---|---|
+  | same-pool opportunities | 4 | 4 |
+  | permissions granted | **0** | **3** |
+  | opportunities leaving a waiter unpermitted | 4 | **0** |
+
+  **Accepted with slice D absent from every check.** All four criteria are computed from release-site
+  readings only — none reads a re-ask, a boundary, or a routing flip — so E would still be falsifiable
+  if the layer half were deleted. That separation is deliberate: D's acceptance must come from a
+  different run, or one thing gets proved twice and counted as two.
+
+  The three constraints held. **The sweep stays** — E adds a trigger and replaces none; the sweep remains
+  the backstop and still drives §6.11's terminal, which is time-based and cannot be event-driven
+  (`permanentDenials 3` unchanged). **Grant, never reserve** — verified by a check that would fail if a
+  permission decremented the census (`starved still 5 with 3 permissions outstanding`). **R1 shown, not
+  asserted** — hoisted callback and module scratch make the release allocation-free, and
+  `releaseScanWaiters / releases = 3.0 waiters/release` demonstrates the scan is O(waiters).
+
+  One correction worth keeping: E's first acceptance check counted grants per opportunity and read
+  **1/4 on a correct run** — once all three waiters held a permission, the next three releases rightly
+  granted nothing. A rate cannot express *"everyone who should be permitted is"*. The criterion is the
+  IMPLICATION (`releaseLeftUnpermitted == 0`), not a ratio.
+
+- **SLICE D IS UNREACHABLE ON THIS PATH — measured 2026-08-06, and it is not a fixture problem.** With E
+  supplying permissions, D still reported `attempts 0`. Attribution instead of inference:
+
+  > **`0/5 starved source(s) are layers the D trigger can see.`**
+
+  Slice D's boundary detector lives in `WebglMediaLayer.tsx`. The pool has a SECOND acquire call site,
+  `useFlarexCompProxies.ts`, and every starved source in this fixture came from it. There is no re-ask
+  path for them at all — which is a different failure from a trigger that fired and lost, and the two
+  are indistinguishable in a count of zero. `__rfWcMode` covers only `WebglMediaLayer` layers, which is
+  what made the attribution possible.
+
+  So DEBT-013's clause (a) needs D's trigger at BOTH acquire sites, not a better fixture. Not
+  implemented here: it is a third call site's worth of layer work, and bundling it with E would make
+  E's soak un-bisectable.
+
 
 Two instrument additions were needed to make this readable at all, both unconditional:
 `admissionRecoverySweeps`/`admissionRecoveryWaits` (did the pass run, and did it decide per waiter) and

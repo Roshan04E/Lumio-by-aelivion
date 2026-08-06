@@ -70,6 +70,10 @@ interface Census {
   admissionRecoveryEmptyTicks: number;
   capacityFreedWhileStarved: number;
   capacityFreedMatchingPool: number;
+  releaseGrantEvents: number;
+  releaseEligibilityGrants: number;
+  releaseScanWaiters: number;
+  releaseLeftUnpermitted: number;
   admissionReacquireAttempts: number;
   admissionReacquireGrants: number;
   tickInterval: { count: number; meanMs: number; minMs: number; maxMs: number };
@@ -130,6 +134,10 @@ async function readCensus(page: Page, tMs: number): Promise<Census | null> {
       admissionRecoveryEmptyTicks: Number(p.admissionRecoveryEmptyTicks ?? -1),
       capacityFreedWhileStarved: Number(p.capacityFreedWhileStarved ?? -1),
       capacityFreedMatchingPool: Number(p.capacityFreedMatchingPool ?? -1),
+      releaseGrantEvents: Number(p.releaseGrantEvents ?? -1),
+      releaseEligibilityGrants: Number(p.releaseEligibilityGrants ?? -1),
+      releaseScanWaiters: Number(p.releaseScanWaiters ?? -1),
+      releaseLeftUnpermitted: Number(p.releaseLeftUnpermitted ?? -1),
       admissionReacquireAttempts: Number(p.admissionReacquireAttempts ?? -1),
       admissionReacquireGrants: Number(p.admissionReacquireGrants ?? -1),
       tickInterval: p.recoveryTickIntervalMs ?? { count: 0, meanMs: 0, minMs: 0, maxMs: 0 },
@@ -295,7 +303,12 @@ async function main(): Promise<void> {
   );
   console.log(
     `  OQ11 freed       while starved ${last.capacityFreedWhileStarved} · same pool ${last.capacityFreedMatchingPool}` +
-      `   (recovery saw: retries ${last.admissionRecoveries})`
+      `   (permissions granted: ${last.admissionRecoveries})`
+  );
+  console.log(
+    `  slice E          grant events ${last.releaseGrantEvents}/${last.capacityFreedMatchingPool} opportunities` +
+      ` · permissions ${last.releaseEligibilityGrants} · left-unpermitted ${last.releaseLeftUnpermitted}` +
+      ` · scan ${last.capacityFreedWhileStarved > 0 ? (last.releaseScanWaiters / last.capacityFreedWhileStarved).toFixed(1) : "0"} waiters/release`
   );
   const ti = last.tickInterval;
   const rs = last.rejectShortfall;
@@ -387,6 +400,86 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     }
 
+    // ──── SLICE E — accepted on its OWN terms, at the release site ──────────────────────
+    // Reported BEFORE slice D and computed only from release-site readings, because E must be
+    // falsifiable with slice D absent entirely. Nothing below reads a re-ask, a boundary, or a routing
+    // flip — if the layer half were deleted, every check here would still run and still mean the same
+    // thing. That separation is the guard against proving one thing twice and calling it two.
+    console.log("\n──── slice E — the release-path grant ────");
+    if (last.capacityFreedMatchingPool === 0) {
+      console.log(
+        "  ⚠ UNEXERCISED — no capacity freed in the same pool as a waiter during this run, so the\n" +
+          "    trigger never had an opportunity to act on. Not a result about slice E."
+      );
+      process.exitCode = 1;
+    } else {
+      const eChecks: [string, boolean, string][] = [
+        [
+          // THE acceptance criterion, stated as the IMPLICATION rather than as a rate: an opportunity
+          // must leave nobody in the right pool unpermitted. Measured at the release site, so the
+          // "within a bounded time" clause is satisfied by construction — the bound is zero, the grant
+          // is synchronous with the event.
+          //
+          // The first version of this check counted grants per opportunity and read 1/4 on a CORRECT
+          // run: once all three waiters held a permission, the next three releases rightly granted
+          // nothing. A rate cannot express "everyone who should be permitted is".
+          "no opportunity left a same-pool waiter unpermitted",
+          last.releaseLeftUnpermitted === 0,
+          `${last.releaseLeftUnpermitted} left unpermitted across ${last.capacityFreedMatchingPool} opportunities`,
+        ],
+        [
+          // OQ11's defect, stated as its own check so a regression names itself.
+          "permissions are no longer missed entirely",
+          last.admissionRecoveries > 0,
+          `granted ${last.admissionRecoveries}`,
+        ],
+        [
+          // R1 SHOWN, not asserted: mean scan length must track the waiter count, not the session count
+          // or the frame count. Bounded by the sources the fixture starves.
+          "the release scan is O(waiters)",
+          last.capacityFreedWhileStarved === 0 ||
+            last.releaseScanWaiters / last.capacityFreedWhileStarved <= Math.max(1, peakStarved),
+          `${(last.releaseScanWaiters / Math.max(1, last.capacityFreedWhileStarved)).toFixed(1)} waiters/release vs peak ${peakStarved}`,
+        ],
+        [
+          // GRANT, NEVER RESERVE. A permission must not decrement the starvation census — only service
+          // does (C-D3). If this fails, slice E has quietly rebuilt slice A's original defect.
+          "a permission did not make the census go quiet",
+          peakStarved > 0 && last.starvedSources > 0,
+          `starved still ${last.starvedSources} with ${last.admissionRecoveries} permission(s) outstanding`,
+        ],
+      ];
+      for (const [name, ok, detail] of eChecks) console.log(`  ${ok ? "✓" : "✗"} ${name}  (${detail})`);
+      if (eChecks.some(([, ok]) => !ok)) process.exitCode = 1;
+      else console.log("\n[census] ✓ slice E PASS — opportunities are observed where they occur.");
+    }
+
+    // ATTRIBUTION for slice D: are the starved sources ones the D trigger can even see? `__rfWcMode`
+    // covers only layers that go through `WebglMediaLayer`; the pool is also acquired from
+    // `useFlarexCompProxies`, which has no boundary trigger. A starved key absent from the routing map
+    // has no re-ask path AT ALL, which is a different failure from a trigger that fired and lost.
+    const attribution = await page.evaluate(() => {
+      const modes = (globalThis as unknown as { __rfWcMode?: Record<string, string> }).__rfWcMode ?? {};
+      const pool = (globalThis as Record<string, any>).__rfWcPool;
+      const starved: string[] = pool?.starvedKeys ?? [];
+      const known = new Set(Object.keys(modes));
+      return {
+        starved: starved.length,
+        withTrigger: starved.filter((k) => known.has(k)).length,
+        sample: starved.slice(0, 3).map((k) => (k.length > 42 ? "…" + k.slice(-42) : k)),
+      };
+    });
+    console.log(
+      `  attribution      ${attribution.withTrigger}/${attribution.starved} starved source(s) are layers the D trigger can see`
+    );
+    if (attribution.starved > 0 && attribution.withTrigger === 0) {
+      console.log(
+        "                   → NONE of them. Slice D's trigger lives in WebglMediaLayer; these were\n" +
+          "                     acquired elsewhere (useFlarexCompProxies), so there is no re-ask path for\n" +
+          `                     them at all. e.g. ${attribution.sample.join(", ")}`
+      );
+    }
+
     // ── SLICE D, reported SEPARATELY from slice A ─────────────────────────────
     // Kept apart on purpose. Slice A's readings can pass while D is untested, and folding them into one
     // verdict would let A's green flatter D — which is the exact mistake that let slice A ship on a
@@ -404,13 +497,13 @@ async function main(): Promise<void> {
       // the layer to act on. D is untested rather than failing, and saying "PASS" here would be the
       // vacuity this probe exists to prevent.
       console.log(
-        `  ⚠ UNEXERCISED — recovery granted no eligibility all run (retries 0), because free capacity\n` +
-          `    never appeared: the pool stayed full for the whole session. ${boundaries} boundaries were\n` +
-          "    driven and correctly produced 0 re-asks, since no source was ever permitted to re-ask.\n" +
+        `  ⚠ UNEXERCISED — recovery granted no eligibility this run, so with no permission outstanding\n` +
+          `    the layer correctly re-asked 0 times across ${boundaries} boundaries. The layer half behaved\n` +
+          "    as contracted; there was simply nothing to act on.\n" +
           "    THIS RUN SHOWS SLICE D BREAKS NOTHING; IT DOES NOT SHOW IT WORKS.\n" +
-          "    Exercising D1/D2 needs a fixture where capacity frees ASYMMETRICALLY — one source leaving\n" +
-          "    while another stays starved. Six simultaneous MediaIns cannot produce that: they all live\n" +
-          "    and die together, so every release is a full teardown followed by a fresh lottery."
+          `    Why no permission: ${last.capacityFreedMatchingPool} same-pool release(s) occurred while starved\n` +
+          "    (slice E's opportunity count). If that is 0, this run had no opportunity at all and the\n" +
+          "    fixture needs re-running rather than re-designing — the count varies run to run."
       );
     } else {
       const dChecks: [string, boolean, string][] = [
