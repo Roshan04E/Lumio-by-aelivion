@@ -1284,6 +1284,27 @@ const idleCountOf = (software: boolean): number => idle.reduce((n, entry) => n +
 function bumpActive(software: boolean, delta: number): void {
   if (software) activeSoftwareSessions = Math.max(0, activeSoftwareSessions + delta);
   else activeSessions = Math.max(0, activeSessions + delta);
+  // OQ11 — capacity freeing measured AT THE RELEASE, not sampled at the sweep.
+  //
+  // Slice D reported `retries 0` and I wrote "free capacity never appeared". That was an INFERENCE
+  // from a counter that only observes the pool every ~11.5s, and the soak contradicts it: `created 11`
+  // sessions against a 4-slot cap means sessions are released and retaken constantly. Whether a
+  // starved source ever HAD room available is therefore a different question from whether recovery
+  // ever SAW room, and only an instrument at the release site can tell them apart.
+  //
+  // If this counts up while `admissionRecoveries` stays 0, capacity is freeing in transients that the
+  // sweep interval steps over — which is a sampling defect, not an absent opportunity, and it is the
+  // same coupling as the pause case: the mechanism that grants permission is not observing when the
+  // opportunity occurs.
+  if (delta < 0 && deniedWaiters.size > 0) {
+    capacityFreedWhileStarved += 1;
+    for (const record of deniedWaiters.values()) {
+      if (record.software === software) {
+        capacityFreedMatchingPool += 1;
+        break;
+      }
+    }
+  }
 }
 
 /**
@@ -1623,6 +1644,9 @@ let admissionRecoveryWaits = 0;
  */
 let admissionRecoveryTicks = 0;
 let admissionRecoveryEmptyTicks = 0;
+/** OQ11: releases that happened while at least one source was starved (see `bumpActive`). */
+let capacityFreedWhileStarved = 0;
+let capacityFreedMatchingPool = 0;
 /**
  * OQ10 SIZING INSTRUMENT — the host tick's actual period, and by how much a rejected tick missed.
  *
@@ -1926,6 +1950,14 @@ export interface WcPoolStats {
    */
   admissionReacquireAttempts: number;
   admissionReacquireGrants: number;
+  /**
+   * OQ11: session releases observed WHILE something was starved, counted at the release site.
+   * `matchingPool` restricts to releases in the same hardware/software pool as a waiter — a software
+   * waiter is not helped by a hardware slot opening, so the unrestricted count would overstate the
+   * opportunity. If these move while `admissionRecoveries` stays 0, recovery is missing transients.
+   */
+  capacityFreedWhileStarved: number;
+  capacityFreedMatchingPool: number;
   /** Ticks that found an empty registry — the third branch, which closes `ticks = sweeps + rejects + empty`. */
   admissionRecoveryEmptyTicks: number;
   /** OQ10 sizing: the host tick's observed period, and the miss distribution of rejected ticks. */
@@ -1971,6 +2003,8 @@ export function getWcPoolStats(): WcPoolStats {
     admissionReacquireAttempts,
     admissionReacquireGrants,
     admissionRecoveryEmptyTicks,
+    capacityFreedWhileStarved,
+    capacityFreedMatchingPool,
     recoveryTickIntervalMs: {
       count: tickIntervalCount,
       meanMs: tickIntervalCount > 0 ? Math.round(tickIntervalSumMs / tickIntervalCount) : 0,

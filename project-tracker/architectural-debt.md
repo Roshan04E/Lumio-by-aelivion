@@ -739,6 +739,43 @@ Two things the run added that the constants did not predict:
   > attributable rather than ambiguous between "no asymmetric release" and "no permission granted in
   > time". The block on building that fixture is lifted **on evidence**.
 
+- **OQ11 — recovery samples for an opportunity that arrives as an event, and misses it. NEW, 2026-08-06,
+  and it falsifies my own published claim.**
+
+  Slice D reported `retries 0` and I wrote *"free capacity never appeared: the pool stayed full for the
+  entire session."* That was an inference from a counter which only observes the pool every ~11.5s.
+  Measuring releases **at the release site** instead gives, on a single 55s run:
+
+  > **`capacityFreedWhileStarved 5 · samePool 4`**, with `admissionRecoveries 0`.
+
+  Capacity freed **four times in the same pool as a waiter**, while sources were starved throughout, and
+  recovery granted **zero** permissions. The pool never stays full — it *churns* (`created 11` against a
+  4-slot cap). The sweep steps over the transients: a slot is released and retaken well inside 11.5s.
+
+  **The opportunity is an EVENT; the sweep is a SAMPLE.** No cadence fixes that, because the gap is not
+  a rate — a faster sweep only shortens the window it can miss. The structural answer is to grant
+  eligibility where the opportunity is created, in the release path, which is where the pool already
+  knows both facts (a slot opened, and someone is waiting).
+
+  **This leaves C-D2 fully intact**, and that is why it is the right shape rather than a convenient one:
+  the contract already separates *whether* a re-ask is entertained (kernel) from *when* it happens
+  (layer). OQ11 is a defect in the first half only. The layer would still act only at a seek, scrub, or
+  pause; it would simply have a permission to act on.
+
+  **Deliberately not implemented.** It would make slice D's own fixture pass, and a mechanism must not be
+  changed to satisfy the run that measures it. Recommendation recorded; decision open.
+
+  **It also retires the fixture-engineering plan.** The stated next step was to build an arrangement that
+  frees capacity asymmetrically — the existing fixture *already does*, 4–5 times per run. Building a
+  bigger rig first would have reproduced `retries 0` on it and invited the conclusion that the fixture
+  was still wrong.
+
+  **Third instance of one error in this programme**, all mine, all the same shape: a zero read as *"the
+  condition never occurred"* when it meant *"the instrument never looked"* (F2's `U = 0.0%`, OQ10's
+  rejection rate, and now this). It is the sharpest statement yet of DEBT-012, because in each case the
+  counter was accurate — it faithfully reported what the subject SAW, and I wrote down what the world
+  DID.
+
 Two instrument additions were needed to make this readable at all, both unconditional:
 `admissionRecoverySweeps`/`admissionRecoveryWaits` (did the pass run, and did it decide per waiter) and
 `admissionRecoveryTicks` (did the host call it). Without them, a run in which nothing recovers and
