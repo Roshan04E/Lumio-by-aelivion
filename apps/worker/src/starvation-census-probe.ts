@@ -68,6 +68,8 @@ interface Census {
   admissionRecoveryWaits: number;
   admissionRecoveryTicks: number;
   admissionRecoveryEmptyTicks: number;
+  capacityFreedWhileStarved: number;
+  capacityFreedMatchingPool: number;
   admissionReacquireAttempts: number;
   admissionReacquireGrants: number;
   tickInterval: { count: number; meanMs: number; minMs: number; maxMs: number };
@@ -126,6 +128,8 @@ async function readCensus(page: Page, tMs: number): Promise<Census | null> {
       admissionRecoveryWaits: Number(p.admissionRecoveryWaits ?? -1),
       admissionRecoveryTicks: Number(p.admissionRecoveryTicks ?? -1),
       admissionRecoveryEmptyTicks: Number(p.admissionRecoveryEmptyTicks ?? -1),
+      capacityFreedWhileStarved: Number(p.capacityFreedWhileStarved ?? -1),
+      capacityFreedMatchingPool: Number(p.capacityFreedMatchingPool ?? -1),
       admissionReacquireAttempts: Number(p.admissionReacquireAttempts ?? -1),
       admissionReacquireGrants: Number(p.admissionReacquireGrants ?? -1),
       tickInterval: p.recoveryTickIntervalMs ?? { count: 0, meanMs: 0, minMs: 0, maxMs: 0 },
@@ -288,6 +292,10 @@ async function main(): Promise<void> {
   console.log(
     `  slice D          boundaries ${boundaries} · reacquire attempts ${last.admissionReacquireAttempts}` +
       ` · grants ${last.admissionReacquireGrants}`
+  );
+  console.log(
+    `  OQ11 freed       while starved ${last.capacityFreedWhileStarved} · same pool ${last.capacityFreedMatchingPool}` +
+      `   (recovery saw: retries ${last.admissionRecoveries})`
   );
   const ti = last.tickInterval;
   const rs = last.rejectShortfall;

@@ -38,10 +38,17 @@ Three facts from this run bear directly on the design:
 1. **The losers are identifiable and stable.** Three sources starved for the entire window and none
    recovered — `starvedSources` never moved off 3. The set this slice acts on is small and quiet, not a
    churning population.
-2. **`retries 0` is the whole gap.** Recovery never issued a single `retry` verdict, because free
-   capacity never appeared: the pool stayed full for the entire session. **A retry path that only fires
-   on freed capacity would have done nothing in this run.** See §5 — this is why the trigger is a
-   transport boundary and not a capacity event.
+2. ~~**`retries 0` is the whole gap.** Recovery never issued a `retry` verdict because free capacity
+   never appeared: the pool stayed full for the entire session. A retry path that only fires on freed
+   capacity would have done nothing in this run.~~ **WRONG — falsified 2026-08-06 (OQ11).** Measuring
+   releases *at the release site* rather than inferring from `retries 0` gives
+   **`capacityFreedWhileStarved 5 · samePool 4`** on a run where recovery granted **0** permissions.
+   Capacity freed four times in the right pool while a source was starved, and recovery saw none of it.
+   The pool does not stay full; it **churns** (`created 11` against a 4-slot cap), and the sweep's
+   ~11.5s sampling steps over the transients. The opportunity existed and was not observed.
+
+   *Third time in this programme that a zero was read as "the condition never occurred" instead of "the
+   instrument never looked". The counter said what recovery SAW, and I wrote down what the pool DID.*
 3. ~~**The sweep cadence under-delivers.** `ticks 5 · sweeps 2`: recovery's own 10s rate limit rejects
    most of the host ticks it rides.~~ **WRONG — falsified 2026-08-06 by instrumenting the branch.**
    `rejects n=0` on four consecutive runs; the limit has never rejected a tick. The gap was an uncounted
@@ -84,12 +91,22 @@ entertain a re-ask*, never *a slot is reserved*.
 Permitted moments — a **seek**, a **scrub**, or **while paused**. Forbidden: mid-playback on a running
 source.
 
-**Why a transport boundary and not freed capacity — this is the measured reason the slice has its
-shape.** In the 2026-08-06 census the pool stayed full for the entire session and recovery issued
-`retries 0`: free capacity **never appeared**. A retry path triggered only by a capacity event would
-therefore have been *dead code shipped behind a clean gate* — it would have passed every gate in the
-repo while never once firing, and the counters would have read 0 exactly as they do now. The trigger has
-to be an event that actually occurs on a starved runtime, and transport is the one that does.
+~~**Why a transport boundary and not freed capacity.** The pool stayed full for the entire session, so a
+capacity-triggered retry would have been dead code shipped behind a clean gate.~~ **This argument is
+RETRACTED (OQ11, 2026-08-06).** Capacity frees 4–5 times per run while a source is starved; a
+capacity-event trigger would have fired, not lain dead. The premise was an inference from `retries 0`.
+
+**C-D2 still stands, on its other argument alone** — the risk asymmetry below — and the retraction
+actually *sharpens* the clause rather than undermining it. Eligibility and the moment of re-acquire are
+two different things, and this contract already separates them: the kernel decides *whether* a re-ask is
+entertained, the layer decides *when*. OQ11 shows the defect is in the first half, not the second. The
+opportunity is a **release event**; recovery only looks for it on a ~11.5s sweep, so it misses
+transients. Fixing that means granting eligibility *at the release*, which leaves C-D2 completely intact
+— the layer would still act only at a seek, scrub, or pause.
+
+**Not implemented here, deliberately.** It would make this slice's fixture pass, and a mechanism must not
+be changed to satisfy the run that measures it. Recorded as OQ11 with a recommendation; the decision is
+open.
 
 The reasoning is the risk asymmetry, and it is the same argument that kept displacement out of slice A.
 A re-acquire tears down and rebuilds a decode path. At a transport boundary a decode discontinuity is
@@ -225,22 +242,28 @@ starvedSources peak 5 · starvedLongestMs 82s · ticks 7 · sweeps 4 · waits 7 
 
 ### NOT established — D is unexercised, and this is the honest result
 
-**77 transport boundaries were driven (P-c satisfied) and produced 0 re-asks — correctly.** Recovery
-granted no eligibility all run (`retries 0`) because free capacity never appeared: the pool stayed full
-for the entire session. With no permission outstanding, the correct number of re-asks is zero.
+**77 transport boundaries were driven (P-c satisfied) and produced 0 re-asks.** Recovery granted no
+eligibility all run (`retries 0`), so with no permission outstanding the layer correctly re-asked zero
+times — **the layer half of D behaved exactly as contracted.**
+
+The reason recovery granted nothing was FIRST RECORDED HERE AS "free capacity never appeared", and that
+was wrong (OQ11, §1 above): capacity freed 4–5 times per run in the right pool, and the sweep's ~11.5s
+sampling stepped over every one. So D is unexercised because of a defect in the KERNEL half — recovery
+not observing the opportunity — and not because the fixture cannot produce the condition.
 
 > **This run shows slice D breaks nothing. It does not show that it works.**
 > D1 and D2 are unexercised, exactly as slice A's `capMisses 0` soak left slice A unexercised.
 
-**Why this fixture structurally cannot exercise it.** Six simultaneous MediaIns in one comp live and die
-together, so every release is a full teardown followed by a fresh lottery — never *one source leaving
-while another stays starved*. D needs capacity to free **asymmetrically**, and that is a property of the
-fixture, not of the runtime.
+~~**Why this fixture structurally cannot exercise it.** Six simultaneous MediaIns live and die together,
+so every release is a full teardown followed by a fresh lottery. D needs capacity to free
+asymmetrically, and that is a property of the fixture.~~ **RETRACTED (OQ11).** This fixture DOES free
+capacity asymmetrically — `capacityFreedWhileStarved 5 · samePool 4` per run, with sources starved
+throughout. The arrangement was never the obstacle.
 
-**The next step is fixture engineering, not code.** An arrangement is needed in which one source departs
-while a starved one remains — timeline clips whose windows differ under a seek is the obvious candidate,
-since a clip leaving the window releases its session while the rest stay mounted. Until such a run
-exists, D's acceptance table is a specification and not evidence, and it should be described that way.
+**So the next step is NOT fixture engineering.** It is OQ11: recovery must observe the release, because
+the opportunity is an event and the sweep is a sample. Building a more elaborate fixture first would
+have produced the same `retries 0` on a bigger rig, and I would have concluded the fixture was still
+wrong. Until OQ11 is resolved, D's acceptance table remains a specification and not evidence.
 
 ### Carried forward
 
