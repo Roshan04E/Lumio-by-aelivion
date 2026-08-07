@@ -935,6 +935,70 @@ unaffected by either open question above:** the shared boundary-detector module 
 the epoch-state→callback re-render fix (both documented in `admission-reacquire.ts`'s own header). These
 ship as their own commit, independent of "D fires" and independent of the comp-proxy second half.
 
+**CORRECTION, 2026-08-07 — the "F causes a decoder-topology regression" framing above is RETRACTED, with
+reason, not deleted. It was quoted as established across three replies in this thread before the defect
+in the measurement was found. Left in place above because rewriting it would hide how the mistake was
+made, which is worth more than a register that reads as though it always knew.**
+
+A pre-registered instrument (four counters inside D's original inline effect body: entered unconditionally,
+passed both gates, failed on healthy-not-starved, failed on not-yet-eligible) was run on the E tree across
+four arms, two thermal states (immediately post-restart, and after prior probes had already warmed the
+same server). Every arm read **36 boundary-reaching events**, split as **0–2 passes** and **~15–21 blocked
+on `isAdmissionEligible` false at a genuinely starved (`wcModeRef === "element"`) source** — confirmed
+per-instance, not global, by reading the `useRef` declaration directly. The one thing that varied between
+arms was thermal state, not tree: the sole anomalous reading (`created 14 · preload 0 · gatePassed 2`) was
+the first successful run after a dev-server restart; every other arm — including the *second* arm of that
+same run, on the same tree — converged on an identical `created 11 · preload 3 · gatePassed 0`.
+
+**Supported — mechanism B.** D's inline effect body runs at high frequency and reliably reaches its gate
+(36/arm, stable across thermal state and across trees). It almost never passes. The trigger and the
+permission are not synchronised: eligibility is granted at a release event and consumed only if a
+transport boundary happens to land while it is still true, and on this evidence that coincidence is rare
+by construction, not because either half is broken. Per your ruling: this is what F's clock-driven
+detector is polling — a gate that refuses ~100% of the time until a sample lands — and firing it faster is
+not a repair. **F's detector does not ship**, decided on this evidence, independent of the retraction
+below.
+
+**Not supported — F causes a decoder-topology regression.** The claim (three replies in this thread: soak
+tables, `created 11→13-14`, `preload 3→0`, localized via an arm-1 bisect to the WebglMediaLayer detector
+swap) rested on comparing E and F readings taken under uncontrolled, opposite thermal conditions — in
+every comparison run, whichever tree was read first-after-a-restart differed from whichever was read
+after prior probes had already warmed the server, and tree identity was confounded with thermal state
+throughout. **`preload 3 → 0` is specifically retracted**: the one run in this thread that measured F's
+actual `preload` value under the pre-registered instrument's conditions read **1**, not 0. The raw logs
+for the original three-E/four-F comparison predate this session's context and cannot be re-inspected to
+separate thermal state from tree identity after the fact. **This is unrecoverable, not merely unproven** —
+re-running would cost a day to re-establish a number nothing now depends on, since mechanism B already
+decides F's detector on independent grounds. Not re-run.
+
+**DEBT-013 — PARKED, 2026-08-07, and this is a good outcome, not a stall.** Three things block retirement,
+stated precisely so the next person starts in an hour instead of a week:
+
+1. **Clause (a) ("subsequently admitted") remains unsatisfied.** D's trigger and E's permission exist but
+   are not synchronised (mechanism B above) — D is effectively inert in practice, not because it never
+   runs, but because it almost never runs *while eligible*.
+2. **F's detector is rejected**, on the mechanism-B evidence, independent of the retracted regression
+   claim. No fix is proposed here — see open question 1.
+3. **The comp-proxy site cannot be tracked across attempts at all.** `useFlarexCompProxies` mints a fresh
+   blob URL per re-ask, so there is no stable identity for a granted permission to attach to. This is a
+   structural gap, not a tuning question.
+
+**Two open questions, recorded and NOT chased today:**
+
+- **Why eligibility and boundaries never coincide.** The obvious suspect is cadence: recovery's sweep
+  rides the ~10-11.5s idle tick (OQ10), against a 12s probe arm — a permission window and a boundary
+  window that are each individually plentiful can still rarely overlap if one is short relative to the
+  other's period. Untested. A real slice, not today's.
+- **Stable waiter identity at the comp-proxy site.** `useFlarexCompProxies` needs an identity for a
+  re-ask that survives the blob-URL churn — the specific shape is unwritten. A real slice, not today's.
+
+**What ships from this programme:** the corruption repair (verified at eight commits, backup retained
+until this correction lands), `kernel-conformance.ts`'s enumeration of acquire sites, and the
+epoch-state→callback re-render fix in `admission-reacquire.ts`. **What does not ship: F, either half** —
+the shared detector module ships only as inert, unconsumed code (the enumeration and the callback fix are
+real independent of whether anything calls `useTransportBoundary` yet); nothing currently calls it into
+service.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
