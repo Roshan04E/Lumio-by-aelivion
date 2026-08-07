@@ -602,6 +602,26 @@ Sequenced **behind** the C15 purpose-class work and the playback-contention fixt
 bounded: it blocks M1b on virtual sources only, and OQ1 remains runnable on a timeline-clip corpus.
 No code has moved; `MIN_RESIDENCY_MS` is untouched.
 
+**A fourth shape — verifying the wrong SUBJECT, not the wrong property (2026-08-07).** A zero-context
+patch (`git apply --cached --unidiff-zero`), used to stage one session's hunks out of a file another
+session held dirty, computed its line numbers against the working tree and applied them to the index —
+producing a byte-valid but wrongly-positioned splice in the **committed blob** of
+`WebglMediaLayer.tsx` across three commits. Every gate run that session (typecheck, pixel, decoder soak,
+`kernel:conform`) passed, repeatedly, because every one of them ran against the **working tree**, which
+was never touched by the corruption and stayed correct throughout. The break was invisible until a
+`git worktree add` at the suspect commit produced a file that failed to parse.
+
+This is not instance 1–3's shape (a sampler reading a state where an event was needed) — the gates here
+were the *right* kind of check, run against the *wrong* artifact. Two different files existed under one
+path: the one every tool read, and the one `git log` would eventually ship. Nothing in the session's gate
+suite ever looked at the second one. **The general form: for anything that lands as a commit, "it passes"
+must mean "a clean checkout of the commit passes" — verifying the working tree, however thoroughly, is a
+claim about a different artifact than the one being shipped.** Detection: any workflow that edits or
+stages a file whose committed content the reviewer has not independently checked out and built stand-alone
+is exposed to this, regardless of how many working-tree gates it runs. The repair (sequential
+`cherry-pick` + context-anchored rebuild + `--amend`, full typecheck at every intermediate commit, not
+just the tip) is recorded in ADR-020's evidence index rather than here; this entry keeps only the class.
+
 ### DEBT-013 — a source denied at mount can never be admitted, and nothing reports it
 
 - Status: **open — USER-VISIBLE DEFECT**, raised to the founder 2026-08-06
@@ -841,7 +861,79 @@ nothing reaches the terminal leaves the outcome counters at zero — indistingui
 never ran. That is DEBT-012's signature, and the fix is the same every time: count the reasons, never
 infer which branch fired.
 
----
+**SLICE F shipped a shared boundary detector (one predicate, `admission-reacquire.ts`, consumed at both
+acquire sites) and, incidentally, un-stuck D's own layer-site trigger for the first time — measured
+2026-08-07, and it is NOT the same finding as F's own stated purpose.**
+
+Bisected against a decoder-topology regression on `preview:budget` (PROBE_SOURCES=6): E's repaired tip
+reads `created 11 · unmet 1 · preload 3` stable across three clean runs; F reads `created 13-14 · unmet
+2-3 · preload 0` stable across four. Restoring D's original render-dependency-gated inline detector at
+the `WebglMediaLayer` site ALONE (F's other changes — the comp-proxy trigger, `kernel:conform`'s
+enumeration check — left in place) exactly reproduces E's numbers, twice, byte-identical. The regression
+is localized to that one swap, not to the shared module's existence or to the second site.
+
+The mechanism is not the stale-eligibility-flag bug it first looked like — `noteDenied` already resets
+`record.eligible = false` on every re-denial (checked directly; not present). Direct instrumentation of
+the same fixture instead shows the shared detector's real effect: `reacquireAttempts 6-7 ·
+reacquireGrants 2-3 · admissionRecoveries 9-10` — D's OWN re-acquire path, wired since slice D and
+carried forward unchanged, executing for the first time in this fixture. D's inline effect was gated on
+a React re-render (`[mediaType, src, transportTime, transportPlaying]`) that this fixture apparently
+never delivered inside a 12s arm; F's hook is driven by `subscribePlaybackClock`'s imperative,
+render-independent notification and reaches the same guarded body at the clock's real cadence. Nothing
+in the swap is incorrect — `wcModeRef !== "element"` and `isAdmissionEligible` gate both versions
+identically — F's detector simply *fires*, where D's mostly didn't, in exactly the scenario this whole
+programme exists to fix.
+
+**The cost is real and attributable, not a bug.** Every additional reacquire attempt is a `playhead`-
+priority `acquirePreviewFrameProvider` call, and `preload`-priority pre-roll shells are the documented,
+pre-existing victims of exactly that contention (`WebglMediaLayer.tsx`'s own comment: "a mounting
+PLAYHEAD clip can preempt them"). Recovering the currently-broken visible source at the expense of a
+not-yet-visible pre-roll shell's warm session is the priority system doing what it was built to do; it
+was simply never exercised at this frequency before F fixed the trigger's cadence. There is no code
+defect here to fix — reverting the swap would mean deliberately re-breaking D's own mechanism to hide a
+cost the mechanism was always going to have once it worked.
+
+**F's OWN stated purpose remains unconfirmed.** The census fixture's attribution (paused, comp-proxy-
+heavy) reads `comp-proxy re-asks 0` even with `slice E permissions 3` granted — `useFlarexCompProxies`'s
+new trigger has never been observed to fire, on any run in this programme. So the accounting is: a
+**measured, reproducible, explicable cost** (preload eviction, from D's own trigger finally running) is
+now attached to F, and F's actual contribution over D — a second acquire site — has **zero observed
+benefit**. These are separable facts about one commit. Not shipped as a single unit pending a decision on
+whether they should be.
+
+**SLICE D'S ACCEPTANCE IS VOID — ruled 2026-08-07, founder decision, recorded here as the load-bearing
+copy (full reasoning: `plans/adr-020-slice-d-transport-reacquire.md` §8).** `reacquireAttempts 6-7` above
+is the FIRST nonzero reading this mechanism has ever produced, on any fixture, across slices D, E, and F.
+Every prior soak, gate run, and census pass that treated D as shipped-and-fine was a vacuous pass over a
+population of zero executions — D's contract (§5, D1–D5) is evidence about a mechanism only across runs
+where the mechanism ran, and until this bisect none had. **DEBT-013 clause (a) remains unmet by anything
+on the branch.** D1/D2 are downgraded from "unexercised" to **retracted, unevaluated** — one favorable
+data point (`grants 2-3` of `attempts 6-7`) exists now, but it is one run, on one adversarial fixture, and
+does not by itself constitute acceptance. D3/D4 continue to hold on every run measured.
+
+**Successor slice, provisionally "D fires" — proposed, not accepted, gated on one measurement.** The fix
+is not to D's contract (every clause is still the right shape); it is that the boundary detector's actual
+firing site should be the imperative clock subscription (`admission-reacquire.ts`), not the React-render-
+gated inline effect — "a transport-boundary re-ask that does not fire on transport boundaries is not a
+shipped mechanism, it is dormant code with a commit hash." **Not yet accepted**, because every reading of
+its cost so far comes from an adversarial fixture (six sources against four slots) built specifically to
+force contention. The pending measurement: the same A/B (D-restored vs. detector-swapped) on a
+non-adversarial timeline — one or two sources, spare decoder capacity, `capMisses` at or near 0 — to learn
+whether `preload 3 → 0` is a contention-only cost (an easy accept) or persists with capacity to spare (a
+harder decision). Until that lands, "D fires" ships as neither accepted nor reverted — held in the working
+tree, not committed.
+
+**F's second half — does not ship, and is blocked on a different slice, not on F.** `comp-proxy re-asks 0`
+on every run in this programme, before and after F, including the census run above with three permissions
+outstanding on a comp-proxy-heavy fixture. This is not an unlucky fixture: `useFlarexCompProxies` mints a
+fresh blob URL per attempt (see `admission-reacquire.ts`'s own doc comment and `forgetAdmissionWaiter`),
+so the site has no stable identity for a granted permission to attach to across a re-ask — the finding
+that explains why it structurally cannot fire, not merely why it hasn't yet. Blocked on an identity slice
+for that acquire site, unwritten. **What survives from F regardless, correct on its own terms and
+unaffected by either open question above:** the shared boundary-detector module (`admission-reacquire.ts`,
+`isTransportBoundary`/`useTransportBoundary`), `kernel-conformance.ts`'s enumeration of acquire sites, and
+the epoch-state→callback re-render fix (both documented in `admission-reacquire.ts`'s own header). These
+ship as their own commit, independent of "D fires" and independent of the comp-proxy second half.
 
 ## Retired
 
