@@ -2528,6 +2528,79 @@ console.log("\nI-5 / I-15 / I-35 — the claims shipped modules make about thems
   session.dispose();
 }
 
+console.log("\nADR-020 slice F — every acquire site is enumerated");
+{
+  const webDir = fileURLToPath(new URL("../../web/src/", import.meta.url));
+  const strip = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const walk = (dir: string, out: string[] = []): string[] => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules") continue;
+      const full = `${dir}${entry.name}`;
+      if (entry.isDirectory()) walk(`${full}/`, out);
+      else if (/\.tsx?$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  };
+
+  /**
+   * THE ENUMERATION. Every file that acquires a decode session from the pool.
+   *
+   * This exists because a structural gap has now worn a fixture's clothes three times, and the shape was
+   * identical each time: an UNENUMERATED SITE. Slice D's re-ask trigger was written into one acquire
+   * site; the pool had two; the second was found by measurement (`0/5 starved sources are layers the D
+   * trigger can see`) after two rounds of blaming the fixture. Finding a second site that way is luck.
+   * Finding a third the same way would be the pattern's fourth instance.
+   *
+   * So the count is asserted, not remembered. A new acquire site appearing without a review decision
+   * fails HERE, in the harness, rather than being noticed months later.
+   *
+   * REDUCED, 2026-08-07. This block originally asserted four more things: that both "re-ask" sites
+   * consumed a shared boundary detector, that the detector was defined exactly once, and that no site
+   * redefined its threshold constant. All four were dropped, not merely disabled, because the detector
+   * they check (`admission-reacquire.ts`) is not committed — slice D's consumption of it (mechanism B)
+   * and slice F's comp-proxy consumption were both rejected, so the module has zero consumers and does
+   * not ship (DEBT-013, 2026-08-07; L13 — no dormant code). A check that reads a file which does not
+   * exist in a clean checkout does not degrade gracefully to a false; it throws. Kept here as the one
+   * assertion that stands without the detector: the enumeration itself, which is meaningful on its own
+   * — a third undeclared acquire site is worth failing the harness over regardless of what any site does
+   * once it re-asks.
+   */
+  const DECLARED_ACQUIRE_SITES: Record<string, "re-ask" | "exempt"> = {
+    // "re-ask" records INTENT, not a currently-enforced property — no committed mechanism gives either
+    // site a way back for a denied source today (D is parked, F's comp-proxy trigger is rejected). Kept
+    // as the classification a future trigger should restore, not as a claim about what exists now.
+    "components/WebglMediaLayer.tsx": "re-ask",
+    "editor/flarex/useFlarexCompProxies.ts": "re-ask",
+    // The `wc:gate` fixture page drives the pool directly to assert its mechanics (preload/preempt/cap).
+    // It has no starved USER-VISIBLE source to recover, and giving it a re-ask path would change the
+    // thing it measures. Exempt by name, which is the point — an exemption someone chose, not a site
+    // nobody noticed.
+    "pages/WcDecoderGatePage.tsx": "exempt",
+  };
+
+  // Stepwise rather than one chain. The pool module and its unit test are excluded BY NAME, so that
+  // excluding a file is always a visible decision rather than a side effect of a path pattern.
+  const candidates = walk(webDir)
+    .filter((file) => !/\.test\.tsx?$/.test(file))
+    .filter((file) => !file.endsWith("playback/preview-frame-pool.ts"));
+  const acquiring = candidates.filter((file) =>
+    /acquirePreviewFrameProvider\s*\(/.test(strip(readFileSync(file, "utf8")))
+  );
+  const found = acquiring.map((file) => file.slice(webDir.length).split("\\").join("/")).sort();
+  const declared = Object.keys(DECLARED_ACQUIRE_SITES).sort();
+  const missing = declared.filter((site) => !found.includes(site));
+  const undeclared = found.filter((site) => !declared.includes(site));
+
+  enforced(
+    "ADR-020/F",
+    "the set of pool acquire sites is exactly the declared set",
+    missing.length === 0 && undeclared.length === 0,
+    `undeclared: [${undeclared.join(", ")}] · declared-but-absent: [${missing.join(", ")}]`
+  );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------------------------
