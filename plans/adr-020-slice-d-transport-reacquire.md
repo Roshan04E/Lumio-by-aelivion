@@ -1,8 +1,9 @@
 # ADR-020 slice D — the layer-side re-acquire
 
-*Status: **IMPLEMENTED 2026-08-06**, and **UNEXERCISED** — see §7. The contract below was written before
-the code, because this slice crosses out of the kernel and the seam is where the last two admission
-defects lived. It is left in its original form; §7 records what the runs then showed.*
+*Status: **IMPLEMENTED 2026-08-06**, **ACCEPTANCE VOID 2026-08-07** — see §8. The contract below was
+written before the code, because this slice crosses out of the kernel and the seam is where the last two
+admission defects lived. It is left in its original form; §7 records what the runs then showed and §8
+records why that record does not amount to acceptance.*
 
 ---
 
@@ -271,3 +272,40 @@ wrong. Until OQ11 is resolved, D's acceptance table remains a specification and 
 rather than needing its own campaign. Three runs so far: `1/–`, `2/5`, `4/6`, `4/7` sweeps/ticks — the
 rate limit rejects a large and *varying* share of host ticks, and the run that recorded `sweeps 1` is the
 one that missed §6.11's terminal entirely.
+
+---
+
+## 8. Acceptance is VOID (2026-08-07)
+
+Every run of this slice, on every fixture built, through slice E and F, read `reacquireAttempts 0`. The
+census run in §7 said so honestly at the time ("D is unexercised"), and that honesty is exactly why this
+section exists now: the mechanism was never once observed to fire, on ANY fixture, until an unrelated
+change — F's swap of the boundary detector from a React-render-gated inline effect to
+`admission-reacquire.ts`'s imperative `subscribePlaybackClock` subscription — incidentally raised its
+firing frequency to match the real transport clock. The very first run that change touched read
+`reacquireAttempts 6-7 · reacquireGrants 2-3` (full account: DEBT-013, 2026-08-07 update; bisect: F's
+soak regression, localized to that one swap).
+
+**What this means for what "D shipped" means.** A contract's acceptance table (§5, D1–D5) is evidence
+about a mechanism only across runs where the mechanism executed. Every prior run — including the ones
+this document and DEBT-013 previously described as "D breaks nothing, established as unexercised" — had
+`attempts 0`. Zero executions is not a small sample of a working mechanism; it is no sample. Any language
+in this document, in DEBT-013, or in conversation that treated D's soak passing (`capMisses` moving,
+gates green, D3/D4 holding) as *acceptance of D* was a vacuous pass over a population of approximately
+zero, in exactly the shape slice A's first `capMisses 0` soak was — and that one was named as vacuous
+immediately. This one was not, until now.
+
+**Restated precisely.** DEBT-013 clause (a) — "a denied source is subsequently admitted" — remains
+**unmet by anything currently on this branch**. The one run that ever exercised the re-acquire path did
+so under code that is not committed (F's detector swap, held pending its own acceptance — see the
+DEBT-013 update dated 2026-08-07 and the successor slice below). D1 and D2 (§5) are **retracted to
+unevaluated**, not failed — the one data point available is favorable (`grants 2-3` of `attempts 6-7`)
+but it is one run, on one fixture, and the trade it implies (preload eviction) has not been measured
+under non-adversarial conditions. D3 and D4 continue to hold on every run measured, including this one.
+
+**What ships instead.** The fix is not to D's contract — every clause here is still the right shape. It
+is to WHERE the boundary detector lives and how it is triggered, which was always meant to be "at a
+transport boundary" and, by an accident of React's render-gating, was instead "at a transport boundary
+that also happens to cause a re-render" — a much rarer event. That fix is being proposed as its own
+slice, provisionally named **"D fires"**, gated on a non-adversarial capacity measurement before
+acceptance. See DEBT-013 for the pending measurement.
