@@ -309,3 +309,28 @@ transport boundary" and, by an accident of React's render-gating, was instead "a
 that also happens to cause a re-render" — a much rarer event. That fix is being proposed as its own
 slice, provisionally named **"D fires"**, gated on a non-adversarial capacity measurement before
 acceptance. See DEBT-013 for the pending measurement.
+
+---
+
+## 9. CORRECTION (2026-08-07) — the regression claim above is retracted; "D fires" is rejected, not pending
+
+§8's first three paragraphs still hold: D's acceptance is void, and that finding does not depend on
+anything retracted here. What is retracted is the specific phrase *"bisect: F's soak regression, localized
+to that one swap"* and the framing built on it (§8's final paragraph, "What ships instead").
+
+A pre-registered instrument (four counters inside D's own inline effect body) run on the E tree across
+four arms found **mechanism B**: the effect body reaches its gate reliably (36 boundary-reaching events
+per arm, stable across thermal state) and almost never passes (0–2). Eligibility and transport boundaries
+rarely coincide — not because the trigger under-fires, but because the two are on independent, unsynced
+cadences. **This decides "D fires" directly: raising the trigger's firing frequency (F's fix) polls a gate
+that refuses regardless of frequency, and is not a repair.** "D fires" is therefore **rejected**, not
+pending on a non-adversarial measurement — that measurement is no longer the open question.
+
+The "F causes a decoder-topology regression" claim itself (`created 11→13-14`, `preload 3→0`) is separately
+retracted: the E-vs-F comparison it rested on was confounded by cold/warm dev-server state, not tree
+identity, and the raw logs predate this session's context and cannot be re-inspected. Unrecoverable, not
+re-run — full account in `project-tracker/architectural-debt.md`, DEBT-013, 2026-08-07 correction.
+
+**What remains open, recorded and not chased:** why eligibility and boundaries never coincide (recovery's
+~10–11.5s sweep cadence against a 12s probe arm is the obvious suspect, untested), and stable waiter
+identity at the comp-proxy site. Both are real slices; neither is this one.
