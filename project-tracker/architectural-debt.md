@@ -999,6 +999,33 @@ the shared detector module ships only as inert, unconsumed code (the enumeration
 real independent of whether anything calls `useTransportBoundary` yet); nothing currently calls it into
 service.
 
+**UPDATE (2026-08-08) — separation executed, and the paragraph above is corrected on two points, not
+rewritten.** Working tree audit found `WebglMediaLayer.tsx` still mixed with another session's
+uncommitted grade-compare work; it was not touched (hard stop, no hunk surgery — that technique is
+retired). The other four files were mine alone and clean:
+
+- `useFlarexCompProxies.ts` and `preview-frame-pool.ts` — reverted whole-file (`git checkout --`). Both
+  diffs existed solely in service of F's rejected comp-proxy trigger (`forgetAdmissionWaiter`,
+  `admissionWaitersAbandoned` served no other consumer once the trigger that used them is gone).
+- `admission-reacquire.ts` — **did not ship.** Both its consumers are rejected (D's swap, still sitting
+  unreverted in the hard-stopped `WebglMediaLayer.tsx`; F's comp-proxy trigger, just reverted), so it has
+  zero consumers — L13, no dormant code. Preserved as a design artifact on branch
+  **`artifact/adr020-shared-detector`** (commit `1ffc898`), not on `main`/`method-3-gpu-compositor`. The
+  "epoch-state→callback re-render fix" named above lives entirely inside this module and shipped nowhere,
+  contrary to the paragraph above — corrected here. It also does not map cleanly onto D's own committed
+  code as something to "extract and land": D's inline detector (as committed) reads render-time values via
+  a dependency array and never had the `useState`-epoch anti-pattern the fix addresses — that pattern only
+  ever existed in an early, never-committed draft of this shared module. There is nothing to extract onto
+  D, and `wcReacquireEpoch` itself is not dead cost (it is D's real, still-parked mechanism, occasionally
+  observed firing under mechanism B) — so neither offered option applied. No action taken; moot in
+  practice today regardless, since the file it would touch is hard-stopped.
+- `kernel-conformance.ts` — shipped, reduced. Of the block's five assertions, four depended on
+  `admission-reacquire.ts` existing (three would read a file absent from any clean checkout and throw,
+  not fail gracefully) and were dropped rather than disabled. The base enumeration — a third undeclared
+  acquire site fails the harness — stands alone and was verified standing alone: `kernel:conform` run with
+  `admission-reacquire.ts` removed from the tree entirely, and again from a clean detached-worktree
+  checkout of the committed tip (`7db1085`), both green.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
