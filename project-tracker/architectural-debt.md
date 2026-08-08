@@ -1260,6 +1260,87 @@ defects (below) which would confound any attempt to size it today.
 reported, or the ADR-013 fixture is re-run with an engagement gate and the instability in blocker 2 is
 resolved — whichever comes first.
 
+### DEBT-015 — CLASS: an error path that reports COMPLETION, so a failure ships as product output
+
+- Status: **open** (registered as a CLASS; instance 1 fixed, instance 2 found and NOT fixed)
+- Registered: 2026-08-09 (from an intermittent `render:compare:pixels` failure)
+- Reason: an export's error handler had exactly one job it could not do — there is no safe degraded
+  output for a render. Faced with a composite that threw, `SceneStage.tsx` set `complete = true` and
+  released the `delayRender()` handle, so **Remotion was told the frame was finished**. It wrote
+  whatever was in the canvas — nothing — and the process exited **0**. The compromise was not
+  carelessness: `complete = true` prevented a `delayRender()` timeout from hanging the export. The
+  author chose "ship something" over "hang", and the third option — *fail* — was not taken.
+- Invariant affected: none named yet. The rule this violates is **a process that exits 0 asserts its
+  output is valid**; the runtime had no invariant saying so, which is why nothing caught it.
+- Owner: unassigned
+- Expiry condition: no error path in the export pipeline releases a render handle, or reports
+  completion, for work that did not succeed — for EVERY such path, not only the composite one
+- Planned slice: none. Instance 2 below is the next unit of work.
+- Tracking issue: —
+- Detection: **a `catch` that sets a success/completion flag.** Concretely, in any Remotion component:
+  a `continueRender()` reachable from a `catch`, or any assignment of a completion variable inside one.
+  The grep is `catch` within a few lines of `continueRender` or `complete =`.
+
+**How it surfaced, and why it is a production bug rather than a lab curiosity.** `render:compare:pixels`
+failed once at `e448b0d` with `flarex-unified-color` at **78.506% (1627901/2073600)** against a 0.500%
+bar. The log carried, before any fixture ran, `SceneStage: composite failed` /
+`Error: media-renderer: shader compile failed:` with an **empty info log**, through
+`SceneCompositor.regionGradeEntry → renderGroupInto → renderFrameCore`. The tell was in the artifacts:
+the `remotion-*.png` files were MODIFIED while the `web-preview-*.png` files were **byte-identical** —
+the preview rendered correctly and only the export was blank. A re-run passed 53/53. **Only a
+comparison gate could see this**; the export itself reported success. A customer would have received a
+video with a blank frame in it and no indication anything went wrong.
+
+**Falsifiability, established by breaking the subject (2026-08-09).** A guaranteed compile failure was
+injected into `MEDIA_FRAGMENT_SHADER` and `render:manifest` run on the `flarex-unified-color` fixture:
+
+| | before the fix | after the fix |
+|---|---|---|
+| exit code | **0** | **1** |
+| mp4 written | yes, 524073 bytes | **none** |
+| exported mp4 frame | **blank white**, 99.99% `rgb(255,255,255)` | not produced |
+| still PNG | blank black, `meanLuma 0.00`, 100% `rgb(0,0,0)` | not produced |
+| console | `SceneStage: composite failed` ×N, then `[mp4] done` | 3 retries at 150/300/600ms, then the named abort |
+
+The before-case reproduced the reported incident precisely, including the **white** frame. (The still
+path blanks to black and the video path to white — same defect, different background; do not treat the
+colour as diagnostic.) Injection reverted; `git diff` on `media-shader.ts` empty.
+
+**Instance 1 — FIXED. The composite path (`SceneStage.tsx`).** A failed composite now enters a bounded
+ladder — 3 retries at 150/300/600ms with the `delayRender` handle **held**, so nothing is emitted while
+retrying — and then calls `cancelRender()` with a named error. The hang requirement that motivated
+`complete = true` is preserved: the ladder always terminates, and its total (~1s) sits far inside the
+`delayRender` timeout. The shape deliberately copies `ScenePreviewCanvas`'s context-loss ladder
+(`MAX_SCENE_REBUILDS` / `RECOVERY_BACKOFF_MS` / `HEALTHY_FRAMES_TO_RESET`) rather than inventing a second
+recovery vocabulary. **One deliberate difference:** the preview degrades to the DOM path when its budget
+is exhausted, because a viewer showing something slightly wrong beats a viewer showing nothing; an export
+has no such fallback, because a wrong file *is* the product. Terminal state here is failure.
+
+**Instance 2 — FOUND, NOT FIXED, and it is the same defect one function away.** `SceneStage.tsx`'s
+controller-creation effect catches a `SceneCompositor` init failure, logs
+`"SceneStage: SceneCompositor init failed"`, and sets `controllerRef.current = null`. The composite
+effect then returns early on `if (!controller) return;` — **before any `delayRender()` handle is
+acquired.** So an init failure does not even need to release a handle to ship a blank frame: it never
+blocks the frame at all, and every frame of the export is emitted uncomposited, exit 0. This is
+instance 1's outcome by a shorter route. It was left alone because the scope of this fix was the
+composite path, the observed incident went through `mediaRendererFor` during composite (not init), and
+guessing at init-failure semantics unprompted is how a second, differently-shaped recovery path gets
+invented. **It is the next unit of work and this entry does not retire while it stands.**
+
+**The GL transient itself is NOT diagnosed, and this entry does not claim it is.** What is known: the
+compile failed with an **empty info log** on a context that `gl.isContextLost()` reported as *not* lost —
+`media-renderer.ts:108-110` converts exactly that empty-log case to `MEDIA_RENDERER_CONTEXT_LOST` when
+the context *is* lost, and that conversion did not fire here. **Memory pressure is a SUSPECT, not a
+finding.** The circumstantial support: the same machine produced two Chrome OOM/`networkidle` void runs
+of this gate at 3.9 GB free of 13.9 GB with 28 chrome + 34 node processes live, and a user exporting on a
+loaded laptop is that condition. Nobody has reproduced the compile failure by applying memory pressure,
+and until someone does, "OOM caused it" is a hypothesis with a plausible mechanism and no measurement.
+
+**Why the fix is worth having even though the cause is unknown.** It converts an undiagnosed, intermittent
+GPU transient from *silent wrong output* into *a loud, named, non-zero-exit failure*. That is worth having
+on its own, and it is also what makes the cause investigable: the next occurrence will announce itself
+with the frame number and the underlying error instead of hiding in a PNG nobody diffs.
+
 ### DEBT-012 addendum — a FIFTH shape: the absolute falsifier that presupposes an unmeasured baseline
 
 **(2026-08-08, founder-identified, from this session's own Scope C.)** The pre-registered falsifier read

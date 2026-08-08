@@ -4,6 +4,7 @@ import {
   Audio,
   OffthreadVideo,
   Sequence,
+  cancelRender,
   continueRender,
   delayRender,
   useCurrentFrame,
@@ -477,6 +478,32 @@ function layerSpeed(layer: Pick<RenderManifestLayer, "speed">): number {
   return Math.min(16, Math.max(0.05, raw));
 }
 
+// ── FAILED COMPOSITE HANDLING (DEBT-015) ──────────────────────────────────────────────────────────
+// A composite that THREW must never be reported to Remotion as a completed frame. The previous
+// `catch { complete = true }` did exactly that: it released the render handle, Remotion wrote whatever
+// happened to be in the canvas (blank), and the export exited 0. A customer's video silently contained
+// a blank frame and only a comparison gate could see it.
+//
+// `complete = true` was not an accident — it stopped a delayRender() timeout hanging the export. That
+// requirement is preserved: this ladder always TERMINATES, either by compositing successfully or by
+// cancelRender(), so the render fails deterministically instead of hanging OR passing.
+//
+// The shape deliberately mirrors ScenePreviewCanvas's context-loss recovery ladder (bounded attempts,
+// backoff, reset after a healthy run) rather than inventing a second recovery vocabulary for the same
+// problem — see MAX_SCENE_REBUILDS / RECOVERY_BACKOFF_MS / HEALTHY_FRAMES_TO_RESET there. The one
+// deliberate difference: the preview degrades to the DOM path when its budget is exhausted, because a
+// viewer showing something slightly wrong beats a viewer showing nothing. An export has no such
+// fallback — a wrong file IS the product — so the terminal state here is failure, not degradation.
+//
+// The delayRender handle stays HELD across retries, which is what guarantees nothing is emitted while
+// we are still trying. Total ladder time (150+300+600ms) sits far inside Remotion's delayRender
+// timeout, so the retries cannot themselves become the hang this code was written to avoid.
+const MAX_COMPOSITE_RETRIES = 3;
+const COMPOSITE_RETRY_BACKOFF_MS = [150, 300, 600];
+// A sustained run of clean frames clears the attempt budget, so one transient early in a long export
+// does not leave the rest of the render one failure away from aborting.
+const HEALTHY_FRAMES_TO_RESET_COMPOSITE = 120;
+
 /** Hidden image decoder: blocks the frame (delayRender) until the image is decoded, then hands it to `onFrame`. */
 function ImageGrabber({
   layer,
@@ -632,9 +659,53 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   const pendingRef = useRef<{ frame: number; id: number } | null>(null);
   const continuedFrameRef = useRef<number>(-1);
   const compositePassRef = useRef(0);
+  // Bounded composite-failure recovery (DEBT-015; see the constants above).
+  const compositeAttemptsRef = useRef(0);
+  const cleanCompositesRef = useRef(0);
+  const renderAbortedRef = useRef(false);
+  const compositeRetryTimerRef = useRef<number | null>(null);
+  const [compositeRetryTick, setCompositeRetryTick] = useState(0);
+
+  /**
+   * A composite threw. Retry a bounded number of times, then FAIL the render.
+   *
+   * Never calls continueRender: the frame did not composite, so there is no valid picture to emit and
+   * releasing the handle is precisely the bug this exists to prevent.
+   */
+  const failComposite = useCallback((frameNumber: number, error: unknown) => {
+    if (renderAbortedRef.current) return;
+    console.error("SceneStage: composite failed", error);
+    const attempt = compositeAttemptsRef.current;
+    if (attempt >= MAX_COMPOSITE_RETRIES) {
+      renderAbortedRef.current = true;
+      const cause = error instanceof Error ? error.message : String(error);
+      cancelRender(
+        new Error(
+          `SceneStage: composite failed on frame ${frameNumber} after ${MAX_COMPOSITE_RETRIES} retries — ` +
+            `refusing to emit an uncomposited frame (DEBT-015). Cause: ${cause}`
+        )
+      );
+      return;
+    }
+    compositeAttemptsRef.current = attempt + 1;
+    cleanCompositesRef.current = 0;
+    const delay = COMPOSITE_RETRY_BACKOFF_MS[Math.min(attempt, COMPOSITE_RETRY_BACKOFF_MS.length - 1)] ?? 600;
+    console.warn(
+      `SceneStage: composite failed on frame ${frameNumber}; retry ${attempt + 1}/${MAX_COMPOSITE_RETRIES} in ${delay}ms`
+    );
+    // Idempotent while a retry is already scheduled — one ladder step per failure, not one per caller.
+    if (compositeRetryTimerRef.current != null) return;
+    compositeRetryTimerRef.current = window.setTimeout(() => {
+      compositeRetryTimerRef.current = null;
+      setCompositeRetryTick((tick) => tick + 1);
+    }, delay);
+  }, []);
+
   useEffect(() => {
     const controller = controllerRef.current;
     if (!controller) return;
+    // The render is already failing; do not start new work behind cancelRender.
+    if (renderAbortedRef.current) return;
     const pass = ++compositePassRef.current;
 
     // Acquire (or keep) this frame's render-block handle.
@@ -692,16 +763,22 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
 
     void (async () => {
       let complete = false;
+      let failure: unknown = null;
       try {
         const activeFlarexLoaders = flarexVirtualLayers.filter(
           (loader) => t >= loader.startSeconds && t < loader.startSeconds + loader.durationSeconds
         );
         complete = await controller.composite(merged, rawRef.current, matteRef.current, transitions, t, activeFlarexLoaders);
       } catch (error) {
-        console.error("SceneStage: composite failed", error);
-        complete = true;
+        // Recorded, NOT converted into completion. Handled below, after the staleness check, so a
+        // superseded pass cannot fail a render that has already moved on.
+        failure = error instanceof Error ? error : new Error(String(error));
       }
       if (pass !== compositePassRef.current) return;
+      if (failure) {
+        failComposite(frame, failure);
+        return;
+      }
       if (complete && pendingRef.current && pendingRef.current.frame === frame) {
         try {
           continueRender(pendingRef.current.id);
@@ -710,10 +787,29 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
         }
         continuedFrameRef.current = frame;
         pendingRef.current = null;
+        // Healthy-run reset of the retry budget (see HEALTHY_FRAMES_TO_RESET_COMPOSITE).
+        if (compositeAttemptsRef.current > 0) {
+          cleanCompositesRef.current += 1;
+          if (cleanCompositesRef.current >= HEALTHY_FRAMES_TO_RESET_COMPOSITE) {
+            compositeAttemptsRef.current = 0;
+            cleanCompositesRef.current = 0;
+          }
+        }
       }
     })();
     // `mediaTick` re-runs this when a media frame arrives; `t`/`frame` cover the timeline advancing.
-  }, [frame, t, sorted, adjustments, mediaTick, assetDurationById, flarexVirtualLayers]);
+    // `compositeRetryTick` re-runs it for a bounded retry after a failed composite (DEBT-015).
+  }, [frame, t, sorted, adjustments, mediaTick, assetDurationById, flarexVirtualLayers, compositeRetryTick, failComposite]);
+
+  // Drop any pending retry on unmount so a teardown can't resurrect a composite for a gone canvas.
+  useEffect(() => {
+    return () => {
+      if (compositeRetryTimerRef.current != null) {
+        window.clearTimeout(compositeRetryTimerRef.current);
+        compositeRetryTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Continue any outstanding handle on unmount so a teardown mid-frame can't hang the render.
   useEffect(() => {
