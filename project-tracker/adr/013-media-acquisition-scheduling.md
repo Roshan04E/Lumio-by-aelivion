@@ -19,7 +19,46 @@ Extends:
 
 Amends: (nothing — no existing clause changes)
 Evidence base: FLAREX_DECODE_SCHEDULING_REVIEW.md (2026-08-01)
+Amended by: ADR-020 (2026-08-06, premise correction) — see box below
 ```
+
+---
+
+> ## AMENDMENT (2026-08-08) — the Media Acquisition Scheduler is not being built as specified
+>
+> This is a consequence of ADR-020's premise correction (2026-08-06), recorded here rather than in a new
+> ADR — ADR-020 already carries the decision; this states what it implies for the document below.
+>
+> **ADR-020 measured that this runtime's contention is a mount-storm transient, not the sustained,
+> steady-state pressure this ADR was sized for** (§1). Every one of ADR-013's 15 invariants and 4
+> contracts has been re-tested against that finding, one at a time, not asserted in bulk. Full working:
+> `plans/adr-013-scope-after-adr-020.md`.
+>
+> **Of 19 items: 2 satisfied · 6 dissolved · 4 storm-needed · 2 ambiguous · 5 Governor-deferred.**
+> "Dissolved" means the invariant's *premise* — recurring contention to arbitrate — has no live case in
+> this runtime, not that it is wrong forever; it revives if a real second acquisition client ever
+> materializes (§10.3's own bar). The 2 ambiguous items (I-42, I-53) are not decided here — each has a
+> named, unrun measurement in the scope note that would settle it either way; the 4-vs-6 storm-needed/
+> ambiguous split is robust to both outcomes.
+>
+> **Subsystem 3.25, as specified — job model, deadlines, quality ladder, reservations, per-frame
+> ordering — is not being built.** What remains genuinely needed, outside the Governor, spans four items
+> (C15, C16, I-44, I-48) — none of which need it either. Triaged: C15's discipline already holds in the
+> existing single-hop admission path (nothing downstream recomputes rank; no fix pending). C16 and I-44
+> are one shared violation (a backend named from source identity, not from rank), in one file. I-48 is
+> partially corrected already (slice B) with a real, scoped, unshipped remainder (slice B2) — not the
+> uniform "four call-site fixes" a first pass suggested. Full triage, including what's currently blocked
+> by unrelated uncommitted work: `project-tracker/architectural-debt.md`, DEBT-013, 2026-08-08.
+>
+> **The Governor (3.26) is unaffected by the correction and is explicitly deferred to its own pass — not
+> touched here.** One point of care: the closest thing this programme had to empirical support for the
+> Governor's necessity — a measured preload-session eviction under playhead-priority contention, which
+> would have been a real instance of the quality-tradeoff pressure the Governor exists to arbitrate — was
+> **retracted** (confounded by dev-server thermal state, not reproducible; `project-tracker/
+> architectural-debt.md`, DEBT-013, 2026-08-07). The Governor is therefore **unmeasured again**, exactly
+> where it stood before that finding. Read the deferral as "not yet examined," not as "examined and found
+> to need building" — no evidence currently distinguishes those two readings, and stating the deferral
+> without this note would let it read as the latter.
 
 ---
 
