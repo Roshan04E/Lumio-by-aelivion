@@ -1222,6 +1222,67 @@ constant** — the `> 1` threshold itself. What is measured is that ≥3 concurr
 `plans/adr-013-scope-after-adr-020.md` (§"Two qualifications on 'complete'") and
 `plans/adr-013-real-project-measurement-plan.md` (§5, Scope C).
 
+### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
+
+- Status: **open — PARKED, deliberately not chased (2026-08-08)**
+- Registered: 2026-08-08, from the ADR-013 real-project measurement and its counterfactual
+- Invariant affected: none directly; this is the defect the `preferSoftwareDecode` rule has been arguing
+  *around* rather than addressing.
+
+**The finding, in one line: Host C's host clip is routed to `element` in every arm of BOTH conditions —
+6 of 6 runs, at `> 1` and at `> 0` alike.** The threshold changes which engine the *loader* gets
+(`wc-hw` under `> 1`, `wc-sw` under `> 0`); it never changes the host's outcome. The host loses the
+hardware block at mount either way.
+
+This is the same shape as the 2026-07-27 report the software-decode rule was originally built for ("host
+frozen, loaders playing" — `preview-frame-pool.ts:91–101` records it), which means that rule has been
+mitigating a symptom whose cause is still present. Every threshold argument in this programme has been
+conducted downstream of it.
+
+**Evidence** (`tmp/adr013-real-project/{cold,old}{1,2,3}.json`): in Host C's regime all six runs show
+exactly one source on `element` and one on WebCodecs, `active` 0 with `activeSoftware` 1 under `> 0`, and
+`active` 1 with `activeSoftware` 0 under `> 1`. The pair never both hold a session.
+
+**Why it is PARKED and not chased now.** It is a real investigation into decoder acquisition ordering at
+mount, not a fix; it is not what ADR-013 was reopened for; and the measurement that found it has two known
+defects (below) which would confound any attempt to size it today.
+
+**Blockers, precisely:**
+1. The probe presses play before WebCodecs routing has engaged (`active = 0` across the predicted peak
+   window in all three `cold` arms) — this repo's own `awaitWebCodecsEngaged` / read-`__rfRouting`-first
+   rule was not applied. Any timing claim about mount is unsound until it is.
+2. Run-to-run routing instability is unexplained and large: concurrent sibling WebCodecs engagement lasted
+   ~17s in `cold1` vs ~0.9s in `cold3`, and `old2` established **no** hardware WebCodecs session at all
+   during playback while `old1`/`old3` did. Until that is understood, two runs of this fixture are not
+   comparable.
+
+**Trigger (not a schedule):** investigate when either a user-visible host freeze on a Flarex clip is
+reported, or the ADR-013 fixture is re-run with an engagement gate and the instability in blocker 2 is
+resolved — whichever comes first.
+
+### DEBT-012 addendum — a FIFTH shape: the absolute falsifier that presupposes an unmeasured baseline
+
+**(2026-08-08, founder-identified, from this session's own Scope C.)** The pre-registered falsifier read
+*"a lone loader is safe on hardware"* — an **absolute**. It fired: with the lone loader on hardware, a
+source starved. The verdict looked clean and it was wrong, because the counterfactual arm then showed the
+same starvation with the lone loader on **software** — there is no clean baseline here. The absolute
+phrasing silently assumed one, and nobody had measured it.
+
+**The general form: an absolute falsifier presupposes a baseline. If the baseline is unmeasured, the
+falsifier smuggles in an assumption and reads as a verdict.** The correct form is **comparative** —
+*"a lone loader on hardware is no worse than on software"* — which, against exactly the same data, yields
+a bounded answer (`capMisses` 2/2/2 vs 1/0/1: worse, by about one, and more consistently) instead of a
+false verdict ("unsafe, revert").
+
+Detection: any falsifier phrased as a property of one condition rather than a difference between two.
+Ask "compared to what, and did I measure it?" — and if the answer is "compared to how it presumably
+behaved before," the counterfactual arm is not optional.
+
+Same family as the four shapes above, and the most expensive to catch late: it produces a *confident,
+reproducible, 3/3* result that points at the wrong remedy. Here it would have reverted a real
+common-case benefit (a lone Flarex clip getting hardware decode) to recover ~one cap miss in a
+three-host fixture, and re-broken I-44a for nothing.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is

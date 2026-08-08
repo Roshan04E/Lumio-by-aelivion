@@ -196,10 +196,50 @@ test failing, which is what I-44a exists to detect.
 threshold exists that is both safe AND varies. C16 likewise. Neither is satisfied by a rule that is
 correct-by-construction because it never discriminates.
 
-**Not yet decided:** whether `37ed422` caused the cap misses, or merely coincides with them. That is a
-separate, cheap question and it is pre-registered as the counterfactual arm
-(`plans/adr-013-real-project-measurement-plan.md` §7) — the same fixture at `> 0`. **No fix is chosen
-until that reads.**
+**RESOLVED by the counterfactual (2026-08-08). `37ed422` did NOT create the starvation — and it is KEPT.**
+
+The same fixture at the old threshold (`> 0`, 3 cold arms, vacuity guard passed in all three:
+`activeSoftwareInRegime = [1]`, loader genuinely on software) reproduces the same signature:
+
+| | new (`> 1`) | old (`> 0`) |
+|---|---|---|
+| F1/F4 fire | 3/3 | 2/3 |
+| `capMisses` | 2, 2, 2 | 1, 0, 1 |
+| loader routing | `wc-hw` | `wc-sw` |
+| **host clip routing** | **`element`** | **`element`** |
+
+**The decision: KEEP `> 1`. `37ed422` is not reverted.** It amplifies a pre-existing defect; it does not
+create one. Reverting would surrender a real common-case benefit — a lone Flarex clip getting hardware
+decode, which is most users most of the time — to recover roughly one cap miss in a fixture carrying
+three Flarex hosts, and would re-break I-44a for nothing. A change that amplifies an existing defect gets
+a different decision from one that creates it.
+
+**This supersedes the earlier "safety wins, revert or narrow" direction in this note**, which was written
+while `37ed422` was still assumed to be the cause. Recorded as a change of direction, not adjusted
+quietly.
+
+**Consequently I-44a stands and C16/I-44 are NOT withdrawn on safety grounds** — the safety premise that
+withdrew them did not survive the counterfactual. Their status returns to satisfied-under-I-44a, with the
+threshold's cost now measured rather than unmeasured: about one additional cap miss, more consistently,
+in a three-host project.
+
+**The real subject is elsewhere, and is parked:** the host clip is on `element` in **6 of 6 runs across
+both conditions**. The host loses the hardware block at mount regardless of the threshold. That is
+pre-existing, matches the 2026-07-27 finding the software-decode rule was built for, and is what every
+threshold argument here has been conducted downstream of. Registered as **DEBT-014, PARKED** with named
+blockers and a trigger.
+
+**One arm's status, reported rather than resolved.** `old2` is the only arm carrying the "2/3 not 3/3"
+reading. Checked directly: its Host C regime is **structurally identical** to `old1`/`old3` — same three
+sources, same modes (one `element`, one `wc-sw`), same live counts (`active [0]`, `activeSoftware [1]`),
+`sawExactlyOne` true. **It is not void by the "a source never engaged" test.** But it differs
+systemically: it created 14 sessions against 15 everywhere else, 10 vs 12 by the regime's start, and
+established **no hardware WebCodecs session at all during playback** (its only `wc-hw` source appears at
+t=90.3, after the run). So `old2` tested the `== 1` case under systematically lighter decode load. It is
+neither clean evidence of safety nor a void arm — it is a lower-engagement run, and it is the same
+instability recorded as DEBT-014 blocker 2. The categorical question does not turn on it: the decision
+above holds whether `old2` reads 2/3 or 3/3, because both conditions fire and the host-on-element shape
+is 6/6.
 
 ### What the other two scopes actually support (less than first reported)
 
