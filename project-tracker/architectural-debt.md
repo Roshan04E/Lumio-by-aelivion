@@ -602,6 +602,30 @@ Sequenced **behind** the C15 purpose-class work and the playback-contention fixt
 bounded: it blocks M1b on virtual sources only, and OQ1 remains runnable on a timeline-clip corpus.
 No code has moved; `MIN_RESIDENCY_MS` is untouched.
 
+**NAME-COLLISION CORRECTION (2026-08-08).** This paragraph was accurate on 2026-08-05 and has been
+misquoted as current in three later entries (this register's own DEBT-013 updates, and
+`plans/adr-013-scope-after-adr-020.md`), each saying "slice B... remains unimplemented" without checking
+git log against the claim. **Slice B shipped**, in `collectFlarexVirtualLayers`, currently at `38b9c73`
+("fix(flarex): slice B — a virtual source inherits its host's transform instead of manufacturing one";
+the commit's own self-naming). Its pre-repair hash was `cd6fdf8` — verified identical content (empty
+`git diff cd6fdf8 38b9c73`), re-hashed by the 2026-08-07 corruption repair like every commit after it,
+not a second, different piece of work.
+
+What shipped is **narrower than what this paragraph describes.** The commit inherits a virtual layer's
+HOST transform, which discriminates correctly **between** comps on different hosts (a half-scale,
+10%-opacity host can no longer outrank a full-frame one) — measured 10/10, `contribution:scope`. It does
+**not** discriminate **within** one comp: siblings on the same host still score identically, because that
+needs each node's own reachability/composited area within the comp graph, "for which a TimelineLayer has
+no channel today" (the shipping commit's own words) — a real design gap, not an oversight, and exactly
+the remaining scope this paragraph originally described in full.
+
+**So: one slice B, shipped partially, not two.** To stop the collision this caused from recurring, the
+**unshipped remainder — within-comp/sibling discrimination, needing a new per-node contribution channel —
+is renamed `slice B2`** from this entry forward. `slice B` alone now means only the shipped,
+cross-host-discrimination piece. I-48's status is corrected accordingly in DEBT-013 and the scope note:
+partially satisfied (cross-host), still defeated in substance for the within-comp case, blocked on
+unimplemented `slice B2` — not on an unimplemented `slice B`.
+
 **A fourth shape — verifying the wrong SUBJECT, not the wrong property (2026-08-07).** A zero-context
 patch (`git apply --cached --unidiff-zero`), used to stage one session's hunks out of a file another
 session held dirty, computed its line numbers against the working tree and applied them to the index —
@@ -621,6 +645,15 @@ stages a file whose committed content the reviewer has not independently checked
 is exposed to this, regardless of how many working-tree gates it runs. The repair (sequential
 `cherry-pick` + context-anchored rebuild + `--amend`, full typecheck at every intermediate commit, not
 just the tip) is recorded in ADR-020's evidence index rather than here; this entry keeps only the class.
+
+**Third incident of the shared-tree class (2026-08-08).** A concurrent session, live on this same branch,
+committed while this session had a file staged; the shared index took whatever was staged at commit time,
+attributing this session's content to that session's unrelated commit message. A subsequent history
+rewrite by that session (the commit is now dangling) restored correct attribution, but by luck of timing,
+not by any safeguard either session had. Third occurrence of two sessions writing the same branch at once
+producing a wrong or misleading commit — after the 2026-07-29 broad `git add -A` sweep and the 2026-08-07
+zero-context-patch corruption above. No fix is proposed here; recorded so the pattern is visible the next
+time it costs someone an hour.
 
 ### DEBT-013 — a source denied at mount can never be admitted, and nothing reports it
 
