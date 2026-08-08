@@ -13,6 +13,37 @@
   log. The unshipped remainder (within-comp/sibling discrimination) is renamed **slice B2** to stop the
   collision — see `project-tracker/architectural-debt.md`, DEBT-012, 2026-08-08.
 
+## ADR-013 status ledger
+
+Three entries, appended and never rewritten. Each names the evidence that moved it, so a reader can see
+which claim rests on which measurement instead of only the current verdict. **The trajectory is the
+record**: entries 1 and 2 are marked superseded in place below, not removed.
+
+| # | Date | Status | What moved it |
+|---|---|---|---|
+| 1 | 2026-08-08 | **complete as scoped** | The 19-item tally below — 5 satisfied · 6 dissolved · 1 deferred by trigger · 2 deliberately unmeasured · 5 Governor-deferred. Carried one unmeasured constant (the `> 1` threshold) with a falsifier pre-registered against it. `023c605`, `fb435f1`. |
+| 2 | 2026-08-08 | **REOPENED — "complete as scoped" WITHDRAWN** | The real-project measurement, 3 cold arms at `14b66dc`. Scope C falsified 3/3: off a clean baseline (`capMisses 0`, `starvedSources 0` at t≈76.78), the lone-loader regime showed `F1_capMissOnset = 2` and `F4_starvedOnset = 1` with `activeSoftware = 0` throughout. Read as `37ed422` having **created** the starvation; C16/I-44 satisfaction withdrawn, I-44 returned to unsatisfied. `54bcd0e`. |
+| 3 | 2026-08-08 | **complete as scoped — entry 2's PREMISE is FALSIFIED** | The counterfactual arm entry 2 itself pre-registered: same fixture at the old `> 0`, 3 cold arms, vacuity guard passed 3/3 (`activeSoftwareInRegime = [1]`). It reproduces the same signature — `capMisses` 1/0/1 against 2/2/2, and the host clip on `element` in **6 of 6 runs across both conditions**. `37ed422` amplifies a pre-existing defect; it does not create one. Decision: **KEEP `> 1`**, not reverted. `e448b0d`. |
+
+**What entry 3 restores, and what it does not.** It restores C16/I-44 to satisfied-under-I-44a and returns
+the document to *complete as scoped* — the same words as entry 1, reached the other way round, and now
+with the constant's cost **measured** (about one additional cap miss, more consistently, in a three-host
+project) rather than unmeasured. It does **not** restore entry 1's confidence. The pre-registered
+falsifier fired and its counters stand as taken; what the counterfactual overturned is the **attribution**,
+not the reading. A status that travelled complete → reopened → complete is not the same artifact as one
+that was never disturbed, and this ledger exists so it cannot be read as one.
+
+**Why entry 2 stays.** Its measurement is correct; only its causal claim is overturned, and it was
+overturned by an arm entry 2 pre-registered before knowing the answer. Deleting it would erase the
+evidence that the process caught its own error, and would leave entry 3 asserting a conclusion with no
+visible reason it had ever been in doubt.
+
+**What the reopening left genuinely open — NOT closed by entry 3:** Scope A's junction claim is **VOID**
+(`active = 0` across the predicted window, so WebCodecs never engaged and the junction was never tested);
+Scope B is weakly supported and **I-48 / slice B2 is NOT dissolved on it**; the host clip on `element` 6/6
+is registered as **DEBT-014, PARKED** with named blockers and a trigger; and the ~19× run-to-run spread in
+how long Host A's siblings held WebCodecs is an open question rather than noise.
+
 ADR-020 itself asserts "all fifteen invariants stand" and "all four contracts stand" — true as a
 statement that nothing is invalidated forever. This note asks a narrower, more current question: of the
 work actually shipped since, what does each item's status read as **today**, on this runtime, given
@@ -164,12 +195,24 @@ said. Same discipline this note exists to enforce elsewhere.)
 
 ## ADR-013 REOPENS (2026-08-08) — "complete as scoped" is WITHDRAWN
 
+> **STATUS ENTRY 2 — SUPERSEDED by entry 3 (see the ledger at the top). Retained in full, deliberately.**
+> The readings below are correct and stand as taken. The **attribution** is what was overturned: the
+> counterfactual arm this section pre-registered showed the same starvation signature at the old
+> threshold, so `37ed422` amplifies a pre-existing defect rather than creating one, and the withdrawal of
+> C16/I-44 does not survive. The resolution is recorded inline below, from "RESOLVED by the
+> counterfactual".
+
 The real-project measurement ran (3 cold arms, `14b66dc`, plan §5). **Scope C is FALSIFIED, 3/3.** The
 `> 1` threshold that `37ed422` shipped — the fix on which C16 and I-44's satisfaction rested — is not
 safe in the case it newly created.
 
 **Everything below marked "satisfied" for C16/I-44 is withdrawn pending a fix.** The status of ADR-013 is
 **reopened**, not complete.
+
+> **Amended by entry 3.** That withdrawal is **rescinded** — it rested on `37ed422` being the cause, and
+> the counterfactual removed that premise. C16/I-44 are satisfied-under-I-44a again. ADR-013's status is
+> **complete as scoped** for the third and current time. The sentence above is kept because it is what
+> was believed on the evidence available at the time it was written.
 
 **L11 held.** An ADR is a hypothesis until a measurement it could have failed has survived it. This one
 could have failed and did. That is the process working exactly as intended — not a setback, and not to be
@@ -264,7 +307,15 @@ is 6/6.
 
 ---
 
-### Two qualifications on "complete", both load-bearing — SUPERSEDED, see the reopening above
+### Two qualifications on "complete", both load-bearing — STATUS ENTRY 1, superseded twice over
+
+> **Pointer corrected (entry 3).** This section was marked "SUPERSEDED, see the reopening above" while
+> entry 2 stood. Entry 2 has itself been superseded, so read this as the record of **entry 1** — the
+> original *complete as scoped* verdict and, in qualification (ii), the pre-registered falsifier for the
+> `> 1` constant. **That falsifier fired** (entry 2 measured it) and was then **resolved by attribution
+> rather than by revert** (entry 3): the threshold is KEPT, and qualification (ii)'s "what is NOT
+> measured" is now measured. Qualification (i) — I-44 satisfied under the amended I-44a, not the original
+> — is unaffected by either entry and still stands.
 
 **(i) I-44 is satisfied under an amended invariant, not the original one.** `isFlarexVirtualLayerId` is
 still a conjunct in `preferSoftwareDecode`; identity was scoped, not removed. See the I-44 row above and
