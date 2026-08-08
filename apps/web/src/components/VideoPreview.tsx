@@ -1378,6 +1378,11 @@ function VideoPreviewImpl({
   // dormant. The first asset-bound MediaIn is the first entry here — and the first WC acquire.
   traceFlarexChange("loaders", "set", flarexVirtualLayers.map((v) => `${v.id.split(":").slice(-1)[0]}:${v.type}:${v.assetId ?? "-"}`));
 
+  // C16/I-44 (2026-08-08): the declared need `preferSoftwareDecode` reads below — how many virtual
+  // loaders are actually contending for the one hardware H.264 block right now — not `layer.id`.
+  // Generators (Text+/Background) are rasterized in-compositor and never mount a decoder (see the
+  // filter at the Flarex loader render site below), so they don't count toward decode contention.
+  const flarexConcurrentLoaders = flarexVirtualLayers.filter((v) => !isFlarexGeneratorVirtualLayer(v)).length;
 
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
   // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
@@ -2220,6 +2225,7 @@ function VideoPreviewImpl({
                       selected={false}
                       sceneComposited
                       hideVisual
+                      flarexConcurrentLoaders={flarexConcurrentLoaders}
                       // DEMOTED while this comp's proxy is serving (S3.5). The loader stays mounted and
                       // keeps its session; it just stops pulling. Always `false` on the legacy path,
                       // where a served comp's loaders are not in this list at all.
@@ -2414,6 +2420,10 @@ type PreviewLayerProps = {
   /** This layer shares its asset with another active layer (same-source stack) — keep the element
    *  path tightly synced to the transport so stacked twins don't drift into a ghost. */
   strictSourceSync?: boolean | undefined;
+  /** C16/I-44 (2026-08-08): how many decode-hungry Flarex virtual loaders are mounted right now —
+   *  the declared-need signal `preferSoftwareDecode` reads instead of source identity alone. Only
+   *  meaningful for virtual loaders; irrelevant (and left at its 0 default) for ordinary layers. */
+  flarexConcurrentLoaders?: number | undefined;
 };
 
 type PreviewTransformHud = {
@@ -2536,7 +2546,8 @@ const PreviewLayer = memo(function PreviewLayer({
   sceneMediaSink,
   bakeOpacity = true,
   contentMode = false,
-  onEnterContentMode
+  onEnterContentMode,
+  flarexConcurrentLoaders = 0
 }: PreviewLayerProps) {
   bumpRenderCount("PreviewLayer");
   const warpTextSvg = useWarpedTextSvg(layer, currentTime);
@@ -3764,8 +3775,23 @@ const PreviewLayer = memo(function PreviewLayer({
             // 16ms and CPU 3ms — a healthy frame pipeline — while the loader logged LOST SOURCE and
             // played at 1× with jumps. That is starvation, not frame cost. Loaders at 1× are untouched,
             // so the proven multi-source behaviour this flag exists for is unchanged.
+            //
+            // C16/I-44 (2026-08-08): this used to be `isFlarexVirtualLayerId(layer.id)` alone — a
+            // backend chosen from what kind of thing the layer IS, forbidden by I-44's "never source
+            // identity" test. The actual scarce resource is the one hardware block; the declared need is
+            // how many decode-hungry virtual loaders are contending for it right now
+            // (`flarexConcurrentLoaders`), which the measured failure (3 seek-on-demand streams) already
+            // showed is the real variable. A LONE virtual loader plus the host is 2 hardware consumers,
+            // not the measured 3-way starvation case, so it now gets hardware like everything else — a
+            // capability read from contention, not an engine named from identity. Unmeasured: this
+            // specific threshold (>1) has not itself been soaked: it narrows the prior "always software"
+            // rule conservatively (at the exact count the freeze was measured at) rather than loosening
+            // past it, but it is a real behavioural change and should be watched, not assumed proven.
             preferSoftwareDecode={
-              (flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id) && flarexLoaderRate(layer) <= 1
+              (flarexSwDecodeOverride() ?? true) &&
+              isFlarexVirtualLayerId(layer.id) &&
+              flarexConcurrentLoaders > 1 &&
+              flarexLoaderRate(layer) <= 1
             }
             // A RETIMED loader (TimeSpeed, ADR-011) must decode alone. It usually carries the HOST's own
             // url — a promoted host MediaIn always does — and by construction asks for a different time
