@@ -1383,6 +1383,14 @@ function VideoPreviewImpl({
   // Generators (Text+/Background) are rasterized in-compositor and never mount a decoder (see the
   // filter at the Flarex loader render site below), so they don't count toward decode contention.
   const flarexConcurrentLoaders = flarexVirtualLayers.filter((v) => !isFlarexGeneratorVirtualLayer(v)).length;
+  // TEMPORARY — COUNTERFACTUAL ARM (plan §7). Same publish as 3f315cb (the probe's build-identity check
+  // requires it), alongside the threshold reverted to `> 0` so the OLD behaviour is measured on the same
+  // fixture. Both revert together in one commit once the three arms are read.
+  try {
+    (window as unknown as { __rfFlarexConcurrentLoaders?: number }).__rfFlarexConcurrentLoaders = flarexConcurrentLoaders;
+  } catch {
+    /* ignore */
+  }
 
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
   // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
@@ -3790,7 +3798,7 @@ const PreviewLayer = memo(function PreviewLayer({
             preferSoftwareDecode={
               (flarexSwDecodeOverride() ?? true) &&
               isFlarexVirtualLayerId(layer.id) &&
-              flarexConcurrentLoaders > 1 &&
+              flarexConcurrentLoaders > 0 &&
               flarexLoaderRate(layer) <= 1
             }
             // A RETIMED loader (TimeSpeed, ADR-011) must decode alone. It usually carries the HOST's own
