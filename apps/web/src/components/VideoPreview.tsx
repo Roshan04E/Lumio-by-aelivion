@@ -1383,6 +1383,17 @@ function VideoPreviewImpl({
   // Generators (Text+/Background) are rasterized in-compositor and never mount a decoder (see the
   // filter at the Flarex loader render site below), so they don't count toward decode contention.
   const flarexConcurrentLoaders = flarexVirtualLayers.filter((v) => !isFlarexGeneratorVirtualLayer(v)).length;
+  // TEMPORARY MEASUREMENT INSTRUMENTATION (ADR-013 real-project measurement, Scope C).
+  // Publishes the value the `> 1` gate actually reads, so the run can confirm it observed the `== 1`
+  // regime rather than assuming it. The DECISION's outcome needs no publish — `__rfWcPool.activeSoftware`
+  // already reports how many sessions are software-decoded.
+  // REVERTED IN ITS OWN COMMIT once the three runs are read. See
+  // plans/adr-013-real-project-measurement-plan.md §3.
+  try {
+    (window as unknown as { __rfFlarexConcurrentLoaders?: number }).__rfFlarexConcurrentLoaders = flarexConcurrentLoaders;
+  } catch {
+    /* ignore */
+  }
 
   // Comp proxies (plans/flarex-comp-proxy.md, S2): a comp with a VALID pre-rendered proxy plays from it
   // instead of lowering its graph every frame. All the eligibility rules live in the hook; here it is
