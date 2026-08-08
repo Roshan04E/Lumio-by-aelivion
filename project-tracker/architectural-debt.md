@@ -1106,6 +1106,19 @@ stops being mixed — at which point D's swap can finally be reverted for real, 
 can be deleted from the working tree (it already lives safely on `artifact/adr020-shared-detector`). Until
 then, do not `git clean` this tree expecting a normal untracked-file cleanup to be safe.
 
+**RESOLVED (2026-08-08).** The other session committed the grade-compare work as `32e5703`;
+`WebglMediaLayer.tsx` stopped being mixed. `git diff` on the file showed only F's swap (16 insertions / 44
+deletions: the `useTransportBoundary` import, D's inline detector replaced by the shared hook, doc-comment
+changes) — read in full before acting, confirmed to contain nothing else. Reverted with `git checkout --`,
+restoring D's original inline detector and doc comments (the rejection this programme decided on but could
+not execute while the file was hard-stopped). Grepped the whole repo for `admission-reacquire` afterward:
+the only remaining hits are a diagnostic string literal (`WebglMediaLayer.tsx:793`), a trace-reason tag
+(`provider-lifecycle-trace.ts:49`), and documentation references — no code imports the module. Deleted
+`apps/web/src/playback/admission-reacquire.ts` from disk; it remains preserved on
+`artifact/adr020-shared-detector` (`1ffc898`). `pnpm --filter @orreris/web typecheck` and
+`pnpm --filter @orreris/worker typecheck` both pass clean. Nothing on this programme's critical path
+remains blocked by this file.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
