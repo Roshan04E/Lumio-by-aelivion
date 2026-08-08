@@ -1119,6 +1119,34 @@ the only remaining hits are a diagnostic string literal (`WebglMediaLayer.tsx:79
 `pnpm --filter @orreris/worker typecheck` both pass clean. Nothing on this programme's critical path
 remains blocked by this file.
 
+**DISPOSITION UPDATE (2026-08-08) — C15, C16, I-44, I-48, and a location error corrected.**
+
+- **C15 satisfied, not fixed.** `preview-frame-pool.ts` already receives `contribution`/`priority` only
+  as `AcquireOptions` fields and never computes rank itself — the constraint C15 asks for was structurally
+  true before this session touched anything. No code changed.
+- **C16 and I-44 are one violation, fixed in one commit (`37ed422`).** `preferSoftwareDecode` chose a
+  backend from `isFlarexVirtualLayerId(layer.id)` — source identity — forbidden by I-44's own corollary
+  (ADR-013 §4.2). Replaced with a gate on `flarexConcurrentLoaders > 1`, the count of decode-hungry
+  virtual loaders actually mounted — a declared-need signal read from real contention, not from what kind
+  of layer this is. A lone virtual loader now takes hardware like the host does; ≥2 (the measured 3-way
+  starvation shape, host + 2) still takes software. Verified from a clean `git worktree` checkout, not
+  the working tree.
+- **Location error, corrected.** The founder's own check pointed at `WebglMediaLayer.tsx` (`preferSoftware`
+  found there via grep) as I-44's site. That file only *consumes* the value (`preferSoftware:
+  props.preferSoftwareDecode`) — the decision lives in `VideoPreview.tsx:3767` (now `:3786`), which is
+  where it was fixed. Same lesson as the epoch-pattern correction two entries up: **a grep hit names where
+  a symbol is read, not where it is decided** — check the assignment site, not the first match.
+- **I-48 is DEFERRED, not scheduled.** Slice B2 (within-comp/sibling virtual-layer discrimination) is real,
+  unscoped design work — a new per-node contribution channel `TimelineLayer` does not have — for a defect
+  nobody has shown causes harm. That is exactly ADR-020's own dissolution shape. It is not designed here.
+  **Trigger, not a deadline:** if the large real-project measurement (see the measurement plan, filed
+  alongside this entry) shows sibling virtual layers on one Flarex host actually contending, B2 gets
+  scoped and sized from that finding. If it does not, B2 dissolves on the same grounds as I-49/I-50/I-54.
+- **The slice-B collision's root cause, as a class, not just a correction.** A document said "proposed and
+  unimplemented" and was believed over `git log` for three days across three later documents. Documents
+  drift; the repo is the subject. Same family as the fourth DEBT-012 shape above — for anything that ships
+  as a commit, the artifact of record is the commit, never a paragraph that once described it correctly.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
