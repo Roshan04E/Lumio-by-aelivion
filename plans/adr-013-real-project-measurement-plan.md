@@ -88,24 +88,66 @@ Counts alone don't say whether sources are concurrent or sequential; a stacked t
 fixture wearing ordinary clothes. Pre-registered arrangement, on a single timeline track (per §"explicitly
 not included" — no artificial stacking):
 
+**Concrete start/end times, pre-registered. All transitions are 2s; every other junction is a HARD CUT.**
+
+| # | Element | Span | Junction into it | Flarex loaders live |
+|---|---|---|---|---|
+| 1 | clip1 | 0–10s | — | 0 |
+| 2 | clip2 | 10–20s | cross-dissolve (overlap 10–12s) | 0 |
+| 3 | clip3 | 20–32s | wipe (overlap 20–22s) | 0 |
+| 4 | **HOST A** (3 MediaIns) | **32–48s** | **Flarex junction (overlap 32–34s)** | 3 |
+| 5 | clip4 | 48–58s | hard cut | 0 |
+| 6 | **HOST B** (2 MediaIns) | **58–70s** | hard cut | 2 |
+| 7 | clip5 | 70–78s | hard cut | 0 |
+| 8 | **HOST C** (1 MediaIn) | **78–90s** | hard cut | **1** |
+
 ```
-0s        10s  14s      34s     44s  46s        62s      72s        84s  86s     90s
-|- clip1 -|xdis|- clip2 -|- clip3-|junc|- HOST A -|- clip4 -|- HOST B -|wipe|HOST C|
-                                   tion  3 MediaIns          2 MediaIns      1 MediaIn
-                                    ▲
-                            THE PEAK MOMENT (~1.2–3.2s)
-                       clip3 outgoing + Host A's host + A's 3 loaders
-                              = 5 sessions against a ceiling of 4
+0    10   20   32        48    58      70    78         90
+|clip1|clp2|clp3|--HOST A--|clip4|-HOST B-|clp5|--HOST C--|
+      xdis wipe ▲          hard  hard     hard hard
+                │           cut   cut      cut  cut
+        PEAK 30.8–34.0s                   ▲
+        5 sessions vs ceiling 4      ==1 REGIME 76.8–90.0s
+                                     CLEAN WINDOW 78.0–90.0s (12s)
 ```
 
-- **Ordinary clips: sequential.** Each plays start-to-end before the next begins. The ONLY overlap between
-  two ordinary clips is during their own transition (~1–2s), where outgoing and incoming briefly coexist.
-  Not zero overlap ever — overlap bounded to the transition's own duration, never a deliberate stack.
-- **No two Flarex hosts overlap.** A, B and C each occupy a contiguous span separated by at least one
-  ordinary clip. Honored as a default per the brief; testing overlapping hosts would be its own
-  separately-motivated measurement, not folded in here.
-- **The Flarex junction transition connects clip3 to Host A**, never host-to-host — placing it between two
-  hosts would manufacture exactly the overlap ruled out above.
+- **Ordinary clips: sequential.** The only ordinary-clip overlap is during a transition (2s each).
+- **No two Flarex hosts overlap**, and none is adjacent to another — see the isolation arithmetic below.
+- **The Flarex junction transition connects clip3 to Host A**, never host-to-host.
+- **Nothing follows Host C**, and its entry is a hard cut — deliberate, per the isolation requirement.
+
+#### Host C's isolation — the same preroll mechanism, applied one layer down
+
+`PRELOAD_LOOKAHEAD_SECONDS` (1.2s) pulls a host's loaders into `flarexConcurrentLoaders` *before* it is on
+screen. That is what widened the junction window; it applies to Host C too, and if Host C sat within
+preroll reach of Host B its count would be 1+2 = 3 and the `== 1` case would vanish by exactly the
+mechanism just corrected for. Arithmetic on **both** sides:
+
+**Before Host C (the side that matters):**
+- Host B is active 58–70s. Its entry and exit are **hard cuts**, so `isOutgoingInPostroll` never applies
+  (postroll requires a resolved transition) — **Host B contributes 0 loaders from 70.0s onward.**
+- Host C prerolls from `78.0 − 1.2 = 76.8s`.
+- **Separation between B's last contribution and C's first: 76.8 − 70.0 = 6.8s.** Host B is 5.6s clear of
+  even touching Host C's preroll. clip5 (70–78s, 8s) provides that gap and is an ordinary clip, so it
+  contributes no Flarex loaders at all.
+
+**After Host C:** nothing follows. No later clip can preroll into C's window — the one direction a naive
+layout would still leak from.
+
+**Resulting windows:**
+- **`== 1` count regime: 76.8 – 90.0s (13.2s).** From 76.8–78.0s clip5 is still on screen, so total
+  sessions there are 3 (clip5 hardware + C's host prerolling + C's loader) — the *count* is 1, but the
+  window is not decode-clean.
+- **CLEAN `== 1` window: 78.0 – 90.0s = 12.0 seconds.** clip5 has ended (hard cut, no postroll), nothing
+  else is mounted, and the only decoders alive are Host C's host clip and its single loader — 2 sessions
+  against a ceiling of 4, both on hardware under `37ed422`.
+- **At 100ms sampling that is ~120 samples in the clean window**, far above the "a few seconds" floor. No
+  need to move Host C further out; the separation is already 5.6s wider than preroll reach.
+
+**Vacuity check for this specific window**, since the whole point is not to repeat the mistake: the run
+must *observe* `flarexConcurrentLoaders == 1` in samples timestamped within 78.0–90.0s. If it reads
+anything else there, Scope C is VOID (not falsified) and the reading itself is the finding — it would mean
+the count's scope is not what §0's tracing concluded.
 
 #### Corrected arithmetic (the previous draft was wrong twice)
 
@@ -278,15 +320,55 @@ The fixture isolates all three regimes deliberately: **Host C = 1 loader** (`== 
 changed by `37ed422`), **Host B = 2** (`> 1`, software — unchanged), **Host A = 3** (`> 1`, software —
 unchanged, and the case the original 2026-07-27 finding was measured at).
 
-- **Threshold VALIDATED** — Host C's window shows its lone loader on hardware (`__rfWcMode`) with no
-  starvation attributable to it: `capMisses` does not increment during C's span, the loader does not fall
-  back to `element`, and no held/dropped-frame signature appears. Combined with Hosts A and B behaving as
-  before, `> 1` is the right cutoff and the unmeasured constant is retired.
-- **Threshold FALSIFIED** — Host C's window shows starvation attributable to the host+loader pair
-  (`capMisses` increments during C's span, or the loader/host falls to `element`, or frames hold). This is
-  the falsifier named in the scope note: `== 1` was **not** safe on hardware, `37ed422` regressed that
-  case, and the threshold must revert to the old behaviour (`> 0`) or take a different shape. **Reported as
-  a defect in shipped code, not as a plan finding**, and it takes priority over I-48/Governor conclusions.
+- **Threshold VALIDATED** — across **all three runs**, in the clean window W (defined below): none of F1–F4
+  fires, and `flarexConcurrentLoaders == 1` is positively observed in W (the vacuity check). Combined with
+  Hosts A and B behaving as before, `> 1` is the right cutoff and the constant moves from "shipped with no
+  evidence" to "shipped with one supporting observation."
+- **Threshold FALSIFIED** — stated as readings, not as a description. Let **W** = the clean window,
+  samples whose recorded playhead time satisfies `78.0 ≤ t ≤ 90.0`, and let `t₀` = the last sample with
+  `t < 78.0`. **Any ONE of the following falsifies:**
+
+  | # | Reading | Threshold |
+  |---|---|---|
+  | F1 | `capMisses` at any sample in W minus `capMisses` at `t₀` | **Δ ≥ 1** |
+  | F2 | `__rfWcMode[<Host C loader's source URL>]` at any sample in W | **`"element"`** (fell off WebCodecs) |
+  | F3 | `__rfWcMode[<Host C host clip's source URL>]` at any sample in W | **`"element"`** (the inverse case — the loader won the block and the *host* lost, the 2026-07-27 shape) |
+  | F4 | `starvedSources` at any sample in W | **≥ 1** |
+
+  > **CORRECTED 2026-08-08, before any measurement run, on evidence from a non-measuring validation run.**
+  > The table above is defective in two ways and the probe implements the corrected form.
+  >
+  > **(a) W was drawn to exclude the causal moment.** W = 78.0–90.0 was chosen as "decode-clean" — only
+  > Host C's pair mounted. But granting hardware to a *lone* loader can only cause harm when there **is**
+  > other pressure, and the only such moment is Host C's preroll overlap with clip5 at **76.8–78.0s**,
+  > which the clean window excludes by construction. The validation run showed both cap misses landing at
+  > **t=76.9 and t=77.1** — so F1, measured from 78.0, read **0** while the event it exists to catch had
+  > already happened. **Primary window is now the whole `== 1` REGIME, 76.8–90.0s.** The clean window is
+  > retained as a *secondary* observation answering a different question: does the starvation *persist*
+  > once pressure is gone (a DEBT-013 recovery question, not a threshold question)?
+  >
+  > **(b) F4 was a LEVEL, so it fired on inherited starvation.** `starvedSources ≥ 1` anywhere in W says
+  > nothing about *when* the starvation began — a waiter denied at 30s and never recovered reads 1 at 80s
+  > and would have been attributed to Host C. **F1 and F4 are now ONSET measures**: the delta against a
+  > baseline sampled immediately before the regime begins. A level that was already 1 before 76.8s is not
+  > Scope C evidence; it is a Scope A observation about recovery.
+  >
+  > This is the same class of error the plan already corrects elsewhere (a guard that cannot distinguish
+  > "the thing didn't happen" from "I couldn't see it"), found in my own pre-registration by running the
+  > fixture once without measuring. It is recorded rather than quietly fixed because the falsifier changed
+  > *before* it was used, and a reader must be able to see that it did.
+
+  **How attribution works, concretely.** Every sample carries its playhead time (§3), so W is selected by
+  timestamp, not inferred. Attribution is sound *by construction of the layout*: within 78.0–90.0s the only
+  mounted decoders are Host C's host clip and its single loader — clip5 ended at 78.0s on a hard cut with
+  no postroll, nothing follows Host C, and Hosts A and B are 8s and 30s away respectively. So an F1–F4
+  reading inside W cannot be attributed to any other source, which is exactly what "not somewhere in 90
+  seconds" requires. A `capMisses` increment anywhere *outside* W is a Scope A observation and is reported
+  there, never as Scope C evidence.
+
+  If falsified: `== 1` was **not** safe on hardware, `37ed422` regressed that case, and the threshold must
+  revert to `> 0` (old behaviour) or take a different shape. **Reported as a defect in shipped code, not as
+  a plan finding**, and it takes priority over the I-48/Governor conclusions.
 - **Threshold UNTESTED** → VOID for Scope C specifically — Host C never mounted, its loader never reached
   a create attempt, or the `== 1` regime was never actually observed (e.g. `flarexConcurrentLoaders` read
   something other than 1 during C's window, which would itself be a finding about the count's scope).
