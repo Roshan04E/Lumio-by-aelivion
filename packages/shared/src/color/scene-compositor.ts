@@ -55,7 +55,7 @@ import {
   type FragmentEffectParam,
 } from "./fragment-effects/registry";
 import type { BlendMode } from "../types";
-import type { ColorPipeline } from "./types";
+import type { ColorPipeline, GradeCompare } from "./types";
 import { MediaWebGLRenderer } from "./media-renderer";
 import { frameProfiler, type CompositorProfilerSnapshot } from "./frame-profiler";
 
@@ -244,6 +244,12 @@ export interface SceneRegionPass {
   blurPx?: number | undefined;
   /** Color pipeline of the ONE region effect, applied to the RUNNING nest image. */
   pipeline?: ColorPipeline | null | undefined;
+  /**
+   * Editor-only grade compare: `pipeline` applies to one side of this split only. The split is a
+   * fraction of the NEST image being graded (comp space for a Flarex wrap, which is comp-sized).
+   * Omitted on every export/Remotion draw, where the grade always covers the whole image.
+   */
+  compare?: GradeCompare | null | undefined;
 }
 
 export interface SceneLayerDraw {
@@ -405,6 +411,12 @@ export interface SceneGroupDraw {
    * skip, byte-identical to before this field existed.
    */
   pipeline?: ColorPipeline | null | undefined;
+  /**
+   * Editor-only grade compare for `pipeline` (see {@link SceneRegionPass.compare}). This is THE grade
+   * point for a Flarex colour node — its pipeline lands on a comp-sized wrap here, not on any media
+   * layer — so without it a before/after wipe over a Flarex comp shows the same graded picture twice.
+   */
+  compare?: GradeCompare | null | undefined;
   /** Stable per-instance key for the grade renderer/LUT cache (the compound clip id). Required when
    *  `pipeline` is set; falls back to `debugGroupId`. */
   groupKey?: string | undefined;
@@ -2645,6 +2657,7 @@ export class SceneCompositor {
           matte: null,
           pipeline: pass.pipeline,
           amount: 1,
+          compare: pass.compare ?? null,
           opacity: 1,
           mediaEffects: null,
           target: entry.target,
@@ -2953,6 +2966,7 @@ export class SceneCompositor {
         matte: null,
         pipeline: draw.pipeline,
         amount: 1,
+        compare: draw.compare ?? null,
         opacity: 1,
         mediaEffects: null,
         target: entry.target,

@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
 } from "react";
-import { bindDecoderSource, colorPipelineCacheKey, decoderReleaseVerdict, defaultSession, MediaWebGLRenderer, registerContextDisposer, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@orreris/shared";
+import { bindDecoderSource, colorPipelineCacheKey, decoderReleaseVerdict, defaultSession, gradeCompareKey, MediaWebGLRenderer, registerContextDisposer, resolveGradeCompare, resolveGraphicAnimation, graphicToAnimatedDataUrl, graphicAnimationBakeTime, graphicAnimationFrameAt, type ColorPipeline, type GradeCompareRequest, type GraphicAnimationPlan, type LayerGraphic, type MatteRef, type MediaEffects, type MediaTransition, type TimelineKeyframeV2 } from "@orreris/shared";
 import type { VisibleContribution } from "@orreris/shared";
 import { acquireVideo } from "../lib/video-element-pool";
 import { markHotSpot } from "../lib/perfDiagnostics";
@@ -274,6 +274,12 @@ interface BaseProps {
   /** Pro stylize effects (vignette/grain/chroma) applied in the same shader pass. */
   mediaEffects?: MediaEffects | null;
   amount?: number;
+  /**
+   * Editor before/after wipe: the grade applies to one side of a comp-space divider only. Resolved to
+   * this layer's media UV at draw time (the source size is known only there). Null = grade the whole
+   * frame, which is what every non-viewer path passes.
+   */
+  gradeCompare?: GradeCompareRequest | null | undefined;
   /** Full style from getCompositionMediaStyle(..., { skipColorFilter: true }). */
   style: CSSProperties;
   className?: string | undefined;
@@ -475,7 +481,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     const {
       mediaType, src, matte, pipeline, mediaEffects = null, amount = 1, style, className,
       dragHandlers, onWebglFailed, poster, hidden = false, interactiveHidden = false, transition = null, onGradedFrame,
-      bakeOpacity = true, sceneMediaSink,
+      bakeOpacity = true, sceneMediaSink, gradeCompare = null,
     } = props;
 
     // ── SINGLE-CTX PREVIEW (Phase 5, orreris.singleCtxPreview) ────────────────
@@ -503,9 +509,12 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       matteOpacity: number;
       transition: MediaTransition | null;
       transitionKey: string;
+      gradeCompare: GradeCompareRequest | null;
+      gradeCompareKey: string;
     }>({
       pipeline: null, pipelineKey: "", mediaEffects: null, mediaEffectsKey: "", amount: 1,
       bakedOpacity: 1, hasMatte: false, matteInvert: false, matteOpacity: 1, transition: null, transitionKey: "",
+      gradeCompare: null, gradeCompareKey: "",
     });
 
     // Latest onGradedFrame, read inside the draw loop (whose closure would otherwise be stale).
@@ -527,6 +536,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // The transition reveal changes every frame; the playing draw loop reads the latest from this ref.
     const transitionRef = useRef<MediaTransition | null>(transition);
     transitionRef.current = transition;
+
+    // Same reason as the two above: the divider can be dragged WHILE PLAYING, and the loop's closure
+    // would otherwise keep grading against the split it started with.
+    const gradeCompareRef = useRef<GradeCompareRequest | null>(gradeCompare);
+    gradeCompareRef.current = gradeCompare;
 
     // Same-source-stack flag, read inside the watchdog interval closure (which doesn't re-subscribe
     // when this prop flips). Element-path only; the WC path is already transport-frame-locked.
@@ -1252,7 +1266,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // only refreshed once you played, where the per-frame loop re-grades every frame). Keying on their
     // VALUES (not object identity, so no spurious redraws) repaints a paused frame on any change, making
     // every baked draw input real-time. Covers the reported opacity bug + the same class for the others.
-    const bakedInputsKey = `${extractOpacity(style)}|${amount}|${matte?.invert ?? false}|${matte?.opacity ?? 1}`;
+    // The compare wipe joins them: dragging the divider changes a baked shader uniform, and the frame
+    // being compared is almost always PAUSED, so without this the divider would only move on playback.
+    const compareKey = useMemo(() => gradeCompareKey(gradeCompare), [gradeCompare]);
+    const bakedInputsKey = `${extractOpacity(style)}|${amount}|${matte?.invert ?? false}|${matte?.opacity ?? 1}|${compareKey}`;
     useEffect(() => {
       if (failedRef.current) return;
       if (mediaType === "image") drawImage();
@@ -1443,6 +1460,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           sourceHeight: still.height,
           pipeline,
           amount,
+          compare: resolveGradeCompare(gradeCompareRef.current, still.width, still.height),
           opacity: bakeOpacity ? extractOpacity(style) : 1,
           mediaEffects: mediaEffectsRef.current,
           transition: transitionRef.current,
@@ -2060,6 +2078,7 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           matteOpacity: matte?.opacity ?? 1,
           pipeline,
           amount,
+          compare: resolveGradeCompare(gradeCompareRef.current, sourceWidth, sourceHeight),
           opacity: bakeOpacity ? extractOpacity(style) : 1,
           mediaEffects: mediaEffectsRef.current,
           transition: transitionRef.current,
@@ -2423,6 +2442,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
         matteOpacity: matte?.opacity ?? 1,
         transition: transitionRef.current,
         transitionKey,
+        // COMP-space, not yet resolved: the compositor owns the decoded source size for this layer, so
+        // it is the only place the media-UV split can be computed from the frame it is about to grade.
+        gradeCompare,
+        gradeCompareKey: compareKey,
       };
     }
 
@@ -2494,6 +2517,8 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
             matte: gi.hasMatte && matteVideo ? { source: matteVideo as TexImageSource, invert: gi.matteInvert, opacity: gi.matteOpacity } : null,
             transition: gi.transition,
             transitionKey: gi.transitionKey,
+            gradeCompare: gi.gradeCompare,
+            gradeCompareKey: gi.gradeCompareKey,
             stalenessSeconds,
             // Diagnostic companion to the line above: the clamp's input, so a large staleness reading
             // can be told apart from a clamp that never ran. Video only — a still has no media end.

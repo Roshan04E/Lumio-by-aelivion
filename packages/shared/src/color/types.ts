@@ -162,6 +162,21 @@ export interface MediaEffects {
   timeSeconds: number;
 }
 
+/**
+ * Grade-compare wipe, RESOLVED to the media's own UV space — what `MediaWebGLRenderer.draw` consumes.
+ * A VIEWER-ONLY affordance: the editor's before/after control produces it, and nothing on the
+ * export/Remotion path ever does, so a rendered frame is always fully graded.
+ *
+ * `split` is media UV x (0 = left edge of the SOURCE image, 1 = right). Callers hold a comp-space
+ * divider and convert with `resolveGradeCompare`, which folds in object-fit + content zoom/pan so the
+ * divider drawn over the viewport lands where the grade actually switches.
+ */
+export interface GradeCompare {
+  split: number;
+  /** Which side of the split shows the GRADED image; the other shows the original. */
+  gradedSide: "left" | "right";
+}
+
 /** True when every stylize branch is disabled (renderer can skip the uniforms cheaply). */
 export function isIdentityMediaEffects(fx: MediaEffects | null | undefined): boolean {
   return !fx || (!fx.vignette && !fx.grain && !fx.chromaKey);

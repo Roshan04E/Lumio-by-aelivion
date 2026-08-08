@@ -45,11 +45,13 @@ import {
   notePresent,
   recordFlarexDegradation,
   registerResource,
+  resolveGradeCompare,
   servedTime,
   touchResource,
   type ServedTime,
   type ColorPipeline,
   type FrameOutcome,
+  type GradeCompare,
   type FlarexComp,
   type NestedGroupSpec,
   type SceneFrameSpec,
@@ -497,6 +499,13 @@ export interface ScenePreviewCanvasProps {
    *  compiler no longer reads the persisted `comp.previewNodeId`, so this is the only channel by which
    *  a view dot reaches the viewer. Export and the worker pass nothing and root at MediaOut (I-26). */
   flarexPreviewRoots?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Editor before/after wipe for Flarex comps — a comp's grade is in its colour NODES, so the media
+   * layer's own compare finds nothing to bypass and both halves come back identical without this.
+   * Comp-width fraction; applied to the LIVE frame only (never to node thumbnails or viewer-proxy
+   * captures, which must not bake a review overlay into a cached artifact).
+   */
+  flarexGradeCompare?: GradeCompare | null | undefined;
   /** Flarex asset-source MediaIn virtual loaders (FLAREX.md Phase 2, Fusion model): synthetic
    *  off-timeline media layers whose graded canvases the caller ALSO publishes into `gradedRef`
    *  (by virtual id), consulted only by the Flarex compiler's `resolveSourceDraw`. Undefined = no
@@ -536,6 +545,7 @@ export function ScenePreviewCanvas({
   nestedGroups,
   flarexComps,
   flarexPreviewRoots,
+  flarexGradeCompare,
   flarexVirtualLayers,
   flarexCompProxiesRef,
   captureRef,
@@ -853,8 +863,8 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
-  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexVirtualLayers });
-  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexVirtualLayers };
+  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexGradeCompare, flarexVirtualLayers });
+  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexGradeCompare, flarexVirtualLayers };
   // Event-driven redraw: composite while playing, or for a settle window after any input change /
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
@@ -954,7 +964,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
   // new graph and thus a new `layers` array identity. Relying on that is exactly the coupling the
   // kernel migration is unpicking, and an explicit dependency costs nothing: the memo behind it is
   // keyed on `graph.flarexComps`, so its identity is stable while the dots are.
-  useEffect(requestDraw, [layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, nestedGroups, flarexPreviewRoots]);
+  useEffect(requestDraw, [layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, nestedGroups, flarexPreviewRoots, flarexGradeCompare]);
 
   useEffect(() => {
     disposedRef.current = false;
@@ -1136,7 +1146,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     const drawStart = performance.now();
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
-    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexPreviewRoots: fxRoots, flarexVirtualLayers: fxVirtual } = inputsRef.current;
+    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexPreviewRoots: fxRoots, flarexGradeCompare: fxCompare, flarexVirtualLayers: fxVirtual } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
@@ -1334,7 +1344,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       // `fr` is load-bearing: the proxy and full-res frames can share a `frameVersion` (the swap is the
       // COMPOSITOR's decision, not a new publish by the producer), so without it the skip would serve
       // the cached proxy-graded texture forever and the upgrade would never appear on screen.
-      const key = `${snap.frameVersion}|${snap.pipelineKey}|${snap.mediaEffectsKey}|${snap.amount}|${snap.bakedOpacity}|${snap.transitionKey}|fr${chosenFrame === snap.fullResFrame ? 1 : 0}`;
+      // `gradeCompareKey` is in the key for the same reason `pipelineKey` is: moving the divider changes
+      // the grade this target holds, and without it a paused frame would keep serving the cached one.
+      const key = `${snap.frameVersion}|${snap.pipelineKey}|${snap.mediaEffectsKey}|${snap.amount}|${snap.bakedOpacity}|${snap.transitionKey}|${snap.gradeCompareKey}|fr${chosenFrame === snap.fullResFrame ? 1 : 0}`;
       if (!snap.matte && entry.lastKey === key && entry.target.width === w0 && entry.target.height === h0) {
         recordSingleCtx("skips");
         // Re-grade skip: same frame version, same grade — so the same pixels, and therefore the same
@@ -1362,6 +1374,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
         matteOpacity: snap.matte?.opacity ?? 1,
         pipeline: snap.pipeline,
         amount: snap.amount,
+        // w0/h0 are the DECODED source dimensions of the very frame being graded — the proxy and the
+        // full-res frame can differ in size, and the split must follow whichever one is on the GPU.
+        compare: resolveGradeCompare(snap.gradeCompare, w0, h0),
         opacity: snap.bakedOpacity,
         mediaEffects: snap.mediaEffects,
         transition: snap.transition,
@@ -1470,6 +1485,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       height: h,
       frameTimeSeconds: t,
       mediaEpoch,
+      // Compare is a render-context input: it changes what a colour node draws without touching the
+      // graph, the time or any source, so it has to invalidate reuse or the divider would not move.
+      gradeCompareKey: fxCompare ? `${fxCompare.split.toFixed(4)}|${fxCompare.gradedSide}` : "",
       frameId: activeFrame()?.id ?? 0,
       nowMs: performance.now(),
     });
@@ -1495,6 +1513,9 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       nestMatteCaches: nestMatteCachesRef.current,
       flarexComps: fxComps,
       flarexPreviewRoots: fxRoots,
+      // LIVE frame only. The two capture paths below deliberately omit it — a node thumbnail or a
+      // viewer proxy is a stored artifact, and a review-mode wipe must never be baked into one.
+      flarexGradeCompare: fxCompare,
       flarexVirtualLayers: fxVirtual,
       // S4.5 — the HOST decides the substitution policy and the compiler is told (I-15: the lowering
       // layer owns no policy). Read from a ref so the live path never re-resolves a flag per frame.

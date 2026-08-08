@@ -19,7 +19,7 @@
  * photo win the producer-version upload skip used to provide).
  */
 
-import type { ColorPipeline, MediaEffects, MediaTransition } from "@orreris/shared";
+import type { ColorPipeline, GradeCompareRequest, MediaEffects, MediaTransition } from "@orreris/shared";
 
 export interface ScenePreviewMediaFrame {
   /** The raw decode source to upload (video element / VideoFrame clone / ImageBitmap / img). */
@@ -51,6 +51,14 @@ export interface ScenePreviewMediaSnapshot {
   /** Legacy per-clip reveal (wipe/iris/dip) — null in scene mode (junctions fold in-compositor). */
   transition: MediaTransition | null;
   transitionKey: string;
+  /**
+   * Editor before/after wipe, still in COMP space — the compositor resolves it to this layer's media UV
+   * against the frame it grades (only it knows the decoded source size). Null whenever compare is off,
+   * which is always outside the viewer.
+   */
+  gradeCompare: GradeCompareRequest | null;
+  /** Memoized key for `gradeCompare`; folded into the re-grade skip so dragging the divider repaints. */
+  gradeCompareKey: string;
   /**
    * TEMPORAL COHERENCE (2026-07-28): how far the frame in `frame` is from the one the LIVE playhead
    * asks for, in TIMELINE seconds. 0 = showing exactly the requested frame. This is the question

@@ -26,7 +26,7 @@
 
 import { evaluateFlarexNodeParam } from "../animation";
 import { createBoxMask, createMask } from "../clip-masks";
-import type { ColorPipeline } from "../color/types";
+import type { ColorPipeline, GradeCompare } from "../color/types";
 import { getFragmentEffect, resolveFragmentEffectParams } from "../color/fragment-effects/registry";
 import {
   FLAREX_CHANNELS_ID,
@@ -149,6 +149,19 @@ export interface FlarexLowerCtx {
    * unwired), so a preview pass can never blank the real viewer.
    */
   previewRootNodeId?: string | undefined;
+  /**
+   * EDITOR GRADE COMPARE (viewer-only). Every colour node in this comp applies to one side of this
+   * split only, so the before/after wipe means the same thing over a Flarex comp as it does over a
+   * plain clip: same picture, one side ungraded.
+   *
+   * A comp's grade lives in its NODES, not on the host layer — so the layer-level wipe that serves an
+   * ordinary clip finds nothing to bypass here and both halves come back identical. This is the hook
+   * that fixes that. The split is a fraction of the comp width; a Flarex wrap's nest RTT is comp-sized
+   * and identity-shelled, so it needs no object-fit conversion (unlike the media path).
+   *
+   * Undefined in export, Remotion, and every worker compile — where the grade always covers the frame.
+   */
+  gradeCompare?: GradeCompare | null | undefined;
   /**
    * DEGRADATION OUT-CHANNEL (slice S0.2). Called whenever a node produces less than it was asked for —
    * a source that ended, a loader with no picture yet, an unbacked generator, an unimplemented node, a
@@ -915,7 +928,13 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         const pipeline = effects.length ? pipelineForEffects(effects) : null;
         let draw = input;
         if (pipeline) {
-          draw = pushRegionPass(input, { effectKey: `flarex_${comp.id}_${node.id}`, mask: raster.tex, maskVersion: raster.version, pipeline });
+          draw = pushRegionPass(input, {
+            effectKey: `flarex_${comp.id}_${node.id}`,
+            mask: raster.tex,
+            maskVersion: raster.version,
+            pipeline,
+            compare: ctx.gradeCompare ?? null,
+          });
         }
         // Film passes are fragment passes, so they take the pass model's OWN mask — same region, one
         // pass, no second nest.
@@ -950,6 +969,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           // stay stable across frames as the chain grows.
           upstream!.__flarexColorEffects = merged;
           upstream!.pipeline = pipeline;
+          upstream!.compare = ctx.gradeCompare ?? null;
           frameProfiler.bump("compile.colorCoalesced");
           out = upstream!;
           placed = true;
@@ -960,6 +980,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         if (pipeline) {
           const wrap = wrapFor(input, STAGE_PIPELINE);
           wrap.pipeline = pipeline;
+          wrap.compare = ctx.gradeCompare ?? null;
           wrap.groupKey = `flarex_${comp.id}_${node.id}`;
           wrap.__flarexColorEffects = effects;
           out = wrap;

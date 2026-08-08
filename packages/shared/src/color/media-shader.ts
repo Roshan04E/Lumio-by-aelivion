@@ -35,6 +35,15 @@ uniform float u_lutSize;
 uniform float u_amount;
 uniform bool u_hasLut;
 
+// Grade-compare wipe (VIEWER ONLY — never set by the export/Remotion path, where the mode stays 0 and
+// this whole block is inert). Splits the frame so one side shows the graded image and the other the
+// original, for an A/B on the same picture instead of a whole-frame bypass toggle.
+//   0 = off, 1 = graded on the RIGHT of the split, 2 = graded on the LEFT.
+// u_compareSplit is in MEDIA UV x (the caller converts the comp-space divider through the layer's
+// object-fit + content transform, so the drawn divider lands where the grade actually switches).
+uniform int u_compareMode;
+uniform float u_compareSplit;
+
 uniform sampler2D u_matte;
 uniform bool u_hasMatte;
 uniform bool u_matteInvert;
@@ -149,7 +158,14 @@ void main() {
 
   if (u_hasLut) {
     vec3 graded = lutLookup(src.rgb);
-    src.rgb = mix(src.rgb, graded, u_amount);
+    // Compare wipe: the "before" side simply grades at amount 0, so the ungraded pixels are the SAME
+    // pixels the whole-frame bypass produced — the two sides differ only by the grade, never by path.
+    float amt = u_amount;
+    if (u_compareMode != 0) {
+      float onRight = step(u_compareSplit, v_uv.x);
+      amt *= (u_compareMode == 1) ? onRight : (1.0 - onRight);
+    }
+    src.rgb = mix(src.rgb, graded, amt);
   }
 
   // Chroma key — YCbCr chroma-plane keyer: soft edge, matte choke, key-direction despill.

@@ -16,7 +16,7 @@ import { getTexImageSourceProducerInfo } from "../color/gl-context";
 import { frameProfiler } from "../color/frame-profiler";
 import { MediaWebGLRenderer } from "../color/media-renderer";
 import { colorPipelineCacheKey } from "../color/pipeline";
-import type { ColorPipeline } from "../color/types";
+import type { ColorPipeline, GradeCompare } from "../color/types";
 import { getFragmentEffect } from "../color/fragment-effects/registry";
 import { builtinFragmentEffectId } from "../color/fragment-effects/builtins";
 import { isSceneTextureSource } from "../color/scene-compositor";
@@ -214,6 +214,15 @@ export interface BuildSceneDrawsInputs {
    * renders one comp at a time, so a single id is sufficient.
    */
   flarexPreviewRootNodeId?: string | undefined;
+  /**
+   * EDITOR GRADE COMPARE for Flarex comps (viewer-only). Forwarded verbatim to `compileFlarexComp`'s
+   * `gradeCompare`, which makes every colour node in the comp apply to one side of the split. Absent
+   * in export/Remotion → byte-identical to before this field existed.
+   *
+   * Separate from the media path's compare (which travels on the layer, in the source's UV space)
+   * because a comp's grade is in its nodes: the split here is a plain comp-width fraction.
+   */
+  flarexGradeCompare?: GradeCompare | null | undefined;
   /**
    * PER-COMP preview roots (`compId → nodeId`) — the live viewer's view dots (ADR-012 §0.5, S1.2).
    *
@@ -868,6 +877,8 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
       // Thumbnail scalar wins (it is explicitly re-rooting one comp); otherwise this comp's own live
       // view dot, if the viewer supplied one. Absent in export/worker → roots at MediaOut (I-26).
       previewRootNodeId: inputs.flarexPreviewRootNodeId ?? inputs.flarexPreviewRoots?.[comp.id],
+      // Editor before/after wipe. Comp-space split, no object-fit conversion — see the option's docs.
+      gradeCompare: inputs.flarexGradeCompare,
       // Degradation reporting (S0.2). Observability only; absent → the compiler is unchanged.
       onDegrade: inputs.onFlarexDegrade ? (degradation) => inputs.onFlarexDegrade!(comp.id, degradation) : undefined,
       // S6.4/S6.6 — comp id attached here, so a node id is never ambiguous across comps in one frame.

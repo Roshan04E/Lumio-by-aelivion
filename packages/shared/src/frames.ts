@@ -724,6 +724,71 @@ export function mediaRectInFrame(args: {
 }
 
 /**
+ * The comp-space divider a grade-compare wipe is drawn at, expressed in the MEDIA's own UV x — what
+ * the media shader compares `v_uv.x` against. Without this the wipe would split each source at that
+ * fraction of its own image, which is NOT where the divider sits whenever the source is cropped by
+ * object-fit (16:9 footage in a 9:16 comp — the normal case here) or content-zoomed.
+ *
+ * Reuses `mediaRectInFrame`, so it inverts the same mapping the compositor applies. Content CROP is
+ * deliberately not an input: crop trims the frame's outer edges (`COMPOSITE_FS` discards those
+ * fragments) without shifting the media inside it, so it cannot move the split.
+ *
+ * NOT handled: the layer TRANSFORM (a scaled/rotated PIP clip). Its quad is placed after this mapping,
+ * so the wipe still splits such a layer at the comp divider's fraction of the layer box rather than of
+ * the comp. Full-frame clips — the ones anyone grades — are exact.
+ */
+export function resolveGradeCompareSplit(args: {
+  /** Divider position in comp fractions, 0 = left edge of the comp, 1 = right. */
+  splitComp: number;
+  sourceAspect: number;
+  compAspect: number;
+  fit: FrameObjectFit;
+  contentScale: number;
+  contentOffset: { x: number; y: number };
+}): number {
+  const rect = mediaRectInFrame(args);
+  if (!(rect.width > 0)) return args.splitComp;
+  return (args.splitComp - rect.x) / rect.width;
+}
+
+/**
+ * A grade-compare wipe as the EDITOR states it: a divider in comp space plus everything needed to place
+ * it in any one layer's media UV. Travels down as a prop / through the single-ctx snapshot; each media
+ * layer resolves it against its own decoded source size at draw time (which is the only place the
+ * source aspect is known). Null everywhere the compare is off.
+ */
+export interface GradeCompareRequest {
+  /** Divider position in comp fractions, 0 = left edge of the comp, 1 = right. */
+  splitComp: number;
+  /** Which side of the divider shows the GRADED image. */
+  gradedSide: "left" | "right";
+  compAspect: number;
+  fit: FrameObjectFit;
+  contentScale: number;
+  contentOffset: { x: number; y: number };
+}
+
+/** Resolve a {@link GradeCompareRequest} against one layer's decoded source size → shader-ready UV split. */
+export function resolveGradeCompare(
+  request: GradeCompareRequest | null | undefined,
+  sourceWidth: number,
+  sourceHeight: number
+): { split: number; gradedSide: "left" | "right" } | null {
+  if (!request) return null;
+  const sourceAspect = sourceHeight > 0 ? sourceWidth / sourceHeight : 0;
+  return {
+    split: resolveGradeCompareSplit({ ...request, sourceAspect }),
+    gradedSide: request.gradedSide,
+  };
+}
+
+/** Stable cache key for a compare request — folded into the re-grade skip keys so dragging the divider repaints. */
+export function gradeCompareKey(request: GradeCompareRequest | null | undefined): string {
+  if (!request) return "";
+  return `${request.splitComp.toFixed(4)}|${request.gradedSide}|${request.compAspect.toFixed(4)}|${request.fit}|${request.contentScale}|${request.contentOffset.x}|${request.contentOffset.y}`;
+}
+
+/**
  * Snap a media rect's edges/centre to a frame box while panning in content mode. Returns the comp-fraction
  * shift `{ dx, dy }` to apply to the rect so a near edge (or centre) clicks onto the frame, plus whether each
  * axis snapped (for a HUD). Engages only within `thresholdX`/`thresholdY` (comp fractions — the caller

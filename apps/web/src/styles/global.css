@@ -10207,19 +10207,85 @@ input[type="checkbox"] {
   text-transform: uppercase;
 }
 
-.preview-compare-badge {
+/* ── Grade compare (before/after wipe) ─────────────────────────────────────
+   Sits inside .phone-frame, whose box IS the comp box, so `--compare-split` is a plain percentage of
+   the composition and needs no zoom math. Only the divider takes pointer events — everything else is
+   click-through so selecting/dragging clips underneath still works while compare is on. */
+.preview-compare {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.preview-compare-label {
   position: absolute;
   top: 12px;
-  right: 12px;
-  z-index: 8;
   padding: 3px 9px;
   border-radius: 999px;
   font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  color: #f2f3f5;
+  background: rgba(12, 13, 16, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.preview-compare-label.is-left { left: 12px; }
+.preview-compare-label.is-right { right: 12px; }
+
+/* The graded half is the one being judged — mark it, so which side is which never has to be guessed. */
+.preview-compare-label.is-after {
   color: #0b0c10;
   background: #ffce4d;
+}
+
+.preview-compare-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--compare-split, 50%);
+  width: 25px;
+  margin-left: -12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ew-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* The line itself is a child pseudo-element, not the box: the hit target has to be finger-wide while
+   the drawn divider stays 1px so it never hides the pixels being compared. */
+.preview-compare-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.55);
+}
+
+.preview-compare-handle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  border-radius: 999px;
+  color: #f2f3f5;
+  background: rgba(20, 21, 25, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+
+.preview-compare-divider:hover .preview-compare-handle {
+  background: rgba(32, 34, 40, 0.95);
 }
 
 /* Background modes for the preview frame. */

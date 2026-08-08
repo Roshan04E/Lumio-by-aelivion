@@ -27,7 +27,7 @@ import {
   type RenderTarget,
 } from "./gl-context";
 import { MEDIA_FRAGMENT_SHADER, MEDIA_VERTEX_SHADER, mediaLut3dToRgbaFloat } from "./media-shader";
-import type { ColorPipeline, MediaEffects } from "./types";
+import type { ColorPipeline, GradeCompare, MediaEffects } from "./types";
 
 export interface MediaRendererDrawParams {
   /** Decoded video frame, image element, or ImageBitmap — the graded source. Omit when `sourceTexture` is set. */
@@ -53,6 +53,11 @@ export interface MediaRendererDrawParams {
   pipeline: ColorPipeline | null;
   /** Grade intensity 0..1 blended toward graded result. Default 1. */
   amount?: number;
+  /**
+   * Editor-only before/after wipe: the grade applies to one side of `compare.split` only. Null/omitted
+   * (every export and Remotion draw) = the whole frame grades exactly as before.
+   */
+  compare?: GradeCompare | null;
   /** Layer opacity 0..1 multiplied into alpha. Default 1. */
   opacity?: number;
   /** When true, draw the grayscale HSL-secondary matte preview instead of the grade. */
@@ -150,6 +155,8 @@ export class MediaWebGLRenderer {
   private readonly uLutSize: WebGLUniformLocation | null;
   private readonly uAmount: WebGLUniformLocation | null;
   private readonly uHasLut: WebGLUniformLocation | null;
+  private readonly uCompareMode: WebGLUniformLocation | null;
+  private readonly uCompareSplit: WebGLUniformLocation | null;
   private readonly uMatte: WebGLUniformLocation | null;
   private readonly uHasMatte: WebGLUniformLocation | null;
   private readonly uMatteInvert: WebGLUniformLocation | null;
@@ -238,6 +245,8 @@ export class MediaWebGLRenderer {
     this.uLutSize = gl.getUniformLocation(program, "u_lutSize");
     this.uAmount = gl.getUniformLocation(program, "u_amount");
     this.uHasLut = gl.getUniformLocation(program, "u_hasLut");
+    this.uCompareMode = gl.getUniformLocation(program, "u_compareMode");
+    this.uCompareSplit = gl.getUniformLocation(program, "u_compareSplit");
     this.uMatte = gl.getUniformLocation(program, "u_matte");
     this.uHasMatte = gl.getUniformLocation(program, "u_hasMatte");
     this.uMatteInvert = gl.getUniformLocation(program, "u_matteInvert");
@@ -429,7 +438,7 @@ export class MediaWebGLRenderer {
     const {
       source, sourceWidth: w, sourceHeight: h,
       matte, matteInvert = false, matteOpacity = 1,
-      pipeline, amount = 1, opacity = 1, mediaEffects = null, transition = null
+      pipeline, amount = 1, opacity = 1, mediaEffects = null, transition = null, compare = null
     } = params;
     if (!this.canUpload(w, h)) return;
 
@@ -489,6 +498,12 @@ export class MediaWebGLRenderer {
     gl.uniform1f(this.uLutSize, this.lutSize);
     gl.uniform1f(this.uAmount, Math.max(0, Math.min(1, amount)));
     gl.uniform1i(this.uHasLut, hasLut ? 1 : 0);
+
+    // Grade-compare wipe. Written on EVERY draw like the stylize uniforms — one program is shared
+    // across many layers on a context, so an absent compare must clear a previous layer's, not
+    // inherit it. Mode 0 is the export/Remotion path and reproduces the pre-compare shader exactly.
+    gl.uniform1i(this.uCompareMode, compare ? (compare.gradedSide === "right" ? 1 : 2) : 0);
+    gl.uniform1f(this.uCompareSplit, compare ? Math.max(0, Math.min(1, compare.split)) : 0);
 
     // Luma matte → TEXTURE2
     gl.activeTexture(gl.TEXTURE2);

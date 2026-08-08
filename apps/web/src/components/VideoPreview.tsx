@@ -16,7 +16,7 @@ import {
   type WheelEvent as ReactWheelEvent
 } from "react";
 import { createPortal } from "react-dom";
-import { Activity, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, ImagePlus, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
+import { Activity, ArrowLeftRight, Camera, Check, ChevronLeft, ChevronRight, Circle, Columns2, Eye, Grid3x3, Hexagon, ImagePlus, Maximize, MousePointer2, PenTool, Ratio, Square, SunMoon } from "lucide-react";
 import {
   buildColorFilterDefs,
   buildMaskDefsSvg,
@@ -37,6 +37,7 @@ import {
   getCompositionMediaEffects,
   getMaskedEffectOverlays,
   getCompositionObjectFit,
+  type GradeCompareRequest,
   isTrackEnabled,
   expandEffectRegionMasks,
   expandNestedCompositions,
@@ -762,7 +763,26 @@ function VideoPreviewImpl({
     };
   }, [gridMenuOpen, repositionGridMenu]);
   const [previewBg, setPreviewBg] = useState<"default" | "dark" | "light" | "checker">("default");
+  // GRADE COMPARE (before/after). `compareBefore` is the mode toggle; `compareSplit` is the divider in
+  // COMP fractions (0 = left edge, 1 = right) and `compareGradedSide` says which half is the graded one,
+  // so the same wipe answers both "show me the original on the left" and the mirror. Dragging the
+  // divider to an edge reproduces the whole-frame bypass this control used to be.
   const [compareBefore, setCompareBefore] = useState(false);
+  const [compareSplit, setCompareSplit] = useState(0.5);
+  const [compareGradedSide, setCompareGradedSide] = useState<"left" | "right">("right");
+  const compareRequest = useMemo(
+    () => (compareBefore ? { splitComp: compareSplit, gradedSide: compareGradedSide } : null),
+    [compareBefore, compareSplit, compareGradedSide]
+  );
+  // The Flarex form of the same divider. A comp's grade lives in its colour NODES rather than on the
+  // host layer, so `compareRequest` (which only spatializes a LAYER's pipeline) finds nothing to bypass
+  // over a comp and both halves come back identical — this is what the compiler wipes instead. Already
+  // comp-space: a Flarex wrap's nest is comp-sized, so it needs no object-fit conversion.
+  const flarexCompare = useMemo(
+    () => (compareBefore ? { split: compareSplit, gradedSide: compareGradedSide } : null),
+    [compareBefore, compareSplit, compareGradedSide]
+  );
+  const compareDragRef = useRef<number | null>(null);
   const isPortrait = composition.height >= composition.width;
   function toggleFullscreen() {
     const el = stageRef.current;
@@ -1696,6 +1716,47 @@ function VideoPreviewImpl({
     setIsPanning(false);
   }
 
+  /**
+   * Grade-compare divider drag. Measured against `.phone-frame`, whose box IS the comp box (it is sized
+   * to comp × displayScale), so the fraction we store is directly the comp fraction the shader wipes at
+   * — no viewer-zoom or scroll compensation, and it stays correct while the viewport is panned.
+   *
+   * Every handler stops propagation: the divider sits over the composition, and the viewport beneath it
+   * treats a pointer-down as the start of a pan / an empty-space deselect.
+   */
+  function compareSplitFromPointer(event: ReactPointerEvent<HTMLDivElement>): number | null {
+    const frame = (event.currentTarget as HTMLElement).closest(".phone-frame");
+    if (!frame) return null;
+    const rect = frame.getBoundingClientRect();
+    if (rect.width <= 0) return null;
+    return clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  }
+
+  function startCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const split = compareSplitFromPointer(event);
+    if (split === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    compareDragRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setCompareSplit(split);
+  }
+
+  function updateCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (compareDragRef.current !== event.pointerId) return;
+    const split = compareSplitFromPointer(event);
+    if (split === null) return;
+    event.stopPropagation();
+    setCompareSplit(split);
+  }
+
+  function endCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (compareDragRef.current !== event.pointerId) return;
+    compareDragRef.current = null;
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
   function deselectFromEmptyPreviewClick(event: ReactMouseEvent<HTMLDivElement>) {
     if (viewerPanMode) {
       event.preventDefault();
@@ -1838,9 +1899,23 @@ function VideoPreviewImpl({
         <button type="button" className={previewBg !== "default" ? "is-active" : ""} title={`Background: ${previewBg}`} onClick={() => setPreviewBg((v) => (v === "default" ? "dark" : v === "dark" ? "light" : v === "light" ? "checker" : "default"))}>
           <SunMoon size={15} />
         </button>
-        <button type="button" className={compareBefore ? "is-active" : ""} title="Before / after (bypass color grade)" onClick={() => setCompareBefore((v) => !v)}>
+        <button
+          type="button"
+          className={compareBefore ? "is-active" : ""}
+          title={compareBefore ? "Before / after compare — drag the divider (double-click it to re-centre)" : "Before / after compare (split the frame at the colour grade)"}
+          onClick={() => setCompareBefore((v) => !v)}
+        >
           <Columns2 size={15} />
         </button>
+        {compareBefore ? (
+          <button
+            type="button"
+            title={`Graded side: ${compareGradedSide} — swap which half shows the grade`}
+            onClick={() => setCompareGradedSide((side) => (side === "right" ? "left" : "right"))}
+          >
+            <ArrowLeftRight size={15} />
+          </button>
+        ) : null}
         {onSaveFreezeFrame ? (
           <button type="button" title="Save freeze frame of the selected clip" onClick={() => onSaveFreezeFrame()}>
             <Camera size={15} />
@@ -1904,7 +1979,6 @@ function VideoPreviewImpl({
           </>
         )}
       </div>
-      {compareBefore ? <div className="preview-compare-badge">Before</div> : null}
       {activeAudioLayerEntries.map(({ layer, track }) => (
         <AudioPreviewLayer
           assets={resolvedAssets}
@@ -1985,6 +2059,7 @@ function VideoPreviewImpl({
                   flarexComps={graph.flarexComps}
                   // The live view dots, as runtime input (ADR-012 §0.5). Export/worker pass nothing.
                   flarexPreviewRoots={flarexPreviewRoots}
+                  flarexGradeCompare={flarexCompare}
                   flarexVirtualLayers={activeFlarexVirtualLayers}
                   flarexCompProxiesRef={flarexCompProxyFramesRef}
                   captureRef={proxyCaptureRef}
@@ -2047,7 +2122,7 @@ function VideoPreviewImpl({
                     // applies it LIVE at composite (no stale opacity on seek/pause). DOM + transition-active
                     // clips (drawn by the DOM overlay) still bake — hence `sceneLayerIds`, not sceneMediaIds.
                     bakeOpacity={!sceneLayerIds.has(layer.id)}
-                    bypassColor={compareBefore}
+                    gradeCompare={compareRequest}
                     // Single-ctx preview: media publishes a raw frame to the sink instead of grading into a
                     // canvas — so onGradedFrame is suppressed for those layers (the sink drives recomposite).
                     onGradedFrame={
@@ -2205,6 +2280,35 @@ function VideoPreviewImpl({
               <div ref={setOverlayLayer} className="preview-overlay-layer" aria-hidden="true" />
               </OverlayPortalContext.Provider>
             </div>
+            {/* GRADE COMPARE divider. A sibling of `.preview-composition-space` inside `.phone-frame`,
+                which is sized EXACTLY to the comp box — so `left: split%` is the same comp fraction the
+                shader wipes at, at any viewer zoom, with no scale math of its own. Only the handle takes
+                pointer events; the rest stays click-through so layer selection is unaffected. */}
+            {compareBefore ? (
+              <div className="preview-compare" style={{ "--compare-split": `${compareSplit * 100}%` } as CSSProperties}>
+                <span className={`preview-compare-label is-left ${compareGradedSide === "left" ? "is-after" : ""}`}>
+                  {compareGradedSide === "left" ? "After" : "Before"}
+                </span>
+                <span className={`preview-compare-label is-right ${compareGradedSide === "right" ? "is-after" : ""}`}>
+                  {compareGradedSide === "right" ? "After" : "Before"}
+                </span>
+                <div
+                  className="preview-compare-divider"
+                  role="separator"
+                  aria-label="Grade compare divider"
+                  onPointerDown={startCompareDrag}
+                  onPointerMove={updateCompareDrag}
+                  onPointerUp={endCompareDrag}
+                  onPointerCancel={endCompareDrag}
+                  onDoubleClick={() => setCompareSplit(0.5)}
+                >
+                  <span className="preview-compare-handle" aria-hidden="true">
+                    <ChevronLeft size={12} />
+                    <ChevronRight size={12} />
+                  </span>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -2255,8 +2359,12 @@ type PreviewLayerProps = {
   suspended?: boolean;
   /** Scene compositor draws this MEDIA clip — hide the DOM canvas via opacity:0 but keep it click-selectable. */
   sceneComposited?: boolean;
-  /** Before/after compare: skip the color grade so the original (ungraded) frame shows. */
-  bypassColor?: boolean;
+  /**
+   * Before/after grade compare, as a COMP-space divider. The WebGL media paths wipe the grade at it
+   * (one side graded, the other original); the legacy SVG/DOM fallback can't grade per-pixel, so it
+   * degrades to the whole-frame bypass this control used to be. Null = compare off.
+   */
+  gradeCompare?: { splitComp: number; gradedSide: "left" | "right" } | null | undefined;
   /** Report the graded canvas so the transition overlay can sample it as a from/to texture. */
   onGradedFrame?: ((canvas: HTMLCanvasElement) => void) | undefined;
   /** Single-ctx preview (Phase 5): publish this media layer's raw frame source to the scene compositor
@@ -2423,7 +2531,7 @@ const PreviewLayer = memo(function PreviewLayer({
   suspended = false,
   strictSourceSync = false,
   sceneComposited = false,
-  bypassColor = false,
+  gradeCompare = null,
   onGradedFrame,
   sceneMediaSink,
   bakeOpacity = true,
@@ -2442,6 +2550,27 @@ const PreviewLayer = memo(function PreviewLayer({
   // fails to init at runtime, flip this and fall back to the legacy SVG-filter DOM path.
   const [webglMediaFailed, setWebglMediaFailed] = useState(false);
   const useWebglMedia = useWebglRenderer(webgl2Supported()) && !webglMediaFailed;
+  // GRADE COMPARE. The divider arrives in COMP space; the media shader compares against the source's
+  // own UV, so the layer's object-fit + content zoom/pan have to be folded in or the wipe would split
+  // a cover-cropped source (16:9 footage in a 9:16 comp — the usual case) somewhere other than under
+  // the line the user is dragging. `resolveGradeCompare` does the conversion once the decoded source
+  // size is known, which is inside the media layer.
+  const compareContent = gradeCompare ? getCompositionContentTransform(layer, { currentTimeSeconds: currentTime }) : null;
+  const mediaGradeCompare: GradeCompareRequest | null =
+    gradeCompare && compareContent && useWebglMedia && frameAspect
+      ? {
+          splitComp: gradeCompare.splitComp,
+          gradedSide: gradeCompare.gradedSide,
+          compAspect: frameAspect,
+          fit: getCompositionObjectFit(layer),
+          contentScale: compareContent.scale,
+          contentOffset: { x: compareContent.offsetX, y: compareContent.offsetY },
+        }
+      : null;
+  // Legacy SVG-filter / DOM fallback (WebGL off or the renderer failed): there is no per-pixel grade
+  // control there, so compare degrades to the whole-frame bypass this control used to be — the button
+  // still shows the original rather than doing nothing.
+  const bypassColor = Boolean(gradeCompare) && !useWebglMedia;
   const dragRef = useRef<{
     layerId: string;
     pointerId: number;
@@ -3597,6 +3726,7 @@ const PreviewLayer = memo(function PreviewLayer({
             assetLabel={asset?.fileName ?? asset?.id}
             matte={layer.matte}
             pipeline={videoColorPipeline}
+            gradeCompare={mediaGradeCompare}
             mediaEffects={videoMediaEffects}
             currentTime={currentTime}
             isPlaying={effectivePlaying}
@@ -3924,6 +4054,7 @@ const PreviewLayer = memo(function PreviewLayer({
           graphicStartSeconds={layer.startSeconds}
           graphicAnimations={layer.animations}
           pipeline={imageColorPipeline}
+          gradeCompare={mediaGradeCompare}
           mediaEffects={imageMediaEffects}
           transition={onGradedFrame || sceneMediaSink ? null : imageTransition}
           onGradedFrame={onGradedFrame}
