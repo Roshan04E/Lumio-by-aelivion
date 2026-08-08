@@ -44,7 +44,7 @@ D's void ruling exist to catch, and this note does not repeat it.
 | **I-41** | **Satisfied** | Structural, not vacuous: the recovery/re-acquire mechanism (slice D/E) has no code path into `EvaluationContext` or node evaluation — it lives entirely in the playback/pool layer. A negative constraint with no path to violate it is a legitimate satisfaction, not an untested one. |
 | **I-42** | Still needed | No adaptive decision is threaded into evaluation as an input at all — the clause has no subject yet. |
 | **I-43** | **Dissolved** | Its stated form — one budget *per frame*, derived from *that frame's deadline* — presupposes per-frame contention to plan against. None exists (ADR-020 §1). The budget that does exist is a flat constant (K=4), which is I-54's shape, not I-43's. |
-| **I-44** | **Satisfied (2026-08-08, `37ed422`)** | Was: `preferSoftwareDecode`/`preferSoftware` selected a backend from source identity — the named example in ADR-013 §4.2. Fixed in `VideoPreview.tsx` (the actual decision site — `WebglMediaLayer.tsx` only consumes the value; a grep hit is not a call site, same correction as the epoch claim, `project-tracker/architectural-debt.md` DEBT-013). One fix with C16. |
+| **I-44** | **Satisfied under AMENDED wording (I-44a), NOT literally** | Was: `preferSoftwareDecode` selected a backend from source identity — the named example in ADR-013 §4.2. Fixed in `VideoPreview.tsx` (the actual decision site — `WebglMediaLayer.tsx` only consumes the value; a grep hit is not a call site). **Stated plainly: `isFlarexVirtualLayerId(layer.id)` is still a conjunct in the condition.** Identity was not removed; a contention term (`flarexConcurrentLoaders > 1`) was added beside it. Under I-44 as *originally written* ("never of source identity") that is **not** satisfied. It is satisfied under **I-44a** (ADR-013 §6, added 2026-08-08), which distinguishes identity *scoping* a rule from identity *deciding* a backend. The amendment was written because the literal reading forbids any scoped capability rule at all, which was never §4.2's intent — but it IS an invariant reinterpreted to fit shipped code, so it is recorded as an amendment with its test, not applied silently. One fix with C16. |
 | **I-45** | Still needed | Governor-owned (§3.26, "owns the quality ladder"). Deferred. |
 | **I-46** | Still needed | Governor-owned (§3.26, "restoration is collective and rendezvoused"). Deferred. |
 | **I-47** | **Satisfied** | Structural: recovery is pool-internal (idle-sweep tick, release-path grant) and has no code path through a present. Same basis as I-41 — no pressure *loop* exists yet for the rule to be tested against, but nothing built has a route through presentation either. |
@@ -161,6 +161,31 @@ I-53) **· 5 Governor-deferred, out of scope** (I-45, I-46, I-52, C17, C18). `5+
 (The interim "4 satisfied" figure quoted in conversation the same day undercounted by one — the arithmetic
 above is what the table actually supports, checked by addition rather than carried forward from what was
 said. Same discipline this note exists to enforce elsewhere.)
+
+### Two qualifications on "complete", both load-bearing
+
+**(i) I-44 is satisfied under an amended invariant, not the original one.** `isFlarexVirtualLayerId` is
+still a conjunct in `preferSoftwareDecode`; identity was scoped, not removed. See the I-44 row above and
+I-44a in ADR-013 §6. An invariant quietly reinterpreted to fit the code is the failure mode this whole
+programme exists to catch — so it is written down as an amendment with an explicit test, and anyone who
+disagrees with the amendment should read ADR-013 as **not** satisfying I-44.
+
+**(ii) ADR-013's completion rests on ONE UNMEASURED CONSTANT.** Promoting this out of the code comment
+where it currently lives (`VideoPreview.tsx`, `37ed422`), because a disclosure buried in a comment is not
+a disclosure the programme can act on:
+
+> **The constant:** the `> 1` threshold in `flarexConcurrentLoaders > 1`.
+> **What it decides:** whether a Flarex virtual loader gets hardware or software decode.
+> **What is measured:** that ≥3 concurrent hardware consumers starve (the 2026-07-27 finding the flag was
+> built for). **What is NOT measured:** that a *lone* virtual loader (the `== 1` case) is safe on hardware.
+> Before `37ed422` that case took software; it now takes hardware, and nothing has soaked it.
+> **Falsifier, stated in advance:** a single-MediaIn Flarex comp playing alongside its host shows decode
+> starvation, dropped/held frames, or `capMisses > 0` attributable to that pair — i.e. `== 1` was not
+> actually safe and the threshold should be `> 0` (the old behaviour) or the rule needs a different shape.
+> **Who resolves it:** `plans/adr-013-real-project-measurement-plan.md` §5, third pre-registered outcome.
+
+Neither qualification is a reason to reopen the other 18 items. Both are reasons not to describe ADR-013
+as "done and proven" when it is "done as scoped, with one interpretation stated and one constant pending."
 
 **Is ADR-013 complete as scoped?** Every non-Governor item now has a definitive disposition — satisfied,
 dissolved, or explicitly deferred with a stated trigger — except the two deliberately-ambiguous items,

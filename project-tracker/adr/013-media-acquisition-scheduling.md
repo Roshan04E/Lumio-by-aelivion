@@ -50,6 +50,21 @@ Amended by: ADR-020 (2026-08-06, premise correction) — see box below
 > uniform "four call-site fixes" a first pass suggested. Full triage, including what's currently blocked
 > by unrelated uncommitted work: `project-tracker/architectural-debt.md`, DEBT-013, 2026-08-08.
 >
+> **UPDATE (2026-08-08, later the same day): C15, C16 and I-44 are now satisfied; I-48's remainder is
+> deferred behind a stated trigger. Two qualifications travel with that, and neither is decorative:**
+>
+> 1. **I-44 is satisfied under AMENDED wording, not as originally written.** `isFlarexVirtualLayerId`
+>    remains a conjunct in `preferSoftwareDecode` (`37ed422`); identity was *scoped*, not removed. See
+>    **I-44a** in §6, added for exactly this case, with the test that distinguishes scoping from deciding.
+>    Reject I-44a and this ADR does **not** satisfy I-44.
+> 2. **One constant shipped unmeasured** — the `> 1` threshold in `flarexConcurrentLoaders > 1`. That ≥3
+>    concurrent consumers starve is measured; that a *lone* loader is safe on hardware is not, and
+>    `37ed422` newly created that case. Falsifier and resolution are pre-registered as Scope C of
+>    `plans/adr-013-real-project-measurement-plan.md`.
+>
+> So: **complete as scoped, with one interpretation stated and one constant pending** — not "done and
+> proven." The distinction is the point.
+>
 > **The Governor (3.26) is unaffected by the correction and is explicitly deferred to its own pass — not
 > touched here.** One point of care: the closest thing this programme had to empirical support for the
 > Governor's necessity — a measured preload-session eviction under playhead-priority contention, which
@@ -556,7 +571,8 @@ Added to ADR-012 Part 12. Total becomes **54**.
 - **I-41** No adaptive acquisition decision is observable by the Node Evaluator. Evaluation reads the `EvaluationContext` and nothing else. *(This is what preserves I-18 and ADR-007 parity under adaptive acquisition.)*
 - **I-42** Every adaptive decision is resolved **before** evaluation begins and enters as part of the `EvaluationContext`. The context is recordable and replayable (supports I-37).
 - **I-43** There is exactly one acquisition budget for a frame, derived from that frame's deadline. Per-provider budgets that do not sum to it are forbidden.
-- **I-44** A grant expresses a desired capability and quality, never a backend. Capability selection is a function of rank and declared need, never of source identity.
+- **I-44** A grant expresses a desired capability and quality, never a backend. Capability selection is a function of rank and declared need, never of source identity. **(AMENDED 2026-08-08 — see I-44a.)**
+- **I-44a** *(amendment to I-44, 2026-08-08)* **Source identity may SCOPE a capability rule; it may never DECIDE the capability.** A predicate that selects *which sources a rule governs* is not a backend decision. A predicate that selects *which backend a governed source receives* is, and remains forbidden. The test: hold identity fixed and vary the declared need — if the chosen backend changes, identity is scoping, which is permitted. If the backend is fixed the moment identity is known, identity is deciding, which I-44 forbids. **Reasoning:** I-44 as originally written admits no way to express "this rule applies to class X," yet every capability rule must have a domain, and a domain is necessarily expressed in terms of what a source *is*. Read literally, I-44 forbids not just identity-driven backends but *any scoped capability rule at all* — which was never its intent; §4.2's own worked example objects specifically to choosing *from* "what kind of thing you are" rather than *what is scarce right now*. This amendment states the boundary that §4.2's reasoning already implies. **Registered against a live case, not in the abstract:** `preferSoftwareDecode` (`VideoPreview.tsx`, commit `37ed422`) retains `isFlarexVirtualLayerId(layer.id)` as a conjunct alongside `flarexConcurrentLoaders > 1`. Under the test above it passes: with identity held fixed (a virtual loader), the backend still varies with contention — hardware when alone, software when contending. Identity scopes; contention decides. It would have failed the test before `37ed422`, when identity alone fixed the backend.
 - **I-45** The quality ladder is declared in one place, ordered, and defined by outcome rather than mechanism. Coherence sacrifice is its last rung; L5 is declared absence, never substitution.
 - **I-46** Quality restoration is collective: no source raises its level until every participant can.
 - **I-47** Pressure never flows through presentation. No present may cause an allocation, a reclamation, or a quality change.

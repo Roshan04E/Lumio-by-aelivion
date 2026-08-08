@@ -1147,6 +1147,42 @@ remains blocked by this file.
   drift; the repo is the subject. Same family as the fourth DEBT-012 shape above — for anything that ships
   as a commit, the artifact of record is the commit, never a paragraph that once described it correctly.
 
+**CORRECTION (2026-08-08, same day) — "C16 and I-44 satisfied" above is too strong on I-44.** Caught by the
+founder reading `37ed422` itself rather than the claim about it. The shipped condition is:
+
+```
+(flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id) &&
+flarexConcurrentLoaders > 1 && flarexLoaderRate(layer) <= 1
+```
+
+`isFlarexVirtualLayerId(layer.id)` — **source identity — is still a conjunct.** A contention term was added
+beside it; the identity term was never removed. Against I-44 as originally written ("Capability selection
+is a function of rank and declared need, **never of source identity**") that is not satisfied, and this
+register said "satisfied" without stating the interpretation it depended on.
+
+**Resolved by amending the invariant, deliberately and in writing** — ADR-013 §6 now carries **I-44a**,
+which distinguishes identity *scoping* a capability rule (permitted; every rule needs a domain, and a
+domain is necessarily expressed in terms of what a source is) from identity *deciding* a backend
+(forbidden, unchanged). Test: hold identity fixed, vary declared need — if the backend still changes,
+identity is scoping. `preferSoftwareDecode` passes it now (hardware when alone, software when contending)
+and would have failed it before `37ed422`.
+
+**Why this is recorded loudly rather than absorbed:** an invariant reinterpreted to fit shipped code is
+precisely the failure mode this programme exists to catch, and the fact that the reinterpretation is (I
+believe) correct does not exempt it from being written down. Anyone who rejects I-44a should read ADR-013
+as **not** satisfying I-44. **Second-order lesson, of a piece with the two above:** I verified the fix
+against the *invariant's intent as I understood it* and reported "satisfied" — without re-reading the
+invariant's actual text against the actual shipped conjunction. Same shape as verifying the working tree
+instead of the committed blob, and as believing a document over `git log`: **the artifact of record was
+right there, and the check was run against a paraphrase of it.**
+
+**Also promoted out of a code comment (2026-08-08):** ADR-013's completion rests on **one unmeasured
+constant** — the `> 1` threshold itself. What is measured is that ≥3 concurrent hardware consumers starve
+(2026-07-27). What is *not* measured is that a lone virtual loader is safe on hardware, which is the case
+`37ed422` newly created. Falsifier and resolution path are recorded in
+`plans/adr-013-scope-after-adr-020.md` (§"Two qualifications on 'complete'") and
+`plans/adr-013-real-project-measurement-plan.md` (§5, Scope C).
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
