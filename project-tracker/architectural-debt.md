@@ -1026,6 +1026,53 @@ retired). The other four files were mine alone and clean:
   `admission-reacquire.ts` removed from the tree entirely, and again from a clean detached-worktree
   checkout of the committed tip (`7db1085`), both green.
 
+**CORRECTION (2026-08-08) — the update immediately above is itself wrong on one point, verified against
+the committed blob, not asserted.** `git show HEAD:apps/web/src/components/WebglMediaLayer.tsx` shows:
+
+- `:685` — `const [wcReacquireEpoch, setWcReacquireEpoch] = useState(0);`
+- `:1007` — the lease-acquire effect's own dependency array, `[mediaType, src, wcReacquireEpoch]`
+- `:1050` — `setWcReacquireEpoch((value) => value + 1);`, inside D's own boundary-detector effect
+
+D's committed code **does** have a `useState`-declared epoch, bumped, and depended on by another effect.
+The claim two entries up — "D's inline detector... never had the `useState`-epoch anti-pattern... nothing
+to extract onto D" — is **wrong** and is corrected here, not rewritten there, per this register's own
+convention.
+
+**A second, related correction, in the other direction.** `admission-reacquire.ts`'s own doc comment
+(and this register's earlier readings of it) describe the pre-callback draft as one that "re-renders
+every consumer on every boundary." `wcReacquireEpoch` is declared with `useState` **inside the component
+function body** — per-layer-instance, not module-level or global. A bump in one layer's epoch re-renders
+that layer alone; it does not re-render every media layer in the comp. That characterization, inherited
+from the shared module's own history and repeated in this register without independently checking the
+scope of the state it was said to describe, was also wrong.
+
+**The quantified consequence — labelled INFERENCE, not measured.** The lease effect's deps are
+`[mediaType, src, wcReacquireEpoch]`; `mediaType` and `src` are stable for a mounted layer within one
+probe arm, so that effect re-runs if and only if `wcReacquireEpoch` changes. Mechanism B's `bodyRuns`
+counter (this entry, 2026-08-07) measured **~320** invocations of D's *detector* effect per 12s arm,
+against only **~36** that reach the boundary-relevant gate — leaving **~285 unaccounted for at the time**,
+attributed then to the two early returns (`mediaType !== "video"`, and the boundary predicate
+`playing && !jumped`) without a counter placed on either. **Inference, not yet confirmed:** if a
+meaningful share of those ~285 detector-effect re-entries are themselves caused by the epoch's own bump
+triggering a component re-render (a bump forces a re-render; a re-render recomputes `transportTime`/
+`transportPlaying` fresh from `wcTimeRef.current`; if those differ from the prior render — likely during
+active playback — the detector effect's own deps change and it re-enters), then a large share of the
+missing 285 is the epoch mechanism re-entering its own trigger, exiting immediately because the boundary
+predicate is false on a re-render that wasn't itself a transport event. This is a **hypothesis about the
+missing-285 attribution, not a demonstrated one** — it requires a counter at `:1050` (or on the lease
+effect's own entry) to confirm, and that requires editing the hard-stopped file. Recorded here so it is
+checkable the moment `WebglMediaLayer.tsx` unblocks, not asserted as established.
+
+**BLOCKED-WORK NOTE, for whoever hits this next.** `admission-reacquire.ts` must remain on disk,
+**untracked**, for as long as the uncommitted `WebglMediaLayer.tsx` imports it — confirmed 2026-08-07 by
+removing it and watching `pnpm --filter @orreris/web typecheck` fail for the whole shared tree, not just
+this branch's own work. `git clean -fd` (or any equivalent untracked-file sweep) will reproduce that
+failure. **This does not resolve on its own and is on this programme's critical path**: it untangles only
+when the other session's grade-compare work is committed (or otherwise resolved) and `WebglMediaLayer.tsx`
+stops being mixed — at which point D's swap can finally be reverted for real, and `admission-reacquire.ts`
+can be deleted from the working tree (it already lives safely on `artifact/adr020-shared-detector`). Until
+then, do not `git clean` this tree expecting a normal untracked-file cleanup to be safe.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
