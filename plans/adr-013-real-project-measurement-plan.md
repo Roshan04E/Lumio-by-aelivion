@@ -436,4 +436,32 @@ and not addressed by anything in this plan.
 
 ---
 
-**Awaiting approval before any of this is built or run**, per instruction.
+**Approved, built, and run 2026-08-08.** Results: Scope C FALSIFIED 3/3; Scope A's junction claim VOID;
+Scope B weakly supported. See `plans/adr-013-scope-after-adr-020.md` (§"ADR-013 REOPENS").
+
+---
+
+## 7. The counterfactual arm — pre-registered 2026-08-08, BEFORE running
+
+**Why this is needed and why it is cheap.** Scope C falsified "a lone virtual loader is safe on hardware."
+That is **not** the same claim as "`37ed422` caused the cap misses." The cap misses could belong to the
+fixture (Host C's mount arrangement) or to the window (preroll overlap with clip5) rather than to the
+change — in which case reverting the threshold would fix nothing and would cost I-44a for no safety gain.
+The same fixture at the OLD threshold settles it, and reuses everything already built.
+
+**The arm.** Identical fixture, identical layout, identical windows, identical procedure (3 cold arms,
+fresh Vite per arm, build identity verified, 100ms sampling). One change: the `preferSoftwareDecode`
+threshold reverts from `flarexConcurrentLoaders > 1` to `> 0` — i.e. old behaviour, any virtual loader
+takes software. Applied as a **temporary, reverted-in-its-own-commit** change exactly as the
+instrumentation was, never left standing.
+
+**Pre-registered outcomes — written now, before the run:**
+
+| Reading in Host C's `== 1` regime (76.8–90.0s), old threshold | Interpretation |
+|---|---|
+| **F1/F4 also fire** (`capMissOnset ≥ 1` or `starvedOnset ≥ 1`) | The contention is **the fixture or the window, not the change**. `37ed422` is exonerated as the cause; reverting it would fix nothing. A different finding entirely, and the real subject becomes whatever the mount arrangement is doing. |
+| **F1/F4 are clean** (both 0, with the same clean pre-regime baseline) | **Attribution confirmed.** `37ed422` introduced the starvation. The fix is then to revert or narrow the threshold — chosen with the I-44a tension explicitly on the table, not silently. |
+| **Vacuity: `activeSoftware` is not ≥1 in the regime** | The old-threshold arm did not actually take effect (the loader was not software) — **VOID**, fix the arm before interpreting anything. This is the guard that stops a null result being read as "clean." |
+
+**Agreement:** same rule as before — the categorical read must agree across all 3 arms; counts reported as
+a range. **No fix is implemented until this reads.**

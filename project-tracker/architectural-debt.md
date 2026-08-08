@@ -1176,7 +1176,46 @@ invariant's actual text against the actual shipped conjunction. Same shape as ve
 instead of the committed blob, and as believing a document over `git log`: **the artifact of record was
 right there, and the check was run against a paraphrase of it.**
 
-**Also promoted out of a code comment (2026-08-08):** ADR-013's completion rests on **one unmeasured
+**MEASURED, AND FALSIFIED (2026-08-08, later the same day). ADR-013 REOPENS — "complete as scoped" is
+WITHDRAWN.** The real-project measurement ran, 3 cold arms at `14b66dc`. The unmeasured constant named
+below was tested and **failed, 3/3**. Readings, identical in every arm: with a clean baseline immediately
+before Host C's `== 1` regime (`capMisses 0`, `starvedSources 0` at t≈76.78), the regime showed
+`F1_capMissOnset = 2` and `F4_starvedOnset = 1`, with `activeSoftware = 0` throughout — the lone loader
+took hardware as the new rule intends, and something starved for it.
+
+**The sharper consequence:** every cap miss in the whole 90s project occurs inside the lone-loader window.
+Host A's three siblings produced zero. The only contention this project generated is contention the fix
+introduced. C16 and I-44's "satisfied" status is **withdrawn**.
+
+**L11 held.** An ADR is a hypothesis until a measurement it could have failed has survived it; this one
+did not. That is the process working, not a setback, and it is recorded without softening.
+
+**The tension that constrains the fix, stated plainly:** reverting to the old behaviour (any virtual
+loader → software) **re-breaks I-44a** — a `> 0` threshold is always true for a virtual loader, so the
+count decides nothing and the hold-identity-vary-need test fails. **Safety and I-44a conflict; safety
+wins. I-44 returns to UNSATISFIED until a threshold exists that is both safe AND varies.**
+
+**Not yet attributed.** Falsifying "a lone loader is safe on hardware" is not the same as showing
+`37ed422` caused it. The counterfactual (same fixture at `> 0`, 3 cold arms) is pre-registered in
+`plans/adr-013-real-project-measurement-plan.md` §7 and **no fix is chosen until it reads**.
+
+**Two measurement defects found in the run itself, both recorded rather than absorbed:**
+1. **F2 caught prospectively — the falsifier could not have fired.** Scope C's original window (78–90s)
+   was drawn to be "decode-clean," which excluded the only moment the defect can manifest (Host C's
+   preroll overlap, 76.8–78.0, where both cap misses land). F1 measured from 78.0 read 0 while the event
+   had already happened; F4 was a level, so it fired on starvation inherited from earlier in the run.
+   Found by running the fixture **once without measuring**, and corrected in `14b66dc` **before any arm
+   ran**. Standing lesson: run a new fixture once as a non-measuring validation pass, specifically to ask
+   whether the pre-registered reading *could* fire.
+2. **Scope A's junction claim is VOID, not clean.** `active = 0` across the whole predicted peak window
+   means WebCodecs never engaged there — the probe pressed play before routing flipped, ignoring this
+   repo's own `awaitWebCodecsEngaged` / read-`__rfRouting`-first rule. Its counters characterise a warming
+   system, not an ordinary project. Scope B is correspondingly weak (siblings were software by design) and
+   **I-48/B2 is NOT dissolved on it**. Open question: `samplesWithTwoPlusNonElement` read 273/277/**143**,
+   localised to Host A — concurrent sibling WebCodecs engagement lasted ~17s in cold1 but ~0.9s in cold3,
+   a ~19× run-to-run difference in decode routing stability between nominally identical cold arms.
+
+**Original entry, retained for the record:** ADR-013's completion rests on **one unmeasured
 constant** — the `> 1` threshold itself. What is measured is that ≥3 concurrent hardware consumers starve
 (2026-07-27). What is *not* measured is that a lone virtual loader is safe on hardware, which is the case
 `37ed422` newly created. Falsifier and resolution path are recorded in

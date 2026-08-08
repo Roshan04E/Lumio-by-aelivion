@@ -162,7 +162,69 @@ I-53) **· 5 Governor-deferred, out of scope** (I-45, I-46, I-52, C17, C18). `5+
 above is what the table actually supports, checked by addition rather than carried forward from what was
 said. Same discipline this note exists to enforce elsewhere.)
 
-### Two qualifications on "complete", both load-bearing
+## ADR-013 REOPENS (2026-08-08) — "complete as scoped" is WITHDRAWN
+
+The real-project measurement ran (3 cold arms, `14b66dc`, plan §5). **Scope C is FALSIFIED, 3/3.** The
+`> 1` threshold that `37ed422` shipped — the fix on which C16 and I-44's satisfaction rested — is not
+safe in the case it newly created.
+
+**Everything below marked "satisfied" for C16/I-44 is withdrawn pending a fix.** The status of ADR-013 is
+**reopened**, not complete.
+
+**L11 held.** An ADR is a hypothesis until a measurement it could have failed has survived it. This one
+could have failed and did. That is the process working exactly as intended — not a setback, and not to be
+softened in the retelling. The alternative was shipping the same change with the same confidence and no
+measurement, which is what the programme existed to stop.
+
+**The readings** (identical across all three arms; raw data `tmp/adr013-real-project/cold{1,2,3}.json`):
+baseline immediately before Host C's regime was clean (`capMisses 0`, `starvedSources 0` at t≈76.78), then
+within the `== 1` regime `F1_capMissOnset = 2` and `F4_starvedOnset = 1`, with `activeSoftware = 0`
+throughout — i.e. the lone loader did take hardware, as designed, and something starved as a result.
+
+**And the sharper consequence:** every cap miss in the entire 90-second project (`capMisses` 2,
+`starvedSources` max 1) occurs inside the lone-loader window. Host A's three siblings produced **zero**.
+The only contention this project generated is contention the fix itself introduced.
+
+### The tension this creates, stated because it constrains the fix
+
+**Reverting to the old behaviour (any virtual loader → software) re-breaks I-44a.** A threshold of `> 0`
+is always true for a virtual loader, so the count would no longer decide anything — hold identity fixed,
+vary the declared need, and the backend does not change. That is precisely the hold-identity-vary-need
+test failing, which is what I-44a exists to detect.
+
+**So safety and I-44a currently conflict. Safety wins.** I-44 goes back to **unsatisfied** until a
+threshold exists that is both safe AND varies. C16 likewise. Neither is satisfied by a rule that is
+correct-by-construction because it never discriminates.
+
+**Not yet decided:** whether `37ed422` caused the cap misses, or merely coincides with them. That is a
+separate, cheap question and it is pre-registered as the counterfactual arm
+(`plans/adr-013-real-project-measurement-plan.md` §7) — the same fixture at `> 0`. **No fix is chosen
+until that reads.**
+
+### What the other two scopes actually support (less than first reported)
+
+- **Scope A: its junction claim is VOID, not "no contention found."** `active = 0` across the entire
+  predicted peak window (30.8–34.0s) in all three arms means WebCodecs never engaged there — so
+  `capMisses 0` at the junction is evidence the junction *was never tested*, not that it is safe. The
+  probe pressed play before routing had flipped; the repo's own standing guidance (`awaitWebCodecsEngaged`,
+  read `__rfRouting` first) was not applied. The Scope A counters characterise a **warming system**, not
+  an ordinary project.
+- **Scope B: weakly supported, NOT settled. I-48/slice B2 is NOT dissolved on it.** The siblings were
+  software by design (the `> 1` rule put them there) and `active = 0` says the host was not on WebCodecs
+  either, so "siblings did not contend" is partly by construction and partly unmeasured. B2's trigger
+  remains open, awaiting the re-run.
+- **The one genuine spread, explained rather than waved through.** `samplesWithTwoPlusNonElement` read
+  273 / 277 / **143**. Localised entirely to Host A's window: cold1 had 139/146 samples with ≥2 sibling
+  loaders off the element path, cold3 had **8/146**. Concurrent 3-loader WebCodecs engagement lasted
+  ~17s (30.95→48.02) in cold1 but ~0.9s (30.91→31.8) in cold3 — the loaders engaged and then fell back
+  to element — while `activeSoftware` still peaked at 3 in both. **Two nominally identical cold runs
+  produced a ~19× difference in how long Host A's siblings held WebCodecs.** That is run-to-run decode
+  routing instability, and it further weakens Scope B: in cold3 the siblings were barely ever
+  concurrently engaged at all. It is an open question, not noise, and it needs its own look.
+
+---
+
+### Two qualifications on "complete", both load-bearing — SUPERSEDED, see the reopening above
 
 **(i) I-44 is satisfied under an amended invariant, not the original one.** `isFlarexVirtualLayerId` is
 still a conjunct in `preferSoftwareDecode`; identity was scoped, not removed. See the I-44 row above and
