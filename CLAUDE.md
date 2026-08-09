@@ -33,6 +33,8 @@ pnpm --filter @orreris/worker render:compare:pixels     # pixel-diff version of 
 pnpm --filter @orreris/worker render:manifest <file>    # render a manifest JSON through the real Remotion renderer to an mp4, for manual verification
 ```
 
+On a fresh clone or a new worktree, the FIRST `render:compare:pixels` run can fail at fixture 1 with `page.goto: Timeout 30000ms exceeded ... networkidle` - vite's dep pre-bundle happens inside that first navigation and blows the harness's 30s budget. Re-run before investigating; the second run is warm and passes.
+
 There is no per-test filtering - these scripts run a fixed scenario end to end. When verifying a renderer change, prefer `render:manifest` against a real manifest and inspect output frames over trusting typecheck alone.
 
 ## Architecture

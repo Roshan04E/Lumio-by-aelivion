@@ -1262,7 +1262,9 @@ resolved — whichever comes first.
 
 ### DEBT-015 — CLASS: an error path that reports COMPLETION, so a failure ships as product output
 
-- Status: **open** (registered as a CLASS; instance 1 fixed, instance 2 found and NOT fixed)
+- Status: **open** (registered as a CLASS. Instances 1 and 2 fixed; instance 3 measured **dormant** and
+  deliberately unchanged. The entry does not retire on its instances — the expiry condition is about
+  EVERY error path in the export pipeline, and no exhaustive audit of those paths has been done.)
 - Registered: 2026-08-09 (from an intermittent `render:compare:pixels` failure)
 - Reason: an export's error handler had exactly one job it could not do — there is no safe degraded
   output for a render. Faced with a composite that threw, `SceneStage.tsx` set `complete = true` and
@@ -1316,7 +1318,9 @@ recovery vocabulary. **One deliberate difference:** the preview degrades to the 
 is exhausted, because a viewer showing something slightly wrong beats a viewer showing nothing; an export
 has no such fallback, because a wrong file *is* the product. Terminal state here is failure.
 
-**Instance 2 — FOUND, NOT FIXED, and it is the same defect one function away.** `SceneStage.tsx`'s
+**Instance 2 — FIXED 2026-08-09. Update at the end of this entry.**
+
+**Instance 2, as first found — NOT FIXED at the time, and it is the same defect one function away.** `SceneStage.tsx`'s
 controller-creation effect catches a `SceneCompositor` init failure, logs
 `"SceneStage: SceneCompositor init failed"`, and sets `controllerRef.current = null`. The composite
 effect then returns early on `if (!controller) return;` — **before any `delayRender()` handle is
@@ -1340,6 +1344,65 @@ and until someone does, "OOM caused it" is a hypothesis with a plausible mechani
 GPU transient from *silent wrong output* into *a loud, named, non-zero-exit failure*. That is worth having
 on its own, and it is also what makes the cause investigable: the next occurrence will announce itself
 with the frame number and the underlying error instead of hiding in a PNG nobody diffs.
+
+**Update (2026-08-09) — instance 2 FIXED, and it fails immediately rather than retrying.**
+
+The controller-init catch now calls `cancelRender()` with a named error instead of nulling the controller
+and letting every frame emit uncomposited. **Deliberately NOT the composite path's ladder**, and the
+reasoning is recorded at the call site as well as here so nobody "harmonises" the two later:
+
+- init runs **once per render**, not per frame — it is not the per-frame transient the ladder exists for;
+- the plausible causes (no WebGL2, context creation refused, OOM at startup) are mostly conditions a
+  one-second retry cannot change;
+- a render that fails at frame 0 costs a queued job that can be re-run; a silent blank export cannot be
+  recovered at all. The asymmetry favours failing loudly and early over machinery for a case nobody has
+  observed.
+
+Copying the ladder would have invented a second recovery vocabulary for a case with no evidence behind
+it. **If init failures are ever shown to be transient that is a new finding and a new decision** — it is
+deliberately not pre-empted in code.
+
+Falsifiability, by breaking the subject: `new SceneController(...)` forced to throw, `render:manifest` on
+the `flarex-unified-color` fixture. **BEFORE:** mp4 written, exit **0**. **AFTER:** no mp4, exit **1**,
+`SceneStage: SceneCompositor init failed — refusing to emit an uncomposited render (DEBT-015)`. Injection
+reverted, `git diff` empty, zero grep matches for the token.
+
+**Instance 3 — the unconditional `continueRender` on unmount. DORMANT, measured, deliberately UNCHANGED.**
+
+`SceneStage.tsx`'s unmount cleanup releases `pendingRef`'s handle unconditionally — it does not
+distinguish a healthy pending frame from one that FAILED and is mid-ladder. On paper that is exactly what
+this entry's expiry condition forbids, and it matches this entry's own Detection rule. **The fix for
+instance 1 widened its window**: a failed composite used to resolve in the same tick, so `pendingRef`
+essentially never referred to a failed frame; the ladder now holds the handle across 150+300+600ms plus
+composite time. Recorded here because the register's Detection field exists precisely to catch a
+compromise being deepened *by the PR paying the debt down* — which is what happened, and it was found in
+review rather than by the author.
+
+**It is not reachable on the export path**, measured before being left alone:
+
+| condition | mounts | unmounts |
+|---|---|---|
+| healthy render (still + mp4, exit 0) | 3 | **0** |
+| every composite failing — ladder active throughout, ending in `cancelRender` (exit 1) | 1 | **0** |
+
+The second row is the sensitive one: with every composite throwing, a failed frame's handle is held for
+essentially the whole life of the component, so any teardown would collide with it. None occurred.
+Structurally: `SceneStage` has exactly **one** call site (`Root.tsx:61`, rendered unconditionally as the
+composition root, no key, no conditional branch), there is **no StrictMode** anywhere in
+`apps/worker/src`, and Remotion ends a render by **closing the page**, which never runs React cleanup.
+
+**The sharper consequence, stated because it is easy to stop one step short of:** if unmount never fires,
+then the effect's *original* purpose — the comment says it exists "so a teardown mid-frame can't hang the
+render" — also describes a scenario that does not occur. **Instance 3 is dormant, and so is the
+protection it was written for.** It has been dormant since well before instance 1's fix existed.
+
+**Kept, not deleted, and NOT an L13 violation.** L13 is about newly built infrastructure shipped ahead of
+a consumer; this is a pre-existing safety net whose absence would fail *silently*, and reachability
+arguments age badly. **Re-arming condition, precisely:** the moment `SceneStage` acquires a second,
+conditionally-mounted host (a preview surface, a harness that swaps compositions), unmount becomes
+reachable and this becomes load-bearing — at which point the release must distinguish *pending and
+healthy* (release, as today) from *pending and failed / mid-ladder* (`cancelRender`). The argument is
+duplicated as a comment at the effect so the next reader does not re-derive it.
 
 ### DEBT-012 addendum — a FIFTH shape: the absolute falsifier that presupposes an unmeasured baseline
 

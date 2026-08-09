@@ -319,6 +319,13 @@ async function capturePreviewFrame(url: string, outputPath: string): Promise<Omi
       deviceScaleFactor: 1,
       viewport: { width: 1200, height: 2100 }
     });
+    // COLD-CACHE FIRST RUN (measured 2026-08-09): on a fresh clone or a new worktree, vite's dep
+    // pre-bundle happens inside this first navigation and can exceed the 30s `networkidle` budget — the
+    // gate then fails at fixture 1 with `page.goto: Timeout 30000ms exceeded`. RE-RUN BEFORE
+    // INVESTIGATING; the second run is warm and passes. Verified by holding env fixed and varying only
+    // `node_modules/.vite`: cold failed, warm passed 53/53 with byte-identical per-fixture numbers.
+    // The timeout is deliberately NOT raised — nobody has measured what the right budget is, and that
+    // would be a behaviour change to a gate.
     await page.goto(url, { waitUntil: "networkidle" });
     await page.locator("[data-render-fixture='ready']").waitFor({ state: "visible" });
     await page.evaluate(async () => {

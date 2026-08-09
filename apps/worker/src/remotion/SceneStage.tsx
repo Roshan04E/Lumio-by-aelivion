@@ -620,6 +620,9 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   );
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<SceneController | null>(null);
+  // Set once this render has been failed via cancelRender (DEBT-015). Read by BOTH the controller-init
+  // effect and the per-frame composite effect, so neither starts work behind a render already failing.
+  const renderAbortedRef = useRef(false);
   const rawRef = useRef<Map<string, RawFrame>>(new Map());
   const matteRef = useRef<Map<string, RawFrame>>(new Map());
   const [mediaTick, bumpMediaTick] = useState(0);
@@ -648,6 +651,31 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     } catch (error) {
       console.error("SceneStage: SceneCompositor init failed", error);
       controllerRef.current = null;
+      // DEBT-015 instance 2 — FAIL the render here. Without a controller the composite effect returns at
+      // `if (!controller) return;` BEFORE any delayRender() handle is acquired, so nothing blocks the
+      // frame at all: Remotion writes every frame uncomposited and exits 0. That is instance 1's blank
+      // export by a shorter route — it does not even need to release a handle to ship a blank file.
+      //
+      // Deliberately NOT the composite path's retry ladder. That is a decision, not an omission:
+      //   • init runs ONCE per render, not per frame — it is not the per-frame transient the ladder was
+      //     built for;
+      //   • the plausible causes (no WebGL2, context creation refused, OOM at startup) are mostly
+      //     conditions a one-second retry cannot change;
+      //   • a render that fails at frame 0 costs a queued job that can simply be re-run, while a silent
+      //     blank export is unrecoverable — the asymmetry favours failing loudly and early over
+      //     machinery for a case nobody has observed.
+      // Copying the ladder here would invent a second recovery vocabulary for a case with no evidence
+      // behind it. If init failures are ever SHOWN to be transient, that is a new finding and a new
+      // decision — not something to pre-empt with a branch nothing has asked for.
+      if (!renderAbortedRef.current) {
+        renderAbortedRef.current = true;
+        const cause = error instanceof Error ? error.message : String(error);
+        cancelRender(
+          new Error(
+            `SceneStage: SceneCompositor init failed — refusing to emit an uncomposited render (DEBT-015). Cause: ${cause}`
+          )
+        );
+      }
     }
     return () => {
       controllerRef.current?.dispose();
@@ -662,7 +690,6 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   // Bounded composite-failure recovery (DEBT-015; see the constants above).
   const compositeAttemptsRef = useRef(0);
   const cleanCompositesRef = useRef(0);
-  const renderAbortedRef = useRef(false);
   const compositeRetryTimerRef = useRef<number | null>(null);
   const [compositeRetryTick, setCompositeRetryTick] = useState(0);
 
@@ -812,6 +839,28 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
   }, []);
 
   // Continue any outstanding handle on unmount so a teardown mid-frame can't hang the render.
+  //
+  // DEBT-015 instance 3 — READ THIS BEFORE "FIXING" IT EITHER WAY. This release is unconditional: it
+  // does not distinguish a healthy pending frame from one that FAILED and is mid-ladder, so on paper it
+  // is the very thing DEBT-015 forbids — an error path releasing a handle for work that did not succeed.
+  // The composite ladder widened that window from ~0 (a failed composite used to resolve in the same
+  // tick) to ~1s. It was measured before being left alone, and it is NOT reachable on the export path:
+  //   • `SceneStage` has exactly ONE call site — `Root.tsx` renders it unconditionally as the
+  //     composition root, with no key and no conditional branch — and there is no StrictMode in
+  //     `apps/worker/src`, so nothing above it can drop or re-key it;
+  //   • Remotion ends a render by CLOSING THE PAGE, which never runs React cleanup;
+  //   • measured 2026-08-09 over both a healthy render and one where every composite failed (ladder
+  //     active throughout, ending in cancelRender): 4 mounts, ZERO unmounts.
+  // So this cleanup never runs — which also means its ORIGINAL purpose, stopping a mid-frame teardown
+  // from hanging the render, describes a scenario that does not occur either. It has been dormant since
+  // long before the ladder existed.
+  //
+  // It is kept, not deleted: it is a pre-existing safety net whose absence would fail SILENTLY, and
+  // reachability arguments age badly. The re-arming condition is precise — the moment `SceneStage`
+  // acquires a SECOND, conditionally-mounted host (a preview surface, a harness that swaps
+  // compositions), unmount becomes reachable, this becomes load-bearing, and the release must then
+  // distinguish "pending and healthy" (release, as today) from "pending and failed / mid-ladder"
+  // (cancelRender). Do that then; do not build it now.
   useEffect(() => {
     return () => {
       if (pendingRef.current) {
