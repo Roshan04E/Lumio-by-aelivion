@@ -1639,6 +1639,28 @@ this fixture. Per this round's own standard — "a recovery mechanism that has n
 up is not bounded, it is untested" — A3 is reported as **untested**, not confirmed, and the Expiry
 condition above names exactly what would close it.
 
+**Update (2026-08-09) — A3 confirmed, by injection rather than behaviour.** Three behavioural forcing
+attempts above were reasonable and were never going to be reliable against a decoder that stabilises
+after light use — that is a property of the decoder, not a gap in the probing. Closed instead the way
+DEBT-015 closed its own untested branch: temporarily set `MAX_PAUSED_WC_RECOVERY_ATTEMPTS = 0` in
+`WebglMediaLayer.tsx` (token `TEMPORARY-DEBT018A3-INJECTION`, reverted immediately after, proven clean
+via `git diff` reporting no changes and a grep for the token returning zero matches), then fired the
+same real trigger (seek 2 → 16.37) used throughout this investigation. Result:
+
+```
+mode before test seek: wc-hw
+mode 8s after the stall-triggering seek: element
+ladder console lines (1):
+  WebglMediaLayer: paused WC recovery exhausted (0 attempts) — staying on <video> element for this source
+saw "attempt" line: false (budget was 0 — correctly never scheduled one)
+```
+
+The exhaustion path fires exactly as designed: the warning logs, no attempt is scheduled, the layer
+settles on `element`. **Status: fixed, all three acceptance links (A1/A2/A3) confirmed** — A1/A2 by
+ordinary behaviour, A3 by injection because ordinary behaviour could not reach it. That distinction —
+which link needed which method — is worth keeping on the record rather than collapsing into a single
+"tested" checkbox.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
