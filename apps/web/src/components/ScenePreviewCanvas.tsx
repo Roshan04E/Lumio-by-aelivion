@@ -392,8 +392,12 @@ export interface SceneViewerCaptureHandle {
    * view-dot selection.
    *
    * Returns null (caller: "not ready, try later") whenever the picture would be wrong or the cost would
-   * land in the wrong place — while PLAYING, before the first frame has composited, or when the host
-   * clip is not among the layers currently on screen.
+   * land in the wrong place — while PLAYING, before the first frame has composited, when the host clip
+   * is not among the layers currently on screen, or (DEBT-010) when the requested node is itself an
+   * asset-source MediaIn whose own loader has not decoded a frame yet: the compile substitutes the HOST
+   * clip's picture for that gap, which is correct for the live viewer's soft-degrade but wrong to cache
+   * as this node's thumbnail. Scoped to the requested node itself — a pending MediaIn elsewhere in the
+   * graph that a downstream Merge correctly absorbs does not trigger this.
    */
   renderFlarexNodeThumbnail(input: {
     /** The clip carrying the comp. Must be one of the viewer's current layers. */
@@ -1978,6 +1982,28 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       beginFrame("thumbnail", inputsRef.current.currentTime);
       let thumbOutcome: FrameOutcome = "abandoned";
       const scoped = scratchScopeCaches();
+      // DEBT-010 — the fourth not-ready case (2026-08-09). A thumbnail re-rooted at a MediaIn whose own
+      // asset-source loader has not decoded a frame yet compiles to null for THAT node (the compiler's
+      // own I-27 guard — `compile-flarex.ts`'s `substituting` branch — already refuses to show the host's
+      // pixels here); `compileFlarexComp` then silently re-evaluates from MediaOut instead of respecting
+      // the requested root (see its `previewRootNodeId` fallthrough), and `buildSceneDraws`'s Flarex hook
+      // falls back to the host's plain draw for ANY null result, with no signal distinguishing "this
+      // node's own source just hasn't landed yet" from "broken graph" or "no source assigned at all".
+      // That is the whole bug: readiness was never reported at this boundary, so a host-substituted
+      // capture got cached exactly like a correct one.
+      //
+      // Scoped to `degradation.nodeId === rootNodeId` — not "any pending source anywhere in this
+      // compile" — because a pending MediaIn feeding a downstream Merge is correctly absorbed (dropped
+      // to background) without substitution, and flagging THAT thumbnail as not-ready too would be
+      // needless imprecision, not a fix for anything.
+      //
+      // "pending" only ever fires for a node that HAS a loader (`collectFlarexVirtualLayers` resolved its
+      // `sourceAssetId` to a real asset) whose graded canvas has not landed — never for an empty
+      // `sourceAssetId` or an unresolvable one, both of which return a valid (non-null) host-draw image
+      // immediately in the compiler and never reach this degrade branch at all. So a MediaIn with no
+      // source assigned, or a deleted asset, is NEVER reported here and caches normally — the spin guard
+      // this fix must not break.
+      let unresolvedMediaInSubstitution = false;
       try {
         const draws = buildSceneDraws({
           // The clip ALONE: this shows what this layer (or node) OUTPUTS, not what the timeline
@@ -2004,7 +2030,22 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
           // replaces the whole lowering with one pre-rendered frame, so every node would render
           // identically as the comp's final output — the one input that would make this silently wrong.
           ...(rootNodeId ? { flarexPreviewRootNodeId: rootNodeId } : {}),
+          // Purely an out-channel (never changes what buildSceneDraws returns, same contract as the live
+          // draw's onFlarexDegrade a few hundred lines up) — read here only to decide whether THIS
+          // capture is trustworthy enough to cache, not to change the picture itself.
+          onFlarexDegrade: (_compId, degradation) => {
+            if (
+              degradation.nodeId === rootNodeId &&
+              (degradation.reason === "host-substituted:pending" || degradation.reason === "source-pending-retimed")
+            ) {
+              unresolvedMediaInSubstitution = true;
+            }
+          },
         });
+        // Not ready (fourth case, see above): the picture the caller would cache right now is the HOST's,
+        // substituted for a source that is still loading. Refusing here is free — nothing was composited
+        // yet — and the idle loop re-requests this node on its next tick, same contract as the other three.
+        if (unresolvedMediaInSubstitution) return null;
         // CONTAIN the project aspect inside the requested box: the readback is a straight blit of the
         // whole frame, so asking for a 16:9 target on a 9:16 project would squash it. The caller gets
         // the size actually used and letterboxes with it.

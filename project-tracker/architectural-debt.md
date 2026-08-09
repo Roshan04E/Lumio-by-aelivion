@@ -325,6 +325,39 @@ Entries are never rewritten. To change one, append a new dated note under it.
   touched**. It resurfaces whenever a first render lands before decode — a large asset, a cold OPFS —
   which is rarer now but not gone. An entry exists precisely because "the symptom stopped" is the
   weakest possible evidence that a cache-identity defect is fixed.
+- **RETIRED (2026-08-09).** Fixed by sidestepping the ContextVersion question rather than answering it:
+  readiness is an EVENT, not a state, so it does not need a version number — it needs the existing
+  "not ready, try later" contract `SceneViewerCaptureHandle.renderFlarexNodeThumbnail` already had for
+  three other cases (playing / no frame yet / host off-screen). Found the exact fallback site
+  (`packages/shared/src/scene/build-scene-draws.ts:895-909`'s `resolveSourceDraw`, which returns
+  `null` — not `"pending"` — for a MediaIn whose virtual layer hasn't been built yet, indistinguishable
+  from a node with no source at all; `compile-flarex.ts:1826-1829`'s `previewRootNodeId` fallthrough
+  then silently re-evaluates from MediaOut instead of respecting the requested root when that returns
+  null; `build-scene-draws.ts:912`'s `return lowered ?? draw;` is where the host gets substituted, with
+  no signal distinguishing "genuinely nothing to wait for" from "still loading"). Added a FOURTH
+  not-ready case in `ScenePreviewCanvas.tsx`'s `renderIsolated`: a local `onFlarexDegrade` listener,
+  scoped to `degradation.nodeId === rootNodeId`, flags a `"host-substituted:pending"` /
+  `"source-pending-retimed"` degrade for the SPECIFIC requested node and returns `null` instead of
+  compositing — no cache-key change, no ContextVersion, no new plumbing into
+  `flarex-node-thumbnails.ts` at all.
+  **The spin guard, verified not by reading the code but by injection**: `resolveSourceDraw` only ever
+  returns this signal for a node that HAS a loader (`collectFlarexVirtualLayers` resolved its
+  `sourceAssetId` to a real, existing asset) whose graded canvas hasn't landed — never for an empty
+  `sourceAssetId` or a deleted/unresolvable one, both of which return a valid (non-null) host-draw
+  image immediately and never reach this degrade branch. A MediaIn with no source assigned settled to
+  zero further capture attempts across 10s of idle canvas, confirmed via a temporary console.log
+  injection (reverted, proven clean via `git diff` + a token search) rather than asserted from reading
+  the branch.
+  **Acceptance, all three links, `git diff`-proven falsifiable**: (1) a MediaIn bound to a second asset
+  showed its own picture ~1.4s after binding, no reload, while staying on the Flarex page throughout;
+  (2) reverting the fix to git HEAD and repeating the identical steps reproduced the bug exactly —
+  the host clip's picture persisted for 15+ seconds of continued interaction, never self-corrected;
+  (3) an unbound MediaIn produced zero further render attempts once settled. All three measured on a
+  real running editor via Playwright, not asserted from the diff.
+  ContextVersion remains genuinely absent from `entryKey` for every other axis a thumbnail could in
+  principle depend on — none are known to cause a real defect today, so this retires rather than
+  expanding into "add ContextVersion for everything." See `flarex-node-thumbnails.ts`'s own docstring,
+  rewritten in place, for the fuller account.
 
 ### DEBT-009 — a resource's liveness is inferred from a signal its consumer does not emit
 - Status: open
@@ -1678,3 +1711,7 @@ which link needed which method — is worth keeping on the record rather than co
 - **DEBT-016** — retired 2026-08-09 in place above, same commit as its fix. `FlarexSourceDrawCache`'s
   hit path now rebinds the transform, not just the media handle; falsified before/after with
   `flarex-source-draw-cache-transform.test.ts`.
+- **DEBT-010** — retired 2026-08-09 in place above, same commit as its fix. Sidestepped ContextVersion
+  entirely: readiness is now a fourth not-ready EVENT at the capture boundary
+  (`ScenePreviewCanvas.tsx`'s `renderIsolated`), not a cache-key axis. All three acceptance links
+  (repro / falsifier / spin-guard) measured on a real running editor via Playwright.
