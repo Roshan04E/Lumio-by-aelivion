@@ -68,6 +68,23 @@ const WC_DIVERGE_MAX_MS = 10_000;
 // lag sat at 1.4–2.3s, under the playing threshold). Element fallback seeks natively and exactly.
 const WC_PAUSED_STALE_LAG_S = 0.5;
 const WC_PAUSED_STALE_MAX_MS = 3000;
+// PAUSED WC RECOVERY LADDER (2026-08-09). The `pausedStall` branch below does NOT add to
+// `wcBailedSources` — only the PLAYING branch does, deliberately (see its own comment) — so nothing
+// in the code forbids WebCodecs from serving this source again. Measured
+// (ruler-jump-pause-alone-probe.ts G4): a full remount DOES restore it, confirming there was never a
+// policy blocking recovery, only a missing re-attempt — nothing during ordinary continued use causes
+// this layer to remount on its own, so a source demoted here stayed on <video> for the rest of the
+// session by accident, not by design.
+//
+// Mirrors ScenePreviewCanvas's WebGL context-loss ladder / SceneStage's DEBT-015 composite ladder —
+// bounded attempts, fixed backoff, reset after a healthy run — rather than inventing a third recovery
+// vocabulary for the same shape of problem. `wcReacquireEpoch` (S4.3/ADR-020 slice D) already exists
+// as "re-enter the lease effect and re-evaluate whether this source can have WebCodecs" for a starved
+// source the pool marked eligible; this ladder is a second caller of that same re-entry point, not a
+// new acquisition path.
+const MAX_PAUSED_WC_RECOVERY_ATTEMPTS = 3;
+const PAUSED_WC_RECOVERY_BACKOFF_MS = [150, 300, 600];
+const HEALTHY_WC_REQUESTS_TO_RESET_PAUSED_RECOVERY = 120;
 // Self-heal net for the states the lag-based bails can NOT see (2026-07-04, "cyclist clip
 // invisible while paused"): a `lease.ready` that never settles (wedged init / starved pool) left
 // the layer with NO source, and a getFrame promise that never resolves left `wcBusy` stuck forever
@@ -679,6 +696,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
     // Wall-clock start of the current catch-up hold streak (null = not holding). See the
     // REWIND CATCH-UP HOLD block in requestWcFrame.
     const wcHoldStartRef = useRef<number | null>(null);
+    // PAUSED WC RECOVERY LADDER state — see the constants' comment. Attempts/healthy persist across a
+    // `wcReacquireEpoch` bump within the same mounted source (that bump is what this ladder itself
+    // causes); a genuine src change gets a fresh component instance and fresh refs via React's own
+    // key-based remount, so no separate reset-on-src-change is needed here.
+    const wcPausedRecoveryAttemptsRef = useRef(0);
+    const wcPausedRecoveryHealthyRef = useRef(0);
+    const wcPausedRecoveryTimerRef = useRef<number | null>(null);
     const wcFallbackRef = useRef<() => void>(() => {});
     const requestWcFrameRef = useRef<() => void>(() => {});
     // When drawVideoFrame last actually painted — the watchdog uses it to catch a layer whose draw
@@ -966,6 +990,10 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
           if (wcTolerateRetryTimerRef.current !== null) {
             window.clearTimeout(wcTolerateRetryTimerRef.current);
             wcTolerateRetryTimerRef.current = null;
+          }
+          if (wcPausedRecoveryTimerRef.current !== null) {
+            window.clearTimeout(wcPausedRecoveryTimerRef.current);
+            wcPausedRecoveryTimerRef.current = null;
           }
           if (wcRerequestRafRef.current !== null) {
             cancelAnimationFrame(wcRerequestRafRef.current);
@@ -2114,6 +2142,38 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       }, delayMs);
     }
 
+    /**
+     * PAUSED WC RECOVERY LADDER (see the constants' comment above `MAX_PAUSED_WC_RECOVERY_ATTEMPTS`).
+     * Called only from the `pausedStall` branch, never the playing one — that one blacklists via
+     * `wcBailedSources` on purpose and this ladder must not interfere with it.
+     *
+     * Idempotent (one pending timer at a time) and self-terminating: once the attempt budget is spent
+     * this simply stops scheduling and the source stays on `element` — exactly today's behaviour,
+     * just reached deliberately after trying, instead of never trying at all.
+     */
+    function scheduleWcPausedRecovery() {
+      if (wcPausedRecoveryTimerRef.current !== null) return;
+      const attempt = wcPausedRecoveryAttemptsRef.current;
+      if (attempt >= MAX_PAUSED_WC_RECOVERY_ATTEMPTS) {
+        console.warn(
+          `WebglMediaLayer: paused WC recovery exhausted (${MAX_PAUSED_WC_RECOVERY_ATTEMPTS} attempts) — staying on <video> element for this source`
+        );
+        return;
+      }
+      wcPausedRecoveryAttemptsRef.current = attempt + 1;
+      wcPausedRecoveryHealthyRef.current = 0;
+      const delay = PAUSED_WC_RECOVERY_BACKOFF_MS[Math.min(attempt, PAUSED_WC_RECOVERY_BACKOFF_MS.length - 1)] ?? 600;
+      console.warn(`WebglMediaLayer: paused WC recovery attempt ${attempt + 1}/${MAX_PAUSED_WC_RECOVERY_ATTEMPTS} in ${delay}ms`);
+      wcPausedRecoveryTimerRef.current = window.setTimeout(() => {
+        wcPausedRecoveryTimerRef.current = null;
+        // Re-enters the SAME lease effect a starved-source reacquire uses (S4.3/ADR-020 slice D) — not
+        // a second acquisition path. `forceElementPath` gets recomputed from scratch there: the proxy
+        // is already resolved and this branch never touched `wcBailedSources`, so nothing but the
+        // ordinary cap check stands between this and a real retry.
+        setWcReacquireEpoch((value) => value + 1);
+      }, delay);
+    }
+
     // WebCodecs frame request (stage 2): single in-flight decode, latest transport time wins.
     // A resolved frame belongs to the provider (valid until its NEXT getFrame), so we draw it
     // immediately and keep it referenced for paused repaints (pipeline/effect changes).
@@ -2304,9 +2364,25 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
                   scheduleTolerantRetry();
                   return;
                 }
-                if (tp.isPlaying) wcBailedSources.add(src);
+                if (tp.isPlaying) {
+                  wcBailedSources.add(src);
+                } else {
+                  // PAUSED WC RECOVERY LADDER — the paused branch deliberately does not blacklist (see
+                  // above), so schedule the bounded re-attempt that non-blacklisting implies.
+                  scheduleWcPausedRecovery();
+                }
                 wcFallbackRef.current();
                 return;
+              }
+              // Reached this point without stalling: a real pass of the guard that found nothing wrong.
+              // Only meaningful once the paused ladder has actually spent an attempt — an ordinary
+              // healthy source (attempts still 0) has nothing to reset.
+              if (wcPausedRecoveryAttemptsRef.current > 0) {
+                wcPausedRecoveryHealthyRef.current += 1;
+                if (wcPausedRecoveryHealthyRef.current >= HEALTHY_WC_REQUESTS_TO_RESET_PAUSED_RECOVERY) {
+                  wcPausedRecoveryAttemptsRef.current = 0;
+                  wcPausedRecoveryHealthyRef.current = 0;
+                }
               }
             }
             const presentFrame = () => {

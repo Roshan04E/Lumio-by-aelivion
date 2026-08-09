@@ -56,7 +56,8 @@
     "rulerjump:capaudit": "tsx src/ruler-jump-cap-audit.ts",
     "rulerjump:initrace": "tsx src/ruler-jump-init-race-probe.ts",
     "rulerjump:wedgeconfirm": "tsx src/ruler-jump-wedge-confirm-probe.ts",
-    "rulerjump:pausealone": "tsx src/ruler-jump-pause-alone-probe.ts"
+    "rulerjump:pausealone": "tsx src/ruler-jump-pause-alone-probe.ts",
+    "rulerjump:recoveryaccept": "tsx src/ruler-jump-recovery-acceptance-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

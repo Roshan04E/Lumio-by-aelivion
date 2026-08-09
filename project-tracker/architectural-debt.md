@@ -1580,6 +1580,65 @@ the host and an asset-source MediaIn land in the mathematically-predicted box fo
 answers "do the two renderers agree"; only an absolute-ground-truth instrument answers "is either of them
 right." This entry names the gap; building that harness is not attempted here.
 
+### DEBT-018 — a recovery the code declares available was never performed (paused WC fallback)
+
+- Status: **fixed — one acceptance link (A3, exhaustion) remains observed-never, not disproven**
+- Registered: 2026-08-09 (a four-round measurement chain: D1-D4 seek-delay probe → path/cap-contention
+  audits → E1-E4 seek-triggered demotion → F1-F4 telemetry-confirmed the `pausedStall` site, WRONG on
+  the first-proposed `busyWedge` site → G1-G4 confirmed the seek is required and a full remount DOES
+  restore WebCodecs, meaning nothing was blocking recovery — only the retry itself was missing)
+- Reason: `WebglMediaLayer.tsx`'s paused-case stall guard (`WC_PAUSED_STALE_LAG_S`/`WC_PAUSED_STALE_MAX_MS`,
+  ~line 2286 pre-fix) hands a layer to the native `<video>` element on a sustained stale-lag streak while
+  paused, and — unlike the PLAYING branch, which deliberately blacklists via `wcBailedSources` — the
+  paused branch never added the source to that list. The comment already said so ("Remember it (playing
+  case) so a re-mount skips WC"). Nothing forbade recovery; nothing performed it either. One paused seek
+  cost a user hardware decode for the rest of the session, and G4 measured that a page reload (a remount)
+  fixed it by accident — confirming there was never a policy, only a missing retry.
+- Invariant affected: none named in ADR-012/020; this is closer to DEBT-013's shape (a source denied a
+  session with no path back) than to a numbered ADR invariant. Related, not identical: DEBT-013 is
+  about ADMISSION losing a cap fight; this is about a SELF-HEAL declaring a source unservable with no
+  re-attempt, on a single-source fixture with no contention at all.
+- Owner: unassigned
+- Expiry condition (for the remaining open half): A3 below is observed to fire — a real fourth
+  `pausedStall` event after the 3-attempt budget is spent, producing the ladder's own "exhausted"
+  console line — on any fixture, not necessarily this one.
+- Planned slice: none: this is a bounded, already-landed fix, not a slice.
+- Tracking issue: —
+- Detection: any future change to `wcBailedSources`, `scheduleWcPausedRecovery`, or the paused branch of
+  the stall guard should re-run `rulerjump:recoveryaccept` (A1-A3) before merging — the ladder shape is
+  copied from ScenePreviewCanvas's context-loss ladder / SceneStage's DEBT-015 composite ladder
+  specifically so it stays legible; diverging from that shape without re-justifying it here is the thing
+  Detection exists to catch.
+
+**The fix, one paragraph.** `WebglMediaLayer.tsx`'s paused-stall branch now calls
+`scheduleWcPausedRecovery()` instead of only falling back: up to `MAX_PAUSED_WC_RECOVERY_ATTEMPTS` (3)
+bounded, backed-off (`[150, 300, 600]`ms) re-attempts, each re-entering the SAME lease-acquire effect a
+starved-source reacquire already used (`wcReacquireEpoch` — S4.3/ADR-020 slice D), not a new acquisition
+path. A sustained healthy run (120 clean guard passes) resets the budget, mirroring the two existing
+ladders' shape exactly. The PLAYING branch (`wcBailedSources`) is untouched, as is `tolerateLag` behaviour
+and both stall thresholds — none of those were the diagnosed defect and none were touched.
+
+**Acceptance, A1-A3, measured (`rulerjump:recoveryaccept`), two full runs.**
+
+| reading | result |
+|---|---|
+| A1 — recovery after a demoting seek | **confirmed**, twice: 1380ms and 1608ms after the demoting seek, no reload |
+| A2 — no thrash across 10+ seeks / 60s | **confirmed**, twice: 2-3 scheduled attempts total across 17-18 repeated seeks, never exceeding the 3-attempt cap, no oscillation |
+| A3 — the bound terminates under forced persistence | **not observed either way** — see below |
+
+**A3, honestly unresolved.** Three independent attempts to force a fourth `pausedStall` (repeating the
+exact triggering jump; repeating it in tight succession; cycling through ten DISTINCT far-from-keyframe
+targets spread across the whole clip, in tight succession) all produced the same pattern: 1-2 stalls
+right at the start of WebCodecs engagement for that source, then **zero further stalls across 100+ more
+seeks of every kind tried**, including fresh jumps into regions never previously visited. This looks like
+a real, reproducible property of the underlying decoder — once exercised a couple of times, this source
+stopped presenting the stale-lag condition at all — not a probe bug (the same pattern held across two
+full independent runs with different random session state). The consequence: the ladder's give-up path
+(`attempt >= MAX` → console.warn "exhausted" → stay on element) was never exercised by measurement, on
+this fixture. Per this round's own standard — "a recovery mechanism that has never been observed giving
+up is not bounded, it is untested" — A3 is reported as **untested**, not confirmed, and the Expiry
+condition above names exactly what would close it.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
