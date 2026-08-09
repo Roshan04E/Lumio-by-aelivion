@@ -1,6 +1,7 @@
 import { Link, NavLink } from "react-router-dom";
 import { Sparkles } from "lucide-react";
 import { BrandMark } from "./BrandMark";
+import { AccountMenu } from "./AccountMenu";
 import { usePro } from "../lib/proMode";
 
 const navItems = [
@@ -28,9 +29,7 @@ export function Navbar() {
         </nav>
 
         <span className="mkt-nav-spacer" />
-        <NavLink to="/login" className="mkt-nav-ghost">
-          Sign in
-        </NavLink>
+        <AccountMenu />
         <Link to="/create" className="mkt-btn mkt-btn-primary">
           Start editing free
         </Link>
