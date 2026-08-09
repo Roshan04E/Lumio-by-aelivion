@@ -1295,9 +1295,15 @@ resolved — whichever comes first.
 
 ### DEBT-015 — CLASS: an error path that reports COMPLETION, so a failure ships as product output
 
-- Status: **open** (registered as a CLASS. Instances 1 and 2 fixed; instance 3 measured **dormant** and
-  deliberately unchanged. The entry does not retire on its instances — the expiry condition is about
-  EVERY error path in the export pipeline, and no exhaustive audit of those paths has been done.)
+- Status: **open** (registered as a CLASS. Update 2026-08-09: instances 1, 2, and 4 fixed; instance 3
+  measured **dormant** and deliberately unchanged; the one remaining audit row (`:784-793`, the
+  stale-handle release) is now also **measured dormant** rather than reasoned-only — see the audit
+  update below. The 2026-08-09 exhaustive audit confirmed every `delayRender`/`continueRender`/
+  `cancelRender` call site and every catch/finally/cleanup path in `apps/worker/` lives in exactly one
+  file (`SceneStage.tsx`), and all of them are now accounted for. This entry is left **open** rather than
+  flipped to retired in this pass: the expiry condition names "the export pipeline," a broader claim than
+  one grep-verified file, and retiring a CLASS entry is a call left to the founder rather than inferred
+  from an instance count reaching zero.)
 - Registered: 2026-08-09 (from an intermittent `render:compare:pixels` failure)
 - Reason: an export's error handler had exactly one job it could not do — there is no safe degraded
   output for a render. Faced with a composite that threw, `SceneStage.tsx` set `complete = true` and
@@ -1455,7 +1461,7 @@ calling the API itself; `Root.tsx`/`entry.tsx` carry no completion logic of thei
 | `SceneStage.tsx:547-550` `ImageGrabber`, unmount/dep-change cleanup | `continueRender(handle)`, unconditional | N/A — not itself a failure path | SAFE, distinct from instance 3's shape: this component owns exactly ONE handle for ONE effect run, so a superseded run's handle release cannot ship stale content — either a NEW effect run (new `src`) already owns its own new handle, or the layer/composition is genuinely gone. Nothing is asserted as "complete" that isn't. |
 | `SceneStage.tsx:646-684` controller-init `catch` → `cancelRender` | N/A — this IS the failure path | `cancelRender` with a named DEBT-015 error | SAFE — this is instance 2, FIXED. Falsifier already on record above (forced throw, exit 0→1, `git diff` empty after revert). |
 | `SceneStage.tsx:702-729` `failComposite` → ladder → `cancelRender` on exhaustion | N/A — this IS the failure path | 3 retries (150/300/600ms, handle held throughout) then `cancelRender` with a named DEBT-015 error | SAFE — this is instance 1, FIXED. Falsifier already on record above. |
-| `SceneStage.tsx:739-748` composite effect, "new frame, stale OTHER-frame handle" release | `continueRender(pendingRef.current.id)` before acquiring the new frame's handle | N/A if reasoning below holds — no failure state can reach this branch | DORMANT, **by structural reasoning, NOT by measurement** — flagged as a lower-confidence verdict than instance 3's. `pendingRef.current` is nulled immediately after every successful `continueRender` (line 816) and never touched by the retry ladder (a retry re-runs the SAME `frame`, so the outer `pendingRef.current.frame !== frame` guard is false and this block is skipped). For this branch to fire, `frame` (from `useCurrentFrame()`) would have to advance to a NEW value while an OLDER frame's handle is still outstanding — which Remotion's own `delayRender` contract exists to prevent within one mounted instance. Plausible but genuinely unmeasured; unlike instance 3, no mount/unmount-style falsifier was run for it this round. |
+| `SceneStage.tsx:739-748` (now `:784-793` after instance 4's insertions above it — file grew, site unchanged) composite effect, "new frame, stale OTHER-frame handle" release | `continueRender(pendingRef.current.id)` before acquiring the new frame's handle | N/A if reasoning below holds — no failure state can reach this branch | **Upgraded 2026-08-09: MEASURED DORMANT** (was reasoned-only). See the follow-up measurement below — 0 hits across a real healthy multi-frame render AND a real all-failing render, plus two structural gaps the original reasoning left open (retry interaction, post-abort interaction) now closed by tracing rather than assuming. Original reasoning retained below for the record. `pendingRef.current` is nulled immediately after every successful `continueRender` (line 816, now ~869) and never touched by the retry ladder (a retry re-runs the SAME `frame`, so the outer `pendingRef.current.frame !== frame` guard is false and this block is skipped). For this branch to fire, `frame` (from `useCurrentFrame()`) would have to advance to a NEW value while an OLDER frame's handle is still outstanding — which Remotion's own `delayRender` contract exists to prevent within one mounted instance. |
 | `SceneStage.tsx:791-826` composite effect, success path | `continueRender`, gated on `pass === compositePassRef.current` AND `pendingRef.current.frame === frame` | failure is diverted to `failComposite` at line 806 BEFORE this code is reached | SAFE — the staleness guard is exactly what instance-1's fix relies on; a superseded pass returns at line 804 before either branch. |
 | `SceneStage.tsx:832-839` cleanup, clear the retry timer | none — clears a `setTimeout`, not a render signal | N/A | SAFE / not applicable — listed because it sits beside the ladder and could be mistaken for a completion signal; it is bookkeeping only. |
 | `SceneStage.tsx:864-875` unmount cleanup, unconditional `continueRender` | `continueRender`, unconditional, on any pending handle | releases a handle without checking pending-vs-failed | **This IS instance 3** — already fully documented and measured above (4 mounts / 0 unmounts, both a healthy and an all-failing render). Not re-measured here; cited for completeness of the exhaustive claim. Kept DORMANT with its re-arming condition on record. |
@@ -1546,11 +1552,49 @@ image URL as optional anywhere; every truthy `src` that fails to decode now goes
 retry-then-cancelRender path regardless of which of the three producers (timeline image layer, matte
 layer, Flarex asset-source loader) supplied it.
 
-**DEBT-015 still does not retire.** Instance 4 is now fixed (4/4 known live instances closed: 1, 2, 4
-fixed; 3 confirmed measured-dormant). The `:739-748` stale-handle-release row remains open at its
-original lower-confidence, reasoned-not-measured verdict — see the exhaustive-audit table above; it was
-not touched by this pass and is tracked separately (see the follow-up item closing it, below, if present
-at read time).
+**DEBT-015 still does not retire at this point in the log** — see the next update, which closes the
+remaining open row.
+
+**Update (2026-08-09, same day) — the `:739-748` (now `:784-793`) stale-handle-release row: MEASURED,
+upgraded from reasoned-only. DEBT-015 retirement status: see verdict at the end of this update.**
+
+The prior pass's reasoning was sound but admittedly untested: `pendingRef.current` is nulled on every
+successful `continueRender`, and a same-frame retry can't reach the branch because `pendingRef.current.frame
+!== frame` is false throughout a retry (the retry ladders — both `failComposite`'s and instance 4's new
+image ladder — never change `frame`, only re-run in place). The one thing genuinely unverified was
+whether Remotion's `delayRender` contract really does prevent `frame` from advancing while a handle from
+an OLDER frame is still open, in a REAL multi-tab render, under both normal and failing conditions.
+
+Measured directly, using the same temporary-injection-then-revert method as the rest of this file's
+history: a `console.warn` at the exact branch (`if (pendingRef.current)` inside the "Acquire (or keep)"
+block), firing only when reached with a NON-null `pendingRef` whose `frame` differs from the incoming
+one — precisely the condition the reasoning claimed was unreachable.
+
+- **Healthy render**: a two-clip, 150-frame (5s @ 30fps) fixture with a junction transition between them
+  (so two media layers are simultaneously active, not just one static clip) — `debt015b-manifest-healthy.json`,
+  rendered via `renderManifestToMp4` directly. **0 hits**, exit 0.
+- **All-failing render**: the same fixture with one clip's asset pointing at an undecodable data URL —
+  `debt015b-manifest-broken.json`. Both render tabs ran the instance-4 retry ladder to exhaustion
+  (`retry 1/3` → `retry 2/3` → `retry 3/3`) and `cancelRender`d. **0 hits**, exit 1.
+
+This also closes two structural gaps the original reasoning left open without naming them: (1) whether a
+composite-retry sequence could somehow still reach this branch — traced and confirmed impossible by
+construction (retries hold `frame` constant, so the branch's own precondition is false the entire time);
+(2) whether the abort path could reach it — traced and confirmed impossible (`if (renderAbortedRef.current)
+return;` at the top of the same effect exits before this code runs at all, once aborted).
+
+Reverted cleanly after measurement (`git diff` on `SceneStage.tsx` matches instance 4's committed fix
+exactly, zero probe tokens remaining).
+
+**Verdict: MEASURED DORMANT**, same confidence class as instance 3 now (a bounded real-render
+measurement, not exhaustive formal proof — the same standard instance 3 itself was held to).
+
+**Left open, not declared retired.** All four known instances are now resolved (1, 2, 4 fixed; 3 and this
+row confirmed dormant) and the 2026-08-09 exhaustive audit accounted for every completion-signaling site
+in `apps/worker/`. Whether that satisfies the entry's own expiry condition — "no error path in the export
+pipeline," a claim broader than one grep-verified directory — is left for the founder to decide rather
+than inferred here from an instance count reaching zero. Any FUTURE completion-signaling site added to
+this file starts its own clock regardless of how this is decided.
 
 **(2026-08-08, founder-identified, from this session's own Scope C.)** The pre-registered falsifier read
 *"a lone loader is safe on hardware"* — an **absolute**. It fired: with the lone loader on hardware, a
