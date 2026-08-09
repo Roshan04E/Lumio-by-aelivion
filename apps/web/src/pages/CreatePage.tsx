@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Clapperboard, Wand2 } from "lucide-react";
 import type { ModuleType } from "@orreris/shared";
 import { UploadDropzone } from "../components/UploadDropzone";
-import { createAsset, createProject } from "../lib/api";
+import { claimUploadedAsset, createAsset, createProject } from "../lib/api";
 import { usePro } from "../lib/proMode";
 
 type Step = "upload" | "style" | "prompt";
@@ -103,6 +103,13 @@ export function CreatePage() {
         ...(opts.durationSeconds !== undefined ? { durationSeconds: opts.durationSeconds } : {}),
         ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {})
       });
+      // The pile fix (EditorPage.tsx handleUploadAsset) stamps ownerProjectId at createAsset time
+      // because the project already exists there. Here the asset necessarily predates the project
+      // (createProject needs its id) — claim it now, in the same order every other upload gets
+      // ownership, just one step later. See claimUploadedAsset in lib/api.ts.
+      if (asset) {
+        void claimUploadedAsset(asset.id, project.id);
+      }
       navigate(`/editor/${project.id}`);
     } catch {
       setBusy(false); // stay on the flow so the user can retry

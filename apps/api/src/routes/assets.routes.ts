@@ -194,7 +194,13 @@ assetsRouter.patch(
         // Duration HEAL only: the client's proxy transcode demuxes the true decodable end of the
         // media and reports it here when the stored duration overshoots (legacy ceil-to-Int rows
         // froze clip tails for the overshoot). Downward-only — the stored value can never grow.
-        durationSeconds: z.coerce.number().min(0.2).max(7200).optional()
+        durationSeconds: z.coerce.number().min(0.2).max(7200).optional(),
+        // CLAIM only, not reassignment: an upload made through CreatePage.tsx is created before its
+        // project exists (ownerProjectId is a real FK — it cannot reference a project that doesn't
+        // have a row yet, which is also why createProject needs the asset to already exist for its
+        // sourceAssetId lookup). The client sets ownership here, right after createProject returns,
+        // instead of at creation time. Only fires on a still-ownerless asset — see below.
+        projectId: z.string().trim().min(1).optional()
       }),
       req.body
     );
@@ -206,11 +212,17 @@ assetsRouter.patch(
       throw new HttpError(404, "Asset not found");
     }
 
-    const data: { folder?: string | null; tags?: string[]; durationSeconds?: number } = {};
+    const data: Prisma.SourceAssetUpdateInput = {};
     if (input.folder !== undefined) data.folder = input.folder || null;
     if (input.tags !== undefined) data.tags = input.tags;
     if (input.durationSeconds !== undefined && input.durationSeconds < asset.durationSeconds) {
       data.durationSeconds = input.durationSeconds;
+    }
+    if (input.projectId !== undefined && !asset.ownerProjectId) {
+      const project = await prisma.project.findFirst({ where: { id: input.projectId, userId: req.user.id } });
+      if (!project) throw new HttpError(404, "Project not found");
+      data.ownerProject = { connect: { id: input.projectId } };
+      data.projectLinks = { create: { projectId: input.projectId } };
     }
     const updated = await prisma.sourceAsset.update({
       where: { id: asset.id },

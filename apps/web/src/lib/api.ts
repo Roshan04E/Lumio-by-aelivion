@@ -863,6 +863,33 @@ export async function healAssetDurationSeconds(assetId: string, durationSeconds:
   }).catch(() => undefined);
 }
 
+/**
+ * Claim a still-ownerless asset for the project it was uploaded into. CreatePage.tsx's upload path
+ * creates the SourceAsset BEFORE the project exists — createProject needs the asset's id up front to
+ * size the timeline and seed the initial media layer, and ownerProjectId is a real FK that cannot
+ * reference a project with no row yet — so the asset is created ownerless and ownership is claimed
+ * here, right after createProject returns. Best-effort, like healAssetDurationSeconds: a failure just
+ * leaves the asset in the pre-existing (ownerless/library) state for a future retry, never throws.
+ */
+export async function claimUploadedAsset(assetId: string, projectId: string): Promise<void> {
+  try {
+    await apiRequest(`/assets/${assetId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ projectId })
+    });
+  } catch {
+    /* offline/local — fall through to the local record below */
+  }
+  await withLocalAssetsWriteLock(async () => {
+    const assets = readLocal<SourceAsset[]>(localAssetsKey, []);
+    const next = assets.map((asset) =>
+      asset.id === assetId && !asset.ownerProjectId ? { ...asset, ownerProjectId: projectId } : asset
+    );
+    writeLocal(localAssetsKey, next);
+  }).catch(() => undefined);
+  if (assetId.startsWith(LOCAL_ASSET_ID_PREFIX)) addLocalProjectLink(projectId, assetId);
+}
+
 // --- Stock media ------------------------------------------------------------------
 // One unified, provider-agnostic Search surface — no provider name is ever shown in the UI. Stock
 // requires the server (search hits the provider API; import downloads the file into our own storage so
