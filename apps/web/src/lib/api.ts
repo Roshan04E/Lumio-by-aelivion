@@ -1413,11 +1413,65 @@ function scheduleOfflinePoll(delayMs: number): void {
   }, delayMs);
 }
 
+// ── Backend-waking state (2026-08-09) ───────────────────────────────────────
+// Production runs on Render's free tier: the API spins down after 15 minutes idle and cold-starts
+// in roughly a minute. Until now the app had no vocabulary for "the server is fine, it's waking
+// up" — a request just sat there and looked broken. Same shape as the offline flag above (one
+// shared flag, one hook, one banner) rather than a parallel system: a request in flight past
+// WAKING_THRESHOLD_MS flips it, and every request that completes (success OR error — this is
+// presentation only, never a verdict on the response) clears it. A counter, not a boolean, because
+// more than one request can be in flight; the banner should only clear once ALL of them have
+// settled.
+//
+// WAKING_THRESHOLD_MS = 2750ms: long enough that ordinary latency/jitter on a warm connection never
+// trips it, short enough that a cold-starting ~60s backend announces itself well before a user
+// wonders whether their click registered at all.
+//
+// NEVER ABORTS THE REQUEST — this is the load-bearing constraint. A cold start can legitimately
+// take a minute, so any client-side timeout short enough to feel responsive would turn a slow
+// SUCCESS into a hard FAILURE. This block only ever flips a UI flag; the `fetch()` below is
+// untouched by it.
+const WAKING_THRESHOLD_MS = 2750;
+
+let apiWaking = false;
+let wakingInFlight = 0;
+const wakingListeners = new Set<(waking: boolean) => void>();
+
+export function isApiWaking(): boolean {
+  return apiWaking;
+}
+
+export function subscribeApiWaking(listener: (waking: boolean) => void): () => void {
+  wakingListeners.add(listener);
+  return () => wakingListeners.delete(listener);
+}
+
+function setApiWaking(next: boolean): void {
+  if (apiWaking === next) return;
+  apiWaking = next;
+  for (const listener of wakingListeners) listener(next);
+}
+
 async function apiRequestWithAuthRetry<T>(path: string, init: RequestInit = {}, _canRetryAuth: boolean): Promise<T> {
   // Fail fast while offline: one poller owns reconnection; data callers drop to their local paths.
   if (apiOffline) {
     throw new ApiOfflineError();
   }
+  wakingInFlight += 1;
+  const wakingTimer = window.setTimeout(() => setApiWaking(true), WAKING_THRESHOLD_MS);
+  const clearWaking = () => {
+    clearTimeout(wakingTimer);
+    wakingInFlight = Math.max(0, wakingInFlight - 1);
+    if (wakingInFlight === 0) setApiWaking(false);
+  };
+  try {
+    return await apiRequestBody<T>(path, init);
+  } finally {
+    clearWaking();
+  }
+}
+
+async function apiRequestBody<T>(path: string, init: RequestInit): Promise<T> {
   const headers = new Headers(init.headers);
   const bodyIsForm = init.body instanceof FormData;
   if (!bodyIsForm && !headers.has("Content-Type")) {

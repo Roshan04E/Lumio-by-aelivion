@@ -10,6 +10,9 @@ import {
 } from "./api";
 import { promoteAllPending } from "./sync";
 
+// See the comment at `adopt` below for why this value and why it is a race, not a hard cap.
+const ADOPT_PROMOTE_TIMEOUT_MS = 8000;
+
 export type AuthStatus = "loading" | "authenticated" | "guest";
 
 interface AuthContextValue {
@@ -51,14 +54,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // After any successful sign-in, claim guest local drafts into the account (idempotent).
   //
-  // AWAITED (was `void promoteAllPending()`, fire-and-forget). Measured 2026-08-09: on a normal
-  // client-side sign-in the unawaited version usually finished before the caller's navigate() /
-  // Dashboard's one-shot listProjects() fetch anyway, so it rarely showed — but a full page reload
-  // fired the instant sign-in completed reliably ABORTED the in-flight promotion (`syncStatus` landed
-  // on "failed", no `serverId`), and Dashboard's project list is a one-shot fetch with no subscription
-  // to sync state, so a promotion racing behind navigation could land after the list already rendered.
-  // Awaiting here closes that: the caller's navigate() (AuthPage's `run()`) cannot fire, and Dashboard
-  // cannot mount, until promotion has actually settled.
+  // AWAITED (was `void promoteAllPending()`, fire-and-forget), BOUNDED (2026-08-09) rather than
+  // fully awaited. History, so the next reader doesn't re-derive it:
+  //   - unawaited: a full page reload fired the instant sign-in completed reliably ABORTED the
+  //     in-flight promotion (`syncStatus` landed on "failed", no `serverId`);
+  //   - awaited outright: closes that, BUT this project's `AuthPage.tsx` has a SEPARATE `useEffect`
+  //     watching `status` that navigates the instant `status` flips to "authenticated" — which
+  //     happens synchronously at the top of THIS function, before any await below runs. So an
+  //     unbounded await here never actually delayed navigation; it only delayed what THIS
+  //     function's own returned promise resolves to. Measured: the effect-driven navigate fires
+  //     ~6ms after status flips, while promotion can take 8+ seconds. Left unfixed here — it is a
+  //     separate defect in AuthPage, reported, not this file's to fix — but it means the bound
+  //     below is not "the thing standing between the user and a stuck screen" the way it would be
+  //     if this were the only navigate; it exists for the callers that DO wait on this promise
+  //     directly, and so the 2a waking banner (a global flag, unaffected by which component is
+  //     mounted) has a bounded, legible window to describe instead of an open-ended one.
+  //
+  // BOUND = 8000ms: `promoteAllPending` is a SEQUENTIAL loop, one round-trip set per pending local
+  // draft (sync.ts) — on an already-warm connection that is fast regardless (single digit seconds
+  // for the common 1-2-draft case), but a slow or throttled connection with several drafts must not
+  // scale this function's wait time linearly with draft count. Sized against the 2a waking
+  // threshold (2750ms) rather than the ~60s Render cold-start figure: a cold start is a one-time
+  // cost normally paid by the LOGIN request itself (which resolves before this function is even
+  // called), not by the sync loop that follows it on an already-woken connection.
+  //
+  // NOT CANCELLED. Whichever side of the race loses, `promoteAllPending()` keeps running to
+  // completion in the background — its own `upsertProject()` calls persist regardless of whether
+  // anything is still awaiting the outer promise, observed later via `syncStatus`/SyncBadge and the
+  // reconnect monitor (ensureMonitor), exactly as before this bound existed.
   //
   // Never rethrows — the local-first contract is that sign-in must succeed even when promotion
   // doesn't (drafts stay editable locally either way). A promotion failure is NOT invisible: the
@@ -71,11 +94,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const adopt = useCallback(async (u: UserRecord) => {
     setUser(u);
     setStatus("authenticated");
-    try {
-      await promoteAllPending();
-    } catch (error) {
+    const promotion = promoteAllPending().catch((error) => {
       console.error("Failed to promote local drafts into the account", error);
-    }
+    });
+    await Promise.race([promotion, new Promise<void>((resolve) => window.setTimeout(resolve, ADOPT_PROMOTE_TIMEOUT_MS))]);
     return u;
   }, []);
 

@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { GlobalErrorToast } from "./components/GlobalErrorToast";
 import { AiThinkingPanel } from "./components/ai/AiThinkingPanel";
-import { isApiOffline, subscribeApiOffline } from "./lib/api";
+import { isApiOffline, isApiWaking, subscribeApiOffline, subscribeApiWaking } from "./lib/api";
 import { configureExperience } from "./ai/experience/stream";
 
 // The ORIS session row records WHICH BUILD observed it. `configureExperience` previously had
@@ -33,16 +33,33 @@ const MediaSharedContextProbePage = lazy(() => import("./pages/MediaSharedContex
 const WcDecoderGatePage = lazy(() => import("./pages/WcDecoderGatePage").then((module) => ({ default: module.WcDecoderGatePage })));
 const AuthPage = lazy(() => import("./pages/AuthPage").then((module) => ({ default: module.AuthPage })));
 
-/** Slim status strip while the API is unreachable (api.ts flips the flag; ONE poller reconnects). */
+/**
+ * Slim status strip for the two connectivity states api.ts tracks — offline (api.ts flips the
+ * flag; ONE poller reconnects) and waking (a Render free-tier cold start; the request in flight is
+ * NOT aborted, this is presentation only). Same banner element for both: offline takes priority
+ * since it is the more severe state and the two are not expected to overlap in practice (a request
+ * that is merely slow hasn't failed).
+ */
 function ApiOfflineBanner() {
   const [offline, setOffline] = useState(() => isApiOffline());
+  const [waking, setWaking] = useState(() => isApiWaking());
   useEffect(() => subscribeApiOffline(setOffline), []);
-  if (!offline) return null;
-  return (
-    <div className="api-offline-banner" role="status">
-      Backend offline — your edits keep saving locally; reconnecting…
-    </div>
-  );
+  useEffect(() => subscribeApiWaking(setWaking), []);
+  if (offline) {
+    return (
+      <div className="api-offline-banner" role="status">
+        Backend offline — your edits keep saving locally; reconnecting…
+      </div>
+    );
+  }
+  if (waking) {
+    return (
+      <div className="api-offline-banner" role="status">
+        Waking the server — this can take up to a minute on the first request…
+      </div>
+    );
+  }
+  return null;
 }
 
 export default function App() {

@@ -4,6 +4,7 @@ import { BrowserRouter } from "react-router-dom";
 import { registerSW } from "virtual:pwa-register";
 import { configureFontResolver, kernelDiagnostics, warpFontFile } from "@orreris/shared";
 import App from "./App";
+import { pingHealth } from "./lib/api";
 import { AuthProvider } from "./lib/auth";
 import { initAnalyticsPersistence } from "./ai/analytics-store";
 import { installPerfDiagnostics } from "./lib/perfDiagnostics";
@@ -28,6 +29,14 @@ import "./styles/marketing.css";
 // blob-store copy (imported media) is best-effort and non-blocking.
 migrateBrandLocalStorage();
 void migrateBrandBlobStores();
+
+// Prewarm the API (2026-08-09): the web app is a static site and loads instantly, so firing this
+// the moment the page is alive gives a cold-starting Render free-tier API (~15min idle -> ~60s
+// spin-up) a head start while the user is still reading the page, before they click anything.
+// Fire-and-forget, deliberately outside apiRequestWithAuthRetry: `pingHealth()` never touches the
+// offline flag or the waking flag on its own, so a failed prewarm is silent — no banner, no
+// offline latch — exactly as required; only a USER-INITIATED request may raise either.
+void pingHealth();
 
 registerSW({ immediate: true });
 if (typeof navigator !== "undefined" && navigator.storage?.persist) {
