@@ -959,12 +959,33 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
   }
 
   /**
-   * Cross-frame-cached `buildLayerPreFlarexDraw` for Flarex asset-source loaders. A BARE loader (identity
-   * transform, no effects/masks/animation — every `collectFlarexVirtualLayers` output) has a time-invariant
-   * draw STRUCTURE, so on a cache hit we reuse the immutable template and REBIND only the live media handle
-   * (`source`/`sourceVersion`/size), skipping the full rebuild (`buildLayerDraw` + `getCompositionTransform`
-   * + `buildFragmentPasses`). Byte-identical to the uncached path: the rebound media fields are exactly what
-   * a fresh build would compute this frame. Not bare, or no cache supplied → full rebuild (unchanged path).
+   * Cross-frame-cached `buildLayerPreFlarexDraw` for Flarex asset-source loaders. A BARE loader (no
+   * effects/masks/animation — every `collectFlarexVirtualLayers` output) has a time-invariant draw
+   * STRUCTURE, so on a cache hit we reuse the immutable template and REBIND the live media handle
+   * (`source`/`sourceVersion`/size) AND the transform, skipping the full rebuild (`buildLayerDraw` +
+   * `buildFragmentPasses`). Byte-identical to the uncached path: the rebound fields are exactly what a
+   * fresh build would compute this frame. Not bare, or no cache supplied → full rebuild (unchanged path).
+   *
+   * TRANSFORM REBIND (fixed 2026-08-09; DEBT-016). The cache key is `(layerId, comp.version, renderScale)`
+   * — comp.version bumps only on a Flarex-GRAPH edit, never on a host-clip transform edit — but since
+   * ADR-020 slice B (38b9c73) a bare loader's transform is `host.transform` (inherited, not the identity
+   * constant this cache was designed around). So scaling/moving the host clip from the timeline inspector
+   * left the cached template's transform frozen at whatever it was on the loader's first frame: the host's
+   * own draw rebuilds fresh every frame and moves correctly, but every asset-source MediaIn riding this
+   * cache stayed exactly where it was when the comp was first rendered — visible only as long as the WebGL
+   * context lives (a reload empties the cache, so the NEXT edit reproduces it again). Slice B's own
+   * pixel-parity gate could not have caught this: every Flarex fixture sits at an identity host transform,
+   * where the stale value and the correct one are the same value.
+   *
+   * `transform` (+ `rotateX`/`rotateY`/`perspective`/`z`, all four solely transform-derived) is the ONLY
+   * transform-dependent field a bare loader's template carries — `mask` is null regardless of transform
+   * (bare requires empty `masks` AND virtual loaders never carry `.frame`, so `SceneMaskMatteCache.get`'s
+   * combined mask list is always empty and returns null before it would ever read the transform argument
+   * passed alongside it), and `content`/`blurPx`/`glow`/`fit`/`blendMode` all read layer fields that are
+   * independent of `.transform` entirely. So rebinding just these four here — rather than folding
+   * `compVersion` on the transform, which would mint a new cache entry every frame of a live scale-drag and
+   * defeat the cache during exactly the interaction that surfaces this bug — is the complete fix, not a
+   * partial one.
    */
   const cachedPreFlarexDraw = (
     virtual: TimelineLayer,
@@ -991,8 +1012,11 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
     const key = FlarexSourceDrawCache.key(virtual.id, compVersion, rScale);
     const template = cache.get(key);
     if (template) {
-      // HIT: skip the rebuild; rebind only the per-frame-volatile media handle. If the source isn't ready
-      // this frame, hold (return null → the same not-ready path a fresh build would take).
+      // HIT: skip the rebuild; rebind the per-frame-volatile media handle AND the transform (DEBT-016 —
+      // see this function's doc comment: a bare loader's transform is inherited from the host and is NOT
+      // part of the cache key, so it must be rebound here exactly like the media handle or a host
+      // transform edit freezes the loader at whatever value was cached on its first frame). If the source
+      // isn't ready this frame, hold (return null → the same not-ready path a fresh build would take).
       const src = getMediaGraded(virtual.id);
       if (!src || src.width === 0 || src.height === 0) {
         onLayerNotReady?.(virtual.id);
@@ -1000,12 +1024,18 @@ export function buildSceneDraws(inputs: BuildSceneDrawsInputs): SceneDraw[] {
         return null;
       }
       frameProfiler.bump("sourceDraw.hits");
+      const tr = getCompositionTransform(virtual, { currentTimeSeconds: t });
       return {
         ...template,
         source: src,
         sourceWidth: src.width,
         sourceHeight: src.height,
         sourceVersion: getTexImageSourceProducerInfo(src as unknown as TexImageSource)?.updatedAt,
+        transform: { x: tr.x, y: tr.y, scale: tr.scale, rotation: tr.rotation, opacity: tr.opacity, anchorX: tr.anchorX, anchorY: tr.anchorY },
+        rotateX: tr.rotateX,
+        rotateY: tr.rotateY,
+        perspective: tr.perspective * rScale,
+        z: tr.z * rScale,
       };
     }
     // MISS: full build (already carries this frame's media), then cache the shallow-frozen template. The

@@ -1427,6 +1427,79 @@ reproducible, 3/3* result that points at the wrong remedy. Here it would have re
 common-case benefit (a lone Flarex clip getting hardware decode) to recover ~one cap miss in a
 three-host fixture, and re-broken I-44a for nothing.
 
+### DEBT-016 — a source-draw cache key omitted an input the cached value depended on
+
+- Status: **RETIRED same commit** (fixed as part of the change that registers this entry)
+- Registered: 2026-08-09 (surfaced while implementing the "MediaIn stays put when the host clip is
+  scaled from the inspector" fix)
+- Reason: `FlarexSourceDrawCache` (`packages/shared/src/flarex/source-draw-cache.ts`) keys a bare Flarex
+  asset-source MediaIn's cached draw template on `(layerId, comp.version, renderScale)` —
+  ADR-009's `CacheKey = (ContractVersion, applicableContext, NodeContentHash)` rule, narrowed to what
+  this cache actually varies on. At the time this cache was built (perf slice, source-draw-cache.ts's own
+  header) a bare loader's transform was a hardcoded identity constant, so the key's omission of transform
+  was correct — nothing content-dependent was left out. **ADR-020 slice B (`38b9c73`) changed what a bare
+  loader's transform IS** — inherited from the host clip (`transform: host.transform ?? …`,
+  virtual-layers.ts) instead of the identity constant — **without adding it to the cache key that already
+  omitted it.** The key kept describing the OLD invariant ("this loader's presentation is time- and
+  edit-invariant") after the change made it false: a host-transform edit is now a real content change the
+  key is blind to.
+- Invariant affected: ADR-009 completeness rules (cache identity must include every input the cached
+  value depends on) — same class as DEBT-010 (node-thumbnail cache key omits ContextVersion).
+- Owner: unassigned
+- Expiry condition: n/a — retired in place. Detection kept below for the next cache built over a field
+  that starts constant and is later made variable.
+- Planned slice: none (unplanned defect, not a rollout-flag compromise)
+- Tracking issue: —
+- Detection: any cache key built when a field was a hardcoded constant, that is not revisited when a
+  later change turns that field into a variable derived from caller state. Concretely here: `git blame`
+  on a field a cache's key omits — if the omission predates the field becoming variable, the key is stale
+  by construction, not by oversight at the time it was written.
+
+**Symptom.** Founder repro: drop a clip on the timeline → scale it → open Flarex, create a comp → add a
+second media as an asset-source MediaIn → back to the timeline → scale the clip AGAIN from the inspector.
+The host clip's own picture scales correctly (its draw rebuilds fresh every frame). The MediaIn inside
+its comp does not move — it stays exactly where it was when the comp was first rendered. A full page
+reload "fixes" it (a fresh mount gets a fresh, empty cache), until the next host-transform edit
+reproduces it again.
+
+**Why 0 of 13 existing Flarex pixel fixtures caught this, and why a fixture couldn't unless built for
+it.** Two independent reasons stack here, not one:
+1. Every existing Flarex fixture's host sits at an identity transform, so the stale cached value and the
+   correct value are the same value — a diff of the two is zero regardless of whether the bug is present.
+2. `render:compare:pixels` renders each fixture exactly ONCE per process. The defect only appears on a
+   SECOND render against an already-warm cache (the comp already exists; the host is edited after). A
+   single-frame render is structurally unable to exercise that sequence no matter what transform the
+   fixture's host carries — reason 1 alone is not the whole story, and fixing only reason 1 (a fixture
+   with a non-identity host, rendered once) would still pass on the buggy code.
+- Slice B's own commit cited pixel parity as evidence for a decoder-topology-only change ("NOT DRAWN...
+  the pixel gate is the evidence for that claim" — virtual-layers.ts's own comment on the transform
+  field). That citation was honest about what the gate measured and wrong about what it could prove:
+  every fixture the gate runs sits at the one input value (identity) that makes this defect
+  unobservable, so "the gate passed" was never evidence against a bug that only manifests away from
+  identity.
+
+**Fix.** `cachedPreFlarexDraw`'s cache-hit path (`build-scene-draws.ts`) now rebinds the transform
+(`transform`/`rotateX`/`rotateY`/`perspective`/`z`) from a fresh `getCompositionTransform(virtual, …)`
+call on every hit, exactly like it already rebound the live media handle. Enumerated what else in a bare
+loader's cached template depends on transform before choosing this over widening the cache key: `mask` is
+null regardless (bare requires empty `masks`, and virtual loaders never carry `.frame`, so
+`SceneMaskMatteCache.get`'s combined mask list is always empty and returns null before reading the
+transform argument); `content`/`blurPx`/`glow`/`fit`/`blendMode` read layer fields that don't depend on
+`.transform` at all for a bare loader. Transform is the only transform-dependent field, so rebinding it on
+the hit path is the complete fix — folding `compVersion` on the transform instead would mint a new cache
+entry every frame of a live scale-drag, defeating the cache during exactly the interaction that surfaces
+this bug.
+
+**Falsifiability**, `packages/shared/src/scene/flarex-source-draw-cache-transform.test.ts`
+(`pnpm --filter @orreris/shared sourceCacheTransform:test`): builds one comp, renders it once at an
+identity host transform (populates the cache), mutates the SAME host layer's transform, renders again
+through the SAME cache instance, and asserts the second render's MediaIn transform matches the new host
+transform. Confirmed BEFORE the fix (`cachedPreFlarexDraw`'s hit branch reverted to the pre-fix spread):
+the gate fails, reporting the exact stale value (`{"x":50,"y":50,"scale":1,...}` where 30/30/0.5 was
+promised) — the same failure mode as the founder's repro, reproduced deterministically outside the
+browser. Restored and reconfirmed passing. `render:compare:pixels` (chrome channel) run after the fix:
+all 13 Flarex fixtures unmoved at 0.000%, full 54-fixture sweep passed.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
@@ -1441,3 +1514,6 @@ three-host fixture, and re-broken I-44a for nothing.
   missing — verified non-vacuous by breaking the runtime and watching it fail.
 - **DEBT-006** — retired 2026-08-03 in place above; the S6.3 commit (`b5452cd`) has landed. The
   threshold stays at 2 on a replaced justification: it now backstops DEBT-007's context-blind `fanout`.
+- **DEBT-016** — retired 2026-08-09 in place above, same commit as its fix. `FlarexSourceDrawCache`'s
+  hit path now rebinds the transform, not just the media handle; falsified before/after with
+  `flarex-source-draw-cache-transform.test.ts`.

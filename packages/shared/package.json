@@ -18,6 +18,7 @@
     "idt:test": "tsx src/color/input-transform.test.ts",
     "flarex:test": "tsx src/flarex/flarex.test.ts",
     "compproxy:test": "tsx src/scene/comp-proxy.test.ts",
+    "sourceCacheTransform:test": "tsx src/scene/flarex-source-draw-cache-transform.test.ts",
     "notes:test": "tsx src/notes/notes.test.ts",
     "notes:intent:test": "tsx src/notes/notes-intent.test.ts",
     "governor:test": "tsx src/color/gl-context.test.ts"
