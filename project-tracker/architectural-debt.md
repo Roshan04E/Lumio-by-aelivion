@@ -1437,7 +1437,42 @@ reachable and this becomes load-bearing — at which point the release must dist
 healthy* (release, as today) from *pending and failed / mid-ladder* (`cancelRender`). The argument is
 duplicated as a comment at the effect so the next reader does not re-derive it.
 
-### DEBT-012 addendum — a FIFTH shape: the absolute falsifier that presupposes an unmeasured baseline
+**Update (2026-08-09) — EXHAUSTIVE AUDIT (read-only; no fix in this pass). Verdict: CANNOT RETIRE — a
+fourth live instance found, unfixed.**
+
+The entry's own expiry condition is about EVERY error path in the export pipeline, and no exhaustive
+audit had been done — instances 1-3 were each found by chasing a SPECIFIC incident, never by asking
+"what else in this file does the same thing." Asked now. Every `continueRender`/`cancelRender`/
+`delayRender` call and every catch/finally/cleanup path in `apps/worker/` lives in exactly one file,
+`SceneStage.tsx` (confirmed by grep across the whole `apps/worker/src` tree — `remotion-renderer.ts`
+only mentions `delayRender` in comments, configuring Remotion's own `timeoutInMilliseconds`, never
+calling the API itself; `Root.tsx`/`entry.tsx` carry no completion logic of their own).
+
+| site | signals completion | on the failure path | verdict |
+|---|---|---|---|
+| `SceneStage.tsx:539-546` `ImageGrabber`, load success/cancelled | `continueRender(handle)` in `.then()` | N/A — this row is the happy path | SAFE — `cancelled` gates whether `onFrame` fires; the render still needs releasing either way so a superseded load can't hang the frame |
+| **`SceneStage.tsx:546` `ImageGrabber`, `.catch(() => continueRender(handle))`** | **`continueRender`, unconditionally, on ANY image-load failure** | **swallowed — no `cancelRender`, no `console.error`, nothing** | **DEFECT — live, same class as instances 1/2/3, unfixed.** `loadImageOnce` (line 100-113) rejects via `img.onerror`, i.e. a genuinely broken/unreachable/corrupt image or graphic asset. That rejection is caught and answered with `continueRender` — Remotion is told the frame is done. `onFrame` is never called for that layer (its `.then()` branch didn't run), so it is simply ABSENT from `rawRef`, the composite proceeds without it, and the export ships a frame silently missing an image/graphic/text-behind-person layer, exit 0. This is instance 1's exact defect (error path reports completion) in a path instances 1-3 never touched. |
+| `SceneStage.tsx:547-550` `ImageGrabber`, unmount/dep-change cleanup | `continueRender(handle)`, unconditional | N/A — not itself a failure path | SAFE, distinct from instance 3's shape: this component owns exactly ONE handle for ONE effect run, so a superseded run's handle release cannot ship stale content — either a NEW effect run (new `src`) already owns its own new handle, or the layer/composition is genuinely gone. Nothing is asserted as "complete" that isn't. |
+| `SceneStage.tsx:646-684` controller-init `catch` → `cancelRender` | N/A — this IS the failure path | `cancelRender` with a named DEBT-015 error | SAFE — this is instance 2, FIXED. Falsifier already on record above (forced throw, exit 0→1, `git diff` empty after revert). |
+| `SceneStage.tsx:702-729` `failComposite` → ladder → `cancelRender` on exhaustion | N/A — this IS the failure path | 3 retries (150/300/600ms, handle held throughout) then `cancelRender` with a named DEBT-015 error | SAFE — this is instance 1, FIXED. Falsifier already on record above. |
+| `SceneStage.tsx:739-748` composite effect, "new frame, stale OTHER-frame handle" release | `continueRender(pendingRef.current.id)` before acquiring the new frame's handle | N/A if reasoning below holds — no failure state can reach this branch | DORMANT, **by structural reasoning, NOT by measurement** — flagged as a lower-confidence verdict than instance 3's. `pendingRef.current` is nulled immediately after every successful `continueRender` (line 816) and never touched by the retry ladder (a retry re-runs the SAME `frame`, so the outer `pendingRef.current.frame !== frame` guard is false and this block is skipped). For this branch to fire, `frame` (from `useCurrentFrame()`) would have to advance to a NEW value while an OLDER frame's handle is still outstanding — which Remotion's own `delayRender` contract exists to prevent within one mounted instance. Plausible but genuinely unmeasured; unlike instance 3, no mount/unmount-style falsifier was run for it this round. |
+| `SceneStage.tsx:791-826` composite effect, success path | `continueRender`, gated on `pass === compositePassRef.current` AND `pendingRef.current.frame === frame` | failure is diverted to `failComposite` at line 806 BEFORE this code is reached | SAFE — the staleness guard is exactly what instance-1's fix relies on; a superseded pass returns at line 804 before either branch. |
+| `SceneStage.tsx:832-839` cleanup, clear the retry timer | none — clears a `setTimeout`, not a render signal | N/A | SAFE / not applicable — listed because it sits beside the ladder and could be mistaken for a completion signal; it is bookkeeping only. |
+| `SceneStage.tsx:864-875` unmount cleanup, unconditional `continueRender` | `continueRender`, unconditional, on any pending handle | releases a handle without checking pending-vs-failed | **This IS instance 3** — already fully documented and measured above (4 mounts / 0 unmounts, both a healthy and an all-failing render). Not re-measured here; cited for completeness of the exhaustive claim. Kept DORMANT with its re-arming condition on record. |
+| `SceneController.pruneRenderers` (`:278`) / `.dispose()` (`:381`) `catch { /* ignore */ }` | none — these swallow GL-disposal errors, not render completion | N/A | Not applicable to this class. Checked because the brief asked for every catch/finally in the file; neither sets a completion flag nor touches `continueRender`/`cancelRender`. Best-effort cleanup, a different (and generally correct) pattern from "an error became a success." |
+| `SceneController.composite()` returning `false` for a not-yet-decoded media frame (`:305,306,313,326`) | N/A — this is the existing "not ready, retry" contract, not a failure | the composite effect correctly does NOT `continueRender` on `complete === false` (line 809's guard) | SAFE, and worth naming explicitly: this is the LEGITIMATE pending case DEBT-015 was never about — confirms the boundary between "still loading" (return false, retry) and "threw" (catch, ladder) is drawn correctly at the one place that matters. |
+| `VideoGrabber` (`OffthreadVideo`'s `onVideoFrame`) | delegated entirely to Remotion's own library component | delegated | Out of scope — this codebase never calls `delayRender`/`continueRender` for video frames itself; Remotion's `<OffthreadVideo>` owns that internally. Auditing Remotion's own library code is a different exercise. |
+| `remotion-renderer.ts` (`timeoutInMilliseconds` config) | N/A — configures Remotion's OWN internal `delayRender` timeout budget | N/A | Out of scope — comments only, no call site. |
+
+**Why this is not a tidy retirement.** The table has one unambiguous DEFECT (the image-load `.catch`) and
+one lower-confidence DORMANT verdict reached by reasoning rather than measurement (the stale-handle
+release at `:739-748`). Per this round's own rule — *"anything you cannot decide is DEFECT until proven
+otherwise, do not guess to make the table tidy"* — the `:739-748` row is reported exactly as confident as
+the evidence supports, not rounded up to match instance 3's measured certainty.
+
+**Not fixed here, on instruction.** The image-load defect is a live bug matching this entry's own class,
+found by this audit and left for its own prompt with its own falsifier — the same discipline instances
+1 and 2 were each given. **DEBT-015 does not retire.**
 
 **(2026-08-08, founder-identified, from this session's own Scope C.)** The pre-registered falsifier read
 *"a lone loader is safe on hardware"* — an **absolute**. It fired: with the lone loader on hardware, a
