@@ -52,7 +52,8 @@
     "playback:contention": "tsx src/playback-contention-probe.ts",
     "starvation:census": "tsx src/starvation-census-probe.ts",
     "rulerjump:probe": "tsx src/ruler-jump-delay-probe.ts",
-    "rulerjump:pathaudit": "tsx src/ruler-jump-path-audit.ts"
+    "rulerjump:pathaudit": "tsx src/ruler-jump-path-audit.ts",
+    "rulerjump:capaudit": "tsx src/ruler-jump-cap-audit.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",
