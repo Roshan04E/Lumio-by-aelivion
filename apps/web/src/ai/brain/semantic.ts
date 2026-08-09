@@ -887,7 +887,7 @@ function layersHash(composition: TimelineComposition, layerIds: string[]): strin
     }
     parts.push(JSON.stringify(found));
   }
-  return djb2(parts.join(" "));
+  return djb2(parts.join(" "));
 }
 
 function loadPlanCache(): CachedPlan[] {

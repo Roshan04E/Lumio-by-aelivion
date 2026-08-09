@@ -243,7 +243,7 @@ class KernelDiagnostics {
     this.ring[this.write] = event;
     this.write = (this.write + 1) % RING_CAPACITY;
 
-    const key = `${event.kind} ${subjectKey(event.subject)} ${event.reason}`;
+    const key = `${event.kind} ${subjectKey(event.subject)} ${event.reason}`;
     const row = this.aggregates.get(key);
     if (row === undefined) {
       this.aggregates.set(key, {
