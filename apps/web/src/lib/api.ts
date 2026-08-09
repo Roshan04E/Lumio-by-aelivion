@@ -86,8 +86,17 @@ function filterLocalAssetsByScope(
 ): SourceAsset[] {
   if (scope === "library") return assets.filter((a) => !a.ownerProjectId);
   if (scope === "project" && projectId) {
-    const linked = new Set(readLocalProjectLinks()[projectId] ?? []);
-    return assets.filter((a) => a.ownerProjectId === projectId || linked.has(a.id));
+    // A promoted local draft keeps its OLD (local) id as the key for anything recorded before
+    // promotion — `ownerProjectId` stamps and project-asset links both — while the route/UI now
+    // holds the NEW (server) id. Matching `projectId` alone misses everything recorded pre-promotion,
+    // which is why an imported asset vanished from the Local pool the moment sign-in promoted its
+    // project: the clip on the timeline resolves by ASSET id and never passes through this filter, so
+    // only the bin went empty. `candidateProjectIds` is the existing fix for this exact id-shape
+    // problem (built for `getProject`'s local-lookup miss, see its docstring) — reused here rather
+    // than writing a second one.
+    const candidates = candidateProjectIds(projectId);
+    const linked = new Set(candidates.flatMap((id) => readLocalProjectLinks()[id] ?? []));
+    return assets.filter((a) => (a.ownerProjectId ? candidates.includes(a.ownerProjectId) : false) || linked.has(a.id));
   }
   return assets;
 }
@@ -918,9 +927,12 @@ export async function importStock(
   return data.asset;
 }
 
-/** Asset ids linked into a project (local-first mirror of the server ProjectAsset join). */
+/** Asset ids linked into a project (local-first mirror of the server ProjectAsset join). A link
+ *  recorded before a promotion is keyed by the OLD (local) id, so the lookup must try every id this
+ *  project may be stored under — same id-shape problem as `filterLocalAssetsByScope`. */
 export function getLinkedAssetIdsForProject(projectId: string): string[] {
-  return readLocalProjectLinks()[projectId] ?? [];
+  const links = readLocalProjectLinks();
+  return candidateProjectIds(projectId).flatMap((id) => links[id] ?? []);
 }
 
 export async function transcribeAutoCaptions(input: {

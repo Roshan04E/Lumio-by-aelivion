@@ -427,6 +427,7 @@ import { useRenderCost } from "../lib/perfDiagnostics";
 import { useStableHandler, useStableHandlers } from "../lib/useStableHandler";
 import { NoticeToast, getNotice, setNotice } from "../lib/noticeStore";
 import {
+  candidateProjectIds,
   checkNow,
   clearLocalAssetPromotion,
   countLocalProjectsUsingAsset,
@@ -11782,10 +11783,18 @@ function AssetBinImpl({
     // Stock refs are user-level library rows — scope them to THIS project via the link mirror
     // (imported here) or actual timeline use, or every project's Stock bin would show the whole
     // account's stock history (the same "pile" bug the ownerProjectId filter fixed for uploads).
+    // `getLinkedAssetIdsForProject` already resolves across a promoted project's id set.
     const linkedIds = currentProjectId ? new Set(getLinkedAssetIdsForProject(currentProjectId)) : null;
+    // A project's SERVER id after promotion differs from the OLD (local) id that `ownerProjectId`
+    // was stamped with at asset-creation time — raw equality here reproduces the exact "No media
+    // yet" bug this fix targets, one render layer downstream of `filterLocalAssetsByScope`
+    // (api.ts), which already resolves this the same way. Measured: without this, an asset
+    // correctly returned by listAssets/setAssets was STILL dropped here, because this memo re-
+    // filters `assets` client-side with the id the route currently holds.
+    const ownerCandidates = currentProjectId ? new Set(candidateProjectIds(currentProjectId)) : null;
     const scoped = currentProjectId
       ? rawAssets.filter((a) => {
-          if (a.ownerProjectId && a.ownerProjectId !== currentProjectId) return false;
+          if (a.ownerProjectId && ownerCandidates && !ownerCandidates.has(a.ownerProjectId)) return false;
           if (linkedIds && (a.source === "pexels" || a.source === "unsplash")) {
             return linkedIds.has(a.id) || Boolean(usedCounts[a.id]);
           }
