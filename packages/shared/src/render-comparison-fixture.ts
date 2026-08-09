@@ -49,6 +49,21 @@ const fixturePersonMatteSvg = encodeURIComponent(`
   <circle cx="635" cy="740" r="54" fill="#ffffff"/>
 </svg>`);
 
+// LANDSCAPE (1920x1080), deliberately the opposite orientation of the 1080x1920 comp — every other
+// fixture's media asset already matches the comp's aspect, which is exactly why none of them caught a
+// Flarex asset-source MediaIn stretching a mismatched-aspect clip (virtual-layers.ts's hardcoded
+// `fit: "fill"`). Four saturated vertical bars + a center circle: "cover" (crop, correct) keeps the
+// bars square-cornered and the circle round; "fill" (stretch, the bug) squeezes all four bars into
+// view and the circle into a tall ellipse — a large, unambiguous, deterministic diff either way.
+const fixtureMismatchedAspectSvg = encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <rect x="0" y="0" width="480" height="1080" fill="#e63946"/>
+  <rect x="480" y="0" width="480" height="1080" fill="#f4a300"/>
+  <rect x="960" y="0" width="480" height="1080" fill="#2a9d8f"/>
+  <rect x="1440" y="0" width="480" height="1080" fill="#264653"/>
+  <circle cx="960" cy="540" r="200" fill="#ffffff"/>
+</svg>`);
+
 export const renderComparisonFrameSeconds = 0.45;
 export const renderComparisonArtifactDir = "render-comparison";
 
@@ -112,7 +127,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-color-chain"
   | "flarex-unified-color"
   | "flarex-filter-stack"
-  | "flarex-generators";
+  | "flarex-generators"
+  | "flarex-mismatched-aspect";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -168,7 +184,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-color-chain",
   "flarex-unified-color",
   "flarex-filter-stack",
-  "flarex-generators"
+  "flarex-generators",
+  "flarex-mismatched-aspect"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -859,6 +876,25 @@ function buildFlarexMultiInComp(): FlarexComp {
   return comp;
 }
 
+// Vacuous-fixture gap (2026-08-09): an asset-source MediaIn (`params.sourceAssetId`, not
+// `sourceClipId` — a real media-pool asset loaded independently of the timeline, not a sibling
+// clip) whose asset is a DIFFERENT aspect than the comp. None of the other 11 Flarex fixtures'
+// MediaIns reference an asset at all, or their one shared asset already matches the comp's aspect —
+// so a hardcoded stretch on this path had no fixture that could ever catch it. Bypasses comp_in
+// entirely (an asset-source MediaIn is self-contained, not a read of the host clip) — the comp's
+// entire output is this one MediaIn.
+const FLAREX_MISMATCHED_ASSET_ID = "fixture_mismatched_aspect_asset";
+function buildFlarexMismatchedAspectComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_mismatched_aspect_comp", "Flarex mismatched-aspect source fixture");
+  const srcIn = createFlarexNode("mediaIn", "fixture_flarex_mismatched_aspect_srcin");
+  srcIn.params = { ...srcIn.params, sourceAssetId: FLAREX_MISMATCHED_ASSET_ID };
+  comp.nodes[srcIn.id] = srcIn;
+  comp.edges = [
+    { id: "fixture_flarex_mismatched_aspect_e1", from: { nodeId: srcIn.id, socket: "out" }, to: { nodeId: "fixture_flarex_mismatched_aspect_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -1027,6 +1063,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexFilterStackComp() };
     case "flarex-generators":
       return { effects: [], fit: "cover", flarex: buildFlarexGeneratorsComp() };
+    case "flarex-mismatched-aspect":
+      return { effects: [], fit: "cover", flarex: buildFlarexMismatchedAspectComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
@@ -1147,6 +1185,21 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     durationSeconds: 12,
     width: 1080,
     height: 1920,
+    status: "ready",
+    createdAt: new Date(0).toISOString()
+  };
+
+  // flarex-mismatched-aspect: a landscape asset for the asset-source MediaIn to load, deliberately
+  // the opposite orientation of the 1080x1920 comp (see fixtureMismatchedAspectSvg above).
+  const mismatchedAspectAsset: SourceAsset = {
+    id: FLAREX_MISMATCHED_ASSET_ID,
+    userId: "fixture_user",
+    fileName: "fixture-mismatched-aspect.svg",
+    fileType: "image/svg+xml",
+    fileUrl: `data:image/svg+xml;charset=utf-8,${fixtureMismatchedAspectSvg}`,
+    durationSeconds: 12,
+    width: 1920,
+    height: 1080,
     status: "ready",
     createdAt: new Date(0).toISOString()
   };
@@ -1535,7 +1588,7 @@ Save this style now`);
       ...graph,
       composition: compositionWithCaptions
     },
-    assets: [imageAsset],
+    assets: [imageAsset, mismatchedAspectAsset],
     currentTime: renderComparisonFrameSeconds
   };
 }

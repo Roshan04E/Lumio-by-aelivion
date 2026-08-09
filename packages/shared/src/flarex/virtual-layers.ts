@@ -15,6 +15,7 @@
  * node in hand), not here — this module only assembles the decode-shaped layers.
  */
 
+import { compositionMediaDefaults } from "../composition-style";
 import { getLayerSpeed, getSpeedRamp } from "../timeline";
 import type { TimelineComposition, TimelineLayer } from "../types";
 import {
@@ -334,7 +335,13 @@ export function collectFlarexVirtualLayers(
         assetId,
         sourceInSeconds: timing.sourceInSeconds,
         ...(timing.speed === 1 ? {} : { speed: timing.speed }),
-        fit: "fill",
+        // Was hardcoded "fill" (stretches a mismatched-aspect source to the comp frame) with no
+        // rationale attached — unlike `transform` two fields below, which carries one. A picture must
+        // not change depending on which surface drew it: this is the SAME default a normal timeline
+        // video layer gets (compositionMediaDefaults.fit, via getCompositionObjectFit — the one
+        // fit-resolution path every renderer shares), so a MediaIn source now agrees with the timeline
+        // instead of silently overriding it.
+        fit: compositionMediaDefaults.fit,
         /**
          * INHERITED from the host, not manufactured (ADR-020 slice B; F2 in the Phase 0 record).
          *

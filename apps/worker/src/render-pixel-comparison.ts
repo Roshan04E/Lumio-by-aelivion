@@ -52,7 +52,10 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
   "flarex-multi-in": 0.005,
   "flarex-color-chain": 0.005,
   "flarex-unified-color": 0.005,
-  "flarex-filter-stack": 0.005
+  "flarex-filter-stack": 0.005,
+  // Measured 0.000% (0/2073600) on the full sweep that added this fixture — same methodology as the
+  // entries above.
+  "flarex-mismatched-aspect": 0.005
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {
