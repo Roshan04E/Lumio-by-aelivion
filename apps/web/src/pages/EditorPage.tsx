@@ -420,7 +420,7 @@ import {
   type TemplateDefinition
 } from "@orreris/shared";
 import { getVideoPoster, useVideoPoster } from "../lib/videoThumbnails";
-import { ASSET_LABEL_COLORS, assetLabelOf, defaultAssetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
+import { ASSET_LABEL_COLORS, assetLabelOf, tagsWithAssetLabel } from "../lib/assetLabels";
 import { assetHasAudioStream } from "../lib/assetAudio";
 import { getAssetBlobStore } from "../lib/asset-blob-store";
 import { useRenderCost } from "../lib/perfDiagnostics";
@@ -13367,8 +13367,9 @@ function AssetBinImpl({
                           // Pure depth indent: root files sit flush with root bins; only children
                           // of an expanded bin step inward (one step per nesting level).
                           "--asset-indent": `${node.depth * 16}px`,
-                          // Every asset wears a label (explicit or type default) — Premiere-style.
-                          "--asset-label": ASSET_LABEL_COLORS[labelName ?? defaultAssetLabelOf(asset)]
+                          // Unlabelled = no colour identity (founder decision, 2026-08-09) — the CSS
+                          // fallback (var(--asset-label, transparent)) handles the omitted case.
+                          ...(labelName ? { "--asset-label": ASSET_LABEL_COLORS[labelName] } : {})
                         } as CSSProperties
                       }
                       draggable
@@ -13590,7 +13591,9 @@ function AssetBinImpl({
               return (
                 <div
                   className={`asset-tile asset-tile-${kind} ${selectedIds.includes(asset.id) || selectedAssetId === asset.id ? "is-selected" : ""}`}
-                  style={{ "--asset-label": ASSET_LABEL_COLORS[labelName ?? defaultAssetLabelOf(asset)] } as CSSProperties}
+                  // Unlabelled = no colour identity (founder decision, 2026-08-09) — the CSS fallback
+                  // (var(--asset-label, transparent)) handles the omitted case.
+                  style={(labelName ? { "--asset-label": ASSET_LABEL_COLORS[labelName] } : {}) as CSSProperties}
                   draggable
                   key={asset.id}
                   role="button"
