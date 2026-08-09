@@ -50,7 +50,8 @@
     "residency:falsify": "tsx src/residency-falsify-probe.ts",
     "contribution:scope": "tsx src/contribution-scope-test.ts",
     "playback:contention": "tsx src/playback-contention-probe.ts",
-    "starvation:census": "tsx src/starvation-census-probe.ts"
+    "starvation:census": "tsx src/starvation-census-probe.ts",
+    "rulerjump:probe": "tsx src/ruler-jump-delay-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",

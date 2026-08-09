@@ -64,6 +64,25 @@ const fixtureMismatchedAspectSvg = encodeURIComponent(`
   <circle cx="960" cy="540" r="200" fill="#ffffff"/>
 </svg>`);
 
+// RENDERER-DIVERGENCE coverage under a non-identity host transform (project-tracker/architectural-debt.md
+// DEBT-017) — NOT a DEBT-016 staleness guard (render:compare:pixels is differential; DEBT-016's cache
+// lives only on the web-preview side, so it never shows up as a preview/export disagreement — the
+// two-render unit test flarex-source-draw-cache-transform.test.ts is that guard). What this DOES catch:
+// if a future change makes ONE renderer handle a host transform differently from the other, this is the
+// first of the 14 Flarex fixtures able to see it — the other 13 sit at an identity host transform, where
+// there is nothing to diverge on. Falsified against exactly that shape (a temporary Remotion-only
+// perturbation in SceneStage.tsx, reverted): 56.226% diff, failed as expected; restored, 0.000%, passed.
+// Matches the comp's own aspect (1080x1920) so "cover" fit does not crop it — a plain teal/white checker,
+// distinct from the warm-gradient host asset, so a merge between the two is visually unambiguous in the
+// diff PNGs.
+const fixtureHostTransformMediaSvg = encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <rect width="1080" height="1920" fill="#1e6b63"/>
+  <rect x="0" y="0" width="540" height="960" fill="#2fae9e"/>
+  <rect x="540" y="960" width="540" height="960" fill="#2fae9e"/>
+  <circle cx="540" cy="960" r="260" fill="#ffffff"/>
+</svg>`);
+
 export const renderComparisonFrameSeconds = 0.45;
 export const renderComparisonArtifactDir = "render-comparison";
 
@@ -128,7 +147,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-unified-color"
   | "flarex-filter-stack"
   | "flarex-generators"
-  | "flarex-mismatched-aspect";
+  | "flarex-mismatched-aspect"
+  | "flarex-host-transform";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -185,7 +205,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-unified-color",
   "flarex-filter-stack",
   "flarex-generators",
-  "flarex-mismatched-aspect"
+  "flarex-mismatched-aspect",
+  "flarex-host-transform"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -895,6 +916,39 @@ function buildFlarexMismatchedAspectComp(): FlarexComp {
   return comp;
 }
 
+// RENDERER-DIVERGENCE coverage under a non-identity host transform (DEBT-017, project-tracker/
+// architectural-debt.md) — NOT a DEBT-016 guard. `render:compare:pixels` is DIFFERENTIAL (it diffs
+// web-preview against Remotion), and DEBT-016's cache lives only on the web-preview side
+// (`ScenePreviewCanvas.tsx`), so a differential gate structurally cannot see it — confirmed empirically,
+// not assumed: reverting DEBT-016's fix, and separately reverting the ADR-020 slice-B transform-
+// inheritance line this fixture's host also exercises, both read 0.000% before AND after. The two-render
+// unit test (scene/flarex-source-draw-cache-transform.test.ts) is DEBT-016's sole and correct guard.
+// What THIS fixture catches: a FUTURE change that makes one renderer handle a host transform differently
+// from the other — the host's own transform is non-identity (scale/position/opacity all off their
+// defaults) AND a second, asset-source MediaIn is merged over it, which no other Flarex fixture exercises
+// (all 13 others sit at an identity host transform, where there is nothing to diverge on). Falsified
+// against exactly that shape: a temporary Remotion-only perturbation (SceneStage.tsx, reverted) forced
+// this comp's host to identity on the Remotion side only — 56.226% diff, failed as expected; reverted,
+// 0.000%, passed.
+const FLAREX_HOST_TRANSFORM_ASSET_ID = "fixture_host_transform_media_asset";
+function buildFlarexHostTransformComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_host_transform_comp", "Flarex host-transform fixture");
+  const srcIn = createFlarexNode("mediaIn", "fixture_flarex_host_transform_srcin");
+  srcIn.params = { ...srcIn.params, sourceAssetId: FLAREX_HOST_TRANSFORM_ASSET_ID };
+  const merge = createFlarexNode("merge", "fixture_flarex_host_transform_merge");
+  comp.nodes[srcIn.id] = srcIn;
+  comp.nodes[merge.id] = merge;
+  comp.edges = [
+    // Host MediaIn (comp_in) → merge background — the host's own transformed draw.
+    { id: "fixture_flarex_host_transform_e1", from: { nodeId: "fixture_flarex_host_transform_comp_in", socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
+    // Asset-source MediaIn → merge foreground — inherits the host's transform (the field this fixture
+    // exercises); a correct render places it in the SAME box as the host behind it.
+    { id: "fixture_flarex_host_transform_e2", from: { nodeId: srcIn.id, socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
+    { id: "fixture_flarex_host_transform_e3", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "fixture_flarex_host_transform_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
 interface FixtureVariant {
   effects: TimelineLayer["effects"];
   fit: "cover" | "contain";
@@ -942,6 +996,11 @@ interface FixtureVariant {
    *  MediaIn references. The clip is suppressed from independent drawing and appears only inside the
    *  comp output — proving both resolution and suppression are renderer-consistent. */
   flarexMultiSource?: boolean;
+  /** DEBT-017 fixture: override the HOST media layer's transform POSITION away from center (50/50). Every other
+   *  variant leaves this undefined, so `imageLayer`'s position stays exactly 50/50 — byte-identical to
+   *  before this field existed. Separate from `anchorTransform.anchor` (the rotation/scale PIVOT, not a
+   *  translation) and from `anchorTransform.scale`/`mediaOpacity` (which already vary scale/opacity). */
+  hostPosition?: { x: number; y: number };
 }
 
 function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
@@ -1065,6 +1124,17 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexGeneratorsComp() };
     case "flarex-mismatched-aspect":
       return { effects: [], fit: "cover", flarex: buildFlarexMismatchedAspectComp() };
+    case "flarex-host-transform":
+      // DEBT-017 fixture: scale != 1, position != 50/50, opacity != 100 — all three off their identity
+      // default, the one host-transform shape none of the other 13 Flarex fixtures carries.
+      return {
+        effects: [],
+        fit: "cover",
+        flarex: buildFlarexHostTransformComp(),
+        hostPosition: { x: 30, y: 35 },
+        anchorTransform: { anchor: { x: 50, y: 50 }, rotation: 0, scale: 0.6 },
+        mediaOpacity: 70
+      };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
@@ -1204,6 +1274,21 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     createdAt: new Date(0).toISOString()
   };
 
+  // flarex-host-transform (DEBT-017 renderer-divergence coverage): the asset-source MediaIn's media,
+  // merged over the host at the host's own (non-identity) transform.
+  const hostTransformMediaAsset: SourceAsset = {
+    id: FLAREX_HOST_TRANSFORM_ASSET_ID,
+    userId: "fixture_user",
+    fileName: "fixture-host-transform-media.svg",
+    fileType: "image/svg+xml",
+    fileUrl: `data:image/svg+xml;charset=utf-8,${fixtureHostTransformMediaSvg}`,
+    durationSeconds: 12,
+    width: 1080,
+    height: 1920,
+    status: "ready",
+    createdAt: new Date(0).toISOString()
+  };
+
   const imageLayer: TimelineLayer = {
     id: "fixture_image_layer",
     trackId: "video_track",
@@ -1214,7 +1299,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     assetId: imageAsset.id,
     fit: variant.fit,
     transform: {
-      position: { x: 50, y: 50 },
+      position: variant.hostPosition ?? { x: 50, y: 50 },
       scale: variant.anchorTransform?.scale ?? 1,
       rotation: variant.anchorTransform?.rotation ?? 0,
       opacity: variant.mediaOpacity ?? 100,
@@ -1588,7 +1673,7 @@ Save this style now`);
       ...graph,
       composition: compositionWithCaptions
     },
-    assets: [imageAsset, mismatchedAspectAsset],
+    assets: [imageAsset, mismatchedAspectAsset, hostTransformMediaAsset],
     currentTime: renderComparisonFrameSeconds
   };
 }

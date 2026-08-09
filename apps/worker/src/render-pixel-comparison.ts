@@ -55,7 +55,11 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
   "flarex-filter-stack": 0.005,
   // Measured 0.000% (0/2073600) on the full sweep that added this fixture — same methodology as the
   // entries above.
-  "flarex-mismatched-aspect": 0.005
+  "flarex-mismatched-aspect": 0.005,
+  // DEBT-017 renderer-divergence coverage (NOT a DEBT-016 guard — see the fixture's own comment and
+  // project-tracker/architectural-debt.md). Measured 0.000% (0/2073600) on the full 55-fixture sweep
+  // that added this fixture; the pre-13 Flarex fixtures did not move.
+  "flarex-host-transform": 0.005
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

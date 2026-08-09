@@ -1500,6 +1500,86 @@ promised) — the same failure mode as the founder's repro, reproduced determini
 browser. Restored and reconfirmed passing. `render:compare:pixels` (chrome channel) run after the fix:
 all 13 Flarex fixtures unmoved at 0.000%, full 54-fixture sweep passed.
 
+**Note (2026-08-09) — a parity gate can never guard this entry, structurally, not just in practice.**
+`flarexSourceDrawCache` is constructed and consumed ONLY in `apps/web/src/components/ScenePreviewCanvas.tsx`
+(six sites) — the Remotion/export path never builds one, so it always does a full rebuild and is never
+subject to the staleness this entry describes. A differential gate comparing the two renderers has
+nothing to compare on this specific defect: web-preview would be wrong, Remotion would be right (or,
+after the fix, both right), and either way the two sides never disagree with each other in the way
+`render:compare:pixels` measures. Confirmed empirically, not just reasoned: reverting the fix and running
+`PIXEL_FIXTURES=flarex-host-transform` reads 0.000% both before and after. The two-render unit test
+(`flarex-source-draw-cache-transform.test.ts`) remains this entry's sole and correct guard — see DEBT-017
+for the general shape of this gap.
+
+### DEBT-017 — CLASS: the pixel-parity gate cannot see a bug both renderers share
+
+- Status: **open** — registered as a CLASS, not a single instance; there is nothing here to "fix" except
+  build the missing instrument (see Expiry condition), and this entry does not retire until that exists
+- Registered: 2026-08-09 (discovered attempting to falsify the DEBT-016 pixel fixture — twice, against two
+  different auditor-proposed reverts, neither of which the gate could detect)
+- Reason: `render:compare:pixels` is a **differential** instrument — it renders the SAME composition
+  through the web-preview path and the Remotion/export path and diffs the two PNGs. That is exactly
+  right for what it was built to catch: CLAUDE.md's own worked example is a renderer-only
+  `entranceScale()` spring that zoomed exports while the editor preview stayed flat — genuine divergence
+  between two independent implementations. It has never been able to catch the other failure mode: a
+  wrong value computed ONCE by code both renderers consume verbatim, because there both sides compute the
+  identical (wrong) answer and the diff reads 0.000% by construction. There is no disagreement to measure.
+  On this branch specifically, the amount of Flarex logic that is SHARED rather than renderer-specific has
+  been deliberately increasing — `collectFlarexVirtualLayers`, `buildSceneDraws`, the evaluator, and (per
+  the branch's own name) the compositor are now consumed verbatim by both consumers. Every one of those is
+  a growing blind spot for this gate, not a shrinking one.
+- Invariant affected: none named — this is a gap in the TEST INSTRUMENT, not a violation of a product
+  invariant. The closest existing language is ADR-010's determinism rule ("same (comp, ctx) → structurally
+  identical draws"), which is true and is exactly why the gate cannot see inside it: two renderers being
+  fed the same deterministic function are GUARANTEED to agree, correct or not.
+- Owner: unassigned
+- Expiry condition: an audit exists naming which parts of the Flarex render path are STILL
+  renderer-specific — i.e., what surface `render:compare:pixels` can actually still see, versus what has
+  been absorbed into shared code and is now gate-invisible. That number was explicitly NOT claimed here:
+  attempting it without auditing would be exactly the confident-but-unmeasured mistake this register exists
+  to catch (see DEBT-012's own five shapes). Until that audit exists, "the pixel gate passed" is not
+  evidence of correctness for any change that lands entirely inside `packages/shared`.
+- Planned slice: none. This entry names the gap and the RIGHT instrument shape for it (below); building
+  that instrument is unscoped, future work.
+- Tracking issue: —
+- Detection: any change that moves logic from a renderer-specific file (`apps/web/src/components/*`,
+  `apps/worker/src/remotion/*`) into `packages/shared` should say so in its commit message as a
+  side-effect: it may be shrinking what `render:compare:pixels` can still catch, even though the sweep
+  will keep passing at 0.000% throughout the move.
+
+**The demonstration, not just the claim.** While attempting to falsify the DEBT-016 pixel fixture
+(`flarex-host-transform`) by reverting the ADR-020 slice-B transform-inheritance line in
+`virtual-layers.ts` back to its pre-slice-B hardcoded identity value, the fixture read **0.000% both
+before and after** the revert — the same null result as reverting DEBT-016's own fix directly. Before
+reporting that as "the inherited transform isn't reaching the drawn output" (the auditor's own
+pre-registered contingency for a larger finding), the actual rendered PNGs were pixel-diffed against a
+fresh correct-code run to rule out a stale-build artifact:
+
+```
+remotion: correct vs reverted — diff 1759396/2073600 (84.847%)
+web:      correct vs reverted — diff 1759335/2073600 (84.844%)
+```
+
+The edit changed **~85% of the frame, on BOTH renderers, by the same amount** — proof the revert took
+full effect and proof the two renderers moved in lockstep, together, the whole way. `render:compare:pixels`
+still read 0.000% throughout, because it was never looking at whether the picture was right — only at
+whether the two renderers agreed with each other, which two renderers fed the same shared function by
+construction always will.
+
+**What this means for the project's primary render gate, stated plainly.** A 53-or-55/N sweep at 0.000%
+is evidence that web-preview and Remotion AGREE. It is not, and never was, evidence that the picture is
+CORRECT. For any change that lands entirely inside shared evaluator/compositor code, the pixel gate
+passing is silent on correctness — it can only speak to divergence, and shared code cannot diverge from
+itself.
+
+**The right instrument, named but not built.** Shared-layer correctness needs an ABSOLUTE assertion
+against a known ground truth, never a differential one — either (a) a unit test with hand-computed
+expected values (exactly the shape of the bounding-box measurement used earlier this session to confirm
+the host and an asset-source MediaIn land in the mathematically-predicted box for a given transform), or
+(b) an oracle render compared against an independently-computed expected image. `render:compare:pixels`
+answers "do the two renderers agree"; only an absolute-ground-truth instrument answers "is either of them
+right." This entry names the gap; building that harness is not attempted here.
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
