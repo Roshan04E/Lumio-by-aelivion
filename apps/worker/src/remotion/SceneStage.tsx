@@ -504,6 +504,12 @@ const COMPOSITE_RETRY_BACKOFF_MS = [150, 300, 600];
 // does not leave the rest of the render one failure away from aborting.
 const HEALTHY_FRAMES_TO_RESET_COMPOSITE = 120;
 
+// DEBT-015 instance 4 — same ladder shape as the composite handler above, sized for a single decode
+// instead of a per-frame loop: no "healthy run" reset exists here because each ImageGrabber mount (a
+// fresh `src`) is already an independent budget, not a shared counter that needs periodic forgiveness.
+const MAX_IMAGE_RETRIES = 3;
+const IMAGE_RETRY_BACKOFF_MS = [150, 300, 600];
+
 /** Hidden image decoder: blocks the frame (delayRender) until the image is decoded, then hands it to `onFrame`. */
 function ImageGrabber({
   layer,
@@ -536,17 +542,57 @@ function ImageGrabber({
       : layer.assetUrl;
   useEffect(() => {
     if (!src) return undefined;
+    // DEBT-015 instance 4: the old `.catch(() => continueRender(handle))` answered a genuine decode
+    // failure with completion — Remotion wrote whatever was already in the canvas (nothing, for this
+    // layer) and the export exited 0. Mirrors `failComposite`'s ladder: hold ONE delayRender handle
+    // across every retry (never continueRender-then-re-delayRender, which is what would let a partial
+    // frame slip out between attempts) and only settle it once, on success or on terminal failure.
     const handle = delayRender(`scene-stage image ${layer.id}`);
     let cancelled = false;
-    void loadImageOnce(src)
-      .then((img) => {
-        if (!cancelled) onFrame(layer.id, { source: img, width: img.naturalWidth, height: img.naturalHeight });
-        continueRender(handle);
-      })
-      .catch(() => continueRender(handle));
+    let settled = false;
+    let attempt = 0;
+    let retryTimer: number | null = null;
+
+    const attemptLoad = () => {
+      void loadImageOnce(src)
+        .then((img) => {
+          if (cancelled) return;
+          onFrame(layer.id, { source: img, width: img.naturalWidth, height: img.naturalHeight });
+          settled = true;
+          continueRender(handle);
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          if (attempt >= MAX_IMAGE_RETRIES) {
+            settled = true;
+            // img.onerror rejects with an Event, not an Error — build the message ourselves rather than
+            // interpolating it. Truncated: `src` can be a multi-megabyte animated-graphic data URL.
+            const truncatedSrc = src.length > 120 ? `${src.slice(0, 120)}…(${src.length} chars)` : src;
+            const cause = error instanceof Error ? error.message : "image failed to load";
+            cancelRender(
+              new Error(
+                `SceneStage: image load failed for layer ${layer.id} after ${MAX_IMAGE_RETRIES + 1} attempts — ` +
+                  `refusing to emit a frame missing this layer (DEBT-015). src="${truncatedSrc}" cause=${cause}`
+              )
+            );
+            return;
+          }
+          const delay = IMAGE_RETRY_BACKOFF_MS[Math.min(attempt, IMAGE_RETRY_BACKOFF_MS.length - 1)] ?? 600;
+          attempt += 1;
+          console.warn(
+            `SceneStage: image load failed for layer ${layer.id}; retry ${attempt}/${MAX_IMAGE_RETRIES} in ${delay}ms`
+          );
+          retryTimer = window.setTimeout(attemptLoad, delay);
+        });
+    };
+    attemptLoad();
+
     return () => {
       cancelled = true;
-      continueRender(handle);
+      if (retryTimer != null) window.clearTimeout(retryTimer);
+      // Only release the handle here if neither success nor terminal failure already did — mirrors
+      // `failComposite`: a render already failing via cancelRender must not also continueRender.
+      if (!settled) continueRender(handle);
     };
   }, [src, layer.id, onFrame]);
   return null;

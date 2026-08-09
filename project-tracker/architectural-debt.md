@@ -1474,6 +1474,84 @@ the evidence supports, not rounded up to match instance 3's measured certainty.
 found by this audit and left for its own prompt with its own falsifier — the same discipline instances
 1 and 2 were each given. **DEBT-015 does not retire.**
 
+**Update (2026-08-09) — instance 4 FIXED. Verdict unchanged: DEBT-015 still does not retire (one
+lower-confidence row remains open).**
+
+`ImageGrabber`'s `.catch(() => continueRender(handle))` (was `:546`) now retries up to
+`MAX_IMAGE_RETRIES = 3` times with `IMAGE_RETRY_BACKOFF_MS = [150, 300, 600]` — the same constants and
+ladder shape as `failComposite`'s (instance 1) — holding ONE `delayRender` handle across every attempt
+(never releasing and re-acquiring, which is exactly what would let a partial frame slip out between
+retries), then `cancelRender` on exhaustion with a message naming the layer id, a truncated `src`
+(a data URL can be multi-megabyte), the attempt count, and the underlying cause. `loadImageOnce`
+(`:100-113`) only memoizes on SUCCESS, so each retry is a genuine new attempt, not a vacuous repeat of a
+cached rejection.
+
+**The falsifier needed a second design pass.** The first fixture (a single static, permanently-broken
+image layer) did NOT reproduce "ships blank, exits 0" — it reproduced a *different* real problem: Remotion's
+own generic delayRender timeout (28s for `renderStill`'s default, 120s for `renderManifestToMp4`'s
+configured `MEDIA_FETCH_TIMEOUT_MS`) firing and failing the render with exit 1, because
+`SceneController.composite()` (`:304-306`) already refuses to report a frame complete while any active
+media layer has no entry in `rawById` — a layer that *never* successfully decodes blocks every frame
+forever and the render hangs-then-fails, it does not silently succeed. Traced and confirmed empirically
+(logs on record) before accepting it as the finding, rather than asserting it from the code alone.
+
+The actual "ships blank/stale, exits 0" mechanism needs a layer whose `src` **changes every frame**
+(true of `layer.graphic`'s per-frame `graphicToAnimatedDataUrl` re-bake, `:533-536`) where an EARLY
+frame's decode succeeds — populating `rawRef.current` for that `layer.id` — and a LATER frame's decode
+fails: `rawById.has(layer.id)` is still `true` from the earlier success, so `composite()`'s gate passes,
+and the composite proceeds using the STALE earlier frame while the current one silently never updates.
+No timeout, no error, no log — the export completes and looks fine.
+
+Reproducing this organically (a real animated graphic that decodes for N frames then breaks) was judged
+too fragile to depend on for a repeatable test, so it was isolated with the same temporary-injection
+methodology already used elsewhere in this file's history (DEBT-010, the composite ladder's own
+untested-branch exercise below): a `layer.id === "image_layer_1"` probe in `ImageGrabber` forcing
+`frame < 15` to the real (valid) asset and `frame >= 15` to a syntactically-valid-but-undecodable data
+URL, injected on top of each code version, run, then fully reverted (`git diff` empty afterward).
+
+Falsifier (current/defective code + probe, `debt015-run-mp4-only.ts` against `debt015-manifest-good.json`,
+90 frames @ 30fps/3s): **exit 0**, mp4 produced. Frame 80 (65 frames after the layer started permanently
+failing) is pixel-identical to frame 45 of a clean render — the STALE frame 14 image, shipped silently,
+forever, with zero signal anything was wrong.
+
+With the fix (same probe, same manifest): 2 render tabs each logged `retry 1/3 in 150ms` →
+`retry 2/3 in 300ms` → `retry 3/3 in 600ms`, then `cancelRender` at ~12% progress:
+`SceneStage: image load failed for layer image_layer_1 after 4 attempts — refusing to emit a frame
+missing this layer (DEBT-015). src="data:image/png;base64,c3RhbGUtcHJvYmUtYmFkLWJ5dGVzLTE1" cause=image
+failed to load`. **exit 1**, fast (~1s of retries, not a 28-120s generic timeout), named cause.
+
+Happy path (fix applied, probe removed, same manifest): exit 0, ran to 100% with no retry warnings,
+spot-checked frame pixel-identical to the falsifier's pre-break frames. No cost added to a working decode.
+
+Exhaustion branch: exercised directly by the same probe run above (a real, forced 4-consecutive-failure
+sequence, not asserted from reading the code) — not a separate step.
+
+**Judgement call, made and disclosed rather than silently picked:** the retry ladder does NOT
+differentiate a generated data URL (`layer.graphic`'s animated bake) from a `layer.assetUrl` fetch, even
+though a malformed data URL will fail identically on every retry (no possible transient recovery) while
+an asset URL failure might be a genuine transient (slow storage, a race with an in-flight upload). Chose
+NOT to differentiate: it mirrors `failComposite`'s precedent (which also retries on any composite
+failure without cause-based branching), and the cost of retrying a data URL that can't recover is capped
+at the same ~1050ms the composite ladder already treats as negligible next to a render's total runtime —
+adding a second branch to save ~1s on a frame that was going to fail anyway was judged not worth a new
+axis of behavior with no precedent in this file.
+
+**Manifest paths treating a missing image as legitimately optional — checked, none do.** Two places
+already short-circuit BEFORE any decode is attempted: `ImageGrabber`'s own `if (!src) return undefined;`
+(an empty/absent `assetUrl`) and the Flarex loader mount's `if (!loader.assetUrl) return null;`
+(`:934`, an asset that failed to resolve — "the compiler's documented host soft-degrade still applies").
+Both are EMPTY-url cases, never reaching `delayRender`/the retry ladder at all — they were already
+correctly optional before this fix and remain unchanged by it. No manifest path treats a PRESENT-but-broken
+image URL as optional anywhere; every truthy `src` that fails to decode now goes through the same
+retry-then-cancelRender path regardless of which of the three producers (timeline image layer, matte
+layer, Flarex asset-source loader) supplied it.
+
+**DEBT-015 still does not retire.** Instance 4 is now fixed (4/4 known live instances closed: 1, 2, 4
+fixed; 3 confirmed measured-dormant). The `:739-748` stale-handle-release row remains open at its
+original lower-confidence, reasoned-not-measured verdict — see the exhaustive-audit table above; it was
+not touched by this pass and is tracked separately (see the follow-up item closing it, below, if present
+at read time).
+
 **(2026-08-08, founder-identified, from this session's own Scope C.)** The pre-registered falsifier read
 *"a lone loader is safe on hardware"* — an **absolute**. It fired: with the lone loader on hardware, a
 source starved. The verdict looked clean and it was wrong, because the counterfactual arm then showed the
