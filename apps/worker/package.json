@@ -53,7 +53,8 @@
     "starvation:census": "tsx src/starvation-census-probe.ts",
     "rulerjump:probe": "tsx src/ruler-jump-delay-probe.ts",
     "rulerjump:pathaudit": "tsx src/ruler-jump-path-audit.ts",
-    "rulerjump:capaudit": "tsx src/ruler-jump-cap-audit.ts"
+    "rulerjump:capaudit": "tsx src/ruler-jump-cap-audit.ts",
+    "rulerjump:initrace": "tsx src/ruler-jump-init-race-probe.ts"
   },
   "dependencies": {
     "@orreris/render-templates": "workspace:*",
