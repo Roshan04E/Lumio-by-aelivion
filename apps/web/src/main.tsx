@@ -11,6 +11,7 @@ import { installPerfDiagnostics } from "./lib/perfDiagnostics";
 import { installCrashTelemetry } from "./lib/crash-telemetry";
 import { resolveKernelDiagnosticsEnabled } from "./playback/frame-completion";
 import { migrateBrandLocalStorage, migrateBrandBlobStores } from "./lib/brand-migration";
+import { installStoragePersistence } from "./lib/storage-persistence";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
@@ -39,9 +40,9 @@ void migrateBrandBlobStores();
 void pingHealth();
 
 registerSW({ immediate: true });
-if (typeof navigator !== "undefined" && navigator.storage?.persist) {
-  void navigator.storage.persist();
-}
+// See lib/storage-persistence.ts: captures the grant/deny outcome instead of discarding it, reads
+// whether the origin is already persisted, and retries a denial once on the user's first gesture.
+installStoragePersistence();
 
 // Text-warp outline engine: resolve warp font families to the served binaries in
 // /public/fonts. The catalog (warpFontFile) is the seam for the future font library.
