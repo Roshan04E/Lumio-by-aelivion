@@ -92,6 +92,21 @@ interface SceneFrameStageProbeOptions {
 const MAX_POOLED_MEDIA_RENDERERS = 2;
 const SAFE_CONTEXT_THRESHOLD = 8;
 
+// DEBT-015 (browser export scope): a per-frame decode failure on an already-successfully-created
+// provider used to be indistinguishable from "not ready yet" — `gradeMediaLayer` returned null either
+// way, `buildSceneDraws`'s `getMediaGraded` treated the absence as "draw nothing for this layer", and
+// the frame composited and shipped without it. Silent — no throw, no console line, export exit 0. This
+// is the exact class already shipped once as black/blank clips (WebCodecs decoder warmup/flush
+// lifecycle). Same ladder shape as the worker's DEBT-015 fix (SceneStage.tsx `failComposite`/
+// `ImageGrabber`): bounded retries, then throw with a clear cause — no separate "healthy run" reset
+// because grading is per-frame-call, not a persistent per-instance budget.
+const MAX_FRAME_DECODE_RETRIES = 3;
+const FRAME_DECODE_RETRY_BACKOFF_MS = [150, 300, 600];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface FlatLayer {
   layer: TimelineLayer;
   trackIndex: number;
@@ -586,7 +601,17 @@ export class SceneFrameCompositor {
       }
       return null;
     }
-    const frame = await source.getFrame(sourceTime);
+    let frame = await source.getFrame(sourceTime);
+    let decodeAttempt = 0;
+    while ((!frame || source.width === 0 || source.height === 0) && decodeAttempt < MAX_FRAME_DECODE_RETRIES) {
+      const delay = FRAME_DECODE_RETRY_BACKOFF_MS[Math.min(decodeAttempt, FRAME_DECODE_RETRY_BACKOFF_MS.length - 1)] ?? 600;
+      decodeAttempt += 1;
+      console.warn(
+        `[export] no frame for layer ${layer.id} (providerKey=${providerKey}, sourceTime=${sourceTime.toFixed(3)}); retry ${decodeAttempt}/${MAX_FRAME_DECODE_RETRIES} in ${delay}ms`
+      );
+      await sleep(delay);
+      frame = await source.getFrame(sourceTime);
+    }
     if (!frame || source.width === 0 || source.height === 0) {
       if (this.stageProbe && this.shouldProbe(t)) {
         this.stageProbe.onProbe({
@@ -598,7 +623,13 @@ export class SceneFrameCompositor {
           detail: `no-frame providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)} provider=${source.width}x${source.height}`,
         });
       }
-      return null;
+      // DEBT-015: a decode failure here used to return null, which buildSceneDraws' getMediaGraded
+      // treats identically to "not ready yet" — the frame composites and ships without this layer,
+      // silently. Refuse to emit a frame silently missing content the timeline says should be visible.
+      throw new Error(
+        `Export: no decoded frame for layer "${layer.id}" at t=${t.toFixed(3)}s after ${MAX_FRAME_DECODE_RETRIES + 1} attempts ` +
+          `(providerKey=${providerKey}, sourceTime=${sourceTime.toFixed(3)}, provider=${source.width}x${source.height}) — refusing to ship a frame missing this layer (DEBT-015).`
+      );
     }
     if (this.stageProbe && this.shouldProbe(t)) {
       this.stageProbe.onProbe({

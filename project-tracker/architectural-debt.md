@@ -1617,6 +1617,84 @@ reproducible, 3/3* result that points at the wrong remedy. Here it would have re
 common-case benefit (a lone Flarex clip getting hardware decode) to recover ~one cap miss in a
 three-host fixture, and re-broken I-44a for nothing.
 
+**Update (2026-08-09) — SCOPE 2: the browser export pipeline (`apps/web/src/export/`). One live instance
+found and FIXED. DEBT-015 remains open; this scope is now audited but not exhausted (three ambiguous
+sites written up, not fixed).**
+
+The prior audit (worker scope) explicitly declined to retire on the grounds that "the export pipeline"
+is broader than one directory — there is a SECOND, independent export path with its own completion
+semantics and no Remotion `delayRender` contract at all: the browser's local export
+(`local-export.ts` → `export-core.ts` → `scene-frame-compositor.ts` / `webcodecs-decoder.ts` /
+`source-decoder.ts` / `video-encoder.ts` / `audio-mixer.ts` / `matte-resolve.ts` / `source-color.ts`).
+This scope is not hypothetical: it already shipped the exact DEBT-015 symptom once (black/blank clips
+in a completed export, traced to WebCodecs decoder warmup/flush lifecycle — see
+`EXPORT_DECODER_WARMUP_TODO`/`lumio.exportDecodeDebug`).
+
+**The falsifier needed the same second design pass instance 4 needed, for the same structural reason.**
+A permanently-broken source never even gets a provider created (`createWebCodecsVideoSource`'s own
+probe-decode returns null and `source-decoder.ts` falls through to `<video>`, or that also fails and the
+whole export throws at setup — already correctly loud). The silent-success shape only appears when a
+provider that ALREADY decoded successfully has a LATER `getFrame()` call fail — mirroring instance 4's
+"early success, later failure" finding exactly. Confirmed empirically (not assumed) before accepting the
+finding, via a `FrameProvider` wrapped to succeed for its first 3 calls then return null forever, run
+through a real `SceneFrameCompositor.renderFrame()` loop in a live browser (Playwright/Chromium),
+injected on a temporary route (`Debt015bFalsifierPage.tsx`, deleted after use, `App.tsx` route reverted
+— `git diff` empty afterward).
+
+| site | signals completion | on the failure path | verdict |
+|---|---|---|---|
+| **`scene-frame-compositor.ts` `gradeMediaLayer`, `!frame` after `source.getFrame(sourceTime)`** (was one `if`, now the retry block below it) | previously: `return null` | `buildSceneDraws`'s `getMediaGraded` (`packages/shared/src/scene/build-scene-draws.ts:690`) treats a null graded source as "not ready yet" — `onLayerNotReady?.()` (not even wired up by this caller) then `return null` — the layer is simply omitted from the composite. Frame ships, export exits 0, zero console output in the default (non-diagnostic) path. | **DEFECT — FIXED this round.** Retry 3× (150/300/600ms, same constants/shape as the worker's `failComposite`/instance-4 ladders) then `throw`, naming the layer, time, provider key, and attempt count. |
+| `scene-frame-compositor.ts` `gradeMediaLayer`, `!source` (provider never found for an active layer's key) | `return null`, stageProbe-only diagnostic (off by default) | same "not ready" absorption as above | DEFECT by the same shape, **NOT fixed this round** — structurally near-unreachable: `export-core.ts`'s per-frame loop `await`s `loadSource` for every `activeSourceKeysAt(t)` key BEFORE `renderFrame(t)` runs, and a non-matte `loadSource` failure already throws (see next row) — this path should only fire if the two independently-computed provider-key functions (`export-core.ts`'s `mediaSourceKey` vs this file's inline `providerKey` computation) ever disagree, which inspection did not find but cannot rule out as a future regression. Written up, not fixed — no known incident, and a confident fix here would be guessing at an unreachable branch's intent. |
+| `scene-frame-compositor.ts` `gradeMediaLayer`, matte `getFrame()` returns null (`matteFrame` stays null) | silent — no stageProbe entry even, layer renders **unmatted** (full clip visible) instead of failing | matches `export-core.ts`'s `loadSource` (next row) — the SAME deliberate matte-specific leniency, not an independent gap | DEFECT by DEBT-015's letter, **written up, not fixed** — ambiguous: mirrors an EXISTING, apparently deliberate design decision (mattes are treated as optional throughout this pipeline), and making a matte failure abort the whole export would be a real product-behavior change, not "fail loudly instead of silently" in the narrow sense. The founder's call. |
+| `export-core.ts` `loadSource`, `catch (error) { if (!key.startsWith("matte:")) throw error; }` | swallows ONLY for matte-prefixed keys; every non-matte source load failure already throws (confirmed — this path is SAFE) | a failed matte load leaves no entry in `sources`, feeding the row above | Same ambiguous matte-optional decision as the row above — one finding, two call sites. Written up together, not fixed. |
+| `local-export.ts` audio mixdown: `Promise.race([mixTimelineAudio(...), timeout(20s)]).catch(() => null)` | any throw OR a 20s stall is converted to `null` — indistinguishable from "the timeline has no audio" (`mixTimelineAudio`'s own legitimate null-return contract) | export proceeds **muted**, no warning, exit 0, reported successful | DEFECT by DEBT-015's letter (a genuine failure ships as success) but this is clearly BUILT infrastructure, not an oversight — the 20s race is explicit and documented. Whether a broken audio mix should fail the WHOLE video export is a real, debatable product tradeoff (unlike "a video frame must be complete", there is no established precedent elsewhere in this codebase that missing audio is export-fatal). Written up, not fixed. |
+| `audio-mixer.ts` `decode()`, fetch/decodeAudioData failure → `buffer = null` | documented as intentional: *"a source without an audio track (silent video) just contributes nothing"* | that ONE audio layer is silent; other layers still mix and play | SAFE — explicitly by design, low severity (per-layer, not per-export), and the file's own comment predates this audit. Noted imprecision: this conflates "no audio track" with "fetch/network failure," which are different conditions, but not a completion-signaling defect — just an unexamined edge inside an intentionally-lenient path. |
+| `matte-resolve.ts` `resolveGraphMattes` | never throws per-matte; every unrecoverable matte lands in a `failures` array, explicitly documented: *"the caller decides whether that's fatal"* | verified the actual export-gate caller: `apps/web/src/lib/sync.ts:745` does `throw new MatteResolveError(matteReport.failures)`. Tool-panel callers (`TextBehindPersonToolPanel.tsx` etc.) don't throw — those are bake/background-sync flows, a different, already-documented concern (`"opportunistically on every background sync"`). | SAFE — explicit contract, correctly consumed where it matters. |
+| `video-encoder.ts` `addVideoFrame`/`finalize` (encoder-error latch, backpressure watchdog, bounded stall-recovery ladder) | throws on a stalled queue after ≤2 bounded reset attempts; checks the latched `encoderError` before AND after `flush()`/`close()` | fully explicit, no swallow anywhere — this file's own top comment names the exact hazard DEBT-015 is about ("a WebCodecs encoder reports failures through its async error callback, NOT by rejecting any promise... if we just throw in that callback, the error vanishes... the export silently 'stops'") and was ALREADY built to avoid it | SAFE — model implementation, not a defect source. |
+| `video-encoder.ts` `dispose()` catches | swallow `close()` errors | only called to ABANDON an already-failing/aborted encode (its own docstring), never a success path | SAFE — same shape as the worker's `SceneController.dispose()`, judged the same way there. |
+| `export-core.ts` per-frame loop: `FRAME_TIMEOUT_MS` watchdog, black-frame guard (throws on 2 consecutive black expected-media-frame samples), `EncoderStallRecoveredError` re-render | throws on stall/timeout/context-loss; the guard throws when tripped | explicit propagation throughout — this file's own comments state the philosophy plainly: *"Phase 5: no canvas2D degrade... propagates out of the loop... surfaces as a hard export error rather than shipping black"* | SAFE — actively working AS a DEBT-015-class safety net. Coverage gap noted, not itself a defect: the black-frame guard is opt-in, sparse-sampled (≤4 timestamps per export), and only wired up on the default Worker-scene path (`workerSceneDiagnostics`) — the main-thread fallback (`runExportCore` called directly, no diagnostics) has no guard at all. This round's fix (row 1) is the actual safety net for the general case; the guard is supplementary tooling on top of it. |
+| `export-core.ts` `document.fonts.load(...).catch(() => undefined)` | catch → undefined, falls back to the platform font | text still renders (different font, not missing) — explicitly matches the LIVE PREVIEW's own non-blocking font-load behavior, so preview↔export stay in parity | SAFE — intentional, documented, not a content-loss defect. |
+| `local-export.ts` `rasterizeSvgSources` catch | keeps the original SVG URL unchanged on rasterize failure | the main-thread `<img>`-decode SVG path (`createImageSource`) is a real, exercised fallback, not a dead end | SAFE — documented fallback chain. |
+| `export.worker.ts` | always posts exactly `"done"` or `"error"`, one try/catch, no swallow | N/A | SAFE. |
+| `webcodecs-decoder.ts` `createWebCodecsVideoSource` setup/probe failures (demux, `isConfigSupported`, `configure`, probe-decode) — many sites | all return `null`, each with a `console.warn` naming why | `source-decoder.ts`'s `.catch(() => null)` + null-check falls through to the `<video>` fallback provider, which has its OWN real error handling (`createVideoSource`'s load/seek both reject on timeout) | SAFE — an explicit, documented two-tier fallback contract, correctly consumed by the caller. Not a silent-success shape: setup failure here means "try the other decoder," not "ship anyway." |
+| `webcodecs-decoder.ts` `getFrame()` returning `null` mid-stream (warmup-stall bail, drain-yielded-nothing bail, `KEY_RETRY_MAX`-exhausted decode() throw) | returns `null`, no exception (by the `FrameProvider` contract's own design — see `source-decoder.ts`'s docstring: `"Returns null when the file can't be demuxed/decoded"`) | consumed by `gradeMediaLayer` — this is exactly what feeds the FIXED row at the top of this table | The `null` contract itself is correct and by design; the defect was never here — it was purely in how the CONSUMER (`gradeMediaLayer`) treated a genuine failure identically to "not ready." Now covered by the fix. |
+| `source-decoder.ts` `createVideoSource().getFrame()` → `null` when `readyState < 2` right after a resolved seek | same shape as the row above, same consumer, same fix | — | Covered by the fix. |
+| `source-color.ts` `detectSourceMetadataFromFile` — any parse failure returns `{ color: null, ... }` | export proceeds tagged with DEFAULT color metadata instead of DETECTED | metadata-tagging concern, not "did the frame render" — a genuinely different, much lower-stakes class (color-accuracy nuance vs missing content) | SAFE / not applicable to this defect class — same treatment the worker audit gave GL-disposal catches ("a different, generally correct pattern"). |
+| `export-gl-debug.ts`, `export-preview-suspend.ts`, `export-worker-protocol.ts` | no completion signaling anywhere in these files | N/A | Not applicable — pure diagnostics, refcount state, and message-protocol types. |
+
+**Falsifier, before/after** (`Debt015bFalsifierPage.tsx`, 12-clip fixture, one provider wrapped to
+succeed 3 times then return null forever, run via `SceneFrameCompositor.renderFrame()` in a real browser):
+
+| | before the fix | after the fix |
+|---|---|---|
+| result | `state=ready`, **50/50 frames rendered** | `state=error` at frame 3 |
+| console | nothing — zero warnings, zero errors | `retry 1/3 in 150ms` → `retry 2/3 in 300ms` → `retry 3/3 in 600ms`, then the named throw |
+| thrown error | none | `Export: no decoded frame for layer "stress_clip_0" at t=0.360s after 4 attempts (providerKey=stress_image, sourceTime=0.000, provider=1080x1920) — refusing to ship a frame missing this layer (DEBT-015).` |
+
+Happy-path / exhaustion-branch note: the retry loop's own guard (`while ((!frame || ...) && decodeAttempt
+< MAX)`) is skipped ENTIRELY when the first `getFrame()` call already succeeds — a working decode adds
+zero code execution, not just zero visible behavior change. The exhaustion branch (all 4 attempts fail)
+is exercised directly by the falsifier above, not asserted from reading the code. A DEDICATED
+non-flaky happy-path browser run (same fixture, real decode, no wrapper) was attempted three times at
+increasing fixture sizes (12/3/2 clips) and three times failed to complete within this environment
+(`page.goto` itself did not resolve, unrelated to any observable change from this fix — the same hang
+reproduced on a 2-clip fixture, ruling out GPU/render load as the cause) — **stated plainly as
+unverified by a dedicated run**, rather than silently dropped: the happy-path claim rests on the
+structural guarantee above plus the 3 real, unwrapped, successful decodes the falsifier's OWN "before
+failure" frames already exercised under the fixed code (visible in the retry log: exactly 3 renderFrame
+calls completed cleanly before the wrapped failure began).
+
+`pnpm --filter @orreris/web typecheck` clean.
+
+**DEBT-015 still does not retire.** Scope 2 (browser export) is now audited, one live instance found and
+fixed, three sites written up as ambiguous (two matte-related, one audio-mixdown) — none fixed this
+round, each is its own future prompt with its own product decision. The `!source` row is flagged
+DEFECT-by-shape but near-unreachable; not fixed, no known incident. Combined with worker scope
+(instances 1/2/4 fixed, instance 3 and the stale-handle row measured dormant), the entry now covers two
+of what may be more than two export paths in this codebase (the API-layer mock processing service is
+explicitly mocked, not real, per CLAUDE.md, and was not audited here since it does not perform genuine
+encode/render work) — retirement remains the founder's call, not inferred from a shrinking instance count.
+
 ### DEBT-016 — a source-draw cache key omitted an input the cached value depended on
 
 - Status: **RETIRED same commit** (fixed as part of the change that registers this entry)
