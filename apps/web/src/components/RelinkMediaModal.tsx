@@ -4,17 +4,20 @@ import { Button } from "./Button";
 import { relinkAsset, type RelinkAssetNeed } from "../lib/sync";
 
 /**
- * Shown when export needs media whose local bytes are missing (e.g. cleared site data).
- * The user re-selects each file once; we re-attach it under the same local asset id and
- * then let the caller retry export. Edits are never lost.
+ * Shown when media whose local bytes are missing needs to be re-selected — either on project
+ * OPEN (bytes gone, e.g. cleared site data / different machine; editing stays safe) or at
+ * EXPORT time (the sync gate needs bytes to upload). Same list/pick UI, different title/copy/CTA
+ * and different resolution behaviour per `mode`.
  */
 export function RelinkMediaModal({
   open,
+  mode,
   assets,
   onClose,
   onResolved,
 }: {
   open: boolean;
+  mode: "open" | "export";
   assets: RelinkAssetNeed[];
   onClose: () => void;
   onResolved: () => void;
@@ -37,12 +40,15 @@ export function RelinkMediaModal({
   }
 
   const allDone = assets.length > 0 && assets.every((a) => done[a.localAssetId]);
+  const title = mode === "open" ? "Some media is missing" : "Relink media for export";
+  const copy =
+    mode === "open"
+      ? "This project references media that isn't on this device (e.g. cleared site data, or a different browser/machine). Your edits are safe — re-select the files below to play and export them again."
+      : "This media needs to be selected once so we can sync it for export. Your edits are safe.";
 
   return (
-    <Modal open={open} title="Relink media for export" onClose={onClose} className="relink-modal">
-      <p className="relink-copy">
-        This media needs to be selected once so we can sync it for export. Your edits are safe.
-      </p>
+    <Modal open={open} title={title} onClose={onClose} className="relink-modal">
+      <p className="relink-copy">{copy}</p>
       <ul className="relink-list">
         {assets.map((need) => (
           <li key={need.localAssetId}>
@@ -72,7 +78,7 @@ export function RelinkMediaModal({
           Cancel
         </Button>
         <Button disabled={!allDone || busy} onClick={onResolved}>
-          Continue export
+          {mode === "open" ? "Done" : "Continue export"}
         </Button>
       </div>
     </Modal>

@@ -774,8 +774,10 @@ export function EditorPage() {
   const [busy, setBusy] = useState<string | null>(null);
   // `notice` toasts live in the noticeStore module (leaf <NoticeToast/> below) — the ~106 setNotice
   // call sites no longer re-render this component.
-  // Set when export needs missing media bytes re-selected (relink flow).
+  // Set when export, or the on-open media scan, needs missing bytes re-selected (relink flow).
   const [relinkNeeds, setRelinkNeeds] = useState<RelinkAssetNeed[] | null>(null);
+  // Which flow raised relinkNeeds — governs RelinkMediaModal's copy/CTA and what onResolved does.
+  const [relinkMode, setRelinkMode] = useState<"open" | "export">("export");
   // Crash-recovery checkpoint found on open that is newer than the loaded project.
   const [recoveryOffer, setRecoveryOffer] = useState<RecoveryCheckpoint | null>(null);
   // Local (in-browser) export progress + cancel.
@@ -1325,6 +1327,18 @@ export function EditorPage() {
       }
       const report = await ensureProjectMediaLocal(loaded.projectGraph, [...list, ...healed], { userId: loaded.userId });
       if (cancelled) return;
+      if (report.unresolvable.length > 0) {
+        // Genuinely lost bytes (no local copy, no pullable cloud URL) — warn now instead of letting
+        // the user edit blind and only discover it at export. `report.failed` (an attempted pull that
+        // errored) is transient/retryable and does NOT belong here.
+        const byId = new Map([...list, ...healed].map((asset) => [asset.id, asset]));
+        const needs: RelinkAssetNeed[] = report.unresolvable.map((id) => ({
+          localAssetId: id,
+          fileName: byId.get(id)?.fileName ?? "media",
+        }));
+        setRelinkMode("open");
+        setRelinkNeeds(needs);
+      }
       if (report.pulled.length > 0) {
         // Re-resolve so the freshly-cached assets play from on-device bytes this session.
         const refreshed = await listProjectAssets(resolvedId).catch(() => null);
@@ -7081,6 +7095,7 @@ export function EditorPage() {
         setNotice("Sign in to export.");
         navigate(`/login?from=${encodeURIComponent(window.location.pathname)}`);
       } else if (error instanceof RelinkRequiredError) {
+        setRelinkMode("export");
         setRelinkNeeds(error.assets);
         setNotice("Sync required before export.");
       } else if (error instanceof SyncRequiredError) {
@@ -9609,10 +9624,27 @@ export function EditorPage() {
       />
       <RelinkMediaModal
         open={relinkNeeds !== null}
+        mode={relinkMode}
         assets={relinkNeeds ?? []}
         onClose={() => setRelinkNeeds(null)}
         onResolved={() => {
           setRelinkNeeds(null);
+          if (relinkMode === "open") {
+            // Detected-on-open relink: no export to retry. Re-resolve the bin so the freshly
+            // re-attached bytes play this session (same refresh syncProjectMedia does after a pull).
+            const openedId = project?.id;
+            if (openedId) {
+              void listProjectAssets(openedId)
+                .then((list) => {
+                  const stripped = list.map((asset) =>
+                    asset.proxyUrl?.startsWith("blob:") ? { ...asset, proxyUrl: undefined } : asset
+                  );
+                  setAssets(stripped);
+                })
+                .catch(() => undefined);
+            }
+            return;
+          }
           // Retry the cloud export with the same settings that triggered the relink; fall back to
           // reopening the export window if we somehow lost them.
           if (lastCloudExportSettingsRef.current) {
