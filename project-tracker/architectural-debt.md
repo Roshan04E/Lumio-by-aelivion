@@ -1761,6 +1761,64 @@ of what may be more than two export paths in this codebase (the API-layer mock p
 explicitly mocked, not real, per CLAUDE.md, and was not audited here since it does not perform genuine
 encode/render work) — retirement remains the founder's call, not inferred from a shrinking instance count.
 
+**Update (2026-08-10) — the three scope-2 rows written up as ambiguous are now FIXED. Every DEFECT row
+in the scope-2 audit table is closed; Status line left unchanged (see why, below).**
+
+The three sites the prior round declined to fix on product-ambiguity grounds got their product decision
+this round (founder call, not inferred): a matte that was SPECIFIED and then failed to load or decode is
+now fatal to the export; a matte that was never specified stays untouched (the existing "mattes are
+optional" design, preserved exactly); a genuine audio-mixdown throw or stall now fails the export instead
+of shipping muted; a project with no audio still ships silent, unchanged.
+
+| scope-2 table row | this round |
+|---|---|
+| `scene-frame-compositor.ts` `!source` | FIXED — throws `no source provider found for layer "…"` instead of `return null` |
+| `scene-frame-compositor.ts` matte `getFrame()` null / zero-width | FIXED — throws `…failed to decode…`, only inside `if (layer.matte?.uri)` |
+| `export-core.ts` `loadSource`'s `matte:`-prefixed swallow | FIXED — swallow removed (provably safe: a `matte:<layerId>` key only ever exists when `layer.matte?.uri` is set, at all three map-building sites, so every failure on it is specified-and-broken, never never-specified) |
+| `local-export.ts` audio mixdown `.catch(() => null)` | FIXED — split via a private timeout sentinel into: legitimate null (unchanged), thrown → `"mixdown failed"`, race expired → `"did not finish within 20s"` |
+
+**Verification, both halves of each case, real Chrome:**
+- Audio: no audio layers → export completes, ships silent (`{"kind":"done"}`). A real `OfflineAudioContext`
+  `startRendering` RangeError (absurd composition duration, not a wrapper) → rejects, named "mixdown
+  failed". A genuinely pending fetch (`page.route()` that never resolves, not a simulated delay) → real
+  20s wait → rejects, named "did not finish within 20s" — distinguishable from the throw case.
+- Matte decode: **succeed-2-then-fail** injected through `SceneFrameCompositor`'s own `getSource`
+  constructor seam — the matte provider returns real frames for calls 1–2, `null` on call 3 — throws
+  exactly on frame 3 (`matteCalls:3`), the mid-stream shape, not a permanently-broken setup that would
+  fail at load time and never reach the decode branch. No matte specified: completes, `matteCalls:0`.
+- Matte load: `getSource` returning `undefined` for `matte:<id>` while `layer.matte?.uri` is set → throws
+  `…failed to load…`. Missing main source (`!source`): `getSource` returning `undefined` for the layer's
+  own key → throws `…no source provider found…`.
+- **Residual closed this round**: the previous round flagged the real `export-core.ts` `loadSource` →
+  `runExportCore` → `exportLocally` propagation path, and the actual message a user would see on a real
+  matte-URL failure, as unverified. Both are now settled. Propagation was settled by reading (both
+  `loadSource` call sites are awaited, so a rejection reaches `runExportCore`'s awaited flow and cannot
+  become an unhandled rejection). The message was NOT settled by reading — ran one real export against a
+  matte URL that 404s (real network failure, real pipeline, no wrapper): the message that reached the
+  catch was `"Failed to load video source for export"` — generic, named neither the layer nor the URL nor
+  that it was a matte. Fixed the message only (no restructuring): `loadSource`'s single catch now wraps
+  the underlying detail with the key (decoded to `matte for layer "<id>"` or `source "<id>"`) and the URL.
+  Re-ran the same live 404 after the fix: `"Export: failed to load matte for layer \"clip1\"
+  (http://…/__debt015_nonexistent_matte__.mp4) — Failed to load video source for export"` — names the
+  layer, names it as a matte, gives the URL, and preserves the original detail.
+- `render:compare:pixels` 55/55, no fixture regressed. `pnpm --filter @orreris/web typecheck` clean.
+
+**Left open, explicitly, so it is not lost**: the 20s audio-mixdown budget (`local-export.ts`) is fixed
+regardless of timeline length or audio-layer count. A mixdown that legitimately needs 25s now fails
+loudly instead of shipping muted silently — a real improvement — but it still fails a mixdown that would
+have succeeded given more time. Whether the budget should scale with duration/layer-count, and if so how,
+was explicitly left as a separate decision — not evaluated, not fixed, this round.
+
+**Status line NOT changed.** Every DEFECT row in the scope-2 table is now closed, but the entry's own
+2026-08-09 language already reserved retirement as the founder's call rather than something inferred from
+an instance count reaching zero, and named a specific reason it wasn't ready to close even with worker
+scope fully accounted for: "the entry now covers two of what may be more than two export paths in this
+codebase" (the API-layer mock processing service was explicitly excluded from audit, being mocked rather
+than real per CLAUDE.md — not evidence the class is closed, just evidence it wasn't in scope). Nothing
+this round changes that reservation. What DOES change: scope 2, specifically, now has zero open DEFECT
+rows in its own audit table — if scope 2 alone were the question, it would retire; DEBT-015 as a whole
+does not, on the same grounds the prior round already gave.
+
 ### DEBT-016 — a source-draw cache key omitted an input the cached value depended on
 
 - Status: **RETIRED same commit** (fixed as part of the change that registers this entry)
