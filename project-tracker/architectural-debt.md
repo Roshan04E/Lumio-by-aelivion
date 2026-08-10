@@ -1819,6 +1819,47 @@ this round changes that reservation. What DOES change: scope 2, specifically, no
 rows in its own audit table — if scope 2 alone were the question, it would retire; DEBT-015 as a whole
 does not, on the same grounds the prior round already gave.
 
+**Update (2026-08-10) — the 20s-budget residual left open above is now RESOLVED. Fixed in `2f02c5a`.**
+
+The prior append registered the fixed 20s audio-mixdown budget as an explicitly open residual — a
+mixdown that legitimately needed 25s would fail loudly instead of shipping muted, an improvement, but
+still a failed export the budget had no real basis for. Resolved by measurement, not by picking a bigger
+number: `mixTimelineAudio` alone, timed across a 3x3 grid (1/5/20 audio layers x 1/10/30 minutes of
+timeline, real Chrome), came in at 6.63s worst case (20 layers, 30 min) — a third of the 20s budget that
+was failing exports, and the expectation ("mixing is cheap, even 20 layers over 30 minutes should be
+single-digit seconds") held, so the deadline itself was removed rather than rescaled. The premise DEBT-015
+never examined — a stopwatch on mixing was aimed at the wrong subject, since mixing either completes or
+errors, and what can actually hang forever is the underlying network fetch — is now the guard: each audio
+source fetch in `audio-mixer.ts` is individually bounded (25s, mirroring `export-core.ts`'s
+`SOURCE_LOAD_TIMEOUT_MS`), `response.ok` is checked explicitly (fetch does not reject on 404, so an
+unchecked 404 would previously have fallen through to a decode failure and been silently absorbed), and a
+new `AudioSourceFetchError` distinguishes a fetch failure from a genuine mixdown failure at the call site.
+No scaled constant (duration x layers x factor) was introduced — the measurement didn't call for one, and
+the prior round's own instruction was explicit that wanting one would mean the premise was wrong. Mixdown
+also now reports real per-layer progress through the existing `onProgress` channel, closing the silent gap
+the prior append didn't mention but this round's task named directly — a stalled mix is now observable by
+progress not advancing, without a number chosen in advance.
+
+Verified in real Chrome, all four outcomes through the real `exportLocally`: no audio layers → silent
+export ships, unchanged; a genuine `OfflineAudioContext` RangeError → named mixdown failure; a
+never-fulfilled fetch (`page.route()`, no fulfill/continue/abort) → rejects after the real 25s bound,
+named fetch failure; a genuine 404 (`route.fulfill({status:404})` — an unmapped path on Vite's OWN dev
+server turned out to 200 via SPA history fallback, a dev-server artifact worth remembering the next time
+someone tries to reproduce a 404 against this same dev server) → rejects immediately, named fetch failure,
+HTTP 404 visible in the message. Progress observed monotonic across five layers
+(`[0.18, 0.36, 0.54, 0.72, 0.9, 1]`). `render:compare:pixels` 56/56 (one fixture,
+`flarex-animated-roto`, appeared between runs — a parallel session's work landing mid-round, unrelated).
+`pnpm --filter @orreris/web typecheck` clean.
+
+**New residual, so the entry does not read as having nothing left when it does**: an AUDIO-type layer
+whose file decodes to no usable audio track is still silently absorbed by `audio-mixer.ts`'s `decode()` —
+`buffer = null`, that layer contributes nothing, no warning, no failure. This is CORRECT and deliberate
+for a video layer used for its picture only (silent by design, per the file's own pre-existing comment).
+It is arguably WRONG for a layer the user explicitly added AS an audio clip — a broken/silent audio file
+placed deliberately on an audio track probably should not disappear without a trace. Distinguishing the
+two needs layer-type context `mixTimelineAudio`/`decode()` do not have today (`AudioLayerInput` carries no
+layer-type field). Named here, not fixed this round.
+
 ### DEBT-016 — a source-draw cache key omitted an input the cached value depended on
 
 - Status: **RETIRED same commit** (fixed as part of the change that registers this entry)
