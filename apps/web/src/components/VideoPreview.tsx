@@ -2262,12 +2262,17 @@ function VideoPreviewImpl({
                       sceneComposited
                       hideVisual
                       flarexConcurrentLoaders={flarexConcurrentLoaders}
-                      // DEMOTED while this comp's proxy is serving (S3.5), or while playing if this
-                      // loader is unreachable from the comp's active root. The loader stays mounted and
-                      // keeps its session; it just stops pulling, and its lease drops to `preload` so a
-                      // playhead source can preempt it. Always `false` on the legacy proxy path, where a
-                      // served comp's loaders are not in this list at all.
+                      // PULL suspension: this comp's proxy is serving (S3.5), or the loader is
+                      // unreachable AND the transport is playing. Playback-only for the unreachable case
+                      // on purpose — a suspended loader holds its last frame, which is the wrong picture
+                      // for a node the user inspects while paused.
                       suspended={isSuspended}
+                      // PRIORITY demotion, deliberately NOT gated on playback. Slice D re-asks at a
+                      // transport boundary (paused or just-seeked), so a demotion that lifts whenever
+                      // playback stops is absent at every moment an acquire actually retries — measured
+                      // as 26 re-ask attempts with a live permission and 0 grants. The loader keeps its
+                      // session and keeps decoding; it is only ranked below sources that feed the view.
+                      preemptible={flarexUnreachableSourceIds.has(vlayer.id)}
                       bakeOpacity={false}
                       onGradedFrame={
                         singleCtxPreview
@@ -2401,6 +2406,8 @@ type PreviewLayerProps = {
   hideVisual?: boolean;
   /** Demoted while a comp proxy serves this loader's comp (ADR-012 slice S3.5) — mounted, not pulling. */
   suspended?: boolean;
+  /** Unreachable Flarex loader: ranked `preload` so a viewed source can preempt it. Still pulls. */
+  preemptible?: boolean;
   /** Scene compositor draws this MEDIA clip — hide the DOM canvas via opacity:0 but keep it click-selectable. */
   sceneComposited?: boolean;
   /**
@@ -2577,6 +2584,7 @@ const PreviewLayer = memo(function PreviewLayer({
   hideForTransition = false,
   hideVisual = false,
   suspended = false,
+  preemptible = false,
   strictSourceSync = false,
   sceneComposited = false,
   gradeCompare = null,
@@ -3801,6 +3809,10 @@ const PreviewLayer = memo(function PreviewLayer({
             decoderSourceId={isFlarexVirtualLayerId(layer.id) ? layer.id : undefined}
             // S3.5: demoted, not deleted. The session and the last frame are kept; only the pull stops.
             suspended={suspended}
+            // Priority-only demotion for an unreachable loader — keeps pulling, just yields its slot
+            // first. Ungated by playback so a victim exists at the transport boundaries where slice D
+            // actually re-asks.
+            preemptible={preemptible}
             // ...and decode in SOFTWARE so they don't contend with the host for the one hardware H.264
             // block. That contention (not reset churn) is the confirmed multi-source freeze: with 3
             // seek-on-demand streams the host wins the block and the loaders starve. Software decode runs

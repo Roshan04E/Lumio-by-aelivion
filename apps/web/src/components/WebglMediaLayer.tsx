@@ -358,6 +358,29 @@ interface BaseProps {
    */
   suspended?: boolean | undefined;
   /**
+   * PREEMPTIBLE, but still pulling — the priority half of demotion WITHOUT the pull half.
+   *
+   * Set for a Flarex loader whose MediaIn is unreachable from its comp's active root: it feeds nothing
+   * currently being viewed, so it should yield its slot to a source that does. It keeps its session and
+   * keeps decoding; only its rank changes.
+   *
+   * WHY THIS IS NOT `suspended`. `suspended` bundles two effects, and 680ddfc set it for the unreachable
+   * case only while `isPlaying` — which is exactly when a re-ask CANNOT happen. Slice D's trigger fires
+   * at a transport boundary (paused, or just-seeked), so at the only moments an acquire is retried every
+   * lease had already been promoted back to `playhead`, `reserveSession` found no preload victim, and the
+   * acquire was refused. Measured: 26 re-ask attempts holding a live permission, 0 grants.
+   *
+   * So the two effects are split by WHEN they are correct, not bundled by where they came from:
+   *   · priority demotion (this prop) is correct WHENEVER the loader is unreachable, playing or not —
+   *     it costs nothing while there is no pressure, because nothing preempts a lease no one is
+   *     competing for;
+   *   · pull suspension (`suspended`) stays playback-only, because a loader that stops pulling holds its
+   *     last frame, and that is the wrong picture for a node the user is inspecting while paused.
+   *
+   * `suspended` is unchanged and still means both: the comp-proxy path (S3.5) sets it and needs both.
+   */
+  preemptible?: boolean | undefined;
+  /**
    * What this layer contributes to the picture, for decode admission (ADR-012 §6.3, slice S4.3).
    *
    * Forwarded verbatim to `acquirePreviewFrameProvider` and never computed here: the layer knows its
@@ -1100,8 +1123,11 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       // programme's stated mitigation for the sessions this slice keeps warm. It cannot starve a visible
       // source, because `reserveSession` preempts the oldest preload lease before it ever refuses a
       // playhead one.
-      wcLeaseRef.current?.setPriority(hidden || props.suspended ? "preload" : "playhead");
-    }, [mediaType, hidden, props.suspended]);
+      // `preemptible` joins the same demotion: an unreachable loader is ranked below anything feeding the
+      // viewed output, and unlike `suspended` it is NOT gated on playback — otherwise the demotion is
+      // absent at exactly the transport boundaries where a re-ask looks for a victim. See its docstring.
+      wcLeaseRef.current?.setPriority(hidden || props.suspended || props.preemptible ? "preload" : "playhead");
+    }, [mediaType, hidden, props.suspended, props.preemptible]);
     // RESUME. Coming out of suspension must repaint from the source's own decoder immediately: the proxy
     // that was standing in has just stopped, so anything that waits for the next transport change would
     // leave the comp on the last proxy frame — the visible "cut" this slice exists to turn into a
