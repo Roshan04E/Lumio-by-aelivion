@@ -1995,6 +1995,60 @@ ordinary behaviour, A3 by injection because ordinary behaviour could not reach i
 which link needed which method — is worth keeping on the record rather than collapsing into a single
 "tested" checkbox.
 
+### DEBT-019 — a source provider holds the WHOLE file in memory, so residency scales with clip length
+
+- Status: open
+- Registered: 2026-08-10 (surfaced by the ADR-021 pull-model feasibility measurement, not by a slice)
+- Reason: `fetchSourceBlob` (`apps/web/src/export/webcodecs-decoder.ts`) materialises the entire
+  source file as a `Blob` and the provider retains it for its whole lifetime, because the chunk
+  window (`createBlobChunkWindow`) slices encoded samples out of that Blob on demand. That was a
+  sound trade when a small, fixed number of sources were live at once: one Blob per playing clip is
+  cheap, and slicing a resident Blob avoids re-issuing range requests per GOP. It stops being sound
+  the moment the number of simultaneously-live sources becomes a product variable rather than a
+  constant — which is exactly what ADR-021's frame-provider seam makes it.
+  **The cost is a function of clip LENGTH, not of resolution or of how much of the clip is used.**
+  A provider that serves one frame of a 2-minute source still holds the whole 2-minute file.
+- Invariant affected: **none — and that is the finding.** I-8 governs *tracked GPU resources* and a
+  source Blob is CPU memory that no subsystem tracks at all, so this residency is invisible to the
+  Resource Manager's accounting and to every budget built on it. Same shape as DEBT-003 (accounted
+  but not owned), one level worse: not accounted either.
+- Owner: unassigned
+- Expiry condition: a provider's resident bytes are bounded by a budget that does not grow with
+  source duration — i.e. the encoded-sample window is demand-paged and evictable, and total
+  provider residency is reported to whatever authority enforces ADR-021's I-P6 memory budget.
+- Planned slice: none yet. ADR-021 step 2 cannot ship its I-P6 budget honestly while the dominant
+  per-source term is unbounded and untracked, so this is a likely prerequisite rather than a
+  follow-up.
+- Tracking issue: —
+- Detection: any new consumer that constructs providers per *source* rather than per *playing clip*,
+  without first asking what the resident-byte ceiling is. Concretely: a `createFrameProvider` call
+  site whose count is bounded by the project's asset count or a comp's node count instead of by a
+  small constant. Also — a memory budget expressed in **provider count** rather than in **bytes** is
+  this debt being extended, because count is only a proxy for bytes while clip lengths are similar.
+
+**Measurement (2026-08-10, `apps/worker/tmp/pull-model-feasibility.md`).** N live providers over
+distinct 1280×720 sources, sum of all `chrome.exe` working sets, fresh browser per rung with a
+baseline taken before the providers exist:
+
+| N | delta | per source |
+|---|---|---|
+| 1 | 106 MB | 106.4 MB |
+| 25 | 617 MB | 24.7 MB |
+| 50 | 892 MB | 17.8 MB |
+| 100 | **2546 MB** | 25.5 MB |
+
+~25 MB per source at N=100 — **with 3-second clips**. This is why memory, not latency, is the first
+hard wall in ADR-021 §3.2(a). The figure is not a resolution effect: the same clips at 2 minutes
+would hold ~40× the bytes per source for the same picture on screen.
+
+**Why this is a defect on its own terms, independent of ADR-021.** It is registered here rather than
+inside the ADR because it is not conditional on the seam shipping. Today's timeline already builds a
+provider per playing clip, and a project cutting between several long sources pays the same
+whole-file residency for clips it shows for a second. The pull model makes it acute; it does not
+make it true.
+
+---
+
 ## Retired
 
 - **DEBT-001** — retired 2026-08-05 in place above. The I-27 host-clip substitution for `pending` is
