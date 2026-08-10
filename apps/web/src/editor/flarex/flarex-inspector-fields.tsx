@@ -45,8 +45,17 @@ import {
   flarexChannelSources,
   FLAREX_CHROMA_KEY_ID,
   FLAREX_LUMA_KEY_ID,
+  FLAREX_DEFAULT_MASK_POINTS,
+  FLAREX_SHAPE_KEY_EPSILON,
+  flarexMaskPointsToShape,
+  parseFlarexShapePoints,
+  readFlarexShapeKeyframes,
+  resolveFlarexShapeAtTime,
+  writeFlarexShapeKeyframes,
   type FlarexComp,
   type FlarexNode,
+  type FlarexShapeKeyframeEntry,
+  type FlarexShapePoint,
   type FragmentEffectDefinition,
   type FragmentEffectParam,
   type TrackingPathArtifactData,
@@ -58,6 +67,7 @@ import { HslSecondary } from "../../components/HslSecondary";
 import { HueSatCurves } from "../../components/HueSatCurves";
 import { LutFileImport } from "../../components/LutFileImport";
 import type { PropertyField, PropertyFieldAxis } from "../inspector/PropertyFieldList";
+import { KeyframeButtons } from "../inspector/controls/KeyframeButtons";
 import { FlarexSourcePicker, type FlarexSourceAssetOption } from "./FlarexSourcePicker";
 import { FlarexTrackPicker } from "./FlarexTrackPicker";
 import type { SavedTrack } from "../../lib/trackLibrary";
@@ -147,6 +157,10 @@ const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color",
 /** polygonMask/bezierMask `points` — a structured row-per-point editor (the documented fallback for the
  *  on-viewer SVG overlay), rendered as a custom field just like the clip-effect schema's curve editors. */
 const POINT_LIST_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);
+/** The outline ANIMATION track. Never a text row — it is a serialized point-snapshot list, and typing
+ *  into it is the "serialized blob in a single-line input" non-affordance the Tracker picker replaced. */
+const SHAPE_TRACK_PARAMS = new Set(["polygonMask.shapeKeyframes", "bezierMask.shapeKeyframes"]);
+const SHAPE_KEY_EPSILON = FLAREX_SHAPE_KEY_EPSILON;
 
 const prettyLabel = (key: string): string => key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
 
@@ -219,17 +233,26 @@ function parseFilterEffectParams(raw: string): Record<string, number | number[] 
   }
 }
 
-function parsePointsParam(raw: string): Array<[number, number]> {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((p): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === "number" && Number.isFinite(n)))
-      .map(([x, y]) => [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))] as [number, number]);
-  } catch {
-    return [];
-  }
+/**
+ * The numeric fallback editor edits ANCHORS ONLY — but the payload may carry tangents, so it must not
+ * be the thing that destroys them.
+ *
+ * This used to parse with its own 2-tuple filter. Against a 6-tuple payload that filter matched
+ * nothing, so the editor would have shown an empty list and its next write would have persisted `[]` —
+ * silently deleting an authored bezier outline. It now reads through the shared parser and writes back
+ * through `mergeAnchors`, which keeps each point's handles attached to its (possibly moved) anchor.
+ */
+function parsePointsParam(raw: string): FlarexShapePoint[] {
+  return parseFlarexShapePoints(raw, []);
+}
+
+/** Anchors from the numeric rows, handles from the payload they came from. A point added by the "+"
+ *  button has no counterpart and is a plain corner, which is what a typed coordinate is. */
+function mergeAnchors(previous: FlarexShapePoint[], anchors: Array<[number, number]>): FlarexShapePoint[] {
+  return anchors.map(([x, y], index) => {
+    const before = previous[index];
+    return before && before.length === 6 ? ([x, y, before[2], before[3], before[4], before[5]] as FlarexShapePoint) : ([x, y] as FlarexShapePoint);
+  });
 }
 
 function rgbToHex(rgb: number[]): string {
@@ -607,9 +630,74 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
       continue;
     }
     if (POINT_LIST_PARAMS.has(metaKey)) {
-      const points = parsePointsParam(value);
-      const setPoints = (next: Array<[number, number]>) => setParam(key, JSON.stringify(next));
-      fields.push({ kind: "custom", key, node: <FlarexPointsEditor label={label} points={points} onChange={setPoints} /> });
+      const stored = parsePointsParam(value);
+      const anchors = stored.map((p) => [p[0], p[1]] as [number, number]);
+      const setPoints = (next: Array<[number, number]>) => setParam(key, JSON.stringify(mergeAnchors(stored, next)));
+      fields.push({ kind: "custom", key, node: <FlarexPointsEditor label={label} points={anchors} onChange={setPoints} /> });
+      continue;
+    }
+    if (SHAPE_TRACK_PARAMS.has(metaKey)) {
+      const entries = readFlarexShapeKeyframes(value);
+      const activeIndex = entries.findIndex((entry) => Math.abs(entry.timeSeconds - compTime) <= SHAPE_KEY_EPSILON);
+      const write = (next: FlarexShapeKeyframeEntry[]) => setParam(key, writeFlarexShapeKeyframes(next));
+      fields.push({
+        kind: "custom",
+        key,
+        node: (
+          <div className="flarex-shape-track">
+            <span className="flarex-shape-track-label">Shape</span>
+            <span className="flarex-shape-track-count">
+              {entries.length === 0 ? "not animated" : `${entries.length} key${entries.length === 1 ? "" : "s"}`}
+            </span>
+            <KeyframeButtons
+              label="Shape"
+              active={activeIndex >= 0}
+              hasAny={entries.length > 0}
+              hasPrevious={entries.some((entry) => entry.timeSeconds < compTime - SHAPE_KEY_EPSILON)}
+              hasNext={entries.some((entry) => entry.timeSeconds > compTime + SHAPE_KEY_EPSILON)}
+              // Toggle ON snapshots the outline AS RESOLVED AT THE PLAYHEAD, so keying a not-yet-animated
+              // node captures its base shape and keying an animated one captures what is on screen —
+              // in both cases the first key changes no pixel, which is what makes it safe to press.
+              onToggle={() =>
+                activeIndex >= 0
+                  ? write(entries.filter((_, index) => index !== activeIndex))
+                  : write([
+                      ...entries,
+                      {
+                        timeSeconds: compTime,
+                        // Resolved at width/height = 1, so the result comes back in the comp FRACTIONS
+                        // the param stores and the round-trip is a multiply by 1 — exact, and it saves
+                        // threading comp dimensions into an adapter that otherwise needs none.
+                        points: flarexMaskPointsToShape(
+                          resolveFlarexShapeAtTime({
+                            points: node.params.points,
+                            shapeKeyframes: value,
+                            fallback: FLAREX_DEFAULT_MASK_POINTS[node.type as "polygonMask" | "bezierMask"],
+                            width: 1,
+                            height: 1,
+                            idPrefix: `${nodeId}_key`,
+                            timeSeconds: compTime,
+                          }),
+                          1,
+                          1,
+                        ),
+                        interpolation: "linear",
+                      },
+                    ])
+              }
+              onClearAll={() => write([])}
+              onPrevious={() => {
+                const previous = [...entries].reverse().find((entry) => entry.timeSeconds < compTime - SHAPE_KEY_EPSILON);
+                if (previous) onSeekCompTime(previous.timeSeconds);
+              }}
+              onNext={() => {
+                const next = entries.find((entry) => entry.timeSeconds > compTime + SHAPE_KEY_EPSILON);
+                if (next) onSeekCompTime(next.timeSeconds);
+              }}
+            />
+          </div>
+        ),
+      });
       continue;
     }
     fields.push({ kind: "text", key, label, icon: paramIcon(key), value, onChange: (next) => setParam(key, next) });

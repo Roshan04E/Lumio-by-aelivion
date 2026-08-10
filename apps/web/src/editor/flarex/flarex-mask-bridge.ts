@@ -20,16 +20,28 @@
  * the mapping collapses to a multiply by width/height. `shapeKind` is deliberately NOT `"pen"`: that
  * flag routes the overlay into editing a layer's own outline instead of its masks.
  *
- * ── The one honest limit ───────────────────────────────────────────────────────────────────────────
- * `MaskPoint` carries optional bezier TANGENTS; the node param is `[x, y]` pairs only. Tangents are
- * therefore dropped on commit. A `bezierMask` still curves — the compiler lowers positions through the
- * shared bezier rasterizer — so dragging points genuinely shapes the curve; what you cannot do is pull
- * a handle and have it persist. Storing them needs a param-shape change (`[x,y]` → 6-tuple) plus a
- * lowering change, which is a separate slice and was explicitly deferred. Named here rather than
- * discovered: an affordance that silently discards your edit is the Tracker's text-blob bug again.
+ * ── The limit that used to be here is gone ─────────────────────────────────────────────────────────
+ * This header used to record an honest limit: `MaskPoint` carries bezier TANGENTS, the node param was
+ * `[x, y]` pairs only, so pulling a handle did not persist. The param form now carries them
+ * (`mask-shape.ts`, the 6-tuple) and both directions below preserve them. The deferred slice landed.
+ *
+ * ── Time ───────────────────────────────────────────────────────────────────────────────────────────
+ * The outline can now ANIMATE (`shapeKeyframes`), so the bridge takes a time and presents the shape at
+ * the playhead — through `resolveFlarexShapeAtTime`, the same function the compiler lowers through. Two
+ * resolvers would mean the overlay's handles could sit somewhere other than the rasterized edge, which
+ * is the specific failure a bridge exists to prevent.
  */
 
-import type { FlarexNode, Mask, MaskPoint, TimelineLayer } from "@orreris/shared";
+import {
+  FLAREX_DEFAULT_MASK_POINTS,
+  FLAREX_SHAPE_KEY_EPSILON,
+  flarexMaskPointsToShape,
+  readFlarexShapeKeyframes,
+  resolveFlarexShapeAtTime,
+  serializeFlarexShapePoints,
+  writeFlarexShapeKeyframes,
+} from "@orreris/shared";
+import type { FlarexNode, FlarexShapePoint, Mask, MaskPoint, TimelineLayer } from "@orreris/shared";
 
 /** Stable synthetic ids. Not persisted anywhere — they exist for the duration of one edit session. */
 export const FLAREX_MASK_LAYER_ID = "flarexmask:layer";
@@ -41,41 +53,35 @@ export function isFlarexMaskNode(node: FlarexNode | null | undefined): node is F
   return node?.type === "polygonMask" || node?.type === "bezierMask";
 }
 
-/** Mirrors the compiler's `parseFractionPoints` — same soft-fail, so the overlay and the render agree
- *  about a malformed payload instead of disagreeing about what is on screen. */
-function parsePoints(raw: unknown): Array<[number, number]> {
-  if (typeof raw !== "string" || !raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((p): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === "number" && Number.isFinite(n)))
-      .map(([x, y]) => [x, y] as [number, number]);
-  } catch {
-    return [];
-  }
-}
-
 export interface FlarexMaskBridge {
   layer: TimelineLayer;
   masks: Mask[];
 }
 
 /**
- * Present a mask node as the layer+mask pair `MaskEditorOverlay` expects, or null when the node has no
- * usable outline (fewer than 3 points — the overlay needs a shape to manipulate, and the compiler
- * soft-fails to its default at that point anyway).
+ * Present a mask node as the layer+mask pair `MaskEditorOverlay` expects, at comp-local `timeSeconds`.
+ *
+ * The outline is resolved through the compiler's own resolver, so an animated shape is presented at the
+ * playhead and the handles sit exactly on the rasterized edge. Never null on a well-formed node: the
+ * resolver soft-fails to the node type's default shape, which is what the compiler will draw too.
  */
-export function buildFlarexMaskBridge(node: FlarexNode, compWidth: number, compHeight: number): FlarexMaskBridge | null {
+export function buildFlarexMaskBridge(
+  node: FlarexNode,
+  compWidth: number,
+  compHeight: number,
+  timeSeconds: number,
+): FlarexMaskBridge | null {
   if (!isFlarexMaskNode(node)) return null;
-  const fractions = parsePoints(node.params.points);
-  if (fractions.length < 3) return null;
-
-  const points: MaskPoint[] = fractions.map(([fx, fy], i) => ({
-    id: `${FLAREX_MASK_ID}_p${i}`,
-    x: fx * compWidth,
-    y: fy * compHeight,
-  }));
+  const points = resolveFlarexShapeAtTime({
+    points: node.params.points,
+    shapeKeyframes: node.params.shapeKeyframes,
+    fallback: FLAREX_DEFAULT_MASK_POINTS[node.type],
+    width: compWidth,
+    height: compHeight,
+    idPrefix: FLAREX_MASK_ID,
+    timeSeconds,
+  });
+  if (points.length < 3) return null;
 
   const mask: Mask = {
     id: FLAREX_MASK_ID,
@@ -120,15 +126,39 @@ export function buildFlarexMaskBridge(node: FlarexNode, compWidth: number, compH
 /**
  * Committed overlay points → the node's `points` param JSON.
  *
- * Clamped to 0..1 because the overlay lets you drag outside the frame and the compiler's parser clamps
- * anyway — doing it here means the number you see in the inspector is the number that renders.
- * Tangents are dropped; see the header.
+ * Anchors are clamped to 0..1 (the overlay lets you drag outside the frame and the parser clamps
+ * anyway, so clamping here means the number in the inspector is the number that renders); tangent
+ * deltas are not, because a handle outside the frame still describes a curve inside it.
  */
 export function flarexMaskPointsToParam(points: MaskPoint[], compWidth: number, compHeight: number): string {
-  const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
-  const fractions = points.map((p) => [
-    clamp01(compWidth > 0 ? p.x / compWidth : 0),
-    clamp01(compHeight > 0 ? p.y / compHeight : 0),
-  ]);
-  return JSON.stringify(fractions);
+  return serializeFlarexShapePoints(flarexMaskPointsToShape(points, compWidth, compHeight));
+}
+
+/**
+ * The param patch for a committed outline edit — where the edit LANDS depends on whether the node is
+ * animated, which is the auto-key rule `MaskItemBody` already uses for clip masks:
+ *
+ *   not animated  → rewrite the base `points`. Today's behaviour, unchanged, and the common case.
+ *   animated      → write a keyframe AT THE PLAYHEAD, replacing one already there.
+ *
+ * Dragging a point on an animated shape and having it silently overwrite the base outline (which the
+ * keyframes then override, so nothing visibly happens) is the failure this rule exists to prevent —
+ * the same class as the tangents this bridge used to discard.
+ */
+export function flarexMaskCommitPatch(
+  node: FlarexNode,
+  points: MaskPoint[],
+  compWidth: number,
+  compHeight: number,
+  timeSeconds: number,
+): Record<string, string> {
+  const shape: FlarexShapePoint[] = flarexMaskPointsToShape(points, compWidth, compHeight);
+  const existing = readFlarexShapeKeyframes(node.params.shapeKeyframes);
+  if (existing.length === 0) return { points: serializeFlarexShapePoints(shape) };
+  return {
+    shapeKeyframes: writeFlarexShapeKeyframes([
+      ...existing.filter((entry) => Math.abs(entry.timeSeconds - timeSeconds) > FLAREX_SHAPE_KEY_EPSILON),
+      { timeSeconds, points: shape, interpolation: "linear" },
+    ]),
+  };
 }

@@ -660,7 +660,18 @@ function VideoPreviewImpl({
    * pointed at a layer that does not exist.
    */
   maskEditOverride?:
-    | { layer: TimelineLayer; masks: Mask[]; onCommitPoints: (points: MaskPoint[]) => void }
+    | {
+        layer: TimelineLayer;
+        /**
+         * The outline AT A TIME. A mask node's shape can be keyframed (`shapeKeyframes`), so the
+         * overlay has to be handed the shape at the playhead or its handles sit on a frame the
+         * viewer is not showing. Resolved here rather than in the host page because this component
+         * already owns the live clock — pushing `currentTime` up to EditorPage to pre-resolve would
+         * re-render the 15k-line page on every tick, which is what the clock store exists to avoid.
+         */
+        masksAt: (timelineSeconds: number) => Mask[];
+        onCommitPoints: (points: MaskPoint[], timelineSeconds: number) => void;
+      }
     | undefined;
   /** Live feather/opacity from the on-canvas widget; commit=false while dragging, true on release. */
   onPreviewMaskScalar?: ((layerId: string, maskId: string, patch: { feather?: number; opacity?: number }, commit: boolean) => void) | undefined;
@@ -1093,7 +1104,7 @@ function VideoPreviewImpl({
     : undefined;
   // The mask collection the overlay edits: a blur effect's region masks (Phase 3) or the clip masks.
   const maskEditMasks: Mask[] = maskEditOverride
-    ? maskEditOverride.masks
+    ? maskEditOverride.masksAt(currentTime)
     : maskActiveLayer
     ? maskEffectId
       ? maskActiveLayer.effects.find((effect) => effect.id === maskEffectId)?.masks ?? []
@@ -2320,7 +2331,7 @@ function VideoPreviewImpl({
                   onSelectMask={onSelectMask}
                   onChangeMaskTool={onChangeMaskTool}
                   onUpdateLayerMasks={maskEditOverride ? undefined : onUpdateLayerMasks}
-                  onCommitMaskPoints={maskEditOverride ? (_layerId, _maskId, points) => maskEditOverride.onCommitPoints(points) : onCommitMaskPoints}
+                  onCommitMaskPoints={maskEditOverride ? (_layerId, _maskId, points) => maskEditOverride.onCommitPoints(points, currentTime) : onCommitMaskPoints}
                   onPreviewMaskScalar={maskEditOverride ? undefined : onPreviewMaskScalar}
                   onCommitShapePath={maskEditOverride ? undefined : onCommitShapePath}
                 />

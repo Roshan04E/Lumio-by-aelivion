@@ -25656,6 +25656,25 @@ h3.notes-note-md-heading {
 
 /* F3 (round 3): structured point-list editor for polygonMask/bezierMask, replacing the raw JSON
    textarea — a row per point (x/y comp-fraction fields + reorder/remove). */
+/* Outline animation track — one 24px inspector row, matching the height of every other node param row
+   so the mask node's rows stay on the same rhythm as the rest of the panel. */
+.flarex-shape-track {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 10px;
+}
+.flarex-shape-track-label {
+  font-size: 11px;
+  color: rgba(230, 236, 244, 0.78);
+}
+.flarex-shape-track-count {
+  font-size: 10px;
+  color: rgba(230, 236, 244, 0.45);
+}
+
 .flarex-points-editor {
   display: flex;
   flex-direction: column;

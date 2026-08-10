@@ -27,6 +27,9 @@ export * from "./flarex/registry";
 export * from "./flarex/virtual-layers";
 export * from "./flarex/time-transform";
 export * from "./flarex/source-draw-cache";
+// Mask-node outline payload + the ONE site that resolves it at a time (the editor bridge and the
+// compiler must read and write the same form, or the overlay shows a shape the render disagrees with).
+export * from "./flarex/mask-shape";
 // Node content hashing (ADR-009) — the editor's node thumbnails key their cache on it.
 export * from "./flarex/content-hash";
 // Lowering degradation vocabulary (ADR-012 I-34, slice S0.2) — observability out-channel only.

@@ -35,6 +35,18 @@ export interface FlarexNodeDefinition {
   params: z.ZodTypeAny;
   /** Param keys the graph/keyframe editor may animate (scope "flarexNode"). */
   keyframeable: string[];
+  /**
+   * Param keys whose VALUE is a serialized animation track rather than a value — today only a mask
+   * node's `shapeKeyframes`.
+   *
+   * Declared here, and read UNIFORMLY (never branched on `node.type`), because ADR-009 R1 says a
+   * keyframed param contributes its EVALUATED VALUE and never its keyframe track. `computeFlarexContentHashes`
+   * enforces R1 for numeric params by resolving them through the animation evaluator; a track that
+   * arrives as a JSON string slips past that and hashes as a constant, so every consumer keyed on the
+   * hash would treat an animating node as static. This list is how a node says "my hash has a time
+   * term" without the hasher learning what a mask is (ADR-010 node-blindness).
+   */
+  trackParams?: readonly string[] | undefined;
   /** Phase gating: nodes past the current ship phase stay out of the palette. */
   phase: 1 | 1.5 | 2;
 }
@@ -58,6 +70,24 @@ const num = (def: number, min?: number, max?: number) => {
   if (min !== undefined) s = s.min(min);
   if (max !== undefined) s = s.max(max);
   return s.default(def);
+};
+
+/**
+ * Shared params of the two OUTLINE mask nodes (polygon / bezier), alongside their own `points` default.
+ *
+ * `shapeKeyframes` is the outline's animation track: JSON `[{ t, p, e? }]` snapshots of the same point
+ * form, resolved through the shared clip-mask evaluator (`mask-shape.ts` → `getMaskPathAtTime`). Empty
+ * = not animated, which is every comp saved before this existed, and costs nothing.
+ *
+ * `expansion` grows (+) / shrinks (-) the outline, as a comp fraction on the SAME scale as `feather`
+ * so the two read consistently in the inspector. The rasterizer has always honoured `Mask.expansion`;
+ * these nodes simply never offered it, and choking a roto edge is a daily operation.
+ */
+const animatableOutlineParams = {
+  shapeKeyframes: z.string().default(""),
+  feather: num(0, 0, 1),
+  expansion: num(0, -1, 1),
+  invert: z.boolean().default(false),
 };
 
 /** Shared shape-mask params (comp-relative 0..1 coordinates, like the vector Mask model). */
@@ -450,14 +480,15 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     group: "mask",
     inputs: [],
     outputs: MATTE_OUT,
-    // points = JSON array of [x,y] pairs in COMP FRACTIONS (0..1), e.g. "[[0.3,0.2],[0.7,0.2],[0.5,0.85]]".
-    // A fresh node needs a visible default shape — a centered triangle.
+    // points = JSON array in COMP FRACTIONS (0..1): [x,y] for a corner, or [x,y,inX,inY,outX,outY] to
+    // carry its bezier handles as deltas (see mask-shape.ts). A fresh node needs a visible default
+    // shape — a centered triangle.
     params: z.object({
       points: z.string().default("[[0.3,0.2],[0.7,0.2],[0.5,0.85]]"),
-      feather: num(0, 0, 1),
-      invert: z.boolean().default(false),
+      ...animatableOutlineParams,
     }).strict(),
-    keyframeable: ["feather"],
+    keyframeable: ["feather", "expansion"],
+    trackParams: ["shapeKeyframes"],
     phase: 1.5,
   },
   bezierMask: {
@@ -465,14 +496,14 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     group: "mask",
     inputs: [],
     outputs: MATTE_OUT,
-    // Same points payload as polygonMask; lowers with shape "bezier" (straight segments — no
-    // control-handle authoring in this pass, see FLAREX.md Phase 1.5 scope note).
+    // Same points payload as polygonMask; lowers with shape "bezier", so a point carrying handles
+    // rasterizes as a cubic segment.
     params: z.object({
       points: z.string().default("[[0.25,0.2],[0.75,0.25],[0.7,0.8],[0.3,0.75]]"),
-      feather: num(0, 0, 1),
-      invert: z.boolean().default(false),
+      ...animatableOutlineParams,
     }).strict(),
-    keyframeable: ["feather"],
+    keyframeable: ["feather", "expansion"],
+    trackParams: ["shapeKeyframes"],
     phase: 1.5,
   },
   matteControl: {

@@ -341,7 +341,7 @@ import { flushColdPlaybackNotify, getPlaybackClock, setColdPlaybackSuspended, se
 import { HARD_RESYNC_S, MAX_SERVO_PER_TICK_S, SERVO_GAIN, getAudioClockEnabled, getAudioMasterTime, noteAudioClockDrift } from "../playback/audio-clock";
 import { EDITOR_RESPONSIVE_LAYOUT, getEditorPaneResizeBounds, useEditorResponsiveLayout, type EditorOverlayPanel } from "../editor/responsive-layout";
 import { averageTrackConfidence, type SavedTrack } from "../lib/trackLibrary";
-import { buildFlarexMaskBridge, flarexMaskPointsToParam } from "../editor/flarex/flarex-mask-bridge";
+import { buildFlarexMaskBridge, flarexMaskCommitPatch } from "../editor/flarex/flarex-mask-bridge";
 import {
   createAsset,
   cancelJob,
@@ -5619,24 +5619,36 @@ export function EditorPage() {
     const comp = graph.flarexComps?.[flarexMaskNode.compId];
     const node = comp?.nodes[flarexMaskNode.nodeId];
     if (!comp || !node) return undefined;
-    const bridged = buildFlarexMaskBridge(node, composition.width, composition.height);
+    // Comp-local time. The viewer hands back TIMELINE seconds (it owns the clock; see the override's
+    // docstring in VideoPreview), and a comp's own clock starts at its host clip.
+    const layerStart = inspectorLayer?.startSeconds ?? 0;
+    const compTime = (timelineSeconds: number) => Math.max(0, timelineSeconds - layerStart);
+    const bridged = buildFlarexMaskBridge(node, composition.width, composition.height, 0);
     if (!bridged) return undefined;
     return {
+      // Static: the synthetic layer is scaffolding (comp-space, always-active); only the OUTLINE moves.
       layer: bridged.layer,
-      masks: bridged.masks,
-      onCommitPoints: (points: MaskPoint[]) => {
+      masksAt: (timelineSeconds: number) =>
+        buildFlarexMaskBridge(node, composition.width, composition.height, compTime(timelineSeconds))?.masks ?? [],
+      onCommitPoints: (points: MaskPoint[], timelineSeconds: number) => {
         const liveComp = graph.flarexComps?.[flarexMaskNode.compId];
         const liveNode = liveComp?.nodes[flarexMaskNode.nodeId];
         if (!liveComp || !liveNode) return;
-        const nextNode = {
-          ...liveNode,
-          params: { ...liveNode.params, points: flarexMaskPointsToParam(points, composition.width, composition.height) },
-        };
+        // Auto-key: an animated outline records a key at the playhead, a static one rewrites the base
+        // outline. The bridge owns that rule so the inspector's diamond and this drag agree.
+        const patch = flarexMaskCommitPatch(
+          liveNode,
+          points,
+          composition.width,
+          composition.height,
+          compTime(timelineSeconds),
+        );
+        const nextNode = { ...liveNode, params: { ...liveNode.params, ...patch } };
         const nextComp = { ...liveComp, nodes: { ...liveComp.nodes, [flarexMaskNode.nodeId]: nextNode } };
         void updateGraph({ ...stampFlarexComp(graph, nextComp), version: graph.version + 1 });
       },
     };
-  }, [editorPage, graph, composition, flarexMaskNode]);
+  }, [editorPage, graph, composition, flarexMaskNode, inspectorLayer]);
 
   function handleCopyLayer(layerId: string) {
     if (!composition) {

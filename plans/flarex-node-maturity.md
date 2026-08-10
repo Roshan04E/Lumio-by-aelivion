@@ -197,6 +197,20 @@ Give the mask node the shape payload the rest of the codebase already understand
 **Excludes, deliberately:** per-point feather; motion blur; shape morphing across differing point
 counts (holds, per the existing MVP rule); planar-tracked roto; any automated roto.
 
+> **SHIPPED 2026-08-10.** All four items landed. The payload is `mask-shape.ts`'s tuple form (2-tuple
+> corner, 6-tuple corner+handles, legacy payloads still read); `shapeKeyframes` resolves through the
+> shared `getMaskPathAtTime`; the bridge preserves tangents in both directions and the inspector has a
+> `KeyframeButtons` diamond; `expansion` is a keyframeable param.
+>
+> One thing this slice had to fix that the scoping did not anticipate: **`computeFlarexContentHashes`
+> hashed the keyframe track as a constant string.** ADR-009 R1 resolves *numeric* drivers to values, and
+> a track that arrives as JSON has no numeric form, so an animating node's content hash was identical at
+> every time — and the node-thumbnail cache keys on `(ContractVersion, contentHash)` with no time axis.
+> That would have frozen every thumbnail of an animated mask on its first rendered frame: DEBT-016's
+> class exactly. Fixed with a def-declared `trackParams` list and a time term folded only when a track
+> is actually present (static nodes hash unchanged), plus a ContractVersion bump to 2. Gate:
+> `pnpm --filter @orreris/shared maskShape:test`, §4.
+
 **Renderer or editor:** **shared-compiler + editor.** The evaluator is shared and reaches both
 renderers through `build-scene-draws.ts`; the keying affordance is editor-only. The rasterizer needs
 no change — it already draws cubics. `render:compare:pixels` with an animated-bezier fixture is

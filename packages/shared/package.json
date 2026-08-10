@@ -17,6 +17,7 @@
     "color:test": "tsx src/color/color.test.ts",
     "idt:test": "tsx src/color/input-transform.test.ts",
     "flarex:test": "tsx src/flarex/flarex.test.ts",
+    "maskShape:test": "tsx src/flarex/animated-mask-shape.test.ts",
     "compproxy:test": "tsx src/scene/comp-proxy.test.ts",
     "sourceCacheTransform:test": "tsx src/scene/flarex-source-draw-cache-transform.test.ts",
     "notes:test": "tsx src/notes/notes.test.ts",

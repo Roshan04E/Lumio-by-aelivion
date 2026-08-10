@@ -25,7 +25,7 @@ import type { FlarexComp, FlarexNode } from "./types";
 
 /** Bump when the MEANING of the hash changes (a new folded input class, a fold-algorithm change) —
  *  the ADR-009 ContractVersion escape hatch that invalidates every cached content at once. */
-export const FLAREX_CONTENT_HASH_CONTRACT_VERSION = 1;
+export const FLAREX_CONTENT_HASH_CONTRACT_VERSION = 2;
 
 // FNV-1a, 64-bit (BigInt) — deterministic, dependency-free, well-distributed. The token is opaque
 // (ADR-010 §6): callers never interpret it, so the digest is an implementation detail.
@@ -92,8 +92,35 @@ export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number
       .sort()
       .map((key) => `${key}=${canonicalValue(resolveParam(node, key, node.params[key]))}`);
 
+    const def = getFlarexNodeDefinition(node.type);
+
+    /**
+     * R1, for tracks that arrive as a serialized payload rather than as a number (ContractVersion 2).
+     *
+     * R1's rule is that a keyframed param contributes its EVALUATED VALUE, never its keyframe track.
+     * `resolveParam` above enforces that for numeric params by running the animation evaluator. A param
+     * whose value IS a track — a mask node's `shapeKeyframes` — has no numeric form to resolve, so it
+     * hashed as a constant string: the node's hash was IDENTICAL at every time while its geometry
+     * animated, and every consumer keyed on the hash would serve one frame's shape forever. That is
+     * DEBT-016's class exactly (a key omitting an input the cached value depends on), and the node
+     * thumbnail cache — which keys on `(ContractVersion, contentHash)` with no time axis at all — is
+     * where it would have shown.
+     *
+     * The fix is a TIME TERM, added only when a declared track param actually carries a track. Folding
+     * time unconditionally would put a per-frame value in every key and destroy reuse for the static
+     * nodes these caches serve best (the same argument the compiler's own retime term makes at its
+     * `if (at !== ctx.timeSeconds)` site). Static nodes therefore hash exactly as before.
+     *
+     * Node-blind (ADR-010): `trackParams` is read off the definition uniformly, like `inputs` below.
+     * This function still contains no per-node-type branch and knows nothing about masks.
+     */
+    const animatedByTrack = (def.trackParams ?? []).some((key) => {
+      const raw = node.params[key];
+      return typeof raw === "string" && raw !== "" && raw !== "[]";
+    });
+
     // R3: upstream content hashes in the def's fixed socket order (topology + fan-in order).
-    const upstreamTokens = getFlarexNodeDefinition(node.type).inputs.map((input) => {
+    const upstreamTokens = def.inputs.map((input) => {
       const from = edgeInto.get(`${nodeId}:${input.id}`);
       return `${input.id}<${from ? hashNode(from) : "∅"}`;
     });
@@ -101,12 +128,26 @@ export function computeFlarexContentHashes(comp: FlarexComp, timeSeconds: number
     visiting.delete(nodeId);
 
     const digest = fnv1a64(
-      JSON.stringify([FLAREX_CONTENT_HASH_CONTRACT_VERSION, node.type, node.enabled, paramTokens, upstreamTokens]),
+      JSON.stringify([
+        FLAREX_CONTENT_HASH_CONTRACT_VERSION,
+        node.type,
+        node.enabled,
+        paramTokens,
+        upstreamTokens,
+        animatedByTrack ? `t:${timeSeconds.toFixed(6)}` : "",
+      ]),
     );
     hashes.set(nodeId, digest);
     // Profiler-only (no-op unless recording): the node's LOCAL token (own content, WITHOUT upstream) lets
     // the frame report say WHY a hash changed — own params vs. an upstream child's hash propagating down.
-    frameProfiler.noteHashNode(nodeId, node.type, digest, JSON.stringify([node.type, node.enabled, paramTokens]));
+    frameProfiler.noteHashNode(
+      nodeId,
+      node.type,
+      digest,
+      // The time term belongs in the LOCAL token too, or the frame report would blame an upstream child
+      // for a change that is this node's own animating outline.
+      JSON.stringify([node.type, node.enabled, paramTokens, animatedByTrack ? `t:${timeSeconds.toFixed(6)}` : ""]),
+    );
     return digest;
   };
 

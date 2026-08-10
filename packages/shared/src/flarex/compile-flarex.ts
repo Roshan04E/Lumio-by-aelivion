@@ -63,6 +63,7 @@ import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
 import { computeFlarexContentHashes } from "./content-hash";
+import { FLAREX_DEFAULT_MASK_POINTS, resolveFlarexShapeAtTime } from "./mask-shape";
 import { isSubstitutionReason, type FlarexDegradationReason, type FlarexOnDegrade } from "./degradation";
 import { frameProfiler } from "../color/frame-profiler";
 import { flarexChannelSources, getFlarexNodeDefinition } from "./node-defs";
@@ -251,27 +252,9 @@ function isGroup(draw: FlarexImageValue): draw is SceneGroupDraw {
 /** Default comp-fraction shapes, mirrored from node-defs' param defaults — the soft-fail target
  *  when a node's `points` JSON is missing/malformed (never throw; a fresh/bad node still shows
  *  something rather than vanishing the matte). */
-const DEFAULT_MASK_POINTS: Record<"polygonMask" | "bezierMask", Array<[number, number]>> = {
-  polygonMask: [[0.3, 0.2], [0.7, 0.2], [0.5, 0.85]],
-  bezierMask: [[0.25, 0.2], [0.75, 0.25], [0.7, 0.8], [0.3, 0.75]],
-};
-
-/** Parse a `points` param (JSON array of `[x, y]` comp-fraction pairs) — soft-fails to the node
- *  type's default shape on malformed/empty JSON so a bad payload never throws mid-lowering. */
-function parseFractionPoints(raw: string, nodeType: "polygonMask" | "bezierMask"): Array<[number, number]> {
-  const fallback = DEFAULT_MASK_POINTS[nodeType];
-  if (!raw) return fallback;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length < 3) return fallback;
-    const points = parsed
-      .filter((p): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === "number" && Number.isFinite(n)))
-      .map(([x, y]) => [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))] as [number, number]);
-    return points.length >= 3 ? points : fallback;
-  } catch {
-    return fallback;
-  }
-}
+/* The `points` parser moved to `mask-shape.ts` when the payload grew tangents and an animation track:
+ * the editor's mask bridge has to read and write the same form, and one parser is the only way the
+ * overlay is guaranteed to show the outline the compiler will rasterize. */
 
 function parseHexColor(input: string): [number, number, number] {
   const hex = (input || "").trim().replace(/^#/, "");
@@ -1707,18 +1690,44 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         return { kind: "matte", matte: { masks } };
       }
 
+      /**
+       * OUTLINE MASKS — the first Flarex nodes whose GEOMETRY varies per frame.
+       *
+       * The outline is resolved at `at` (the evaluation time, not the frame time) through the SHARED
+       * clip-mask evaluator — `resolveFlarexShapeAtTime` → `getMaskPathAtTime`. Same reason
+       * `rasterizeMatte` below resolves at `at`: under a TimeSpeed a matte on the playhead drifts away
+       * from the image it masks.
+       *
+       * The resolved Mask is STATIC — the points are the shape at `at`, and no `pathKeyframes` ride
+       * along. That keeps ONE resolution site: `SceneMaskMatteCache` would otherwise re-resolve through
+       * `resolveMaskAtTime`, and two resolution sites is two chances for the preview and the export to
+       * disagree about which moment an outline belongs to.
+       */
       case "polygonMask":
       case "bezierMask": {
         const w = ctx.compWidth;
         const h = ctx.compHeight;
-        const points = parseFractionPoints(str(node, "points", ""), node.type);
+        const idPrefix = `flarex_${comp.id}_${node.id}`;
+        const points = resolveFlarexShapeAtTime({
+          points: node.params.points,
+          shapeKeyframes: node.params.shapeKeyframes,
+          fallback: FLAREX_DEFAULT_MASK_POINTS[node.type],
+          width: w,
+          height: h,
+          idPrefix,
+          timeSeconds: at,
+        });
         const mask = createMask(
           node.type === "polygonMask" ? "polygon" : "bezier",
-          points.map(([px, py], index) => ({ id: `flarex_${comp.id}_${node.id}_p${index}`, x: px * w, y: py * h })),
+          points,
           node.type === "polygonMask" ? "Polygon" : "Bezier",
         );
-        mask.id = `flarex_${comp.id}_${node.id}`;
-        mask.feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * Math.min(w, h) * 0.5;
+        mask.id = idPrefix;
+        // Feather and expansion are comp fractions on one shared scale, so they read consistently
+        // against each other in the inspector; the Mask model wants pixels.
+        const edgeScale = Math.min(w, h) * 0.5;
+        mask.feather = Math.max(0, Math.min(1, num(at, node, "feather", 0))) * edgeScale;
+        mask.expansion = Math.max(-1, Math.min(1, num(at, node, "expansion", 0))) * edgeScale;
         mask.inverted = bool(node, "invert");
         return { kind: "matte", matte: { masks: [mask] } };
       }

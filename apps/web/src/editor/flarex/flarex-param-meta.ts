@@ -106,6 +106,11 @@ export const FLAREX_PARAM_RANGES: Record<string, [number, number, number]> = {
   "matteControl.feather": [0, 1, 0.01],
   "polygonMask.feather": [0, 1, 0.01],
   "bezierMask.feather": [0, 1, 0.01],
+  // Expansion shares feather's scale (both are comp fractions the compiler multiplies by the same
+  // half-short-edge), so the two sliders mean the same distance at the same number — and it is
+  // signed, because choking a roto edge inward is the common direction.
+  "polygonMask.expansion": [-1, 1, 0.01],
+  "bezierMask.expansion": [-1, 1, 0.01],
   "text.fontSize": [1, 400, 1],
   "text.fontWeight": [100, 900, 100],
   "text.x": [0, 1, 0.01],

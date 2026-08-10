@@ -148,7 +148,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-filter-stack"
   | "flarex-generators"
   | "flarex-mismatched-aspect"
-  | "flarex-host-transform";
+  | "flarex-host-transform"
+  | "flarex-animated-roto";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -206,7 +207,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-filter-stack",
   "flarex-generators",
   "flarex-mismatched-aspect",
-  "flarex-host-transform"
+  "flarex-host-transform",
+  "flarex-animated-roto"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -851,6 +853,63 @@ function buildFlarexEllipseMatteComp(): FlarexComp {
   return comp;
 }
 
+/**
+ * ANIMATED ROTO — the first fixture whose mask GEOMETRY varies per frame.
+ *
+ * A bezier outline with `shapeKeyframes` at t=0 and t=1, driving a blur's region mask so the moving
+ * edge is visible as a moving soft/sharp boundary rather than as a shape only alpha would show.
+ *
+ * Sampled MID-ANIMATION, deliberately, for the reason N5 gives above the keyframed-blur fixture: the
+ * harness renders one frame per fixture at `renderComparisonFrameSeconds` = 0.45s, and every failure
+ * this fixture can see is a failure to INTERPOLATE. A renderer that ignored `shapeKeyframes` entirely
+ * would draw the base `points`; one that held the first key would draw the t=0 outline. Neither
+ * matches the 45%-of-the-way shape, and both are far enough from it to move a lot of pixels.
+ *
+ * The two keys carry the SAME point count on purpose — a differing count is the documented HOLD case
+ * (shape morphing is out of scope for this slice), and a fixture built on the hold path would assert
+ * the opposite of what it looks like it asserts.
+ *
+ * What this fixture CANNOT see, stated so no one reads a green run as more than it is: per DEBT-017
+ * the gate is differential, and this whole path is shared code both renderers consume verbatim, so a
+ * wrong-but-agreed shape reads 0.000%. Cross-frame staleness needs a second render against a warm
+ * cache, which one still per process cannot produce. Both are covered by unit tests instead —
+ * `flarex.test.ts` (multi-time sampling) and `flarex-animated-mask-matte.test.ts` (two renders, one
+ * cache). This fixture's job is narrower and real: the two renderers agree, at an interpolated time.
+ */
+function buildFlarexAnimatedRotoComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_roto_comp", "Flarex animated roto fixture");
+  const shape = createFlarexNode("bezierMask", "fixture_flarex_roto_shape");
+  // A rounded quad (handles on every point) that TRANSLATES right and grows over one second. Tangents
+  // are carried in the payload, so this also pins the 6-tuple form through both renderers.
+  const at = (dx: number, r: number): string =>
+    JSON.stringify([
+      [0.28 + dx, 0.30, -r, 0, r, 0],
+      [0.60 + dx, 0.30, 0, -r, 0, r],
+      [0.60 + dx, 0.72, r, 0, -r, 0],
+      [0.28 + dx, 0.72, 0, r, 0, -r],
+    ]);
+  shape.params = {
+    ...shape.params,
+    points: at(0, 0.06),
+    shapeKeyframes: JSON.stringify([
+      { t: 0, p: JSON.parse(at(0, 0.06)) },
+      { t: 1, p: JSON.parse(at(0.22, 0.14)) },
+    ]),
+    feather: 0.05,
+    expansion: 0.02,
+  };
+  const blur = createFlarexNode("blur", "fixture_flarex_roto_blur");
+  blur.params = { ...blur.params, sigma: 26 };
+  comp.nodes[shape.id] = shape;
+  comp.nodes[blur.id] = blur;
+  comp.edges = [
+    { id: "fixture_flarex_roto_e1", from: { nodeId: "fixture_flarex_roto_comp_in", socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: "fixture_flarex_roto_e2", from: { nodeId: shape.id, socket: "out" }, to: { nodeId: blur.id, socket: "mask" } },
+    { id: "fixture_flarex_roto_e3", from: { nodeId: blur.id, socket: "out" }, to: { nodeId: "fixture_flarex_roto_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
 // F6.2: reroute pass-through parity ACROSS REAL RENDERERS (the flarex.test.ts check already
 // proves the compiler's own output is structurally identical; this proves web preview and
 // Remotion agree pixel-for-pixel when a reroute sits in the middle of a real chain).
@@ -1135,6 +1194,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
         anchorTransform: { anchor: { x: 50, y: 50 }, rotation: 0, scale: 0.6 },
         mediaOpacity: 70
       };
+    case "flarex-animated-roto":
+      return { effects: [], fit: "cover", flarex: buildFlarexAnimatedRotoComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
