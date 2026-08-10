@@ -258,12 +258,70 @@ export interface FlarexSourceAssetInfo {
 }
 
 /**
+ * One virtual loader plus the derivation facts about it that a `TimelineLayer` has no channel for.
+ *
+ * `reachable` exists because the collection walk already knows it and used to throw it away. See
+ * {@link collectFlarexVirtualLayerEntries}. It is deliberately NOT a field on `TimelineLayer`: the
+ * layer type is the contract every renderer consumes, and this answer is meaningful to exactly one
+ * consumer (the preview's decode-admission pressure). A field there would read as a rendering
+ * instruction that two of the three renderers silently ignore.
+ */
+export interface FlarexVirtualLayerEntry {
+  layer: TimelineLayer;
+  /**
+   * Whether this loader's MediaIn is reached by the backwards walk from the comp's ACTIVE ROOTS (the
+   * live view dot when one is supplied, plus every MediaOut) — i.e. whether it contributes to what is
+   * being viewed. False means a disconnected branch or an abandoned experiment: the compiler never
+   * pulls this source, so nothing on screen changes if it stops decoding.
+   *
+   * Sourced from `resolveFlarexMediaInRetimes`' key set, which is exactly that reachability set (its
+   * own docstring: "Nodes not reachable from any root … are absent from the map"). Every MediaIn it
+   * reaches gets an entry — identity transform included — so this is a reachability answer, not a
+   * "has a TimeSpeed" answer.
+   *
+   * CONSERVATIVE BY CONSTRUCTION, in the safe direction. The walk visits the view dot AND every
+   * MediaOut, while `compileFlarexComp` evaluates the view dot and only FALLS THROUGH to MediaOut
+   * (compile-flarex.ts:1824-1832). So this set is a superset of what any one compile reads: it can
+   * call a node reachable that this frame did not pull, never the reverse.
+   *
+   * NOT an answer about `ctx.previewRootNodeId`, the per-pass re-root behind node THUMBNAILS — that
+   * root is chosen after the loaders exist, and a thumbnail may legitimately read an unreachable
+   * node. Thumbnails are idle-only (`ScenePreviewCanvas` hard-gates them on `!isPlaying`), which is
+   * why the one consumer of this flag acts on it only while the transport is playing.
+   *
+   * GENERATORS ARE ALWAYS `true`. A Text+/Background loader is rasterized, never decoded, and holds
+   * no session — there is nothing to reclaim, so it is never a candidate for whatever a caller does
+   * with `false`. Reporting the literal map answer here would say "unreachable" about a loader that
+   * costs nothing and invite a caller to act on it.
+   */
+  reachable: boolean;
+}
+
+/**
  * Build the virtual media layers for every asset-source MediaIn across a project's Flarex comps.
  * `layers` is the flat list of the composition's timeline layers (the HOSTS — a comp is attached to a
  * layer via `flarexCompId`); `lookupAsset` resolves an asset id to its media kind. A MediaIn whose
  * asset can't be resolved is skipped (its MediaIn soft-degrades to the host clip at compile time).
  */
 export function collectFlarexVirtualLayers(
+  layers: readonly TimelineLayer[],
+  flarexComps: Record<string, FlarexComp> | undefined,
+  lookupAsset: (assetId: string) => FlarexSourceAssetInfo | null,
+  previewRoots?: Readonly<Record<string, string>> | undefined,
+): TimelineLayer[] {
+  return collectFlarexVirtualLayerEntries(layers, flarexComps, lookupAsset, previewRoots).map((entry) => entry.layer);
+}
+
+/**
+ * {@link collectFlarexVirtualLayers}, keeping the per-loader REACHABILITY the walk already computed.
+ *
+ * Same layers, same order, nothing added and nothing dropped — the array is identical to what the
+ * plain collector returns, because deciding a loader should not exist is the move S3.5 deliberately
+ * reversed (unmounting destroys the decoder, so recovery pays a cold re-demux of N streams; see
+ * `WebglMediaLayer`'s `suspended` docstring). A caller that wants an unreachable loader to cost less
+ * changes what it COSTS, never whether it exists.
+ */
+export function collectFlarexVirtualLayerEntries(
   layers: readonly TimelineLayer[],
   flarexComps: Record<string, FlarexComp> | undefined,
   lookupAsset: (assetId: string) => FlarexSourceAssetInfo | null,
@@ -274,9 +332,9 @@ export function collectFlarexVirtualLayers(
    * Omitted by export and the worker, which retime from MediaOut alone.
    */
   previewRoots?: Readonly<Record<string, string>> | undefined,
-): TimelineLayer[] {
+): FlarexVirtualLayerEntry[] {
   if (!flarexComps) return [];
-  const out: TimelineLayer[] = [];
+  const out: FlarexVirtualLayerEntry[] = [];
   for (const host of layers) {
     if (!host.flarexCompId) continue;
     const comp = flarexComps[host.flarexCompId];
@@ -289,21 +347,27 @@ export function collectFlarexVirtualLayers(
       // resolve, so they short-circuit the media path below entirely.
       const generatorKind = FLAREX_GENERATOR_LAYER_TYPES[node.type];
       if (generatorKind) {
-        out.push(buildFlarexGeneratorLayer(comp, node, host, generatorKind));
+        // `reachable: true` unconditionally — a rasterized loader holds no decoder session, so it is
+        // never a candidate for reclamation. See `FlarexVirtualLayerEntry.reachable`.
+        out.push({ layer: buildFlarexGeneratorLayer(comp, node, host, generatorKind), reachable: true });
         continue;
       }
       if (node.type !== "mediaIn") continue;
       const assetId = typeof node.params.sourceAssetId === "string" ? node.params.sourceAssetId : "";
+      // The map's KEY SET is the reachability set; the transform is what it was already read for.
+      const reachable = retimes.has(node.id);
       const retime = retimes.get(node.id)?.transform ?? FLAREX_IDENTITY_TIME_TRANSFORM;
       if (!assetId) {
         // Empty id = the HOST clip. Normally no loader at all — the compiler hands that MediaIn the
         // host's own finished draw. Under a retime it needs one, because the host's picture comes from
         // the timeline's decoder, which sits at the playhead and cannot also be somewhere else. See
         // `promoteHostMediaInLoader`.
+        // Always reachable when it exists at all: a non-identity retime can only come FROM the map,
+        // so an unreachable host MediaIn reads identity and is promoted to nothing.
         const promoted = isIdentityFlarexTimeTransform(retime)
           ? null
           : promoteHostMediaInLoader(comp, node, host, retime, lookupAsset);
-        if (promoted) out.push(promoted);
+        if (promoted) out.push({ layer: promoted, reachable: true });
         continue;
       }
       const asset = lookupAsset(assetId);
@@ -322,7 +386,7 @@ export function collectFlarexVirtualLayers(
       const endless = asset.type !== "video" || freeze || asset.durationSeconds == null || !Number.isFinite(asset.durationSeconds);
       const timing = applyRetimeToLoaderTiming(declaredIn, 1, retime, endless ? undefined : asset.durationSeconds);
       const activeSeconds = Math.min(host.durationSeconds, timing.remainingSeconds);
-      out.push({
+      const layer: TimelineLayer = {
         id: flarexVirtualLayerId(comp.id, node.id),
         trackId: "__flarex_virtual",
         type: asset.type,
@@ -376,7 +440,8 @@ export function collectFlarexVirtualLayers(
         transform: host.transform ?? { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
         effects: [],
         keyframes: [],
-      });
+      };
+      out.push({ layer, reachable });
     }
   }
   return out;

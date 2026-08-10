@@ -42,7 +42,7 @@ import {
   expandEffectRegionMasks,
   expandNestedCompositions,
   buildRegionBlurCloneAliases,
-  collectFlarexVirtualLayers,
+  collectFlarexVirtualLayerEntries,
   isFlarexGeneratorVirtualLayer,
   isFlarexVirtualLayerId,
   effectsWithLayerRegionMask,
@@ -1354,9 +1354,9 @@ function VideoPreviewImpl({
     return roots;
   }, [graph.flarexComps]);
 
-  const flarexVirtualLayers = useMemo(() => {
+  const flarexVirtualLayerEntries = useMemo(() => {
     if (!graph.flarexComps) return [];
-    return collectFlarexVirtualLayers(
+    return collectFlarexVirtualLayerEntries(
       renderedLayerEntries.map((entry) => entry.layer),
       graph.flarexComps,
       (assetId) => {
@@ -1372,6 +1372,36 @@ function VideoPreviewImpl({
       flarexPreviewRoots,
     );
   }, [graph.flarexComps, renderedLayerEntries, resolvedAssets, flarexPreviewRoots]);
+  const flarexVirtualLayers = useMemo(
+    () => flarexVirtualLayerEntries.map((entry) => entry.layer),
+    [flarexVirtualLayerEntries],
+  );
+
+  /**
+   * Loaders whose MediaIn feeds NOTHING you are looking at — a disconnected branch, an abandoned
+   * experiment, a node feeding a branch that is not the viewed one.
+   *
+   * They are built (and must keep being built — see S3.5 below), but the compiler never pulls them, so
+   * while the transport is PLAYING they are told to stop pulling and their leases drop to `preload`.
+   * That is the whole point: sessions are capped at `MAX_WC_TOTAL_SESSIONS` with one slot reserved for
+   * hardware, so a comp with more MediaIns than slots used to hand them out first-come and starve the
+   * sources actually on screen. Reachable loaders now win the contention instead of racing for it.
+   *
+   * WHY ONLY WHILE PLAYING. Node thumbnails re-root the compile per pass (`ctx.previewRootNodeId`) and
+   * read the media textures already resident for the on-screen frame, so an unreachable node's
+   * thumbnail is exactly the picture a user inspecting that node wants. They are idle-only by a hard
+   * gate (`ScenePreviewCanvas`: `if (inputsRef.current.isPlaying) return null`), so suspending only
+   * during playback leaves every thumbnail untouched — and there is no session pressure while paused
+   * to relieve anyway.
+   *
+   * Nothing is DELETED from the set. Deleting is what S3.5 reversed: unmounting destroys the decoder,
+   * so a node rewired back into the graph would pay a cold re-demux instead of resuming.
+   */
+  const flarexUnreachableSourceIds = useMemo(() => {
+    const unreachable = flarexVirtualLayerEntries.filter((entry) => !entry.reachable);
+    if (unreachable.length === 0) return EMPTY_SOURCE_ID_SET;
+    return new Set(unreachable.map((entry) => entry.layer.id));
+  }, [flarexVirtualLayerEntries]);
 
   // THE CLIFF, in one line of the trace: a bare MediaIn→MediaOut comp builds NO loaders (an empty
   // `sourceAssetId` resolves to the host clip's existing draw), so the whole decoder path stays
@@ -2207,7 +2237,13 @@ function VideoPreviewImpl({
                     const vTime = Math.min(currentTime, holdEnd);
                     // A demoted loader holds the moment it was demoted at, rather than tracking a playhead
                     // it is not rendering against. See suspendedLoaderTimesRef.
-                    const isSuspended = proxySuspendedSourceIds.has(vlayer.id);
+                    //
+                    // Two independent reasons to demote, same mechanism: this comp is being served by
+                    // its proxy (S3.5), or this loader feeds nothing the viewer is showing and the
+                    // transport is playing (see flarexUnreachableSourceIds — playing only, so node
+                    // thumbnails keep their media while paused).
+                    const isSuspended =
+                      proxySuspendedSourceIds.has(vlayer.id) || (isPlaying && flarexUnreachableSourceIds.has(vlayer.id));
                     const heldTimes = suspendedLoaderTimesRef.current;
                     if (!isSuspended) heldTimes.set(vlayer.id, vTime);
                     const loaderTime = isSuspended ? heldTimes.get(vlayer.id) ?? vTime : vTime;
@@ -2226,9 +2262,11 @@ function VideoPreviewImpl({
                       sceneComposited
                       hideVisual
                       flarexConcurrentLoaders={flarexConcurrentLoaders}
-                      // DEMOTED while this comp's proxy is serving (S3.5). The loader stays mounted and
-                      // keeps its session; it just stops pulling. Always `false` on the legacy path,
-                      // where a served comp's loaders are not in this list at all.
+                      // DEMOTED while this comp's proxy is serving (S3.5), or while playing if this
+                      // loader is unreachable from the comp's active root. The loader stays mounted and
+                      // keeps its session; it just stops pulling, and its lease drops to `preload` so a
+                      // playhead source can preempt it. Always `false` on the legacy proxy path, where a
+                      // served comp's loaders are not in this list at all.
                       suspended={isSuspended}
                       bakeOpacity={false}
                       onGradedFrame={
