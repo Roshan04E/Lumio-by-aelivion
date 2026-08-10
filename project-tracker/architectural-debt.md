@@ -1255,6 +1255,72 @@ constant** — the `> 1` threshold itself. What is measured is that ≥3 concurr
 `plans/adr-013-scope-after-adr-020.md` (§"Two qualifications on 'complete'") and
 `plans/adr-013-real-project-measurement-plan.md` (§5, Scope C).
 
+**UPDATE (2026-08-10) — a Flarex-side demand-reduction fix shipped (`ac0d9f2`, following `680ddfc`). It
+changes the PARKED verdict's evidence, not the verdict itself, and mechanism B is refuted on new
+measurement.**
+
+**Clause (a) is still unmet as written, and remains so — stated plainly rather than claimed satisfied.**
+"A source denied at mount is subsequently admitted" requires an admission that happened *after* a denial.
+Nothing on the branch produces one. What `ac0d9f2` changed is upstream of admission entirely: an
+unreachable Flarex loader (one that feeds no node the viewer is showing) is now ranked `preload` whenever
+it is unreachable, not only while playing, so on the measured fixture it loses its slot to a starved
+reachable source *before* a denial is ever recorded. `starvedSources` reads 0, the denied registry is
+empty, and the starvation probe returns `{"skipped": "no starved source"}` — clause (a) has no subject to
+satisfy on this fixture, which is a different fact from the subject having been satisfied. The distinction
+matters the first time a fixture produces a denial this change cannot prevent (more starved sources than
+there are unreachable loaders to preempt, for instance) — clause (a) will be exactly as unmet then as it
+is today.
+
+**Mechanism B (2026-08-07, above) is refuted, not superseded — the trigger and the permission were never
+the problem.** That verdict rested on a pre-registered instrument reading 36 boundary-reaching events/arm,
+~15-21 blocked on `isAdmissionEligible` false, 0-2 passes — support for "the trigger and the permission
+almost never coincide." Direct re-measurement (2026-08-09/10, `admission-eligibility-duty-probe.ts`, both
+the real 7-MediaIn fixture and the synthetic 6-of-4 census rig, same instrument, same session) found the
+opposite:
+
+- Eligibility duty cycles ran 13.6-100% across sources and fixtures.
+- Boundary coincidence: **28/28** (real fixture) and **25/25** (census fixture) driven transport boundaries
+  landed while at least one starved source held a permission.
+- 30 re-ask attempts across four pre-fix runs, **every one** holding a live `isAdmissionEligible` permission
+  at the moment of the attempt.
+- Grants: **0 of 30.** `reserveSession` found no preload-priority victim to evict, because 680ddfc's
+  demotion was gated on `isPlaying` and slice D's re-ask trigger fires exactly when `isPlaying` is false
+  (paused, or just-seeked) — the two were mutually exclusive by construction, not by rarity.
+
+So the trigger and the permission coincide constantly; what was missing was a victim for `reserveSession`
+to find. `ac0d9f2` supplies one. This is a different mechanism than mechanism B named, not a refinement of
+it — the 2026-08-07 measurement is not wrong on its own numbers, but the explanation it supported does not
+generalize to this fixture, and should not be cited as evidence against a re-ask mechanism in general.
+
+**A residual mismatch, unaddressed: eligibility is gated on free capacity, not on an available victim.**
+Grants require `sessionCap(3) − activeSoftware > 0` (`preview-frame-pool.ts`'s recovery sweep). In the one
+observed saturated run (`activeSoftware 3`, no free software slot) duty cycle read **0%** across all three
+starved sources and time-to-first-grant was **never**, for the full sampling window. `ac0d9f2`'s preemption
+happens at ACQUIRE time and does not depend on this gate — but eligibility-driven recovery still does, and
+the two mechanisms were not measured together under saturation. Whether `ac0d9f2` closes this gap or merely
+sits beside it unmeasured is open.
+
+**A failed re-ask costs 12-30s of permission.** `noteDenied` clears `record.eligible` on every re-denial by
+design (C-D4, prevents the terminal from being unreachable for sources that retry often); regrant needs a
+release event, and the deliberately-failed re-ask fired this round to test that path took 12.4-14.0s to
+regrant on the census fixture and did not regrant at all within a 30s window on the real fixture (one arm).
+Not a problem while the first attempt succeeds — `ac0d9f2` makes that the common case on the measured
+fixture — but a sharp non-linearity if a re-ask ever fails after this: the next several seconds to tens of
+seconds see a source that COULD retry sitting out because its permission was just spent and refused.
+
+**Open, not measured: no run in either round landed at `activeSoftware 3`.** All five valid post-fix runs
+and both pre-fix runs settled at `activeSoftware 2` (one free software slot). Whether `ac0d9f2` helps, does
+nothing, or costs a thumbnail at `activeSoftware 3` — where a preempted loader has nowhere to land — is
+unknown. This is the same run-to-run software-pool instability already recorded as **DEBT-014 blocker 2**
+(concurrent WebCodecs engagement varying ~19× between nominally identical cold arms); it is not a new
+finding, but it is the reason this round could not close the question it was measuring.
+
+**Status unchanged: open — PARKED.** The three blockers from 2026-08-07 are not all resolved. Blocker 3
+(comp-proxy site cannot be tracked across attempts — `useFlarexCompProxies` mints a fresh blob URL per
+re-ask) is untouched by `ac0d9f2`, which is a `WebglMediaLayer`-site-only change. Blocker 1 ("clause (a)
+remains unsatisfied") is reworded above, not closed. Blocker 2 ("F's detector is rejected") is unaffected —
+`ac0d9f2` does not touch the shared boundary-detector question at all.
+
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
 - Status: **open — PARKED, deliberately not chased (2026-08-08)**
