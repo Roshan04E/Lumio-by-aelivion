@@ -2026,7 +2026,7 @@ which link needed which method — is worth keeping on the record rather than co
   small constant. Also — a memory budget expressed in **provider count** rather than in **bytes** is
   this debt being extended, because count is only a proxy for bytes while clip lengths are similar.
 
-**Measurement (2026-08-10, `apps/worker/tmp/pull-model-feasibility.md`).** N live providers over
+**Measurement (2026-08-10, `plans/adr-021-pull-model-feasibility.md`).** N live providers over
 distinct 1280×720 sources, sum of all `chrome.exe` working sets, fresh browser per rung with a
 baseline taken before the providers exist:
 

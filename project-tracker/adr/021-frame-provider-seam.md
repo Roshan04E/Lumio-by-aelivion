@@ -11,8 +11,8 @@ Depends on:  ADR-007 (compiler contract), ADR-008/009/010 (evaluation engine —
              ADR-012 (the kernel is the runtime), ADR-013 + ADR-020 (media acquisition)
 Supersedes:  nothing
 Amends:      nothing
-Evidence base: apps/worker/tmp/pull-model-feasibility.md    (measured at 680ddfc, 2026-08-10)
-               apps/worker/tmp/adr021-verification.md       (measured at 39893e2, 2026-08-10)
+Evidence base: plans/adr-021-pull-model-feasibility.md       (measured at 680ddfc, 2026-08-10)
+               plans/adr-021-verification.md                 (measured at 39893e2, 2026-08-10)
 Corrections:  §3.2(c), §3.3 and §6 step 3 were corrected on 2026-08-10 after instrument
               verification. Superseded text is retained in place, marked, with the reason.
 Related debt: DEBT-013 clause (a), DEBT-019 (whole-file source residency)
@@ -70,7 +70,7 @@ target rather than the aspirational one.
 
 ## 3. What measurement establishes, and what it refuses
 
-Full method and tables: `apps/worker/tmp/pull-model-feasibility.md`. Measured on an AMD Radeon
+Full method and tables: `plans/adr-021-pull-model-feasibility.md`. Measured on an AMD Radeon
 Vega 8 (integrated) in real Chrome with real WebCodecs — the target hardware class.
 
 ### 3.1 The seam is vindicated (claim: supported)
