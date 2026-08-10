@@ -13,6 +13,32 @@ const SAMPLE_RATE = 48_000;
 const CHANNELS = 2;
 // Gain envelope sampling rate for keyframed volume (fades). 60 Hz is smooth for short fades.
 const GAIN_SAMPLE_HZ = 60;
+// Same value/rationale as export-core.ts's SOURCE_LOAD_TIMEOUT_MS for the same class of operation
+// (a network media fetch) — this file can't import that module's private constant, so it's
+// duplicated locally, matching this repo's existing convention for the `withTimeout` helper itself
+// (already independently duplicated in export-core.ts / LocalExportPage.tsx / world/observers/look.ts).
+const AUDIO_SOURCE_FETCH_TIMEOUT_MS = 25_000;
+
+/**
+ * Thrown when an audio layer's SOURCE BYTES can't be fetched — dead network, 404, or a request that
+ * never resolves. Deliberately distinct from a decodeAudioData failure (bytes arrived, but the file
+ * has no audio track — that stays the existing, documented "contributes nothing" leniency below):
+ * a fetch failure is a real failure the export must report, not a silent per-layer no-op.
+ */
+export class AudioSourceFetchError extends Error {
+  constructor(public readonly assetId: string, public readonly url: string, cause: string) {
+    super(`failed to fetch audio source (assetId=${assetId}, url=${url}) — ${cause}`);
+    this.name = "AudioSourceFetchError";
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /** A gain automation curve in absolute composition seconds, or a single constant gain. */
 export interface GainEnvelope {
@@ -152,10 +178,14 @@ function renderFxClipChannels(buffer: AudioBuffer, layer: AudioLayerInput): Floa
   return channels;
 }
 
-/** Mix all audio layers into a single AudioBuffer over [0, durationSeconds]. */
+/** Mix all audio layers into a single AudioBuffer over [0, durationSeconds].
+ *  `onProgress` (0..1), when given, is called once per layer decode plus once at completion — cheap,
+ *  not a per-sample callback; the render phase itself (`startRendering()`) has no native progress API
+ *  and is fast enough (measured, see DEBT-015's mixdown-scaling probe) not to need one. */
 export async function mixTimelineAudio(
   layers: AudioLayerInput[],
-  durationSeconds: number
+  durationSeconds: number,
+  onProgress?: (fraction: number) => void
 ): Promise<AudioBuffer | null> {
   const audible = layers.filter((layer) => !layer.muted);
   if (audible.length === 0 || durationSeconds <= 0) return null;
@@ -164,11 +194,32 @@ export async function mixTimelineAudio(
   const cache = new Map<string, AudioBuffer | null>();
   async function decode(layer: AudioLayerInput): Promise<AudioBuffer | null> {
     if (cache.has(layer.assetId)) return cache.get(layer.assetId) ?? null;
+    // FETCH failures (dead network, 404, a request that hangs forever) are a REAL failure and must
+    // be reported, distinct from "this source has no audio track" (a legitimate, documented no-op
+    // below) — DEBT-015 originally guarded the whole mixdown with one wall-clock race that couldn't
+    // tell the two apart; that race is gone (see mixTimelineAudio's caller), so the fetch itself now
+    // carries its own bound and its own name. `response.ok` is checked explicitly: fetch() resolves
+    // (does not reject) on a 404, and decodeAudioData on an HTML error body would otherwise have been
+    // silently absorbed as "no audio track" below.
+    let bytes: ArrayBuffer;
+    try {
+      bytes = await withTimeout(
+        (async () => {
+          // cache:"no-store" bypasses the HTTP cache — the dev server's /storage range responses
+          // otherwise trip Chromium's ERR_CACHE_OPERATION_NOT_SUPPORTED, which silently dropped the
+          // audio track.
+          const response = await fetch(layer.url, { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.arrayBuffer();
+        })(),
+        AUDIO_SOURCE_FETCH_TIMEOUT_MS,
+        `audio source fetch (assetId=${layer.assetId})`
+      );
+    } catch (error) {
+      throw new AudioSourceFetchError(layer.assetId, layer.url, error instanceof Error ? error.message : String(error));
+    }
     let buffer: AudioBuffer | null = null;
     try {
-      // cache:"no-store" bypasses the HTTP cache — the dev server's /storage range responses otherwise
-      // trip Chromium's ERR_CACHE_OPERATION_NOT_SUPPORTED, which silently dropped the audio track.
-      const bytes = await (await fetch(layer.url, { cache: "no-store" })).arrayBuffer();
       buffer = await decodeCtx.decodeAudioData(bytes);
     } catch {
       buffer = null; // a source without an audio track (silent video) just contributes nothing
@@ -177,7 +228,15 @@ export async function mixTimelineAudio(
     return buffer;
   }
 
-  const decoded = await Promise.all(audible.map(async (layer) => ({ layer, buffer: await decode(layer) })));
+  let decodedCount = 0;
+  const decoded = await Promise.all(
+    audible.map(async (layer) => {
+      const buffer = await decode(layer);
+      decodedCount += 1;
+      onProgress?.((decodedCount / audible.length) * 0.9);
+      return { layer, buffer };
+    })
+  );
   await decodeCtx.close();
 
   const totalFrames = Math.ceil(durationSeconds * SAMPLE_RATE);
@@ -248,9 +307,14 @@ export async function mixTimelineAudio(
     }
     scheduled += 1;
   }
-  if (scheduled === 0) return null;
+  if (scheduled === 0) {
+    onProgress?.(1);
+    return null;
+  }
 
-  return offline.startRendering();
+  const rendered = await offline.startRendering();
+  onProgress?.(1);
+  return rendered;
 }
 
 /** Planar f32 channels + sample rate — a transferable snapshot of a mixed AudioBuffer. */

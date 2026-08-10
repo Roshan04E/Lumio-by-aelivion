@@ -19,7 +19,7 @@ import {
   type FlarexSourceAssetMap,
   type SourceUrlMap,
 } from "./export-core";
-import { collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
+import { AudioSourceFetchError, collectAudioLayers, extractAudioChannels, mixTimelineAudio } from "./audio-mixer";
 import { getExportSingleContext, getExportWorkerScene } from "../color/render-engine";
 import { beginPreviewSuspendForExport, endPreviewSuspendForExport } from "./export-preview-suspend";
 import { logExportGl } from "./export-gl-debug";
@@ -125,26 +125,24 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   onProgress?.(0.02, "Mixing audio…");
   await yieldToBrowser();
   const audioLayers = collectAudioLayers(expandedForSourceResolution, urlForAsset);
-  // DEBT-015: mixTimelineAudio's OWN contract legitimately resolves null when there is nothing
-  // audible to mix (no audio layers, all muted, or zero duration) — that case must ship silent,
-  // same as today. A throw and a stalled race are both real failures and must not collapse into
-  // that same null, so the timeout resolves a private sentinel instead of null — a sentinel is the
-  // only way to tell "the timeline has no audio" apart from "the mixdown never finished".
-  const AUDIO_MIXDOWN_TIMED_OUT = Symbol("audio-mixdown-timed-out");
-  let mixResult: Awaited<ReturnType<typeof mixTimelineAudio>> | typeof AUDIO_MIXDOWN_TIMED_OUT;
+  // DEBT-015 residual: mixing itself is cheap (measured — even 20 layers over a 30-minute timeline
+  // mixes in single-digit seconds), so the wall-clock race that used to bound the WHOLE mixdown is
+  // gone. What could actually hang forever was never the mix — it was a network fetch inside it —
+  // and that is now bounded individually, per source, inside mixTimelineAudio/decode(). A throw here
+  // is either a real mixdown failure or an AudioSourceFetchError; both are real failures and must not
+  // collapse into mixTimelineAudio's own legitimate null-return contract (no audible layers, zero
+  // duration), which still ships silent, unchanged.
+  let mixResult: Awaited<ReturnType<typeof mixTimelineAudio>>;
   try {
-    mixResult = await Promise.race([
-      mixTimelineAudio(audioLayers, composition.durationSeconds),
-      new Promise<typeof AUDIO_MIXDOWN_TIMED_OUT>((resolve) => setTimeout(() => resolve(AUDIO_MIXDOWN_TIMED_OUT), 20_000))
-    ]);
+    mixResult = await mixTimelineAudio(audioLayers, composition.durationSeconds, (fraction) =>
+      onProgress?.(0.02 + fraction * 0.008, "Mixing audio…")
+    );
   } catch (error) {
+    if (error instanceof AudioSourceFetchError) {
+      throw new Error(`Export: audio source fetch failed — ${error.message} — refusing to ship a silently muted export (DEBT-015).`);
+    }
     throw new Error(
       `Export: audio mixdown failed — ${error instanceof Error ? error.message : String(error)} — refusing to ship a silently muted export (DEBT-015).`
-    );
-  }
-  if (mixResult === AUDIO_MIXDOWN_TIMED_OUT) {
-    throw new Error(
-      `Export: audio mixdown did not finish within 20s (${audioLayers.length} layer(s), ${composition.durationSeconds.toFixed(1)}s timeline) — refusing to ship a silently muted export (DEBT-015).`
     );
   }
   const audio = mixResult ? extractAudioChannels(mixResult) : null;
