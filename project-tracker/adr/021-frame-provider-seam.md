@@ -1,0 +1,416 @@
+# ADR-021 — The frame-provider seam: sources are pulled, not bridged into fake timeline clips
+
+- Status: **Accepted** (normative). The DECISION (§2) and the seam (§4) are accepted and not
+  provisional; the MEASURED LIMITS (§3) are **Provisional until step 2 ships**. See §8.
+- Date drafted: 2026-08-10
+- Date accepted: 2026-08-10
+- Governed by: `FLAREX_IMPLEMENTATION_GOVERNANCE.md`
+
+```
+Depends on:  ADR-007 (compiler contract), ADR-008/009/010 (evaluation engine — NOT reopened),
+             ADR-012 (the kernel is the runtime), ADR-013 + ADR-020 (media acquisition)
+Supersedes:  nothing
+Amends:      nothing
+Evidence base: apps/worker/tmp/pull-model-feasibility.md    (measured at 680ddfc, 2026-08-10)
+               apps/worker/tmp/adr021-verification.md       (measured at 39893e2, 2026-08-10)
+Corrections:  §3.2(c), §3.3 and §6 step 3 were corrected on 2026-08-10 after instrument
+              verification. Superseded text is retained in place, marked, with the reason.
+Related debt: DEBT-013 clause (a), DEBT-019 (whole-file source residency)
+```
+
+> **ADR-019 is reserved** for the expression contract (ADR-018 §27: "the expression contract moves
+> to ADR-019"). This is 021 because 020 is taken; the gap is deliberate, not an error.
+
+---
+
+## 0. What this does NOT reopen
+
+**ADR-008, ADR-009 and ADR-010 froze how a node's picture is computed. They stand, unamended.**
+This ADR changes only **what feeds the evaluator**: where a source's pixels come from. The
+evaluator stays node-type-blind (ADR-010), the content hash keeps its exact meaning and its
+time-invariance (ADR-009), and the lowering compiler remains the parity contract (ADR-007).
+
+Reading "sources become frame providers" as "rewrite the compositor" exceeds this ADR's scope.
+
+Also not reopened: the **2D/2.5D capability boundary** (founder, 2026-08-09). It is settled input
+here, not a question.
+
+---
+
+## 1. Context — the defect, and why the fix is smaller than it sounds
+
+Every asset-source `MediaIn` is bridged into playback as a synthetic off-timeline `TimelineLayer`
+(`collectFlarexVirtualLayers`) that runs through the timeline's per-layer media pipeline and
+acquires a live decoder session. That adapter is why Phase 2 shipped quickly and it is not a
+mistake — but it inherits an assumption that is false for a compositor: that a small, fixed number
+of sources play at once. The preview pool caps sessions at 4 with one hardware slot reserved
+(`MAX_WC_TOTAL_SESSIONS` / `HARDWARE_RESERVED_SLOTS`), so **the loader ceiling is 3 regardless of
+host**, and the 4th MediaIn is denied at mount and never re-admitted (DEBT-013 clause (a)).
+
+**The target model already exists in this repo, in the export path.**
+`SceneFrameCompositor.gradeMediaLayer` obtains pixels by `await source.getFrame(sourceTime)` — a
+pull, per source, per frame, with no session, no cap, no starvation. This is Fusion's and Nuke's
+model. The convergence is therefore *make playback consume the interface export already consumes*,
+not *write a second engine*. It also collapses a standing bug class: preview and export disagreeing
+because they are two machines kept in agreement by gates.
+
+---
+
+## 2. Decision
+
+**Adopt the pull-based frame-provider seam as the media boundary for the Flarex compositor**, with
+a content-addressed cache behind it, per the four-step sequence in §6.
+
+**Adopted with the limits in §3, which are measured, not estimated.** The founder's stated target
+of Fusion-equivalent capability in ~95% of cases stands; the ~100-node figure does not survive
+contact with measurement in the form "100 live video sources", and this ADR records the corrected
+target rather than the aspirational one.
+
+---
+
+## 3. What measurement establishes, and what it refuses
+
+Full method and tables: `apps/worker/tmp/pull-model-feasibility.md`. Measured on an AMD Radeon
+Vega 8 (integrated) in real Chrome with real WebCodecs — the target hardware class.
+
+### 3.1 The seam is vindicated (claim: supported)
+
+Driving the real export pull path over N distinct 1280×720 sources, **decode is not the
+bottleneck** up to N=50:
+
+| N | warm frame total | decode wall | composite |
+|---|---|---|---|
+| 1 | 23.7 ms | 2.8 ms | 20.9 ms |
+| 10 | 154.1 ms | 4.7 ms | 149.4 ms |
+| 50 | 864.2 ms | 9.0 ms | 855.2 ms |
+| 100 | 2080.4 ms | 1139.5 ms | 940.9 ms |
+
+Cost is **linear** in N (per-source flat at 13–24 ms; cost(100) < 2.5 × cost(50)). Warm sequential
+`getFrame` is ~0.03–0.1 ms per source. A pull model degrades predictably instead of hitting the
+session cliff the adapter has today.
+
+### 3.2 The limits, each of which must be designed for
+
+**(a) Memory is the first hard wall.** ~25 MB per live source; **2546 MB delta / 2991 MB total at
+N=100**, with 3-second clips. `fetchSourceBlob` holds whole files in RAM, so residency scales with
+clip *length* — registered separately as **DEBT-019**, because it is a defect whether or not this
+ADR ships. A browser tab does not survive this. **Any implementation must bound live providers by a
+memory budget in BYTES, not by a count** — a count is only a proxy for bytes while clip lengths are
+similar, and DEBT-019 is precisely why they are not.
+
+**(b) Random access costs ~100× its budget.** Random `getFrame` p95 is **100.4 ms with an all-intra
+proxy**, against a 1.0 ms/source budget for 10fps scrub at N=100. Interactive scrub across 100
+live-decoding sources is arithmetically impossible.
+
+**(c) A scrub invalidates every NODE OUTPUT.** Measured on the real `dependency-graph.ts` closure
+over a 121-node graph: dragging a param dirties **7.4%**, rewiring an edge **5.0%**, changing a
+source **8.3%** — but **scrubbing one frame dirties 100%**, and narrowing the `time` axis to genuine
+time-dependents only moves it to **99.2%** in an all-video comp, because every node really is
+downstream of something that changes with t. Only genuinely time-invariant subtrees (stills,
+generators) benefit: a 1-in-3-generator graph drops scrub invalidation to 74.4%.
+
+> ~~**Therefore the cache is an editing accelerator (92–95% hit), not a playback mechanism.** Any
+> plan that assumes playback-from-cache is unfunded.~~
+>
+> **SUPERSEDED 2026-08-10 — this generalised from the wrong cache.** The 100% figure above is
+> correct, and it is the right number for a **node-output cache**. It says nothing about playback,
+> because the cache that makes playback work is a **different object**: a **frame cache** holding
+> the *composited output* at time t, keyed on `(graph content hash, t)` — After Effects' RAM Preview
+> and Fusion's render cache. A time change invalidating every node output is exactly what you would
+> expect of a node cache and is *orthogonal* to whether a frame cache works. See **(c′)**.
+
+**(c′) The frame cache is a CAPACITY property, not a graph property.** Its behaviour is decided by
+residency, not by the dependency closure:
+
+| | 1080p | 720p |
+|---|---|---|
+| one RGBA8 frame | **7.91 MB** | 3.52 MB |
+| one second @30fps | **237 MB** | 106 MB |
+| per 1 GB of budget | **~4.3 s (129 frames)** | ~9.7 s (291 frames) |
+
+At a 1 GB / 1080p budget, measured hit rates: **scrub back over ground already played — 100%**, and
+**loop a range — 100%**, for ranges inside capacity (2 s and 4 s). A param change and a rewire
+invalidate **everything, 0%, by construction** — the graph content hash changes, so every cached
+frame's key is stale. That is correct and expected, not a limitation.
+
+Cost to populate it: GPU-side retention (`copyTexSubImage2D`) is **0.10 ms** but spends VRAM, which
+on an integrated part is system memory; CPU readback (`readPixels`) is **11.0 ms p50 / 54.1 ms p95**
+against a 33.3 ms frame budget, shared with the render that produced the frame.
+
+**So "scrub is cached, not live" IS supported — bounded to a work range of ~4.3 s per GB at 1080p.**
+That is the RAM-Preview model: it does not cache a timeline, it caches a work area.
+
+### 3.3 A deferred supporting item is retired on evidence — FOR RANDOM ACCESS ONLY
+
+The deferral entry lists an **all-intra proxy variant** as a supporting item, on the ProRes/DNxHD
+reasoning that intra-frame media is what makes a pull model cheap. **Measurement does not support
+this for random access.**
+
+> ~~At `webcodecs-decoder.ts:779-782`, a keyframe re-seek happens only on the first call or a
+> **backward** jump; a **forward** jump falls through and decodes every intermediate frame. So
+> forward-seek cost rises linearly with distance (~1.4 ms/frame) **at the same rate on both
+> encodings** — an all-intra proxy cannot help forward access at all until that path learns to seek
+> to the nearest sync sample.~~
+>
+> **SUPERSEDED 2026-08-10 — the mechanism was wrong, twice over.** The cited lines are the
+> reclaimed-decoder recreation block, not the forward path. The forward path is
+> `webcodecs-decoder.ts:818-821` (`const forwardKey = keyAtOrBefore(chunkIndexForMicros(micros));
+> if (forwardKey > fed) resetTo(...)`) and it **already does** re-seek to the nearest sync sample,
+> keeping sequential decode only for in-GOP targets, which is correct. Counting
+> `wcDecoderResetStats.hardReset` per request confirms it fires: **1.00 resets/request at +30f and
+> +90f on all three encodings.** A second hypothesis — that an all-intra file with no `stss` box
+> would be misread as having one keyframe via the `syncCount === 0` fallback at lines 271-281 — was
+> also **refuted**: our own parser reports `p3-intra.mp4` as **600 samples / 600 keyframes**, so
+> mp4box synthesises the flags correctly and the fallback never fires. The intra arm was valid.
+
+**The measured mechanism is a fixed per-reset cost of ~34 ms** — `decoder.reset()` + `configure()` +
+re-feed + first-output latency. On an all-intra file a reset means decoding exactly **one** frame,
+yet a +30f jump still costs **33.7 ms**. The GOP walk is a smaller term on top: GOP-12's +30f costs
+**44.9 ms**, and the ~11 ms difference is ≈11 frames of post-keyframe decode at ~1 ms each.
+
+Against a 1.0 ms/source budget, **33.7 ms and 44.9 ms are the same answer.** Intra buys **~25% of a
+random seek**, not an order of magnitude, because the dominant term is a reset the media cannot
+influence.
+
+Its price is lower than assumed: **1.55–1.80×** file size at matched CRF, not the estimated 2–4×.
+(Caveat against my own result: synthetic constant-motion content understates the ratio; real
+static-camera footage would push it toward 2–3×.)
+
+**Decision: an all-intra proxy is NOT a prerequisite for random access, and is demoted from the
+programme's front on that basis.** The ordered levers are now:
+
+1. **Reduce the COST of a reset.** Open question, deliberately not measured this round (§9).
+2. **Reduce the FREQUENCY of resets** — a frame cache (§3.2(c′)), a scheduler that prefers
+   sequential access, and read-ahead so a jump lands inside the already-fed window. The counters
+   show this is reachable: at +12f the intra arm resets on only **0.24** of requests, because the
+   feed window already ran past the target.
+3. Intra media, for its tail behaviour only.
+
+> **SCOPE OF THIS DEMOTION — read it narrowly.** This section demotes all-intra **for random-access
+> latency**, which is the only thing measured here. It says **nothing** about all-intra for **encode
+> throughput**, a different mechanism: intra encoding skips inter-frame motion estimation, the
+> dominant cost in H.264 encoding, which is why professional NLEs proxy to intra codecs (ProRes
+> Proxy/LT, DNxHR LB, DNxHD 36). **The proxy codec question is NOT settled by this ADR** and is
+> being measured separately.
+
+### 3.4 Note — the 5.4 s backward-seek stall is export-only
+
+Recorded because the number is alarming and the disposition is not obvious.
+
+Backward-seek p95 measures **5359.8 ms** on GOP-12, from
+`Promise.race([decoder.flush(), rejectAfter(5000)])` (`webcodecs-decoder.ts:874, 963`) — a 5-second
+flush bail-out. The same provider **does** serve live playback (`preview-frame-pool.ts:1240` builds
+it with `frameBudgetMs: 24`; `WebglMediaLayer` consumes that pool), so the obvious reading is that
+users feel this while scrubbing backwards.
+
+**They do not.** Measured in both modes on the same sweep: with the preview budget, backward-seek
+p95 is **28.6 ms with zero calls over 100 ms**. The budget works. The cost is paid as *staleness*
+instead — the served frame runs up to **11.9 s behind** the requested time, which is the documented
+deliberate behaviour ("HOLD the last frame instead of playing the gap fast-forward").
+
+So: a **note, not a programme**. The 5.4 s stall is real in **export**, which has no frame budget,
+and export is forward-only in normal operation. But **11.9 s of lag is worth someone knowing about**
+even though it is working as designed — a held picture that takes twelve seconds to catch up is a
+user-visible artifact, and a future change to the hold policy should know this number.
+
+### 3.5 The corrected target
+
+**~100 nodes: yes. ~100 concurrently-decoding sources: no.** The supported shape is ~100 nodes with
+a bounded live-source set — measured at 121 nodes / 24 sources. There is additionally a
+decoder-count ceiling between N=50 and N=100 where concurrent WebCodecs decoders thrash (decode
+wall 9.0 → 1139.5 ms).
+
+---
+
+## 4. The seam
+
+Defined precisely enough for two implementers, because **there are two from the start**: the
+browser (WebCodecs) and the native runtime at `Documents/orreris` (its own decode path). ADR-012
+already requires a kernel usable "from a future native host without behaviour change"; this is the
+same property one layer down. The graph, the content-hash cache keys and the resulting pixels are
+shared; **only the provider differs.**
+
+The seam is the interface `apps/web/src/export/source-decoder.ts` already defines. It is adopted,
+not invented:
+
+```ts
+interface FrameProvider {
+  readonly width: number;
+  readonly height: number;
+  /** The picture at `sourceTimeSeconds`. Provider-owned; valid until the next call or dispose. */
+  getFrame(sourceTimeSeconds: number): Promise<CanvasImageSource | null>;
+  readonly nominalFps?: number | undefined;
+  readonly decodableEndSeconds?: number | undefined;
+  dispose(): void;
+}
+```
+
+### 4.1 Normative obligations
+
+**I-P1 — Pull, never push.** A provider never notifies, schedules or renders. It answers
+`getFrame(t)` and nothing else. It holds no session, claims no slot, and has no priority. This is
+what removes the cap and the starvation.
+
+**I-P2 — Ownership is the provider's.** The returned frame is valid until the next `getFrame` on
+that provider or `dispose()`. Callers draw synchronously and must not close it. (Unchanged from
+today's contract — stated because a second implementer needs it stated.)
+
+**I-P3 — Time is the only input.** No frame numbers, no rate, no direction hint. A provider must
+answer any `t` in range, in any order. Ordering is an optimization the provider may exploit
+(today's forward cursor), never a requirement it may impose.
+
+**I-P4 — Never null for an in-range t.** Past `decodableEndSeconds`, clamp to the final frame.
+Absence must be distinguishable from "not ready" — this is the DEBT-015 class, where a silent null
+shipped a frame with a layer missing.
+
+**I-P5 — `decodableEndSeconds` is authoritative over container metadata.** Container duration
+routinely overshoots the true decodable end; a consumer that trusts metadata bakes in a frozen tail.
+
+**I-P6 — Bounded by memory, not by count.** A provider set must be evictable against a byte budget.
+§3.2(a) is the reason this is normative rather than advisory: 25 MB per source × an unbounded set
+is a dead tab. Eviction is `dispose()` + reconstruct; providers must therefore be **cheap to
+recreate and expensive only once** (cold construction is 94–238 ms and serializes — that is the
+cost eviction pays, and it is why the budget must evict rarely).
+
+**I-P7 — Caches sit BEHIND the seam, and there are two of them.** A provider is not a cache and must
+not become one.
+- The **node-output cache** keys on `(ContractVersion, ContextVersion, NodeContentHash)` — unchanged
+  from ADR-009. Time is **not** folded into the content hash (§3.2(c)).
+- The **frame cache** keys on `(graph content hash, t)` and holds composited output (§3.2(c′)).
+
+They are different objects with different keys and different lifetimes, and a claim proven about one
+does not transfer to the other — the correction recorded in §3.2(c) exists because that transfer was
+made once already.
+
+**I-P8 — Two implementers, one behaviour.** Any observable difference between the browser and
+native providers other than *latency* is a defect. Same `t` → same picture. This is what stops two
+compositors from being built.
+
+**I-P9 — Eviction policy is a DECISION, and LRU is disqualified for the frame cache.** Not left to
+whoever implements it. Looping a range is one of the two things playback actually *is*, and LRU on a
+cyclic access pattern larger than capacity is the textbook worst case: it evicts precisely the frame
+needed next. Measured at a 1 GB / 1080p budget (129 frames): an **8 s loop hits 0.0% under LRU and
+27.6% under random eviction**; a 20 s loop, 0.0% vs 1.0%. Within capacity both are 100%, so the
+policy only shows itself at the cliff — which is exactly where a user with a long work area lives.
+**Any frame cache here must use an eviction policy that degrades gracefully on cyclic access**
+(random, or a retain-the-work-area policy); LRU is ruled out by measurement, not by taste.
+
+### 4.2 What the seam deliberately does NOT specify
+
+Decode strategy, threading, GOP handling, caching inside the provider, and hardware/software
+selection are all implementation. The seam is `t → picture`; everything in §3.3 is a provider-local
+optimization that must not leak into it.
+
+---
+
+## 5. Out of scope
+
+Explicitly out, and not deferred-for-later — **out**:
+
+- **3D**: 3D geometry, mesh import (FBX/Alembic), lights/materials, a 3D renderer, particles. In
+  scope is 2D and **2.5D**: layers in Z under a camera, parallax, card-based compositing.
+- **Deep (EXR deep-pixel) compositing** and heavy multi-channel CG integration at film resolution.
+- **OFX plugin ecosystems.**
+- **Render-farm distribution.**
+- **Feature-film VFX as a target user.** Targets are motion designers, commercial finishers,
+  YouTube/social editors, and small studios doing cleanup, screen replacement, beauty work, titles.
+
+The browser's per-tab memory ceiling makes several of these structurally out, not merely
+unprioritized — §3.2(a) is the measurement that says so.
+
+Also out of this ADR (deferred, not rejected): **region-of-interest evaluation**, and the
+**timeline's** own migration beyond step 4.
+
+---
+
+## 6. Sequence
+
+Each step must ship a **user-visible win on its own** — the standing rule against
+finished-but-unused infrastructure. **Explicitly rejected: building the new engine alongside the
+old and switching at the end.**
+
+**Step 1 — Name the seam.** A decision, not code: this ADR, §4. Win: the native runtime and the
+browser stop being able to diverge silently.
+
+**Step 2 — Move the Flarex page onto it.** Smallest blast radius, and the surface that actually
+hurts. Win: **the loader ceiling of 3 disappears** — the 4th MediaIn stops being denied at mount
+(DEBT-013 clause (a)). Must ship with the I-P6 memory budget, because §3.2(a) says an unbounded
+provider set at N=100 is a dead tab. Provisional status lifts when this ships.
+
+**Step 3 — The caches behind the seam. There are TWO, and they are different objects.**
+
+- **3a — the node-output cache**, keyed on the ADR-009 hashes that already exist and already drive
+  node thumbnails. Win: **editing a big graph stops re-evaluating it** — measured 92–95% reuse for
+  param-drag, rewire and source-change. Claimed for **editing only**; §3.2(c) forbids claiming it
+  for playback.
+- **3b — the frame cache**, holding composited output at t, keyed on `(graph content hash, t)`.
+  Win: **scrub-back and loop over a work range become instant** — 100% hit inside capacity. Bounded
+  to ~4.3 s per GB at 1080p (§3.2(c′)), and must satisfy **I-P9** on eviction policy.
+
+  Each ships a win alone and 3b does not depend on 3a: a frame cache is keyed on the whole graph's
+  hash and needs no per-node reuse.
+
+> ~~Claimed for editing only; §3.2(c) forbids claiming it for playback.~~ — the blanket form of this
+> is superseded; it holds for 3a and not for 3b. See §3.2(c′).
+
+**Step 4 — The timeline last**, once the seam is proven on the harder case.
+
+**Not in the sequence, and newly ordered ahead of the all-intra proxy by §3.3:** reducing the cost
+and the frequency of decoder resets. Provider-local (§4.2), needs no seam change, and worth more
+than the transcode it was assumed to require.
+
+> ~~the forward-seek and backward-seek fixes in `webcodecs-decoder.ts`~~ — **superseded 2026-08-10:
+> the forward-seek path is already correct** (§3.3). The work is reset cost and reset frequency, not
+> a seek-path fix.
+
+---
+
+## 7. Consequences
+
+**Accepted.** A per-frame pull is more total work than a held streaming session for the *sequential
+playback* case; measurement says it is 2.8–9.0 ms up to N=50, which is affordable. Cold provider
+construction (94–238 ms, serialized) becomes a visible cost when eviction churns — bounded by
+making the budget evict rarely (I-P6).
+
+**Improved.** No session cap, no starvation, no mount-order dependence, and one media interface
+across preview and export instead of two machines kept in agreement by gates.
+
+**Still open, and honestly so.** Compositor pass count dominates the frame at every N measured
+(composite 20.9–855.2 ms vs decode 2.8–9.0 ms). **This ADR does not address it** and must not be
+read as a performance fix for large comps: it fixes *acquisition*, and acquisition was not the
+thing that was slow — except at N≥100, where decoder thrash makes it so. Pass-count reduction is a
+separate programme against ADR-008/010, which this ADR leaves untouched.
+
+---
+
+## 8. Status
+
+Two things here have different statuses, and a reader must not mistake one for the other.
+
+**The DECISION is ACCEPTED, and is not provisional.** Adopting the pull-based frame-provider seam
+(§2) is a founder decision, already recorded in `architecture.md`'s deferral entry. Measurement did
+not choose it and cannot un-choose it. The seam's normative obligations (§4.1, I-P1…I-P9) and the
+out-of-scope list (§5) are accepted with it.
+
+**The measured LIMITS are PROVISIONAL until step 2 ships.** Specifically §3.1–§3.5: the N-ladder,
+the ~25 MB/source memory figure, the ~34 ms reset cost, the frame-cache capacity table and the
+eviction cliff. They were measured on one machine (AMD Radeon Vega 8, integrated), on synthetic
+media, through the export path rather than a live Flarex page. They are the best evidence available
+and they are not yet product evidence.
+
+What would revise them: whether a memory-budgeted provider set holds a **real** comp with **real**
+footage inside a browser tab. That is step 2's own gate. If it fails, §3.2(a) and §3.5 change and
+the decision does not.
+
+---
+
+## 9. Open questions
+
+**OQ1 — Is the ~34 ms reset cost dominated by `configure()` rather than `reset()`?** Not measured
+this round, deliberately, and named here so it is not silently assumed either way.
+`VideoDecoder.reset()` clears decoder state **without** requiring a reconfigure, yet `resetTo()`
+calls `decoder.reset()` **and** `configure()` together. If the 34 ms is mostly reconfigure — plausible,
+since reconfigure can rebuild the hardware decode pipeline — then the whole random-access number is
+a self-inflicted cost and lever (1) in §3.3 collapses to a one-line change. If it is mostly
+first-output latency after a flush, the lever is real work. **This is the single cheapest experiment
+that could move §3.3's conclusion**, and it should be run before any effort is spent on lever (2).
