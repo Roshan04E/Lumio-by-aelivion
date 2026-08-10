@@ -599,7 +599,13 @@ export class SceneFrameCompositor {
           detail: `missing-source providerKey=${providerKey} sourceTime=${sourceTime.toFixed(3)}`,
         });
       }
-      return null;
+      // DEBT-015: structurally near-unreachable (export-core.ts's per-frame loop loads every
+      // activeSourceKeysAt(t) key before renderFrame runs) — but returning null here fed the same
+      // "not ready yet" absorption as the row below. Fail loudly: it costs nothing precisely because
+      // this branch does not fire.
+      throw new Error(
+        `Export: no source provider found for layer "${layer.id}" (providerKey=${providerKey}, sourceTime=${sourceTime.toFixed(3)}) — refusing to ship a frame missing this layer (DEBT-015).`
+      );
     }
     let frame = await source.getFrame(sourceTime);
     let decodeAttempt = 0;
@@ -644,14 +650,28 @@ export class SceneFrameCompositor {
 
     let matteFrame: CanvasImageSource | null = null;
     if (layer.matte?.uri) {
+      // DEBT-015: mattes are optional by design — a layer with NO matte specified (this whole `if`
+      // not entered) stays untouched and renders unmatted, exactly as before. But a matte that WAS
+      // specified and then failed to load or decode used to fall through to that same unmatted
+      // render, indistinguishable from "no matte was ever specified". Once we're inside this block
+      // the matte was specified, so both failure shapes below are fatal.
       const matteSource = this.getSource(`matte:${layer.id}`);
-      if (matteSource) {
-        // A windowed matte is 0-based over its slice, so read it at `sourceTime − startSeconds`
-        // (0/absent = full-source matte, unchanged). Same offset the preview renderers apply.
-        const matteTime = Math.max(0, sourceTime - (layer.matte.startSeconds ?? 0));
-        const mf = await matteSource.getFrame(matteTime);
-        if (mf && matteSource.width > 0) matteFrame = mf;
+      if (!matteSource) {
+        throw new Error(
+          `Export: matte for layer "${layer.id}" (${layer.matte.uri}) failed to load — refusing to ship this layer unmatted (DEBT-015).`
+        );
       }
+      // A windowed matte is 0-based over its slice, so read it at `sourceTime − startSeconds`
+      // (0/absent = full-source matte, unchanged). Same offset the preview renderers apply.
+      const matteTime = Math.max(0, sourceTime - (layer.matte.startSeconds ?? 0));
+      const mf = await matteSource.getFrame(matteTime);
+      if (!mf || matteSource.width === 0) {
+        throw new Error(
+          `Export: matte for layer "${layer.id}" (${layer.matte.uri}) failed to decode at t=${matteTime.toFixed(3)}s ` +
+            `(provider=${matteSource.width}x${matteSource.height}) — refusing to ship this layer unmatted (DEBT-015).`
+        );
+      }
+      matteFrame = mf;
     }
 
     const merged = this.mergedLayer(item, t);

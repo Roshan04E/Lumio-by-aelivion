@@ -125,11 +125,29 @@ export async function exportLocally(request: LocalExportRequest): Promise<Blob> 
   onProgress?.(0.02, "Mixing audio…");
   await yieldToBrowser();
   const audioLayers = collectAudioLayers(expandedForSourceResolution, urlForAsset);
-  const mixedBuffer = await Promise.race([
-    mixTimelineAudio(audioLayers, composition.durationSeconds),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 20_000))
-  ]).catch(() => null);
-  const audio = mixedBuffer ? extractAudioChannels(mixedBuffer) : null;
+  // DEBT-015: mixTimelineAudio's OWN contract legitimately resolves null when there is nothing
+  // audible to mix (no audio layers, all muted, or zero duration) — that case must ship silent,
+  // same as today. A throw and a stalled race are both real failures and must not collapse into
+  // that same null, so the timeout resolves a private sentinel instead of null — a sentinel is the
+  // only way to tell "the timeline has no audio" apart from "the mixdown never finished".
+  const AUDIO_MIXDOWN_TIMED_OUT = Symbol("audio-mixdown-timed-out");
+  let mixResult: Awaited<ReturnType<typeof mixTimelineAudio>> | typeof AUDIO_MIXDOWN_TIMED_OUT;
+  try {
+    mixResult = await Promise.race([
+      mixTimelineAudio(audioLayers, composition.durationSeconds),
+      new Promise<typeof AUDIO_MIXDOWN_TIMED_OUT>((resolve) => setTimeout(() => resolve(AUDIO_MIXDOWN_TIMED_OUT), 20_000))
+    ]);
+  } catch (error) {
+    throw new Error(
+      `Export: audio mixdown failed — ${error instanceof Error ? error.message : String(error)} — refusing to ship a silently muted export (DEBT-015).`
+    );
+  }
+  if (mixResult === AUDIO_MIXDOWN_TIMED_OUT) {
+    throw new Error(
+      `Export: audio mixdown did not finish within 20s (${audioLayers.length} layer(s), ${composition.durationSeconds.toFixed(1)}s timeline) — refusing to ship a silently muted export (DEBT-015).`
+    );
+  }
+  const audio = mixResult ? extractAudioChannels(mixResult) : null;
 
   // Resolve the single-context flag ONCE here (main thread) and thread it through — the Worker can't read the
   // ?exportSingleContext= flag (no window), so resolve once on the main thread and pass it down. Single-context

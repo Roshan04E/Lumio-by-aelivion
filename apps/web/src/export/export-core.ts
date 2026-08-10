@@ -347,6 +347,12 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
     if (!sourceDef) return;
     const load = (async () => {
       throwIfAborted();
+      // DEBT-015: this used to swallow load failures for matte-prefixed keys, on the theory that
+      // mattes are optional. But a `matte:<layerId>` key only ever exists in providerUrlMap when
+      // `layer.matte?.uri` is set (see activeSourceKeysAt / the map-building sites below) — a
+      // NEVER-specified matte never reaches this function at all. So a failure here is always
+      // "specified and broken", never "never specified", and swallowing it fed the same silent
+      // unmatted-render defect as the matteFrame consumer in scene-frame-compositor.ts.
       try {
         sources.set(
           key,
@@ -360,7 +366,13 @@ export async function runExportCore(input: ExportCoreInput, handlers: ExportCore
           )
         );
       } catch (error) {
-        if (!key.startsWith("matte:")) throw error;
+        // DEBT-015 message residual: createVideoSource/createImageSource's own errors ("Failed to
+        // load video source for export") name neither the layer nor the URL — a user staring at a
+        // failed export has no way to tell which clip broke. Name both; the underlying detail is
+        // preserved (not replaced), so a genuine codec/timeout reason survives alongside "what/where".
+        const detail = error instanceof Error ? error.message : String(error);
+        const label = key.startsWith("matte:") ? `matte for layer "${key.slice("matte:".length)}"` : `source "${key}"`;
+        throw new Error(`Export: failed to load ${label} (${sourceDef.url}) — ${detail}`);
       }
     })().finally(() => sourceLoads.delete(key));
     sourceLoads.set(key, load);
