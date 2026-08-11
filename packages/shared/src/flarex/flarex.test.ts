@@ -891,7 +891,10 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
 
   const comp = createFlarexComp("gc", "Generators");
   const text = createFlarexNode("text", "txt");
-  text.params = { ...text.params, content: "Hello", fontSize: 120, color: "#ff0000", align: "left", x: 0.25, y: 0.75 };
+  text.params = {
+    ...text.params, content: "Hello", fontSize: 120, color: "#ff0000", align: "left", x: 0.25, y: 0.75,
+    strokeWidth: 6, strokeColor: "#00ff00", shadowBlur: 18, shadowColor: "#0000ff", shadowOffsetX: 3, shadowOffsetY: 5,
+  };
   const bg = createFlarexNode("background", "bgn");
   bg.params = { ...bg.params, color: "#123456", opacity: 0.5 };
   comp.nodes[text.id] = text;
@@ -903,6 +906,12 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   const bgLayer = virtuals.find((l) => l.id === flarexVirtualLayerId("gc", "bgn"));
   check("Text+ is backed by a TEXT layer carrying its content", textLayer?.type === "text" && textLayer?.text === "Hello");
   check("Text+ carries font + colour + align to the rasterizer", textLayer?.fontSize === 120 && textLayer?.color === "#ff0000" && textLayer?.textAlign === "left");
+  // Stroke + drop shadow (2026-08-11): the same TimelineLayer fields a caption layer carries, so the
+  // shared rasterizer draws them identically without a second text renderer.
+  check("Text+ carries stroke + shadow to the rasterizer",
+    textLayer?.strokeWidth === 6 && textLayer?.strokeColor === "#00ff00" &&
+    textLayer?.shadowBlur === 18 && textLayer?.shadowColor === "#0000ff" &&
+    textLayer?.shadowOffsetX === 3 && textLayer?.shadowOffsetY === 5);
   check("Background is backed by a comp-filling SHAPE layer", bgLayer?.type === "shape" && bgLayer?.widthPercent === 100 && bgLayer?.heightPercent === 100 && bgLayer?.color === "#123456");
   // Placement/opacity must NOT be baked onto the layer — the compiler applies them, keyframe-aware.
   check("generator layers stay transform-neutral (placement is the compiler's job)",

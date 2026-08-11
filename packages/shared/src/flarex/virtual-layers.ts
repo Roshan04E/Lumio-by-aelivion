@@ -173,6 +173,14 @@ function buildFlarexGeneratorLayer(
       fontWeight: num("fontWeight", 700),
       color: str("color", "#ffffff"),
       textAlign: align === "left" || align === "right" ? align : "center",
+      // Stroke + drop shadow — same TimelineLayer fields a caption layer carries, so the shared
+      // rasterizer (`getCompositionTextStyle` → `drawTextLayer`) draws them identically either way.
+      strokeWidth: num("strokeWidth", 0),
+      strokeColor: str("strokeColor", "#000000"),
+      shadowBlur: num("shadowBlur", 0),
+      shadowColor: str("shadowColor", "#000000"),
+      shadowOffsetX: num("shadowOffsetX", 0),
+      shadowOffsetY: num("shadowOffsetY", 0),
     };
   }
   return {

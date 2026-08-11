@@ -591,10 +591,21 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
       align: z.enum(["left", "center", "right"]).default("center"),
       x: num(0.5, 0, 1),
       y: num(0.5, 0, 1),
+      // Stroke + drop shadow — routed to the SAME rasterizer the caption pipeline already uses
+      // (`getCompositionTextStyle` → WebkitTextStroke/textShadow, drawn by `drawTextLayer`). Defaults
+      // are all off (strokeWidth 0, shadowBlur 0), so an existing project's Text+ node rasterizes
+      // byte-identically until a user turns one on.
+      strokeWidth: num(0, 0, 100),
+      strokeColor: z.string().default("#000000"),
+      shadowBlur: num(0, 0, 150),
+      shadowColor: z.string().default("#000000"),
+      shadowOffsetX: num(0, -200, 200),
+      shadowOffsetY: num(0, -200, 200),
     }).strict(),
     // Only PLACEMENT animates. x/y are applied by the compiler onto the composite quad, so they
     // animate for free; `fontSize` cannot — it changes the rasterized glyphs, and the raster is built
-    // once per content change (not per frame) by the shared text rasterizer.
+    // once per content change (not per frame) by the shared text rasterizer. Stroke/shadow are the same
+    // shape of param as fontSize (they change the raster, not the quad), so they stay unkeyframeable too.
     keyframeable: ["x", "y"],
     phase: 1,
   },

@@ -155,7 +155,7 @@ function colorSectionActive(params: Record<string, unknown>, keys: string[]): bo
 /** Params the CANVAS owns, not the inspector — structural payloads with no meaningful text editor. */
 const STRUCTURAL_PARAMS = new Set(["group.members"]);
 
-const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "backdrop.color", "background.color"]);
+const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "text.strokeColor", "text.shadowColor", "backdrop.color", "background.color"]);
 /** polygonMask/bezierMask `points` — a structured row-per-point editor (the documented fallback for the
  *  on-viewer SVG overlay), rendered as a custom field just like the clip-effect schema's curve editors. */
 const POINT_LIST_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);

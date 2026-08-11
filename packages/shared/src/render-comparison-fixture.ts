@@ -148,6 +148,7 @@ export type RenderComparisonFixtureKey =
   | "flarex-unified-color"
   | "flarex-filter-stack"
   | "flarex-generators"
+  | "flarex-text-stroke-shadow"
   | "flarex-mismatched-aspect"
   | "flarex-host-transform"
   | "flarex-animated-roto"
@@ -156,7 +157,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-stabilize"
   | "flarex-directional-blur-max"
   | "flarex-radial-blur-max"
-  | "flarex-glow-max";
+  | "flarex-glow-max"
+  | "flarex-blur-max";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -213,6 +215,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-unified-color",
   "flarex-filter-stack",
   "flarex-generators",
+  "flarex-text-stroke-shadow",
   "flarex-mismatched-aspect",
   "flarex-host-transform",
   "flarex-animated-roto",
@@ -221,7 +224,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-stabilize",
   "flarex-directional-blur-max",
   "flarex-radial-blur-max",
-  "flarex-glow-max"
+  "flarex-glow-max",
+  "flarex-blur-max"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -809,6 +813,31 @@ function buildFlarexBlurMaxComp(kind: "directional" | "radial"): FlarexComp {
 }
 
 /**
+ * The Gaussian BLUR node at the top of its range (2026-08-11) — the last node in the palette that
+ * still truncated, now sharing glow's pyramid.
+ *
+ * `flarex-keyframed-blur` and the clip-level blur fixtures all sit BELOW the truncation point, which
+ * is the point of them: they are the evidence that the 1x path is untouched. None of them renders
+ * through a reduction, so without this fixture the pyramid would be exercised by glow only, and the
+ * blur node's own trip through it — a different source (an opaque full-frame plate rather than a
+ * sparse brightpass, so the frame EDGES carry content) — would be ungated.
+ *
+ * sigma 200 puts it at the 8x level. What it cannot see is temporal shimmer, for the same reason
+ * given on the glow fixture: one frame, two renderers.
+ */
+function buildFlarexBlurSigmaMaxComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_blurmax_comp", "Flarex gaussian blur at maximum");
+  const blur = createFlarexNode("blur", "fixture_flarex_blurmax_node");
+  blur.params = { ...blur.params, sigma: 200 };
+  comp.nodes[blur.id] = blur;
+  comp.edges = [
+    { id: "fixture_flarex_blurmax_e1", from: { nodeId: "fixture_flarex_blurmax_comp_in", socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: "fixture_flarex_blurmax_e2", from: { nodeId: blur.id, socket: "out" }, to: { nodeId: "fixture_flarex_blurmax_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
  * Glow at the top of its range (2026-08-11) — the setting the bloom PYRAMID exists for.
  *
  * `flarex-key-glow` covers glow at a normal radius, which takes the unchanged full-resolution path.
@@ -865,6 +894,45 @@ function buildFlarexGeneratorsComp(): FlarexComp {
     { id: "fixture_flarex_gen_e1", from: { nodeId: background.id, socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
     { id: "fixture_flarex_gen_e2", from: { nodeId: text.id, socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
     { id: "fixture_flarex_gen_e3", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "fixture_flarex_gen_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
+ * Text+ stroke + drop shadow (2026-08-11) — the same generator-rasterizer parity risk as
+ * `buildFlarexGeneratorsComp`, but exercising the NEW params: a thick outline and a soft offset
+ * shadow, both routed through the caption pipeline's existing `getCompositionTextStyle` →
+ * `drawTextLayer` machinery rather than a second text renderer. If stroke/shadow were wired only into
+ * one renderer's raster path, this is the fixture that would show it.
+ */
+function buildFlarexTextStrokeShadowComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_stroke_comp", "Flarex text stroke+shadow fixture");
+  const background = createFlarexNode("background", "fixture_flarex_stroke_bg");
+  background.params = { ...background.params, color: "#14202e", opacity: 1 };
+  const text = createFlarexNode("text", "fixture_flarex_stroke_text");
+  text.params = {
+    ...text.params,
+    content: "OUTLINE",
+    fontFamily: "Inter",
+    fontSize: 150,
+    fontWeight: 800,
+    color: "#ffffff",
+    align: "center",
+    x: 0.5,
+    y: 0.5,
+    strokeWidth: 10,
+    strokeColor: "#ff2d55",
+    shadowBlur: 24,
+    shadowColor: "#000000",
+    shadowOffsetX: 8,
+    shadowOffsetY: 10
+  };
+  const merge = createFlarexNode("merge", "fixture_flarex_stroke_merge");
+  for (const node of [background, text, merge]) comp.nodes[node.id] = node;
+  comp.edges = [
+    { id: "fixture_flarex_stroke_e1", from: { nodeId: background.id, socket: "out" }, to: { nodeId: merge.id, socket: "bg" } },
+    { id: "fixture_flarex_stroke_e2", from: { nodeId: text.id, socket: "out" }, to: { nodeId: merge.id, socket: "fg" } },
+    { id: "fixture_flarex_stroke_e3", from: { nodeId: merge.id, socket: "out" }, to: { nodeId: "fixture_flarex_stroke_comp_out", socket: "in" } }
   ];
   return comp;
 }
@@ -1334,6 +1402,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexFilterStackComp() };
     case "flarex-generators":
       return { effects: [], fit: "cover", flarex: buildFlarexGeneratorsComp() };
+    case "flarex-text-stroke-shadow":
+      return { effects: [], fit: "cover", flarex: buildFlarexTextStrokeShadowComp() };
     case "flarex-mismatched-aspect":
       return { effects: [], fit: "cover", flarex: buildFlarexMismatchedAspectComp() };
     case "flarex-host-transform":
@@ -1361,6 +1431,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexBlurMaxComp("radial") };
     case "flarex-glow-max":
       return { effects: [], fit: "cover", flarex: buildFlarexGlowMaxComp() };
+    case "flarex-blur-max":
+      return { effects: [], fit: "cover", flarex: buildFlarexBlurSigmaMaxComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone
