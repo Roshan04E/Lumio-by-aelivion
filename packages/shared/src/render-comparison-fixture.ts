@@ -1,4 +1,4 @@
-import type { ProjectGraph, SourceAsset, TimelineLayer } from "./types";
+import type { ProjectGraph, SourceAsset, TimelineLayer, TransitionKind } from "./types";
 import { applyCaptionTrackToComposition, captionStylePresets, createCaptionTrack, parseTranscriptInput } from "./captions";
 import { createBoxMask } from "./clip-masks";
 import { LEGACY_PROJECT_COLOR_SETTINGS, type ColorEffectLight } from "./color/color-management";
@@ -165,7 +165,9 @@ export type RenderComparisonFixtureKey =
   | "linear-blur"
   | "linear-stylize"
   | "linear-stylize-print"
-  | "linear-transition";
+  | "linear-transition"
+  | "pipeline-transition"
+  | "linear-pipeline-transition";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -238,7 +240,9 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "linear-blur",
   "linear-stylize",
   "linear-stylize-print",
-  "linear-transition"
+  "linear-transition",
+  "pipeline-transition",
+  "linear-pipeline-transition"
 ];
 
 /**
@@ -311,6 +315,16 @@ export const renderComparisonFixtureRelations: RenderComparisonFixtureRelation[]
       "slice 4's claim, as a relation: a dissolve is a two-colour mix, so mixing light cannot land on " +
       "the same picture as mixing codes. If these ever match, the transition mix has quietly gone back " +
       "to display — which the blur probe would not notice, because it is a different stage."
+  },
+  {
+    a: "linear-pipeline-transition",
+    b: "pipeline-transition",
+    relation: "different",
+    why:
+      "the same claim for the MULTI-PASS path, which brackets per pass rather than once: each pass " +
+      "decodes at its doorways and re-encodes in main(), so the mix still runs on light. If these " +
+      "match, either the per-pass bracket is not being applied or the pipeline collapsed back to the " +
+      "monolith/dissolve fallback — the failure mode this fixture pair was added to catch."
   }
 ];
 
@@ -1391,6 +1405,9 @@ interface FixtureVariant {
   /** Phase 4.2: two same-track clips joined by a junction transition, sampled MID-transition — exercises
    *  the scene pass mixing the junction in-canvas (vs the DOM overlay). */
   transition?: boolean;
+  /** Which registry transition joins the junction. Defaults to `crossDissolve` (a MONOLITH definition);
+   *  `focusPull` selects the multi-pass PIPELINE path, which assembles and chains one program per pass. */
+  transitionKind?: TransitionKind;
   /** Phase 6.3c: luma person-extraction matte on a media layer. */
   matte?: TimelineLayer["matte"];
   /** Frames Step E: parametric frame (clip mask + border chrome) on the media layer. */
@@ -1517,6 +1534,25 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
      */
     case "linear-transition":
       return { effects: [], fit: "cover", transition: true, effectLight: "linear" };
+    /**
+     * The MULTI-PASS transition pair (`focusPull` — bokeh → mix → bokeh).
+     *
+     * Every other transition fixture uses a MONOLITH definition, which compiles one program and mixes
+     * once. The pipeline family assembles one program PER PASS and chains them through a ping-pong
+     * pair, and until this fixture landed nothing rendered that path at all: all four pipeline
+     * definitions failed to link (`'uBokehRadius' : redefinition`), the scene compositor refused the
+     * frame, and the DOM fallback quietly substituted a plain dissolve. A defect visible in neither
+     * renderer's diff, because neither renderer ever ran the code.
+     *
+     * So the display arm is the regression gate for the assembler's dedupe, and the linear arm is the
+     * only coverage of the PER-PASS bracket: three passes, each decoding at its doorways and
+     * re-encoding in main(), with the intermediates round-tripping through 8-bit sRGB. If that
+     * round-trip were lossy or stored linear, this pair is where it would show.
+     */
+    case "pipeline-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "focusPull" };
+    case "linear-pipeline-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "focusPull", effectLight: "linear" };
     case "linear-stylize":
       return { effects: stylizeEffects, fit: "cover", effectLight: "linear" };
     case "linear-stylize-print":
@@ -1953,7 +1989,7 @@ Save this style now`);
     transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 100 },
     effects: colorCurvesEffects,
     transitionIn: {
-      kind: key === "advanced-transition" ? "rgbDisplace" : "crossDissolve",
+      kind: variant.transitionKind ?? (key === "advanced-transition" ? "rgbDisplace" : "crossDissolve"),
       durationSeconds: 0.4
     },
     keyframes: []

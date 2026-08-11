@@ -1,6 +1,6 @@
 {
-  "commit": "472aa9c796a2bc7c415ddecbcaf0ad1da123e401",
-  "capturedAt": "2026-08-11T17:36:35.325Z",
+  "commit": "b0c957636281b571c666cbc05a78302a8eeb083a",
+  "capturedAt": "2026-08-11T18:45:09.228Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -208,6 +208,11 @@
       "width": 1080,
       "height": 1920
     },
+    "linear-pipeline-transition": {
+      "sha256": "1e8808fe59f8336eb9797b3c36e185caa97bae7e19765053dd3a9234fb1c3ca6",
+      "width": 1080,
+      "height": 1920
+    },
     "linear-stylize": {
       "sha256": "f49ad4e5755b0d57c79a1c0713a564641ce30630b76744d05db45962e71d1f44",
       "width": 1080,
@@ -270,6 +275,11 @@
     },
     "overlap-region-effects": {
       "sha256": "83132c5ed29a993cc9f998d7b8d539d9312917b9e606094a717d91a1b9d243d1",
+      "width": 1080,
+      "height": 1920
+    },
+    "pipeline-transition": {
+      "sha256": "b9a5c166139c7a4599c62610fd0d00db4475a903b4abbe27b0232e133e087549",
       "width": 1080,
       "height": 1920
     },

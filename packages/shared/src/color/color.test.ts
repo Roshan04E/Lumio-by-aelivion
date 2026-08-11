@@ -595,6 +595,62 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   check("and the refusal names both fixes", threw.includes("sRGB storage") && threw.includes("§2.1"));
 }
 
+// 40. Pipeline-transition pass assembly: no uniform is declared twice.
+//
+//     `prepareTransition` passes the DEFINITION's params to the assembler as extras so any pass can
+//     read them by name, and a module that consumes a param declares it in its own `uniforms` too.
+//     The assembler deduped against the standard set but not between the two lists, so every param a
+//     module actually uses was emitted twice — `'uBokehRadius' : redefinition` — and GLSL ES 3.0
+//     rejects the shader, so ALL FOUR multi-pass transitions failed to compile in SceneCompositor
+//     (the DOM fallback has no `glsl` for a pipeline def and silently substituted a plain dissolve).
+//     A shader that never links is invisible to every pixel gate we have, so the invariant is
+//     asserted on the SOURCE here.
+{
+  const { listTransitions, GLSL_TYPE: GLSL_PARAM_TYPE } = await import("./transitions/registry");
+  const { PipelineAssembler } = await import("./transitions/pipeline-assembler");
+
+  const declaredNames = (src: string): string[] =>
+    [...src.matchAll(/^uniform\s+[^;]*?([A-Za-z_][A-Za-z0-9_]*)\s*;/gm)].map((m) => m[1]!);
+
+  const pipelineDefs = listTransitions().filter((d) => (d.pipeline?.passes.length ?? 0) > 0);
+  check("the pipeline transitions are registered", pipelineDefs.length >= 4);
+
+  const duplicated: string[] = [];
+  let anyCollisionExercised = false;
+  for (const def of pipelineDefs) {
+    // Exactly what prepareTransition passes.
+    const paramDecls = def.params.map((p) => `${GLSL_PARAM_TYPE[p.type]} ${p.name}`);
+    for (const pass of def.pipeline!.passes) {
+      for (const light of ["display", "linear"] as const) {
+        const src = PipelineAssembler.assemblePassShader(pass.moduleId, paramDecls, light);
+        const names = declaredNames(src);
+        const dupes = names.filter((n, i) => names.indexOf(n) !== i);
+        if (dupes.length > 0) duplicated.push(`${def.id}/${pass.moduleId}@${light}: ${[...new Set(dupes)].join(", ")}`);
+        // A module that declares one of the def's own params is the collision case; if no definition
+        // has one any more, this test has stopped testing anything and must be re-pointed.
+        if (def.params.some((p) => names.includes(p.name))) anyCollisionExercised = true;
+      }
+    }
+  }
+  check(
+    "no pipeline pass declares a uniform twice",
+    duplicated.length === 0
+  );
+  if (duplicated.length > 0) console.error("    duplicated:", duplicated.join(" | "));
+  check("...and at least one def's params DO collide with its module's (the case under test)", anyCollisionExercised);
+
+  // Every param still reaches the shader once — the dedupe must drop the duplicate, not the uniform.
+  for (const def of pipelineDefs) {
+    const paramDecls = def.params.map((p) => `${GLSL_PARAM_TYPE[p.type]} ${p.name}`);
+    const first = def.pipeline!.passes[0]!;
+    const names = declaredNames(PipelineAssembler.assemblePassShader(first.moduleId, paramDecls));
+    check(
+      `${def.id}: every definition param is declared in its first pass`,
+      def.params.every((p) => names.includes(p.name))
+    );
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} color test(s) failed.`);
   process.exit(1);

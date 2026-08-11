@@ -15,8 +15,8 @@
  *
  * ## The assertions
  *
- * TWO probes, one per stage the programme has converted, because they can fail independently: the
- * plate path (slice 1) and the transition mix (slice 4) share a setting but not a line of code.
+ * THREE probes, because the stages fail independently: the plate path (slice 1), the transition mix
+ * (slice 4, monolith path) and the multi-pass PIPELINE path share a setting but not a line of code.
  *
  * ### 1. A blurred hard edge (slice 1)
  *
@@ -167,8 +167,8 @@ async function midpointFor(light: "display" | "linear"): Promise<number> {
  */
 const CROSSFADE_FRAME = 12;
 
-function crossfadeGraphWith(light: "display" | "linear") {
-  const fixture = createRenderComparisonFixture("transition");
+function crossfadeGraphWith(light: "display" | "linear", kind: "crossDissolve" | "focusPull" = "crossDissolve") {
+  const fixture = createRenderComparisonFixture(kind === "focusPull" ? "pipeline-transition" : "transition");
   const graph = JSON.parse(JSON.stringify(fixture.graph)) as {
     projectId: string;
     composition: {
@@ -200,8 +200,11 @@ function crossfadeGraphWith(light: "display" | "linear") {
   return { graph, assets: fixture.assets };
 }
 
-async function crossfadeMidpointFor(light: "display" | "linear"): Promise<number> {
-  const { graph, assets } = crossfadeGraphWith(light);
+async function crossfadeMidpointFor(
+  light: "display" | "linear",
+  kind: "crossDissolve" | "focusPull" = "crossDissolve"
+): Promise<number> {
+  const { graph, assets } = crossfadeGraphWith(light, kind);
   const manifest = buildRenderManifest({
     projectId: graph.projectId,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the probe graph is a fixture clone
@@ -210,7 +213,7 @@ async function crossfadeMidpointFor(light: "display" | "linear"): Promise<number
     quality: "final",
     createdAt: new Date(0).toISOString()
   });
-  const file = path.join(outDir, `crossfade-${light}.png`);
+  const file = path.join(outDir, `${kind}-${light}.png`);
   await renderManifestStill({ manifest, frame: CROSSFADE_FRAME, outputLocation: file, rendererMode: "webgl" });
   const png = PNG.sync.read(fs.readFileSync(file));
   const at = (x: number, y: number): number => {
@@ -230,10 +233,27 @@ async function crossfadeMidpointFor(light: "display" | "linear"): Promise<number
   );
   assert.ok(
     spread < 2,
-    `The crossfade probe's frame is not flat (spread ${spread.toFixed(1)} codes). It is measuring ` +
+    `The ${kind} probe's frame is not flat (spread ${spread.toFixed(1)} codes). It is measuring ` +
       `something other than a black→white dissolve, so its midpoint means nothing.`
   );
   return mid;
+}
+
+/**
+ * Probe 3: the same midpoint through the MULTI-PASS path (`focusPull` — bokeh → linear-mix → bokeh).
+ *
+ * The prediction is IDENTICAL to probe 2's, and that is what makes it evidence rather than repetition.
+ * A defocus of a FLAT field is that field, so the two bokeh passes are the identity here and the mix in
+ * the middle is the same weighted sum — but it now arrives through three assembled programs, chained
+ * through the ping-pong pair, each one decoding at its doorways and re-encoding into 8-bit sRGB.
+ *
+ * So a reading of 188 says three things at once: the pipeline programs LINK at all (they did not — see
+ * the assembler's dedupe), the per-pass bracket is applied, and the intermediate round-trip is lossless.
+ * A linear arm reading 128 with probe 2 still green would mean the per-pass bracket specifically is
+ * broken while the monolith path is fine — which is exactly the split no other instrument can see.
+ */
+async function pipelineMidpointFor(light: "display" | "linear"): Promise<number> {
+  return crossfadeMidpointFor(light, "focusPull");
 }
 
 async function main(): Promise<void> {
@@ -294,6 +314,31 @@ async function main(): Promise<void> {
     `The dissolve arms differ by only ${(xLinear - xDisplay).toFixed(1)} codes; the spaces are ~60 apart.`
   );
   console.log(`  OK  the dissolve arms are ${(xLinear - xDisplay).toFixed(1)} codes apart\n`);
+
+  // ---- Probe 3: the same midpoint through the MULTI-PASS pipeline path -----------------------------
+  console.log(`Pipeline midpoint: black → white focusPull (bokeh → mix → bokeh) at progress 0.5\n`);
+  const pDisplay = await pipelineMidpointFor("display");
+  const pLinear = await pipelineMidpointFor("linear");
+  console.log("");
+  assert.ok(
+    Math.abs(pDisplay - EXPECTED_DISPLAY) <= TOLERANCE,
+    `DISPLAY arm pipeline midpoint ${pDisplay.toFixed(1)} is not ${EXPECTED_DISPLAY}±${TOLERANCE}. A defocus of ` +
+      `a flat field is the identity, so this must agree with the plain dissolve; a different number means the ` +
+      `pipeline is not running the passes it claims (or is falling back to a monolith dissolve).`
+  );
+  console.log(`  OK  multi-pass display mixes CODE values (${pDisplay.toFixed(1)} ≈ ${EXPECTED_DISPLAY})`);
+  assert.ok(
+    Math.abs(pLinear - EXPECTED_LINEAR) <= TOLERANCE,
+    `LINEAR arm pipeline midpoint ${pLinear.toFixed(1)} is not ${EXPECTED_LINEAR}±${TOLERANCE}. Reading ` +
+      `~${EXPECTED_DISPLAY} with probe 2 green means the PER-PASS bracket is broken while the monolith path is ` +
+      `fine; a value between the two means an intermediate round-trip is lossy or storing linear in 8 bits.`
+  );
+  console.log(`  OK  multi-pass linear mixes LIGHT        (${pLinear.toFixed(1)} ≈ ${EXPECTED_LINEAR})`);
+  assert.ok(
+    pLinear - pDisplay > 40,
+    `The pipeline arms differ by only ${(pLinear - pDisplay).toFixed(1)} codes; the spaces are ~60 apart.`
+  );
+  console.log(`  OK  the pipeline arms are ${(pLinear - pDisplay).toFixed(1)} codes apart\n`);
 
   console.log(`Linear-light gate PASSED. Renders in ${path.relative(repoRoot, outDir)}\n`);
 }

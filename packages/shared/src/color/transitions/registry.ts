@@ -67,7 +67,10 @@ export function applyTransitionEasing(progress: number, easing: TransitionEasing
   }
 }
 
-const GLSL_TYPE: Record<TransitionParamType, string> = {
+/** GLSL declaration type per transition param type. Exported because `SceneCompositor` declares the
+ *  same params as pipeline-pass extras and had its own copy — two tables that must agree is one too
+ *  many, and the uniform-collision test needs to build exactly what the compositor builds. */
+export const GLSL_TYPE: Record<TransitionParamType, string> = {
   float: "float",
   vec2: "vec2",
   vec3: "vec3",

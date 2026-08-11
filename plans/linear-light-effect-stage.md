@@ -518,7 +518,7 @@ which is where a compositor user notices it first.
 >
 > **The default did NOT flip, and slice 4 was not what was blocking it.** See the note under §7 / slice 3.
 >
-> **FOUND WHILE ADDING COVERAGE, NOT FIXED — a live defect that predates this programme.** Every
+> **FOUND WHILE ADDING COVERAGE — FIXED 2026-08-12, in its own commit, ahead of slice 3.** Every
 > MULTI-PASS transition (`focusPull`, `liquidMorph`, `portal`, and the fourth `pipeline` def) fails to
 > compile in `SceneCompositor` and therefore in the shipping preview and both exports:
 >
@@ -538,10 +538,19 @@ which is where a compositor user notices it first.
 > transitions silently render as a cross dissolve there instead.
 >
 > The fix is one dedupe (name-key the merged uniform list, not just the standard set), but it changes
-> what four shipped transitions DO, so it is not being folded into a commit whose claim is "no display
-> fixture moved". That is why this slice ships with a single-pass fixture pair only: the intended
-> `focusPull` pair (display + linear, the only coverage the per-pass bracket could have) is written and
-> was reverted when it hit this, and it should be the first thing added back after the dedupe lands.
+> what four shipped transitions DO, so it was not folded into a commit whose claim is "no display
+> fixture moved". It shipped alone instead, with the invariant asserted on the assembled SOURCE
+> (`color.test.ts`: no pipeline pass may declare a uniform twice, in either light space, built from
+> exactly what `prepareTransition` passes) — because a shader that never links is invisible to every
+> pixel gate in the repo, which is how this survived.
+>
+> Checked before fixing: **no existing baseline had photographed the dissolve fallback.** No fixture
+> referenced any of the four, so all 70 baselines stayed byte-unchanged and the only new hashes were
+> the two fixtures that commit added. The `focusPull` pair (`pipeline-transition` /
+> `linear-pipeline-transition`) landed there too, giving the per-pass bracket the coverage this slice
+> shipped without — plus a third `render:linear-gate` probe measuring **128.0 / 188.0** through three
+> chained programs, which is the same prediction as the monolith dissolve and therefore also proves the
+> intermediate 8-bit sRGB round-trip is lossless.
 
 **Includes:** the transition harness (`color/transitions/registry.ts`, whose rule at :13 is the same rule
 in the same words), the two-side mix, and the transition fixtures' linear-arm bars.

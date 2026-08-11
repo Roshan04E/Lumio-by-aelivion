@@ -50,8 +50,19 @@ export class PipelineAssembler {
     const module = ATOMIC_MODULES[moduleId];
     if (!module) throw new Error(`Unknown transition module: ${moduleId}`);
 
+    // Dedupe against the standard set AND against each other. `prepareTransition` passes the
+    // DEFINITION's params as extras so any pass can read them by name, and a module that consumes a
+    // param declares it too — so every param a module actually uses arrived here twice and GLSL ES 3.0
+    // rejects the redefinition, killing the whole transition. First declaration wins: the module's own
+    // (identical type, since the extra is derived from the same param) when it declares one.
+    const seen = new Set<string>(STANDARD_UNIFORM_NAMES);
     const moduleUniforms = [...module.uniforms, ...extraUniforms]
-      .filter((u) => !STANDARD_UNIFORM_NAMES.has(uniformName(u)))
+      .filter((u) => {
+        const name = uniformName(u);
+        if (seen.has(name)) return false;
+        seen.add(name);
+        return true;
+      })
       .map((u) => `uniform ${u};`)
       .join("\n");
 

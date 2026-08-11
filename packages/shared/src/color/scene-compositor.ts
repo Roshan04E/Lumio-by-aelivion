@@ -41,6 +41,7 @@ import {
 import {
   buildTransitionFragmentShader,
   resolveTransitionParams,
+  GLSL_TYPE as GLSL_PARAM_TYPE,
   type TransitionDefinition,
   type TransitionLightSpace,
   type TransitionParam,
@@ -948,14 +949,6 @@ const MAX_PYRAMID_REDUCTION = 8;
  * `display` is every path in the product before 2026-08-11 and every path this slice does not touch.
  */
 type EffectLightSpace = "display" | "linear";
-
-/** GLSL declaration types for transition params (mirrors registry.ts's private GLSL_TYPE). */
-const GLSL_PARAM_TYPE: Record<TransitionParam["type"], string> = {
-  float: "float",
-  vec2: "vec2",
-  vec3: "vec3",
-  bool: "bool",
-};
 
 /** Set a uniform whose GLSL type is inferred from the JS value shape (pipeline pass params). */
 function setUniformByValue(
