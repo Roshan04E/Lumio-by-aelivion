@@ -156,7 +156,15 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
    * 0.002 like their siblings: measured 0.000% on the sweep that added them.
    */
   "linear-glow": 0.002,
-  "linear-blur": 0.002
+  "linear-blur": 0.002,
+  /**
+   * The linear arm's stylize pair. Same bars as their display twins (`stylize` 0.001%, `stylize-print`
+   * 0.051%) because they render the same picture — the artistic family is `displayReferred` and opts
+   * out of the linear stage, so these are byte-for-byte their twins and carry the twins' cross-renderer
+   * noise, no more.
+   */
+  "linear-stylize": 0.005,
+  "linear-stylize-print": 0.005
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

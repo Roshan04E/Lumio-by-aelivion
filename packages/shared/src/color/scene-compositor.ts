@@ -51,6 +51,7 @@ import { defaultSession, type RuntimeSession } from "../kernel/session";
 import {
   buildFragmentEffectPassShader,
   buildFragmentEffectShader,
+  effectLightFor,
   type FragmentEffectLightSpace,
   resolveFragmentEffectParams,
   type FragmentEffectDefinition,
@@ -2062,12 +2063,17 @@ export class SceneCompositor {
   private prepareFragmentEffect(
     def: FragmentEffectDefinition,
     pass: FragmentEffectPassDefinition | undefined,
-    light: FragmentEffectLightSpace,
+    stageLight: FragmentEffectLightSpace,
   ): CompiledFragmentEffect {
     // The light space is part of the program's identity, in BOTH maps: this per-context program cache
     // and the assembled-source memo in the registry. They are one identity split across two caches, and
     // a variant that reached one but not the other would be an order-dependent wrong picture — the
     // worst kind to reproduce, because it depends on which project was opened first.
+    //
+    // Resolved through `effectLightFor` rather than used raw, for exactly that reason: a
+    // `displayReferred` effect must key as "display" in this cache and in the registry's, or the two
+    // disagree about which program a definition owns.
+    const light = effectLightFor(def, stageLight);
     const key = pass ? `${def.id}#${pass.id}@${light}` : `${def.id}@${light}`;
     const existing = this.fragmentPrograms.get(key);
     if (existing) {

@@ -90,6 +90,41 @@ export interface FragmentEffectDefinition {
    * sets is overwritten by the registry's derivation.
    */
   dependencies?: readonly FragmentEffectDependency[];
+  /**
+   * This effect is AUTHORED IN DISPLAY SPACE end to end, and the linear stage must leave it alone.
+   *
+   * Set it and the harness neither decodes on the way in nor encodes on the way out, so the body sees
+   * and returns exactly what it saw and returned before the linear stage existed — in a linear project
+   * as well as a display one. It is an opt-out from the light, not a conversion of it.
+   *
+   * WHY THIS EXISTS RATHER THAN A TABLE OF RE-TUNED CONSTANTS. The plan (§3.4) expected the artistic
+   * family to need new luma thresholds in linear. Measured, that is not the shape of the problem:
+   * these effects do not MIX light, they DRAW a picture out of authored display-referred numbers, and
+   * the numbers are not only thresholds.
+   *
+   *   · `stylize.ts` pivots contrast at `(c - 0.5) * k + 0.5`. 0.5 is middle grey on a display graph;
+   *     linear middle grey is 0.214. Run in linear it crushes and saturates everything below mid —
+   *     which is exactly what the render showed: olive hillside, blood-red bokeh, over-saturated ground.
+   *   · `halftone` returns `mix(vec3(0.97), vec3(0.05), ink)` — authored PAPER and INK values. Emitted
+   *     as linear they are the wrong paper and the wrong ink.
+   *   · the cel-band quantizer bands LUMA into N steps; banding linear luma puts every edge somewhere
+   *     else, because most of a picture's linear luma sits low.
+   *
+   * Converting a threshold cannot fix a pivot, an output constant or a quantizer. Re-authoring all of
+   * them would mean re-designing four shipped looks by eye, with no reference for what they should
+   * become — and freezing the result into a baseline, which is what makes a bad tuning permanent.
+   *
+   * This is not a special case invented here. It is the rule `color/cpu.ts` already applies to curves,
+   * wheels, HSL and .cube LUTs — *authored on display graphs, so run them on display values* — and the
+   * one the linear-light plan itself mandates for grain (§3.4). The family that needed an exception was
+   * simply larger than the plan expected.
+   *
+   * The consequence is deliberate and worth stating: for these effects the display and linear arms are
+   * BIT-IDENTICAL. That is the correct answer, not a missing feature. What the linear stage buys is
+   * correct light in the operations that mix it — blur, glow, bloom — and those are unaffected by this
+   * flag because they are not fragment effects.
+   */
+  displayReferred?: boolean;
 }
 
 /** Semantic environment/data axes an effect's output depends on (ADR-010 dependency declarations).
@@ -238,11 +273,26 @@ ${main}
  */
 export type FragmentEffectLightSpace = "display" | "linear";
 
+/**
+ * The light space an effect actually runs in: the stage's, unless the definition opted out.
+ *
+ * One choke point, deliberately. Both shader builders below and the compositor's own program cache key
+ * off this, so a `displayReferred` effect resolves to `display` everywhere or nowhere — a flag honoured
+ * in one cache and not the other is an order-dependent wrong picture.
+ */
+export function effectLightFor(
+  def: FragmentEffectDefinition,
+  stage: FragmentEffectLightSpace
+): FragmentEffectLightSpace {
+  return def.displayReferred ? "display" : stage;
+}
+
 /** Assemble the full fragment shader for a SINGLE-PASS definition. Memoized by (id, light space). */
 export function buildFragmentEffectShader(
   def: FragmentEffectDefinition,
-  light: FragmentEffectLightSpace = "display"
+  requested: FragmentEffectLightSpace = "display"
 ): string {
+  const light = effectLightFor(def, requested);
   const key = `${def.id}@${light}`;
   const cached = shaderCache.get(key);
   if (cached) return cached;
@@ -259,8 +309,9 @@ export function buildFragmentEffectShader(
 export function buildFragmentEffectPassShader(
   def: FragmentEffectDefinition,
   pass: FragmentEffectPassDefinition,
-  light: FragmentEffectLightSpace = "display"
+  requested: FragmentEffectLightSpace = "display"
 ): string {
+  const light = effectLightFor(def, requested);
   const passes = def.passes ?? [];
   const key = `${def.id}#${pass.id}@${light}`;
   const cached = shaderCache.get(key);

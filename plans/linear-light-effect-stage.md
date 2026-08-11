@@ -239,6 +239,35 @@ Every 50% mix moves from code 128 to code 188:
 
 This is the largest re-tuning cost in the whole change and it is not optional.
 
+> **RESOLVED 2026-08-11, and this section's premise was wrong. There was no re-tuning cost.**
+>
+> The prediction below — new luma constants for ink, comic-print, subject-aware and Kuwahara — assumes
+> the problem is *thresholds*. Measured, it is not. Rendering `stylize` in both arms before touching a
+> constant produced an olive hillside, blood-red bokeh and a heavily over-saturated ground, and reading
+> the code the causes are not thresholds at all:
+>
+> - `stylize.ts` pivots contrast at `(c - 0.5) * k + 0.5`. **0.5 is middle grey on a display graph;
+>   linear middle grey is 0.214.** In linear that pivot crushes and saturates everything below mid.
+> - `halftone` returns `mix(vec3(0.97), vec3(0.05), ink)` — authored **paper** and **ink** values.
+>   Emitted as linear they are the wrong paper and the wrong ink.
+> - the cel-band quantizer bands *luma* into N steps; banding linear luma relocates every band edge,
+>   because most of a picture's linear luma sits low.
+>
+> Converting a threshold cannot fix a pivot, an output constant or a quantizer, and re-authoring all of
+> them means re-designing four shipped looks by eye with no reference for what they should become.
+>
+> **The right answer is the one this section already reaches for grain, applied more widely than it
+> expected: these effects are authored in display space end to end, so run them there.** Shipped as
+> `displayReferred` on the effect definition (`fragment-effects/registry.ts`), set on `sketch`, `oldTv`,
+> `glitchFx`, `halftone`, `posterize` and the `stylize` pass-graph; the harness then neither decodes in
+> nor encodes out for them. Grain needs no separate rule — it is the same rule.
+>
+> Consequence, and it is the correct one rather than a gap: for these effects the display and linear
+> arms are **bit-identical**, proven by sha256 (`linear-stylize` == `stylize`, `linear-stylize-print` ==
+> `stylize-print`) against a control that must differ and does (`linear-glow` != `glow`). What linear
+> light buys is correct light in the operations that MIX it — blur, glow, bloom — none of which are
+> fragment effects. **Slice 2's "worse before better" phase does not exist.**
+
 - **Any effect with a hardcoded luma threshold gets a different picture, not just a different look.** The
   harness prelude's `_luma()` (registry.ts:113) is fed encoded values today. Every constant compared
   against it in `fragment-effects/builtins.ts` was chosen against display values. In linear, shadow

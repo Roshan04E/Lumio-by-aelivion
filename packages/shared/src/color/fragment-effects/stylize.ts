@@ -390,6 +390,9 @@ vec4 effect(vec2 uv) {
 
 export const STYLIZE_PAINTERLY: FragmentEffectDefinition = {
   id: STYLIZE_EFFECT_ID,
+  // Authored end to end in display space — the contrast pivot at 0.5, the cel-band quantizer and
+  // the paper/ink constants are all display-referred numbers. See `displayReferred` in the registry.
+  displayReferred: true,
   name: "Stylize",
   category: "Stylize",
   params: [

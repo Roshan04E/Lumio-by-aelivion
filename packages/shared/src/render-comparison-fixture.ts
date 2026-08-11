@@ -162,7 +162,9 @@ export type RenderComparisonFixtureKey =
   | "flarex-blur-max"
   | "glow-edge-max"
   | "linear-glow"
-  | "linear-blur";
+  | "linear-blur"
+  | "linear-stylize"
+  | "linear-stylize-print";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -232,7 +234,9 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-blur-max",
   "glow-edge-max",
   "linear-glow",
-  "linear-blur"
+  "linear-blur",
+  "linear-stylize",
+  "linear-stylize-print"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -1405,6 +1409,28 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: linearGlowEffects, fit: "cover", effectLight: "linear" };
     case "linear-blur":
       return { effects: blurEffects, fit: "cover", effectLight: "linear" };
+    /**
+     * The linear arm's STYLIZE pair — the coverage the fragment stage had none of.
+     *
+     * Same plate, same effects, same params as `stylize` and `stylize-print`; one field different.
+     * What they assert is unusual and worth stating plainly: these must render BIT-IDENTICALLY to
+     * their display twins, because the artistic family is `displayReferred` and opts out of the light
+     * (see the registry's flag). A DIFFERENCE here is the failure, not a pass.
+     *
+     * That makes them a real gate rather than a formality. They fail if the opt-out is ever dropped,
+     * if a new artistic effect forgets the flag, or if the two shader caches disagree about which
+     * program a definition owns — the order-dependent bug `effectLightFor` exists to prevent. Before
+     * the flag, `stylize` in linear rendered an olive hillside and blood-red bokeh; that is what these
+     * fixtures now hold the line against.
+     *
+     * `print` as the second one because it is the hardest case: it thresholds hard (halftone dot
+     * coverage, shadow hatching) AND emits authored paper/ink constants, so it moves visibly if either
+     * half of the opt-out breaks.
+     */
+    case "linear-stylize":
+      return { effects: stylizeEffects, fit: "cover", effectLight: "linear" };
+    case "linear-stylize-print":
+      return { effects: stylizePrintEffects, fit: "cover", effectLight: "linear" };
     case "glow-edge-max":
       // Scale 1 with the size in the font — see `textFontSize`. At scale 5 this fixture rendered a
       // bloom so diffuse it was invisible, and read 0.000% for the wrong reason.

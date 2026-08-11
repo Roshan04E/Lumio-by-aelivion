@@ -182,6 +182,8 @@ vec4 effect(vec2 uv) {
 
 const SKETCH: FragmentEffectDefinition = {
   id: builtinFragmentEffectId("sketch"),
+  // Authored end to end in display space — see `displayReferred`.
+  displayReferred: true,
   name: "Pencil Sketch",
   category: "Stylize",
   params: [
@@ -215,6 +217,8 @@ vec4 effect(vec2 uv) {
 
 const OLD_TV: FragmentEffectDefinition = {
   id: builtinFragmentEffectId("oldTv"),
+  // Authored end to end in display space — see `displayReferred`.
+  displayReferred: true,
   name: "Old TV",
   category: "Stylize",
   params: [
@@ -251,6 +255,8 @@ vec4 effect(vec2 uv) {
 
 const GLITCH_FX: FragmentEffectDefinition = {
   id: builtinFragmentEffectId("glitchFx"),
+  // Authored end to end in display space — see `displayReferred`.
+  displayReferred: true,
   name: "Glitch",
   category: "Stylize",
   params: [
@@ -280,6 +286,8 @@ vec4 effect(vec2 uv) {
 
 const HALFTONE: FragmentEffectDefinition = {
   id: builtinFragmentEffectId("halftone"),
+  // Authored end to end in display space — see `displayReferred`.
+  displayReferred: true,
   name: "Halftone",
   category: "Stylize",
   params: [
@@ -308,6 +316,8 @@ vec4 effect(vec2 uv) {
 
 const POSTERIZE: FragmentEffectDefinition = {
   id: builtinFragmentEffectId("posterize"),
+  // Authored end to end in display space — see `displayReferred`.
+  displayReferred: true,
   name: "Posterize",
   category: "Stylize",
   params: [{ name: "levels", type: "float", default: 5, min: 2, max: 16, step: 1, label: "Levels" }],
