@@ -157,12 +157,32 @@ ${main}
 `;
 }
 
-/** Assemble the full fragment shader for a SINGLE-PASS definition. Memoized by id (definitions are static). */
-export function buildFragmentEffectShader(def: FragmentEffectDefinition): string {
-  const cached = shaderCache.get(def.id);
+/**
+ * Which light the STAGE hands these bodies, and therefore part of the assembled shader's identity.
+ *
+ * Bodies never convert — the registry's rule above stands, and the harness converts once for everyone.
+ * But an assembled shader is only valid for the space it was assembled for, and the cache below is a
+ * process-lifetime memo keyed on the definition. A project setting that changes the space would
+ * otherwise be answered with whatever variant happened to be compiled first, for the rest of the
+ * session — an order-dependent wrong picture, which is the worst kind to reproduce.
+ *
+ * Slice 1 passes `display` from the compositor for every fragment pass, because slice 1 leaves the
+ * fragment stage display-referred. That is a real value read from a real variable rather than a
+ * placeholder: when slice 2 moves the nest into linear, the value changes at the call site and these
+ * keys follow it with no edit here.
+ */
+export type FragmentEffectLightSpace = "display" | "linear";
+
+/** Assemble the full fragment shader for a SINGLE-PASS definition. Memoized by (id, light space). */
+export function buildFragmentEffectShader(
+  def: FragmentEffectDefinition,
+  light: FragmentEffectLightSpace = "display"
+): string {
+  const key = `${def.id}@${light}`;
+  const cached = shaderCache.get(key);
   if (cached) return cached;
   const src = assembleShader(def, def.glsl, 0, true);
-  shaderCache.set(def.id, src);
+  shaderCache.set(key, src);
   return src;
 }
 
@@ -171,9 +191,13 @@ export function buildFragmentEffectShader(def: FragmentEffectDefinition): string
  * assembled source is compiled by every renderer (web preview, browser export, Remotion) — the
  * parity-by-construction law extends to graphs unchanged.
  */
-export function buildFragmentEffectPassShader(def: FragmentEffectDefinition, pass: FragmentEffectPassDefinition): string {
+export function buildFragmentEffectPassShader(
+  def: FragmentEffectDefinition,
+  pass: FragmentEffectPassDefinition,
+  light: FragmentEffectLightSpace = "display"
+): string {
   const passes = def.passes ?? [];
-  const key = `${def.id}#${pass.id}`;
+  const key = `${def.id}#${pass.id}@${light}`;
   const cached = shaderCache.get(key);
   if (cached) return cached;
   const isFinal = passes.length > 0 && passes[passes.length - 1]!.id === pass.id;

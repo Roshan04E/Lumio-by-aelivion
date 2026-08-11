@@ -62,6 +62,7 @@ import {
   sceneTexture,
   activeFrame,
   type ResourceHandle,
+  type ColorEffectLight,
 } from "@orreris/shared";
 import { isPreviewSuspendedForExport } from "../export/export-preview-suspend";
 import { KERNEL_FLAGS, readKernelFlag } from "../playback/kernel-flags";
@@ -450,6 +451,12 @@ export interface ScenePreviewCanvasProps {
   width: number;
   height: number;
   backgroundColor: string;
+  /**
+   * Which light the effect stage mixes in — the composition's `settings.color.effectLight`, normalized
+   * by the caller. Absent means `display`, which is what a project saved before the setting existed
+   * means and what any caller that has not been taught about it gets.
+   */
+  effectLight?: ColorEffectLight | undefined;
   currentTime: number;
   isPlaying: boolean;
   /** Live map of each layer's graded canvas, populated by the hidden WebglMediaLayers. */
@@ -537,6 +544,7 @@ export function ScenePreviewCanvas({
   width,
   height,
   backgroundColor,
+  effectLight,
   currentTime,
   isPlaying,
   gradedRef,
@@ -867,8 +875,8 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     onFailureRef.current?.();
   };
   // Keep the latest inputs in a ref so the rAF playback loop reads live values without re-subscribing.
-  const inputsRef = useRef({ layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexGradeCompare, flarexVirtualLayers });
-  inputsRef.current = { layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexGradeCompare, flarexVirtualLayers };
+  const inputsRef = useRef({ layers, width, height, backgroundColor, effectLight, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexGradeCompare, flarexVirtualLayers });
+  inputsRef.current = { layers, width, height, backgroundColor, effectLight, currentTime, isPlaying, renderScale, transitions, onFrameRendered, mediaSourceAlias, nestedGroups, flarexComps, flarexPreviewRoots, flarexGradeCompare, flarexVirtualLayers };
   // Event-driven redraw: composite while playing, or for a settle window after any input change /
   // async raster arrival. Idle (paused, settled) costs ~one cheap timestamp check per frame, not a
   // full recomposite — this is what keeps the timeline + viewer responsive in scene mode.
@@ -968,7 +976,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
   // new graph and thus a new `layers` array identity. Relying on that is exactly the coupling the
   // kernel migration is unpicking, and an explicit dependency costs nothing: the memo behind it is
   // keyed on `graph.flarexComps`, so its identity is stable while the dots are.
-  useEffect(requestDraw, [layers, width, height, backgroundColor, currentTime, isPlaying, renderScale, transitions, nestedGroups, flarexPreviewRoots, flarexGradeCompare]);
+  useEffect(requestDraw, [layers, width, height, backgroundColor, effectLight, currentTime, isPlaying, renderScale, transitions, nestedGroups, flarexPreviewRoots, flarexGradeCompare]);
 
   useEffect(() => {
     disposedRef.current = false;
@@ -1150,7 +1158,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
     const drawStart = performance.now();
     const compositor = compositorRef.current;
     if (!compositor || compositor.isContextLost() || failedRef.current || contextLostRef.current || disposedRef.current) return;
-    const { layers: ls, width: w, height: h, backgroundColor: bg, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexPreviewRoots: fxRoots, flarexGradeCompare: fxCompare, flarexVirtualLayers: fxVirtual } = inputsRef.current;
+    const { layers: ls, width: w, height: h, backgroundColor: bg, effectLight: fxLight, currentTime: t, isPlaying: playing, renderScale: rScale, transitions: tPairs, onFrameRendered: frameRendered, mediaSourceAlias: alias, nestedGroups: nestGroups, flarexComps: fxComps, flarexPreviewRoots: fxRoots, flarexGradeCompare: fxCompare, flarexVirtualLayers: fxVirtual } = inputsRef.current;
     // Logical comp (w/h) drives text layout + the matte; the GPU BACKING renders at comp*renderScale.
     // Element-box half-extents (logical comp px) scale with it; media/mask are scale-invariant/normalized.
     const renderW = Math.max(1, Math.round(w * rScale));
@@ -1734,7 +1742,7 @@ const PLACEHOLDER_HANDLE: ResourceHandle = { key: "", generation: -1 };
       mediaPool: sharedMediaRenderersRef.current,
     });
 
-    const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t };
+    const spec: SceneFrameSpec = { width: renderW, height: renderH, backgroundColor: bg, layers: draws, debugFrameTime: t, effectLight: fxLight };
     try {
       // HOT SPOT: composite + present (renderFrame ends in presentFrame). Unlike `frameProfiler`,
       // which only records while the transport is PLAYING, this fires whenever the call exceeds 40ms —

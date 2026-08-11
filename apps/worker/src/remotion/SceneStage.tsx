@@ -19,6 +19,8 @@ import {
   SceneTextRasterizer,
   buildSceneDraws,
   colorPipelineCacheKey,
+  normalizeProjectColorSettings,
+  type ColorEffectLight,
   effectiveTransitionDuration,
   effectsWithLayerRegionMask,
   findTransitionPairs,
@@ -218,6 +220,11 @@ class SceneController {
     private readonly height: number,
     private readonly backgroundColor: string,
     private readonly regionPassModel: boolean,
+    // Which light the effect stage mixes in (`manifest.output.color.effectLight`, normalized at manifest
+    // build time). Threaded exactly like `regionPassModel` above and for the same reason: it is recorded
+    // in the manifest so the cloud render mixes light the same way the preview that produced the manifest
+    // did. Never default it here — an absent setting already means "display" one layer up.
+    private readonly effectLight: ColorEffectLight,
     // Compound-clip group specs (from `manifest.nestedGroups`, rebuilt into a Map by the caller). `layers`
     // passed into `composite()` already carries nested children flattened in as ordinary entries; this is
     // consulted only to fold them back into a group + build the compound clip's shell.
@@ -368,7 +375,8 @@ class SceneController {
       width: this.width,
       height: this.height,
       backgroundColor: this.backgroundColor || "#000000",
-      layers: draws
+      layers: draws,
+      effectLight: this.effectLight
     };
     this.compositor.renderFrame(spec);
     return true;
@@ -693,7 +701,16 @@ export function SceneStage({ manifest }: { manifest: RenderManifest }) {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     try {
-      controllerRef.current = new SceneController(canvas, width, height, "#000000", manifest.regionPassModel ?? false, nestedGroups, manifest.flarexComps);
+      controllerRef.current = new SceneController(
+        canvas,
+        width,
+        height,
+        "#000000",
+        manifest.regionPassModel ?? false,
+        normalizeProjectColorSettings(manifest.output.color).effectLight,
+        nestedGroups,
+        manifest.flarexComps
+      );
     } catch (error) {
       console.error("SceneStage: SceneCompositor init failed", error);
       controllerRef.current = null;

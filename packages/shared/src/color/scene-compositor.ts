@@ -27,7 +27,9 @@ import {
   RenderTarget,
   bytesPerPixel,
   supportsHalfFloatRenderTarget,
+  supportsSrgbRenderTarget,
   type RenderTargetPrecision,
+  type TargetColorEncoding,
   compileShader,
   createFullscreenVao,
   createGl,
@@ -49,12 +51,14 @@ import { defaultSession, type RuntimeSession } from "../kernel/session";
 import {
   buildFragmentEffectPassShader,
   buildFragmentEffectShader,
+  type FragmentEffectLightSpace,
   resolveFragmentEffectParams,
   type FragmentEffectDefinition,
   type FragmentEffectPassDefinition,
   type FragmentEffectParam,
 } from "./fragment-effects/registry";
 import type { BlendMode } from "../types";
+import { rec709CodeToLinear, type ColorEffectLight } from "./color-management";
 import type { ColorPipeline, GradeCompare } from "./types";
 import { MediaWebGLRenderer } from "./media-renderer";
 import { frameProfiler, type CompositorProfilerSnapshot } from "./frame-profiler";
@@ -504,6 +508,15 @@ export interface SceneFrameSpec {
   layers: SceneDraw[];
   /** Diagnostic-only preview/export time for upload tracing. */
   debugFrameTime?: number | undefined;
+  /**
+   * Which light the effect stage mixes in — `composition.settings.color.effectLight`, threaded from the
+   * render manifest by each renderer (linear-light programme, slice 1).
+   *
+   * ABSENT MEANS `display`, and that default is load-bearing rather than incidental: it is what every
+   * project saved before the setting existed means, and what any caller that has not been taught about
+   * it gets. A caller that forgets this field renders exactly what it rendered yesterday.
+   */
+  effectLight?: ColorEffectLight | undefined;
 }
 
 /**
@@ -610,6 +623,29 @@ interface PassGraphTarget {
   lastUsedMs: number;
 }
 
+/**
+ * The stage boundary's transfer pair (linear-light programme, slice 1).
+ *
+ * These are the EXACT GLSL twins of `rec709CodeToLinear` / `rec709LinearToCode`
+ * (`color-management.ts`), which the grade stage already uses — so "linear" means one thing in this
+ * product, not two. Keeping them identical is not tidiness: the effect stage decodes what the grade
+ * stage encoded, and a boundary whose halves disagree by even a curve segment produces a picture that
+ * looks like a grading bug rather than a colour-space bug.
+ *
+ * A second alignment makes the storage decision exact rather than merely good: this piecewise curve IS
+ * the sRGB transfer function, which is what `SRGB8_ALPHA8` hardware applies. So a shader decode
+ * followed by the fixed-function encode on write is an identity round trip, and the plate stores the
+ * source's original bytes back. The linear stage costs no precision on entry at all.
+ */
+const TRANSFER_GLSL = `
+vec3 sceneToLinear(vec3 c){
+  return mix(c / 12.92, pow(max(c + 0.055, vec3(0.0)) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+vec3 sceneToDisplay(vec3 c){
+  vec3 hi = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+  return mix(c * 12.92, hi, step(vec3(0.0031308), c));
+}`;
+
 const COMPOSITE_VS = `#version 300 es
 in vec3 a_posw;     // NDC corner (xy) + projective w (z) for perspective tilt
 in vec2 a_uv;       // source/plate uv, bottom-left origin
@@ -639,8 +675,12 @@ uniform int uBlend;
 uniform vec2 uFitScale; // comp/draw per axis (object-fit, content zoom folded in); (1,1) = fill
 uniform vec2 uContentPan; // pan the source within the frame (frame space)
 uniform vec4 uCrop;       // edge insets: left, right, top, bottom (fractions of the frame)
+// S6, the linear stage's EXIT. Set per-draw, so the fast path (no blur/glow) never sets it and stays
+// byte-identical. uSrc is the finished linear plate; the accumulator below is display-referred.
+uniform bool uFromLinear;
 out vec4 fragColor;
 ${BLEND_GLSL}
+${TRANSFER_GLSL}
 void main(){
   // Crop trims the frame edges → the trimmed area reads transparent (the backdrop shows through).
   if (v_uv.x < uCrop.x || v_uv.x > 1.0 - uCrop.y || v_uv.y > 1.0 - uCrop.z || v_uv.y < uCrop.w) {
@@ -653,6 +693,9 @@ void main(){
   if (all(greaterThanEqual(mediaUv, vec2(0.0))) && all(lessThanEqual(mediaUv, vec2(1.0)))) {
     src = texture(uSrc, mediaUv);
   }
+  // ENCODE before anything else touches it: mask coverage, opacity and the blend all belong to the
+  // display-referred composite (slice 3 moves them), so they must see display values.
+  if (uFromLinear) src.rgb = sceneToDisplay(src.rgb);
   if (uHasMask) {
     // The clip-mask matte is COMP-space; sample it at the fragment's comp position, not v_uv. For a
     // comp-filling quad the two coincide, but for an element-box (text/shape) or tilted quad v_uv is
@@ -691,7 +734,11 @@ uniform bool uHasMask;
 uniform vec2 uFitScale;     // object-fit, with content zoom folded in by JS
 uniform vec2 uContentPan;   // pan the source within the frame (frame space)
 uniform vec4 uCrop;         // edge insets: left, right, top, bottom (fractions of the frame)
+// S1, the linear stage's ENTRY. Folded into this pass rather than added as one: the effect path is
+// already 3-5 full-screen passes on an integrated GPU and a sixth for a pow() is a real cost.
+uniform bool uToLinear;
 out vec4 fragColor;
+${TRANSFER_GLSL}
 void main(){
   // Crop trims the frame edges → the trimmed area reads transparent (shows what's below).
   if (v_uv.x < uCrop.x || v_uv.x > 1.0 - uCrop.y || v_uv.y > 1.0 - uCrop.z || v_uv.y < uCrop.w) { fragColor = vec4(0.0); return; }
@@ -700,6 +747,7 @@ void main(){
   if (all(greaterThanEqual(mediaUv, vec2(0.0))) && all(lessThanEqual(mediaUv, vec2(1.0)))) {
     src = texture(uSrc, mediaUv);
   }
+  if (uToLinear) src.rgb = sceneToLinear(src.rgb);
   if (uHasMask) src.a *= texture(uMask, v_uv).a;
   fragColor = src; // opacity is already baked into uSrc
 }`;
@@ -716,7 +764,12 @@ uniform int uRadius;    // half-width in taps
 uniform float uSigma;
 uniform bool uPremultIn;
 uniform bool uUnpremultOut;
+// Set only when the blur's SOURCE is a display-referred texture the linear stage is reading in — the
+// region-blur case (S8), where the input is the nest accumulator rather than an already-linear plate.
+// Applied per tap and BEFORE the premultiply, because premultiplying is a light operation.
+uniform bool uToLinear;
 out vec4 fragColor;
+${TRANSFER_GLSL}
 void main(){
   float twoSigma2 = max(2.0 * uSigma * uSigma, 1e-4);
   vec4 acc = vec4(0.0);
@@ -729,6 +782,7 @@ void main(){
     // into the comp corners/edges (the leak). Still divide by the full Gaussian weight so the edge
     // fades out smoothly instead of brightening.
     vec4 t = (any(lessThan(suv, vec2(0.0))) || any(greaterThan(suv, vec2(1.0)))) ? vec4(0.0) : texture(uTex, suv);
+    if (uToLinear) t.rgb = sceneToLinear(t.rgb);
     if (uPremultIn) t.rgb *= t.a;
     acc += t * wt;
     wsum += wt;
@@ -765,11 +819,25 @@ precision highp float;
 in vec2 v_uv;
 uniform sampler2D uSrc;
 uniform float uThreshold;
+/**
+ * The knee's top edge, supplied explicitly ONLY by the linear stage (see uExplicitKnee).
+ *
+ * The threshold is a DISPLAY-REFERRED control and has to stay one: 0.7 in display is ≈0.45 in linear,
+ * so feeding a stored 0.7 straight to a linear luma raises the gate enormously and most existing glows
+ * would simply stop appearing. Both ends of the knee are therefore converted on the CPU, where the
+ * conversion is exact and free, rather than the shader guessing at one of them.
+ *
+ * Display mode keeps deriving the top edge in-shader — the same instruction on the same values as
+ * before this uniform existed, so the byte-identity claim needs no floating-point argument.
+ */
+uniform float uThresholdHi;
+uniform bool uExplicitKnee;
 out vec4 fragColor;
 void main(){
   vec4 c = texture(uSrc, v_uv);
   float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
-  float w = smoothstep(uThreshold, min(1.0, uThreshold + 0.25), l) * c.a;
+  float hi = uExplicitKnee ? uThresholdHi : min(1.0, uThreshold + 0.25);
+  float w = smoothstep(uThreshold, hi, l) * c.a;
   fragColor = vec4(c.rgb, w);
 }`;
 
@@ -816,9 +884,14 @@ in vec2 v_uv;
 uniform sampler2D uTex;
 uniform vec2 uTexel;      // 1 / source size
 uniform bool uPremultIn;
+// Same role as BLUR_FS's: only the FIRST hop can be reading a display-referred source (S8), and only
+// then. Later hops read pyramid levels, which are already linear.
+uniform bool uToLinear;
 out vec4 fragColor;
+${TRANSFER_GLSL}
 vec4 tap(vec2 uv){
   vec4 t = texture(uTex, uv);
+  if (uToLinear) t.rgb = sceneToLinear(t.rgb);
   if (uPremultIn) t.rgb *= t.a;
   return t;
 }
@@ -882,6 +955,12 @@ const MAX_BLUR_RADIUS = 96;
  * it lets sigma reach 256 px, past the top of the node's declared range.
  */
 const MAX_PYRAMID_REDUCTION = 8;
+
+/**
+ * Which light an effect-stage pass mixes in — and therefore which target pool it draws from.
+ * `display` is every path in the product before 2026-08-11 and every path this slice does not touch.
+ */
+type EffectLightSpace = "display" | "linear";
 
 /** GLSL declaration types for transition params (mirrors registry.ts's private GLSL_TYPE). */
 const GLSL_PARAM_TYPE: Record<TransitionParam["type"], string> = {
@@ -1294,11 +1373,16 @@ export class SceneCompositor {
   private uBlurSigma!: WebGLUniformLocation | null;
   private uBlurPremultIn!: WebGLUniformLocation | null;
   private uBlurUnpremultOut!: WebGLUniformLocation | null;
+  private uBlurToLinear!: WebGLUniformLocation | null;
+  private uPlateToLinear!: WebGLUniformLocation | null;
+  private uCompositeFromLinear: WebGLUniformLocation | null = null;
   private uGlowPlate!: WebGLUniformLocation | null;
   private uGlowTex!: WebGLUniformLocation | null;
   private uGlowColor!: WebGLUniformLocation | null;
   private uBloomBrightSrc!: WebGLUniformLocation | null;
   private uBloomBrightThreshold!: WebGLUniformLocation | null;
+  private uBloomBrightThresholdHi!: WebGLUniformLocation | null;
+  private uBloomBrightExplicitKnee!: WebGLUniformLocation | null;
   private uBloomAddPlate!: WebGLUniformLocation | null;
   private uBloomAddTex!: WebGLUniformLocation | null;
   private uBloomAddTint!: WebGLUniformLocation | null;
@@ -1307,6 +1391,7 @@ export class SceneCompositor {
   private uPyramidDownTex!: WebGLUniformLocation | null;
   private uPyramidDownTexel!: WebGLUniformLocation | null;
   private uPyramidDownPremultIn!: WebGLUniformLocation | null;
+  private uPyramidDownToLinear!: WebGLUniformLocation | null;
   private pyramidUpProgram!: WebGLProgram;
   private uPyramidUpTex!: WebGLUniformLocation | null;
   private uPyramidUpTexel!: WebGLUniformLocation | null;
@@ -1316,6 +1401,36 @@ export class SceneCompositor {
   private plateRT: RenderTarget | null = null;
   private scratch1: RenderTarget | null = null;
   private scratch2: RenderTarget | null = null;
+  /**
+   * The linear stage's OWN target pool (`SRGB8_ALPHA8`), separate from the display pool above.
+   *
+   * Two pools rather than reallocating one, and the reason is a wrong-picture bug rather than a
+   * performance preference: `effectTargets()` is shared by five consumers and only two of them are
+   * linear in this slice. Transitions (slice 4) and the nest's fragment passes (slice 2) still run
+   * display-referred, and handing them an sRGB target would silently convert their input and output —
+   * a picture that is wrong in a way no flag protects against, because the flag would be ON.
+   *
+   * The cost is 3 comp-sized targets (~25 MB at 1080p) held only when a linear project actually draws
+   * a blur or glow. A display project allocates none of this: the fields stay null forever.
+   */
+  private linearPlateRT: RenderTarget | null = null;
+  private linearScratch1: RenderTarget | null = null;
+  private linearScratch2: RenderTarget | null = null;
+  private linearPyramidLevels: RenderTarget[] = [];
+  private linearPyramidLevelScratch: RenderTarget[] = [];
+  /**
+   * Which light THIS FRAME's effect stage mixes in. Ambient, per-frame, one field — deliberately not a
+   * per-draw property.
+   *
+   * The plan proposed carrying it on `SceneLayerDraw`, which would have meant stamping it at every draw
+   * construction site in `build-scene-draws.ts` and `compile-flarex.ts`. A site missed there renders a
+   * linear project's layer in display light: a wrong picture, silent, and invisible to a parity gate
+   * because BOTH renderers would miss the same site. As one spec field it cannot be partially applied —
+   * and it is honest about what the setting is, which is a property of the project, not of a layer.
+   */
+  private effectLight: ColorEffectLight = "display";
+  /** Resolved once per context: `SRGB8_ALPHA8` unavailable ⇒ stay display-referred rather than band. */
+  private srgbTargetsOk: boolean | null = null;
   // Small pooled target for `readCompositeThumbnail` — the color scopes downsample the RETAINED
   // composite (accumA) into this via a linear blit, so scope sampling never re-composites the frame
   // and never depends on the on-screen canvas (which has no preserveDrawingBuffer). Lazily allocated.
@@ -1682,6 +1797,7 @@ export class SceneCompositor {
     this.uFitScale = gl.getUniformLocation(program, "uFitScale");
     this.uContentPan = gl.getUniformLocation(program, "uContentPan");
     this.uCrop = gl.getUniformLocation(program, "uCrop");
+    this.uCompositeFromLinear = gl.getUniformLocation(program, "uFromLinear");
   }
 
   private makeTex(): WebGLTexture {
@@ -1707,6 +1823,9 @@ export class SceneCompositor {
     this.plateRT?.resize(width, height);
     this.scratch1?.resize(width, height);
     this.scratch2?.resize(width, height);
+    this.linearPlateRT?.resize(width, height);
+    this.linearScratch1?.resize(width, height);
+    this.linearScratch2?.resize(width, height);
     this.sideA?.resize(width, height);
     this.sideAScratch?.resize(width, height);
     this.sideB?.resize(width, height);
@@ -1732,6 +1851,7 @@ export class SceneCompositor {
     this.uPlateFitScale = gl.getUniformLocation(this.plateProgram, "uFitScale");
     this.uPlateContentPan = gl.getUniformLocation(this.plateProgram, "uContentPan");
     this.uPlateCrop = gl.getUniformLocation(this.plateProgram, "uCrop");
+    this.uPlateToLinear = gl.getUniformLocation(this.plateProgram, "uToLinear");
 
     this.blurProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLUR_FS);
     this.uBlurTex = gl.getUniformLocation(this.blurProgram, "uTex");
@@ -1740,6 +1860,7 @@ export class SceneCompositor {
     this.uBlurSigma = gl.getUniformLocation(this.blurProgram, "uSigma");
     this.uBlurPremultIn = gl.getUniformLocation(this.blurProgram, "uPremultIn");
     this.uBlurUnpremultOut = gl.getUniformLocation(this.blurProgram, "uUnpremultOut");
+    this.uBlurToLinear = gl.getUniformLocation(this.blurProgram, "uToLinear");
 
     this.glowProgram = linkProgram(gl, FULLSCREEN_TRI_VS, GLOW_FS);
     this.uGlowPlate = gl.getUniformLocation(this.glowProgram, "uPlate");
@@ -1749,6 +1870,8 @@ export class SceneCompositor {
     this.bloomBrightProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_BRIGHT_FS);
     this.uBloomBrightSrc = gl.getUniformLocation(this.bloomBrightProgram, "uSrc");
     this.uBloomBrightThreshold = gl.getUniformLocation(this.bloomBrightProgram, "uThreshold");
+    this.uBloomBrightThresholdHi = gl.getUniformLocation(this.bloomBrightProgram, "uThresholdHi");
+    this.uBloomBrightExplicitKnee = gl.getUniformLocation(this.bloomBrightProgram, "uExplicitKnee");
     this.bloomAddProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_ADD_FS);
     this.uBloomAddPlate = gl.getUniformLocation(this.bloomAddProgram, "uPlate");
     this.uBloomAddTex = gl.getUniformLocation(this.bloomAddProgram, "uBloom");
@@ -1759,6 +1882,7 @@ export class SceneCompositor {
     this.uPyramidDownTex = gl.getUniformLocation(this.pyramidDownProgram, "uTex");
     this.uPyramidDownTexel = gl.getUniformLocation(this.pyramidDownProgram, "uTexel");
     this.uPyramidDownPremultIn = gl.getUniformLocation(this.pyramidDownProgram, "uPremultIn");
+    this.uPyramidDownToLinear = gl.getUniformLocation(this.pyramidDownProgram, "uToLinear");
     this.pyramidUpProgram = linkProgram(gl, FULLSCREEN_TRI_VS, PYRAMID_UP_FS);
     this.uPyramidUpTex = gl.getUniformLocation(this.pyramidUpProgram, "uTex");
     this.uPyramidUpTexel = gl.getUniformLocation(this.pyramidUpProgram, "uTexel");
@@ -1774,9 +1898,19 @@ export class SceneCompositor {
    * no-op when unchanged; a frame that alternates nest/comp effect passes pays a realloc per switch
    * (acceptable — only comps that nest blur/transitions hit it; flag if it shows in a trace).
    */
-  private effectTargets(): { plate: RenderTarget; s1: RenderTarget; s2: RenderTarget } {
+  private effectTargets(space: EffectLightSpace = "display"): { plate: RenderTarget; s1: RenderTarget; s2: RenderTarget } {
     const gl = this.gl;
     this.ensureEffectPrograms(); // programs + targets are always needed together — one choke point
+    if (space === "linear") {
+      const enc: TargetColorEncoding = "srgb";
+      this.linearPlateRT ??= new RenderTarget(gl, this.width, this.height, this.precision, enc);
+      this.linearScratch1 ??= new RenderTarget(gl, this.width, this.height, this.precision, enc);
+      this.linearScratch2 ??= new RenderTarget(gl, this.width, this.height, this.precision, enc);
+      this.linearPlateRT.resize(this.width, this.height);
+      this.linearScratch1.resize(this.width, this.height);
+      this.linearScratch2.resize(this.width, this.height);
+      return { plate: this.linearPlateRT, s1: this.linearScratch1, s2: this.linearScratch2 };
+    }
     this.plateRT ??= new RenderTarget(gl, this.width, this.height, this.precision);
     this.scratch1 ??= new RenderTarget(gl, this.width, this.height, this.precision);
     this.scratch2 ??= new RenderTarget(gl, this.width, this.height, this.precision);
@@ -1784,6 +1918,30 @@ export class SceneCompositor {
     this.scratch1.resize(this.width, this.height);
     this.scratch2.resize(this.width, this.height);
     return { plate: this.plateRT, s1: this.scratch1, s2: this.scratch2 };
+  }
+
+  /**
+   * Is this frame's effect stage running in linear light?
+   *
+   * Two conditions, and the second is a real fallback rather than a formality: without a renderable
+   * `SRGB8_ALPHA8` the only way to hold linear values in 8 bits is linear storage, which bands
+   * every shadow (plan §2.1). Staying display-referred renders the picture the project rendered
+   * yesterday, which is strictly better than a banded approximation of a better one.
+   */
+  private get linearStage(): boolean {
+    if (this.effectLight !== "linear") return false;
+    this.srgbTargetsOk ??= supportsSrgbRenderTarget(this.gl);
+    return this.srgbTargetsOk;
+  }
+
+  /** The pool this frame's effect stage draws from. */
+  private get effectSpace(): EffectLightSpace {
+    return this.linearStage ? "linear" : "display";
+  }
+
+  /** A user-picked (display-referred) colour, as light. */
+  private linearizeRgb(rgb: [number, number, number]): [number, number, number] {
+    return [rec709CodeToLinear(rgb[0]), rec709CodeToLinear(rgb[1]), rec709CodeToLinear(rgb[2])];
   }
 
   /** Per-effect region-grade renderer + output RTT on THIS context (lazy; LUT cached via pipelineKey). */
@@ -1917,7 +2075,13 @@ export class SceneCompositor {
   /** Compile + cache the program for a fragment-effect definition (or ONE pass of a multi-pass one).
    *  Throws on GLSL compile/link failure. */
   private prepareFragmentEffect(def: FragmentEffectDefinition, pass?: FragmentEffectPassDefinition): CompiledFragmentEffect {
-    const key = pass ? `${def.id}#${pass.id}` : def.id;
+    // Fragment passes run in the NEST, which slice 1 leaves display-referred (the nest boundary is
+    // slice 2's S7/S11). Stated explicitly rather than defaulted so that when that changes, the
+    // program cache below and the source memo in the registry move together — they are one identity
+    // split across two maps, and a variant that reached one but not the other would be an
+    // order-dependent wrong picture.
+    const light: FragmentEffectLightSpace = "display";
+    const key = pass ? `${def.id}#${pass.id}@${light}` : `${def.id}@${light}`;
     const existing = this.fragmentPrograms.get(key);
     if (existing) {
       existing.lastFrame = this.frameCounter;
@@ -1925,7 +2089,11 @@ export class SceneCompositor {
       return existing;
     }
     const gl = this.gl;
-    const program = linkProgram(gl, FULLSCREEN_TRI_VS, pass ? buildFragmentEffectPassShader(def, pass) : buildFragmentEffectShader(def));
+    const program = linkProgram(
+      gl,
+      FULLSCREEN_TRI_VS,
+      pass ? buildFragmentEffectPassShader(def, pass, light) : buildFragmentEffectShader(def, light),
+    );
     const compiled: CompiledFragmentEffect = {
       program,
       uSrc: gl.getUniformLocation(program, "uSrc"),
@@ -2464,17 +2632,23 @@ export class SceneCompositor {
    * blur. Pooled and resized like `effectTargets`. Total pixels at depth 3 are ~2/3 of ONE comp-sized
    * target, so the pyramid costs less memory than the scratch buffer the old path already used.
    */
-  private pyramidTargets(depth: number): { level: RenderTarget; scratch: RenderTarget }[] {
+  private pyramidTargets(depth: number, space: EffectLightSpace): { level: RenderTarget; scratch: RenderTarget }[] {
     const gl = this.gl;
     const out: { level: RenderTarget; scratch: RenderTarget }[] = [];
+    // Two pools for the same reason `effectTargets` keeps two: a level allocated for the linear stage
+    // converts on every sample, so lending it to a display-referred caller would silently change its
+    // picture. Levels are small — all of them together are ~1/3 of one comp-sized target.
+    const levels = space === "linear" ? this.linearPyramidLevels : this.pyramidLevels;
+    const scratches = space === "linear" ? this.linearPyramidLevelScratch : this.pyramidLevelScratch;
+    const enc: TargetColorEncoding = space === "linear" ? "srgb" : "raw";
     for (let i = 0; i < depth; i += 1) {
       const w = Math.max(1, Math.ceil(this.width / 2 ** (i + 1)));
       const h = Math.max(1, Math.ceil(this.height / 2 ** (i + 1)));
-      this.pyramidLevels[i] ??= new RenderTarget(gl, w, h, this.precision);
-      this.pyramidLevelScratch[i] ??= new RenderTarget(gl, w, h, this.precision);
-      this.pyramidLevels[i]!.resize(w, h);
-      this.pyramidLevelScratch[i]!.resize(w, h);
-      out.push({ level: this.pyramidLevels[i]!, scratch: this.pyramidLevelScratch[i]! });
+      levels[i] ??= new RenderTarget(gl, w, h, this.precision, enc);
+      scratches[i] ??= new RenderTarget(gl, w, h, this.precision, enc);
+      levels[i]!.resize(w, h);
+      scratches[i]!.resize(w, h);
+      out.push({ level: levels[i]!, scratch: scratches[i]! });
     }
     return out;
   }
@@ -2524,18 +2698,32 @@ export class SceneCompositor {
    * is just 3*sigma growing. Same at the 64->65 crossing. A half-res blur of sigma 32 is still a
    * well-sampled Gaussian (48 taps), which is why.
    */
-  private pyramidBlur(src: RenderTarget, dst: RenderTarget, scratch: RenderTarget, sigma: number): void {
+  private pyramidBlur(
+    src: RenderTarget,
+    dst: RenderTarget,
+    scratch: RenderTarget,
+    sigma: number,
+    /** Which pool the intermediate levels come from — `dst`/`scratch` must already be from it. */
+    space: EffectLightSpace = "display",
+    /**
+     * `src` holds DISPLAY-referred values that the linear stage is reading in (S8: the region blur's
+     * input is the nest accumulator, not an already-linear plate). Decode per tap, before the
+     * premultiply. Never set for the layer-wide blur, whose input is the plate — already linear, and
+     * decoded for free by the sRGB sampler.
+     */
+    srcIsDisplay = false,
+  ): void {
     let reduction = 1;
     while (Math.ceil(sigma * 3) / reduction > MAX_BLUR_RADIUS && reduction < MAX_PYRAMID_REDUCTION) {
       reduction *= 2;
     }
     if (reduction === 1) {
-      this.gaussianBlur(src, dst, scratch, sigma);
+      this.gaussianBlur(src, dst, scratch, sigma, srcIsDisplay);
       return;
     }
     const gl = this.gl;
     const depth = Math.log2(reduction);
-    const levels = this.pyramidTargets(depth);
+    const levels = this.pyramidTargets(depth, space);
 
     // Down: full -> /2 -> ... -> /reduction. The first hop premultiplies (the brightpass hands us
     // straight colour with the weight in alpha); the rest are already premultiplied.
@@ -2548,6 +2736,7 @@ export class SceneCompositor {
     for (let i = 0; i < depth; i += 1) {
       gl.uniform2f(this.uPyramidDownTexel, 1 / srcW, 1 / srcH);
       gl.uniform1i(this.uPyramidDownPremultIn, i === 0 ? 1 : 0);
+      gl.uniform1i(this.uPyramidDownToLinear, srcIsDisplay && i === 0 ? 1 : 0);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       this.fullscreenPassAt(levels[i]!.level);
       srcTex = levels[i]!.level.tex;
@@ -2565,6 +2754,7 @@ export class SceneCompositor {
     gl.uniform1f(this.uBlurSigma, lowSigma);
     gl.uniform1i(this.uBlurPremultIn, 0);
     gl.uniform1i(this.uBlurUnpremultOut, 0);
+    gl.uniform1i(this.uBlurToLinear, 0); // levels are already in the stage's space
     gl.uniform2f(this.uBlurStep, 1 / deep.level.width, 0);
     gl.bindTexture(gl.TEXTURE_2D, deep.level.tex);
     this.fullscreenPassAt(deep.scratch);
@@ -2583,7 +2773,14 @@ export class SceneCompositor {
   }
 
   /** Separable Gaussian blur of `src` into `dst` (via `scratch`), σ = sigma px, premultiplied. */
-  private gaussianBlur(src: RenderTarget, dst: RenderTarget, scratch: RenderTarget, sigma: number): void {
+  private gaussianBlur(
+    src: RenderTarget,
+    dst: RenderTarget,
+    scratch: RenderTarget,
+    sigma: number,
+    /** See `pyramidBlur`'s `srcIsDisplay`. Only the HORIZONTAL pass reads `src`. */
+    srcIsDisplay = false,
+  ): void {
     const gl = this.gl;
     const radius = Math.min(MAX_BLUR_RADIUS, Math.max(1, Math.ceil(sigma * 3)));
     gl.useProgram(this.blurProgram);
@@ -2594,13 +2791,16 @@ export class SceneCompositor {
     gl.uniform2f(this.uBlurStep, 1 / this.width, 0);
     gl.uniform1i(this.uBlurPremultIn, 1);
     gl.uniform1i(this.uBlurUnpremultOut, 0);
+    gl.uniform1i(this.uBlurToLinear, srcIsDisplay ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, src.tex);
     this.fullscreenPass(scratch);
-    // Vertical: premultiplied → straight, scratch → dst.
+    // Vertical: premultiplied → straight, scratch → dst. `scratch` is in the stage's own space by
+    // construction, so the decode never applies here even when the horizontal pass needed it.
     gl.uniform2f(this.uBlurStep, 0, 1 / this.height);
     gl.uniform1i(this.uBlurPremultIn, 0);
     gl.uniform1i(this.uBlurUnpremultOut, 1);
+    gl.uniform1i(this.uBlurToLinear, 0);
     gl.bindTexture(gl.TEXTURE_2D, scratch.tex);
     this.fullscreenPass(dst);
   }
@@ -2624,6 +2824,12 @@ export class SceneCompositor {
     crop: [number, number, number, number] = [0, 0, 0, 0],
     dest: RenderTarget | null = null,
     trackMatte: { tex: WebGLTexture; luma: boolean; invert: boolean } | null = null,
+    /**
+     * S6. `tex` holds LINEAR values (it came out of the linear effect pool) and the accumulator is
+     * display-referred, so encode on the way in. Defaults false, which is every caller that is not the
+     * linear stage's exit — including the no-effect fast path, which therefore stays byte-identical.
+     */
+    fromLinear = false,
   ): void {
     const gl = this.gl;
     const w = this.width;
@@ -2659,6 +2865,7 @@ export class SceneCompositor {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, dest ? this.emptyTex : this.accumA.tex);
     gl.uniform1i(this.uDest, 2);
+    gl.uniform1i(this.uCompositeFromLinear, fromLinear ? 1 : 0);
     gl.uniform2f(this.uResolution, w, h);
     gl.uniform1f(this.uOpacity, Math.max(0, Math.min(1, opacity)));
     gl.uniform1i(this.uBlend, blendModeIndex(blend));
@@ -2757,7 +2964,14 @@ export class SceneCompositor {
     // mask, so the blur/glow must NOT be clipped to the mask before they run — masking first would
     // let the blur bleed the masked edge outward (the corner/halo leak). Masking in the composite
     // (COMPOSITE_FS samples uMask at v_uv) clips the blurred result to a sharp edge, matching DOM/export.
-    const { plate, s1, s2 } = this.effectTargets();
+    //
+    // LINEAR-LIGHT BOUNDARY (slice 1). When `linear`, this whole branch — plate, blur, glow, bloom —
+    // computes on light rather than on gamma-encoded code values, and the only two conversions are S1
+    // (the plate write, below) and S6 (the composite that ends the branch). Everything between reads
+    // and writes the linear pool, whose sRGB storage does the conversion in fixed function.
+    const space = this.effectSpace;
+    const linear = space === "linear";
+    const { plate, s1, s2 } = this.effectTargets(space);
     gl.useProgram(this.plateProgram);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, srcTex);
@@ -2766,9 +2980,10 @@ export class SceneCompositor {
     gl.uniform2f(this.uPlateFitScale, fitVec[0], fitVec[1]);
     gl.uniform2f(this.uPlateContentPan, contentPan[0], contentPan[1]);
     gl.uniform4f(this.uPlateCrop, crop[0], crop[1], crop[2], crop[3]);
+    gl.uniform1i(this.uPlateToLinear, linear ? 1 : 0); // S1: DECODE
     this.fullscreenPass(plate);
 
-    if (blurPx > 0) this.pyramidBlur(plate, plate, s1, blurPx); // in-place via s1
+    if (blurPx > 0) this.pyramidBlur(plate, plate, s1, blurPx, space); // in-place via s1
 
     if (glow && glow.mode === "highlights") {
       // Highlight bloom (footage): brightpass the plate → s2, blur it, then ADD it back tinted. Reuses the
@@ -2778,9 +2993,13 @@ export class SceneCompositor {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, plate.tex);
       gl.uniform1i(this.uBloomBrightSrc, 0);
-      gl.uniform1f(this.uBloomBrightThreshold, glow.threshold ?? 0.55);
+      // The stored threshold is display-referred; in linear both ends of the knee move with it.
+      const t = glow.threshold ?? 0.55;
+      gl.uniform1f(this.uBloomBrightThreshold, linear ? rec709CodeToLinear(t) : t);
+      gl.uniform1f(this.uBloomBrightThresholdHi, linear ? rec709CodeToLinear(Math.min(1, t + 0.25)) : 0);
+      gl.uniform1i(this.uBloomBrightExplicitKnee, linear ? 1 : 0);
       this.fullscreenPass(s2); // s2 = bright pixels (straight alpha, weight in .a)
-      this.pyramidBlur(s2, s2, s1, glow.radiusPx); // spread the bright energy (in-place via s1)
+      this.pyramidBlur(s2, s2, s1, glow.radiusPx, space); // spread the bright energy (in-place via s1)
       gl.useProgram(this.bloomAddProgram);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, plate.tex);
@@ -2788,7 +3007,11 @@ export class SceneCompositor {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, s2.tex);
       gl.uniform1i(this.uBloomAddTex, 1);
-      gl.uniform3f(this.uBloomAddTint, glow.color[0], glow.color[1], glow.color[2]);
+      // The tint is a user-picked colour, i.e. display-referred. Multiplying linear light by an
+      // un-decoded tint would bias every non-white glow toward the light — a subtle, look-shifting
+      // wrong answer that a parity gate cannot see, because both renderers would make it.
+      const tint = linear ? this.linearizeRgb(glow.color) : glow.color;
+      gl.uniform3f(this.uBloomAddTint, tint[0], tint[1], tint[2]);
       gl.uniform1f(this.uBloomAddStrength, glow.strength ?? 1);
       this.fullscreenPass(s1); // bloom result → s1 (can't read+write plate)
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, s1.fbo);
@@ -2801,7 +3024,7 @@ export class SceneCompositor {
       // the glow a timeline user actually reaches for, and its 0..160 radius plateaued from 32 upward —
       // 80% of the slider doing nothing. Fixing the mechanism rather than moving the default: changing a
       // control's default would silently restyle every project that used it, making it work does not.
-      this.pyramidBlur(plate, s2, s1, glow.radiusPx);
+      this.pyramidBlur(plate, s2, s1, glow.radiusPx, space);
       gl.useProgram(this.glowProgram);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, plate.tex);
@@ -2809,7 +3032,8 @@ export class SceneCompositor {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, s2.tex);
       gl.uniform1i(this.uGlowTex, 1);
-      gl.uniform3f(this.uGlowColor, glow.color[0], glow.color[1], glow.color[2]);
+      const edgeTint = linear ? this.linearizeRgb(glow.color) : glow.color;
+      gl.uniform3f(this.uGlowColor, edgeTint[0], edgeTint[1], edgeTint[2]);
       this.fullscreenPass(s1); // glow result → s1 (can't read+write plate)
       // Copy s1 → plate.
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, s1.fbo);
@@ -2832,6 +3056,7 @@ export class SceneCompositor {
       [0, 0, 0, 0],
       dest,
       trackMatte,
+      linear, // S6: ENCODE — the stage's exit
     );
   }
 
@@ -2880,6 +3105,11 @@ export class SceneCompositor {
       // then composites it back masked — the masked mix IS the ordinary compositeTexture, ping-ponging the
       // nest accumulator.
       let fxTex: WebGLTexture | null = null;
+      // Only the region BLUR opens a linear bracket. Region COLOUR is the grade stage, which already
+      // owns its own closed linear segment (`color/cpu.ts` decodes, grades, re-encodes) and must not be
+      // wrapped in a second one — that is the double-transform this slice deliberately does not touch
+      // (plan S9, slice 2). It stays display-referred here, and so does its composite.
+      let regionBlurLinear = false;
       if (pass.pipeline && !pass.pipeline.identity) {
         // Region color: grade the running nest image with this ONE effect's pipeline, in this same context.
         const entry = this.regionGradeEntry(pass.effectKey);
@@ -2909,9 +3139,17 @@ export class SceneCompositor {
         // Region blur: gaussian the running nest image. Goes through the pyramid for the same reason
         // the layer-wide blur above does — a masked blur that ran out of reach where an unmasked one
         // did not would be a worse outcome than either, since it is the SAME node with a mask on it.
-        const { s1, s2 } = this.effectTargets();
-        this.pyramidBlur(this.accumA, s2, s1, pass.blurPx!);
+        //
+        // S8. The layer-wide blur's linear boundary opens at the plate; this one has no plate to open
+        // at — its input is the running nest accumulator, which is display-referred (the nest itself
+        // moves to linear in slice 2, sites S7/S11). So the bracket is local: decode on the blur's
+        // first read, and encode in the composite below that consumes it. Same two conversions as
+        // S1/S6, just placed at this pass's own edges.
+        const space = this.effectSpace;
+        const { s1, s2 } = this.effectTargets(space);
+        this.pyramidBlur(this.accumA, s2, s1, pass.blurPx!, space, space === "linear");
         fxTex = s2.tex;
+        regionBlurLinear = space === "linear";
       }
       if (!fxTex) continue;
       const maskTex = this.uploadSource(pass.mask, pass.maskVersion, {
@@ -2928,6 +3166,11 @@ export class SceneCompositor {
         "normal",
         { x: 50, y: 50, scale: 1, rotation: 0, opacity: 100 },
         { halfW: this.width / 2, halfH: this.height / 2, rotateX: 0, rotateY: 0, perspective: 0, z: 0 },
+        [0, 0],
+        [0, 0, 0, 0],
+        null,
+        null,
+        regionBlurLinear, // S8's other half: encode only when the blur opened the bracket
       );
     }
     // Plugin fragment-shader passes run AFTER region passes, inside the SAME nest (risk #1: never a
@@ -3095,7 +3338,15 @@ export class SceneCompositor {
    * `dependencyVersions` payload is OPAQUE: incorporated verbatim, never interpreted (ADR-010).
    */
   private contentCacheKey(draw: SceneGroupDraw, nestW: number, nestH: number): string {
-    return `${CONTENT_CACHE_CONTRACT_VERSION}|${nestW}x${nestH}|r${RENDERER_REVISION}|${draw.contentHash}|${draw.dependencyVersions ?? ""}`;
+    // `effectLight` folds in HERE, exactly as this comment anticipated, and it is REQUIRED rather than
+    // tidy: a cached artifact is a picture, and the same node content renders a different picture in
+    // linear light. Without this, flipping the project setting mid-session serves display-referred
+    // nests into a linear render — and it would look like a stale cache, not like a colour bug,
+    // because that is precisely what it would be. The other two keys inherit the setting for free
+    // (`regionGradeEntry`'s `pipelineKey` stringifies a `ColorPipeline`, which carries `colorSettings`;
+    // `renderCache.ts` carries `composition.settings?.color`) — verified by reading both, and true only
+    // because the setting lives on `ProjectColorSettings`. This one had to be told.
+    return `${CONTENT_CACHE_CONTRACT_VERSION}|${nestW}x${nestH}|r${RENDERER_REVISION}|el:${this.effectLight}|${draw.contentHash}|${draw.dependencyVersions ?? ""}`;
   }
 
   /** Lazily allocate (and resize-to-fit) the dedicated RTT pair for compound-group nesting depth `depth`. */
@@ -3319,6 +3570,7 @@ export class SceneCompositor {
   private renderFrameCore(spec: SceneFrameSpec): boolean {
     if (this.disposed) return false;
     this.debugFrameTime = spec.debugFrameTime;
+    this.effectLight = spec.effectLight ?? "display";
     const gl = this.gl;
     // If the browser evicted this context ("Too many active WebGL contexts. Oldest context will be lost."),
     // every upload/draw below is a no-op that floods the console. A lost context is PERMANENT, so bail loudly
@@ -3718,6 +3970,13 @@ export class SceneCompositor {
     for (const rt of this.pyramidLevelScratch) rt.dispose();
     this.pyramidLevels = [];
     this.pyramidLevelScratch = [];
+    this.linearPlateRT?.dispose();
+    this.linearScratch1?.dispose();
+    this.linearScratch2?.dispose();
+    for (const rt of this.linearPyramidLevels) rt.dispose();
+    for (const rt of this.linearPyramidLevelScratch) rt.dispose();
+    this.linearPyramidLevels = [];
+    this.linearPyramidLevelScratch = [];
     this.scopeThumb?.dispose();
     if (this.scopeFence) {
       gl.deleteSync(this.scopeFence);

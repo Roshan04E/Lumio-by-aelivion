@@ -57,6 +57,7 @@ import {
   type ColorPipeline,
   isFlarexGeneratorVirtualLayer,
   type FlarexComp,
+  normalizeProjectColorSettings,
   type NestedGroupSpec,
   type SceneCompositorDebugSnapshot,
   type SceneDraw,
@@ -907,6 +908,10 @@ export class SceneFrameCompositor {
       height: this.height,
       backgroundColor: this.composition.backgroundColor || "#000000",
       layers: draws,
+      // Read from the composition rather than defaulted here: `normalizeProjectColorSettings` answers
+      // "the stored data did not say — what did it mean?" with the LEGACY contract, which is the only
+      // safe answer for a project saved before this setting existed.
+      effectLight: normalizeProjectColorSettings(this.composition.settings?.color).effectLight,
     };
     this.compositor.renderFrame(spec);
     // Force GPU completion before the caller snapshots this canvas into a VideoFrame. WebGL draws are async;

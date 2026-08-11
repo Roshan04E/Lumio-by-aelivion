@@ -438,7 +438,27 @@ function noteHdrPipeline(kind: "targets" | "halfFloat" | "fallbacks"): void {
   s[kind] += 1;
 }
 
+/**
+ * How a target's bytes ENCODE the values the shader sees. Orthogonal to {@link RenderTargetPrecision},
+ * which is about how many bits — this is about what those bits mean.
+ *
+ * `raw` — bytes are the values. Today's behaviour for every target in the product.
+ * `srgb` — `SRGB8_ALPHA8`: the GPU decodes sRGB→linear on every `texture()` sample and encodes
+ *   linear→sRGB on every write, in fixed function. The shader reads and writes LINEAR floats while the
+ *   storage stays 8-bit PERCEPTUAL, which is the whole reason the linear-light stage is affordable:
+ *   8-bit *linear* storage would collapse display codes 0..15 onto two code values and band visibly in
+ *   every shadow (plans/linear-light-effect-stage.md §2.1), and half-float would double the bandwidth
+ *   on the integrated GPUs this product targets. Same bytes, same bandwidth, no banding — plus correct
+ *   linear filtering on blur taps and pyramid downsamples, which the RGBA8 path never had.
+ *
+ * Alpha is NOT sRGB-transformed by this format (the spec transforms RGB only), which the premultiply /
+ * unpremultiply logic in `BLUR_FS` depends on. Verified by probe, not assumed — see
+ * {@link supportsSrgbRenderTarget}.
+ */
+export type TargetColorEncoding = "raw" | "srgb";
+
 const halfFloatColorBufferCache = new WeakMap<WebGL2RenderingContext, boolean>();
+const srgbColorBufferCache = new WeakMap<WebGL2RenderingContext, boolean>();
 
 /**
  * Can this context actually RENDER to a half-float texture?
@@ -458,6 +478,50 @@ export function supportsHalfFloatRenderTarget(gl: WebGL2RenderingContext): boole
     ok = false;
   }
   halfFloatColorBufferCache.set(gl, ok);
+  return ok;
+}
+
+/**
+ * Can this context actually RENDER to an `SRGB8_ALPHA8` texture?
+ *
+ * Unlike half-float there is no extension to interrogate — WebGL2 lists `SRGB8_ALPHA8` as colour-
+ * renderable in core, so the honest check is to allocate one and ask the driver. That costs a 1×1
+ * texture once per context, which is affordable precisely because it is once per context, and it is
+ * worth paying: a silent `FRAMEBUFFER_INCOMPLETE_ATTACHMENT` here would render the entire effect stage
+ * black rather than degrade, and SwiftShader (what the pixel gate runs on unless
+ * `PIXEL_BROWSER_CHANNEL=chrome`) is exactly the kind of implementation that earns a probe.
+ *
+ * A `false` here does NOT fall back to 8-bit linear storage — that trades a correct picture for a
+ * banded one. The caller keeps the display-referred path, which is the same picture the project
+ * rendered yesterday.
+ */
+export function supportsSrgbRenderTarget(gl: WebGL2RenderingContext): boolean {
+  const cached = srgbColorBufferCache.get(gl);
+  if (cached !== undefined) return cached;
+  let ok = false;
+  let tex: WebGLTexture | null = null;
+  let fbo: WebGLFramebuffer | null = null;
+  try {
+    tex = gl.createTexture();
+    fbo = gl.createFramebuffer();
+    if (tex && fbo) {
+      const prevTex = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null;
+      const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+      gl.bindTexture(gl.TEXTURE_2D, prevTex);
+    }
+  } catch {
+    ok = false;
+  } finally {
+    if (tex) gl.deleteTexture(tex);
+    if (fbo) gl.deleteFramebuffer(fbo);
+  }
+  srgbColorBufferCache.set(gl, ok);
   return ok;
 }
 
@@ -481,17 +545,26 @@ export class RenderTarget {
   readonly fbo: WebGLFramebuffer;
   /** What this target ACTUALLY is, after the capability fallback. */
   readonly precision: RenderTargetPrecision;
+  /** What this target ACTUALLY encodes, after the capability fallback. Never what was asked for. */
+  readonly encoding: TargetColorEncoding;
   private disposed = false;
 
   constructor(
     private readonly gl: WebGL2RenderingContext,
     public width: number,
     public height: number,
-    requested: RenderTargetPrecision = "rgba8"
+    requested: RenderTargetPrecision = "rgba8",
+    requestedEncoding: TargetColorEncoding = "raw"
   ) {
     const half = requested === "rgba16f" && supportsHalfFloatRenderTarget(gl);
     if (requested === "rgba16f" && !half) noteHdrPipeline("fallbacks");
     this.precision = half ? "rgba16f" : "rgba8";
+    // Half-float already stores linear values without quantisation, so the sRGB round trip would only
+    // cost precision it does not need. The CALLER's contract is unchanged either way — "a target in the
+    // linear pool reads back linear" holds for both formats — so slice 5 can flip precision under this
+    // without touching a shader.
+    this.encoding =
+      requestedEncoding === "srgb" && this.precision === "rgba8" && supportsSrgbRenderTarget(gl) ? "srgb" : "raw";
     const tex = make2dTexture(gl);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     this.allocate(tex, width, height);
@@ -512,6 +585,11 @@ export class RenderTarget {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     if (this.precision === "rgba16f") {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      return;
+    }
+    if (this.encoding === "srgb") {
+      // Same 4 bytes/px as below — only the interpretation differs, which is why this costs nothing.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       return;
     }
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);

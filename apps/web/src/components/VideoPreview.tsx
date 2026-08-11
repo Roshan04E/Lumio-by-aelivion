@@ -89,6 +89,7 @@ import {
   demoteMediaSources,
   suppressMediaSources,
   type ProjectGraph,
+  normalizeProjectColorSettings,
   type SourceAsset,
   type TimelineComposition,
   type TimelineKeyframeV2,
@@ -2093,6 +2094,7 @@ function VideoPreviewImpl({
                   width={composition.width}
                   height={composition.height}
                   backgroundColor={composition.backgroundColor || "#000000"}
+                  effectLight={normalizeProjectColorSettings(composition.settings?.color).effectLight}
                   currentTime={currentTime}
                   isPlaying={isPlaying}
                   gradedRef={gradedCanvasesRef}

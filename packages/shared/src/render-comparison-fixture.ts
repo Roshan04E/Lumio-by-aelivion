@@ -1,6 +1,7 @@
 import type { ProjectGraph, SourceAsset, TimelineLayer } from "./types";
 import { applyCaptionTrackToComposition, captionStylePresets, createCaptionTrack, parseTranscriptInput } from "./captions";
 import { createBoxMask } from "./clip-masks";
+import { LEGACY_PROJECT_COLOR_SETTINGS, type ColorEffectLight } from "./color/color-management";
 import { registerFragmentEffect } from "./color/fragment-effects/registry";
 import { SHADER_MANIFEST_ID_PARAM_KEY } from "./plugin-effect-adapter";
 import { createFlarexNode } from "./flarex/node-defs";
@@ -159,7 +160,9 @@ export type RenderComparisonFixtureKey =
   | "flarex-radial-blur-max"
   | "flarex-glow-max"
   | "flarex-blur-max"
-  | "glow-edge-max";
+  | "glow-edge-max"
+  | "linear-glow"
+  | "linear-blur";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -227,7 +230,9 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-radial-blur-max",
   "flarex-glow-max",
   "flarex-blur-max",
-  "glow-edge-max"
+  "glow-edge-max",
+  "linear-glow",
+  "linear-blur"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -327,6 +332,25 @@ const blurEffects: TimelineLayer["effects"] = [
 
 const glowEffects: TimelineLayer["effects"] = [
   { id: "fixture_glow", type: "glow", name: "Glow", enabled: true, intensity: 100, params: { radius: 28, color: "#C9FF4A" } }
+];
+
+/**
+ * The linear arm's glow: a HIGHLIGHT bloom over the fixture's landscape plate.
+ *
+ * Highlights rather than edge because this is the founder's actual report — bright areas washing
+ * instead of concentrating — and because it is the mode that exercises the threshold remap. The
+ * threshold stays the stored display-referred 0.55; the compositor converts it (≈0.26 linear) so the
+ * same pixels pass the gate in both spaces. Getting that wrong is not subtle: the glow disappears.
+ */
+const linearGlowEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_linear_glow",
+    type: "glow",
+    name: "Glow",
+    enabled: true,
+    intensity: 100,
+    params: { radius: 28, color: "#C9FF4A", mode: "highlights", threshold: 55 }
+  }
 ];
 
 /**
@@ -1265,6 +1289,8 @@ interface FixtureVariant {
   tilt?: { rotateX?: number; rotateY?: number; perspective?: number };
   /** When set, the overlay track is a single TEXT layer at this scale (no captions/shape) — exercises the
    *  resolution-aware BOX raster: scaled scene text must stay as crisp as the DOM/export text. */
+  /** Stamped onto the fixture composition's colour settings. Omitted = `display`, today's contract. */
+  effectLight?: ColorEffectLight;
   textScale?: number;
   /**
    * Size the text in the FONT rather than the transform. Only `glow-edge-max` needs it, and the reason
@@ -1361,6 +1387,24 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: blurEffects, fit: "cover" };
     case "glow":
       return { effects: glowEffects, fit: "cover" };
+    /**
+     * The linear arm. These two are the SAME effects the `glow` and `blur` fixtures carry, on the same
+     * plate, differing in exactly one field: the composition's `effectLight`.
+     *
+     * That is the whole design. A linear-arm fixture that also changed its radius or its footage would
+     * prove the renderers agree about something, but not about THIS — and the pair of pictures could
+     * not be diffed against each other to see what the light actually did. Held identical, the
+     * `glow` → `linear-glow` diff IS the change, which is what makes them worth looking at as well as
+     * gating on.
+     *
+     * `glow` uses HIGHLIGHTS mode here rather than the fixture's default edge, because the founder's
+     * report is about highlights washing rather than blooming, and because it is the mode whose
+     * threshold changes meaning between the two spaces (display 0.55 ≈ linear 0.26).
+     */
+    case "linear-glow":
+      return { effects: linearGlowEffects, fit: "cover", effectLight: "linear" };
+    case "linear-blur":
+      return { effects: blurEffects, fit: "cover", effectLight: "linear" };
     case "glow-edge-max":
       // Scale 1 with the size in the font — see `textFontSize`. At scale 5 this fixture rendered a
       // bloom so diffuse it was invisible, and read 0.000% for the wrong reason.
@@ -1958,6 +2002,24 @@ Save this style now`);
       fps: 30,
       durationSeconds: 12,
       backgroundColor: "#000000",
+      /**
+       * EVERY fixture stamps its effect light explicitly, including the 63 that want today's
+       * display-referred behaviour.
+       *
+       * The alternative — leaving it absent and relying on `normalizeProjectColorSettings` to mean
+       * "display" — is correct today and fragile forever: these fixtures build their own compositions,
+       * so the day anything makes them inherit a project default, they would silently change arm and
+       * every baseline would rebase to the new light with a green gate the whole way. A gate that can
+       * change what it is measuring without saying so is worse than no gate. Stamping it makes the arm
+       * a property of the fixture, which is where it belongs.
+       */
+      settings: {
+        color: { ...LEGACY_PROJECT_COLOR_SETTINGS, effectLight: variant.effectLight ?? "display" },
+        // `viewport`/`timeline` are required by the type and are inert here — nothing in the render
+        // path reads them. They mirror the composition's own numbers so they cannot contradict it.
+        viewport: { preset: "vertical_1080x1920", width: 1080, height: 1920, fps: 30, backgroundColor: "#000000", resizeBehavior: "keep-layout" },
+        timeline: { baseDurationSeconds: 12, autoGrow: true, tailPaddingSeconds: 1, snapSeconds: 0.1, timeDisplay: "seconds" }
+      },
       tracks: [
         {
           id: "overlay_track",

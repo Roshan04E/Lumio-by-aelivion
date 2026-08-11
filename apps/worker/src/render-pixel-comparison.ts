@@ -140,7 +140,23 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
    * one-code-value disagreement between the two renderers would spread over the most pixels, so the
    * strictest defensible bar is the informative one.
    */
-  "glow-edge-max": 0.002
+  "glow-edge-max": 0.002,
+  /**
+   * THE LINEAR ARM (linear-light programme, slice 1). Same plate, same effects, same radii as the
+   * `glow` and `blur` fixtures — one field different, the composition's `effectLight`.
+   *
+   * What these gate is narrower than it looks and worth stating, because a green run here is easy to
+   * over-read. They prove the two renderers agree IN LINEAR: that the sRGB targets, the fixed-function
+   * conversions, the threshold remap and the tint linearisation land identically in the web preview and
+   * in Remotion. They do NOT prove the linear picture is right — two renderers agreeing about a wrong
+   * transfer function is precisely the blind spot that let a truncated glow pass for two months
+   * (DEBT-017). "Is it right?" is answered by the ratio measurement and by looking at the render, both
+   * recorded in the commit; this bar answers "do the two agree?".
+   *
+   * 0.002 like their siblings: measured 0.000% on the sweep that added them.
+   */
+  "linear-glow": 0.002,
+  "linear-blur": 0.002
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {
