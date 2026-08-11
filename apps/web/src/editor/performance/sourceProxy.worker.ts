@@ -118,28 +118,43 @@ async function build(
   console.info(
     `[proxy] nominalFps=${provider.nominalFps ?? "undef"} → encode @ ${fps} fps · ${width}×${height} · GOP=${keyFrameEveryNFrames}f/${keyFrameIntervalSeconds.toFixed(3)}s · dur=${durationSeconds.toFixed(2)}s · decodableEnd=${provider.decodableEndSeconds?.toFixed(2) ?? "undef"}s`
   );
-  // SEGMENT CACHE (2026-08-11, Slice 1). One encoder for the whole build, exactly as before — the
-  // chunks are TAPPED on their way to the muxer and grouped into fixed frame-count segments, so an
-  // uninterrupted build's bitstream is byte-for-byte what it was before this existed. See
+  // SEGMENT CACHE (2026-08-11, Slice 1) + PLAYHEAD-FIRST ORDER (Slice 2). One encoder for the whole
+  // build — the chunks are TAPPED on their way out and grouped into fixed frame-count segments. See
   // sourceProxySegments.ts for why the cache holds chunks rather than N finalized MP4s.
+  //
+  // Slice 2 defers muxing: segments may now be produced in ANY source order (playhead first, gaps
+  // filled from cache), so the muxer is fed once at the end, in logical segment order. This is not
+  // an extra copy of the bitstream — the bytes live in `segments` instead of the muxer's buffer, and
+  // are released segment by segment as they are muxed, so the two always sum to one bitstream.
+  interface SegmentContent {
+    header: SegmentHeader;
+    payloads: Uint8Array[];
+  }
+  const segments = new Map<number, SegmentContent>();
   let segmentChunkMeta: SegmentChunkMeta[] = [];
   let segmentPayloads: Uint8Array[] = [];
-  let chunksSeen = 0;
   let firstDescriptionBase64: string | undefined;
   let firstCodec: string | undefined;
-  // Monotonic segment index. Seeded at the resume point so a resumed build continues the numbering
-  // instead of overwriting the prefix it just replayed.
-  let nextSegmentIndex = 0;
+  let firstColorSpace: VideoColorSpaceInit | undefined;
+  // Chunk bookkeeping is per RUN (a contiguous forward walk of segments). Reset at each run start,
+  // which is safe because the encoder is flushed at every run boundary.
+  let runFirstSegment = 0;
+  let runChunkCount = 0;
 
   /**
-   * Seal the buffered chunks as one segment and hand it to the engine to persist.
+   * Seal the buffered chunks as one segment: keep it for the final mux AND hand it to the engine to
+   * persist for a future resume.
    *
    * Segmentation is driven by the CHUNK STREAM, not the frame-submission loop. `addVideoFrame` only
    * enqueues — the encoder's output lags submission by up to its queue depth (8) — so counting
    * submitted frames drifts off the segment grid, which silently (a) collided segment indices and
    * (b) put boundaries on non-keyframes. There is exactly one chunk per frame and chunks arrive in
-   * order, so chunk N IS frame N: counting chunks makes every boundary land on an exact multiple of
-   * `segmentFrames`, and therefore — since that is a multiple of the GOP — always on a keyframe.
+   * order within a run, so the Nth chunk of a run IS the Nth frame of that run: counting chunks
+   * makes every boundary land on an exact multiple of `segmentFrames`, and therefore — since that is
+   * a multiple of the GOP — always on a keyframe.
+   *
+   * `encodeSegment` copies the payloads into the blob, so the arrays retained here survive the
+   * transfer of that blob to the engine.
    */
   const flushSegment = (segmentIndex: number, startFrame: number, endFrame: number): void => {
     if (!segmentsUsable || segmentChunkMeta.length === 0) return;
@@ -153,12 +168,16 @@ async function build(
       fps,
       width,
       height,
-      ...(segmentIndex === 0 ? { descriptionBase64: firstDescriptionBase64, codec: firstCodec } : {}),
+      descriptionBase64: firstDescriptionBase64,
+      codec: firstCodec,
+      colorSpace: firstColorSpace,
       chunks: segmentChunkMeta,
     };
-    const blob = encodeSegment(header, segmentPayloads);
+    const content: SegmentContent = { header, payloads: segmentPayloads };
+    segments.set(segmentIndex, content);
     segmentChunkMeta = [];
     segmentPayloads = [];
+    const blob = encodeSegment(header, content.payloads);
     void blob.arrayBuffer().then((buffer) => {
       scope.postMessage({ type: "segment", segmentIndex, buffer } as SourceProxyWorkerResponse, [buffer]);
     });
@@ -177,12 +196,15 @@ async function build(
     audio: audio ? { sampleRate: audio.sampleRate, channels: audio.channels } : undefined,
     ...(segmentsUsable
       ? {
+          // Deferred mux: chunks are only tapped here. `muxAllSegments` feeds the muxer at the end,
+          // in logical order, so the build order above it is free to be anything.
+          deferVideoMux: true,
           onEncodedVideoChunk: (chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata | undefined): void => {
-            if (chunksSeen === 0 && meta?.decoderConfig) {
+            if (!firstDescriptionBase64 && meta?.decoderConfig) {
               firstDescriptionBase64 = descriptionToBase64(meta.decoderConfig.description);
               firstCodec = meta.decoderConfig.codec;
+              firstColorSpace = meta.decoderConfig.colorSpace;
             }
-            chunksSeen += 1;
             const bytes = new Uint8Array(chunk.byteLength);
             chunk.copyTo(bytes);
             segmentChunkMeta.push({
@@ -192,10 +214,11 @@ async function build(
               byteLength: bytes.length,
             });
             segmentPayloads.push(bytes);
+            runChunkCount += 1;
             if (segmentChunkMeta.length >= segmentFrames) {
-              const startFrame = nextSegmentIndex * segmentFrames;
-              flushSegment(nextSegmentIndex, startFrame, startFrame + segmentFrames);
-              nextSegmentIndex += 1;
+              const segmentIndex = runFirstSegment + Math.floor((runChunkCount - 1) / segmentFrames);
+              const startFrame = segmentIndex * segmentFrames;
+              flushSegment(segmentIndex, startFrame, startFrame + segmentFrames);
             }
           },
         }
@@ -213,7 +236,6 @@ async function build(
     // body of the clip ABORTS the build — no proxy beats a corrupt proxy. Nulls in the last
     // quarter-second (duration metadata often overshoots the sample table) end the encode cleanly.
     const maxNullRun = Math.max(2, Math.ceil(fps * 0.5));
-    let nullRun = 0;
     let decodedAny = false;
     // DECODABLE-END CLAMP (2026-07-13, keep in sync with sourceProxyEngine.ts): asset duration
     // metadata can OVERSHOOT the sample table (historically up to ~1s via the ceil-to-Int asset
@@ -225,70 +247,170 @@ async function build(
       decodableEnd !== undefined && decodableEnd > 0.2 && decodableEnd < durationSeconds ? decodableEnd : durationSeconds;
     const frameCount = Math.max(1, Math.ceil(effectiveDuration * fps));
 
-    // RESUME: replay the persisted prefix straight into the muxer — no decode, no re-encode. The
-    // engine has already validated each segment's guards (asset/bytes/recipe) and their contiguity;
-    // anything it could not vouch for it simply does not send, and we rebuild those frames instead.
-    let resumeFromFrame = 0;
-    if (segmentsUsable && payload.resumePrefix.length > 0 && payload.resumeFromFrame > 0) {
-      let replayed = 0;
-      for (const buffer of payload.resumePrefix) {
-        const parsed = await decodeSegment(new Blob([buffer]));
-        if (!parsed) break; // truncated/unreadable → stop replaying and encode the rest live
-        const chunks = segmentToChunks(parsed.header, parsed.payloads);
-        for (let c = 0; c < chunks.length; c += 1) {
-          const isVeryFirst = replayed === 0 && c === 0;
-          const description = isVeryFirst ? descriptionFromBase64(parsed.header.descriptionBase64) : undefined;
-          encoder.muxPreEncodedVideoChunk(
-            chunks[c]!,
-            // Only the FIRST chunk of the whole file carries a decoderConfig — that is what the
-            // muxer writes into avcC. The live encoder's own first chunk will also carry one, but
-            // mp4-muxer keeps the first it saw, and both describe the same pinned config.
-            isVeryFirst && description && parsed.header.codec
-              ? { decoderConfig: { codec: parsed.header.codec, description, codedWidth: width, codedHeight: height } }
-              : undefined
-          );
-        }
-        replayed += 1;
-        resumeFromFrame = parsed.header.endFrame;
-        decodedAny = true; // the prefix IS decoded content — it just was not decoded this session
-      }
-      if (replayed > 0) {
-        console.info(`[proxy] resumed from segment ${replayed} — replayed ${resumeFromFrame} frames, encoding from there`);
+    // The grid the BUILD LOOP walks. With segmentation disabled (a `segmentFrames` that is not a
+    // multiple of the GOP — see `segmentsUsable`) there is no grid: the whole file is one run, which
+    // is the pre-segment code path verbatim. Using `segmentFrames` here regardless would silently
+    // truncate that fallback's output to one segment's worth of frames.
+    const runGridFrames = segmentsUsable ? segmentFrames : frameCount;
+    const totalSegments = segmentsUsable ? Math.max(1, Math.ceil(frameCount / segmentFrames)) : 1;
+
+    // RESUME: adopt every cached segment the engine vouched for — no decode, no re-encode. Slice 2
+    // made the cache SPARSE (playhead-first order leaves gaps), so this is a set, not a prefix.
+    // Anything unreadable here is simply not adopted and gets rebuilt below.
+    if (segmentsUsable) {
+      for (const entry of payload.resumeSegments) {
+        const parsed = await decodeSegment(new Blob([entry.buffer]));
+        if (!parsed) continue;
+        if (parsed.header.segmentIndex !== entry.index || parsed.header.startFrame !== entry.index * segmentFrames) continue;
+        if (parsed.header.endFrame > frameCount) continue; // built against a longer clamp — rebuild it
+        segments.set(entry.index, { header: parsed.header, payloads: parsed.payloads });
+        // The cached frames ARE decoded content; they just were not decoded this session. Without
+        // this a resume that only needs the tail would trip the "produced no frames" check.
+        decodedAny = true;
       }
     }
+    const resumedFrames = [...segments.values()].reduce((sum, s) => sum + s.payloads.length, 0);
 
-    let encodedFrames = resumeFromFrame;
-    nextSegmentIndex = segmentsUsable ? Math.floor(resumeFromFrame / segmentFrames) : 0;
-    for (let i = resumeFromFrame; i < frameCount; i += 1) {
-      // Parks an in-flight build the moment playback starts (engine forwards suspend messages);
-      // resumes exactly here on pause. Also the abort exit.
-      await waitWhileSuspended();
-      const frame = await provider.getFrame(i / fps);
-      if (aborted) throw new ProxyBuildAborted();
-      if (frame) {
-        nullRun = 0;
-        decodedAny = true;
-        ctx.drawImage(frame as CanvasImageSource, 0, 0, width, height);
-      } else {
-        nullRun += 1;
-        if (decodedAny && i / fps > effectiveDuration - 0.25) {
-          break; // tail overshoot — finish with what we have
+    // BUILD ORDER (Slice 2). Missing segments, playhead's segment first, forward to the end, then
+    // wrapping to the head. See the protocol's `playheadSeconds` for why forward-wrap rather than
+    // strictly alternating outward.
+    const missing: number[] = [];
+    for (let s = 0; s < totalSegments; s += 1) if (!segments.has(s)) missing.push(s);
+    const playheadFrame =
+      payload.playheadSeconds === null || !Number.isFinite(payload.playheadSeconds)
+        ? 0
+        : Math.max(0, Math.min(frameCount - 1, Math.round(payload.playheadSeconds * fps)));
+    const startSegment = Math.min(totalSegments - 1, Math.floor(playheadFrame / segmentFrames));
+    const ordered = [...missing.filter((s) => s >= startSegment), ...missing.filter((s) => s < startSegment)];
+    // Group into contiguous runs: within a run the walk is forward and the encoder needs no restart,
+    // so the common case (playhead at 0, nothing cached) is ONE run — byte-for-byte the old loop.
+    const runs: Array<{ start: number; end: number }> = [];
+    for (const s of ordered) {
+      const last = runs[runs.length - 1];
+      if (last && s === last.end + 1) last.end = s;
+      else runs.push({ start: s, end: s });
+    }
+    if (startSegment > 0 || segments.size > 0) {
+      console.info(
+        `[proxy] build order: ${runs.length} run(s) from segment ${startSegment} of ${totalSegments}` +
+          `${segments.size > 0 ? ` — ${segments.size} cached (${resumedFrames} frames) reused` : ""}`
+      );
+    }
+
+    let encodedFrames = resumedFrames;
+    // Frames past this point do not exist in the source (tail overshoot). Only ever moves down, and
+    // only ever from within the last segment.
+    let tailEndFrame = frameCount;
+    for (let r = 0; r < runs.length; r += 1) {
+      const run = runs[r]!;
+      // Non-contiguous continuation: the next timestamp jumps backwards, which WebCodecs does not
+      // take. Flush + reset + reconfigure resets the baseline and forces an IDR.
+      if (r > 0) await encoder.restartVideoEncoder();
+      runFirstSegment = run.start;
+      runChunkCount = 0;
+      segmentChunkMeta = [];
+      segmentPayloads = [];
+      // FROZEN-TAIL GUARD, RESTATED PER RUN (Slice 2). "The decoder stopped producing frames" only
+      // means anything across a CONTIGUOUS forward walk — a null at the start of a new run follows a
+      // seek, not the previous run's last frame, so carrying the counter across would let a normal
+      // post-seek gap accumulate into a false truncation. The guard's strength is unchanged inside a
+      // run, which is where a real mid-file decoder failure shows up.
+      let nullRun = 0;
+      const from = run.start * runGridFrames;
+      const to = Math.min(frameCount, (run.end + 1) * runGridFrames);
+      let stoppedAt = to;
+      for (let i = from; i < to; i += 1) {
+        // Parks an in-flight build the moment playback starts (engine forwards suspend messages);
+        // resumes exactly here on pause. Also the abort exit.
+        await waitWhileSuspended();
+        const frame = await provider.getFrame(i / fps);
+        if (aborted) throw new ProxyBuildAborted();
+        if (frame) {
+          nullRun = 0;
+          decodedAny = true;
+          ctx.drawImage(frame as CanvasImageSource, 0, 0, width, height);
+        } else {
+          nullRun += 1;
+          // Tail overshoot — the metadata duration runs past the sample table. Ends THIS RUN only
+          // (out-of-order building means later runs still have real frames to encode), and the
+          // condition is absolute source time, so it can only ever fire inside the last segment.
+          //
+          // The old form also required `decodedAny`, i.e. "we have seen a real frame THIS SESSION".
+          // Under playhead-first order the tail can be the FIRST thing built, so that clause turned a
+          // legitimate end into a frozen-tail abort purely because of build order. The degenerate
+          // case it was guarding — a source that decodes nothing at all — is caught unchanged by the
+          // `!decodedAny` check after every run, which does not depend on order.
+          if (i / fps > effectiveDuration - 0.25) {
+            stoppedAt = i;
+            break;
+          }
+          if (nullRun > maxNullRun) {
+            throw new Error(`decoder stopped producing frames at ~${(i / fps).toFixed(1)}s — aborted (frozen-tail guard)`);
+          }
         }
-        if (nullRun > maxNullRun) {
-          throw new Error(`decoder stopped producing frames at ~${(i / fps).toFixed(1)}s — aborted (frozen-tail guard)`);
+        await encoder.addVideoFrame(canvas, i);
+        encodedFrames += 1;
+        // Live feedback (2026-07-18, user report: silent builds read as a hang): a throttled progress
+        // ping the engine forwards to the editor's notice line. Every 30 frames ≈ once a second.
+        if (encodedFrames % 30 === 0) {
+          scope.postMessage({ type: "progress", encodedFrames, totalFrames: frameCount });
         }
       }
-      await encoder.addVideoFrame(canvas, i);
-      encodedFrames += 1;
-      // Live feedback (2026-07-18, user report: silent builds read as a hang): a throttled progress
-      // ping the engine forwards to the editor's notice line. Every 30 frames ≈ once a second.
-      if (encodedFrames % 30 === 0) {
-        scope.postMessage({ type: "progress", encodedFrames, totalFrames: frameCount });
+      // Drain before reading `runChunkCount` — the tap lags submission by up to the queue depth, so
+      // the leftover below is only complete once every frame of this run has come out.
+      await encoder.flushVideo();
+      if (segmentChunkMeta.length > 0) {
+        // A short final segment. Only legitimate at the very end of the file: a mid-file run spans
+        // whole segments by construction, so leftovers there would mean the run was cut short.
+        const segmentIndex = runFirstSegment + Math.floor(runChunkCount / segmentFrames);
+        const startFrame = segmentIndex * segmentFrames;
+        flushSegment(segmentIndex, startFrame, startFrame + segmentChunkMeta.length);
       }
+      if (stoppedAt < to) tailEndFrame = Math.min(tailEndFrame, stoppedAt);
     }
     if (!decodedAny) {
       throw new Error("decoder produced no frames — aborted");
     }
+
+    // MUX, once, in logical segment order — the step that makes any build order legal. Payloads are
+    // released as they go, so `segments` and the muxer never both hold a full copy.
+    // When segments are unusable there is no tap and no deferral: the muxer took the chunks live,
+    // exactly as it did before any of this existed, and there is nothing to replay.
+    let muxedFrames = 0;
+    for (let s = 0; segmentsUsable && s < totalSegments; s += 1) {
+      const content = segments.get(s);
+      if (!content) {
+        // Legitimate only past the true tail; anywhere else it is a gap, and a proxy with a hole in
+        // it is exactly the corruption the frozen-tail guard exists to keep off disk.
+        if (s * segmentFrames >= tailEndFrame) break;
+        throw new Error(`source-proxy segment ${s} of ${totalSegments} missing after build — aborted`);
+      }
+      const chunks = segmentToChunks(content.header, content.payloads);
+      for (let c = 0; c < chunks.length; c += 1) {
+        const description = muxedFrames === 0 ? descriptionFromBase64(content.header.descriptionBase64) : undefined;
+        encoder.muxPreEncodedVideoChunk(
+          chunks[c]!,
+          // Only the FIRST chunk of the file carries a decoderConfig — that is what the muxer writes
+          // into avcC (and, via its colorSpace, into `colr`). Every run's encoder is configured
+          // identically, so any segment's copy describes them all.
+          description && content.header.codec
+            ? {
+                decoderConfig: {
+                  codec: content.header.codec,
+                  description,
+                  codedWidth: width,
+                  codedHeight: height,
+                  ...(content.header.colorSpace ? { colorSpace: content.header.colorSpace } : {}),
+                },
+              }
+            : undefined
+        );
+        muxedFrames += 1;
+      }
+      content.payloads.length = 0;
+      segments.delete(s);
+    }
+    if (muxedFrames > 0) encodedFrames = muxedFrames;
     // The tail (audio encode + finalize) parks too: the 2026-07-06 harness run showed a build whose
     // frame loop finished pre-play completing its audio/mux DURING playback — harmless off-thread,
     // but the suspension contract is "no background work while the transport runs".

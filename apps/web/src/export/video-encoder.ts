@@ -59,6 +59,17 @@ export interface MediaEncoderOptions {
    * The callback must not retain `chunk`; copy what it needs synchronously.
    */
   onEncodedVideoChunk?: ((chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata | undefined) => void) | undefined;
+  /**
+   * Opt-in: encoded chunks are NOT muxed as they arrive; the caller muxes them later, in whatever
+   * order it needs, via {@link MediaEncoder.muxPreEncodedVideoChunk} (source-proxy playhead-first
+   * build order, 2026-08-11 Slice 2). Only meaningful together with `onEncodedVideoChunk` — without
+   * a tap this would simply discard the video. Every export path omits it and is unaffected.
+   *
+   * Deliberately NOT a memory regression: the bytes move from the muxer's in-memory buffer to the
+   * caller's, they are not duplicated. While the caller muxes and releases segment by segment the
+   * two halves sum to one bitstream, exactly as before.
+   */
+  deferVideoMux?: boolean | undefined;
 }
 
 interface CommonMuxer {
@@ -175,8 +186,9 @@ export class MediaEncoder {
 
     this.videoEncoder = new VideoEncoder({
       output: (chunk, meta) => {
-        this.muxedVideoChunks += 1;
         this.opts.onEncodedVideoChunk?.(chunk, meta);
+        if (this.opts.deferVideoMux) return; // caller muxes later, in its own order
+        this.muxedVideoChunks += 1;
         this.muxer.addVideoChunk(chunk, this.tagColorMetadata(meta));
       },
       error: (error) => {
@@ -259,6 +271,40 @@ export class MediaEncoder {
     if (this.encoderError) throw this.encoderError;
     this.muxedVideoChunks += 1;
     this.muxer.addVideoChunk(chunk, this.tagColorMetadata(meta));
+  }
+
+  /**
+   * Drain the video encoder so every frame submitted so far has reached the `output` callback
+   * (source-proxy segment tap, 2026-08-11). The tap lags submission by up to the encoder's queue
+   * depth, so a caller that groups chunks by submission position MUST flush before it acts on the
+   * grouping. Safe to call repeatedly; `finalize()` flushes again and a flushed encoder no-ops.
+   */
+  async flushVideo(): Promise<void> {
+    if (this.encoderError) throw this.encoderError;
+    await this.videoEncoder.flush();
+    if (this.encoderError) throw this.encoderError;
+  }
+
+  /**
+   * Start a fresh encoder session for a NON-CONTIGUOUS continuation (source-proxy playhead-first
+   * build order, 2026-08-11 Slice 2).
+   *
+   * WebCodecs takes frame timestamps as monotonically increasing; building segments out of source
+   * order means the next frame's timestamp jumps BACKWARDS. Rather than gamble on how a particular
+   * hardware encoder reacts to that — the class of gamble that bakes corruption into a proxy — this
+   * flushes, resets and reconfigures with the identical `videoConfig`, which resets the timestamp
+   * baseline outright. Identical config produces identical SPS/PPS, so chunks from either side of a
+   * restart are interchangeable in one file. The next frame is a forced IDR, so the new run opens on
+   * a closed GOP that references nothing before it.
+   *
+   * The caller must be muxing deferred (`deferVideoMux`): mid-stream restarts only make sense when
+   * the caller reorders chunks afterwards. No export path calls this.
+   */
+  async restartVideoEncoder(): Promise<void> {
+    await this.flushVideo();
+    this.videoEncoder.reset();
+    this.videoEncoder.configure(this.videoConfig);
+    this.forceKeyFrame = true;
   }
 
   /** Encode one composited frame. `index` is the 0-based frame number. */

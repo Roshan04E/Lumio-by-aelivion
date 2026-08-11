@@ -48,9 +48,22 @@ export interface SegmentHeader {
   fps: number;
   width: number;
   height: number;
-  /** avcC/decoder description from the encoder's first chunk, base64. Present on segment 0 only. */
+  /**
+   * avcC/decoder description + codec from the encoder's first chunk, base64.
+   *
+   * Stamped on EVERY segment since 2026-08-11 (Slice 2), not just segment 0: playhead-first build
+   * order means the first chunk of a session may belong to any segment, and a resumed build may not
+   * hold segment 0 at all. Every segment describes the same pinned encoder config, so any copy will
+   * do — the mux step takes the first one it finds.
+   */
   descriptionBase64?: string | undefined;
   codec?: string | undefined;
+  /**
+   * The colour descriptor the ENCODER reported, preserved so a deferred mux writes the same `colr`
+   * box a live mux would have. Without this the muxer would fall back to the Rec.709 default and a
+   * proxy's container tag could silently differ from one built before deferred muxing existed.
+   */
+  colorSpace?: VideoColorSpaceInit | undefined;
   chunks: SegmentChunkMeta[];
 }
 

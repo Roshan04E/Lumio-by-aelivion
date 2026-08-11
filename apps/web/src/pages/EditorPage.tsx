@@ -164,6 +164,7 @@ import {
   createFlarexComp,
   getLayerFlarexComp,
   soloLayerComposition,
+  layerSourceTimeSeconds,
   stampFlarexComp,
   type NodeGraphIntent,
   compileNotesIntent,
@@ -276,6 +277,7 @@ import {
   ensureSourceProxy,
   setSourceProxyBuildSuspended,
   setSourceProxyDenseGopListener,
+  setSourceProxyPlayheadResolver,
   setSourceProxyProgressListener
 } from "../editor/performance/sourceProxyEngine";
 import { setWorldAssetProvider } from "../ai/world";
@@ -1438,6 +1440,30 @@ export function EditorPage() {
       setNotice(`Optimizing media in the background — ${progress.percent}%${queueSuffix}. Playback may be softer until it finishes`);
     });
     return () => setSourceProxyProgressListener(null);
+  }, []);
+  // PLAYHEAD-FIRST PROXY BUILDS (2026-08-11, Slice 2): tell the build engine where the user is
+  // parked, in the ASSET's own source timebase, so an interrupted build leaves the segments nearest
+  // the work rather than the first N seconds of a clip nobody was looking at. Builds only run while
+  // the transport is parked, so this is a stationary reading. Refs, not state — this is polled once
+  // per build, never rendered, and must not re-register on every playhead tick.
+  useEffect(() => {
+    setSourceProxyPlayheadResolver((assetId) => {
+      const active = compositionRef.current;
+      if (!active) return null;
+      const playhead = currentTimeRef.current;
+      for (const track of active.tracks) {
+        for (const layer of track.layers) {
+          if (layer.assetId !== assetId) continue;
+          if (playhead < layer.startSeconds || playhead >= layer.startSeconds + layer.durationSeconds) continue;
+          // Through the clip's own speed/ramp mapping — the same evaluator the preview and the
+          // renderers use, rather than a second copy of it living in the proxy engine.
+          const source = layerSourceTimeSeconds(layer, playhead - layer.startSeconds);
+          return Number.isFinite(source) ? Math.max(0, source) : null;
+        }
+      }
+      return null; // asset not under the playhead (or only in a Flarex comp) — build from 0
+    });
+    return () => setSourceProxyPlayheadResolver(null);
   }, []);
 
   useEffect(() => {

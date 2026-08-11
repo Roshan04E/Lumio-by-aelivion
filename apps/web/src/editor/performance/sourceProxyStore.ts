@@ -159,6 +159,31 @@ export async function getSourceProxySegment(assetId: string, segmentIndex: numbe
 }
 
 /**
+ * Which segment indices exist on disk for an asset, ascending. Sparse by design since 2026-08-11
+ * (Slice 2): playhead-first build order persists the middle of a clip before its head, so a resume
+ * must ask "which segments are there" rather than walking 0,1,2… until it misses.
+ * Empty when OPFS is unavailable or the directory cannot be enumerated — i.e. a full rebuild.
+ */
+export async function listSourceProxySegmentIndices(assetId: string): Promise<number[]> {
+  const handle = await getHandle();
+  if (!handle) return [];
+  const prefix = `${assetId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.seg`;
+  try {
+    const dir = handle.dir as FileSystemDirectoryHandle & { keys?: () => AsyncIterableIterator<string> };
+    if (!dir.keys) return [];
+    const indices: number[] = [];
+    for await (const name of dir.keys()) {
+      if (!name.startsWith(prefix) || !name.endsWith(".bin")) continue;
+      const index = Number(name.slice(prefix.length, -".bin".length));
+      if (Number.isInteger(index) && index >= 0) indices.push(index);
+    }
+    return indices.sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Drop every segment file for an asset. Called once a build completes (the finished proxy
  * supersedes its own resume cache) and whenever a proxy is invalidated or removed, so a stale
  * prefix from different source bytes can never be spliced into a later build.

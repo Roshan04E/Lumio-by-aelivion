@@ -34,9 +34,8 @@ export interface SourceProxyWorkerPayload {
   /** Initial suspension state so a build queued mid-playback parks before its first frame. */
   suspended: boolean;
   /**
-   * RESUME (2026-08-11, Slice 1). Segment length in FRAMES, and the already-persisted prefix the
-   * engine resolved from the segment cache. The worker replays `resumePrefix` into the muxer
-   * without re-encoding, then encodes live from `resumeFromFrame` onward.
+   * RESUME (2026-08-11, Slice 1). Segment length in FRAMES. The worker replays every cached segment
+   * into the muxer without re-encoding and encodes only the frames no segment covers.
    *
    * `segmentFrames` MUST be a multiple of `keyFrameEveryNFrames`, so every segment boundary — and
    * therefore every possible resume point — is a keyframe. The engine enforces this; the worker
@@ -45,10 +44,26 @@ export interface SourceProxyWorkerPayload {
    * to prevent.
    */
   segmentFrames: number;
-  /** Frame index to start LIVE encoding at (0 = full build). Always a multiple of segmentFrames. */
-  resumeFromFrame: number;
-  /** Serialized segment files covering [0, resumeFromFrame), in order. Empty for a full build. */
-  resumePrefix: ArrayBuffer[];
+  /**
+   * Segments already on disk, in any order and with any gaps (Slice 2 made the cache sparse — see
+   * `playheadSeconds`). The engine has already checked each one's guards; the worker re-parses and
+   * re-checks contiguity of the FRAME RANGE it claims, then encodes only the indices that are
+   * missing. Empty for a full build.
+   */
+  resumeSegments: Array<{ index: number; buffer: ArrayBuffer }>;
+  /**
+   * PLAYHEAD-FIRST BUILD ORDER (2026-08-11, Slice 2). Where the user is parked, in SOURCE seconds
+   * (the engine maps timeline time through the placed clip's speed/sourceIn). The worker builds the
+   * segment containing this point first, then forward to the end, then wraps to the head.
+   *
+   * Null — no clip placed at the playhead, no resolver registered — means build from 0, i.e. exactly
+   * the order every build used before this existed.
+   *
+   * Forward-then-wrap rather than strictly alternating outward: a proxy exists because its SOURCE is
+   * expensive to seek, so each backward jump costs a full GOP grind on the original. Forward-wrap
+   * pays that once; alternating outward would pay it once per segment.
+   */
+  playheadSeconds: number | null;
 }
 
 export type SourceProxyWorkerRequest =

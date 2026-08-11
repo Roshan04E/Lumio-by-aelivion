@@ -29,6 +29,60 @@ revisited anywhere in this plan.**
 
 ---
 
+## 0b. MEASUREMENT HAZARDS — read this before benchmarking anything in this pipeline
+
+Two traps, both found the expensive way. Neither is about segmentation; both are properties of the
+pipeline itself and were true before any slice of this plan was built.
+
+### Trap 1 — the muxed file's digest is not stable, even for unchanged code
+
+`mp4-muxer` stamps creation/modification times into `mvhd`/`tkhd`, so a digest over the whole muxed
+file is **non-deterministic**: two runs of *unchanged* code produce identical byte lengths and
+different digests. That reads exactly like "my change altered the output" and will send you chasing
+a phantom. Digest the **encoded bitstream** in the encoder's `output` callback instead
+(`chunk.copyTo` into a buffer, hash that).
+
+### Trap 2 — the ENCODED BITSTREAM is not deterministic under system load
+
+This is the more dangerous one, because Trap 1's fix looks like it closes the question and it does
+not. On a loaded machine, three runs at **identical configuration** produced **three different
+bitstream digests and three different file sizes at identical frame counts**
+(86,009 / 122,001 / 82,879 ms wall, decode 22.5 / 57.5 / 23.1 s). Same config, varying output —
+which rules out any config variable as the cause and points at the hardware VBR encoder responding
+to *frame-delivery timing*: when frames arrive late and irregularly, rate control makes different
+decisions, and those decisions are in the bytes.
+
+Consequences, stated plainly:
+
+- **Byte-identity is only a valid check on a quiet machine.** A digest mismatch on a loaded box is
+  not evidence of a regression, and a match is not evidence of correctness.
+- **This is a property of the pipeline, not of segmentation.** It predates Slice 1. Do not attribute
+  it to whatever you are currently changing.
+- Any future benchmark or identity check **must control machine state or it is measuring noise**.
+  State whether the machine was quiet, every time you report a number. A run taken while another
+  build, a browser soak, or a parallel session's work is running is void.
+
+### Consequence: the segment-duration sweep is UNFINISHED
+
+Slice 1 shipped `PROXY_SEGMENT_FRAMES = 300`, and that constant does **not** rest on a completed
+measurement. What actually exists:
+
+| segFrames | build wall | decode | machine |
+|---:|---:|---:|---|
+| (none — baseline) | 61,099 ms | ~5.0 s | quiet |
+| 300 | 63,297 ms | 5,989 ms | quiet |
+| 120 | 69,190 ms | 8,056 ms | quiet |
+| 600 / 1200 | never completed inside the timeout | — | degraded |
+
+Two clean single runs, no repeats, no spread. The **~+3.6 %** implied by 300-vs-baseline is
+**indicative, not measured** — do not quote it as a measured figure. Everything collected after the
+machine degraded is contaminated per Trap 2 and was discarded. 300 was chosen on that clean
+300-vs-120 comparison plus the structural argument that the cache costs ~0.5 % in header overhead at
+any of these lengths. **A proper sweep on a quiet machine is still owed.** The constant is a
+one-line change in `sourceProxyEngine.ts` if that sweep says otherwise.
+
+---
+
 ## 1. How playback consumes a proxy today
 
 The full path, as it is:
@@ -114,6 +168,27 @@ and rehydrates coverage across reloads. That is the *span* cache, a different ca
 invalidation — but its record shape and coverage bookkeeping are the pattern to copy rather than
 invent.
 
+### AMENDMENT (2026-08-11): Slice 1 shipped Option B′, not Option B — chunks, not MP4s
+
+Option B as written above was **not** built, and the deviation is load-bearing for everything after
+it. What shipped (`sourceProxySegments.ts`) is **one continuous encoder, tapped at chunk boundaries**,
+persisting raw encoded chunks per segment rather than N finalized MP4s. Why:
+
+- **Option B needs one ENCODER per segment.** Each encoder starts with fresh rate-control state, so
+  the encoded bitstream necessarily differs from today's single continuous encode. Option B would
+  therefore have changed the output of **every** build, including uninterrupted ones — a
+  steady-state change to buy a transient feature, which is the exact objection that disqualified
+  Option A above.
+- **Tapping one encoder keeps uninterrupted builds byte-identical.** Verified: `chunkDigest`
+  1807211703 / 57,315,028 bitstream bytes / 60,845,662 file bytes, the pre-change baseline, on two
+  separate quiet runs. Only a genuinely **resumed** build diverges, and only after the resume point
+  — unavoidable in any design, because encoder state cannot be persisted.
+- **It removes the N× `moov` overhead** §4 named as Slice 1's main cost: a segment carries no
+  container at all, just a JSON header and the chunk payloads.
+
+The trade: **segments are not independently playable.** §4's Slice 3 is rewritten below to account
+for that.
+
 ---
 
 ## 3. What the store and routing would have to learn
@@ -183,14 +258,11 @@ across the boundary. That is materially bigger than this slice scoped, and its p
 encoder's cost is thread-servicing (which a second worker would relieve) versus GPU time (which it
 would not). Anyone attempting it should measure that split first.
 
-**MEASUREMENT TRAP, for whoever benchmarks this next.** `mp4-muxer` stamps creation/modification
-times into `mvhd`/`tkhd`, so a digest over the whole muxed file is **non-deterministic** — two runs
-of *unchanged* code produce identical byte lengths and different digests. That reads exactly like
-"my change altered the output" and will send you chasing a phantom. Digest the **encoded bitstream**
-in the encoder's `output` callback instead (`chunk.copyTo` into a buffer, hash that); it is
-deterministic and was identical across all six runs of both arms.
+**MEASUREMENT TRAPS** found by this round are recorded in **§0b** — the `mvhd`/`tkhd` timestamp trap
+(which this round hit) and the load-dependent bitstream non-determinism (which the next round hit).
+Read §0b before benchmarking anything here.
 
-### Slice 1 — Segmented build + store, still adopted whole
+### Slice 1 — Segmented build + store, still adopted whole — **SHIPPED 2026-08-11 (`7ecfa80`)**
 
 Build to N segments, finalize each, persist each. **Do not change routing yet** — adopt only when
 the last segment lands, reassembling coverage into the same single-`proxyUrl` patch.
@@ -200,12 +272,14 @@ the last segment lands, reassembling coverage into the same single-`proxyUrl` pa
   longer throws away 100% of the work; on the next open, 80% is already on disk. Today an
   interrupted build leaves nothing.
 - **Excludes:** all coverage routing. Playback behaviour is byte-identical to today.
-- **Decides:** segment duration. Not guessed here — it is a real tradeoff (more segments = finer
-  coverage granularity and faster first-adoption, but N× the `moov` overhead and N× the OPFS
-  writes) and should be measured in this slice, using the same phase instrumentation the
-  2026-08-09 round used.
+- **Decides:** segment duration. **Shipped at 300 frames on an UNFINISHED sweep — see §0b.** The
+  `moov`-overhead half of the tradeoff evaporated with the Option B′ deviation (segments carry no
+  container); what remains is N× OPFS writes and ~0.5 % header overhead.
+- **As built:** see the Option B′ amendment in §2. One encoder, chunk tap, byte-identical
+  uninterrupted output, resume verified end to end (interrupted at 1500/4352 frames → replayed 5
+  segments without re-encoding, encoded 2,852 new frames, complete file, 34.8 s vs ~55 s).
 
-### Slice 2 — Playhead-first build order
+### Slice 2 — Playhead-first build order — **SHIPPED 2026-08-11**
 
 Build segments outward from the current playhead rather than from t=0. Resolve and Premiere both
 prioritise what you are looking at; the measurement rounds confirmed builds already suspend during
@@ -216,30 +290,113 @@ signal to read, not a moving target to chase.
   a 2:25 clip currently waits for 0:00–2:00 to encode before anything near them exists. Combined
   with Slice 3 it is the difference between "useful in 5s" and "useful in 50s".
 - **Excludes:** coverage routing (still adopt-whole until Slice 3).
-- **Watch:** ordering must not break the frozen-tail guard's assumption that it is walking forward
-  through the source, nor `decodableEndSeconds` clamping. The guard is about the *decoder* failing
-  mid-file; out-of-order building means "the decoder stopped producing frames" needs re-stating in
-  terms of a segment, not the file.
 
-### Slice 3 — Coverage-aware routing (the actual feature)
+**As built.**
 
-Playback consults coverage: covered time plays the proxy segment, uncovered time plays the original
-via today's expression. Reuse `requestLiveReprime` at boundary crossings — it exists for exactly
-this, in the span cache.
+- **Forward-then-wrap, not strictly outward.** Order is `[playhead segment … last]` then
+  `[0 … playhead-1]`. A proxy exists because its SOURCE is expensive to seek, so every backward jump
+  costs a full GOP grind on the original; forward-wrap pays that **once**, alternating outward would
+  pay it once per segment. Degenerate case worth knowing: a playhead in the LAST segment gives only
+  one segment "ahead" before the wrap.
+- **The playhead is resolved by the editor, not the engine.** `setSourceProxyPlayheadResolver` hands
+  the engine a callback; `EditorPage` maps timeline time through the placed clip's own
+  speed/`sourceIn` with `layerSourceTimeSeconds` — the same evaluator the preview and renderers use,
+  rather than a second copy inside the proxy engine. Null (no clip under the playhead, no resolver)
+  means build from 0, i.e. exactly the previous order.
+- **Out-of-order encoding needs an encoder restart, not a timestamp gamble.** WebCodecs takes frame
+  timestamps as monotonically increasing, and jumping back to segment 0 breaks that. Rather than bet
+  on how one hardware encoder reacts, each non-contiguous run flushes, resets and reconfigures with
+  the identical config (same SPS/PPS) and opens on a forced IDR. Muxing is therefore **deferred**:
+  the muxer is fed once at the end in logical order. Not a memory regression — the bytes sit in the
+  segment map instead of the muxer's buffer and are released as they are muxed.
+- **The resume cache became a SET, not a prefix.** Slice 1 walked 0,1,2… and stopped at the first
+  gap; playhead-first leaves gaps by design, so the store now enumerates indices
+  (`listSourceProxySegmentIndices`) and the worker encodes whatever is missing.
 
-- **Win:** the headline one. The user stops waiting.
+**The guard, restated (§4's "Watch" item, which was the real risk).**
+
+- `nullRun` now resets **per run**, not per file. "The decoder stopped producing frames" only means
+  anything across a contiguous forward walk; a null right after a seek is not a continuation of the
+  previous run's last frame. Inside a run the guard is unchanged, which is where a real mid-file
+  decoder failure appears.
+- The tail-overshoot exit is stated in **absolute source time** (`i/fps > effectiveDuration − 0.25`),
+  so it can only ever fire inside the last segment regardless of build order, and it now ends **that
+  run** rather than the whole build.
+- Its old `decodedAny &&` clause was **removed**, deliberately. It meant "we have seen a real frame
+  this session" — true under t=0 order by the time you reach the tail, and false under playhead-first
+  when the tail is built FIRST, which turned a legitimate end into a frozen-tail abort purely because
+  of build order. The degenerate case it guarded (a source that decodes nothing at all) is caught
+  unchanged by the order-independent `!decodedAny` check after the runs.
+- A **missing segment** below the tail is now a hard build failure — a proxy with a hole in it is
+  precisely what the guard exists to keep off disk.
+
+**Verified** (real product path, real Chrome, AMD Vega 8):
+
+| check | result |
+|---|---|
+| playhead at 0 | one run `0-15`, no resume — shape identical to before |
+| playhead-first order | parked at 150.9 s → `build order: 2 run(s) from segment 15 of 16`; killed mid-build, disk held `[0,1,2,3,4,5,6,15]` — segment 15 exists with a gap below it, which t=0 order cannot produce |
+| resume from a sparse set | reused 8 non-contiguous segments (2,129 frames), encoded only run `7-14`, muxed a complete 4,529/4,529-frame file |
+| encoder-restart splice | uninterrupted 2-run build (`15-15`, `0-14`) → complete file, `decodableEndSeconds` 150.97 s, decodes at frames 0/299/300/600/1500/1501/4500 |
+| suspend during playback | 30 → 30 frozen while playing (`__rfBgGate.reasons: ["playing"]`) → 120 after pause |
+
+**NOT verified: byte-identity, and no timing figures.** Per §0b this machine was not quiet
+(CPU 18–100 % throughout, VS Code + Docker + a parallel session). Four alternating builds of the same
+clip — two with segmentation disabled, two with it on — produced **four different digests, including
+two at identical configuration**, with file sizes spread across 0.13 %. That is §0b Trap 2, not a
+regression signal; frame counts were exact (932/932) in every arm. Build wall times ranged 44–259 s
+for the same work at 26–97 % CPU and are reported here only to say they are **not measurements**.
+Byte-identity and the cost of the extra seek are both **still owed on a quiet machine**.
+
+**A latent bug the verification caught.** The run bounds initially used the segment grid even when
+segmentation is disabled (a `segmentFrames` that is not a multiple of the GOP), truncating that
+fallback's output to one segment's worth of frames. Found because the baseline arm returned 301
+frames instead of 932. Fixed with an explicit `runGridFrames`.
+
+### Slice 3 — Coverage-aware routing (the actual feature) — **REWRITTEN 2026-08-11 for Option B′**
+
+*The original text described routing between N independently-playable segment files. Slice 1 does
+not produce those (see the §2 amendment), so that design is gone. A plan describing a design the
+code abandoned is worse than no plan.*
+
+Playback consults coverage: covered time plays the proxy, uncovered time plays the original via
+today's expression. Reuse `requestLiveReprime` at boundary crossings — it exists for exactly this,
+in the span cache.
+
+**What "the proxy" now means during a build.** Segments are raw chunk bundles, not files. So
+coverage routing means **muxing the covered prefix on demand into ONE playable MP4** — the same
+`muxPreEncodedVideoChunk` + `finalize()` path the resume replay already uses, run against segments
+`[0, k)` and written to a blob URL. Not N files to route between: **one file, one URL, one
+`proxyUrl` patch**, which is the shape `resolvePlaybackUrl` already takes.
+
+Consequences, all of which make this *simpler* than the original design, not harder:
+
+- **Routing does not change shape.** `resolvePlaybackUrl` keeps returning one URL per asset. The
+  time-dependence lives in *when the URL is re-minted*, not in the function's signature — so the
+  `preferNativeDecode` / `mediaUrl !== proxyUrl` coupling named below is untouched by construction.
+- **Coverage is a scalar, not a set**: `coveredUntilFrame`. Playhead-first order (Slice 2) makes
+  coverage a *set* of built segments, so Slice 3 muxes the contiguous run containing the playhead
+  and reports its bounds — still one file, now `[a, b)` rather than `[0, k)`.
+- **The re-mux is not free** and must be rate-limited: it copies the whole covered bitstream through
+  the muxer. Re-mint on a coarse trigger (every few segments, or on demand when the playhead lands
+  outside coverage), never per segment.
+- **Adoption stays deferred exactly as today.** A re-minted URL is a `src` swap; it must go through
+  `pendingProxyUrlsRef` and land only when the transport is parked. Never mid-playback.
+
+Unchanged from the original scoping:
+
 - **Excludes:** audio. The current proxy carries a full AAC track muxed from one pre-decoded PCM
   buffer; segmenting audio is a separate problem (gapless concatenation across segment boundaries is
-  its own class of bug) and should be scoped separately. **Until then, segments should be
-  video-only and the original keeps supplying audio** — state this explicitly rather than
-  discovering it.
+  its own class of bug). **Until then, on-demand prefix muxes should be video-only and the original
+  keeps supplying audio** — state this explicitly rather than discovering it.
 - **Excludes:** the quality-toggle interaction. `ingestProxyPlaybackEnabled=false` must bypass
   coverage entirely, not consult it.
-- **Hardest part, named:** decoupling `preferNativeDecode`'s `mediaUrl !== proxyUrl` identity from
-  routing, so that crossing a coverage boundary doesn't silently move a source between the pool and
-  the element path. Per the comment at `WebglMediaLayer.tsx:896-908`, moving loaders onto elements
-  en masse hits the browser's ~16 hardware-decode-context cap — "a slow source is a degradation; a
-  capped one is an outage."
+- **Still the hardest part:** `preferNativeDecode`'s `mediaUrl !== proxyUrl` identity. A partial
+  proxy IS a `proxyUrl`, so a source flips onto the pooled decoder the moment the first prefix
+  adopts, and back if coverage is ever withdrawn. Per `WebglMediaLayer.tsx:896-908`, mass movement
+  between the pool and the element path hits the browser's ~16 hardware-decode-context cap — "a slow
+  source is a degradation; a capped one is an outage." Coverage must therefore only ever GROW within
+  a session; never withdraw a `proxyUrl` once adopted.
 
 ### Slice 4 — Progressive adoption UI
 
@@ -251,7 +408,20 @@ already exists and already reports per-build percent into the notice line.
 
 ---
 
-## 5. Recommendation: ship Slice 1 (segmented build + store) first
+## 5. Recommendation: Slice 3 next (Slices 1 and 2 are shipped)
+
+*Revised again 2026-08-11. Slices 1 and 2 both shipped; the §4 entries above carry their results.
+**Slice 3 is now the whole remaining feature** — segments exist, they are built where the user is
+looking, and they survive an interrupted session. Nothing else stands between that and "the user
+stops waiting". Read the rewritten Slice 3 above rather than the original: it routes to one
+on-demand mux of the covered run, not to N playable files.*
+
+**Owed before or alongside Slice 3, on a quiet machine:** the segment-duration sweep (§0b) and a
+byte-identity check of an uninterrupted playhead-at-0 build. Neither blocks Slice 3; both are
+cheap once the box is idle, and §0b explains why running them on a loaded one is worse than not
+running them.
+
+### Historical: why Slice 1 went first
 
 *Revised 2026-08-11. The original recommendation was Slice 0, on the strength of a certain −23%.
 That number did not survive contact with measurement (see Slice 0 above), and with it goes the

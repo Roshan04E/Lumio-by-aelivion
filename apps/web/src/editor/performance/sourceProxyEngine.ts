@@ -29,6 +29,7 @@ import {
   removeSourceProxy,
   saveSourceProxySegment,
   getSourceProxySegment,
+  listSourceProxySegmentIndices,
   clearSourceProxySegments,
   SOURCE_PROXY_VERSION,
 } from "./sourceProxyStore";
@@ -538,13 +539,15 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   // the worker (no <video> fallback there) or the worker chunk failed to boot. Deterministic build
   // failures (frozen-tail guard, no frames) rethrow: the fallback decodes through the same
   // WebCodecs-first path and would fail identically after doubling the work.
-  // RESUME (2026-08-11, Slice 1): collect whatever contiguous, guard-matching prefix the segment
-  // cache holds from a previous interrupted attempt. Strictly best-effort — a miss just means a
-  // full rebuild, which is exactly today's behaviour, so this can never make a build worse.
-  const resume = await collectResumePrefix(asset.id, blob.size);
+  // RESUME (2026-08-11, Slice 1/2): collect whatever guard-matching segments a previous interrupted
+  // attempt left behind, in any order. Strictly best-effort — a miss just means a full rebuild,
+  // which is exactly today's behaviour, so this can never make a build worse.
+  const resume = await collectResumeSegments(asset.id, blob.size, width, height);
+  const playheadSeconds = resolvePlayheadSeconds(asset.id);
+  logProxy(asset.id, `playhead=${playheadSeconds === null ? "none (building from 0)" : `${playheadSeconds.toFixed(1)}s`}`);
   let encoded: TranscodeResult;
   try {
-    encoded = await transcodeInWorker(asset, blob.size, sourceUrl, meta.durationSeconds, width, height, audio, resume);
+    encoded = await transcodeInWorker(asset, blob.size, sourceUrl, meta.durationSeconds, width, height, audio, resume, playheadSeconds);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!/WEBCODECS_REQUIRED_NO_DOM|WORKER_CRASHED/.test(message)) {
@@ -592,54 +595,90 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
 }
 
 /**
- * SEGMENT LENGTH, in frames. Chosen from measurement (2026-08-11), not preference — see
- * `plans/source-proxy-progressive.md` Slice 1. Must be a multiple of PROXY_KEYFRAME_EVERY_N_FRAMES
+ * SEGMENT LENGTH, in frames. 300 rests on an UNFINISHED sweep — two clean single runs (300 vs 120)
+ * plus the ~0.5% header-overhead argument; see `plans/source-proxy-progressive.md` §0b, which also
+ * explains why the rest of that sweep is not trustworthy. A one-line change if it is ever redone.
+ * Must be a multiple of PROXY_KEYFRAME_EVERY_N_FRAMES
  * so every segment boundary is a keyframe and a resume can splice there; the worker re-asserts it
  * and disables the cache rather than emit a prefix that would corrupt a rebuild.
  */
 const PROXY_SEGMENT_FRAMES = PROXY_KEYFRAME_EVERY_N_FRAMES * 25; // 300 frames = 10s @30fps, 5s @60fps
 
-interface ResumePrefix {
-  /** Serialized segment files, in order, covering [0, resumeFromFrame). */
-  buffers: ArrayBuffer[];
-  resumeFromFrame: number;
+interface ResumeSegment {
+  index: number;
+  buffer: ArrayBuffer;
 }
 
 /**
- * Walk the segment cache from 0 upward, stopping at the first gap. Segments are only accepted while
- * they are contiguous AND their stamped guards match this asset's current bytes and recipe — a
- * relinked or recipe-bumped asset therefore resumes from nothing, which is what we want.
+ * Collect every cached segment whose stamped guards match this asset's current bytes, recipe and
+ * proxy dimensions. Any index, any gaps — playhead-first build order (Slice 2) persists the middle
+ * of a clip before its head, so contiguity from 0 is no longer a precondition for reuse; the worker
+ * simply encodes whatever is not here.
+ *
+ * A relinked, resized or recipe-bumped asset matches nothing and rebuilds from scratch, which is
+ * exactly the behaviour that existed before any segment cache did.
  */
-async function collectResumePrefix(assetId: string, sourceByteSize: number): Promise<ResumePrefix> {
-  const buffers: ArrayBuffer[] = [];
-  let resumeFromFrame = 0;
+async function collectResumeSegments(
+  assetId: string,
+  sourceByteSize: number,
+  width: number,
+  height: number
+): Promise<ResumeSegment[]> {
+  const found: ResumeSegment[] = [];
+  let frames = 0;
   try {
-    for (let index = 0; ; index += 1) {
+    for (const index of await listSourceProxySegmentIndices(assetId)) {
       const blob = await getSourceProxySegment(assetId, index);
-      if (!blob) break;
+      if (!blob) continue;
       const parsed = await decodeSegment(blob);
-      if (!parsed) break;
+      if (!parsed) continue;
       const { header } = parsed;
       if (
         header.assetId !== assetId ||
         header.sourceByteSize !== sourceByteSize ||
         header.version !== SOURCE_PROXY_VERSION ||
+        header.width !== width ||
+        header.height !== height ||
         header.segmentIndex !== index ||
-        header.startFrame !== resumeFromFrame ||
+        header.startFrame !== index * PROXY_SEGMENT_FRAMES ||
         header.endFrame <= header.startFrame
       ) {
-        break;
+        continue;
       }
-      buffers.push(await blob.arrayBuffer());
-      resumeFromFrame = header.endFrame;
+      found.push({ index, buffer: await blob.arrayBuffer() });
+      frames += header.endFrame - header.startFrame;
     }
   } catch {
-    return { buffers: [], resumeFromFrame: 0 };
+    return [];
   }
-  if (buffers.length > 0) {
-    logProxy(assetId, `resume cache: ${buffers.length} segment(s), ${resumeFromFrame} frames already encoded`);
+  if (found.length > 0) {
+    logProxy(assetId, `resume cache: ${found.length} segment(s) [${found.map((s) => s.index).join(",")}], ${frames} frames already encoded`);
   }
-  return { buffers, resumeFromFrame };
+  return found;
+}
+
+/**
+ * PLAYHEAD-FIRST BUILD ORDER (2026-08-11, Slice 2). Where the user is parked in THIS asset's own
+ * source timebase, or null when the asset is not under the playhead / nothing has registered.
+ *
+ * The engine deliberately does not compute this: mapping timeline time through a clip's
+ * speed/sourceIn is the editor's knowledge, and duplicating it here would be a second copy of
+ * `layerSourceTimeSeconds` to keep in sync. Builds only ever run while the transport is PARKED
+ * (see setSourceProxyBuildSuspended), so this is a stationary reading, not a moving target.
+ */
+export type SourceProxyPlayheadResolver = (assetId: string) => number | null;
+let playheadResolver: SourceProxyPlayheadResolver | null = null;
+export function setSourceProxyPlayheadResolver(resolver: SourceProxyPlayheadResolver | null): void {
+  playheadResolver = resolver;
+}
+function resolvePlayheadSeconds(assetId: string): number | null {
+  if (!playheadResolver) return null;
+  try {
+    const seconds = playheadResolver(assetId);
+    return seconds !== null && Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+  } catch {
+    return null; // a resolver fault must never fail a build — fall back to building from 0
+  }
 }
 
 interface TranscodeResult {
@@ -659,7 +698,8 @@ function transcodeInWorker(
   width: number,
   height: number,
   audio: DecodedAudio | null,
-  resume: ResumePrefix
+  resume: ResumeSegment[],
+  playheadSeconds: number | null
 ): Promise<TranscodeResult> {
   return new Promise<TranscodeResult>((resolve, reject) => {
     let worker: Worker;
@@ -713,6 +753,9 @@ function transcodeInWorker(
       audioPayload = { sampleRate: audio.sampleRate, channels: audio.channels, frames: audio.frames, planes };
       transfer.push(...planes);
     }
+    // Transfer the resume buffers rather than cloning them — a full-length cache is the size of the
+    // finished proxy, and structured-cloning it would hold two copies across the postMessage.
+    transfer.push(...resume.map((segment) => segment.buffer));
     worker.postMessage(
       {
         type: "start",
@@ -730,8 +773,8 @@ function transcodeInWorker(
           audio: audioPayload,
           suspended: buildSuspended,
           segmentFrames: PROXY_SEGMENT_FRAMES,
-          resumeFromFrame: resume.resumeFromFrame,
-          resumePrefix: resume.buffers,
+          resumeSegments: resume,
+          playheadSeconds,
         },
       } satisfies SourceProxyWorkerRequest,
       transfer
