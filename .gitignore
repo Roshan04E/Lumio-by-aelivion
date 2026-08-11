@@ -18,3 +18,15 @@ apps/api/storage/derived/*
 !apps/api/storage/previews/.gitkeep
 !apps/api/storage/finals/.gitkeep
 !apps/api/storage/derived/.gitkeep
+
+# A repo-root-relative path used while the shell is already inside the package. A probe that writes to
+# `path.join(process.cwd(), "apps/worker/tmp/...")` from apps/worker lands here instead, and because
+# apps/worker/tmp is untracked-but-not-ignored, a broad `git add` then commits the artifacts (that is
+# how 11 screenshots got committed here in 62cd9ba). Once tracked they come back on every checkout and
+# look exactly like junk, so they have twice been deleted by someone tidying up.
+#
+# The doubled path can only ever be a mistake, so the rule is cheaper than care: it is ignored, and the
+# files that were tracked under it have been removed (git history keeps them). Deliberately NOT
+# extending this to `apps/worker/tmp/` itself — that would hide live probe scripts from `git status`,
+# where other sessions are working.
+apps/worker/apps/

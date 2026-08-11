@@ -102,7 +102,23 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
    * hold, at the setting where the tap count is at its cap and the jitter is at its most visible.
    */
   "flarex-directional-blur-max": 0.002,
-  "flarex-radial-blur-max": 0.002
+  "flarex-radial-blur-max": 0.002,
+  /**
+   * Glow at radius 200, where the bloom blur runs on a 1/8-size copy and comes back up through a tent
+   * filter. Measured 0.000% (0/2073600).
+   *
+   * Same suspicion applied as to the blurs, and the render answers it emphatically: the sun bleeds
+   * across the top third of the frame and washes the whole sky. Nothing about this reads zero because
+   * nothing happened.
+   *
+   * The pyramid is worth its own fixture because nothing else in the suite renders through one: level
+   * sizes come from `ceil(w / 2^n)` and the taps read at `1/size` offsets, so a renderer that rounded a
+   * level's dimensions differently would put a visibly different halo on screen. What this CANNOT see
+   * is the risk the change actually carries — temporal shimmer lives between consecutive frames and
+   * this compares one, so both renderers would crawl identically and still read 0.000%. That check is
+   * `apps/worker/tmp/glow-motion.ts`; its result is in the audit's S3.7.
+   */
+  "flarex-glow-max": 0.002
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

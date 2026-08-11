@@ -194,6 +194,10 @@ gradient rasterizer already exists for shapes/frames.
 
 ## Part 3 — GLOW, the worked example
 
+> **REACH FIXED 2026-08-11 — see §3.7.** Everything below describes the node as audited. The
+> plateau is gone (8.89% → 42.50% of frame width); the **colour space is not** and glow still hazes
+> rather than blooms.
+
 The founder's report was *"Glow doesn't produce enough glow like DaVinci."* That is a behaviour
 complaint, and it is correct. Here is exactly what the node does.
 
@@ -444,6 +448,114 @@ every spatial filter's look at once. Recommended fix #3 below is re-scoped accor
 
 ---
 
+### §3.7 — the bloom pyramid (2026-08-11)
+
+The founder's original report, fixed. Same chart and same instrument as the measurements above.
+
+#### Reach
+
+| radius | before | after |
+|---:|---:|---:|
+| 0 | 0 | 0 |
+| 24 *(node default)* | 65 px (6.02%) | **65 px (6.02%)** — unchanged |
+| 32 | 87 px (8.06%) | **87 px (8.06%)** — unchanged |
+| 33 | — | 91 px (8.43%) |
+| 64 | 96 px (8.89%) | **175 px (16.20%)** |
+| 65 | — | 179 px (16.57%) |
+| 120 | 96 px (8.89%) | **327 px (30.28%)** |
+| **200 (max)** | **96 px (8.89%)** | **459 px (42.50%)** |
+
+Target was ≥25% of frame width, chosen before building because it had to plainly exceed the blurs'
+new 10.09% and 13.33% — a glow that bleeds less far than a blur is the wrong answer. Met at 42.50%.
+
+#### How, and why not the obvious way
+
+`MAX_BLUR_RADIUS = 96` clamps the kernel's half-width but not its sigma, and `BLUR_FS` normalises by
+the *surviving* weights — so past sigma 32 the Gaussian stopped widening and flattened into a box
+average inside a fixed 96 px window. Raising the constant would have bought a 1201-tap kernel, twice,
+per glowing layer. Instead the blur runs on a reduced-resolution copy where the same 96 taps cover
+2^n times the distance.
+
+**Reduction factor: adaptive, the smallest power of two that fits the whole Gaussian.** sigma ≤ 32 →
+**1×**; ≤ 64 → 2×; ≤ 128 → 4×; else 8×. Halving twice is not automatically better than halving once,
+so it halves exactly as many times as the sigma requires and no more.
+
+Two consequences worth stating plainly:
+
+- **At 1× the function *is* the old code path.** Every project at radius ≤ 32 — which is every
+  project that was not already stuck on the plateau, including the default of 24 — renders
+  byte-identically. **There is no response curve and no remap**, because below the plateau nothing
+  changed and above it the old behaviour was a defect. (This is the opposite call from the blurs,
+  where the range genuinely was linear all the way up and a remap was needed to protect existing
+  looks. Here the range above 32 produced nothing, so nothing is being taken away.)
+- **8× is the floor, not a default.** At 8× a 1080×1920 comp's smallest level is 135×240, so a
+  highlight a handful of pixels across still covers more than one texel. Below that a moving
+  highlight starts popping between texels rather than sliding.
+
+#### It is also much cheaper, which was not the goal
+
+*Arithmetic on texture-fetch counts, not a measured frame time.* At radius 200 on a 1080×1920 comp the
+old path ran two full-resolution blur passes of 193 taps each: ~800 M fetches. The pyramid runs three
+downsamples (13 taps over ¼ + 1/16 + 1/64 of the frame), two blur passes of ~75 taps at 1/64
+resolution, and one 9-tap magnification: **~33 M**. Roughly **24× fewer fetches while reaching 4.8×
+further** — the old path was paying full-resolution prices for a blur it then threw away by
+truncating. At radius ≤ 32 the cost is identical to before, because the code path is.
+
+The seams measure ≤ **1 code value** at every sampled distance (radius 32 vs 33: 74/68/59/41/16
+against 73/67/58/42/17; same at 64 vs 65), so an animated radius crossing a boundary does not step.
+
+#### The temporal check, which is the one that mattered
+
+Downsampling to buy reach fails temporally: a small bright highlight that moves lands on different
+low-res texels each frame and the halo crawls or pops. It is invisible in a still and **invisible to
+`render:compare:pixels`**, which compares two renderers on one frame — both would shimmer identically
+and the gate would read 0.000%.
+
+Method: an 8%-of-frame highlight slid **1.5 px per frame** (a fifth of a texel at 8×) across 8 frames,
+the halo resampled at fixed distances *from the highlight's sub-pixel centroid*, and the frame-to-frame
+variation aggregated over the +70..340 px band.
+
+| arm | reduction | peak frame-to-frame delta | RMS |
+|---|---|---|---|
+| radius 32 *(control)* | 1× — **cannot** shimmer from downsampling | 1.00 code | 1.280 |
+| radius 120 | 4× | 1.00 code | 0.966 |
+| radius 200 | 8× | 1.00 code | 0.868 |
+
+**No shimmer above the 8-bit quantisation floor.** Every arm's peak variation is one code value, and
+the pyramid arms' absolute RMS is *lower* than the un-downsampled control's. The filters are doing
+their job: a 13-tap Jimenez/COD kernel on the way down (a much better low-pass than a naive halving
+for the same fetch budget) and a 3×3 tent on the way up.
+
+Two instrument failures on the way there, both caught before they were believed:
+
+1. The first run returned **0.00 on every arm including the control**. That is not a result: a 2.5%
+   highlight spread over sigma 200 leaves a 1–3 code halo, and in an 8-bit render everything below
+   half a code quantises to the same number. The instrument could not have told a shimmering glow
+   from a stable one. Fixed by making the highlight and intensity big enough to put the halo in the
+   20–90 code range.
+2. The band then started at +30 px, which is **inside the bright core** — its edge is a near-vertical
+   step, where a hundredth of a pixel of centroid error yields tens of code values. It reported an
+   RMS of 6.5 while the peak delta at every sampled distance was 1.0, which is arithmetically
+   impossible for one signal and was the tell. Band moved to +70 px, clear of the core.
+
+#### What got worse
+
+Banding. A 20-code gradient now spread over 450 px shows concentric contours on a flat dark
+background at maximum. Measured, they are **single-code steps widening from 8 px to 32 px apart as
+the gradient flattens** — 8-bit quantisation, not a pyramid artefact (they do not follow the low-res
+texel grid; a 4× render bands at 1–7 px spacing, an 8× at 8–32 px, both tracking the gradient rather
+than the reduction). Invisible over textured footage, visible over a flat plate. The fix is dither at
+the composite's quantisation point or `rgba16f` intermediates; deliberately not bolted onto this
+change.
+
+#### What did NOT change
+
+**Colour space.** Glow still computes on display-encoded values, because §3.6 established that is the
+whole fragment-effect stage, by design and in writing. Glow still hazes rather than blooms. It now
+hazes far enough.
+
+---
+
 ## Part 4 — the behaviour checklist
 
 The deliverable that outlives the audit. Every entry is checkable **by looking at a rendered frame**.
@@ -451,13 +563,28 @@ Numbers are for a 1080-wide frame at `renderScale` 1; percentages are of frame w
 *(estimate)* are judgement, not measurement, and should be tightened when someone measures them.
 
 ### GLOW
-- [ ] at maximum radius, a bright highlight bleeds **at least 25% of frame width** *(estimate — chosen
-      because Fusion users routinely push a bloom across a quarter of frame; current: **8.89%**)*
-- [ ] increasing the radius increases the reach **across the whole slider** — no plateau
-- [ ] falloff is smooth to zero with no visible banding and no hard cut at maximum radius
+- [x] at maximum radius, a bright highlight bleeds **at least 25% of frame width** — measured
+      **42.50%** (459 px on a 1080-wide frame; was 8.89%). Comfortably past both blurs (10.09%,
+      13.33%), which was the point: a glow that bleeds less far than a blur is the wrong answer
+- [x] increasing the radius increases the reach **across the whole slider** — no plateau
+      *(6.02 / 8.06 / 8.43 / 16.20 / 16.57 / 30.28 / 42.50% at radius 24 / 32 / 33 / 64 / 65 / 120 / 200)*
+- [x] the two reduction seams are invisible — radius 32 vs 33 and 64 vs 65 differ by at most **one
+      code value** at every sampled distance
+- [x] **no temporal shimmer.** A moving highlight's halo does not crawl or pop between frames: at the
+      deepest reduction the frame-to-frame variation is **≤1 code**, and its absolute RMS (0.868) is
+      *lower* than the full-resolution control's (1.280)
+- [ ] falloff is smooth to zero with no visible banding and no hard cut at maximum radius —
+      **hard cut gone, banding remains and is now more visible.** On a flat dark background at
+      maximum, the halo shows concentric contours. Measured, they are **single-code steps that widen
+      as the gradient flattens** (8 → 32 px apart), which is 8-bit quantisation of a 20-code gradient
+      spread over 450 px, not a pyramid artefact — the bands do not follow the low-res texel grid.
+      Inherent to an 8-bit output; the fix is dither at the composite's quantisation point or
+      `rgba16f` intermediates, and it is not in the pyramid change
 - [ ] only highlights above the threshold glow; a 60%-luma midtone at threshold 0.7 contributes
       **zero** ✅ *currently passes*
 - [ ] glow is computed in linear light: a 100% patch throws **≈3×** the light of a 60% patch, not 1.7×
+      *(still 1.68 — and §3.6 established this is the whole fragment-effect STAGE, not glow. The
+      pyramid did not touch it: glow still hazes rather than blooms, it now hazes far enough)*
 - [ ] doubling `intensity` roughly doubles the bloom's brightness and does **not** change its reach
       ✅ *currently passes — measured, total extent identical at intensity 0.6 and 2.0*
 - [ ] a glow tint other than white is reachable from the node
@@ -570,9 +697,15 @@ families.
 
 ## Recommended first three fixes
 
-**1 — Bloom/blur resolution pyramid.** *1–2 days.* This is the founder's actual report, it is measured
-(8.89% of frame width is the entire range of the control, and radius 32→200 changes nothing), and it
-fixes the `blur` node's identical ceiling for free.
+**1 — Bloom/blur resolution pyramid.** ✅ **DONE 2026-08-11 for GLOW — see §3.7.** Estimated 1–2 days.
+Reach 8.89% → **42.50%** of frame width, no plateau anywhere in the slider, no temporal shimmer above
+the 8-bit floor, and byte-identical output at radius ≤ 32 so no existing project moved.
+
+> **The `blur` node did NOT come along for free, contrary to this estimate.** The pyramid was scoped
+> to the bloom path (`bloomBlur`), and the plain `blur` node still calls `gaussianBlur` and still
+> plateaus at the same 96 px. The two are one function call apart and `blur`'s ceiling is now the
+> palette's last timid maximum, but changing it moves every existing blurred layer, which is a
+> different decision from the one this round was authorised to make.
 
 > **To answer the question as asked: no, glow is not a one-line range change — and the one-line
 > version is a trap.** `MAX_BLUR_RADIUS = 96` is a single constant and raising it *would* widen the
@@ -611,7 +744,8 @@ left is one pattern and one omission:
 - **A filter family whose spatial nodes stop responding well below their declared maximum.** Glow and
   blur plateau at 16% of their range; directional and radial blur never had much range to begin with.
   In every case the slider keeps moving and the picture does not. None of it is architectural.
-  *(The two blurs were fixed on 2026-08-11 — §3.6. Glow and `blur` still plateau.)*
+  *(Fixed 2026-08-11: the two blurs in §3.6, glow in §3.7. **`blur` is the last one left** and it is
+  a one-call change from the machinery §3.7 built.)*
 - **A `text` node named after Fusion's Text+ that cannot draw an outline** — while the caption system
   three directories away can.
 

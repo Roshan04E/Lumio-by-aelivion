@@ -155,7 +155,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-tracked-mask-late"
   | "flarex-stabilize"
   | "flarex-directional-blur-max"
-  | "flarex-radial-blur-max";
+  | "flarex-radial-blur-max"
+  | "flarex-glow-max";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -219,7 +220,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-tracked-mask-late",
   "flarex-stabilize",
   "flarex-directional-blur-max",
-  "flarex-radial-blur-max"
+  "flarex-radial-blur-max",
+  "flarex-glow-max"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -807,6 +809,32 @@ function buildFlarexBlurMaxComp(kind: "directional" | "radial"): FlarexComp {
 }
 
 /**
+ * Glow at the top of its range (2026-08-11) — the setting the bloom PYRAMID exists for.
+ *
+ * `flarex-key-glow` covers glow at a normal radius, which takes the unchanged full-resolution path.
+ * This one is at radius 200, where the blur happens on a 1/8-size copy and comes back up through a
+ * tent filter. What it gates is that three renderers agree about a pyramid: the level sizes come from
+ * `ceil(w / 2^n)`, the taps read at `1/size` offsets, and a renderer that rounded a level's dimensions
+ * differently or filtered the magnification differently would put a visibly different halo on screen.
+ * None of that is exercised anywhere else in the suite.
+ *
+ * It cannot see the risk this change actually carries — temporal shimmer is a property of consecutive
+ * frames and this compares one. That check lives in `apps/worker/tmp/glow-motion.ts` and its result is
+ * recorded in the audit.
+ */
+function buildFlarexGlowMaxComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_glowmax_comp", "Flarex glow at maximum");
+  const glow = createFlarexNode("glow", "fixture_flarex_glowmax_node");
+  glow.params = { ...glow.params, radius: 200, intensity: 1.2, threshold: 0.55 };
+  comp.nodes[glow.id] = glow;
+  comp.edges = [
+    { id: "fixture_flarex_glowmax_e1", from: { nodeId: "fixture_flarex_glowmax_comp_in", socket: "out" }, to: { nodeId: glow.id, socket: "in" } },
+    { id: "fixture_flarex_glowmax_e2", from: { nodeId: glow.id, socket: "out" }, to: { nodeId: "fixture_flarex_glowmax_comp_out", socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
  * Text+ over Background — the generator nodes, and the highest parity risk in the batch.
  *
  * Both are backed by virtual `text`/`shape` layers that each renderer RASTERIZES with its own canvas,
@@ -1331,6 +1359,8 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexBlurMaxComp("directional") };
     case "flarex-radial-blur-max":
       return { effects: [], fit: "cover", flarex: buildFlarexBlurMaxComp("radial") };
+    case "flarex-glow-max":
+      return { effects: [], fit: "cover", flarex: buildFlarexGlowMaxComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone

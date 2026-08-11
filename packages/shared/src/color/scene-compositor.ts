@@ -793,8 +793,95 @@ void main(){
   fragColor = vec4(ao > 0.0 ? co / ao : vec3(0.0), ao);
 }`;
 
+/**
+ * Bloom pyramid, down (2026-08-11). Halves the brightpass with the 13-tap filter from Jimenez's
+ * "Next Generation Post Processing in Call of Duty: Advanced Warfare" — four 2x2 box taps at the
+ * inner corners carrying half the weight, plus a 3x3 of wider taps.
+ *
+ * The filter choice IS the fix for the failure mode this change risks. Buying blur reach by
+ * downsampling is standard; the standard way it goes wrong is TEMPORAL SHIMMER — a small bright
+ * highlight that moves lands on different low-res texels each frame, and the glow crawls or pops.
+ * That is aliasing on the way down, invisible in a still and invisible to a single-frame pixel gate.
+ * A point-sampled or naive 2x2 halving aliases badly; this kernel is a much better low-pass for the
+ * same four bilinear-fetch budget, which is exactly why it exists in the literature.
+ *
+ * Works in PREMULTIPLIED alpha, like BLUR_FS: the brightpass carries its weight in .a, and averaging
+ * straight-alpha colour across a partly-empty neighbourhood would drag dark unweighted pixels into
+ * the result. `uPremultIn` converts on read for the FIRST level only; later levels are already
+ * premultiplied.
+ */
+const BLOOM_DOWN_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D uTex;
+uniform vec2 uTexel;      // 1 / source size
+uniform bool uPremultIn;
+out vec4 fragColor;
+vec4 tap(vec2 uv){
+  vec4 t = texture(uTex, uv);
+  if (uPremultIn) t.rgb *= t.a;
+  return t;
+}
+void main(){
+  vec2 o = uTexel;
+  vec4 a = tap(v_uv + vec2(-2.0 * o.x,  2.0 * o.y));
+  vec4 b = tap(v_uv + vec2( 0.0,        2.0 * o.y));
+  vec4 c = tap(v_uv + vec2( 2.0 * o.x,  2.0 * o.y));
+  vec4 d = tap(v_uv + vec2(-2.0 * o.x,  0.0));
+  vec4 e = tap(v_uv);
+  vec4 f = tap(v_uv + vec2( 2.0 * o.x,  0.0));
+  vec4 g = tap(v_uv + vec2(-2.0 * o.x, -2.0 * o.y));
+  vec4 h = tap(v_uv + vec2( 0.0,       -2.0 * o.y));
+  vec4 i = tap(v_uv + vec2( 2.0 * o.x, -2.0 * o.y));
+  vec4 j = tap(v_uv + vec2(-o.x,  o.y));
+  vec4 k = tap(v_uv + vec2( o.x,  o.y));
+  vec4 l = tap(v_uv + vec2(-o.x, -o.y));
+  vec4 m = tap(v_uv + vec2( o.x, -o.y));
+  fragColor = e * 0.125
+            + (a + c + g + i) * 0.03125
+            + (b + d + f + h) * 0.0625
+            + (j + k + l + m) * 0.125;
+}`;
+
+/**
+ * Bloom pyramid, up. A 3x3 tent, which is the matching reconstruction filter for the halving above —
+ * a plain bilinear magnification of a 1/4- or 1/8-size buffer shows its texel grid as faint diagonal
+ * creases in a smooth halo, and that grid is also what a moving highlight would crawl along.
+ *
+ * Unpremultiplies on the way out, because BLOOM_ADD_FS expects straight colour with the bloom weight
+ * in .a and multiplies them itself.
+ */
+const BLOOM_UP_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D uTex;
+uniform vec2 uTexel;      // 1 / source size
+out vec4 fragColor;
+void main(){
+  vec2 o = uTexel;
+  vec4 acc = texture(uTex, v_uv) * 4.0;
+  acc += (texture(uTex, v_uv + vec2( o.x, 0.0))
+        + texture(uTex, v_uv + vec2(-o.x, 0.0))
+        + texture(uTex, v_uv + vec2(0.0,  o.y))
+        + texture(uTex, v_uv + vec2(0.0, -o.y))) * 2.0;
+  acc += texture(uTex, v_uv + vec2( o.x,  o.y))
+       + texture(uTex, v_uv + vec2(-o.x,  o.y))
+       + texture(uTex, v_uv + vec2( o.x, -o.y))
+       + texture(uTex, v_uv + vec2(-o.x, -o.y));
+  acc /= 16.0;
+  acc.rgb = acc.a > 1e-4 ? acc.rgb / acc.a : vec3(0.0);
+  fragColor = acc;
+}`;
+
 const DEG = Math.PI / 180;
 const MAX_BLUR_RADIUS = 96;
+/**
+ * The bloom pyramid's deepest reduction. 8 keeps a 1080x1920 comp's smallest level at 135x240 — a
+ * highlight a handful of pixels across still covers more than one texel there, which is the line
+ * past which a moving highlight starts popping between texels rather than sliding. 8 is also enough:
+ * it lets sigma reach 256 px, past the top of the node's declared range.
+ */
+const MAX_BLOOM_REDUCTION = 8;
 
 /** GLSL declaration types for transition params (mirrors registry.ts's private GLSL_TYPE). */
 const GLSL_PARAM_TYPE: Record<TransitionParam["type"], string> = {
@@ -1216,6 +1303,16 @@ export class SceneCompositor {
   private uBloomAddTex!: WebGLUniformLocation | null;
   private uBloomAddTint!: WebGLUniformLocation | null;
   private uBloomAddStrength!: WebGLUniformLocation | null;
+  private bloomDownProgram!: WebGLProgram;
+  private uBloomDownTex!: WebGLUniformLocation | null;
+  private uBloomDownTexel!: WebGLUniformLocation | null;
+  private uBloomDownPremultIn!: WebGLUniformLocation | null;
+  private bloomUpProgram!: WebGLProgram;
+  private uBloomUpTex!: WebGLUniformLocation | null;
+  private uBloomUpTexel!: WebGLUniformLocation | null;
+  /** Bloom pyramid levels 1..MAX (comp/2, /4, /8) plus a same-size scratch each for the separable blur. */
+  private bloomLevels: RenderTarget[] = [];
+  private bloomLevelScratch: RenderTarget[] = [];
   private plateRT: RenderTarget | null = null;
   private scratch1: RenderTarget | null = null;
   private scratch2: RenderTarget | null = null;
@@ -1657,6 +1754,14 @@ export class SceneCompositor {
     this.uBloomAddTex = gl.getUniformLocation(this.bloomAddProgram, "uBloom");
     this.uBloomAddTint = gl.getUniformLocation(this.bloomAddProgram, "uTint");
     this.uBloomAddStrength = gl.getUniformLocation(this.bloomAddProgram, "uStrength");
+
+    this.bloomDownProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_DOWN_FS);
+    this.uBloomDownTex = gl.getUniformLocation(this.bloomDownProgram, "uTex");
+    this.uBloomDownTexel = gl.getUniformLocation(this.bloomDownProgram, "uTexel");
+    this.uBloomDownPremultIn = gl.getUniformLocation(this.bloomDownProgram, "uPremultIn");
+    this.bloomUpProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_UP_FS);
+    this.uBloomUpTex = gl.getUniformLocation(this.bloomUpProgram, "uTex");
+    this.uBloomUpTexel = gl.getUniformLocation(this.bloomUpProgram, "uTexel");
 
     this.effectProgramsBuilt = true;
   }
@@ -2345,6 +2450,124 @@ export class SceneCompositor {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  /** As `fullscreenPass`, but at the target's OWN size — the bloom pyramid's levels are not comp-sized. */
+  private fullscreenPassAt(target: RenderTarget): void {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, target.width, target.height);
+    gl.bindVertexArray(this.presentVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /**
+   * Bloom pyramid levels 1..`depth` (comp/2, /4, /8), each with a same-size scratch for the separable
+   * blur. Pooled and resized like `effectTargets`. Total pixels at depth 3 are ~2/3 of ONE comp-sized
+   * target, so the pyramid costs less memory than the scratch buffer the old path already used.
+   */
+  private bloomTargets(depth: number): { level: RenderTarget; scratch: RenderTarget }[] {
+    const gl = this.gl;
+    const out: { level: RenderTarget; scratch: RenderTarget }[] = [];
+    for (let i = 0; i < depth; i += 1) {
+      const w = Math.max(1, Math.ceil(this.width / 2 ** (i + 1)));
+      const h = Math.max(1, Math.ceil(this.height / 2 ** (i + 1)));
+      this.bloomLevels[i] ??= new RenderTarget(gl, w, h, this.precision);
+      this.bloomLevelScratch[i] ??= new RenderTarget(gl, w, h, this.precision);
+      this.bloomLevels[i]!.resize(w, h);
+      this.bloomLevelScratch[i]!.resize(w, h);
+      out.push({ level: this.bloomLevels[i]!, scratch: this.bloomLevelScratch[i]! });
+    }
+    return out;
+  }
+
+  /**
+   * Blur the brightpass by `sigma` COMP pixels, reading `src` and writing `dst`, without the reach
+   * ceiling `gaussianBlur` has.
+   *
+   * The ceiling being removed: `gaussianBlur` clamps its half-width to MAX_BLUR_RADIUS = 96 taps but
+   * keeps the requested sigma, and BLUR_FS normalises by the SURVIVING weights — so past sigma 32 the
+   * kernel stops widening and instead flattens into a box average inside a fixed 96px window. Measured,
+   * the glow's reach stopped growing at radius 32 while the slider went to 200: 84% of the control did
+   * nothing. Raising the constant is not the fix — sigma 200 wants a 1201-tap kernel, twice, per
+   * glowing layer, on the integrated GPUs this product targets.
+   *
+   * Instead the blur happens on a REDUCED-resolution copy, where the same 96 taps cover 2^n times the
+   * distance. The reduction is chosen as the smallest power of two that lets the full Gaussian fit:
+   *
+   *     sigma <=  32  ->  1x   (the existing full-res path, called unchanged)
+   *     sigma <=  64  ->  2x
+   *     sigma <= 128  ->  4x
+   *     otherwise     ->  8x   (covers sigma <= 256; the node's max radius is 200)
+   *
+   * Adaptive rather than fixed, and that is deliberate: at 1x this function IS the old code path, so
+   * every existing project whose radius sits at or below 32 — which is every project that was not
+   * already stuck on the plateau, including the node's default of 24 — renders byte-identically. There
+   * is no response curve to remap and no "existing glows all got bigger" migration, because below the
+   * plateau nothing changed and above it the old behaviour was a defect.
+   *
+   * The cost of adapting is a seam: sigma 32 crosses from full-res to half-res, and an animated radius
+   * passing through it could step. Measured, it does not — radius 32 vs 33 differ by at most ONE code
+   * value at every sampled distance (74/68/59/41/16 against 73/67/58/42/17), and the 4px of extra reach
+   * is just 3*sigma growing. Same at the 64->65 crossing. A half-res blur of sigma 32 is still a
+   * well-sampled Gaussian (48 taps), which is why.
+   */
+  private bloomBlur(src: RenderTarget, dst: RenderTarget, scratch: RenderTarget, sigma: number): void {
+    let reduction = 1;
+    while (Math.ceil(sigma * 3) / reduction > MAX_BLUR_RADIUS && reduction < MAX_BLOOM_REDUCTION) {
+      reduction *= 2;
+    }
+    if (reduction === 1) {
+      this.gaussianBlur(src, dst, scratch, sigma);
+      return;
+    }
+    const gl = this.gl;
+    const depth = Math.log2(reduction);
+    const levels = this.bloomTargets(depth);
+
+    // Down: full -> /2 -> ... -> /reduction. The first hop premultiplies (the brightpass hands us
+    // straight colour with the weight in alpha); the rest are already premultiplied.
+    gl.useProgram(this.bloomDownProgram);
+    gl.uniform1i(this.uBloomDownTex, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    let srcTex = src.tex;
+    let srcW = src.width;
+    let srcH = src.height;
+    for (let i = 0; i < depth; i += 1) {
+      gl.uniform2f(this.uBloomDownTexel, 1 / srcW, 1 / srcH);
+      gl.uniform1i(this.uBloomDownPremultIn, i === 0 ? 1 : 0);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      this.fullscreenPassAt(levels[i]!.level);
+      srcTex = levels[i]!.level.tex;
+      srcW = levels[i]!.level.width;
+      srcH = levels[i]!.level.height;
+    }
+
+    // Blur at the reduced level, staying premultiplied end to end (the up pass unpremultiplies).
+    const deep = levels[depth - 1]!;
+    const lowSigma = Math.max(0.5, sigma / reduction);
+    const lowRadius = Math.min(MAX_BLUR_RADIUS, Math.max(1, Math.ceil(lowSigma * 3)));
+    gl.useProgram(this.blurProgram);
+    gl.uniform1i(this.uBlurTex, 0);
+    gl.uniform1i(this.uBlurRadius, lowRadius);
+    gl.uniform1f(this.uBlurSigma, lowSigma);
+    gl.uniform1i(this.uBlurPremultIn, 0);
+    gl.uniform1i(this.uBlurUnpremultOut, 0);
+    gl.uniform2f(this.uBlurStep, 1 / deep.level.width, 0);
+    gl.bindTexture(gl.TEXTURE_2D, deep.level.tex);
+    this.fullscreenPassAt(deep.scratch);
+    gl.uniform2f(this.uBlurStep, 0, 1 / deep.level.height);
+    gl.bindTexture(gl.TEXTURE_2D, deep.scratch.tex);
+    this.fullscreenPassAt(deep.level);
+
+    // Up: straight back to full size in one tent-filtered magnification. Climbing the pyramid level by
+    // level would be smoother still, but the buffer being magnified has already been blurred by 3*sigma
+    // at its own scale — there is no detail left for the intermediate steps to preserve.
+    gl.useProgram(this.bloomUpProgram);
+    gl.uniform1i(this.uBloomUpTex, 0);
+    gl.uniform2f(this.uBloomUpTexel, 1 / deep.level.width, 1 / deep.level.height);
+    gl.bindTexture(gl.TEXTURE_2D, deep.level.tex);
+    this.fullscreenPass(dst);
+  }
+
   /** Separable Gaussian blur of `src` into `dst` (via `scratch`), σ = sigma px, premultiplied. */
   private gaussianBlur(src: RenderTarget, dst: RenderTarget, scratch: RenderTarget, sigma: number): void {
     const gl = this.gl;
@@ -2543,7 +2766,7 @@ export class SceneCompositor {
       gl.uniform1i(this.uBloomBrightSrc, 0);
       gl.uniform1f(this.uBloomBrightThreshold, glow.threshold ?? 0.55);
       this.fullscreenPass(s2); // s2 = bright pixels (straight alpha, weight in .a)
-      this.gaussianBlur(s2, s2, s1, glow.radiusPx); // spread the bright energy (in-place via s1)
+      this.bloomBlur(s2, s2, s1, glow.radiusPx); // spread the bright energy (in-place via s1)
       gl.useProgram(this.bloomAddProgram);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, plate.tex);
@@ -3470,6 +3693,10 @@ export class SceneCompositor {
     this.plateRT?.dispose();
     this.scratch1?.dispose();
     this.scratch2?.dispose();
+    for (const rt of this.bloomLevels) rt.dispose();
+    for (const rt of this.bloomLevelScratch) rt.dispose();
+    this.bloomLevels = [];
+    this.bloomLevelScratch = [];
     this.scopeThumb?.dispose();
     if (this.scopeFence) {
       gl.deleteSync(this.scopeFence);
