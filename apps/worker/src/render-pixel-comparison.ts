@@ -118,7 +118,29 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
    * this compares one, so both renderers would crawl identically and still read 0.000%. That check is
    * `apps/worker/tmp/glow-motion.ts`; its result is in the audit's S3.7.
    */
-  "flarex-glow-max": 0.002
+  "flarex-glow-max": 0.002,
+  /**
+   * The Gaussian blur node at sigma 200, its first trip through the pyramid.
+   *
+   * Not redundant with `flarex-glow-max` even though both ride the same code: glow feeds the pyramid a
+   * sparse brightpass that is mostly empty, while the blur node feeds it an OPAQUE FULL-FRAME plate, so
+   * the frame edges carry content. The down chain samples with CLAMP_TO_EDGE while `BLUR_FS` treats
+   * out-of-frame as transparent, and those two conventions only meet where there is something at the
+   * border — which is here and not in the glow fixture.
+   */
+  "flarex-blur-max": 0.002,
+  /**
+   * The CLIP glow effect at radius 160 in edge mode — the pyramid's third and last consumer. Not
+   * redundant with `flarex-glow-max`: that is the Flarex glow NODE, which lowers to `mode: "highlights"`
+   * and blurs a sparse brightpass. This is the other mode entirely — a blurred ALPHA silhouette of a
+   * text plate — so it is the one that would catch the tent upsample mishandling alpha, where a
+   * brightpass carrying its weight in `.a` would not.
+   *
+   * Same 0.2% bar as its siblings for the same reason: a full-frame soft gradient is where a
+   * one-code-value disagreement between the two renderers would spread over the most pixels, so the
+   * strictest defensible bar is the informative one.
+   */
+  "glow-edge-max": 0.002
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

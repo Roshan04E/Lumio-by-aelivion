@@ -810,7 +810,7 @@ void main(){
  * the result. `uPremultIn` converts on read for the FIRST level only; later levels are already
  * premultiplied.
  */
-const BLOOM_DOWN_FS = `#version 300 es
+const PYRAMID_DOWN_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 uniform sampler2D uTex;
@@ -851,7 +851,7 @@ void main(){
  * Unpremultiplies on the way out, because BLOOM_ADD_FS expects straight colour with the bloom weight
  * in .a and multiplies them itself.
  */
-const BLOOM_UP_FS = `#version 300 es
+const PYRAMID_UP_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 uniform sampler2D uTex;
@@ -881,7 +881,7 @@ const MAX_BLUR_RADIUS = 96;
  * past which a moving highlight starts popping between texels rather than sliding. 8 is also enough:
  * it lets sigma reach 256 px, past the top of the node's declared range.
  */
-const MAX_BLOOM_REDUCTION = 8;
+const MAX_PYRAMID_REDUCTION = 8;
 
 /** GLSL declaration types for transition params (mirrors registry.ts's private GLSL_TYPE). */
 const GLSL_PARAM_TYPE: Record<TransitionParam["type"], string> = {
@@ -1303,16 +1303,16 @@ export class SceneCompositor {
   private uBloomAddTex!: WebGLUniformLocation | null;
   private uBloomAddTint!: WebGLUniformLocation | null;
   private uBloomAddStrength!: WebGLUniformLocation | null;
-  private bloomDownProgram!: WebGLProgram;
-  private uBloomDownTex!: WebGLUniformLocation | null;
-  private uBloomDownTexel!: WebGLUniformLocation | null;
-  private uBloomDownPremultIn!: WebGLUniformLocation | null;
-  private bloomUpProgram!: WebGLProgram;
-  private uBloomUpTex!: WebGLUniformLocation | null;
-  private uBloomUpTexel!: WebGLUniformLocation | null;
+  private pyramidDownProgram!: WebGLProgram;
+  private uPyramidDownTex!: WebGLUniformLocation | null;
+  private uPyramidDownTexel!: WebGLUniformLocation | null;
+  private uPyramidDownPremultIn!: WebGLUniformLocation | null;
+  private pyramidUpProgram!: WebGLProgram;
+  private uPyramidUpTex!: WebGLUniformLocation | null;
+  private uPyramidUpTexel!: WebGLUniformLocation | null;
   /** Bloom pyramid levels 1..MAX (comp/2, /4, /8) plus a same-size scratch each for the separable blur. */
-  private bloomLevels: RenderTarget[] = [];
-  private bloomLevelScratch: RenderTarget[] = [];
+  private pyramidLevels: RenderTarget[] = [];
+  private pyramidLevelScratch: RenderTarget[] = [];
   private plateRT: RenderTarget | null = null;
   private scratch1: RenderTarget | null = null;
   private scratch2: RenderTarget | null = null;
@@ -1755,13 +1755,13 @@ export class SceneCompositor {
     this.uBloomAddTint = gl.getUniformLocation(this.bloomAddProgram, "uTint");
     this.uBloomAddStrength = gl.getUniformLocation(this.bloomAddProgram, "uStrength");
 
-    this.bloomDownProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_DOWN_FS);
-    this.uBloomDownTex = gl.getUniformLocation(this.bloomDownProgram, "uTex");
-    this.uBloomDownTexel = gl.getUniformLocation(this.bloomDownProgram, "uTexel");
-    this.uBloomDownPremultIn = gl.getUniformLocation(this.bloomDownProgram, "uPremultIn");
-    this.bloomUpProgram = linkProgram(gl, FULLSCREEN_TRI_VS, BLOOM_UP_FS);
-    this.uBloomUpTex = gl.getUniformLocation(this.bloomUpProgram, "uTex");
-    this.uBloomUpTexel = gl.getUniformLocation(this.bloomUpProgram, "uTexel");
+    this.pyramidDownProgram = linkProgram(gl, FULLSCREEN_TRI_VS, PYRAMID_DOWN_FS);
+    this.uPyramidDownTex = gl.getUniformLocation(this.pyramidDownProgram, "uTex");
+    this.uPyramidDownTexel = gl.getUniformLocation(this.pyramidDownProgram, "uTexel");
+    this.uPyramidDownPremultIn = gl.getUniformLocation(this.pyramidDownProgram, "uPremultIn");
+    this.pyramidUpProgram = linkProgram(gl, FULLSCREEN_TRI_VS, PYRAMID_UP_FS);
+    this.uPyramidUpTex = gl.getUniformLocation(this.pyramidUpProgram, "uTex");
+    this.uPyramidUpTexel = gl.getUniformLocation(this.pyramidUpProgram, "uTexel");
 
     this.effectProgramsBuilt = true;
   }
@@ -2464,31 +2464,39 @@ export class SceneCompositor {
    * blur. Pooled and resized like `effectTargets`. Total pixels at depth 3 are ~2/3 of ONE comp-sized
    * target, so the pyramid costs less memory than the scratch buffer the old path already used.
    */
-  private bloomTargets(depth: number): { level: RenderTarget; scratch: RenderTarget }[] {
+  private pyramidTargets(depth: number): { level: RenderTarget; scratch: RenderTarget }[] {
     const gl = this.gl;
     const out: { level: RenderTarget; scratch: RenderTarget }[] = [];
     for (let i = 0; i < depth; i += 1) {
       const w = Math.max(1, Math.ceil(this.width / 2 ** (i + 1)));
       const h = Math.max(1, Math.ceil(this.height / 2 ** (i + 1)));
-      this.bloomLevels[i] ??= new RenderTarget(gl, w, h, this.precision);
-      this.bloomLevelScratch[i] ??= new RenderTarget(gl, w, h, this.precision);
-      this.bloomLevels[i]!.resize(w, h);
-      this.bloomLevelScratch[i]!.resize(w, h);
-      out.push({ level: this.bloomLevels[i]!, scratch: this.bloomLevelScratch[i]! });
+      this.pyramidLevels[i] ??= new RenderTarget(gl, w, h, this.precision);
+      this.pyramidLevelScratch[i] ??= new RenderTarget(gl, w, h, this.precision);
+      this.pyramidLevels[i]!.resize(w, h);
+      this.pyramidLevelScratch[i]!.resize(w, h);
+      out.push({ level: this.pyramidLevels[i]!, scratch: this.pyramidLevelScratch[i]! });
     }
     return out;
   }
 
   /**
-   * Blur the brightpass by `sigma` COMP pixels, reading `src` and writing `dst`, without the reach
-   * ceiling `gaussianBlur` has.
+   * Blur by `sigma` COMP pixels, reading `src` and writing `dst`, without the reach ceiling
+   * `gaussianBlur` has. Straight alpha in, straight alpha out — the same contract as `gaussianBlur`,
+   * which is what lets it stand in wherever that is called.
+   *
+   * Every Gaussian in the product now comes through here (all three landed 2026-08-11, in order): the
+   * glow node's highlight brightpass; the Gaussian BLUR node, layer-wide and region/masked alike; and
+   * the EDGE glow, which was the last truncated path and the one a timeline user hits without choosing
+   * anything, `mode` defaulting to "edge". Each had the identical defect for the identical reason.
+   * `gaussianBlur` below is now reached only through this function's 1x case.
    *
    * The ceiling being removed: `gaussianBlur` clamps its half-width to MAX_BLUR_RADIUS = 96 taps but
    * keeps the requested sigma, and BLUR_FS normalises by the SURVIVING weights — so past sigma 32 the
-   * kernel stops widening and instead flattens into a box average inside a fixed 96px window. Measured,
-   * the glow's reach stopped growing at radius 32 while the slider went to 200: 84% of the control did
-   * nothing. Raising the constant is not the fix — sigma 200 wants a 1201-tap kernel, twice, per
-   * glowing layer, on the integrated GPUs this product targets.
+   * kernel stops widening and instead flattens into a box average inside a fixed 96px window. Measured
+   * on the blur node, reach ran 10/21/43/86px across sigma 4..32 and then stalled at 95px for sigma 64,
+   * 96, 128 and 200 alike; the glow's did the same at radius 32 while its slider went to 200. Raising
+   * the constant is not the fix — sigma 200 wants a 1201-tap kernel, twice, per blurred layer, on the
+   * integrated GPUs this product targets.
    *
    * Instead the blur happens on a REDUCED-resolution copy, where the same 96 taps cover 2^n times the
    * distance. The reduction is chosen as the smallest power of two that lets the full Gaussian fit:
@@ -2499,10 +2507,16 @@ export class SceneCompositor {
    *     otherwise     ->  8x   (covers sigma <= 256; the node's max radius is 200)
    *
    * Adaptive rather than fixed, and that is deliberate: at 1x this function IS the old code path, so
-   * every existing project whose radius sits at or below 32 — which is every project that was not
-   * already stuck on the plateau, including the node's default of 24 — renders byte-identically. There
-   * is no response curve to remap and no "existing glows all got bigger" migration, because below the
-   * plateau nothing changed and above it the old behaviour was a defect.
+   * every existing project below the truncation point renders byte-identically. There is no response
+   * curve to remap and no "everyone's blurs got bigger" migration, because below the plateau nothing
+   * changed and above it the old behaviour was a defect.
+   *
+   * The boundaries line up exactly, which is what makes that claim strong rather than approximate.
+   * `gaussianBlur` truncates when `ceil(3*sigma) > 96`; the loop below leaves `reduction` at 1 in
+   * precisely the complementary case. At sigma 32, `ceil(96) = 96` is not `> 96`, so the old path did
+   * not truncate and this one does not reduce. At sigma 32.01, `ceil(96.03) = 97` does, and both
+   * change together. So the set of sigmas that render byte-identically is exactly the set the old
+   * path rendered CORRECTLY — no gap on either side.
    *
    * The cost of adapting is a seam: sigma 32 crosses from full-res to half-res, and an animated radius
    * passing through it could step. Measured, it does not — radius 32 vs 33 differ by at most ONE code
@@ -2510,9 +2524,9 @@ export class SceneCompositor {
    * is just 3*sigma growing. Same at the 64->65 crossing. A half-res blur of sigma 32 is still a
    * well-sampled Gaussian (48 taps), which is why.
    */
-  private bloomBlur(src: RenderTarget, dst: RenderTarget, scratch: RenderTarget, sigma: number): void {
+  private pyramidBlur(src: RenderTarget, dst: RenderTarget, scratch: RenderTarget, sigma: number): void {
     let reduction = 1;
-    while (Math.ceil(sigma * 3) / reduction > MAX_BLUR_RADIUS && reduction < MAX_BLOOM_REDUCTION) {
+    while (Math.ceil(sigma * 3) / reduction > MAX_BLUR_RADIUS && reduction < MAX_PYRAMID_REDUCTION) {
       reduction *= 2;
     }
     if (reduction === 1) {
@@ -2521,19 +2535,19 @@ export class SceneCompositor {
     }
     const gl = this.gl;
     const depth = Math.log2(reduction);
-    const levels = this.bloomTargets(depth);
+    const levels = this.pyramidTargets(depth);
 
     // Down: full -> /2 -> ... -> /reduction. The first hop premultiplies (the brightpass hands us
     // straight colour with the weight in alpha); the rest are already premultiplied.
-    gl.useProgram(this.bloomDownProgram);
-    gl.uniform1i(this.uBloomDownTex, 0);
+    gl.useProgram(this.pyramidDownProgram);
+    gl.uniform1i(this.uPyramidDownTex, 0);
     gl.activeTexture(gl.TEXTURE0);
     let srcTex = src.tex;
     let srcW = src.width;
     let srcH = src.height;
     for (let i = 0; i < depth; i += 1) {
-      gl.uniform2f(this.uBloomDownTexel, 1 / srcW, 1 / srcH);
-      gl.uniform1i(this.uBloomDownPremultIn, i === 0 ? 1 : 0);
+      gl.uniform2f(this.uPyramidDownTexel, 1 / srcW, 1 / srcH);
+      gl.uniform1i(this.uPyramidDownPremultIn, i === 0 ? 1 : 0);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       this.fullscreenPassAt(levels[i]!.level);
       srcTex = levels[i]!.level.tex;
@@ -2561,9 +2575,9 @@ export class SceneCompositor {
     // Up: straight back to full size in one tent-filtered magnification. Climbing the pyramid level by
     // level would be smoother still, but the buffer being magnified has already been blurred by 3*sigma
     // at its own scale — there is no detail left for the intermediate steps to preserve.
-    gl.useProgram(this.bloomUpProgram);
-    gl.uniform1i(this.uBloomUpTex, 0);
-    gl.uniform2f(this.uBloomUpTexel, 1 / deep.level.width, 1 / deep.level.height);
+    gl.useProgram(this.pyramidUpProgram);
+    gl.uniform1i(this.uPyramidUpTex, 0);
+    gl.uniform2f(this.uPyramidUpTexel, 1 / deep.level.width, 1 / deep.level.height);
     gl.bindTexture(gl.TEXTURE_2D, deep.level.tex);
     this.fullscreenPass(dst);
   }
@@ -2754,7 +2768,7 @@ export class SceneCompositor {
     gl.uniform4f(this.uPlateCrop, crop[0], crop[1], crop[2], crop[3]);
     this.fullscreenPass(plate);
 
-    if (blurPx > 0) this.gaussianBlur(plate, plate, s1, blurPx); // in-place via s1
+    if (blurPx > 0) this.pyramidBlur(plate, plate, s1, blurPx); // in-place via s1
 
     if (glow && glow.mode === "highlights") {
       // Highlight bloom (footage): brightpass the plate → s2, blur it, then ADD it back tinted. Reuses the
@@ -2766,7 +2780,7 @@ export class SceneCompositor {
       gl.uniform1i(this.uBloomBrightSrc, 0);
       gl.uniform1f(this.uBloomBrightThreshold, glow.threshold ?? 0.55);
       this.fullscreenPass(s2); // s2 = bright pixels (straight alpha, weight in .a)
-      this.bloomBlur(s2, s2, s1, glow.radiusPx); // spread the bright energy (in-place via s1)
+      this.pyramidBlur(s2, s2, s1, glow.radiusPx); // spread the bright energy (in-place via s1)
       gl.useProgram(this.bloomAddProgram);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, plate.tex);
@@ -2782,7 +2796,12 @@ export class SceneCompositor {
       gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     } else if (glow) {
       // Edge glow (text/cutouts): blurred silhouette of the (already blurred) plate by the radius → s2.
-      this.gaussianBlur(plate, s2, s1, glow.radiusPx);
+      // Through the pyramid for the same reason the highlight bloom above is: this is the mode the clip
+      // `glow` effect uses BY DEFAULT (composition-style reads `stringOr(params.mode, "edge")`), so it is
+      // the glow a timeline user actually reaches for, and its 0..160 radius plateaued from 32 upward —
+      // 80% of the slider doing nothing. Fixing the mechanism rather than moving the default: changing a
+      // control's default would silently restyle every project that used it, making it work does not.
+      this.pyramidBlur(plate, s2, s1, glow.radiusPx);
       gl.useProgram(this.glowProgram);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, plate.tex);
@@ -2887,9 +2906,11 @@ export class SceneCompositor {
         });
         fxTex = entry.target.tex;
       } else if ((pass.blurPx ?? 0) > 0) {
-        // Region blur: gaussian the running nest image.
+        // Region blur: gaussian the running nest image. Goes through the pyramid for the same reason
+        // the layer-wide blur above does — a masked blur that ran out of reach where an unmasked one
+        // did not would be a worse outcome than either, since it is the SAME node with a mask on it.
         const { s1, s2 } = this.effectTargets();
-        this.gaussianBlur(this.accumA, s2, s1, pass.blurPx!);
+        this.pyramidBlur(this.accumA, s2, s1, pass.blurPx!);
         fxTex = s2.tex;
       }
       if (!fxTex) continue;
@@ -3693,10 +3714,10 @@ export class SceneCompositor {
     this.plateRT?.dispose();
     this.scratch1?.dispose();
     this.scratch2?.dispose();
-    for (const rt of this.bloomLevels) rt.dispose();
-    for (const rt of this.bloomLevelScratch) rt.dispose();
-    this.bloomLevels = [];
-    this.bloomLevelScratch = [];
+    for (const rt of this.pyramidLevels) rt.dispose();
+    for (const rt of this.pyramidLevelScratch) rt.dispose();
+    this.pyramidLevels = [];
+    this.pyramidLevelScratch = [];
     this.scopeThumb?.dispose();
     if (this.scopeFence) {
       gl.deleteSync(this.scopeFence);

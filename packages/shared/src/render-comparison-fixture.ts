@@ -158,7 +158,8 @@ export type RenderComparisonFixtureKey =
   | "flarex-directional-blur-max"
   | "flarex-radial-blur-max"
   | "flarex-glow-max"
-  | "flarex-blur-max";
+  | "flarex-blur-max"
+  | "glow-edge-max";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -225,7 +226,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-directional-blur-max",
   "flarex-radial-blur-max",
   "flarex-glow-max",
-  "flarex-blur-max"
+  "flarex-blur-max",
+  "glow-edge-max"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -325,6 +327,32 @@ const blurEffects: TimelineLayer["effects"] = [
 
 const glowEffects: TimelineLayer["effects"] = [
   { id: "fixture_glow", type: "glow", name: "Glow", enabled: true, intensity: 100, params: { radius: 28, color: "#C9FF4A" } }
+];
+
+/**
+ * The CLIP glow effect at its maximum radius (160), in EDGE mode — the last path still truncated by
+ * MAX_BLUR_RADIUS after the glow node and the blur node joined the pyramid, and the one that mattered
+ * most quietly: `mode` defaults to "edge" (composition-style `stringOr(params.mode, "edge")`), so this
+ * is what a timeline user gets without choosing anything, and everything past radius 32 — 80% of the
+ * slider — landed in the same fixed 96px window.
+ *
+ * On TEXT rather than media, and that is the point: an edge glow blooms the ALPHA silhouette, so an
+ * opaque full-frame plate gives it almost nothing to work with. The existing `glow` fixture is media at
+ * radius 28 and covers the unchanged full-resolution path; this one covers reach, over real glyph edges
+ * where a 480px bloom is unmistakable.
+ *
+ * `mode` is written out even though it equals the default. The fixture asserts a radius behaviour, not
+ * a default, and the two should not be able to fail as one line.
+ */
+const glowEdgeMaxEffects: TimelineLayer["effects"] = [
+  {
+    id: "fixture_glow_edge_max",
+    type: "glow",
+    name: "Glow",
+    enabled: true,
+    intensity: 100,
+    params: { radius: 160, color: "#C9FF4A", mode: "edge" }
+  }
 ];
 
 // Task 1.5 pixel gate: a real user GLSL "Custom Shader" (webgl-fragment) effect. Registered here so the
@@ -1238,6 +1266,14 @@ interface FixtureVariant {
   /** When set, the overlay track is a single TEXT layer at this scale (no captions/shape) — exercises the
    *  resolution-aware BOX raster: scaled scene text must stay as crisp as the DOM/export text. */
   textScale?: number;
+  /**
+   * Size the text in the FONT rather than the transform. Only `glow-edge-max` needs it, and the reason
+   * is a property of the effect stage: the effect plate is built BEFORE the layer transform, so a
+   * scale-5 text is glowed at 1x and then magnified 5x by the composite. A radius-160 bloom then spreads
+   * over ~2400px and lands at 2-3 code values — an effect that is running perfectly and is invisible.
+   * At scale 1 the bloom is in screen space, where it can be seen and measured.
+   */
+  textFontSize?: number;
   /** Base media-layer opacity (0–100). Exercises scene composite-applied opacity vs DOM CSS opacity. */
   mediaOpacity?: number;
   content?: TimelineLayer["content"];
@@ -1325,6 +1361,10 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: blurEffects, fit: "cover" };
     case "glow":
       return { effects: glowEffects, fit: "cover" };
+    case "glow-edge-max":
+      // Scale 1 with the size in the font — see `textFontSize`. At scale 5 this fixture rendered a
+      // bloom so diffuse it was invisible, and read 0.000% for the wrong reason.
+      return { effects: [], fit: "cover", textFontSize: 420, textEffects: glowEdgeMaxEffects };
     case "region-blur":
       return { effects: regionBlurEffects, fit: "cover" };
     case "masked-blur":
@@ -1690,7 +1730,7 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     startSeconds: 0,
     durationSeconds: 12,
     fontFamily: "Arial",
-    fontSize: 110,
+    fontSize: variant.textFontSize ?? 110,
     textWidthPercent: 86,
     textAlign: "center",
     color: "#ffffff",

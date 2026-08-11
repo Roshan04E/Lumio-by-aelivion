@@ -556,6 +556,158 @@ hazes far enough.
 
 ---
 
+### §3.8 — the Gaussian blur joins the pyramid (2026-08-11)
+
+The palette's last timid maximum. Same defect, same mechanism, same fix — `gaussianBlur` truncated at
+96 taps while keeping the requested sigma, and `BLUR_FS` normalises by the surviving weights, so past
+σ 32 the kernel stopped widening and redistributed energy inside a fixed window instead.
+
+| σ | before | after |
+|---:|---:|---:|
+| 4 | 10 px (0.93%) | **10 px — identical** |
+| 8 | 21 px (1.94%) | **21 px — identical** |
+| 16 | 43 px (3.98%) | **43 px — identical** |
+| 32 | 86 px (7.96%) | **86 px — identical** |
+| 33 | 87 px (8.06%) | 90 px (8.33%) |
+| 48 | 94 px (8.70%) | 130 px (12.04%) |
+| 64 | 95 px | 174 px (16.11%) |
+| 96 | 95 px | 262 px (24.26%) |
+| 128 | 95 px | 347 px (32.13%) |
+| **200 (max)** | **95 px (8.80%)** | **474 px (43.89%)** |
+
+The plateau is visible in the *before* column as a number that stops moving: identical at 95 px for
+σ 64, 96, 128 and 200 — 68% of the slider doing nothing. The falloff told the same story from the
+other side: at +60 px the value crept 31 → 40 → 43 → 46 across those four settings, which is energy
+being redistributed inside the 96 px window rather than the window growing.
+
+Two call sites moved, the layer-wide blur and the region/masked blur, because they are the same node
+with a mask on it and a masked blur that ran out of reach where an unmasked one did not would be
+worse than either. `bloomBlur` is renamed `pyramidBlur` now that it has two consumers.
+
+#### The byte-identity property, confirmed rather than assumed
+
+This is what makes the change safe, and it is provable from the code before it is measured: the old
+path truncates exactly when `ceil(3σ) > 96`, and the reduction loop leaves the factor at 1 in
+precisely the complementary case. At σ 32, `ceil(96) = 96` is not `> 96` — neither truncates. At
+σ 32.01, `ceil(96.03) = 97` — both change together. **The set of sigmas that render byte-identically
+is exactly the set the old path rendered correctly**, with no gap on either side.
+
+Measured: σ 4, 16 and 32 render with **zero differing samples** before and after.
+
+**`render:compare:pixels` cannot establish this.** It compares two renderers, so a change that
+shifted both identically reads 0.000% — DEBT-017's first axis, the blind spot that hid radialBlur's
+broken Center Y. Byte-identity needs the *same* renderer before and after.
+
+> **A void run on the way, worth recording.** The first before/after pair reported a uniform
+> 0.21-luma difference at **every** sigma, including σ 4, which provably runs the identical code path.
+> That is not a result — a parallel session was editing `render-comparison-fixture.ts`, `builtins.ts`
+> and `virtual-layers.ts` in the same tree between the two measurements, and the pair had measured
+> those edits too (the fixture's background moved by 3 in the blue channel). The tell was that the
+> difference was uniform and present where the code could not have changed anything. Redone as a
+> controlled pair minutes apart — stash the change, measure, restore, measure — the differing-sample
+> count is zero. **A before/after pair is only valid if the tree holds still between the halves**,
+> which in a repo with concurrent sessions is a precondition to check, not to assume.
+
+#### Known and accepted
+
+Banding at the new maximum, exactly as glow has it: a shallow gradient over hundreds of pixels
+quantises to contours in 8 bits. Not fixed here — the only place a dither works is the composite's
+quantisation point, which touches every layer.
+
+#### Still truncating: the clip-level glow effect's EDGE mode
+
+Found while confirming which callers were left. `gaussianBlur` now has one remaining caller — the
+edge-glow path — and it is **reachable and it is the default**: `composition-style.ts` reads
+`stringOr(params.mode, "edge")`, so the clip `glow` effect blooms an alpha silhouette through the
+truncated path unless the user switches it to Highlights. Its radius goes to 160, so it plateaus over
+roughly the top 40% of its slider.
+
+This narrows a claim made in §3.7's commit. Glow's reach *is* fixed for the Flarex glow **node**,
+which lowers to `mode: "highlights"` and is what the founder reported. It was **not** fixed for the
+clip-level glow effect in its default mode. Left alone deliberately — it is a glow decision, not a
+blur one, and it is one word.
+
+> **Resolved 2026-08-11 in §3.9 below**, and not by the one word. Changing the default would have
+> restyled every project that used the effect; the mechanism was fixed instead.
+
+---
+
+### §3.9 — the edge glow joins the pyramid (2026-08-11)
+
+The path §3.8 found and left. It is the one that mattered most quietly: `mode` **defaults** to
+`"edge"`, so a timeline user who drops a Glow on a clip and drags Radius gets this path without
+choosing anything, and everything past radius 32 landed in the same fixed 96 px window — **80% of a
+0..160 slider doing nothing.**
+
+Measured on a white glyph over black, reach past the silhouette edge at ≥ 1/255:
+
+| radius | before | after |
+|---:|---:|---:|
+| 8 | 22 px (2.04%) | **22 px — identical** |
+| 16 | 43 px (3.98%) | **43 px — identical** |
+| 32 | 86 px (7.96%) | **86 px — identical** |
+| 33 | 87 px (8.06%) | 89 px (8.24%) |
+| 48 | 94 px (8.70%) | 127 px (11.76%) |
+| 64 | 95 px | 165 px (15.28%) |
+| 96 | 95 px | 237 px (21.94%) |
+| 128 | 95 px | 308 px (28.52%) |
+| **160 (max)** | **95 px (8.80%)** | **369 px (34.17%)** |
+
+The same plateau in the same place, to the pixel: 95 px repeated across radius 64, 96, 128 and 160,
+and the identical 86 px at σ 32 the blur node measured — the same kernel, hit the same way. The
+reduction seam is invisible: radius 32 vs 33 differ by at most **one code value** at every sampled
+distance (96/58/6 against 95/59/7).
+
+**Byte-identity holds, and it was checked the same way as §3.8**: a same-renderer pair with only the
+one call line reverted between the halves, minutes apart, `git status --short` captured on both sides
+(the only drift was the probe file this session added). Radii 0, 8, 16 and 32 → **zero differing
+samples**. The first changed radius, 33, differs by a worst delta of exactly **1 code**, which is what
+a boundary crossing should look like; the deltas then grow smoothly with radius (8 / 24 / 54 / 75 / 88
+at 48 / 64 / 96 / 128 / 160).
+
+**The default was not touched, and that was the decision.** Switching the default to `"highlights"`
+would have "fixed" the reported symptom by silently restyling every existing project that used the
+effect — an edge bloom and a luminance bloom are different looks, not different amounts of one look.
+Making the control work does not.
+
+#### Known and accepted
+
+Banding at the new maximum, as in §3.7 and §3.8 and for the same reason. Looked at, not assumed: the
+radius-160 render puts faint concentric contours on the flat black surround. It is 8-bit quantisation
+of a gradient that now spreads ~25 code values over 369 px, not a pyramid artefact — the contours are
+smooth ellipses that do not follow the low-res texel grid. The only correct fix is dither at the
+composite's quantisation point, which touches every layer and is not this change.
+
+#### Two instrument failures, both of the same family
+
+Neither is incidental; both are the instrument being unable to tell the answers apart, and both were
+caught by an arithmetic impossibility rather than by the number looking wrong.
+
+1. **A frame-clipped ruler.** On the fixture's own scale-5 "HI", the glyph edge sits at x 828 of 1080,
+   leaving 251 px of headroom. Radius 32 and radius 160 both read **exactly 251 px** — both blooms ran
+   off the frame. Fixed by measuring up the 1920-tall axis instead of across the 1080-wide one.
+2. **A magnified measuring space.** The effect plate is built *before* the layer transform, so a
+   scale-5 text is glowed at 1× and then magnified 5× by the composite: a radius-32 bloom measured
+   ~390 px on screen off a 96 px kernel. Not a defect — that is what "blur before transform" means, and
+   it matches CSS filter order — but the numbers were in a stretched space and not comparable to frame
+   width. Fixed by putting the size in the font (420 px) and leaving `scale` at 1.
+
+3. **The fixture itself, caught by the suspicion rule.** `glow-edge-max` read 0.000% on the full sweep
+   and the render carried **no visible glow at all** — it had inherited the text fixture's `textScale: 5`
+   and hit failure 2 above, spreading a radius-160 bloom to 2-3 code values. A green gate on a picture
+   where nothing happened. Fixed in the fixture (`textFontSize: 420`, scale 1), not in the code; the
+   render now puts an unmistakable yellow-green bloom over several hundred pixels of hillside. **This is
+   the third pass in a row where looking at the picture behind a 0.000% was the check that mattered**,
+   and the first where it caught something.
+
+A further finding fell out of the first attempt, recorded because it is not obvious: **edge glow does
+nothing on a Flarex comp host or on a full-frame shape.** The plate is comp-sized and pre-transform, so
+a shape scaled to 12% presents an opaque full-frame plate with no interior alpha edges to bloom. Text
+rasterises its silhouette *into* the plate, which is why the fixture and the probe both use text — and
+why the existing `glow` fixture (media, radius 28) exercises the code path but barely the effect.
+
+---
+
 ## Part 4 — the behaviour checklist
 
 The deliverable that outlives the audit. Every entry is checkable **by looking at a rendered frame**.
@@ -568,8 +720,14 @@ Numbers are for a 1080-wide frame at `renderScale` 1; percentages are of frame w
       13.33%), which was the point: a glow that bleeds less far than a blur is the wrong answer
 - [x] increasing the radius increases the reach **across the whole slider** — no plateau
       *(6.02 / 8.06 / 8.43 / 16.20 / 16.57 / 30.28 / 42.50% at radius 24 / 32 / 33 / 64 / 65 / 120 / 200)*
-- [x] the two reduction seams are invisible — radius 32 vs 33 and 64 vs 65 differ by at most **one
-      code value** at every sampled distance
+- [x] **the CLIP glow effect's EDGE mode reaches too — its default mode.** Measured **34.17%**
+      (369 px; was 8.80%) at its maximum radius of 160, with no plateau: **22 / 43 / 86 / 89 / 127 /
+      165 / 237 / 308 / 369 px** at radius 8 / 16 / 32 / 33 / 48 / 64 / 96 / 128 / 160. It previously
+      stalled at 95 px for radius 64, 96, 128 and 160 alike — 80% of the slider. Byte-identical at and
+      below radius 32 (zero differing samples), so no existing project moved; the default stayed
+      `"edge"` deliberately, since changing it would restyle projects rather than fix the control
+- [x] the reduction seams are invisible — radius 32 vs 33 and 64 vs 65 differ by at most **one
+      code value** at every sampled distance, in the highlight bloom and the edge bloom alike
 - [x] **no temporal shimmer.** A moving highlight's halo does not crawl or pop between frames: at the
       deepest reduction the frame-to-frame variation is **≤1 code**, and its absolute RMS (0.868) is
       *lower* than the full-resolution control's (1.280)
@@ -590,10 +748,25 @@ Numbers are for a 1080-wide frame at `renderScale` 1; percentages are of frame w
 - [ ] a glow tint other than white is reachable from the node
 
 ### BLUR
-- [ ] at maximum sigma the blur is unrecognisably soft — a 96 px feature is fully dissolved
-- [ ] reach increases across the whole slider — no plateau *(currently plateaus at σ≈32)*
-- [ ] no ringing or edge darkening against a transparent surround
-- [ ] a blur applied to a masked region does not bleed outside the mask edge ✅ *(fixture-covered)*
+- [x] at maximum sigma the blur is unrecognisably soft — a 96 px feature is fully dissolved.
+      At σ 200 the whole plate collapses to a colour wash: no landscape, no road, no bokeh, nothing
+      recognisable survives
+- [x] reach increases across the whole slider — no plateau. Measured smear past a hard edge:
+      **10 / 21 / 43 / 86 / 90 / 130 / 174 / 262 / 347 / 474 px** at σ 4 / 8 / 16 / 32 / 33 / 48 / 64 /
+      96 / 128 / 200, i.e. **0.93% → 43.89% of frame width**. It previously stalled at **95 px (8.80%)**
+      for σ 64, 96, 128 and 200 alike
+- [x] **byte-identical at and below the truncation point.** σ 4 / 16 / 32 render with ZERO differing
+      samples before and after. This is *not* something `render:compare:pixels` can establish — it
+      compares two renderers, so a change shifting both identically still reads 0.000% (DEBT-017's
+      first axis). It needs the same renderer before and after, held against an unchanging tree
+- [ ] no ringing or edge darkening against a transparent surround — *unverified at the new maximum.
+      The pyramid's down chain samples with `CLAMP_TO_EDGE` while `BLUR_FS` treats out-of-frame as
+      transparent, and those conventions only meet where content reaches the border. The full-frame
+      fixture shows no rim, but a transparent-surround case at σ > 32 has not been measured*
+- [x] a blur applied to a masked region does not bleed outside the mask edge ✅ *(fixture-covered)*
+- [ ] **banding at maximum**, same as glow and for the same reason: a shallow gradient spread over
+      hundreds of pixels quantises to visible contours in 8 bits. Known and accepted; the fix is
+      dither at the composite's quantisation point, which touches every layer and is its own change
 
 ### TRANSFORM
 - [ ] a negative or flipped scale mirrors the image *(currently unreachable — `scale` min is 0)*
@@ -706,6 +879,16 @@ the 8-bit floor, and byte-identical output at radius ≤ 32 so no existing proje
 > plateaus at the same 96 px. The two are one function call apart and `blur`'s ceiling is now the
 > palette's last timid maximum, but changing it moves every existing blurred layer, which is a
 > different decision from the one this round was authorised to make.
+>
+> **Done 2026-08-11, second pass — see §3.8.** It turned out NOT to move every existing blurred
+> layer: below the truncation point the render is byte-identical, verified directly. `bloomBlur` is
+> now `pyramidBlur` and has two consumers.
+>
+> **Done 2026-08-11, third pass — see §3.9.** The clip glow effect's EDGE mode, found by asking which
+> callers of `gaussianBlur` were left, and the one a timeline user actually hits: it is the effect's
+> DEFAULT mode. Reach 8.80% → **34.17%**, byte-identical at and below radius 32, default untouched.
+> `pyramidBlur` now has three consumers and every Gaussian in the product goes through it —
+> `gaussianBlur` is reachable only via its 1× case.
 
 > **To answer the question as asked: no, glow is not a one-line range change — and the one-line
 > version is a trap.** `MAX_BLUR_RADIUS = 96` is a single constant and raising it *would* widen the
@@ -744,8 +927,11 @@ left is one pattern and one omission:
 - **A filter family whose spatial nodes stop responding well below their declared maximum.** Glow and
   blur plateau at 16% of their range; directional and radial blur never had much range to begin with.
   In every case the slider keeps moving and the picture does not. None of it is architectural.
-  *(Fixed 2026-08-11: the two blurs in §3.6, glow in §3.7. **`blur` is the last one left** and it is
-  a one-call change from the machinery §3.7 built.)*
+  *(Fixed 2026-08-11, in four passes: the two blurs in §3.6, the glow node in §3.7, the Gaussian blur
+  in §3.8, the clip glow's EDGE mode in §3.9. **No truncated Gaussian remains** — every one in the
+  product now goes through `pyramidBlur`, and `gaussianBlur` is reachable only via its 1× case. Each
+  pass found the next one by asking which callers were left, which is why the count went from one node
+  to four paths.)*
 - **A `text` node named after Fusion's Text+ that cannot draw an outline** — while the caption system
   three directories away can.
 
