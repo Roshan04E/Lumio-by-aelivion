@@ -33,17 +33,31 @@ const RADIAL_BLUR: FragmentEffectDefinition = {
   ],
   glsl: `
 vec4 effect(vec2 uv) {
-  vec2 center = vec2(centerX, 1.0 - centerY) / 100.0;
+  // centerY is a PERCENT and uv.y runs bottom-up, so the flip is 100 - y, not 1 - y. It read
+  // "1.0 - centerY" from the day it was written: at the default centre that is (1 - 50)/100 =
+  // -0.49, roughly half a frame BELOW the picture, and every setting of the control lands off
+  // frame. The measured symptom was a zoom that smeared everything upward and barely moved along
+  // the frame's own centre row; the Center Y control has never done anything usable.
+  vec2 center = vec2(centerX, 100.0 - centerY) / 100.0;
   vec2 delta = uv - center;
-  float strength = (amount / 100.0) * 0.06;
-  const int TAPS = 16;
+  // Quadratic response into a 30% zoom sweep at the top of the slider (was a flat 6%). See the
+  // range/tap note above DIRECTIONAL_BLUR — same reasoning, same shape.
+  float a = clamp(amount, 0.0, 100.0) / 100.0;
+  float strength = 0.30 * a * a;
+  // Tap count from the WORST-CASE sweep in the frame (the corner furthest from the centre), not
+  // from this pixel's own. A per-pixel count would print a visible ring wherever it steps, and two
+  // renderers could round that step differently; this is constant across the frame because it reads
+  // uniforms only.
+  float maxSweepPx = length(max(center, 1.0 - center) * uResolution) * strength;
+  int taps = int(clamp(ceil(maxSweepPx / 3.0), 8.0, 96.0));
+  float jitter = _rand(uv * uResolution) - 0.5;
   vec4 sum = vec4(0.0);
-  for (int i = 0; i < TAPS; i++) {
-    float t = float(i) / float(TAPS - 1);
+  for (int i = 0; i < taps; i++) {
+    float t = (float(i) + jitter) / float(taps - 1);
     float scale = 1.0 - strength * t;
     sum += getSrcColor(center + delta * scale);
   }
-  return sum / float(TAPS);
+  return sum / float(taps);
 }
 `
 };
@@ -56,19 +70,51 @@ const DIRECTIONAL_BLUR: FragmentEffectDefinition = {
     { name: "amount", type: "float", default: 40, min: 0, max: 100, step: 1, label: "Amount" },
     { name: "angle", type: "float", default: 0, min: -180, max: 180, step: 1, label: "Angle" }
   ],
+  /**
+   * Range and taps (2026-08-11). The old body streaked a fixed 60 PIXELS at amount 100 over a
+   * fixed 16 taps — 5.6% of a 1080-wide frame, and smaller still on a 4K conform, because the
+   * length was absolute. Measured, the response was linear to the top of the slider with no
+   * plateau (reach past a hard edge 2/7/11/17/23/29px across amount 0.1..1.0), so unlike glow the
+   * ceiling was never a kernel truncation; the constant was simply timid. See
+   * `plans/flarex-node-controls-audit.md`.
+   *
+   * Three changes, and the second is the one that makes the first honest:
+   *
+   *  1. The streak is now a fraction of frame WIDTH, topping out at 20%, so it survives a conform.
+   *  2. Taps scale with the streak at roughly one per 3px, capped at 96. Spreading a longer streak
+   *     over the old 16 taps would not produce a longer blur, it would produce discrete ghosts —
+   *     216px over 16 taps is 14px between samples. The count is derived from uniforms only, so it
+   *     is constant across the frame and identical in every renderer, and it is demand-driven, so a
+   *     short streak still costs a short shader.
+   *
+   *     The cap is where this stops being free: it covers a 288px span at the 3px target, which is
+   *     the whole range on a 1080-wide frame (216px, 3.0px spacing) and most of it at 1920 (384px,
+   *     4.0px). At 3840 the top of the slider samples ~8px apart and the phase jitter below is
+   *     carrying it. The honest fix past that point is to prefilter at reduced resolution — the same
+   *     change glow needs — and it is not in this round.
+   *  3. Quadratic response. A linear remap would have multiplied every existing project's streak by
+   *     3.6x at the same slider value; squaring keeps the low and middle of the range near their
+   *     historical lengths (amount 0.4 goes 24px -> 35px) and puts the new reach at the top, where
+   *     the complaint was. It also gives finer control over the short streaks people actually dial.
+   */
   glsl: `
 vec4 effect(vec2 uv) {
   float rad = radians(angle);
   vec2 dir = vec2(cos(rad), sin(rad));
-  float lengthPx = (amount / 100.0) * 60.0;
-  vec2 dirStep = dir * (lengthPx / uResolution);
-  const int TAPS = 16;
+  float a = clamp(amount, 0.0, 100.0) / 100.0;
+  float spanPx = 0.20 * uResolution.x * a * a;
+  int taps = int(clamp(ceil(spanPx / 3.0), 8.0, 96.0));
+  vec2 dirStep = dir * (spanPx / uResolution);
+  // Per-pixel phase jitter of +-half a tap. At the top of the range the taps are several pixels
+  // apart and a fixed phase ladders a hard edge into countable ghosts; jitter turns that ladder
+  // into dither. _rand is the shared integer hash — bit-identical across renderers, never sin().
+  float jitter = _rand(uv * uResolution) - 0.5;
   vec4 sum = vec4(0.0);
-  for (int i = 0; i < TAPS; i++) {
-    float t = (float(i) / float(TAPS - 1)) - 0.5;
+  for (int i = 0; i < taps; i++) {
+    float t = ((float(i) + jitter) / float(taps - 1)) - 0.5;
     sum += getSrcColor(uv + dirStep * t);
   }
-  return sum / float(TAPS);
+  return sum / float(taps);
 }
 `
 };
@@ -443,7 +489,10 @@ vec4 effect(vec2 uv) {
  * crop would be invisible (the same reason the keyers set it).
  *
  * Insets are frame fractions from each edge. Note `uv.y` runs BOTTOM-up here while the params read
- * top-down (matching `radialBlur`'s `1.0 - centerY`), so top/bottom are mapped, not passed straight.
+ * top-down, so top/bottom are mapped, not passed straight. (This comment used to cite `radialBlur`'s
+ * `1.0 - centerY` as the precedent. It was not one: crop's insets are 0..1 fractions so `1.0 - top`
+ * is right, while radialBlur's centre is a 0..100 percent and that line was a defect — see the note
+ * on RADIAL_BLUR above.)
  */
 export const FLAREX_CROP_ID = "flarex.crop";
 const FLAREX_CROP: FragmentEffectDefinition = {

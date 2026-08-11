@@ -153,7 +153,9 @@ export type RenderComparisonFixtureKey =
   | "flarex-animated-roto"
   | "flarex-tracked-mask-early"
   | "flarex-tracked-mask-late"
-  | "flarex-stabilize";
+  | "flarex-stabilize"
+  | "flarex-directional-blur-max"
+  | "flarex-radial-blur-max";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -215,7 +217,9 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-animated-roto",
   "flarex-tracked-mask-early",
   "flarex-tracked-mask-late",
-  "flarex-stabilize"
+  "flarex-stabilize",
+  "flarex-directional-blur-max",
+  "flarex-radial-blur-max"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -772,6 +776,37 @@ function buildFlarexFilterStackComp(): FlarexComp {
 }
 
 /**
+ * The two spatial filters at their NEW maximum (2026-08-11).
+ *
+ * A fixture at the old default would have proved nothing about the range that just moved, and the
+ * top of the range is also where the parity risk lives. Both bodies now run a DYNAMIC tap loop whose
+ * bound is computed from uniforms, and both jitter the tap phase per pixel through the shared
+ * integer hash. Either of those is a way for two renderers to disagree — a dynamic loop bound is new
+ * ground for this harness, and a hash that is not bit-exact is exactly the failure `glsl-hash.ts`
+ * exists to prevent. At amount 1 the tap count is at its cap and the jitter is at its most visible,
+ * so this is the setting that tests them.
+ *
+ * The angle is deliberately off-axis and the radial centre deliberately off-centre: an axis-aligned
+ * streak or a centred sweep would exercise one component of `dirStep`/`delta` and leave the other
+ * at zero.
+ */
+function buildFlarexBlurMaxComp(kind: "directional" | "radial"): FlarexComp {
+  const id = `fixture_flarex_${kind}_max`;
+  const comp = createFlarexComp(`${id}_comp`, `Flarex ${kind} blur at maximum`);
+  const node = createFlarexNode(kind === "directional" ? "directionalBlur" : "radialBlur", `${id}_node`);
+  node.params =
+    kind === "directional"
+      ? { ...node.params, amount: 1, angle: 27 }
+      : { ...node.params, amount: 1, centerX: 0.34, centerY: 0.3 };
+  comp.nodes[node.id] = node;
+  comp.edges = [
+    { id: `${id}_e1`, from: { nodeId: `${id}_comp_in`, socket: "out" }, to: { nodeId: node.id, socket: "in" } },
+    { id: `${id}_e2`, from: { nodeId: node.id, socket: "out" }, to: { nodeId: `${id}_comp_out`, socket: "in" } }
+  ];
+  return comp;
+}
+
+/**
  * Text+ over Background — the generator nodes, and the highest parity risk in the batch.
  *
  * Both are backed by virtual `text`/`shape` layers that each renderer RASTERIZES with its own canvas,
@@ -1292,6 +1327,10 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", flarex: buildFlarexTrackedMaskComp("late") };
     case "flarex-stabilize":
       return { effects: [], fit: "cover", flarex: buildFlarexStabilizeComp() };
+    case "flarex-directional-blur-max":
+      return { effects: [], fit: "cover", flarex: buildFlarexBlurMaxComp("directional") };
+    case "flarex-radial-blur-max":
+      return { effects: [], fit: "cover", flarex: buildFlarexBlurMaxComp("radial") };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone

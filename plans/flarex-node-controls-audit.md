@@ -110,7 +110,7 @@ both broken at the top of their declared range by the same 12-character constant
 
 | Fusion parameter | Flarex | Verdict |
 |---|---|---|
-| Length, Angle | `amount`, `angle` | present |
+| Length, Angle | `amount`, `angle` | present; range raised to 20% of frame width on 2026-08-11 (§3.6) |
 | Glow | **missing** | not wanted — niche |
 | Blend | **missing** | wanted (as above) |
 
@@ -119,7 +119,7 @@ both broken at the top of their declared range by the same 12-character constant
 | Fusion | Flarex | Verdict |
 |---|---|---|
 | Type: zoom vs rotation | **missing — only one behaviour exists** | **wanted.** Spin blur is half of what people reach for this tool for; today it is unreachable. |
-| Centre X/Y | present | — |
+| Centre X/Y | present, ~~working~~ | Centre **Y** was broken from the day it was written and fixed on 2026-08-11 (§3.6); Centre X was always fine |
 | Blend | missing | wanted |
 
 ### colorCorrect / colorWheels / colorCurves / hueSat / lut / look
@@ -315,6 +315,9 @@ Fixing the pyramid fixes both. Nobody has reported blur because a 96 px blur sti
 
 ### §3.5 — glow is not alone: the filter family has a systemic timid-maximum pattern
 
+> **FIXED 2026-08-11 — see §3.6 below for what was measured and what changed.** The section is kept
+> as written because two of its claims were wrong and the correction is the useful part.
+
 Having found one, I checked the rest. Two more nodes have the same shape of defect, and unlike glow
 these genuinely **are** near-one-line fixes.
 
@@ -342,6 +345,102 @@ or never had much range — well below their declared maximum, and in every case
 says otherwise. That is why the checklist in Part 4 opens its general section with *"the node's
 maximum produces a visibly stronger result than 80% of maximum"*: it is the single check that would
 have caught all three, and no gate in the repo performs it.
+
+---
+
+### §3.6 — the two blurs, measured and fixed (2026-08-11)
+
+Same instrument as glow: a white square on black rendered through the real renderer, profiled off
+the returned PNG (`apps/worker/tmp/blur-range-measure.ts`). Reach is the distance past the square's
+**geometric** edge at which the added light is still ≥ 1/255.
+
+#### It is NOT the same shape of defect as glow
+
+This was the first thing to establish and it settles how the fix has to work. Glow's ceiling is a
+kernel truncation: past radius 32 the reach stops moving. Neither blur plateaus. Measured before any
+change, on a 1080-wide frame:
+
+| node amount | 0.1 | 0.25 | 0.4 | 0.6 | 0.8 | **1.0** |
+|---|---|---|---|---|---|---|
+| directionalBlur reach | 2 | 7 | 11 | 17 | 23 | **29 px (2.69%)** |
+| radialBlur reach | 2 | 6 | 9 | 13 | 17 | **22 px (2.04%)** |
+
+Linear to the top of the slider in both cases, and the directional figure matches the shader
+arithmetic exactly (a 60 px span is ±30 px). **The parameter range was never the constraint and the
+tap count was never the constraint — the scale constants were simply small.** So the fix is raising
+them, and the tap count is what decides how far they can honestly be raised.
+
+#### What §3.5 got wrong
+
+- *"16 discrete ghosts rather than a smooth streak"* — **wrong, and wrong for an instructive reason.**
+  The old streak measured **0 ripples**: 60 px over 16 taps is 4 px apart, and a blur that short
+  cannot ghost because the ghosts overlap. The prediction was arithmetic reasoning about a picture I
+  had not yet rendered. Ghosting was a risk of the **fix**, not a symptom of the defect.
+- *"~32 px at the frame edge"* for radial — the right order, but derived from a shader line that was
+  itself broken (below).
+
+#### A defect that fell out of the measurement: Center Y has never worked
+
+The radial numbers disagreed with the arithmetic — a 30% sweep should have thrown ~81 px along the
+frame's own centre row and threw ~10 — and the picture showed everything smearing *upward* from a
+centre that was clearly not in the frame. The cause is one line, present since the effect was
+written in the 2026-07-14 batch:
+
+```glsl
+vec2 center = vec2(centerX, 1.0 - centerY) / 100.0;   // centerY is a PERCENT
+```
+
+`centerY` arrives as 0..100, so the default 50 gives `(1 - 50)/100 = -0.49` — the blur centre sits
+about half a frame **below** the picture, at every setting of the control. Fixed to `100.0 - centerY`.
+
+Worth noting how it survived: the pixel gate **cannot** see this. Both renderers share the shader, so
+both were wrong in the same way and any parity fixture would have read 0.000%. This is DEBT-017's
+first axis exactly — a differential instrument is blind to a defect the two sides share — and it is
+the second time in a week that the thing that actually found the bug was rendering a known input and
+checking the answer against arithmetic.
+
+#### After
+
+| | before | after | change |
+|---|---|---|---|
+| `directionalBlur` streak at max | 60 px total (5.6% of width) | **216 px (20% of width)** | reach 29 px → **109 px (10.09%)** |
+| `radialBlur` sweep at max | 6% | **30%** | reach 22 px → **144 px (13.33%)** |
+| taps | fixed 16 | **demand-driven, ~1 per 3 px, cap 96** | 72 taps at the 1080-wide maximum |
+| response curve | linear | **quadratic** | amount 0.4 goes 24 px → 35 px, so existing projects shift much less than the 3.6× a linear remap would have imposed |
+| tap phase | fixed | **per-pixel jitter, ±½ tap** | dithers the ladder a wide tap spacing would otherwise leave |
+
+Sample spacing, the number that decides whether a longer blur is actually a *better* one:
+
+| | at the old maximum | at the new maximum |
+|---|---|---|
+| `directionalBlur` | 60 px / 16 taps = **4.0 px** | 216 px / 72 taps = **3.0 px** |
+| `radialBlur` (corner) | ~66 px / 16 taps = **4.4 px** | 330 px / 96 taps = **3.4 px** |
+
+The spacing got *tighter* while the reach grew 3.6×, which is the whole point: the taps were raised
+with the range rather than stretched across it. Verified by eye and by profile — both maxima fall
+monotonically from the edge to zero with no ghost copies.
+
+**Where this stops being free.** The 96-tap cap covers 288 px at the 3 px target. That is the entire
+range on a 1080-wide frame and most of it at 1920 (384 px → 4.0 px). At 3840 the top of the slider
+samples ~8 px apart and the jitter is carrying it. Past that the honest fix is a reduced-resolution
+prefilter — **the same change glow needs** — and it was not done in this round.
+
+#### The colour-space question, answered: it is the stage, not the node
+
+Glow is **not** special. The entire fragment-effect stage runs on display-encoded values, and this is
+deliberate and written down: `color/fragment-effects/registry.ts` states as a hard rule that bodies
+*"operate in the renderer's sRGB OUTPUT space … do not add pow(2.2) linear round-trips, or preview
+and export diverge"* — and the transition harness carries the same rule. The managed pipeline is a
+**closed linear segment inside the grade stage only**: `color/cpu.ts` decodes to Rec.709 linear,
+grades, and encodes back before the stage ends. `compile-flarex.ts`'s stage order then runs
+`PIPELINE(1) → REGION(2) → FRAGMENT(3) → TRANSFORM(4) → BLUR(5) → GLOW(6) → MASK(7)`, so every
+fragment effect, the Gaussian blur, the glow, and the merges all receive gamma-encoded pixels. Glow's
+measured 1.68 white:grey ratio is therefore not a glow bug — it is what the stage guarantees.
+
+That makes "fix glow in linear light" a **larger and more delicate change than it looked**, and it
+should not be attempted node-by-node: the rule exists because a linear round-trip inside one body
+diverges preview from export, so the conversion has to move to the stage boundary, where it changes
+every spatial filter's look at once. Recommended fix #3 below is re-scoped accordingly.
 
 ---
 
@@ -403,15 +502,30 @@ Numbers are for a 1080-wide frame at `renderScale` 1; percentages are of frame w
 
 ### RADIAL BLUR
 - [ ] both zoom and spin behaviours are reachable *(currently zoom only)*
-- [ ] the blur is zero at the centre point and increases outward
-- [ ] at maximum, the streak at the frame edge is unmistakable — **at least 10% of frame width**
-      *(estimate; currently ≈3%)*
-- [ ] no discrete ghost copies visible at maximum — taps are dense enough for the streak length
+- [x] the blur is zero at the centre point and increases outward
+- [x] **Centre X and Centre Y both put the blur's origin where the control says.** Set Centre Y to
+      0.2 and to 0.8 and confirm the sweep radiates from the upper and lower thirds respectively
+      — *this failed from 2026-07-14 to 2026-08-11 and no parity gate could see it, because both
+      renderers ran the same wrong line*
+- [x] at maximum, the sweep at the frame edge is unmistakable — **at least 10% of frame width**
+      *(measured **13.33%**, 144 px on a 1080-wide frame; was 2.04%)*
+- [x] **no visible banding or ghosting at maximum.** The falloff from the object's edge is monotone
+      to zero with no ghost copies — measured, and confirmed by looking at the frame. Sample spacing
+      at maximum is **3.4 px at the frame corner** (330 px sweep / 96 taps)
+- [ ] at 3840 width the top of the range samples ~8 px apart — **known limit**, the fix is a
+      reduced-resolution prefilter, not more taps
 
 ### DIRECTIONAL BLUR
-- [ ] at maximum, the streak is **at least 15% of frame width** *(estimate; currently 5.6%)*
-- [ ] no discrete ghost copies at maximum on a hard edge *(currently 16 taps over 60 px)*
+- [x] at maximum, the streak is **at least 15% of frame width** — the streak **span** is 20% of
+      frame width by construction; reach past a hard edge measures **10.09%** (109 px on 1080-wide;
+      was 2.69%)
+- [x] **no visible banding or ghosting at maximum on a hard edge.** Monotone falloff, no ghost
+      copies; sample spacing at maximum is **3.0 px** (216 px / 72 taps), *tighter* than the 4.0 px
+      the old 60 px / 16-tap version had
+- [x] the streak length is a fraction of frame **width**, so it survives a conform — a 4K render of
+      the same project streaks proportionally, not 4× smaller
 - [ ] `angle` sweeps the streak through a full 360° with no flip or discontinuity
+      *(off-axis 27° is pixel-gated; the full sweep is not)*
 
 ### VIGNETTE / GRAIN
 - [ ] vignette at maximum darkens the corners without a visible ring or banding
@@ -468,17 +582,22 @@ fixes the `blur` node's identical ceiling for free.
 > slider's clothes, and that the standard fix (blur the brightpass at quarter resolution, where the
 > existing 96-tap kernel covers 384 px) is a day or two, not an afternoon.
 
-**2 — Directional and radial blur maximums.** *Half a day, both.* Promoted above the linear-light fix
-because it is the **cheapest real range increase in the palette** — two constants (`* 60.0`, `* 0.06`)
-plus a tap count — and because it is the same complaint the founder already made about glow, waiting
-to be made again about two more nodes. Doing it alongside (1) means one round of "the filters actually
-reach now" rather than two.
+**2 — Directional and radial blur maximums.** ✅ **DONE 2026-08-11 — see §3.6.** Estimated half a day
+for both and that held. Directional reaches 20% of frame width (was 5.6%) and radial sweeps 30% (was
+6%), with the tap count raised alongside so the sample spacing got *tighter* rather than looser. It
+also turned up a defect the estimate did not anticipate: radial blur's **Centre Y control had never
+worked** — a percent/fraction mix-up put the blur's origin half a frame below the picture at every
+setting, invisible to the pixel gate because both renderers shared the wrong line.
 
-**3 — Glow in linear light.** *Half a day.* Fixes the *character* of the glow rather than its size:
-bright things bloom instead of everything hazing. Measured, not guessed — the white:grey contribution
-ratio is 1.68 where linear light predicts 3.24. Sequenced third only because it changes how every
-existing glow looks and therefore wants the founder's eye before it ships, where (1) and (2) are
-unambiguous improvements at every setting.
+**3 — ~~Glow in linear light~~ → the fragment stage in linear light.** *Re-scoped 2026-08-11, and it
+is no longer half a day.* The measurement stands — the white:grey contribution ratio is 1.68 where
+linear light predicts 3.24 — but glow is not the thing that is wrong. **The whole fragment-effect
+stage is display-encoded by design** (§3.6): the managed pipeline opens and closes its linear segment
+inside the grade stage, and the effect harness explicitly forbids `pow(2.2)` round-trips in effect
+bodies because a body that linearizes on its own diverges preview from export. So this cannot be
+fixed one node at a time; the conversion has to move to the stage boundary, and it changes how every
+spatial filter looks at once. **Get the founder's eye on it before it is scheduled** — it is now the
+largest of the three, not the smallest.
 
 *Just behind these three: text stroke and shadow (1 day, and mostly routing — the caption pipeline
 already has `strokeWidth`/`strokeColor`/`shadowBlur`), then transform flip and non-uniform scale
@@ -492,6 +611,7 @@ left is one pattern and one omission:
 - **A filter family whose spatial nodes stop responding well below their declared maximum.** Glow and
   blur plateau at 16% of their range; directional and radial blur never had much range to begin with.
   In every case the slider keeps moving and the picture does not. None of it is architectural.
+  *(The two blurs were fixed on 2026-08-11 — §3.6. Glow and `blur` still plateau.)*
 - **A `text` node named after Fusion's Text+ that cannot draw an outline** — while the caption system
   three directories away can.
 

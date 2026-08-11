@@ -84,7 +84,25 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
    * thick doubled shapes and large filled areas into the diff, an order of magnitude above this bar.
    * 0.02 keeps ~78% headroom over the measured value while staying 1.75× tighter than the global.
    */
-  "flarex-stabilize": 0.02
+  "flarex-stabilize": 0.02,
+  /**
+   * The two spatial filters at their new maximum. Both measured 0.000% (0/2073600), so the bar is
+   * the tightest in the table.
+   *
+   * A blur fixture landing at exactly zero deserves suspicion — a green gate on a picture where
+   * nothing happened is this repo's classic void run — so it was checked the other way as well: both
+   * renders were looked at, and both carry an unmistakable full-frame streak (a 27° smear and a
+   * zoom sweep radiating from an off-centre point). The effect is emphatically running.
+   *
+   * What these two are really gating is the pair of things this change introduced that a shader in
+   * this harness has never had: a loop whose bound is COMPUTED rather than a compile-time constant,
+   * and a per-pixel tap-phase jitter. The jitter is the sharper risk — `glsl-hash.ts` exists because
+   * a `sin`-based hash silently disagreed between these same two renderers and quietly invalidated
+   * three fixtures' parity for weeks. 0/2073600 says the integer hash and the dynamic bound both
+   * hold, at the setting where the tap count is at its cap and the jitter is at its most visible.
+   */
+  "flarex-directional-blur-max": 0.002,
+  "flarex-radial-blur-max": 0.002
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {
