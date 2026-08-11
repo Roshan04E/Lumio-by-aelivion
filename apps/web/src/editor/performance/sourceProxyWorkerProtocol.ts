@@ -11,6 +11,10 @@
  */
 
 export interface SourceProxyWorkerPayload {
+  /** Identity + guards stamped into each cached segment so a stale prefix can never be reused. */
+  assetId: string;
+  sourceByteSize: number;
+  recipeVersion: number;
   sourceUrl: string;
   width: number;
   height: number;
@@ -29,6 +33,22 @@ export interface SourceProxyWorkerPayload {
   audio: { sampleRate: number; channels: number; frames: number; planes: ArrayBuffer[] } | null;
   /** Initial suspension state so a build queued mid-playback parks before its first frame. */
   suspended: boolean;
+  /**
+   * RESUME (2026-08-11, Slice 1). Segment length in FRAMES, and the already-persisted prefix the
+   * engine resolved from the segment cache. The worker replays `resumePrefix` into the muxer
+   * without re-encoding, then encodes live from `resumeFromFrame` onward.
+   *
+   * `segmentFrames` MUST be a multiple of `keyFrameEveryNFrames`, so every segment boundary — and
+   * therefore every possible resume point — is a keyframe. The engine enforces this; the worker
+   * asserts it rather than trusting it, because a non-keyframe splice produces a proxy that plays
+   * and then breaks up, which is exactly the corruption class this file's frozen-tail guard exists
+   * to prevent.
+   */
+  segmentFrames: number;
+  /** Frame index to start LIVE encoding at (0 = full build). Always a multiple of segmentFrames. */
+  resumeFromFrame: number;
+  /** Serialized segment files covering [0, resumeFromFrame), in order. Empty for a full build. */
+  resumePrefix: ArrayBuffer[];
 }
 
 export type SourceProxyWorkerRequest =
@@ -42,6 +62,13 @@ export type SourceProxyWorkerResponse =
       type: "progress";
       encodedFrames: number;
       totalFrames: number;
+    }
+  | {
+      /** One completed segment of the resume cache, emitted as soon as its frames are encoded.
+       *  NOT terminal — the build continues. The engine persists it and keeps listening. */
+      type: "segment";
+      segmentIndex: number;
+      buffer: ArrayBuffer;
     }
   | {
       type: "done";

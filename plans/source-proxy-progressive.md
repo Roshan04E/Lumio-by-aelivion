@@ -148,24 +148,47 @@ layer, never in the layer component.**
 
 Each ships a user-visible win on its own and is independently revertable.
 
-### Slice 0 — Pipelining (independent; does NOT fall out of segmentation)
+### ~~Slice 0 — Pipelining~~ — **SUPERSEDED 2026-08-11. Built, measured, reverted. It does not work.**
 
-Overlap decode+scale (13,898ms of CPU) with the encoder's backpressure wait (41,561ms, during which
-the worker thread is genuinely idle on a `setTimeout(0)` poll). Floor:
-`max(13898, 41561) = 41,561ms`, i.e. **~61.6s → ~47.5s, −23%**, cross-checked against the encoder's
-own 107fps ceiling (4352 frames ÷ 107 = 40.7s — the two routes agree).
+*The original proposal is kept below rather than deleted, because the reason it failed is the
+useful part.*
 
-**This is independent of segmentation, and I want to be explicit that it does not fall out of the
-same work.** Segmentation changes *what the loop finalizes and when*; pipelining changes *the
-dependency order inside the loop body*. They touch the same `for` loop in `sourceProxy.worker.ts`
-and will conflict textually, but neither produces the other. Doing segmentation first would mean
-restructuring that loop twice.
+> Overlap decode+scale (13,898ms of CPU) with the encoder's backpressure wait (41,561ms, during
+> which the worker thread is genuinely idle on a `setTimeout(0)` poll). Floor:
+> `max(13898, 41561) = 41,561ms`, i.e. **~61.6s → ~47.5s, −23%**, cross-checked against the
+> encoder's own 107fps ceiling (4352 frames ÷ 107 = 40.7s — the two routes agree).
 
-- **Win:** every build gets 23% shorter, including the ones nobody is waiting on.
-- **Excludes:** any routing, store, or coverage change. No user-visible surface changes at all.
-- **Risk:** low and self-contained. The frozen-tail guard's `nullRun` logic depends on strict
-  sequential frame ordering — a pipeline must preserve *ordering* even while overlapping *timing*,
-  and that guard must be re-verified, not assumed.
+**Result: +0.3%. 61,099ms → 61,278ms.** Three clean runs each way, same 145s/141.4MB clip, real
+Chrome. Serial spread was 61,035/61,260/61,002 (258ms); pipelined 63,074/59,481 plus one 77,906
+decode-variance outlier reported separately.
+
+**The pipeline itself worked exactly as designed** — this was not an implementation failure:
+`maxQueueDepth` sat at 4 (always full), `queueFullWaitMs` ≈ 39–46s (producer blocked on space, as
+predicted for a ~3× faster producer), and crucially `queueEmptyWaitMs` was only ~550ms out of ~55s,
+meaning the consumer was essentially never starved and the overlap genuinely happened.
+
+**Why it bought nothing:** `encodeBackpressureMs` grew **40,705 → 54,370ms, +13,665ms** — almost
+exactly the ~13,500ms of decode+scale now running inside that window. The encoder's queue does not
+drain at a rate independent of the worker thread: its `output` callback (`chunk.copyTo` +
+`muxer.addVideoChunk`) runs on that thread, and so does frame submission. So the "genuinely idle"
+poll time was never spare capacity — spending it delays the encoder's own servicing one-for-one.
+**`max(a, b)` was the wrong model; on a single thread it is still a sum.**
+
+**A deeper queue cannot rescue this.** `queueEmptyWaitMs` ≈ 0 means the consumer never waited, so
+depth 4 was not the constraint and no larger number would change the outcome.
+
+**What real overlap would take:** decode+scale on a SECOND worker thread, with frames transferred
+across the boundary. That is materially bigger than this slice scoped, and its payoff is now
+**unproven rather than certain** — the one-thread result gives no evidence about how much of the
+encoder's cost is thread-servicing (which a second worker would relieve) versus GPU time (which it
+would not). Anyone attempting it should measure that split first.
+
+**MEASUREMENT TRAP, for whoever benchmarks this next.** `mp4-muxer` stamps creation/modification
+times into `mvhd`/`tkhd`, so a digest over the whole muxed file is **non-deterministic** — two runs
+of *unchanged* code produce identical byte lengths and different digests. That reads exactly like
+"my change altered the output" and will send you chasing a phantom. Digest the **encoded bitstream**
+in the encoder's `output` callback instead (`chunk.copyTo` into a buffer, hash that); it is
+deterministic and was identical across all six runs of both arms.
 
 ### Slice 1 — Segmented build + store, still adopted whole
 
@@ -228,24 +251,29 @@ already exists and already reports per-build percent into the notice line.
 
 ---
 
-## 5. Recommendation: ship Slice 0 (pipelining) first, alone
+## 5. Recommendation: ship Slice 1 (segmented build + store) first
 
-**Do pipelining before any progressive work starts.**
+*Revised 2026-08-11. The original recommendation was Slice 0, on the strength of a certain −23%.
+That number did not survive contact with measurement (see Slice 0 above), and with it goes the
+whole argument for doing pipelining first — there is no longer a cheap certain win to bank before
+the harder work.*
 
-- It is **certain**. −23% is arithmetic from measurements already validated two independent ways,
-  not a projection.
-- It is **internal**. No routing, no store, no container, no coverage, no `SOURCE_PROXY_VERSION`
-  bump, no user-visible surface. It cannot regress playback because it cannot reach playback.
-- It **shrinks the problem the rest of the plan solves**. A 47.5s build is a materially smaller wait
-  than 61.6s before anyone changes how playback resolves a URL.
-- It is **the cheapest thing in the plan by a wide margin**, and Slice 1 would otherwise force the
-  same loop to be restructured twice.
+**Do Slice 1 next.**
 
-The honest counterweight, stated rather than buried: pipelining is a smaller *felt* win than
-progressive delivery. −23% shortens a wait; progressive delivery ends it. If the goal is the felt
-experience, Slices 1→3 are where it lives, and Slice 0 does not substitute for them. But Slice 0 is
-low-risk, certain, and strictly reduces the cost of everything after it — so it goes first, and the
-progressive slices follow in order behind it.
+- It is the **prerequisite for every remaining slice**. Slices 2, 3 and 4 all assume segments exist;
+  none of them can start without it.
+- Its own win is **modest but real, and does not depend on a performance prediction**: a build
+  interrupted at 80% today discards 100% of the work, and after this it discards none. That is a
+  behavioural guarantee, not an arithmetic projection — exactly the property Slice 0 turned out to
+  lack.
+- It is **still invisible to playback**. Adopt-whole keeps routing, `resolvePlaybackUrl` and
+  `preferNativeDecode` untouched, so it cannot regress the preview path.
+- The **cost is a real risk to watch, not an assumption**: N× `moov` overhead and N× OPFS writes.
+  Segment duration must be picked from measurement, and if total build time rises materially that
+  is a price the founder should see stated, not discovered.
+
+The felt win still lives in Slice 3. Slices 1 and 2 are the road to it, and Slice 1 is the part
+nothing else can proceed without.
 
 **What I would not build:** `fastStart: 'fragmented'` (Section 2 — a steady-state container change,
 and a rebuild of every user's cache, to serve a 60-second transient), segmented audio inside Slice 3

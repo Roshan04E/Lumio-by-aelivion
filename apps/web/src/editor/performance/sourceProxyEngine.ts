@@ -22,7 +22,17 @@ import { getAssetBlobStore } from "../../lib/asset-blob-store";
 import { createFrameProvider } from "../../export/source-decoder";
 import { MediaEncoder } from "../../export/video-encoder";
 import { markHotSpot } from "../../lib/perfDiagnostics";
-import { getSourceProxy, saveSourceProxy, sourceProxyStoreAvailable, removeSourceProxy } from "./sourceProxyStore";
+import {
+  getSourceProxy,
+  saveSourceProxy,
+  sourceProxyStoreAvailable,
+  removeSourceProxy,
+  saveSourceProxySegment,
+  getSourceProxySegment,
+  clearSourceProxySegments,
+  SOURCE_PROXY_VERSION,
+} from "./sourceProxyStore";
+import { decodeSegment } from "./sourceProxySegments";
 import { probeGopProfile, needsProxyForDecodeCost, describeGopProfile, type GopProfile } from "./gop-probe";
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 import type { SourceAsset } from "@orreris/shared";
@@ -528,9 +538,13 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   // the worker (no <video> fallback there) or the worker chunk failed to boot. Deterministic build
   // failures (frozen-tail guard, no frames) rethrow: the fallback decodes through the same
   // WebCodecs-first path and would fail identically after doubling the work.
+  // RESUME (2026-08-11, Slice 1): collect whatever contiguous, guard-matching prefix the segment
+  // cache holds from a previous interrupted attempt. Strictly best-effort — a miss just means a
+  // full rebuild, which is exactly today's behaviour, so this can never make a build worse.
+  const resume = await collectResumePrefix(asset.id, blob.size);
   let encoded: TranscodeResult;
   try {
-    encoded = await transcodeInWorker(sourceUrl, meta.durationSeconds, width, height, audio);
+    encoded = await transcodeInWorker(asset, blob.size, sourceUrl, meta.durationSeconds, width, height, audio, resume);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!/WEBCODECS_REQUIRED_NO_DOM|WORKER_CRASHED/.test(message)) {
@@ -558,6 +572,10 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     encoded.blob
   );
   if (!url) throw new Error("proxy persist failed");
+  // The finished proxy supersedes its own resume cache — drop it so OPFS doesn't carry a second
+  // copy of every proxy indefinitely. A failure here only wastes space; the guards still make the
+  // stale segments unusable by any later build.
+  void clearSourceProxySegments(asset.id);
 
   // DURATION HEAL (2026-07-13): the transcode just demuxed the source's TRUE decodable end. When
   // the stored asset duration overshoots it (legacy ceil-to-Int rows, stock provider metadata),
@@ -573,6 +591,57 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
   return url;
 }
 
+/**
+ * SEGMENT LENGTH, in frames. Chosen from measurement (2026-08-11), not preference — see
+ * `plans/source-proxy-progressive.md` Slice 1. Must be a multiple of PROXY_KEYFRAME_EVERY_N_FRAMES
+ * so every segment boundary is a keyframe and a resume can splice there; the worker re-asserts it
+ * and disables the cache rather than emit a prefix that would corrupt a rebuild.
+ */
+const PROXY_SEGMENT_FRAMES = PROXY_KEYFRAME_EVERY_N_FRAMES * 25; // 300 frames = 10s @30fps, 5s @60fps
+
+interface ResumePrefix {
+  /** Serialized segment files, in order, covering [0, resumeFromFrame). */
+  buffers: ArrayBuffer[];
+  resumeFromFrame: number;
+}
+
+/**
+ * Walk the segment cache from 0 upward, stopping at the first gap. Segments are only accepted while
+ * they are contiguous AND their stamped guards match this asset's current bytes and recipe — a
+ * relinked or recipe-bumped asset therefore resumes from nothing, which is what we want.
+ */
+async function collectResumePrefix(assetId: string, sourceByteSize: number): Promise<ResumePrefix> {
+  const buffers: ArrayBuffer[] = [];
+  let resumeFromFrame = 0;
+  try {
+    for (let index = 0; ; index += 1) {
+      const blob = await getSourceProxySegment(assetId, index);
+      if (!blob) break;
+      const parsed = await decodeSegment(blob);
+      if (!parsed) break;
+      const { header } = parsed;
+      if (
+        header.assetId !== assetId ||
+        header.sourceByteSize !== sourceByteSize ||
+        header.version !== SOURCE_PROXY_VERSION ||
+        header.segmentIndex !== index ||
+        header.startFrame !== resumeFromFrame ||
+        header.endFrame <= header.startFrame
+      ) {
+        break;
+      }
+      buffers.push(await blob.arrayBuffer());
+      resumeFromFrame = header.endFrame;
+    }
+  } catch {
+    return { buffers: [], resumeFromFrame: 0 };
+  }
+  if (buffers.length > 0) {
+    logProxy(assetId, `resume cache: ${buffers.length} segment(s), ${resumeFromFrame} frames already encoded`);
+  }
+  return { buffers, resumeFromFrame };
+}
+
 interface TranscodeResult {
   blob: Blob;
   encodedFrames: number;
@@ -583,11 +652,14 @@ interface TranscodeResult {
 
 /** Run the transcode body in the dedicated worker; suspension changes are forwarded live. */
 function transcodeInWorker(
+  asset: SourceAsset,
+  sourceByteSize: number,
   sourceUrl: string,
   durationSeconds: number,
   width: number,
   height: number,
-  audio: DecodedAudio | null
+  audio: DecodedAudio | null,
+  resume: ResumePrefix
 ): Promise<TranscodeResult> {
   return new Promise<TranscodeResult>((resolve, reject) => {
     let worker: Worker;
@@ -609,6 +681,12 @@ function transcodeInWorker(
       if (message.type === "progress") {
         reportProgress(message.encodedFrames, message.totalFrames);
         return; // NOT terminal — cleanup() here would terminate the worker mid-build
+      }
+      if (message.type === "segment") {
+        // Persist the resume cache as it is produced. Fire-and-forget and best-effort: a segment
+        // that fails to land costs a slower resume, never the build. Also NOT terminal.
+        void saveSourceProxySegment(asset.id, message.segmentIndex, new Blob([message.buffer]));
+        return;
       }
       cleanup();
       if (message.type === "done") {
@@ -639,6 +717,9 @@ function transcodeInWorker(
       {
         type: "start",
         payload: {
+          assetId: asset.id,
+          sourceByteSize,
+          recipeVersion: SOURCE_PROXY_VERSION,
           sourceUrl,
           width,
           height,
@@ -648,6 +729,9 @@ function transcodeInWorker(
           bitsPerPixelFrame: PROXY_BITS_PER_PIXEL_FRAME,
           audio: audioPayload,
           suspended: buildSuspended,
+          segmentFrames: PROXY_SEGMENT_FRAMES,
+          resumeFromFrame: resume.resumeFromFrame,
+          resumePrefix: resume.buffers,
         },
       } satisfies SourceProxyWorkerRequest,
       transfer

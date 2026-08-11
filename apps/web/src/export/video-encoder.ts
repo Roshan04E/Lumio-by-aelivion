@@ -52,6 +52,13 @@ export interface MediaEncoderOptions {
   keyFrameIntervalSeconds?: number;
   /** Present when the timeline has audio. */
   audio?: { sampleRate: number; channels: number } | undefined;
+  /**
+   * Opt-in tap on every encoded video chunk, fired just BEFORE it is muxed (source-proxy segment
+   * cache, 2026-08-11). Purely observational: the muxing path is unchanged whether or not this is
+   * set, so a caller that omits it — every export path does — behaves exactly as before.
+   * The callback must not retain `chunk`; copy what it needs synchronously.
+   */
+  onEncodedVideoChunk?: ((chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata | undefined) => void) | undefined;
 }
 
 interface CommonMuxer {
@@ -169,6 +176,7 @@ export class MediaEncoder {
     this.videoEncoder = new VideoEncoder({
       output: (chunk, meta) => {
         this.muxedVideoChunks += 1;
+        this.opts.onEncodedVideoChunk?.(chunk, meta);
         this.muxer.addVideoChunk(chunk, this.tagColorMetadata(meta));
       },
       error: (error) => {
@@ -233,6 +241,24 @@ export class MediaEncoder {
    */
   getAppliedColorSpace(): VideoColorSpaceInit | null {
     return this.colorSpaceApplied;
+  }
+
+  /**
+   * Mux an ALREADY-ENCODED video chunk without re-encoding it (source-proxy resume, 2026-08-11).
+   *
+   * Used to replay a persisted prefix into a fresh file before the live encoder takes over. The
+   * caller owns correctness of what it feeds: chunks must be in presentation order, timestamps
+   * monotonic and consistent with `fps`, and the first chunk after any splice must be a keyframe
+   * carrying a `decoderConfig` whose SPS/PPS match the live encoder's (identical
+   * width/height/codec/bitrate config produces identical SPS/PPS, which is why the proxy build
+   * pins all of those).
+   *
+   * No export path calls this; it does not touch the VideoEncoder at all, only the muxer.
+   */
+  muxPreEncodedVideoChunk(chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata): void {
+    if (this.encoderError) throw this.encoderError;
+    this.muxedVideoChunks += 1;
+    this.muxer.addVideoChunk(chunk, this.tagColorMetadata(meta));
   }
 
   /** Encode one composited frame. `index` is the 0-based frame number. */

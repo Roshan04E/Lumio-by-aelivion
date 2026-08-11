@@ -124,6 +124,62 @@ function blobName(assetId: string): string {
   return `${assetId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.mp4`;
 }
 
+/** Resume-cache segment file for an asset (see sourceProxySegments.ts). Not a playable container. */
+function segmentName(assetId: string, segmentIndex: number): string {
+  return `${assetId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.seg${segmentIndex}.bin`;
+}
+
+/**
+ * Persist one completed segment of an in-flight build. Best-effort by design: a failed segment
+ * write costs a slower resume later, never a failed or corrupt build, so it is swallowed.
+ */
+export async function saveSourceProxySegment(assetId: string, segmentIndex: number, blob: Blob): Promise<void> {
+  const handle = await getHandle();
+  if (!handle) return;
+  try {
+    const fileHandle = await handle.dir.getFileHandle(segmentName(assetId, segmentIndex), { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+  } catch {
+    /* resume is an optimization — never fail a build over its cache */
+  }
+}
+
+/** Read a persisted segment blob, or null when absent/unreadable (→ that segment gets rebuilt). */
+export async function getSourceProxySegment(assetId: string, segmentIndex: number): Promise<Blob | null> {
+  const handle = await getHandle();
+  if (!handle) return null;
+  try {
+    const fileHandle = await handle.dir.getFileHandle(segmentName(assetId, segmentIndex));
+    return await fileHandle.getFile();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop every segment file for an asset. Called once a build completes (the finished proxy
+ * supersedes its own resume cache) and whenever a proxy is invalidated or removed, so a stale
+ * prefix from different source bytes can never be spliced into a later build.
+ */
+export async function clearSourceProxySegments(assetId: string): Promise<void> {
+  const handle = await getHandle();
+  if (!handle) return;
+  const prefix = `${assetId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.seg`;
+  try {
+    const dir = handle.dir as FileSystemDirectoryHandle & { keys?: () => AsyncIterableIterator<string> };
+    if (!dir.keys) return;
+    const names: string[] = [];
+    for await (const name of dir.keys()) {
+      if (name.startsWith(prefix) && name.endsWith(".bin")) names.push(name);
+    }
+    for (const name of names) await handle.dir.removeEntry(name).catch(() => undefined);
+  } catch {
+    /* best-effort cleanup */
+  }
+}
+
 // One stable object URL per asset per session (revoked on remove).
 const urlCache = new Map<string, string>();
 
@@ -222,6 +278,9 @@ export async function removeSourceProxy(assetId: string): Promise<void> {
     urlCache.delete(assetId);
   }
   await handle.dir.removeEntry(blobName(assetId)).catch(() => undefined);
+  // A proxy invalidated by changed source bytes or a recipe bump must take its resume cache with
+  // it, or the next build could splice a prefix encoded from the OLD bytes into the new one.
+  await clearSourceProxySegments(assetId);
   const records = (await loadRecords(handle.dir)).filter((item) => item.assetId !== assetId);
   recordsPromise = Promise.resolve(records);
   await writeIndex(handle.dir, records).catch(() => undefined);

@@ -14,6 +14,15 @@
 
 import { createFrameProvider } from "../../export/source-decoder";
 import { MediaEncoder } from "../../export/video-encoder";
+import {
+  decodeSegment,
+  descriptionFromBase64,
+  descriptionToBase64,
+  encodeSegment,
+  segmentToChunks,
+  type SegmentChunkMeta,
+  type SegmentHeader,
+} from "./sourceProxySegments";
 import type { SourceProxyWorkerPayload, SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 
 interface WorkerScope {
@@ -83,6 +92,11 @@ async function build(
   payload: SourceProxyWorkerPayload
 ): Promise<{ buffer: ArrayBuffer; mime: string; encodedFrames: number; fps: number; decodableEndSeconds: number | undefined }> {
   const { sourceUrl, width, height, durationSeconds, maxFps, keyFrameEveryNFrames, bitsPerPixelFrame, audio } = payload;
+  const segmentFrames = Math.max(1, Math.floor(payload.segmentFrames || 0));
+  // Asserted, not trusted: a segment boundary that is not a keyframe means a resume splices the
+  // live encoder in mid-GOP, producing a proxy that plays then breaks up. Fall back to one segment
+  // (i.e. today's all-or-nothing behaviour) rather than emit a cache that could corrupt a rebuild.
+  const segmentsUsable = segmentFrames > 0 && segmentFrames % keyFrameEveryNFrames === 0;
   // Software decode: never steal a hardware session from live playback (proxy playback keeps running
   // on the main thread while we build here). Throws WEBCODECS_REQUIRED_NO_DOM for sources the
   // WebCodecs path can't open — the engine falls back to the main thread for those.
@@ -104,6 +118,52 @@ async function build(
   console.info(
     `[proxy] nominalFps=${provider.nominalFps ?? "undef"} → encode @ ${fps} fps · ${width}×${height} · GOP=${keyFrameEveryNFrames}f/${keyFrameIntervalSeconds.toFixed(3)}s · dur=${durationSeconds.toFixed(2)}s · decodableEnd=${provider.decodableEndSeconds?.toFixed(2) ?? "undef"}s`
   );
+  // SEGMENT CACHE (2026-08-11, Slice 1). One encoder for the whole build, exactly as before — the
+  // chunks are TAPPED on their way to the muxer and grouped into fixed frame-count segments, so an
+  // uninterrupted build's bitstream is byte-for-byte what it was before this existed. See
+  // sourceProxySegments.ts for why the cache holds chunks rather than N finalized MP4s.
+  let segmentChunkMeta: SegmentChunkMeta[] = [];
+  let segmentPayloads: Uint8Array[] = [];
+  let chunksSeen = 0;
+  let firstDescriptionBase64: string | undefined;
+  let firstCodec: string | undefined;
+  // Monotonic segment index. Seeded at the resume point so a resumed build continues the numbering
+  // instead of overwriting the prefix it just replayed.
+  let nextSegmentIndex = 0;
+
+  /**
+   * Seal the buffered chunks as one segment and hand it to the engine to persist.
+   *
+   * Segmentation is driven by the CHUNK STREAM, not the frame-submission loop. `addVideoFrame` only
+   * enqueues — the encoder's output lags submission by up to its queue depth (8) — so counting
+   * submitted frames drifts off the segment grid, which silently (a) collided segment indices and
+   * (b) put boundaries on non-keyframes. There is exactly one chunk per frame and chunks arrive in
+   * order, so chunk N IS frame N: counting chunks makes every boundary land on an exact multiple of
+   * `segmentFrames`, and therefore — since that is a multiple of the GOP — always on a keyframe.
+   */
+  const flushSegment = (segmentIndex: number, startFrame: number, endFrame: number): void => {
+    if (!segmentsUsable || segmentChunkMeta.length === 0) return;
+    const header: SegmentHeader = {
+      assetId: payload.assetId,
+      sourceByteSize: payload.sourceByteSize,
+      version: payload.recipeVersion,
+      segmentIndex,
+      startFrame,
+      endFrame,
+      fps,
+      width,
+      height,
+      ...(segmentIndex === 0 ? { descriptionBase64: firstDescriptionBase64, codec: firstCodec } : {}),
+      chunks: segmentChunkMeta,
+    };
+    const blob = encodeSegment(header, segmentPayloads);
+    segmentChunkMeta = [];
+    segmentPayloads = [];
+    void blob.arrayBuffer().then((buffer) => {
+      scope.postMessage({ type: "segment", segmentIndex, buffer } as SourceProxyWorkerResponse, [buffer]);
+    });
+  };
+
   const encoder = new MediaEncoder({
     width,
     height,
@@ -114,7 +174,32 @@ async function build(
     // 30fps size instead of 2× with no visible quality change. ≤30fps sources are unaffected.
     videoBitrate: Math.round(width * height * fps * bitsPerPixelFrame * Math.min(1, Math.sqrt(30 / fps))),
     keyFrameIntervalSeconds,
-    audio: audio ? { sampleRate: audio.sampleRate, channels: audio.channels } : undefined
+    audio: audio ? { sampleRate: audio.sampleRate, channels: audio.channels } : undefined,
+    ...(segmentsUsable
+      ? {
+          onEncodedVideoChunk: (chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata | undefined): void => {
+            if (chunksSeen === 0 && meta?.decoderConfig) {
+              firstDescriptionBase64 = descriptionToBase64(meta.decoderConfig.description);
+              firstCodec = meta.decoderConfig.codec;
+            }
+            chunksSeen += 1;
+            const bytes = new Uint8Array(chunk.byteLength);
+            chunk.copyTo(bytes);
+            segmentChunkMeta.push({
+              type: chunk.type,
+              timestamp: chunk.timestamp,
+              duration: chunk.duration ?? null,
+              byteLength: bytes.length,
+            });
+            segmentPayloads.push(bytes);
+            if (segmentChunkMeta.length >= segmentFrames) {
+              const startFrame = nextSegmentIndex * segmentFrames;
+              flushSegment(nextSegmentIndex, startFrame, startFrame + segmentFrames);
+              nextSegmentIndex += 1;
+            }
+          },
+        }
+      : {}),
   });
   try {
     const canvas = new OffscreenCanvas(width, height);
@@ -139,8 +224,42 @@ async function build(
     const effectiveDuration =
       decodableEnd !== undefined && decodableEnd > 0.2 && decodableEnd < durationSeconds ? decodableEnd : durationSeconds;
     const frameCount = Math.max(1, Math.ceil(effectiveDuration * fps));
-    let encodedFrames = 0;
-    for (let i = 0; i < frameCount; i += 1) {
+
+    // RESUME: replay the persisted prefix straight into the muxer — no decode, no re-encode. The
+    // engine has already validated each segment's guards (asset/bytes/recipe) and their contiguity;
+    // anything it could not vouch for it simply does not send, and we rebuild those frames instead.
+    let resumeFromFrame = 0;
+    if (segmentsUsable && payload.resumePrefix.length > 0 && payload.resumeFromFrame > 0) {
+      let replayed = 0;
+      for (const buffer of payload.resumePrefix) {
+        const parsed = await decodeSegment(new Blob([buffer]));
+        if (!parsed) break; // truncated/unreadable → stop replaying and encode the rest live
+        const chunks = segmentToChunks(parsed.header, parsed.payloads);
+        for (let c = 0; c < chunks.length; c += 1) {
+          const isVeryFirst = replayed === 0 && c === 0;
+          const description = isVeryFirst ? descriptionFromBase64(parsed.header.descriptionBase64) : undefined;
+          encoder.muxPreEncodedVideoChunk(
+            chunks[c]!,
+            // Only the FIRST chunk of the whole file carries a decoderConfig — that is what the
+            // muxer writes into avcC. The live encoder's own first chunk will also carry one, but
+            // mp4-muxer keeps the first it saw, and both describe the same pinned config.
+            isVeryFirst && description && parsed.header.codec
+              ? { decoderConfig: { codec: parsed.header.codec, description, codedWidth: width, codedHeight: height } }
+              : undefined
+          );
+        }
+        replayed += 1;
+        resumeFromFrame = parsed.header.endFrame;
+        decodedAny = true; // the prefix IS decoded content — it just was not decoded this session
+      }
+      if (replayed > 0) {
+        console.info(`[proxy] resumed from segment ${replayed} — replayed ${resumeFromFrame} frames, encoding from there`);
+      }
+    }
+
+    let encodedFrames = resumeFromFrame;
+    nextSegmentIndex = segmentsUsable ? Math.floor(resumeFromFrame / segmentFrames) : 0;
+    for (let i = resumeFromFrame; i < frameCount; i += 1) {
       // Parks an in-flight build the moment playback starts (engine forwards suspend messages);
       // resumes exactly here on pause. Also the abort exit.
       await waitWhileSuspended();
