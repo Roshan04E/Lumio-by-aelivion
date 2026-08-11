@@ -1,6 +1,6 @@
 {
-  "commit": "e7efe7f639eda475e856f4fda163f8a76cd1f963",
-  "capturedAt": "2026-08-11T09:38:33.465Z",
+  "commit": "aabcff50bfd592d9800f07a843d583aa114faea5",
+  "capturedAt": "2026-08-11T13:18:13.206Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -55,6 +55,11 @@
     },
     "flarex-animated-roto": {
       "sha256": "f561690cf952b891ffc8a93564b3e58db5ab225fcc13f96bb8cdd0ce663bc96f",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-blur-max": {
+      "sha256": "7f4fdc4ed7c55ccc3c98ccd71bfba733cbdaf6d327ece98d6c3b9055ed0fbe14",
       "width": 1080,
       "height": 1920
     },
@@ -178,6 +183,11 @@
       "width": 1080,
       "height": 1920
     },
+    "glow-edge-max": {
+      "sha256": "266e7e5029e4d129e89551a6b0b64f79c84efd9b42ebb293646d04c88550ac46",
+      "width": 1080,
+      "height": 1920
+    },
     "graded-text": {
       "sha256": "181f3e36942cf833d8285953d5324c0d031981dab30144a31f6579a824a73d17",
       "width": 1080,
@@ -263,6 +273,11 @@
       "width": 1080,
       "height": 1920
     },
+    "stylize": {
+      "sha256": "f49ad4e5755b0d57c79a1c0713a564641ce30630b76744d05db45962e71d1f44",
+      "width": 1080,
+      "height": 1920
+    },
     "stylize-ink": {
       "sha256": "5b66b86c92c830ffce8fc0171d814fe12f3affafb35890ee78537e7358ba45e4",
       "width": 1080,
@@ -275,11 +290,6 @@
     },
     "stylize-subject": {
       "sha256": "4bad8723163457ada72030ba6179f029e711c78ceef54e11b2e3c5594a83645f",
-      "width": 1080,
-      "height": 1920
-    },
-    "stylize": {
-      "sha256": "f49ad4e5755b0d57c79a1c0713a564641ce30630b76744d05db45962e71d1f44",
       "width": 1080,
       "height": 1920
     },
