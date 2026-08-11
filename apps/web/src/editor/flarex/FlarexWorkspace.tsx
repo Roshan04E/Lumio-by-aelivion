@@ -530,6 +530,12 @@ export function FlarexWorkspace({ graph, layer, assets = [], onPickSource, onMas
           trackLibrary={trackLibrary}
           onPickSource={onPickSource ? (nodeId) => onPickSource(comp.id, nodeId) : undefined}
           onInspectSource={(assetId) => setInspectAssetId(assetId)}
+          // Eyedropper context: the SAME capture handle the node thumbnails render through, so picking
+          // a key colour reads the node's input image out of the viewer's own compositor rather than
+          // sampling the composited output. See `FlarexKeyColorPicker`.
+          hostLayerId={layer.id}
+          viewerCaptureRef={viewerCaptureRef}
+          isPlaying={isPlaying}
         />
       </div>
       {inspectAsset ? (

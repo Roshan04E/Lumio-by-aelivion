@@ -818,6 +818,29 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return { ...draw, mask: raster.tex, maskVersion: raster.version };
   };
 
+  /**
+   * The COMPLEMENT of a vector matte — "everywhere this matte is not" — still as `Mask[]`.
+   *
+   * NOT `masks.map(m => ({ ...m, inverted: true }))`, which is the obvious wrong answer: inverting each
+   * mask of an add-combined pair gives ¬A ∪ ¬B = ¬(A ∩ B), not the ¬(A ∪ B) the caller means. A
+   * full-frame rectangle minus each mask is exact for add-combined lists (the shape a matte chain
+   * normally has) and composites in list order for mixed-mode chains, which is the approximation
+   * FLAREX.md already documents for MatteControl.
+   *
+   * Shared by MatteControl's `invert` and by the keyer's garbage/hold-out sockets, so "invert a matte"
+   * means one thing in this compiler rather than two.
+   */
+  const complementMatte = (masks: Mask[], idPrefix: string): Mask[] => {
+    const full = createMask("rectangle", [
+      { id: "fx_i0", x: 0, y: 0 },
+      { id: "fx_i1", x: ctx.compWidth, y: 0 },
+      { id: "fx_i2", x: ctx.compWidth, y: ctx.compHeight },
+      { id: "fx_i3", x: 0, y: ctx.compHeight },
+    ], "invert-base");
+    full.id = `${idPrefix}_invert`;
+    return [full, ...masks.map((mask) => ({ ...mask, mode: "subtract" as const }))];
+  };
+
   /** One synthetic color effect standing in for a color node. */
   const colorEffectFor = (nodeId: string, type: TimelineEffect["type"], params: Record<string, number | string>): TimelineEffect =>
     ({ id: nodeId, type, name: type, enabled: true, intensity: 100, params }) as TimelineEffect;
@@ -1616,6 +1639,40 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         return { kind: "image", draw: pass ? pushFragmentPass(input, pass) : input };
       }
 
+      /**
+       * CHROMA KEYER + its two auxiliary matte sockets (the industry keyer contract — see the node def).
+       *
+       * PRECEDENCE, which is the whole defect if it is wrong: **garbage beats hold-out.** A garbage
+       * matte is the operator saying "this is not picture, whatever else you conclude" — the rig, the
+       * stand, the edge of the screen — while a hold-out is a hint about a region that IS picture. When
+       * the two overlap, an operator who drew both means the garbage one; a hold-out that could resurrect
+       * a rig would make garbage untrustworthy and every keyer in the industry resolves it this way.
+       *
+       * Here that ordering is STRUCTURAL rather than arithmetic: the hold-out composites into the keyed
+       * image first, and the garbage matte then multiplies the alpha of that whole result. Zero times
+       * anything is zero, so garbage cannot lose — there is no branch to get backwards later.
+       *
+       *   keyed      = key(in)
+       *   protected  = in ∙ H            (H = hold-out region)
+       *   held       = keyed OVER protected
+       *   out        = held ∙ ¬G          (G = garbage region)
+       *
+       * HOLD-OUT is a composite, not an alpha write, because the mattes stay VECTOR until they are
+       * rasterized and this compiler can only ever MULTIPLY a rasterized matte into coverage — raising
+       * alpha needs something to raise it with. Putting the node's own input underneath the keyed
+       * result is that something: in the protected region the plate's coverage fills whatever the key
+       * removed (α = m + α_in∙(1−m) = 1 for an opaque plate), while the despilled/decontaminated key
+       * output still shows wherever the key was confident. Outside the region the masked copy
+       * contributes nothing and the key is untouched, bit for bit.
+       *
+       * KNOWN LIMIT, stated rather than hidden: under `matteOnly` — the tuning view, where the pass
+       * writes the matte into RGB and leaves alpha alone — the hold-out is invisible, because the
+       * opaque matte view covers the protected copy. Representing it there means forcing the matte to
+       * white INSIDE the keyer shader (`flarex.chromaKey` in `color/fragment-effects/builtins.ts`),
+       * which is where a fully faithful implementation of both sockets belongs. Garbage does show in
+       * `matteOnly` (it punches the view transparent). The COMPOSITED result — the thing that actually
+       * meets the background — is correct for both sockets either way.
+       */
       case "chromaKey": {
         const input = imageInput(node, "in", at);
         if (!input) {
@@ -1634,7 +1691,51 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           decontaminate: num(at, node, "decontaminate", 0.5),
           matteOnly: bool(node, "matteOnly"),
         });
-        return { kind: "image", draw: pass ? pushFragmentPass(input, pass) : input };
+        let draw = pass ? pushFragmentPass(input, pass) : input;
+
+        const holdOut = matteInput(node, "holdOut", at);
+        if (holdOut && holdOut.masks.length > 0) {
+          // A SECOND per-consumer clone of the same upstream value — `imageInput` re-reads the memo, so
+          // this costs one clone and one extra composite, not a second evaluation of the subtree. Paid
+          // only when the socket is wired.
+          const plate = imageInput(node, "in", at);
+          const region = bool(node, "holdOutInvert")
+            ? complementMatte(holdOut.masks, `flarex_${comp.id}_${node.id}_holdout`)
+            : holdOut.masks;
+          const key = `flarex_${comp.id}_${node.id}_holdout`;
+          const guarded = plate ? applyMatteToImage(plate, { masks: region }, key, at) : null;
+          // `applyMatteToImage` returns its input UNCHANGED when the matte could not be rasterized (no
+          // matte cache, empty list). Compositing an UNMASKED plate under the key would restore the
+          // whole frame — the opposite of a soft degrade — so the identity result is refused, and the
+          // hold-out simply does not apply.
+          if (guarded && plate && guarded !== plate) {
+            frameProfiler.bump("compile.operations"); // the hold-out combine (keyed over protected plate)
+            frameProfiler.bump("compile.drawCommands");
+            frameProfiler.bump("compile.objects", 3); // group + shell + transform (identityShell)
+            frameProfiler.bump("compile.arrays"); // children [protected, keyed]
+            draw = {
+              kind: "group",
+              debugGroupId: `flarex_${comp.id}_${node.id}_holdout`,
+              children: [guarded, draw],
+              nestWidth: nestW,
+              nestHeight: nestH,
+              shell: identityShell(),
+              __flarexStage: 0,
+            } as FlarexWrapGroup;
+          }
+        }
+
+        const garbage = matteInput(node, "garbage", at);
+        if (garbage && garbage.masks.length > 0) {
+          // Alpha is MULTIPLIED by the matte, so zeroing inside the garbage region means masking by its
+          // COMPLEMENT — and `garbageInvert` (garbage everywhere EXCEPT the shape) is then the raw
+          // region, uncomplemented. Applied last: see the precedence note above.
+          const region = bool(node, "garbageInvert")
+            ? garbage.masks
+            : complementMatte(garbage.masks, `flarex_${comp.id}_${node.id}_garbage`);
+          draw = applyMatteToImage(draw, { masks: region }, `flarex_${comp.id}_${node.id}_garbage`, at);
+        }
+        return { kind: "image", draw };
       }
 
       case "lumaKey": {
@@ -1689,14 +1790,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         if (bool(node, "invert")) {
           // Exact for add-combined mattes: full-frame ∖ union. (FLAREX.md documents the approximation
           // for mixed-mode chains; the rasterizer composites in list order.)
-          const full = createMask("rectangle", [
-            { id: "fx_i0", x: 0, y: 0 },
-            { id: "fx_i1", x: ctx.compWidth, y: 0 },
-            { id: "fx_i2", x: ctx.compWidth, y: ctx.compHeight },
-            { id: "fx_i3", x: 0, y: ctx.compHeight },
-          ], "invert-base");
-          full.id = `flarex_${comp.id}_${node.id}_invert`;
-          return { kind: "matte", matte: { masks: [full, ...masks.map((mask) => ({ ...mask, mode: "subtract" as const }))] } };
+          return { kind: "matte", matte: { masks: complementMatte(masks, `flarex_${comp.id}_${node.id}`) } };
         }
         return { kind: "matte", matte: { masks } };
       }

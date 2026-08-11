@@ -17,6 +17,7 @@ import { PropertyFieldList } from "../inspector/PropertyFieldList";
 import { FlarexNodeIcon } from "./flarex-node-icons";
 import { buildFlarexColorNodeSections, buildFlarexNodeFields } from "./flarex-inspector-fields";
 import type { FlarexSourceAssetOption } from "./FlarexSourcePicker";
+import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 import type { SavedTrack } from "../../lib/trackLibrary";
 
 const WIDTH_KEY = "flarex.inspectorWidth";
@@ -42,9 +43,15 @@ export interface FlarexInspectorProps {
   onInspectSource?: ((assetId: string) => void) | undefined;
   /** Saved tracks a Tracker node may follow (`editableFields.trackLibrary`). */
   trackLibrary?: SavedTrack[];
+  /** Eyedropper context (see `FlarexKeyColorPicker`): the clip carrying the comp, the viewer's capture
+   *  handle, and the transport state. Passed straight through to the field adapter; absent ⇒ colour
+   *  rows render as the plain shared picker. */
+  hostLayerId?: string | null | undefined;
+  viewerCaptureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
+  isPlaying?: boolean;
 }
 
-export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekCompTime, sourceAssets = [], onPickSource, onInspectSource, trackLibrary = [] }: FlarexInspectorProps) {
+export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekCompTime, sourceAssets = [], onPickSource, onInspectSource, trackLibrary = [], hostLayerId = null, viewerCaptureRef, isPlaying = false }: FlarexInspectorProps) {
   const [width, setWidth] = useState<number>(() => {
     const stored = Number(window.localStorage.getItem(WIDTH_KEY));
     return Number.isFinite(stored) && stored >= MIN_W && stored <= MAX_W ? stored : 300;
@@ -132,7 +139,7 @@ export function FlarexInspector({ comp, node, onUpdateComp, compTime, onSeekComp
   const def = getFlarexNodeDefinition(node.type);
   // The WHOLE Flarex-specific step: node definition → shared inspector schema. Everything below renders
   // through the same InspectorSection + `.effect-controls` container + shared controls as the Edit page.
-  const builderArgs = { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource, trackLibrary };
+  const builderArgs = { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource, trackLibrary, hostLayerId, viewerCaptureRef, isPlaying };
 
   // The unified Color node carries the whole grade toolset (~25 params), so it renders as collapsible
   // stages in PIPELINE ORDER instead of one wall of sliders — a section header's dot says whether that

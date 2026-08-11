@@ -68,8 +68,10 @@ import { HueSatCurves } from "../../components/HueSatCurves";
 import { LutFileImport } from "../../components/LutFileImport";
 import type { PropertyField, PropertyFieldAxis } from "../inspector/PropertyFieldList";
 import { KeyframeButtons } from "../inspector/controls/KeyframeButtons";
+import { FlarexKeyColorPicker } from "./FlarexKeyColorPicker";
 import { FlarexSourcePicker, type FlarexSourceAssetOption } from "./FlarexSourcePicker";
 import { FlarexTrackPicker } from "./FlarexTrackPicker";
+import type { SceneViewerCaptureHandle } from "../../components/ScenePreviewCanvas";
 import type { SavedTrack } from "../../lib/trackLibrary";
 import {
   applyNodeParamValueAtTime,
@@ -156,6 +158,15 @@ function colorSectionActive(params: Record<string, unknown>, keys: string[]): bo
 const STRUCTURAL_PARAMS = new Set(["group.members"]);
 
 const COLOR_PARAMS = new Set(["chromaKey.color", "text.color", "text.strokeColor", "text.shadowColor", "backdrop.color", "background.color"]);
+/**
+ * Colour params that also get an EYEDROPPER (a subset of `COLOR_PARAMS`).
+ *
+ * Only the ones that name a colour IN THE PICTURE. A keyer's colour is a measurement of the plate, so
+ * it must be sampled; a Text+ fill or a Background solid is a colour the user is INVENTING, and an
+ * eyedropper there would be a control looking for a use. The picker's node-blind input resolution
+ * (`flarexNodeImageInputId`) means adding a row here is all a future sampled param needs.
+ */
+const EYEDROPPER_PARAMS = new Set(["chromaKey.color"]);
 /** polygonMask/bezierMask `points` — a structured row-per-point editor (the documented fallback for the
  *  on-viewer SVG overlay), rendered as a custom field just like the clip-effect schema's curve editors. */
 const POINT_LIST_PARAMS = new Set(["polygonMask.points", "bezierMask.points"]);
@@ -285,11 +296,22 @@ export interface BuildFlarexNodeFieldsArgs {
   onInspectSource?: ((assetId: string) => void) | undefined;
   /** Saved tracks (`editableFields.trackLibrary`) a Tracker node may follow. */
   trackLibrary?: SavedTrack[];
+  /**
+   * EYEDROPPER CONTEXT (see `FlarexKeyColorPicker`). The viewer's capture handle plus the clip carrying
+   * the comp — together they let a colour row sample the node's INPUT image through the viewer's own
+   * compositor. Absent ⇒ every colour row renders as the plain shared picker, which is what the field
+   * builder produced before the eyedropper existed.
+   */
+  hostLayerId?: string | null | undefined;
+  viewerCaptureRef?: React.MutableRefObject<SceneViewerCaptureHandle | null> | undefined;
+  /** Transport playing state — picking is refused on a moving picture (a still frame is the only
+   *  honest sample; see the picker's docstring). */
+  isPlaying?: boolean;
 }
 
 /** Translate one node's definition + params into the shared inspector schema. */
 export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): PropertyField[] {
-  const { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource, trackLibrary = [] } = args;
+  const { comp, node, compTime, onUpdateComp, onSeekCompTime, sourceAssets, onPickSource, onInspectSource, trackLibrary = [], hostLayerId = null, viewerCaptureRef, isPlaying = false } = args;
   const def = getFlarexNodeDefinition(node.type);
   const keyframeable = new Set(def.keyframeable);
   const nodeId = node.id;
@@ -632,7 +654,31 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
       continue;
     }
     if (COLOR_PARAMS.has(metaKey)) {
-      fields.push({ kind: "color", key, label, icon: paramIcon(key), value: /^#[0-9a-fA-F]{6}$/.test(value) ? value : "#00b140", onChange: (next) => setParam(key, next) });
+      const hex = /^#[0-9a-fA-F]{6}$/.test(value) ? value : "#00b140";
+      // A KEY colour is picked off the picture, never typed (see `FlarexKeyColorPicker`). The row is
+      // still the shared `ColorControl` — the eyedropper is an extra row beneath it, not a replacement
+      // control — so the swatch/hex behaviour is identical to every other colour row in the app.
+      if (EYEDROPPER_PARAMS.has(metaKey)) {
+        fields.push({
+          kind: "custom",
+          key,
+          node: (
+            <FlarexKeyColorPicker
+              comp={comp}
+              nodeId={nodeId}
+              label={label}
+              icon={paramIcon(key)}
+              value={hex}
+              onChange={(next) => setParam(key, next)}
+              hostLayerId={hostLayerId}
+              captureRef={viewerCaptureRef}
+              isPlaying={isPlaying}
+            />
+          ),
+        });
+        continue;
+      }
+      fields.push({ kind: "color", key, label, icon: paramIcon(key), value: hex, onChange: (next) => setParam(key, next) });
       continue;
     }
     if (POINT_LIST_PARAMS.has(metaKey)) {

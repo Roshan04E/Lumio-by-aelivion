@@ -541,10 +541,26 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     keyframeable: ["feather"],
     phase: 1,
   },
+  /**
+   * CHROMA KEYER — a keyer's PARAMETERS plus a keyer's INPUTS.
+   *
+   * In Fusion, Resolve and Nuke a keyer is never one-image-in / one-matte-out. It takes two auxiliary
+   * mattes, and without them every real key devolves into a stack of masks downstream:
+   *
+   *   `garbage`  — forces alpha to ZERO where the matte is on. The rig, the light stand, the edge of
+   *                the cyc where the screen runs out. ALWAYS WINS (see the compiler's ordering note).
+   *   `holdOut`  — the core/solid matte: forces alpha to ONE where the matte is on. Protects detail the
+   *                key eats — the classic case being a subject wearing a colour near the key.
+   *
+   * Both are ordinary `matte` sockets, so every matte source already in the graph (rect/ellipse/
+   * polygon/bezier outlines, a MatteControl combination, a tracked shape) drives them with no new
+   * vocabulary. `garbageInvert` / `holdOutInvert` flip each one's sense in place, so "everything except
+   * this region" does not need a MatteControl inserted just to invert.
+   */
   chromaKey: {
     label: "Chroma Keyer",
     group: "mask",
-    inputs: [image("in", "Input", true)],
+    inputs: [image("in", "Input", true), matte("garbage", "Garbage Matte"), matte("holdOut", "Hold-Out Matte")],
     outputs: OUT,
     params: z.object({
       color: z.string().default("#00b140"),
@@ -558,6 +574,10 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
       choke: num(0.05, -1, 1),
       decontaminate: num(0.5, 0, 1),
       matteOnly: z.boolean().default(false),
+      // Both auxiliary mattes are invertible. Default false ⇒ a comp saved before the sockets existed
+      // parses to exactly the behaviour it had.
+      garbageInvert: z.boolean().default(false),
+      holdOutInvert: z.boolean().default(false),
     }).strict(),
     keyframeable: ["tolerance", "softness", "clipBlack", "clipWhite", "spillSuppression", "edgeSoftness", "choke", "decontaminate"],
     phase: 1,
