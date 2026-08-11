@@ -1,0 +1,322 @@
+{
+  "commit": "e7efe7f639eda475e856f4fda163f8a76cd1f963",
+  "capturedAt": "2026-08-11T09:38:33.465Z",
+  "rendererMode": "webgl",
+  "fixtures": {
+    "advanced-transition": {
+      "sha256": "145354a59f589256b0d249657b86791eab20f94e5b237c185c84eea876f2c486",
+      "width": 1080,
+      "height": 1920
+    },
+    "anchored-media": {
+      "sha256": "c407e8863af9fcc9f1d07f02df7b2b9075448fef8183931ce13ba72d498e66b7",
+      "width": 1080,
+      "height": 1920
+    },
+    "blur": {
+      "sha256": "9ff7e7de8a41c45d9cf9d9be9bd78a4f191859790a11149052dbfbe697790fe7",
+      "width": 1080,
+      "height": 1920
+    },
+    "brightness-contrast": {
+      "sha256": "8f5904c5baf5200ce32ffd9b02022bdcf4b511f05b3c447c68602e9b6bc10b51",
+      "width": 1080,
+      "height": 1920
+    },
+    "chroma-key": {
+      "sha256": "093186b792142a4ab1f433a61cd2dd5de49902e8aff02c59088948be6228763e",
+      "width": 1080,
+      "height": 1920
+    },
+    "clip-region-blur": {
+      "sha256": "2258addb058dbc3ddd6b1583edc409c76cbc6062eaa4f530e8c12028f970b617",
+      "width": 1080,
+      "height": 1920
+    },
+    "color-curves": {
+      "sha256": "674ab4fdad1ddf87327f8c3f6ab204b9457fdb205cb9a2c33feb7cbc5ccf0b77",
+      "width": 1080,
+      "height": 1920
+    },
+    "content-transform": {
+      "sha256": "77fb11bcf3581911820435966ebaf3aa51a08c48cec6ba894059743ec5a8d021",
+      "width": 1080,
+      "height": 1920
+    },
+    "default": {
+      "sha256": "02efc63c18fcfb49f95ef685429dcaefb23109f2075316cc64ee068eaa21477f",
+      "width": 1080,
+      "height": 1920
+    },
+    "feather-region-blur": {
+      "sha256": "c0df053f71d1f0594ec3e5c81c26df2c92f99b734cecaac86dd4cdf9761cb4da",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-animated-roto": {
+      "sha256": "f561690cf952b891ffc8a93564b3e58db5ab225fcc13f96bb8cdd0ce663bc96f",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-color-chain": {
+      "sha256": "b23ca006e904c81e83786193c2f04019b347457c0defece612826890fe3eb490",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-curves": {
+      "sha256": "dc35678e84f46c3f843b63c569e0bd62dfbd6294540aef7572e241a6de33514d",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-directional-blur-max": {
+      "sha256": "67a9aa11041df0a6f3167debf8e218d9adafc9abd78a6046fc75ab5410aa7cf7",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-ellipse-matte": {
+      "sha256": "265682933295937e502e2dd7572bac464a6922f840fa704e336a883e36934ba4",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-filter-stack": {
+      "sha256": "8541496dc42927b50524deda4221762468a51a177afe47387ed46a0948580864",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-generators": {
+      "sha256": "ebcb089c1859eee27b949f7f368cbb6deced4899eff8e6d42a95491ccee1b9c3",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-glow-max": {
+      "sha256": "e7dc80763e45d8452897f70067ee6e7320f4d822f78aec9b5ae0c9ef0fde779d",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-host-transform": {
+      "sha256": "a08eb309be3a4a95acc269533182b6a53f400a12373beef45206d0e5a896d9f6",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-key-glow": {
+      "sha256": "4ede3bf4399d0e30bcebac431017ac501854f55b5ed85e929f53e2b3b25756a5",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-keyframed-blur": {
+      "sha256": "b85706186cf79dd239cc88329aff45409bbdeea386807eec3216d6bfea56b54a",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-merge-blend": {
+      "sha256": "581baee71eb72cacd690491d3f409d5f14db246530e32ce5dbbc8e951e400133",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-mismatched-aspect": {
+      "sha256": "4b08f7ef1c2f866f4653d600c5798d0c2fe0758b87c1359373cbf91dabca5d9b",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-multi-in": {
+      "sha256": "fabb4be8c5005cb3814eaa4d88880c67aa560b17ab6f7f75a74b64effdae413f",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-radial-blur-max": {
+      "sha256": "76f793b8fbd54f97227a332fc7356be685ed2ece9bedb118c7c34bff9bd4feb6",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-reroute": {
+      "sha256": "abfb1a35693345e2898c8a19c7393f065c6b9878488cf418ca7d1e6030f35ba7",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-stabilize": {
+      "sha256": "81c884141ff59387166c533b7b9bcc27ce16bda394d945fd25496db598d3f1e4",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-text-stroke-shadow": {
+      "sha256": "dd59484246ec8589d8a8fab31dfcbdca213e547fb32afc9eb60d3b581e8d8985",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-tracked-mask-early": {
+      "sha256": "6600d154c4f0eb83f91ba677138359cdfeb6075ebd2fb2007d5de081607f67a1",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-tracked-mask-late": {
+      "sha256": "5b6fc88d026600817212d93372b0c97c772d5e7eeaa044a5d4b124b8c347786f",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-transform": {
+      "sha256": "7bacfe9b0e42804d8fd93596671d2a3b549077e381495390e507400ef11341b8",
+      "width": 1080,
+      "height": 1920
+    },
+    "flarex-unified-color": {
+      "sha256": "9f0d3f377d8903c4af0d9ddae9c4c9095cc0ef3abae2ddfa9bf7503cca001b9d",
+      "width": 1080,
+      "height": 1920
+    },
+    "framed-blob": {
+      "sha256": "596df40cac8ccf33b940f79d166536d40a7877aa43bb4d857897c22bd0beb539",
+      "width": 1080,
+      "height": 1920
+    },
+    "framed-media": {
+      "sha256": "4e6145cca7177a8a967d6515b4db8f36c079fc6d73afc9cb1ebf1c032a9a0843",
+      "width": 1080,
+      "height": 1920
+    },
+    "glow": {
+      "sha256": "a8f9300b59c2eef84aaeb99d5c2e729043cc1440abce165cc91bc09ecdd5bf65",
+      "width": 1080,
+      "height": 1920
+    },
+    "graded-text": {
+      "sha256": "181f3e36942cf833d8285953d5324c0d031981dab30144a31f6579a824a73d17",
+      "width": 1080,
+      "height": 1920
+    },
+    "grain": {
+      "sha256": "67053e86bab568a178a2ea74c6e8aedadb1c0cb8f31abc4a0e60c8b2f3e306f0",
+      "width": 1080,
+      "height": 1920
+    },
+    "masked-blur": {
+      "sha256": "e9e89975bf4e5f3b8b65a7bc3b95dd42193204a834c3dcbccb6479f92b24aa95",
+      "width": 1080,
+      "height": 1920
+    },
+    "masked-text": {
+      "sha256": "3451ad7463fc5389b74adcbc405b3561b9d3f7976ea6a8316080ff24c15cb036",
+      "width": 1080,
+      "height": 1920
+    },
+    "media-opacity": {
+      "sha256": "ea76495d0e3de4cf76d572f572b07f1e55b8be28ca6ca90fd4728bb7a3b4a677",
+      "width": 1080,
+      "height": 1920
+    },
+    "nested-grade": {
+      "sha256": "12c011caeb08895193030fdea6fac205396d1430ce8b0e6371215cdb5dfe504a",
+      "width": 1080,
+      "height": 1920
+    },
+    "nested-junction-preroll": {
+      "sha256": "646212b6481b3cda071b7bca87ce774caa0bccb14c735118c7ef5f098f9eac1e",
+      "width": 1080,
+      "height": 1920
+    },
+    "nested-junction-transition": {
+      "sha256": "94f848783ef4330ac02946895205844381e0f57720bab233dc08263af05747e9",
+      "width": 1080,
+      "height": 1920
+    },
+    "nested-transition": {
+      "sha256": "13a4eb4400365df728e88970b6f891587008330a4e18421f6730af19eb47ff58",
+      "width": 1080,
+      "height": 1920
+    },
+    "object-fit-contain": {
+      "sha256": "a8f9300b59c2eef84aaeb99d5c2e729043cc1440abce165cc91bc09ecdd5bf65",
+      "width": 1080,
+      "height": 1920
+    },
+    "object-fit-cover": {
+      "sha256": "a8f9300b59c2eef84aaeb99d5c2e729043cc1440abce165cc91bc09ecdd5bf65",
+      "width": 1080,
+      "height": 1920
+    },
+    "overlap-region-effects": {
+      "sha256": "83132c5ed29a993cc9f998d7b8d539d9312917b9e606094a717d91a1b9d243d1",
+      "width": 1080,
+      "height": 1920
+    },
+    "plain-image": {
+      "sha256": "a8f9300b59c2eef84aaeb99d5c2e729043cc1440abce165cc91bc09ecdd5bf65",
+      "width": 1080,
+      "height": 1920
+    },
+    "plugin-shader": {
+      "sha256": "4a15b7fb7cc97ad78748efd0ad95a65e5d8ae34cd359a8b99ec1f6191a2b35ea",
+      "width": 1080,
+      "height": 1920
+    },
+    "region-blur": {
+      "sha256": "01af9d8b58e87ee4d44e35ce9932a89e55a51c0e64d428d4257e19229130eff4",
+      "width": 1080,
+      "height": 1920
+    },
+    "region-text": {
+      "sha256": "7674dacbaf39a9d32822b54100694046197c0ea1b013fa558342f0e7cf3fbc93",
+      "width": 1080,
+      "height": 1920
+    },
+    "scaled-text": {
+      "sha256": "d67266f5d819b17f196c7c8963dd7cc56cc3900fc1c71fe70dcea9566a261368",
+      "width": 1080,
+      "height": 1920
+    },
+    "stylize-ink": {
+      "sha256": "5b66b86c92c830ffce8fc0171d814fe12f3affafb35890ee78537e7358ba45e4",
+      "width": 1080,
+      "height": 1920
+    },
+    "stylize-print": {
+      "sha256": "e6fda6581c7cfaa3016c58b913f6a9277fd31b3deb02a22efd3113d2c77876d0",
+      "width": 1080,
+      "height": 1920
+    },
+    "stylize-subject": {
+      "sha256": "4bad8723163457ada72030ba6179f029e711c78ceef54e11b2e3c5594a83645f",
+      "width": 1080,
+      "height": 1920
+    },
+    "stylize": {
+      "sha256": "f49ad4e5755b0d57c79a1c0713a564641ce30630b76744d05db45962e71d1f44",
+      "width": 1080,
+      "height": 1920
+    },
+    "texture-fill": {
+      "sha256": "9d5a1c3628fbf6125945ebd26b9e999fe9bed84da1d945585bbc757662c50606",
+      "width": 1080,
+      "height": 1920
+    },
+    "tilt-3d": {
+      "sha256": "8bf7240a720a098eca9891e76d53c9f1031e3dcd9c471aee3b6e1718b33da752",
+      "width": 1080,
+      "height": 1920
+    },
+    "tilted-text": {
+      "sha256": "443a492a009b555feafad764749a413c1ef7002c1d19afc58fbef8078fb7c788",
+      "width": 1080,
+      "height": 1920
+    },
+    "track-matte": {
+      "sha256": "06581f2dc6e7357c7819086e48369fc7f12322cfd43f6900b80d6585a6b170cc",
+      "width": 1080,
+      "height": 1920
+    },
+    "transition": {
+      "sha256": "13a4eb4400365df728e88970b6f891587008330a4e18421f6730af19eb47ff58",
+      "width": 1080,
+      "height": 1920
+    },
+    "two-region-effects": {
+      "sha256": "8de8146729e60045b33b001ae6f3a367b2d1481b172a56b929e1ad6e609975f2",
+      "width": 1080,
+      "height": 1920
+    },
+    "vignette": {
+      "sha256": "1e5360d5f8eb7861689f4091654336fbe8e301202a7dba7efdc9768147fe01f3",
+      "width": 1080,
+      "height": 1920
+    }
+  }
+}

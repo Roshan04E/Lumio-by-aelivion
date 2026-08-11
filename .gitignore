@@ -30,3 +30,8 @@ apps/api/storage/derived/*
 # extending this to `apps/worker/tmp/` itself — that would hide live probe scripts from `git status`,
 # where other sessions are working.
 apps/worker/apps/
+
+# Across-commit baseline stills (render:baseline). The reviewable reference is the sha256 in
+# tmp/render-baseline/baseline.json, which IS committed; the PNGs are ~70MB of local diagnosis.
+tmp/render-baseline/*.png
+tmp/render-baseline/current/
