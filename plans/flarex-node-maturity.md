@@ -210,6 +210,17 @@ counts (holds, per the existing MVP rule); planar-tracked roto; any automated ro
 > class exactly. Fixed with a def-declared `trackParams` list and a time term folded only when a track
 > is actually present (static nodes hash unchanged), plus a ContractVersion bump to 2. Gate:
 > `pnpm --filter @orreris/shared maskShape:test`, §4.
+>
+> **SLICE 1b, 2026-08-11 — the curve was storable but only half-authorable.** A browser pass over the
+> editor found that of the two gestures that create a tangent, only one reached the graph. Alt-DRAG
+> (pull-out) worked already: its `shape: "bezier"` promotion is skipped for a mask that is already
+> bezier/polygon — which the bridge's synthetic mask always is — so it fell through to
+> `commitPointsFor`. Alt-CLICK (the corner⇄smooth toggle) did not: it writes through
+> `onUpdateLayerMasks`, which the bridge has passed as `undefined` since it was built (2026-07-30).
+> The withholding is pre-existing and was harmless while tangents were discarded on commit anyway;
+> slice 1 is what made it load-bearing. Fixed with an explicit `geometryOnly` mode on
+> `MaskEditorOverlay`, taking `commitPointsFor` for node masks and leaving the clip-mask write
+> textually unchanged.
 
 **Renderer or editor:** **shared-compiler + editor.** The evaluator is shared and reaches both
 renderers through `build-scene-draws.ts`; the keying affordance is editor-only. The rasterizer needs

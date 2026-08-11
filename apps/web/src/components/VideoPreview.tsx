@@ -2330,6 +2330,9 @@ function VideoPreviewImpl({
                   activeMaskId={activeMaskId}
                   onSelectMask={onSelectMask}
                   onChangeMaskTool={onChangeMaskTool}
+                  // The override IS the geometry-only mode; declaring it means the overlay never has to
+                  // read "which callbacks are missing" to know where an edit should land.
+                  geometryOnly={Boolean(maskEditOverride)}
                   onUpdateLayerMasks={maskEditOverride ? undefined : onUpdateLayerMasks}
                   onCommitMaskPoints={maskEditOverride ? (_layerId, _maskId, points) => maskEditOverride.onCommitPoints(points, currentTime) : onCommitMaskPoints}
                   onPreviewMaskScalar={maskEditOverride ? undefined : onPreviewMaskScalar}
@@ -4984,7 +4987,8 @@ function MaskEditorOverlay({
   onUpdateLayerMasks,
   onCommitMaskPoints,
   onPreviewMaskScalar,
-  onCommitShapePath
+  onCommitShapePath,
+  geometryOnly = false
 }: {
   layer: TimelineLayer;
   masks: Mask[];
@@ -4996,6 +5000,17 @@ function MaskEditorOverlay({
   activeMaskId?: string | undefined;
   onSelectMask?: ((maskId: string | null) => void) | undefined;
   onChangeMaskTool?: ((tool: MaskTool) => void) | undefined;
+  /**
+   * GEOMETRY-ONLY mode: the masks being edited are not a layer's clip masks but a synthetic pair from
+   * `flarex-mask-bridge`, whose owner (a Flarex mask NODE) has no per-mask `shape`/`feather`/`invert`
+   * to write — those are node params, edited in its inspector.
+   *
+   * Stated as its own flag rather than inferred from `onUpdateLayerMasks` being absent. The absence IS
+   * how the mode arrived here historically, and reading it that way is how the smooth toggle came to
+   * fail silently: a gesture computed a correct result and posted it into an optional-call no-op. A
+   * mode that decides where an edit LANDS should be declared, not deduced from a missing callback.
+   */
+  geometryOnly?: boolean | undefined;
   onUpdateLayerMasks?: ((layerId: string, updater: (masks: Mask[]) => Mask[]) => void) | undefined;
   onCommitMaskPoints?: ((layerId: string, maskId: string, points: MaskPoint[]) => void) | undefined;
   onPreviewMaskScalar?: ((layerId: string, maskId: string, patch: { feather?: number; opacity?: number }, commit: boolean) => void) | undefined;
@@ -5399,6 +5414,25 @@ function MaskEditorOverlay({
     }
     if (mask.id === SHAPE_SELF_MASK_ID) {
       updateShapeSelfPoints(nextPoints);
+      return;
+    }
+    /**
+     * GEOMETRY-ONLY (Flarex mask node): commit the points through the same channel every other
+     * geometry edit already uses.
+     *
+     * The clip-mask branch below writes TWO things — `shape: "bezier"` and the points. Only the first
+     * is unavailable here, and it is also unnecessary: a node's outline kind is its NODE TYPE
+     * (`bezierMask` / `polygonMask`), which the bridge stamps onto the synthetic mask, so there is no
+     * per-mask shape to promote. Dropping just that half is what makes this safe; routing the clip-mask
+     * case through here instead would silently stop a rectangle mask becoming curvable when you smooth
+     * one of its corners.
+     *
+     * Alt-DRAG (the pull-out) already landed here: its own `shape` promotion is skipped for a mask that
+     * is already "bezier"/"polygon", so it fell through to `commitLive()` → `commitPointsFor`. Only this
+     * no-move toggle was left posting into an optional-call no-op.
+     */
+    if (geometryOnly) {
+      commitPointsFor(mask.id, nextPoints);
       return;
     }
     onUpdateLayerMasks?.(layer.id, (currentMasks) =>
