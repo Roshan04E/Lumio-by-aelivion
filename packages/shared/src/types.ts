@@ -977,9 +977,13 @@ export type TimelineTimeDisplay = "seconds" | "timecode" | "frames";
 
 export interface TimelineCompositionSettings {
   /**
-   * Managed color contract for this composition (working/output space + range). Absent on legacy
-   * projects → treat as {@link DEFAULT_PROJECT_COLOR_SETTINGS} (Rec.709 linear working, Rec.709 SDR
-   * limited output). Persisted in the `ProjectGraph` JSON blob; no schema migration needed.
+   * Managed color contract for this composition (working/output space + range + effect light).
+   * Persisted in the `ProjectGraph` JSON blob; no schema migration needed.
+   *
+   * **Absent means LEGACY, not "default".** A composition that never stored this was authored before
+   * the linear-light effect stage existed, so it normalizes to {@link LEGACY_PROJECT_COLOR_SETTINGS}
+   * (display-referred effects) and keeps rendering exactly as it always did. New compositions stamp
+   * {@link NEW_PROJECT_COLOR_SETTINGS} explicitly at creation rather than relying on any default.
    */
   color?: ProjectColorSettings | undefined;
   viewport: {

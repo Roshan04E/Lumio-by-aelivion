@@ -21,7 +21,7 @@ import { channelCurvesAreIdentity, channelCurvesToToneCurve } from "./curve";
 import { colorWheelsToToneCurve, wheelsAreIdentity } from "./wheels";
 import { hueSatCurvesAreIdentity, secondaryIsIdentity, type HslSecondary } from "./hsl";
 import { resolveLookEffects } from "./looks";
-import { DEFAULT_PROJECT_COLOR_SETTINGS, type ProjectColorSettings } from "./color-management";
+import { LEGACY_PROJECT_COLOR_SETTINGS, type ProjectColorSettings } from "./color-management";
 
 const IDENTITY_MATRIX_3x4: readonly number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
 
@@ -203,14 +203,14 @@ function controlsToStage(c: ColorControls): ColorStage {
  * Non-color and disabled effects should be filtered out by the caller; unknown
  * types are ignored. Stages preserve effect order.
  *
- * `colorSettings` carries the project's managed color contract (working/output space + range).
- * It defaults to `DEFAULT_PROJECT_COLOR_SETTINGS` (Rec.709 linear working, Rec.709 SDR limited
- * output) so existing callers stay managed; thread the composition's `settings.color` here when
- * the project overrides it.
+ * `colorSettings` carries the project's managed color contract (working/output space + range +
+ * effect light). It defaults to `LEGACY_PROJECT_COLOR_SETTINGS` — a caller that passes nothing is
+ * saying "I was handed no project settings", and the answer to that is today's shipped behaviour,
+ * never the new-project default. Thread the composition's `settings.color` here.
  */
 export function compileColorPipeline(
   effects: ColorEffectInput[],
-  colorSettings: ProjectColorSettings = DEFAULT_PROJECT_COLOR_SETTINGS
+  colorSettings: ProjectColorSettings = LEGACY_PROJECT_COLOR_SETTINGS
 ): ColorPipeline {
   const stages: ColorStage[] = [];
   let previewMatte: HslSecondary | null = null;

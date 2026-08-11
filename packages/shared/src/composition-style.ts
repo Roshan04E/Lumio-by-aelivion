@@ -1,7 +1,7 @@
 import { evaluateAnimatedValue, evaluateTimelineEffectParam, evaluateTimelineTransform } from "./animation";
 import type { VisibleContribution } from "./kernel/admission";
 import { frameProfiler } from "./color/frame-profiler";
-import { COLOR_EFFECT_TYPES, compileColorPipeline, DEFAULT_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
+import { COLOR_EFFECT_TYPES, compileColorPipeline, LEGACY_PROJECT_COLOR_SETTINGS, lut3dFromBase64, NEUTRAL_SECONDARY, pipelineToSvgFilter, type ChannelCurves, type ColorEffectInput, type ColorPipeline, type ColorWheels, type CurvePoint, type HslSecondary, type HueSatCurves, type Lut3d, type MediaEffects, type ProjectColorSettings, type SvgColorFilter } from "./color";
 import { applyTransitionEasing, getTransition, resolveTransitionParams, type TransitionDefinition } from "./color";
 import { getCompositionMaskCss, getMaskCss, isRenderableMask } from "./clip-masks";
 import type { BlendMode, LayerContentTransform, Mask, MaskPoint, ShapeKind, SourceTextKeyframe, TextRun, TextWarp, TimelineEffect, TimelineKeyframe, TimelineKeyframeV2, TimelineLayer, TransitionDirection, TransitionSpec } from "./types";
@@ -74,8 +74,9 @@ export interface CompositionStyleOptions {
   skipColorFilter?: boolean | undefined;
   /**
    * The composition's managed color settings (`composition.settings.color`). Defaults to
-   * {@link DEFAULT_PROJECT_COLOR_SETTINGS} (Rec.709 linear working / Rec.709 SDR output) so
-   * callers that don't thread it stay managed. Drives the pipeline's working space.
+   * {@link LEGACY_PROJECT_COLOR_SETTINGS} — "not threaded" means "no project settings in hand", whose
+   * only safe reading is today's shipped behaviour. Drives the pipeline's working space and the
+   * effect stage's light.
    */
   colorSettings?: ProjectColorSettings | undefined;
 }
@@ -1225,7 +1226,7 @@ export function getCompositionColorPipeline(
   const currentTimeSeconds = options.currentTimeSeconds;
   const layerTimeSeconds = typeof currentTimeSeconds === "number" ? Math.max(0, currentTimeSeconds - layerStartSeconds) : undefined;
 
-  const colorSettings = options.colorSettings ?? DEFAULT_PROJECT_COLOR_SETTINGS;
+  const colorSettings = options.colorSettings ?? LEGACY_PROJECT_COLOR_SETTINGS;
   const cached = colorPipelineCache.get(effects);
   if (
     cached &&

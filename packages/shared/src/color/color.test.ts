@@ -11,7 +11,15 @@ import { compileColorPipeline, extractControls } from "./pipeline";
 import { applyPipelineToRgb, type Rgb } from "./cpu";
 import { pipelineToSvgFilter } from "./svg";
 import { LUMA_WEIGHTS, TONE_LUT_SIZE, NEUTRAL_CONTROLS, type ColorEffectInput } from "./types";
-import { rec709CodeToLinear, rec709LinearToCode, DEFAULT_PROJECT_COLOR_SETTINGS } from "./color-management";
+import {
+  rec709CodeToLinear,
+  rec709LinearToCode,
+  DEFAULT_PROJECT_COLOR_SETTINGS,
+  LEGACY_PROJECT_COLOR_SETTINGS,
+  NEW_PROJECT_COLOR_SETTINGS,
+  normalizeProjectColorSettings
+} from "./color-management";
+import { createDefaultComposition } from "../timeline";
 import { applyControlsLinear } from "./managed";
 
 let failures = 0;
@@ -394,6 +402,48 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   }
   check("Rec.709 code→linear→code round-trips", worst < 1e-6);
   check("default working space is rec709-linear", DEFAULT_PROJECT_COLOR_SETTINGS.workingSpace === "rec709-linear");
+}
+
+// 32b. THE LEGACY/NEW DEFAULT SPLIT (linear-light slice 1).
+//
+// This block is the structural guard behind the comment on LEGACY_PROJECT_COLOR_SETTINGS. The
+// failure it defends against — an absent `effectLight` resolving to `linear` — silently re-renders
+// every project a user saved before 2026-08-11, and no pixel gate in this repo can see it: the parity
+// gate compares two renderers that would both read the same wrong default, and the fixtures stamp
+// their own settings. If someone merges the two constants back into one, these assertions fail
+// immediately and say why.
+{
+  check(
+    "an ABSENT colour setting means display-referred effects (existing projects do not move)",
+    normalizeProjectColorSettings(undefined).effectLight === "display"
+  );
+  check(
+    "an EMPTY settings object means display-referred effects",
+    normalizeProjectColorSettings({}).effectLight === "display"
+  );
+  check(
+    "a project that stored only workingSpace still means display-referred effects",
+    normalizeProjectColorSettings({ workingSpace: "rec709-linear" }).effectLight === "display"
+  );
+  check(
+    "an UNRECOGNISED effectLight falls back to display, never linear",
+    normalizeProjectColorSettings({ effectLight: "nonsense" }).effectLight === "display"
+  );
+  check(
+    "a project that explicitly stored linear keeps linear",
+    normalizeProjectColorSettings({ effectLight: "linear" }).effectLight === "linear"
+  );
+  check("legacy default is display-referred", LEGACY_PROJECT_COLOR_SETTINGS.effectLight === "display");
+  check("new-project default is linear", NEW_PROJECT_COLOR_SETTINGS.effectLight === "linear");
+  check(
+    "the two defaults are DIFFERENT constants — merging them is the one-line regression",
+    LEGACY_PROJECT_COLOR_SETTINGS.effectLight !== NEW_PROJECT_COLOR_SETTINGS.effectLight
+  );
+  // A new project must SAVE the setting, not inherit it: the absent case has to keep meaning
+  // "legacy" forever, so a new project that stored nothing would flip meaning under a later refactor.
+  const fresh = createDefaultComposition({ id: "p1", name: "n", durationSeconds: 10 });
+  check("a new composition STAMPS its colour settings", fresh.settings.color !== undefined);
+  check("a new composition stamps linear", fresh.settings.color?.effectLight === "linear");
 }
 
 // 33. Neutral controls are an exact identity in linear (no drift from the managed path).

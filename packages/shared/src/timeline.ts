@@ -1,3 +1,4 @@
+import { NEW_PROJECT_COLOR_SETTINGS } from "./color/color-management";
 import type { ProjectGraph, SpeedKeyframe, TimelineComposition, TimelineLayer, TimelineTrack, TrackAudioKeyframe } from "./types";
 
 export type CompositionOrientation = "portrait" | "landscape";
@@ -57,6 +58,10 @@ export function createDefaultComposition(input: {
     durationSeconds: duration,
     backgroundColor: "#07080C",
     settings: {
+      // Stamped EXPLICITLY, never left to a default: an absent `color` means "authored before the
+      // linear-light effect stage existed" and must keep rendering the old way forever. A new project
+      // has to say so in its own saved data (see NEW_PROJECT_COLOR_SETTINGS).
+      color: { ...NEW_PROJECT_COLOR_SETTINGS },
       viewport: {
         preset: frame.preset,
         width: frame.width,
