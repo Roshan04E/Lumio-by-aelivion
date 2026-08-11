@@ -277,6 +277,7 @@ import {
   ensureSourceProxy,
   setSourceProxyBuildSuspended,
   setSourceProxyDenseGopListener,
+  setSourceProxyPartialListener,
   setSourceProxyPlayheadResolver,
   setSourceProxyProgressListener
 } from "../editor/performance/sourceProxyEngine";
@@ -1365,14 +1366,33 @@ export function EditorPage() {
   // asset.proxyUrl). Exports keep reading the original bytes. The proxyUrl patch is deferred
   // while the transport is playing so a src swap never glitches active playback.
   const pendingProxyUrlsRef = useRef<Map<string, string>>(new Map());
+  // SLICE 3 (2026-08-11): partial proxies ride the SAME deferred-adoption path as complete ones —
+  // a `src` swap must never land mid-playback, and a partial one is no different in that respect.
+  // They land in their own field; routing prefers a complete `proxyUrl` whenever one exists, and
+  // only offers the partial to layers whose whole source range fits its coverage.
+  const pendingPartialProxiesRef = useRef<Map<string, { url: string; coverageSeconds: number }>>(new Map());
   const applySourceProxyPatches = useCallback(() => {
     const pending = pendingProxyUrlsRef.current;
-    if (pending.size === 0) {
+    const pendingPartial = pendingPartialProxiesRef.current;
+    if (pending.size === 0 && pendingPartial.size === 0) {
       return;
     }
     const patches = new Map(pending);
+    const partialPatches = new Map(pendingPartial);
     pending.clear();
-    setAssets((current) => current.map((asset) => (patches.has(asset.id) ? { ...asset, proxyUrl: patches.get(asset.id) } : asset)));
+    pendingPartial.clear();
+    setAssets((current) =>
+      current.map((asset) => {
+        const complete = patches.get(asset.id);
+        const partial = partialPatches.get(asset.id);
+        if (!complete && !partial) return asset;
+        return {
+          ...asset,
+          ...(complete ? { proxyUrl: complete } : {}),
+          ...(partial ? { partialProxyUrl: partial.url, partialProxyCoverageSeconds: partial.coverageSeconds } : {}),
+        };
+      })
+    );
   }, []);
   useEffect(() => {
     // SCOPE (2026-07-24): only proxy assets the OPEN project actually USES — timeline layers (incl.
@@ -1465,6 +1485,20 @@ export function EditorPage() {
     });
     return () => setSourceProxyPlayheadResolver(null);
   }, []);
+  // SLICE 3: a build in flight publishes a playable prefix as coverage grows. Staged, never applied
+  // directly — the same parked-transport rule the completed-proxy patch has followed since 2026-07.
+  useEffect(() => {
+    setSourceProxyPartialListener((partial) => {
+      pendingPartialProxiesRef.current.set(partial.assetId, {
+        url: partial.url,
+        coverageSeconds: partial.coverageSeconds,
+      });
+      if (!isPlayingRef.current) {
+        applySourceProxyPatches();
+      }
+    });
+    return () => setSourceProxyPartialListener(null);
+  }, [applySourceProxyPatches]);
 
   useEffect(() => {
     let cancelled = false;

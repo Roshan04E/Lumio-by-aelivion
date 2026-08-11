@@ -34,6 +34,7 @@ import {
   SOURCE_PROXY_VERSION,
 } from "./sourceProxyStore";
 import { decodeSegment } from "./sourceProxySegments";
+import { buildPrefixProxy, measurePrefixCoverage } from "./sourceProxyPrefixMux";
 import { probeGopProfile, needsProxyForDecodeCost, describeGopProfile, type GopProfile } from "./gop-probe";
 import type { SourceProxyWorkerRequest, SourceProxyWorkerResponse } from "./sourceProxyWorkerProtocol";
 import type { SourceAsset } from "@orreris/shared";
@@ -311,6 +312,7 @@ export function getSourceProxyState(assetId: string): SourceProxyState {
  */
 export async function rebuildSourceProxy(asset: SourceAsset, onReady: ReadyCallback = () => undefined): Promise<void> {
   await removeSourceProxy(asset.id).catch(() => undefined);
+  retirePartialProxy(asset.id); // its segments are gone too — nothing to keep offering
   settled.delete(asset.id);
   inQueue.delete(asset.id);
   fetchRetries.delete(asset.id);
@@ -468,6 +470,12 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     record(asset.id, "built", 0, "rehydrated");
     return existing.url;
   }
+  // SLICE 3: whatever a previous session's interrupted build left on disk is playable RIGHT NOW.
+  // Published HERE — before the GOP probe, the <video> metadata probe (15s timeout) and the audio
+  // pre-decode — because "reopen and keep working at the covered range" is the whole feature, and
+  // none of those steps are inputs to it: the segment guards already bind the cache to these exact
+  // bytes and this recipe, and the geometry is read from the segment headers themselves.
+  schedulePartialPublish(asset.id, blob.size, 1);
   // DECODE COST, NOT FILE SIZE (2026-07-28). Both size gates below used to conclude "small ⇒ cheap to
   // decode" and skip. That inference inverts on low-frequency footage (smoke/fog/gradients): the encoder
   // wins its small size with long GOPs, so the file is small BECAUSE seeking it is expensive. And a skip
@@ -575,6 +583,10 @@ async function buildFromBlob(asset: SourceAsset, blob: Blob, sourceUrl: string |
     encoded.blob
   );
   if (!url) throw new Error("proxy persist failed");
+  // The COMPLETE proxy supersedes any partial one. Routing prefers `proxyUrl` unconditionally, so
+  // adoption of the complete file is what actually retires the partial; this just releases the blob
+  // (on a delay) and stops the engine offering it again.
+  retirePartialProxy(asset.id);
   // The finished proxy supersedes its own resume cache — drop it so OPFS doesn't carry a second
   // copy of every proxy indefinitely. A failure here only wastes space; the guards still make the
   // stale segments unusable by any later build.
@@ -666,6 +678,113 @@ async function collectResumeSegments(
  * `layerSourceTimeSeconds` to keep in sync. Builds only ever run while the transport is PARKED
  * (see setSourceProxyBuildSuspended), so this is a stationary reading, not a moving target.
  */
+/**
+ * PARTIAL PROXIES (2026-08-11, Slice 3). Fires while a build is still running, with a playable MP4
+ * covering `[0, coverageSeconds)` of the source. The consumer stages it exactly like a finished
+ * proxy — deferred to a parked transport — but into `partialProxyUrl`, and only layers whose whole
+ * source range fits the coverage may route to it (`sourceProxyCoverage.ts`).
+ *
+ * Coverage only ever GROWS within a session: each emission strictly exceeds the last for that asset,
+ * and the engine never retracts one. Withdrawing a proxy URL would bounce a source from the pooled
+ * decoder onto the `<video>` element path, which is capped at ~16 hardware contexts.
+ */
+export interface SourceProxyPartial {
+  assetId: string;
+  url: string;
+  coverageSeconds: number;
+  segmentCount: number;
+}
+let partialListener: ((partial: SourceProxyPartial) => void) | null = null;
+export function setSourceProxyPartialListener(listener: ((partial: SourceProxyPartial) => void) | null): void {
+  partialListener = listener;
+}
+
+/** Per-asset partial-proxy state for THIS session: what we last published, so coverage only grows. */
+interface PartialState {
+  coverageSeconds: number;
+  segmentCount: number;
+  url: string;
+  /** Superseded object URLs, revoked on a delay so a layer still holding one is never yanked. */
+  retired: string[];
+}
+const partialPublished = new Map<string, PartialState>();
+
+/**
+ * Re-mux the cached prefix and publish it, if that is worth doing.
+ *
+ * RATE LIMIT: the mux copies the whole covered bitstream, so it is not run per completed segment.
+ * `minGrowthSegments` is the caller's judgement about the moment — a build that has just STARTED on
+ * top of an existing cache re-muxes immediately (that is the whole reopen-and-keep-working case),
+ * while a build in flight waits for a meaningful jump.
+ *
+ * Entirely best-effort: every failure leaves the asset on whatever it is playing now, which is the
+ * original — today's behaviour, and the fail-open rule this feature is not allowed to weaken.
+ */
+async function publishPartialProxy(assetId: string, sourceByteSize: number, minGrowthSegments: number): Promise<void> {
+  if (!partialListener) return;
+  const previous = partialPublished.get(assetId);
+  try {
+    const measured = await measurePrefixCoverage(assetId, sourceByteSize, PROXY_SEGMENT_FRAMES);
+    if (!measured) return;
+    if (previous && measured.segmentCount < previous.segmentCount + minGrowthSegments) return;
+    if (previous && measured.segmentCount <= previous.segmentCount) return;
+    const prefix = await buildPrefixProxy(assetId, sourceByteSize, PROXY_SEGMENT_FRAMES);
+    if (!prefix) return;
+    if (previous && prefix.coverageSeconds <= previous.coverageSeconds) return; // never shrink
+    const url = URL.createObjectURL(prefix.blob);
+    const retired = previous ? [...previous.retired, previous.url] : [];
+    partialPublished.set(assetId, {
+      coverageSeconds: prefix.coverageSeconds,
+      segmentCount: prefix.segmentCount,
+      url,
+      retired: [],
+    });
+    logProxy(assetId, `partial proxy: ${prefix.segmentCount} segment(s), ${prefix.coverageSeconds.toFixed(1)}s playable`);
+    partialListener({ assetId, url, coverageSeconds: prefix.coverageSeconds, segmentCount: prefix.segmentCount });
+    // Revoke superseded blobs on a delay — a layer that resolved the old URL a moment ago may still
+    // be mounting against it, and revoking underneath that is a black frame for no gain.
+    if (retired.length > 0) {
+      setTimeout(() => {
+        for (const stale of retired) URL.revokeObjectURL(stale);
+      }, 20_000);
+    }
+  } catch {
+    /* a partial proxy is an optimization — never let it disturb the build */
+  }
+}
+
+/**
+ * Segments of coverage growth required before an IN-FLIGHT build re-muxes. The mux copies the whole
+ * covered bitstream, so this trades freshness for main-thread work: 4 segments is 1,200 frames —
+ * 40s of source at 30fps, 20s at 60 — which is a meaningful jump in what the user can actually
+ * play, and caps the re-muxes on a 15-minute clip at single digits.
+ */
+const PARTIAL_REMUX_GROWTH_SEGMENTS = 4;
+/** One publish at a time per asset: the mux is async and segment messages arrive far faster. */
+const partialInFlight = new Set<string>();
+
+function schedulePartialPublish(assetId: string, sourceByteSize: number, minGrowthSegments: number): void {
+  if (!partialListener || partialInFlight.has(assetId)) return;
+  partialInFlight.add(assetId);
+  // On an idle window: this runs on the main thread while a build holds the worker, and the whole
+  // point of the feature is that the editor stays usable meanwhile.
+  whenIdle(() => {
+    void publishPartialProxy(assetId, sourceByteSize, minGrowthSegments).finally(() => partialInFlight.delete(assetId));
+  });
+}
+
+/** Drop this session's partial state for an asset (its complete proxy has landed, or it was reset). */
+function retirePartialProxy(assetId: string): void {
+  const state = partialPublished.get(assetId);
+  if (!state) return;
+  partialPublished.delete(assetId);
+  // The complete proxy has already been adopted by the time this runs; still give any in-flight
+  // render a grace period rather than revoking a URL a mounted layer might hold.
+  setTimeout(() => {
+    for (const url of [state.url, ...state.retired]) URL.revokeObjectURL(url);
+  }, 20_000);
+}
+
 export type SourceProxyPlayheadResolver = (assetId: string) => number | null;
 let playheadResolver: SourceProxyPlayheadResolver | null = null;
 export function setSourceProxyPlayheadResolver(resolver: SourceProxyPlayheadResolver | null): void {
@@ -725,7 +844,11 @@ function transcodeInWorker(
       if (message.type === "segment") {
         // Persist the resume cache as it is produced. Fire-and-forget and best-effort: a segment
         // that fails to land costs a slower resume, never the build. Also NOT terminal.
-        void saveSourceProxySegment(asset.id, message.segmentIndex, new Blob([message.buffer]));
+        void saveSourceProxySegment(asset.id, message.segmentIndex, new Blob([message.buffer])).then(() =>
+          // SLICE 3: once it is ON DISK, the prefix mux can read it. Rate-limited and idle-scheduled;
+          // most calls return without muxing anything.
+          schedulePartialPublish(asset.id, sourceByteSize, PARTIAL_REMUX_GROWTH_SEGMENTS)
+        );
         return;
       }
       cleanup();

@@ -353,7 +353,69 @@ segmentation is disabled (a `segmentFrames` that is not a multiple of the GOP), 
 fallback's output to one segment's worth of frames. Found because the baseline arm returned 301
 frames instead of 932. Fixed with an explicit `runGridFrames`.
 
-### Slice 3 — Coverage-aware routing (the actual feature) — **REWRITTEN 2026-08-11 for Option B′**
+### Slice 3 — Coverage-aware routing — **SHIPPED 2026-08-11**
+
+**What shipped, and the one decision everything else follows from.**
+
+The risk that outranked everything in the design below: **a partial proxy is a TRUNCATED file to the
+decoder.** `chunkIndexForMicros` clamps any time past the final sample to the last index entry, so
+`getFrame` serves the same frame forever — never null, so nothing heals, nothing falls back, nothing
+reports it. That is the frozen tail this repo has already shipped twice (`SOURCE_PROXY_VERSION` v4
+and v5).
+
+The answer is structural, not defensive: **a layer may only be routed to a partial proxy when every
+source time it can EVER request is already inside coverage.** The clamp region is then unreachable —
+not avoided at runtime, not detected and recovered from, simply never addressed.
+
+- **The gate is per LAYER, never per TIME.** A layer's URL is fixed for its whole extent, so there is
+  no boundary for playback to cross, no mid-playback `src` swap, and no stall at a crossing. This is
+  also what keeps `resolvePlaybackUrl` returning one stable URL per layer.
+- **Coverage is the contiguous PREFIX from 0, not the covered run.** Slice 2 can leave a covered run
+  starting above zero. A file muxed from `[a, b)` with `a > 0` either keeps timestamps starting at
+  `a` — and a request below `a` clamps to the FIRST sample, showing the wrong picture — or is rebased
+  to zero, and then every source time is off by `a`. Both are silent wrong-picture bugs. Only a
+  prefix preserves the source-time mapping with no offset anywhere.
+- **`partialProxyUrl` is its own field, not a reuse of `proxyUrl`.** A truncated file is not a
+  substitute for a complete one, and `proxyUrl` has consumers that reasonably assume the whole source
+  is present (AI observers, the two-up scrubber, hover previews, thumbnails). Nothing that has not
+  opted in can ever see a partial.
+- **The invariant is preserved by moving it, not by breaking it.** `mediaUrl !== proxyUrl` was
+  written inline at the `preferNativeDecode` site; a partial proxy is equally keyframe-dense and
+  equally belongs on the pool, so both sides now read one function, `isIngestProxyUrl`. Routing and
+  decode-path remain the same decision — a source that resolved to a proxy is never pushed onto the
+  element path.
+- **Audio layers are refused outright.** The prefix mux is video-only (no encoded AAC exists in the
+  cache — a finished proxy muxes audio from one PCM buffer at the END of the build), so routing an
+  audio layer there would silently mute it.
+- **No encoder is allocated to mux.** `mp4-muxer` is driven directly from the cached chunks; putting
+  a second hardware encoder session against a running build is this repo's recurring contention
+  shape.
+
+**THE TENSION WITH SLICE 2, STATED PLAINLY.** Prefix-only coverage and playhead-first build order
+pull against each other. A build that starts at segment 15 produces no usable prefix until it wraps
+and refills from 0. And the headline scenario in this plan's own opening — a fresh import, one clip
+spanning the whole source — **gains nothing from this slice**, because a full-span layer's range is
+the whole source and only a complete build covers it. What gains immediately is a TRIMMED clip,
+which is what a timeline becomes after any real editing. Unlocking the full-span case needs either a
+mid-playback swap (forbidden) or a decoder that returns null past its last sample instead of clamping
+(a change to behaviour v5 deliberately relies on) — neither belongs in this slice.
+
+**Verified** (real product path, real Chrome, AMD Vega 8; CPU noted per run):
+
+| check | result |
+|---|---|
+| frozen-tail probe is LIVE (positive control) | a provider built on the adopted partial, asked for `coverage + 30s`, fires `[frozen-tail]` — so the zeros below mean something |
+| covered layer adopts | clip trimmed to 18s, coverage grew 10s → 50s, `fits` flipped true, layer routed to the partial **on the pool** (`preferNativeDecode: false`); **0** frozen-tail warnings across a full-extent scrub (10 seeks, ending on the last frame). CPU 100% at start |
+| uncovered layer refuses | full-span 150.97s layer against 90s of published coverage: `fits: false` for every partial, stayed on the original via the element path, **0** frozen-tail warnings scrubbing the whole clip past coverage. CPU 10% |
+| reopen is usable immediately | killed at 50s coverage; on reopen the prefix republished and the layer was playable **6.9s** after reload, straight from the persisted segment cache (16.1s before the publish was moved ahead of the GOP/metadata/audio steps). CPU 40% |
+| adoption never lands mid-playback | structural: `drainQueue` awaits `waitWhileSuspended()` **before** `buildOne`, so during playback the engine never reaches the publish at all — no partial could be published across 60s of playback, and coverage appeared only after parking. The deferred-adoption guard is therefore belt-and-braces for a publish already in flight when play begins, which a script cannot time. CPU 91–100% |
+
+**Known, pre-existing, not introduced here:** a full asset-list refresh (`setAssets(refreshed…)` on
+reconnect/heal paths) drops `partialProxyUrl` just as it already drops a session `proxyUrl`, which
+momentarily withdraws coverage. Same shape and same blast radius as today's complete-proxy handling;
+left alone rather than quietly widened.
+
+### Original Slice 3 design (rewritten 2026-08-11 for Option B′; superseded by the record above)
 
 *The original text described routing between N independently-playable segment files. Slice 1 does
 not produce those (see the §2 amendment), so that design is gone. A plan describing a design the
@@ -408,18 +470,28 @@ already exists and already reports per-build percent into the notice line.
 
 ---
 
-## 5. Recommendation: Slice 3 next (Slices 1 and 2 are shipped)
+## 5. Where this stands (Slices 1, 2 and 3 shipped 2026-08-11)
 
-*Revised again 2026-08-11. Slices 1 and 2 both shipped; the §4 entries above carry their results.
-**Slice 3 is now the whole remaining feature** — segments exist, they are built where the user is
-looking, and they survive an interrupted session. Nothing else stands between that and "the user
-stops waiting". Read the rewritten Slice 3 above rather than the original: it routes to one
-on-demand mux of the covered run, not to N playable files.*
+**The feature works, for trimmed clips.** A build interrupted at any point leaves segments on disk;
+they are built where the user was looking; and on reopen the covered range is playable in ~7s
+instead of after another full build. The frozen tail that made this dangerous is structurally
+unreachable, proven against the repo's own instrumentation with a positive control.
 
-**Owed before or alongside Slice 3, on a quiet machine:** the segment-duration sweep (§0b) and a
-byte-identity check of an uninterrupted playhead-at-0 build. Neither blocks Slice 3; both are
-cheap once the box is idle, and §0b explains why running them on a loaded one is worse than not
-running them.
+**What it does NOT yet do, and the founder should decide whether to fund it:** a single full-span
+clip — the fresh-import case this plan opens with — still waits for the whole build. See the tension
+recorded under Slice 3. The two ways out are both bigger than a slice:
+
+1. **A frame-provider seam (ADR-021).** A layer that could be handed a *provider* rather than a URL
+   could switch source mid-clip without a `src` swap, which is what prefix-only coverage exists to
+   avoid. This is the deferred architectural direction anyway.
+2. **Make the demuxer return null past its last sample instead of clamping.** That would let a
+   partial proxy fail open per frame. It changes behaviour `SOURCE_PROXY_VERSION` v5 relies on
+   (metadata overshoot) and touches every source, so it is a decoder change with its own gate, not a
+   proxy change.
+
+**Still owed, on a quiet machine (§0b):** the segment-duration sweep, and a byte-identity check of an
+uninterrupted playhead-at-0 build. Neither blocks anything; both are cheap once the box is idle, and
+§0b explains why running them on a loaded one is worse than not running them.
 
 ### Historical: why Slice 1 went first
 

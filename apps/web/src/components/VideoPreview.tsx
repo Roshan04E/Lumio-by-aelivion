@@ -129,6 +129,7 @@ import { getPreviewQualityProfile } from "../editor/performance/previewQuality";
 import { useFlarexCompProxies } from "../editor/flarex/useFlarexCompProxies";
 import { notePlaybackActive, noteRenderScale } from "../editor/performance/frame-stats";
 import { hasMeasuredDenseGop } from "../editor/performance/sourceProxyEngine";
+import { layerFitsCoverage } from "../editor/performance/sourceProxyCoverage";
 import { ensureAdaptiveQualityStarted, getAdaptiveScaleCap, subscribeAdaptiveScaleCap } from "../editor/performance/adaptive-quality";
 import { PreviewStatsOverlay } from "./PreviewStatsOverlay";
 import { ScenePreviewCanvas, type SceneViewerCaptureHandle } from "./ScenePreviewCanvas";
@@ -2712,7 +2713,7 @@ const PreviewLayer = memo(function PreviewLayer({
     timeSeconds: number;
   } | null>(null);
   const asset = resolveLayerAsset(layer, assets, sourceAsset);
-  const mediaUrl = resolvePlaybackUrl(asset);
+  const mediaUrl = resolvePlaybackUrl(asset, layer);
   // Adaptive selection box: a `contain` media layer paints its source at natural aspect (letterboxed inside
   // the frame), so the selection box + handles should hug that rect — not the whole canvas. We measure the
   // source's TRUE intrinsic aspect from the decoded image (asset.width/height metadata is often wrong or
@@ -3785,10 +3786,10 @@ const PreviewLayer = memo(function PreviewLayer({
             // (v32j), one layer down. `hasMeasuredDenseGop` is true only on a positive measurement, so
             // unprobed and unmeasurable sources keep the conservative element decoder exactly as
             // before; nothing is relaxed on a guess.
-            preferNativeDecode={
-              mediaUrl !== (asset as (typeof asset & { proxyUrl?: string }) | undefined)?.proxyUrl &&
-              !hasMeasuredDenseGop(asset?.id)
-            }
+            // (2026-08-11) `mediaUrl !== asset.proxyUrl` moved into `isIngestProxyUrl` so a PARTIAL
+            // proxy — equally keyframe-dense, equally belonging on the pool — is treated the same
+            // and the two sides of the invariant cannot drift.
+            preferNativeDecode={!isIngestProxyUrl(mediaUrl, asset) && !hasMeasuredDenseGop(asset?.id)}
             // DECODE ADMISSION (ADR-012 §6.3, slice S4.3). Evaluated at the CURRENT time, so an
             // animated scale or opacity moves a source's rank as it moves on screen — merit is a
             // property of the graph at an instant, never of when the layer happened to mount.
@@ -4281,7 +4282,10 @@ const AudioPreviewLayer = memo(function AudioPreviewLayer({
   // Ramp resync checkpoint clock (mirrors the video layer's lastRampSyncMsRef) — see the ramp effect.
   const lastAudioRampSyncMsRef = useRef(0);
   const asset = resolveLayerAsset(layer, assets, sourceAsset);
-  const mediaUrl = resolvePlaybackUrl(asset);
+  // The layer is passed so the partial-proxy refusal is EXPLICIT rather than an omission: a
+  // video-only prefix proxy would silently mute an audio layer, and `layerFitsCoverage` rejects
+  // every non-video layer for exactly that reason.
+  const mediaUrl = resolvePlaybackUrl(asset, layer);
 
   // Clip audio FX chain (EQ/compressor/gate/limiter) — same resolver the exports use. Keyed by
   // value so the wiring effect below only reacts to REAL param/order changes, not layer identity.
@@ -6287,7 +6291,7 @@ export function isIncomingInPreroll(
 }
 
 function resolveLayerUrl(layer: TimelineLayer | undefined, assets: SourceAsset[], sourceAsset: SourceAsset | null | undefined) {
-  return resolvePlaybackUrl(resolveLayerAsset(layer, assets, sourceAsset));
+  return resolvePlaybackUrl(resolveLayerAsset(layer, assets, sourceAsset), layer);
 }
 
 /** Synthetic in-memory image asset for a vector graphic layer — its fileUrl is the recolored SVG data URL, so
@@ -6356,7 +6360,22 @@ export function setIngestProxyPlaybackEnabled(enabled: boolean): void {
   ingestProxyPlaybackEnabled = enabled;
 }
 
-function resolvePlaybackUrl(asset: SourceAsset | undefined) {
+/**
+ * PARTIAL PROXIES (2026-08-11, Slice 3). A build that has not finished can still publish a playable
+ * MP4 covering `[0, partialProxyCoverageSeconds)`. It is offered ONLY to a layer whose entire source
+ * range already fits inside that coverage — past coverage the WebCodecs demuxer CLAMPS to the last
+ * sample instead of returning null, so a layer that could out-run its proxy would freeze on one
+ * frame with nothing healing or reporting it. See `sourceProxyCoverage.ts` for the full argument.
+ *
+ * The gate is per LAYER, never per TIME: the URL a layer resolves to is fixed for its whole extent,
+ * so there is no boundary for playback to cross, no mid-playback `src` swap, and the routing
+ * decision stays exactly the decode-path decision (`isIngestProxyUrl` below is the single place
+ * both are read from).
+ *
+ * `layer` is optional and its absence means "cannot vouch for the range" — such a caller gets only
+ * complete proxies. Audio layers are refused by `layerFitsCoverage`: the prefix mux is video-only.
+ */
+function resolvePlaybackUrl(asset: SourceAsset | undefined, layer?: TimelineLayer | undefined) {
   if (!asset) {
     return undefined;
   }
@@ -6365,7 +6384,29 @@ function resolvePlaybackUrl(asset: SourceAsset | undefined) {
   if (!ingestProxyPlaybackEnabled) {
     return asset.fileUrl ?? previewAsset.previewUrl ?? previewAsset.proxyUrl;
   }
-  return previewAsset.proxyUrl ?? previewAsset.previewUrl ?? asset.fileUrl;
+  if (previewAsset.proxyUrl) {
+    return previewAsset.proxyUrl;
+  }
+  if (asset.partialProxyUrl && layerFitsCoverage(layer, asset.partialProxyCoverageSeconds)) {
+    return asset.partialProxyUrl;
+  }
+  return previewAsset.previewUrl ?? asset.fileUrl;
+}
+
+/**
+ * Is this resolved URL one of the asset's ingest proxies (complete or partial)?
+ *
+ * The ONE place the "routing decision === decode-path decision" invariant is expressed. `mediaUrl
+ * !== proxyUrl` used to be written inline at the `preferNativeDecode` site; partial proxies add a
+ * second URL that is equally a keyframe-dense proxy and equally belongs on the pooled WebCodecs
+ * decoder, and duplicating the test is how the two sides drift apart. A source that resolved to a
+ * proxy must never be pushed onto the `<video>` element path — that path is capped at ~16 hardware
+ * decode contexts, and per `WebglMediaLayer` a slow source is a degradation while a capped one is
+ * an outage.
+ */
+function isIngestProxyUrl(url: string | undefined, asset: SourceAsset | undefined): boolean {
+  if (!url || !asset) return false;
+  return url === asset.proxyUrl || url === asset.partialProxyUrl;
 }
 
 function resolvePosterUrl(asset: SourceAsset | undefined) {

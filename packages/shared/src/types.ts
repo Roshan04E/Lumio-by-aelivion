@@ -125,8 +125,26 @@ export interface SourceAsset {
   thumbnailUrl?: string | undefined;
   /** Lower-res preview/proxy URL used for playback when present. */
   previewUrl?: string | undefined;
-  /** Transcoded proxy URL (preferred for playback over fileUrl when present). */
+  /** Transcoded proxy URL (preferred for playback over fileUrl when present). ALWAYS a COMPLETE
+   *  proxy covering the whole source — see `partialProxyUrl` for the in-progress kind. */
   proxyUrl?: string | undefined;
+  /**
+   * PARTIAL proxy: a playable MP4 covering only `[0, partialProxyCoverageSeconds)` of the source,
+   * muxed from a build that has not finished (2026-08-11, Slice 3 of
+   * `plans/source-proxy-progressive.md`). Video-only.
+   *
+   * Kept in its OWN field rather than reusing `proxyUrl` because a truncated file is not a
+   * substitute for a complete one, and `proxyUrl` has many consumers (AI observers, hover previews,
+   * the two-up scrubber, thumbnails) that reasonably assume the whole source is there. Anything
+   * that has not opted in keeps seeing only complete proxies.
+   *
+   * Only the preview's video routing reads this, and only for a layer whose entire source range
+   * fits inside coverage — past coverage the decoder CLAMPS rather than returning null, which is
+   * the frozen tail this repo has shipped twice. See `sourceProxyCoverage.ts`.
+   */
+  partialProxyUrl?: string | undefined;
+  /** Source seconds from 0 that `partialProxyUrl` actually contains. Never a nominal figure. */
+  partialProxyCoverageSeconds?: number | undefined;
   /** Server copy URL once the asset has been uploaded to cloud (worker-fetchable). */
   cloudUrl?: string | undefined;
   fps?: number | undefined;
