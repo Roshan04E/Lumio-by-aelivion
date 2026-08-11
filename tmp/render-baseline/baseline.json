@@ -1,6 +1,6 @@
 {
-  "commit": "b0c957636281b571c666cbc05a78302a8eeb083a",
-  "capturedAt": "2026-08-11T18:45:09.228Z",
+  "commit": "6d58690133984613fa81f945624f65b972902085",
+  "capturedAt": "2026-08-11T19:42:04.845Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -199,12 +199,12 @@
       "height": 1920
     },
     "linear-blur": {
-      "sha256": "cc57d048eb2e9765e073ad0c96f15bb3c7eb5fbbb65d42f5a9cda78975f16349",
+      "sha256": "ff68c53ff7e0928e67544079cbaec4c60579f7cb77120cb41f551baefc247ef0",
       "width": 1080,
       "height": 1920
     },
     "linear-glow": {
-      "sha256": "912e48dbf459b391b9ccf4de1eb5e50525e1975d00883447d5077fa48c0c822f",
+      "sha256": "556787dbfb6edb8232796ee70f4c6ca96a34c8fb9578242a7be5ab3c77962fda",
       "width": 1080,
       "height": 1920
     },
@@ -214,12 +214,22 @@
       "height": 1920
     },
     "linear-stylize": {
-      "sha256": "f49ad4e5755b0d57c79a1c0713a564641ce30630b76744d05db45962e71d1f44",
+      "sha256": "506e7004b43309fe1f340417b86110e453c8959b3cc833a4dabc11caec36fe5a",
+      "width": 1080,
+      "height": 1920
+    },
+    "linear-stylize-plate": {
+      "sha256": "88701a0fa2e3fb04b84021bf53c1ca36e0adcf2deebfd5141f98c3dafcfa1a4e",
       "width": 1080,
       "height": 1920
     },
     "linear-stylize-print": {
-      "sha256": "e6fda6581c7cfaa3016c58b913f6a9277fd31b3deb02a22efd3113d2c77876d0",
+      "sha256": "0b3e75dfc227644cfabe7e9ba49cc18d0e5be9ce631b5c0953d8cd1fb4c76387",
+      "width": 1080,
+      "height": 1920
+    },
+    "linear-stylize-print-plate": {
+      "sha256": "9a055bff1594beb123fc0c179fb8be59672550f2b4bd612830c4c230e912108e",
       "width": 1080,
       "height": 1920
     },
@@ -318,8 +328,18 @@
       "width": 1080,
       "height": 1920
     },
+    "stylize-plate": {
+      "sha256": "88701a0fa2e3fb04b84021bf53c1ca36e0adcf2deebfd5141f98c3dafcfa1a4e",
+      "width": 1080,
+      "height": 1920
+    },
     "stylize-print": {
       "sha256": "e6fda6581c7cfaa3016c58b913f6a9277fd31b3deb02a22efd3113d2c77876d0",
+      "width": 1080,
+      "height": 1920
+    },
+    "stylize-print-plate": {
+      "sha256": "9a055bff1594beb123fc0c179fb8be59672550f2b4bd612830c4c230e912108e",
       "width": 1080,
       "height": 1920
     },

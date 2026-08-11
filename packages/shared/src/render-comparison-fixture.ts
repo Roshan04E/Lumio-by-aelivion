@@ -167,7 +167,11 @@ export type RenderComparisonFixtureKey =
   | "linear-stylize-print"
   | "linear-transition"
   | "pipeline-transition"
-  | "linear-pipeline-transition";
+  | "linear-pipeline-transition"
+  | "stylize-plate"
+  | "linear-stylize-plate"
+  | "stylize-print-plate"
+  | "linear-stylize-print-plate";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -242,7 +246,11 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "linear-stylize-print",
   "linear-transition",
   "pipeline-transition",
-  "linear-pipeline-transition"
+  "linear-pipeline-transition",
+  "stylize-plate",
+  "linear-stylize-plate",
+  "stylize-print-plate",
+  "linear-stylize-print-plate"
 ];
 
 /**
@@ -276,21 +284,35 @@ export interface RenderComparisonFixtureRelation {
 
 export const renderComparisonFixtureRelations: RenderComparisonFixtureRelation[] = [
   {
-    a: "linear-stylize",
-    b: "stylize",
+    a: "linear-stylize-plate",
+    b: "stylize-plate",
     relation: "identical",
     why:
       "the stylize pass-graph is displayReferred, so a linear project must hand it display values and " +
       "get the same picture back. A difference means the opt-out was dropped, or the registry's shader " +
-      "memo and the compositor's program cache disagree about which program the definition owns."
+      "memo and the compositor's program cache disagree about which program the definition owns. " +
+      "MEDIA-ONLY on purpose: one full-frame opaque layer makes the composite an exact identity in both " +
+      "spaces, so this hash is about the EFFECT and nothing else. It moved here from the " +
+      "linear-stylize/stylize pair when slice 3 converted the composite -- see those fixtures."
   },
   {
-    a: "linear-stylize-print",
-    b: "stylize-print",
+    a: "linear-stylize-print-plate",
+    b: "stylize-print-plate",
     relation: "identical",
     why:
-      "same claim on the hardest case: comic-print thresholds hard AND emits authored paper/ink " +
-      "constants, so it moves if either half of the opt-out breaks."
+      "the same claim on the hardest case: comic-print thresholds hard AND emits authored paper/ink " +
+      "constants, so it moves if either half of the opt-out breaks. Media-only for the same reason as " +
+      "the pair above."
+  },
+  {
+    a: "linear-stylize",
+    b: "stylize",
+    relation: "different",
+    why:
+      "NOT the opt-out claim any more -- that lives on the -plate pair above. These two differ only in " +
+      "their COMPOSITE (overlay shape + captions over an unchanged stylized plate), so this row asserts " +
+      "the mirror image: the composite DID convert. Both rows failing together means the light never " +
+      "reached the frame; this one alone means the composite regressed."
   },
   {
     a: "linear-glow",
@@ -1405,6 +1427,10 @@ interface FixtureVariant {
   /** Phase 4.2: two same-track clips joined by a junction transition, sampled MID-transition — exercises
    *  the scene pass mixing the junction in-canvas (vs the DOM overlay). */
   transition?: boolean;
+  /** MEDIA ONLY: empty the overlay track and skip captions, so the frame is one full-frame opaque
+   *  layer. The composite is then the identity (full coverage, NORMAL blend), which is what lets a
+   *  fixture isolate the EFFECT from the composite around it. */
+  soloMedia?: boolean;
   /** Which registry transition joins the junction. Defaults to `crossDissolve` (a MONOLITH definition);
    *  `focusPull` selects the multi-pass PIPELINE path, which assembles and chains one program per pass. */
   transitionKind?: TransitionKind;
@@ -1553,6 +1579,33 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", transition: true, transitionKind: "focusPull" };
     case "linear-pipeline-transition":
       return { effects: [], fit: "cover", transition: true, transitionKind: "focusPull", effectLight: "linear" };
+    /**
+     * The OPT-OUT pair, isolated from the composite (slice 3).
+     *
+     * `linear-stylize` / `stylize` used to be byte-identical twins, and that identity was the assertion
+     * that the artistic family opts out of the light (102eeb5, gated in 472aa9c). Slice 3 ended it —
+     * legitimately: the stylize PASS still runs in display and its pixels are unchanged, but the
+     * COMPOSITE that lays the plate over the overlay shape and captions now weights coverage in light,
+     * so ~6.9% of the frame (the semi-transparent overlay, the soft text edges) moves. The whole-frame
+     * hash can no longer express "the effect opted out".
+     *
+     * So the claim moves to a frame the composite cannot touch: ONE full-frame opaque media layer, no
+     * overlay, no captions. Full coverage + NORMAL blend makes the composite an exact identity in both
+     * spaces (decode → compose → encode round-trips), leaving the effect as the only variable. The
+     * relation between these two is `identical`, and it means exactly what it says again.
+     */
+    case "stylize-plate":
+      return { effects: stylizeEffects, fit: "cover", soloMedia: true };
+    case "linear-stylize-plate":
+      return { effects: stylizeEffects, fit: "cover", soloMedia: true, effectLight: "linear" };
+    // The same isolation for the HARDEST opt-out case: comic-print thresholds hard (halftone dot
+    // coverage, shadow hatching) AND emits authored paper/ink constants, so it moves visibly if either
+    // half of the opt-out breaks. Kept as its own pair rather than folded in, for the same reason it
+    // was a separate relation before slice 3.
+    case "stylize-print-plate":
+      return { effects: stylizePrintEffects, fit: "cover", soloMedia: true };
+    case "linear-stylize-print-plate":
+      return { effects: stylizePrintEffects, fit: "cover", soloMedia: true, effectLight: "linear" };
     case "linear-stylize":
       return { effects: stylizeEffects, fit: "cover", effectLight: "linear" };
     case "linear-stylize-print":
@@ -2180,7 +2233,7 @@ Save this style now`);
           // Transition/nesting fixtures keep the overlay empty so the diff isolates the concern.
           layers: useTextFixture
             ? [textFixtureLayer]
-            : variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition || variant.nestedJunctionPreroll
+            : variant.soloMedia || variant.transition || variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition || variant.nestedJunctionPreroll
               ? []
               : [shapeLayer]
         },
@@ -2216,7 +2269,7 @@ Save this style now`);
   const nestedFixture =
     variant.nestedTransition || variant.nestedGrade || variant.nestedJunctionTransition || variant.nestedJunctionPreroll;
   const compositionWithCaptions =
-    useTextFixture || variant.transition || nestedFixture
+    useTextFixture || variant.soloMedia || variant.transition || nestedFixture
       ? graph.composition!
       : applyCaptionTrackToComposition(graph.composition!, captionTrack, captionStyle);
 

@@ -1,4 +1,4 @@
-import { LEGACY_PROJECT_COLOR_SETTINGS } from "./color/color-management";
+import { NEW_PROJECT_COLOR_SETTINGS } from "./color/color-management";
 import type { ProjectGraph, SpeedKeyframe, TimelineComposition, TimelineLayer, TimelineTrack, TrackAudioKeyframe } from "./types";
 
 export type CompositionOrientation = "portrait" | "landscape";
@@ -62,30 +62,24 @@ export function createDefaultComposition(input: {
       // linear-light effect stage existed" and must keep rendering the old way forever. A new project
       // has to say so in its own saved data (see NEW_PROJECT_COLOR_SETTINGS).
       //
-      // HELD AT LEGACY UNTIL THE EFFECT STAGE IS WHOLE (2026-08-11, linear-light slice 4).
+      // FLIPPED 2026-08-12, when the effect stage became whole (linear-light slice 3).
       //
-      // This deliberately does NOT stamp NEW_PROJECT_COLOR_SETTINGS yet, and the reason is the same
-      // one the LEGACY/NEW split exists for. The stage is only partly converted, so `effectLight:
-      // "linear"` today does not mean "this project mixes light" — it means "this project mixes light
-      // in SOME operations and not others". Projects created in that window would visibly shift when
-      // the remaining slice lands, which is precisely the "existing projects moved under them" outcome
-      // this split was built to prevent. It is just aimed at the NEWEST projects instead of the oldest.
+      // A new project mixes LIGHT. Every operation between the decode and the encode now does:
+      // glow and blur (slice 1), the nest and the fragment stage (slice 2), transitions (slice 4) and
+      // -- last, and largest -- the composite itself (slice 3): mask coverage, opacity, feathered matte
+      // edges, and the blend modes whose formulas are about light. This was held at LEGACY through
+      // three shipped slices precisely so it would never mean "mixes light in SOME operations", which
+      // is a project that shifts again on the next commit.
       //
-      // WHAT IS STILL MISSING, as of slice 4: **slice 3**. Glow and blur (slice 1), the nest and the
-      // fragment stage (slice 2) and now transitions (slice 4) all mix light. `COMPOSITE_FS` does not:
-      // it encodes to display before mask coverage, opacity and the blend, so every merge, every
-      // opacity ramp, every feathered matte edge and `screen`/`add`/`overlay` are still code-value
-      // operations. That is the largest remaining piece and it owns the scene accumulator, so it moves
-      // last. Flip this the commit after it lands, not before.
+      // Two things stay display-referred, and neither is a hole in the stage:
+      //   · the GRADE (S9), which owns its own closed linear segment and hands back display values;
+      //   · effects and blend modes that OPT OUT (`displayReferred`, `BLEND_MODE_LIGHT`) because they
+      //     were authored end-to-end in display -- an artistic look, a 0.5 pivot that means middle grey.
+      //     Opting out IS the stage working; the flag is read, not ignored.
       //
-      // Colour management is a whole-pipeline mode in every professional tool; there is no
-      // half-managed project in Resolve, Fusion or Nuke. Holding the default costs one line, and
-      // flipping it when the stage is whole costs the same one line.
-      //
-      // NEW_PROJECT_COLOR_SETTINGS stays exported and asserted — it is correct, merely not yet
-      // reachable. `color.test.ts` pins this to "display" WITH the slice that flips it, so the flip
-      // is a failing test rather than something to remember.
-      color: { ...LEGACY_PROJECT_COLOR_SETTINGS },
+      // EXISTING projects are untouched: an absent or LEGACY `color` block still renders exactly as it
+      // did, forever. That is the whole purpose of stamping this explicitly rather than defaulting it.
+      color: { ...NEW_PROJECT_COLOR_SETTINGS },
       viewport: {
         preset: frame.preset,
         width: frame.width,

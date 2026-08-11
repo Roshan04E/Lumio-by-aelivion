@@ -473,20 +473,60 @@ fixtures are rebaselined, because a rebaselined fixture makes a bad tuning perma
 
 ### Slice 3 — merges, opacity and mask edges *(3–5 days plus a large rebaseline)*
 
-> **NOT SHIPPED, and it is now the LAST thing between here and the default flip.** Slices 1, 2 and 4 have
-> landed, so the ordering in this document no longer matches the ordering on the branch — this one was
-> stepped over. `COMPOSITE_FS` still encodes to display before mask coverage, opacity and the blend (the
-> `uFromLinear` line, whose comment already says "slice 3 moves them"), so every merge, opacity ramp,
-> feathered matte edge and `screen`/`add`/`overlay` is still a code-value operation.
+> **SHIPPED 2026-08-12 — and the default flipped with it.** Measured on two stacked full-frame plates
+> with no effects anywhere, so the composite is the only thing under test:
 >
-> Nothing may stamp a new project `linear` until this lands: a project stamped today would mix light in
-> glow, blur, the nest and transitions and NOT in the composite that assembles them, and would shift again
-> the day this ships — the exact harm the LEGACY/NEW split exists to prevent. `createDefaultComposition`
-> and the assertion in `color.test.ts` both name this slice as the trigger.
+> ```
+> NORMAL at 50% over black       display 128.0   linear 188.0
+> SCREEN, code 128 on code 128   display 192.0   linear 167.0
+> OVERLAY, same two greys        display 128.0   linear 128.0   <- must NOT move
+> ```
+>
+> Read the screen row twice: mixing light screens **less** on mid-greys, so the display-referred version
+> has been over-brightening every `screen`/`add` composite in the product. "Linear looks brighter" is not
+> a safe intuition.
+>
+> **The seam is NOT option B below.** An 8-bit accumulator cannot hold linear (`SRGB8_ALPHA8` is
+> perceptual by definition — that is why slice 1 chose it — so option B means raw RGBA8 holding linear,
+> i.e. §2.1 banding on every composite; it really wants RGBA16F, which is slice 5). `composite()` also
+> BLITS accumA→accumB on every draw, which is cedd555's decode-on-read hazard exactly, and the
+> accumulator has five other consumers (present, the S8 region blur, transition sides via
+> `precomposeGroup`, matte builds, the export readback). So: decode `uDest` on read, compose in light,
+> encode on write. Storage stays display-referred and every other consumer is untouched by construction
+> — the same seam as slice 4 and cedd555, now the house pattern.
+>
+> **Blend modes were decided one at a time**, by the rule `_luma` settled in slice 4: linear when the
+> formula is about a QUANTITY OF LIGHT (or commutes with the transfer), display when it holds a
+> constant, pivot or pole that means a POSITION IN THE ENCODED RANGE. Linear: `normal`, `multiply`,
+> `screen`, `add`, `difference`, and `darken`/`lighten` (min/max commute exactly, so the choice is free
+> and said to be free). Display: `overlay`/`hard-light`/`soft-light`/`exclusion` (0.5 pivots),
+> `color-dodge`/`color-burn` (perceptual strength, pole at the top of the encoded range), and the
+> non-separable four (built on `_lum`'s display weights and a 0..1 gamut clamp). The table is
+> `Record<BlendMode, …>`, so adding a mode without deciding is a type error, and the GLSL predicate is
+> generated from it. Falsified: classifying `overlay` as linear drops mid-grey-on-mid-grey from 128 to
+> **86**, the pivot landing in the highlights.
+>
+> **The transition asymmetry slice 4 refused to introduce is resolved**: the uniform is set from
+> `linearStage` in the ONE `composite()` call every draw funnels through, so a clip blended inside a
+> transition and outside one run the same instruction with the same uniform.
+>
+> **Premultiplication is unchanged, and that is the answer.** Coverage scales alpha, never colour, and
+> everything here is straight-alpha; the compositor never stores premultiplied colour. `composeWith`
+> premultiplies and divides back internally, and doing that on light is the fix — it is what removes the
+> dark fringe on a feathered edge.
+>
+> **The twin-identity gate moved and got narrower.** `linear-stylize == stylize` failed on the first run
+> — not because the opt-out broke, but because those fixtures carry an overlay and captions whose
+> composite legitimately converted (~6.9% of the frame). The claim moved to `stylize-plate` /
+> `linear-stylize-plate` and the `-print-plate` pair: one full-frame opaque layer, where the composite is
+> an exact identity and the effect is the only variable. Both come back byte-identical. The old pair keeps
+> an inverted row asserting the composite DID convert, so three failures are now distinguishable where
+> two were before.
 
-**Includes:** boundary option **B** — the scene accumulator in linear, `COMPOSITE_FS` and `blend.ts`,
-`PRESENT_FS` as the encode point, and the readback/export/Remotion capture paths; the merge-midpoint
-fixture (§4.3).
+**Included as shipped:** `COMPOSITE_FS` and `blend.ts` (the per-mode table + the blendFunction/composeWith
+split), the four composite probes in `render:linear-gate`, and the two isolated opt-out fixture pairs.
+The option-B parts of the original scope — accumulator in linear, `PRESENT_FS` as the encode point, the
+readback/export capture paths — were deliberately NOT done; see the note above.
 
 **Excludes:** transitions.
 
@@ -596,6 +636,13 @@ outcome this design exists to prevent, and no gate would catch it** — the fixt
 compositions and would happily stamp the new default themselves. Which is the last fixture requirement:
 **every render-comparison fixture stamps `effectLight` explicitly**, so the gate never inherits a default
 and never silently changes arm.
+
+**STATUS 2026-08-12: the default is FLIPPED.** `createDefaultComposition` stamps
+`NEW_PROJECT_COLOR_SETTINGS` and `color.test.ts` pins `"linear"`. The fallback audit above was re-run at
+the flip and is clean: `DEFAULT_PROJECT_COLOR_SETTINGS` is now literally an alias of the LEGACY constant,
+and the three `??` sites (`composition-style.ts:1229`, `color/pipeline.ts:213`, and the export path) all
+name LEGACY explicitly — so "I was handed nothing" still means the old contract at every site, which is
+what makes the flip safe rather than merely intended.
 
 **UI:** one checkbox in project settings — *"Blend effects in linear light"* — with a short note that it
 changes how existing effects look. Flipping it on an existing project is allowed, warned, and undoable.

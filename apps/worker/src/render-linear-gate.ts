@@ -256,6 +256,108 @@ async function pipelineMidpointFor(light: "display" | "linear"): Promise<number>
   return crossfadeMidpointFor(light, "focusPull");
 }
 
+/**
+ * Probe 4: the COMPOSITE (slice 3) — coverage and the blend, not the effect stage.
+ *
+ * Two full-frame shapes, one over the other, no effects anywhere: the source never enters the linear
+ * effect pool, so this measures the composite and nothing else. Three measurements, and the third is
+ * the one that makes the other two mean something:
+ *
+ *   a) NORMAL at 50% opacity, white over black. Coverage-weighted, so it is the same arithmetic as the
+ *      dissolve: codes -> 128, light -> 188. This is the alpha-ramp/feather claim.
+ *   b) SCREEN at full opacity, code 128 over code 128. Screen is a light operation, so it moves:
+ *          display   0.502 + 0.502 - 0.502^2 = 0.752            -> code 192
+ *          linear    2(0.2159) - 0.2159^2   = 0.385, encoded    -> code 167
+ *      Note the direction: mixing light screens LESS on mid-greys, i.e. the display-referred version
+ *      has been over-brightening every screen/add composite in the product.
+ *   c) OVERLAY at full opacity, same two greys. Overlay is DISPLAY-referred (its 0.5 pivot means middle
+ *      grey), and at full coverage the compose collapses to B alone — so this must come back
+ *      BYTE-IDENTICAL in both arms. It is the per-mode decision, measured: (b) proves the linear modes
+ *      moved, (c) proves the display-referred ones did not, and a table that silently classified
+ *      everything one way fails one of them.
+ */
+const COMPOSITE_FRAME = 12;
+
+function compositeGraphWith(
+  light: "display" | "linear",
+  spec: { under: string; over: string; blend: string; opacity: number }
+) {
+  const fixture = createRenderComparisonFixture("transition");
+  const graph = JSON.parse(JSON.stringify(fixture.graph)) as {
+    projectId: string;
+    composition: {
+      settings: { color: { effectLight: string } };
+      tracks: { id: string; type: string; layers: Record<string, unknown>[] }[];
+    };
+  };
+  graph.composition.settings.color.effectLight = light;
+  const video = graph.composition.tracks.find((t) => t.type === "video")!;
+  const template = video.layers[0]!;
+  const plate = (id: string, trackId: string, color: string, blend: string, opacity: number) => ({
+    ...template,
+    id,
+    trackId,
+    type: "shape",
+    shapeKind: "rectangle",
+    widthPercent: 100,
+    heightPercent: 100,
+    borderRadius: 0,
+    color,
+    blendMode: blend,
+    startSeconds: 0,
+    durationSeconds: 12,
+    assetId: undefined,
+    transitionIn: undefined,
+    effects: [],
+    masks: undefined,
+    keyframes: [],
+    transform: { position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity }
+  });
+  for (const track of graph.composition.tracks) {
+    if (track.type === "video") track.layers = [plate("probe_under", track.id, spec.under, "normal", 100)];
+    else if (track.type === "overlay") track.layers = [plate("probe_over", track.id, spec.over, spec.blend, spec.opacity)];
+    else track.layers = [];
+  }
+  return { graph, assets: fixture.assets };
+}
+
+async function compositeValueFor(
+  light: "display" | "linear",
+  label: string,
+  spec: { under: string; over: string; blend: string; opacity: number }
+): Promise<number> {
+  const { graph, assets } = compositeGraphWith(light, spec);
+  const manifest = buildRenderManifest({
+    projectId: graph.projectId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the probe graph is a fixture clone
+    graph: graph as any,
+    assets,
+    quality: "final",
+    createdAt: new Date(0).toISOString()
+  });
+  const file = path.join(outDir, `composite-${label}-${light}.png`);
+  await renderManifestStill({ manifest, frame: COMPOSITE_FRAME, outputLocation: file, rendererMode: "webgl" });
+  const png = PNG.sync.read(fs.readFileSync(file));
+  const at = (x: number, y: number): number => {
+    const o = (y * png.width + x) * 4;
+    return 0.2126 * png.data[o]! + 0.7152 * png.data[o + 1]! + 0.0722 * png.data[o + 2]!;
+  };
+  const cx = Math.floor(png.width / 2);
+  const cy = Math.floor(png.height / 2);
+  const mid = at(cx, cy);
+  const corners = [at(cx >> 1, cy >> 1), at(cx + (cx >> 1), cy >> 1), at(cx >> 1, cy + (cy >> 1))];
+  const spread = Math.max(...corners, mid) - Math.min(...corners, mid);
+  console.log(
+    `  ${label.padEnd(8)} ${light.padEnd(7)} value=${mid.toFixed(1).padStart(6)}   flatness spread=${spread.toFixed(1)}`
+  );
+  assert.ok(
+    spread < 2,
+    `The composite probe's frame is not flat (spread ${spread.toFixed(1)} codes) — it is measuring ` +
+      `something other than two stacked full-frame plates, so its value means nothing.`
+  );
+  return mid;
+}
+
 async function main(): Promise<void> {
   fs.mkdirSync(outDir, { recursive: true });
   console.log(`Linear-light gate: blurred hard edge, sigma ${SIGMA}, tolerance ±${TOLERANCE} codes\n`);
@@ -339,6 +441,51 @@ async function main(): Promise<void> {
     `The pipeline arms differ by only ${(pLinear - pDisplay).toFixed(1)} codes; the spaces are ~60 apart.`
   );
   console.log(`  OK  the pipeline arms are ${(pLinear - pDisplay).toFixed(1)} codes apart\n`);
+
+  // ---- Probe 4: the composite (slice 3) ------------------------------------------------------------
+  console.log(`Composite: two stacked full-frame plates, no effects — coverage and blend only\n`);
+  const OPACITY_SPEC = { under: "#000000", over: "#ffffff", blend: "normal", opacity: 50 };
+  const GREY_ON_GREY = { under: "#808080", over: "#808080", opacity: 100 };
+  const cDisplay = await compositeValueFor("display", "opacity", OPACITY_SPEC);
+  const cLinear = await compositeValueFor("linear", "opacity", OPACITY_SPEC);
+  const sDisplay = await compositeValueFor("display", "screen", { ...GREY_ON_GREY, blend: "screen" });
+  const sLinear = await compositeValueFor("linear", "screen", { ...GREY_ON_GREY, blend: "screen" });
+  const oDisplay = await compositeValueFor("display", "overlay", { ...GREY_ON_GREY, blend: "overlay" });
+  const oLinear = await compositeValueFor("linear", "overlay", { ...GREY_ON_GREY, blend: "overlay" });
+  console.log("");
+
+  assert.ok(
+    Math.abs(cDisplay - EXPECTED_DISPLAY) <= TOLERANCE,
+    `DISPLAY arm 50% composite ${cDisplay.toFixed(1)} is not ${EXPECTED_DISPLAY}±${TOLERANCE}. A ` +
+      `display-referred composite weights CODE values by coverage.`
+  );
+  console.log(`  OK  display composite weights CODES by coverage (${cDisplay.toFixed(1)} ≈ ${EXPECTED_DISPLAY})`);
+  assert.ok(
+    Math.abs(cLinear - EXPECTED_LINEAR) <= TOLERANCE,
+    `LINEAR arm 50% composite ${cLinear.toFixed(1)} is not ${EXPECTED_LINEAR}±${TOLERANCE}. Reading ` +
+      `~${EXPECTED_DISPLAY} means opacity, masks and feathered edges are still weighting code values — the ` +
+      `defect that reads as a dark fringe on every feathered matte, and the whole point of slice 3.`
+  );
+  console.log(`  OK  linear composite weights LIGHT by coverage (${cLinear.toFixed(1)} ≈ ${EXPECTED_LINEAR})`);
+
+  // Screen: a LIGHT mode, so it must move, and specifically DOWNWARD on mid-greys.
+  assert.ok(
+    Math.abs(sDisplay - 192) <= TOLERANCE && Math.abs(sLinear - 167) <= TOLERANCE,
+    `screen of code 128 over code 128 read ${sDisplay.toFixed(1)} / ${sLinear.toFixed(1)}, expected ` +
+      `192 / 167 (±${TOLERANCE}). Those are the closed forms: 0.502+0.502-0.502² display, and ` +
+      `2(0.2159)-0.2159² in light, encoded.`
+  );
+  console.log(`  OK  screen is a LIGHT mode and moved  (${sDisplay.toFixed(1)} → ${sLinear.toFixed(1)}, darker by ${(sDisplay - sLinear).toFixed(1)})`);
+
+  // Overlay: a DISPLAY-referred mode at full coverage. The compose collapses to B, and B is computed on
+  // display values in both arms, so the two must agree to within 8-bit quantisation.
+  assert.ok(
+    Math.abs(oDisplay - oLinear) <= 1,
+    `overlay read ${oDisplay.toFixed(1)} display vs ${oLinear.toFixed(1)} linear. A display-referred blend ` +
+      `function at full coverage must be byte-identical in both arms; a difference means the per-mode ` +
+      `table is not reaching the shader, and every overlay/soft-light/hue composite just shifted.`
+  );
+  console.log(`  OK  overlay is DISPLAY-referred and did NOT move (${oDisplay.toFixed(1)} vs ${oLinear.toFixed(1)})\n`);
 
   console.log(`Linear-light gate PASSED. Renders in ${path.relative(repoRoot, outDir)}\n`);
 }

@@ -21,7 +21,7 @@
  * back to the DOM renderer for those comps (Phase 4 brings tilt + text/shape into this pass).
  */
 
-import { BLEND_GLSL, blendModeIndex } from "./blend";
+import { BLEND_GLSL, BLEND_LIGHT_GLSL, blendModeIndex } from "./blend";
 import {
   FULLSCREEN_TRI_VS,
   RenderTarget,
@@ -666,8 +666,18 @@ uniform vec4 uCrop;       // edge insets: left, right, top, bottom (fractions of
 // S6, the linear stage's EXIT. Set per-draw, so the fast path (no blur/glow) never sets it and stays
 // byte-identical. uSrc is the finished linear plate; the accumulator below is display-referred.
 uniform bool uFromLinear;
+/**
+ * S3, the composite itself. When set, coverage and the blend run on LIGHT: the accumulator is decoded
+ * on read and the result re-encoded on write, so storage stays display-referred 8-bit and every other
+ * consumer of the accumulator (present, region blur, transition sides, readback) is untouched.
+ *
+ * Set from the project's stage, so a clip composited inside a transition side and the same clip
+ * composited on the main timeline agree — the asymmetry slice 4 refused to introduce halfway.
+ */
+uniform bool uLinearComposite;
 out vec4 fragColor;
 ${BLEND_GLSL}
+${BLEND_LIGHT_GLSL}
 ${TRANSFER_GLSL}
 void main(){
   // Crop trims the frame edges → the trimmed area reads transparent (the backdrop shows through).
@@ -681,9 +691,10 @@ void main(){
   if (all(greaterThanEqual(mediaUv, vec2(0.0))) && all(lessThanEqual(mediaUv, vec2(1.0)))) {
     src = texture(uSrc, mediaUv);
   }
-  // ENCODE before anything else touches it: mask coverage, opacity and the blend all belong to the
-  // display-referred composite (slice 3 moves them), so they must see display values.
-  if (uFromLinear) src.rgb = sceneToDisplay(src.rgb);
+  // COVERAGE FIRST, in either space. Mask, track matte and opacity scale ALPHA and never touch rgb, and
+  // the colours here are STRAIGHT (never premultiplied — W3C straight-alpha, see blend.ts), so these
+  // three lines carry no colour-space meaning at all and are identical either side of the bracket.
+  // They moved above the encode so both arms share them; the display arm is unchanged by the move.
   if (uHasMask) {
     // The clip-mask matte is COMP-space; sample it at the fragment's comp position, not v_uv. For a
     // comp-filling quad the two coincide, but for an element-box (text/shape) or tilted quad v_uv is
@@ -700,6 +711,23 @@ void main(){
   }
   src.a *= uOpacity;
   vec4 dst = texture(uDest, gl_FragCoord.xy / uResolution);
+  if (uLinearComposite) {
+    // The accumulator is display-referred; the source is linear only when it came out of the effect
+    // pool. Get both in both spaces (the transfer pair is an exact round trip, so no arm loses data).
+    vec3 sDisp = uFromLinear ? sceneToDisplay(src.rgb) : src.rgb;
+    vec3 sLin  = uFromLinear ? src.rgb : sceneToLinear(src.rgb);
+    vec3 dLin  = sceneToLinear(dst.rgb);
+    // The blend FUNCTION keeps the units it was authored in; the COMPOSE is always light. Same rule
+    // that kept _luma display-referred inside the linear transition harness.
+    vec3 B = blendIsDisplayReferred(uBlend)
+      ? sceneToLinear(blendFunction(uBlend, dst.rgb, sDisp))
+      : blendFunction(uBlend, dLin, sLin);
+    vec4 outc = composeWith(uBlend, vec4(dLin, dst.a), vec4(sLin, src.a), B);
+    fragColor = vec4(sceneToDisplay(outc.rgb), outc.a);
+    return;
+  }
+  // ENCODE at the very end: the display-referred composite must see display values.
+  if (uFromLinear) src.rgb = sceneToDisplay(src.rgb);
   fragColor = blendCompose(uBlend, dst, src);
 }`;
 
@@ -1356,6 +1384,8 @@ export class SceneCompositor {
   private uBlurToLinear!: WebGLUniformLocation | null;
   private uPlateToLinear!: WebGLUniformLocation | null;
   private uCompositeFromLinear: WebGLUniformLocation | null = null;
+  /** S3: composite coverage + blend in light (the project stage), decoding/encoding the accumulator. */
+  private uLinearComposite: WebGLUniformLocation | null = null;
   private uGlowPlate!: WebGLUniformLocation | null;
   private uGlowTex!: WebGLUniformLocation | null;
   private uGlowColor!: WebGLUniformLocation | null;
@@ -1778,6 +1808,7 @@ export class SceneCompositor {
     this.uContentPan = gl.getUniformLocation(program, "uContentPan");
     this.uCrop = gl.getUniformLocation(program, "uCrop");
     this.uCompositeFromLinear = gl.getUniformLocation(program, "uFromLinear");
+    this.uLinearComposite = gl.getUniformLocation(program, "uLinearComposite");
   }
 
   private makeTex(): WebGLTexture {
@@ -2873,6 +2904,9 @@ export class SceneCompositor {
     gl.bindTexture(gl.TEXTURE_2D, dest ? this.emptyTex : this.accumA.tex);
     gl.uniform1i(this.uDest, 2);
     gl.uniform1i(this.uCompositeFromLinear, fromLinear ? 1 : 0);
+    // S3. Read from the STAGE, not from the caller: every composite draw in the frame -- main timeline,
+    // nest, transition side, matte build -- goes through this one call, so they cannot disagree.
+    gl.uniform1i(this.uLinearComposite, this.linearStage ? 1 : 0);
     gl.uniform2f(this.uResolution, w, h);
     gl.uniform1f(this.uOpacity, Math.max(0, Math.min(1, opacity)));
     gl.uniform1i(this.uBlend, blendModeIndex(blend));

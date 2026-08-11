@@ -444,29 +444,24 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   const fresh = createDefaultComposition({ id: "p1", name: "n", durationSeconds: 10 });
   check("a new composition STAMPS its colour settings", fresh.settings.color !== undefined);
   /**
-   * A new project is stamped DISPLAY, not linear — and this assertion is the reminder to flip it.
+   * A new project is stamped LINEAR. THE FLIP HAPPENED — 2026-08-12, linear-light slice 3.
    *
-   * `NEW_PROJECT_COLOR_SETTINGS` is correct and stays exported; it is simply not reachable yet.
+   * This assertion spent three slices as a reminder that deliberately FAILED the day the default moved,
+   * rather than silently agreeing; it came due twice and the answer was "not yet" both times (slice 4's
+   * note corrected slice 1's, which had mis-scoped what was blocking). It now pins the flip instead.
    *
-   * UPDATED 2026-08-11, and the update is the point of writing it this way. Slice 4 (transitions) has
-   * now landed, so the reminder came due — and the answer is still "not yet", for a reason the earlier
-   * note got wrong. Transitions were never the last display-referred stage: **SLICE 3 IS UNSHIPPED**.
-   * `COMPOSITE_FS` still encodes to display before mask coverage, opacity and the blend (read the
-   * `uFromLinear` line and the comment beside it), so every merge, every opacity ramp, every feathered
-   * matte edge and every `screen`/`add`/`overlay` is still mixing code values. A project stamped
-   * "linear" today would mix light in glow, blur, the nest and transitions, and NOT in the composite
-   * that assembles them — and it would shift again the day slice 3 lands, which is exactly the harm
-   * the setting exists to prevent.
+   * The stage is whole: the plate boundary (slice 1), the fragment stage (slice 2), the composite —
+   * coverage, opacity, mask edges and the light-referred blend modes (slice 3) — and transitions
+   * (slice 4). The grade (S9) and the `displayReferred` / `BLEND_MODE_LIGHT` opt-outs stay display, and
+   * that is the stage working rather than an exception to it.
    *
-   * WHEN THE STAGE IS WHOLE — after linear-light SLICE 3 (merges, opacity, mask edges, the scene
-   * accumulator, `PRESENT_FS` as the encode point) — flip `createDefaultComposition` to
-   * `NEW_PROJECT_COLOR_SETTINGS` and flip this assertion with it. Deliberately written so it FAILS the
-   * day someone changes the default without reading this, rather than silently agreeing.
+   * What must NOT change: the two constants stay separate and an absent `color` block still means
+   * legacy forever. If someone ever "simplifies" those, the checks above fail before this one does.
    */
-  check("a new composition stamps DISPLAY until the stage is whole (flip after slice 3)", fresh.settings.color?.effectLight === "display");
+  check("a new composition stamps LINEAR — the stage is whole (flipped in slice 3)", fresh.settings.color?.effectLight === "linear");
   check(
-    "NEW_PROJECT_COLOR_SETTINGS still says linear — held back, not redefined",
-    NEW_PROJECT_COLOR_SETTINGS.effectLight === "linear"
+    "and it is NEW_PROJECT_COLOR_SETTINGS that it stamps, not a third copy",
+    fresh.settings.color?.effectLight === NEW_PROJECT_COLOR_SETTINGS.effectLight
   );
 }
 
@@ -649,6 +644,90 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
       def.params.every((p) => names.includes(p.name))
     );
   }
+}
+
+// 41. Slice 3 — the composite in light. What is decidable without a GPU is decided here; the picture
+//     itself is `render:linear-gate` probe 4.
+{
+  const {
+    BLEND_MODE_INDEX,
+    BLEND_MODE_LIGHT,
+    BLEND_LIGHT_GLSL,
+    DISPLAY_REFERRED_BLEND_INDICES,
+    blendComposeJs,
+    blendFunctionJs,
+    composeWithJs
+  } = await import("./blend");
+  const { rec709CodeToLinear, rec709LinearToCode } = await import("./color-management");
+
+  const modes = Object.keys(BLEND_MODE_INDEX) as (keyof typeof BLEND_MODE_INDEX)[];
+  check("every blend mode has a light-space decision", modes.every((m) => BLEND_MODE_LIGHT[m] != null));
+
+  // The shader predicate is GENERATED from the table, so drift is impossible by construction — this
+  // checks the generation, not the agreement.
+  // Whole-token match: `mode==1` is a prefix of `mode==11`, which would read multiply (1) as present
+  // because exclusion (11) is.
+  const declares = (i: number): boolean => new RegExp(`mode==${i}(?![0-9])`).test(BLEND_LIGHT_GLSL);
+  check(
+    "the GLSL predicate lists exactly the display-referred indices",
+    DISPLAY_REFERRED_BLEND_INDICES.every(declares) &&
+      modes.filter((m) => BLEND_MODE_LIGHT[m] === "linear").every((m) => !declares(BLEND_MODE_INDEX[m]))
+  );
+
+  // The reason the pivot modes are display-referred, as arithmetic rather than assertion: they hold
+  // MID-GREY fixed. In linear, 0.5 light is code 188 — so the pivot would sit in the highlights and
+  // every one of these would darken the picture.
+  for (const mode of ["overlay", "hard-light", "soft-light", "exclusion"] as const) {
+    const b = blendFunctionJs(BLEND_MODE_INDEX[mode], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+    check(`${mode} holds mid-grey fixed (a 0.5 pivot = a DISPLAY constant)`, Math.abs(b[0] - 0.5) < 1e-9);
+    check(`...so ${mode} is classified display`, BLEND_MODE_LIGHT[mode] === "display");
+  }
+
+  // darken/lighten are min/max, and the transfer function is monotonic, so they commute with it
+  // EXACTLY: their classification is a free choice, and this is the evidence that it is free.
+  for (const mode of ["darken", "lighten"] as const) {
+    const idx = BLEND_MODE_INDEX[mode];
+    const cb: [number, number, number] = [0.2, 0.75, 0.4];
+    const cs: [number, number, number] = [0.6, 0.3, 0.4];
+    const inDisplay = blendFunctionJs(idx, cb, cs);
+    const inLinear = blendFunctionJs(
+      idx,
+      cb.map(rec709CodeToLinear) as [number, number, number],
+      cs.map(rec709CodeToLinear) as [number, number, number]
+    );
+    check(
+      `${mode} gives the same answer in either space (min/max commute with a monotonic transfer)`,
+      inDisplay.every((v, i) => Math.abs(v - rec709LinearToCode(inLinear[i]!)) < 1e-9)
+    );
+  }
+
+  // The refactor that made the two halves separately callable must not have moved a single value.
+  const dst = [0.2, 0.4, 0.1, 0.8] as [number, number, number, number];
+  const src = [0.8, 0.5, 0.6, 0.55] as [number, number, number, number];
+  check(
+    "splitting blendCompose into blendFunction + composeWith is value-identical for every mode",
+    modes.every((m) => {
+      const i = BLEND_MODE_INDEX[m];
+      const whole = blendComposeJs(i, dst, src);
+      const split = composeWithJs(i, dst, src, blendFunctionJs(i, [dst[0], dst[1], dst[2]], [src[0], src[1], src[2]]));
+      return whole.every((v, k) => Math.abs(v - split[k]!) < 1e-12);
+    })
+  );
+
+  // The property `render:linear-gate` probe 4 leans on: at FULL coverage the compose collapses to B
+  // alone, so a display-referred mode over an opaque backdrop must be byte-identical in both arms —
+  // while a linear mode moves. That is what makes the probe's third measurement a real control.
+  check(
+    "at full opacity the compose is exactly B (so a display-referred mode cannot move)",
+    modes
+      .filter((m) => m !== "add")
+      .every((m) => {
+        const i = BLEND_MODE_INDEX[m];
+        const B = blendFunctionJs(i, [0.2, 0.4, 0.1], [0.8, 0.5, 0.6]);
+        const out = composeWithJs(i, [0.2, 0.4, 0.1, 1], [0.8, 0.5, 0.6, 1], B);
+        return out.slice(0, 3).every((v, k) => Math.abs(v - B[k]!) < 1e-12);
+      })
+  );
 }
 
 if (failures > 0) {

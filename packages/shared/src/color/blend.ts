@@ -43,6 +43,87 @@ export function blendModeIndex(mode: BlendMode | undefined): number {
 }
 
 /**
+ * WHICH SPACE EACH BLEND FUNCTION IS AUTHORED IN (linear-light programme, slice 3).
+ *
+ * Two different things happen in `blendCompose`, and only one of them is a question:
+ *
+ *   · The COMPOSITING algebra — `co = as(1-ab)cs + as·ab·B + (1-as)ab·cb`, and `add`'s weighted sum —
+ *     is coverage-weighted light, always and for every mode. Weighting CODE values by a coverage
+ *     fraction is the classic dark-edge error; there is nothing to decide there.
+ *   · The BLEND FUNCTION `B = f(cb, cs)` is authored, and the answer is per mode. The rule: a mode is
+ *     `linear` when its formula is about the QUANTITY of light (or is invariant to the transfer
+ *     function); it stays `display` when its formula contains a constant, pivot or pole that means a
+ *     POSITION IN THE ENCODED RANGE. Same rule that kept `_luma` display-referred in slice 4 and sent
+ *     the whole artistic family out of the stage in 102eeb5 — a "0.5" that means middle grey is a
+ *     display-graph fact, and linear 0.5 is code 188, up in the highlights.
+ *
+ * Measured, not argued: misclassifying `overlay` as linear drops a mid-grey-on-mid-grey composite from
+ * code 128 to 86 (`render:linear-gate` probe 4c), which is the pivot landing in the highlights.
+ *
+ * `Record<BlendMode, ...>` deliberately: adding a blend mode without deciding this is a type error, not
+ * a silently-linear default. `BLEND_LIGHT_GLSL` is GENERATED from this table, so the shader predicate
+ * and the JS port cannot drift.
+ */
+export type BlendLightSpace = "linear" | "display";
+
+export const BLEND_MODE_LIGHT: Record<BlendMode, BlendLightSpace> = {
+  // B = cs. No arithmetic to be in a space; the compose around it goes to light.
+  normal: "linear",
+  // b*s is attenuation — light through a filter. This is the mode whose display-referred version makes
+  // shadows crush, and the one a colourist expects to behave physically.
+  multiply: "linear",
+  // 1-(1-b)(1-s): the complement of multiply, i.e. two light contributions overlapping. Unambiguous.
+  screen: "linear",
+  // Pivots at 0.5 (it is hard-light with the operands swapped). The pivot means MIDDLE GREY.
+  overlay: "display",
+  // min/max are per-channel and the transfer function is monotonic, so these commute with it exactly:
+  // the same result in either space. Classified `linear` because the surrounding compose is, and
+  // because a free choice should not look like a considered one.
+  darken: "linear",
+  lighten: "linear",
+  // b/(1-s) and its complement. The strength is indexed by s as a PERCEPTUAL amount (s = 0.5 doubles;
+  // the pole sits at the top of the encoded range), so these are exposure CONTROLS authored against
+  // display, not exposure arithmetic.
+  "color-dodge": "display",
+  "color-burn": "display",
+  // Explicit 0.5 pivot.
+  "hard-light": "display",
+  // 0.5 pivot AND a second breakpoint at b = 0.25, both authored against the encoded ramp.
+  "soft-light": "display",
+  // |b - s| — a subtraction with no authored constant, and its fixed point (equal inputs → 0) survives
+  // either space. As light it is what a difference of two exposures actually is.
+  difference: "linear",
+  // Looks like difference's sibling but is not: b + s - 2bs holds b = 0.5 fixed for ANY s, which is a
+  // mid-grey pivot by construction.
+  exclusion: "display",
+  // The non-separable four are colour-APPEARANCE operations: they move hue/sat/lightness of the encoded
+  // colour, via `_lum`'s (0.3, 0.59, 0.11) display weights and a `_clipColor` gamut clamp that assumes
+  // a 0..1 display range. "Luminosity" here means perceptual lightness, not luminance.
+  hue: "display",
+  saturation: "display",
+  color: "display",
+  luminosity: "display",
+  // plus-lighter: adding light, weighted by coverage. The definition of a linear operation.
+  add: "linear",
+};
+
+/** The mode indices whose blend FUNCTION must see display values. Generated, never hand-listed. */
+export const DISPLAY_REFERRED_BLEND_INDICES: number[] = (Object.keys(BLEND_MODE_LIGHT) as BlendMode[])
+  .filter((mode) => BLEND_MODE_LIGHT[mode] === "display")
+  .map((mode) => BLEND_MODE_INDEX[mode])
+  .sort((a, b) => a - b);
+
+/**
+ * `bool blendIsDisplayReferred(int mode)` — the GLSL twin of the table above, built from it so the two
+ * cannot disagree. Appended to `BLEND_GLSL` by consumers that need the linear composite.
+ */
+export const BLEND_LIGHT_GLSL = `
+bool blendIsDisplayReferred(int mode){
+  return ${DISPLAY_REFERRED_BLEND_INDICES.map((i) => `mode==${i}`).join("||")};
+}
+`;
+
+/**
  * GLSL (ES 3.00) implementation. Provides `vec4 blendCompose(int mode, vec4 dest, vec4 src)` which
  * composites `src` over `dest` (both straight-alpha) using the blend function selected by `mode`.
  */
@@ -96,7 +177,13 @@ vec3 _blendFn(int mode, vec3 cb, vec3 cs){
   return cs; // mode 0 normal
 }
 
-vec4 blendCompose(int mode, vec4 dest, vec4 src){
+// The blend FUNCTION, exposed on its own (slice 3): a display-referred mode computes B on display
+// values while the compose around it runs on light, so the two halves need separate entry points.
+vec3 blendFunction(int mode, vec3 cb, vec3 cs){ return _blendFn(mode, cb, cs); }
+
+// The compositing algebra, given an already-computed B. Coverage-weighted, so it is a light operation
+// for every mode (see BLEND_MODE_LIGHT). The add mode ignores B by definition.
+vec4 composeWith(int mode, vec4 dest, vec4 src, vec3 B){
   float ab = dest.a; vec3 cb = dest.rgb;
   float as = src.a;  vec3 cs = src.rgb;
   if(mode==16){ // add / plus-lighter compositing operator
@@ -104,10 +191,13 @@ vec4 blendCompose(int mode, vec4 dest, vec4 src){
     float ao = min(1.0, as + ab);
     return vec4(ao>0.0 ? co/ao : vec3(0.0), ao);
   }
-  vec3 B = _blendFn(mode, cb, cs);
   vec3 co = as*(1.0-ab)*cs + as*ab*B + (1.0-as)*ab*cb;
   float ao = as + ab*(1.0-as);
   return vec4(ao>0.0 ? co/ao : vec3(0.0), ao);
+}
+
+vec4 blendCompose(int mode, vec4 dest, vec4 src){
+  return composeWith(mode, dest, src, _blendFn(mode, dest.rgb, src.rgb));
 }
 `;
 
@@ -179,8 +269,13 @@ function blendFn(mode: number, cb: V3, cs: V3): V3 {
   }
 }
 
-/** JS reference of `blendCompose` — composites straight-alpha `src` over `dest` in mode. */
-export function blendComposeJs(mode: number, dest: Rgba, src: Rgba): Rgba {
+/** JS reference of `blendFunction` — the blend function B alone, without the compose around it. */
+export function blendFunctionJs(mode: number, cb: [number, number, number], cs: [number, number, number]): V3 {
+  return blendFn(mode, cb, cs);
+}
+
+/** JS reference of `composeWith` — the compositing algebra, given an already-computed B. */
+export function composeWithJs(mode: number, dest: Rgba, src: Rgba, B: V3): Rgba {
   const ab = dest[3];
   const cb: V3 = [dest[0], dest[1], dest[2]];
   const as = src[3];
@@ -190,9 +285,13 @@ export function blendComposeJs(mode: number, dest: Rgba, src: Rgba): Rgba {
     const co: V3 = [cs[0] * as + cb[0] * ab, cs[1] * as + cb[1] * ab, cs[2] * as + cb[2] * ab];
     return ao > 0 ? [co[0] / ao, co[1] / ao, co[2] / ao, ao] : [0, 0, 0, ao];
   }
-  const B = blendFn(mode, cb, cs);
   const f = (v: number, b: number, db: number) => as * (1 - ab) * v + as * ab * b + (1 - as) * ab * db;
   const ao = as + ab * (1 - as);
   const co: V3 = [f(cs[0], B[0], cb[0]), f(cs[1], B[1], cb[1]), f(cs[2], B[2], cb[2])];
   return ao > 0 ? [co[0] / ao, co[1] / ao, co[2] / ao, ao] : [0, 0, 0, ao];
+}
+
+/** JS reference of `blendCompose` — composites straight-alpha `src` over `dest` in mode. */
+export function blendComposeJs(mode: number, dest: Rgba, src: Rgba): Rgba {
+  return composeWithJs(mode, dest, src, blendFn(mode, [dest[0], dest[1], dest[2]], [src[0], src[1], src[2]]));
 }
