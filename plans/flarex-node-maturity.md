@@ -94,8 +94,8 @@ track, and the result is **applicable** — match-move onto a transform, stabili
 | Backward | **No.** `startTimeSeconds` only trims the front; tracking always runs to the end. There is no reverse pass. `track-cleanup` does forward-backward re-tracking *between adjacent frames* as an error metric — that is not the same thing and does not give you a track that runs backwards from a mid-shot anchor. |
 | Occlusion | **Partial, and better than most.** It coasts on the smooth-motion prior, widens the search, and re-acquires semantically. What it does not do is *record a gap* — a low-confidence stretch produces points, not holes, so the track claims knowledge it does not have. That is the one Blender practice most worth copying and the one not copied. |
 | Applicable → match-move | **Yes,** translation only. |
-| Applicable → stabilize | **No.** No inverse mode anywhere. |
-| Applicable → drive a mask | **No.** The tracker outputs an image; masks output a matte and have no transform input. The two cannot meet. |
+| Applicable → stabilize | ~~**No.** No inverse mode anywhere.~~ **Yes** — slice 2, `mode: stabilize` + auto-fit zoom. |
+| Applicable → drive a mask | ~~**No.** The tracker outputs an image; masks output a matte and have no transform input. The two cannot meet.~~ **Yes** — slice 2. Resolved without making them meet in the graph: the mask nodes take the track attachment DIRECTLY, so no matte ever needs a transform input and §0 stays untouched. |
 | Rotation / scale | **Structurally present, always identity in practice.** `TrackingPoint` carries `scale`/`rotateZ`/`rotateX`/`rotateY` and `sampleTrackingPathAt` reads them, but `local-tracking.ts` never writes them — its header explains the earlier corner-tracker was removed because per-corner noise was amplified into fake rotation swings. So `sample.scale` is always 1 and `sample.rotateZ` always 0. The node's scale/rotation composition is dead code against every track this app can produce. |
 | Planar | **No,** and correctly refused for now (`TRACKER_RESEARCH.md` puts it in Track A, not first). |
 
@@ -120,6 +120,70 @@ Make the existing track applicable. No new analysis, no new model, no CV work.
 
 **Excludes, deliberately:** backward tracking; gap recording; planar / corner-pin; rotation and
 scale channels; running the tracker *from* the node; any change to the tracker's own algorithm.
+
+> **SHIPPED 2026-08-11.** Items 1 and 2 landed; item 3 (surface confidence on the node) came free —
+> the mask nodes reuse `FlarexTrackPicker`, which already reads mean confidence, so an attached track
+> shows "Probe track (90%) · 11 points · 30.00s" in the inspector wherever it is attached.
+>
+> **One definition of the sign.** `applyTrackAtTime` (`masks.ts`) is the only place match-move and
+> stabilize are distinguished; the compiler and both renderers consume it. Stabilize is the exact
+> negation plus `trackStabilizeScale` — a `1 + 2·maxExcursion/100` fit, deliberately unclamped
+> (a ceiling would quietly under-cover and let the black edges back in, which is the artefact the zoom
+> exists to prevent). Masks are always match-move: a "stabilized" mask would move opposite the thing
+> it is covering.
+>
+> **Dead code deleted.** `sampleTrackingPathAt` projected `scale`/`rotateZ` into every sample and no
+> tracker in this app writes either (`local-tracking.ts` hardcodes `is3d: false`, and its header says
+> the corner tracker was REMOVED for amplifying noise into fake rotation). Its one consumer — this
+> node — was composing a guaranteed identity into the shell every frame. The `TrackingPoint` FIELDS
+> stay: `applySmartFollowTextComposition` / `track3dToTransformKeyframes` read them behind the `is3d`
+> gate, so a future planar tracker restores the projection rather than reinventing the storage.
+>
+> **The cache enumeration, again — and it found a second instance.** Slice 1 fixed `shapeKeyframes`;
+> `trackingPathData` is the same shape of input and the Tracker has carried the defect since it
+> shipped (2026-07-28):
+>
+> | Key | Does a track attachment reach it? | Action |
+> |---|---|---|
+> | `computeFlarexContentHashes` | **NO — and this was a live defect.** ADR-009 R1 resolves *numeric* drivers; a track arriving as JSON has no numeric form, so a tracker's hash was identical at every frame while its transform moved. | Declared `trackParams: ["trackingPathData"]` on the Tracker and all four mask nodes. Node-blind, via the mechanism slice 1 built. |
+> | Node-thumbnail cache (`flarex-node-thumbnails.ts:175`) | Keys `(ContractVersion, contentHash)` with **no time axis at all** — so it inherits the hash's correctness entirely. This is where the defect would have shown: every tracked node's thumbnail frozen on its first rendered frame. | Fixed by the row above. No change here. |
+> | Materialization key (`compile-flarex.ts` `wrap.contentHash` + `dependencyVersions`) | Same `contentHash`, so same defect, same fix. Its own `if (at !== ctx.timeSeconds)` retime term is orthogonal and unchanged. | Fixed by the row above. |
+> | `SceneMaskMatteCache` (`scene-mask-matte.ts:211`) | **Already correct, by construction.** It keys on `maskShapeToPathD(m)` of the RESOLVED masks, so a tracked outline is a different path string and therefore a different key. Nothing to do. | None. |
+> | Incremental-eval `evalKey` / axes (`incremental-evaluation.ts`) | **Already correct.** `evalKey` is `nodeId@time`, and `time` is declared by every node and marked whenever frame time moves, so a moving playhead misses on every node regardless. | None. |
+> | Source-draw cache | Not reached: masks are not sources, and the Tracker composes onto the shell rather than rebinding a source draw. | None. |
+>
+> ContractVersion stayed at 2 — slice 1 already bumped it, and the `trackParams` mechanism's meaning
+> is unchanged; only which params declare it grew.
+>
+> **Three instruments were void before one worked, and the working one was a screenshot.** Proving
+> "stabilize counter-moves the frame" from preview pixels defeated three successive automated
+> attempts: sampling two TIMES is confounded by the video being a different frame at each; a
+> shift-only correlation is an invalid model because stabilize zooms as well as shifts (it returned
+> +486px at r=0.447, the low score being the model failing rather than the feature); and a
+> scale+shift fit on a horizontal strip is still invalid because stabilize moves vertically too, so
+> the strip samples different content (r=0.276). Each was reported VOID rather than as a result. What
+> settled it was looking at the two viewer captures side by side — stabilize is visibly magnified and
+> displaced left and down against a right-and-up track. Recorded because the reflex to automate a
+> measurement that two screenshots answer directly cost more than the slice's implementation did.
+>
+> **A remainder the pixel gate could not see, found in the browser.** The compiler offset the mask but
+> `flarex-mask-bridge.ts` did not, so the render was tracked and the EDITING OVERLAY was not — handles
+> sitting off the edge they are meant to drag, at every time except the track's start. Fixed by
+> routing both through one shared `flarexMaskTrackOffsetPx`, applied `+` when presenting and `−` on
+> commit; without the subtraction a drag at a tracked moment would bake the track into the base
+> outline. Also `tracker.mode` had to be registered in the inspector's `ENUMS` table or it rendered as
+> a free-text field.
+>
+> **Fixtures.** Three, not one, because the harness renders exactly ONE still per fixture at
+> `renderComparisonFrameSeconds` = 0.45s and "sampled at several frames" cannot be said inside a
+> single fixture. `flarex-tracked-mask-early` and `-late` are the same comp and the same track shape
+> at different points of its excursion (≈37% and ≈90% of the way, 242px apart), so a renderer that
+> ignored the track or held either endpoint draws the same outline in both. `flarex-stabilize` covers
+> the mode. Measured 0.000% / 0.004% / 1.123%; the last one carries its own 0.02 bar with the reasoning
+> in `render-pixel-comparison.ts` — it is edge-resampling on a 1.48× upscale, deterministic to the same
+> 23288 pixels across three runs, and structurally unlike the thick filled diff a wrong transform gives.
+> Per DEBT-017 none of this can see a wrong-but-agreed value, which is why the sign lives in one shared
+> function and `flarex.test.ts` asserts the exact transform independently.
 
 **Renderer or editor:** neither, exactly — **shared-compiler**. All of it lands in
 `compile-flarex.ts` and `node-defs.ts`, which both `VideoPreview.tsx` and
@@ -172,7 +236,7 @@ combined with booleans, shapes attachable to a track, motion blur.
 | Per-point animation | **None.** `points` is a string param; only `feather` keyframes. This is the line between a mask and a roto tool, and Flarex is on the wrong side of it. |
 | Feather | Per-mask only, one scalar, converted to px. No per-point feather. No `expansion` exposed at all, though `Mask.expansion` exists and the rasterizer reads it. |
 | Booleans | **Yes**, via `matteControl`. The strongest part of the roto story. |
-| Attach to a track | **No.** See §1. |
+| Attach to a track | ~~**No.** See §1.~~ **Yes** — slice 2. All four mask nodes carry the Tracker's own attach params and picker. |
 | Motion blur | **None anywhere in the mask path.** The only `motionBlur` in `masks.ts` is a layer effect on follow-text. |
 
 **Blunt version:** you can draw a shape and you can boolean two shapes. You cannot animate one. On

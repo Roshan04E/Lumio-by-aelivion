@@ -90,6 +90,8 @@ const ENUMS: Record<string, readonly string[]> = {
     "hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "add",
   ],
   "matteControl.operation": ["add", "subtract", "intersect", "exclude"],
+  // Without this the enum falls through to a plain TEXT field and the user types "stabilize" by hand.
+  "tracker.mode": ["matchMove", "stabilize"],
   // Channel Boolean: every output channel picks from the same source vocabulary (shared with the
   // shader's own index order, so the two can't drift).
   "channelBoolean.red": flarexChannelSources,
@@ -562,12 +564,16 @@ export function buildFlarexNodeFields(args: BuildFlarexNodeFieldsArgs): Property
       continue;
     }
 
-    // ── Tracker: the picker owns BOTH params ────────────────────────────────
+    // ── Track attachment: the picker owns BOTH params ───────────────────────
     // `trackingPathData` is the embedded payload the renderers read — megabytes of point JSON. The
     // generic renderer showed it as a text row, which is how the node shipped with no usable UI. It is
     // written by the picker and never edited by hand, so it is not a field at all.
-    if (node.type === "tracker" && key === "trackingPathData") continue;
-    if (node.type === "tracker" && key === "trackingPathId") {
+    //
+    // Keyed on the PARAM, not on `node.type === "tracker"`: slice 2 gave the four mask nodes the same
+    // attach trio, and every node that declares it should get the same picker without this list
+    // growing a node-type branch per addition.
+    if (key === "trackingPathData") continue;
+    if (key === "trackingPathId") {
       const attachedId = typeof node.params.trackingPathId === "string" ? node.params.trackingPathId : "";
       const raw = typeof node.params.trackingPathData === "string" ? node.params.trackingPathData : "";
       let attached: TrackingPathArtifactData | null = null;

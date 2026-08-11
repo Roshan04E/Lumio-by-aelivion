@@ -986,19 +986,29 @@ export interface TrackingSample {
   /** Comp-percent offset from the first point (timeline transform units). */
   dx: number;
   dy: number;
-  /** Multiplier relative to the first point's scale; 1 when the track carries no scale channel. */
-  scale: number;
-  /** Degrees relative to the first point's rotation; 0 when the track carries no rotation channel. */
-  rotateZ: number;
 }
 
-export const TRACKING_SAMPLE_IDENTITY: TrackingSample = { dx: 0, dy: 0, scale: 1, rotateZ: 0 };
+export const TRACKING_SAMPLE_IDENTITY: TrackingSample = { dx: 0, dy: 0 };
 
 /**
  * Sample a track at `timeSeconds`, linearly between the two bracketing points and clamped at both
  * ends — a track is defined over its own duration and holds its endpoints outside it, which is what
- * every NLE does when a clip outlives its track. Undefined 3D channels mean "no change from identity"
- * per `TrackingPoint`, so they read as scale 1 / rotation 0 rather than as zero.
+ * every NLE does when a clip outlives its track.
+ *
+ * TRANSLATION ONLY, and that is a statement about the data, not a limitation chosen here.
+ * `TrackingPoint` carries optional `scale`/`rotateZ`/`rotateX`/`rotateY` for a future planar tracker
+ * (`TrackingPathArtifactData.is3d` gates them), and this function used to project `scale`/`rotateZ`
+ * into every sample. No tracker in this app writes either: `local-tracking.ts` is a point tracker
+ * that hardcodes `is3d: false`, and its header explains that the earlier corner tracker was REMOVED
+ * because per-corner noise was being amplified into fake rotation swings. So the projection was
+ * always exactly `scale 1, rotateZ 0`, and its one consumer — the Flarex Tracker node — was
+ * composing a guaranteed identity into the shell transform every frame.
+ *
+ * Removed rather than kept "for when planar lands" (slice 2, 2026-08-11): a channel that is dead
+ * against every real input invites the next reader to build on it, and rotation/scale are explicitly
+ * out of that slice. The `TrackingPoint` FIELDS stay — they are load-bearing for
+ * `applySmartFollowTextComposition` / `track3dToTransformKeyframes`, which read them behind the
+ * `is3d` gate — so a planar tracker restores this projection rather than reinventing the storage.
  */
 export function sampleTrackingPathAt(
   path: TrackingPathArtifactData,
@@ -1008,15 +1018,9 @@ export function sampleTrackingPathAt(
   const points = smoothTrackingPoints(path.points, smoothing ?? path.smoothing);
   const first = points[0];
   if (!first) return TRACKING_SAMPLE_IDENTITY;
-  const baseScale = first.scale ?? 1;
-  const baseRot = first.rotateZ ?? 0;
   const at = (p: TrackingPoint): TrackingSample => ({
     dx: p.position.x - first.position.x,
     dy: p.position.y - first.position.y,
-    // Ratio, not difference: scale composes multiplicatively, and a track that doubles the subject
-    // must double the attached element regardless of what the base scale happened to be.
-    scale: baseScale === 0 ? 1 : (p.scale ?? 1) / baseScale,
-    rotateZ: (p.rotateZ ?? 0) - baseRot,
   });
   if (timeSeconds <= first.timeSeconds) return at(first);
   const last = points[points.length - 1]!;
@@ -1030,14 +1034,109 @@ export function sampleTrackingPathAt(
     const u = span <= 0 ? 1 : (timeSeconds - a.timeSeconds) / span;
     const sa = at(a);
     const sb = at(b);
-    return {
-      dx: sa.dx + (sb.dx - sa.dx) * u,
-      dy: sa.dy + (sb.dy - sa.dy) * u,
-      scale: sa.scale + (sb.scale - sa.scale) * u,
-      rotateZ: sa.rotateZ + (sb.rotateZ - sa.rotateZ) * u,
-    };
+    return { dx: sa.dx + (sb.dx - sa.dx) * u, dy: sa.dy + (sb.dy - sa.dy) * u };
   }
   return at(last);
+}
+
+/**
+ * What a track is being used FOR. The two modes are the same samples with opposite signs.
+ *
+ *   matchMove — apply the track TO the element. The element goes where the subject went.
+ *   stabilize — apply the track's INVERSE to the frame. The subject holds still and the frame swims.
+ */
+export type TrackApplyMode = "matchMove" | "stabilize";
+
+export interface TrackApplication {
+  /** Comp-percent translation to ADD to whatever transform the target already carries. */
+  dx: number;
+  dy: number;
+  /** Multiplier to compose over the target's scale. 1 for match-move; the swim fit for stabilize. */
+  scale: number;
+}
+
+export const TRACK_APPLICATION_IDENTITY: TrackApplication = { dx: 0, dy: 0, scale: 1 };
+
+/**
+ * The zoom a stabilized frame needs so its edges never swim into view.
+ *
+ * Excursions are comp PERCENT of the frame. Scaling about the centre adds `(s-1)/2` of the frame at
+ * each edge, so covering a `d` percent shift needs `s >= 1 + 2d/100`. Uniform (the larger axis wins)
+ * because a per-axis fit would change the picture's aspect ratio, which is a worse artefact than the
+ * extra crop it saves.
+ *
+ * Deliberately NOT clamped. A wild track produces a large zoom, and that is the honest report: an
+ * upper bound would quietly under-cover and let the black edges back in, which is the exact artefact
+ * this exists to prevent. A track that demands 2× wants smoothing, and the number says so.
+ */
+export function trackStabilizeScale(path: TrackingPathArtifactData, smoothing?: number): number {
+  const points = smoothTrackingPoints(path.points, smoothing ?? path.smoothing);
+  const first = points[0];
+  if (!first) return 1;
+  let maxDx = 0;
+  let maxDy = 0;
+  for (const point of points) {
+    maxDx = Math.max(maxDx, Math.abs(point.position.x - first.position.x));
+    maxDy = Math.max(maxDy, Math.abs(point.position.y - first.position.y));
+  }
+  return 1 + (2 * Math.max(maxDx, maxDy)) / 100;
+}
+
+/**
+ * THE ONE PLACE THE SIGN IS DECIDED.
+ *
+ * Match-move and stabilize are the same data negated, which is precisely why this is one shared
+ * function and not a branch in each consumer: a consumer that chose the sign itself would produce a
+ * picture that looks entirely plausible and is backwards, and no downstream check — including the
+ * pixel gate, which is differential — could tell. Every renderer reaches this through the single
+ * Flarex compile site, so "both renderers agree about which way stabilize goes" is structural.
+ */
+export function applyTrackAtTime(
+  path: TrackingPathArtifactData,
+  timeSeconds: number,
+  options?: { mode?: TrackApplyMode | undefined; smoothing?: number | undefined }
+): TrackApplication {
+  if (path.points.length === 0) return TRACK_APPLICATION_IDENTITY;
+  const smoothing = options?.smoothing;
+  const sample = sampleTrackingPathAt(path, timeSeconds, smoothing);
+  if (options?.mode !== "stabilize") return { dx: sample.dx, dy: sample.dy, scale: 1 };
+  return { dx: -sample.dx, dy: -sample.dy, scale: trackStabilizeScale(path, smoothing) };
+}
+
+/** Soft-parse an embedded track payload. A malformed one means "no track", never a throw on a hot path. */
+export function parseTrackingPathPayload(raw: unknown): TrackingPathArtifactData | null {
+  if (typeof raw !== "string" || raw === "") return null;
+  try {
+    const parsed = JSON.parse(raw) as TrackingPathArtifactData;
+    return Array.isArray(parsed?.points) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A tracked mask's offset in PIXELS at `timeSeconds`.
+ *
+ * Shared, and it has to be: the COMPILER applies this to produce the rasterized outline, and the
+ * EDITOR BRIDGE applies the same value to place the on-canvas handles and to subtract it back off on
+ * commit. Two copies would let the handles drift off the edge they are supposed to be dragging — the
+ * exact failure a bridge exists to prevent — and the drift would only appear away from t=0, which is
+ * where nobody looks.
+ *
+ * Always match-move: a mask sits on something in the picture, so it follows the subject. Stabilize is
+ * a statement about the frame and belongs to the Tracker node.
+ */
+export function flarexMaskTrackOffsetPx(
+  path: TrackingPathArtifactData | null,
+  timeSeconds: number,
+  smoothing: number | undefined,
+  width: number,
+  height: number
+): { x: number; y: number } {
+  if (!path || path.points.length === 0) return { x: 0, y: 0 };
+  const applied = applyTrackAtTime(path, timeSeconds, { mode: "matchMove", smoothing });
+  // dx/dy are comp PERCENT of width and height respectively; masks are in pixels.
+  return { x: (applied.dx / 100) * width, y: (applied.dy / 100) * height };
 }
 
 export function smoothTrackingPoints(points: TrackingPoint[], smoothing: number): TrackingPoint[] {

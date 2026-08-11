@@ -6,6 +6,7 @@ import { SHADER_MANIFEST_ID_PARAM_KEY } from "./plugin-effect-adapter";
 import { createFlarexNode } from "./flarex/node-defs";
 import { createFlarexComp } from "./flarex/registry";
 import type { FlarexComp } from "./flarex/types";
+import type { TrackingPathArtifactData } from "./masks";
 
 const fixtureImageSvg = encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
@@ -149,7 +150,10 @@ export type RenderComparisonFixtureKey =
   | "flarex-generators"
   | "flarex-mismatched-aspect"
   | "flarex-host-transform"
-  | "flarex-animated-roto";
+  | "flarex-animated-roto"
+  | "flarex-tracked-mask-early"
+  | "flarex-tracked-mask-late"
+  | "flarex-stabilize";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -208,7 +212,10 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "flarex-generators",
   "flarex-mismatched-aspect",
   "flarex-host-transform",
-  "flarex-animated-roto"
+  "flarex-animated-roto",
+  "flarex-tracked-mask-early",
+  "flarex-tracked-mask-late",
+  "flarex-stabilize"
 ];
 
 const fullColorEffects: TimelineLayer["effects"] = [
@@ -876,6 +883,89 @@ function buildFlarexEllipseMatteComp(): FlarexComp {
  * `flarex.test.ts` (multi-time sampling) and `flarex-animated-mask-matte.test.ts` (two renders, one
  * cache). This fixture's job is narrower and real: the two renderers agree, at an interpolated time.
  */
+/**
+ * TRACKED MASK / STABILIZE (slice 2) — a track driving something other than a plain match-move.
+ *
+ * ## Why there are three fixtures and not one
+ *
+ * The harness renders exactly ONE still per fixture, at `renderComparisonFrameSeconds` = 0.45s, so
+ * "sample this at several frames" cannot be expressed inside a single fixture. It is expressed as two
+ * fixtures over the SAME comp and the SAME track shape, differing only in how far along its excursion
+ * the track is at 0.45s (`early` ≈ 37% of the way, `late` ≈ 90%). A renderer that ignored the track,
+ * or held its first point, or held its last, draws the same outline in both — and the two correct
+ * outlines are ~13% of frame width apart, which is far more than any bar here tolerates.
+ *
+ * ## What these fixtures CANNOT see, stated so a green run is not over-read
+ *
+ * Per DEBT-017 the gate is DIFFERENTIAL: this whole path is shared code both renderers consume
+ * verbatim through one compile site, so a wrong-but-agreed offset — including a stabilize that went
+ * the wrong way — reads 0.000%. That is exactly why the sign lives in one shared `applyTrackAtTime`
+ * and why `flarex.test.ts` asserts stabilize is the exact negation of match-move rather than trusting
+ * this gate to notice. These fixtures answer a narrower and still-necessary question: the two
+ * renderers agree, at a mid-track instant, about where a tracked mask sits and how a stabilized frame
+ * is framed.
+ */
+const flarexFixtureTrack = (id: string, endSeconds: number): TrackingPathArtifactData => ({
+  id,
+  durationSeconds: 2,
+  smoothing: 0,
+  source: "mock",
+  // Percent of comp width/height, like every other track: right and up. Two points only — the
+  // interpolation between them is what the mid-track sample is testing.
+  points: [
+    { timeSeconds: 0, position: { x: 50, y: 50 }, bounds: { timeSeconds: 0, x: 40, y: 40, width: 20, height: 20, confidence: 1 }, confidence: 1 },
+    { timeSeconds: endSeconds, position: { x: 74, y: 32 }, bounds: { timeSeconds: endSeconds, x: 64, y: 22, width: 20, height: 20, confidence: 1 }, confidence: 1 },
+  ],
+});
+
+function buildFlarexTrackedMaskComp(phase: "early" | "late"): FlarexComp {
+  const comp = createFlarexComp(`fixture_flarex_trkmask_${phase}_comp`, `Flarex tracked mask fixture (${phase})`);
+  const shape = createFlarexNode("bezierMask", `fixture_flarex_trkmask_${phase}_shape`);
+  // The outline itself is STATIC and carries tangents, so every pixel that moves between the two
+  // phases is the track and nothing else — no shapeKeyframes here, deliberately, or a failure could
+  // be blamed on slice 1's evaluator instead of slice 2's offset.
+  shape.params = {
+    ...shape.params,
+    points: JSON.stringify([
+      [0.22, 0.30, -0.05, 0, 0.05, 0],
+      [0.48, 0.30, 0, -0.05, 0, 0.05],
+      [0.48, 0.70, 0.05, 0, -0.05, 0],
+      [0.22, 0.70, 0, 0.05, 0, -0.05],
+    ]),
+    feather: 0.04,
+    trackingPathData: JSON.stringify(flarexFixtureTrack(`fixture_trk_${phase}`, phase === "early" ? 1.2 : 0.5)),
+  };
+  const blur = createFlarexNode("blur", `fixture_flarex_trkmask_${phase}_blur`);
+  blur.params = { ...blur.params, sigma: 26 };
+  comp.nodes[shape.id] = shape;
+  comp.nodes[blur.id] = blur;
+  comp.edges = [
+    { id: `fixture_flarex_trkmask_${phase}_e1`, from: { nodeId: `${comp.id}_in`, socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+    { id: `fixture_flarex_trkmask_${phase}_e2`, from: { nodeId: shape.id, socket: "out" }, to: { nodeId: blur.id, socket: "mask" } },
+    { id: `fixture_flarex_trkmask_${phase}_e3`, from: { nodeId: blur.id, socket: "out" }, to: { nodeId: `${comp.id}_out`, socket: "in" } }
+  ];
+  return comp;
+}
+
+function buildFlarexStabilizeComp(): FlarexComp {
+  const comp = createFlarexComp("fixture_flarex_stabilize_comp", "Flarex stabilize fixture");
+  const tracker = createFlarexNode("tracker", "fixture_flarex_stabilize_tracker");
+  // Max excursion is 24% (x), so the auto-fit zoom is 1 + 2*24/100 = 1.48 — a large, unmistakable
+  // reframe. A renderer that took the match-move sign instead lands the picture on the far side of
+  // where it belongs, roughly 18% of frame width away.
+  tracker.params = {
+    ...tracker.params,
+    mode: "stabilize",
+    trackingPathData: JSON.stringify(flarexFixtureTrack("fixture_trk_stab", 1.2)),
+  };
+  comp.nodes[tracker.id] = tracker;
+  comp.edges = [
+    { id: "fixture_flarex_stabilize_e1", from: { nodeId: `${comp.id}_in`, socket: "out" }, to: { nodeId: tracker.id, socket: "in" } },
+    { id: "fixture_flarex_stabilize_e2", from: { nodeId: tracker.id, socket: "out" }, to: { nodeId: `${comp.id}_out`, socket: "in" } }
+  ];
+  return comp;
+}
+
 function buildFlarexAnimatedRotoComp(): FlarexComp {
   const comp = createFlarexComp("fixture_flarex_roto_comp", "Flarex animated roto fixture");
   const shape = createFlarexNode("bezierMask", "fixture_flarex_roto_shape");
@@ -1196,6 +1286,12 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       };
     case "flarex-animated-roto":
       return { effects: [], fit: "cover", flarex: buildFlarexAnimatedRotoComp() };
+    case "flarex-tracked-mask-early":
+      return { effects: [], fit: "cover", flarex: buildFlarexTrackedMaskComp("early") };
+    case "flarex-tracked-mask-late":
+      return { effects: [], fit: "cover", flarex: buildFlarexTrackedMaskComp("late") };
+    case "flarex-stabilize":
+      return { effects: [], fit: "cover", flarex: buildFlarexStabilizeComp() };
     case "framed-blob":
       // Frames Phase 2: a procedural BLOB frame + border. Exercises the bezier-with-tangents clip mask
       // (the first pixel-gated bezier matte) and the pen+tangent border stroke (the blob's border clone

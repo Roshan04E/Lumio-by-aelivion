@@ -63,7 +63,28 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
   // DEBT-017 renderer-divergence coverage (NOT a DEBT-016 guard — see the fixture's own comment and
   // project-tracker/architectural-debt.md). Measured 0.000% (0/2073600) on the full 55-fixture sweep
   // that added this fixture; the pre-13 Flarex fixtures did not move.
-  "flarex-host-transform": 0.005
+  "flarex-host-transform": 0.005,
+  // Slice 2 (tracked masks). Measured 0.000% and 0.004% on the sweep that added them — the mask's own
+  // geometry is static in both, so the only thing moving is the track offset, and the two renderers
+  // agree on it exactly.
+  "flarex-tracked-mask-early": 0.005,
+  "flarex-tracked-mask-late": 0.005,
+  /**
+   * Stabilize is the one new fixture that cannot hold a 0.5% bar, and the reason is worth stating
+   * rather than hiding behind the 3.5% global.
+   *
+   * Measured 1.123% — 23288/2073600 pixels, the SAME COUNT on three separate runs, so this is a
+   * deterministic difference and not flake. The diff image is the tell: it is hairline outlines
+   * tracing every high-contrast contour of the source graphic, with every region interior clean. That
+   * is the two renderers' samplers rounding differently on a frame the auto-fit zoom has upscaled
+   * 1.48×, and it scales with the source's total edge length, which is why this reads higher than
+   * `flarex-transform` (which also scales, but by less and over a shorter contour).
+   *
+   * A structural failure — wrong sign, wrong offset, wrong zoom — does NOT look like this: it puts
+   * thick doubled shapes and large filled areas into the diff, an order of magnitude above this bar.
+   * 0.02 keeps ~78% headroom over the measured value while staying 1.75× tighter than the global.
+   */
+  "flarex-stabilize": 0.02
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

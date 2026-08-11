@@ -36,6 +36,8 @@ import {
   FLAREX_DEFAULT_MASK_POINTS,
   FLAREX_SHAPE_KEY_EPSILON,
   flarexMaskPointsToShape,
+  flarexMaskTrackOffsetPx,
+  parseTrackingPathPayload,
   readFlarexShapeKeyframes,
   resolveFlarexShapeAtTime,
   serializeFlarexShapePoints,
@@ -48,6 +50,21 @@ export const FLAREX_MASK_LAYER_ID = "flarexmask:layer";
 export const FLAREX_MASK_ID = "flarexmask:mask";
 
 export type FlarexMaskNodeType = "polygonMask" | "bezierMask";
+
+/**
+ * The node's track offset at `timeSeconds`, through the same shared function the compiler uses.
+ *
+ * Applied in BOTH directions and that is the whole point: presented outlines get `+offset` so the
+ * handles sit on the edge the compiler rasterizes, and committed outlines get `-offset` so a drag at a
+ * tracked moment writes the shape the user drew rather than the shape plus wherever the track had got
+ * to. Without the subtraction, dragging a point at t=2s would bake two seconds of track into the base
+ * outline, and the mask would jump the moment the playhead moved.
+ */
+function trackOffsetFor(node: FlarexNode, compWidth: number, compHeight: number, timeSeconds: number): { x: number; y: number } {
+  const path = parseTrackingPathPayload(node.params.trackingPathData);
+  const smoothing = typeof node.params.smoothing === "number" ? node.params.smoothing : undefined;
+  return flarexMaskTrackOffsetPx(path, timeSeconds, smoothing || undefined, compWidth, compHeight);
+}
 
 export function isFlarexMaskNode(node: FlarexNode | null | undefined): node is FlarexNode & { type: FlarexMaskNodeType } {
   return node?.type === "polygonMask" || node?.type === "bezierMask";
@@ -72,7 +89,7 @@ export function buildFlarexMaskBridge(
   timeSeconds: number,
 ): FlarexMaskBridge | null {
   if (!isFlarexMaskNode(node)) return null;
-  const points = resolveFlarexShapeAtTime({
+  const resolved = resolveFlarexShapeAtTime({
     points: node.params.points,
     shapeKeyframes: node.params.shapeKeyframes,
     fallback: FLAREX_DEFAULT_MASK_POINTS[node.type],
@@ -81,7 +98,12 @@ export function buildFlarexMaskBridge(
     idPrefix: FLAREX_MASK_ID,
     timeSeconds,
   });
-  if (points.length < 3) return null;
+  if (resolved.length < 3) return null;
+  // Anchors only — tangents are deltas from their own anchor, so a translated point carries them.
+  const offset = trackOffsetFor(node, compWidth, compHeight, timeSeconds);
+  const points = offset.x === 0 && offset.y === 0
+    ? resolved
+    : resolved.map((point) => ({ ...point, x: point.x + offset.x, y: point.y + offset.y }));
 
   const mask: Mask = {
     id: FLAREX_MASK_ID,
@@ -152,7 +174,13 @@ export function flarexMaskCommitPatch(
   compHeight: number,
   timeSeconds: number,
 ): Record<string, string> {
-  const shape: FlarexShapePoint[] = flarexMaskPointsToShape(points, compWidth, compHeight);
+  // Subtract the track back off before storing: the overlay handed us points in TRACKED space, and
+  // `points`/`shapeKeyframes` are the untracked outline the compiler re-offsets every frame.
+  const offset = trackOffsetFor(node, compWidth, compHeight, timeSeconds);
+  const untracked = offset.x === 0 && offset.y === 0
+    ? points
+    : points.map((point) => ({ ...point, x: point.x - offset.x, y: point.y - offset.y }));
+  const shape: FlarexShapePoint[] = flarexMaskPointsToShape(untracked, compWidth, compHeight);
   const existing = readFlarexShapeKeyframes(node.params.shapeKeyframes);
   if (existing.length === 0) return { points: serializeFlarexShapePoints(shape) };
   return {

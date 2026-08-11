@@ -90,6 +90,24 @@ const animatableOutlineParams = {
   invert: z.boolean().default(false),
 };
 
+/**
+ * Track attachment — the params a node needs to FOLLOW an existing track. Shared verbatim by the
+ * Tracker and by all four mask nodes so one picker drives every one of them and a track reads the
+ * same wherever it is attached.
+ *
+ * `trackingPathData` is the embedded payload; see the Tracker's own note for why the points travel in
+ * node params rather than by reference (`editableFields` never reaches a renderer, so a by-id design
+ * tracks in the preview and sits still in the export). `smoothing` deliberately keeps the Tracker's
+ * name and meaning: a mask and a Tracker attached to the SAME track must move together, and two
+ * differently-named smoothing controls is how they would quietly stop.
+ */
+const trackAttachParams = {
+  trackingPathId: z.string().default(""),
+  trackingPathData: z.string().default(""),
+  /** 0 = raw track, 1 = maximum smoothing. Overrides the artifact's own value when set. */
+  smoothing: num(0, 0, 1),
+};
+
 /** Shared shape-mask params (comp-relative 0..1 coordinates, like the vector Mask model). */
 const shapeMaskParams = {
   centerX: num(0.5, 0, 1),
@@ -462,8 +480,9 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     group: "mask",
     inputs: [],
     outputs: MATTE_OUT,
-    params: z.object({ ...shapeMaskParams, cornerRadius: num(0, 0, 1) }).strict(),
+    params: z.object({ ...shapeMaskParams, ...trackAttachParams, cornerRadius: num(0, 0, 1) }).strict(),
     keyframeable: ["centerX", "centerY", "width", "height", "feather"],
+    trackParams: ["trackingPathData"],
     phase: 1,
   },
   ellipseMask: {
@@ -471,8 +490,9 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     group: "mask",
     inputs: [],
     outputs: MATTE_OUT,
-    params: z.object(shapeMaskParams).strict(),
+    params: z.object({ ...shapeMaskParams, ...trackAttachParams }).strict(),
     keyframeable: ["centerX", "centerY", "width", "height", "feather"],
+    trackParams: ["trackingPathData"],
     phase: 1,
   },
   polygonMask: {
@@ -486,9 +506,10 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     params: z.object({
       points: z.string().default("[[0.3,0.2],[0.7,0.2],[0.5,0.85]]"),
       ...animatableOutlineParams,
+      ...trackAttachParams,
     }).strict(),
     keyframeable: ["feather", "expansion"],
-    trackParams: ["shapeKeyframes"],
+    trackParams: ["shapeKeyframes", "trackingPathData"],
     phase: 1.5,
   },
   bezierMask: {
@@ -501,9 +522,10 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     params: z.object({
       points: z.string().default("[[0.25,0.2],[0.75,0.25],[0.7,0.8],[0.3,0.75]]"),
       ...animatableOutlineParams,
+      ...trackAttachParams,
     }).strict(),
     keyframeable: ["feather", "expansion"],
-    trackParams: ["shapeKeyframes"],
+    trackParams: ["shapeKeyframes", "trackingPathData"],
     phase: 1.5,
   },
   matteControl: {
@@ -683,25 +705,31 @@ const defs: Record<FlarexNodeType, Omit<FlarexNodeDefinition, "type" | "subcateg
     // TrackingPathArtifactData the person-extraction path already produces). It does not ANALYSE —
     // computing a track is a separate project. Empty id, or an id whose artifact is gone, passes
     // through untouched.
+    /**
+     * `trackAttachParams` carries the trio. EMBEDDED, not referenced, and that is a parity decision
+     * rather than a storage one: `editableFields` lives on `ProjectGraph`, which the renderer never
+     * receives, so a by-id-only Tracker would follow the track in the preview and sit still in the
+     * export — exactly the class of divergence ADR-007 removes by construction. Carrying the points
+     * in node params puts them in the manifest, which both renderers read. `trackingPathId` is
+     * retained as provenance (which saved track this came from, for re-link and for a future store
+     * that does reach the renderer); it is not what renders.
+     *
+     * `mode` (slice 2, 2026-08-11) chooses whether the track is applied to the element or inverted
+     * onto the frame. The sign lives in `applyTrackAtTime`, never here and never in a renderer.
+     */
     params: z.object({
-      trackingPathId: z.string().default(""),
-      /**
-       * The track itself, JSON-serialized (the flat-params convention for complex payloads).
-       *
-       * EMBEDDED, not referenced, and that is a parity decision rather than a storage one:
-       * `editableFields` lives on `ProjectGraph`, which the renderer never receives, so a
-       * by-id-only Tracker would follow the track in the preview and sit still in the export —
-       * exactly the class of divergence ADR-007 removes by construction. Carrying the points in
-       * node params puts them in the manifest, which both renderers read.
-       *
-       * `trackingPathId` is retained as provenance (which saved track this came from, for re-link
-       * and for a future store that does reach the renderer); it is not what renders.
-       */
-      trackingPathData: z.string().default(""),
-      /** 0 = raw track, 1 = maximum smoothing. Overrides the artifact's own value when set. */
-      smoothing: num(0, 0, 1),
+      ...trackAttachParams,
+      mode: z.enum(["matchMove", "stabilize"]).default("matchMove"),
     }).strict(),
     keyframeable: [],
+    /**
+     * `trackingPathData` is a TRACK: the node's output varies with time through a param that has no
+     * numeric form, so ADR-009 R1 could not resolve it and the content hash was identical at every
+     * frame while the transform moved. Same shape of defect slice 1 found on `shapeKeyframes`, and it
+     * predates this slice — the Tracker has been hashing time-invariantly since it shipped
+     * (2026-07-28). Declaring it here folds the time term; see `content-hash.ts`.
+     */
+    trackParams: ["trackingPathData"],
     phase: 1.5,
   },
 };

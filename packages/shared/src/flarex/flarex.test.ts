@@ -39,7 +39,7 @@ import {
   wouldCreateFlarexCycle,
 } from "./registry";
 import { createFlarexNode, flarexNodeDefs, parseFlarexNodeParams } from "./node-defs";
-import { sampleTrackingPathAt } from "../masks";
+import { applyTrackAtTime, sampleTrackingPathAt, trackStabilizeScale } from "../masks";
 import {
   collectFlarexVirtualLayers,
   flarexVirtualLayerId,
@@ -1749,28 +1749,46 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
     smoothing: 0,
     source: "mock" as const,
     points: [
-      { timeSeconds: 0, position: { x: 10, y: 20 }, bounds: { timeSeconds: 0, x: 0, y: 0, width: 1, height: 1 }, confidence: 1, scale: 1, rotateZ: 0 },
-      { timeSeconds: 2, position: { x: 30, y: 60 }, bounds: { timeSeconds: 2, x: 0, y: 0, width: 1, height: 1 }, confidence: 1, scale: 2, rotateZ: 90 },
+      { timeSeconds: 0, position: { x: 10, y: 20 }, bounds: { timeSeconds: 0, x: 0, y: 0, width: 1, height: 1 }, confidence: 1 },
+      { timeSeconds: 2, position: { x: 30, y: 60 }, bounds: { timeSeconds: 2, x: 0, y: 0, width: 1, height: 1 }, confidence: 1 },
     ],
   };
 
   // RELATIVE to the first point: attaching a tracker must leave the picture where the user put it and
   // then follow. Absolute output would make every Tracker node a jump cut on insertion.
   const atStart = sampleTrackingPathAt(track, 0);
-  check("a track is identity at its own start",
-    atStart.dx === 0 && atStart.dy === 0 && atStart.scale === 1 && atStart.rotateZ === 0);
+  check("a track is identity at its own start", atStart.dx === 0 && atStart.dy === 0);
 
   const mid = sampleTrackingPathAt(track, 1);
   check("samples linearly between points", Math.abs(mid.dx - 10) < 1e-9 && Math.abs(mid.dy - 20) < 1e-9);
-  check("scale composes as a RATIO, not a difference", Math.abs(mid.scale - 1.5) < 1e-9);
-  check("rotation composes as a difference", Math.abs(mid.rotateZ - 45) < 1e-9);
 
   // A clip outliving its track holds the endpoint, which is what every NLE does.
   const past = sampleTrackingPathAt(track, 99);
-  check("past the end holds the last point", Math.abs(past.dx - 20) < 1e-9 && Math.abs(past.rotateZ - 90) < 1e-9);
+  check("past the end holds the last point", Math.abs(past.dx - 20) < 1e-9 && Math.abs(past.dy - 40) < 1e-9);
   check("before the start holds the first point", sampleTrackingPathAt(track, -5).dx === 0);
   check("an empty track is identity",
-    sampleTrackingPathAt({ ...track, points: [] }, 1).scale === 1);
+    sampleTrackingPathAt({ ...track, points: [] }, 1).dx === 0);
+
+  // ── Slice 2: ONE definition of the sign, in `applyTrackAtTime` ─────────────
+  // The two modes must be exact negations of each other. If they ever stop being, a "stabilized" comp
+  // drifts WITH the subject instead of against it — a picture that looks plausible and is backwards,
+  // which no differential pixel gate can see (DEBT-017).
+  const mm = applyTrackAtTime(track, 1, { mode: "matchMove" });
+  const st = applyTrackAtTime(track, 1, { mode: "stabilize" });
+  check("match-move applies the track as sampled", mm.dx === mid.dx && mm.dy === mid.dy && mm.scale === 1);
+  check("stabilize is the EXACT negation of match-move", st.dx === -mm.dx && st.dy === -mm.dy);
+  check("an absent mode is match-move, so every saved comp renders as it did",
+    applyTrackAtTime(track, 1).dx === mm.dx && applyTrackAtTime(track, 1).scale === 1);
+  // Excursion is 40 (y: 20 → 60), so the frame needs 1 + 2*40/100 = 1.8 to cover the swim.
+  check("stabilize zooms to cover the track's own excursion", Math.abs(st.scale - 1.8) < 1e-9);
+  check("…computed from the WHOLE path, not the sampled instant — the zoom must not itself animate",
+    applyTrackAtTime(track, 0, { mode: "stabilize" }).scale === st.scale
+    && applyTrackAtTime(track, 2, { mode: "stabilize" }).scale === st.scale);
+  check("a still track needs no zoom",
+    trackStabilizeScale({ ...track, points: [track.points[0]!, { ...track.points[1]!, position: { x: 10, y: 20 } }] }) === 1);
+  check("an empty track is identity in both modes",
+    applyTrackAtTime({ ...track, points: [] }, 1, { mode: "stabilize" }).scale === 1
+    && applyTrackAtTime({ ...track, points: [] }, 1, { mode: "stabilize" }).dx === 0);
 
   const build = (params: Record<string, string | number | boolean>): FlarexComp => {
     const comp = createFlarexComp("tk", "Tracker fixture");
@@ -1792,9 +1810,20 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   check("the embedded track drives the shell transform",
     Math.abs((shellOf(tracked)?.x ?? 0) - (base.transform.x + 10)) < 1e-9);
   check("…and y", Math.abs((shellOf(tracked)?.y ?? 0) - (base.transform.y + 20)) < 1e-9);
-  check("…and scale, multiplicatively over the host framing",
-    Math.abs((shellOf(tracked)?.scale ?? 0) - base.transform.scale * 1.5) < 1e-9);
-  check("…and rotation, additively", Math.abs((shellOf(tracked)?.rotation ?? -1) - 45) < 1e-9);
+  check("match-move leaves the framing's scale alone — a point track has no scale to give",
+    Math.abs((shellOf(tracked)?.scale ?? 0) - base.transform.scale) < 1e-9);
+
+  // The node-level half of the sign contract: what the compiler does with each mode, through the one
+  // shared definition. Both renderers reach this same compile site, so this is the parity statement.
+  const stabilized = compileFlarexComp(
+    build({ trackingPathData: JSON.stringify(track), mode: "stabilize" }),
+    { ...lowerCtx(), timeSeconds: 1 },
+  );
+  check("stabilize moves the frame OPPOSITE the track",
+    Math.abs((shellOf(stabilized)?.x ?? 0) - (base.transform.x - 10)) < 1e-9
+    && Math.abs((shellOf(stabilized)?.y ?? 0) - (base.transform.y - 20)) < 1e-9);
+  check("…and zooms in over the host framing so the swimming edges stay out of frame",
+    Math.abs((shellOf(stabilized)?.scale ?? 0) - base.transform.scale * 1.8) < 1e-9);
   check("the tracked input is left untouched as a child — the move is on the shell",
     isGroupDraw(tracked) && Math.abs((tracked.children[0] as SceneLayerDraw).transform.x - base.transform.x) < 1e-9);
 
@@ -1812,6 +1841,88 @@ function stubMatteCache(): { cache: SceneMaskMatteCache; calls: Mask[][] } {
   // A deleted track must degrade the node, never the comp, and never throw on the playback hot path.
   const corrupt = compileFlarexComp(build({ trackingPathData: "{not json" }), lowerCtx());
   check("corrupt track data passes through instead of throwing", corrupt !== null && !isGroupDraw(corrupt));
+
+  // ── Slice 2: a track drives a MASK ────────────────────────────────────────
+  // The payload of the slice. Sampled at THREE times, because a mask that follows a track is exactly
+  // the shape of thing that can look right on one frame and be frozen on every other — the failure
+  // slice 1 found in the content hash, one node over.
+  const maskComp = (type: "bezierMask" | "ellipseMask", params: Record<string, unknown>): FlarexComp => {
+    const comp = createFlarexComp("tm", "Tracked mask fixture");
+    const shape = createFlarexNode(type, "tm_shape");
+    shape.params = { ...shape.params, ...params };
+    const blur = createFlarexNode("blur", "tm_blur");
+    blur.params = { ...blur.params, sigma: 20 };
+    comp.nodes[shape.id] = shape;
+    comp.nodes[blur.id] = blur;
+    comp.edges = [
+      { id: "tm_e1", from: { nodeId: "tm_in", socket: "out" }, to: { nodeId: blur.id, socket: "in" } },
+      { id: "tm_e2", from: { nodeId: shape.id, socket: "out" }, to: { nodeId: blur.id, socket: "mask" } },
+      { id: "tm_e3", from: { nodeId: blur.id, socket: "out" }, to: { nodeId: "tm_out", socket: "in" } },
+    ];
+    return comp;
+  };
+  // The mask's own geometry is STATIC — every position difference below is the track and nothing else.
+  const trackedShape = maskComp("bezierMask", {
+    points: JSON.stringify([[0.2, 0.2], [0.4, 0.2], [0.4, 0.4], [0.2, 0.4]]),
+    trackingPathData: JSON.stringify(track),
+  });
+  // The region pass carries a rasterized TEXTURE, so the resolved `Mask` is read where the compiler
+  // hands it to the matte cache — the same seam the existing polygon-lowering checks use.
+  const maskAt = (comp: FlarexComp, t: number): Mask | undefined => {
+    const { cache, calls } = stubMatteCache();
+    compileFlarexComp(comp, { ...lowerCtx(), timeSeconds: t, matteCache: cache });
+    return calls[0]?.[0];
+  };
+  const t0 = maskAt(trackedShape, 0);
+  const t1 = maskAt(trackedShape, 1);
+  const t2 = maskAt(trackedShape, 2);
+  // lowerCtx is 1920×1080; the track runs +20% x / +40% y over 2s → +384px / +432px at the end.
+  check("a tracked mask is where it was DRAWN at the track's start",
+    t0 !== undefined && Math.abs(t0.points[0]!.x - 0.2 * 1920) < 1e-6 && Math.abs(t0.points[0]!.y - 0.2 * 1080) < 1e-6);
+  check("…and has MOVED by the track's own offset midway",
+    t1 !== undefined && Math.abs(t1.points[0]!.x - (0.2 * 1920 + 192)) < 1e-6 && Math.abs(t1.points[0]!.y - (0.2 * 1080 + 216)) < 1e-6);
+  check("…and again at the end — three distinct times, three distinct outlines",
+    t2 !== undefined && Math.abs(t2.points[0]!.x - (0.2 * 1920 + 384)) < 1e-6 && Math.abs(t2.points[0]!.y - (0.2 * 1080 + 432)) < 1e-6);
+  check("a tracked mask keeps its SHAPE — the track translates, it does not deform",
+    t0 !== undefined && t2 !== undefined
+    && Math.abs((t2.points[1]!.x - t2.points[0]!.x) - (t0.points[1]!.x - t0.points[0]!.x)) < 1e-6);
+  // Detaching must restore the un-tracked outline exactly, or "remove the track" is a destructive edit.
+  const untracked = maskAt(maskComp("bezierMask", { points: JSON.stringify([[0.2, 0.2], [0.4, 0.2], [0.4, 0.4], [0.2, 0.4]]) }), 1);
+  check("a mask with no track attached is byte-identical to the pre-slice-2 lowering",
+    untracked !== undefined && untracked.points[0]!.x === 0.2 * 1920 && untracked.points[0]!.y === 0.2 * 1080);
+  const badTrack = maskAt(maskComp("bezierMask", {
+    points: JSON.stringify([[0.2, 0.2], [0.4, 0.2], [0.4, 0.4], [0.2, 0.4]]),
+    trackingPathData: "{not json",
+  }), 1);
+  check("a mask whose track is corrupt stays where it was drawn rather than throwing",
+    badTrack !== undefined && badTrack.points[0]!.x === 0.2 * 1920);
+  // Centre-based shapes take the same offset through the same helper.
+  const ellipse0 = maskAt(maskComp("ellipseMask", { trackingPathData: JSON.stringify(track) }), 0);
+  const ellipse2 = maskAt(maskComp("ellipseMask", { trackingPathData: JSON.stringify(track) }), 2);
+  check("rect/ellipse masks track by their CENTRE, by the same offset",
+    ellipse0 !== undefined && ellipse2 !== undefined
+    && Math.abs((ellipse2.points[0]!.x - ellipse0.points[0]!.x) - 384) < 1e-6
+    && Math.abs((ellipse2.points[0]!.y - ellipse0.points[0]!.y) - 432) < 1e-6);
+
+  // ── Slice 2: the content hash must SEE the track ──────────────────────────
+  // `trackingPathData` is a track arriving as JSON, exactly like `shapeKeyframes`: no numeric form for
+  // ADR-009 R1 to resolve, so it hashed as a constant while the node's output moved. The Tracker has
+  // had this since it shipped (2026-07-28), and the node-thumbnail cache keys on the hash with NO time
+  // axis — a tracked node's thumbnail would have frozen on its first rendered frame. DEBT-016's class.
+  const hashAt = (comp: FlarexComp, id: string, t: number) => computeFlarexContentHashes(comp, t).get(id);
+  const trackerComp = build({ trackingPathData: JSON.stringify(track) });
+  check("a tracker's content hash VARIES with time once a track is attached",
+    hashAt(trackerComp, "tk1", 0) !== hashAt(trackerComp, "tk1", 1));
+  check("a tracked mask's content hash varies with time",
+    hashAt(trackedShape, "tm_shape", 0) !== hashAt(trackedShape, "tm_shape", 1));
+  // The other half, and the reason the time term is conditional: folding time unconditionally would
+  // put a per-frame value in every key and destroy reuse for the static nodes these caches serve best.
+  const bareTracker = build({});
+  check("a tracker with NO track still hashes stably across time",
+    hashAt(bareTracker, "tk1", 0) === hashAt(bareTracker, "tk1", 5));
+  const staticMask = maskComp("ellipseMask", {});
+  check("an untracked, unanimated mask still hashes stably across time",
+    hashAt(staticMask, "tm_shape", 0) === hashAt(staticMask, "tm_shape", 5));
 }
 
 // ── TimeSpeed (ADR-011): a node that transforms its inputs' evaluation context ──

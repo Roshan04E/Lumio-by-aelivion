@@ -2013,6 +2013,52 @@ the host and an asset-source MediaIn land in the mathematically-predicted box fo
 answers "do the two renderers agree"; only an absolute-ground-truth instrument answers "is either of them
 right." This entry names the gap; building that harness is not attempted here.
 
+**SECOND AXIS (2026-08-11) — the gate cannot see the EDITOR at all, only the two renderers.**
+
+Registered here rather than as its own entry, deliberately. A reader consults this entry to answer one
+question — *"my sweep is green; what has it NOT told me?"* — and splitting the answer across two
+entries invites the specific mistake of fixing the differential axis (an absolute-ground-truth
+harness, above) and concluding the gate now covers everything. It would not. These are two axes of one
+instrument's blind spot: the first is *what both renderers compute wrongly together*; the second is
+*what neither renderer draws at all.*
+
+`render:compare:pixels` renders a composition through the web-preview path and the Remotion path. The
+editor's own on-canvas surfaces — `MaskEditorOverlay`'s handles and outline, the inspector rows,
+`flarex-mask-bridge.ts`, the node canvas — are in **neither**. They are not a renderer, they produce
+no frame, and no fixture exercises them. The gate's universe does not contain them.
+
+**The instance (slice 2, fixed in this commit).** Attaching a track to a Flarex mask node offset the
+rasterized outline correctly — the compiler applied it, and the three tracked fixtures read 0.000% /
+0.004% / 1.123% against their bars. But `flarex-mask-bridge.ts`, which builds the synthetic layer the
+mask overlay edits, did **not** apply the same offset. The consequence is precise and bad: the editing
+handles sat on the un-tracked outline while the rasterized edge sat on the tracked one, so at every
+time except the track's start the user would drag a handle that was not on the shape it belonged to.
+A full sweep was green throughout. It was found by driving the real editor in Chrome and reading
+`.mask-outline path` at four playhead positions — four identical values where the track predicted four
+different ones.
+
+Note what makes this worse than a normal untested surface: the bridge exists **specifically** to keep
+the overlay and the compiler in agreement (its own header says two resolvers "would mean the overlay's
+handles could sit somewhere other than the rasterized edge, which is the specific failure a bridge
+exists to prevent"). The one property it is for is the one property nothing checks.
+
+**Detection.** Ask of any change: *does this alter something the user manipulates on the viewer, or
+only something drawn into the frame?* Anything in the first category — overlays, handles, inspector
+affordances, the bridge — is outside the gate regardless of how green it is. Slice 1b's dead alt-click
+gesture and slice 2's untracked overlay were both in this category, and both were invisible to a full
+sweep.
+
+**Expiry condition.** A browser-driven editor gate exists and runs in CI: reach the editor, perform a
+gesture, assert an observable DOM property (the `.mask-outline path` `d` attribute is the natural
+subject — it is precise, it is the thing the user aims at, and it is already what the slice-1/1b/2
+probes read). The apparatus is largely built and proven: `apps/worker/src/browser/editor-session.ts`'s
+`reachEditor` is the maintained product-flow entry point, and the slice-1/1b/2 probes in
+`apps/worker/tmp/` are working examples against real Chrome. What does not exist is the promotion of
+any of it out of `tmp/` into a committed, named gate with stable selectors. Size: roughly two days for
+a first gate covering mask-overlay geometry, most of it in making the selectors and the settling
+robust enough not to flake — the recurring cost in every probe written so far has been waiting for the
+workspace to mount, not the assertion itself.
+
 ### DEBT-018 — a recovery the code declares available was never performed (paused WC fallback)
 
 - Status: **fixed — one acceptance link (A3, exhaustion) remains observed-never, not disproven**
@@ -2145,6 +2191,98 @@ inside the ADR because it is not conditional on the seam shipping. Today's timel
 provider per playing clip, and a project cutting between several long sources pays the same
 whole-file residency for clips it shows for a second. The pull model makes it acute; it does not
 make it true.
+
+---
+
+### DEBT-020 — CLASS: a time-varying parameter that is not a number is invisible to the content hash
+
+- Status: **open** — registered as a CLASS with two instances, one of which was latent for six weeks
+- Registered: 2026-08-11 (second instance found by the slice-2 cache enumeration; the enumeration was
+  only being run at all because slice 1 had found the first one a day earlier)
+- Reason: ADR-009 R1 says a keyframed parameter contributes its **evaluated value at t**, never its
+  keyframe track. `computeFlarexContentHashes`'s `resolveParam`
+  (`packages/shared/src/flarex/content-hash.ts`) implements that rule with a single type test:
+
+  ```ts
+  if (typeof raw !== "number") return raw;   // ← everything else hashes as its literal
+  return evaluateFlarexNodeParam({ ... });
+  ```
+
+  The test is correct for what it was written against — at the time, every driver *was* numeric, and
+  the animation evaluator only handles numbers. But Flarex's own convention (stated in `FlarexNode`:
+  *"Flat scalars; complex payloads are JSON.stringify'd strings"*) means a parameter whose value IS a
+  track arrives as a **string**. It has no numeric form to resolve, so it falls through and hashes as
+  a constant. The node's content hash is then **identical at every frame while its output moves.**
+- Invariant affected: none named. ADR-009's rule is not violated in letter — the hash still "resolves
+  drivers to values" for every driver the resolver recognises. The defect is in what it does not
+  recognise, which is why no invariant check fires.
+- Owner: unassigned
+- Expiry condition: see below — a `kernel:conform` assertion. **Not** vigilance.
+- Detection: **a node definition whose params include a non-numeric value that varies with time, and
+  whose `trackParams` does not list it.** A reviewer notices it in `node-defs.ts`, at the moment a
+  `z.string()` param is added: ask *"does this string change what the node outputs from one frame to
+  the next?"* If yes and it is not in `trackParams`, this defect just shipped. It will not be noticed
+  anywhere downstream, because every consumer of the hash is a cache, and a cache serving a stale
+  value looks exactly like a cache working.
+
+**Instance 1 — `shapeKeyframes` (slice 1, fixed in `0a3b220`).** Animatable mask outlines. The
+keyframe track is a JSON string, so an animating `polygonMask`/`bezierMask` hashed identically at
+every time. Found by the enumeration the slice was required to do, *before* the feature shipped —
+i.e. it never reached a user. Fixed by introducing `FlarexNodeDefinition.trackParams` (a def-declared
+list of params that carry tracks) and folding a time term into the digest when one is non-empty, with
+`FLAREX_CONTENT_HASH_CONTRACT_VERSION` bumped 1 → 2.
+
+**Instance 2 — `trackingPathData` (slice 2, fixed in this commit). Latent since 2026-07-28.** The
+Tracker node embeds its whole track as JSON in node params — deliberately, so it reaches the manifest
+and both renderers (see the node's own comment). Same shape, same result: a Tracker's hash was
+constant at every frame while its transform swept across the frame. This one **shipped and sat there
+for six weeks**, through the slice that introduced it and every slice after, and would have gone on
+sitting there: the only reason it was found is that slice 2 was required to repeat slice 1's
+enumeration, and `trackingPathData` is the same kind of input.
+
+**Where it shows, and why nothing caught it.** Every consumer is a cache:
+
+| Consumer | Consequence of a frozen hash |
+|---|---|
+| Node-thumbnail cache (`flarex-node-thumbnails.ts`) | keys `(ContractVersion, contentHash)` with **no time axis at all**, so a tracked/animated node's thumbnail freezes on its first rendered frame — the user-visible symptom, and a cosmetic-looking one that nobody would file as a cache bug |
+| Materialization / content-addressed nest cache (`compile-flarex.ts` → `scene-compositor.ts`) | a sealed group can be served from a nest rendered at a different frame's geometry — a stale *picture*, not a stale thumbnail |
+| `render:compare:pixels` | **cannot see any of it.** The gate renders one still per fixture and diffs two renderers; both consume the same shared hash and would agree on the same stale value. See DEBT-017 — this class is a concrete instance of that one's blind spot. |
+
+**Two instances in two consecutive slices is the signal.** Both were found by hand, by an enumeration
+that happened to be mandated. Neither was found by a test, a gate, or a type. The base rate matters
+more than either bug: the resolver's `typeof raw !== "number"` is a **silent, permissive default** —
+add a JSON param and you get wrong behaviour with no diagnostic — and every new node type is another
+draw from that distribution. `filter.effectParams`, `colorCurves.curves`, and the `wheels`/`secondary`
+payloads sketched in `plans/flarex-node-expansion` are all non-numeric params today; they are safe
+only because they are *currently* static, which is a property of today's features, not of the code.
+
+**Expiry condition — invert the default, in `kernel:conform`.** The only version of this that survives
+the next contributor is a structural assertion, because the failure is silent and the correct
+declaration is invisible when omitted:
+
+> For every node definition, every param whose Zod type is not a number must appear in **either**
+> `trackParams` **or** a new explicit `timeInvariantParams` list. A param in neither fails the
+> conformance run with the node type and param name.
+
+That inverts the default from *silently wrong* to *must declare*. It is checkable statically — it
+reads `node-defs.ts` only, needs no render and no browser — and it is node-blind in ADR-010's sense
+(it reads declarations uniformly, learns nothing about node types).
+
+**Viability: yes, and it is small.** Roughly half a day. The mechanical part is one pass over
+`flarexNodeDefs` unwrapping each param's Zod type (`z.string`/`z.enum`/`z.boolean` vs `z.number`),
+plus the `timeInvariantParams` field on `FlarexNodeDefinition`, plus one assertion in the existing
+conformance harness. The real cost is the one-time backfill: ~39 node types must each have their
+non-numeric params classified, and that classification is a judgement call per param — which is
+precisely the judgement that is currently being made implicitly, by omission, and getting it wrong
+twice. Two caveats a builder should know going in: `z.enum` is non-numeric but essentially always
+time-invariant (a blend mode does not animate), so the backfill will be mostly `timeInvariantParams`
+and the assertion earns its keep on the handful of JSON-payload params; and the check cannot catch a
+param that is *declared* time-invariant and later *becomes* time-varying, so the declaration should
+sit adjacent to the param in `node-defs.ts` where the person changing it will see it.
+
+**This class does not retire when its instances are fixed.** Both known instances are fixed. The
+class stays open until the conformance assertion exists, for the reason the register exists: the
+mechanism that produced two bugs in two slices is still in place and still silent.
 
 ---
 

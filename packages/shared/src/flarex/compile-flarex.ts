@@ -43,22 +43,8 @@ import {
 // registered no matter which module loaded first (idempotent — same call effects.ts makes).
 registerBuiltinFragmentEffects();
 import { getCompositionColorPipeline } from "../composition-style";
-import { sampleTrackingPathAt, type TrackingPathArtifactData } from "../masks";
+import { applyTrackAtTime, flarexMaskTrackOffsetPx, parseTrackingPathPayload, type TrackApplyMode, type TrackingPathArtifactData } from "../masks";
 
-/**
- * Parse a Tracker node's embedded track. Malformed or empty JSON yields null, so the node passes
- * through — a corrupt param must degrade the node, never throw inside a per-frame lowering that runs
- * on the playback hot path.
- */
-function parseTrackingPathParam(raw: string): TrackingPathArtifactData | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as TrackingPathArtifactData;
-    return Array.isArray(parsed?.points) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
 import type { SceneMaskMatteCache } from "../scene/scene-mask-matte";
 import type { SceneDraw, SceneFragmentPass, SceneGroupDraw, SceneLayerDraw, SceneRegionPass } from "../color/scene-compositor";
 import type { Mask, TimelineEffect, TimelineLayer } from "../types";
@@ -1212,6 +1198,28 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
     return null;
   };
 
+  /**
+   * A mask node's track offset, in PIXELS, at the evaluation time.
+   *
+   * Always MATCH-MOVE: a mask exists to sit on something in the picture, so it follows the subject.
+   * Stabilize is a statement about the FRAME and belongs to the Tracker node — a "stabilized" mask
+   * would move opposite the thing it is supposed to be covering, which is not a mode anyone wants and
+   * is the confusion the shared `applyTrackAtTime` is there to prevent.
+   *
+   * `dx`/`dy` are comp PERCENT of width and height respectively (timeline transform units); `Mask`
+   * points are pixels. Sampled at `at`, not `ctx.timeSeconds`, for the T4 reason the Tracker states:
+   * under a retime the outline must come from the same moment as the picture it masks.
+   */
+  const maskTrackOffsetPx = (node: FlarexNode, at: number): { x: number; y: number } => {
+    const raw = str(node, "trackingPathData", "");
+    const id = str(node, "trackingPathId", "");
+    if (!raw && !id) return { x: 0, y: 0 };
+    // A deleted or malformed track leaves the mask exactly where it was drawn, matching the Tracker's
+    // soft-degrade: a comp whose track is gone still renders, un-tracked, rather than blank.
+    const path = parseTrackingPathPayload(raw) ?? (ctx.resolveTrackingPath?.(id) ?? null);
+    return flarexMaskTrackOffsetPx(path, at, num(at, node, "smoothing", 0) || undefined, ctx.compWidth, ctx.compHeight);
+  };
+
   function evalNode(nodeId: string, timeSeconds = ctx.timeSeconds): FlarexValue | null {
     const key = evalKey(nodeId, timeSeconds);
     // Profiler-only: track recursion depth (peak/avg) so the retained-cache "no recursive descent" win is
@@ -1649,8 +1657,11 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
       case "ellipseMask": {
         const w = ctx.compWidth;
         const h = ctx.compHeight;
-        const cx = num(at, node, "centerX", 0.5) * w;
-        const cy = num(at, node, "centerY", 0.5) * h;
+        // A track moves the CENTRE and nothing else: width/height/feather are the user's shape, and a
+        // translation-only track has nothing to say about them.
+        const trackOffset = maskTrackOffsetPx(node, at);
+        const cx = num(at, node, "centerX", 0.5) * w + trackOffset.x;
+        const cy = num(at, node, "centerY", 0.5) * h + trackOffset.y;
         const halfW = (Math.max(0, num(at, node, "width", 0.5)) * w) / 2;
         const halfH = (Math.max(0, num(at, node, "height", 0.5)) * h) / 2;
         const mask = createBoxMask(node.type === "rectMask" ? "rectangle" : "ellipse", cx - halfW, cy - halfH, cx + halfW, cy + halfH, 1);
@@ -1708,7 +1719,7 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         const w = ctx.compWidth;
         const h = ctx.compHeight;
         const idPrefix = `flarex_${comp.id}_${node.id}`;
-        const points = resolveFlarexShapeAtTime({
+        const resolved = resolveFlarexShapeAtTime({
           points: node.params.points,
           shapeKeyframes: node.params.shapeKeyframes,
           fallback: FLAREX_DEFAULT_MASK_POINTS[node.type],
@@ -1717,6 +1728,13 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           idPrefix,
           timeSeconds: at,
         });
+        // The track offsets the ANCHORS only. Tangents are stored as deltas from their own anchor
+        // (mask-shape.ts), so translating a point carries its handles with it — offsetting them too
+        // would double the move and bend the curve as the track ran.
+        const offset = maskTrackOffsetPx(node, at);
+        const points = offset.x === 0 && offset.y === 0
+          ? resolved
+          : resolved.map((point) => ({ ...point, x: point.x + offset.x, y: point.y + offset.y }));
         const mask = createMask(
           node.type === "polygonMask" ? "polygon" : "bezier",
           points,
@@ -1788,13 +1806,22 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         // agree on. The id-based adapter is a convenience for callers that have a store; if it ever
         // became the primary path it would have to reach Remotion too, or the preview would track and
         // the export would not.
-        const path = parseTrackingPathParam(str(node, "trackingPathData", ""))
+        const path = parseTrackingPathPayload(str(node, "trackingPathData", ""))
           ?? (ctx.resolveTrackingPath?.(str(node, "trackingPathId", "")) ?? null);
         if (!path || path.points.length === 0) return passthrough(node, at);
         // T4: the track is sampled at the EVALUATION time. Reading `ctx.timeSeconds` here meant a
         // retimed subtree followed the playhead's track position while its pixels came from another
         // moment — the second of the three un-retimed reads, and the same failure shape as the matte.
-        const sample = sampleTrackingPathAt(path, at, num(at, node, "smoothing", 0) || undefined);
+        //
+        // MODE (slice 2): match-move applies the track TO this image; stabilize applies its INVERSE,
+        // plus the zoom that keeps the swimming frame's edges out of view. Both come out of the ONE
+        // shared definition in `applyTrackAtTime` — deciding the sign here would put a second
+        // definition of "stabilize" in the tree, and a renderer that picked the other one produces a
+        // picture that looks plausible, is backwards, and reads 0.000% on a differential gate.
+        const applied = applyTrackAtTime(path, at, {
+          mode: str(node, "mode", "matchMove") as TrackApplyMode,
+          smoothing: num(at, node, "smoothing", 0) || undefined,
+        });
         const wrap = wrapFor(input, STAGE_TRANSFORM);
         frameProfiler.bump("compile.operations");
         frameProfiler.bump("compile.objects");
@@ -1804,10 +1831,9 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
         // Transform node overwrites here because it IS the framing; this one is a delta.
         wrap.shell.transform = {
           ...base,
-          x: base.x + sample.dx,
-          y: base.y + sample.dy,
-          scale: Math.max(0, base.scale * sample.scale),
-          rotation: base.rotation + sample.rotateZ,
+          x: base.x + applied.dx,
+          y: base.y + applied.dy,
+          scale: Math.max(0, base.scale * applied.scale),
         };
         return { kind: "image", draw: wrap };
       }
