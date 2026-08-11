@@ -239,6 +239,70 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "linear-stylize-print"
 ];
 
+/**
+ * CROSS-FIXTURE relations: what two fixtures must say about EACH OTHER, as opposed to what one fixture
+ * must say about its own past.
+ *
+ * `render:baseline` compares every fixture to its OWN previous hash, which is the right instrument for
+ * "did an existing project move" and the wrong one for the claim `102eeb5` actually proved: that
+ * `linear-stylize` is byte-identical to `stylize` because the artistic family opts out of the light.
+ * That identity was OBSERVED — two hashes read off a report — and nothing asserted it. Drop the
+ * `displayReferred` flag and the linear twin's picture changes, which surfaces as "linear-stylize's
+ * baseline changed" — indistinguishable from the routine, expected, legitimate act of re-baselining a
+ * linear fixture in a programme where linear fixtures are supposed to move. The failure would be
+ * laundered by the person least likely to question it, using the documented procedure.
+ *
+ * A relation cannot be satisfied by re-capturing, because both sides are captured by the same run.
+ *
+ * The `different` rows are not decoration. A one-sided check — "the twins match" — passes perfectly if
+ * the LINEAR STAGE SILENTLY STOPS ENGAGING: every linear fixture would then equal its display twin,
+ * including the ones that must not. That is the most valuable failure here to catch and the easiest to
+ * miss, so the controls carry the same weight as the claims.
+ */
+export interface RenderComparisonFixtureRelation {
+  a: RenderComparisonFixtureKey;
+  b: RenderComparisonFixtureKey;
+  /** `identical` = same bytes required; `different` = the two MUST NOT render the same picture. */
+  relation: "identical" | "different";
+  /** Read out verbatim when the relation fails, so the failure explains itself. */
+  why: string;
+}
+
+export const renderComparisonFixtureRelations: RenderComparisonFixtureRelation[] = [
+  {
+    a: "linear-stylize",
+    b: "stylize",
+    relation: "identical",
+    why:
+      "the stylize pass-graph is displayReferred, so a linear project must hand it display values and " +
+      "get the same picture back. A difference means the opt-out was dropped, or the registry's shader " +
+      "memo and the compositor's program cache disagree about which program the definition owns."
+  },
+  {
+    a: "linear-stylize-print",
+    b: "stylize-print",
+    relation: "identical",
+    why:
+      "same claim on the hardest case: comic-print thresholds hard AND emits authored paper/ink " +
+      "constants, so it moves if either half of the opt-out breaks."
+  },
+  {
+    a: "linear-glow",
+    b: "glow",
+    relation: "different",
+    why:
+      "the NEGATIVE CONTROL. Glow mixes light, so the linear arm must render a different picture. If " +
+      "this one ever matches, the linear stage is not engaging at all — and every `identical` row " +
+      "above would pass for the wrong reason."
+  },
+  {
+    a: "linear-blur",
+    b: "blur",
+    relation: "different",
+    why: "the second negative control: a blur is a weighted sum of light, so its arms cannot agree."
+  }
+];
+
 const fullColorEffects: TimelineLayer["effects"] = [
   {
     id: "fixture_curves",

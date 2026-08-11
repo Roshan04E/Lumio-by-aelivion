@@ -56,7 +56,7 @@ export interface FragmentEffectPassDefinition {
   glsl: string;
 }
 
-export interface FragmentEffectDefinition {
+interface FragmentEffectDefinitionShared {
   /** Stable id - stored as `effect.params.__shaderManifestId`. */
   id: string;
   name: string;
@@ -64,8 +64,6 @@ export interface FragmentEffectDefinition {
   params: FragmentEffectParam[];
   /** Single-pass body: must define `vec4 effect(vec2 uv) { ... }`. Ignored when `passes` is set. */
   glsl: string;
-  /** Multi-pass graph (ordered). When present the compositor runs the chain instead of `glsl`. */
-  passes?: FragmentEffectPassDefinition[];
   /**
    * Mask-aware effect (stylize P5): the effect's pass mask is bound INTO the shader as
    * `uniform sampler2D uPassMask` (+ `uniform float uHasPassMask`, 0/1) instead of being applied
@@ -90,42 +88,80 @@ export interface FragmentEffectDefinition {
    * sets is overwritten by the registry's derivation.
    */
   dependencies?: readonly FragmentEffectDependency[];
-  /**
-   * This effect is AUTHORED IN DISPLAY SPACE end to end, and the linear stage must leave it alone.
-   *
-   * Set it and the harness neither decodes on the way in nor encodes on the way out, so the body sees
-   * and returns exactly what it saw and returned before the linear stage existed — in a linear project
-   * as well as a display one. It is an opt-out from the light, not a conversion of it.
-   *
-   * WHY THIS EXISTS RATHER THAN A TABLE OF RE-TUNED CONSTANTS. The plan (§3.4) expected the artistic
-   * family to need new luma thresholds in linear. Measured, that is not the shape of the problem:
-   * these effects do not MIX light, they DRAW a picture out of authored display-referred numbers, and
-   * the numbers are not only thresholds.
-   *
-   *   · `stylize.ts` pivots contrast at `(c - 0.5) * k + 0.5`. 0.5 is middle grey on a display graph;
-   *     linear middle grey is 0.214. Run in linear it crushes and saturates everything below mid —
-   *     which is exactly what the render showed: olive hillside, blood-red bokeh, over-saturated ground.
-   *   · `halftone` returns `mix(vec3(0.97), vec3(0.05), ink)` — authored PAPER and INK values. Emitted
-   *     as linear they are the wrong paper and the wrong ink.
-   *   · the cel-band quantizer bands LUMA into N steps; banding linear luma puts every edge somewhere
-   *     else, because most of a picture's linear luma sits low.
-   *
-   * Converting a threshold cannot fix a pivot, an output constant or a quantizer. Re-authoring all of
-   * them would mean re-designing four shipped looks by eye, with no reference for what they should
-   * become — and freezing the result into a baseline, which is what makes a bad tuning permanent.
-   *
-   * This is not a special case invented here. It is the rule `color/cpu.ts` already applies to curves,
-   * wheels, HSL and .cube LUTs — *authored on display graphs, so run them on display values* — and the
-   * one the linear-light plan itself mandates for grain (§3.4). The family that needed an exception was
-   * simply larger than the plan expected.
-   *
-   * The consequence is deliberate and worth stating: for these effects the display and linear arms are
-   * BIT-IDENTICAL. That is the correct answer, not a missing feature. What the linear stage buys is
-   * correct light in the operations that mix it — blur, glow, bloom — and those are unaffected by this
-   * flag because they are not fragment effects.
-   */
+}
+
+/**
+ * `displayReferred` — this effect is AUTHORED IN DISPLAY SPACE end to end, and the linear stage must
+ * leave it alone.
+ *
+ * Set it and the harness neither decodes on the way in nor encodes on the way out, so the body sees
+ * and returns exactly what it saw and returned before the linear stage existed — in a linear project
+ * as well as a display one. It is an opt-out from the light, not a conversion of it.
+ *
+ * WHY THIS EXISTS RATHER THAN A TABLE OF RE-TUNED CONSTANTS. The plan (§3.4) expected the artistic
+ * family to need new luma thresholds in linear. Measured, that is not the shape of the problem:
+ * these effects do not MIX light, they DRAW a picture out of authored display-referred numbers, and
+ * the numbers are not only thresholds.
+ *
+ *   · `stylize.ts` pivots contrast at `(c - 0.5) * k + 0.5`. 0.5 is middle grey on a display graph;
+ *     linear middle grey is 0.214. Run in linear it crushes and saturates everything below mid —
+ *     which is exactly what the render showed: olive hillside, blood-red bokeh, over-saturated ground.
+ *   · `halftone` returns `mix(vec3(0.97), vec3(0.05), ink)` — authored PAPER and INK values. Emitted
+ *     as linear they are the wrong paper and the wrong ink.
+ *   · the cel-band quantizer bands LUMA into N steps; banding linear luma puts every edge somewhere
+ *     else, because most of a picture's linear luma sits low.
+ *
+ * Converting a threshold cannot fix a pivot, an output constant or a quantizer. Re-authoring all of
+ * them would mean re-designing four shipped looks by eye, with no reference for what they should
+ * become — and freezing the result into a baseline, which is what makes a bad tuning permanent.
+ *
+ * This is not a special case invented here. It is the rule `color/cpu.ts` already applies to curves,
+ * wheels, HSL and .cube LUTs — *authored on display graphs, so run them on display values* — and the
+ * one the linear-light plan itself mandates for grain (§3.4). The family that needed an exception was
+ * simply larger than the plan expected.
+ *
+ * The consequence is deliberate and worth stating: for these effects the display and linear arms are
+ * BIT-IDENTICAL. That is the correct answer, not a missing feature. What the linear stage buys is
+ * correct light in the operations that mix it — blur, glow, bloom — and those are unaffected by this
+ * flag because they are not fragment effects.
+ */
+interface SinglePassShape {
+  /** No pass graph: the definition's own `glsl` is the whole effect. */
+  passes?: undefined;
   displayReferred?: boolean;
 }
+
+/**
+ * A MULTI-PASS definition must be `displayReferred: true`, and the type enforces it rather than
+ * trusting the next author to remember. This is the trap `102eeb5` recorded in prose and nobody would
+ * have read.
+ *
+ * WHY. Intermediate pass targets are pooled RAW RGBA8 (`assembleShader` encodes only in the FINAL
+ * pass's `main()`; earlier passes write their output verbatim, because they carry data — structure
+ * tensors, flow fields, paint buffers — not colour). Run a NON-display-referred graph in a linear
+ * project and every intermediate hop stores linear values in 8 bits, where display codes 0..15
+ * collapse onto two code values (plan §2.1). The result is banding in the shadows: subtle, look-like,
+ * and attributable to the effect rather than to storage — the kind of defect that gets shipped.
+ *
+ * THE TWO FIXES, and the error should send you to one of them:
+ *   1. mark the definition `displayReferred: true` — correct for anything artistic, which is every
+ *      multi-pass effect shipped today; or
+ *   2. give the intermediate pass targets sRGB storage (`RenderTarget` already takes a requested
+ *      encoding — see `supportsSrgbRenderTarget`) and move the linear bracket accordingly. That is a
+ *      compositor change with its own pixel gate, not a flag flip.
+ *
+ * Note the rule is "has a pass graph", not "has more than one pass". A one-element graph has no
+ * intermediate hop and so no hazard, but it is also indistinguishable from the single-pass form —
+ * write it as `glsl` instead. Keeping the rule countable-free keeps it checkable in the type system.
+ */
+interface MultiPassMustBeDisplayReferred {
+  /** Multi-pass graph (ordered). When present the compositor runs the chain instead of `glsl`. */
+  passes: FragmentEffectPassDefinition[];
+  displayReferred: true;
+}
+
+export type FragmentEffectDefinition = FragmentEffectDefinitionShared &
+  (SinglePassShape | MultiPassMustBeDisplayReferred);
 
 /** Semantic environment/data axes an effect's output depends on (ADR-010 dependency declarations).
  *  Derived from the shader by the registry; kept language-agnostic. Grows as new providers appear. */
@@ -338,13 +374,47 @@ function deriveFragmentEffectDependencies(def: FragmentEffectDefinition): Fragme
   return usesTime ? ["time"] : [];
 }
 
+/**
+ * The runtime half of the multi-pass rule above. The type catches an AUTHORED definition; this catches
+ * a CONSTRUCTED one — `plugin-effect-adapter.ts` builds definitions out of plugin manifests at runtime,
+ * where no annotation is checkable and the "next author" may not be in this repo at all.
+ *
+ * It throws rather than warns, at module load for the builtins, so the failure cannot be a dark picture
+ * discovered later. See `MultiPassMustBeDisplayReferred` for why, and for the two ways out.
+ *
+ * The parameter is deliberately a loose structural shape rather than `FragmentEffectDefinition`: with
+ * the real type, TypeScript narrows the body to `never` and refuses to compile it — which is the type
+ * half of this rule stating, correctly, that it has already made this case impossible.
+ */
+function assertMultiPassIsDisplayReferred(def: {
+  id: string;
+  passes?: readonly unknown[] | undefined;
+  displayReferred?: boolean | undefined;
+}): void {
+  if (!def.passes?.length || def.displayReferred) return;
+  throw new Error(
+    `Fragment effect "${def.id}" has a multi-pass graph but is not displayReferred. Intermediate pass ` +
+      `targets are raw RGBA8, so in a linear project its intermediate hops would store linear values ` +
+      `in 8 bits and band in the shadows (plans/linear-light-effect-stage.md §2.1). Fix it one of two ` +
+      `ways: mark the definition \`displayReferred: true\` (correct for anything that draws a look or ` +
+      `extracts a matte out of authored constants — which is every multi-pass effect shipped today), ` +
+      `or give the intermediate pass targets sRGB storage in the compositor's pass pool and move the ` +
+      `linear bracket to match (a compositor change with its own pixel gate, not a flag flip).`
+  );
+}
+
 export function registerFragmentEffect(def: FragmentEffectDefinition, options: { override?: boolean } = {}): boolean {
+  assertMultiPassIsDisplayReferred(def);
   if (registry.has(def.id) && !options.override) {
     return false;
   }
-  shaderCache.delete(def.id);
-  for (const pass of def.passes ?? []) {
-    shaderCache.delete(`${def.id}#${pass.id}`);
+  // Both light variants: the shader cache is keyed by (id, light) since the linear stage, so evicting
+  // the bare id would leave a re-registered definition serving its predecessor's compiled source.
+  for (const light of ["display", "linear"] as const) {
+    shaderCache.delete(`${def.id}@${light}`);
+    for (const pass of def.passes ?? []) {
+      shaderCache.delete(`${def.id}#${pass.id}@${light}`);
+    }
   }
   // Store the def with its DERIVED dependency declarations (non-mutating: a shallow copy, so the
   // caller's object is untouched and the registry is the single source of the derived metadata).

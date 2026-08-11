@@ -47,6 +47,7 @@ import { buildRenderManifest } from "@orreris/render-templates";
 import {
   createRenderComparisonFixture,
   renderComparisonFixtureKeys,
+  renderComparisonFixtureRelations,
   renderComparisonFrameSeconds,
   type RenderComparisonFixtureKey
 } from "@orreris/shared";
@@ -157,6 +158,61 @@ function diffPngs(
   return { diffPixels, totalPixels: baseline.width * baseline.height };
 }
 
+/**
+ * CROSS-FIXTURE relations — the half of this gate that a re-capture cannot launder.
+ *
+ * Everything above compares a fixture to its OWN past, and the documented response to a legitimate
+ * change is `--capture`. That makes it the wrong instrument for a claim about two fixtures agreeing
+ * with EACH OTHER: `linear-stylize` must be byte-identical to `stylize` because the artistic family
+ * opts out of the light, and if that breaks, the symptom is "a linear fixture's baseline moved" —
+ * which is what this programme's linear fixtures are SUPPOSED to do. Re-capture and the evidence is
+ * gone, by the book, by whoever is least likely to be suspicious.
+ *
+ * Both sides are hashed in the same run, so a relation is unaffected by what any baseline says.
+ *
+ * It runs in CAPTURE mode as well as verify, BEFORE the manifest is written, and a failure means no
+ * manifest is written at all. That ordering is the whole point: capture is the laundering path.
+ *
+ * A relation whose partner is outside a scoped run renders the partner anyway (into `relations/`,
+ * never recorded as a baseline). Otherwise `BASELINE_FIXTURES=linear-stylize --capture` would be a
+ * hole shaped exactly like the failure this is here to catch.
+ */
+async function checkRelations(scope: Set<string>, shas: Map<string, string>): Promise<string[]> {
+  const relations = renderComparisonFixtureRelations.filter((rel) => scope.has(rel.a) || scope.has(rel.b));
+  if (!relations.length) {
+    console.log("\nNo cross-fixture relations involve this run's fixtures.");
+    return [];
+  }
+  const relationDir = path.join(baselineDir, "relations");
+  fs.mkdirSync(relationDir, { recursive: true });
+
+  const shaFor = async (key: RenderComparisonFixtureKey): Promise<string> => {
+    const known = shas.get(key);
+    if (known) return known;
+    const out = path.join(relationDir, `${key}.png`);
+    await renderFixture(key, out);
+    const sha = sha256File(out);
+    shas.set(key, sha);
+    return sha;
+  };
+
+  console.log("\nCross-fixture relations (a re-capture cannot satisfy these):");
+  const failures: string[] = [];
+  for (const rel of relations) {
+    const shaA = await shaFor(rel.a);
+    const shaB = await shaFor(rel.b);
+    const same = shaA === shaB;
+    const ok = rel.relation === "identical" ? same : !same;
+    const verb = rel.relation === "identical" ? "==" : "!=";
+    const line = `${rel.a} ${verb} ${rel.b}`;
+    console.log(
+      `  ${line.padEnd(46)} ${ok ? "ok" : "FAILED"}   ${shaA.slice(0, 12)} ${same ? "==" : "!="} ${shaB.slice(0, 12)}`
+    );
+    if (!ok) failures.push(`${line} — ${rel.why}`);
+  }
+  return failures;
+}
+
 async function main(): Promise<void> {
   fs.mkdirSync(baselineDir, { recursive: true });
 
@@ -165,11 +221,27 @@ async function main(): Promise<void> {
     console.log(`Capturing baselines at ${commit} (rendererMode=${rendererMode})`);
     // Merge into any existing entries — a scoped capture must not erase baselines it did not take.
     const fixtures: Record<string, BaselineEntry> = { ...(readManifest()?.fixtures ?? {}) };
+    const captured = new Map<string, string>();
     for (const key of fixtureKeys) {
       const out = path.join(baselineDir, `${key}.png`);
       await renderFixture(key, out);
       fixtures[key] = { sha256: sha256File(out), ...pngSize(out) };
+      captured.set(key, fixtures[key]!.sha256);
       console.log(`  captured ${key}  ${fixtures[key]!.sha256.slice(0, 12)}`);
+    }
+    // Before the write, never after: a capture that would freeze a broken relation into the reference
+    // must not produce a reference at all.
+    const relationFailures = await checkRelations(new Set<string>(fixtureKeys), captured);
+    if (relationFailures.length) {
+      throw new Error(
+        `Refusing to write baselines: ${relationFailures.length} cross-fixture relation(s) FAILED.\n  ` +
+          `${relationFailures.join("\n  ")}\n\n` +
+          `These do not compare against a baseline, so re-capturing cannot make them pass — the ` +
+          `pictures themselves disagree. Fix the code, then capture.\n\n` +
+          `NOTE: the local PNGs in ${path.relative(repoRoot, baselineDir)} WERE overwritten by this ` +
+          `run; only the manifest was withheld. Re-capture after the fix so the diagnosis diffs on a ` +
+          `later failure compare against the reference the manifest actually holds.`
+      );
     }
     const manifest: BaselineManifest = {
       commit,
@@ -203,6 +275,7 @@ async function main(): Promise<void> {
   fs.mkdirSync(currentDir, { recursive: true });
   const failures: string[] = [];
   const missing: string[] = [];
+  const rendered = new Map<string, string>();
 
   for (const key of fixtureKeys) {
     const entry = baselineManifest.fixtures[key];
@@ -216,6 +289,7 @@ async function main(): Promise<void> {
     const currentPath = path.join(currentDir, `${key}.png`);
     await renderFixture(key, currentPath);
     const sha = sha256File(currentPath);
+    rendered.set(key, sha);
     if (sha === entry.sha256) {
       console.log(`  ${key.padEnd(32)} unchanged`);
       continue;
@@ -242,13 +316,26 @@ async function main(): Promise<void> {
     console.log("These were NOT checked. Run with --capture to add them.");
   }
 
-  if (failures.length) {
-    throw new Error(
-      `The rendered picture CHANGED for ${failures.length} fixture(s) versus baseline ` +
-        `${baselineManifest.commit.slice(0, 7)}:\n  ${failures.join("\n  ")}\n\n` +
-        `If the change is intended, review the diff PNGs in ${path.relative(repoRoot, currentDir)} ` +
-        `and re-capture. If it is not, an existing project just shifted.`
-    );
+  const relationFailures = await checkRelations(new Set<string>(fixtureKeys), rendered);
+
+  if (failures.length || relationFailures.length) {
+    const parts: string[] = [];
+    if (failures.length) {
+      parts.push(
+        `The rendered picture CHANGED for ${failures.length} fixture(s) versus baseline ` +
+          `${baselineManifest.commit.slice(0, 7)}:\n  ${failures.join("\n  ")}\n\n` +
+          `If the change is intended, review the diff PNGs in ${path.relative(repoRoot, currentDir)} ` +
+          `and re-capture. If it is not, an existing project just shifted.`
+      );
+    }
+    if (relationFailures.length) {
+      parts.push(
+        `${relationFailures.length} cross-fixture relation(s) FAILED:\n  ${relationFailures.join("\n  ")}\n\n` +
+          `Re-capturing will NOT clear these — they compare two fixtures rendered in this same run, ` +
+          `not a fixture against its baseline.`
+      );
+    }
+    throw new Error(parts.join("\n\n"));
   }
   const checked = fixtureKeys.length - missing.length;
   console.log(`\nPicture unchanged for all ${checked} checked fixture(s) versus ${baselineManifest.commit.slice(0, 7)}.`);

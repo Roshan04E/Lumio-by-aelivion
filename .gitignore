@@ -35,3 +35,5 @@ apps/worker/apps/
 # tmp/render-baseline/baseline.json, which IS committed; the PNGs are ~70MB of local diagnosis.
 tmp/render-baseline/*.png
 tmp/render-baseline/current/
+# Partners rendered only to evaluate a cross-fixture relation in a SCOPED run — never a reference.
+tmp/render-baseline/relations/

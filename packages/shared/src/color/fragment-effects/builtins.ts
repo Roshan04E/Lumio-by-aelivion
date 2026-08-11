@@ -361,6 +361,22 @@ const FLAREX_CHROMA_KEY: FragmentEffectDefinition = {
   name: "Chroma Keyer",
   category: "Keying",
   rewritesAlpha: true,
+  /**
+   * FOUND BY THE TYPE, not by review: this is the second multi-pass definition in the tree, and
+   * `102eeb5` asserted in prose that the stylize graph was the only one. It was wrong, and nothing
+   * would have said so — a keyer in a LINEAR project would have run its 3-pass graph through raw
+   * RGBA8 intermediates, banding the matte in the shadows exactly where hair edges live.
+   *
+   * `displayReferred` is also the right answer on its own merits, before the storage argument. A
+   * color-difference keyer is not a light-mixing operation: it measures how key-hued a pixel is in
+   * the CbCr plane, and every constant here — tolerance's `0.5 + t * 2.0` gain, the clipBlack/
+   * clipWhite screen levels, the choke shoulder — was authored and tuned against DISPLAY chroma.
+   * In linear, chroma collapses toward the shadows and all of them mean something else.
+   *
+   * If a linear keyer is ever wanted, it is the compositor-side fix (sRGB intermediates) plus a
+   * re-tune of the whole control set, not this flag.
+   */
+  displayReferred: true,
   params: [
     { name: "keyColor", type: "vec3", default: [0.0, 0.69, 0.25], label: "Key Color" },
     { name: "tolerance", type: "float", default: 0.35, min: 0, max: 1, step: 0.01, label: "Tolerance" },

@@ -554,6 +554,37 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   const { buildFragmentEffectShader, listFragmentEffects } = await import("./fragment-effects/registry");
   const plain = listFragmentEffects().find((d) => d.id !== "builtin.stylize" && !d.maskAware && !d.passes);
   check("non-mask-aware defs stay free of uPassMask", plain != null && !buildFragmentEffectShader(plain).includes("uPassMask"));
+
+  /**
+   * THE MULTI-PASS TRAP, as a gate rather than a paragraph in a commit message.
+   *
+   * Intermediate pass targets are raw RGBA8. A multi-pass definition that does NOT opt out of the
+   * linear light would store linear values in 8 bits at every hop and band in the shadows — a
+   * look-shaped defect that reads as the effect's fault, not storage's. The type makes an AUTHORED
+   * definition impossible; these two checks cover what the type cannot see.
+   */
+  const { registerFragmentEffect } = await import("./fragment-effects/registry");
+  check(
+    "every registered multi-pass effect is displayReferred",
+    listFragmentEffects().every((d) => !d.passes?.length || d.displayReferred === true)
+  );
+  // The CONSTRUCTED path (plugin manifests build definitions at runtime, where no annotation is
+  // checkable). Only a deliberate cast reaches the guard, which is the point of casting here.
+  let threw = "";
+  try {
+    registerFragmentEffect({
+      id: "test.multipass.not-display-referred",
+      name: "trap",
+      category: "Stylize",
+      params: [],
+      glsl: "vec4 effect(vec2 uv){ return getSrcColor(uv); }",
+      passes: [{ id: "a", glsl: "vec4 effect(vec2 uv){ return getSrcColor(uv); }" }]
+    } as unknown as Parameters<typeof registerFragmentEffect>[0]);
+  } catch (error) {
+    threw = error instanceof Error ? error.message : String(error);
+  }
+  check("a constructed multi-pass def without the opt-out is REFUSED", threw.includes("displayReferred"));
+  check("and the refusal names both fixes", threw.includes("sRGB storage") && threw.includes("§2.1"));
 }
 
 if (failures > 0) {
