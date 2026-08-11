@@ -2,7 +2,7 @@ import {
   ATOMIC_MODULES,
   type TransitionPassModuleId,
 } from "./pipeline";
-import { HARNESS_PRELUDE } from "./registry";
+import { transitionHarnessPrelude, transitionMainGlsl, type TransitionLightSpace } from "./registry";
 
 /**
  * Standard uniforms every assembled pass shader declares. Module `uniforms` entries that collide with
@@ -35,8 +35,18 @@ function uniformName(decl: string): string {
  * web preview, browser export, and Remotion, multi-pass transitions stay pixel-aligned by construction.
  */
 export class PipelineAssembler {
-  /** Assemble the full fragment shader for one pipeline pass. */
-  static assemblePassShader(moduleId: TransitionPassModuleId, extraUniforms: string[] = []): string {
+  /**
+   * Assemble the full fragment shader for one pipeline pass.
+   *
+   * In LINEAR light every pass brackets independently: the three doorways decode, `main()` encodes, so
+   * each intermediate stays display-referred 8-bit while every module's math runs on light. See
+   * `HARNESS_PRELUDE_LINEAR` in the registry for why the bracket is here and not in the target pool.
+   */
+  static assemblePassShader(
+    moduleId: TransitionPassModuleId,
+    extraUniforms: string[] = [],
+    light: TransitionLightSpace = "display"
+  ): string {
     const module = ATOMIC_MODULES[moduleId];
     if (!module) throw new Error(`Unknown transition module: ${moduleId}`);
 
@@ -61,15 +71,22 @@ uniform float ratio;       // resolution.x / resolution.y
 uniform vec2 uFromFit;     // object-fit uv scale for the outgoing texture
 uniform vec2 uToFit;       // object-fit uv scale for the incoming texture
 ${moduleUniforms}
-${HARNESS_PRELUDE}
+${transitionHarnessPrelude(light)}
 // Previous pass output — pipeline passes chain through this (comp-sized, fit already applied upstream).
-vec4 getSrcColor(vec2 uv){ return texture(uSrc, clamp(uv, 0.0, 1.0)); }
+// Every module in the library chains a PICTURE through here (there is no data-carrying pass, unlike the
+// fragment-effect graphs), so decoding it in linear is right: the next pass mixes light, not a tensor.
+${
+  light === "linear"
+    ? `vec4 getSrcColor(vec2 uv){
+  vec4 c = texture(uSrc, clamp(uv, 0.0, 1.0));
+  return vec4(sceneToLinear(c.rgb), c.a);
+}`
+    : `vec4 getSrcColor(vec2 uv){ return texture(uSrc, clamp(uv, 0.0, 1.0)); }`
+}
 
 ${module.glsl}
 
-void main() {
-  fragColor = passMain(v_uv);
-}
+${transitionMainGlsl(light, "passMain(v_uv)")}
 `;
   }
 }

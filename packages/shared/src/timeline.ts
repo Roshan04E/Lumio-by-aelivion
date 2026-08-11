@@ -62,16 +62,21 @@ export function createDefaultComposition(input: {
       // linear-light effect stage existed" and must keep rendering the old way forever. A new project
       // has to say so in its own saved data (see NEW_PROJECT_COLOR_SETTINGS).
       //
-      // HELD AT LEGACY UNTIL THE EFFECT STAGE IS WHOLE (2026-08-11, linear-light slice 2).
+      // HELD AT LEGACY UNTIL THE EFFECT STAGE IS WHOLE (2026-08-11, linear-light slice 4).
       //
       // This deliberately does NOT stamp NEW_PROJECT_COLOR_SETTINGS yet, and the reason is the same
-      // one the LEGACY/NEW split exists for. The stage is only partly converted: transitions are
-      // display-referred until slice 4, and `scene-compositor.ts` still has effect-target consumers
-      // that take no light space. So `effectLight: "linear"` today does not mean "this project mixes
-      // light" — it means "this project mixes light in SOME operations and not others". Projects
-      // created in that window would visibly shift in their transitions when the remaining slices
-      // land, which is precisely the "existing projects moved under them" outcome this split was
-      // built to prevent. It is just aimed at the NEWEST projects instead of the oldest.
+      // one the LEGACY/NEW split exists for. The stage is only partly converted, so `effectLight:
+      // "linear"` today does not mean "this project mixes light" — it means "this project mixes light
+      // in SOME operations and not others". Projects created in that window would visibly shift when
+      // the remaining slice lands, which is precisely the "existing projects moved under them" outcome
+      // this split was built to prevent. It is just aimed at the NEWEST projects instead of the oldest.
+      //
+      // WHAT IS STILL MISSING, as of slice 4: **slice 3**. Glow and blur (slice 1), the nest and the
+      // fragment stage (slice 2) and now transitions (slice 4) all mix light. `COMPOSITE_FS` does not:
+      // it encodes to display before mask coverage, opacity and the blend, so every merge, every
+      // opacity ramp, every feathered matte edge and `screen`/`add`/`overlay` are still code-value
+      // operations. That is the largest remaining piece and it owns the scene accumulator, so it moves
+      // last. Flip this the commit after it lands, not before.
       //
       // Colour management is a whole-pipeline mode in every professional tool; there is no
       // half-managed project in Resolve, Fusion or Nuke. Holding the default costs one line, and

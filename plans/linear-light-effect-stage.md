@@ -473,6 +473,17 @@ fixtures are rebaselined, because a rebaselined fixture makes a bad tuning perma
 
 ### Slice 3 — merges, opacity and mask edges *(3–5 days plus a large rebaseline)*
 
+> **NOT SHIPPED, and it is now the LAST thing between here and the default flip.** Slices 1, 2 and 4 have
+> landed, so the ordering in this document no longer matches the ordering on the branch — this one was
+> stepped over. `COMPOSITE_FS` still encodes to display before mask coverage, opacity and the blend (the
+> `uFromLinear` line, whose comment already says "slice 3 moves them"), so every merge, opacity ramp,
+> feathered matte edge and `screen`/`add`/`overlay` is still a code-value operation.
+>
+> Nothing may stamp a new project `linear` until this lands: a project stamped today would mix light in
+> glow, blur, the nest and transitions and NOT in the composite that assembles them, and would shift again
+> the day this ships — the exact harm the LEGACY/NEW split exists to prevent. `createDefaultComposition`
+> and the assertion in `color.test.ts` both name this slice as the trigger.
+
 **Includes:** boundary option **B** — the scene accumulator in linear, `COMPOSITE_FS` and `blend.ts`,
 `PRESENT_FS` as the encode point, and the readback/export/Remotion capture paths; the merge-midpoint
 fixture (§4.3).
@@ -484,6 +495,53 @@ dark in the middle; `screen`/`add`/`overlay` become real light operations. Also 
 which is where a compositor user notices it first.
 
 ### Slice 4 — transitions *(2–3 days)*
+
+> **SHIPPED 2026-08-11.** Measured at the midpoint of a black→white `crossDissolve`: **display 128.0,
+> linear 188.0**, both exact against the arithmetic, 60 codes apart. `render:linear-gate` now carries
+> both probes; pinning the transition mix back to display made the crossfade probe fail at 128 while the
+> blur probe still read 186, which is why they are two probes and not one.
+>
+> **The bracket is IN THE SHADER, not in the target pool**, and that is a correction to the plan rather
+> than a shortcut. The two sides come from `precomposeGroup`, a full clip-nest composite whose
+> `COMPOSITE_FS` reads its own destination for blend modes — sRGB side storage would have moved every
+> blend *inside a transition side* to linear while the same clip outside a transition stayed
+> display-referred, i.e. slice 3's change, applied to half the timeline, by accident. Decoding at the
+> three doorways (`getFromColor`/`getToColor`/`getSrcColor`) and encoding in `main()` keeps the stage's
+> output display-referred, so the mix plate, the ping-pong pair and `compositeTexture` are untouched.
+> Intermediate pipeline passes therefore round-trip through 8-bit sRGB, which is free — the storage
+> stays perceptual, so there is no §2.1 banding — and every module's math still runs on light.
+>
+> `_luma` stays DISPLAY-referred inside the linear harness. Its callers threshold on it rather than mix
+> with it (`luma-mix`'s reveal band, `bokeh-blur`'s `pow(luma,4)` highlight weighting), and those
+> constants mean "this brightness" — the rule §3.4 settled. The mix became light-correct; the
+> discriminator kept its authored units.
+>
+> **The default did NOT flip, and slice 4 was not what was blocking it.** See the note under §7 / slice 3.
+>
+> **FOUND WHILE ADDING COVERAGE, NOT FIXED — a live defect that predates this programme.** Every
+> MULTI-PASS transition (`focusPull`, `liquidMorph`, `portal`, and the fourth `pipeline` def) fails to
+> compile in `SceneCompositor` and therefore in the shipping preview and both exports:
+>
+> ```
+> gl-context: shader compile failed: ERROR: 0:18: 'uBokehRadius' : redefinition
+>                                    ERROR: 0:19: 'uBokehHighlight' : redefinition
+> SceneStage: composite failed on frame 14 after 3 retries — refusing to emit an uncomposited frame
+> ```
+>
+> `prepareTransition` passes the definition's params to `assemblePassShader` as `extraUniforms`, and the
+> module *also* declares them (`bokeh-blur` lists `uBokehRadius`/`uBokehHighlight`; `curl-noise` and
+> `radial-warp` do the same for theirs). `assemblePassShader` dedupes only against
+> `STANDARD_UNIFORM_NAMES`, so each collides with itself. Every affected definition names at least one
+> param its module also declares, so **no pipeline transition has ever rendered through the scene
+> compositor**. The DOM fallback (`TransitionCompositor`) does not crash — it compiles the monolith
+> shader, which for a pipeline def has no `glsl` and falls back to a plain dissolve, so those four
+> transitions silently render as a cross dissolve there instead.
+>
+> The fix is one dedupe (name-key the merged uniform list, not just the standard set), but it changes
+> what four shipped transitions DO, so it is not being folded into a commit whose claim is "no display
+> fixture moved". That is why this slice ships with a single-pass fixture pair only: the intended
+> `focusPull` pair (display + linear, the only coverage the per-pass bracket could have) is written and
+> was reverted when it hit this, and it should be the first thing added back after the dedupe lands.
 
 **Includes:** the transition harness (`color/transitions/registry.ts`, whose rule at :13 is the same rule
 in the same words), the two-side mix, and the transition fixtures' linear-arm bars.

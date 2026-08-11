@@ -13,7 +13,12 @@
  * This one renders a known input and checks the answer against arithmetic — the same shape of
  * instrument that found the glow ratio and radial blur's dead Centre Y.
  *
- * ## The assertion
+ * ## The assertions
+ *
+ * TWO probes, one per stage the programme has converted, because they can fail independently: the
+ * plate path (slice 1) and the transition mix (slice 4) share a setting but not a line of code.
+ *
+ * ### 1. A blurred hard edge (slice 1)
  *
  * A hard black/white edge, blurred. The midpoint of the resulting ramp has exactly one right answer
  * per space:
@@ -24,6 +29,21 @@
  * Both arms are asserted, and that is the point rather than thoroughness: if `effectLight` silently
  * failed to reach a renderer — the exact failure the manifest threading exists to prevent, and one no
  * parity diff can see — the linear arm would read ~128 and this fails loudly.
+ *
+ * ### 2. A crossfade at its exact midpoint (slice 4)
+ *
+ * Black clip dissolving to white clip, sampled at progress 0.5 — the canonical light-mixing operation
+ * and the one the founder-facing claim is about ("dissolves stop dipping dark through the middle").
+ * The arithmetic is the same because the operation is the same, a weighted sum of two colours:
+ *
+ *     mixed on GAMMA-ENCODED values → (0 + 255)/2            → code 128   ← the dark dip
+ *     mixed in LINEAR light         → (0.0 + 1.0)/2 = 0.5    → code 188
+ *
+ * Deliberately NOT reusing the blur probe's comp. The two stages could regress independently — the
+ * transition mix has its own shaders, its own program cache and its own light-space key — and a gate
+ * that measures one while claiming both is the reassuring-null-result failure this file exists to
+ * avoid. `crossDissolve` eases `easeInOut`, which is symmetric, so the window's midpoint really is
+ * progress 0.5 and the prediction is exact rather than approximate.
  *
  * ## Why NOT the white-vs-grey contribution ratio the plan originally specified (§4.3)
  *
@@ -132,6 +152,90 @@ async function midpointFor(light: "display" | "linear"): Promise<number> {
   return mid;
 }
 
+/**
+ * The crossfade arm's graph: the `transition` fixture's two-clip junction with both sides replaced by
+ * FLAT shapes — outgoing black, incoming white — so the mixed value has a closed-form prediction
+ * instead of "whatever those two photographs average to".
+ *
+ * The junction window is Premiere-style CENTRED ON THE CUT — [cut - D/2, cut + D/2], see
+ * `getActiveTransition` — so with the fixture's cut at 0.4s the midpoint is the cut itself: frame 12 at
+ * 30fps, where progress is exactly 0.5. (Read from the code, not assumed: the first attempt used the
+ * fixture's own comment, which still describes the old start-aligned window, and rendered a finished
+ * dissolve. The flatness guard reported 255 and the assertion caught it.) Everything
+ * outside the video track is emptied: a caption or overlay drawn over the sample point would be
+ * measured instead of the mix, and it would look like a plausible number rather than an obvious fault.
+ */
+const CROSSFADE_FRAME = 12;
+
+function crossfadeGraphWith(light: "display" | "linear") {
+  const fixture = createRenderComparisonFixture("transition");
+  const graph = JSON.parse(JSON.stringify(fixture.graph)) as {
+    projectId: string;
+    composition: {
+      settings: { color: { effectLight: string } };
+      tracks: { type: string; layers: Record<string, unknown>[] }[];
+    };
+  };
+  graph.composition.settings.color.effectLight = light;
+  for (const track of graph.composition.tracks) {
+    if (track.type !== "video") {
+      track.layers = [];
+      continue;
+    }
+    track.layers = track.layers.map((layer, index) => ({
+      ...layer,
+      type: "shape",
+      shapeKind: "rectangle",
+      // A shape layer draws an ELEMENT BOX, not the frame: without these it renders a small centred
+      // rounded rect and the probe measures the background. The flatness guard caught exactly that.
+      widthPercent: 100,
+      heightPercent: 100,
+      borderRadius: 0,
+      color: index === 0 ? "#000000" : "#ffffff",
+      assetId: undefined,
+      effects: [],
+      keyframes: []
+    }));
+  }
+  return { graph, assets: fixture.assets };
+}
+
+async function crossfadeMidpointFor(light: "display" | "linear"): Promise<number> {
+  const { graph, assets } = crossfadeGraphWith(light);
+  const manifest = buildRenderManifest({
+    projectId: graph.projectId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the probe graph is a fixture clone
+    graph: graph as any,
+    assets,
+    quality: "final",
+    createdAt: new Date(0).toISOString()
+  });
+  const file = path.join(outDir, `crossfade-${light}.png`);
+  await renderManifestStill({ manifest, frame: CROSSFADE_FRAME, outputLocation: file, rendererMode: "webgl" });
+  const png = PNG.sync.read(fs.readFileSync(file));
+  const at = (x: number, y: number): number => {
+    const o = (y * png.width + x) * 4;
+    return 0.2126 * png.data[o]! + 0.7152 * png.data[o + 1]! + 0.0722 * png.data[o + 2]!;
+  };
+  const cx = Math.floor(png.width / 2);
+  const cy = Math.floor(png.height / 2);
+  const mid = at(cx, cy);
+  // The mix is FLAT, so four spread samples agreeing is the check that we are reading the dissolve and
+  // not a corner of something else. A wide spread here means the frame is not what this probe thinks.
+  const corners = [at(cx >> 1, cy >> 1), at(cx + (cx >> 1), cy >> 1), at(cx >> 1, cy + (cy >> 1))];
+  const spread = Math.max(...corners, mid) - Math.min(...corners, mid);
+  console.log(
+    `  ${light.padEnd(7)} midpoint=${mid.toFixed(1).padStart(6)}   flatness spread=${spread.toFixed(1)}` +
+      `  samples: ${[mid, ...corners].map((v) => v.toFixed(0)).join(" ")}`
+  );
+  assert.ok(
+    spread < 2,
+    `The crossfade probe's frame is not flat (spread ${spread.toFixed(1)} codes). It is measuring ` +
+      `something other than a black→white dissolve, so its midpoint means nothing.`
+  );
+  return mid;
+}
+
 async function main(): Promise<void> {
   fs.mkdirSync(outDir, { recursive: true });
   console.log(`Linear-light gate: blurred hard edge, sigma ${SIGMA}, tolerance ±${TOLERANCE} codes\n`);
@@ -165,6 +269,32 @@ async function main(): Promise<void> {
       `Both arms agreeing means the setting is not switching anything.`
   );
   console.log(`  OK  the arms are ${(linear - display).toFixed(1)} codes apart (the spaces differ by ~60)\n`);
+
+  // ---- Probe 2: the crossfade midpoint (slice 4) -------------------------------------------------
+  console.log(`Crossfade midpoint: black → white crossDissolve at progress 0.5, tolerance ±${TOLERANCE}\n`);
+  const xDisplay = await crossfadeMidpointFor("display");
+  const xLinear = await crossfadeMidpointFor("linear");
+  console.log("");
+  assert.ok(
+    Math.abs(xDisplay - EXPECTED_DISPLAY) <= TOLERANCE,
+    `DISPLAY arm crossfade midpoint ${xDisplay.toFixed(1)} is not ${EXPECTED_DISPLAY}±${TOLERANCE}. A ` +
+      `display-referred dissolve averages the CODE values; reading ~${EXPECTED_LINEAR} means the linear mix ` +
+      `is running for a project that did not ask for it, and every existing dissolve just changed.`
+  );
+  console.log(`  OK  display dissolve mixes CODE values  (${xDisplay.toFixed(1)} ≈ ${EXPECTED_DISPLAY} — the dark dip)`);
+  assert.ok(
+    Math.abs(xLinear - EXPECTED_LINEAR) <= TOLERANCE,
+    `LINEAR arm crossfade midpoint ${xLinear.toFixed(1)} is not ${EXPECTED_LINEAR}±${TOLERANCE}. Reading ` +
+      `~${EXPECTED_DISPLAY} means the transition mix is still on code values — the plate path can be linear ` +
+      `while this one is not, which is why this probe does not reuse the blur comp.`
+  );
+  console.log(`  OK  linear dissolve mixes LIGHT         (${xLinear.toFixed(1)} ≈ ${EXPECTED_LINEAR})`);
+  assert.ok(
+    xLinear - xDisplay > 40,
+    `The dissolve arms differ by only ${(xLinear - xDisplay).toFixed(1)} codes; the spaces are ~60 apart.`
+  );
+  console.log(`  OK  the dissolve arms are ${(xLinear - xDisplay).toFixed(1)} codes apart\n`);
+
   console.log(`Linear-light gate PASSED. Renders in ${path.relative(repoRoot, outDir)}\n`);
 }
 

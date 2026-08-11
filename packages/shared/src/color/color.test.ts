@@ -446,16 +446,24 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   /**
    * A new project is stamped DISPLAY, not linear — and this assertion is the reminder to flip it.
    *
-   * `NEW_PROJECT_COLOR_SETTINGS` is correct and stays exported; it is simply not reachable yet. The
-   * effect stage is only partly converted (transitions are display-referred until slice 4), so a
-   * project stamped "linear" today would mix light in some operations and not others, and would shift
-   * when the remaining slices land. See the comment on `createDefaultComposition`.
+   * `NEW_PROJECT_COLOR_SETTINGS` is correct and stays exported; it is simply not reachable yet.
    *
-   * WHEN THE STAGE IS WHOLE — after linear-light slice 4 — flip `createDefaultComposition` to
-   * `NEW_PROJECT_COLOR_SETTINGS` and flip this assertion with it. Deliberately written so it FAILS
-   * the day someone changes the default without reading this, rather than silently agreeing.
+   * UPDATED 2026-08-11, and the update is the point of writing it this way. Slice 4 (transitions) has
+   * now landed, so the reminder came due — and the answer is still "not yet", for a reason the earlier
+   * note got wrong. Transitions were never the last display-referred stage: **SLICE 3 IS UNSHIPPED**.
+   * `COMPOSITE_FS` still encodes to display before mask coverage, opacity and the blend (read the
+   * `uFromLinear` line and the comment beside it), so every merge, every opacity ramp, every feathered
+   * matte edge and every `screen`/`add`/`overlay` is still mixing code values. A project stamped
+   * "linear" today would mix light in glow, blur, the nest and transitions, and NOT in the composite
+   * that assembles them — and it would shift again the day slice 3 lands, which is exactly the harm
+   * the setting exists to prevent.
+   *
+   * WHEN THE STAGE IS WHOLE — after linear-light SLICE 3 (merges, opacity, mask edges, the scene
+   * accumulator, `PRESENT_FS` as the encode point) — flip `createDefaultComposition` to
+   * `NEW_PROJECT_COLOR_SETTINGS` and flip this assertion with it. Deliberately written so it FAILS the
+   * day someone changes the default without reading this, rather than silently agreeing.
    */
-  check("a new composition stamps DISPLAY until the stage is whole (flip at slice 4)", fresh.settings.color?.effectLight === "display");
+  check("a new composition stamps DISPLAY until the stage is whole (flip after slice 3)", fresh.settings.color?.effectLight === "display");
   check(
     "NEW_PROJECT_COLOR_SETTINGS still says linear — held back, not redefined",
     NEW_PROJECT_COLOR_SETTINGS.effectLight === "linear"

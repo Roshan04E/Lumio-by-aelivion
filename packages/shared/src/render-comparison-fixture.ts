@@ -164,7 +164,8 @@ export type RenderComparisonFixtureKey =
   | "linear-glow"
   | "linear-blur"
   | "linear-stylize"
-  | "linear-stylize-print";
+  | "linear-stylize-print"
+  | "linear-transition";
 
 export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "default",
@@ -236,7 +237,8 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "linear-glow",
   "linear-blur",
   "linear-stylize",
-  "linear-stylize-print"
+  "linear-stylize-print",
+  "linear-transition"
 ];
 
 /**
@@ -300,6 +302,15 @@ export const renderComparisonFixtureRelations: RenderComparisonFixtureRelation[]
     b: "blur",
     relation: "different",
     why: "the second negative control: a blur is a weighted sum of light, so its arms cannot agree."
+  },
+  {
+    a: "linear-transition",
+    b: "transition",
+    relation: "different",
+    why:
+      "slice 4's claim, as a relation: a dissolve is a two-colour mix, so mixing light cannot land on " +
+      "the same picture as mixing codes. If these ever match, the transition mix has quietly gone back " +
+      "to display — which the blur probe would not notice, because it is a different stage."
   }
 ];
 
@@ -1491,6 +1502,21 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
      * coverage, shadow hatching) AND emits authored paper/ink constants, so it moves visibly if either
      * half of the opt-out breaks.
      */
+    /**
+     * The linear arm's TRANSITION (slice 4) — same two clips, same crossDissolve, same 0.45s sample as
+     * `transition`; one field different.
+     *
+     * This one MUST differ from its display twin, and that is the whole claim of the slice: a dissolve
+     * mixes light, so a display-referred one dips dark through its midpoint.
+     *
+     * The 0.45s sample lands at progress 0.625 of the [0.2, 0.6] window (Premiere-style centred on the
+     * 0.4s cut), NOT at the midpoint — deliberately. The midpoint has a closed-form answer and is
+     * asserted arithmetically by `render:linear-gate` (128 vs 188, measured exactly). What a still
+     * fixture adds is a real photograph mixed at an ARBITRARY point on the eased curve, where a
+     * progress, easing or fit regression shows up and a symmetric midpoint sample would hide it.
+     */
+    case "linear-transition":
+      return { effects: [], fit: "cover", transition: true, effectLight: "linear" };
     case "linear-stylize":
       return { effects: stylizeEffects, fit: "cover", effectLight: "linear" };
     case "linear-stylize-print":

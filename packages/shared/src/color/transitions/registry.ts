@@ -1,4 +1,5 @@
 import { GLSL_HASH_PRELUDE } from "../glsl-hash";
+import { GLSL_TRANSFER_PRELUDE } from "../glsl-transfer";
 import type { TransitionPipeline } from "./pipeline";
 
 /**
@@ -102,15 +103,106 @@ vec2 _rotUV(vec2 uv, float ang){
 bool _inside(vec2 uv){ return uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0; }
 `;
 
+/** Which light a transition's bodies mix in. Mirrors `FragmentEffectLightSpace`, deliberately its own
+ *  type: this module knows nothing about fragment effects and should not start now. */
+export type TransitionLightSpace = "display" | "linear";
+
+/**
+ * The LINEAR harness (linear-light programme, slice 4). This is the slice the whole programme exists
+ * for: a crossfade is the canonical light-mixing operation, and mixing two encoded values dips dark
+ * through the midpoint — the artefact every compositor's linear mode is sold on fixing.
+ *
+ * WHERE THE BRACKET IS, AND WHY IT IS NOT IN THE TARGET POOL. The instruction was to convert
+ * `effectTargets()` at the ping-pong and the mix plate. Measured against the consumers, that is the
+ * wrong seam and it would have shipped a wrong picture:
+ *
+ *   · The two SIDES (`uFrom`/`uTo`) are produced by `precomposeGroup`, a full clip-nest composite whose
+ *     `COMPOSITE_FS` READS ITS OWN DESTINATION for blend modes. Give a side sRGB storage and every
+ *     blend inside a transition side silently moves to linear, while the same clip composited outside
+ *     a transition stays display-referred — the same picture rendering two ways depending on whether a
+ *     cut happens to be under the playhead. Blends are slice 3; they are not mine to move here.
+ *   · So the sides arrive display-referred whatever the pool does, and the shader has to decode them.
+ *     Once it decodes, converting the pool as well buys nothing and costs an asymmetry: `getSrcColor`
+ *     would be hardware-decoded while `getFromColor` was shader-decoded, and the next person to touch
+ *     either would have to know that. That asymmetry is exactly how a double-decode ships.
+ *
+ * So: decode at the three doorways, encode in `main()`. The stage's OUTPUT stays display-referred, so
+ * the mix plate, the ping-pong pair and `compositeTexture` are all untouched and correct by
+ * construction — the same reasoning cedd555 used for the fragment stage, for the same reason (there it
+ * was a `blitFramebuffer` that would have decoded and not re-encoded).
+ *
+ * Intermediate pipeline passes therefore round-trip through 8-bit sRGB between passes. That is free, not
+ * a compromise: encode∘decode on an 8-bit code is the identity, and the storage stays PERCEPTUAL, so
+ * there is no 8-bit-linear banding (plan §2.1) of the kind the multi-pass fragment rule guards against.
+ * Every module's math — mixes, blur accumulation, the additive flash, the bokeh disc — happens on light.
+ *
+ * `_luma` IS A DELIBERATE EXCEPTION AND THE ONE JUDGEMENT CALL HERE. It stays DISPLAY-referred: the
+ * linear definition converts back before weighting. Its callers do not mix with it, they THRESHOLD on
+ * it — `luma-mix` reveals brighter areas first with a softness band authored in display units, and
+ * `bokeh-blur` weights highlights by `pow(luma, 4)`. Those constants mean "this brightness", and 102eeb5
+ * settled what to do with a constant that means a brightness: keep its meaning. Left on linear luma, a
+ * luma wipe would hold the shadows back for most of its duration and the bokeh highlights would all but
+ * stop weighting. The MIX becomes light-correct; the DISCRIMINATOR keeps its authored units.
+ */
+const HARNESS_PRELUDE_LINEAR = `
+${GLSL_TRANSFER_PRELUDE}
+vec2 _fitUv(vec2 uv, vec2 s){ return (uv - 0.5) * s + 0.5; }
+vec4 getFromColor(vec2 uv){
+  vec4 c = texture(uFrom, clamp(_fitUv(uv, uFromFit), 0.0, 1.0));
+  return vec4(sceneToLinear(c.rgb), c.a);
+}
+vec4 getToColor(vec2 uv){
+  vec4 c = texture(uTo, clamp(_fitUv(uv, uToFit), 0.0, 1.0));
+  return vec4(sceneToLinear(c.rgb), c.a);
+}
+
+${GLSL_HASH_PRELUDE}
+// Display-referred on purpose — see the note above. Thresholds keep their authored units.
+float _luma(vec3 c){ return dot(sceneToDisplay(c), vec3(0.299, 0.587, 0.114)); }
+vec2 _scaleUV(vec2 uv, float s){ return (uv - 0.5) / max(s, 1e-4) + 0.5; }
+vec2 _rotUV(vec2 uv, float ang){
+  vec2 p = uv - 0.5; p.x *= ratio;
+  float c = cos(ang), s = sin(ang);
+  p = mat2(c, -s, s, c) * p;
+  p.x /= ratio;
+  return p + 0.5;
+}
+bool _inside(vec2 uv){ return uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0; }
+`;
+
+/** The prelude for a light space. Exported so the pipeline assembler wraps multi-pass modules in the
+ *  SAME helpers — one prelude, all renderers, pixel-identical. */
+export function transitionHarnessPrelude(light: TransitionLightSpace): string {
+  return light === "linear" ? HARNESS_PRELUDE_LINEAR : HARNESS_PRELUDE;
+}
+
+/** The pass/definition `main()` for a light space: linear bodies hand back light, so the stage encodes
+ *  on the way out and every consumer of the result stays display-referred. */
+export function transitionMainGlsl(light: TransitionLightSpace, call: string): string {
+  return light === "linear"
+    ? `void main(){ vec4 _c = ${call}; fragColor = vec4(sceneToDisplay(_c.rgb), _c.a); }`
+    : `void main(){ fragColor = ${call}; }`;
+}
+
 function paramUniformLines(params: TransitionParam[]): string {
   return params.map((p) => `uniform ${GLSL_TYPE[p.type]} ${p.name};`).join("\n");
 }
 
 const shaderCache = new Map<string, string>();
 
-/** Assemble the full fragment shader for a definition. Memoized by id (definitions are static). */
-export function buildTransitionFragmentShader(def: TransitionDefinition): string {
-  const cached = shaderCache.get(def.id);
+/**
+ * Assemble the full fragment shader for a definition. Memoized by (id, light space).
+ *
+ * The light belongs in the KEY, not just the source: this memo lives for the process, so a project
+ * setting that changes the space would otherwise be answered with whichever variant happened to compile
+ * first, for the rest of the session — an order-dependent wrong picture, the worst kind to reproduce.
+ */
+export function buildTransitionFragmentShader(
+  def: TransitionDefinition,
+  light: TransitionLightSpace = "display"
+): string {
+  const key = `${def.id}@${light}`;
+  const cached = shaderCache.get(key);
   if (cached) return cached;
   const src = `#version 300 es
 precision highp float;
@@ -127,12 +219,12 @@ uniform float ratio;       // resolution.x / resolution.y
 uniform vec2 uFromFit;     // object-fit uv scale for the outgoing texture (cover/contain/fill)
 uniform vec2 uToFit;       // object-fit uv scale for the incoming texture
 ${paramUniformLines(def.params)}
-${HARNESS_PRELUDE}
+${transitionHarnessPrelude(light)}
 ${def.glsl ?? `vec4 transition(vec2 uv){ return mix(getFromColor(uv), getToColor(uv), progress); }`}
 
-void main(){ fragColor = transition(v_uv); }
+${transitionMainGlsl(light, "transition(v_uv)")}
 `;
-  shaderCache.set(def.id, src);
+  shaderCache.set(key, src);
   return src;
 }
 
@@ -146,7 +238,10 @@ export function registerTransition(def: TransitionDefinition, options: { overrid
   if (registry.has(def.id) && !options.override) {
     return false;
   }
-  shaderCache.delete(def.id);
+  // Both light variants: the key carries the space since slice 4, so evicting the bare id would leave a
+  // re-registered definition (a plugin override) serving its predecessor's assembled source.
+  shaderCache.delete(`${def.id}@display`);
+  shaderCache.delete(`${def.id}@linear`);
   registry.set(def.id, def);
   return true;
 }

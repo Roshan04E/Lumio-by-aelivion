@@ -42,6 +42,7 @@ import {
   buildTransitionFragmentShader,
   resolveTransitionParams,
   type TransitionDefinition,
+  type TransitionLightSpace,
   type TransitionParam,
 } from "./transitions/registry";
 import { PipelineAssembler } from "./transitions/pipeline-assembler";
@@ -2001,14 +2002,24 @@ export class SceneCompositor {
    *  A definition with a `pipeline` compiles one program PER PASS (assembled by `PipelineAssembler` — the
    *  same assembled GLSL every renderer compiles, so multi-pass transitions keep pixel parity). */
   private prepareTransition(def: TransitionDefinition): CompiledTransition {
-    const existing = this.transitionPrograms.get(def.id);
+    // Slice 4: the mix runs in the STAGE's light, so the compiled program is only valid for that space
+    // and the cache key has to carry it. Same rule (and same failure mode) as the fragment stage's
+    // `effectLightFor` — a program cache that ignores the space answers with whichever variant compiled
+    // first and keeps answering with it for the rest of the session.
+    const light: TransitionLightSpace = this.effectSpace;
+    const cacheKey = `${def.id}@${light}`;
+    const existing = this.transitionPrograms.get(cacheKey);
     if (existing) return existing;
     const gl = this.gl;
     if (def.pipeline && def.pipeline.passes.length > 0) {
       // Every pass declares the def's params as uniforms too, so a pass can read them by name.
       const paramDecls = def.params.map((p) => `${GLSL_PARAM_TYPE[p.type]} ${p.name}`);
       const pipelinePasses: CompiledPipelinePass[] = def.pipeline.passes.map((pass) => {
-        const program = linkProgram(gl, FULLSCREEN_TRI_VS, PipelineAssembler.assemblePassShader(pass.moduleId, paramDecls));
+        const program = linkProgram(
+          gl,
+          FULLSCREEN_TRI_VS,
+          PipelineAssembler.assemblePassShader(pass.moduleId, paramDecls, light)
+        );
         const extraNames = new Set<string>([...def.params.map((p) => p.name), ...Object.keys(pass.params ?? {})]);
         return {
           program,
@@ -2036,12 +2047,12 @@ export class SceneCompositor {
         params: [],
         pipelinePasses,
       };
-      this.transitionPrograms.set(def.id, compiled);
+      this.transitionPrograms.set(cacheKey, compiled);
       return compiled;
     }
     // FULLSCREEN_TRI_VS produces the same `v_uv` (a_position*0.5+0.5) the transition FS expects, and
     // linkProgram binds a_position→0 (matching presentVao) — so the mix reuses the present triangle.
-    const program = linkProgram(gl, FULLSCREEN_TRI_VS, buildTransitionFragmentShader(def));
+    const program = linkProgram(gl, FULLSCREEN_TRI_VS, buildTransitionFragmentShader(def, light));
     const compiled: CompiledTransition = {
       program,
       uFrom: gl.getUniformLocation(program, "uFrom"),
@@ -2054,7 +2065,7 @@ export class SceneCompositor {
       params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
       pipelinePasses: null,
     };
-    this.transitionPrograms.set(def.id, compiled);
+    this.transitionPrograms.set(cacheKey, compiled);
     return compiled;
   }
 
