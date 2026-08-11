@@ -1,4 +1,4 @@
-import { NEW_PROJECT_COLOR_SETTINGS } from "./color/color-management";
+import { LEGACY_PROJECT_COLOR_SETTINGS } from "./color/color-management";
 import type { ProjectGraph, SpeedKeyframe, TimelineComposition, TimelineLayer, TimelineTrack, TrackAudioKeyframe } from "./types";
 
 export type CompositionOrientation = "portrait" | "landscape";
@@ -61,7 +61,26 @@ export function createDefaultComposition(input: {
       // Stamped EXPLICITLY, never left to a default: an absent `color` means "authored before the
       // linear-light effect stage existed" and must keep rendering the old way forever. A new project
       // has to say so in its own saved data (see NEW_PROJECT_COLOR_SETTINGS).
-      color: { ...NEW_PROJECT_COLOR_SETTINGS },
+      //
+      // HELD AT LEGACY UNTIL THE EFFECT STAGE IS WHOLE (2026-08-11, linear-light slice 2).
+      //
+      // This deliberately does NOT stamp NEW_PROJECT_COLOR_SETTINGS yet, and the reason is the same
+      // one the LEGACY/NEW split exists for. The stage is only partly converted: transitions are
+      // display-referred until slice 4, and `scene-compositor.ts` still has effect-target consumers
+      // that take no light space. So `effectLight: "linear"` today does not mean "this project mixes
+      // light" — it means "this project mixes light in SOME operations and not others". Projects
+      // created in that window would visibly shift in their transitions when the remaining slices
+      // land, which is precisely the "existing projects moved under them" outcome this split was
+      // built to prevent. It is just aimed at the NEWEST projects instead of the oldest.
+      //
+      // Colour management is a whole-pipeline mode in every professional tool; there is no
+      // half-managed project in Resolve, Fusion or Nuke. Holding the default costs one line, and
+      // flipping it when the stage is whole costs the same one line.
+      //
+      // NEW_PROJECT_COLOR_SETTINGS stays exported and asserted — it is correct, merely not yet
+      // reachable. `color.test.ts` pins this to "display" WITH the slice that flips it, so the flip
+      // is a failing test rather than something to remember.
+      color: { ...LEGACY_PROJECT_COLOR_SETTINGS },
       viewport: {
         preset: frame.preset,
         width: frame.width,

@@ -14,6 +14,7 @@
  */
 
 import { GLSL_HASH_PRELUDE } from "../glsl-hash";
+import { GLSL_TRANSFER_PRELUDE } from "../glsl-transfer";
 
 export type FragmentParamType = "float" | "vec2" | "vec3" | "bool";
 
@@ -113,13 +114,50 @@ ${GLSL_HASH_PRELUDE}
 float _luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
 `;
 
+/**
+ * The LINEAR-light variant of the prelude (linear-light programme, slice 2).
+ *
+ * The registry's rule at the top of this file — bodies operate in the renderer's OUTPUT space and must
+ * never add their own `pow(2.2)` round-trips — is unchanged and is exactly what makes this work: no
+ * body converts, so the harness can convert once, here, for all of them. `getSrcColor` is the single
+ * doorway every body reads the layer's image through, so decoding inside it converts the whole stage
+ * with no body edited.
+ *
+ * `uPass{i}` inputs are deliberately NOT decoded. Intermediate passes carry raw DATA — structure
+ * tensors, flow fields, paint accumulation buffers — not colour, and running a transfer function over
+ * a tensor produces a plausible-looking wrong answer rather than an obvious one. That is also why
+ * their pooled targets stay `raw` rather than becoming sRGB.
+ *
+ * KNOWN AND NOT FIXED HERE: every luma threshold in `builtins.ts` was authored against display values
+ * (plan §3.4). In linear, shadow detail collapses toward zero and highlight separation expands, so the
+ * ink edge pass, the comic-print halftone, the subject-aware weighting and Kuwahara's variance
+ * comparison all want new constants. Re-tuning them is its own slice with its own look-review;
+ * changing appearance inside a commit whose claim is byte-identity would make the proof unreadable.
+ */
+const HARNESS_PRELUDE_LINEAR = `
+${GLSL_TRANSFER_PRELUDE}
+vec4 getSrcColor(vec2 uv){
+  vec4 c = texture(uSrc, clamp(uv, 0.0, 1.0));
+  return vec4(sceneToLinear(c.rgb), c.a);
+}
+
+${GLSL_HASH_PRELUDE}
+float _luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+`;
+
 function paramUniformLines(params: FragmentEffectParam[]): string {
   return params.map((p) => `uniform ${GLSL_TYPE[p.type]} ${p.name};`).join("\n");
 }
 
 const shaderCache = new Map<string, string>();
 
-function assembleShader(def: FragmentEffectDefinition, body: string, passInputCount: number, isFinal: boolean): string {
+function assembleShader(
+  def: FragmentEffectDefinition,
+  body: string,
+  passInputCount: number,
+  isFinal: boolean,
+  light: FragmentEffectLightSpace
+): string {
   const passSamplers = Array.from({ length: passInputCount }, (_, i) => `uniform sampler2D uPass${i};`).join("\n");
   // Mask-aware defs (stylize P5) read the effect mask inside the shader; everyone else's
   // assembled source is untouched (parity baselines stay byte-identical).
@@ -127,12 +165,39 @@ function assembleShader(def: FragmentEffectDefinition, body: string, passInputCo
   // Intermediate passes write their raw output (data textures — tensors, flow fields, paint
   // buffers); ONLY the final pass mixes against the source, so `uIntensity` keeps its product
   // meaning ("how much of the effect") across single- and multi-pass definitions.
-  const main = isFinal
-    ? `void main(){
+  /**
+   * The linear stage's EXIT sits here, in the final pass's `main()`, rather than at the consumer the
+   * way the plate path's S6 does. That is a deliberate difference and it is a correctness one.
+   *
+   * The plate path has exactly one consumer — a `compositeTexture` — so a `uFromLinear` flag on that
+   * draw closes the bracket. The fragment stage has THREE, and one of them cannot convert: a
+   * `rewritesAlpha` (keyer) pass REPLACES the running nest image with a raw `blitFramebuffer`. In
+   * WebGL2 a blit from an sRGB attachment to a plain RGBA8 one decodes on read and does not re-encode
+   * on write, so linear values would land in a display-referred buffer — a picture roughly twice as
+   * dark as it should be, on the keyer path only, with no flag to blame because the flag would be ON.
+   *
+   * Encoding here instead keeps the stage's OUTPUT display-referred, so every consumer — the masked
+   * composite, the replace-blit, the mask gate — is untouched and correct by construction, and the
+   * pass targets stay in the display pool. Precision is unchanged either way: 8-bit perceptual out.
+   *
+   * Intermediate passes are NOT encoded. They carry data, not colour, and they are consumed only by
+   * later passes in the same graph that read them raw.
+   */
+  const finalMain =
+    light === "linear"
+      ? `void main(){
+  vec4 s = getSrcColor(v_uv);
+  vec4 e = effect(v_uv);
+  vec4 mixed = mix(s, e, clamp(uIntensity, 0.0, 1.0));
+  fragColor = vec4(sceneToDisplay(mixed.rgb), mixed.a);
+}`
+      : `void main(){
   vec4 s = getSrcColor(v_uv);
   vec4 e = effect(v_uv);
   fragColor = mix(s, e, clamp(uIntensity, 0.0, 1.0));
-}`
+}`;
+  const main = isFinal
+    ? finalMain
     : `void main(){
   fragColor = effect(v_uv);
 }`;
@@ -150,7 +215,7 @@ uniform vec2 uResolution;    // THIS pass's output resolution (scaled passes see
 uniform float uIntensity;    // 0..1, mixed against the source in the final pass's main()
 uniform float uTime;
 ${paramUniformLines(def.params)}
-${HARNESS_PRELUDE}
+${light === "linear" ? HARNESS_PRELUDE_LINEAR : HARNESS_PRELUDE}
 ${body}
 
 ${main}
@@ -181,7 +246,7 @@ export function buildFragmentEffectShader(
   const key = `${def.id}@${light}`;
   const cached = shaderCache.get(key);
   if (cached) return cached;
-  const src = assembleShader(def, def.glsl, 0, true);
+  const src = assembleShader(def, def.glsl, 0, true, light);
   shaderCache.set(key, src);
   return src;
 }
@@ -201,7 +266,7 @@ export function buildFragmentEffectPassShader(
   const cached = shaderCache.get(key);
   if (cached) return cached;
   const isFinal = passes.length > 0 && passes[passes.length - 1]!.id === pass.id;
-  const src = assembleShader(def, pass.glsl, pass.inputs?.length ?? 0, isFinal);
+  const src = assembleShader(def, pass.glsl, pass.inputs?.length ?? 0, isFinal, light);
   shaderCache.set(key, src);
   return src;
 }

@@ -308,10 +308,22 @@ The instrument that found the glow ratio, and the instrument that found radial b
 the same one: **render a known input and check the answer against arithmetic.** Promote it from `tmp/`
 into the gate. Three assertions, each a number, each independent of the other renderer:
 
-- **Linear-light ratio.** The audit's own chart (`apps/worker/tmp/glow-measure2.ts`): a 100% patch and a
-  60% patch, threshold 0. Assert the contribution ratio is **≈3.24, not ≈1.68.** This fixture is the
-  definition of "the change landed."
-- **Blur midpoint.** A hard black/white edge, blurred. Assert the midpoint reads **≈188, not 128.**
+- ~~**Linear-light ratio.** The audit's own chart (`apps/worker/tmp/glow-measure2.ts`): a 100% patch and a
+  60% patch, threshold 0. Assert the contribution ratio is **≈3.24, not ≈1.68.**~~
+  **STRUCK 2026-08-11 (slice 1): this assertion cannot discriminate.** On a black field the display
+  arm's ratio-of-codes is 1/0.6 = 1.67 and the linear arm's ratio-of-**light** is 3.14, which *encodes*
+  to 3.14^(1/2.4) ≈ 1.70 — the same number by construction. Measured both arms: **1.68 and 1.71.**
+  "1.68 → 3.24" is the same pixels described in two different spaces, not two outcomes. The tell was
+  that the absolute values moved hugely (white at +5px: 111 → 176, exactly what a 0.45-coverage tap
+  encodes to in each space) while the ratio did not move at all. Do not re-derive this and read it as
+  a pass.
+- **Blur midpoint — the assertion that replaces it.** A hard black/white edge, blurred. Assert the
+  midpoint reads **≈188 in linear and ≈128 in display**: one right answer per space, 60 code values
+  apart, with no ratio arithmetic in between. Measured during slice 1 (126.0 / 186.0) and shipped as a
+  real gate in slice 2: `pnpm --filter @orreris/worker render:linear-gate`
+  (`apps/worker/src/render-linear-gate.ts`), tolerance ±6 codes, both arms asserted so a setting that
+  fails to reach a renderer fails the gate. Proven in both directions — forcing the linear arm to stamp
+  `display` makes it read 126.0 and fail.
 - **Merge midpoint** *(slice 3)*. A 50%-opacity white over black. Same assertion, same number.
 
 Each of these fails loudly if the setting silently fails to reach a renderer — which is precisely the

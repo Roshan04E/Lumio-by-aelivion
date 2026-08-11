@@ -59,6 +59,7 @@ import {
 } from "./fragment-effects/registry";
 import type { BlendMode } from "../types";
 import { rec709CodeToLinear, type ColorEffectLight } from "./color-management";
+import { GLSL_TRANSFER_PRELUDE } from "./glsl-transfer";
 import type { ColorPipeline, GradeCompare } from "./types";
 import { MediaWebGLRenderer } from "./media-renderer";
 import { frameProfiler, type CompositorProfilerSnapshot } from "./frame-profiler";
@@ -624,27 +625,11 @@ interface PassGraphTarget {
 }
 
 /**
- * The stage boundary's transfer pair (linear-light programme, slice 1).
- *
- * These are the EXACT GLSL twins of `rec709CodeToLinear` / `rec709LinearToCode`
- * (`color-management.ts`), which the grade stage already uses — so "linear" means one thing in this
- * product, not two. Keeping them identical is not tidiness: the effect stage decodes what the grade
- * stage encoded, and a boundary whose halves disagree by even a curve segment produces a picture that
- * looks like a grading bug rather than a colour-space bug.
- *
- * A second alignment makes the storage decision exact rather than merely good: this piecewise curve IS
- * the sRGB transfer function, which is what `SRGB8_ALPHA8` hardware applies. So a shader decode
- * followed by the fixed-function encode on write is an identity round trip, and the plate stores the
- * source's original bytes back. The linear stage costs no precision on entry at all.
+ * The stage boundary's transfer pair (linear-light programme, slice 1). Moved to `glsl-transfer.ts`
+ * in slice 2, when the fragment-effect harness became its second consumer — see that file for why one
+ * definition is load-bearing rather than tidy.
  */
-const TRANSFER_GLSL = `
-vec3 sceneToLinear(vec3 c){
-  return mix(c / 12.92, pow(max(c + 0.055, vec3(0.0)) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
-}
-vec3 sceneToDisplay(vec3 c){
-  vec3 hi = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
-  return mix(c * 12.92, hi, step(vec3(0.0031308), c));
-}`;
+const TRANSFER_GLSL = GLSL_TRANSFER_PRELUDE;
 
 const COMPOSITE_VS = `#version 300 es
 in vec3 a_posw;     // NDC corner (xy) + projective w (z) for perspective tilt
@@ -2074,13 +2059,15 @@ export class SceneCompositor {
 
   /** Compile + cache the program for a fragment-effect definition (or ONE pass of a multi-pass one).
    *  Throws on GLSL compile/link failure. */
-  private prepareFragmentEffect(def: FragmentEffectDefinition, pass?: FragmentEffectPassDefinition): CompiledFragmentEffect {
-    // Fragment passes run in the NEST, which slice 1 leaves display-referred (the nest boundary is
-    // slice 2's S7/S11). Stated explicitly rather than defaulted so that when that changes, the
-    // program cache below and the source memo in the registry move together — they are one identity
-    // split across two maps, and a variant that reached one but not the other would be an
-    // order-dependent wrong picture.
-    const light: FragmentEffectLightSpace = "display";
+  private prepareFragmentEffect(
+    def: FragmentEffectDefinition,
+    pass: FragmentEffectPassDefinition | undefined,
+    light: FragmentEffectLightSpace,
+  ): CompiledFragmentEffect {
+    // The light space is part of the program's identity, in BOTH maps: this per-context program cache
+    // and the assembled-source memo in the registry. They are one identity split across two caches, and
+    // a variant that reached one but not the other would be an order-dependent wrong picture — the
+    // worst kind to reproduce, because it depends on which project was opened first.
     const key = pass ? `${def.id}#${pass.id}@${light}` : `${def.id}@${light}`;
     const existing = this.fragmentPrograms.get(key);
     if (existing) {
@@ -2116,13 +2103,18 @@ export class SceneCompositor {
    * Multi-pass definitions run their whole graph (intermediate scaled targets → final into `dstRT`).
    * Returns false (no-op, base image preserved) if any program fails to compile — never black-frames.
    */
-  private runFragmentPass(srcTex: WebGLTexture, pass: SceneFragmentPass, dstRT: RenderTarget): boolean {
+  private runFragmentPass(
+    srcTex: WebGLTexture,
+    pass: SceneFragmentPass,
+    dstRT: RenderTarget,
+    light: FragmentEffectLightSpace = "display",
+  ): boolean {
     if (pass.def.passes && pass.def.passes.length > 0) {
-      return this.runFragmentPassGraph(srcTex, pass, dstRT);
+      return this.runFragmentPassGraph(srcTex, pass, dstRT, light);
     }
     let compiled: CompiledFragmentEffect;
     try {
-      compiled = this.prepareFragmentEffect(pass.def);
+      compiled = this.prepareFragmentEffect(pass.def, undefined, light);
     } catch (error) {
       if (!this.fragmentCompileFailureWarnings.has(pass.def.id)) {
         this.fragmentCompileFailureWarnings.add(pass.def.id);
@@ -2141,7 +2133,12 @@ export class SceneCompositor {
    * resolve strictly to EARLIER passes — an unknown input id skips the whole effect (compile-time
    * data bug, warned once, never a black frame).
    */
-  private runFragmentPassGraph(srcTex: WebGLTexture, pass: SceneFragmentPass, dstRT: RenderTarget): boolean {
+  private runFragmentPassGraph(
+    srcTex: WebGLTexture,
+    pass: SceneFragmentPass,
+    dstRT: RenderTarget,
+    light: FragmentEffectLightSpace = "display",
+  ): boolean {
     const passes = pass.def.passes!;
     const resolvedParams = resolveFragmentEffectParams(pass.def, pass.params);
     const outputs = new Map<string, RenderTarget>();
@@ -2157,7 +2154,7 @@ export class SceneCompositor {
       }
       let compiled: CompiledFragmentEffect;
       try {
-        compiled = this.prepareFragmentEffect(pass.def, stage);
+        compiled = this.prepareFragmentEffect(pass.def, stage, light);
       } catch (error) {
         const key = `${pass.def.id}#${stage.id}`;
         if (!this.fragmentCompileFailureWarnings.has(key)) {
@@ -3177,8 +3174,20 @@ export class SceneCompositor {
     // second nest, or the layer's opacity/blend gets applied twice). A compile failure just skips the
     // pass (runFragmentPass returns false) — the running nest image is left untouched.
     for (const pass of fragmentPasses) {
+      //
+      // S10. The fragment stage's bracket OPENS in `getSrcColor` (which decodes the nest image this
+      // reads) and CLOSES in the final pass's `main()` (which encodes on the way out) — see
+      // `assembleShader`. Both halves live in the shader, so unlike S1-S6 and S8 the targets stay in
+      // the DISPLAY pool and every consumer below is unchanged.
+      //
+      // That is not a shortcut, it is the only correct placement here. This loop has three consumers
+      // of `s2` and one of them is a raw `blitFramebuffer` (the `rewritesAlpha` replace path). A blit
+      // out of an sRGB attachment into a plain RGBA8 one decodes and does not re-encode, so a linear
+      // pool would put linear values straight into the display-referred nest on the keyer path — a
+      // wrong picture with the flag ON, which is the class this slice exists to avoid.
+      const light: FragmentEffectLightSpace = this.effectSpace;
       const { s2 } = this.effectTargets();
-      const ok = this.runFragmentPass(this.accumA.tex, pass, s2);
+      const ok = this.runFragmentPass(this.accumA.tex, pass, s2, light);
       if (!ok) continue;
       // Mask-aware defs (stylize P5) consumed the mask INSIDE the shader as a weight map — the
       // binary after-composite gate would double-apply it, so it's skipped for them.

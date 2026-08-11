@@ -443,7 +443,23 @@ import { rgbToHsl, hslToRgb, applyHueSatCurves, applySecondary, secondaryKey, hu
   // "legacy" forever, so a new project that stored nothing would flip meaning under a later refactor.
   const fresh = createDefaultComposition({ id: "p1", name: "n", durationSeconds: 10 });
   check("a new composition STAMPS its colour settings", fresh.settings.color !== undefined);
-  check("a new composition stamps linear", fresh.settings.color?.effectLight === "linear");
+  /**
+   * A new project is stamped DISPLAY, not linear — and this assertion is the reminder to flip it.
+   *
+   * `NEW_PROJECT_COLOR_SETTINGS` is correct and stays exported; it is simply not reachable yet. The
+   * effect stage is only partly converted (transitions are display-referred until slice 4), so a
+   * project stamped "linear" today would mix light in some operations and not others, and would shift
+   * when the remaining slices land. See the comment on `createDefaultComposition`.
+   *
+   * WHEN THE STAGE IS WHOLE — after linear-light slice 4 — flip `createDefaultComposition` to
+   * `NEW_PROJECT_COLOR_SETTINGS` and flip this assertion with it. Deliberately written so it FAILS
+   * the day someone changes the default without reading this, rather than silently agreeing.
+   */
+  check("a new composition stamps DISPLAY until the stage is whole (flip at slice 4)", fresh.settings.color?.effectLight === "display");
+  check(
+    "NEW_PROJECT_COLOR_SETTINGS still says linear — held back, not redefined",
+    NEW_PROJECT_COLOR_SETTINGS.effectLight === "linear"
+  );
 }
 
 // 33. Neutral controls are an exact identity in linear (no drift from the managed path).
