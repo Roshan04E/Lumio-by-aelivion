@@ -1396,6 +1396,52 @@ state, different decider, different gate, different status; and DEBT-018's A1 is
 anywhere that `wcReacquireEpoch` re-acquires successfully, which locates this entry's gap upstream of
 the vehicle rather than in it.
 
+**UPDATE (2026-08-12) — the counter is now an ASSERTION, and it has been seen failing. Still open.**
+
+The phase 1 read found that `wc:gate` already denies synthetically and already prints
+`admissionReacquireAttempts 0` on a passing run. That reading has been turned into a check rather than
+a fixture (`WcDecoderGatePage.tsx` `runReadmissionChecks`, asserted in `wc-decoder-gate.ts`), and it
+runs on every `wc:gate`.
+
+**The preconditions are the substance, not the counters.** `attempts 0 / grants 0` is the same reading
+in three different worlds — never denied, denied and refused, or nobody asked — and this entry has
+already been burned three times by exactly that ambiguity. So the gate now asserts, in order:
+
+```
+re-admission precondition: the source was really denied        capMisses=2 starved=[…#other]
+re-admission precondition: freed capacity granted a permission eligible=true grants=1 leftUnpermitted=0
+re-admission precondition: nothing had re-asked yet            attempts=0 grants=0
+denied source is RE-ADMITTED on its permission                 lease=true provider=true frame=true
+the re-ask is attributed, granted, and leaves the starved reg.  attempts 0→1 grants 0→1 starved=[]
+```
+
+A DECODED FRAME, not a lease handle, is what closes it — a counter that moves while nothing decodes is
+the class of evidence this entry keeps being misled by. The node side additionally asserts all five
+checks are PRESENT, because `every(ok)` is silent about a check that was deleted, and this one guards a
+defect that does not currently reproduce.
+
+**Falsified before being trusted.** With the pool temporarily refilled before the re-ask (token
+`TEMPORARY-DEBT013-FALSIFY`, reverted, zero grep matches), the gate went red in precisely the intended
+shape: the three preconditions stayed GREEN, `attempts 0→1` (the ask was made and attributed) and
+`grants 0→0` (it was refused), source still starved, exit 1. That is the discrimination the entry
+needs — a refused re-ask is now distinguishable from an absent one, by measurement rather than by
+argument.
+
+**What this does and does not settle.** It settles that slice D's vehicle is sound at the POOL level:
+a source denied at acquire, granted a permission when capacity freed, re-asking through the ordinary
+acquire path, is admitted and decodes. It does NOT settle clause (a), which is about a LAYER with a
+`<video>` fallback and a visible picture; these are pool leases with no layer, no element and no
+`wcReacquireEpoch`. The reachable-MediaIn fixture named in the phase 1 read is still what clause (a)
+needs, and this entry stays **open** for it. What changed is that the pool half is now guarded in
+CI-style verification instead of being re-derived by hand each time.
+
+**Slice F's shared detector is absent from this branch — recorded here so it is not built twice or
+never.** `admission-reacquire.ts` / `kernel-conformance.ts` do not exist under `apps/web/src`;
+`1ffc898` (which preserved F as a zero-consumer design artifact) is NOT an ancestor of
+`method-3-gpu-compositor`. Any plan for this entry that assumes a shared boundary predicate exists
+here is wrong, and work sitting on an unmerged branch is exactly how a defect gets fixed twice or not
+at all.
+
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
 - Status: **open — PARKED, deliberately not chased (2026-08-08)**
@@ -1476,6 +1522,64 @@ measurement-preconditions rule, and the reason the original six runs cannot be t
 
 **Trigger unchanged, and deliberately not converted into a schedule here.** It remains: a user-visible
 host freeze on a Flarex clip, or an ADR-013 re-run with the engagement gate and blocker 2 resolved.
+
+**RETIRED 2026-08-12 — the reading was taken, and the regime does not reproduce. Scope stated below.**
+
+The discriminating reading this entry specified has been taken, on a fresh fixture, with all three of
+its own blockers addressed (`apps/worker/tmp/debt014-host-routing-probe.ts`). Host clip on one file, a
+Flarex MediaIn bound to a DIFFERENT file — two decode consumers, which is Host C's regime — sampled at
+250ms from mount through 12s paused and 12s playing, in three independent arms.
+
+```
+arm 1/2/3   host modes seen: wc-hw   (never element, paused or playing)
+            loader: <second seed>=wc-hw          playhead advanced 6.0s under play
+            capMisses=0  admissionDenials=0  starved=0  active=2/sw0
+usable arms 3/3 · host reached 'element' with a loader present: 0/3
+```
+
+**Pressing Space is an input, not a result**, so the playing half is gated on the playhead having
+actually moved (`__rfClock.committed`, ≥0.5s or the arm VOIDs; 6.0s observed in all three). A keypress
+that lands on a focused control leaves the transport parked and the "playing" window becomes a second
+paused window wearing a label — the same class of void as blocker 1, and it would have gone unnoticed
+here because the verdict is a NEGATIVE finding, which a dead window produces for free.
+
+**Blockers, each answered rather than noted.** Blocker 1: `awaitWebCodecsEngaged` gates the run and a
+failure to engage is a VOID, not a number — so no claim here is made about a subsystem that had not
+started. Blocker 2: three arms are printed individually and the verdict is only taken where they
+agree; they agreed exactly. Blocker 3 (the one added by the phase 1 read): the evidence predating
+`ac0d9f2` cannot be compared to, so this is a fresh measurement and is reported as one — no number
+here is set against the recorded 6/6.
+
+**On the merge question: not an instance of DEBT-013, and now on evidence rather than on constants.**
+Strictly, the discriminator's antecedent never occurred — the host never landed on `element`, so
+"capMisses at that moment" has no moment. That is itself the answer to the entry: with two consumers
+against a 3/3/4 budget, `capMisses` stayed 0 for the whole run, no denial was recorded anywhere, and
+BOTH consumers held hardware sessions simultaneously (`active=2/sw0`). There is no refusal for this
+entry to be an instance of. The phase 1 inference from the cap constants is confirmed by measurement;
+the entries stay separate.
+
+**SCOPE, and it is a real limit.** This is a two-consumer minimal reconstruction, not Host C's project
+— those artifacts are gone from the tree and cannot be recovered. So the honest claim is: *the
+described regime does not reproduce on a current fixture built to its own specification.* It is not a
+proof that no real project can put a host clip on `element`. Retired on non-reproduction, which the
+register treats as different from "fixed": nothing was changed to make this go away, and `ac0d9f2` is
+the most likely reason it is gone.
+
+**Re-registration trigger, unchanged in substance and now cheap to act on:** a user-visible host freeze
+on a Flarex clip. The probe is in the tree; re-running it is the first step, and if the host does land
+on `element` its `@host=element` row prints the census at that instant, which is the reading this
+entry existed to obtain.
+
+**Two probe defects found and fixed while taking this reading**, both of the class that produces
+confident wrong numbers rather than errors, and both recorded because the next probe author will meet
+them: (1) `addMediaInBoundTo(page, 1)` bound the MediaIn to the HOST's own asset — asset-bin tile
+order is not import order — producing the one-file-two-doors SHARE the fixture header explicitly rules
+out, and a clean-looking 3/3 result from a fixture in which no denial was ever possible. The fix picks
+the tile by NAME, and a second guard now asserts on the measurement itself that the loader's asset is
+not the host's, so that mistake VOIDS instead of answering. (2) tsx compiles with `keepNames`, which
+wraps a function-valued `const` inside `page.evaluate` in a `__name()` helper that does not exist in
+the page — every arm reported VOID with `__name is not defined`. Loud, so it cost minutes rather than
+a conclusion, but worth knowing before writing the next evaluate.
 
 ### DEBT-015 — CLASS: an error path that reports COMPLETION, so a failure ships as product output
 
@@ -2298,6 +2402,34 @@ programme that `wcReacquireEpoch` actually re-acquires and succeeds.** DEBT-013 
 That matters for how DEBT-013 is read: its gap is upstream of the vehicle — permission, victim, and a
 fixture that still denies — not in the re-acquire itself. Cross-referenced rather than merged.
 
+**RETIRED 2026-08-12, on the evidence this entry already contained.**
+
+Retired on the founder's call after the phase 1 read above. Nothing new was measured to retire it, and
+that is the point: **the expiry condition was met on 2026-08-09 and the header was never updated.**
+
+The condition, as written: *"A3 below is observed to fire — a real fourth `pausedStall` event after the
+3-attempt budget is spent, producing the ladder's own 'exhausted' console line — on any fixture."* The
+2026-08-09 update in this entry records exactly that: `MAX_PAUSED_WC_RECOVERY_ATTEMPTS = 0` (token
+`TEMPORARY-DEBT018A3-INJECTION`, reverted and proven clean by `git diff` and a zero-match grep), the
+real seek trigger fired, `mode 8s after the stall-triggering seek: element`, and the ladder's own line
+logged: *"paused WC recovery exhausted (0 attempts) — staying on `<video>` element for this source"*,
+with no attempt scheduled. A1 and A2 were confirmed by ordinary behaviour (recovery at 1380ms and
+1608ms after a demoting seek, twice, no reload; 2-3 attempts across 17-18 seeks, never exceeding the
+cap). All three acceptance links hold; the fix is present and intact in `WebglMediaLayer.tsx`
+(`:85`, `:2180-2192`, `:2394`, `:2398`), unmoved by anything since.
+
+**What was actually wrong here was bookkeeping, and it is worth naming.** An entry whose Status line
+and Expiry condition contradict its own most recent update is not "open" — it is unmarked, and it
+costs a full read to discover that. The phase 1 batch spent its DEBT-018 budget rediscovering a
+conclusion the entry already stated. The register's own rule ("append a new dated note") makes the
+header the oldest text in a long entry by construction, so a reader who stops at the header reads the
+entry backwards. Both DEBT-018 and DEBT-013 hit this in the same pass, in the same way.
+
+**Not merged with DEBT-013**, and the comparison table above is the reason. DEBT-018's A1 remains the
+only end-to-end demonstration in this programme that `wcReacquireEpoch` re-acquires and succeeds in
+the product — which is why retiring this entry does not weaken DEBT-013's position but locates it: the
+vehicle works, and 013's gap is upstream of it.
+
 ### DEBT-019 — a source provider holds the WHOLE file in memory, so residency scales with clip length
 
 - Status: open
@@ -2610,6 +2742,47 @@ single spot fix. Registered here so it is not rediscovered: the remaining untrac
 sites are `useFlarexCompProxies.ts:331`, `sourceProxyStore.ts:239/266/289`, `sourceProxyEngine.ts:737`,
 and the picked-`File` sites in `CreatePage.tsx`/`EditorPage.tsx`.
 
+**PARKED WITH A TRIGGER (2026-08-12): the ~15 MB/source unattributed residual blocks ADR-021 step 2's
+I-P6 budget, and nothing before it.**
+
+Founder call, and the reasoning is worth keeping because it is what makes this a park rather than a
+stall. The residual is real and is correctly recorded above as UNATTRIBUTED. But it only bites at
+large N, and today the timeline builds a provider **per playing clip**, so N is small and this costs a
+user nothing. Large N is precisely what ADR-021's frame-provider seam introduces — every source
+becomes a provider whether or not it is playing — and that work is deferred. So the trigger is not a
+date and not a symptom report: **ADR-021 step 2 may not accept its I-P6 residency budget while this is
+open.** Sizing it before then would be building a measurement for a shape that does not exist yet.
+
+**The next instrument, written down so the next investigator does not start where the last two rounds
+did.** Do NOT open with a working-set delta. Every mis-attribution in this entry — the retracted
+~25 MB/source, the retracted ~7 MB/source index term — came from asking a delta *what* was holding
+memory, which it cannot answer; it can only ever say *how much*. What is needed is:
+
+> A **heap snapshot with retainer paths** taken at a large-N rung, plus a **per-term ablation** (build
+> the provider with the index disabled, with the chunk window disabled, with the decoder unconfigured,
+> and difference the retained sizes). The snapshot names the holder; the ablation prices it. Either
+> alone reproduces the error already made twice.
+
+Two hypotheses are already dead and should not be re-derived: mp4box's sample array is NOT retained
+via the `track` object (`getInfo` builds a fresh object of copied scalars), and the codec
+`description` does NOT alias a parse buffer (`getDescription` writes into a fresh `DataStream`).
+
+**Harness note (2026-08-12), belonging to this entry because the reaper was born here.**
+`browser-preflight.ts` counted BROWSERS, so it passed a machine holding two leftover **node** trees
+from earlier `wc:gate` runs and the next run hung with no output and no browser for ~25 minutes — the
+same class of failure the preflight was promoted to prevent, one process class over. It now also
+refuses on a live process running the calling gate's own script (`scriptMarker`), excluding this
+process and its ancestors. Both directions were exercised on the way in: it caught three real corpses
+on its first run (one of them the run whose PASSED output had already been read), and it produced one
+false positive by building its ancestor map from `node.exe` rows only — the chain
+`pnpm → shell → tsx` has a non-node link, the walk stopped at the hole, and the preflight refused on
+its own two parents. The map is now built from ALL processes and filtered to node afterwards.
+
+The root cause of the leftovers was in the gate, not the preflight, and is fixed too: `stopProcess`
+killed the `cmd.exe` that `spawn(..., { shell: true })` returns, which dies obediently while the vite
+node process underneath survives holding the stdio pipes it inherited — so a gate that had already
+printed PASSED could not exit. It now `taskkill /T /F`s the tree and waits.
+
 ---
 
 ### DEBT-020 — CLASS: a time-varying parameter that is not a number is invisible to the content hash
@@ -2721,6 +2894,16 @@ mechanism that produced two bugs in two slices is still in place and still silen
 - **DEBT-016** — retired 2026-08-09 in place above, same commit as its fix. `FlarexSourceDrawCache`'s
   hit path now rebinds the transform, not just the media handle; falsified before/after with
   `flarex-source-draw-cache-transform.test.ts`.
+- **DEBT-018** — retired 2026-08-12 in place above, on evidence the entry already held: its own
+  2026-08-09 update closed A3 by injection and the Status/Expiry lines were never updated to match.
+  Nothing was re-measured to retire it. Its A1 remains the only end-to-end proof in this programme that
+  `wcReacquireEpoch` re-acquires and succeeds in the product, which is why DEBT-013 cites it.
+- **DEBT-014** — retired 2026-08-12 in place above, on NON-REPRODUCTION rather than a fix. The
+  discriminating reading was taken on a fresh two-consumer fixture with all three blockers addressed
+  (`tmp/debt014-host-routing-probe.ts`): host `wc-hw` in 3/3 arms, `capMisses 0`, no denial anywhere,
+  both consumers holding hardware simultaneously. Not an instance of DEBT-013 — there is no refusal for
+  it to be an instance of. Scope is stated in the entry: a reconstruction, not Host C's project, whose
+  artifacts are gone.
 - **DEBT-010** — retired 2026-08-09 in place above, same commit as its fix. Sidestepped ContextVersion
   entirely: readiness is now a fourth not-ready EVENT at the capture boundary
   (`ScenePreviewCanvas.tsx`'s `renderIsolated`), not a cache-key axis. All three acceptance links
