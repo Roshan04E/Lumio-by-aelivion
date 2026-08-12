@@ -2192,6 +2192,85 @@ provider per playing clip, and a project cutting between several long sources pa
 whole-file residency for clips it shows for a second. The pull model makes it acute; it does not
 make it true.
 
+**Update (2026-08-12) — Phase 1 investigation: the premise is CONFIRMED, the shape is not what this
+entry says, and the named remedy is aimed at the wrong term.** Read-only; no product code changed.
+Measured with `apps/worker/tmp/debt019-residency-probe.ts`, same instrument and rules as the ladder
+above (sum of every `chrome.exe` working set, fresh browser per rung, baseline in that same browser
+before the sources exist), over two corpora identical in every axis except duration — 3s vs 120s.
+
+*The instrument had to be fixed first, and the fix matters for anyone re-running the original
+ladder.* `browser.close()` does **not** reap Chrome here: a first pass left 16–36 `chrome.exe` alive
+and every rung after the first baselined against the previous rung's corpses, producing baselines of
+1.4–3.3 GB and **negative deltas** (−694 MB). The probe now hard-kills chrome and refuses to measure
+a rung unless the count reaches zero first; baselines then sit at 460–490 MB, consistent with the
+original study's ~445 MB. Numbers from any ladder that did not enforce that floor are suspect.
+
+**Term 1 — the Blob. The claim is true: it is RAM-resident and it scales 1:1 with file size.**
+Variant `blob` holds only `fetch(url).blob()`, no demux and no decoder:
+
+| corpus | file size | N | delta | per source |
+|---|---|---|---|---|
+| 3s | 1.9 MB | 10 | 49 MB | 4.9 MB |
+| 120s | 76.8 MB | 10 | 865 MB | **86.5 MB** |
+
+40× the duration buys **17.6×** the per-source residency, and 86.5 MB resident for a 76.8 MB file is
+a whole-file RAM copy plus overhead. Chromium is not spooling these to disk at this working-set size.
+**This directly falsifies the file's own header comment** (`webcodecs-decoder.ts:10-16`: "disk-backed
+Blob … Peak RAM is O(one GOP window), not O(file)"). The window part is true; the Blob part is not.
+
+**Term 2 — the chunk window is ALREADY demand-paged, bounded and evictable.**
+`createBlobChunkWindow` (`webcodecs-decoder.ts:386`) caps each materialization at
+`WINDOW_MAX_SAMPLES = 96` **and** `WINDOW_MAX_SPAN_BYTES = 24 MB`, and `ensure()` does a
+whole-window replace (`loaded = next`), which is a strict bound, not a leak. It is duration-*flat*
+by construction — for a 120s source the window covers ~3.2s of samples. So this entry's Expiry
+condition ("the encoded-sample window is demand-paged and evictable") **is already satisfied**, and
+work aimed there would close nothing. The unbounded thing is not the window; it is the Blob the
+window slices out of.
+
+**Term 3 — the sample index, a real but secondary duration-scaling term.** `SampleIndexEntry[]` is
+one JS object per sample (`webcodecs-decoder.ts:48`), so it is O(duration) on the JS heap: at N=10
+the heap goes 56.2 MB (3s) → 73.9 MB (120s), ≈ **1.8 MB per 2-minute source**. Unbounded in
+principle (a 2-hour source is ~216k entries) and, like the Blob, invisible to every budget.
+
+**Term 4 — flat.** Full provider minus blob at N=10 is ≈25 MB/source on the 3s corpus: `VideoDecoder`
++ DPB + pinned frames + the 64 MB-capped reverse cache. This is the ~25 MB/source the original ladder
+reported, and it is **not** the Blob — at 3s the Blob is only 4.9 MB of it. The headline figure that
+motivated this entry was therefore mostly attributed to the wrong term.
+
+**The finding that changes the fix: residency DIFFERS BY SOURCE KIND, and for the local-first path
+it is entirely gratuitous.** `createFrameProvider` is not usually handed a remote URL. OPFS assets
+are `URL.createObjectURL(await handle.getFile())` (`apps/web/src/lib/asset-blob-store.ts:175`) — an
+object URL over a **disk-backed `File` that already slices lazily at zero residency** — and the store
+already exposes that File directly as `getBlob(id)` (`:184`). `fetchSourceBlob` takes that URL and
+does `fetch().blob()` over it, which measurement shows is a **full disk→RAM copy**, not a handle
+pass-through. Six OPFS files of 32 MB, both arms paying the identical write cost:
+
+| variant | what is held | delta | vs. the other arm |
+|---|---|---|---|
+| `opfs-file` | the `File` from `handle.getFile()` | 204 MB | — |
+| `opfs-fetch` | `fetch(objectURL).blob()` | 430 MB | **+226 MB for 192 MB of files** |
+
+Holding the File costs nothing beyond the write; fetching a copy costs the whole file. So:
+
+- **Local / OPFS / IndexedDB sources (the dominant path):** there is no paging problem to solve. The
+  bytes are already on disk and already lazily sliceable. The fix is to stop making the copy — pass
+  the `File`/`Blob` through instead of re-fetching its object URL. `blob.slice()` in the existing
+  window then reads from disk on demand, unchanged.
+- **Remote http(s) sources:** the residency is real and unavoidable *as written*, and this is the
+  only case that needs actual demand-paging — HTTP `Range` requests per window instead of one
+  whole-body `.blob()`. Both the R2 origin and the probe's own media server already advertise
+  `Accept-Ranges`.
+
+**Consequences for this entry.** The debt is real and stays open — a provider does hold whole-file
+RAM that scales with duration. But (a) its Expiry condition as written is already met and must be
+restated in terms of the Blob, not the window; (b) the dominant per-source term in the ADR-021
+ladder was decoder state, not the Blob, so ADR-021 §3.2(a)'s memory wall does not move as much as
+closing this debt might suggest; and (c) the two source kinds are two different fixes, one of which
+is a deletion rather than a mechanism. **Restated expiry condition:** a provider's resident encoded
+bytes are bounded by a byte budget independent of source duration — local sources by holding the
+disk-backed `File` rather than a fetched copy, remote sources by range-paging the window — with
+total provider residency reported in BYTES to whatever authority enforces ADR-021's I-P6 budget.
+
 ---
 
 ### DEBT-020 — CLASS: a time-varying parameter that is not a number is invisible to the content hash
