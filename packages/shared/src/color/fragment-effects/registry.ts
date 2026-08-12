@@ -73,6 +73,18 @@ interface FragmentEffectDefinitionShared {
    */
   maskAware?: boolean;
   /**
+   * Keyer garbage/hold-out matte inputs (Flarex `chromaKey`): binds TWO independent in-shader
+   * mattes — `uniform sampler2D uGarbageMatte` / `uniform float uHasGarbageMatte` and the same pair
+   * for `uHoldOutMatte` — on texture units 8/9 (unit 7 stays `maskAware`'s single region weight map;
+   * the two mechanisms are unrelated and a def could in principle use both). Bound only for the
+   * FINAL pass of a multi-pass graph, since that is the only stage that owns `matteOnly` and the
+   * finished alpha — binding on every stage would upload the same texture 3x/frame for nothing.
+   * Unlike `maskAware`'s weight map (limits WHERE an effect applies), these are read as DATA the
+   * effect's own math folds in (garbage forces alpha to 0, hold-out to 1) — see `builtins.ts`'s
+   * chroma keyer for the fold and `compile-flarex.ts`'s chromaKey case for what rasterizes them.
+   */
+  keyerMattes?: boolean;
+  /**
    * The effect LOWERS alpha (keyers). The default composite-back draws the pass result OVER the
    * running nest image, which is correct only for opaque outputs — a keyed hole would show the
    * original opaque pixel underneath and the key would be invisible. `rewritesAlpha` passes with
@@ -233,6 +245,11 @@ function assembleShader(
   // Mask-aware defs (stylize P5) read the effect mask inside the shader; everyone else's
   // assembled source is untouched (parity baselines stay byte-identical).
   const maskUniforms = def.maskAware ? "uniform sampler2D uPassMask;\nuniform float uHasPassMask;" : "";
+  // Declared on every pass of the graph (harmless if a non-final stage's body never references
+  // them — GLSL doesn't complain about an unused uniform); only the final pass's body reads them.
+  const keyerMatteUniforms = def.keyerMattes
+    ? "uniform sampler2D uGarbageMatte;\nuniform float uHasGarbageMatte;\nuniform sampler2D uHoldOutMatte;\nuniform float uHasHoldOutMatte;"
+    : "";
   // Intermediate passes write their raw output (data textures — tensors, flow fields, paint
   // buffers); ONLY the final pass mixes against the source, so `uIntensity` keeps its product
   // meaning ("how much of the effect") across single- and multi-pass definitions.
@@ -282,6 +299,7 @@ out vec4 fragColor;
 uniform sampler2D uSrc;      // the layer's own composited image
 ${passSamplers}
 ${maskUniforms}
+${keyerMatteUniforms}
 uniform vec2 uResolution;    // THIS pass's output resolution (scaled passes see their working res)
 uniform float uIntensity;    // 0..1, mixed against the source in the final pass's main()
 uniform float uTime;

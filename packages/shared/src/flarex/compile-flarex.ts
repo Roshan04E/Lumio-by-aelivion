@@ -1648,30 +1648,20 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
        * the two overlap, an operator who drew both means the garbage one; a hold-out that could resurrect
        * a rig would make garbage untrustworthy and every keyer in the industry resolves it this way.
        *
-       * Here that ordering is STRUCTURAL rather than arithmetic: the hold-out composites into the keyed
-       * image first, and the garbage matte then multiplies the alpha of that whole result. Zero times
-       * anything is zero, so garbage cannot lose — there is no branch to get backwards later.
+       * FOLDED INTO THE KEYER SHADER (`flarex.chromaKey` in `color/fragment-effects/builtins.ts`,
+       * `keyerMattes` on the definition) rather than composited here at compile time — this compiler
+       * used to build a hold-out-composite-then-garbage-mask group around the keyed draw, which worked
+       * but could never make `matteOnly` show the hold-out (that view only ever saw the keyer pass's own
+       * RGB, and the protected plate lived in a sibling child it couldn't see). The shader now does:
        *
-       *   keyed      = key(in)
-       *   protected  = in ∙ H            (H = hold-out region)
-       *   held       = keyed OVER protected
-       *   out        = held ∙ ¬G          (G = garbage region)
+       *   m = clamp(max(m, holdOutCoverage) * (1 - garbageCoverage), 0, 1)
        *
-       * HOLD-OUT is a composite, not an alpha write, because the mattes stay VECTOR until they are
-       * rasterized and this compiler can only ever MULTIPLY a rasterized matte into coverage — raising
-       * alpha needs something to raise it with. Putting the node's own input underneath the keyed
-       * result is that something: in the protected region the plate's coverage fills whatever the key
-       * removed (α = m + α_in∙(1−m) = 1 for an opaque plate), while the despilled/decontaminated key
-       * output still shows wherever the key was confident. Outside the region the masked copy
-       * contributes nothing and the key is untouched, bit for bit.
-       *
-       * KNOWN LIMIT, stated rather than hidden: under `matteOnly` — the tuning view, where the pass
-       * writes the matte into RGB and leaves alpha alone — the hold-out is invisible, because the
-       * opaque matte view covers the protected copy. Representing it there means forcing the matte to
-       * white INSIDE the keyer shader (`flarex.chromaKey` in `color/fragment-effects/builtins.ts`),
-       * which is where a fully faithful implementation of both sockets belongs. Garbage does show in
-       * `matteOnly` (it punches the view transparent). The COMPOSITED result — the thing that actually
-       * meets the background — is correct for both sockets either way.
+       * — applied BEFORE `matteOnly`'s early return, so both sockets are visible there too. Precedence
+       * is structural in that expression, not compared: at garbageCoverage=1 the product is 0 regardless
+       * of holdOut; at garbageCoverage=0, holdOutCoverage=1 forces 1. There is one seam left on THIS
+       * side: the mattes stay VECTOR until rasterized, so all this case does is rasterize each wired
+       * socket straight onto the pass (no group, no second `in` clone, no `complementMatte`) — inversion
+       * is a param the shader reads, not a second rasterized region.
        */
       case "chromaKey": {
         const input = imageInput(node, "in", at);
@@ -1690,52 +1680,30 @@ export function compileFlarexComp(comp: FlarexComp, ctx: FlarexLowerCtx): Flarex
           choke: num(at, node, "choke", 0.05),
           decontaminate: num(at, node, "decontaminate", 0.5),
           matteOnly: bool(node, "matteOnly"),
+          garbageInvert: bool(node, "garbageInvert"),
+          holdOutInvert: bool(node, "holdOutInvert"),
         });
-        let draw = pass ? pushFragmentPass(input, pass) : input;
-
-        const holdOut = matteInput(node, "holdOut", at);
-        if (holdOut && holdOut.masks.length > 0) {
-          // A SECOND per-consumer clone of the same upstream value — `imageInput` re-reads the memo, so
-          // this costs one clone and one extra composite, not a second evaluation of the subtree. Paid
-          // only when the socket is wired.
-          const plate = imageInput(node, "in", at);
-          const region = bool(node, "holdOutInvert")
-            ? complementMatte(holdOut.masks, `flarex_${comp.id}_${node.id}_holdout`)
-            : holdOut.masks;
-          const key = `flarex_${comp.id}_${node.id}_holdout`;
-          const guarded = plate ? applyMatteToImage(plate, { masks: region }, key, at) : null;
-          // `applyMatteToImage` returns its input UNCHANGED when the matte could not be rasterized (no
-          // matte cache, empty list). Compositing an UNMASKED plate under the key would restore the
-          // whole frame — the opposite of a soft degrade — so the identity result is refused, and the
-          // hold-out simply does not apply.
-          if (guarded && plate && guarded !== plate) {
-            frameProfiler.bump("compile.operations"); // the hold-out combine (keyed over protected plate)
-            frameProfiler.bump("compile.drawCommands");
-            frameProfiler.bump("compile.objects", 3); // group + shell + transform (identityShell)
-            frameProfiler.bump("compile.arrays"); // children [protected, keyed]
-            draw = {
-              kind: "group",
-              debugGroupId: `flarex_${comp.id}_${node.id}_holdout`,
-              children: [guarded, draw],
-              nestWidth: nestW,
-              nestHeight: nestH,
-              shell: identityShell(),
-              __flarexStage: 0,
-            } as FlarexWrapGroup;
-          }
-        }
+        if (!pass) return { kind: "image", draw: input };
 
         const garbage = matteInput(node, "garbage", at);
         if (garbage && garbage.masks.length > 0) {
-          // Alpha is MULTIPLIED by the matte, so zeroing inside the garbage region means masking by its
-          // COMPLEMENT — and `garbageInvert` (garbage everywhere EXCEPT the shape) is then the raw
-          // region, uncomplemented. Applied last: see the precedence note above.
-          const region = bool(node, "garbageInvert")
-            ? garbage.masks
-            : complementMatte(garbage.masks, `flarex_${comp.id}_${node.id}_garbage`);
-          draw = applyMatteToImage(draw, { masks: region }, `flarex_${comp.id}_${node.id}_garbage`, at);
+          const raster = rasterizeMatte(garbage, `flarex_${comp.id}_${node.id}_garbage`, at);
+          if (raster) {
+            pass.garbageMatte = raster.tex;
+            pass.garbageMatteVersion = raster.version;
+          }
         }
-        return { kind: "image", draw };
+
+        const holdOut = matteInput(node, "holdOut", at);
+        if (holdOut && holdOut.masks.length > 0) {
+          const raster = rasterizeMatte(holdOut, `flarex_${comp.id}_${node.id}_holdout`, at);
+          if (raster) {
+            pass.holdOutMatte = raster.tex;
+            pass.holdOutMatteVersion = raster.version;
+          }
+        }
+
+        return { kind: "image", draw: pushFragmentPass(input, pass) };
       }
 
       case "lumaKey": {

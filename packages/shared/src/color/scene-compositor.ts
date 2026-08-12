@@ -357,6 +357,16 @@ export interface SceneFragmentPass {
   timeSeconds: number;
   mask?: TexImageSource | null | undefined;
   maskVersion?: number | undefined;
+  /**
+   * Keyer garbage/hold-out matte inputs (`FragmentEffectDefinition.keyerMattes`). Comp-space alpha
+   * mattes, `.a` is coverage — same convention as `mask`, but read INSIDE the shader as data (garbage
+   * forces alpha to 0, hold-out to 1) rather than as a region gate. Bound only for the graph's final
+   * pass. `undefined`/`null` = socket unwired, the shader's has-flag reads 0 and the fold is a no-op.
+   */
+  garbageMatte?: TexImageSource | null | undefined;
+  garbageMatteVersion?: number | undefined;
+  holdOutMatte?: TexImageSource | null | undefined;
+  holdOutMatteVersion?: number | undefined;
 }
 
 /**
@@ -613,6 +623,11 @@ interface CompiledFragmentEffect {
   /** Mask-aware defs only (stylize P5): the in-shader effect-mask sampler + has-flag. */
   uPassMask: WebGLUniformLocation | null;
   uHasPassMask: WebGLUniformLocation | null;
+  /** `keyerMattes` defs only (Flarex chromaKey): the two auxiliary matte samplers + has-flags. */
+  uGarbageMatte: WebGLUniformLocation | null;
+  uHasGarbageMatte: WebGLUniformLocation | null;
+  uHoldOutMatte: WebGLUniformLocation | null;
+  uHasHoldOutMatte: WebGLUniformLocation | null;
   params: { param: FragmentEffectParam; location: WebGLUniformLocation | null }[];
   lastFrame: number;
   /** Wall-clock `performance.now()` of the last use (S5.3). Ages while nothing composites. */
@@ -2131,6 +2146,10 @@ export class SceneCompositor {
       uTime: gl.getUniformLocation(program, "uTime"),
       uPassMask: def.maskAware ? gl.getUniformLocation(program, "uPassMask") : null,
       uHasPassMask: def.maskAware ? gl.getUniformLocation(program, "uHasPassMask") : null,
+      uGarbageMatte: def.keyerMattes ? gl.getUniformLocation(program, "uGarbageMatte") : null,
+      uHasGarbageMatte: def.keyerMattes ? gl.getUniformLocation(program, "uHasGarbageMatte") : null,
+      uHoldOutMatte: def.keyerMattes ? gl.getUniformLocation(program, "uHoldOutMatte") : null,
+      uHasHoldOutMatte: def.keyerMattes ? gl.getUniformLocation(program, "uHasHoldOutMatte") : null,
       params: def.params.map((param) => ({ param, location: gl.getUniformLocation(program, param.name) })),
       lastFrame: this.frameCounter,
       lastUsedMs: sceneNowMs(),
@@ -2235,7 +2254,7 @@ export class SceneCompositor {
       const w = Math.max(1, Math.round(this.width * scale));
       const h = Math.max(1, Math.round(this.height * scale));
       const target = isFinal ? dstRT : this.passGraphTarget(`${pass.def.id}:${stage.id}`, w, h);
-      this.drawFragmentProgram(compiled, srcTex, inputTextures, pass, target, w, h);
+      this.drawFragmentProgram(compiled, srcTex, inputTextures, pass, target, w, h, isFinal);
       if (!isFinal) outputs.set(stage.id, target);
     }
     return true;
@@ -2263,6 +2282,7 @@ export class SceneCompositor {
     dstRT: RenderTarget,
     width: number,
     height: number,
+    isFinal = true,
   ): void {
     const gl = this.gl;
     const resolved = resolveFragmentEffectParams(pass.def, pass.params);
@@ -2290,6 +2310,27 @@ export class SceneCompositor {
       gl.bindTexture(gl.TEXTURE_2D, maskTex ?? this.emptyTex);
       if (compiled.uPassMask) gl.uniform1i(compiled.uPassMask, 7);
       if (compiled.uHasPassMask) gl.uniform1f(compiled.uHasPassMask, maskTex ? 1 : 0);
+    }
+    // Keyer garbage/hold-out mattes (fixed units 8/9 — never collide with pass inputs 1..N or the
+    // maskAware slot at 7). FINAL PASS ONLY: only that stage's body reads them (matteOnly and the
+    // finished alpha both live there), and gating here means an unwired socket costs nothing on the
+    // matte/edge stages of the graph rather than three redundant uploads of the same texture.
+    if (pass.def.keyerMattes && isFinal) {
+      const garbageTex = pass.garbageMatte
+        ? this.uploadSource(pass.garbageMatte, pass.garbageMatteVersion, { role: "mask", frameTime: this.debugFrameTime })
+        : null;
+      gl.activeTexture(gl.TEXTURE8);
+      gl.bindTexture(gl.TEXTURE_2D, garbageTex ?? this.emptyTex);
+      if (compiled.uGarbageMatte) gl.uniform1i(compiled.uGarbageMatte, 8);
+      if (compiled.uHasGarbageMatte) gl.uniform1f(compiled.uHasGarbageMatte, garbageTex ? 1 : 0);
+
+      const holdOutTex = pass.holdOutMatte
+        ? this.uploadSource(pass.holdOutMatte, pass.holdOutMatteVersion, { role: "mask", frameTime: this.debugFrameTime })
+        : null;
+      gl.activeTexture(gl.TEXTURE9);
+      gl.bindTexture(gl.TEXTURE_2D, holdOutTex ?? this.emptyTex);
+      if (compiled.uHoldOutMatte) gl.uniform1i(compiled.uHoldOutMatte, 9);
+      if (compiled.uHasHoldOutMatte) gl.uniform1f(compiled.uHasHoldOutMatte, holdOutTex ? 1 : 0);
     }
     gl.uniform2f(compiled.uResolution, width, height);
     gl.uniform1f(compiled.uIntensity, Math.max(0, Math.min(1, pass.intensity)));

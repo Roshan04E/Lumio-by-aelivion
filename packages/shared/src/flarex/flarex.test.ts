@@ -674,15 +674,18 @@ const matteKeyOf = (tex: unknown): string | null => (tex as { __matteKey?: strin
 //
 // The industry keyer contract (Fusion/Resolve/Nuke): a keyer takes auxiliary mattes, not just an
 // image. `garbage` forces alpha to ZERO where it is on; `holdOut` (the core/solid matte) forces alpha
-// to ONE. The asymmetry is the point — GARBAGE BEATS HOLD-OUT — and the compiler makes that
-// structural rather than arithmetic: the hold-out composites into the keyed image first, then the
-// garbage matte multiplies the alpha of that whole result. Zero times anything is zero.
+// to ONE. The asymmetry is the point — GARBAGE BEATS HOLD-OUT.
 //
-// The compiler can only MULTIPLY a rasterized matte into coverage, so each socket lowers to the op
-// that produces its semantic:
-//   garbage  → the finished image masked by the matte's COMPLEMENT (full-frame ∖ region)
-//   holdOut  → the node's own input, masked TO the region, composited UNDER the keyed result, so the
-//              plate's coverage fills whatever the key removed there
+// 2026-08-12: the fold moved from a compile-time composite (hold-out plate composited under the keyed
+// image, garbage applied as a shell mask over that) into the keyer SHADER itself (`keyerMattes` on
+// `flarex.chromaKey`, `color/fragment-effects/builtins.ts`'s final pass):
+//   m = clamp(max(m, holdOutCoverage) * (1 - garbageCoverage), 0, 1)
+// applied BEFORE `matteOnly`'s early return — closing the one thing the old composite could never do
+// (a matteOnly view that only ever saw the keyer pass's own RGB could not show a hold-out that lived
+// in a sibling child). This compiler's job shrank to match: rasterize each wired socket straight onto
+// the SAME `SceneFragmentPass` the keyer already opened (`pass.garbageMatte` / `pass.holdOutMatte`),
+// no group, no second `in` clone, no `complementMatte` — inversion is now a param the shader reads
+// (`garbageInvert`/`holdOutInvert`), not a second rasterized region.
 /** `mediaIn → chromaKey → mediaOut`, optionally with a rect matte on `garbage` / an ellipse on `holdOut`. */
 function keyerComp(id: string, opts: { garbage?: boolean; holdOut?: boolean; params?: Record<string, unknown> } = {}) {
   const comp = createFlarexComp(id, id);
@@ -707,9 +710,11 @@ function keyerComp(id: string, opts: { garbage?: boolean; holdOut?: boolean; par
 }
 
 const keyerPasses = (d: SceneDraw | null): number => (isGroupDraw(d) ? d.shell.fragmentPasses?.length ?? 0 : 0);
+const keyerPass = (d: SceneDraw | null) => (isGroupDraw(d) ? d.shell.fragmentPasses?.[0] : undefined);
 
 {
   // The sockets exist, are MATTE-typed, and only accept matte wires (edge validation is def-driven).
+  // Unchanged by the fold — node-defs.ts's socket declarations are untouched.
   const def = flarexNodeDefs.chromaKey;
   const socketIds = def.inputs.map((s) => s.id);
   check("keyer declares in + garbage + holdOut sockets", socketIds.join(",") === "in,garbage,holdOut");
@@ -729,93 +734,106 @@ const keyerPasses = (d: SceneDraw | null): number => (isGroupDraw(d) ? d.shell.f
 }
 
 {
-  // GARBAGE zeroes alpha. Coverage is a MULTIPLY, so "alpha 0 inside the region" is the region's
-  // COMPLEMENT applied as the shell mask: a full-frame rectangle with the garbage shape subtracted.
+  // GARBAGE reaches the pass, raw (no complement — the shader inverts, not the compiler).
   const { cache, calls, keys } = stubMatteCache();
   const out = compileFlarexComp(keyerComp("kg", { garbage: true }), { ...lowerCtx(), matteCache: cache });
-  check("garbage: keyer still carries its own pass", keyerPasses(out) === 1);
-  check("garbage: the matte lands on the keyed image's shell mask", isGroupDraw(out) && Boolean(out.shell.mask));
-  check("garbage: that mask is the GARBAGE matte, by cache key", isGroupDraw(out) && matteKeyOf(out.shell.mask) === "flarex_kg_kg_k_garbage");
-  check("garbage: rasterized as full-frame MINUS the shape (2 masks, the shape subtracted)", calls[0]?.length === 2 && calls[0]?.[1]?.mode === "subtract");
-  check("garbage: the complement's base covers the whole comp", calls[0]?.[0]?.points.length === 4 && calls[0]?.[0]?.points[2]?.x === 1920);
+  check("garbage: keyer still carries exactly its own pass", keyerPasses(out) === 1);
+  const pass = keyerPass(out);
+  check("garbage: the matte lands on the pass's garbageMatte field, by cache key", matteKeyOf(pass?.garbageMatte) === "flarex_kg_kg_k_garbage");
+  check("garbage: no hold-out matte attached", !pass?.holdOutMatte);
+  check("garbage: garbageInvert resolves false by default", pass?.params.garbageInvert === false);
+  check("garbage: rasterized as the RAW region (1 mask, no complement)", calls[0]?.length === 1);
   check("garbage: exactly one matte rasterized", keys.length === 1);
-  // Folded onto the SAME wrap the keyer pass already opened — a garbage matte must not cost an RTT.
+  // No compile-side composite anymore: the keyer's own wrap is untouched — no shell mask, no group.
+  check("garbage: no shell mask (the fold happens in-shader, not at compile time)", isGroupDraw(out) && !out.shell.mask);
   check("garbage: no extra nest level", groupDepth(out) === 1);
 }
 
 {
-  // GARBAGE, INVERTED: "kill everything EXCEPT this shape" is the raw region, uncomplemented —
-  // complementing it again would be the identity and the flag would do nothing.
+  // GARBAGE, INVERTED: now a param the shader reads, not a second rasterized region.
   const { cache, calls } = stubMatteCache();
-  compileFlarexComp(keyerComp("kgi", { garbage: true, params: { garbageInvert: true } }), { ...lowerCtx(), matteCache: cache });
-  check("garbage invert: rasterizes the raw region (1 mask, not the complement)", calls[0]?.length === 1);
+  const out = compileFlarexComp(keyerComp("kgi", { garbage: true, params: { garbageInvert: true } }), { ...lowerCtx(), matteCache: cache });
+  check("garbage invert: still rasterizes the SAME raw region (1 mask)", calls[0]?.length === 1);
+  check("garbage invert: garbageInvert reaches the pass's params", keyerPass(out)?.params.garbageInvert === true);
 }
 
 {
-  // HOLD-OUT forces alpha to ONE: the node's own input, masked TO the region, composited UNDER the
-  // keyed result. Raising alpha is impossible by multiplication — the plate underneath is what
-  // supplies the coverage the key removed.
+  // HOLD-OUT reaches the pass, raw. No composite, no protected-plate clone — the wrap stays the one
+  // the keyer pass already opened.
   const { cache, calls } = stubMatteCache();
   const out = compileFlarexComp(keyerComp("kh", { holdOut: true }), { ...lowerCtx(), matteCache: cache });
-  check("hold-out: lowers to a 2-child composite", isGroupDraw(out) && out.children.length === 2);
-  if (isGroupDraw(out)) {
-    const guarded = out.children[0]!;
-    const keyed = out.children[1]!;
-    // ORDER IS THE SEMANTIC: protected plate UNDER, key OVER. Reversed, the raw plate would cover the
-    // key inside the region (α still 1, but the despill/decontamination thrown away).
-    check("hold-out: the protected plate is the BACK child", !isGroupDraw(guarded) && Boolean((guarded as SceneLayerDraw).mask));
-    check("hold-out: the protected plate carries the HOLD-OUT matte", matteKeyOf((guarded as SceneLayerDraw).mask) === "flarex_kh_kh_k_holdout");
-    check("hold-out: the protected plate is UNKEYED (no keyer pass on it)", keyerPasses(guarded) === 0);
-    check("hold-out: the keyed image is the FRONT child", keyerPasses(keyed) === 1);
-    check("hold-out: no garbage matte was applied", !out.shell.mask);
-  }
+  check("hold-out: still exactly one child, one pass — no composite", isGroupDraw(out) && out.children.length === 1 && keyerPasses(out) === 1);
+  const pass = keyerPass(out);
+  check("hold-out: the matte lands on the pass's holdOutMatte field, by cache key", matteKeyOf(pass?.holdOutMatte) === "flarex_kh_kh_k_holdout");
+  check("hold-out: no garbage matte attached", !pass?.garbageMatte);
+  check("hold-out: holdOutInvert resolves false by default", pass?.params.holdOutInvert === false);
   check("hold-out: rasterizes the region as-is (1 mask, no complement)", calls[0]?.length === 1);
+  check("hold-out: no extra nest level", groupDepth(out) === 1);
 }
 
 {
-  // HOLD-OUT, INVERTED: protect everything EXCEPT the shape → the complement.
+  // HOLD-OUT, INVERTED: same raw region: the invert is a pass param, not a second rasterize.
   const { cache, calls } = stubMatteCache();
-  compileFlarexComp(keyerComp("khi", { holdOut: true, params: { holdOutInvert: true } }), { ...lowerCtx(), matteCache: cache });
-  check("hold-out invert: rasterizes the complement (2 masks, the shape subtracted)", calls[0]?.length === 2 && calls[0]?.[1]?.mode === "subtract");
+  const out = compileFlarexComp(keyerComp("khi", { holdOut: true, params: { holdOutInvert: true } }), { ...lowerCtx(), matteCache: cache });
+  check("hold-out invert: still rasterizes the SAME raw region (1 mask)", calls[0]?.length === 1);
+  check("hold-out invert: holdOutInvert reaches the pass's params", keyerPass(out)?.params.holdOutInvert === true);
 }
 
 {
-  // PRECEDENCE — the whole defect if it is wrong. Both sockets wired: the garbage matte must apply to
-  // the composite that ALREADY contains the hold-out, so where the two overlap the alpha the hold-out
-  // forced to 1 is then multiplied by 0. Asserted as structure, because that is what makes it
-  // impossible to get backwards later: there is no comparison of the two mattes anywhere to invert.
+  // BOTH WIRED. There is no compile-time composite left to order — both mattes land on the SAME pass
+  // object, and precedence is the shader's algebra now (mirrored and gated below). What the compiler
+  // must still get right: both sockets actually reach the pass, each identified by its own cache key,
+  // and wiring one never crowds out the other.
   const { cache, keys } = stubMatteCache();
   const out = compileFlarexComp(keyerComp("kb", { garbage: true, holdOut: true }), { ...lowerCtx(), matteCache: cache });
-  check("both: lowers to the hold-out composite", isGroupDraw(out) && out.children.length === 2);
-  check(
-    "GARBAGE BEATS HOLD-OUT: the garbage matte is the OUTERMOST alpha op, over the hold-out composite",
-    isGroupDraw(out) && matteKeyOf(out.shell.mask) === "flarex_kb_kb_k_garbage",
-  );
-  if (isGroupDraw(out)) {
-    check("both: the hold-out plate is still inside that garbage-masked group", matteKeyOf((out.children[0] as SceneLayerDraw).mask) === "flarex_kb_kb_k_holdout");
-    check("both: the keyed image is still the front child", keyerPasses(out.children[1]!) === 1);
-  }
-  // Hold-out first, garbage second — the order the precedence depends on.
-  check("both: hold-out rasterizes before garbage", keys[0] === "flarex_kb_kb_k_holdout" && keys[1] === "flarex_kb_kb_k_garbage");
+  const pass = keyerPass(out);
+  check("both: garbage matte reaches the pass", matteKeyOf(pass?.garbageMatte) === "flarex_kb_kb_k_garbage");
+  check("both: hold-out matte reaches the pass", matteKeyOf(pass?.holdOutMatte) === "flarex_kb_kb_k_holdout");
+  check("both: still exactly one child, one pass — no composite", isGroupDraw(out) && out.children.length === 1 && keyerPasses(out) === 1);
+  check("both: no extra nest level", groupDepth(out) === 1);
+  check("both: both sockets rasterized independently", keys.length === 2);
+}
+
+/**
+ * PRECEDENCE — the whole defect if it is wrong. This file has no GL context, so the shader's algebra
+ * can't run directly; `flarexKeyerFold` is a byte-for-byte transcription of the fold in
+ * `color/fragment-effects/builtins.ts`'s chromaKey final pass (kept next to it in the same PR, not
+ * shared code, so a divergence between the two is a review problem, not a runtime one — but the edge
+ * cases below are the ones a divergence would most likely get wrong, which is what makes them worth
+ * gating even without shared source):
+ *   m = clamp(max(m, holdOut) * (1 - garbage), 0, 1)
+ */
+function flarexKeyerFold(m: number, garbage: number, holdOut: number): number {
+  return Math.min(1, Math.max(0, Math.max(m, holdOut) * (1 - garbage)));
+}
+{
+  check("fold: neither matte is an identity", flarexKeyerFold(0.4, 0, 0) === 0.4);
+  check("fold: hold-out alone forces alpha to 1", flarexKeyerFold(0, 0, 1) === 1);
+  check("fold: garbage alone forces alpha to 0", flarexKeyerFold(1, 1, 0) === 0);
+  check("fold: GARBAGE BEATS HOLD-OUT — both fully on", flarexKeyerFold(0, 1, 1) === 0);
+  check("fold: garbage beats hold-out even with the key already at full alpha", flarexKeyerFold(1, 1, 1) === 0);
+  check("fold: partial garbage proportionally suppresses a forced hold-out", flarexKeyerFold(0, 0.5, 1) === 0.5);
+  check("fold: partial hold-out only ever RAISES the matte, never lowers it", flarexKeyerFold(0.7, 0, 0.3) === 0.7);
+  // matteOnly reads this SAME `m` (the fold runs before its early return in the shader), so a
+  // fully-keyed-away pixel (m=0) with hold-out on shows white in the tuning view — the KNOWN LIMIT the
+  // old compile-side composite recorded (matteOnly could never represent a sibling-child hold-out) is
+  // closed by construction: there is no second child for the view to miss anymore.
+  check("fold: matteOnly's m now carries the hold-out contribution (m=0, holdOut=1 → 1)", flarexKeyerFold(0, 0, 1) === 1);
 }
 
 {
-  // SOFT DEGRADE. `applyMatteToImage` returns its input unchanged when a matte cannot be rasterized
-  // (no matte cache). For garbage that is a no-op; for hold-out it MUST also be a no-op, because
-  // compositing an UNMASKED plate under the key would restore the entire frame — the loudest possible
-  // wrong answer from a missing texture.
+  // SOFT DEGRADE. `rasterizeMatte` returns null when a matte cannot be rasterized (no matte cache) —
+  // both sockets simply stay unattached, which the shader's has-flags read as 0 (true no-op), same as
+  // never wiring them at all.
   const out = compileFlarexComp(keyerComp("kd", { garbage: true, holdOut: true }), lowerCtx());
-  check("no matte cache: keyer degrades to the plain key (no composite, no mask)", isGroupDraw(out) && out.children.length === 1 && !out.shell.mask);
-  check("no matte cache: the key itself still runs", keyerPasses(out) === 1);
+  check("no matte cache: keyer degrades to the plain key (one pass, one child)", isGroupDraw(out) && out.children.length === 1 && keyerPasses(out) === 1);
+  const pass = keyerPass(out);
+  check("no matte cache: no garbage matte attached", !pass?.garbageMatte);
+  check("no matte cache: no hold-out matte attached", !pass?.holdOutMatte);
 }
 
 {
   // REGRESSION GUARD — an existing keyer with NEITHER socket wired must not move.
-  //
-  // Verified byte-identical against the pre-socket compiler (`git show HEAD:compile-flarex.ts` run
-  // side by side over this exact comp, 2026-08-12): the stripped draw JSON compared equal. What is
-  // asserted here is the STRUCTURE that made it equal, so a future change that would break it fails
-  // loudly instead of needing that comparison to be re-run by hand.
   const bare = keyerComp("kn");
   const plain = compileFlarexComp(bare, lowerCtx());
   const strip = (v: unknown) => JSON.stringify(v, (key, val) => (key === "source" ? undefined : val));
@@ -825,6 +843,7 @@ const keyerPasses = (d: SceneDraw | null): number => (isGroupDraw(d) ? d.shell.f
   if (isGroupDraw(plain)) {
     check("bare keyer: no shell mask, no region pass", !plain.shell.mask && !plain.shell.regionPasses);
     check("bare keyer: resolves the same registered def", plain.shell.fragmentPasses?.[0]?.def.id === "flarex.chromaKey");
+    check("bare keyer: neither matte field attached", !plain.shell.fragmentPasses?.[0]?.garbageMatte && !plain.shell.fragmentPasses?.[0]?.holdOutMatte);
   }
   // A matte cache being AVAILABLE must not change an unwired keyer — the sockets cost nothing until wired.
   const { cache, keys } = stubMatteCache();

@@ -331,7 +331,8 @@ vec4 effect(vec2 uv) {
 `
 };
 
-/** Flarex chroma keyer v2 (FLAREX.md Phase 1; upgraded to the pro 3-pass graph 2026-07-21).
+/** Flarex chroma keyer v2 (FLAREX.md Phase 1; upgraded to the pro 3-pass graph 2026-07-21; garbage/
+ *  hold-out mattes folded into the final pass 2026-08-12 — see below).
  *  Not a `TimelineEffectType` — referenced by id from the Flarex lowering compiler's chromaKey node.
  *
  *  Pass graph (Keylight / Delta-Keyer family, not a distance key):
@@ -341,10 +342,34 @@ vec4 effect(vec2 uv) {
  *    edge   — matte-space refinement: Gaussian feather whose radius is FRAME-RELATIVE (defined at a
  *             1080p short edge, scales with working res — proxy/preview/export paint the same
  *             picture-space edge), then choke levels (positive eats the fringe, negative grows back).
- *    final  — y-preserving despill (project the key hue out of the chroma plane; luma untouched, no
- *             darkening) + EDGE DECONTAMINATION: an edge pixel is fg + key*(1-m), so the key
- *             contribution is divided back out (screen subtraction) — green casts leave the hair
- *             entirely instead of being dimmed. `matteOnly` shows the refined matte for tuning. */
+ *    final  — GARBAGE/HOLD-OUT FOLD, then y-preserving despill (project the key hue out of the chroma
+ *             plane; luma untouched, no darkening) + EDGE DECONTAMINATION: an edge pixel is
+ *             fg + key*(1-m), so the key contribution is divided back out (screen subtraction) —
+ *             green casts leave the hair entirely instead of being dimmed. `matteOnly` shows the
+ *             (now garbage/hold-out-inclusive) matte for tuning.
+ *
+ *  GARBAGE/HOLD-OUT FOLD (`keyerMattes`, `uGarbageMatte`/`uHoldOutMatte`, compile-flarex.ts's
+ *  chromaKey case rasterizes the two optional matte sockets straight onto this pass — no compile-side
+ *  composite anymore):
+ *
+ *    m = clamp(max(m, holdOut) * (1 - garbage), 0, 1)
+ *
+ *  Applied BEFORE `matteOnly`'s early return, so the tuning view shows both mattes' contribution —
+ *  the one thing the OLD compile-side composite could not do (a hold-out there was a plate composited
+ *  UNDER the keyed image, invisible to a matteOnly pass that only ever saw the key's own RGB became
+ *  matte). PRECEDENCE — garbage beats hold-out — is structural in this expression, not compared: at
+ *  garbage=1 the product is 0 regardless of holdOut; at garbage=0, holdOut=1 forces 1. Partial values
+ *  (feathered mattes) are the continuous extension of the same rule. Both sockets are invertible via
+ *  the `garbageInvert`/`holdOutInvert` bools, applied to the sampled coverage before the fold — a
+ *  node-param pair (node-defs.ts), not a second rasterized mask (that used to be `complementMatte`'s
+ *  job on the compile side; inverting a scalar in the shader is simpler and costs nothing extra).
+ *
+ *  `displayReferred: true` (below) makes the WHOLE graph — matte/edge/final — resolve to "display"
+ *  light space (`effectLightFor`). That governs `getSrcColor`, the ONE place colour is decoded, which
+ *  only the "matte" pass calls — untouched by this fold. The garbage/hold-out textures are alpha-only
+ *  coverage, sampled directly via `texture(...).a` with no `getSrcColor`/transfer-function pass at
+ *  all, so there is nothing for the linear stage to convert either way: the key keeps reading exactly
+ *  the display-chroma values its tolerance/clip/choke constants were tuned against. */
 export const FLAREX_CHROMA_KEY_ID = "flarex.chromaKey";
 
 const CHROMA_HELPERS = `
@@ -361,6 +386,7 @@ const FLAREX_CHROMA_KEY: FragmentEffectDefinition = {
   name: "Chroma Keyer",
   category: "Keying",
   rewritesAlpha: true,
+  keyerMattes: true,
   /**
    * FOUND BY THE TYPE, not by review: this is the second multi-pass definition in the tree, and
    * `102eeb5` asserted in prose that the stylize graph was the only one. It was wrong, and nothing
@@ -387,7 +413,12 @@ const FLAREX_CHROMA_KEY: FragmentEffectDefinition = {
     { name: "edgeSoftness", type: "float", default: 2, min: 0, max: 20, step: 0.5, label: "Edge Softness" },
     { name: "choke", type: "float", default: 0.05, min: -1, max: 1, step: 0.01, label: "Choke" },
     { name: "decontaminate", type: "float", default: 0.5, min: 0, max: 1, step: 0.01, label: "Edge Cleanup" },
-    { name: "matteOnly", type: "bool", default: false, label: "Matte Only" }
+    { name: "matteOnly", type: "bool", default: false, label: "Matte Only" },
+    // Node params of the same name (node-defs.ts) flow straight through as `pass.params` — see
+    // `resolveFragmentEffectParams`. Coverage sampled from `uGarbageMatte`/`uHoldOutMatte`; these
+    // bools flip which side of it counts as "on" before the fold below.
+    { name: "garbageInvert", type: "bool", default: false, label: "Invert Garbage" },
+    { name: "holdOutInvert", type: "bool", default: false, label: "Invert Hold-Out" }
   ],
   glsl: "", // multi-pass — see `passes`
   passes: [
@@ -454,6 +485,23 @@ ${CHROMA_HELPERS}
 vec4 effect(vec2 uv) {
   vec4 c = getSrcColor(uv);
   float m = texture(uPass0, uv).r;
+  // GARBAGE/HOLD-OUT FOLD — see the definition's docstring for the algebra and why it is safe from
+  // linear-light conversion. Coverage is alpha-only DATA (never routed through getSrcColor), so this
+  // is unaffected by displayReferred either way. Invert is applied ONLY when the socket is actually
+  // wired: an unwired matte must stay a true no-op regardless of the invert flag's (persisted) value,
+  // or a keyer saved with holdOutInvert=true would force full hold-out the moment the socket is
+  // unplugged instead of degrading to the plain key.
+  float holdOutCoverage = 0.0;
+  if (uHasHoldOutMatte > 0.5) {
+    holdOutCoverage = texture(uHoldOutMatte, uv).a;
+    if (holdOutInvert) holdOutCoverage = 1.0 - holdOutCoverage;
+  }
+  float garbageCoverage = 0.0;
+  if (uHasGarbageMatte > 0.5) {
+    garbageCoverage = texture(uGarbageMatte, uv).a;
+    if (garbageInvert) garbageCoverage = 1.0 - garbageCoverage;
+  }
+  m = clamp(max(m, holdOutCoverage) * (1.0 - garbageCoverage), 0.0, 1.0);
   if (matteOnly) return vec4(vec3(m), c.a);
   vec2 kc = _chroma(keyColor);
   float sat = max(length(kc), 1e-4);
