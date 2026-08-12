@@ -3,7 +3,14 @@ import { createFile, type MP4Sample, type MP4VideoTrackInfo } from "mp4box";
 import { MediaWebGLRenderer } from "@orreris/shared";
 import { createImageSource } from "../export/source-decoder";
 import { createWebCodecsVideoSource, wcDecoderStats } from "../export/webcodecs-decoder";
-import { acquirePreviewFrameProvider, getWcPoolStats, getWcPreviewDecodeEnabled } from "../playback/preview-frame-pool";
+import {
+  acquirePreviewFrameProvider,
+  getWcPoolStats,
+  getWcPreviewDecodeEnabled,
+  isAdmissionEligible,
+  type PreviewFrameLease,
+  type WcPoolStats
+} from "../playback/preview-frame-pool";
 
 /**
  * Streaming-demux decoder gate (`/editor/__wc-decoder-gate`) — driven headlessly by
@@ -201,6 +208,73 @@ async function runReverseShuttleCheck(): Promise<PoolCheck[]> {
 }
 
 /**
+ * DEBT-013 clause (a), ASSERTED rather than printed.
+ *
+ * The pool scenario above already denies a source synthetically and then frees capacity while it is
+ * starved, and its accounting dump has been printing `admissionReacquireAttempts 0` on PASSING runs
+ * for as long as it has existed — the exact counter whose movement is the entry's expiry condition,
+ * sitting in the output unread. This turns it into a check.
+ *
+ * THE PRECONDITIONS ARE THE POINT, not ceremony. `attempts 0` / `grants 0` is the same reading for
+ * three different worlds: the source was never denied, the source was denied and the ask was refused,
+ * or nobody ever asked. An assertion that only reads the counters cannot tell them apart, so it would
+ * pass the moment the fixture stopped denying — which is precisely how DEBT-013 came to "not
+ * reproduce" without being fixed (`ac0d9f2` removed the denial, not the mechanism). So the run must
+ * first prove it earned the right to read the counters: a real denial is on the books, a permission
+ * was really granted at the release, and nothing had re-asked before this call. Only then does a
+ * moved counter mean re-admission, and only then does an unmoved one mean refusal.
+ *
+ * The re-ask goes through the ORDINARY acquire path — the same one a layer's `wcReacquireEpoch`
+ * effect enters — and is proven by a DECODED FRAME, not by a lease handle: clause (a) is about a
+ * source getting a picture back, and a counter that moves while nothing decodes would be the same
+ * class of evidence this entry has already been burned by three times.
+ */
+async function runReadmissionChecks(
+  starvedKey: string,
+  before: WcPoolStats,
+  push: (name: string, ok: boolean, detail?: string) => void
+): Promise<PreviewFrameLease | null> {
+  push(
+    "re-admission precondition: the source was really denied",
+    before.capMisses > 0 && before.starvedKeys.includes(starvedKey),
+    `capMisses=${before.capMisses} starved=${JSON.stringify(before.starvedKeys)}`
+  );
+  const permitted = isAdmissionEligible(starvedKey);
+  push(
+    "re-admission precondition: freed capacity granted it a permission",
+    permitted && before.releaseEligibilityGrants > 0 && before.releaseLeftUnpermitted === 0,
+    `eligible=${permitted} grants=${before.releaseEligibilityGrants} leftUnpermitted=${before.releaseLeftUnpermitted}`
+  );
+  push(
+    "re-admission precondition: nothing had re-asked yet",
+    before.admissionReacquireAttempts === 0 && before.admissionReacquireGrants === 0,
+    `attempts=${before.admissionReacquireAttempts} grants=${before.admissionReacquireGrants}`
+  );
+
+  // Deliberately NOT gated on the preconditions above: if one of them fails the gate is red already,
+  // and taking the reading anyway is what says WHICH of the three worlds this run was in.
+  const lease = acquirePreviewFrameProvider(starvedKey, { priority: "playhead" });
+  const provider = await (lease?.ready ?? Promise.resolve(null));
+  const frame = provider ? await provider.getFrame(0) : null;
+  push(
+    "denied source is RE-ADMITTED on its permission (DEBT-013 clause a)",
+    lease !== null && provider !== null && frame !== null,
+    `lease=${lease !== null} provider=${provider !== null} frame=${frame !== null}`
+  );
+  const after = getWcPoolStats();
+  push(
+    "the re-ask is attributed, granted, and leaves the starved registry",
+    after.admissionReacquireAttempts > before.admissionReacquireAttempts &&
+      after.admissionReacquireGrants > before.admissionReacquireGrants &&
+      !after.starvedKeys.includes(starvedKey),
+    `attempts ${before.admissionReacquireAttempts}→${after.admissionReacquireAttempts} ` +
+      `grants ${before.admissionReacquireGrants}→${after.admissionReacquireGrants} ` +
+      `starved=${JSON.stringify(after.starvedKeys)}`
+  );
+  return lease;
+}
+
+/**
  * Session-prioritization scenario (flip blocker 2), run only when `?wcDecode=1`:
  * preload leases may not take the last slot; a playhead acquire preempts the oldest preload
  * when full; `setPriority` promotion protects a shell that just went live.
@@ -208,6 +282,7 @@ async function runReverseShuttleCheck(): Promise<PoolCheck[]> {
 async function runPoolPriorityChecks(): Promise<PoolCheck[]> {
   const checks: PoolCheck[] = [];
   const push = (name: string, ok: boolean, detail?: string) => checks.push(detail ? { name, ok, detail } : { name, ok });
+  let readmitLease: PreviewFrameLease | null = null;
   // Same encoded bytes behind four distinct URLs (the pool keys by URL).
   const sourceUrl = await synthMp4("in-memory");
   const blob = await (await fetch(sourceUrl)).blob();
@@ -233,7 +308,8 @@ async function runPoolPriorityChecks(): Promise<PoolCheck[]> {
 
     // Shell B just went live — promote it. Pool is full of playhead leases → next acquire is denied.
     preloadB?.setPriority("playhead");
-    const playhead3 = acquirePreviewFrameProvider(`${urls[3]!}#other`, { priority: "playhead" });
+    const starvedKey = `${urls[3]!}#other`;
+    const playhead3 = acquirePreviewFrameProvider(starvedKey, { priority: "playhead" });
     push("promoted shell is not a victim", playhead3 === null && !preemptedB);
 
     playhead1?.release();
@@ -246,7 +322,9 @@ async function runPoolPriorityChecks(): Promise<PoolCheck[]> {
       stats.active === 0 && stats.preemptions === 1 && stats.idle <= 2,
       JSON.stringify(stats)
     );
+    readmitLease = await runReadmissionChecks(starvedKey, stats, push);
   } finally {
+    readmitLease?.release();
     for (const url of urls) URL.revokeObjectURL(url);
   }
   return checks;

@@ -6,7 +6,11 @@
  *  (a) both variants create a provider via the STREAMING index path (no fragmented fallback,
  *      no whole-file RAM buffer),
  *  (b) every frame check is color-exact (frame-accurate demux offsets/timestamps),
- *  (c) forward decode across multiple chunk windows + a backward jump onto an evicted window.
+ *  (c) forward decode across multiple chunk windows + a backward jump onto an evicted window,
+ *  (d) DEBT-013 clause (a): a source DENIED at acquire, and granted a permission when capacity later
+ *      freed, is actually re-admitted and decodes — with the denial and the permission asserted as
+ *      preconditions, so a zero re-ask counter cannot be read as success by a fixture that quietly
+ *      stopped denying.
  *
  * Standalone assert-and-exit script. Needs real WebCodecs encode+decode → `PIXEL_BROWSER_CHANNEL=chrome`.
  */
@@ -73,7 +77,7 @@ async function main() {
   // Leftover Playwright trees corrupt this gate — see browser-preflight.ts. MUST run here, at
   // process start, before this gate has launched anything of its own: at a launch site it
   // cannot tell a leftover from a browser this run is already using.
-  assertQuietBrowserMachine({ label: "wc:gate" });
+  assertQuietBrowserMachine({ label: "wc:gate", scriptMarker: "wc-decoder-gate" });
 
   await generateRealFixture();
   const port = await getFreePort();
@@ -123,6 +127,16 @@ async function main() {
       assert.ok(!fatal, `Gate page fatal error: ${fatal}`);
       assert.equal(results.length, 2, "Expected faststart + moov-at-end variants.");
       assert.ok(poolChecks.length >= 6, `Pool priority scenario did not run (${poolChecks.length} checks).`);
+      // The DEBT-013 re-admission checks must have RUN, not merely not-failed. Every other check here
+      // is guarded by `every(ok)`, which is silent about a check that was deleted or skipped — and
+      // this one guards a defect that does not currently reproduce, the easiest kind to lose without
+      // anyone noticing the gate went quiet about it.
+      const readmissionChecks = poolChecks.filter((c) => /re-admission precondition|RE-ADMITTED|the re-ask is attributed/.test(c.name));
+      assert.equal(
+        readmissionChecks.length,
+        5,
+        `DEBT-013 re-admission checks did not run (found ${readmissionChecks.length}/5): ${poolChecks.map((c) => c.name).join(" | ")}`
+      );
       assert.ok(
         poolChecks.every((c) => c.ok),
         `Pool priority checks failed: ${poolChecks.filter((c) => !c.ok).map((c) => c.name).join("; ")}`
@@ -195,17 +209,30 @@ async function waitForServer(url: string) {
   throw new Error(`Dev server did not come up: ${String(lastError)}`);
 }
 
+/**
+ * Kill the dev server AND ITS TREE, and wait for the kill to finish.
+ *
+ * The previous version killed `child` and only escalated to `taskkill /T` when `child.exitCode` was
+ * still null. It never was: `spawn(..., { shell: true })` makes `child` a `cmd.exe` wrapper, which
+ * dies obediently — while the real vite node process underneath it survives, holding the stdio pipes
+ * it inherited from THIS process. Node then cannot exit, so a gate that had already printed PASSED
+ * sat alive indefinitely (measured 2026-08-12: three such trees, one of them the run whose output was
+ * read as a clean pass). The leftover is what the next run's preflight now refuses on, so leaking one
+ * is no longer merely untidy — it blocks the following run.
+ */
 async function stopProcess(child: ChildProcess) {
-  if (child.exitCode != null) return;
-  child.kill();
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  if (child.exitCode == null) {
-    try {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { shell: true });
-    } catch {
-      /* best effort */
-    }
+  if (child.pid == null) return;
+  if (process.platform === "win32") {
+    await new Promise<void>((resolve) => {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", shell: true });
+      killer.on("close", () => resolve());
+      killer.on("error", () => resolve());
+    });
+    return;
   }
+  if (child.exitCode == null) child.kill();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (child.exitCode == null) child.kill("SIGKILL");
 }
 
 main().catch((e) => {

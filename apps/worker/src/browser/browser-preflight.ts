@@ -30,6 +30,16 @@
  * browser this run is currently rendering into" -- reaping at gate start killed Remotion mid-render
  * ("ProtocolError: Target closed") while this was being built. Clearing the machine is a human's
  * call; only a measurement ladder that provably owns the machine reaps, via `assertZeroBrowserFloor`.
+ *
+ * IT ALSO COUNTS THE HARNESS ITSELF (2026-08-12), and that addition has its own measured cost. A
+ * `wc:gate` run hung with no output and no browser for ~25 minutes; the machine was holding two
+ * leftover NODE trees from earlier gate runs, and this preflight passed it, because it counts
+ * browsers and a corpse that never got as far as launching one is invisible to that count. That is
+ * the same failure this file was promoted to prevent -- a gate that starts on a dirty machine and
+ * produces a reading nobody questions -- one process class over. So `assertQuietBrowserMachine` now
+ * also refuses on a live process running THIS gate's own script, excluding this process and its
+ * ancestors (the `pnpm`/`tsx` chain that launched it carries the script name in its command line too,
+ * and a preflight that fails on its own launcher is worse than no preflight).
  */
 import { execSync } from "node:child_process";
 
@@ -126,9 +136,79 @@ export function assertZeroBrowserFloor(label: string): void {
   }
 }
 
+interface HarnessProcess {
+  pid: number;
+  cmd: string;
+}
+
+/**
+ * Live node processes running `scriptMarker`, EXCLUDING this process and its ancestors.
+ *
+ * The exclusion is not a nicety. A gate is normally launched as pnpm -> tsx -> node, and every link
+ * in that chain carries the script name in its own command line, so a naive match refuses on the
+ * launcher that is currently running the check. Walking up `ParentProcessId` from `process.pid`
+ * removes exactly the chain that belongs to this run and nothing else -- a sibling run's chain has a
+ * different root and stays visible, which is the case worth catching.
+ *
+ * Returns [] on any enumeration failure: this is a guard, and a guard that cannot see the machine
+ * must not invent a reason to block work.
+ */
+export function listStaleHarnessProcesses(scriptMarker: string): HarnessProcess[] {
+  try {
+    const rows: { pid: number; ppid: number; name: string; cmd: string }[] = [];
+    if (isWindows) {
+      // EVERY process, not just node.exe. The ancestor walk below needs an unbroken parent chain, and
+      // this run's chain is not all node: `pnpm --dir … exec tsx …` puts a shell between the launcher
+      // and the script. Enumerating node.exe alone left a hole in the map, the walk stopped at it, and
+      // the preflight refused on its OWN two pnpm parents (measured, the first run after this change).
+      const raw = execSync(
+        'powershell -NoProfile -Command "Get-CimInstance Win32_Process | ForEach-Object { $_.ProcessId.ToString() + \'|\' + $_.ParentProcessId.ToString() + \'|\' + $_.Name + \'|\' + $_.CommandLine }"',
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }
+      );
+      for (const line of raw.split(/\r?\n/)) {
+        const parts = line.trim().split("|");
+        if (parts.length < 4) continue;
+        const pid = Number(parts[0]);
+        const ppid = Number(parts[1]);
+        if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
+        rows.push({ pid, ppid, name: parts[2] ?? "", cmd: parts.slice(3).join("|") });
+      }
+    } else {
+      const raw = execSync("ps -eo pid=,ppid=,args=", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      for (const line of raw.split(/\r?\n/)) {
+        const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+        if (!match) continue;
+        rows.push({ pid: Number(match[1]), ppid: Number(match[2]), name: "", cmd: match[3]! });
+      }
+    }
+    const parentOf = new Map(rows.map((r) => [r.pid, r.ppid]));
+    const ownChain = new Set<number>();
+    let cursor: number | undefined = process.pid;
+    // Bounded: a corrupt/cyclic parent map must not hang a preflight.
+    for (let hop = 0; cursor != null && hop < 64 && !ownChain.has(cursor); hop += 1) {
+      ownChain.add(cursor);
+      cursor = parentOf.get(cursor);
+    }
+    return rows
+      .filter((r) => (isWindows ? /^node\.exe$/i.test(r.name) : true))
+      .filter((r) => r.cmd.includes(scriptMarker) && !ownChain.has(r.pid))
+      .map((r) => ({ pid: r.pid, cmd: r.cmd.slice(0, 160) }));
+  } catch {
+    return [];
+  }
+}
+
 export interface BrowserPreflightOptions {
   /** Gate name, for the failure message. */
   label: string;
+  /**
+   * Source-file marker (e.g. `"wc-decoder-gate"`) for this gate's OWN process class.
+   *
+   * Opt-in per gate, because only the gate knows its script name. Supplying it makes the preflight
+   * refuse when a previous run of the SAME gate is still alive -- a state the browser count cannot
+   * see at all when the corpse never reached its `launch()` (measured: ~25 lost minutes, 2026-08-12).
+   */
+  scriptMarker?: string;
   /**
    * Kill leftovers rather than just refusing. DEFAULT FALSE, and that default is load-bearing.
    *
@@ -165,7 +245,22 @@ let preflightDone = false;
 export function assertQuietBrowserMachine(options: BrowserPreflightOptions): void {
   if (preflightDone) return;
   preflightDone = true;
-  const { label, reap = false } = options;
+  const { label, reap = false, scriptMarker } = options;
+  if (scriptMarker) {
+    const stale = listStaleHarnessProcesses(scriptMarker);
+    if (stale.length) {
+      throw new Error(
+        `${label}: REFUSING TO RUN — ${stale.length} earlier run(s) of this gate are still alive ` +
+          `(pids ${stale.map((p) => p.pid).join(", ")}).\n` +
+          `  A stalled gate holds its dev server and its fixture directory, and the next run then hangs ` +
+          `with no output and no browser — which does not look like process hygiene (measured: ~25 ` +
+          `minutes, 2026-08-12). The browser count above cannot see this: a run that never reached its ` +
+          `own launch() leaves a node tree and no chrome.exe.\n` +
+          `  Fix: taskkill /F /PID ${stale.map((p) => p.pid).join(" /PID ")} /T   then re-run.\n` +
+          stale.map((p) => `    pid ${p.pid}: ${p.cmd}`).join("\n")
+      );
+    }
+  }
   let alive = listAutomationBrowsers();
   if (alive.length && reap) {
     reapAutomationBrowsers();
