@@ -67,6 +67,10 @@
     stats.passthroughBytes = res.passthroughBytes;
     stats.copiedSources = res.copiedSources;
     stats.passthroughSources = res.passthroughSources;
+    // The sample-index term, measured directly. Non-zero proves the providers are alive and holding
+    // their tables; MB/source of it is what the columns commit is supposed to move.
+    stats.indexBytes = res.indexBytes;
+    stats.indexSamples = res.indexSamples;
   } else if (args.variant === "opfs-file" || args.variant === "opfs-fetch") {
     const root = await navigator.storage.getDirectory();
     for (let i = 0; i < args.n; i += 1) {
@@ -129,6 +133,10 @@
     stats.passthroughBytes = res.passthroughBytes;
     stats.copiedSources = res.copiedSources;
     stats.passthroughSources = res.passthroughSources;
+    // The sample-index term, measured directly. Non-zero proves the providers are alive and holding
+    // their tables; MB/source of it is what the columns commit is supposed to move.
+    stats.indexBytes = res.indexBytes;
+    stats.indexSamples = res.indexSamples;
   }
 
   window.__debt019Held = held;

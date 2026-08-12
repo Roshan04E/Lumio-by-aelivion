@@ -2333,6 +2333,125 @@ five parallel typed arrays instead of 3600+ objects — and it is cheap.
 O(file) for BOTH source kinds by construction; and the sample index is O(duration) regardless of
 source kind. Local sources no longer hold encoded bytes at all.
 
+**PHASE 2b (2026-08-12) — the sample index is now typed-array COLUMNS, and the measurement RETRACTS
+the attribution that motivated it. The term was real and is closed; it was never ~7 MB/source, and
+closing it moved per-source residency by nothing measurable.**
+
+`SampleIndexEntry[]` — one JS object per sample, five properties each — is now five typed arrays
+(`Float64` offset, `Uint32` size, `Float64` timestamp, `Uint32` duration, `Uint8` isKey), allocated
+once at the exact sample count both demux paths already know. `keyIndices` went the same way
+(`Int32Array`), because an all-intra source has one entry per sample there and a JS `number[]` would
+have re-introduced a duration-scaled term beside the one being removed. Every consumer was converted;
+the chunk window, the cursor scan, the fps derivation and `decodableEndSeconds` read columns now.
+
+**THE ARITHMETIC, BEFORE AND AFTER — and the before was wrong by ~80×.** Phase 2a attributed
+~7 MB/source of the 120s residual to sample-table metadata, and predicted that at N=100 the 120s local
+rung (29.3 MB/source) sat about 4 MB above a ~25 MB/source duration-flat decoder floor, so this fix
+should land within noise of that floor. `residency.indexBytes`/`indexSamples` now measure the term
+directly instead of attributing it, and it reads:
+
+| corpus | samples held (N=100) | index bytes | per source |
+|---|---|---|---|
+| 3s | 9,000 | 0.2 MB | **0.002 MB** |
+| 120s | 360,000 | 8.6 MB | **0.086 MB** |
+
+**0.086 MB per 2-minute source, not 7 MB.** The phase-2a figure was a residual attributed by
+subtraction — the leftover after a duration-flat floor was assumed — and nothing checked it against
+the shape it named. It was checkable in advance: 3600 samples reaching 7 MB requires ~2 KB per sample,
+and a five-field JS object is two orders of magnitude smaller than that. Measured directly for the two
+shapes at the sizes the decoder actually builds (`tmp/debt019-index-shape-probe.ts`, retained heap
+after a forced GC):
+
+| samples | rows (JS objects) | columns (typed) | bytes/sample |
+|---|---|---|---|
+| 360,000 (100 × 2-min) | 19.65 / 19.66 MB | 8.59 / 8.58 MB | **57.2 → 25.0** |
+
+Two consecutive runs, reproducing to ±0.1 B/sample, and the column figure lands exactly on the
+analytic `25 = 8+4+8+4+1` — which is the check that the probe measures the object it names. Only the
+large run is quoted: `performance.memory` is quantised coarsely enough that a few-hundred-KB
+allocation sits inside its own granularity (the 3600-sample rows read 37.9 B/sample, and a mid-size
+run once read **negative** — a collection landing inside the baseline). Extrapolated to one 2-minute
+30fps source: **~201 KB of objects → 88 KB of columns, a saving of ~0.11 MB per source.**
+
+**So the fix is right and the reason given for it was not.** The columns are the correct shape — they
+remove hundreds of thousands of allocations, make the table's cost exactly `25 × samples` bytes and
+state that ceiling in the type — but they close a term worth ~0.09 MB/source, not one worth ~7, and
+the ladder confirms they move the total by nothing outside noise.
+
+**Local ladder, re-run at the same shape (both corpora and both arms in ONE process, one proven build
+identity, fresh browser per rung, zero-Chrome floor enforced, `copiedBytes` 0 at every local rung):**
+
+| N | 3s local | 120s local | ratio | 120s local, phase 2a | index held (120s) |
+|---|---|---|---|---|---|
+| 1 | 100.8 | 102.8 | 1.02× | 127.4 | 0.1 MB |
+| 25 | 14.5 | 23.9 | 1.65× | 21.4 | 2.1 MB / 90,000 smp |
+| 50 | 14.0 | 19.4 | 1.39× | 19.8 | 4.3 MB / 180,000 smp |
+| 100 | 12.3 | 27.8 | 2.26× | 29.3 | 8.6 MB / 360,000 smp |
+
+(MB per source; duration varies 40× between corpora.) Providers proven live and proven to page: 100
+streaming / 0 fragmented, 400 `getFrame` calls, 0 nulls, 5,856–9,307 decodes, pulls at 2/35/70/98% of
+each clip. Preconditions: `PIXEL_BROWSER_CHANNEL=chrome`, **0 chrome.exe before the run**, 10 node.exe,
+worktree root PROVEN. One caveat on that last one, stated because it matters: the build-identity check
+hashes `scene-frame-compositor.ts`, which this change does not touch, so it proves the dev server's
+ROOT and not this file's content — what proves the new build is serving is the `index …smp` reading
+itself, which does not exist in the previous build.
+
+Ratios are 1.02–2.26× against phase 2a's 1.17–2.48×: **inside the ladder's own rung-to-rung noise.**
+Nothing was expected to move once the term's true size was known, and nothing did.
+
+**THE RESIDUAL IS UNATTRIBUTED, and is stated that way rather than re-attributed by subtraction — the
+error above was made once already.** At N=100 the 120s local rung is ~15 MB/source above the 3s rung.
+Named terms account for 0.086 MB of it. Two hypotheses were tested by reading and **both are refuted,
+recorded here so nobody spends the day re-deriving them**:
+- *mp4box's own sample array, retained via the `track` object the provider keeps.* Refuted:
+  `ISOFile.getInfo` builds `track` as a fresh plain object of copied scalars (mp4box 0.5.4,
+  `mp4box.all.js:6905-6990`); its only references into the parsed tree are `edits` and the tkhd
+  `matrix`, neither of which reaches `trak.samples`.
+- *the codec `description` aliasing a large parse buffer.* Refuted: `getDescription` writes the
+  avcC/hvcC box into a **fresh** `DataStream` and returns a view on that, so it retains tens of bytes.
+
+**The instrument this now needs is not the ladder.** A working-set delta can say how much, never what
+holds it, and every mis-attribution in this entry came from asking it the second question. The next
+step is a heap snapshot with retainer paths taken at a held rung, plus a per-term ablation (build
+providers with the decode step skipped, with the window disposed, with the index dropped) — a
+different instrument, and a separate slice from this one.
+
+**EXPIRY CONDITION RESTATED — "flat" was the wrong target, and is withdrawn.** A sample index has one
+entry per sample by definition, and every NLE keeps one because it is how seeking works; a decode path
+whose retained bytes do not vary at all with duration is not achievable and was never the right bar.
+Replaced with a **byte ceiling on the terms this entry names**, which is achieved and provable today:
+
+> For a LOCAL source, the decode path retains **zero whole-file copies** (`sourceResidentBytes().copiedBytes`
+> reads 0 on a local-only project, at every rung) plus **25 bytes × sample count** for the sample index —
+> ≤ 0.09 MB for a 2-minute 30fps source, ≤ 0.5 MB for 10 minutes, ≤ 2.7 MB per hour — plus a chunk
+> window bounded by `WINDOW_MAX_SPAN_BYTES` (24 MB) that is transient and evicted on advance.
+
+That ceiling does not grow meaningfully with duration and is the honest form of what this entry asked
+for. **It does not claim the residency question as a whole**: total per-source residency still varies
+1.0–2.3× across a 40× duration change, that variance is unattributed, and it is tracked as the open
+item above rather than folded into a condition this entry can mark satisfied.
+
+**THE REMOTE EXHAUSTION IS A PRODUCT CEILING IN ITS OWN RIGHT, not a footnote to a memory ladder.**
+Recorded as a first-class finding: **the unfixed remote path cannot build 50 concurrent 2-minute
+sources.** It exhausts, falls back to `<video>`, and times out — three independent
+reproductions now — where the fixed local path completes the same rung and goes on to N=100. Stated as
+a limit rather than a measurement: a project may hold roughly 25–50 2-minute remote
+sources before the decode path stops working, against no such limit on local ones. That asymmetry is
+what makes remote range-paging a **scheduled slice** rather than a someday item — it is not a byte
+optimisation, it is the difference between a working project and a broken one, and it lands on exactly
+the sources a user does not control the size of (stock, cloud, shared).
+
+**A missed pass-through site, found while reading and deliberately NOT fixed here.**
+`useFlarexCompProxies.ts:331` mints an object URL with a bare `URL.createObjectURL(stored.blob)` for a
+comp proxy read out of IndexedDB, so that URL is invisible to `object-url-registry.ts` and
+`sourceBlobFor` falls through to the fetch — a disk-backed blob copied into RAM, which is the exact
+defect phase 2a deleted, at a site phase 2a did not cover. It is one line plus its paired revoke, but
+its proof is "which sources still copy on a real project" (`copiedBytes` on a live editor), not
+"bytes vs duration on a synthetic ladder", and it needs an audit of the other mint sites rather than a
+single spot fix. Registered here so it is not rediscovered: the remaining untracked video-source mint
+sites are `useFlarexCompProxies.ts:331`, `sourceProxyStore.ts:239/266/289`, `sourceProxyEngine.ts:737`,
+and the picked-`File` sites in `CreatePage.tsx`/`EditorPage.tsx`.
+
 ---
 
 ### DEBT-020 — CLASS: a time-varying parameter that is not a number is invisible to the content hash

@@ -221,9 +221,10 @@ async function main() {
               s.copiedBytes === undefined
                 ? ""
                 : ` copied ${(s.copiedBytes / 1048576).toFixed(0)}MB/${s.copiedSources}src` +
-                  ` passthru ${(s.passthroughBytes! / 1048576).toFixed(0)}MB/${s.passthroughSources}src`;
+                  ` passthru ${(s.passthroughBytes! / 1048576).toFixed(0)}MB/${s.passthroughSources}src` +
+                  ` index ${(s.indexBytes! / 1048576).toFixed(1)}MB/${s.indexSamples}smp`;
             const note = variant.startsWith("opfs")
-              ? `fileBytes ${(s.blobBytes! / 1048576).toFixed(0)}MB sliced ${(s.indexSamples! / 1048576).toFixed(0)}MB procs ${baseProcs}`
+              ? `fileBytes ${(s.blobBytes! / 1048576).toFixed(0)}MB procs ${baseProcs}`
               : variant === "blob"
                 ? `blobBytes ${(s.blobBytes! / 1048576).toFixed(0)}MB procs ${baseProcs}->${processCount("chrome.exe")}`
                 : `streaming ${s.streaming} frag ${s.fragmented} getFrame ${s.getFrameCalls} null ${s.nulls} decodes ${s.decodeCalls}${residency}`;

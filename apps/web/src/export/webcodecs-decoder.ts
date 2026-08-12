@@ -63,7 +63,22 @@ const SOURCE_BLOB_CACHE_MAX = 12;
  * as *extending* the debt, because a count only proxies bytes while clip lengths are similar.
  * Whatever ends up enforcing ADR-021's I-P6 budget should read `copiedBytes`.
  */
-const residency = { copiedBytes: 0, passthroughBytes: 0, copiedSources: 0, passthroughSources: 0 };
+const residency = {
+  copiedBytes: 0,
+  passthroughBytes: 0,
+  copiedSources: 0,
+  passthroughSources: 0,
+  /**
+   * Sample-table bytes held by live providers — the OTHER duration-scaled term, and the one the
+   * pass-through could not touch. Reported so it is measured directly instead of being inferred from
+   * a working-set delta, which was how it got mis-attributed in the first place.
+   */
+  indexBytes: 0,
+  indexSamples: 0,
+};
+
+/** On-heap cost of one sample: Float64 offset + Uint32 size + Float64 ts + Uint32 duration + Uint8 key. */
+const INDEX_BYTES_PER_SAMPLE = 8 + 4 + 8 + 4 + 1;
 
 export function sourceResidentBytes(): Readonly<typeof residency> {
   return residency;
@@ -114,13 +129,60 @@ if (typeof window !== "undefined") {
   }
 }
 
-/** One demuxed sample-table entry — metadata only, bytes stay in the Blob until windowed in. */
-interface SampleIndexEntry {
-  offset: number;
-  size: number;
-  timestamp: number; // micros
-  duration: number; // micros
-  isKey: boolean;
+/**
+ * The demuxed sample table — metadata only, bytes stay in the Blob until windowed in.
+ *
+ * COLUMNS, NOT ROWS (DEBT-019). This was `SampleIndexEntry[]`: one JS object per sample, five
+ * properties each. MEASURED at 57 bytes/sample of retained heap (`tmp/debt019-index-shape-probe.ts`,
+ * 360k samples, two runs) against 25 bytes of payload; as five typed arrays it is `length × 25`
+ * exactly, with no per-sample allocation and no GC pressure. The table is held for the provider's
+ * whole life because seeking is what it is for, and it is the last term in this file that grows with
+ * clip DURATION — 3600 samples for a 2-minute 30fps source, 18000 for a 10-minute one.
+ *
+ * DO NOT read this as the fix for per-source residency; it is not, and the entry says so. The term is
+ * ~0.09 MB per 2-minute source, roughly 0.3% of that source's measured residency — phase 2a attributed
+ * ~7 MB/source here by subtraction and was wrong by ~80×. This shape is right on its own merits.
+ *
+ * Widths are chosen for real files, not for typical ones:
+ *   - `offset` is Float64 because a sample offset exceeds 2^32 in any file over 4 GB.
+ *   - `timestamp` is Float64 because 2^31 micros is only ~36 minutes, and cts is not clamped to the
+ *     clip we happen to be showing.
+ *   - `duration` is Uint32 (max ~71 min per sample) and non-negative by construction; callers that
+ *     already `Math.max(0, …)` it keep doing so.
+ */
+interface SampleIndex {
+  readonly length: number;
+  readonly offset: Float64Array;
+  readonly size: Uint32Array;
+  readonly timestamp: Float64Array;
+  readonly duration: Uint32Array;
+  /** 1 = sync sample. Uint8, not boolean[] — a boolean array is a pointer array. */
+  readonly isKey: Uint8Array;
+}
+
+/** Allocate an index of exactly `count` samples. Both demux paths know the count up front. */
+function allocSampleIndex(count: number): {
+  index: SampleIndex;
+  set: (i: number, offset: number, size: number, timestamp: number, duration: number, isKey: boolean) => void;
+} {
+  const index: SampleIndex = {
+    length: count,
+    offset: new Float64Array(count),
+    size: new Uint32Array(count),
+    timestamp: new Float64Array(count),
+    duration: new Uint32Array(count),
+    isKey: new Uint8Array(count),
+  };
+  const set = (i: number, offset: number, size: number, timestamp: number, duration: number, isKey: boolean) => {
+    index.offset[i] = offset;
+    index.size[i] = Math.max(0, size);
+    index.timestamp[i] = timestamp;
+    // Uint32 wraps a negative, and a garbage duration on the LAST sample becomes the clip's
+    // decodable end — clamp here, once, rather than at every read.
+    index.duration[i] = Math.max(0, duration);
+    index.isKey[i] = isKey ? 1 : 0;
+  };
+  return { index, set };
 }
 
 /** Feed-window bounds: how much encoded data may be RAM-resident per provider at once. */
@@ -266,7 +328,7 @@ async function appendBlobSlice(file: MP4File, blob: Blob, start: number, end: nu
 interface DemuxedIndex {
   track: MP4VideoTrackInfo;
   description: Uint8Array | undefined;
-  index: SampleIndexEntry[];
+  index: SampleIndex;
   /** Non-null only on the fragmented-MP4 fallback path (chunks fully RAM-resident). */
   ramChunks: EncodedVideoChunk[] | null;
   /**
@@ -377,13 +439,11 @@ async function demuxIndex(blob: Blob): Promise<DemuxedIndex | null> {
     // black/slow-fallback. If NO sample is flagged sync, assume the first is a keyframe so the
     // decoder can start (the probe still falls back if that assumption is wrong for this file).
     const syncCount = samples.reduce((n, s) => n + (s.is_sync ? 1 : 0), 0);
-    const index: SampleIndexEntry[] = samples.map((sample, i) => ({
-      offset: sample.offset ?? 0,
-      size: sample.size ?? 0,
-      timestamp: toMicros(sample.cts),
-      duration: toMicros(sample.duration),
-      isKey: sample.is_sync || (syncCount === 0 && i === 0),
-    }));
+    const { index, set } = allocSampleIndex(samples.length);
+    for (let i = 0; i < samples.length; i += 1) {
+      const sample = samples[i]!;
+      set(i, sample.offset ?? 0, sample.size ?? 0, toMicros(sample.cts), toMicros(sample.duration), sample.is_sync || (syncCount === 0 && i === 0));
+    }
     if (webcodecsDebugEnabled()) {
       console.log(
         `[export] webcodecs streaming index: ${index.length} samples, ${syncCount} sync, codec="${track.codec}"${fragmented ? ", fragmented" : ""}, parsed ${rounds} slice(s) of ${blob.size}B`
@@ -466,13 +526,11 @@ async function demuxFragmented(
     console.log(`[export] webcodecs fragmented fallback: ${ramChunks.length} chunks fully extracted`);
   }
   wcDecoderStats.fragmented += 1;
-  const index: SampleIndexEntry[] = ramChunks.map((chunk) => ({
-    offset: 0,
-    size: chunk.byteLength,
-    timestamp: chunk.timestamp,
-    duration: chunk.duration ?? 0,
-    isKey: chunk.type === "key",
-  }));
+  const { index, set } = allocSampleIndex(ramChunks.length);
+  for (let i = 0; i < ramChunks.length; i += 1) {
+    const chunk = ramChunks[i]!;
+    set(i, 0, chunk.byteLength, chunk.timestamp, chunk.duration ?? 0, chunk.type === "key");
+  }
   return { track: resolved.track ?? infoTrack, description: resolved.description ?? infoDescription, index, ramChunks, rotationDegrees };
 }
 
@@ -487,7 +545,7 @@ interface ChunkWindow {
   dispose(): void;
 }
 
-function createBlobChunkWindow(blob: Blob, index: SampleIndexEntry[]): ChunkWindow {
+function createBlobChunkWindow(blob: Blob, index: SampleIndex): ChunkWindow {
   let loaded = new Map<number, EncodedVideoChunk>();
   return {
     chunkAt(i) {
@@ -505,14 +563,13 @@ function createBlobChunkWindow(blob: Blob, index: SampleIndexEntry[]): ChunkWind
       }
       // Grow the window forward from `from`, bounded by count AND file-byte span (interleaved
       // audio sits inside the span, so span — not sample-size sum — is what the read costs).
-      const first = index[from]!;
-      let spanStart = first.offset;
-      let spanEnd = first.offset + first.size;
+      let spanStart = index.offset[from]!;
+      let spanEnd = spanStart + index.size[from]!;
       let to = from + 1;
       while (to < index.length && to - from < WINDOW_MAX_SAMPLES) {
-        const s = index[to]!;
-        const nextStart = Math.min(spanStart, s.offset);
-        const nextEnd = Math.max(spanEnd, s.offset + s.size);
+        const sOffset = index.offset[to]!;
+        const nextStart = Math.min(spanStart, sOffset);
+        const nextEnd = Math.max(spanEnd, sOffset + index.size[to]!);
         if (nextEnd - nextStart > WINDOW_MAX_SPAN_BYTES && to > from + 1) break;
         spanStart = nextStart;
         spanEnd = nextEnd;
@@ -521,14 +578,13 @@ function createBlobChunkWindow(blob: Blob, index: SampleIndexEntry[]): ChunkWind
       const buffer = await blob.slice(spanStart, spanEnd).arrayBuffer();
       const next = new Map<number, EncodedVideoChunk>();
       for (let i = from; i < to; i += 1) {
-        const s = index[i]!;
         next.set(
           i,
           new EncodedVideoChunk({
-            type: s.isKey ? "key" : "delta",
-            timestamp: s.timestamp,
-            duration: s.duration,
-            data: new Uint8Array(buffer, s.offset - spanStart, s.size),
+            type: index.isKey[i] ? "key" : "delta",
+            timestamp: index.timestamp[i]!,
+            duration: index.duration[i]!,
+            data: new Uint8Array(buffer, index.offset[i]! - spanStart, index.size[i]!),
           })
         );
       }
@@ -579,8 +635,8 @@ export async function probeDecodableEndSeconds(blobOrUrl: Blob | string): Promis
     return null;
   }
   if (!demuxed || !demuxed.index.length) return null;
-  const last = demuxed.index[demuxed.index.length - 1]!;
-  const endMicros = last.timestamp + Math.max(0, last.duration);
+  const lastAt = demuxed.index.length - 1;
+  const endMicros = demuxed.index.timestamp[lastAt]! + demuxed.index.duration[lastAt]!;
   return endMicros > 0 ? endMicros / 1_000_000 : null;
 }
 
@@ -615,12 +671,23 @@ export async function createWebCodecsVideoSource(
   const { track, description, index, rotationDegrees } = demuxed;
   const win = demuxed.ramChunks ? createRamChunkWindow(demuxed.ramChunks) : createBlobChunkWindow(blob, index);
   const chunkCount = index.length;
+  // Charged for the provider's lifetime (credited in dispose) — the index is held precisely because
+  // seeking needs it, so this is a real, permanent, duration-scaled cost and is reported as one.
+  residency.indexBytes += chunkCount * INDEX_BYTES_PER_SAMPLE;
+  residency.indexSamples += chunkCount;
+  let indexCharged = true;
 
-  const keyIndices: number[] = [];
-  index.forEach((entry, i) => {
-    if (entry.isKey) keyIndices.push(i);
-  });
-  if (!keyIndices.length) keyIndices.push(0);
+  // Key-sample positions, also a column: an all-intra source (ProRes-style proxies, screen
+  // recordings) has one entry PER SAMPLE here, so a JS number[] would re-introduce a duration-scaled
+  // term right next to the one we just removed.
+  let keyCount = 0;
+  for (let i = 0; i < chunkCount; i += 1) if (index.isKey[i]) keyCount += 1;
+  const keyIndices = new Int32Array(Math.max(1, keyCount));
+  {
+    let k = 0;
+    for (let i = 0; i < chunkCount; i += 1) if (index.isKey[i]) keyIndices[k++] = i;
+    // No sync sample flagged anywhere → start at 0 (the demux already forces sample 0 to key).
+  }
 
   const trackW = track.video?.width ?? track.track_width ?? 0;
   const trackH = track.video?.height ?? track.track_height ?? 0;
@@ -633,7 +700,7 @@ export async function createWebCodecsVideoSource(
   // beyond-EOF region instead of every rAF while the tail sits frozen. lastSampleMicros is hoisted
   // ONCE here so the per-frame guard is a single integer compare (no index access, no debug read).
   let lastLoggedOvershootMicros = -1;
-  const lastSampleMicros = chunkCount > 0 ? index[chunkCount - 1]!.timestamp : 0;
+  const lastSampleMicros = chunkCount > 0 ? index.timestamp[chunkCount - 1]! : 0;
   const onOutput = (frame: VideoFrame) => {
     outputCount += 1;
     queue.push(frame);
@@ -774,7 +841,7 @@ export async function createWebCodecsVideoSource(
     }
     return k;
   };
-  // index[].timestamp is cts (presentation) order — B-frame streams aren't strictly sorted, so a
+  // index.timestamp is cts (presentation) order — B-frame streams aren't strictly sorted, so a
   // plain binary search is unsafe. The scan stays linear, but a FORWARD CURSOR makes monotonic
   // playback/export amortized O(1): every entry below the cursor already satisfied ts ≤ cursorMicros
   // ≤ micros, so resuming there returns the same break point the from-zero scan would (backward
@@ -784,7 +851,7 @@ export async function createWebCodecsVideoSource(
   let chunkCursorJ = 0;
   const chunkIndexForMicros = (micros: number) => {
     let j = micros >= chunkCursorMicros ? chunkCursorJ : 0;
-    while (j < chunkCount && index[j]!.timestamp <= micros) j += 1;
+    while (j < chunkCount && index.timestamp[j]! <= micros) j += 1;
     chunkCursorMicros = micros;
     chunkCursorJ = j;
     return Math.max(0, j - 1);
@@ -993,7 +1060,7 @@ export async function createWebCodecsVideoSource(
       while (fed < chunkCount && decoder.decodeQueueSize < MAX && queue.length < MAX) {
         // Post-flush/configure the decoder demands a keyframe first — rewind to the keyframe at/before the
         // target so we never feed a delta into a decoder that's waiting for an IDR (the DataError black-clip bug).
-        if (needKey && !index[fed]!.isKey) fed = keyAtOrBefore(fed);
+        if (needKey && !index.isKey[fed]) fed = keyAtOrBefore(fed);
         const chunk = win.chunkAt(fed);
         if (!chunk) break; // outside the loaded window (e.g. keyframe rewind) — outer loop re-ensures
         try {
@@ -1121,7 +1188,7 @@ export async function createWebCodecsVideoSource(
   const probe = await getFrame(0).catch(() => null);
   if (failed || !probe) {
     console.warn(
-      `[export] WebCodecs probe-decode produced no frame → <video> fallback. outputs=${outputCount} state=${decoder.state} failed=${failed} qsize=${decoder.decodeQueueSize} firstChunkKey=${index[0]?.isKey}`
+      `[export] WebCodecs probe-decode produced no frame → <video> fallback. outputs=${outputCount} state=${decoder.state} failed=${failed} qsize=${decoder.decodeQueueSize} firstChunkKey=${Boolean(index.isKey[0])}`
     );
     for (const frame of queue) frame.close();
     queue.length = 0;
@@ -1134,6 +1201,11 @@ export async function createWebCodecsVideoSource(
       /* already closed */
     }
     win.dispose();
+    // Bailing to the <video> fallback drops the index too — credit it back, or a session that
+    // probe-fails a few sources reports index bytes for providers that never existed.
+    indexCharged = false;
+    residency.indexBytes -= chunkCount * INDEX_BYTES_PER_SAMPLE;
+    residency.indexSamples -= chunkCount;
     return null;
   }
   // Do NOT reset after the probe: `getFrame(0)` already decoded frame 0 and left the decoder positioned
@@ -1157,9 +1229,10 @@ export async function createWebCodecsVideoSource(
   {
     let minCts = Infinity;
     let maxCts = -Infinity;
-    for (const entry of index) {
-      if (entry.timestamp < minCts) minCts = entry.timestamp;
-      if (entry.timestamp > maxCts) maxCts = entry.timestamp;
+    for (let i = 0; i < chunkCount; i += 1) {
+      const ts = index.timestamp[i]!;
+      if (ts < minCts) minCts = ts;
+      if (ts > maxCts) maxCts = ts;
     }
     const spanSec = (maxCts - minCts) / 1_000_000;
     if (index.length >= 4 && spanSec > 0) {
@@ -1202,10 +1275,8 @@ export async function createWebCodecsVideoSource(
 
   // True decodable end from the sample table — see FrameProvider.decodableEndSeconds. The proxy
   // build clamps to this so overshooting duration metadata can never bake a frozen tail again.
-  const lastSample = index[index.length - 1];
-  const decodableEndSeconds = lastSample
-    ? Math.max(0, (lastSample.timestamp + Math.max(0, lastSample.duration)) / 1_000_000)
-    : undefined;
+  const decodableEndSeconds =
+    chunkCount > 0 ? Math.max(0, (index.timestamp[chunkCount - 1]! + index.duration[chunkCount - 1]!) / 1_000_000) : undefined;
 
   const provider: FrameProvider = {
     get width() {
@@ -1242,6 +1313,11 @@ export async function createWebCodecsVideoSource(
         /* already closed */
       }
       win.dispose();
+      if (indexCharged) {
+        indexCharged = false; // dispose() is called more than once on some teardown paths
+        residency.indexBytes -= chunkCount * INDEX_BYTES_PER_SAMPLE;
+        residency.indexSamples -= chunkCount;
+      }
     },
   };
   // Gate/soak telemetry only (not part of the FrameProvider contract): total decoder.decode()
