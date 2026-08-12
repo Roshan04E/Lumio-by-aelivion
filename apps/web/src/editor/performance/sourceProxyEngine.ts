@@ -19,6 +19,7 @@
  */
 
 import { getAssetBlobStore } from "../../lib/asset-blob-store";
+import { createTrackedObjectUrl, revokeTrackedObjectUrl } from "../../lib/object-url-registry";
 import { createFrameProvider } from "../../export/source-decoder";
 import { MediaEncoder } from "../../export/video-encoder";
 import { markHotSpot } from "../../lib/perfDiagnostics";
@@ -453,13 +454,15 @@ async function buildOne(asset: SourceAsset): Promise<string | null> {
       // (with backoff) rather than permanently skipping the asset and stranding it on the heavy original.
       throw new RetryableProxyFetchError(`fetch failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    sourceUrl = URL.createObjectURL(blob);
+    // TRACKED (DEBT-019): these bytes are already RAM-resident (we just downloaded them), so
+    // registering the URL stops the decoder fetching a SECOND copy of the same file.
+    sourceUrl = createTrackedObjectUrl(blob);
     revokeSourceUrl = true;
   }
   try {
     return await buildFromBlob(asset, blob, sourceUrl);
   } finally {
-    if (revokeSourceUrl && sourceUrl) URL.revokeObjectURL(sourceUrl);
+    if (revokeSourceUrl && sourceUrl) revokeTrackedObjectUrl(sourceUrl);
   }
 }
 

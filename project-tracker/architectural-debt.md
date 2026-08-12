@@ -2271,6 +2271,68 @@ bytes are bounded by a byte budget independent of source duration — local sour
 disk-backed `File` rather than a fetched copy, remote sources by range-paging the window — with
 total provider residency reported in BYTES to whatever authority enforces ADR-021's I-P6 budget.
 
+**Update (2026-08-12) — Phase 2a shipped: the local-source copy is deleted. Status stays OPEN
+(remote range-paging is a separate slice), and THE ORIGINAL LADDER IN THIS ENTRY IS RETRACTED.**
+
+**Retraction first, because it is the most quotable thing here.** The 1 / 25 / 50 / 100 table above
+(106 / 617 / 892 / **2546 MB**, "~25 MB per source") was produced without a zero-Chrome floor.
+`browser.close()` does not reliably reap its tree on Windows, so rungs can baseline against the
+previous rung's corpses — the failure mode that produced baselines of 1.4–3.3 GB and deltas of
+−694 MB when it was noticed. **Those four numbers should not be quoted as fact.** Their headline
+conclusion is also wrong on attribution: measured cleanly, ~25 MB/source at 3 seconds is dominated
+by DECODER state (VideoDecoder + DPB + pinned frames), which is FLAT in duration. The Blob — the
+term this entry is named for — was only **4.9 MB** of it. The debt was real and the motivation
+pointed at the wrong thing. Any ladder that did not enforce the floor is suspect, including that one;
+`src/browser/browser-preflight.ts` now enforces it and refuses to run without it.
+
+**What shipped.** `fetchSourceBlob` no longer copies a source we already have. `object-url-registry.ts`
+records url → Blob at the four places object URLs are minted (`asset-blob-store.cacheUrl`,
+`proxyMediaStore` OPFS + memory, `sourceProxyEngine`, `api.ts` upload), and `sourceBlobFor` returns
+that original Blob. For OPFS/IndexedDB assets and picked Files that Blob is a disk-backed handle, so
+`blob.slice()` reads each window off disk and **nothing is resident**. Remote http(s) still fetches.
+`sourceResidentBytes()` / `window.__rfSourceResidency` report `copiedBytes` vs `passthroughBytes` —
+in BYTES, never in provider count, per this entry's own Detection clause. The chunk window was left
+exactly as it was, per Phase 1: it was never the unbounded term.
+
+**Both ladders, clean instrument, fresh browser per rung, zero-Chrome floor enforced, providers
+proven live (100 streaming / 0 fragmented, 400 getFrame calls, 0 nulls, 5827–9303 decodes) and
+proven to page (frames pulled at 2%/35%/70%/98% of each clip, not one frame at 0.5s).** `local` is
+the shipped path (OPFS → `getObjectUrl` → provider); `remote` is the unchanged fetch path, i.e. the
+before-picture, measured in the same run:
+
+| N | 3s local | 120s local | ratio | 3s remote | 120s remote | ratio |
+|---|---|---|---|---|---|---|
+| 1 | 109.1 | 127.4 | 1.17× | 113.9 | 216.3 | 1.90× |
+| 25 | 14.0 | 21.4 | **1.53×** | 19.7 | 107.9 | **5.48×** |
+| 50 | 14.4 | 19.8 | 1.38× | 17.3 | **could not complete** | — |
+| 100 | 11.8 | 29.3 | 2.48× | 15.5 | **could not complete** | — |
+
+(MB per source. Duration varies 40× between the two corpora.)
+
+`copiedBytes` was **0 at every local rung** — the pass-through is proven engaged, not inferred from
+the memory number it would otherwise be used to explain.
+
+**The remote path could not finish its own ladder.** At 50 × 2-minute sources it exhausts, falls
+back to `<video>`, and times out — reproduced twice. The fixed local path completed the same rung at
+19.8 MB/source and went on to N=100. So this is not only a byte reduction; at realistic source
+lengths it is the difference between working and not.
+
+**HONEST FAILURE TO MEET THE PASS CONDITION.** The bar was per-source residency FLAT across
+duration. Local is 1.17–2.48×, not 1.0×. It is a large improvement on the 1.90–5.48× it replaces and
+the named term is gone, but it is not flat, and the residual is duration-scaling:
+- **~7 MB/source** of sample-table metadata (our `SampleIndexEntry[]` — one JS object per sample —
+  plus mp4box's own parse structures). Isolated by re-running with a SINGLE pull per clip, which
+  drops the ratio to 1.33×.
+- **the rest, ~14 MB/source, is decode/seek state** that only appears under multi-point access: a
+  long clip's four pulls cross GOPs and force resets (9303 decodes vs 5827 for the short corpus).
+Neither is the Blob, and neither was in this slice's scope. The index term is the obvious next one —
+five parallel typed arrays instead of 3600+ objects — and it is cheap.
+
+**Restated, again, for what remains open:** remote http(s) sources still hold whole-file RAM copies
+(`sourceBlobCache`, ≤12 entries) and still need range-paged windows; the fragmented-MP4 fallback is
+O(file) for BOTH source kinds by construction; and the sample index is O(duration) regardless of
+source kind. Local sources no longer hold encoded bytes at all.
+
 ---
 
 ### DEBT-020 — CLASS: a time-varying parameter that is not a number is invisible to the content hash

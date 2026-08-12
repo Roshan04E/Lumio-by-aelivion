@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ffmpegPath from "ffmpeg-static";
 import { chromium } from "playwright";
+import { assertQuietBrowserMachine } from "./browser/browser-preflight";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const fixtureDir = path.join(repoRoot, "apps/web/public/__wc-fixtures");
@@ -69,6 +70,11 @@ interface VariantResult {
 }
 
 async function main() {
+  // Leftover Playwright trees corrupt this gate — see browser-preflight.ts. MUST run here, at
+  // process start, before this gate has launched anything of its own: at a launch site it
+  // cannot tell a leftover from a browser this run is already using.
+  assertQuietBrowserMachine({ label: "wc:gate" });
+
   await generateRealFixture();
   const port = await getFreePort();
   const vite = startWebServer(port);

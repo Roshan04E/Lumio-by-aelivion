@@ -7,25 +7,94 @@
  * same source) resets to the nearest keyframe. Returns null when the file can't be
  * demuxed/decoded so the caller falls back to the <video> provider.
  *
- * STREAMING DEMUX (wcDecode flip blocker 1): the source is held as a disk-backed Blob
- * (`response.blob()` — Chromium spools large bodies to disk), NOT a RAM ArrayBuffer. mp4box
- * only ever sees the byte ranges needed to parse the sample TABLE (moov; `appendBuffer`'s
- * return value jumps over mdat for moov-at-end files), and encoded chunks are materialized
- * on demand from `blob.slice()` in a bounded window around the feed position. Peak RAM is
- * O(one GOP window), not O(file), which is what a 4GB machine needs when the preview pool
- * (`preview-frame-pool.ts`) runs this same provider on the UI thread.
+ * STREAMING DEMUX (wcDecode flip blocker 1): mp4box only ever sees the byte ranges needed to
+ * parse the sample TABLE (moov; `appendBuffer`'s return value jumps over mdat for moov-at-end
+ * files), and encoded chunks are materialized on demand from `blob.slice()` in a bounded window
+ * around the feed position (`WINDOW_MAX_SAMPLES` / `WINDOW_MAX_SPAN_BYTES`, whole-window replace).
+ * The WINDOW's RAM is therefore O(one GOP window), not O(file).
+ *
+ * WHERE THE SOURCE BYTES LIVE, and what that costs (DEBT-019, measured 2026-08-12). This comment
+ * used to claim `response.blob()` gives a "disk-backed Blob … Peak RAM O(one GOP window), not
+ * O(file)". The window half was true; the Blob half was FALSE and cost real memory: a fetched Blob
+ * measured 86.5 MB resident for a 76.8 MB file, so per-source residency scaled with clip LENGTH
+ * (~4.9 MB for a 3s source vs ~86.5 MB for a 2-minute one — 17.6× for 40× the duration).
+ *
+ * So the bytes now come from whichever of these applies, in order:
+ *   1. an object URL we minted ourselves (`object-url-registry.ts`) — the LOCAL-FIRST path, and
+ *      the common one. OPFS/IndexedDB assets and the user's own picked Files are already
+ *      disk-backed and already sliceable, so we hand the original Blob straight to the window and
+ *      copy NOTHING. `blob.slice()` reads the window off disk on demand.
+ *   2. `fetch(url).blob()` — remote http(s) sources only. This one IS a whole-file RAM copy and is
+ *      still O(file); range-paging it is a separate slice (see DEBT-019's restated expiry).
+ * `sourceResidentBytes()` reports the difference in BYTES, never in provider count — a count is
+ * only a proxy for bytes while clip lengths are similar, which is the assumption that broke.
+ *
  * Fragmented MP4s (empty sample table, moof-driven) fall back to a full sequential
  * extraction pass — rare for user uploads, and still cheaper than v1 because mp4box's
- * internal buffers are released as chunks are captured.
+ * internal buffers are released as chunks are captured. That fallback holds every chunk in RAM by
+ * construction, so it is O(file) for BOTH source kinds — the pass-through does not help it.
  */
 
 import { createFile, DataStream, type MP4File, type MP4VideoTrackInfo } from "mp4box";
+import { resolveObjectUrlBlob } from "../lib/object-url-registry";
 import { rotationFromMatrix, type SourceRotation } from "./source-color";
 import type { FrameProvider } from "./source-decoder";
 
-/** Disk-backed source Blobs (browser spools to disk); LRU so long sessions can't pin every source. */
+/**
+ * FETCHED source Blobs — remote http(s) only. LRU so long sessions can't pin every source.
+ *
+ * Locally-backed sources deliberately never enter this map: they are resolved from the object-URL
+ * registry with no copy and no retention, so caching them would reintroduce exactly the residency
+ * this cache's entries still carry. Every Blob in here is a whole-file RAM copy; see
+ * `sourceResidentBytes()`.
+ */
 const sourceBlobCache = new Map<string, Promise<Blob>>();
 const SOURCE_BLOB_CACHE_MAX = 12;
+
+/**
+ * Resident encoded-source bytes, IN BYTES, split by whether we own a copy.
+ *
+ * `copiedBytes` is what this module actually costs the process: the sum of every fetched whole-file
+ * Blob it is holding. `passthroughBytes` is the size of the sources it is serving WITHOUT holding
+ * their bytes (disk-backed Files sliced in place) — reported so the two are visibly different
+ * quantities rather than one aggregate that hides which is which.
+ *
+ * Deliberately NOT a provider count. DEBT-019's Detection clause names a count-denominated budget
+ * as *extending* the debt, because a count only proxies bytes while clip lengths are similar.
+ * Whatever ends up enforcing ADR-021's I-P6 budget should read `copiedBytes`.
+ */
+const residency = { copiedBytes: 0, passthroughBytes: 0, copiedSources: 0, passthroughSources: 0 };
+
+export function sourceResidentBytes(): Readonly<typeof residency> {
+  return residency;
+}
+
+/**
+ * Byte size of each fetched Blob this module still holds, so eviction can credit the right amount
+ * back. CAVEAT worth stating rather than hiding: `copiedBytes` counts what THIS CACHE retains. A
+ * provider constructed before an eviction keeps its own reference alive, so during heavy churn the
+ * true process cost can exceed this figure. It is an accurate floor, not a ceiling.
+ */
+const copiedSizes = new Map<string, number>();
+
+/** URLs already counted into `passthroughBytes`, so the gauge counts sources and not calls. */
+const passthroughSeen = new Set<string>();
+
+function releaseCopied(url: string): void {
+  const size = copiedSizes.get(url);
+  if (size === undefined) return;
+  copiedSizes.delete(url);
+  residency.copiedBytes -= size;
+  residency.copiedSources -= 1;
+}
+
+if (typeof window !== "undefined") {
+  try {
+    Object.defineProperty(window, "__rfSourceResidency", { configurable: true, get: () => residency });
+  } catch {
+    /* read-only window in some embeds — telemetry is best-effort */
+  }
+}
 
 /** Which demux path providers took this session — asserted by the wc-decoder gate + soak telemetry. */
 export const wcDecoderStats = { streaming: 0, fragmented: 0 };
@@ -76,6 +145,34 @@ function webcodecsDebugEnabled(): boolean {
   return env?.VITE_EXPORT_DECODE_DEBUG === "1" || env?.VITE_EXPORT_DECODE_DEBUG === "true";
 }
 
+/**
+ * The source bytes for `url`, copying only when we have no choice.
+ *
+ * THE PASS-THROUGH (DEBT-019). If we minted this object URL ourselves, we still have the Blob it
+ * points at, and for OPFS/IndexedDB assets and picked Files that Blob is a disk-backed handle — no
+ * bytes resident, `slice()` reads on demand. `fetch(url).blob()` over the very same URL would
+ * instead materialise the whole file in RAM (measured: +226 MB for 192 MB of files), which is
+ * pure loss, since the only consumer is a chunk window that wants ≤24 MB of it at a time.
+ *
+ * Returns the original Blob for anything the registry knows, and falls back to the fetch for
+ * remote http(s) sources, where the copy is currently unavoidable.
+ */
+function sourceBlobFor(url: string): Promise<Blob> {
+  const local = resolveObjectUrlBlob(url);
+  if (local) {
+    // No cache entry: there is nothing to cache. We hold no bytes, so a second call is free.
+    // Counted once per URL, not once per call — this is a gauge of what is being served without
+    // residency, and re-deriving a provider for the same source must not inflate it.
+    if (!passthroughSeen.has(url)) {
+      passthroughSeen.add(url);
+      residency.passthroughBytes += local.size;
+      residency.passthroughSources += 1;
+    }
+    return Promise.resolve(local);
+  }
+  return fetchSourceBlob(url);
+}
+
 function fetchSourceBlob(url: string): Promise<Blob> {
   let cached = sourceBlobCache.get(url);
   if (!cached) {
@@ -89,7 +186,13 @@ function fetchSourceBlob(url: string): Promise<Blob> {
         const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
         clearTimeout(timer);
         timer = setTimeout(() => controller.abort(), 120_000);
-        return await response.blob();
+        const blob = await response.blob();
+        // This IS a whole-file RAM copy — the remaining half of DEBT-019, and the reason the number
+        // is reported in bytes. Charged on arrival, credited back when evicted below.
+        copiedSizes.set(url, blob.size);
+        residency.copiedBytes += blob.size;
+        residency.copiedSources += 1;
+        return blob;
       } finally {
         clearTimeout(timer);
       }
@@ -102,6 +205,7 @@ function fetchSourceBlob(url: string): Promise<Blob> {
       const oldest = sourceBlobCache.keys().next().value;
       if (oldest === undefined) break;
       sourceBlobCache.delete(oldest);
+      releaseCopied(oldest);
     }
   } else {
     // LRU refresh: re-insert on hit so the busiest sources survive eviction.
@@ -464,7 +568,7 @@ export async function probeDecodableEndSeconds(blobOrUrl: Blob | string): Promis
   if (typeof VideoDecoder === "undefined") return null;
   let blob: Blob;
   try {
-    blob = typeof blobOrUrl === "string" ? await fetchSourceBlob(blobOrUrl) : blobOrUrl;
+    blob = typeof blobOrUrl === "string" ? await sourceBlobFor(blobOrUrl) : blobOrUrl;
   } catch {
     return null;
   }
@@ -496,7 +600,7 @@ export async function createWebCodecsVideoSource(
 
   let blob: Blob;
   try {
-    blob = await fetchSourceBlob(url);
+    blob = await sourceBlobFor(url);
   } catch {
     return null;
   }

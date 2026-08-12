@@ -28,6 +28,7 @@ import {
   type ToolDefinition
 } from "@orreris/shared";
 import { getAssetBlobStore, requestPersistentAssetStorage } from "./asset-blob-store";
+import { createTrackedObjectUrl } from "./object-url-registry";
 // Runtime-only use (inside function bodies) — safe across the api⇄sync circular edge; no top-level call.
 import {
   candidateProjectIds,
@@ -409,9 +410,11 @@ export async function createAsset(input: CreateAssetInput) {
         // stay id-keyed with a legacy-flat fallback.
         await store.put(id, file, { projectId: input.projectId ?? null });
         void requestPersistentAssetStorage();
-        liveUrl = (await store.getObjectUrl(id)) ?? URL.createObjectURL(file);
+        // TRACKED (DEBT-019): `file` is the user's own disk-backed File from the picker — the
+        // decoder can slice it in place, so never let it be re-fetched into a RAM copy.
+        liveUrl = (await store.getObjectUrl(id)) ?? createTrackedObjectUrl(file);
       } catch {
-        liveUrl = URL.createObjectURL(file); // session-only last resort
+        liveUrl = createTrackedObjectUrl(file); // session-only last resort
       }
     }
 

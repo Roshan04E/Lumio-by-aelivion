@@ -21,6 +21,8 @@
  * and reads always fall back to the legacy flat dir, so pre-taxonomy blobs keep working untouched
  * (no bulk migration of user footage — deliberately; a mass move risks the data it organizes).
  */
+import { createTrackedObjectUrl, revokeTrackedObjectUrl } from "./object-url-registry";
+
 export interface AssetScope {
   userId?: string | undefined;
   /** Owning project, or null/absent for the user-level library. */
@@ -83,14 +85,17 @@ const urlCache = new Map<string, string>();
 function cacheUrl(id: string, blobOrFile: Blob): string {
   const existing = urlCache.get(id);
   if (existing) return existing;
-  const url = URL.createObjectURL(blobOrFile);
+  // TRACKED (DEBT-019): records url → this Blob so a consumer can get the bytes back without
+  // `fetch(url).blob()`, which copies a disk-backed OPFS File into RAM in full. The decoder is the
+  // consumer that matters — it slices a bounded window out of this Blob and never wants the whole file.
+  const url = createTrackedObjectUrl(blobOrFile);
   urlCache.set(id, url);
   return url;
 }
 function dropUrl(id: string): void {
   const url = urlCache.get(id);
   if (url) {
-    URL.revokeObjectURL(url);
+    revokeTrackedObjectUrl(url);
     urlCache.delete(id);
   }
 }

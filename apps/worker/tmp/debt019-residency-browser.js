@@ -25,7 +25,49 @@
   // then does fetch(url).blob() over it. These two variants ask whether that fetch is a free
   // handle pass-through or a disk->RAM copy -- if it is a copy, the local case and the remote case
   // are different defects and the local one needs no paging at all, just a shorter path.
-  if (args.variant === "opfs-file" || args.variant === "opfs-fetch") {
+  // THE PRODUCT PATH. Seeds/reads through the REAL asset blob store, so the URL the decoder gets is
+  // the one `getObjectUrl` actually mints (OPFS File → createTrackedObjectUrl). Nothing bespoke:
+  // if the registry pass-through regresses, this variant regresses with it.
+  //
+  // Split into a seed phase and a measure phase, run in SEPARATE browsers over one persistent
+  // profile, because seeding has to fetch the bytes once and that transient copy is exactly what
+  // the measurement is about. The measured browser only ever reads OPFS.
+  if (args.variant === "local-seed" || args.variant === "local") {
+    const store = await (await import(/* @vite-ignore */ "/src/lib/asset-blob-store.ts")).getAssetBlobStore();
+    if (args.variant === "local-seed") {
+      for (let i = 0; i < args.n; i += 1) {
+        const id = "debt019-" + args.clips[i];
+        if (await store.has(id)) continue;
+        const bytes = await (await fetch(args.mediaOrigin + "/" + args.clips[i], { cache: "no-store" })).blob();
+        await store.put(id, bytes);
+      }
+      return { n: args.n, variant: args.variant, jsHeapMB: 0, stats: { seeded: args.n } };
+    }
+    const sd = await import(/* @vite-ignore */ "/src/export/source-decoder.ts");
+    const wc = await import(/* @vite-ignore */ "/src/export/webcodecs-decoder.ts");
+    for (let i = 0; i < args.n; i += 1) {
+      const url = await store.getObjectUrl("debt019-" + args.clips[i]);
+      if (!url) throw new Error("seed missing for " + args.clips[i]);
+      const p = await sd.createFrameProvider(url, "video");
+      const end = p.decodableEndSeconds || 3;
+      for (const frac of args.pullFractions) {
+        const f = await p.getFrame(Math.max(0, Math.min(end - 0.05, end * frac)));
+        stats.getFrameCalls += 1;
+        if (!f) stats.nulls += 1;
+      }
+      stats.decodeCalls += p.__wcDecodeCalls || 0;
+      held.push(p);
+    }
+    stats.streaming = wc.wcDecoderStats.streaming;
+    stats.fragmented = wc.wcDecoderStats.fragmented;
+    // PROVE THE PASS-THROUGH ENGAGED, rather than inferring it from the memory number we are trying
+    // to prove. copiedBytes must be 0 (nothing fetched) and passthroughBytes must cover every source.
+    const res = wc.sourceResidentBytes();
+    stats.copiedBytes = res.copiedBytes;
+    stats.passthroughBytes = res.passthroughBytes;
+    stats.copiedSources = res.copiedSources;
+    stats.passthroughSources = res.passthroughSources;
+  } else if (args.variant === "opfs-file" || args.variant === "opfs-fetch") {
     const root = await navigator.storage.getDirectory();
     for (let i = 0; i < args.n; i += 1) {
       const name = "debt019-" + i + ".bin";
@@ -82,6 +124,11 @@
     }
     stats.streaming = wc.wcDecoderStats.streaming;
     stats.fragmented = wc.wcDecoderStats.fragmented;
+    const res = wc.sourceResidentBytes();
+    stats.copiedBytes = res.copiedBytes;
+    stats.passthroughBytes = res.passthroughBytes;
+    stats.copiedSources = res.copiedSources;
+    stats.passthroughSources = res.passthroughSources;
   }
 
   window.__debt019Held = held;

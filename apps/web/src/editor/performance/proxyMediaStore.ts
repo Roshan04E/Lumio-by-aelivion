@@ -15,6 +15,7 @@
  * No new WebGL context is created here — frames arrive from the single existing preview compositor.
  */
 
+import { createTrackedObjectUrl, revokeTrackedObjectUrl } from "../../lib/object-url-registry";
 import { MediaEncoder, type ExportFormat } from "../../export/video-encoder";
 import { detectBrowserToolCapabilities } from "../../tools/capabilities";
 
@@ -108,7 +109,7 @@ function createMemoryBlobStore(): ProxyBlobStore {
   const revoke = (id: string): void => {
     const url = urls.get(id);
     if (url) {
-      URL.revokeObjectURL(url);
+      revokeTrackedObjectUrl(url);
       urls.delete(id);
     }
   };
@@ -127,7 +128,9 @@ function createMemoryBlobStore(): ProxyBlobStore {
       if (!blob) {
         return undefined;
       }
-      const url = URL.createObjectURL(blob);
+      // TRACKED (DEBT-019): lets the decoder slice these bytes in place rather than fetching a
+      // second RAM copy of a Blob we are already holding.
+      const url = createTrackedObjectUrl(blob);
       urls.set(id, url);
       return url;
     },
@@ -164,7 +167,7 @@ function createOpfsBlobStore(directory: FileSystemDirectoryHandle): ProxyBlobSto
   const revoke = (id: string): void => {
     const url = urls.get(id);
     if (url) {
-      URL.revokeObjectURL(url);
+      revokeTrackedObjectUrl(url);
       urls.delete(id);
     }
   };
@@ -240,7 +243,10 @@ function createOpfsBlobStore(directory: FileSystemDirectoryHandle): ProxyBlobSto
       try {
         const handle = await directory.getFileHandle(fileName(id));
         const file = await handle.getFile();
-        const url = URL.createObjectURL(file);
+        // TRACKED (DEBT-019): a proxy read back from OPFS is a disk-backed File. Registering it
+        // lets the decoder slice it in place instead of `fetch()`ing a full RAM copy — proxies are
+        // the bytes playback actually decodes, so this is the hot path for preview residency.
+        const url = createTrackedObjectUrl(file);
         urls.set(id, url);
         known.add(id);
         return url;

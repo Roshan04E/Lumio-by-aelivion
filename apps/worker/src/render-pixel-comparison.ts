@@ -14,6 +14,7 @@ import {
 } from "@orreris/shared";
 import pixelmatch from "pixelmatch";
 import { chromium } from "playwright";
+import { assertQuietBrowserMachine } from "./browser/browser-preflight";
 import { PNG } from "pngjs";
 import { renderManifestStill } from "./remotion-renderer";
 
@@ -199,6 +200,11 @@ interface FixtureResult {
 }
 
 async function main() {
+  // Leftover Playwright trees corrupt this gate — see browser-preflight.ts. MUST run here, at
+  // process start: this gate also drives Remotion's own browser, and a preflight sitting at a
+  // launch site would classify that live browser as a leftover and kill it mid-render.
+  assertQuietBrowserMachine({ label: "render:compare:pixels" });
+
   fs.mkdirSync(artifactDir, { recursive: true });
   console.log(`Render path under test: rendererMode=${rendererMode}`);
   console.log(`Fixtures: ${fixtureKeys.join(", ")}`);

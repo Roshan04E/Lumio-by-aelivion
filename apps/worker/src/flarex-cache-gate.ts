@@ -28,6 +28,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { assertQuietBrowserMachine } from "./browser/browser-preflight";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const fsSpecifier = (rel: string) => `/@fs/${path.join(repoRoot, rel).replace(/\\/g, "/")}`;
@@ -55,6 +56,11 @@ interface ScenarioResult {
 }
 
 async function main(): Promise<void> {
+  // Leftover Playwright trees corrupt this gate — see browser-preflight.ts. MUST run here, at
+  // process start, before this gate has launched anything of its own: at a launch site it
+  // cannot tell a leftover from a browser this run is already using.
+  assertQuietBrowserMachine({ label: "flarex:cache-gate" });
+
   const channel = process.env.PIXEL_BROWSER_CHANNEL;
   const browser = await chromium.launch(channel ? { channel } : {});
   const page = await browser.newPage();

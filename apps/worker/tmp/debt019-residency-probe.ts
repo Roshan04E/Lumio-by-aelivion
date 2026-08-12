@@ -28,6 +28,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { assertServingThisWorktree, getFreePort, startVite, stopProcess, waitForServer } from "./pull-bootstrap.js";
+import { assertZeroBrowserFloor, reapAutomationBrowsers } from "../src/browser/browser-preflight.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SHORT_DIR = process.env.DEBT019_MEDIA_SHORT ?? "";
@@ -35,7 +36,7 @@ const LONG_DIR = process.env.DEBT019_MEDIA_LONG ?? "";
 const LADDER = (process.env.DEBT019_N ?? "1,25,50,100").split(",").map(Number);
 const VARIANTS = (process.env.DEBT019_VARIANTS ?? "provider").split(",");
 /** Where in each clip to pull frames. Spread across the WHOLE clip so the chunk window pages. */
-const PULL_FRACTIONS = [0.02, 0.35, 0.7, 0.98];
+const PULL_FRACTIONS = (process.env.DEBT019_PULL ?? "0.02,0.35,0.7,0.98").split(",").map(Number);
 /** Synthetic per-file size for the opfs-* source-kind variants; matches the 120s corpus (76.8 MB). */
 const FILE_BYTES = Number(process.env.DEBT019_FILE_BYTES ?? 76.8 * 1048576);
 
@@ -76,24 +77,27 @@ function processCount(image: string): number {
 }
 
 /**
- * Reap every chrome.exe and WAIT for the count to reach zero.
- *
- * `browser.close()` is NOT sufficient: measured on this machine, a ladder that only closed its
- * Playwright browser left 16 chrome.exe alive at exit, so every rung after the first baselined
- * against the previous rung's corpses -- which is how a working-set ladder produces a NEGATIVE
- * delta (seen: -694 MB) and how it silently inherits a high-water mark it was designed to avoid.
- * A rung that cannot reach a zero-chrome floor is not measured; it is refused.
+ * Reaping now lives in `src/browser/browser-preflight.ts` (promoted there after this probe and the
+ * keyer session's pixel-gate failures turned out to be the same root cause on the same day). This
+ * ladder reaps between EVERY rung rather than once at startup: a rung that inherits the previous
+ * rung's corpses measures a high-water mark, not a residency.
  */
 function reapChrome(): void {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (processCount("chrome.exe") === 0) return;
-    try {
-      execSync("taskkill /F /IM chrome.exe /T", { stdio: "ignore" });
-    } catch {
-      /* nothing to kill on this pass */
-    }
-    execSync("powershell -NoProfile -Command \"Start-Sleep -Milliseconds 500\"", { stdio: "ignore" });
-  }
+  reapAutomationBrowsers();
+}
+
+const LAUNCH_ARGS = [
+  "--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights",
+];
+
+/**
+ * Persistent Chrome profile per corpus, so the LOCAL variant's OPFS seed survives across rungs
+ * (fresh PROCESS per rung is what the baseline needs; a fresh PROFILE would mean re-seeding 7.7 GB
+ * every rung). `--unlimited-storage` only lifts the origin quota — it does not change how the
+ * browser accounts for or retains memory, which is what is being measured.
+ */
+function profileDir(corpusLabel: string): string {
+  return path.join(process.env.TEMP ?? here, `debt019-profile-${corpusLabel}`);
 }
 
 function startMediaServer(port: number, root: string): Promise<Server> {
@@ -163,14 +167,40 @@ async function main() {
         for (const variant of VARIANTS) {
           for (const n of LADDER) {
             if (n > clips.length) continue;
-            reapChrome();
-            const floor = processCount("chrome.exe");
-            if (floor !== 0) throw new Error(`refusing to measure: ${floor} chrome.exe survived the reap before rung ${corpus.label}/${variant}/N=${n}`);
-            const browser = await chromium.launch({
+            // LOCAL variant: seed OPFS in a throwaway browser FIRST, over the same persistent
+            // profile the measured browser will use. Seeding must fetch the bytes once, and that
+            // transient copy is precisely what this ladder measures — so it cannot happen inside
+            // the measured process. The measured browser only reads OPFS.
+            if (variant === "local") {
+              assertZeroBrowserFloor(`debt019 seed ${corpus.label}/N=${n}`);
+              const seeder = await chromium.launchPersistentContext(profileDir(corpus.label), {
+                channel: process.env.PIXEL_BROWSER_CHANNEL ?? "chrome",
+                args: [...LAUNCH_ARGS, "--unlimited-storage"],
+              });
+              const seedPage = await seeder.newPage();
+              await seedPage.route(`${origin}/__pull_probe`, (r) =>
+                r.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>seed</title><body>" })
+              );
+              await seedPage.goto(`${origin}/__pull_probe`);
+              await seedPage.evaluate(
+                `(${browserSrc})(${JSON.stringify({ n, variant: "local-seed", mediaOrigin, clips, pullFractions: PULL_FRACTIONS, fileBytes: FILE_BYTES })})`
+              );
+              await seeder.close();
+            }
+
+            assertZeroBrowserFloor(`debt019 ${corpus.label}/${variant}/N=${n}`);
+            const context =
+              variant === "local"
+                ? await chromium.launchPersistentContext(profileDir(corpus.label), {
+                    channel: process.env.PIXEL_BROWSER_CHANNEL ?? "chrome",
+                    args: [...LAUNCH_ARGS, "--unlimited-storage"],
+                  })
+                : null;
+            const browser = context ?? (await chromium.launch({
               channel: process.env.PIXEL_BROWSER_CHANNEL ?? "chrome",
-              args: ["--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights"],
-            });
-            const page = await browser.newPage();
+              args: LAUNCH_ARGS,
+            }));
+            const page = context ? await context.newPage() : await (browser as import("playwright").Browser).newPage();
             await page.route(`${origin}/__pull_probe`, (r) =>
               r.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>debt019</title><body>" })
             );
@@ -187,11 +217,16 @@ async function main() {
             await new Promise((r) => setTimeout(r, 2500)); // let allocation settle before sampling
             const heldMB = chromeMemoryMB();
             const s = info.stats;
+            const residency =
+              s.copiedBytes === undefined
+                ? ""
+                : ` copied ${(s.copiedBytes / 1048576).toFixed(0)}MB/${s.copiedSources}src` +
+                  ` passthru ${(s.passthroughBytes! / 1048576).toFixed(0)}MB/${s.passthroughSources}src`;
             const note = variant.startsWith("opfs")
               ? `fileBytes ${(s.blobBytes! / 1048576).toFixed(0)}MB sliced ${(s.indexSamples! / 1048576).toFixed(0)}MB procs ${baseProcs}`
               : variant === "blob"
                 ? `blobBytes ${(s.blobBytes! / 1048576).toFixed(0)}MB procs ${baseProcs}->${processCount("chrome.exe")}`
-                : `streaming ${s.streaming} frag ${s.fragmented} getFrame ${s.getFrameCalls} null ${s.nulls} decodes ${s.decodeCalls}`;
+                : `streaming ${s.streaming} frag ${s.fragmented} getFrame ${s.getFrameCalls} null ${s.nulls} decodes ${s.decodeCalls}${residency}`;
             rows.push({
               corpus: corpus.label,
               variant,
