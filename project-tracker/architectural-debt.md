@@ -1321,6 +1321,81 @@ re-ask) is untouched by `ac0d9f2`, which is a `WebglMediaLayer`-site-only change
 remains unsatisfied") is reworded above, not closed. Blocker 2 ("F's detector is rejected") is unaffected —
 `ac0d9f2` does not touch the shared boundary-detector question at all.
 
+**PHASE 1 READ (2026-08-12) — batched with DEBT-014 and DEBT-018. Three defects, not fewer. This one
+does NOT reproduce today and is NOT closed, and those are different sentences.**
+
+**Does it reproduce?** No, on the measured fixture — and the 2026-08-10 update already says why, in
+the right words: `ac0d9f2` removes the *denial*, not the *defect*. An unreachable Flarex loader is now
+ranked `preload` whenever it is unreachable, so a starved reachable source preempts it before a denial
+is ever recorded; `starvedSources` reads 0, the denied registry is empty, and the starvation probe
+returns `{"skipped": "no starved source"}`. Clause (a) has no subject on that fixture. **The mechanism
+underneath is untouched**: nothing added a path from `element` back to a session for a source that was
+genuinely refused, so the first fixture that produces a denial `ac0d9f2` cannot prevent will reproduce
+this exactly as it stood. Verified on this branch: `ac0d9f2`, `680ddfc`, `37ed422`, `14b66dc` are all
+ancestors of HEAD.
+
+**The remedy the entry's own header names is no longer the operative one, and that should not be
+rediscovered.** *Planned slice: ADR-020 §5 slice A* and the whole 2026-08-07 "the trigger and the
+permission rarely coincide" reading were refuted by the 2026-08-09/10 duty-cycle measurement in this
+entry (boundary coincidence 28/28 and 25/25; 30 re-ask attempts, every one holding a live permission;
+grants 0 for want of a victim, not of a trigger). A reader who stops at the header will build the wrong
+thing. Header and body disagree; the body is correct.
+
+**Current code state, checked rather than assumed:**
+- D's re-ask trigger is present and is the ORIGINAL React-render-gated inline effect
+  (`WebglMediaLayer.tsx:1098-1116`, deps `[mediaType, src, transportTime, transportPlaying]`).
+- Slice F's shared boundary detector **is not in the tree, on this branch or in its history**.
+  `admission-reacquire.ts` and `kernel-conformance.ts` do not exist under `apps/web/src`. F was
+  preserved as a design artifact in `1ffc898` (zero consumers, per L13) — and that commit is **not an
+  ancestor of this branch's HEAD**, so on `method-3-gpu-compositor` the module is absent outright, not
+  merely unused. Any plan that assumes a shared predicate exists here is wrong.
+- Blocker 3 is intact and unchanged: `useFlarexCompProxies.ts:331` still does
+  `URL.createObjectURL(stored.blob)` per attempt, so that acquire site still has no stable identity for
+  a permission to attach to across a re-ask.
+
+**What instrument would show it failing — and the entry's existing ones would NOT, today.** The
+readings are all present and unconditional (`__rfWcPool.starvedSources` / `starvedLongestMs` /
+`capMisses` / `admissionRecoveries` / `admissionPermanentDenials`, plus `__rfWcMode`); what is missing
+is a fixture that still denies. The instrument is therefore a FIXTURE requirement first:
+
+> **Every MediaIn must feed a node the viewer is showing** — so `ac0d9f2` has no unreachable loader to
+> preempt — with more such sources than the hardware cap (`MAX_WC_SESSIONS = 3`). Five or six reachable
+> sources on a 3-slot pool. A comp built from off-screen or unrouted loaders will read `starvedSources 0`
+> and prove nothing, which is exactly what the current fixture now does.
+
+Then the failure signature is: `capMisses > 0` **and** `starvedSources` sustained > 0 **and**
+`admissionRecoveries` 0 across ≥2 driven transport boundaries, with the same urls on `element` in
+`__rfWcMode` throughout. Report all four; a zero in any one of them alone is unattributable between
+"never denied", "denied and recovered", and "the instrument never looked" — the failure mode this entry
+has already hit three times by its own count.
+
+**An instrument that shows it already exists and runs on every `wc:gate` — this was not known.** The
+decoder gate's pool scenario forces a denial synthetically (preload A+B take the spare slots, C is
+refused at the reserved slot, a playhead lease preempts), and its accounting dump on a PASSING run
+today reads:
+
+```
+capMisses 2 · starvedSources 1 · admissionDenials 1
+capacityFreedWhileStarved 3 · capacityFreedMatchingPool 3
+releaseGrantEvents 1 · releaseEligibilityGrants 1 · releaseLeftUnpermitted 0
+admissionRecoveries 1
+admissionReacquireAttempts 0 · admissionReacquireGrants 0
+```
+
+Slice E's half works — capacity freed while starved, a permission granted, nobody left unpermitted.
+**`admissionReacquireAttempts 0` is clause (a) unmet, observed live, on a gate that runs in CI-style
+verification rather than on a hand-built census rig.** A permission was granted and no re-ask was ever
+made against it. That is a cheaper starting instrument than the fixture described above: it already
+denies, it already grants, and the one counter that would have to move for this entry to retire is
+already being printed and is already zero. What it cannot show is the *product* consequence — these
+are pool leases, not layers with a `<video>` fallback and a visible picture — so the reachable-MediaIn
+fixture is still needed for clause (a) proper. Two instruments, cheap one first.
+
+**Not the same defect as DEBT-018** — see the comparison table appended to that entry. Same visible end
+state, different decider, different gate, different status; and DEBT-018's A1 is the only observed proof
+anywhere that `wcReacquireEpoch` re-acquires successfully, which locates this entry's gap upstream of
+the vehicle rather than in it.
+
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
 - Status: **open — PARKED, deliberately not chased (2026-08-08)**
@@ -1358,6 +1433,49 @@ defects (below) which would confound any attempt to size it today.
 **Trigger (not a schedule):** investigate when either a user-visible host freeze on a Flarex clip is
 reported, or the ADR-013 fixture is re-run with an engagement gate and the instability in blocker 2 is
 resolved — whichever comes first.
+
+**PHASE 1 READ (2026-08-12) — batched with DEBT-013 and DEBT-018. Stays PARKED, and its evidence is
+now stale for a third reason nobody has recorded.**
+
+**Does it reproduce?** Unknown, and cannot be answered from the existing evidence. The entry rests on
+`tmp/adr013-real-project/{cold,old}{1,2,3}.json`, and those artifacts are **not in the tree** (the
+`adr013-real-project` directory is absent under `apps/worker/tmp`), so the six runs cannot be
+re-examined either.
+
+**The two blockers the entry names are still open, and there is now a THIRD.** Blocker 1 (the probe
+pressed play before WebCodecs engaged) and blocker 2 (run-to-run routing instability ~19×) are
+unchanged. The new one: **the evidence predates `ac0d9f2` (2026-08-10) by two days**, and `ac0d9f2`
+changes precisely the competition this entry says the host loses. It adds a `preemptible` prop, ungated
+by playback, that demotes an unreachable virtual loader to `preload` — which is a victim
+`reserveSession` can take at acquire time, on behalf of exactly the kind of source this entry watches
+being refused. Whether Host C's host clip still lands on `element` in 6/6 arms after that change is
+unmeasured. **Any re-run must therefore be a fresh measurement, not a comparison against the recorded
+numbers.**
+
+**The routing rule itself is unchanged**, checked directly: `VideoPreview.tsx:3857-3862` still reads
+`(flarexSwDecodeOverride() ?? true) && isFlarexVirtualLayerId(layer.id) && flarexConcurrentLoaders > 1
+&& flarexLoaderRate(layer) <= 1`. So the `> 1` threshold this entry was written *around* is intact and
+its "unmeasured" caveat still stands.
+
+**Is it an instance of DEBT-013? Probably not — and here is the discriminator, which is one reading
+nobody has taken.** The pool's caps are `MAX_WC_SESSIONS = 3` hardware, `MAX_WC_SOFTWARE_SESSIONS = 3`,
+`MAX_WC_TOTAL_SESSIONS = 4`, `HARDWARE_RESERVED_SLOTS = 1` (`preview-frame-pool.ts:90-119`). Host C's
+regime is **two** decode consumers — the host and one loader. Two against a 3/3/4 budget cannot be a
+capacity refusal, so the host's `element` routing is very unlikely to be an admission denial at all,
+which would make this a different defect from DEBT-013 rather than an instance of it. That is an
+inference from the constants, not a measurement, and the measurement is cheap:
+
+> **Read `__rfWcPool.capMisses` and the denied registry at the moment the host lands on `element`.**
+> `capMisses` 0 with the host on `element` ⇒ nothing refused it ⇒ this is an acquisition-ORDERING or
+> attach defect, and the two entries stay separate. `capMisses` > 0 ⇒ the host was genuinely denied
+> ⇒ this collapses into DEBT-013 and should be merged rather than chased alone.
+
+Any such run must also fix blocker 1 (`awaitWebCodecsEngaged`, read `__rfRouting` before pressing play)
+and answer blocker 2 by reporting a distribution over ≥3 arms rather than a mean — this repo's own
+measurement-preconditions rule, and the reason the original six runs cannot be trusted.
+
+**Trigger unchanged, and deliberately not converted into a schedule here.** It remains: a user-visible
+host freeze on a Flarex clip, or an ADR-013 re-run with the engagement gate and blocker 2 resolved.
 
 ### DEBT-015 — CLASS: an error path that reports COMPLETION, so a failure ships as product output
 
@@ -2139,6 +2257,46 @@ settles on `element`. **Status: fixed, all three acceptance links (A1/A2/A3) con
 ordinary behaviour, A3 by injection because ordinary behaviour could not reach it. That distinction —
 which link needed which method — is worth keeping on the record rather than collapsing into a single
 "tested" checkbox.
+
+**PHASE 1 READ (2026-08-12) — this entry is RETIRABLE, and its own header is the only thing still
+saying otherwise.**
+
+Read as part of a three-entry batch (DEBT-013/014/018) taken together because they share a subsystem
+and a symptom. Findings for this one:
+
+**It does not reproduce, and the fix is present and intact.** `WebglMediaLayer.tsx` still carries the
+whole mechanism the 2026-08-09 update describes: `MAX_PAUSED_WC_RECOVERY_ATTEMPTS = 3` (`:85`), the
+`scheduleWcPausedRecovery` ladder with its `[150, 300, 600]`ms backoff and its named exhaustion warning
+(`:2180-2192`), the call from the paused branch of the stall guard (`:2398`), and the PLAYING branch's
+`wcBailedSources.add(src)` left untouched beside it (`:2394`). Nothing since has moved it.
+
+**The header contradicts the entry's own last update, and the header is the stale one.** The Status
+line still reads *"fixed — one acceptance link (A3, exhaustion) remains observed-never, not disproven"*
+and the Expiry condition still names A3 as the open half. The 2026-08-09 update closes exactly that:
+A3 was confirmed by injection (`MAX_PAUSED_WC_RECOVERY_ATTEMPTS = 0`, token
+`TEMPORARY-DEBT018A3-INJECTION`, reverted and proven clean), the exhaustion line logged, no attempt
+scheduled, the layer settled on `element`. **The expiry condition as written is met.** Recommendation:
+retire in place, on that evidence. Left as a recommendation rather than done here, because retiring an
+entry is a founder call and this pass was a read.
+
+**Not the same defect as DEBT-013, and the difference is worth keeping.** Both end in the same visible
+state — a source on `<video>` for the rest of the session with no way back — which is why batching them
+was reasonable. They are not one mechanism:
+
+| | DEBT-013 | DEBT-018 |
+|---|---|---|
+| who decides | the POOL, on a cap it cannot satisfy | the LAYER, abandoning a session it already holds |
+| contention | required (more sources than slots) | none — single source, spare capacity |
+| what recovery needs | a permission AND a free slot AND a trigger | only a retry |
+| status | open, clause (a) unmet | fixed, all three links confirmed |
+
+**What they DO share is the recovery vehicle, and that is the useful finding.** DEBT-018's ladder
+re-enters the same lease-acquire effect through `wcReacquireEpoch` that ADR-020 slice D introduced for
+starved sources — it does not add an acquisition path. So DEBT-018's A1 (recovery measured 1380ms and
+1608ms after a demoting seek, twice, no reload) is **the only end-to-end demonstration anywhere in this
+programme that `wcReacquireEpoch` actually re-acquires and succeeds.** DEBT-013 has never observed one.
+That matters for how DEBT-013 is read: its gap is upstream of the vehicle — permission, victim, and a
+fixture that still denies — not in the re-acquire itself. Cross-referenced rather than merged.
 
 ### DEBT-019 — a source provider holds the WHOLE file in memory, so residency scales with clip length
 
