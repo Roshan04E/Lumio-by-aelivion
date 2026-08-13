@@ -16,6 +16,7 @@ import { markHotSpot } from "../lib/perfDiagnostics";
 import { STILL_PROXY_EDGES, getStillProxyBlob } from "../editor/performance/stillProxyStore";
 import { recordMediaFrame } from "../editor/performance/frame-stats";
 import { acquirePreviewFrameProvider, isAdmissionEligible } from "../playback/preview-frame-pool";
+import { acquireFlarexSourceProvider } from "../playback/flarex-source-providers";
 import { getLivePlaybackTime, subscribePlaybackClock } from "../playback/playback-clock";
 import { setMediaPlaybackRate } from "../playback/media-rate";
 import { ELEMENT_FALLBACK_MAX_LAG_S, sourceFramePeriodSeconds, stalenessSeconds } from "../playback/temporal-coherence";
@@ -341,6 +342,23 @@ interface BaseProps {
    * only the terminal draw is replaced by a publish. See scene-media-source.ts.
    */
   sceneMediaSink?: SceneMediaSink | undefined;
+  /**
+   * ADR-021 step 2 — acquire this layer's provider from the byte-budgeted Flarex set instead of the
+   * session-capped preview pool. Set for Flarex virtual loaders (asset-source `MediaIn`) and nothing
+   * else.
+   *
+   * The FRAME PATH IS IDENTICAL either way: both hand back a `FrameProvider` and every request below
+   * goes through `provider.getFrame(t)`. Only ADMISSION differs — the pool caps concurrent decoder
+   * SESSIONS at 4 with one hardware slot reserved, which is right for the timeline and puts a hard
+   * ceiling of 3 on a comp's loaders (DEBT-013 clause (a)); the Flarex set caps RESIDENT BYTES and
+   * evicts, which is right for a compositor whose live-source count is a property of the user's graph.
+   *
+   * Routing it here rather than inside `acquirePreviewFrameProvider` is deliberate: the pool's caps are
+   * load-bearing for the timeline and adding an exemption to them is how "two caps that merely sum"
+   * happened last time (see `MAX_WC_TOTAL_SESSIONS`). This is a different admission authority, not a
+   * hole in that one.
+   */
+  pullSeam?: boolean | undefined;
   /**
    * DEMOTED, not removed (ADR-012 I-16/I-24, slice S3.5) — this source still exists, still holds its
    * decode session, still holds its last frame, and is simply not being pulled from right now.
@@ -932,7 +950,13 @@ export const WebglMediaLayer = forwardRef<HTMLVideoElement | null, WebglMediaLay
       }
       const wcLease = forceElementPath
         ? null
-        : acquirePreviewFrameProvider(src, {
+        : props.pullSeam
+          ? // ADR-021 step 2. No priority, no contribution, no borrow: the byte budget is the whole
+            // admission rule, and a loader that stops mattering demotes itself by not pulling. The
+            // options the pool needs to arbitrate scarcity have no counterpart here because there is
+            // no slot to arbitrate — that IS the fix.
+            acquireFlarexSourceProvider(src, { preferSoftware: props.preferSoftwareDecode })
+          : acquirePreviewFrameProvider(src, {
             priority: hiddenAtMountRef.current ? "preload" : "playhead",
             onPreempted: () => wcFallbackRef.current(),
             // Virtual loaders decode in SOFTWARE so they don't contend with the host for the one

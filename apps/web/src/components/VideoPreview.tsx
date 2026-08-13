@@ -251,6 +251,50 @@ function flarexSwDecodeOverride(): boolean | null {
   }
   return flarexSwDecodeFlag;
 }
+
+/**
+ * MEASUREMENT CONTROL for ADR-021 step 2's frame-provider seam. `?flarexPullSeam=0` routes Flarex
+ * virtual loaders back to the session-capped `preview-frame-pool`; absent or `=1` is the shipped
+ * behaviour (the byte-budgeted provider set).
+ *
+ * WHY A CONTROL AND NOT A ROLLOUT FLAG — the distinction matters, because ADR-021 §6 explicitly rejects
+ * "building the new engine alongside the old and switching at the end". Nothing here is built alongside:
+ * the pull path is the SAME `getFrame(t)` path in both arms, and `=0` simply asks the old ADMISSION
+ * authority instead of the new one. It exists because the step's acceptance claim is *"the ceiling of 3
+ * disappears"*, and a claim about a ceiling is only demonstrated by a run in which the ceiling is
+ * present in one arm and absent in the other, with ONE variable between them. Asserting it from
+ * constants would be exactly the "proof by a signal the subject never emits" this repo keeps paying for.
+ *
+ * Delete it together with the measurement it exists to settle — like `flarexSwDecode`, and unlike
+ * `kernelDiagnostics`, which was retained as a permanent observability control.
+ *
+ * Published unconditionally as `__rfFlarexPullSeam`, including when the param is absent: a symbol that
+ * only appears once the flag is set cannot tell "flag off" from "build predates the flag", and that
+ * exact confusion has already voided a full A/B round in this file (see `flarexSwDecodeOverride`).
+ */
+let flarexPullSeamFlag: boolean | undefined;
+function flarexPullSeamEnabled(): boolean {
+  if (flarexPullSeamFlag === undefined) {
+    try {
+      flarexPullSeamFlag = new URLSearchParams(window.location.search).get("flarexPullSeam") !== "0";
+    } catch {
+      flarexPullSeamFlag = true;
+    }
+    try {
+      (window as unknown as { __rfFlarexPullSeam?: boolean }).__rfFlarexPullSeam = flarexPullSeamFlag;
+    } catch {
+      /* ignore */
+    }
+  }
+  return flarexPullSeamFlag;
+}
+// Read EAGERLY at module load, not lazily at first use. `flarexPullSeamEnabled()` is only called while
+// rendering a virtual loader row, so on a project with no Flarex comp yet — which is every project a
+// probe reaches before it builds its fixture — the symbol did not exist and a build-identity check read
+// "the bundle predates the seam" on a bundle that contains it. A build-presence test must be answerable
+// before the feature is exercised, or it is testing the fixture rather than the build.
+flarexPullSeamEnabled();
+
 /**
  * The peak |rate| a Flarex virtual loader is asked to traverse its source at — 1 for every loader that
  * is not retimed, which is every loader that existed before TimeSpeed (ADR-011).
@@ -3824,6 +3868,11 @@ const PreviewLayer = memo(function PreviewLayer({
             // leaving the graph (S3.3). Undefined for ordinary clips — they are not declared sources
             // yet, and a binding the Media Manager never declared is one the kernel must refuse.
             decoderSourceId={isFlarexVirtualLayerId(layer.id) ? layer.id : undefined}
+            // ADR-021 step 2: a Flarex loader's provider comes from the BYTE-budgeted set, not from the
+            // session-capped preview pool. Same `getFrame(t)` pull, different admission authority — which
+            // is what removes the loader ceiling of 3 (DEBT-013 clause (a)). Ordinary timeline clips keep
+            // the pool: its caps are correct for them and are not being relaxed.
+            pullSeam={isFlarexVirtualLayerId(layer.id) && flarexPullSeamEnabled()}
             // S3.5: demoted, not deleted. The session and the last frame are kept; only the pull stops.
             suspended={suspended}
             // Priority-only demotion for an unreachable loader — keeps pulling, just yields its slot

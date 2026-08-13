@@ -1523,6 +1523,20 @@ for reasons unrelated to itself.
 > reading for its SHAPE (one predicate, delivered by call not by re-render-triggering state) even
 > though its rationale is dead.
 
+**GENERALIZATION (2026-08-13), found building ADR-021 step 2 and stronger than this entry's original
+claim.** DEBT-013 as registered is about the SESSION pool specifically — "a source denied a slot at
+mount is never re-admitted". Building `apps/web/src/playback/flarex-source-providers.ts` (a BYTE
+budget, no sessions, no cap) reproduced the identical shape inside its own fix, at first construction:
+a comp mounting 12 MediaIns in one tick started 12 constructions together, each holding a PROVISIONAL
+charge before its real size was known, none yet evictable (nothing was live to evict), and the budget
+had no move left but to refuse — 9 of 12 denied, with the budget sitting at 757 MB of 768 MB and
+`evictions: 0`. Session count was never the cause; **the cause is any admission authority judging a
+BURST of simultaneous requests against a budget that starts empty**, and a byte budget is exactly as
+exposed to it as a session cap. Work in progress on `artifact/adr021-step2-pullseam`; not retired here,
+because the seam itself has not shipped and this entry's own pool half is unaffected. Recorded so the
+next thing that admits under any kind of budget — the frame cache's I-P9 eviction, a future GPU-memory
+budget — starts from "serialize or stagger the burst" instead of re-discovering it.
+
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
 - Status: **RETIRED 2026-08-12** (see the closing update at the end of this entry)
