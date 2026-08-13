@@ -396,6 +396,12 @@ the export.
   `.woff2` (`font-outlines.ts:35`), so a `.woff2` upload needs decompression before the name-table
   parse and before any warp use.
 
+- **Family grouping is the seam S2.7 left you** (581cbd1). A `source: "user"` font has no known
+  siblings, so today both weight controls correctly report "we don't know what other cuts this has"
+  and refuse to turn bold **on** while still allowing it **off**. Giving uploaded fonts a family
+  group is what closes that — and T-18 governs it: the grouping resolver must refuse across styles
+  rather than return a nearest match, or an uploaded roman silently answers a bold request.
+
 **Blocked on:** nothing from OQ4 — closed (D4a), and moot here anyway since user fonts are not
 redistributed. OQ7 (a collaborator who cannot relink) **does** need an answer before sharing a
 project with user fonts is a supported flow.
@@ -549,6 +555,14 @@ from S4 is what makes that expressible rather than a pile of runtime conditional
 
 **Scope:** builds on the existing `TextRun`s (`getCompositionTextRuns`, composition-style.ts:746)
 and the existing keyframe evaluator (`animation.ts`) — no new animation system.
+
+**The variable-axis half needs a different file than S2.7 pins** (581cbd1). Cairo is a variable
+family, but Google's index enumerates *instances* and its CDN serves a static instance per weight —
+which is why S2.7 sees nine weights and correctly picks between files. Animating weight that way is
+a different `fileHash` per frame, and T-8 makes each one a different raster. S9 needs the one
+variable file plus `font-variation-settings`. **An assertion in the face tests fails loudly if
+someone "fixes" the enumeration** to collapse those instances; that assertion is protecting this
+stage, not the last one.
 
 **Blocked on OQ6, which is a correctness question, not a polish one:** an animated "character" must
 be a **grapheme cluster**, never a code unit, or combining marks, emoji ZWJ sequences and Devanagari

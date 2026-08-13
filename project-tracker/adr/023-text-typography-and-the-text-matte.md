@@ -631,6 +631,17 @@ and on a machine that does have the font it fails honestly rather than passing v
 generalises to every remaining font stage — S2.5's previews must be proven to render in the face
 they name, and "it looked right on my machine" is the same fallacy in a different costume.
 
+**T-18 — A nearest-match font resolver answers "what do I show". It must never answer "what do I
+become".** (S2.7, 581cbd1.) `catalogueFace` and `fontIndexFace` both fall back to the nearest
+weight, which is right for display — a picker row must draw *something* — and a lie the moment the
+same call decides which face a layer pins: asking either for Anton 700 returns Anton 400, and the
+Bold toggle silently does nothing while reporting success. **Identity resolution must refuse across
+styles and return `undefined`**, and the refusal must be re-checked at the write site, because a
+plan is reachable from code that never consulted the control. Two pre-existing instances of the same
+hazard were closed alongside it: a bundled fast path served the roman under an italic request, and a
+family topping out at 700 asked for 900 would have sent the mirror after a face that does not exist.
+Whenever a font resolver gains a second caller, ask which of the two questions it is being asked.
+
 **T-14 — No feature may re-open the shaping boundary that D9a closes.** (D6a, OQ6) Any operation
 that transforms text below the level of a shaping run — per-character animation is the known case,
 because each animated grapheme cluster becomes its own shaping context and cursive joining breaks —
