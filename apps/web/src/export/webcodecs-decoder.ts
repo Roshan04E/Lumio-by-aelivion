@@ -849,6 +849,106 @@ export async function probeDecodableEndSeconds(blobOrUrl: Blob | string): Promis
   return endMicros > 0 ? endMicros / 1_000_000 : null;
 }
 
+/**
+ * DIAGNOSTIC ONLY — build a provider PARTIALLY, stopping after one construction stage.
+ *
+ * Exists for DEBT-019's residual attribution and nothing else. No product code calls it, so it is
+ * tree-shaken out of the app bundle; it lives here rather than in a probe because the point is to
+ * price THE REAL TERMS. Every mis-attribution in DEBT-019 came from measuring something adjacent to
+ * the thing being named — a working-set delta asked "what", a residual attributed by subtraction, a
+ * replica of the demux measured instead of the demux. A probe that re-implemented these stages would
+ * be the same error in a new costume.
+ *
+ * Stages are cumulative, in construction order, and each holds exactly what a real provider holds at
+ * that point:
+ *   bytes     — `sourceBlobFor` only (registry pass-through / ranged remote / whole-file fetch)
+ *   index     — + `demuxIndex` (mp4box parse → typed sample columns, `track`, `description`)
+ *   window    — + `createBlobChunkWindow`, materialized at `atSample` (the ≤24 MB feed window)
+ *   configure — + a configured `VideoDecoder` that has never been fed a chunk
+ * Differencing the stages across two corpora that vary only in duration prices each term per second
+ * of source. The full provider is the existing `createWebCodecsVideoSource` — not re-declared here.
+ */
+export type WcAblationStage = "bytes" | "index" | "window" | "configure";
+
+export interface WcAblationHandle {
+  stage: WcAblationStage;
+  /** Logical size of the byte source, whether or not those bytes are resident. */
+  byteSourceSize: number;
+  /** 0 for the `bytes` stage (no demux ran). */
+  sampleCount: number;
+  dispose(): void;
+}
+
+export async function wcAblationBuild(url: string, stage: WcAblationStage, atSample = 0): Promise<WcAblationHandle | null> {
+  if (typeof VideoDecoder === "undefined" || typeof EncodedVideoChunk === "undefined") return null;
+  let blob: ByteSource;
+  try {
+    blob = await sourceBlobFor(url);
+  } catch {
+    return null;
+  }
+  // Held so the stage's retention is the stage's, not whatever survives a closure the optimizer
+  // decided to keep. Each is assigned only when its stage is reached.
+  let held: { blob: ByteSource; demuxed?: DemuxedIndex; win?: ChunkWindow; decoder?: VideoDecoder } = { blob };
+  if (stage === "bytes") {
+    // STEADY STATE, not the instant after construction. `probeAndBuildRangedSource` holds its 4 MB
+    // (or whole-file, for a source smaller than that) 206 body in `primed` so that `demuxIndex`'s
+    // first `slice(0, INDEX_SLICE_BYTES)` costs no second request — and the prime is released by that
+    // very call. A stage that stops BEFORE the demux therefore retains 100 probe bodies that no real
+    // provider ever holds: measured 207 MB of post-GC JS heap at N=100 on the 3s corpus, which is
+    // exactly 100 x 1.9 MB of unreleased primes. That is this probe's residency, not a provider's.
+    // Consume the prime the way the next stage would, and discard the bytes.
+    await blob.slice(0, INDEX_SLICE_BYTES).arrayBuffer();
+    return { stage, byteSourceSize: blob.size, sampleCount: 0, dispose: () => void (held = { blob }) };
+  }
+
+  let demuxed: DemuxedIndex | null;
+  try {
+    demuxed = await Promise.race([demuxIndex(blob), rejectAfter(20_000)]);
+  } catch {
+    return null;
+  }
+  if (!demuxed || !demuxed.index.length) return null;
+  held.demuxed = demuxed;
+  const sampleCount = demuxed.index.length;
+  const finish = (): WcAblationHandle => ({
+    stage,
+    byteSourceSize: blob.size,
+    sampleCount,
+    dispose() {
+      held.win?.dispose();
+      try {
+        held.decoder?.close();
+      } catch {
+        /* already closed */
+      }
+      held = { blob };
+    },
+  });
+  if (stage === "index") return finish();
+
+  const win = demuxed.ramChunks ? createRamChunkWindow(demuxed.ramChunks) : createBlobChunkWindow(blob, demuxed.index);
+  held.win = win;
+  await win.ensure(Math.max(0, Math.min(atSample, sampleCount - 1)));
+  if (stage === "window") return finish();
+
+  const decoder = new VideoDecoder({ output: (frame) => frame.close(), error: () => {} });
+  held.decoder = decoder;
+  const { track, description } = demuxed;
+  const config: VideoDecoderConfig = { codec: track.codec };
+  const w = track.video?.width ?? track.track_width ?? 0;
+  const h = track.video?.height ?? track.track_height ?? 0;
+  if (w) config.codedWidth = w;
+  if (h) config.codedHeight = h;
+  if (description) config.description = description;
+  try {
+    decoder.configure(config);
+  } catch {
+    return null;
+  }
+  return finish();
+}
+
 export async function createWebCodecsVideoSource(
   url: string,
   opts: {

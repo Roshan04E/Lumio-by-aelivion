@@ -2730,12 +2730,13 @@ vehicle works, and 013's gap is upstream of it.
 
 ### DEBT-019 — a source provider holds the WHOLE file in memory, so residency scales with clip length
 
-- Status: **open, narrower.** Remote range-paging SHIPPED (2026-08-13) — the product-breaking
-  ceiling (50–100 concurrent 2-minute remote sources) is closed; see the closing update at the end of
-  this entry. What remains open: the ~15 MB/source unattributed residual, still **PARKED WITH A
-  TRIGGER (2026-08-12)** on ADR-021 step 2's I-P6 budget and now confirmed present on BOTH source
-  kinds (not local-only, see below); and the untouched pass-through mint sites this entry flags but
-  does not fix (`useFlarexCompProxies.ts:331` etc.).
+- Status: **open, narrower again.** Remote range-paging SHIPPED (2026-08-13). The ~15 MB/source
+  residual is **ATTRIBUTED (2026-08-13)** and its park is LIFTED — it is decoded frames held in the
+  decoder's own bounded output queue plus the chunk window, priced by frame GEOMETRY and
+  **duration-independent**; see the attribution update at the end of this entry. What remains open is
+  smaller and different: a ~4.8 MB/source browser-internal decode floor with no JS object behind it
+  (not actionable), and the untouched pass-through mint sites this entry flags but does not fix
+  (`useFlarexCompProxies.ts:331` etc.).
 - Registered: 2026-08-10 (surfaced by the ADR-021 pull-model feasibility measurement, not by a slice)
 - Reason: `fetchSourceBlob` (`apps/web/src/export/webcodecs-decoder.ts`) materialises the entire
   source file as a `Blob` and the provider retains it for its whole lifetime, because the chunk
@@ -2763,12 +2764,13 @@ vehicle works, and 013's gap is upstream of it.
   whatever authority enforces ADR-021's I-P6 budget. A remote source whose Range probe fails degrades
   to `copiedBytes` honestly (see the close below) rather than silently reinstating this debt. This
   does NOT claim total residency is duration-flat: a ~15 MB/source residual at N=100 is real,
-  measured, UNATTRIBUTED, and — as of 2026-08-13 — present at a closely matching ratio on BOTH source
-  kinds, not a local-only artifact. See the park below, which is what keeps this entry open rather
-  than retiring on the restated condition alone.
-- Planned slice: none yet for the residual. ADR-021 step 2 cannot ship its I-P6 budget honestly while
-  that term is unattributed, so sizing it is a likely prerequisite rather than a follow-up. Remote
-  range-paging itself is DONE, not planned — see the close below.
+  measured, and — as of 2026-08-13 — present at a closely matching ratio on BOTH source kinds, not a
+  local-only artifact. **No longer unattributed:** the attribution update at the end of this entry
+  names it (decoded frames + the chunk window, priced on frame geometry, duration-independent) and
+  leaves ~4.8 MB/source as a browser-internal decode floor.
+- Planned slice: none. The residual's sizing was the prerequisite ADR-021 step 2 was waiting on and it
+  is DONE — that step's I-P6 budget is charged on the measured per-provider figure. Remote
+  range-paging is likewise DONE, not planned — see the close below.
 - Tracking issue: —
 - Detection: any new consumer that constructs providers per *source* rather than per *playing clip*,
   without first asking what the resident-byte ceiling is. Concretely: a `createFrameProvider` call
@@ -3066,7 +3068,10 @@ sites are `useFlarexCompProxies.ts:331`, `sourceProxyStore.ts:239/266/289`, `sou
 and the picked-`File` sites in `CreatePage.tsx`/`EditorPage.tsx`.
 
 **PARKED WITH A TRIGGER (2026-08-12): the ~15 MB/source unattributed residual blocks ADR-021 step 2's
-I-P6 budget, and nothing before it.**
+I-P6 budget, and nothing before it.** — *superseded 2026-08-13: the trigger fired and the residual is
+attributed; see the attribution update at the end of this entry. The reasoning below is retained
+because it is what made this a park rather than a stall, and because it correctly predicted both the
+instrument and the two failure modes that instrument would hit.*
 
 Founder call, and the reasoning is worth keeping because it is what makes this a park rather than a
 stall. The residual is real and is correctly recorded above as UNATTRIBUTED. But it only bites at
@@ -3290,6 +3295,126 @@ still not scheduled. The fragmented-MP4 fallback is unchanged and remains O(file
 kinds by construction (unrelated to this slice — it never held a Blob to page in the first place). The
 untouched pass-through mint sites (`useFlarexCompProxies.ts:331`, `sourceProxyStore.ts:239/266/289`,
 `sourceProxyEngine.ts:737`) are unaudited, exactly as this entry already flagged.
+
+---
+
+**THE RESIDUAL IS ATTRIBUTED (2026-08-13). It is DECODED FRAMES, and it is not duration-scaling —
+the ladder that framed it as a duration effect was measuring a property of its own access pattern.**
+
+The trigger fired: ADR-021 step 2 is being built, so the residual was sized before its I-P6 budget was
+written rather than after. Instrument: `apps/worker/tmp/debt019-attribution-probe.ts` plus
+`debt019-attribution-browser.js`, running **exactly the two things this entry's own park specified** —
+a per-term ablation over the real provider internals, and a heap snapshot with retainer paths. Neither
+alone would have been enough, and the park was right about which error each one prevents.
+
+**The ablation runs the REAL internals, not a replica.** `wcAblationBuild`
+(`apps/web/src/export/webcodecs-decoder.ts`) builds a provider partially, stopping after one
+construction stage, calling the same `sourceBlobFor` / `demuxIndex` / `createBlobChunkWindow` /
+`VideoDecoder.configure` the product calls. A probe that re-implemented those stages would have been
+this entry's own mistake in a new costume — measuring something adjacent to the thing it names.
+
+**PART A — the ablation. N=100, 1280x720, working-set MB per source, two corpora differing only in
+duration:**
+
+| stage | 3s | 120s | ratio |
+|---|---|---|---|
+| byte source only | 2.42 | 3.14 | 1.30× |
+| + sample index | 2.46 | 2.87 | 1.17× |
+| + chunk window | 2.76 | 3.02 | 1.09× |
+| + configured `VideoDecoder` | 2.95 | 3.60 | 1.22× |
+| + **ONE** pull | **22.40** | **23.39** | **1.04×** |
+| + **FOUR** pulls | **13.55** | **28.61** | **2.11×** |
+
+Read the last two rows together, because that is where the whole answer is.
+
+- **Everything before decode is under 1 MB/source, on both corpora.** Byte source, sample index, chunk
+  window and decoder allocation together account for **0.65 MB** of the ~15 MB/source gap. The terms
+  this entry is named for are, finally and quantitatively, not the problem.
+- **One pull costs ~20 MB/source and the two corpora AGREE to 1.04×.** A provider that has served a
+  frame holds ~20 MB regardless of whether its clip is three seconds or two minutes. **The dominant
+  term is duration-INDEPENDENT**, which is precisely why four rounds of duration ladders could not
+  name it: the axis they varied is not the axis it lives on.
+- **The gap appears only at FOUR pulls** (2.11×, a difference of 15.06 MB/source — the residual,
+  reproduced). Four pulls spread across a 120s clip cross GOPs and land the decoder mid-stream; four
+  pulls across a 3s clip run past EOS, where the flush drains the output queue. So the "duration
+  effect" is a **multi-point-access effect**, and duration only decides whether four pulls happen to
+  straddle the end of the file.
+
+**PART B — the heap snapshot with retainer paths. N=25, full provider.** This is the half that says
+WHAT, and it starts by ruling out the place everyone looks first:
+
+> **The JS heap is exonerated.** Total JS self size: 3s **21.0 MB**, 120s **23.3 MB** — a difference of
+> **0.092 MB/source** against a working-set difference of ~15. Nothing on the JavaScript heap holds
+> this. A `VideoFrame`'s pixels are renderer/GPU memory with a ~100-byte JS shell, so the byte columns
+> of a heap snapshot are *structurally blind* to the term — which is why the snapshot is read for
+> INSTANCE COUNTS and retainer paths, not for sizes.
+
+| native class | 3s (count) | 120s (count) | per source 3s | per source 120s |
+|---|---|---|---|---|
+| `VideoFrame` | 50 | 216 | **2.00** | **8.64** |
+| `EncodedVideoChunk` | 150 | 1392 | 6.00 | 55.68 |
+| `VideoDecoder` | 25 | 24 | 1.00 | 0.96 |
+
+Retainer paths, walked on the 120s snapshot (abbreviated to the load-bearing hops):
+
+```
+native:VideoFrame         Window → Array(held) → Object(provider) → closure:dispose
+                                 → Context → Array → VideoFrame
+native:EncodedVideoChunk  Window → Array(held) → Object(provider) → closure:dispose → Context
+                                 → Object → closure:dispose → Context → Map → array → EncodedVideoChunk
+```
+
+Both terminate inside the provider's own closure, and both name a specific structure:
+
+- the **`Array`** holding `VideoFrame`s is the decoder's decoded-output `queue` plus `current`
+  (`webcodecs-decoder.ts`). **8.64 per provider is exactly its documented steady state** —
+  `OUTPUT_MAX` (8) queued outputs plus the current frame. Not a leak: the designed feed window,
+  correctly bounded, and simply never accounted for.
+- the **`Map`** holding `EncodedVideoChunk`s is `createBlobChunkWindow`'s `loaded`
+  (`webcodecs-decoder.ts:758`). 55.68 chunks/source sits inside `WINDOW_MAX_SAMPLES` (96) — again
+  bounded as designed, and again unaccounted.
+
+**Pricing the two named holders against the 15.06 MB/source gap:**
+
+| holder | Δ instances/src | unit | Δ MB/src |
+|---|---|---|---|
+| `VideoFrame` (`queue` + `current`) | +6.64 | 1.38 MB (1280×720 NV12) | **≈ 9.2** |
+| `EncodedVideoChunk` (`loaded` window) | +49.68 | 21.3 KB (76.8 MB / 3600 samples) | ≈ 1.1 |
+| **named total** | | | **≈ 10.3 of 15.06** |
+
+**The remaining ~4.8 MB/source is stated as unnamed rather than attributed by subtraction**, because
+that is the error this entry made twice. What can be said about it positively: it is not on the JS
+heap (part B), it is not any pre-decode term (part A ≤ 0.65 MB), and `native:blink::DecoderTemplate
+<blink::VideoDecoder>` appears in the graph carrying no size — i.e. it is decoder-internal memory
+(reorder buffer, GPU-side frame backing) with no JS object to count. It is a floor the browser charges
+per decode session, not a defect with a fix.
+
+**CONSEQUENCE FOR THE I-P6 BUDGET — the reason this park existed.** The budget must be charged per
+provider on **frame GEOMETRY**, not on clip duration and not on file size:
+
+> `providerBytes = fixed(≈3 MB) + PINNED_FRAMES(16) × width × height × 1.5`
+
+16 rather than the snapshot's 8.64 is deliberate and is documented at the constant
+(`apps/web/src/playback/flarex-source-providers.ts`): the instance count and the working set disagree
+by ~40% because of memory with no JS object, and a budget built on the count would over-admit by that
+much. The charge follows the working set, which is the thing that actually kills the tab.
+
+**Status change: this entry's remaining open item is now SIZED, and the park is LIFTED.** What it was
+blocking has been delivered — ADR-021 step 2 can and does state its budget in bytes with a measured
+per-provider charge. What remains genuinely open here is smaller and different from what the header
+said: the ~4.8 MB/source browser-internal decode floor, which is not actionable, and the untouched
+pass-through mint sites, which are.
+
+**Instrument notes, both of which cost a run and would cost the next investigator one too:**
+- **A working-set sample must be taken after a forced GC.** The first ablation came back
+  NON-MONOTONIC (`ab-bytes` 448 MB > `ab-index` 267 MB at N=100), which is impossible for cumulative
+  retention: the sample was dominated by uncollected transients. `HeapProfiler.collectGarbage` twice,
+  then a 3s settle, before reading. Without it the stage costs measure GC timing.
+- **A stage that stops early can retain something no real provider holds.** The `bytes` stage read
+  207 MB of post-GC JS heap at N=100 on the 3s corpus — exactly 100 × 1.9 MB of
+  `probeAndBuildRangedSource`'s primed 206 body, which is released by `demuxIndex`'s first slice and
+  therefore never held in production. The stage now consumes the prime the way the next stage would.
+  Both readings looked like findings and neither was.
 
 ---
 
