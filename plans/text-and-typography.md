@@ -126,6 +126,15 @@ warp comes back for shaping-dependent scripts, that anchor must resolve logical 
   `unicode-bidi: plaintext`; an absent `direction` emits neither property, unchanged from today.
 - `render:baseline` at zero tolerance across the commit. The legacy-absent path must be byte-
   identical — this is the whole claim D6a makes about existing projects, and it is checkable.
+- **The falsifier (T-15), non-optional:** render the fixture at `"rtl"`, then at `"ltr"`, and assert
+  the two renders DIFFER. S1 proved a parity gate cannot see a field that never reached the manifest
+  — both renderers read the same bag and agree at 0.000% on an answer neither was given.
+- **Fold in the structural fix while adding `direction`.** `buildRenderManifest`'s text bag is a
+  hand-written field list in two places (`render-templates/src/index.ts:404-433`, :509). S5 adds ~6
+  more properties; every one is an omission away from S1's near-miss, twice. Derive the copy from a
+  declared key set with a compile-time exhaustiveness constraint — `TEXT_STYLE_FIELD_KEYS`
+  (`text-styles.ts:10-29`) is the pattern — so a missing field is a typecheck failure, not a
+  silent divergence found by luck. This is the last cheap moment to do it.
 
 **Risk:** low-moderate. The manifest addition is small and the CSS is engine-native. The real risk
 is the alignment change leaking into existing projects, which `render:baseline` is the instrument

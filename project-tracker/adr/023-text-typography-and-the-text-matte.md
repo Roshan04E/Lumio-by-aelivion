@@ -534,6 +534,32 @@ renderer infers direction from content at paint time.** (D6a) `"auto"` is delega
 via `unicode-bidi: plaintext`; we do not implement first-strong resolution. An absent `direction`
 renders as `ltr` with physical alignment, permanently and without migration.
 
+**T-15 — Every new text field ships with a falsifier: flip it and prove the render CHANGES.**
+(S1, 2026-08-13 — learned the hard way.) A renderer-parity gate compares two consumers that read the
+same manifest bag; it therefore cannot detect a field that never reached the bag. Both renderers
+agree, at 0.000%, on the answer neither of them was given. S1 nearly shipped exactly this:
+`strokePaintOrder` was absent from `buildRenderManifest`'s hand-written field list
+(`render-templates/src/index.ts:404-433` and the second site at :509), so the editor rendered
+stroke-under and the export stroke-over for the same project. What caught it was flipping the
+fixture to the opposite value and finding the render **byte-identical** to the baseline — a feature
+that changes nothing changed nothing.
+
+Parity answers "do the two renderers agree." It never answers "is either one listening." Only a
+falsifier does, and from S2 on every stage adds manifest fields, so this is not a one-off lesson.
+**The hand-written copy list is the defect's home** — until the manifest's text bag is derived from
+a declared key set with a compile-time exhaustiveness constraint (the `TEXT_STYLE_FIELD_KEYS`
+`satisfies` pattern at `text-styles.ts:10-29` is the shape), every future field is one omission away
+from the same silent divergence, in two places at once.
+
+**T-16 — A "visible degraded state" is proven by pixels, never by computed style.** (D3, T-12; S0,
+2026-08-13.) D3's font-substitution surface and T-12's warp marker both exist to announce a silent
+degradation, which makes a marker that silently fails to paint the purest form of the bug it guards
+against — and S0 shipped that in its first draft: the badge was nested inside an element carrying
+`opacity: 0` while GPU-composited, and reported a full rect, `opacity: 1`, `visibility: visible`.
+Every naive assertion passed on an invisible element. A marker check must walk effective opacity up
+the ancestor chain and confirm viewport intersection. **Any gate asserting a user-visible warning
+must itself be falsified against a deliberately hidden marker before it is trusted.**
+
 **T-14 — No feature may re-open the shaping boundary that D9a closes.** (D6a, OQ6) Any operation
 that transforms text below the level of a shaping run — per-character animation is the known case,
 because each animated grapheme cluster becomes its own shaping context and cursive joining breaks —
