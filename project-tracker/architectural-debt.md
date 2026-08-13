@@ -707,7 +707,10 @@ time it costs someone an hour.
 
 ### DEBT-013 — a source denied at mount can never be admitted, and nothing reports it
 
-- Status: **open — USER-VISIBLE DEFECT**, raised to the founder 2026-08-06
+- Status: **open — USER-VISIBLE DEFECT**, raised to the founder 2026-08-06. **PARKED WITH A TRIGGER
+  2026-08-13**: the pool half is closed and guarded on every `wc:gate`; the remaining layer half is
+  blocked on an unwritten identity slice for the comp-proxy acquire site — see the closing update at
+  the end of this entry
 - Registered: 2026-08-06 (ADR-013 Phase 0; see ADR-020 §2)
 - Reason: ADR-012 §6.11 offers a persistently low-ranked source exactly two ends — *it receives a session, or it is declared permanently denied.* The runtime produces a third: it waits forever. Two independently measured mechanisms compose to make recovery impossible, and neither is individually wrong.
 - Invariant affected: **ADR-012 §6.11 (violated)**; I-40's aging requirement unmet in practice
@@ -720,9 +723,11 @@ time it costs someone an hour.
   fixture named in that read is the next instrument, not a fix.)
 - Tracking issue: —
 - Detection: any change that adds a retention path, or removes an admission decision point, without adding a compensating re-ranking opportunity. Also: `deniedForMs` failing to accumulate for a candidate that is losing.
-- **Header updated 2026-08-13:** see the Planned-slice correction above. Status ("open —
-  USER-VISIBLE DEFECT, raised to the founder 2026-08-06") is unchanged because it remains accurate;
-  only the named remedy had drifted. See `README.md`, "State fields vs. history."
+- **Header updated 2026-08-13:** see the Planned-slice correction above. The defect statement ("open
+  — USER-VISIBLE DEFECT, raised to the founder 2026-08-06") is unchanged because it remains
+  accurate; only the named remedy had drifted. Status gained the PARK later the same day, after the
+  slice F read settled what the remaining half is actually blocked on. See `README.md`, "State
+  fields vs. history."
 
 **The mechanism, measured.**
 
@@ -1466,6 +1471,58 @@ never.** `admission-reacquire.ts` / `kernel-conformance.ts` do not exist under `
 here is wrong, and work sitting on an unmerged branch is exactly how a defect gets fixed twice or not
 at all.
 
+**SLICE F IS REFUTED, NOT MERELY ABSENT — read 2026-08-13, recorded so nobody re-derives it.** The
+note above says where F is. This says whether to bring it back, which is the question a reader
+actually arrives with, and the answer is no.
+
+`1ffc898` contains exactly one file, `apps/web/src/playback/admission-reacquire.ts` (99 lines, zero
+consumers): the pure predicate `isTransportBoundary(previous, next, playing)` with
+`SEEK_DISCONTINUITY_S = 0.5`, and `useTransportBoundary(playing, onBoundary)` driving it from
+`subscribePlaybackClock` as a CALLBACK rather than a `useState` epoch. Its stated purpose was one
+boundary definition consumed at BOTH acquire sites, replacing D's per-site inline effect.
+
+**Its rationale is refuted by this entry's own measurement.** F's case rested on mechanism B — D's
+React-render-gated trigger and slice E's permission "almost never coincide", so a clock-driven
+detector would fire where D's did not. The 2026-08-09/10 duty-cycle probe measured the opposite and
+is recorded above: boundary coincidence **28/28** (real 7-MediaIn fixture) and **25/25** (synthetic
+6-of-4 census rig), with all 30 re-ask attempts holding a live `isAdmissionEligible` permission at
+the moment of the ask. The trigger and the permission coincide constantly. Grants were 0/30 for want
+of a **victim** for `reserveSession` to evict — which is what `ac0d9f2` supplies, at acquire time,
+via `preemptible`. A faster or better-placed boundary detector would not have moved that number by
+one.
+
+**And `ac0d9f2` does not intersect F.** Checked rather than assumed: `ac0d9f2` touches
+`VideoPreview.tsx` and `WebglMediaLayer.tsx` only — a new `preemptible` prop joining the existing
+`hidden || suspended` demotion effect, ungated by playback. It changes lease PRIORITY at the pool,
+not when or whether a boundary is detected. Nothing in it reads `isTransportBoundary`,
+`subscribePlaybackClock`, or D's detector body. So F is neither obsoleted nor validated by it — F
+was aimed at a mechanism that measurement says was never broken.
+
+**Disposition: NOT cherry-pick, NOT port, NOT re-derive — for the `WebglMediaLayer` site.** D's
+original inline detector is present and correct at `:1098-1116`, and swapping it for F's hook was
+already rejected once on the mechanism-B evidence (2026-08-07). Re-landing it now would be a
+behaviour change with no defect behind it. A stale fix carried forward is worse than an absent one,
+and this one would also re-open the `created 11→13-14 / preload 3→0` question whose own framing this
+entry has already had to retract.
+
+**DEBT-013's REMAINING HALF IS PARKED WITH A TRIGGER (2026-08-13), not scheduled.** Founder call.
+The pool half is closed and guarded in CI (`wc:gate`, five checks, falsified). What is left is
+clause (a) at the LAYER, and the only site still lacking any re-ask trigger is the comp-proxy one —
+blocker 3, unchanged since 2026-08-07: `useFlarexCompProxies.ts:331` mints a fresh
+`URL.createObjectURL(stored.blob)` per attempt, so a granted permission has no stable identity to
+attach to across a re-ask. **That is an identity problem, not a trigger problem**, which is exactly
+why F's second half was never observed firing (`comp-proxy re-asks 0` on every run in this
+programme, before and after F, including with three permissions outstanding). Landing a boundary
+detector at that site now — F's or a new one — builds finished-but-unused infrastructure ahead of
+its consumer, against the standing directive, and would produce another mechanism that cannot fire
+for reasons unrelated to itself.
+
+> **Trigger: an identity slice for the comp-proxy acquire site exists** — a waiter identity that
+> survives blob-URL churn across attempts. Until then this entry stays open and unworked. When it
+> lands, the boundary predicate is a small piece of that slice's own work, and `1ffc898` is worth
+> reading for its SHAPE (one predicate, delivered by call not by re-render-triggering state) even
+> though its rationale is dead.
+
 ### DEBT-014 — the host clip loses the hardware decode block at mount, regardless of any threshold
 
 - Status: **RETIRED 2026-08-12** (see the closing update at the end of this entry)
@@ -2200,8 +2257,12 @@ for the general shape of this gap.
 
 ### DEBT-017 — CLASS: the pixel-parity gate cannot see a bug both renderers share
 
-- Status: **open** — registered as a CLASS, not a single instance; there is nothing here to "fix" except
-  build the missing instrument (see Expiry condition), and this entry does not retire until that exists
+- Status: **open** — registered as a CLASS, not a single instance. **THREE axes as of 2026-08-13**:
+  (1) both renderers compute the same wrong value; (2) the gate cannot see the EDITOR at all;
+  (3) the gate's universe is its FIXTURE LIST — 3 of 29 transitions and 14 of 24 visual effects are
+  exercised by any fixture, measured. Does not retire until the missing instrument exists — but note
+  the "named but not built" line below is CORRECTED: `render:linear-gate` is that instrument's shape,
+  already built and proven; what it lacks is coverage
 - Registered: 2026-08-09 (discovered attempting to falsify the DEBT-016 pixel fixture — twice, against two
   different auditor-proposed reverts, neither of which the gate could detect)
 - Reason: `render:compare:pixels` is a **differential** instrument — it renders the SAME composition
@@ -2232,7 +2293,13 @@ for the general shape of this gap.
 - Detection: any change that moves logic from a renderer-specific file (`apps/web/src/components/*`,
   `apps/worker/src/remotion/*`) into `packages/shared` should say so in its commit message as a
   side-effect: it may be shrinking what `render:compare:pixels` can still catch, even though the sweep
-  will keep passing at 0.000% throughout the move.
+  will keep passing at 0.000% throughout the move. **Added 2026-08-13 (axis 3):** also any new entry
+  added to a rendering registry — a transition, a fragment effect, a node — WITHOUT a fixture that
+  renders it. It is invisible to both gates from the moment it lands, and "the sweep is green" will
+  keep being true if it never worked at all.
+- **Header updated 2026-08-13:** Status previously said only "registered as a CLASS, not a single
+  instance"; it now names all three axes and flags the corrected instrument claim. See `README.md`,
+  "State fields vs. history."
 
 **The demonstration, not just the claim.** While attempting to falsify the DEBT-016 pixel fixture
 (`flarex-host-transform`) by reverting the ADR-020 slice-B transform-inheritance line in
@@ -2312,6 +2379,110 @@ any of it out of `tmp/` into a committed, named gate with stable selectors. Size
 a first gate covering mask-overlay geometry, most of it in making the selectors and the settling
 robust enough not to flake — the recurring cost in every probe written so far has been waiting for the
 workspace to mount, not the assertion itself.
+
+**THIRD AXIS (2026-08-13) — the gate's universe is its FIXTURE LIST, so most of the product is
+invisible to it for a reason that has nothing to do with the two renderers agreeing.**
+
+Axis 1 is *both renderers compute the same wrong value*. Axis 2 is *neither renderer draws it at
+all*. This third one is blunter and, measured, much larger: **the code is never executed by any
+gate**, so whether the renderers would agree is moot. `6d58690` is the worked example — all four
+multi-pass transitions had never compiled in any renderer, for the life of the feature, and the
+commit's own words are the axis: *"a shader that never links is invisible to every pixel gate we
+have… the defect survived because nothing rendered it."*
+
+**Measured coverage, not estimated** (`apps/worker/tmp/debt017-shader-link-audit.ts --coverage`,
+which walks every fixture's built graph and intersects it with the live registries):
+
+| registry | exercised by ≥1 of the 76 fixtures | invisible |
+|---|---|---|
+| transitions | **3 of 29** — `crossDissolve`, `rgbDisplace`, `focusPull` | 26 |
+| visual timeline effects | **14 of 24** | 10 |
+
+The 26: `dip, wipe, iris, slide, push, zoom, punchZoom, zoomBlur, whipPan, blurSwipe, flash, shake,
+spin, lumaFade, lightLeak, filmBurn, parallaxPush, glitch, pixelate, maskReveal, organicReveal,
+lumaWarp, liquidMorph, portal, motionSmear, kineticSwoosh`. The 10: `hueSatCurves, creativeLook,
+importedLut, sharpen, chromaticAberration, sketch, oldTv, glitchFx, halftone, posterize`. (Audio
+effects are excluded — not a pixel concern.)
+
+**Three details that make this worse than a bare coverage number.**
+
+1. **`render:baseline` adds nothing on this axis.** It reads the same `renderComparisonFixtureKeys`
+   array (`render-baseline-gate.ts:49,74-77`). Two gates, two instrument *shapes* — differential and
+   historical — and **one identical universe**. Neither can see outside it, so "two gates passed" is
+   one gate's coverage counted twice.
+2. **3 of the 4 multi-pass transitions are still uncovered** — `liquidMorph`, `portal`,
+   `motionSmear`. `6d58690` fixed the shared dedupe for all four and added a fixture for
+   `focusPull` only. The fix is real and the other three are asserted-correct **by shared-code
+   inheritance**, which is precisely the reasoning this entry exists to distrust.
+3. **The uncovered fragment effects each compile their own program.** `sharpen`,
+   `chromaticAberration`, `sketch`, `oldTv`, `glitchFx`, `halftone`, `posterize` are separate
+   `buildFragmentEffectShader` programs, so a break in one is scoped to that one — no other fixture
+   fails in sympathy, and the blast radius is exactly the thing nothing looks at.
+
+**What would have to break for every gate to stay green, and does anything else catch it?**
+
+| candidate | what breaks it silently | caught by |
+|---|---|---|
+| any of the 26 transitions | any GLSL error; a wrong constant; a dead param | **nothing** |
+| the 7 uncovered fragment effects | same, scoped to that one program | **nothing** |
+| pipeline uniform redefinition (the `6d58690` defect) | re-introducing the dedupe bug | `color:test` #40 — all 4 defs, both light spaces, on the SOURCE |
+| a wrong transfer function both renderers apply | `effectLight` not reaching a renderer | `render:linear-gate` — absolute, predicted arithmetic |
+| the keyframe evaluator | a wrong value at time *t* | `animation:test` |
+| shared draw-building (`buildSceneDraws`) | a wrong transform on a cache hit | only for the ONE case DEBT-016 pinned |
+
+**DEMONSTRATED, not argued — the class reproduced on demand.** `dip` (uncovered, monolith) was given
+one undefined identifier (`TEMPORARY_DEBT017_FALSIFY_undefined_symbol`, reverted; `git diff` on
+`transitions/registry.ts` empty and zero token matches after). With a shipped transition thereby
+**dead in every renderer**:
+
+```
+debt017-shader-link-audit   FAIL  dip @display, dip @linear   (126/128 linked)
+render:compare:pixels       PASS  7/7 — transition, advanced-transition, pipeline-transition,
+                                  linear-transition, linear-pipeline-transition,
+                                  nested-transition, nested-junction-transition
+```
+
+Every transition fixture in the tree, green, while a transition in the product cannot compile. That
+is this entry's whole thesis, now with a repeatable one-command demonstration behind it.
+
+**THE CURRENT STATE IS CLEAN, and that is the least interesting part of this audit.** With the
+injection reverted, **128 of 128** assembled sources link against a real WebGL2 context — every
+fragment effect (each pass of each multi-pass def) and every transition (each pass of each pipeline
+def), in **both** light spaces, since `effectLight` selects between two different assembled programs
+and a fixture exercising one says nothing about the other. So there is no dead shader today. The
+class is live; its instances are latent. **Nothing in any gate performs this check** — the only
+reason the number is known is that the probe was written for this audit, and it is deliberately not
+wired into any script (promoting it is the founder's call, per the standing "different instrument,
+not a code change" point).
+
+**A CORRECTION TO THIS ENTRY'S OWN "right instrument, named but not built."** It IS built, for a
+narrow surface: `render:linear-gate` renders a known input and checks it against **arithmetic
+predicted in advance** (a blurred edge's midpoint at code 128 display / 188 linear; a crossfade at
+progress 0.5 likewise; the `focusPull` pipeline landing on the same 188.0, which is evidence rather
+than repetition because a defocus of a flat field is the identity). That is exactly shape (a) from
+the paragraph above, it exists, and it has caught real defects — the truncated glow kernel and radial
+blur's dead Centre Y. **What is missing is coverage, not design.** So the response to this axis is to
+extend a proven instrument, not to build the harness this entry says is unscoped.
+
+**TWO PROBE DEFECTS, recorded because both produced a confident, plausible, WRONG failure list** —
+and in both cases the discriminator was a fixture already known to be green:
+1. *A hand-written stub vertex shader.* Reported **0/128**, every one
+   `FRAGMENT varying v_uv does not match any VERTEX varying` — including `crossDissolve`, which
+   renders green today. A link is a contract between TWO shaders; the vertex half has to be the
+   product's own (`FULLSCREEN_TRI_VS`, now imported) or every result describes the stub. **A probe
+   that fails uniformly is measuring itself.**
+2. *Passing a pass INDEX where the API takes the pass OBJECT.* `buildFragmentEffectPassShader(def,
+   pass, light)` — with an index, `pass.glsl` is `undefined`, the literal text `undefined` lands in
+   the source, and 18 cases failed with `'undefined' : syntax error` in `builtin.stylize` and
+   `flarex.chromaKey`. Both are covered by green fixtures, which is the only reason it was caught
+   rather than filed. Had this landed on an UNCOVERED effect there would have been no green fixture
+   to contradict it, and the audit would have reported a live defect that does not exist.
+
+**Expiry condition — unchanged in substance, and this audit is the first half of it.** The condition
+asks for an audit naming what the gate can still see. The registry half is now measured and above.
+The remaining half is the one this entry has always described: enumerate which parts of the *Flarex
+render path* are still renderer-specific versus absorbed into `packages/shared`. Not attempted here,
+and deliberately not estimated.
 
 ### DEBT-018 — a recovery the code declares available was never performed (paused WC fallback)
 
