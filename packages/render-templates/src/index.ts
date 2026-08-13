@@ -1,4 +1,4 @@
-import { REGION_PASS_MODEL_DEFAULT, collectFlarexSourceAssetIds, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@orreris/shared";
+import { REGION_PASS_MODEL_DEFAULT, collectFlarexSourceAssetIds, expandEffectRegionMasks, expandFrameBorders, expandNestedCompositions, getTrackAudioGain, getTrackPan, graphicIsAnimated, graphicToDataUrl, isTrackEnabled, layerSourceTimeSeconds, normalizeProjectColorSettings, pickManifestLayerStyle, shiftSpeedKeyframes, type LayerFrame, type LayerGraphic } from "@orreris/shared";
 
 /** Manifest field that lets the renderer PLAY a SMIL-animated graphic (see `RenderManifestLayer.graphic`).
  *  Static/absent graphics contribute nothing, so the settled `assetUrl` stays the source. */
@@ -397,41 +397,7 @@ export function buildRenderManifest(input: {
             flarexCompId: layer.flarexCompId,
             content: layer.content,
             transform: layer.transform as unknown as Record<string, unknown>,
-            style: {
-              color: layer.color,
-              fontFamily: layer.fontFamily,
-              fontSize: layer.fontSize,
-              fontWeight: layer.fontWeight,
-              italic: layer.italic,
-              letterSpacing: layer.letterSpacing,
-              lineHeight: layer.lineHeight,
-              textWidthPercent: layer.textWidthPercent,
-              textAlign: layer.textAlign,
-              textWarp: layer.textWarp,
-              fit: layer.fit,
-              widthPercent: layer.widthPercent,
-              heightPercent: layer.heightPercent,
-              // Shape geometry — without these a non-default shape (pen path, ellipse, frame-border clone)
-              // rendered as the default rounded-rectangle in the cloud path (styleOf reads this bag).
-              shapeKind: layer.shapeKind,
-              shapePath: layer.shapePath,
-              borderRadius: layer.borderRadius,
-              strokeColor: layer.strokeColor,
-              strokeWidth: layer.strokeWidth,
-              // S1 (ADR-023 D7). Omitted here, the export renders stroke-over while the editor renders
-              // stroke-under for the SAME project — the manifest-is-the-contract failure. A renderer-
-              // parity gate cannot see it: it compares two renderers that both read this bag, so both
-              // agree on the wrong answer. Caught by flipping the fixture's order and finding the
-              // render byte-identical.
-              strokePaintOrder: layer.strokePaintOrder,
-              backgroundColor: layer.backgroundColor,
-              backgroundPaddingEm: layer.backgroundPaddingEm,
-              backgroundRadiusEm: layer.backgroundRadiusEm,
-              shadowColor: layer.shadowColor,
-              shadowBlur: layer.shadowBlur,
-              shadowOffsetX: layer.shadowOffsetX,
-              shadowOffsetY: layer.shadowOffsetY
-            },
+            style: pickManifestLayerStyle(layer),
             effects: layer.effects,
             keyframes: layer.keyframes,
             animations: layer.animations ?? [],
@@ -484,37 +450,7 @@ export function buildRenderManifest(input: {
           flarexCompId: layer.flarexCompId,
           content: layer.content,
           transform: layer.transform as unknown as Record<string, unknown>,
-          style: {
-            color: layer.color,
-            fontFamily: layer.fontFamily,
-            fontSize: layer.fontSize,
-            fontWeight: layer.fontWeight,
-            italic: layer.italic,
-            letterSpacing: layer.letterSpacing,
-            lineHeight: layer.lineHeight,
-            textWidthPercent: layer.textWidthPercent,
-            textAlign: layer.textAlign,
-            textWarp: layer.textWarp,
-            fit: layer.fit,
-            widthPercent: layer.widthPercent,
-            heightPercent: layer.heightPercent,
-            // Shape geometry — without these a non-default shape (pen path, ellipse, frame-border clone)
-            // rendered as the default rounded-rectangle in the cloud path (styleOf reads this bag).
-            shapeKind: layer.shapeKind,
-            shapePath: layer.shapePath,
-            borderRadius: layer.borderRadius,
-            strokeColor: layer.strokeColor,
-            strokeWidth: layer.strokeWidth,
-            // S1 (ADR-023 D7) — see the sibling builder above; both copies must carry it.
-            strokePaintOrder: layer.strokePaintOrder,
-            backgroundColor: layer.backgroundColor,
-            backgroundPaddingEm: layer.backgroundPaddingEm,
-            backgroundRadiusEm: layer.backgroundRadiusEm,
-            shadowColor: layer.shadowColor,
-            shadowBlur: layer.shadowBlur,
-            shadowOffsetX: layer.shadowOffsetX,
-            shadowOffsetY: layer.shadowOffsetY
-          },
+          style: pickManifestLayerStyle(layer),
           effects: layer.effects,
           keyframes: layer.keyframes,
           animations: layer.animations ?? [],

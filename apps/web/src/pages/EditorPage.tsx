@@ -29,8 +29,11 @@ import {
   Plus,
   Search,
   AlignCenter,
+  AlignHorizontalJustifyEnd,
+  AlignHorizontalJustifyStart,
   AlignLeft,
   AlignRight,
+  ArrowLeftRight,
   Bold,
   CaseSensitive,
   Italic,
@@ -409,6 +412,7 @@ import {
   normalizeGraphicSvg,
   extractSvgPalette,
   getCompositionTextRuns,
+  detectTextScript,
   graphicToDataUrl,
   DEFAULT_GRAPHIC_FILL,
   defaultExportSettings,
@@ -10316,6 +10320,12 @@ function createEditorLayer(
       textWidthPercent: 0,
       color: "#FFFFFF",
       strokeWidth: 0,
+      // ADR-023 D6a (S0b): NEW text is authored "auto" — the browser resolves the base direction from
+      // the content the user is about to type, and keeps resolving it as they edit. Stamped at
+      // creation, never inferred at read time, so an absent value keeps meaning "authored before this
+      // existed" permanently. `textAlign` stays "center" here because centre has no handedness; it is
+      // "start"/"end" that need a direction to resolve against.
+      direction: "auto" as const,
       // ADR-023 D7 (S1): NEW text is authored stroke-behind-fill. Stamped at creation rather than
       // defaulted at read time — that is what lets an absent value keep meaning "authored before
       // this existed" permanently, so no existing project moves. See TimelineLayer.strokePaintOrder.
@@ -14980,6 +14990,9 @@ function TextGraphicControls({
             <AlignmentControl value={layer.textAlign ?? "center"} onChange={(value) => onChange((item) => ({ ...item, textAlign: value }))} />
           </div>
           <div className="icon-control-row">
+            <TextDirectionControl layer={layer} onChange={onChange} />
+          </div>
+          <div className="icon-control-row">
             <NumberControl icon={<MoveHorizontal size={14} />} label="Letter spacing" keyframe={styleKf?.keyframe("style.letterSpacing", styleKf.value("style.letterSpacing", layer.letterSpacing ?? 0))} value={styleKf?.value("style.letterSpacing", layer.letterSpacing ?? 0) ?? layer.letterSpacing ?? 0} min={-50} max={200} step={0.5} onReset={() => onChange((item) => ({ ...item, letterSpacing: defaultTextStyle.letterSpacing }))} onChange={(value) => (styleKf ? styleKf.change("style.letterSpacing", value) : onChange((item) => ({ ...item, letterSpacing: value })))} />
             <NumberControl icon={<MoveVertical size={14} />} label="Line height" keyframe={styleKf?.keyframe("style.lineHeight", styleKf.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight))} value={styleKf?.value("style.lineHeight", layer.lineHeight ?? defaultTextStyle.lineHeight) ?? layer.lineHeight ?? defaultTextStyle.lineHeight} min={0} max={5} step={0.05} onReset={() => onChange((item) => ({ ...item, lineHeight: defaultTextStyle.lineHeight }))} onChange={(value) => (styleKf ? styleKf.change("style.lineHeight", value) : onChange((item) => ({ ...item, lineHeight: value })))} />
             <NumberControl icon={<MoveHorizontal size={14} />} label="Text box width" keyframe={styleKf?.keyframe("style.textWidthPercent", styleKf.value("style.textWidthPercent", layer.textWidthPercent ?? 0))} value={styleKf?.value("style.textWidthPercent", layer.textWidthPercent ?? 0) ?? layer.textWidthPercent ?? 0} min={0} max={100} step={1} onReset={() => onChange((item) => ({ ...item, textWidthPercent: defaultTextStyle.textWidthPercent }))} onChange={(value) => (styleKf ? styleKf.change("style.textWidthPercent", value) : onChange((item) => ({ ...item, textWidthPercent: value })))} />
@@ -15725,6 +15738,53 @@ function EffectParamControl({
   return <PropertyFieldView field={selectField} />;
 }
 
+/**
+ * Base text direction (ADR-023 D6a, S0b).
+ *
+ * "Auto" is labelled with what it currently resolves to, and THAT is the one place S0's detector is
+ * consumed: at authoring time, in the editor, to tell the user which way the line will run. No
+ * renderer calls it — direction is carried in the manifest and `"auto"` is handed to the browser's
+ * own first-strong rule (T-13). The label is a reading of the text as it stands, not a stored value,
+ * so it keeps up as the user types.
+ *
+ * "Default" is the legacy state and is deliberately offered: it is not the same as "ltr". It emits
+ * no `direction` and no `unicode-bidi` at all, which is what every project authored before this
+ * existed does, permanently.
+ */
+function TextDirectionControl({
+  layer,
+  onChange
+}: {
+  layer: TimelineLayer;
+  onChange: (updater: (layer: TimelineLayer) => TimelineLayer) => void;
+}) {
+  const detected = detectTextScript(getCompositionTextRuns(layer).map((run) => run.text).join(""));
+  const autoLabel = `Auto (${detected.direction === "rtl" ? "right-to-left" : "left-to-right"})`;
+  return (
+    <label className="number-row-select">
+      <span className="effect-slider-label">
+        <span className="control-icon">
+          <ArrowLeftRight size={14} />
+        </span>
+        <span className="effect-slider-label-text">Direction</span>
+      </span>
+      <ThemedSelect
+        ariaLabel="Text direction"
+        value={layer.direction ?? "default"}
+        options={[
+          { value: "default", label: "Default (left-to-right)" },
+          { value: "auto", label: autoLabel },
+          { value: "ltr", label: "Left to right" },
+          { value: "rtl", label: "Right to left" }
+        ]}
+        onChange={(value) =>
+          onChange((item) => ({ ...item, direction: value === "default" ? undefined : (value as NonNullable<TimelineLayer["direction"]>) }))
+        }
+      />
+    </label>
+  );
+}
+
 function AlignmentControl({
   value,
   onChange
@@ -15735,9 +15795,14 @@ function AlignmentControl({
   return (
     <div className="alignment-control" aria-label="Text alignment">
       {[
+        // S0b (ADR-023 D6a): start/end are LOGICAL — they follow the layer's direction, so RTL text
+        // aligns to the right edge without the author having to know which edge that is. left/right
+        // stay PHYSICAL and keep their meaning for every project that already uses them.
+        { value: "start", icon: <AlignHorizontalJustifyStart size={15} />, label: "Align to start (follows text direction)" },
         { value: "left", icon: <AlignLeft size={15} />, label: "Align left" },
         { value: "center", icon: <AlignCenter size={15} />, label: "Align center" },
-        { value: "right", icon: <AlignRight size={15} />, label: "Align right" }
+        { value: "right", icon: <AlignRight size={15} />, label: "Align right" },
+        { value: "end", icon: <AlignHorizontalJustifyEnd size={15} />, label: "Align to end (follows text direction)" }
       ].map((item) => (
         <button
           aria-label={item.label}

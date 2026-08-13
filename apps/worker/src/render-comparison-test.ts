@@ -173,6 +173,80 @@ assert.equal(
   "no stroke means no paint-order declaration."
 );
 
+/**
+ * S0b (ADR-023 D6a/T-13) — base direction, asserted as emitted CSS.
+ *
+ * The plan is explicit that this is the half that matters: both renderers are Chromium and will
+ * agree on a wrong answer as readily as a right one, and a pure-Arabic run still resolves to correct
+ * VISUAL order under `ltr`, so a pixel fixture is clean while the render is wrong to anyone who
+ * reads the script. Only the emitted declarations can distinguish the states.
+ */
+// Legacy: absent emits NEITHER property. Not `direction: ltr` — that renders the same and changes
+// every existing project's CSS, which is precisely the migration D6a refuses to perform.
+assert.equal(renderTextStyle.direction, undefined, "absent direction must emit no `direction`.");
+assert.equal(renderTextStyle.unicodeBidi, undefined, "absent direction must emit no `unicode-bidi`.");
+
+// "auto" delegates to the browser's own first-strong rule. We do not implement UBA P2/P3 (T-5).
+const autoStyle = getCompositionTextStyle({ ...manifestTextLayer, direction: "auto" });
+assert.equal(autoStyle.unicodeBidi, "plaintext", "'auto' must delegate via unicode-bidi: plaintext.");
+assert.equal(autoStyle.direction, undefined, "'auto' must NOT pin a direction — plaintext resolves it.");
+
+// Explicit directions are stated and ISOLATED, so a layer neither leaks its level into the
+// surrounding editor DOM nor inherits one from it.
+const rtlStyle = getCompositionTextStyle({ ...manifestTextLayer, direction: "rtl" });
+assert.equal(rtlStyle.direction, "rtl");
+assert.equal(rtlStyle.unicodeBidi, "isolate");
+const ltrStyle = getCompositionTextStyle({ ...manifestTextLayer, direction: "ltr" });
+assert.equal(ltrStyle.direction, "ltr");
+assert.equal(ltrStyle.unicodeBidi, "isolate");
+
+// Unreadable input takes the legacy answer, not a guess — "I could not read it" and "it said
+// something else" must resolve the same way (the colour pipeline's rule).
+const bogusStyle = getCompositionTextStyle({ ...manifestTextLayer, direction: "sideways" as never });
+assert.equal(bogusStyle.direction, undefined);
+assert.equal(bogusStyle.unicodeBidi, undefined);
+
+// Logical alignment passes through to CSS, which resolves it against `direction`. Physical values
+// stay physical, forever.
+assert.equal(getCompositionTextStyle({ ...manifestTextLayer, textAlign: "start" }).textAlign, "start");
+assert.equal(getCompositionTextStyle({ ...manifestTextLayer, textAlign: "end" }).textAlign, "end");
+assert.equal(getCompositionTextStyle({ ...manifestTextLayer, textAlign: "left" }).textAlign, "left");
+
+/**
+ * T-15's structural half, asserted rather than assumed: the manifest's style bag must actually
+ * CARRY the new field. S1's near-miss was exactly this — the field existed, both renderers read the
+ * bag, and the bag never had it. The bag is now derived from a key set with a compile-time
+ * exhaustiveness constraint, so this assertion is a second lock on the same door rather than the
+ * only one.
+ */
+const directionLayer = { ...textLayer, direction: "rtl" as const, textAlign: "end" as const };
+const directionGraph = {
+  ...graph,
+  composition: {
+    ...graph.composition!,
+    tracks: graph.composition!.tracks.map((track) => ({
+      ...track,
+      layers: track.layers.map((l) => (l.id === textLayer.id ? directionLayer : l))
+    }))
+  }
+};
+const directionManifest = buildRenderManifest({
+  projectId: graph.projectId,
+  graph: directionGraph,
+  assets: [asset],
+  quality: "final",
+  createdAt: new Date(0).toISOString()
+});
+const directionManifestLayer = directionManifest.layers.find((l) => l.id === textLayer.id);
+assert.ok(directionManifestLayer);
+assert.equal(
+  (directionManifestLayer.style as Record<string, unknown>).direction,
+  "rtl",
+  "the manifest's style bag must carry `direction` — a field the renderers never receive is a field they cannot honour."
+);
+assert.equal((directionManifestLayer.style as Record<string, unknown>).textAlign, "end");
+assert.equal(getCompositionTextStyle(directionManifestLayer).direction, "rtl", "and it must survive the round trip.");
+
 const previewShapeStyle = getCompositionShapeStyle(shapeLayer);
 const renderShapeStyle = getCompositionShapeStyle(manifestShapeLayer);
 assert.equal(previewShapeStyle.width, renderShapeStyle.width);

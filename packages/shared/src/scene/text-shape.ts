@@ -505,6 +505,25 @@ export async function drawTextLayer(
   // emitted style object rather than from the layer, so the DOM and the raster cannot diverge on
   // which look a layer has. Absent → false → the existing fill-then-stroke order, untouched.
   const strokeUnderFill = style.paintOrder === "stroke fill";
+  /**
+   * S0b (ADR-023 D6a). The base paragraph direction the layer DECLARES, never one inferred from its
+   * content (T-13). Canvas 2D takes it as `ctx.direction`, which is what makes `fillText` place
+   * neutrals — a `?` or `!` closing an Arabic sentence, a bracket, a digit run — at the correct end
+   * of each drawn string. Measured, not assumed: flipping this changes an Arabic render and leaves a
+   * pure-Latin one byte-identical.
+   *
+   * `"auto"` is the one value canvas cannot express, and this is a KNOWN GAP, not an oversight. CSS
+   * delegates `"auto"` to the browser's first-strong rule via `unicode-bidi: plaintext`; the canvas
+   * API has no equivalent, and resolving it here by reading the content is exactly the paint-time
+   * inference T-13 forbids. So `"auto"` draws at the canvas default (ltr), which is what an
+   * `"auto"` layer renders in BOTH renderers today — measured: the `bidi-direction` fixture's
+   * `"auto"` still is byte-identical to its `"ltr"` still. Closing it needs a product decision
+   * (resolve `"auto"` to a concrete value at AUTHORING time, which T-13 permits), not a change here.
+   */
+  const baseDirection = style.direction === "rtl" ? "rtl" : style.direction === "ltr" ? "ltr" : undefined;
+  // Only touch the context when the layer actually declares a direction, so a legacy layer's draw
+  // sequence is byte-identical to what it was before this field existed.
+  if (baseDirection) ctx.direction = baseDirection;
 
   // #3b: alphabetic baseline matching the CSS line-box model. The browser centers the
   // glyph block (ascent+descent) vertically within each line-height box using half-leading.
@@ -536,7 +555,14 @@ export async function drawTextLayer(
     const y = lineBoxTop + (lineHeightPx - (lineAscent + lineDescent)) / 2 + lineAscent;
 
     const lw = lineWidth(ctx, line);
-    let x = textAlign === "left" ? contentLeft : textAlign === "right" ? contentRight - lw : -lw / 2;
+    // S0b: resolve the LOGICAL keywords against the layer's DECLARED direction. This is not the
+    // paint-time inference T-13 forbids — that is deriving direction from content; this is what CSS
+    // itself does with a direction it was given. `left`/`right` stay physical and untouched.
+    const physicalAlign =
+      textAlign === "start" ? (baseDirection === "rtl" ? "right" : "left")
+      : textAlign === "end" ? (baseDirection === "rtl" ? "left" : "right")
+      : textAlign;
+    let x = physicalAlign === "left" ? contentLeft : physicalAlign === "right" ? contentRight - lw : -lw / 2;
     ctx.textAlign = "left";
     line.forEach((word, wordIndex) => {
       ctx.font = word.font;
@@ -610,6 +636,12 @@ export async function drawTextLayer(
 
   ctx.restore();
   ctx.letterSpacing = "";
+  // Belt-and-braces, alongside the letterSpacing reset above and for the same reason: these
+  // rasterizers share a scratch context, and a leaked `rtl` would silently re-lay-out the NEXT layer
+  // drawn into it. The `ctx.restore()` on the line above should already cover it — `direction` is
+  // part of the canvas drawing state — but so is `letterSpacing`, and that one is still reset by hand
+  // here because the guarantee is recent and not uniformly old across the engines this ships to.
+  if (baseDirection) ctx.direction = "inherit";
   ctx.shadowColor = "transparent";
   ctx.shadowBlur = 0;
   return { boxW, boxH };

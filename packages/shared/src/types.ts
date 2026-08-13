@@ -235,7 +235,7 @@ export interface TextStyleFields {
   shadowBlur?: number | undefined;
   shadowOffsetX?: number | undefined;
   shadowOffsetY?: number | undefined;
-  textAlign?: "left" | "center" | "right" | undefined;
+  textAlign?: "left" | "center" | "right" | "start" | "end" | undefined;
 }
 
 /** A named, reusable text look saved in the project (§2 Text Styles). Applied by BAKING its fields
@@ -757,7 +757,34 @@ export interface TimelineLayer {
   letterSpacing?: number | undefined;
   lineHeight?: number | undefined;
   textWidthPercent?: number | undefined;
-  textAlign?: "left" | "center" | "right" | undefined;
+  /**
+   * `"left"`/`"right"` are PHYSICAL and stay physical forever — they are never remapped to logical
+   * values, because an existing project that says "left" means the left of the frame (ADR-023 D6a).
+   * `"start"`/`"end"` are LOGICAL: they resolve against {@link TimelineLayer.direction}, so RTL text
+   * aligns to the right edge without the author having to know which edge that is. New text is
+   * authored `"start"`.
+   */
+  textAlign?: "left" | "center" | "right" | "start" | "end" | undefined;
+  /**
+   * Base paragraph direction for the Unicode Bidi Algorithm (ADR-023 D6a, stage S0b).
+   *
+   * The UBA resolves the *relative* order of runs correctly on its own, but the paragraph embedding
+   * level decides where neutrals land, which edge a line starts from, and what "align start" means.
+   * That level is not derivable from the glyph stream — it is data, and this is where it lives.
+   *
+   * - `"auto"` — the browser's own first-strong rule (`unicode-bidi: plaintext`). We delegate rather
+   *   than reimplement: T-5 is about bidi as much as about shaping.
+   * - `"ltr"` / `"rtl"` — stated explicitly (`unicode-bidi: isolate`).
+   *
+   * **ABSENT MEANS `ltr` WITH PHYSICAL ALIGNMENT, permanently, and is never migrated** — the same
+   * two-constants shape as {@link TimelineLayer.strokePaintOrder} and `LEGACY_PROJECT_COLOR_SETTINGS`.
+   * An existing project with Arabic text stays exactly as wrong as it is today until its author opts
+   * in, because silently re-laying-out a published project is the worse defect.
+   *
+   * No renderer may infer this from content at paint time (T-13). The detector in `text-script.ts`
+   * exists for the AUTHORING-time default only.
+   */
+  direction?: "auto" | "ltr" | "rtl" | undefined;
   textWarp?: TextWarp | undefined;
   color?: string | undefined;
   fit?: "cover" | "contain" | "fill" | undefined;

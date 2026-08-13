@@ -37,7 +37,8 @@ export interface CompositionLayerStyleInput {
   letterSpacing?: number | undefined;
   lineHeight?: number | undefined;
   textWidthPercent?: number | undefined;
-  textAlign?: "left" | "center" | "right" | string | undefined;
+  textAlign?: "left" | "center" | "right" | "start" | "end" | string | undefined;
+  direction?: "auto" | "ltr" | "rtl" | undefined;
   textWarp?: TextWarp | undefined;
   fit?: "cover" | "contain" | "fill" | string | undefined;
   blendMode?: BlendMode | undefined;
@@ -707,6 +708,11 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
   // changes anything, so every project authored before this field existed emits exactly the CSS it
   // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
   const strokeUnderFill = (layer.strokePaintOrder ?? style.strokePaintOrder) === "under";
+  // ADR-023 D6a (S0b). ABSENT emits NOTHING — no `direction`, no `unicode-bidi` — so an existing
+  // project keeps rendering at the CSS initial `ltr` exactly as it does today, permanently. Only an
+  // explicit value produces declarations. See TimelineLayer.direction for why absence is not a
+  // default waiting to be changed.
+  const direction = getTextDirection(layer.direction ?? style.direction);
   const effectCss = getEffectCss(layer.effects, layer.animations as TimelineKeyframeV2[] | undefined, layer.startSeconds, options.currentTimeSeconds);
   const paddingEmY = animStyleNumber(
     layer,
@@ -748,6 +754,12 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     // letterform. `undefined` (the legacy case) emits no declaration at all, which is what keeps an
     // existing project's CSS byte-identical rather than merely equivalent.
     paintOrder: strokeUnderFill && strokeWidth > 0 ? ("stroke fill" as const) : undefined,
+    // ADR-023 D6a/T-13. `"auto"` hands the paragraph level to the browser's own first-strong rule
+    // (`unicode-bidi: plaintext`) instead of us reimplementing UBA P2/P3 — T-5 is about bidi as much
+    // as about shaping. An explicit direction is ISOLATED so the layer cannot leak its level into,
+    // or inherit one from, whatever DOM happens to surround it in the editor.
+    direction: direction === "ltr" || direction === "rtl" ? direction : undefined,
+    unicodeBidi: direction === "auto" ? ("plaintext" as const) : direction ? ("isolate" as const) : undefined,
     whiteSpace: "pre-wrap" as const
   };
 }
@@ -971,8 +983,113 @@ function styleOf(layer: CompositionLayerStyleInput | TimelineLayer) {
   return "style" in layer && layer.style ? layer.style : {};
 }
 
-function getTextAlign(value: unknown): "left" | "center" | "right" {
-  return value === "left" || value === "right" || value === "center" ? value : "center";
+/**
+ * Fields of {@link CompositionLayerStyleInput} that the manifest carries somewhere OTHER than the
+ * style bag: `RenderManifestLayer` has its own top-level slots for them. Excluded here so the
+ * exhaustiveness check below is about the style bag and nothing else.
+ */
+type NonStyleBagKey = "id" | "startSeconds" | "transform" | "keyframes" | "animations" | "style" | "effects" | "masks" | "blendMode";
+
+/** Every style field the manifest's `style` bag is obliged to carry. */
+export type ManifestLayerStyleKey = Exclude<keyof CompositionLayerStyleInput, NonStyleBagKey>;
+
+/**
+ * The manifest's text/graphic style bag, as data (ADR-023 T-15, stage S0b).
+ *
+ * WHY THIS EXISTS — the defect it makes impossible. `buildRenderManifest` used to copy these fields
+ * into the manifest as a hand-written object literal, in TWO places. S1 added `strokePaintOrder` to
+ * the layer and to both renderers, and forgot one of those literals: the editor read the live graph
+ * and rendered stroke-under, the export read the manifest and rendered stroke-over, for the same
+ * project. `render:compare:pixels` passed at 0.000%, because it compares two consumers of this bag
+ * and both agreed perfectly about a field neither of them was given. Parity answers "do the
+ * renderers agree"; it cannot answer "is either one listening."
+ *
+ * The list below is checked against {@link CompositionLayerStyleInput} — the interface
+ * `getCompositionTextStyle`/`getCompositionShapeStyle` actually READ from — so the constraint is a
+ * real one rather than a restatement: a stage that adds a style property has to add it to that
+ * interface in order to read it, and the moment it does, omitting it here FAILS TYPECHECK with the
+ * missing key named. S5 adds roughly six of these. The alternative was finding the next one by luck,
+ * twice, as S1 did.
+ */
+export const MANIFEST_LAYER_STYLE_KEYS = [
+  "color",
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "italic",
+  "letterSpacing",
+  "lineHeight",
+  "textWidthPercent",
+  "textAlign",
+  "direction",
+  "textWarp",
+  "fit",
+  "widthPercent",
+  "heightPercent",
+  // Shape geometry — without these a non-default shape (pen path, ellipse, frame-border clone)
+  // rendered as the default rounded-rectangle in the cloud path (styleOf reads this bag).
+  "shapeKind",
+  "shapePath",
+  "borderRadius",
+  "strokeColor",
+  "strokeWidth",
+  "strokePaintOrder",
+  "backgroundColor",
+  "backgroundPaddingEm",
+  "backgroundRadiusEm",
+  "shadowColor",
+  "shadowBlur",
+  "shadowOffsetX",
+  "shadowOffsetY"
+] as const satisfies ReadonlyArray<ManifestLayerStyleKey>;
+
+/**
+ * The exhaustiveness half. `satisfies` above only proves every key LISTED is real; this proves every
+ * key REQUIRED is listed. A missing one makes `MissingManifestStyleKeys` a union of the offenders,
+ * and the assignment below fails with those names in the error text.
+ */
+type MissingManifestStyleKeys = Exclude<ManifestLayerStyleKey, (typeof MANIFEST_LAYER_STYLE_KEYS)[number]>;
+const _manifestStyleKeysAreExhaustive: MissingManifestStyleKeys extends never
+  ? true
+  : ["manifest style bag is missing these keys — add them to MANIFEST_LAYER_STYLE_KEYS", MissingManifestStyleKeys] = true;
+void _manifestStyleKeysAreExhaustive;
+
+/**
+ * Copy a layer's style fields into the manifest bag. Every key is assigned unconditionally, so the
+ * emitted object has the same shape (and key order) the two hand-written literals produced — this
+ * change is a refactor of HOW the bag is built, not of what it contains.
+ */
+export function pickManifestLayerStyle(layer: TimelineLayer): Record<string, unknown> {
+  const bag: Record<string, unknown> = {};
+  // Indexed directly off `TimelineLayer` rather than through a `Record<string, unknown>` cast: the
+  // cast would silently accept a key that exists on the style INPUT interface but not on the layer,
+  // and copy `undefined` for it forever. This way that is a compile error too.
+  for (const key of MANIFEST_LAYER_STYLE_KEYS) {
+    bag[key] = layer[key];
+  }
+  return bag;
+}
+
+/**
+ * `"start"`/`"end"` (ADR-023 D6a, S0b) are LOGICAL and pass straight through to CSS `text-align`,
+ * which resolves them against the element's `direction`. `"left"`/`"right"` stay PHYSICAL forever.
+ * Anything unrecognised still falls back to `"center"`, exactly as before.
+ */
+function getTextAlign(value: unknown): "left" | "center" | "right" | "start" | "end" {
+  return value === "left" || value === "right" || value === "center" || value === "start" || value === "end"
+    ? value
+    : "center";
+}
+
+/**
+ * Absent stays absent (ADR-023 D6a). This deliberately does NOT fall back to `"ltr"`: emitting
+ * `direction: ltr` for a legacy layer would render identically but change the emitted CSS, and the
+ * whole legacy claim is byte-identity, not equivalence. Unrecognised input is treated as absent —
+ * "I could not read it" and "it said something else" get the same safe answer, as
+ * `normalizeProjectColorSettings` does for colour.
+ */
+function getTextDirection(value: unknown): "auto" | "ltr" | "rtl" | undefined {
+  return value === "auto" || value === "ltr" || value === "rtl" ? value : undefined;
 }
 
 function getTextShadowCss(

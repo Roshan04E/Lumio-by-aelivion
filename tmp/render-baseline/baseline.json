@@ -1,6 +1,6 @@
 {
-  "commit": "b41957824dad68f0ca2d587dcf6e742878b5b98b",
-  "capturedAt": "2026-08-13T13:11:54.047Z",
+  "commit": "c0ce462d2cd8f1abc74bb6b68711349dfd8fc3d1",
+  "capturedAt": "2026-08-13T14:01:31.346Z",
   "rendererMode": "webgl",
   "fixtures": {
     "advanced-transition": {
@@ -10,6 +10,11 @@
     },
     "anchored-media": {
       "sha256": "c407e8863af9fcc9f1d07f02df7b2b9075448fef8183931ce13ba72d498e66b7",
+      "width": 1080,
+      "height": 1920
+    },
+    "bidi-direction": {
+      "sha256": "cf7cd55479021f9733bf4f29172db77c8164a9dea9864af5cd83dee4582477ea",
       "width": 1080,
       "height": 1920
     },

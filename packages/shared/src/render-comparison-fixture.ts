@@ -113,6 +113,7 @@ export type RenderComparisonFixtureKey =
   | "tilt-3d"
   | "scaled-text"
   | "stroke-paint-order"
+  | "bidi-direction"
   | "media-opacity"
   | "graded-text"
   | "masked-text"
@@ -199,6 +200,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "tilt-3d",
   "scaled-text",
   "stroke-paint-order",
+  "bidi-direction",
   "media-opacity",
   "graded-text",
   "masked-text",
@@ -1503,6 +1505,13 @@ interface FixtureVariant {
    */
   textStrokePaintOrder?: TimelineLayer["strokePaintOrder"];
   textStrokeWidth?: number;
+  /**
+   * S0b (ADR-023 D6a): base direction + the text to exercise it with. Both undefined everywhere else,
+   * so `textFixtureLayer` omits the keys and every existing fixture stays byte-identical.
+   */
+  textDirection?: TimelineLayer["direction"];
+  textContent?: string;
+  textAlignOverride?: TimelineLayer["textAlign"];
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
    *  effects array — over a background layer so the keyed-away area is a real composite. */
   flarex?: FlarexComp;
@@ -1730,6 +1739,24 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       // in the FONT for the same reason `glow-edge-max` does it: the stroke is drawn before the
       // layer transform, so a scale-5 layer would magnify a 1x stroke rather than test a heavy one.
       return { effects: [], fit: "cover", textScale: 1, textFontSize: 340, textStrokeWidth: 22, textStrokePaintOrder: "under" };
+    case "bidi-direction":
+      // S0b (ADR-023 D6a). Arabic, with an embedded Latin word and a trailing Arabic question mark —
+      // the three things the paragraph's base level actually governs, and the three a pure-Arabic
+      // sample would NOT catch: a pure run resolves to correct visual order even under `ltr`, which
+      // is exactly why this defect survived every gate we own.
+      //
+      // `direction: "auto"` is the value new text is authored with, so this fixture pins the DEFAULT
+      // path rather than a setting almost nobody will pick. `textAlign: "end"` exercises the logical
+      // keyword resolving against that direction.
+      return {
+        effects: [],
+        fit: "cover",
+        textScale: 1,
+        textFontSize: 120,
+        textDirection: "auto",
+        textAlignOverride: "end",
+        textContent: "مرحبا Brand بالعالم؟"
+      };
     case "media-opacity":
       return { effects: [], fit: "cover", mediaOpacity: 50 };
     case "graded-text":
@@ -2067,24 +2094,25 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
   // concern — scaled-text (resolution-aware BOX raster), graded-text (LUT grade), masked-text (clip
   // matte), tilted-text (3D quad). All four now composite text on the GPU (Phase 4.1c/d, no DOM fallback).
   const useTextFixture = Boolean(
-    variant.textScale || variant.textEffects || variant.textMasks || variant.textTilt || variant.textStrokePaintOrder
+    variant.textScale || variant.textEffects || variant.textMasks || variant.textTilt || variant.textStrokePaintOrder || variant.textDirection
   );
   const textFixtureLayer: TimelineLayer = {
     id: "fixture_scaled_text",
     trackId: "overlay_track",
     type: "text",
     name: "Text fixture",
-    text: "HI",
+    text: variant.textContent ?? "HI",
     startSeconds: 0,
     durationSeconds: 12,
     fontFamily: "Arial",
     fontSize: variant.textFontSize ?? 110,
     textWidthPercent: 86,
-    textAlign: "center",
+    textAlign: variant.textAlignOverride ?? "center",
     color: "#ffffff",
     strokeColor: "#050608",
     strokeWidth: variant.textStrokeWidth ?? 4,
     ...(variant.textStrokePaintOrder ? { strokePaintOrder: variant.textStrokePaintOrder } : {}),
+    ...(variant.textDirection ? { direction: variant.textDirection } : {}),
     transform: {
       position: { x: 50, y: 50 },
       scale: variant.textScale ?? 1,
