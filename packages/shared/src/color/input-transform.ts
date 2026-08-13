@@ -301,7 +301,12 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
     verification: {
       status: "corroborated",
       document: "Sony, S-Log3/S-Gamut3 Technical Summary",
-      evidence: "18% grey derived from the curve → 0.41056, matching Sony's published code 420/1023 exactly"
+      evidence:
+        "Full coefficient set confirmed against the Technical Summary's published formula, not just an " +
+        "operating point: log segment (420 + log10((in+0.01)/(0.18+0.01))·261.5)/1023, linear segment " +
+        "(in·(171.2102946929−95)/0.01125 + 95)/1023. The break code 171.2102946929 is the spec's own " +
+        "value, carried here at full published precision rather than derived. 18% grey → 0.41056, " +
+        "matching Sony's published code 420/1023."
     }
   },
   vlog: {
@@ -309,8 +314,13 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
     domain: "scene-linear", nativeGamut: "v-gamut", implementation: "implemented",
     verification: {
       status: "corroborated",
-      document: "Panasonic, V-Log/V-Gamut Reference Manual",
-      evidence: "18% grey derived from the curve → 0.4233, matching Panasonic's published 42.3% IRE"
+      document: "Panasonic, V-Log/V-Gamut Reference Manual (2014-11-28)",
+      evidence:
+        "Full coefficient set confirmed against the reference manual, not just an operating point: " +
+        "cut1 = 0.01, cut2 = 0.181, b = 0.00873, c = 0.241514, d = 0.598206, linear segment " +
+        "5.6·in + 0.125. Note the manual gives cut1 for ENCODE (linear domain) and cut2 for DECODE " +
+        "(code domain) — two different thresholds naming different points, as implemented here. " +
+        "18% grey → 0.4233, matching Panasonic's published 42.3% IRE."
     }
   },
   logc3: {
@@ -319,7 +329,16 @@ export const INPUT_TRANSFERS: Record<Exclude<InputColorSpace, "auto">, InputTran
     verification: {
       status: "corroborated",
       document: "ARRI, ALEXA LogC Curve — Usage in VFX",
-      evidence: "18% grey derived from the curve → 0.3910, matching ARRI's published ~39.1% for EI 800"
+      evidence:
+        "Full coefficient set confirmed for EI 800: cut = 0.010591, a = 5.555556, b = 0.052272, " +
+        "c = 0.247190, d = 0.385537, e = 5.367655, f = 0.092809. 18% grey → 0.391006, matching ARRI's " +
+        "published ~39.1%. " +
+        "TRAP, recorded so nobody 'fixes' this to match a reference implementation: ARRI publishes " +
+        "LogC3 in TWO parameterizations. These are the NORMALIZED SENSOR SIGNAL constants. The " +
+        "LINEAR SCENE EXPOSURE FACTOR form of the same curve has different numbers " +
+        "(cut 0.004201, a 200.0, b −0.729169, e 0.193235573, f 0.149658) and is what colour-science " +
+        "tabulates. Only c and d are shared between the two. A side-by-side against colour-science " +
+        "will look like a mismatch and is not one — check which domain the other table is in first."
     }
   },
   logc4: {
