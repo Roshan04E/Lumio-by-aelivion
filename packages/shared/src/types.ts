@@ -225,6 +225,9 @@ export interface TextStyleFields {
   color?: string | undefined;
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
+  /** See {@link TimelineLayer.strokePaintOrder}. Part of the look, so a saved style carries it — and
+   *  a style captured before S1 simply has no key, which keeps meaning `"over"`. */
+  strokePaintOrder?: "over" | "under" | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
@@ -773,6 +776,24 @@ export interface TimelineLayer {
   borderRadius?: number | undefined;
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
+  /**
+   * Where a TEXT layer's stroke paints relative to its fill (ADR-023 D7, stage S1).
+   *
+   * - `"over"` — the stroke is centred on the glyph outline and painted ON TOP of the fill, so half
+   *   its width eats inward and a heavy stroke thins the letterform. That is `-webkit-text-stroke`'s
+   *   own behaviour, and what every text layer has always done.
+   * - `"under"` — the stroke paints BEHIND the fill (CSS `paint-order: stroke fill`). The whole glyph
+   *   stays visible and the stroke reads as an outline around it: the sticker-caption look.
+   *
+   * **ABSENT MEANS `"over"`, permanently, and is never migrated.** This is D1a's shape applied to a
+   * second axis, for the reason `color-management.ts:82-119` gives for keeping
+   * `LEGACY_PROJECT_COLOR_SETTINGS` and `NEW_PROJECT_COLOR_SETTINGS` as two constants rather than one
+   * default behind a flag: *absent* must keep meaning "authored before this existed" for good, not
+   * until someone changes the default. Flipping it under an existing project is a visible pixel
+   * change in work the user may already have published. New text is authored `"under"`; everything
+   * else renders exactly as it does today until its author opts in.
+   */
+  strokePaintOrder?: "over" | "under" | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;

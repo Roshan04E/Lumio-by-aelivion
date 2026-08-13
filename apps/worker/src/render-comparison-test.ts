@@ -142,6 +142,37 @@ assert.equal(renderTextStyle.width, "42%");
 assert.equal(renderTextStyle.WebkitTextStroke, "2px #050608");
 assert.equal(renderTextStyle.textShadow, "0px 7px 19px rgba(0,0,0,0.62)");
 
+/**
+ * S1 (ADR-023 D7) — assert the EMITTED CSS, not just that the two renderers agree.
+ *
+ * A `render:compare:pixels` run answers "do the renderers agree?", and both of them would agree
+ * perfectly on ignoring `paint-order` entirely: same code, same Chromium, 0.000%, green. That is
+ * DEBT-017's blind spot, and a feature whose only evidence is a parity gate has not been shown to
+ * do anything. These three assertions pin the actual contract instead.
+ *
+ * The legacy case is the one that matters most: an absent `strokePaintOrder` must emit NO
+ * declaration at all — not `paint-order: fill stroke`, which would be equivalent to today's render
+ * and still change every existing project's emitted CSS.
+ */
+assert.equal(renderTextStyle.paintOrder, undefined, "absent strokePaintOrder must emit no paint-order at all.");
+assert.equal(
+  getCompositionTextStyle({ ...manifestTextLayer, strokePaintOrder: "under" }).paintOrder,
+  "stroke fill",
+  "strokePaintOrder 'under' must emit paint-order: stroke fill."
+);
+assert.equal(
+  getCompositionTextStyle({ ...manifestTextLayer, strokePaintOrder: "over" }).paintOrder,
+  undefined,
+  "an explicit 'over' is the legacy look and must also emit nothing."
+);
+// A paint order with no stroke to order is not a look, and emitting it would put a live declaration
+// on layers that have no outline — the widest possible blast radius for the smallest possible gain.
+assert.equal(
+  getCompositionTextStyle({ ...manifestTextLayer, strokePaintOrder: "under", strokeWidth: 0 }).paintOrder,
+  undefined,
+  "no stroke means no paint-order declaration."
+);
+
 const previewShapeStyle = getCompositionShapeStyle(shapeLayer);
 const renderShapeStyle = getCompositionShapeStyle(manifestShapeLayer);
 assert.equal(previewShapeStyle.width, renderShapeStyle.width);

@@ -48,6 +48,7 @@ export interface CompositionLayerStyleInput {
   borderRadius?: number | undefined;
   strokeColor?: string | undefined;
   strokeWidth?: number | undefined;
+  strokePaintOrder?: "over" | "under" | undefined;
   backgroundColor?: string | undefined;
   backgroundPaddingEm?: number | undefined;
   backgroundRadiusEm?: number | undefined;
@@ -702,6 +703,10 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
   const textWidth = animStyleNumber(layer, options, "style.textWidthPercent", numberOr(layer.textWidthPercent ?? style.textWidthPercent, 0));
   const strokeWidth = animStyleNumber(layer, options, "style.strokeWidth", numberOr(layer.strokeWidth ?? style.strokeWidth, 0));
   const strokeColor = stringOr(layer.strokeColor ?? style.strokeColor, "#000000");
+  // ADR-023 D7 (S1). ABSENT resolves to "over" — the legacy look — and only an explicit "under"
+  // changes anything, so every project authored before this field existed emits exactly the CSS it
+  // emitted before. See TimelineLayer.strokePaintOrder for why absence is permanent, not defaulted.
+  const strokeUnderFill = (layer.strokePaintOrder ?? style.strokePaintOrder) === "under";
   const effectCss = getEffectCss(layer.effects, layer.animations as TimelineKeyframeV2[] | undefined, layer.startSeconds, options.currentTimeSeconds);
   const paddingEmY = animStyleNumber(
     layer,
@@ -739,6 +744,10 @@ export function getCompositionTextStyle(layer: CompositionLayerStyleInput | Time
     transformOrigin: compositionTransformOriginCss(transform),
     width: textWidth > 0 ? `${textWidth}%` : "max-content",
     WebkitTextStroke: strokeWidth > 0 ? `${strokeWidth}px ${strokeColor}` : undefined,
+    // `paint-order: stroke fill` moves the stroke BEHIND the fill so a heavy stroke stops eating the
+    // letterform. `undefined` (the legacy case) emits no declaration at all, which is what keeps an
+    // existing project's CSS byte-identical rather than merely equivalent.
+    paintOrder: strokeUnderFill && strokeWidth > 0 ? ("stroke fill" as const) : undefined,
     whiteSpace: "pre-wrap" as const
   };
 }

@@ -418,6 +418,12 @@ export function buildRenderManifest(input: {
               borderRadius: layer.borderRadius,
               strokeColor: layer.strokeColor,
               strokeWidth: layer.strokeWidth,
+              // S1 (ADR-023 D7). Omitted here, the export renders stroke-over while the editor renders
+              // stroke-under for the SAME project — the manifest-is-the-contract failure. A renderer-
+              // parity gate cannot see it: it compares two renderers that both read this bag, so both
+              // agree on the wrong answer. Caught by flipping the fixture's order and finding the
+              // render byte-identical.
+              strokePaintOrder: layer.strokePaintOrder,
               backgroundColor: layer.backgroundColor,
               backgroundPaddingEm: layer.backgroundPaddingEm,
               backgroundRadiusEm: layer.backgroundRadiusEm,
@@ -499,6 +505,8 @@ export function buildRenderManifest(input: {
             borderRadius: layer.borderRadius,
             strokeColor: layer.strokeColor,
             strokeWidth: layer.strokeWidth,
+            // S1 (ADR-023 D7) — see the sibling builder above; both copies must carry it.
+            strokePaintOrder: layer.strokePaintOrder,
             backgroundColor: layer.backgroundColor,
             backgroundPaddingEm: layer.backgroundPaddingEm,
             backgroundRadiusEm: layer.backgroundRadiusEm,

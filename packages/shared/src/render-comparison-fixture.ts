@@ -112,6 +112,7 @@ export type RenderComparisonFixtureKey =
   | "feather-region-blur"
   | "tilt-3d"
   | "scaled-text"
+  | "stroke-paint-order"
   | "media-opacity"
   | "graded-text"
   | "masked-text"
@@ -197,6 +198,7 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "feather-region-blur",
   "tilt-3d",
   "scaled-text",
+  "stroke-paint-order",
   "media-opacity",
   "graded-text",
   "masked-text",
@@ -1494,6 +1496,13 @@ interface FixtureVariant {
   nestedJunctionPreroll?: boolean;
   /** Texture fill (D2): image paint on the TEXT fixture's glyphs. */
   textFillTexture?: TimelineLayer["fillTexture"];
+  /**
+   * S1 (ADR-023 D7): stroke paint order + a stroke heavy enough for the order to be legible. Both are
+   * left UNDEFINED by every other variant, so `textFixtureLayer` omits the keys entirely and every
+   * existing fixture stays byte-identical — the claim `render:baseline` is checking.
+   */
+  textStrokePaintOrder?: TimelineLayer["strokePaintOrder"];
+  textStrokeWidth?: number;
   /** Flarex parity (S4): the media layer renders through this node comp instead of its own
    *  effects array — over a background layer so the keyed-away area is a real composite. */
   flarex?: FlarexComp;
@@ -1713,6 +1722,14 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", tilt: { rotateY: 26, rotateX: -12, perspective: 1000 } };
     case "scaled-text":
       return { effects: [], fit: "cover", textScale: 5 };
+    case "stroke-paint-order":
+      // S1 (ADR-023 D7). A HEAVY stroke is the whole point: at the default 4px the two paint orders
+      // differ by a couple of pixels of letterform and a diff would be arguing about antialiasing.
+      // At 22px, stroke-over eats visibly into the glyph and stroke-under does not, so this fixture
+      // distinguishes the two states rather than merely rendering one of them. Scale 1 with the size
+      // in the FONT for the same reason `glow-edge-max` does it: the stroke is drawn before the
+      // layer transform, so a scale-5 layer would magnify a 1x stroke rather than test a heavy one.
+      return { effects: [], fit: "cover", textScale: 1, textFontSize: 340, textStrokeWidth: 22, textStrokePaintOrder: "under" };
     case "media-opacity":
       return { effects: [], fit: "cover", mediaOpacity: 50 };
     case "graded-text":
@@ -2049,7 +2066,9 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
   // Text-only fixtures: a single large text layer (no captions/shape) so the diff isolates ONE text
   // concern — scaled-text (resolution-aware BOX raster), graded-text (LUT grade), masked-text (clip
   // matte), tilted-text (3D quad). All four now composite text on the GPU (Phase 4.1c/d, no DOM fallback).
-  const useTextFixture = Boolean(variant.textScale || variant.textEffects || variant.textMasks || variant.textTilt);
+  const useTextFixture = Boolean(
+    variant.textScale || variant.textEffects || variant.textMasks || variant.textTilt || variant.textStrokePaintOrder
+  );
   const textFixtureLayer: TimelineLayer = {
     id: "fixture_scaled_text",
     trackId: "overlay_track",
@@ -2064,7 +2083,8 @@ export function createRenderComparisonFixture(key: RenderComparisonFixtureKey = 
     textAlign: "center",
     color: "#ffffff",
     strokeColor: "#050608",
-    strokeWidth: 4,
+    strokeWidth: variant.textStrokeWidth ?? 4,
+    ...(variant.textStrokePaintOrder ? { strokePaintOrder: variant.textStrokePaintOrder } : {}),
     transform: {
       position: { x: 50, y: 50 },
       scale: variant.textScale ?? 1,

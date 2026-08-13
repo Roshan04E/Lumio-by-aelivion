@@ -500,6 +500,11 @@ export async function drawTextLayer(
   const strokeStr = style.WebkitTextStroke ? String(style.WebkitTextStroke) : "";
   const strokeWidth = strokeStr ? num(strokeStr) : 0;
   const strokeColor = strokeStr ? strokeStr.slice(String(num(strokeStr)).length + 3) : "";
+  // ADR-023 D7 (S1). The CSS the DOM path gets is `paint-order: stroke fill`; canvas has no such
+  // property, so the equivalent here is literally the order of the two passes. Read from the SAME
+  // emitted style object rather than from the layer, so the DOM and the raster cannot diverge on
+  // which look a layer has. Absent → false → the existing fill-then-stroke order, untouched.
+  const strokeUnderFill = style.paintOrder === "stroke fill";
 
   // #3b: alphabetic baseline matching the CSS line-box model. The browser centers the
   // glyph block (ascent+descent) vertically within each line-height box using half-leading.
@@ -566,18 +571,36 @@ export async function drawTextLayer(
       // #3c: fill first (with shadow), then stroke on top — matches CSS -webkit-text-stroke
       // which paints the stroke centered on the glyph outline OVER the fill.
       // Texture fill (D2): the pattern overrides every run's solid color (whole-layer paint, v1).
-      if (shadow) applyShadow(ctx, shadow);
-      ctx.fillStyle = glyphPaint ?? word.color;
-      ctx.fillText(word.text, x, y);
-
-      if (strokeWidth > 0) {
-        // Clear shadow for the stroke pass so the stroke doesn't add a second shadow.
-        ctx.shadowColor = "transparent";
-        ctx.shadowBlur = 0;
+      //
+      // S1 (ADR-023 D7): `paint-order: stroke fill` swaps the two passes so the stroke goes down
+      // first and the fill covers its inner half. The shadow always rides the FIRST pass, so it is
+      // cast by whichever silhouette is outermost — for stroke-under that is the stroke, which is
+      // what CSS does too; a shadow on the second pass would draw on top of the first.
+      if (strokeUnderFill && strokeWidth > 0) {
+        if (shadow) applyShadow(ctx, shadow);
         ctx.lineWidth = strokeWidth;
         ctx.strokeStyle = strokeColor || "#000";
         ctx.lineJoin = "round";
         ctx.strokeText(word.text, x, y);
+
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = glyphPaint ?? word.color;
+        ctx.fillText(word.text, x, y);
+      } else {
+        if (shadow) applyShadow(ctx, shadow);
+        ctx.fillStyle = glyphPaint ?? word.color;
+        ctx.fillText(word.text, x, y);
+
+        if (strokeWidth > 0) {
+          // Clear shadow for the stroke pass so the stroke doesn't add a second shadow.
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+          ctx.lineWidth = strokeWidth;
+          ctx.strokeStyle = strokeColor || "#000";
+          ctx.lineJoin = "round";
+          ctx.strokeText(word.text, x, y);
+        }
       }
 
       if (synthesizeItalic) ctx.restore();

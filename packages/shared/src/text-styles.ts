@@ -17,6 +17,7 @@ export const TEXT_STYLE_FIELD_KEYS = [
   "color",
   "strokeColor",
   "strokeWidth",
+  "strokePaintOrder",
   "backgroundColor",
   "backgroundPaddingEm",
   "backgroundRadiusEm",

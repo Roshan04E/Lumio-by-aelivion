@@ -116,6 +116,10 @@ export function createTextLayer(
     textWidthPercent: 0,
     color: params.color ?? "#FFFFFF",
     strokeWidth: 0,
+    // ADR-023 D7 (S1): text added by an action (AI, voice, a skill) is new text too, and must be
+    // authored the same way the editor's own "Add text" authors it — the alternative is two kinds of
+    // new text that look different for no reason a user could name.
+    strokePaintOrder: "under" as const,
     transform: defaultTransform({ position }),
     effects: [],
     keyframes: []

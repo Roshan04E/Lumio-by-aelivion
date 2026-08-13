@@ -10315,7 +10315,11 @@ function createEditorLayer(
       textAlign: "center",
       textWidthPercent: 0,
       color: "#FFFFFF",
-      strokeWidth: 0
+      strokeWidth: 0,
+      // ADR-023 D7 (S1): NEW text is authored stroke-behind-fill. Stamped at creation rather than
+      // defaulted at read time — that is what lets an absent value keep meaning "authored before
+      // this existed" permanently, so no existing project moves. See TimelineLayer.strokePaintOrder.
+      strokePaintOrder: "under" as const
     };
   }
 
@@ -14989,6 +14993,16 @@ function TextGraphicControls({
             <ColorControl icon={<PaintBucket size={14} />} label="Fill color" palette={palette} value={layer.color ?? "#ffffff"} onReset={() => onChange((item) => ({ ...item, color: defaultTextStyle.color }))} onChange={(value) => onChange((item) => ({ ...item, color: value }))} />
             <ColorControl icon={<PenLine size={14} />} label="Stroke color" palette={palette} value={layer.strokeColor ?? "#161618"} onReset={() => onChange((item) => ({ ...item, strokeColor: defaultTextStyle.strokeColor }))} onChange={(value) => onChange((item) => ({ ...item, strokeColor: value }))} />
             <NumberControl icon={<PenLine size={14} />} label="Stroke width" keyframe={styleKf?.keyframe("style.strokeWidth", styleKf.value("style.strokeWidth", layer.strokeWidth ?? 0))} value={styleKf?.value("style.strokeWidth", layer.strokeWidth ?? 0) ?? layer.strokeWidth ?? 0} min={0} max={200} step={1} onReset={() => onChange((item) => ({ ...item, strokeWidth: defaultTextStyle.strokeWidth }))} onChange={(value) => (styleKf ? styleKf.change("style.strokeWidth", value) : onChange((item) => ({ ...item, strokeWidth: value })))} />
+          </div>
+          <div className="icon-control-row">
+            {/* ADR-023 D7 (S1). How an EXISTING project opts in — the value is stamped only on new
+                text, so this toggle is the migration, per project, per layer, and visible. */}
+            <ToggleControl
+              icon={<PenLine size={15} />}
+              label="Stroke behind fill"
+              active={(layer.strokePaintOrder ?? "over") === "under"}
+              onChange={(active) => onChange((item) => ({ ...item, strokePaintOrder: active ? "under" : "over" }))}
+            />
           </div>
         </div>
       </InspectorSection>
