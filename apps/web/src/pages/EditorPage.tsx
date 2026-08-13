@@ -234,6 +234,10 @@ import { orisNoteGraphWrite } from "../editor/oris-write-probe";
 import { appendEditCommit, appendHistoryAction } from "../ai/experience/stream";
 import { shouldRecordHistoryEntry, type CommitIntent } from "../editor/gesture-scope";
 import { FontPicker } from "../editor/controls/FontPicker";
+// ADR-023 S2.7 — Bold/Italic resolve to a real FACE over a pinned ref. The rule lives in shared so
+// it is testable without a browser; `pinFont` turns the chosen cut into bytes (mirroring if needed).
+import { faceControlBlocked, isBoldActive, isItalicActive, planFaceChange, FACE_BOLD_WEIGHT, FACE_REGULAR_WEIGHT } from "@orreris/shared";
+import { fontPinState, fontPinVersion, pinFont, subscribeFontPins } from "../lib/font-pin";
 import { NumberControl } from "../editor/inspector/controls/NumberControl";
 import { KeyframeButtons } from "../editor/inspector/controls/KeyframeButtons";
 import { ThemedSelect, type ThemedSelectGroup } from "../editor/inspector/controls/ThemedSelect";
@@ -14990,11 +14994,14 @@ function TextGraphicControls({
               value={{
                 fontFamily: layer.fontFamily ?? renderSafeFonts[0].family,
                 fontRef: layer.fontRef,
-                // S2.6: a pinned ref's weight/style come from the REF, because they describe the
-                // file (`fontRefCss`). So the picker has to be told what the layer is asking for, or
-                // picking a family while Bold is on would silently pin the regular cut.
-                weight: layer.fontWeight ?? defaultTextStyle.fontWeight,
-                italic: layer.italic ?? false
+                // S2.6/S2.7: a pinned ref's weight/style come from the REF, because they describe
+                // the file (`fontRefCss`). So the picker is told what the layer is asking for —
+                // read from the REF when there is one, or picking a new family would silently drop
+                // the cut the user is already on back to regular upright.
+                weight: isBoldActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
+                  ? FACE_BOLD_WEIGHT
+                  : FACE_REGULAR_WEIGHT,
+                italic: isItalicActive({ fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic })
               }}
               onReset={() => onChange((item) => ({ ...item, fontFamily: defaultTextStyle.fontFamily, fontRef: undefined }))}
               onPick={(next) => onChange((item) => ({ ...item, fontFamily: next.fontFamily, fontRef: next.fontRef }))}
@@ -15002,8 +15009,13 @@ function TextGraphicControls({
             <NumberControl icon={<CaseSensitive size={14} />} label="Font size" keyframe={styleKf?.keyframe("style.fontSize", styleKf.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize))} value={styleKf?.value("style.fontSize", layer.fontSize ?? defaultTextStyle.fontSize) ?? layer.fontSize ?? defaultTextStyle.fontSize} min={1} max={1000} step={1} onReset={() => onChange((item) => ({ ...item, fontSize: defaultTextStyle.fontSize }))} onChange={(value) => (styleKf ? styleKf.change("style.fontSize", value) : onChange((item) => ({ ...item, fontSize: value })))} />
           </div>
           <div className="icon-control-row">
-            <ToggleControl icon={<Bold size={15} />} label="Bold" active={(layer.fontWeight ?? defaultTextStyle.fontWeight) >= 700} onChange={(active) => onChange((item) => ({ ...item, fontWeight: active ? 900 : 400 }))} />
-            <ToggleControl icon={<Italic size={15} />} label="Italic" active={layer.italic ?? false} onChange={(active) => onChange((item) => ({ ...item, italic: active }))} />
+            {/* ADR-023 S2.7 — Bold picks the bold FILE. Over a pinned ref these toggles rewrite the
+                ref to the family's matching cut (async, because a cut we do not hold has to be
+                mirrored first); over a legacy system stack they write CSS exactly as they always
+                have. A family with no such cut DISABLES the control with a reason rather than
+                faux-bolding, which would smear on screen and differ in the export. */}
+            <FaceToggleControl layer={layer} control="bold" onChange={onChange} />
+            <FaceToggleControl layer={layer} control="italic" onChange={onChange} />
             <AlignmentControl value={layer.textAlign ?? "center"} onChange={(value) => onChange((item) => ({ ...item, textAlign: value }))} />
           </div>
           <div className="icon-control-row">
@@ -15110,18 +15122,95 @@ function ShapeGraphicControls({
   );
 }
 
-function ToggleControl({ icon, label, active, onChange }: { icon: ReactNode; label: string; active: boolean; onChange: (active: boolean) => void }) {
+function ToggleControl({
+  icon,
+  label,
+  active,
+  onChange,
+  disabled,
+  reason
+}: {
+  icon: ReactNode;
+  label: string;
+  active: boolean;
+  onChange: (active: boolean) => void;
+  /** ADR-023 S2.7 — additive, default off, so every other call site is untouched. */
+  disabled?: boolean | undefined;
+  /** Shown instead of the label when disabled. A greyed control with no explanation is a bug report. */
+  reason?: string | undefined;
+}) {
   return (
     <button
       type="button"
-      className={`inspector-toggle ${active ? "is-active" : ""}`}
+      className={`inspector-toggle ${active ? "is-active" : ""} ${disabled ? "is-disabled" : ""}`}
       aria-pressed={active}
-      title={label}
+      aria-disabled={disabled ? true : undefined}
+      disabled={disabled ?? false}
+      title={disabled && reason ? reason : label}
       onClick={() => onChange(!active)}
     >
       {icon}
       <span>{label}</span>
     </button>
+  );
+}
+
+/**
+ * ADR-023 S2.7 — Bold/Italic over a pinned font.
+ *
+ * Three behaviours, and which one applies is decided in shared (`planFaceChange`) rather than here,
+ * so the rule is testable without a browser:
+ *
+ *  - **Legacy `{ source: "system" }`** — writes `fontWeight`/`italic` exactly as this editor always
+ *    has, including the 900 the Bold toggle has always used. D1a: untouched, permanently.
+ *  - **Pinned, and the family has the cut** — rewrites the REF to that cut. A cut we do not hold is
+ *    mirrored first (S2.6), so this is async and the control shows it working.
+ *  - **Pinned, and the family has no such cut** — the control is DISABLED with the reason. Anton has
+ *    one weight; faking a second one is smeared on screen and different in the export, and that
+ *    silent divergence is what this whole ADR exists to prevent.
+ */
+function FaceToggleControl({
+  layer,
+  control,
+  onChange
+}: {
+  layer: TimelineLayer;
+  control: "bold" | "italic";
+  onChange: (updater: (item: TimelineLayer) => TimelineLayer) => void;
+}) {
+  const [resolving, setResolving] = useState(false);
+  useSyncExternalStore(subscribeFontPins, fontPinVersion, fontPinVersion);
+
+  const input = { fontRef: layer.fontRef, fontWeight: layer.fontWeight ?? defaultTextStyle.fontWeight, italic: layer.italic };
+  const active = control === "bold" ? isBoldActive(input) : isItalicActive(input);
+  const blocked = faceControlBlocked(input, control);
+  const failure = layer.fontRef && layer.fontRef.source !== "system" ? fontPinState(layer.fontRef.family) : undefined;
+
+  return (
+    <ToggleControl
+      icon={control === "bold" ? <Bold size={15} /> : <Italic size={15} />}
+      label={control === "bold" ? "Bold" : "Italic"}
+      active={active}
+      disabled={Boolean(blocked) || resolving}
+      reason={blocked ?? (resolving ? "Fetching this cut…" : failure?.status === "failed" ? failure.message : undefined)}
+      onChange={(next) => {
+        const plan = planFaceChange(input, control === "bold" ? { bold: next } : { italic: next });
+        if (plan.kind === "unavailable") return;
+        if (plan.kind === "css") {
+          onChange((item) => ({ ...item, fontWeight: plan.fontWeight, italic: plan.italic }));
+          return;
+        }
+        setResolving(true);
+        void pinFont(plan.family, plan.weight, plan.style)
+          .then((ref) => {
+            // A failed resolution writes NOTHING. The layer keeps the cut it had, and the control
+            // carries the reason — the alternative, falling back to a CSS weight, is precisely the
+            // faux-bold this stage exists to prevent, arriving through the error path.
+            if (ref) onChange((item) => ({ ...item, fontRef: ref }));
+          })
+          .finally(() => setResolving(false));
+      }}
+    />
   );
 }
 

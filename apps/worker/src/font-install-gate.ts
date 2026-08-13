@@ -33,7 +33,7 @@ process.env.STORAGE_DRIVER = "local";
 process.env.STORAGE_ROOT = tempRoot;
 
 const { buildRenderManifest } = await import("@orreris/render-templates");
-const { createRenderComparisonFixture, renderComparisonFrameSeconds, fontIndexFace, fontIndexFamily, fontLicenseObjectKey, FontResolutionError } =
+const { createRenderComparisonFixture, renderComparisonFrameSeconds, fontIndexFace, fontIndexFamily, fontLicenseObjectKey, planFaceChange, FontResolutionError } =
   await import("@orreris/shared");
 const { mirrorCatalogueFont, mirrorGoogleFont } = await import("@orreris/storage");
 const { renderManifestStill } = await import("./remotion-renderer");
@@ -239,6 +239,67 @@ async function main(): Promise<void> {
     hashOf(pinnedPng),
     "two DIFFERENT pinned families rendered identically. One face is standing in for both, which is the " +
       "empty-catalogue failure reaching the export rather than the picker."
+  );
+
+  /**
+   * ---- S2.7: Bold picks the bold FILE, proven at the raster. ----------------------------------
+   *
+   * The plan's verification, and it is T-17's sharpened form: the two renders must differ FROM EACH
+   * OTHER, not merely from a fallback. Differing from a fallback would pass if both cuts resolved to
+   * the same file, or if one of them quietly fell back and the browser faux-bolded it — and a
+   * faux-bold of Arimo 400 looks enough like Arimo 700 that no one would question the picture.
+   *
+   * Both cuts are real files this repo ships, mirrored through the same path, so what is being
+   * compared is two pinned refs of ONE family that differ only in which bytes they name.
+   */
+  const regularFace = fontIndexFace("Arimo", 400, "normal");
+  assert.ok(regularFace, "the index must offer Arimo's regular cut.");
+  const arimoRegularBytes = fs.readFileSync(path.join(repoRoot, "apps", "worker", "public", "fonts", "Arimo-Regular.ttf"));
+  const mirroredRegular = await mirrorGoogleFont({
+    family: "Arimo",
+    weight: regularFace.weight,
+    style: regularFace.style,
+    licensePath: row.licensePath,
+    urlResolver: async () => "https://fonts.example/arimo-400.ttf",
+    fetcher: async () =>
+      arimoRegularBytes.buffer.slice(arimoRegularBytes.byteOffset, arimoRegularBytes.byteOffset + arimoRegularBytes.byteLength) as ArrayBuffer
+  });
+
+  assert.notEqual(
+    mirroredRegular.key.fileHash,
+    fromIndex.key.fileHash,
+    "Arimo 400 and Arimo 700 must be different fileHashes. If they are equal the resolver is handing the same " +
+      "file to both requests, and every pixel comparison below is comparing a font with itself."
+  );
+
+  // What the toggle would produce, taken from the SHARED planner rather than restated here — a gate
+  // that recomputed the rule would agree with the rule being wrong.
+  const boldPlan = planFaceChange(
+    { fontRef: { source: "catalogue", family: "Arimo", weight: 400, style: "normal", fileHash: mirroredRegular.key.fileHash }, fontWeight: 400, italic: false },
+    { bold: true }
+  );
+  assert.equal(boldPlan.kind, "face");
+  assert.equal(boldPlan.kind === "face" ? boldPlan.weight : 0, 700, "the Bold toggle must ask for the 700 cut.");
+
+  const regularPng = await renderWithFont(
+    { source: "catalogue", family: "Arimo", weight: 400, style: "normal", fileHash: mirroredRegular.key.fileHash },
+    "arimo-regular"
+  );
+  const boldPng = await renderWithFont(
+    { source: "catalogue", family: "Arimo", weight: 700, style: "normal", fileHash: fromIndex.key.fileHash },
+    "arimo-bold"
+  );
+  process.stdout.write(
+    `S2.7 weight → regular=${hashOf(regularPng).slice(0, 12)} (${mirroredRegular.key.fileHash.slice(0, 8)}…)  ` +
+      `bold=${hashOf(boldPng).slice(0, 12)} (${fromIndex.key.fileHash.slice(0, 8)}…)\n`
+  );
+  assert.notEqual(
+    textRegionHash(regularPng),
+    textRegionHash(boldPng),
+    "BOLD DID NOTHING — the same family pinned at 400 and at 700 rendered the same text pixels. Either both refs " +
+      "resolved to one file, or the bold ref never reached the raster. This is the defect S2.7 exists to close, " +
+      "and it is asserted between the two PINNED renders rather than against a fallback, because a faux-bolded " +
+      "regular would also differ from a fallback."
   );
 
   process.stdout.write("\nPASS — pinned bytes reach the raster, the render is deterministic, and a missing font aborts by name.\n");

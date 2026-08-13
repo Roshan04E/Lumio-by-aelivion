@@ -63,11 +63,17 @@ export function clearFontPinState(family: string): void {
  * families would queue a mirror per row the pointer passed over.
  */
 export function pinFont(family: string, weight = 400, style: "normal" | "italic" = "normal"): Promise<FontRef | undefined> {
-  // The bundled fast path. Note it resolves the nearest BUNDLED face, which may differ from the
-  // nearest indexed one — the bundled set ships fewer cuts, and pinning a face we hold beats
-  // fetching one we do not.
+  /**
+   * The bundled fast path, and it must be EXACT (S2.7).
+   *
+   * `catalogueFontRef` resolves to the nearest bundled cut, which is right when the question is
+   * "show me this family" and wrong when it is "give me the italic": we bundle Arimo 400 and 700
+   * and no italics, so a nearest-match would hand back the roman under an italic request and the
+   * layer would claim a cut it does not have. An inexact match falls through to the mirror, which
+   * can fetch the real one.
+   */
   const bundled = catalogueFontRef(family, weight, style);
-  if (bundled) return Promise.resolve(bundled);
+  if (bundled && bundled.weight === weight && bundled.style === style) return Promise.resolve(bundled);
 
   const key = `${family}|${weight}|${style}`;
   const existing = inFlight.get(key);

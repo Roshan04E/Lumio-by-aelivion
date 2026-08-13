@@ -18901,6 +18901,14 @@ input.scrub-number:focus {
   color: #fff;
 }
 
+/* ADR-023 S2.7 — a cut the family does not have. Dimmed rather than hidden: the control disappearing
+   would read as a missing feature, where a disabled one with a tooltip says the family is the limit.
+   `cursor: help` because the reason is the point — the title attribute carries it. */
+.inspector-toggle.is-disabled {
+  opacity: 0.4;
+  cursor: help;
+}
+
 @keyframes pulseText {
   0%,
   100% {

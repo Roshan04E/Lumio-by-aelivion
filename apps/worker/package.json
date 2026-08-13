@@ -27,6 +27,7 @@
     "font:install-gate": "tsx src/font-install-gate.ts",
     "marker:photo-gate": "tsx src/marker-photo-gate.ts",
     "font:catalogue-test": "tsx src/font-catalogue-test.ts",
+    "font:face-test": "tsx src/font-face-resolution-test.ts",
     "font:index-build": "tsx src/font-index-build.ts",
     "font:index-test": "tsx src/font-index-test.ts",
     "font:picker-perf": "tsx src/font-picker-perf-gate.ts",

@@ -35,6 +35,7 @@ import {
   FONT_SCRIPT_FILTERS,
   queryFontIndex,
   renderSafeFonts,
+  resolveFamilyFace,
   type FontIndexFamily,
   type FontRef
 } from "@orreris/shared";
@@ -183,14 +184,22 @@ export function FontPicker({
 
   const choose = useCallback(
     async (family: string) => {
-      const bundled = catalogueFontRef(family, weight, style);
-      if (bundled) {
+      /**
+       * Resolve to a face the family ACTUALLY has before asking for it (S2.7). The layer may be
+       * asking for weight 900 while the family tops out at 700, or for an italic it does not ship;
+       * `resolveFamilyFace` answers with a real cut, or with nothing when the style does not exist —
+       * and asking the mirror for a face Google has never heard of is a 404, not a font.
+       */
+      const face = resolveFamilyFace(family, weight, style) ?? resolveFamilyFace(family, weight, "normal");
+      if (!face) return;
+      const bundled = catalogueFontRef(family, face.weight, face.style);
+      if (bundled && bundled.weight === face.weight && bundled.style === face.style) {
         onPick({ fontFamily: family, fontRef: bundled });
         setOpen(false);
         return;
       }
       clearFontPinState(family);
-      const ref = await pinFont(family, weight, style);
+      const ref = await pinFont(family, face.weight, face.style);
       // A failed pin leaves the layer alone and the row explains itself. The menu deliberately stays
       // OPEN on failure — closing it would hide the only place the reason is shown.
       if (!ref) return;
