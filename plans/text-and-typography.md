@@ -19,6 +19,7 @@ S1  paint-order + stroke                  no manifest change, no schema change  
 S2  font reference + mirror + install     manifest change (FontRef)              the big one
 S2.5 catalogue + font picker UI          the ceiling a user can SEE going       split from S2
 S2.6 the catalogue goes VAST             virtualized list + mirror-on-pick      the original ask
+S2.7 Bold picks the bold FILE            weight resolves to a face, not CSS    S2.6 made it reachable
 S3  user font upload                      storage + asset doctrine
 S4  TextStyle as a PropertySchema         migration; unblocks S6
 S5  tier-1 texture + CSS depth            rides S4
@@ -342,6 +343,42 @@ reports "Missing font — showing a substitute". Previews load a bundled copy un
 `"<family> Preview"` CSS family so they can never be picked up by a layer's CSS by accident; the
 layer's own font resolves through the store, which is empty. That is D3 behaving exactly as
 designed, and it will look like a defect to anyone who has not seeded the mirror.
+
+---
+
+## S2.7 — Bold picks the bold FILE
+
+**Win:** turning on Bold over a pinned font makes it bold. Today it does nothing, and S2.6 made
+that failure far more reachable: a pinned ref's weight comes from the ref because the ref describes
+a *file* (`fontRefCss`), which is correct and was settled in S2 — but the layer's Bold toggle still
+writes a CSS weight nothing reads. With 7,804 faces now pickable, someone hits this immediately.
+S2.6 wired the picker to the layer's current weight, so picking *while* Bold is on pins the bold
+cut; toggling *after* pinning is the hole.
+
+**The industry answer, and it is not synthetic weight.** Figma, InDesign and Canva all resolve a
+weight/style request to a real face of the family and only synthesise when no such cut exists.
+Faux-bold over a family that ships a bold file is the amateur outcome — smeared, and different in
+the export.
+
+**Scope**
+- A resolver: `(family, weight, italic) → FontRef`, over the face index S2.6 already ingested.
+  Bold/Italic toggles **rewrite the ref** to the family's matching cut rather than emitting CSS.
+- **No cut, no lie.** A single-style family — Anton is the standing example, and
+  `warpFontCatalog`'s bold-less entry was the precedent — must not silently faux-bold. Either the
+  control disables with a reason, or synthesis is explicit and visible. Choose one and say which.
+- Legacy `{ source: "system" }` refs keep CSS synthetic weight, exactly as today. D1a: untouched,
+  permanently.
+- The variable-axis case is **out of scope** — that is S9's `font-variation-settings`. A variable
+  family exposing `wght` is one file, and this stage is about picking between files. Note where the
+  two will meet; do not build it.
+
+**Verification**
+- Bold on a pinned family writes a *different* `fileHash`, and the render differs. T-17's sharpened
+  form applies: the two renders must differ from each other, not merely from a fallback.
+- A single-style family takes the declared no-cut path, asserted — not "looks fine."
+- A legacy stack still bolds via CSS, byte-identical to today. `render:baseline` covers it.
+
+**Risk:** low. Contained to resolution; no new storage, no new manifest field.
 
 ---
 

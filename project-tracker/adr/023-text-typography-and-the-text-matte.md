@@ -603,8 +603,26 @@ Every naive assertion passed on an invisible element. A marker check must walk e
 the ancestor chain and confirm viewport intersection. **Any gate asserting a user-visible warning
 must itself be falsified against a deliberately hidden marker before it is trusted.**
 
+**T-11 addendum — the licence may live BESIDE the font, and that is still one operation.** (S2.6,
+f553091, measured.) D4a and T-11 assumed the licence travels in the font's name table. Every static
+instance `fonts.gstatic.com` serves has name IDs 13/14 **stripped** — Cairo, Amiri, Noto Naskh
+Arabic and Inter all return no licence text — so a mirror that reads only the name table would have
+refused every family the catalogue can offer, and mirror-on-pick would have been dead on arrival.
+The licence is not missing; it is stored next to the font. The mirror therefore admits a **second
+source** (a licence path recorded in the index) but never a second **step**: the licence is fetched
+inside the same call, before any write, both-or-neither intact. A document too short to be a licence
+is refused, or a 404 page returned with status 200 would satisfy T-11 on paper. The stored file
+records which source applied. **`isOpenSource` in Google's metadata is true for all ~1942 families
+and filters nothing** — do not mistake it for a licence check.
+
 **T-17 — A font gate must not assert a fact about the host it runs on. Make the host demonstrate the
-difference.** (S2.4, 72982a3.) The obvious way to prove an install path delivered bytes is to render
+difference.** (S2.4, 72982a3. **Sharpened by S2.6:** "differs from the control" is necessary and not
+sufficient. Two *different* system-named families render the identical picture when neither is
+installed and both land on one fallback — so pinned renders must also be asserted to differ **from
+each other**, or a single face standing in for every pinned font passes. The same trap caught an
+optimisation: a family loaded for the sample text `"Ag"` has no Arabic glyphs, so a row could report
+itself loaded and draw the fallback. The sample text is part of the load request, tracked per
+family.) The obvious way to prove an install path delivered bytes is to render
 a font "the machine does not have" — which silently makes the gate depend on the font folder it is
 standing in, the exact dependency it claims to remove, and turns green on a host that happens to
 have the face. The shape that works: render the same text twice, once naming the family as a system
