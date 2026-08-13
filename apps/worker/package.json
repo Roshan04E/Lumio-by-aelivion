@@ -23,6 +23,7 @@
     "text:direction-falsifier": "tsx src/text-direction-falsifier.ts",
     "font:ref-falsifier": "tsx src/font-ref-falsifier.ts",
     "font:ingest-test": "tsx src/font-ingest-test.ts",
+    "font:mirror-test": "tsx src/font-mirror-test.ts",
     "render:linear-gate": "tsx src/render-linear-gate.ts",
     "render:link-gate": "tsx src/render-link-gate.ts",
     "kernel:conform": "tsx src/kernel-conformance.ts",

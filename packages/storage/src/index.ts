@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 /**
@@ -159,6 +159,34 @@ export function relativeKeyFromUrl(publicUrl: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Whether an object exists at a storage-relative key, without downloading it.
+ *
+ * Added for ADR-023's font mirror, whose whole shape is "fetch once, then never again": the question
+ * "do we already have this?" has to be answerable for a few hundred bytes rather than a few hundred
+ * kilobytes, or mirror-on-first-use is mirror-on-every-use with extra steps.
+ *
+ * A missing object is a `false`, not a throw — absence is the expected answer here, not an error.
+ */
+export async function objectExists(relativeKey: string): Promise<boolean> {
+  const cfg = resolveStorageConfig();
+  if (cfg.driver === "r2") {
+    const { client, bucket } = r2();
+    try {
+      await client.send(new HeadObjectCommand({ Bucket: bucket, Key: relativeKey }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    await fs.access(path.join(cfg.storageRoot, relativeKey));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Persist bytes at a storage-relative key and return its public URL. */
