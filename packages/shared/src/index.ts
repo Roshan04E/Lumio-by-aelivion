@@ -67,6 +67,7 @@ export * from "./schemas";
 export * from "./skills";
 export * from "./templates";
 export * from "./text-styles";
+export * from "./text-script";
 export * from "./text-warp";
 export * from "./text-warp-mesh";
 export * from "./font-outlines";

@@ -73,6 +73,7 @@ import {
   type TransitionWindowSides,
   getLayerAnimations,
   hasTextWarp,
+  isTextWarpSuppressed,
   normalizeTextWarp,
   setGlContextBudget,
   setGlGovernorEnabled,
@@ -3602,6 +3603,11 @@ const PreviewLayer = memo(function PreviewLayer({
     // HTML runs stay for box sizing/selection but go invisible once the warp is ready;
     // while it loads (or if the font isn't hosted) the plain text shows instead.
     const warpReady = warpTextSvg != null;
+    // S0 / ADR-023 T-12 (INTERIM — delete with the D9a rework): warp is requested but the engine
+    // refused it because this text needs shaping. Mark the layer in the preview, not only in the
+    // inspector: the failure this exists to prevent is a wrong render nobody notices, and a user
+    // with the warp panel closed would otherwise see silence.
+    const warpSuppressed = isTextWarpSuppressed(layer.textWarp, visibleRuns.map((run) => run.text).join(""));
     // Clip mask (text): the comp-px mask must live on a comp-sized, transform-less wrapper (text is
     // content-sized) so it aligns + stays comp-fixed like the GPU scene path. `null` when unmasked → no
     // wrapper, byte-identical to before. The inner button re-enables pointer events (wrapper is none).
@@ -3644,6 +3650,22 @@ const PreviewLayer = memo(function PreviewLayer({
     return (
       <>
         {textMaskWrapper ? <div style={textMaskWrapper as CSSProperties}>{textButton}</div> : textButton}
+        {/* S0 / ADR-023 T-12 (INTERIM — delete with the D9a rework). A SIBLING of the text button, not
+            a child of it, and that is load-bearing rather than stylistic: when the layer is
+            GPU-composited the button carries `opacity: 0` (`hideVisual` — the scene canvas draws the
+            text instead), so a badge nested inside it inherits zero opacity and paints nothing while
+            still reporting itself present in the DOM. That is the exact silent-degradation failure
+            this marker exists to announce, and it shipped that way for one gate run. Positioned from
+            the same resolved style, so it tracks the layer. */}
+        {warpSuppressed && interactive ? (
+          <span
+            className="preview-warp-suppressed"
+            data-testid="preview-warp-suppressed"
+            style={{ left: (style as CSSProperties).left, top: (style as CSSProperties).top }}
+          >
+            Warp unavailable — this script needs shaping
+          </span>
+        ) : null}
         {selected ? (
           <PreviewSelectionOverlay
             layer={layer}

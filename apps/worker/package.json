@@ -19,6 +19,7 @@
     "render:compare": "tsx src/render-comparison-test.ts",
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
     "render:baseline": "tsx src/render-baseline-gate.ts",
+    "warp:shaping-gate": "tsx src/warp-shaping-gate.ts",
     "render:linear-gate": "tsx src/render-linear-gate.ts",
     "render:link-gate": "tsx src/render-link-gate.ts",
     "kernel:conform": "tsx src/kernel-conformance.ts",

@@ -1,3 +1,4 @@
+import { detectTextScript } from "./text-script";
 import { hasTextWarp, normalizeTextWarp } from "./text-warp";
 import { warpPathCommands, type PathCommand, type WarpBounds } from "./text-warp-mesh";
 import type { TextRun, TextWarp } from "./types";
@@ -199,6 +200,11 @@ export async function buildWarpedTextPaths(
   if (!hasTextWarp(warp)) return undefined;
   const text = runs.map((run) => run.text).join("");
   if (!text.trim()) return undefined;
+  // S0 / ADR-023 T-12 (INTERIM — delete with the D9a rework): `getPath()` below is glyph lookup,
+  // not shaping, so a shaping-dependent script would come out with the wrong glyphs. Refuse here,
+  // at the one choke point BOTH renderers share, so the editor and the export suppress warp
+  // identically; the editor surfaces the refusal (`isTextWarpSuppressed`).
+  if (detectTextScript(text).shapingDependent) return undefined;
 
   const family = primaryFontFamily(style.fontFamily);
   const fontSize = num(style.fontSize, 48);

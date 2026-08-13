@@ -14,6 +14,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "actions:test": "tsx src/timeline-actions/registry.test.ts",
     "resolver:test": "tsx src/timeline-ops.resolveGroupMove.test.ts",
+    "textscript:test": "tsx src/text-script.test.ts",
     "color:test": "tsx src/color/color.test.ts",
     "idt:test": "tsx src/color/input-transform.test.ts",
     "flarex:test": "tsx src/flarex/flarex.test.ts",

@@ -11030,6 +11030,31 @@ input.scrub-number:focus {
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
 }
 
+/* S0 / ADR-023 T-12 (INTERIM — delete with the D9a warp rework). Warp was requested and the engine
+   refused it because this text needs shaping. Sits in COMP space like the text it marks, so it
+   scales with the preview; sizes are comp px on purpose. Editor-only — never in an export. */
+.preview-warp-suppressed {
+  position: absolute;
+  /* `left`/`top` come from the layer's own resolved style (inline), so the badge tracks the text.
+     The translate centres it on that point and lifts it clear of the glyphs — a fixed comp-px
+     offset, because the text box's height is not knowable here. */
+  transform: translate(-50%, calc(-50% - 80px));
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 196, 84, 0.55);
+  border-radius: 8px;
+  background: rgba(38, 26, 6, 0.92);
+  color: #ffc454;
+  font-size: 26px;
+  font-weight: 600;
+  font-style: normal;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-shadow: none;
+  text-transform: none;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .preview-shape-layer {
   position: absolute;
   width: 44%;
@@ -14526,6 +14551,26 @@ input.scrub-number:focus {
 .rich-text-kf-hint {
   color: var(--editor-text-dim);
   font-size: 0.66rem;
+}
+
+/* S0 / ADR-023 T-12 (INTERIM — delete with the D9a warp rework). */
+.warp-shaping-notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 196, 84, 0.32);
+  border-radius: 6px;
+  background: rgba(255, 196, 84, 0.09);
+  color: #ffc454;
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.warp-shaping-notice svg {
+  flex: none;
+  margin-top: 2px;
 }
 
 .rich-text-toolbar-hint {

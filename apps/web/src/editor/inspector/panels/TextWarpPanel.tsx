@@ -1,5 +1,5 @@
-import { MoveHorizontal, MoveVertical, Spline } from "lucide-react";
-import { defaultTextWarp, type TextWarp, type TextWarpStyle } from "@orreris/shared";
+import { AlertTriangle, MoveHorizontal, MoveVertical, Spline } from "lucide-react";
+import { defaultTextWarp, detectTextScript, getCompositionTextRuns, type TextWarp, type TextWarpStyle } from "@orreris/shared";
 import type { InspectorPanelProps } from "../../registry/inspector";
 import { NumberControl } from "../controls/NumberControl";
 import { ThemedSelect } from "../controls/ThemedSelect";
@@ -24,6 +24,10 @@ const textWarpStyleOptions: Array<{ value: TextWarpStyle; label: string }> = [
 export default function TextWarpPanel({ layer, onChange }: InspectorPanelProps) {
   const warp = layer.textWarp ?? defaultTextWarp;
   const isActive = warp.style !== "none";
+  // S0 / ADR-023 T-12 (INTERIM): warp's outline engine does glyph lookup, not shaping, so it is
+  // suppressed for scripts that need shaping. Say so HERE, where warp is controlled — the incident
+  // this guards against (`font-outlines.ts:45-50`) was a wrong render nobody could see was wrong.
+  const shapingBlocked = detectTextScript(getCompositionTextRuns(layer).map((run) => run.text).join("")).shapingDependent;
 
   function updateWarp(patch: Partial<TextWarp>) {
     onChange((item) => ({ ...item, textWarp: { ...(item.textWarp ?? defaultTextWarp), ...patch } }));
@@ -31,6 +35,16 @@ export default function TextWarpPanel({ layer, onChange }: InspectorPanelProps) 
 
   return (
     <div className="graphic-controls">
+      {shapingBlocked ? (
+        <p className="warp-shaping-notice" role="status" data-testid="warp-shaping-notice">
+          <AlertTriangle size={14} aria-hidden="true" />
+          <span>
+            Warp is unavailable for this text. It uses a script that needs shaping (Arabic, Hebrew, Devanagari, Thai and
+            similar), which the warp engine cannot lay out correctly yet — so it renders unwarped rather than with the
+            wrong letters.
+          </span>
+        </p>
+      ) : null}
       <label className="number-row-select">
         <span className="effect-slider-label">
           <span className="control-icon">
