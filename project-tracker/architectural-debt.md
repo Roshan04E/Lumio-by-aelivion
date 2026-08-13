@@ -2257,12 +2257,15 @@ for the general shape of this gap.
 
 ### DEBT-017 — CLASS: the pixel-parity gate cannot see a bug both renderers share
 
-- Status: **open** — registered as a CLASS, not a single instance. **THREE axes as of 2026-08-13**:
-  (1) both renderers compute the same wrong value; (2) the gate cannot see the EDITOR at all;
-  (3) the gate's universe is its FIXTURE LIST — 3 of 29 transitions and 14 of 24 visual effects are
-  exercised by any fixture, measured. Does not retire until the missing instrument exists — but note
-  the "named but not built" line below is CORRECTED: `render:linear-gate` is that instrument's shape,
-  already built and proven; what it lacks is coverage
+- Status: **open** — registered as a CLASS, not a single instance. **THREE axes.** (1) both renderers
+  compute the same wrong value; (2) the gate cannot see the EDITOR at all; (3) the gate's universe is
+  its FIXTURE LIST. Axis 3 has a real instrument now: `render:link-gate`, a total (all-registry)
+  compile/link gate promoted 2026-08-13, self-checking, 128/128 green, transition coverage 3/29 → 6/29
+  (all four multi-pass pipeline transitions now fixture-covered; 26 monolith transitions and 10
+  fragment effects remain link-checked only, by design). Axis 1's own instrument is likewise BUILT,
+  not merely named: `render:linear-gate` predicts arithmetic in advance and has caught real defects —
+  what axis 1 lacks is coverage, not design. Does not retire until axis 2's editor-reaching gate exists
+  and axis 3's remaining fragment/monolith coverage is a scoped decision, not merely a number
 - Registered: 2026-08-09 (discovered attempting to falsify the DEBT-016 pixel fixture — twice, against two
   different auditor-proposed reverts, neither of which the gate could detect)
 - Reason: `render:compare:pixels` is a **differential** instrument — it renders the SAME composition
@@ -2297,9 +2300,12 @@ for the general shape of this gap.
   added to a rendering registry — a transition, a fragment effect, a node — WITHOUT a fixture that
   renders it. It is invisible to both gates from the moment it lands, and "the sweep is green" will
   keep being true if it never worked at all.
-- **Header updated 2026-08-13:** Status previously said only "registered as a CLASS, not a single
-  instance"; it now names all three axes and flags the corrected instrument claim. See `README.md`,
-  "State fields vs. history."
+- **Header updated 2026-08-13 (morning):** Status previously said only "registered as a CLASS, not a
+  single instance"; it now names all three axes and flags the corrected instrument claim.
+- **Header updated 2026-08-13 (afternoon), same day:** Status revised again after axis 3 was promoted
+  from a finding to a shipped gate (`render:link-gate`) with measured before/after coverage, and to
+  fold in that axis 1's own instrument is also built rather than merely named. See `README.md`, "State
+  fields vs. history."
 
 **The demonstration, not just the claim.** While attempting to falsify the DEBT-016 pixel fixture
 (`flarex-host-transform`) by reverting the ADR-020 slice-B transform-inheritance line in
@@ -2483,6 +2489,90 @@ asks for an audit naming what the gate can still see. The registry half is now m
 The remaining half is the one this entry has always described: enumerate which parts of the *Flarex
 render path* are still renderer-specific versus absorbed into `packages/shared`. Not attempted here,
 and deliberately not estimated.
+
+**STATED PLAINLY, because it belongs at the level of a rule rather than a footnote: `render:compare:pixels`
+and `render:baseline` share one fixture universe, so their two passes are not two independent pieces
+of evidence — they are one piece of evidence about that universe, read twice.** This weakens every
+"both gates agreed" claim made about this codebase to date, including ones made in this register and
+in this session's own reports, for anything the 76-fixture (now 82) set does not build. It does not
+make those claims wrong for what they actually cover; it makes them narrower than "both gates agreed"
+sounds. Read "N/N fixtures passed" as "the fixture set's own universe renders without incident", never
+as "the product is correct" — the second claim needs an instrument that predicts an answer in advance
+(below), not one that compares two things fed the same code.
+
+**UPDATE (2026-08-13) — PROMOTED. The probe is now a real gate, three of the four coverage gaps this
+audit itself found are closed, and the falsification was re-run through the wired gate, not just the
+tmp probe.**
+
+**The gate.** `apps/worker/tmp/debt017-shader-link-audit.ts` is now `apps/worker/src/render-link-gate.ts`
+(`pnpm --filter @orreris/worker render:link-gate`), inside the worker's own `tsconfig` `include` rather
+than typechecked separately. Same 128-source sweep (every transition and fragment effect, every pass,
+both light spaces), no rendering, no fixtures, no baselines — the cheap, total half of the standard
+split; golden images stay the expensive, curated half.
+
+**The self-check is now mandatory, not a plan.** Before the main sweep runs at all, EIGHT cases —
+one real sentinel per builder shape (transition monolith, transition pipeline pass, fragment
+single-pass, fragment multi-pass), each checked once as-built (must LINK) and once corrupted with a
+guaranteed-invalid top-level GLSL statement (must FAIL) — must all match expectation. A mismatch
+aborts at exit 2 and reports NOTHING about the registries: this directly targets the two probe defects
+this audit's own first pass produced (a stub vertex shader that failed uniformly; a pass-index-for-
+pass-object argument bug), both of which were plausible specifically because nothing else was watching
+the effects they landed on. Verified both directions: a clean run reads `self-check: 8/8 matched
+expectation`, and the `dip` falsification below re-confirmed the self-check stays green even while the
+main sweep goes red — i.e. the harness correctly distinguishes "the harness is broken" from "the
+product is broken", which is the one distinction this whole entry is about.
+
+**`dip` re-falsified through the WIRED gate, not just the tmp probe.** Same injection
+(`TEMPORARY_DEBT017_FALSIFY_undefined_symbol`, reverted; `registry.ts` byte-identical after, zero
+token matches):
+
+```
+render:link-gate   self-check: 8/8 matched expectation — harness trusted.
+                   FAIL  transition dip @display / @linear
+                   FAIL — 126/128 sources linked; 2 FAILED   (exit 1)
+```
+
+**Fixtures added for `liquidMorph`, `portal`, `motionSmear`** — the 3 of the 4 multi-pass pipeline
+transitions this audit itself found still asserted-correct only by shared-code inheritance.
+`liquid-morph-transition` / `linear-liquid-morph-transition` / `portal-transition` /
+`linear-portal-transition` / `motion-smear-transition` / `linear-motion-smear-transition`
+(`render-comparison-fixture.ts`), byte-for-byte the same shape as `pipeline-transition` /
+`linear-pipeline-transition` — same transition pair, same 0.45s sample, `transitionKind` swapped — plus
+a `different` cross-fixture relation for each display/linear pair, matching `focusPull`'s own. The
+other 26 uncovered transitions and 10 uncovered effects were deliberately NOT given fixtures: link-
+checking 128 sources is cheap and total; pixel-comparing 128 is neither, and a fixture nobody tunes a
+bar for becomes the next flaky gate. Multi-pass was the right subset because it is where the dead ones
+actually lived and where shared-code inheritance is weakest.
+
+Measured, reproducible byte-identical across 3 independent runs (two scoped to just these six
+fixtures, one inside the full 82-fixture sweep):
+
+```
+liquid-morph-transition          0.000% (5/2073600)
+linear-liquid-morph-transition   0.000% (4/2073600)
+portal-transition                0.000% (6/2073600)
+linear-portal-transition         0.092% (1899/2073600)   <- portal's additive-mix pass is the
+                                                             only one of the four that ADDS light
+                                                             rather than only blending it
+motion-smear-transition          0.000% (0/2073600)
+linear-motion-smear-transition   0.001% (11/2073600)
+```
+
+All six given the 0.005 tier (matching the `flarex-*`/`flarex-tracked-mask-*` siblings) rather than
+six bespoke values. `linear-portal-transition` is the tightest fit at ~5.4x headroom over its measured
+reading — still 7x tighter than the 3.5% global, and the reading is a real, stable, reproduced-3-times
+cross-renderer noise floor rather than a race.
+
+**Coverage, before → after:** transitions 3/29 → **6/29** — `crossDissolve`, `rgbDisplace`,
+`focusPull`, `liquidMorph`, `portal`, `motionSmear`. All four multi-pass pipeline transitions are now
+covered; 26 monolith transitions and 10 fragment effects remain link-checked-only, by design (see
+above). Fragment effects unchanged at 14/24 — out of scope for this round.
+
+**Verification:** six typechecks zero. `render:link-gate`: self-check 8/8, main sweep 128/128, `dip`
+falsification red (both above), self-check unaffected by the falsification. `render:compare:pixels`:
+6/6 scoped to the new fixtures, then the full 82-fixture sweep — 82/82, all six readings
+byte-identical to the two scoped runs, no regression elsewhere in the wider set. Tree held still
+throughout (`fcd2559` unchanged as parent).
 
 ### DEBT-018 — a recovery the code declares available was never performed (paused WC fallback)
 

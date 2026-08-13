@@ -170,7 +170,42 @@ const fixtureMaxDiffRatio: Partial<Record<RenderComparisonFixtureKey, number>> =
    * noise, no more.
    */
   "linear-stylize": 0.005,
-  "linear-stylize-print": 0.005
+  "linear-stylize-print": 0.005,
+  /**
+   * DEBT-017 THIRD AXIS (2026-08-13) — the other 3 of the 4 multi-pass pipeline transitions,
+   * matching `focusPull`'s own pair in shape. `pipeline-transition`/`linear-pipeline-transition`
+   * deliberately deferred a tight bar ("belongs with the other deferred per-fixture bars" — that
+   * commit's own words); these six do not, because DEBT-017 is exactly the axis this pass exists
+   * to close, and shipping them on the loose 3.5% global would leave the same blind spot the
+   * fixtures were added to remove — a future regression inside the bracket could move by nearly a
+   * full percent and still read green.
+   *
+   * Measured, reproducible across 3 independent runs (byte-identical pixel counts every time — two
+   * scoped to just these six fixtures, one inside the full 82-fixture sweep):
+   *
+   *     liquid-morph-transition          0.000% (5/2073600)
+   *     linear-liquid-morph-transition   0.000% (4/2073600)
+   *     portal-transition                0.000% (6/2073600)
+   *     linear-portal-transition         0.092% (1899/2073600)   <- the outlier, see below
+   *     motion-smear-transition          0.000% (0/2073600)
+   *     linear-motion-smear-transition   0.001% (11/2073600)
+   *
+   * All six get the same 0.005 tier as their `flarex-*`/`flarex-tracked-mask-*` siblings rather than
+   * six bespoke values — one tier for "the multi-pass transition family" is easier for the next
+   * reader to reason about than a different number per fixture, and every reading here has real
+   * margin under it. `linear-portal-transition` is the tightest fit at ~5.4x headroom (0.092% measured
+   * against a 0.5% bar) — still 7x tighter than the global 3.5% budget, and unsurprising once you
+   * read why: `portal`'s pipeline is the only one of the four whose intermediate stages ADD light
+   * (`additive-mix`) rather than only blending it, so its linear/display divergence is the largest of
+   * the family by construction, not by flake — three runs reading the identical 1899 differing pixels
+   * is the evidence it is a real, stable, cross-renderer noise floor rather than a race.
+   */
+  "liquid-morph-transition": 0.005,
+  "linear-liquid-morph-transition": 0.005,
+  "portal-transition": 0.005,
+  "linear-portal-transition": 0.005,
+  "motion-smear-transition": 0.005,
+  "linear-motion-smear-transition": 0.005
 };
 
 function barFor(key: RenderComparisonFixtureKey): number {

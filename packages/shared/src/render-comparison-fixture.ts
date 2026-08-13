@@ -168,6 +168,12 @@ export type RenderComparisonFixtureKey =
   | "linear-transition"
   | "pipeline-transition"
   | "linear-pipeline-transition"
+  | "liquid-morph-transition"
+  | "linear-liquid-morph-transition"
+  | "portal-transition"
+  | "linear-portal-transition"
+  | "motion-smear-transition"
+  | "linear-motion-smear-transition"
   | "stylize-plate"
   | "linear-stylize-plate"
   | "stylize-print-plate"
@@ -247,6 +253,12 @@ export const renderComparisonFixtureKeys: RenderComparisonFixtureKey[] = [
   "linear-transition",
   "pipeline-transition",
   "linear-pipeline-transition",
+  "liquid-morph-transition",
+  "linear-liquid-morph-transition",
+  "portal-transition",
+  "linear-portal-transition",
+  "motion-smear-transition",
+  "linear-motion-smear-transition",
   "stylize-plate",
   "linear-stylize-plate",
   "stylize-print-plate",
@@ -347,6 +359,35 @@ export const renderComparisonFixtureRelations: RenderComparisonFixtureRelation[]
       "decodes at its doorways and re-encodes in main(), so the mix still runs on light. If these " +
       "match, either the per-pass bracket is not being applied or the pipeline collapsed back to the " +
       "monolith/dissolve fallback — the failure mode this fixture pair was added to catch."
+  },
+  {
+    a: "linear-liquid-morph-transition",
+    b: "liquid-morph-transition",
+    relation: "different",
+    why:
+      "the per-pass bracket claim for `liquidMorph`'s 4-pass chain (curl-noise, gaussian-blur x2, " +
+      "linear-mix). If these match, either the bracket is not applied on this pipeline or it has " +
+      "collapsed back to the dissolve fallback — the exact silent failure that shipped for all four " +
+      "pipeline transitions before `6d58690`."
+  },
+  {
+    a: "linear-portal-transition",
+    b: "portal-transition",
+    relation: "different",
+    why:
+      "the per-pass bracket claim for `portal`'s chain, whose `additive-mix` pass ADDS light rather " +
+      "than only blending it — the sharpest of the three new pairs, since an additive stage run in " +
+      "the wrong space clips or dims by far more than a pure mix does. A match here means the bracket " +
+      "is not reaching this pipeline."
+  },
+  {
+    a: "linear-motion-smear-transition",
+    b: "motion-smear-transition",
+    relation: "different",
+    why:
+      "the per-pass bracket claim for `motionSmear`, the one pipeline where the SAME atomic module " +
+      "(`directional-blur`) appears twice at different positions. A match here means either the " +
+      "bracket is absent or the two instances are colliding on a shared program-cache key."
   }
 ];
 
@@ -1579,6 +1620,45 @@ function variantFor(key: RenderComparisonFixtureKey): FixtureVariant {
       return { effects: [], fit: "cover", transition: true, transitionKind: "focusPull" };
     case "linear-pipeline-transition":
       return { effects: [], fit: "cover", transition: true, transitionKind: "focusPull", effectLight: "linear" };
+    /**
+     * DEBT-017 THIRD AXIS (2026-08-13): the other 3 of the 4 multi-pass pipeline transitions —
+     * `liquidMorph`, `portal`, `motionSmear` — were asserted correct only by SHARED-CODE INHERITANCE
+     * (`6d58690` fixed the dedupe for all four; only `focusPull` got a fixture). That is exactly the
+     * reasoning DEBT-017 exists to distrust: two renderers agreeing proves nothing about code neither
+     * one ever executes, and a fixture that never builds these three cannot tell "correct" from
+     * "never linked" apart. Same shape as `pipeline-transition`/`linear-pipeline-transition` in every
+     * respect but the transition kind — see that pair's own comment for what the display/linear split
+     * proves about the per-pass bracket.
+     *
+     * `liquidMorph`'s passes: curl-noise (warps the outgoing side) → gaussian-blur ×2 (horizontal then
+     * vertical, forming the blur half of the morph) → linear-mix (the cross-fade). Four passes, the
+     * deepest chain of the four pipeline transitions — the round-trip most likely to show a lossy or
+     * wrongly-spaced intermediate if `6d58690`'s dedupe were ever only partially correct.
+     */
+    case "liquid-morph-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "liquidMorph" };
+    case "linear-liquid-morph-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "liquidMorph", effectLight: "linear" };
+    /**
+     * `portal`'s passes: radial-warp (outgoing side) → chromatic-split → additive-mix → linear-mix.
+     * The one pipeline transition whose intermediate stages ADD light (`additive-mix`) rather than only
+     * blending it, so a linear/display divergence here is the sharpest test of the three: an additive
+     * stage run in the wrong space clips or dims by a very different amount than a pure mix does.
+     */
+    case "portal-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "portal" };
+    case "linear-portal-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "portal", effectLight: "linear" };
+    /**
+     * `motionSmear`'s passes: directional-blur (outgoing) → linear-mix → directional-blur (incoming).
+     * The only one of the four where the SAME atomic module (`directional-blur`) appears twice in one
+     * pipeline, at different pipeline positions — the shape most likely to expose a program-cache key
+     * collision between two instances of one module if the assembler ever memoized by module id alone.
+     */
+    case "motion-smear-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "motionSmear" };
+    case "linear-motion-smear-transition":
+      return { effects: [], fit: "cover", transition: true, transitionKind: "motionSmear", effectLight: "linear" };
     /**
      * The OPT-OUT pair, isolated from the composite (slice 3).
      *

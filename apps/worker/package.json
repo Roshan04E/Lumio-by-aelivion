@@ -20,6 +20,7 @@
     "render:compare:pixels": "tsx src/render-pixel-comparison.ts",
     "render:baseline": "tsx src/render-baseline-gate.ts",
     "render:linear-gate": "tsx src/render-linear-gate.ts",
+    "render:link-gate": "tsx src/render-link-gate.ts",
     "kernel:conform": "tsx src/kernel-conformance.ts",
     "flarex:cache-gate": "tsx src/flarex-cache-gate.ts",
     "flarex:proxy-gate": "tsx src/flarex-proxy-parity-gate.ts",
