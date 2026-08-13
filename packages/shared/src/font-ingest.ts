@@ -131,15 +131,63 @@ function isWoff2(bytes: Uint8Array): boolean {
  *
  * Never consults a filename, a MIME type, or anything the caller claims (T-4).
  */
+let woff2Promise: Promise<{ decompress(input: Uint8Array): Promise<Uint8Array> }> | undefined;
+async function getWoff2(): Promise<{ decompress(input: Uint8Array): Promise<Uint8Array> }> {
+  if (!woff2Promise) {
+    // Lazy for the same reason `opentype.js` is, and more so: this is a ~300KB emscripten build that
+    // only a WOFF2 upload ever needs. Nothing that merely renders a font pays for it.
+    woff2Promise = import("wawoff2").then(
+      (mod) => ((mod as unknown as { default?: unknown }).default ?? mod) as { decompress(input: Uint8Array): Promise<Uint8Array> }
+    );
+  }
+  return woff2Promise;
+}
+
+/**
+ * Decompress a WOFF2 into the SFNT the rest of this pipeline can read, or return the bytes untouched.
+ *
+ * **This is a conversion, and the consequence is worth stating plainly: the `fileHash` we store is
+ * the hash of the DECOMPRESSED file, not of what the user handed us.** That is the right way round.
+ * D1 makes the hash the render identity — the thing the worker resolves to bytes and installs — so
+ * it has to name bytes we can actually parse, install and rasterize. Hashing the upload would pin an
+ * identity nothing downstream could use, and would mean the same face uploaded as `.woff2` and as
+ * `.ttf` were two different fonts to a system whose whole point is that they are one.
+ *
+ * `.woff` needs none of this: opentype.js inflates it natively (measured against a real Google
+ * `.woff`, which parsed straight through). Only WOFF2's Brotli-compressed, table-transformed
+ * container is beyond it — which is what `font-outlines.ts:35` records for the warp path too, and
+ * why the warp path also gets the converted bytes rather than the upload.
+ */
+export async function decompressFontIfNeeded(bytes: ArrayBuffer): Promise<ArrayBuffer> {
+  if (!isWoff2(new Uint8Array(bytes))) return bytes;
+  let out: Uint8Array;
+  try {
+    out = await (await getWoff2()).decompress(new Uint8Array(bytes));
+  } catch (error) {
+    // The typed code stays exactly what S2.2 defined. What changed is that it now means "this WOFF2
+    // could not be decompressed" rather than "WOFF2 is not supported" — a much rarer answer, and one
+    // a user meets only with a genuinely broken file.
+    throw new FontIngestError(
+      "woff2-unsupported",
+      `That WOFF2 font could not be decompressed: ${(error as Error)?.message ?? "unknown error"}.`
+    );
+  }
+  return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
+}
+
 export async function readFontIdentity(bytes: ArrayBuffer): Promise<FontIdentity> {
   if (bytes.byteLength === 0) throw new FontIngestError("empty-file", "That file is empty.");
   if (isWoff2(new Uint8Array(bytes))) {
-    // Named rather than left to fail as a generic parse error, because the fix is specific and the
-    // generic message ("Unsupported OpenType signature wOF2") reads as "your font is broken" when it
-    // is not. `font-outlines.ts:35` records the same limitation for the warp path.
+    /**
+     * Still refused HERE, deliberately, even though {@link decompressFontIfNeeded} can now handle
+     * it. This function's contract is "read what a font says about itself", and silently converting
+     * inside it would hide the fact that the bytes changed from every caller — including the ones
+     * that go on to STORE what they parsed. The upload path decompresses first and then ingests the
+     * result, so the file that is hashed is the file that was read.
+     */
     throw new FontIngestError(
       "woff2-unsupported",
-      "WOFF2 fonts must be decompressed before ingest — opentype.js cannot Brotli-decode them. Upload .ttf, .otf or .woff."
+      "WOFF2 fonts must be decompressed before ingest — opentype.js cannot Brotli-decode them. Call decompressFontIfNeeded first."
     );
   }
 

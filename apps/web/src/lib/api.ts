@@ -190,6 +190,27 @@ export function isAuthenticated(): boolean {
   return getToken() !== null;
 }
 
+/**
+ * The signed-in account's id, read from the JWT's `sub`.
+ *
+ * **Not verified here, and it does not need to be.** This is used to SCOPE things the browser owns —
+ * which uploaded fonts to list, which OPFS key to write (ADR-023 D4/D5) — where the worst a forged
+ * value achieves is showing yourself a list of fonts you cannot use. Every place the answer actually
+ * matters, the server re-derives it from the verified token and refuses on a mismatch; a client that
+ * trusted this for authorisation would be trusting an attacker's own claim about who they are.
+ */
+export function getCurrentUserId(): string | undefined {
+  const token = getToken();
+  const payload = token?.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as { sub?: unknown };
+    return typeof decoded.sub === "string" && decoded.sub ? decoded.sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function logout(): void {
   localStorage.removeItem(tokenKey);
 }

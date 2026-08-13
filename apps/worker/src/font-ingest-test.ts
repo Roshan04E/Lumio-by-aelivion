@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { computeFontFileHash, FontIngestError, readFontIdentity } from "@orreris/shared";
+import { computeFontFileHash, decompressFontIfNeeded, FontIngestError, readFontIdentity } from "@orreris/shared";
 
 const fontsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public/fonts");
 
@@ -74,10 +74,62 @@ async function main(): Promise<void> {
     (error: unknown) => error instanceof FontIngestError && error.code === "empty-file"
   );
   // WOFF2 gets its own code because the fix is specific; the generic parse error reads as "your font
-  // is broken" when it is merely compressed in a way opentype.js cannot undo.
+  // is broken" when it is merely compressed in a way opentype.js cannot undo. `readFontIdentity`
+  // still refuses it even though S3 can now decompress: this function's contract is "read what a
+  // font says about itself", and converting inside it would hide from every caller — including the
+  // ones that STORE what they parsed — that the bytes changed.
   const woff2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 0, 0, 0, 0]);
   await assert.rejects(
     () => readFontIdentity(woff2.buffer as ArrayBuffer),
+    (error: unknown) => error instanceof FontIngestError && error.code === "woff2-unsupported"
+  );
+
+  /**
+   * ---- S3: WOFF2 is now ACCEPTED, by decompressing before the parse. --------------------------
+   *
+   * The fixture is BUILT here rather than checked in, which also makes the arm a round trip: a real
+   * OFL binary is compressed to WOFF2 and must come back as a font that identifies itself the same
+   * way. A checked-in `.woff2` would prove the decoder runs; this proves it produces the right font.
+   *
+   * `compress` is deliberately absent from this repo's `wawoff2` declaration — nothing in the
+   * product creates WOFF2, and declaring it would invite something to start — so the gate reaches
+   * for it explicitly. That asymmetry is the point rather than an oversight.
+   */
+  const wawoff2 = (await import("wawoff2")) as unknown as {
+    compress(input: Uint8Array): Promise<Uint8Array>;
+    decompress(input: Uint8Array): Promise<Uint8Array>;
+  };
+  const antonTtf = new Uint8Array(read("Anton-Regular.ttf"));
+  const compressed = await wawoff2.compress(antonTtf);
+  assert.deepEqual([...compressed.slice(0, 4)], [0x77, 0x4f, 0x46, 0x32], "the fixture must really be a WOFF2.");
+  const compressedBuffer = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer;
+
+  const restored = await decompressFontIfNeeded(compressedBuffer);
+  const restoredIdentity = await readFontIdentity(restored);
+  assert.equal(restoredIdentity.family, "Anton", "a decompressed WOFF2 must identify itself as the font it came from.");
+  assert.equal(restoredIdentity.weight, 400);
+  assert.equal(restoredIdentity.style, "normal");
+
+  /**
+   * **The hash is of the DECOMPRESSED file, and that is the whole reason the conversion happens
+   * before the hash rather than after.** D1 makes `fileHash` the render identity — the thing the
+   * worker resolves to bytes and installs — so it has to name bytes that can actually be parsed and
+   * rasterized. Pinning the upload would name something nothing downstream could use.
+   */
+  const restoredHash = await computeFontFileHash(restored);
+  const compressedHash = await computeFontFileHash(compressedBuffer);
+  assert.notEqual(restoredHash, compressedHash, "the stored hash must be the decompressed file's, not the upload's.");
+  assert.equal(await computeFontFileHash(await decompressFontIfNeeded(compressedBuffer)), restoredHash, "…and it must be stable.");
+
+  // A non-WOFF2 passes through untouched, byte for byte. Otherwise every .ttf upload would be
+  // re-hashed through a code path that had no business touching it.
+  const untouched = await decompressFontIfNeeded(read("Anton-Regular.ttf"));
+  assert.equal(await computeFontFileHash(untouched), await computeFontFileHash(read("Anton-Regular.ttf")));
+
+  // A WOFF2 that is only a header is not decompressible, and must still fail with the TYPED code —
+  // the same code, now meaning "this file is broken" rather than "this format is unsupported".
+  await assert.rejects(
+    () => decompressFontIfNeeded(woff2.buffer as ArrayBuffer),
     (error: unknown) => error instanceof FontIngestError && error.code === "woff2-unsupported"
   );
 
@@ -91,7 +143,7 @@ async function main(): Promise<void> {
   mutated[mutated.length - 1] = (mutated[mutated.length - 1]! + 1) & 0xff;
   assert.notEqual(await computeFontFileHash(mutated.buffer as ArrayBuffer), hashA, "one byte must change the render identity.");
 
-  console.log(`Font ingest passed. ${anton.family} 400, ${arimoBold.family} 700, ${hashA.slice(0, 12)}…`);
+  console.log(`Font ingest passed. ${anton.family} 400, ${arimoBold.family} 700, ${hashA.slice(0, 12)}… — WOFF2 round-trips to ${restoredIdentity.family}.`);
 }
 
 main().catch((error) => {

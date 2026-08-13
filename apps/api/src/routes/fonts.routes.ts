@@ -17,13 +17,28 @@
  * so nothing here is scoped to the caller; the auth is on the action, not on the artifact.
  */
 import { Router } from "express";
+import multer from "multer";
 import { z } from "zod";
-import { fontIndexFace, fontIndexFamily, type FontRef } from "@orreris/shared";
-import { FontMirrorError, mirrorGoogleFont } from "@orreris/storage";
+import {
+  computeFontFileHash,
+  decompressFontIfNeeded,
+  fontIndexFace,
+  fontIndexFamily,
+  FontIngestError,
+  fontObjectKey,
+  readFontIdentity,
+  type FontRef,
+  type UserFontKey
+} from "@orreris/shared";
+import { FontMirrorError, mirrorGoogleFont, objectExists, persistBytes } from "@orreris/storage";
 import { asyncHandler, HttpError, ok, validateBody } from "../lib/http";
 import { requireAuth, type AuthRequest } from "../middleware/auth";
 
 export const fontsRouter = Router();
+
+// 32 MiB. A CJK font is the honest upper bound here and lands well inside it; anything larger is not
+// a font, and memoryStorage makes this the per-request RAM bound as well as the size cap.
+const uploadFont = multer({ storage: multer.memoryStorage(), limits: { fileSize: 32 * 1024 * 1024 } });
 
 const mirrorSchema = z.object({
   family: z.string().trim().min(1),
@@ -81,5 +96,68 @@ fontsRouter.post(
       }
       throw error;
     }
+  })
+);
+
+/**
+ * ADR-023 D4 / D5 (S3) — **the opt-in cloud half of a user font upload.**
+ *
+ * The editor already has these bytes on-device; this endpoint is what makes them resolvable by a
+ * cloud render and by the user's second machine. It records a pairing and remaps nothing (D5): the
+ * project already refers to the font by `(ownerId, fileHash)`, and what changes is only whether the
+ * server can answer for that pair.
+ *
+ * **The owner comes from the verified token and from nowhere else.** Not from the body, not from a
+ * query parameter. `ownerId` is the entire isolation boundary (D4), and an endpoint that let a
+ * caller name the owner would let them write into someone else's store — which is the same
+ * violation as reading out of it, with the arrow reversed.
+ *
+ * The parse is the validity gate (D2/T-4) and it runs here too rather than trusting the editor's:
+ * this endpoint is reachable without the editor, and "the client already checked" is not a check.
+ */
+fontsRouter.post(
+  "/user",
+  requireAuth,
+  uploadFont.single("file"),
+  asyncHandler<AuthRequest>(async (req, res) => {
+    const file = (req as AuthRequest & { file?: { buffer: Buffer; originalname: string } }).file;
+    if (!file?.buffer?.byteLength) throw new HttpError(400, "No font file was uploaded.");
+
+    const uploaded = file.buffer.buffer.slice(file.buffer.byteOffset, file.buffer.byteOffset + file.buffer.byteLength) as ArrayBuffer;
+    let bytes: ArrayBuffer;
+    let identity: Awaited<ReturnType<typeof readFontIdentity>>;
+    try {
+      // WOFF2 first: opentype.js cannot Brotli-decode it, and what gets STORED must be what the
+      // worker can install — so the conversion happens before the parse and before the hash.
+      bytes = await decompressFontIfNeeded(uploaded);
+      identity = await readFontIdentity(bytes);
+    } catch (error) {
+      if (error instanceof FontIngestError) throw new HttpError(400, error.message);
+      throw error;
+    }
+
+    const fileHash = await computeFontFileHash(bytes);
+    const key: UserFontKey = { store: "user", ownerId: req.user.id, fileHash };
+    const objectKey = fontObjectKey(key);
+
+    /**
+     * D4's deduplication rule, and the one place it is tempting to be clever. Two accounts uploading
+     * byte-identical copies of the same commercial font get TWO objects, because the second one is
+     * not a copy of the first — it is a different user's licence. The existence check below is
+     * therefore scoped to THIS owner's key and can never collapse across accounts: the owner is in
+     * the path, so there is no shared key for an optimiser to notice.
+     */
+    const already = await objectExists(objectKey);
+    if (!already) await persistBytes(objectKey, Buffer.from(bytes), "font/ttf");
+
+    const ref: FontRef = {
+      source: "user",
+      family: identity.family,
+      weight: identity.weight,
+      style: identity.style,
+      fileHash,
+      ownerId: req.user.id
+    };
+    return ok(res, already ? "Font already uploaded" : "Font uploaded", { ref, stored: !already });
   })
 );

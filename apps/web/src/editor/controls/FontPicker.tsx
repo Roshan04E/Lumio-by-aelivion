@@ -48,6 +48,15 @@ import {
   subscribeCataloguePreviews
 } from "../../lib/font-catalogue-preview";
 import { clearFontPinState, fontPinState, fontPinVersion, pinFont, subscribeFontPins } from "../../lib/font-pin";
+import {
+  addUserFont,
+  listUserFonts,
+  subscribeUserFonts,
+  UserFontError,
+  userFontRef,
+  userFontsVersion,
+  type UserFontRecord
+} from "../../lib/user-fonts";
 
 export interface FontPickerValue {
   /** The layer's CSS stack — what a system pick sets and what a legacy layer already has. */
@@ -74,7 +83,9 @@ const OVERSCAN = 8;
 type Row =
   | { kind: "header"; key: string; label: string }
   | { kind: "system"; key: string; family: string; label: string }
-  | { kind: "family"; key: string; entry: FontIndexFamily; bundled: boolean };
+  | { kind: "family"; key: string; entry: FontIndexFamily; bundled: boolean }
+  /** ADR-023 D5 (S3) — a font this account uploaded. Local-first; the cloud copy is opt-in. */
+  | { kind: "user"; key: string; record: UserFontRecord };
 
 const bundledFamilies = new Set(fontCatalogue.map((entry) => entry.family));
 
@@ -97,6 +108,9 @@ export function FontPicker({
 
   useSyncExternalStore(subscribeCataloguePreviews, cataloguePreviewVersion, cataloguePreviewVersion);
   useSyncExternalStore(subscribeFontPins, fontPinVersion, fontPinVersion);
+  useSyncExternalStore(subscribeUserFonts, userFontsVersion, userFontsVersion);
+  const [uploadError, setUploadError] = useState<string | undefined>(undefined);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   // Close on outside click / Escape. A popup that traps the user is worse than a select.
   useEffect(() => {
@@ -132,6 +146,13 @@ export function FontPicker({
       list.push({ kind: "header", key: "h-system", label: "System — resolves on the render machine" });
       for (const font of renderSafeFonts) list.push({ kind: "system", key: `sys-${font.family}`, family: font.family, label: font.label });
     }
+    // Your own fonts lead the list when you have any: they are the ones you uploaded on purpose,
+    // and a brand font buried under 1,942 Google families is a brand font you will not find.
+    const mine = listUserFonts().filter((record) => !search || record.family.toLowerCase().includes(search.toLowerCase()));
+    if (mine.length && !script) {
+      list.push({ kind: "header", key: "h-user", label: "Your fonts — stored against your account only" });
+      for (const record of mine) list.push({ kind: "user", key: `user-${record.fileHash}`, record });
+    }
     list.push({
       kind: "header",
       key: "h-catalogue",
@@ -141,7 +162,7 @@ export function FontPicker({
       list.push({ kind: "family", key: `fam-${entry.family}`, entry, bundled: bundledFamilies.has(entry.family) });
     }
     return list;
-  }, [search, script]);
+  }, [search, script, userFontsVersion()]);
 
   // Reset the scroll when the filter changes, or the window would point past the end of a shorter
   // list and show nothing.
@@ -274,6 +295,41 @@ export function FontPicker({
             ))}
           </div>
 
+          {/* ADR-023 D5 (S3). The bytes stay on THIS DEVICE until an explicit cloud upload — the
+              asset doctrine's "one asset, two locations", reused rather than reinvented. */}
+          <div className="font-picker-upload">
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
+              style={{ display: "none" }}
+              data-testid="font-upload-input"
+              onChange={async (event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                setUploadError(undefined);
+                try {
+                  const { record, ref } = await addUserFont(file);
+                  onPick({ fontFamily: record.family, fontRef: ref });
+                  setOpen(false);
+                } catch (error) {
+                  // The ingest error already says what is wrong with the FILE (D2) — shown as-is
+                  // rather than replaced with "upload failed", which tells the user nothing.
+                  setUploadError(error instanceof UserFontError || error instanceof Error ? error.message : "Could not add that font.");
+                }
+              }}
+            />
+            <button type="button" className="font-picker-chip" data-testid="font-upload-trigger" onClick={() => fileRef.current?.click()}>
+              + Upload your own font
+            </button>
+            {uploadError ? (
+              <span className="font-picker-upload-error" data-testid="font-upload-error">
+                {uploadError}
+              </span>
+            ) : null}
+          </div>
+
           <div
             className="font-picker-list"
             role="listbox"
@@ -314,6 +370,36 @@ export function FontPicker({
                       </span>
                       <span className="font-picker-name">{row.label}</span>
                       <span className="font-picker-meta">system</span>
+                      {selected ? <Check size={13} aria-hidden="true" /> : null}
+                    </button>
+                  );
+                }
+
+                if (row.kind === "user") {
+                  const { record } = row;
+                  const selected = pinned?.fileHash === record.fileHash;
+                  return (
+                    <button
+                      key={row.key}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={`font-picker-option ${selected ? "is-selected" : ""}`}
+                      style={{ position: "absolute", top, height: ROW_HEIGHT }}
+                      data-testid={`font-option-user-${record.fileHash.slice(0, 8)}`}
+                      title={`${record.fileName} — ${record.cloud ? "on this device and in your account" : "on this device only"}`}
+                      onClick={() => {
+                        onPick({ fontFamily: record.family, fontRef: userFontRef(record) });
+                        setOpen(false);
+                      }}
+                    >
+                      <span className="font-picker-sample" style={{ fontFamily: `'${record.family}'` }}>
+                        Ag
+                      </span>
+                      <span className="font-picker-name">
+                        {record.family} {record.subfamily}
+                      </span>
+                      <span className="font-picker-meta">{record.cloud ? "yours" : "device"}</span>
                       {selected ? <Check size={13} aria-hidden="true" /> : null}
                     </button>
                   );

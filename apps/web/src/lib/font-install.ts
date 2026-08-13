@@ -19,6 +19,7 @@ import {
   type CompositionLayerStyleInput,
   type PinnedFontRef
 } from "@orreris/shared";
+import { readLocalUserFont } from "./user-fonts";
 
 /** Per-font outcome. `undefined` for a family means "never asked for" — not "fine". */
 export type FontInstallState = "installed" | "missing";
@@ -79,6 +80,19 @@ export function installPinnedFont(ref: PinnedFontRef): Promise<FontInstallState>
           source = `url(${storageUrl(fontObjectKey(storeKey))})`;
           break;
         case "user": {
+          /**
+           * LOCAL FIRST (D5). The bytes of a font this account uploaded are on this device already,
+           * and reading them from OPFS means an uploaded font works with no network and before any
+           * opt-in cloud upload has happened — which is the whole shape of the asset doctrine this
+           * reuses. The server is the fallback, for a second machine or a cleared profile.
+           */
+          const local = await readLocalUserFont(storeKey.ownerId, storeKey.fileHash);
+          if (local) {
+            const url = URL.createObjectURL(local);
+            revoke = () => URL.revokeObjectURL(url);
+            source = `url(${url})`;
+            break;
+          }
           const token = localStorage.getItem("orreris_token");
           if (!token) return "missing";
           const response = await fetch(storageUrl(fontObjectKey(storeKey)), { headers: { Authorization: `Bearer ${token}` } });
