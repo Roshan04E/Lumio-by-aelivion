@@ -8,6 +8,7 @@ import { authRouter } from "./routes/auth.routes";
 import { templatesRouter } from "./routes/templates.routes";
 import { toolsRouter } from "./routes/tools.routes";
 import { assetsRouter } from "./routes/assets.routes";
+import { fontsRouter } from "./routes/fonts.routes";
 import { stockRouter } from "./routes/stock.routes";
 import { projectsRouter } from "./routes/projects.routes";
 import { jobsRouter } from "./routes/jobs.routes";
@@ -230,6 +231,8 @@ export function createApp() {
   app.use("/api/tools", toolsRouter);
   app.use("/api/assets", assetsRouter);
   app.use("/api/stock", stockRouter);
+  // ADR-023 S2.6 — mirror-on-pick. Turns an index row into stored bytes plus a pinned FontRef.
+  app.use("/api/fonts", fontsRouter);
   app.use("/api/projects", projectsRouter);
   app.use("/api/jobs", jobsRouter);
   app.use("/api/payments", paymentsRouter);

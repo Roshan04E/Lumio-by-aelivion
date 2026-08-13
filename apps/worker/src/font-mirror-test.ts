@@ -25,8 +25,9 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orreris-font-mirror-"));
 process.env.STORAGE_DRIVER = "local";
 process.env.STORAGE_ROOT = tempRoot;
 
-const { mirrorCatalogueFont, FontMirrorError } = await import("./fonts/font-mirror");
-const { computeFontFileHash, fontLicenseObjectKey, fontObjectKey, canServeFont, fontStoreKeyFor } = await import("@orreris/shared");
+const { mirrorCatalogueFont, mirrorGoogleFont, googleFontLicenseUrl, FontMirrorError } = await import("@orreris/storage");
+const { computeFontFileHash, fontIndexFamily, fontLicenseObjectKey, fontObjectKey, canServeFont, fontStoreKeyFor } =
+  await import("@orreris/shared");
 
 const fontsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public/fonts");
 function readFont(file: string): ArrayBuffer {
@@ -138,6 +139,91 @@ async function main(): Promise<void> {
     exists(`fonts/catalogue/${strippedHash}`),
     false,
     "and it must not be in the bucket at all — the refusal happens BEFORE any write, so an unlicensed font never exists there even transiently."
+  );
+
+  /**
+   * ---- S2.6: the licence lives beside the font, and T-11 still holds. ------------------------
+   *
+   * The specimen above — a real font with name IDs 13/14 blanked — is not a synthetic curiosity.
+   * It is exactly what `fonts.gstatic.com` serves: every static instance Google's CDN hands out has
+   * those records stripped, measured across Cairo, Amiri, Noto Naskh Arabic and Inter. So the arm
+   * below is the mirror-on-pick path, and the arm above is what that path looked like before this
+   * commit: refused, every family, always.
+   */
+  const OFL_TEXT = `Copyright 2020 The Test Project Authors\n\n${"This Font Software is licensed under the SIL Open Font License, Version 1.1. ".repeat(6)}`;
+  let licenseFetches = 0;
+  const licenseFetcher = async () => {
+    licenseFetches += 1;
+    return OFL_TEXT;
+  };
+  const beside = await mirrorCatalogueFont("https://fonts.example/stripped.ttf", {
+    fetcher: async () => stripped.buffer as ArrayBuffer,
+    licenseUrl: "https://raw.example/ofl/test/OFL.txt",
+    licenseFetcher
+  });
+  assert.equal(beside.fetched, true);
+  assert.equal(beside.key.fileHash, strippedHash);
+  assert.equal(licenseFetches, 1);
+  const besideLicense = fs.readFileSync(path.join(tempRoot, fontLicenseObjectKey(beside.key)), "utf8");
+  assert.ok(besideLicense.includes("SIL Open Font License"), "the stored licence must be the DOCUMENT, not a note saying one exists.");
+  assert.ok(
+    besideLicense.includes("License source: google/fonts"),
+    "…and it must record where the text came from. An operator auditing the bucket cannot tell a name-table " +
+      "licence from a fetched one otherwise, and D4a's lawfulness rests on which document applies."
+  );
+  assert.ok(besideLicense.includes(strippedHash), "the licence names the exact bytes it licenses.");
+
+  /**
+   * SUCCEED-THEN-FAIL on the LICENCE, which is the half T-11 exists to protect. A licence fetcher
+   * that never works proves the setup fails; what matters is the source that WAS serving a licence
+   * and then stopped — a moved file, a repo reorganisation, a 404 page returned with status 200.
+   * The font fetch still succeeds throughout, so the only thing that changed is the licence.
+   */
+  fs.unlinkSync(path.join(tempRoot, fontObjectKey(beside.key)));
+  fs.unlinkSync(path.join(tempRoot, fontLicenseObjectKey(beside.key)));
+  await assert.rejects(
+    () =>
+      mirrorCatalogueFont("https://fonts.example/stripped.ttf", {
+        fetcher: async () => stripped.buffer as ArrayBuffer,
+        licenseUrl: "https://raw.example/ofl/test/OFL.txt",
+        licenseFetcher: async () => "404: Not Found"
+      }),
+    (error: unknown) => error instanceof FontMirrorError && error.code === "no-license",
+    "a licence source answering with something that is not a licence must refuse the mirror, not be stored as one."
+  );
+  assert.equal(exists(fontObjectKey(beside.key)), false, "and the FONT must not be in the bucket — both objects or neither (T-11).");
+  assert.equal(exists(fontLicenseObjectKey(beside.key)), false);
+
+  /**
+   * ---- Mirror-on-PICK, end to end from an index row, offline. --------------------------------
+   *
+   * Every network edge is injected, so what is being proven is the CAUSATION rather than Google's
+   * uptime: an index row names a family, the resolver is asked for that exact face, the bytes come
+   * back, and a `fileHash` exists that did not exist before. That direction matters — the hash is
+   * what we fetched, never what a table promised (D1) — and it is why the index carries no hashes.
+   */
+  const cairo = fontIndexFamily("Cairo");
+  assert.ok(cairo?.licensePath, "Cairo must be in the index with a licence path — the arm below is void otherwise.");
+  let asked: string | undefined;
+  const picked = await mirrorGoogleFont({
+    family: cairo.family,
+    weight: 400,
+    style: "normal",
+    licensePath: cairo.licensePath,
+    urlResolver: async (family, weight, style) => {
+      asked = `${family}|${weight}|${style}`;
+      return "https://fonts.example/cairo-400.ttf";
+    },
+    fetcher: async () => stripped.buffer as ArrayBuffer,
+    licenseFetcher
+  });
+  assert.equal(asked, "Cairo|400|normal", "the face requested must be the face the row named.");
+  assert.equal(picked.key.fileHash, strippedHash);
+  assert.ok(exists(fontObjectKey(picked.key)) && exists(fontLicenseObjectKey(picked.key)), "a pick leaves BOTH objects behind.");
+  assert.equal(
+    googleFontLicenseUrl(cairo.licensePath),
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/OFL.txt",
+    "the index's licence path must compose into the real document URL — a wrong path is a silent no-licence."
   );
 
   // ---- T-3: the two stores are two types, and one cannot be served as the other. -------------

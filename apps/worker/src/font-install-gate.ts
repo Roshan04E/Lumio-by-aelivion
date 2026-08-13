@@ -33,8 +33,9 @@ process.env.STORAGE_DRIVER = "local";
 process.env.STORAGE_ROOT = tempRoot;
 
 const { buildRenderManifest } = await import("@orreris/render-templates");
-const { createRenderComparisonFixture, renderComparisonFrameSeconds, FontResolutionError } = await import("@orreris/shared");
-const { mirrorCatalogueFont } = await import("./fonts/font-mirror");
+const { createRenderComparisonFixture, renderComparisonFrameSeconds, fontIndexFace, fontIndexFamily, fontLicenseObjectKey, FontResolutionError } =
+  await import("@orreris/shared");
+const { mirrorCatalogueFont, mirrorGoogleFont } = await import("@orreris/storage");
 const { renderManifestStill } = await import("./remotion-renderer");
 const { assertQuietBrowserMachine, listAutomationBrowsers } = await import("./browser/browser-preflight");
 
@@ -164,6 +165,80 @@ async function main(): Promise<void> {
     fs.existsSync(path.join(outDir, "bogus-hash-SHOULD-NOT-EXIST.png")),
     false,
     "and it must abort BEFORE producing an output file — a wrong deliverable is the thing being prevented."
+  );
+
+  /**
+   * ---- S2.6: the WHOLE chain, from an index row. ---------------------------------------------
+   *
+   * The plan's end-to-end for this stage: "metadata row → mirror write with license → `FontRef` with
+   * `fileHash` → renders in the export." Every arm above starts from bytes we already named. This
+   * one starts from a row in the index — a family the picker lists and we hold nothing of — and ends
+   * at pixels.
+   *
+   * The network edges are injected, deliberately: what is under test is the CAUSATION, not Google's
+   * uptime. Arimo is the subject because it is a real index row whose bytes this repo also ships, so
+   * the chain can be exercised offline without the row and the bytes describing different fonts.
+   *
+   * The T-17 shape is reused rather than re-derived: the same family named as a system stack must
+   * render DIFFERENTLY, which is what proves the pinned render is showing bytes the store delivered
+   * rather than a face this host happens to have.
+   */
+  const row = fontIndexFamily("Arimo");
+  assert.ok(row, "Arimo must be an index row — the end-to-end arm is void otherwise.");
+  const rowFace = fontIndexFace(row.family, 700, "normal");
+  assert.ok(rowFace, "the index row must offer the face being asked for.");
+  const arimoBytes = fs.readFileSync(path.join(repoRoot, "apps", "worker", "public", "fonts", "Arimo-Bold.ttf"));
+  let resolverAsked: string | undefined;
+  const fromIndex = await mirrorGoogleFont({
+    family: row.family,
+    weight: rowFace.weight,
+    style: rowFace.style,
+    licensePath: row.licensePath,
+    urlResolver: async (family, weight, style) => {
+      resolverAsked = `${family}|${weight}|${style}`;
+      return "https://fonts.example/arimo-700.ttf";
+    },
+    fetcher: async () => arimoBytes.buffer.slice(arimoBytes.byteOffset, arimoBytes.byteOffset + arimoBytes.byteLength) as ArrayBuffer
+  });
+  assert.equal(resolverAsked, "Arimo|700|normal", "the face fetched must be the face the row named.");
+  assert.ok(fromIndex.key.fileHash, "the pick must produce a hash — which did not exist anywhere before this fetch (D1).");
+  assert.ok(
+    fs.existsSync(path.join(tempRoot, fontLicenseObjectKey(fromIndex.key))),
+    "and the LICENCE must be beside it. Nothing renders differently without this file, so only an assertion catches it (T-11)."
+  );
+
+  const fromIndexRef: FontRef = {
+    source: "catalogue",
+    family: row.family,
+    weight: rowFace.weight,
+    style: rowFace.style,
+    fileHash: fromIndex.key.fileHash
+  };
+  const indexPinnedPng = await renderWithFont(fromIndexRef, "index-row-arimo");
+  const indexSystemPng = await renderWithFont({ source: "system", fontFamily: "Arimo" }, "index-row-arimo-system");
+  process.stdout.write(
+    `index row → pinned=${hashOf(indexPinnedPng).slice(0, 12)}  system-named=${hashOf(indexSystemPng).slice(0, 12)}\n`
+  );
+  assert.notEqual(
+    hashOf(indexPinnedPng),
+    hashOf(indexSystemPng),
+    "END-TO-END NOT PROVEN — a family taken from the index, mirrored, and pinned rendered identically to the " +
+      "same family named as a system stack. Either the mirrored bytes never reached the raster, or this host " +
+      "has Arimo installed and the comparison says nothing about where the pixels came from."
+  );
+  /**
+   * And the two PINNED renders must differ from each other. Observed while writing this: naming
+   * Anton as a system stack and naming Arimo as a system stack produce the IDENTICAL picture,
+   * because neither is installed and both land on the same fallback. That is the control behaving
+   * correctly — and it means "differs from the control" alone would also pass if one single face
+   * were standing in for every pinned font. This arm is the same invariant `font:preview-gate`
+   * asserts across the picker's rows, applied at the render boundary.
+   */
+  assert.notEqual(
+    hashOf(indexPinnedPng),
+    hashOf(pinnedPng),
+    "two DIFFERENT pinned families rendered identically. One face is standing in for both, which is the " +
+      "empty-catalogue failure reaching the export rather than the picker."
   );
 
   process.stdout.write("\nPASS — pinned bytes reach the raster, the render is deterministic, and a missing font aborts by name.\n");

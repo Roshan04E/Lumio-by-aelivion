@@ -278,3 +278,8 @@ export async function getObjectStream(
     ...(out.ContentRange ? { contentRange: out.ContentRange } : {})
   };
 }
+
+// ADR-023 D4/D4a/T-11 (S2.6) — the font mirror. Here rather than in the worker because
+// mirror-on-pick is triggered from the editor through the API, and two copies of a both-or-neither
+// write is exactly the drift T-11 forbids.
+export * from "./font-mirror";
